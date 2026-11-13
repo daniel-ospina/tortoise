@@ -270,7 +270,6 @@ point shared by both surfaces, so enabling it for the noun path also adds it to
 interactive user search. Default-off does not bound the blast radius of turning it
 on; it only means nothing changes until someone turns it on for everything.
 
-
 ---
 
 ## 6. Latency, at the real pool size, on CPU
@@ -288,6 +287,8 @@ Measured over **39,930 pairs** in the arm-5 run (torch intra-op threads pinned t
 | pairs per mention at pool 40 | 40 |
 | **added latency per mention at pool 40** | **≈ 207 ms** |
 | added latency per mention at pool 15 | ≈ 78 ms |
+| **cost at the production shape (15 queries)** | **≈ 3.1 s / capture** |
+
 **Cost at the production shape:** a capture issues up to `max_queries=15` derived
 object queries, so pool 40 costs **≈ 3.1 s added per capture** (pool 15 ≈ 1.2 s).
 That is the price of the gate, and it is the reason the gate ships **OFF** and
