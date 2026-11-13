@@ -5285,26 +5285,28 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # 9973 at `cd22562c24e4` — +30 across three landing PRs that each
         # registered test files above it; 9987 at the `main` tip `abf186f1109a`
         # (+14: a 13-line `surfaces:` block inserted at 2237 and a 1-line
-        # `tier1:` one at 9150); 10005 at this branch alone (`d036b9859960`,
-        # +32 from its one 32-line block at 7522-7553, the +1 it also adds at
-        # 10291 sitting below the entry). At THAT merge — `main` tip
-        # `abf186f1109a`, which already contains #12060's own registrations,
-        # plus this branch's entry, both landing above it — the entry read
-        # 10019 (+46 = `main`'s +14 and this branch's +32), `carve_out:` opened
-        # 9893 and `uri_requiring:` 10224, so 10019 was inside the section.
-        # ⛔ That 10019 shared the `9951` defect it condemns: it is a MERGE-TREE
-        # value (`9987 + 32`), not a reading of `main` — `abf186f1109a` itself
-        # read 9987, and `main` then added +34 of its own (`+32 @7535`
-        # `ea2c41a696`, `+1 @1039` `a53ba8cf53`, `+1 @2237` `73c479ce40`) to read
-        # 10021 at `87c07462a8` before this lane was rebased. ⚠️ `main`'s OWN +32
-        # does land the anchor on 10019 at `ea2c41a696` — a coincidence of the
-        # same two addends, which is exactly why the prediction looked checked;
-        # the +2 that landed after it is what made it stale. The row below
-        # re-derives 10036 from the rebased tree it names; every number in THIS
-        # paragraph is the earlier tree's, kept as the trail and not as the
-        # current reading. ⚠️ `d036b9859960` (the 10005 above) is NOT in this
-        # clone — `git cat-file -e` exits 128 — so that one value is carried text
-        # rather than a re-measurable one. The
+        # `tier1:` one at 9150); 10002 at this branch alone (`9081bb367e` /
+        # `4de7bbf511`: 9987 + the 15 lines it registers, 9 at 1942 and 6 at
+        # 5063). ⚠️ The 10005 this paragraph once attributed to "this branch
+        # alone" is `d036b9859960`'s OWN reading — a different PR's commit that
+        # registers NONE of this lane's entries and changes `ci-surfaces.yml`
+        # by 0 lines — so it is not this branch's value; do not restore that
+        # attribution. At THAT merge — `main` tip
+        # `abf186f1109a`, which already contains #12060's own registrations —
+        # this branch's 15 lines also land ABOVE the anchor, so the merge tree
+        # read 10002, and that value sits inside the `carve_out:` section
+        # (opened above it, `uri_requiring:` below it).
+        # ⛔ Do not reintroduce the 10019 an earlier cut of this paragraph called
+        # "the merge-tree value": 10019 is `main`'s OWN reading at
+        # `ea2c41a696` (`+32 @7535`, #12108 — 9987 + 32), reached with nothing
+        # of this branch in the tree. It looked like a checked prediction only
+        # because main's +32 and this branch's block had both been written down
+        # as 32; the branch's is 15, and 9987 + 14 + 15 is 10016, never 10019.
+        # `main` then added `+1 @1039` (`a53ba8cf53`, 10020) and `+1 @2237`
+        # (`73c479ce40`) to read 10021 at `87c07462a8` before this lane was
+        # rebased. The row below re-derives 10036 from the rebased tree it
+        # names; every number in THIS paragraph is an earlier tree's, kept as
+        # the trail and not as the current reading. The
         # identical text also sat at 6103 and 8502 at `abf186f1109a` (6120 and
         # 8551 rebased), which is what the 5th element exists to refuse; the
         # pair shows the two cases over `9828250732`'s 6082 / 8459. Each
