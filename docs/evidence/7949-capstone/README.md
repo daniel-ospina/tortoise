@@ -378,7 +378,7 @@ one that pins the wiring.
 
 ⛔ **And PRESENT is not RAN.** `extract_session_v2` emits both keys UNCONDITIONALLY — on the
 flag-OFF arm and on its early-return path the block is `{"enabled": False, "s2": {}, "union":
-{}}` (`extractor_v2.py:13851-13855` — the classify block starts at `:13851`, the vet surface at `:13855` — and `:15653-15659` / `:15663-15667`, the two result blocks). An acceptance test of "a non-empty dict"
+{}}` (`extractor_v2.py:14766-14769` — the classify block starts at `:14766`, the vet surface at `:14770` — and `:15653-15659` / `:15663-15667`, the two result blocks). An acceptance test of "a non-empty dict"
 therefore takes an OFF block as the witness for *the pass ran* and prints `step S2.2 WITNESSED …
 enabled=false, s2={}`: the moment `#9116` copies the sibling key — exactly what this bundle
 instructs — both steps would be WITNESSED on **every** run, including one measured with the
@@ -389,13 +389,13 @@ non-empty S2 stats) fails CLOSED.
 ⛔ **And the FLAG is not ACTIVITY** — the sharper half, and the one this rule got wrong first. The
 first tightened rule accepted `enabled: true` on its own, reading it as "the extractor's OWN
 statement that the gate was open". It is not that: `enabled` is the FLAG, computed BEFORE the pass
-is reached. `vet_enabled` is computed at `extractor_v2.py:13820`, i.e. BEFORE the
-`if not edus:` early return (`:13824`), which emits literally
-`"vet": {"enabled": vet_enabled, "s2": {}, "union": {}}` (`:13855`), and
+is reached. `vet_enabled` is computed at `extractor_v2.py:14735`, i.e. BEFORE the
+`if not edus:` early return (`:14739`), which emits literally
+`"vet": {"enabled": vet_enabled, "s2": {}, "union": {}}` (`:14770`), and
 each VET pass is gated on the LIST — `if vet_enabled and embed_list:` (`:16833`), `if vet_enabled and
 complete_list:` (`:14404`). So a session with the flag ON and an empty list emits `enabled: True`
 with empty counters and no pass ran (a FAILED vet pass leaves the same shape: `_run_vet_pass` returns
-`{}` on its fail-open path, `:13549-13552`). Because `_witness_block` returns the first positive
+`{}` on its fail-open path, `:14464-14467`). Because `_witness_block` returns the first positive
 ANYWHERE on the run, ONE such session out of seven made S2.2/S2.3 WITNESSED (6/8 → 8/8) — and V5
 would then have passed on a step nobody observed. The rule now requires the flag AND positive
 activity, and a flag-on/zero-activity block gets its OWN cause ("flag on, no pass activity") that is
@@ -405,10 +405,10 @@ to look.
 ⛔ **And that cause cites each surface's OWN code — the CLASSIFY pass is not the VET pass.** It was
 first written once and templated for the surface NAME, so the S2.3 line argued from `vet_enabled`,
 the `if vet_enabled and …` gates and `_run_vet_pass` — code the classify pass never reaches. The
-classify pass has its own flag (`classify_later`, `:13789`), its own early-return block
-(`:13851-13854`), its own gates — `if classify_later and embed_list:` (`:14273`) around `if items:`
-(`:14276`), and `if classify_later and complete_list:` (`:14419`) around `if items:` (`:14429`) — and its
-own fail-open `except` (`:14289` / `:14440`), so an idle classify block comes from no embed list **or
+classify pass has its own flag (`classify_later`, `:14704`), its own early-return block
+(`:14766-14769`), its own gates — `if classify_later and embed_list:` (`:15188`) around `if items:`
+(`:15191`), and `if classify_later and complete_list:` (`:15334`) around `if items:` (`:15344`) — and its
+own fail-open `except` (`:15204` / `:15355`), so an idle classify block comes from no embed list **or
 no classify items**, not from a vet gate. The cites now live in ONE table keyed by the surface
 (`_IDLE_CITES`), and a surface added without its own entry fails loudly rather than borrowing
 another pass's code. Pinned by `test_the_flag_on_cause_is_per_surface_so_a_swap_cannot_pass` and by
@@ -1209,7 +1209,7 @@ the same lesson (cite the symbol, not the line).
 
 | step | call site | witness the probe reads | on the receipt? |
 |---|---|---|---|
-| S0 READ | `_edus_from_conversation` `:13823` | `stats["edus"]`, `stats["chunks"]` | ✅ |
+| S0 READ | `_edus_from_conversation` `:14738` | `stats["edus"]`, `stats["chunks"]` | ✅ |
 | S1 NARRATE | `run_s1` `:16748` | `stats["llm"]["by_stage"]["s1"]`, `story_arc` | ✅ (`story_arc` is off-receipt; `by_stage` carries it) |
 | S2.1 EXTRACT | `run_s2` `:16780` | `by_stage["s2"]`, item counts | ✅ (`embed_list` is off-receipt; `by_stage` carries it) |
 | S2.2 VET | `_run_vet_pass` `:16834` | `result["vet"]` — built at `extractor_v2.py:15663-15667`, copied onto the receipt at the meta fold `sdk.py:18864` as `stats["step_witness"]["vet"]` | ✅ reachable (#9116 seam) — and WITNESSED by the shipped post-seam run: `stats["step_witness"]["vet"]` `enabled=true`, `s2={"candidates": 40, "by_outcome": {"KEEP": 40}}` (the SUPERSEDED `e0fc940b5` log is the one that predates the seam) |
