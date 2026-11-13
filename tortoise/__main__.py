@@ -13249,8 +13249,8 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
         "check https://api.premiselabs.co/health or your TORTOISE_API_URL, then "
         "`tortoise config show`"
         if source == "env:TORTOISE_API_KEY" else
-        "check the endpoint is reachable, then `tortoise config show` to see the "
-        "`api_url` this store supplies")
+        "`tortoise config show` to see the `api_url` this store supplies — if it "
+        "is not the Tortoise API, that is what answered")
     api_url = api_url if isinstance(api_url, str) else str(api_url or "")
     # A store/proxy-supplied endpoint ending in `/` would ask for `//health` and
     # `//v1/team` — the 404-that-reads-as-a-broken-key every other hosted caller
