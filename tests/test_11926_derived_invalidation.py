@@ -388,6 +388,13 @@ def test_a_definite_bar_revision_OUTRANKS_an_undecidable_scope(sdk):
     Ordering is the whole fix: only a DEFINITE finding may return early. This test
     asserts the definite one WINS, and (the other half) that a claim with nothing
     definite still reports undecidable rather than being retired on a technicality.
+
+    ⛔ ALL THREE DIMENSIONS, because the fix is three guards and one pin does not
+    cover them. MEASURED by review (cycle 9): with only the indicator arm pinned,
+    reverting the GOAL guard — or the TARGET guard — left all 72 cases green, so two
+    of the three arms could silently regress to shielding a definite finding. The
+    target arm is pinned through the BOUNDARY trigger rather than `target-revised`,
+    because a claim that names no target skips the bar check by design.
     """
     i, t, g = _world(sdk, tag="scope-outranked")
     made = _judge(sdk, i, t, g)
@@ -415,6 +422,70 @@ def test_a_definite_bar_revision_OUTRANKS_an_undecidable_scope(sdk):
     assert v.invalidation.reason == "target-revised"
     assert invalidate_stale(sdk, goal_id=g["id"])["counts"]["retired"] == 1
     assert sdk.get_entity(made["point_id"])["status"] == "retracted"
+
+
+@pytest.mark.parametrize("missing", ["goalId", "targetId"])
+def test_the_OTHER_scope_guards_also_defer_to_a_definite_finding(sdk, missing):
+    """The two arms the single-dimension test above did not cover (review cycle 9).
+
+    ⛔ `goalId` is pinned through `target-revised` and `targetId` through
+    `definition-changed`: a claim that names NO target skips the bar check BY DESIGN
+    (there is no bar to compare), so the only definite finding reachable behind that
+    guard is the boundary. Pinning both through the bar would have been a test that
+    cannot red for the right reason.
+    """
+    i, t, g = _world(sdk, tag=f"scope-outranked-{missing}")
+    made = _judge(sdk, i, t, g, at="2026-11-11T10:00:00Z")
+    sdk._get_proj().g.query(
+        f"MATCH (p:Point) WHERE p.id = $id REMOVE p.{missing}",
+        params={"id": made["point_id"]},
+    )
+    assert missing not in sdk.get_entity(made["point_id"])
+
+    # nothing definite yet: undecidable, and NOT retired
+    v = _only([x for x in verdicts(sdk) if x.judgement_id == made["point_id"]])
+    assert v.invalidation is None, v.invalidation
+    assert v.undecidable is not None
+
+    if missing == "goalId":
+        sdk.update_entity(t["id"], threshold=8.0)
+        expected = "target-revised"
+    else:
+        mark_definition_change(sdk, i["id"], at="2026-11-12T00:00:00+00:00")
+        expected = "definition-changed"
+
+    v = _only([x for x in verdicts(sdk) if x.judgement_id == made["point_id"]])
+    assert v.invalidation is not None, (
+        f"the {missing} guard returned before a DEFINITE finding and shielded it: "
+        f"{v.undecidable}")
+    assert v.invalidation.reason == expected
+    assert invalidate(sdk, v.invalidation)["invalidated"] is True
+    assert sdk.get_entity(made["point_id"])["status"] == "retracted"
+
+
+def test_a_claim_carrying_the_LEGACY_outdated_flag_is_already_retired(sdk):
+    """The claim-side legacy-flag gate, pinned (review cycle 9).
+
+    `invalidate` decides "already retired" with the SHARED vocabulary plus the
+    legacy `outdated` flag, read with `bool()` so a truthy string — the spelling a
+    legacy graph holds — is honoured. MEASURED: reverting both reads to `is True`
+    left the whole suite green, and a claim carrying `outdated='true'` then made
+    `invalidate()` RAISE from `retract_point` instead of reporting
+    `alreadyRetired: True`. Asserting the RESULT (not one read) is what makes this
+    pin meaningful: the first gate is masked by the caught retract refusal.
+    """
+    i, t, g = _world(sdk, tag="legacy-claim-flag")
+    made = _judge(sdk, i, t, g)
+    sdk._get_proj().g.query(
+        "MATCH (p:Point {id:$id}) SET p.outdated = 'true'",
+        params={"id": made["point_id"]},
+    )
+    finding = Invalidation(judgement_id=made["point_id"], reason="target-revised",
+                          detail="…")
+    result = invalidate(sdk, finding)
+    assert result["invalidated"] is False
+    assert result["alreadyRetired"] is True, result
+    assert sdk.get_entity(made["point_id"])["status"] != "retracted"
 
 
 # ── 4b. an UNNAMED scope is undecidable, never a retirement ──────────────
