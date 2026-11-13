@@ -5356,10 +5356,11 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # '/^- test_pack_logic_writeprobe_11083.py$/{print NR}'
             # config/ci-surfaces.yml`), never carried forward from either side of
             # The value this row pins is MEASURED on the tree that merges, never
-            # predicted: `10076` at the merge of `main` `ca74f2375e` into this branch
+            # predicted: `10157` at the merge of `main` `ca74f2375e` into this branch,
+            # and `10172` on this tree — `main`'s `#12372` then added 15 lines above the
+            # entry, which is exactly the shift a carried number cannot know about
             # (`awk '/^- test_pack_logic_writeprobe_11083.py$/{print NR}'
-            # config/ci-surfaces.yml`), which is also what `main`'s tip reads — so the
-            # row and the base agree instead of the row carrying a branch-only offset.
+            # config/ci-surfaces.yml`). Re-measure; never add the delta.
             # ⛔ The earlier trail (9943 -> 9973 -> 9987 -> 10005 -> "10019 merged")
             # was PREDICTED arithmetic, not measurement: a predicted merge-tree value
             # is what #11837's review removed from this file, and the prediction went

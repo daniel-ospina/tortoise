@@ -1897,6 +1897,7 @@ def run(args: argparse.Namespace) -> int:
         arms["blocking"]["fts_only"]["candidate_set"] = (
             "pooled union over a capture's derived queries (max_queries=15); "
             "the per-query window is `k` candidates per mention")
+
         # ── ARM 5 (#12297): the cross-encoder rerank over the SAME candidates.
         #
         # ⛔ A reranker REORDERS what retrieval returned; it cannot surface a row
@@ -1905,6 +1906,7 @@ def run(args: argparse.Namespace) -> int:
         # WIDTH DEPENDENT, so the figures live in `arms.exact.<P>.in_window`
         # (computed) and NOT as a literal here: a re-run moves them, and an
         # earlier draft hardcoded one run's pair in the emitted note.
+        #
         # ⛔ `miss_past_k` is NOT that ceiling, and this comment used to say it
         # was: at k=P it is 0 BY CONSTRUCTION (a response has at most P rows, so
         # "its rank is past P" cannot occur), so it measures the counter, not the
@@ -1916,6 +1918,7 @@ def run(args: argparse.Namespace) -> int:
         # than left to inference because a rerank arm reporting a recall figure
         # without it invites "the reranker fixed recall", which is the one thing
         # it cannot do (issue #12297).
+        #
         # The measurement is per-mention and PAIRED against the unreranked order
         # of the SAME rows, so `gained` / `lost` are counterfactual on one pool
         # and cannot be explained by a population difference:

@@ -2720,7 +2720,7 @@ to answer.
   numbers by §10.32 — not because they were wrong, but because they were measured at `b6a630d` and
   a later rebase+merge (`bb88463894f5`, onto `main` `ca74f2375ef4`) moved every one of them. The
   three numbers it owns, `:10619`/`:14359`/`:14512`, were correct at that head; §10.32 re-derives
-  them for the shipping tree (`:11451`/`:15191`/`:15344`).
+  them for the shipping tree (`:11499`/`:15239`/`:15392`).
 
 ### 10.31 — §10.30's declared follow-up: `_collect_classify_items`, the fail-open pair, and §9/§11's carriers (2026-11-13, `#12295`)
 
@@ -2780,18 +2780,18 @@ to answer.
   claimed to discharge. A follow-up recorded as done while the pin that reads it is red is a false
   claim, so the numbers are re-derived here instead of restated.
 - **New values — each MEASURED at `bb88463894f5` by opening the line, not by adding an offset:**
-  `_collect_classify_items` at `:12772`, its extent `:12772-12794` (`def` to `return items`); the two
-  `if items:` gates at `:15191` (the S2 pass) and `:15344` (the post-S4 pass); the two fail-open
-  `except` arms at `:15204` (`classify(S2) failed`) and `:15355` (`classify(union) failed`); and the
+  `_collect_classify_items` at `:12820`, its extent `:12820-12842` (`def` to `return items`); the two
+  `if items:` gates at `:15239` (the S2 pass) and `:15392` (the post-S4 pass); the two fail-open
+  `except` arms at `:15252` (`classify(S2) failed`) and `:15403` (`classify(union) failed`); and the
   `#10360` read-back the pin opens, `_value_fidelity_judged = _state_value_verbatim_enforced()`, at
-  `:11451`.
-- **Verified by content, not arithmetic.** `:12772` is
-  `def _collect_classify_items(embed_list: dict) -> list[dict]:` and `:12794` is `return items`;
-  `:15204`/`:15355` are the two `except` arms whose appended warnings literally name
+  `:11499`.
+- **Verified by content, not arithmetic.** `:12820` is
+  `def _collect_classify_items(embed_list: dict) -> list[dict]:` and `:12842` is `return items`;
+  `:15252`/`:15403` are the two `except` arms whose appended warnings literally name
   `classify(S2) failed` / `classify(union) failed` (a THIRD `except Exception as e:  # never block
-  capture (P1)` at `:14902` is the S2.2 arm-restore path and is NOT one of these two, which is why
+  capture (P1)` at `:14950` is the S2.2 arm-restore path and is NOT one of these two, which is why
   the number is confirmed by the warning text and not by the `except` line, byte-identical across
-  all three); `:11451` carries the receiving variable `_value_fidelity_judged`, not the `def`
+  all three); `:11499` carries the receiving variable `_value_fidelity_judged`, not the `def`
   (`:5793`) and not the `armed =` site (`:5883`).
 - **Carriers updated, all LIVE:** §11's `steps:` condition, §9's provenance row, and §11.1's and
   §11.3's prose — the four `_live_blocks` carriers the pin binds. §10.29's, §10.30's and §10.31's own
