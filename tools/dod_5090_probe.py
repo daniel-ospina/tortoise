@@ -3343,7 +3343,30 @@ def per_file_scope_note(deployment: dict) -> str:
             parts.append(f"{overrides} value(s) leave it OFF — the LAST of them by compose "
                          "override or by FILE order (an earlier truthy assignment does not "
                          "survive a later non-truthy one)")
-        disarm = ("; ⛔ and this tree DISARMS it in " + " and ".join(parts)
+        # ⛔ THE LEADING CLAUSE IS THE ONE A READER QUOTES, so it states what this tree's
+        # files actually END as — the ORDER qualification above is a subordinate clause and
+        # did not stop "and this tree DISARMS it in 1 declaration(s)" from being printed
+        # beside a per-file line reading that same file `ON`. Measured shape: a compose
+        # `environment: [- FLAG, - FLAG=1]` REPORTS the value-less entry and ends `ON`, so a
+        # tree whose only disarmed file is a SILENT sibling published a false cause for its
+        # own OFF — the retracted-consequence shape this module forbids everywhere
+        # (fresh review of PR #12474, the falsifier the ORDER fix lacked).
+        # ⛔ And a file being `OFF` is not the same as a DECLARATION having disarmed it: the
+        # fixture that falsified the previous wording had the unset in a file that ends `ON`
+        # and an unrelated SILENT sibling — so "this tree DISARMS it in 1 declaration(s)"
+        # attributed the sibling's silence to a line the walk had just read deciding the
+        # other way. Attribute by PATH, and only where that file really ends unarmed.
+        files_by_state = deployment.get("files") or {}
+        declared_paths = {str(entry).split(":", 1)[0]
+                          for entry in list(deployment.get("unset_declarations") or ())
+                          + list(deployment.get("disarming_assignments") or ())
+                          if str(entry)}
+        disarmed_by_declaration = sorted(
+            posix for posix in declared_paths if files_by_state.get(posix) == "OFF")
+        lead = ("this tree DISARMS it in " if disarmed_by_declaration else
+                "the disarming direction is REPORTED here but is NOT the last word in "
+                "its own file, so it does NOT disarm this tree — see ")
+        disarm = ("; ⛔ and " + lead + " and ".join(parts)
                   + " — neither direction is modelled by the per-file arming rule")
     return (
         "this reading is PER FILE and does not model the MERGE: a compose file's "

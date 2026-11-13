@@ -321,11 +321,11 @@ assertion measures.
 ```text
 $ uv run python tools/test_lane.py run -- tests/test_dod_5090_probe.py -q
 121 passed, 1 skipped in 42.50s   # the #11088 transcript this row was cut from
-                                 # this tree: 214 collected
-                                 # (docker lane: 213 passed, 1 skipped)
+                                 # this tree: 215 collected
+                                 # (docker lane: 214 passed, 1 skipped)
 ```
 
-(115 collected before #11088's round 7; the file collects **214 in the tree this document sits in** —
+(115 collected before #11088's round 7; the file collects **215 in the tree this document sits in** —
 nine added by #11337 over the then-122 baseline, nineteen by `#11444`'s writer-register falsifiers, one
 by `#11471`'s GATED-writer bypass arm, fourteen by `#11492`, one by `#11437`, five by `#11747`
 (which brought the cache projection into row 2's served-set comparison — the write path the source
@@ -405,7 +405,12 @@ falsifier a later review measured at this head (PR #12474, P2) — that the `UNM
 one ordering it does not cover, since a LATER resolvable assignment still decides the file while the
 unresolvable line stays REPORTED in `indeterminate` in both orders; shown RED by reverting its own fix,
 with the phrase pin normalising the docstring's whitespace so a reflow cannot red it)
-(`122 + 9 + 19 + 1 + 14 + 1 + 5 + 7 + 1 + 1 + 3 + 4 + 27 = 214`). ⚠️ No figure here names what `main` collects TODAY:
+(`122 + 9 + 19 + 1 + 14 + 1 + 5 + 7 + 1 + 1 + 3 + 4 + 27 + 1 = 215`). The final `1` is PR #12474's
+row-1 falsifier for the `DISARMS it` leading clause — a compose `environment: [- FLAG, - FLAG=1]`
+REPORTS the value-less entry and ends `ON`, so a tree whose only disarmed file was a SILENT sibling
+published a false cause for its own OFF; the test reds against the pre-fix tool and greens after,
+because the clause now attributes a disarm by PATH and only where that file really ends unarmed.
+⚠️ No figure here names what `main` collects TODAY:
 which of those additions are already merged moves with `main`, so any "`main` at N" would be a moving
 reference this paragraph forbids — the total is bound to THIS TREE alone): seven
 row-2 resolution pins (register resolves every writer; the unserved-label falsifier; the
@@ -445,7 +450,7 @@ under
 `tests/_live_utils.py`'s live-graph fixture, which only the docker lane satisfies, so the
 LASTING statement is the invariant rather than either figure: the carve-out lane reads one more
 skip and one fewer pass than the docker lane, and at any one tree the two splits add to that tree's
-collected count — `213 passed, 1 skipped` and `212 passed, 2 skipped` here, both adding to the same `214` the pin re-derives, while the `eee465029a` pair quoted above (`185/1` and `184/2`) adds to the
+collected count — `214 passed, 1 skipped` and `213 passed, 2 skipped` here, both adding to the same `215` the pin re-derives, while the `eee465029a` pair quoted above (`185/1` and `184/2`) adds to the
 `186` THAT tree collects. Neither figure is therefore stale: a carve-out run that
 "corrects" 186/1 to 185/2 rewrites a true record into a false one, and the pin deliberately does
 not cover the split for exactly that reason. ⚠️ The COUNT is bound to THIS TREE, never to a branch

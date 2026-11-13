@@ -3427,6 +3427,68 @@ def test_the_UNMEASURED_doctrine_is_no_wider_than_the_walk_in_EITHER_direction(
             f"{shipped['indeterminate']}")
 
 
+def test_a_superseded_unset_does_not_claim_this_tree_DISARMS_the_flag(
+        tmp_path, monkeypatch):
+    """A REPORTED disarm is not a DISARMED-by-it tree: the leading clause must not say so.
+
+    ⛔ The falsifier the ORDER qualification lacked (fresh review of PR #12474, P2):
+    `environment: [- FLAG, - FLAG=1]` is ONE file whose LAST word is truthy, so the walk
+    reads that file `ON` — while the reported `unset_declarations` still produced a
+    leading *"this tree DISARMS it in 1 declaration(s)"*. Two statements about one flag
+    in one note, and the false one was the clause a reader quotes; the subordinate
+    "the LAST of them by FILE order decides" did not undo it.
+
+    The arm keys on the file STATES, per PATH: a declaration is named as disarming the
+    tree only when the file it sits in really ends unarmed. Dropping the report instead
+    would be the other failure, so both halves are asserted.
+    """
+    (tmp_path / "Dockerfile.hosted").write_text('FROM python:3.12\n', encoding="utf-8")
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n"
+        "  tortoise:\n"
+        "    build:\n"
+        "      dockerfile: Dockerfile.selfhost\n"
+        "    environment:\n"
+        "      - TORTOISE_EMBED_GATE\n"
+        "      - TORTOISE_EMBED_GATE=1\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    files = shipped["deployment"]["files"]
+    # The fixture's whole point: the value-less entry is REPORTED, and the file it sits
+    # in ends `ON` because a LATER truthy assignment decides it. A silent sibling holds
+    # the tree at `on: False`, which is what reached the false cause in the first place.
+    assert shipped["unset_declarations"], shipped
+    assert files["docker-compose.yml"] == "ON", files
+    assert files["Dockerfile.hosted"] == "OFF", files
+    assert shipped["deployment"]["on"] is False, shipped["deployment"]
+
+    caveat = probe.per_file_scope_note(shipped["deployment"])
+    assert "DISARMS it" not in caveat, (
+        "the caveat claimed this tree is disarmed BY a declaration whose own file it "
+        "reads `ON`: " + caveat)
+    # …and the direction is still REPORTED, not dropped to make the sentence true.
+    assert "UNSET it" in caveat, caveat
+    note = _gate_note(shipped)
+    assert "DISARMS it" not in note, note
+    assert "declarations that UNSET it: ['docker-compose.yml:" in note, note
+
+    # The POSITIVE control, in the same fixture shape: move the truthy assignment FIRST
+    # and the value-less entry becomes the last word — the file ends `OFF`, and now the
+    # leading clause MUST name it, so the arm cannot pass by never saying it.
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n"
+        "  tortoise:\n"
+        "    build:\n"
+        "      dockerfile: Dockerfile.selfhost\n"
+        "    environment:\n"
+        "      - TORTOISE_EMBED_GATE=1\n"
+        "      - TORTOISE_EMBED_GATE\n", encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"]["docker-compose.yml"] == "OFF", shipped
+    assert "this tree DISARMS it in 1 declaration(s)" in probe.per_file_scope_note(
+        shipped["deployment"]), probe.per_file_scope_note(shipped["deployment"])
+
+
 def test_a_value_less_compose_environment_entry_is_reported_as_UNSET(
         tmp_path, monkeypatch):
     """A compose entry with NO value DISARMS the container — the direction that costs.
