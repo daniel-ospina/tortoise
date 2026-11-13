@@ -596,12 +596,8 @@ def hard_vetoes(mention: dict, candidate: dict, facts: dict | None = None) -> li
          "mention_is_alias": bool}  # the mention's folded name is the
                                     # candidate's OWN name or one of its
                                     # `aliases[]` — the record that this spelling
-                                    # is already that entity. ⛔ Stands down the
-                                    # three SPELLING vetoes as well as
-                                    # `group_join`: a recorded identity outranks
-                                    # a mechanical class-of-spelling rule, and a
-                                    # refusal here is permanent (an entity hold is
-                                    # not carried forward). ⛔ DERIVED by the
+                                    # is already that entity. ⛔ Escapes
+                                    # `group_join` ONLY. ⛔ DERIVED by the
                                     # caller's shim (`extractor_v2._verdict_facts`),
                                     # never by the facts reader: only the shim sees
                                     # the mention.
@@ -615,17 +611,21 @@ def hard_vetoes(mention: dict, candidate: dict, facts: dict | None = None) -> li
 
     m_ids = identifier_tokens(mention.get("name", ""))
     c_ids = identifier_tokens(candidate.get("name", ""))
-    # ⛔ `mention_is_alias` stands the three SPELLING vetoes down as well as
-    # `group_join`, because it is the tree's own RECORD that the two spellings are
-    # one entity (`apply_entity_merge` writes `aliases[]` only after a reviewer
-    # approved the merge). Re-litigating that here does not just refuse a merge: an
-    # entity hold is not carried forward, so every later re-mention of the alias is
-    # held and LOST. Measured on a real graph — `billing v2 ledger` merged into
-    # `billing v3 ledger`, then a re-mention of the v2 spelling was vetoed
-    # `identifier_conflict` — and it makes `_find_existing_entity`'s kind-agnostic
-    # alias rung self-defeating, since the rung exists precisely because the kind
-    # spelled on a retired variant need not match the survivor's.
-    recorded_identity = bool(facts.get("mention_is_alias"))
+    # ⛔ `alias_recorded` stands the three SPELLING vetoes down, because it is the
+    # tree's own RECORD that the two spellings are one entity (`apply_entity_merge`
+    # writes `aliases[]` only after a reviewer approved the merge). Re-litigating
+    # that does not just refuse a merge: an entity hold is not carried forward, so
+    # every later re-mention of the alias is held and LOST. Measured on a real graph
+    # — `billing v2 ledger` merged into `billing v3 ledger`, then a re-mention of
+    # the v2 spelling was vetoed `identifier_conflict` — and it made
+    # `_find_existing_entity`'s kind-agnostic alias rung self-defeating, since the
+    # rung exists precisely because the kind spelled on a retired variant need not
+    # match the survivor's.
+    # ⛔ `mention_is_alias` is NOT the same fact: it also covers the candidate's OWN
+    # name, and a same spelling must keep its vetoes (a `plan` "Acme" and an `org`
+    # "Acme" are different entities). Keying this guard on it made the pair merge
+    # with no hold and no record (round-4 review).
+    recorded_identity = bool(facts.get("alias_recorded"))
     if (
         m_ids
         and c_ids

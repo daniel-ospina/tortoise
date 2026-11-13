@@ -209,12 +209,17 @@ the variant's spelling is lost on every run. It also made
 exists exactly because "the kind spelled on the retired variant need not match the
 survivor's" — and it is what turned a merged `billing v2 ledger` /
 `billing v3 ledger` pair into a permanent `identifier_conflict` hold. ⛔ The
-escape is the RECORD, not an amnesty for mismatched kinds: on the EXACT path a
-same spelling under a different kind namespace is still `kind_conflict`, because
-no merge recorded otherwise (`plan` "Acme" and `org` "Acme" are different
-entities). Pinned by
+escape is the RECORD, not an amnesty for mismatched kinds, and it is keyed on the
+separate `facts["alias_recorded"]` fact — `aliases[]` ONLY, never
+`mention_is_alias`, which also covers the candidate's OWN name. A same spelling
+under a different kind is still `kind_conflict`: the model's proposal to bind a
+`plan` "Acme" onto an `org` "Acme" is HELD, with the refusal recorded, because no
+merge ever recorded that the two spellings are one entity. (An exact-name row
+cannot even reach that veto — the exact rungs require equal folded kinds — so the
+same-spelling case arrives through phase 2.) Pinned by
+`test_a_same_spelling_different_kind_proposal_is_still_held`,
 `test_a_re_mention_of_a_folded_alias_outranks_an_identifier_veto` and the
-control in `test_a_name_match_beats_an_alias_match_and_two_aliases_are_ambiguous`.
+controls in `test_a_name_match_beats_an_alias_match_and_two_aliases_are_ambiguous`.
 
 The fuller M-4 reading — compare the mention against the group's **members**, not
 only the survivor — remains available and is the next widening; the alias case is
