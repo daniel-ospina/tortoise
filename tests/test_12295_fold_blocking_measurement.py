@@ -320,3 +320,26 @@ def test_the_per_k_width_claim_matches_the_artifact(report):
         f"the brief does not quote the narrowest window ({windows[0]} of {total})")
     assert f"all {windows[-1]} are in the window" in text, (
         f"the brief does not quote the widest window (all {windows[-1]})")
+
+
+def test_the_index_stats_key_set_is_the_one_the_code_emits(report):
+    """The artifact's ``index_stats`` must carry the SHAPE ``BlockIndex.stats()``
+    emits, not just the values it happened to hold.
+
+    ⛔ This is the rename-drift guard. `stats()["keys"]` was renamed to
+    `key_memberships` in this PR, and the committed artifact was hand-renamed with
+    it (the harness writes `index.stats()` verbatim, so the artifact is no longer
+    reproducible at its own `code_head` for that field). The values were identical,
+    so nothing noticed: no test compared the artifact's key SET against the code's.
+    A future rename would slip through the same hole, leaving the artifact naming a
+    field the shipped module cannot emit.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from tortoise.entity_blocking import BlockIndex
+
+    emitted = set(BlockIndex().stats())
+    held = set(report["arms"]["blocking"]["index_stats"])
+    assert held == emitted, (
+        f"the artifact's index_stats keys {sorted(held)} are not the ones "
+        f"BlockIndex.stats() emits {sorted(emitted)} — the artifact names a field "
+        "the shipped module cannot produce")
