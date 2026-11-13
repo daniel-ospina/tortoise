@@ -397,7 +397,13 @@ def run(args: argparse.Namespace) -> int:
               file=sys.stderr)
         return 3
 
-    from tortoise.extractor_v2 import _find_existing_entity, _sanitise_query_text
+    from tortoise.extractor_v2 import (
+        _find_existing_entity,
+        _has_high_entropy,
+        _name_carries_signal,
+        _sanitise_query_text,
+        _signal_tokens,
+    )
     from tortoise.sdk import TortoiseSDK
 
     sessions = Path(os.path.expanduser(args.sessions_dir))
@@ -550,6 +556,35 @@ def run(args: argparse.Namespace) -> int:
         exact = {k: {"in_window": 0, "rank_sum": 0, "attached": 0,
                      "miss_absent_at_max_k": 0, "miss_past_k": 0,
                      "rows_zero": 0} for k in KS}
+        # ── ARM 4 (this change, #12294): the ENTROPY GATE, measured on the SAME
+        # names, windows and graph as ARM 1 — folded into this loop so the arm
+        # costs ZERO extra queries, which is the only way its "before" is the
+        # "before" the other arms report.
+        #
+        # Two predicates, because the issue asks what the ported gate ACTUALLY
+        # tests and whether it reaches our population:
+        #   ``zep_full_name`` — `_has_high_entropy` applied to the whole name,
+        #                       exactly as Zep does (`dedup_helpers.py:80-86`).
+        #   ``shipped``       — `_name_carries_signal`, i.e. the same predicate
+        #                       applied to the CONTENT tokens the sparse leg
+        #                       actually searches (stopwords already removed).
+        # For each: how many names it gates, and — the number that decides the
+        # issue — how many of them had the CANONICAL in the window, i.e. correct
+        # candidates the gate would suppress.
+        gate: dict[str, dict[str, int]] = {
+            p: {"names": 0, "gated": 0, "gated_gap": 0,
+                "in_window_before": 0, "suppressed_correct": 0,
+                "noise_rows_freed": 0, "gated_and_missed": 0}
+            for p in ("zep_full_name", "shipped")}
+        #: per gated name, the evidence the falsifier needs (class, what the gate
+        #: would remove). Capped ONLY by the sample itself, never by a head-slice.
+        gate_gated: list[dict] = []
+        gate_by_class: dict[str, dict[str, dict[str, int]]] = collections.defaultdict(
+            lambda: {c: {"names": 0, "gated": 0, "in_window_before": 0,
+                         "suppressed_correct": 0}
+                   for c in ("zep_full_name", "shipped")})
+        _GATE_KS = (3, 15)
+
         exact_by_class: dict[str, dict[str, dict[str, int]]] = collections.defaultdict(
             lambda: {str(k): {"n": 0, "in_window": 0, "rows_zero": 0} for k in KS})
         exact_misses: list[dict] = []
@@ -568,10 +603,27 @@ def run(args: argparse.Namespace) -> int:
             # fold-equal groups), and 'was the canonical returned' is a question
             # about a node, not a string.
             wide = window(name, max(KS))
+            _g_pred = {"zep_full_name": not _has_high_entropy(name.lower().strip()),
+                       "shipped": not _name_carries_signal(name)}
+            _g_hit: dict[str, dict[int, bool]] = {
+                p: {} for p in _g_pred if _g_pred[p]}
             for k in KS:
                 rows = window(name, k)
                 exact_by_class[row["cls"]][str(k)]["n"] += 1
                 hit = next((i for i, r in enumerate(rows) if r["id"] == row["id"]), None)
+                # #12294 gate accounting, on THIS window — no extra queries.
+                if k in _GATE_KS:
+                    for p, is_gated in _g_pred.items():
+                        if not is_gated:
+                            continue
+                        _g_hit[p][k] = hit is not None
+                        if hit is not None:
+                            gate[p]["suppressed_correct"] += 1
+                            gate_by_class[row["cls"]][p]["suppressed_correct"] += 1
+                        else:
+                            gate[p]["noise_rows_freed"] += len(rows)
+                        if k == KS[0]:
+                            gate[p]["gated_gap"] += len(rows)
                 if hit is not None:
                     exact[k]["in_window"] += 1
                     exact_by_class[row["cls"]][str(k)]["in_window"] += 1
@@ -601,6 +653,8 @@ def run(args: argparse.Namespace) -> int:
                             "returned": len(rows),
                             "wide_returned": len(wide),
                             "tokens": len(toks),
+                            "signal_tokens": len(_signal_tokens(name)),
+                            "gated": _name_carries_signal(name) is False,
                             "siblings_2tok": _siblings.get(name, 0),
                             "tokens_kept_numeric": len(
                                 [t for t in toks if not t.isdigit()]) != len(toks),
@@ -617,6 +671,28 @@ def run(args: argparse.Namespace) -> int:
                 cand, _mode = _find_existing_entity(rows, name, "core:other")
                 if cand is not None:
                     exact[k]["attached"] += 1
+            # #12294: one row per name, so `names`/`gated` counts are names and
+            # the per-class denominator is readable.
+            for p, is_gated in _g_pred.items():
+                gate[p]["names"] += 1
+                gate_by_class[row["cls"]][p]["names"] += 1
+                if is_gated:
+                    gate[p]["gated"] += 1
+                    gate_by_class[row["cls"]][p]["gated"] += 1
+                    if not any(_g_hit[p].values()):
+                        # gated AND the canonical was reachable at NO window —
+                        # the class the gate is FOR (a query that cannot find it)
+                        gate[p]["gated_and_missed"] += 1
+                    gate_gated.append({
+                        "name": name, "cls": row["cls"],
+                        "signal_tokens": _signal_tokens(name),
+                        "in_window_3": _g_hit[p].get(KS[0], False),
+                        "in_window_15": _g_hit[p].get(KS[-1], False),
+                        "window_rows": _g_hit[p] and len(wide),
+                    })
+        arms["gate"] = gate
+        arms["gate_by_class"] = {c: dict(v) for c, v in sorted(gate_by_class.items())}
+        arms["gate_gated_names"] = gate_gated
         arms["exact"] = exact
         arms["exact_misses"] = exact_misses
         arms["exact_misses_recorded"] = len(exact_misses)
@@ -633,13 +709,35 @@ def run(args: argparse.Namespace) -> int:
         by_class: dict[str, dict[str, dict[str, int]]] = collections.defaultdict(
             lambda: {str(k): {"pairs": 0, "in_window": 0, "attached": 0,
                               "attached_folded": 0} for k in KS})
+        #: #12294, variant arm: what the gate removes from the pair population.
+        #: ``suppressed_pairs`` counts every k-window a gated mention would have
+        #: had (the denominator is the arm's own pair count at that k, so the
+        #: share is readable); ``would_attach_before`` is the number that decides
+        #: the issue — a gated pair that phase 1 CAN bind today becomes a
+        #: guaranteed duplicate once its query is not issued.
+        vgate: dict[str, dict[str, int]] = {
+            p: {"pairs": 0, "gated_pairs": 0, "in_window_before": 0,
+                "would_attach_before": 0}
+            for p in ("shipped", "zep_full_name")}
         for row in sample:
             name = row["name"]
             for vclass, surface in variants(name, row["cls"]):
                 folded_surface = _fold_punct(surface)
+                # #12294: the gate evaluates the MENTION — a capture derives its
+                # query from the surface form it extracted, never from the stored
+                # name, which it does not know yet.
+                _v_gated = {"shipped": not _name_carries_signal(surface),
+                            "zep_full_name": not _has_high_entropy(
+                                surface.lower().strip())}
                 for k in KS:
                     var[k]["pairs"] += 1
                     by_class[vclass][str(k)]["pairs"] += 1
+                    vgate_total = _v_gated  # the gate evaluates the MENTION
+                    if k == KS[0]:
+                        for _p, _g in vgate_total.items():
+                            vgate[_p]["pairs"] += 1
+                            if _g:
+                                vgate[_p]["gated_pairs"] += 1
                     rows = window(surface, k)
                     in_win = any(r["id"] == row["id"] for r in rows)
                     if in_win:
@@ -649,6 +747,16 @@ def run(args: argparse.Namespace) -> int:
                     # derived query would carry it — never the stored name
                     cand, _m = _find_existing_entity(rows, surface, "core:other")
                     hit_ok = cand is not None and cand.get("id") == row["id"]
+                    # #12294 false-suppression: a gated mention's query is never
+                    # issued, so a pair that WAS in-window loses its canonical
+                    # from phase 1's window AND from phase 2's candidate table.
+                    for _p, _g in vgate_total.items():
+                        if not _g:
+                            continue
+                        if in_win:
+                            vgate[_p]["in_window_before"] += 1
+                            if hit_ok:
+                                vgate[_p]["would_attach_before"] += 1
                     if hit_ok:
                         var[k]["attached"] += 1
                         by_class[vclass][str(k)]["attached"] += 1
@@ -662,6 +770,7 @@ def run(args: argparse.Namespace) -> int:
                         by_class[vclass][str(k)]["attached_folded"] += 1
         arms["variant"] = var
         arms["variant_by_class"] = {c: dict(v) for c, v in sorted(by_class.items())}
+        arms["gate_variant"] = vgate
 
         # ── ARM 3: what a capture actually hands ``resolve_entities``.
         # ``search_graph`` accumulates every query's rows into ONE id-keyed dict,
