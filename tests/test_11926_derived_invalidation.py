@@ -1552,8 +1552,9 @@ def test_one_refused_retirement_does_not_discard_the_rest_of_the_sweep(sdk):
     # is the one record a caller reads first when the sweep reported a failure:
     # while the key was omitted here, `record["found"]` was a KeyError and
     # `.get("found")` read `None` — indistinguishable from an unnamed bucket,
-    # which is the #12315 defect class one level out. `None` is the honest
-    # answer: the retirement raised before its read concluded.
+    # which is the #12315 defect class one level out. `None` is the conservative
+    # answer: this synthetic raise happens before any read, and `invalidate`'s own
+    # refusals do not say whether they got as far as reading the claim.
     assert failed[0]["found"] is None, failed[0]
 
 
