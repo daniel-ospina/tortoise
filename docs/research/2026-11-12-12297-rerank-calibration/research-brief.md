@@ -290,11 +290,16 @@ point, and EVERY caller of this read is on it:
 | the **ask lane** (`tortoise/ask_lane.py` reaches the same read with the default `order_by="relevance"`, no recency, a non-empty question) | **no** — and its candidate text is captured TURNS, i.e. the passage-length class priced at 85.227 ms/pair, so arming the gate there costs the same ≈3.4 s/query it costs user search |
 
 Every caller that must not have its page re-picked **opts out** via
-`_rerank_candidates=False`, in FOUR classes (below) — and SIX call sites deliberately
-do NOT, because the re-pick IS the lever: the two API-server search routes
+`_rerank_candidates=False`, in FOUR classes (below) — and SIX **product** call sites
+deliberately do NOT, because the re-pick IS the lever: the two API-server search routes
 (`hosted_api` / `selfhost_api`), the MCP search tools (`tortoise_search`,
 `tortoise_query`), the ask lane, and the capture-time noun prior (which has its own
-`OVERRIDES:` record further down). The four mechanisms are NOT the same fact:
+`OVERRIDES:` record further down). ⛔ Those six are not the whole non-opt-out
+population: the four ask-mirror/calibration harnesses (`ask_recall_bench`,
+`gen_ask_transcripts`, `candidate_recall_11901`, `rerank_calibration_12297`) also leave
+the lever ON, because they must measure the shipped reader — they are the census's
+`intentional_keep`, and the census in `tests/test_rerank_pool.py` is the executable
+list. The four mechanisms are NOT the same fact:
 
 - **Order re-owners** — `suggest_entry_points`, `issue_insight`, `recall_state`,
   `recall_gaps` and `volunteer_context` (which binds the read as a `_search_fn=` seam
@@ -474,6 +479,15 @@ interface, so **only the scorer changes**. Two declared, untuned modes:
 
 All three tables below are `measurement-lexical-control.json` — `arms.*.40` / `arms.*.15`
 for the recall and nDCG cells, `arms.*.latency` for the per-pair cost.
+
+⛔ **5.463 is the same arm re-run**, not a different measurement: §6's
+`measurement-noun-path.json` prices the cross-encoder at **5.179 ms/pair** and this
+lexical-control run prices it at **5.463** over the identical 39,930 pairs on one
+thread — a 5.5 % run-to-run spread on the same box. The finding here is the **ratio to
+the lexical baselines measured in this same process** (≈ 176× `difflib`, ~1,090×
+`overlap` — the same ratio as below), which survives the spread; quote §6's 5.179 when
+costing an added millisecond budget, and this ratio when arguing the cross-encoder is
+worth it.
 
 | pool 40, exact arm | recall@3 | nDCG@10 | gained / lost | **ms/pair** |
 |---|---|---|---|---|
