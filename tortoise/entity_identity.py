@@ -141,30 +141,20 @@ class NonFoldedEntry(NamedTuple):
     # reads the shape must not assume the first:
     #  (a) the GONE-SURVIVOR arms — every holder is a carrier of ONE merged entity
     #      whose survivor is deleted (`_ref_is_one_gone_entity` and the `if not
-    #      by_name` twins, four of the five sites). ⛔ Those four answer by ENTITY
-    #      COUNT (review round 25): two DISTINCT entities holding the ref keep
+    #      by_name` twins, four of the five sites); `candidate_ids` is the carrier
+    #      list there, always two or more ids. ⛔ Those four answer by ENTITY COUNT
+    #      (review round 25): two DISTINCT entities holding the ref keep
     #      `"ambiguous-name"`, because telling a consumer to fix ONE dangling
     #      pointer where the graph holds two is the same false repair this note
     #      exists to prevent. So "ONE merged entity" is a PRECONDITION of the
     #      shape on all four, not a description of whatever reaches them.
-    #  (b) the ID-LESS-TARGET arms — a resolved target that carries no id, so the
-    #      journaled fold cannot address it (`commit_ops` id-less Object arm, and
-    #      `entity_identity._record_unaddressable` — NOT `_refuse`, which has no
-    #      `unaddressable-name` caller: review round 26).
+    #  (b) the ID-LESS arms — a single resolved holder that carries no id, so the
+    #      journaled fold cannot address it (`commit_ops` id-less Object arm;
+    #      `_record_unaddressable` here, which records `["<id-less>"]`).
     # They differ in cause, not in shape: in both the name cannot be addressed
-    # one-of-them, so neither may be silently picked.
-    # ⛔ THE SHAPE ALONE CANNOT SEPARATE THEM; `candidate_ids` CAN (review round 26,
-    # correcting this note's previous claim that it could not). Every cause-(a) site
-    # records a tuple of REAL ids — the two `_ref_is_one_gone_entity` arms reach
-    # their recorder only when every row's id is truthy and in `widened`, and the
-    # two `if not by_name` twins filter falsy ids out — so a carrier list is either
-    # `()` or real ids. The id-less target records through `display_holder_ids`, i.e.
-    # exactly `('<id-less>',)` for a NULL id or `('',)` for an empty-string one.
-    # So `('<id-less>',) | ('',)` ⇒ id-less target; `()` or a tuple of real ids ⇒
-    # gone-survivor. The one theoretical collision is a genuine carrier whose id is
-    # literally the string `"<id-less>"`; treat that as a caveat, not as the rule.
-    # Keeping this note WRONG was the round-24 claim and it is not restored: a
-    # repair consumer reads `non_folded_entries()` and has no call site to consult.
+    # one-of-them, so neither may be silently picked. ⛔ The placeholder HAPPENS to
+    # separate them today, but that is incidental, not a contract — take the cause
+    # from the call site, never from these fields.
 
 
 _non_folded: list[NonFoldedEntry] = []
