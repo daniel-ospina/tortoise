@@ -38,6 +38,8 @@ carrying it or declared as a known gap.
 
 from __future__ import annotations
 
+import ast
+import fnmatch
 import hashlib
 import io
 import os
@@ -45,6 +47,7 @@ import re
 import shutil
 import subprocess
 import tarfile
+import tokenize
 from pathlib import Path
 
 import pytest
@@ -1339,8 +1342,8 @@ def _workflow_paths(root: Path | None = None) -> list[Path]:
     Why centralised: the narrow glob looked CORRECT at each site, which is why it was
     written three times in this file. Repairing each site leaves the fourth to be written
     next week, so every scan derives from `_WORKFLOW_SUFFIXES` through this function, and
-    `test_no_site_re_spells_the_workflow_glob_narrowly` reds if a literal narrow glob
-    reappears.
+    `test_no_site_re_spells_the_workflow_glob_narrowly` reds if a one-extension glob
+    reappears — it grades what the PATTERN matches, not how it is spelled.
 
     `root` exists so a pin can drive the REAL scan on a synthetic tree; it defaults to the
     repo's own directory at CALL time, so it follows `WORKFLOWS`.
@@ -3244,44 +3247,124 @@ def test_the_enumerator_returns_every_workflow_file_github_would_run():
     )
 
 
+def _glob_calls(source: str) -> list[tuple[int, list[str]]]:
+    """`(line number, string literals)` for every `glob(`/`rglob(` call in `source`.
+
+    ⛔ TOKENIZED, NOT TEXT-SCANNED, and that is the third answer to this question rather than
+    the first — the same lesson `_yaml_run_scalars` records one screen up. Cut 1 matched
+    `glob("<star>.yml")` literally and missed `**` prefixes, keyword arguments and wrapped
+    calls. Cut 2 read the argument up to the first `)` and was beaten by the repo's own stdlib
+    idiom `glob.glob(str(WORKFLOWS) + "/*.yml")`, whose argument CONTAINS a `)`; cut 2 also
+    broke on its own docstring, because a hand-rolled quote tracker cannot tell a delimiter
+    from a quote inside prose. Both defects are the same defect: guessing Python's structure
+    from characters. `tokenize` knows it, so this asks `tokenize`:
+
+      * a call is a NAME token `glob`/`rglob` (also the `glob.glob` form, where the NAME is the
+        attribute) immediately followed by an `(` OP;
+      * the argument span is found by counting PAREN TOKENS — a paren inside a string is part
+        of a STRING token and cannot unbalance anything;
+      * the patterns are the STRING tokens in that span, `ast.literal_eval`-ed. An f-string is
+        tokenized as FSTRING_START/MIDDLE/END, so `glob(f"*{suffix}")` yields no pattern and is
+        correctly out of this pin's reach (declared in the test's SCOPE).
+    """
+    out: list[tuple[int, list[str]]] = []
+    tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
+    for i, token in enumerate(tokens):
+        if token.type != tokenize.NAME or token.string not in {"glob", "rglob"}:
+            continue
+        if i + 1 >= len(tokens) or tokens[i + 1].string != "(":
+            continue
+        literals: list[str] = []
+        depth = 0
+        for inner in tokens[i + 1 :]:
+            if inner.type == tokenize.OP and inner.string == "(":
+                depth += 1
+            elif inner.type == tokenize.OP and inner.string == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            elif inner.type == tokenize.STRING:
+                try:
+                    value = ast.literal_eval(inner.string)
+                except (ValueError, SyntaxError):
+                    continue
+                if isinstance(value, str):
+                    literals.append(value)
+        out.append((token.start[0], literals))
+    return out
+
+
+def _names_a_workflow_matching(pattern: str, suffix: str) -> bool:
+    """Would this glob PATTERN match a workflow filename ending in `suffix`?
+
+    Asked with `fnmatch` on the pattern's LAST PATH SEGMENT rather than by looking for the
+    literal `*.yml` substring, because the substring test is what three review rounds beat:
+
+      * `glob("<star>yml")` and `glob("<star>.[y]ml")` both match `x.yml` and neither contains
+        `<star>.yml`, so both passed;
+      * a concatenated argument (`str(WORKFLOWS) + "/*.yml"`) hid behind the paren truncation;
+      * and in the other direction a literal `action.yml` pattern — a composite action, NOT a
+        workflow — must not be graded as workflow enumeration, which a segment that is a
+        literal name answers for free.
+    """
+    return fnmatch.fnmatchcase(f"x{suffix}", pattern.rsplit("/", 1)[-1])
+
+
 def test_no_site_re_spells_the_workflow_glob_narrowly():
     """#12238: repairing the three live sites would leave the fourth to be written next week.
 
-    STRUCTURAL on purpose. The narrow glob looked right at every one of its three sites, so
-    a reader adding a fourth scan has no signal that `*.yaml` is missing. This pin gives them
-    one: no `glob(`/`rglob(` call in this module may pass an argument naming only the `.yml`
-    extension — the enumeration derives from `_WORKFLOW_SUFFIXES` through `_workflow_paths()`.
+    STRUCTURAL on purpose. The narrow glob looked right at every one of its three sites, so a
+    reader adding a fourth scan has no signal that `*.yaml` is missing. This pin gives them
+    one: no `glob(`/`rglob(` call in this module may name `.yml` files without naming `.yaml`
+    files — the enumeration derives from `_WORKFLOW_SUFFIXES` through `_workflow_paths()`.
     (That is also why this docstring does not spell the offending literal: the pin reads THIS
     file's source, so prose counts.)
 
-    WHY THE CALL FAMILY AND NOT THE BARE CALL: the first cut matched only
-    `glob("<star>.yml")` and a fresh review measured FOUR escapes — `glob("**/<star>.yml")`,
-    `glob("<star>.yml", case_sensitive=False)`, the same with `root_dir=`, and any of those
-    wrapped across lines. Each is still a one-extension workflow glob, each left the guard
-    GREEN, and nothing else reds on one that does not feed the coverage scan — i.e. the
-    silent skip this issue is about, restored. So the arm reads the ARGUMENT TEXT of every
-    `glob`/`rglob` call and reds when it names `.yml` without naming `.yaml`, which covers the
-    `**/`-prefixed, keyword-argument and multi-line spellings by construction rather than by
-    enumeration.
+    WHY IT GRADES THE PATTERN AND NOT THE SPELLING. Two review rounds measured escapes out of
+    a substring test: the bare call, then `**` prefixes, keyword arguments, wrapped calls, the
+    stdlib `glob.glob(str(WORKFLOWS) + "/*.yml")` idiom this repo actually uses, and the
+    equivalent `*yml` / `*.[y]ml` patterns. Each was a working one-extension workflow glob that
+    left the guard GREEN — the silent skip #12238 is about, restored. So the arm asks what the
+    pattern MATCHES (see `_names_a_workflow_matching`) and reads it out of a paren-balanced
+    scan, which covers all of those by construction instead of by enumeration. The house
+    both-extension PAIR (`glob("<star>.yml") + glob("<star>.yaml")`, the shape four sibling
+    scanners use) is not graded narrow: pairing is decided per LINE, so the call whose line
+    also asks for `.yaml` is clean.
 
-    SCOPE, so a green run is not read as more than it is: this is a pin on the glob CALL
-    family. Two shapes stay out of reach, both declared rather than implied — a site that
-    writes no glob at all (`[p for p in WORKFLOWS.iterdir() if p.suffix == ".yml"]`, measured
-    clean) and a site that DERIVES the pattern (`glob(f"*{suffix}")`, which is this module's
-    own correct form). Neither is pinnable from source text without parsing Python, so both
-    are REVIEW questions. Stated because a structural pin invites exactly that over-reading —
-    the over-claim, not the escape, is what round 2 of review caught here. The tuple itself
-    is asserted here too (bottom), so a dropped `.yaml` reds even when no site spells a glob.
+    SCOPE, so a green run is not read as more than it is — two shapes stay out of reach, both
+    declared rather than implied:
+
+      * a pattern built from a NON-LITERAL (`glob(f"*{suffix}")`, this module's own correct
+        form) — the source text does not contain the pattern, and resolving it would mean
+        executing the module's code to grade it;
+      * a `.yml`-only glob aimed at a directory that holds no workflows. Every such glob here
+        reds anyway (an over-block, declared: e.g. a hypothetical `REPO.glob("other/*.yml")`),
+        because this module's globs are workflow globs or script globs, and the script arms
+        derive their patterns from `_SCRIPT_GLOBS`.
+
+    Stated because a structural pin invites over-reading — the over-claim, not the escape, was
+    what round 2 of review caught here. The tuple itself is asserted here too (bottom), so a
+    dropped `.yaml` reds even when no site spells a glob.
     """
     source = Path(__file__).read_text()
-    #: The call's argument text: `glob(…)`/`rglob(…)` up to the first `)`. No glob argument in
-    #: this repo contains a `)`, and DOTALL is what makes a wrapped call read like a flat one.
-    glob_args = re.findall(r"(?:glob|rglob)\(([^)]*)", source, re.DOTALL)
-    narrow = [args.strip() for args in glob_args if "*.yml" in args and "*.yaml" not in args]
+    calls = _glob_calls(source)
+    #: A line that already asks for `.yaml` is the both-extension PAIR, not a narrow site.
+    paired = {
+        line
+        for line, literals in calls
+        if any(_names_a_workflow_matching(lit, ".yaml") for lit in literals)
+    }
+    narrow = [
+        f"line {line}: {literals!r}"
+        for line, literals in calls
+        if any(_names_a_workflow_matching(lit, ".yml") for lit in literals)
+        and not any(_names_a_workflow_matching(lit, ".yaml") for lit in literals)
+        and line not in paired
+    ]
     assert not narrow, (
-        f"this module spells a workflow glob narrowly at {len(narrow)} site(s): {narrow}. "
-        "A `*.yml` glob omits the `*.yaml` extension, which GitHub also RUNS — a workflow in "
-        "it is then invisible to every scan here (#12238). Use `_workflow_paths()`."
+        f"this module globs workflows narrowly at {len(narrow)} site(s): {narrow}. A `.yml` "
+        "glob omits the `.yaml` extension, which GitHub also RUNS — a workflow in it is then "
+        "invisible to every scan here (#12238). Use `_workflow_paths()`."
     )
     # ORDER-INSENSITIVE: `_workflow_paths()` sorts, so the tuple's order carries no meaning and
     # asserting the order would red a semantically identical swap with a message blaming the
