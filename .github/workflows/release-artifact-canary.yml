@@ -172,6 +172,11 @@ jobs:
       # the workflow, and they run here. A pool runner without `gh` would fail the alert
       # step with 127 and the durable record this workflow exists to leave would never be
       # filed (#9018, #12363 round 8).
+      # ⛔ NOT `continue-on-error`: the runner-tool contract suite forbids it on this step
+      # (a provisioning failure must be loud — #9018). The steps that FOLLOW still run when
+      # it fails, because each carries `!cancelled()` instead of the implicit `success()`:
+      # the alarm needs no `gh`, and the alert step fails NAMING the missing tool rather than
+      # filing nothing while the run reads green.
       - name: Runner tool contract — provide gh (#9018)
         run: bash .github/scripts/runner-tools.sh ensure gh
       # ⛔ THE TRANSCRIPT LIVES ON THE OTHER VM. `report` runs on its own runner, so without
@@ -188,16 +193,26 @@ jobs:
       # A red here is NOT a code defect in the merged tree: it is the published artifact
       # being broken or missing, and only a release clears it. Say which, in the job
       # summary, so the next reader does not go looking for a PR to fix.
-      # The comparison is `!= "1"` on purpose: ONLY an explicit 1 means "the artifact is
-      # broken". A cancelled or timed-out canary exports NO exit code, and telling a human
-      # to cut a release on that is the sentence that ends in an unneeded upload.
+      # ⛔ THREE branches, and the predicates are NOT interchangeable:
+      #   exit 1     → a RELEASE finding (the artifact itself failed)
+      #   exit 0     → a RUNNER fault: the canary REACHED a verdict and a later step failed
+      #                (the transcript upload, most often) — nothing is owed
+      #   anything else (2, empty for a cancelled/timed-out canary) → a DETECTOR outage
+      # Only an explicit 1 may tell a human to cut an irreversible release (#12363 r8–r10).
       - name: What a red here means
-        if: ${{ needs.canary.result != 'success' && needs.canary.outputs.exit_code != '0' }}
+        if: ${{ !cancelled() && needs.canary.result != 'success' }}
         env:
           EXIT_CODE: ${{ needs.canary.outputs.exit_code }}
         run: |
           {
-            if [ "${EXIT_CODE:-}" != "1" ]; then
+            if [ "${EXIT_CODE:-}" = "0" ]; then
+              echo "### This red is a RUNNER fault, not a finding"
+              echo
+              echo "The canary REACHED a verdict (exit code 0: the published artifact passed"
+              echo "its documented checks) and a later step in the job failed — the"
+              echo "transcript upload, most often. Nothing is owed: no release, no alert"
+              echo "issue. Check the failed step on this run. See #12363."
+            elif [ "${EXIT_CODE:-}" != "1" ]; then
               echo "### This is a DETECTOR outage, not a release finding"
               echo
               echo "The canary could not evaluate the published artifact (canary result:"
@@ -221,17 +236,25 @@ jobs:
       # artifact can go on being broken while every summary says so (#12363 round 5).
       - name: File or refresh the alert issue
         # `exit_code == '0'` means the canary DID reach a verdict: a later step failing
-        # (the transcript upload, say) is the runner's fault and must not file an outage
-        # issue that then closes a truthful ledger (#12363 round 9).
-        if: ${{ needs.canary.result != 'success' && needs.canary.outputs.exit_code != '0' }}
+        # (the transcript upload, say) is the runner's fault. Filing an outage issue for it
+        # would assert "could not evaluate" about a run that evaluated fine, and — because
+        # an exit-1 filing is what resolves the outage ledger — would leave that false
+        # record standing (#12363 round 9). The run page still gets the explanation, via the
+        # alarm's runner-fault branch below (#12363 round 10).
+        if: ${{ !cancelled() && needs.canary.result != 'success' && needs.canary.outputs.exit_code != '0' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           EXIT_CODE: ${{ needs.canary.outputs.exit_code }}
         run: bash .github/scripts/published-artifact-alert.sh open
       # Recovery closes it, so the next red opens a fresh issue instead of hiding in a
       # stale thread (the sibling detectors' close-on-green rule).
+      # ⛔ Gated on the READING (exit code 0), not on the job result. A post-reading
+      # runner failure (`result: failure`, `exit_code: 0` — e.g. the transcript upload)
+      # would otherwise file nothing, close nothing, and leave a stale release-owed issue
+      # open while the artifact is green: the "ledger must not outlive its state" contract
+      # this whole path cites. (#12363 round 10)
       - name: Close the alert issue on a green run
-        if: ${{ needs.canary.result == 'success' }}
+        if: ${{ !cancelled() && (needs.canary.result == 'success' || needs.canary.outputs.exit_code == '0') }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash .github/scripts/published-artifact-alert.sh close
