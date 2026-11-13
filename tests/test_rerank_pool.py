@@ -993,7 +993,14 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
     for rel in ("battery/runner/setup.py", "tools/why_layer_rate.py",
                 "tools/longmem_eval/retrieve.py", "tools/fusion_formula_ab.py",
                 "tools/ask_pool_admission_probe.py",
-                "benchmarks/run_report.py", "benchmarks/load_test.py"):
+                "benchmarks/run_report.py", "benchmarks/load_test.py",
+                # ⛔ the eval HARNESS is in the census for the same reason the
+                # seam block below exists: it binds the read as ``_search_fn=``
+                # and its opt-out rides in ``_search_kwargs``. It was added to
+                # the product in the same commit that wrote this comment, and a
+                # census whose list is a literal tuple does not grow by itself —
+                # deleting that kwarg kept every test green (measured).
+                "tests/eval/harness/runner.py"):
         found = _sites(root / rel)
         assert found, f"{rel} no longer reads the rerankable page — check the pin"
         for owner, opted_out in found:
@@ -1384,6 +1391,25 @@ def test_a_declared_RECENCY_order_is_never_inverted_by_the_rerank(
         f"the skip must be disclosed in the leg trace, not silent ({entries})")
     assert entries[0]["reason"] == "recency_order_applied", entries[0]
     assert entries[0]["degraded"] is False, entries[0]   # a skip is not a degrade
+
+    # ⛔ ONE ENTRY PER READ, even when the caller ALSO opted out. The two skip
+    # arms are not exclusive by construction: a caller that passed
+    # ``_rerank_candidates=False`` AND has a live recency spread satisfies both,
+    # and before the arms were disjointed this read emitted TWO
+    # ``leg="rerank"`` entries with two different reasons (measured — that is
+    # exactly the combination `tools/longmem_eval/retrieve.py` passes). A
+    # ``[0]``-only assertion cannot see a second entry, so the LENGTH is the
+    # assertion. The opt-out is the reason the read had first: it declined the
+    # rerank for its own sake, and recency never got a vote.
+    trace_both: list[dict] = []
+    sdk.tortoise_fts_query(
+        q, entity_type="point", limit=5, recency_field="createdAt",
+        recency_boost=10.0, _rerank_candidates=False, leg_trace=trace_both)
+    both = _rerank_entries(trace_both)
+    assert len(both) == 1, (
+        f"one read emitted {len(both)} rerank entries: {both}")
+    assert both[0]["ran"] is False, both[0]
+    assert both[0]["reason"] == "order_owned_downstream", both[0]
 
     # ⛔ AND THE OTHER HALF — the one that makes the guard a GUARD. Step 4b fails
     # OPEN (its ``except`` arm leaves plain RRF order), so a recency request whose

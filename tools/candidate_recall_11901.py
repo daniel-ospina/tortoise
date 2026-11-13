@@ -626,6 +626,12 @@ def _rerank_arm(
     def _shipped_order(query: str, rows: list[dict], width: int) -> list[str] | None:
         """Ids in the SHIPPED post-rerank order, or None when it degraded."""
         cands = [{"id": r["id"], "content": r.get("name") or ""} for r in rows]
+        # ⛔ THE COUNTER IS CUMULATIVE ACROSS THE RUN, ``scored`` IS THIS CALL.
+        # Comparing them totals-to-call passed on the FIRST query and raised on
+        # every one after it (measured: "the timed scorer saw 4 pairs but
+        # rerank_pool reported 2" on the second) — an instrument that crashed on
+        # any real corpus. Delta, not total.
+        pairs_before = timed.pairs
         out_rows, stats = rerank_pool(
             query, cands, text_key="content", pool=width,
             enabled=True, model=model, scorer=timed)
@@ -633,10 +639,10 @@ def _rerank_arm(
             return None
         # The proxy's count and the product's own disclosure must agree; a
         # divergence means this instrument is measuring a different call.
-        if timed.pairs != stats.get("scored"):
+        if timed.pairs - pairs_before != stats.get("scored"):
             raise AssertionError(
-                f"the timed scorer saw {timed.pairs} pairs but rerank_pool "
-                f"reported {stats.get('scored')}")
+                f"the timed scorer saw {timed.pairs - pairs_before} pairs but "
+                f"rerank_pool reported {stats.get('scored')}")
         return [r["id"] for r in out_rows]
 
     for pool in pools:

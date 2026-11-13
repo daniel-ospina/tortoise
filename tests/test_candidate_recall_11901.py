@@ -1702,22 +1702,43 @@ def test_the_arm_measures_the_SHIPPED_reorder_not_a_copy_of_it(
         def score(self, query, texts):
             return [1.0 if not t.strip() else 0.0 for t in texts]
 
-    sample = [{"id": "gold", "name": "alpha", "cls": "exact"}]
+    # ⛔ TWO MENTIONS AND A VARIANT SURFACE, on purpose. With ONE mention and no
+    # variants this test passed over a real P1 in the instrument: the arm
+    # compared its CUMULATIVE pair counter against this call's ``scored``, which
+    # agrees on the first call and raises on every one after it (measured — the
+    # tool aborted on any real corpus). A one-shot fixture cannot see that.
+    sample = [{"id": "gold", "name": "alpha", "cls": "exact"},
+              {"id": "r1", "name": "beta", "cls": "exact"}]
 
     def window(_name, _pool):
         return list(rows)
 
+    def variants(_name, _cls):
+        return [("surface", "alpha surface")]
+
     arm = tool_mod._rerank_arm(
-        sample, window, lambda n, c: [], model="cross-encoder/toy",
+        sample, window, variants, model="cross-encoder/toy",
         pools=(4,), top_k=3, scorer=_BlankLovingScorer())
 
     exact = arm["4"]["exact"]
+    variant = arm["4"]["variant"]
     assert exact["rerank_degraded"] == 0, exact
-    # the product scores 3 of the 4 rows and leaves the textless one in LAST place
-    assert exact["pairs_scored"] == 3, exact
-    assert exact["recall_3_after"] == 0, (
-        "the arm promoted a textless candidate the product never scores")
-    assert exact["gained"] == 0, exact
+    assert variant["rerank_degraded"] == 0, variant
+    assert exact["mentions"] == 2, exact
+    assert variant["pairs"] == 2, variant
+    # the product scores 3 of the 4 rows on EVERY call, and the textless one is
+    # never promoted; a cumulative-vs-per-call slip makes the second call raise
+    assert exact["pairs_scored"] == 6, exact
+    # the arm's own latency counter covers BOTH arms: 2 mentions × 3 scorable
+    # exact + 2 variants × 3 scorable
+    assert arm["latency"]["pairs_scored"] == 12, arm["latency"]
+    # ⛔ NO MEMBERSHIP MOVED. A promotion of the textless row would show up as
+    # ``gained`` (the textless gold enters the top-k) — and, in the copy, as
+    # ``recall_3_after`` above ``recall_3_before``.
+    assert exact["gained"] == 0 and exact["lost"] == 0, exact
+    assert exact["recall_3_after"] == exact["recall_3_before"], (
+        "the arm's reranked page differs in membership from the product's")
+    assert variant["gained"] == 0 and variant["lost"] == 0, variant
 
 
 def test_a_degraded_rerank_on_the_arm_is_COUNTED_not_measured(
