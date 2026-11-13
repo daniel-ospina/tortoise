@@ -5368,11 +5368,14 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # `10005`/`10019` pair that replaced it described a side branch's
             # OWN tree and its MERGE tree respectively — `10005` = 9973 + that
             # branch's 32 lines alone, `10019` = the same + the 14 `main`
-            # already carried. No ref in THIS checkout still reaches either head
-            # that read 10005 — the branch that carried it is deleted on the
-            # remote and its objects are absent here (`git cat-file -e` exits
-            # 128) — so `10005` is stated as that branch's own arithmetic
-            # (9973 + 32), not as a line a reader can go and look at; its
+            # already carried. `10005` was never a value on `main` — its line
+            # 10005 is a comment, with the writeprobe entry at 10021 — and the
+            # remote no longer publishes the branch that carried it, so that
+            # commit's objects survive only in a checkout that fetched it while
+            # the branch existed (`git ls-remote origin
+            # refs/heads/fix/11825-replace-prim` → empty). Hence `10005` is
+            # stated as that branch's own arithmetic (9973 + 32), not as a line
+            # a reader can go and look at; its
             # 32-line block has
             # since landed on `main` itself (`ea2c41a696`), which is what makes
             # 10019 a real value again one landing later. The deltas are where
