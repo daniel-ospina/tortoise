@@ -3399,7 +3399,18 @@ tail is never mistaken for a blank report (a path that cannot be read at all yie
 name, and the sentence says that instead). A carried report **larger than the cap** declares the CUT
 and not its size — the excerpt is there to read, so the size adds nothing, and the squeeze loss, when
 there is one, is declared beside it as above — and one under the cap states nothing about its extent,
-because nothing was cut. It never claims an excerpt it is not showing, never guesses the cause when two states are
+because nothing was cut. When the length comparison that detects a squeeze loss **cannot itself be made**
+— the guard compares a count only when it is a non-empty run of at most 18 ASCII digits, so a `wc` that
+printed no number, two numbers, a non-digit or a count past that bound is not compared — the body says the
+loss is **unmeasured** rather than declaring none: an
+unmeasured comparison is not evidence that nothing was dropped. A carried report whose **own size could not be measured** — the size probe is
+skipped for a path that is not a regular file, and the size is never guessed when the count does not resolve
+to a number — declares the 6000-byte **window** instead of a cut: that only the
+report's last 6000 bytes are shown, and that its own size was not used — it could not be measured, or it was
+longer than the 18 digits the guard compares. Whether anything was cut is
+not asserted in that state: the measurement that could say so was not taken, and the excerpt cannot stand in
+for it — the capture strips NUL bytes and the squeeze drops undecodable sequences, so an excerpt shorter than
+6000 bytes does not prove the report was under the cap. It never claims an excerpt it is not showing, never guesses the cause when two states are
 indistinguishable from there, and the section intro no longer promises a "verbatim" report it
 may not be carrying (#12200): on-call reads the body, so a false claim there costs the reader
 the trip they were trying to avoid.
