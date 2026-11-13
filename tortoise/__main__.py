@@ -8065,6 +8065,7 @@ def _session_post(api_key: str, api_url: str):
                 return outcome
             from tortoise.session_confirm import (
                 FILED,
+                PENDING,
                 UNEXTRACTED,
                 confirm_capture,
             )
@@ -8074,19 +8075,29 @@ def _session_post(api_key: str, api_url: str):
                 session_detail, api_url, api_key,
                 str(payload.get("session_id") or ""),
                 payload.get("conversation") or [])
-            if verdict in (FILED, UNEXTRACTED):
+            if verdict in (FILED, PENDING, UNEXTRACTED):
                 # The spool's contract is TURN DURABILITY, so a confirmed
-                # capture terminalises on either verdict — `_flush_one` stamps
-                # `filed_key` through its own compare-and-swap.
+                # capture terminalises on any of these three verdicts —
+                # `_flush_one` stamps `filed_key` through its own
+                # compare-and-swap.
                 #
                 # An UNEXTRACTED confirmation carries the keyless-mode marker
                 # so `session capture`'s existing #4188 disclosure fires: the
                 # caller must not print an unqualified success for a capture
                 # whose memory points were never minted.
+                #
+                # A PENDING confirmation carries NO extraction_mode on purpose
+                # (#12362): the server has not recorded an outcome, so there is
+                # no cause to name. Labelling it keyless made the CLI print
+                # "no memory points were extracted" — measured FALSE on
+                # captures that extracted 5-7 points seconds later — and
+                # recorded a priced saved-backlog entry for work already done.
                 body: dict = {"confirmed": verdict}
                 if verdict == UNEXTRACTED:
                     from tortoise.sdk import _CAPTURE_NO_PROVIDER_MODE
                     body["extraction_mode"] = _CAPTURE_NO_PROVIDER_MODE
+                elif verdict == PENDING:
+                    body["extraction_outcome"] = "unknown"
                 return PostOutcome(
                     ok=True, status=200,
                     detail=f"{outcome.status} after commit — confirmed {verdict}",
@@ -8514,6 +8525,35 @@ def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
     # "memory points were not extracted" for it would be a false statement
     # about the session.
     #
+    # ⛔ #12362: an UNKNOWN extraction outcome is not a store-only capture and
+    # must not be rendered as one. The confirmation can prove the posted turns
+    # while the capture handler the wait bound abandoned is STILL EXTRACTING,
+    # in which case `GET /v1/sessions/<id>` reports `extracted: 0` beside
+    # `extraction.outcome_known: false` — the server saying "not recorded yet",
+    # not "nothing was extracted". Measured on the hosted deployment: three
+    # captures printed the sentence below and were read back holding 7, 2 and 5
+    # memory points seconds later. Nothing is asserted here (neither success nor
+    # failure) and NO backlog deferral is written: a deferral is a priced offer
+    # to re-extract, and offering it for work already done is how the false
+    # negative became actionable.
+    if body.get("extraction_outcome") == "unknown":
+        # ⛔ #12362 review: name NO cause as fact and assert no outcome. The
+        # state is reached by two different histories — the abandoned handler
+        # still extracting, and one that stopped before writing its outcome
+        # (a SIGKILL, a failed `capture_ok` write) — and the client cannot tell
+        # them apart. It also names no REMEDY: "re-capture this transcript" is
+        # inert here — the spool entry is terminal with this session id, and a
+        # re-POST of a session whose recorded outcome is NULL replays rather
+        # than re-extracting (`retry_failed_capture` requires
+        # `prior_capture_ok is False`) — so an imperative would be a false
+        # instruction. Name the surface that CAN answer instead.
+        print("  Extraction: outcome not recorded yet — the turns are STORED; "
+              "the server has not recorded whether extraction ran (it may "
+              "still be running, or it may have stopped before recording). "
+              "No saved-backlog deferral was recorded for this capture; "
+              "'tortoise session view <id>' reports the server's state later.",
+              file=_sys.stderr)
+    #
     # #3971 merge resolution: main's hunk (#4188) is kept for its INTENT, but
     # RETARGETED to this branch's variables + #4258's mode set. Main binds
     # `result` only in its own direct-POST version of this function; here the
@@ -8553,11 +8593,21 @@ def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
             reason=(_CAPTURE_NO_PROVIDER_MODE
                     if _capture_mode == _CAPTURE_NO_PROVIDER_MODE
                     else _CAPTURE_EXTRACTION_DISABLED_MODE))
-    else:
+    elif body.get("extraction_outcome") != "unknown":
         # #4197: extraction ran for this session — if it had been deferred
         # before, its backlog entry is now retired. No offer here (see
         # `_flush_backlog_offer`): this path is the hook's, and it runs on
         # every capture.
+        #
+        # ⛔ #12362: NOT for an UNRECORDED outcome. `_flush_backlog_offer`
+        # retires the entry through `capture_backlog.mark_processed` — its own
+        # contract says "Call it ONLY where extraction provably ran" — and the
+        # PENDING state above is precisely the case where the server has NOT
+        # said that extraction ran. Retiring on it would mark a session
+        # `processed` (overwriting the record: nothing restores it, `--forget`
+        # only drops) on the one shape this issue says may still FAIL. So the
+        # ledger is left exactly as it was: a session already deferred stays
+        # deferred, and one never deferred gains no entry either way.
         _flush_backlog_offer(session_id=session_id,
                              server_session_id=server_session, offer=False)
     if body.get("warnings"):

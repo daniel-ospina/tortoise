@@ -5287,16 +5287,24 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # (+14: a 13-line `surfaces:` block inserted at 2237 and a 1-line
         # `tier1:` one at 9150); 10005 at this branch alone (`d036b9859960`,
         # +32 from its one 32-line block at 7522-7553, the +1 it also adds at
-        # 10291 sitting below the entry). At THIS merge — `main` tip
+        # 10291 sitting below the entry). At THAT merge — `main` tip
         # `abf186f1109a`, which already contains #12060's own registrations,
-        # plus this branch's entry, both landing above it — the entry reads
-        # 10019 (+46 = `main`'s +14 and this branch's +32), `carve_out:` opens
-        # 9893 and `uri_requiring:` 10224, so 10019 is inside the section. The
-        # identical text also sits at 6103 and 8534, which is what the 5th
-        # element exists to refuse; the pair shows the two cases over
-        # `9828250732`'s 6082 / 8459. Each insertion below is attributed to the
-        # LANDING COMMIT that made it (measured with `git diff -U0 <a> <b> --
-        # config/ci-surfaces.yml`), and its position is where that commit put it:
+        # plus this branch's entry, both landing above it — the entry read
+        # 10019 (+46 = `main`'s +14 and this branch's +32), `carve_out:` opened
+        # 9893 and `uri_requiring:` 10224, so 10019 was inside the section.
+        # ⛔ That 10019 shared the `9951` defect it condemns: it is a MERGE-TREE
+        # value, and no commit carried it — `abf186f1109a` itself read 9987, and
+        # `main` then added +34 of its own (`+32 @7535` `ea2c41a696`, `+1 @1039`
+        # `a53ba8cf53`, `+1 @2237` `73c479ce40`) to read 10021 at `87c07462a8`
+        # before this lane was rebased. The row below re-derives 10036 from the
+        # rebased tree it names; every number in THIS paragraph is the earlier
+        # tree's, kept as the trail and not as the current reading. The
+        # identical text also sat at 6103 and 8502 at `abf186f1109a` (6120 and
+        # 8551 rebased), which is what the 5th element exists to refuse; the
+        # pair shows the two cases over `9828250732`'s 6082 / 8459. Each
+        # insertion below is attributed to the LANDING COMMIT that made it
+        # (measured with `git diff -U0 <a> <b> -- config/ci-surfaces.yml`), and
+        # its position is where that commit put it:
         #   +8  @2725  `cd22562c24` (#12060)   → above BOTH twins
         #   +6  @6721  `ba84fbfabf` (#11609)   → above the sdk twin only
         #  +16  @7514  `e200623286` (#11926)   → above the sdk twin only
@@ -5309,12 +5317,15 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `cd22562c24e4..abf186f1109a` that touches this file. A row naming the span
         # END rather than the commit would be the same defect one level down: the
         # number is true and the reader who checks `git show` learns nothing.
-        # ⛔ So the FIRST twin reads 6103 = 6082 + 8 + 13 (only two of the six
-        # insertions are above it, which is why the two twins do not move
-        # together), and the sdk twin reads 8534 = 8459 + 8 + 6 + 16 + 13 + 32.
+        # ⛔ So the FIRST twin read 6103 = 6082 + 8 + 13 at `abf186f1109a` (only
+        # two of the five insertions are above it, which is why the two twins do
+        # not move together), and the sdk twin read 8502 = 8459 + 8 + 6 + 16 + 13
+        # — NOT 8534, which would be the +32 this branch's block adds and no
+        # commit on `main` had yet.
         # ⚠️ Both of those are INDENTED sub-keys
-        # (`core:` 2235, `sdk:` 8300) of `surfaces:`, so the resolver's
-        # nearest-column-zero-key rule reports the PARENT: a cite onto 8534 refuses
+        # (`core:` 2245, `sdk:` 8317 on the rebased tree — 2235 / 8300 at
+        # `abf186f1109a`) of `surfaces:`, so the resolver's
+        # nearest-column-zero-key rule reports the PARENT: a cite onto 8551 refuses
         # with `sits in section 'surfaces:', not 'carve_out:'` — measured, so a
         # re-derivation onto it does not get told `sdk:` and conclude the guard is
         # broken.
@@ -5355,22 +5366,33 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # re-derived from THIS merged tree (`awk
             # '/^- test_pack_logic_writeprobe_11083.py$/{print NR}'
             # config/ci-surfaces.yml`), never carried forward from either side of
-            # the merge: 9714 -> 9951 -> 9973 -> 10019 is the number's own trail,
-            # and only the last of those describes a tree that adds BOTH parents.
-            # Measured values, not a delta: 9943 at `9828250732`, 9949 at
-            # `ba84fbfabf`, 9965 at `e200623286`, 9973 at `cd22562c24e4`, 9987 at
-            # the `main` tip `abf186f1109a`, 10005 at this branch alone
-            # (`d036b9859960`), and 10019 merged. ⛔ `9951` is in that list only
+            # the merge: 9951 -> 9973 -> 9987 -> 10021 -> 10036 is the number's
+            # own trail, and only the last of those describes a tree that adds
+            # EVERY parent. Measured values, not a delta: 9943 at `9828250732`,
+            # 9949 at `ba84fbfabf`, 9965 at `e200623286`, 9973 at `cd22562c24`,
+            # 9987 at `f1f74135a1` — the value the merge base `d571adef87` still
+            # reads — 10021 on `main` at `87c07462a8`, 10002 at this branch alone
+            # (`4de7bbf511`), and 10036 merged. ⛔ `9951` is in that list only
             # because this row printed it — it was a predicted merge-tree value
-            # (9943 + 8), never a line any commit on `main` carried. The deltas
-            # are just where the registrations landed: `main` adds +14 above the
-            # entry (a 13-line `surfaces:` block at 2237 plus a 1-line `tier1:`
-            # one at 9150) and this branch adds +32 (one 32-line block at
-            # 7522-7553; its 1-line `durations:` addition at 10291 falls below
-            # the entry), so a row sitting BELOW every insertion moves by the
-            # whole +46. The `core:` sub-key reads 2235 on every tree (no
-            # insertion above it); `sdk:` moves +30 then +13 then +32 to 8300.
-            ("10019", "- test_pack_logic_writeprobe_11083.py"),
+            # (9943 + 8), never a line any commit on `main` carried; the `10019`
+            # this row printed next was the same defect (an unmerged tree's
+            # `9987 + 32`), and `main` then overtook it by +34, which is the only
+            # reason a rebase was needed to re-derive rather than re-check it.
+            # The deltas are just where the registrations landed, each measured
+            # per commit with `git diff -U0 <c>^..<c> -- config/ci-surfaces.yml`
+            # (a commit's OWN new-side offset): `+8 @2725` (`cd22562c24`, #12060 —
+            # that is the 9951 step), `+6 @6721` (`ba84fbfabf`, #11609), `+16
+            # @7514` (`e200623286`, #11926), `+13 @2237` plus `+1 @9150`
+            # (`f1f74135a1`, the #12294 name-entropy gate; the `tier1:` line is
+            # below both twins but above this entry), then on `main` itself
+            # `+32 @7535` (`ea2c41a696`, #12108), `+1 @1039` (`a53ba8cf53`,
+            # #12406) and `+1 @2237` (`73c479ce40`, #12408) = 10021, and this
+            # lane `+9 @1941` plus `+6 @5061` = 10036 (its own registration of
+            # `test_12362_capture_outcome_unknown.py` in the `api` and `core`
+            # halves). A row sitting BELOW every insertion moves by the whole sum,
+            # so 9987 + 34 + 15 = 10036. The `core:` sub-key reads 2245 here and
+            # `sdk:` 8317; the two indented twins read 6120 and 8551.
+            ("10036", "- test_pack_logic_writeprobe_11083.py"),
         ), "ci_surfaces", "carve_out:"),
     )
     assert len(rows) >= 9, (
