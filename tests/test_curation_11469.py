@@ -3884,3 +3884,32 @@ def test_a_disarmed_census_failure_carries_the_sections_fallback_note(
         assert payload["operators_read"] is None, payload
         assert payload["operators_total_reported"] is None, payload
         assert payload["operators_reconciled"] is None, payload
+
+
+def test_the_plan_payload_carries_the_layers_three_fields(monkeypatch, tmp_path):
+    """The `plan` payload is the artifact a driver reads — its three fields are pinned.
+
+    The `inventory` report and all three disarmed arms are pinned in both directions;
+    the `plan` success payload's fields were asserted nowhere, so forcing
+    `operators_reconciled` to a constant left the suite green (review of `e1371f7b92`).
+    """
+    mod = _tool_module()
+
+    def run(reported, out):
+        monkeypatch.setattr(mod, "_live_call_tool",
+                            _operator_surface(operators=OPERATOR_ROWS, reported=reported))
+        rc = mod.main(["plan", "--graph", "org_x_g_old", "--target", "org_x_g_new",
+                       "--no-verify-read", "--ledger", str(tmp_path / f"{out}.jsonl"),
+                       "--out", str(tmp_path / f"{out}.json")])
+        assert rc == 0, rc
+        return json.loads((tmp_path / f"{out}.json").read_text())
+
+    unreported = run(None, "p_unreported")
+    assert unreported["operators_read"] == len(OPERATOR_ROWS)
+    assert unreported["operators_total_reported"] is None
+    assert unreported["operators_reconciled"] is False, unreported["operators_reconciled"]
+
+    reconciled = run(len(OPERATOR_ROWS), "p_reconciled")
+    assert reconciled["operators_read"] == len(OPERATOR_ROWS)
+    assert reconciled["operators_total_reported"] == len(OPERATOR_ROWS)
+    assert reconciled["operators_reconciled"] is True
