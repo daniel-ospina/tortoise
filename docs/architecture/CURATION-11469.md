@@ -154,8 +154,12 @@ measurement, not a guarantee.** `structure.operators` counts
 `n.is_operator = true` **plus** the terminal-status/`outdated` exclusion every Point scan applies
 (`search_engine`, #1391). So a legacy `op_type`-only operator (`graph-scripts/backfill_is_operator.py`
 exists for that shape) is COUNTED and not served, and a terminal operator is counted and excluded;
-either makes a *correct* read refuse, and two such rows in opposite directions would cancel into a
-silently short census. The guard still refuses on any mismatch — a diagnosable refusal beats a
+either makes a *correct* read refuse. Both causes push the SAME way — the count's predicate is a
+superset of the read's and applies no status filter, while the read subtracts — so the read can
+never exceed the count: a mismatch can only present as `reported > read`, and equality cannot be
+manufactured by two errors cancelling. What it CAN hide is the one-directional kind: a surface
+that returns fewer rows while still reporting the full count is caught by equality, but a
+short layer with NO reported count is only noted (below). The guard still refuses on any mismatch — a diagnosable refusal beats a
 silent short census — and its message names all three candidate causes so the difference can be
 attributed instead of re-derived. Equality held on `live-v4` on 2026-11-13 (3,727 = 3,727), which
 is what the numbers here rest on.
