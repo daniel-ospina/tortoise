@@ -3789,7 +3789,7 @@ def test_an_operator_payload_that_is_not_a_row_listing_is_refused(monkeypatch, c
 
 
 @pytest.mark.parametrize("failure", ["refused", "raised", "after_read_refused",
-                                      "after_read_raised"])
+                                      "after_read_raised", "refused_inside"])
 def test_a_disarmed_census_failure_carries_the_sections_fallback_note(
         monkeypatch, capsys, tmp_path, failure):
     """BOTH disarmed census-failure arms carry `read_note` — one state, one spelling.
@@ -3825,7 +3825,9 @@ def test_a_disarmed_census_failure_carries_the_sections_fallback_note(
                                  "workspace"}
             return {"counts": {"Point": 1, "Source": 0}}
         if section == "structure":
-            return {"total": 1, "operators": len(OPERATOR_ROWS)}
+            # `refused_inside` makes the LAYER READ ITSELF refuse: two rows served
+            # against three counted, so `read_operators` raises after seeing rows.
+            return {"total": 1, "operators": len(OPERATOR_ROWS) + (failure == "refused_inside")}
         if section == "sources":
             if failure == "refused":
                 return RealCallToolResult({"error": "429 Too Many Requests"}, is_error=True)
@@ -3853,7 +3855,19 @@ def test_a_disarmed_census_failure_carries_the_sections_fallback_note(
     payload = json.loads((tmp_path / "p.json").read_text())
     assert payload["census"] is None, payload
     assert "credential's own graph" in (payload["read_note"] or ""), payload["read_note"]
-    if failure.startswith("after_read"):
+    if failure == "refused_inside":
+        # ⛔ The layer read DID see rows and then refused, so no census was produced. The
+        # three fields are `null` — the definition is "no completed layer read", NOT
+        # "rows were never seen" — and the diagnosis travels in `read_failure`, which is
+        # the only place a driver can learn what the refusing read had already seen
+        # (round-4 review: the artifact said "never read" while `read_failure` said
+        # "read N rows but structure.operators reports N+1").
+        assert payload["operators_read"] is None, payload
+        assert payload["operators_total_reported"] is None, payload
+        assert payload["operators_reconciled"] is None, payload
+        assert f"read {len(OPERATOR_ROWS)} rows" in (payload["read_failure"] or ""), (
+            payload["read_failure"])
+    elif failure.startswith("after_read"):
         # The layer WAS read (and reconciled) before the failing read: the artifact must
         # report the real pair, not `null`.
         assert payload["operators_read"] == len(OPERATOR_ROWS), payload

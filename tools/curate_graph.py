@@ -821,13 +821,17 @@ def _disarmed_artifact(
     # Resolved ONCE: the artifact and the operator-facing line must not disagree.
     measured = (census is not None) if census_measured is None else census_measured
     # ⛔ The reasoning layer's three fields travel HERE too, and they are TRI-STATE for a
-    # reason: `None` means the layer was never read (the census is `null` on these arms,
-    # so "not read" and "read but unreconciled" must not collapse into one value). The
-    # ledger-stopped arm DID read it and passes the real pair. Without this, a driver
-    # doing the round-7-mandated switch on a ledger stop found `census_measured: true`
-    # — the strongest completeness claim the artifact makes — with the only contrary
-    # fact in `read_note` prose, which is the defect the field exists to close, one
-    # artifact over (round-2 review).
+    # reason: `None` means NO COMPLETED LAYER READ, i.e. this run produced no census at
+    # all (it is `null` on exactly those arms, and `read_failure` names the cause — the
+    # refusing read that never returned, whatever rows it had already seen). It does NOT
+    # mean "this graph has no operator layer"; `(n, m)` means a completed read, and
+    # `(n, None)` a completed read with no count to reconcile it. The distinction is the
+    # whole point: "not read" and "read but unreconciled" must not collapse into one
+    # value (round-2/3 review). The ledger-stopped arm DID complete the read and passes
+    # the real pair. Without this, a driver doing the round-7-mandated switch on a ledger
+    # stop found `census_measured: true` — the strongest completeness claim the artifact
+    # makes — with the only contrary fact in `read_note` prose, which is the defect the
+    # field exists to close, one artifact over.
     operators_read, operators_reported = (None, None) if operators is None else operators
     payload = {
         # `null` when the census could not be measured — never a zeroed census, which
@@ -884,7 +888,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
     #: The reasoning layer as READ so far — `None` until the operator read completes, then
     #: `(rows, reported)`. Declared before the `try` so every disarmed arm reports the
     #: truth for its own point in the sequence (see the assignment below).
-    layer: tuple[int, int | None] | None = None
+    layer: tuple[int, int | None] | None = None   # set only when the read COMPLETES
     try:
         counts = reader.counts()
         structure = reader.structure()
