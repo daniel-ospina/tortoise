@@ -5429,6 +5429,28 @@ def _byref_sdk_source() -> str:
         "    def mention_inside_a_LAMBDA_after_its_own_walrus_named_like_an_entrant(self):\n"
         "        f = lambda: (_safe((_review_pool := 1)), _safe(_review_pool))\n"
         "        return f()\n"
+        # ⛔ …and a NESTED lambda is its own scope AGAIN, so a walrus in the INNER body must not
+        # suppress the OUTER lambda's mention of the method's binding — nor the method's own. Without
+        # this arm, descending into a nested lambda body left every other test green while dropping
+        # a real reach (the under-report direction), which the sibling comment above says is the
+        # dangerous one.
+        "    def nested_lambda_body_does_not_shade_the_enclosing_lambda(self):\n"
+        "        f = lambda: (lambda: (_review_pool := 1), _safe(_review_pool))\n"
+        "        return f()\n"
+        # ⛔ …and a COMPREHENSION's walrus binds in the scope that CONTAINS the comprehension — here
+        # that is the lambda, not the method — so a comprehension inside a lambda body must still be
+        # walked and its targets attributed to the LAMBDA. Skipping comprehensions inside the lambda
+        # body published the outer mention as a reach (the cry-wolf direction), and nothing reds.
+        "    def comprehension_inside_a_lambda_body_shadows_only_the_lambda(self):\n"
+        "        f = lambda: ([(_review_pool := i) for i in range(3)], _safe(_review_pool))\n"
+        "        return f()\n"
+        # ⛔ A KEYWORD-ONLY default is still a DEFAULT: `lambda *, v=(_p := 1): v` evaluates it in
+        # the enclosing scope exactly as a positional one does, and the walk has two separate lists
+        # (`defaults` and `kw_defaults`). Dropping the second left every other test green while
+        # publishing a spurious reach — so both lists are pinned, one arm each.
+        "    def walrus_in_a_KEYWORD_ONLY_LAMBDA_DEFAULT_named_like_an_entrant(self):\n"
+        "        f = lambda *, v=(_review_pool := 1): v\n"
+        "        return _safe(_review_pool)\n"
         # ── `#11397` review: `*. __class__` is only the ENCLOSING class when the base is an
         # in-module receiver; a foreign object's class is not this module's method.
         "    def foreign_dunder_class_receiver(self, other):\n"
@@ -5519,6 +5541,13 @@ def test_a_leg_reach_passed_BY_REFERENCE_is_declared_not_dropped(
               # ⛔ and the lambda BODY is its own scope: a walrus there is the lambda's local, so a
               # mention of the same name in the enclosing method is still a reach (round 8 cycle 6).
               "walrus_inside_a_LAMBDA_does_not_shade_the_body",
+              # ⛔ and a NESTED lambda body is a third scope: the inner walrus is the INNER lambda's,
+              # so the outer lambda's mention is still a reach into the method.
+              "nested_lambda_body_does_not_shade_the_enclosing_lambda",
+              # ⛔ and a comprehension inside a lambda body binds in the LAMBDA (its containing
+              # scope), which is NOT the method — so the mention after it is the lambda's binding,
+              # not a reach. This arm asserts the NEGATIVE direction: skipping comprehensions inside
+              # a lambda body published it as a reach (cry-wolf), which nothing else reds.
               # ⛔ `#12020` round 6 review (P3): `type(self)` is the receiver spelled through the
               # type — the positive half of the pair whose NEGATIVE (`type(other)`) is asserted
               # beside `other.__class__` above.
@@ -5639,6 +5668,11 @@ def test_a_leg_reach_passed_BY_REFERENCE_is_declared_not_dropped(
                       "del_binding_named_like_an_entrant",
                       # ⛔ and a lambda DEFAULT binds in the METHOD (`symtable`), unlike its BODY.
                       "walrus_in_a_LAMBDA_DEFAULT_named_like_an_entrant",
+                      # ⛔ and the KEYWORD-ONLY spelling of the same rule (a separate list in the walk).
+                      "walrus_in_a_KEYWORD_ONLY_LAMBDA_DEFAULT_named_like_an_entrant",
+                      # ⛔ a comprehension walrus inside a lambda binds in the LAMBDA, so a mention
+                      # after it is the lambda's binding — not a method reach (the NEGATIVE half).
+                      "comprehension_inside_a_lambda_body_shadows_only_the_lambda",
                       # ⛔ a mention of the lambda's OWN walrus target, later in the SAME lambda.
                       "mention_inside_a_LAMBDA_after_its_own_walrus_named_like_an_entrant",
                       # …and the boundary of the `cls` receiver: a plain parameter named `cls`
@@ -8250,7 +8284,11 @@ def test_the_census_has_no_DUPLICATE_dict_key_in_its_source() -> None:
     # re-measured on the pre-`tree.body` version: real duplicate plus a 23-key decoy → RED, not
     # clean. `seen` is last-wins, so a decoy can only shadow the TRAILING count-agreement check,
     # which compares a literal's key count against the runtime dict. Narrowing the scan removes that
-    # window; it does not close a duplicate fail-open, because there was none.
+    # window; it does not close a duplicate fail-open, because there was none. What a walk DOES get
+    # wrong in the other direction: a 5-key function-local literal bearing the same name FALSE-BLOCKS
+    # on the floors below (measured), so the narrowing is not cosmetic either.
+    # ⚠️ And this is a DIRECTIVE, not a pin: restoring `ast.walk` leaves this file GREEN (measured),
+    # so nothing reds if a later lane widens it back. Re-derive the reason before changing the scope.
     for node in tree.body:
         if not isinstance(node, ast.AnnAssign | ast.Assign):
             continue
@@ -8270,7 +8308,8 @@ def test_the_census_has_no_DUPLICATE_dict_key_in_its_source() -> None:
     # A vacuous pass is the failure mode of a source-reading test: if none of the three literals was
     # found AT TOP LEVEL, nothing was checked. All three exist there today, so a MISS means a table
     # was moved into a scope this detector no longer reads — re-derive it deliberately, do not widen
-    # it back to `ast.walk` (a decoy literal would then also feed `seen`, masking the count check).
+    # it back to `ast.walk` (a decoy literal would then also feed `seen`, masking the count check,
+    # and a smaller one would false-block on the floors).
     assert set(seen) == wanted, (
         f"these census dict literals were not found in {probe.__file__}: "
         f"{sorted(wanted - set(seen))} — the detector checked nothing for them")

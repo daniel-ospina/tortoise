@@ -995,8 +995,10 @@ def test_the_register_scopes_its_SHADOW_claim_to_the_SEAM_and_names_the_builder_
     # INVERSION of the paragraph — `so suppressing a shadowed call never DELETES a real writer at
     # all` — left the WHOLE register file green (48 passed), i.e. the pin held a false statement that
     # argued the deletion direction does not exist. Dropping the `NOT` from the scoping line was
-    # likewise green. The sibling pin 12 lines above already measured this weakness and repaired it
-    # with clause-scoped exclusions; the phrases below do the same job without needing them.
+    # likewise green. The sibling pin
+    # `test_the_never_run_call_entry_NAMES_every_spelling_it_was_measured_on` already measured this
+    # weakness and repaired it with clause-scoped exclusions; the phrases below do the same job
+    # without needing them.
     assert "not threaded for a clause builder" in clause, (
         "the seam-shadow clause no longer SCOPES itself — it must say the shadow is not threaded "
         "for a clause builder (a bare `clause builder` token survives deleting the operator, "
@@ -2726,7 +2728,7 @@ def _iterated_store_problem(node: ast.AST, constant: str, lines: list[str],
         # ⚠️ What that bought, stated no wider than measured (`#12182` review, P3 — corrected twice,
         # so this half is MEASURED): on THIS fixture it changed no verdict. Restoring the pre-round-13
         # inline copy verbatim in this arm leaves the whole two-file suite GREEN (measured here:
-        # 228 passed, 1 skipped), so this fixture cannot discriminate the two copies and must not be
+        # 229 passed, 1 skipped), so this fixture cannot discriminate the two copies and must not be
         # cited as the routing's pin. The two copies were NOT otherwise identical: the pre-PR carrier
         # test accepted `_STORE_CARRIER`, OR — for a merge-class row — `_MERGE_STORE_CARRIER`, while
         # the replacement passes exactly one `pattern`. A merge-class row therefore now accepts only
@@ -3658,7 +3660,7 @@ def test_a_DISCARDED_clause_stores_nothing_on_EVERY_claim_kind() -> None:
     # (the pre-PR copy this arm replaced) already carried `and not isinstance(n, _COMPOUND_STATEMENTS)`
     # beside `_executes_a_call` and `_carrier_issues_a_call`, and `_COMPOUND_STATEMENTS` contains
     # `ast.If`; this test's `_walk_own_scope` never yields a scope node, so restoring that expression
-    # verbatim runs this file green (measured: 49 passed). Round 13 therefore removed a DUPLICATE and
+    # verbatim runs this file green (measured: 50 passed). Round 13 therefore removed a DUPLICATE and
     # bought no behaviour change on THIS shape space — which is true of this fixture, not of the
     # change as a whole: the carrier test narrowed for merge-class rows, where the arm is called.
     # Reverting the routing leaves THIS fixture green. That is why it cannot be cited as the
