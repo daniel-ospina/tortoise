@@ -2685,6 +2685,20 @@ class TestDoctorHostedCredential:
         _data_b, cut_b = _doctor_read_capped(over, 4096, _time.monotonic() + 5)
         assert cut_b is True, "a chunked body over the cap must be a cut"
 
+        # (b2) EOF at/after the deadline with NOTHING declared is ambiguous: our
+        # own watchdog closes the socket and `read1` reports that as EOF, so a
+        # body THIS READER cut must not read as complete (fresh review round 24).
+        eof_late = _Chunked(200, b"")
+        _d_late, cut_late = _doctor_read_capped(eof_late, 4096,
+                                                _time.monotonic() - 1)
+        assert cut_late is True, "EOF after our own interrupt is not completeness"
+
+        # ...but a DECLARED length fully satisfied still proves completeness, even
+        # with the deadline passed (round 17).
+        done = _WithLength(200, b"")
+        _d_done, cut_done = _doctor_read_capped(done, 4096, _time.monotonic() - 1)
+        assert cut_done is False, "a satisfied declared length is complete"
+
         # (c) the probe is ONE byte — its wait and allocation must not scale with
         # the cap (fresh review round 23).
         probe_sizes: list[int] = []
