@@ -1669,19 +1669,32 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
 
     The figure is pinned to the TREE, not to `4f68a2aa7`, because that is what §5
     claims it is: population = every tracked file under `tortoise/`. It has since
-    moved to the figure §5 states, in five moves, one per workstream:
+    moved to the figure §5 states, in six moves, one per workstream:
     `cache_eviction.py:956` (the #10976 census's note on why labels do not partition
     the node set), #8447's ingest door (`tortoise/ingest.py`, the
     `REFUSED_NOT_FOUND` enum docstring), #11729's runtime-label writers
     (`tortoise/hosted_backup.py` — a file the population had not previously reached,
     carrying no `:Document` mention at `4f68a2aa7`; its added mentions are the
     dump-and-restore prose about pre-D10 artifacts), #11682's own
-    `tortoise/search_engine.py:2107` corpus-join comment (one line, an existing
-    file), and #12015's edge-vector prose — three lines in that same
-    `hosted_backup.py` bound plus one in `tortoise/cache_projection.py` (another
-    file the population had not previously reached). Each move is the mechanism
+    `tortoise/search_engine.py:3337` corpus-join comment (one line, an existing
+    file; the block opens at `:3335` — re-measured at this head, review round 25,
+    because the `:2107`/`:2109` this sentence used to carry was true only at
+    `d06c001ff9` and had drifted since), #12015's edge-vector prose — three lines in
+    that same `hosted_backup.py` bound plus one in `tortoise/cache_projection.py`
+    (another file the population had not previously reached) — and **#11928**'s
+    three lines in `tortoise/live.py:965,975` and
+    `tortoise/why.py:200` (`live.KIND_PROPERTIES`' scope note, `kind_expression`'s
+    docstring, `_entity_label`'s record of the derived map) — the first move whose
+    point is a WIDENING rather than a retirement. Each move is the mechanism
     working: the census landed, this check reddened, and §5 was re-measured instead
     of the number being quietly widened or the guard loosened.
+
+    ⛔ THE MOVE LIST IS A SECOND COPY OF §5's NARRATIVE, and nothing executes it —
+    the three pins read the four FIGURES, not this sentence (measured: this docstring
+    still said "four moves" while §5 and the tree said five, and 47 tests passed).
+    It is updated by hand at the same time as §5, and that is the whole reason it is
+    spelled out here with per-file arithmetic rather than summarised: a reader can
+    check it against `git grep -c`, which is what caught the stale copy.
 
     §5's second number is pinned with it: the narrow `\\(\\w*:Document` pattern
     matching **nine** lines now — the RST literals in `migrate_kinds.py` (the

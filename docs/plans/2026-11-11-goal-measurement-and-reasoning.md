@@ -92,7 +92,7 @@ Measured at `32c0f39d4b` (with the two `search_engine.py` citations re-anchored 
 | 12 | a goal's lifecycle affects its targets and sub-goals | replace | ⛔ | no propagation of a goal's own retirement |
 | 13 | deeper cascades converge | weigh | 🟡 | 6 levels then a **silent** stop (**#11823**) |
 | 14 | all of it survives a rebuild | cross-cutting (replay) | 🟡 | journal uniform for supersede; read gates are not (**#11824**) |
-| 15 | "why is this goal green?" | cross-cutting (explain) | 🟡 | `why.py`; blind to Object/Event endpoints |
+| 15 | "why is this goal green?" | cross-cutting (explain) | 🟡 | swept over all four labels (**#11928**, this PR): a goal `:Object` and a reading `:Event` are explainable. Residual, stated not hidden: the supersession read stays `:Point`-only (**#11824**), the anchor is `id`-keyed so an `eventId`-only `:Event` is a traversal position but not an anchor, and a failed dimension read is currently indistinguishable from an empty one on the wire |
 
 **Totals, counted from the table above: 2 ✅ · 6 🟡 · 7 ⛔ of 15.** The table is the source of truth and
 the totals are derived from it, never the reverse: a downstream summary that restates different numbers

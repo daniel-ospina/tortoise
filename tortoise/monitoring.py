@@ -2375,6 +2375,22 @@ def daemon_worker(name: str, *, workers: int = 1,
         return worker
 
 
+def reset_daemon_worker(name: str) -> None:
+    """Drop a named daemon worker so the next call lazily starts a fresh one.
+
+    The general form of ``_reset_graph_size_worker`` / ``_reset_probe_worker``:
+    the escape hatch for tests and for ops recovery when a call is presumed
+    wedged past any realistic budget. The old thread is a DAEMON — abandoned,
+    never joined — so one permanently stalled callable cannot pin the single
+    slot for the life of the process and force a process restart. Introduced
+    for #11892's quota-state worker, which had no hatch of its own (fresh review
+    of #12426, P2: a black-holed count would have silenced `health.quota` until
+    the next deploy).
+    """
+    with _DAEMON_WORKERS_LOCK:
+        _DAEMON_WORKERS.pop(name, None)
+
+
 def _consume_future_exception(future) -> None:
     """Retrieve a finished future's exception so an abandoned failure is not
     reported only as an unattributed asyncio warning. NEVER raises.
@@ -5894,8 +5910,7 @@ def _reset_graph_size_worker() -> None:
     so a permanently stalled ``taxonomy()`` cannot pin the one slot for the
     life of the process and force a restart (#3253 review P2).
     """
-    with _DAEMON_WORKERS_LOCK:
-        _DAEMON_WORKERS.pop(GRAPH_SIZE_WORKER_NAME, None)
+    reset_daemon_worker(GRAPH_SIZE_WORKER_NAME)
 
 
 def metrics(sdk=None, setup_timeout=None) -> dict:

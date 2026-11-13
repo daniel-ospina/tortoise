@@ -5153,20 +5153,21 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # whole sentence's three numbers, so a re-derivation of one cannot leave
         # its neighbours behind the way it did at `a08f7bce3d`.
         ("RECONCILE-A1-A2-A5.md", "`TortoiseSDK._extract_session_v2` at", (
-            # 17974 -> 18728: #12060 adds its own lines to sdk.py above this call,
+            # 17974 -> 18728 -> 18743: #12060 and then #9649's reviewed guard add
+            # their own lines to sdk.py above this call,
             # and every forward merge of `origin/main` (`1f28d107cf`, `c7499ac7a7`
             # carrying #12112/#12111, then `9828250732`) moved the region again, so
             # every number in this table moved with them. Re-derived off THIS merged
             # tree (`grep -nF 'relation_write = apply_relation_edges(' tortoise/sdk.py`),
             # never carried forward from either side. The anchors are unchanged —
             # that is the point of keying a row on the symbol.
-            ("18799", "relation_write = apply_relation_edges("),
+            ("18822", "relation_write = apply_relation_edges("),
         ), "sdk"),
         ("RECONCILE-A1-A2-A5.md", "is the line above it, `:", (
-            ("18798", "from tortoise.relation_write import apply_relation_edges"),
+            ("18821", "from tortoise.relation_write import apply_relation_edges"),
         ), "sdk"),
         ("RECONCILE-A1-A2-A5.md", "`relation_write.py:7`, `sdk.py:", (
-            ("18786", "# `#10999` made the channel TRANSPORT ONLY"),
+            ("18809", "# `#10999` made the channel TRANSPORT ONLY"),
         ), "sdk"),
         # `subject_binding_available`'s DEFINITION and its CONSUME pair, in both
         # documents that state them — a row per document, because a row scopes to
@@ -5176,8 +5177,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("6607", "def subject_binding_available(graph) -> bool:"),
         ), "search_engine"),
         ("00-plan.md", "consumed at `sdk.py:", (
-            ("9938", "subject_binding_available,"),
-            ("9991", "and not subject_binding_available(graph):"),
+            ("9954", "subject_binding_available,"),
+            ("10007", "and not subject_binding_available(graph):"),
         ), "sdk"),
         ("03-test-design.md", "is a **fail-OPEN** probe (`search_engine.py:", (
             ("6607", "def subject_binding_available(graph) -> bool:"),
@@ -5186,13 +5187,13 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # row: a row carries ONE source key, and a mis-keyed cite must red with a
         # message rather than an IndexError (the guard below now says so).
         ("03-test-design.md", "is a **fail-OPEN** probe (`search_engine.py:", (
-            ("9938", "subject_binding_available,"),
-            ("9991", "and not subject_binding_available(graph):"),
+            ("9954", "subject_binding_available,"),
+            ("10007", "and not subject_binding_available(graph):"),
         ), "sdk"),
         # The A5 binder's CALL SITE (its `def` is in `subject_binding.py`; the plan
         # names the call), keyed by the quoted form the sentence prints.
         ("00-plan.md", "point-creation path at", (
-            ("18446", "bind_point_subjects(proj, self, point_id=pid,"),
+            ("18469", "bind_point_subjects(proj, self, point_id=pid,"),
         ), "sdk"),
         # The two cites this forward merge re-pointed in the documents no row read —
         # each is a RANGE, pinned at BOTH endpoints, because a range that moves by a
@@ -5231,11 +5232,11 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("2503", 'errors.append("hierarchies: entry missing \'type\' field")'),
         ), "pack_registry"),
         ("00-align.md", "`llm:deepseek-direct` is what", (
-            ("16322", "The v2 path reports"),
-            ("16323", '"extraction_mode": "llm:<route>"'),
+            ("16345", "The v2 path reports"),
+            ("16346", '"extraction_mode": "llm:<route>"'),
         ), "sdk"),
         ("04-plan.md", "operator / label path", (
-            ("25147", "declared = declared_relation_predicates()"),
+            ("25189", "declared = declared_relation_predicates()"),
         ), "sdk"),
         # The manifest's own `carve_out:` entry, cited from the artifact table.
         # ⛔ The 5th element is the SECTION the cite must fall inside: this exact
@@ -5363,14 +5364,20 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # (`d036b9859960`), and 10019 merged. ⛔ `9951` is in that list only
             # because this row printed it — it was a predicted merge-tree value
             # (9943 + 8), never a line any commit on `main` carried. The deltas
-            # are just where the registrations landed: `main` adds +14 above the
-            # entry (a 13-line `surfaces:` block at 2237 plus a 1-line `tier1:`
-            # one at 9150) and this branch adds +32 (one 32-line block at
-            # 7522-7553; its 1-line `durations:` addition at 10291 falls below
-            # the entry), so a row sitting BELOW every insertion moves by the
-            # whole +46. The `core:` sub-key reads 2235 on every tree (no
-            # insertion above it); `sdk:` moves +30 then +13 then +32 to 8300.
-            ("10019", "- test_pack_logic_writeprobe_11083.py"),
+            # are just where the registrations landed: `main` adds +78 above the
+            # entry by its tip 87c07462a8 (9943 -> 10021: +44 across four landing
+            # PRs at `ba84fbfabf`/`e200623286`/`cd22562c24`/`f1f74135a1`, then +34
+            # across `ea2c41a696`/`a53ba8cf53`/`73c479ce40`) and this branch adds
+            # +13 (a `core:` registration block plus a `slow_files:` row; its
+            # 1-line `durations:` addition falls below the entry), so a row sitting
+            # BELOW every insertion moves by the whole +91: 9943 + 91 = the 10034
+            # this row prints. ⛔ Re-derive on the merged tree — a parent's
+            # PREDICTION is not a value: `main` wrote 10019 into this row from its
+            # own tip and three landings had moved it before the merge. The
+            # `core:` sub-key reads 2235 at 9828250732 and 2236 on the merged tree
+            # (+1, `main`'s own registration above it); `sdk:` moves 8268 -> 8310
+            # (+8 this branch, +34 `main`).
+            ("10034", "- test_pack_logic_writeprobe_11083.py"),
         ), "ci_surfaces", "carve_out:"),
     )
     assert len(rows) >= 9, (
