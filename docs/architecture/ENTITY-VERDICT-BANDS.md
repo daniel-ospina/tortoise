@@ -239,7 +239,7 @@ name+kind *or* on a spelling the survivor's `aliases[]` already records
 (`mode: "alias"`), and on that alias path the three SPELLING vetoes are stood
 down on purpose: `aliases[]` is the reviewer's record that these two are one
 entity, and `kind_conflict` in particular would fire on the retired variant's kind
-namespace (`extractor_v2.py` passes `mention_is_alias: mode == "alias"`, and the
+namespace (`extractor_v2.py` passes `alias_recorded: mode == "alias"`, and the
 warning names only the codes that actually fired). On the exact/bare rungs the
 spellings are `_norm`-equal and the kind already matched, so none of the three can
 fire there either. What phase 1 never skips is `retired` — D-1's second door. `group_join` is

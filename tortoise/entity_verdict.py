@@ -599,7 +599,7 @@ def hard_vetoes(mention: dict, candidate: dict, facts: dict | None = None) -> li
         {"retired": bool,        # candidate carries `resolved_from`
          "dependents": int,      # nodes whose `resolved_from` is the candidate
          "suppressed": bool,     # `dedup_reviewed='reject'` naming no survivor
-         "mention_is_alias": bool,}  # the mention's folded name is the
+         "mention_is_alias": bool,  # the mention's folded name is the
                                     # candidate's OWN name or one of its
                                     # `aliases[]` — the record that this spelling
                                     # is already that entity. ⛔ Escapes
@@ -607,7 +607,7 @@ def hard_vetoes(mention: dict, candidate: dict, facts: dict | None = None) -> li
                                     # caller's shim (`extractor_v2._verdict_facts`),
                                     # never by the facts reader: only the shim sees
                                     # the mention.
-         "alias_recorded": bool,}  # …and the NARROWER fact the three SPELLING
+         "alias_recorded": bool}  # …and the NARROWER fact the three SPELLING
                                     # vetoes read: the mention is one of the
                                     # candidate's `aliases[]`, NEVER its own name.
                                     # A same spelling must keep its vetoes (`plan`

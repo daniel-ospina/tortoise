@@ -319,6 +319,24 @@ class TestThePriorSetNeverCarriesARetiredNode:
         assert "team" in first[0]["aliases"], first
         assert "team" in second[0]["aliases"], second
 
+    def test_the_fold_does_not_make_a_row_its_own_alias(self, sdk_factory):
+        """The folded row's OWN name must not become an alias.
+
+        `aliases[]` is the merge's record; the row's own spelling is not one.
+        Turning it into an alias made EVERY prior row match itself on the
+        kind-agnostic rung, phase 1 reported `mode: "alias"`, and all three
+        SPELLING vetoes stood down — `plan "Acme"` bound onto `org "Acme"` with
+        no hold and no warning (the two lanes' halves disagreeing).
+        """
+        sdk = sdk_factory()
+        _create_object(sdk, "obj-org", "Acme", kind="core:org")
+        out = v2._current_entity_priors(
+            sdk, [{"id": "obj-org", "name": "Acme", "kind": "core:org"}],
+            {"obj-org": "Object"})
+        assert out[0]["aliases"] == [], out
+        hit, mode = v2._find_existing_entity(out, "Acme", "core:plan")
+        assert hit is None and mode == "none", (hit, mode)
+
     def test_the_carrier_s_own_aliases_survive_the_fold(self, sdk_factory):
         """A spelling that lives ONLY on the retired carrier must survive.
 

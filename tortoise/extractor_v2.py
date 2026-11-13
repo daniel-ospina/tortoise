@@ -3045,10 +3045,19 @@ def _absorb_spellings(folded_row: dict, row: dict, fact: tuple | None) -> None:
         stored = [a for a in raw if a is not None]
     else:
         stored = []
+    # ⛔ The folded row's OWN name is NOT an alias. `aliases[]` is the MERGE's
+    # record ("these two are one entity"); the row's own spelling is not a record
+    # of anything, and `_find_existing_entity`'s last rung is deliberately
+    # kind-agnostic — so an own-name entry made EVERY prior row match itself by
+    # `alias`, phase 1 passed `alias_recorded` for it, and all three SPELLING
+    # vetoes stood down: `plan "Acme"` bound onto `org "Acme"` with no hold and no
+    # warning. The CARRIER's spelling (why this function exists) always differs
+    # from the survivor's name, so it is unaffected.
+    own = normalize_entity_name(folded_row.get("name") or "")
     row_name = str(row.get("name") or "")
     for source in (row_name, *stored):
         folded = normalize_entity_name(source) if source else ""
-        if folded and folded not in folded_row["aliases"]:
+        if folded and folded != own and folded not in folded_row["aliases"]:
             folded_row["aliases"].append(folded)
 
 
@@ -6514,8 +6523,11 @@ def resolve_entities(entity_refs: list[dict], search: dict,
                 {"name": ex.get("name") or "", "kind": ex.get("kind") or ""},
                 {"retired": cfacts.get("retired"),
                  # `alias_recorded`, NOT `mention_is_alias`: see `hard_vetoes` —
-                 # the own-name half must keep the spelling vetoes alive.
-                 "alias_recorded": mode == "alias"})
+                 # the own-name half must keep the spelling vetoes alive. And it
+                 # is asserted from the SPELLING, not the mode: a same-spelling
+                 # `alias` hit must never set it either.
+                 "alias_recorded": (mode == "alias"
+                                    and _norm(ex.get("name", "")) != _norm(name))})
             if refusal:
                 vetoed[name] = (kind, refusal)
                 # The sentence names what actually fired: the veto codes carry the
