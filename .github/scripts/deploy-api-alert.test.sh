@@ -1261,7 +1261,8 @@ assert_contains "$WC_OVERFLOW_BODY" "could NOT be measured" "case 17p: and it is
 # A 19-DIGIT count that is INSIDE int64 (`1e18`) is a number the guard still declines (its bound is
 # a LENGTH bound, deliberately conservative). That is over-disclosure, never a hidden loss — but the
 # sentences must describe it: "could not be measured, or longer than the 18-digit bound". A prose-only fact, so
-# this row pins the STATE handling (no diagnostic, one issue filed, same sentence), not the wording.
+# this row pins BOTH the STATE handling (no diagnostic, one issue filed, same sentence) AND the window's
+# wording (the length-bound clause). The SQUEEZE sentence's wording is still unpinned — residual 0b on the PR.
 WC_INRANGE_DIR="$FIX/bin-wc-inrange"
 mkdir -p "$WC_INRANGE_DIR"
 cat > "$WC_INRANGE_DIR/wc" <<'WC_INRANGE_EOF'
