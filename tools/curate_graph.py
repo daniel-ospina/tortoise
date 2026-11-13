@@ -1084,8 +1084,14 @@ def cmd_inventory(args: argparse.Namespace) -> int:
     if args.out:
         with open(args.out, "w", encoding="utf-8") as fh:
             fh.write(text + "\n")
+        # ⛔ EVERY read layer is named, because this line is the ONE place an operator
+        # sees the population without opening the JSON. It said "points + sources +
+        # operators" and omitted the 4,670 Events the census had just classified — a
+        # line stating 21,147 as the census over a run that measured 25,817, which is
+        # the same "presents itself as the census over a population it did not count"
+        # defect #12378 is filed about, one output over (PR review round 1).
         print(f"inventory: {len(points)} points + {len(sources)} sources + "
-              f"{len(operators)} operators -> {args.out}")
+              f"{len(operators)} operators + {len(events)} events -> {args.out}")
         print(json.dumps(report["census"]["totals"], indent=1))
     else:
         print(text)

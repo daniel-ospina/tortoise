@@ -4084,7 +4084,7 @@ def _event_surface(events=None, *, reported=_UNSET, points=None, operators=None)
     return call
 
 
-def test_the_event_layer_reaches_the_census(monkeypatch, tmp_path):
+def test_the_event_layer_reaches_the_census(monkeypatch, tmp_path, capsys):
     """The episodic layer is 4,670 readable rows in one call, and the census must carry it.
 
     Omitting it made `total_rows` a claim about a population the pass never read, and
@@ -4104,6 +4104,31 @@ def test_the_event_layer_reaches_the_census(monkeypatch, tmp_path):
     assert report["events_read"] == 3, report.get("events_read")
     assert report["events_total_reported"] == 3, report.get("events_total_reported")
     assert report["events_reconciled"] is True, report.get("events_reconciled")
+    # ⛔ The STDOUT SUMMARY, which nothing pinned (PR review round 1): it named points,
+    # sources and operators and omitted the 4,670 Events the run had just classified, so
+    # the one line an operator reads without opening the JSON stated 21,147 over a census
+    # of 25,817. Reading the JSON in the other tests did not make that line safe — it can
+    # drift freely while every artifact assertion stays green.
+    assert "3 events" in capsys.readouterr().out, "the summary line must name the layer"
+
+
+def test_an_event_row_that_is_not_an_object_is_refused_not_a_traceback(
+        monkeypatch, capsys, tmp_path):
+    """Shape drift at the ROW level gets the designed refusal, not an AttributeError.
+
+    `_is_row_listing` accepts any list, so a junk element reaches `.get` and raises (rc 1
+    traceback) instead of rc 3 — the guard `read_operators` (and `read_sources`) already
+    carry, and the one arm of this change that had NO revert proof: measured, deleting the
+    `isinstance` block left the whole suite at 230 passed (PR review round 1).
+    """
+    mod = _tool_module()
+    rows = [*EVENT_ROWS, "junk"]
+    monkeypatch.setattr(mod, "_live_call_tool",
+                        _event_surface(rows, reported=len(rows)))
+    rc = mod.main(["inventory", "--graph", "org_x_g_old", "--no-verify-read",
+                   "--out", str(tmp_path / "i.json")])
+    assert rc == 3, (rc, capsys.readouterr())
+    assert "not an object" in capsys.readouterr().err
 
 
 def test_the_event_layer_is_no_longer_claimed_unreadable():
@@ -4337,6 +4362,17 @@ def test_an_agent_session_event_gets_the_session_reason_not_the_domain_one():
         packs)
     assert domain.disposition == C.UNDECIDABLE, domain
     assert "no `events` section" in domain.reason, domain.reason
+    # ⛔ A PACK-NAMESPACED event kind is NOT the same decision as a bare one, which is
+    # exactly what `curation.Plan.bundle`'s spelling note says now (PR review round 1):
+    # the fix case-FOLDS the kind, and case-folding strips no namespace — so the
+    # namespaced spelling still falls through to the domain branch. This arm reds if a
+    # later reader "corrects" that note by bare-folding the comparison instead.
+    for namespaced in ("core:agentSession", "core:AgentSession"):
+        ns = C.classify_event(
+            C.Row(node_id="ev-z", node_type="event", kind=namespaced, content="a session"),
+            packs)
+        assert ns.disposition == C.UNDECIDABLE, (namespaced, ns)
+        assert "no `events` section" in ns.reason, (namespaced, ns.reason)
 
 
 def test_the_ledger_disarmed_arm_carries_the_completed_event_layer(monkeypatch, tmp_path):
@@ -4447,6 +4483,19 @@ def test_the_architecture_doc_no_longer_claims_the_event_layer_is_unread():
     # ...and the row records the change rather than dropping the subject.
     assert "enumerated** since #12378" in doc or "**enumerated** — agent-session" in doc, (
         "the Event row must say it IS enumerated now, and cite #12378")
+    # ⛔ The GUARANTEE TABLE, which none of the phrase pins could see (PR review round 1):
+    # "What the harness guarantees (and how each is proven)" carried a row for the
+    # reasoning layer and NONE for the episodic one, so it presented itself as the
+    # complete guarantee set over a census that had just grown by 4,670 rows. The row is
+    # pinned by its own name plus the test the mutation proof leans on, so a revert of
+    # either reds here rather than drifting back to a guarantees section that is silent
+    # about a layer the census reads.
+    assert "the episodic layer is read, not assumed" in doc, (
+        "the guarantee table has no row for the Event layer the census now reads")
+    assert "test_an_event_row_that_is_not_an_object_is_refused_not_a_traceback" in doc, (
+        "the Event guarantee row must name the row-shape guard's test")
+    assert "EVENT_READ_CEILING" in doc, (
+        "the Event guarantee row must name the bound it refuses above")
 
 
 def test_an_event_with_no_text_is_counted_on_the_report(monkeypatch, tmp_path):

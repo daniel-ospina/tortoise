@@ -707,8 +707,11 @@ class Plan:
                     # spelling is not free. ⚠️ Classification is NOT spelling-invariant:
                     # `classify_point` uses `bare_kind` and `classify_source` compares the
                     # EXACT `row.kind` (a `core:agentSession` source is `carry` where a bare
-                    # `agentSession` is `undecidable`), while `classify_event` case-FOLDS it
-                    # (#12378) — so for Events the two spellings are the SAME decision. What
+                    # `agentSession` is `undecidable`), while `classify_event` case-FOLDS the
+                    # kind (#12378) — so a case-varied `AgentSession` and a bare
+                    # `agentSession` ARE the same decision, but a PACK-NAMESPACED event kind
+                    # (`core:agentSession`) is NOT: case-folding strips no namespace, so it
+                    # still falls through to the domain branch. What
                     # the clean target's kind vocabulary should accept is the clean graph's
                     # decision (#10175 step 2), not this pass's.
                     "kind": d.kind or "statement",
