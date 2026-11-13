@@ -8913,6 +8913,22 @@ def test_no_module_declares_the_same_dict_key_twice():
     assert set(_MIN_MODULES) == set(_DUP_KEY_ROOTS), (
         "every scanned root needs a non-vacuity floor — "
         f"roots={sorted(_DUP_KEY_ROOTS)}, floors={sorted(_MIN_MODULES)}")
+    # ⛔ …AND THE TWO ARE KEPT IN STEP, WHICH PINS NEITHER (#12281 review cycle 3).
+    # Dropping a root from BOTH tuples — and its floor with it — leaves every other
+    # assertion in this test true, so the guard silently stops walking that root and
+    # stays green. Measured by rebinding against an unmodified tree:
+    #   `_DUP_KEY_ROOTS = ("tortoise", "tests")` +
+    #   `_MIN_MODULES = {"tortoise": 100, "tests": 500}`  ->  GREEN
+    # and losing `tools/` that way is precisely the regression the floor loop below
+    # calls "the one that matters most", because `tools/dod_5090_probe.py` is where
+    # this class's original instance lived. So the POPULATION is named here: an
+    # addition has to be deliberate (and has to bring its own floor), and a removal
+    # reds instead of narrowing the guard in silence. Compared as a SORTED list so
+    # the declared ORDER stays free — only membership is load-bearing.
+    assert sorted(_DUP_KEY_ROOTS) == ["tests", "tools", "tortoise"], (
+        "the scanned population changed — this guard walks exactly these three roots; "
+        "dropping one narrows the guard silently (green over an unscanned tree) and "
+        f"adding one needs a `_MIN_MODULES` floor: roots={sorted(_DUP_KEY_ROOTS)}")
     # ⛔ …and a floor of ZERO is the same hole: `per_root[name] >= 0` is true for a walk
     # that yielded nothing, so `{n: 0 for n in _DUP_KEY_ROOTS}` satisfies the loop below
     # while making the non-vacuity claim vacuous — measured GREEN before this assert
