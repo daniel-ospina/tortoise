@@ -37,6 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tortoise import rerank  # noqa: E402, RUF100
 from tortoise import sdk as sdk_mod
+from tortoise.search_engine import declared_degraded_read
 
 QUERY = "when is the gym session"
 
@@ -869,6 +870,267 @@ def test_the_off_path_writes_no_rerank_trace_entry(sdk, monkeypatch):
     sdk.tortoise_fts_query("zebra migration", entity_type="point", limit=3,
                            leg_trace=trace)
     assert _rerank_entries(trace) == []
+
+
+def test_a_QUERY_LESS_full_scan_discloses_the_rerank_it_could_not_run(
+        sdk, monkeypatch):
+    """#12382 — an ARMED lever on the query-less path must say it declined.
+
+    ``tortoise_fts_query(None, kind=..., limit=N)`` is a documented
+    caller-facing mode (``tool_registry``: "Full-scan mode: omit query, set
+    kind"). The rerank block's condition carried ``(query or "").strip()``, so
+    this shape left through its own ``not query`` exit WITHOUT an entry —
+    measured at #12343's head ``93af561442`` as ``rerank entries: []`` with the
+    gate armed: byte-identical to a caller that never armed it. That is the one
+    thing the block exists to prevent, and it is the SAME rule its
+    ``recency_order_applied`` / ``order_by_not_relevance`` arms already obey.
+
+    The gate-OFF half is asserted here rather than in a second test: the whole
+    point is the DIFFERENCE between the two reads, so measuring them apart
+    would let one drift while the pair still read as covered.
+
+    ⛔ FIVE CANDIDATES, A THREE-ROW PAGE (review round 3): the arm reports the
+    PRE-CUT candidate count, so asserting ``unscored == len(returned_rows)`` on
+    a fixture that seeds exactly ``limit`` rows pins the fixture rather than the
+    contract — it would go red on a correct read the moment the pool outgrew the
+    page. The candidate set is therefore DERIVED from the gate-off read at a
+    wide limit, and the cut is exercised deliberately.
+    """
+    _seed(sdk, 5)
+    # 1. GATE OFF — no entry, the pre-existing (and still correct) contract;
+    #    the wide-limit read is also the independent candidate count below.
+    monkeypatch.delenv(rerank.FUSED_RERANK_ENV, raising=False)
+    off_trace: list[dict] = []
+    off_rows = sdk.tortoise_fts_query(None, kind="statement",
+                                     entity_type="point", limit=50,
+                                     leg_trace=off_trace)
+    assert len(off_rows) == 5, off_rows
+    assert _rerank_entries(off_trace) == []
+    # 2. GATE ON — exactly ONE entry, saying the rerank did not run and WHY.
+    monkeypatch.setenv(rerank.FUSED_RERANK_ENV, "1")
+    on_trace: list[dict] = []
+    on_rows = sdk.tortoise_fts_query(None, kind="statement",
+                                     entity_type="point", limit=3,
+                                     leg_trace=on_trace)
+    assert [r["id"] for r in on_rows] == [r["id"] for r in off_rows[:3]], (
+        "the disclosure must not change the READ — only the trace")
+    entries = _rerank_entries(on_trace)
+    assert len(entries) == 1, on_trace
+    entry = entries[0]
+    assert entry["ran"] is False
+    # ``empty_query`` is ``rerank_pool``'s OWN degrade term for this fact, not a
+    # new word invented at the wiring — the vocabulary existed and the wiring
+    # could never reach it, because this exit fired first.
+    assert entry["reason"] == "empty_query", entry
+    # ``degraded`` means "a retrieval LEG did not run" in a leg trace; a lever
+    # that declined to reorder is not that, so it stays False (a True here would
+    # turn the whole read's status degraded for a correct read).
+    assert entry["degraded"] is False
+    assert entry[rerank.RERANK_SCORED_KEY] == 0
+    # The arm reports what the rerank was HANDED — the whole pre-cut candidate
+    # set — so it is the wide-limit count, not the three rows this page returned.
+    # (Asserting against the page would pin the fixture, not the contract.)
+    assert entry[rerank.RERANK_UNSCORED_KEY] == len(off_rows), entry
+
+
+def test_the_disclosure_does_not_DECLARE_a_full_scan_degraded(sdk,
+                                                              monkeypatch):
+    """#12382 review round 3 — the entry is audit and must not create a false
+    signal one surface over.
+
+    ``declared_degraded_read`` gave a ``query=None`` full scan a single-leg
+    "by design" escape by testing that EVERY trace entry was ``structural``. The
+    new disclosure is non-structural, so on an ARMED deployment the same correct
+    3-row read was declared
+    ``degraded_read: True, vector_leg_unavailable: True, reason="leg_absent"`` —
+    blaming an embedder the read never consulted, and ``require_hybrid_read`` (a
+    real-lane gate) then refused it THROUGH THAT FALSE MARKER. This is the
+    composition test: the unit cases live in ``tests/test_2952_degraded_read.py``,
+    but only a real store read shows the trace the SDK actually composes.
+
+    ⛔ THIS DOES NOT MAKE A QUERY-LESS READ PASS THAT GATE. Post-fix
+    ``require_hybrid_read`` still refuses a ``query=None`` full scan, by design —
+    its own positive-proof rule (``_all_vector_arms_measured_empty_scope`` is
+    false when no vector arm exists) — so the fix removes a FALSE signal, it does
+    not grant the read a verdict it never earned.
+    """
+    _seed(sdk, 3)
+    monkeypatch.delenv(rerank.FUSED_RERANK_ENV, raising=False)
+    off: list[dict] = []
+    sdk.tortoise_fts_query(None, kind="statement", entity_type="point",
+                           limit=3, leg_trace=off)
+    assert declared_degraded_read(off) is None
+
+    monkeypatch.setenv(rerank.FUSED_RERANK_ENV, "1")
+    on: list[dict] = []
+    rows = sdk.tortoise_fts_query(None, kind="statement", entity_type="point",
+                                  limit=3, leg_trace=on)
+    assert rows
+    # The disclosure IS in the trace (the issue's fix) ...
+    assert len(_rerank_entries(on)) == 1, on
+    # ... and it changes nothing about how the read is declared.
+    assert declared_degraded_read(on) is None, declared_degraded_read(on)
+
+
+def test_a_read_whose_CANDIDATE_SET_was_emptied_says_empty_pool_not_empty_query(
+        sdk, monkeypatch):
+    """#12382 — the two non-entries are DIFFERENT facts and get different names.
+
+    A query-less read has nothing to score WITH; a read whose candidate set was
+    emptied before the rerank has nothing to score. Reporting the second as
+    ``empty_query`` would blame the caller's query for an empty candidate set —
+    the mis-direction the ``pool_text_empty`` / ``pool_text_read_failed`` split
+    above exists to avoid.
+
+    The candidate set is emptied here by the KIND FILTER, not by an empty store:
+    a read with NO hits at all returns from the fallback path before the rerank
+    block is reached, so no entry is emitted there — and that read already
+    carries its own verdict on every leg it asked (``empty_results``, or
+    ``no_embedder`` / ``no_query_vector`` / ``below_relevance_floor`` /
+    ``breaker_open``, or the fallback's own ``tfidf_snapshot`` /
+    ``no_fallback_applicable``), so a rerank entry would restate one fact twice.
+    """
+    _seed(sdk, 3)
+    monkeypatch.setenv(rerank.FUSED_RERANK_ENV, "1")
+    trace: list[dict] = []
+    # "observation" is a real point kind and nothing in this store carries it, so
+    # the fused pool fuses normally and the KIND FILTER empties ``result_ids``
+    # before the rerank block — the ``result_ids``-empty exit, reached.
+    rows = sdk.tortoise_fts_query("zebra migration", kind="observation",
+                                  entity_type="point", limit=3,
+                                  leg_trace=trace)
+    assert rows == [], "the kind filter must empty the page"
+    entries = _rerank_entries(trace)
+    assert len(entries) == 1, trace
+    entry = entries[0]
+    assert entry["ran"] is False
+    assert entry["reason"] == "empty_pool", entry
+    assert entry["degraded"] is False
+    assert entry[rerank.RERANK_SCORED_KEY] == 0
+    assert entry[rerank.RERANK_UNSCORED_KEY] == 0
+
+
+def test_a_CALLER_DECISION_outranks_an_empty_input_in_the_reason(sdk,
+                                                               monkeypatch):
+    """#12382 review round 1 — the reason names what the READ can act on.
+
+    The new arm sits ABOVE the four existing ones and, like them, is keyed on
+    ``result_ids``/the query text — so on these two shapes nothing else fires and
+    a bare ``empty_query`` would be the only thing a caller sees. But the read did
+    not decline for that reason: it had already decided not to rerank.
+
+    ``recall_state`` is the product path that makes this reachable rather than
+    hypothetical: it passes ``_rerank_candidates=False`` AND ``leg_trace`` while
+    its own ``query`` defaults to ``None``. Reporting ``empty_query`` there sends
+    the reader to supply a query that would still not arm the lever.
+    """
+    _seed(sdk, 3)
+    monkeypatch.setenv(rerank.FUSED_RERANK_ENV, "1")
+
+    # 1. the caller re-owns the order (``recall_state``'s exact shape)
+    owned: list[dict] = []
+    sdk.tortoise_fts_query(None, kind="statement", entity_type="point",
+                           limit=3, _rerank_candidates=False,
+                           leg_trace=owned)
+    entries = _rerank_entries(owned)
+    assert len(entries) == 1, owned
+    assert entries[0]["reason"] == "order_owned_downstream", entries[0]
+    assert entries[0]["ran"] is False and entries[0]["degraded"] is False
+
+    # 2. the caller asked for another ORDER — same rule, its own reason.
+    ordered: list[dict] = []
+    sdk.tortoise_fts_query(None, kind="statement", entity_type="point",
+                           limit=3, order_by="confidence", leg_trace=ordered)
+    entries = _rerank_entries(ordered)
+    assert len(entries) == 1, ordered
+    assert entries[0]["reason"] == "order_by_not_relevance", entries[0]
+    assert entries[0]["ran"] is False and entries[0]["degraded"] is False
+
+    # 3. and with NEITHER decision in play the empty-input reason returns — the
+    #    control that keeps the two above from being satisfied by a blanket
+    #    rule that always names a caller decision.
+    plain: list[dict] = []
+    sdk.tortoise_fts_query(None, kind="statement", entity_type="point",
+                           limit=3, leg_trace=plain)
+    entries = _rerank_entries(plain)
+    assert len(entries) == 1, plain
+    assert entries[0]["reason"] == "empty_query", entries[0]
+
+    # 4. the third caller decision — a declared RECENCY order — is the same rule.
+    #    ``empty_query`` here would be advice that loops: supplying a query then
+    #    reports ``recency_order_applied`` and the lever still does not run.
+    recency: list[dict] = []
+    sdk.tortoise_fts_query(None, kind="statement", entity_type="point",
+                           limit=3, recency_field="createdAt",
+                           recency_boost=10.0, leg_trace=recency)
+    entries = _rerank_entries(recency)
+    assert len(entries) == 1, recency
+    assert entries[0]["reason"] == "recency_order_applied", entries[0]
+    assert entries[0]["ran"] is False and entries[0]["degraded"] is False
+
+
+def test_the_recency_skip_CAN_coexist_with_an_emptied_pool(sdk, monkeypatch):
+    """#12382 review round 5 — the caller-decision rule covers THIS shape too.
+
+    ``_recency_applied`` is bound at step 4b, when the pool is still non-empty;
+    six in-place filters run after it (kind, relationship, traversal, status,
+    claim-class, turn-echo), so a read can reach this block with a live recency
+    order AND no candidates. The reason is then ``recency_order_applied``, not
+    ``empty_pool`` — the same precedence ``order_by_not_relevance`` /
+    ``order_owned_downstream`` already take on a filter-emptied pool.
+
+    Nothing pinned this before: every other recency test runs on a non-empty
+    pool, so a future "restore ``empty_pool`` first" edit would have reversed the
+    caller-decision rule with the whole suite green.
+    """
+    _seed(sdk, 3)
+    monkeypatch.setenv(rerank.FUSED_RERANK_ENV, "1")
+    trace: list[dict] = []
+    rows = sdk.tortoise_fts_query(
+        None, kind="statement", entity_type="point", limit=3,
+        relationship_filter="IMPL:does-not-exist",
+        recency_field="createdAt", recency_boost=10.0, leg_trace=trace)
+    assert rows == [], "the relationship filter must empty the pool"
+    entries = _rerank_entries(trace)
+    assert len(entries) == 1, trace
+    entry = entries[0]
+    assert entry["reason"] == "recency_order_applied", entry
+    assert entry["ran"] is False and entry["degraded"] is False
+    # ``unscored == 0`` is the proof the pool really was emptied here.
+    assert entry[rerank.RERANK_UNSCORED_KEY] == 0, entry
+
+
+def test_the_EMPTY_POOL_wins_when_the_query_is_empty_too(sdk, monkeypatch):
+    """#12382 review round 2 — both-empty resolves to ``empty_pool``.
+
+    ``rerank_pool`` returns ``empty_pool`` BEFORE ``empty_query``
+    (``tortoise/rerank.py``), so the wiring must not invert that order: on a read
+    that returned no rows, naming the query sends the caller to supply a query
+    that would change nothing, while the actual cause is the filter that emptied
+    the candidate set. ``rerank_unscored == 0`` is the proof the pool was empty.
+
+    A ``relationship_filter`` on a predicate nothing in the store carries empties
+    ``result_ids`` in place before the rerank block; the ``kind`` FILTER cannot be
+    used for this shape because the kind filter only runs when a query is present
+    (``kind`` is still passed, because the query-less read is kind-SCOPED).
+    """
+    _seed(sdk, 3)
+    monkeypatch.setenv(rerank.FUSED_RERANK_ENV, "1")
+    trace: list[dict] = []
+    # ``kind`` is REQUIRED for the read to return a pool at all (the full scan is
+    # kind-scoped); the relationship filter then empties that pool in place.
+    rows = sdk.tortoise_fts_query(
+        None, kind="statement", entity_type="point", limit=3,
+        relationship_filter="IMPL:does-not-exist", leg_trace=trace)
+    assert rows == [], "the relationship filter must empty the page"
+    entries = _rerank_entries(trace)
+    assert len(entries) == 1, trace
+    entry = entries[0]
+    assert entry["ran"] is False
+    assert entry["degraded"] is False
+    assert entry["reason"] == "empty_pool", entry
+    assert entry[rerank.RERANK_SCORED_KEY] == 0
+    assert entry[rerank.RERANK_UNSCORED_KEY] == 0
 
 
 def _candidate_count(sdk, monkeypatch, query, limit):
