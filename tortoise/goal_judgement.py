@@ -1048,13 +1048,13 @@ def latest_readings(
     batch = int(_READINGS_PAGE_SIZE)
     if batch < 1:
         # ⛔ REFUSED BY NAME, because the count guard below would otherwise report
-        # it as something else: `LIMIT 0` returns an empty page, so a measured
-        # indicator would reach the truncation check and raise `RuntimeError` —
-        # "a page came back short" — while an indicator with NO readings would
-        # return `[]`, which is the CORRECT answer. Neither is "nothing was ever
-        # measured" (the count guard makes that impossible), so the value of this
-        # guard is that it names the actual misconfiguration instead of letting a
-        # wrong-page-size read masquerade as a transport truncation.
+        # it as something else: `LIMIT 0` returns an empty page on every page, so
+        # a MEASURED indicator would reach the truncation check and raise
+        # `RuntimeError` — "a page came back short" — blaming a server cap for a
+        # local misconfiguration, while an indicator with NO readings would return
+        # `[]`, which is the correct answer. The independent `count(e)` is what
+        # makes "nothing was ever measured" unreachable for a measured indicator;
+        # this guard's job is the remaining one — name the constant to fix.
         raise ValueError(
             f"_READINGS_PAGE_SIZE must be >= 1, got {_READINGS_PAGE_SIZE!r} — a "
             "zero page size would make every measured indicator raise as if its "

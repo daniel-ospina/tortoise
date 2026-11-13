@@ -232,9 +232,10 @@ def test_the_read_pages_rather_than_relying_on_one_result_set(sdk, monkeypatch):
     being deleted: ONE unbounded query over 5 rows returns the same five rows in
     the same order, which is exactly the regression that would re-introduce
     #4233's silent store-order truncation. With the page size retuned to 2, a
-    paged read of 5 rows issues **3** queries; a single unbounded one issues 1.
-    Counting is done on the SDK's own `g.query`, so it cannot be satisfied by a
-    different route.
+    paged read of 5 rows issues **3 PAGE** queries plus the ONE aggregate
+    `count(e)` the truncation guard needs (4 in total); a single unbounded read
+    issues 1 page query plus the aggregate. Counting is done on the SDK's own
+    `g.query`, so it cannot be satisfied by a different route.
 
     ⚠️ Disclosed bound on what this pins: a lane container reports
     ``RESULTSET_SIZE = -1``, so the server-side cap the paging exists for cannot
@@ -299,15 +300,18 @@ def test_a_negative_limit_is_refused_rather_than_silently_sliced(sdk):
         latest_readings(sdk, indicator["id"], limit=-1)
 
 
-def test_a_degenerate_page_size_is_refused_loudly_not_read_as_unmeasured(
-    sdk, monkeypatch
-):
-    """A page size below 1 is a configuration error, and it must be LOUD.
+def test_a_degenerate_page_size_is_refused_by_name(sdk, monkeypatch):
+    """A page size below 1 is a configuration error, and it must be named.
 
-    ``LIMIT 0`` returns an empty page, so a silent guard would end the loop with
-    no rows and report every indicator as "nothing was ever measured" — the
-    silent-bound conflation this module refuses elsewhere (#11822: a FAILED READ
-    is not "we could not tell"). Refused, therefore, rather than answered.
+    ⛔ The failure it prevents is a MISATTRIBUTION, not silence. ``LIMIT 0``
+    returns an empty page on every page, so without this guard a MEASURED
+    indicator would reach the truncation check and raise ``RuntimeError`` ("a page
+    came back short") — blaming a server cap for a local misconfiguration — while
+    an indicator with NO readings would return ``[]``, which is the correct
+    answer. (The independent ``count(e)`` guard means "nothing was ever measured"
+    can no longer be reported for an indicator that has readings; that claim was
+    true before that guard landed and is not true now.) Refused by NAME, so the
+    operator is told which constant to fix.
     """
     import tortoise.goal_judgement as gj
 
