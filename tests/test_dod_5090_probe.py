@@ -8258,11 +8258,23 @@ def test_a_duplicate_literal_key_in_the_census_dicts_cannot_land_silently():
 # `tests/test_embed_writer_register.py::test_a_duplicate_key_raises`).
 #
 # So this is the DICT half: one scan, run wherever a diff SELECTS this module. ⛔ Not
-# on every tree that holds a duplicate: `config/ci-surfaces.yml`'s selection sends a
-# `tools/`-only diff to `tools/dod_5090_probe.py`'s own tests, not to this file
-# (measured: `select(["tools/min_signal.py"], "pull_request")` → 90 test files, this
-# one absent). So the catch is real but SELECTION-BOUND, and the honest claim is the
-# narrower one — a `tests/` or `tortoise/` diff, or any full-lane run, reaches it.
+# on every tree that holds a duplicate — selection is the real bound, and it has TWO
+# shapes:
+#
+#   * most `tools/` files are NOT subjects that reach this module (measured:
+#     `select(["tools/min_signal.py"], "pull_request")` → 90 test files, this one
+#     absent; `tools/who_is_on.py` and `tools/claim_lanes.py` likewise), so a
+#     duplicate born at the merge of two PRs each touching one of those reds nothing
+#     here;
+#   * `tools/dod_5090_probe.py` itself DOES reach it — it is a `CORE_ALSO` entry in
+#     `tools/ci_selection.py` (the instrument has to be selected by its own subject),
+#     measured `select(["tools/dod_5090_probe.py"], "pull_request")` → 830 test files,
+#     this one PRESENT. That is the file `#11996`'s duplicate lived in, and it is
+#     pinned by `test_the_instrument_is_selected_by_its_own_subjects` in this module.
+#
+# So: a `tests/`, `tortoise/` or `tools/dod_5090_probe.py` diff reaches this guard, as
+# does any full-lane run (push/schedule select in FULL) — which is what makes the
+# born-at-merge case catchable. Everything else is lint's alone.
 
 #: Roots the declaration dicts live under today. ⛔ NOT the whole repo: `battery/`,
 #: `graph-scripts/`, `docs/`, `eval/` and several smaller roots sit outside these three,
@@ -8275,12 +8287,13 @@ def test_a_duplicate_literal_key_in_the_census_dicts_cannot_land_silently():
 #: removed in `tests/test_commit_schema.py`. So "lint would still catch it there" is
 #: false for the one shape we have actually observed.
 #:
-#: ⛔ DELIBERATELY NO FILE COUNT, here or for the roots outside. A count is a
-#: measurement of the tree it was taken on: a draft of this comment said "254", and
-#: by the time the text landed the tree held **255** outside these roots, in
-#: directories the enumeration had also missed — the drift class this very comment is
-#: about. The population an assertion should pin is the one it ENFORCES (`_MIN_MODULES`
-#: below), not a figure in prose.
+#: ⛔ NO FILE COUNT IS ASSERTED, here or for the roots outside. A count is a
+#: measurement of the tree it was taken on: a draft of this comment said "254", and by
+#: the time the text landed the tree held 255 outside these roots, in directories the
+#: enumeration had also missed — the drift class this very comment is about. The
+#: figures elsewhere in this comment are bound to the tree that measured them. The
+#: population an assertion should pin is the one it ENFORCES (`_MIN_MODULES` below),
+#: not a figure in prose.
 #:
 #: It is one scan over ALL three roots on purpose: the class is not specific to the
 #: probe, and naming files here would re-open the hole the moment a declaration moves
@@ -8548,3 +8561,10 @@ def test_the_scan_REPORTS_a_duplicate_it_finds(tmp_path):
     assert any(v.startswith("tests/broken.py: UNPARSEABLE") for v in violations), violations
     # …and the clean module contributes nothing: the report is specific, not a roll-up.
     assert not any("clean.py" in v for v in violations), violations
+    # ⛔ And the JOINED render — the string `test_no_module_declares_the_same_dict_key_twice`
+    # asserts on, which lives in the TEST and not in the helper — must carry both
+    # sites. Without this the multi-violation `"\n  ".join(...)` stays an undriven arm,
+    # and a guard whose red arm is only CLAIMED is not evidence.
+    joined = "\n  ".join(violations)
+    assert "tortoise/dup.py:3 re-declares key 'x::y' (first at :2)" in joined, joined
+    assert "tests/broken.py: UNPARSEABLE" in joined, joined

@@ -333,8 +333,9 @@ close review findings on that change: the falsifier for the probe's DIRECT-WRITE
 guard on a node the CALLER builds, which the probe had not measured — the pin that a record label
 with no `KEY_PROPERTY` HOLDS the row instead of taking the whole report down with a `KeyError`, and
 the falsifier for the PLANTED property set, without which reverting that derivation to the literal
-`embedding` red no row at all), seven by `#11455` (all seven are row-1 shipped-default tests), and one by this PR's round-9 fresh review,
-which SCORES the `#11455` clause itself (`test_the_row_VERDICT_reads_the_DEPLOYMENT_not_the_any_surface_bool`
+`embedding` red no row at all), seven by `#11455` (all seven are row-1 shipped-default tests), and one by the round-9 fresh review ON `#11455`'s change
+(`#11415`/`#11455` landed it; no sha is restated here, for the reason the paragraph
+below gives about branch heads), which SCORES the `#11455` clause itself (`test_the_row_VERDICT_reads_the_DEPLOYMENT_not_the_any_surface_bool`
 — reverting `on_by_default = deployment["on"]` to the any-surface bool left every other row-1 test
 green, so the artefact `#11086` item 4 is ticked on was pinned nowhere), one by `#12284`
 (`test_a_duplicate_literal_key_in_the_census_dicts_cannot_land_silently` — `#9314`'s missing
@@ -344,7 +345,9 @@ caught `#11996`'s pair, post-merge), and three by `#12265`'s generalisation of t
 (`test_the_duplicate_key_detector_catches_a_duplicate`,
 `test_no_module_declares_the_same_dict_key_twice` and
 `test_the_scan_REPORTS_a_duplicate_it_finds` — the falsifier, the scan over `tortoise/`,
-`tools/` and `tests/` (not "repo-wide", and deliberately no file count: `battery/`,
+`tools/` and `tests/`, and the RED arm driven over a planted tree (a duplicate must be NAMED with
+its file and both line numbers, an unparseable module must be named rather than skipped green, and
+a clean module must contribute nothing), which (not "repo-wide", and deliberately no file count: `battery/`,
 `graph-scripts/`, `docs/`, `eval/` and several smaller roots sit outside them, and a count there
 has already gone stale once) that make a silently-shadowed declaration key a PYTEST red on any tree
 that holds both rows AND whose diff selects this file, including the MERGE tree, where the duplicate is
@@ -380,8 +383,8 @@ whose `#11858` door guard put an `embedding=` into `tortoise.sdk::create_source`
 `_EMBED_WRITE` reads raw source, so that prose made the door an undeclared writer and three of
 these nodeids red again at `origin/main` `edcac493a5` (measured there: `3 failed, 168 deselected`).
 A branch sha is a moving tree — the same discipline the paragraph below already imposes on the
-population COUNT — so the claim is bound to the tree it was measured on, and this PR carries the
-declaration that clears it.
+population COUNT — so the claim is bound to the tree it was measured on, and the change that
+clears it carries the declaration.
 ⛔ The SPLIT is lane-bound, and the same tree reads **181 passed, 2 skipped** under
 `TORTOISE_TEST_CARVE_OUT=1` with no `TORTOISE_DB_URI` — the second skip is
 `tests/_live_utils.py`'s live-graph fixture, which only the docker lane satisfies. Both splits add
