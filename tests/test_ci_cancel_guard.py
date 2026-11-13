@@ -406,6 +406,38 @@ def test_a_QUEUE_TIME_started_at_alone_is_NOT_evidence_of_work(fixture):
     assert fixture.cancelled() == ["41840910128"]
 
 
+def test_a_requeued_unclaimed_job_with_steps_is_PERMITTED(fixture):
+    """`steps` on an UNCLAIMED job belongs to a PREVIOUS attempt (#12421 review F2).
+
+    The question this guard answers is whether the RUN's work is still at risk. A
+    requeued job's retained step list is the work of an attempt that is already gone;
+    what a cancel would destroy is the REQUEUED attempt, and no runner has claimed it
+    (`runner_name: ""`, `completed_at: null`, `status: queued`). So this must be
+    PERMITTED — and the opposite reading has to be a deliberate decision, not an
+    accident of which fields the predicate happens to read.
+
+    ⛔ THE ASYMMETRY WITH `run_reaper.job_work_start` IS INTENTIONAL: that function
+    reads `steps` because its question is WHEN this attempt's work began, and it
+    floors them at the claim stamp for exactly this reason. Reading them here would
+    make the guard refuse a cancel it exists to authorise (both tools agree that
+    `steps` can never ESTABLISH that a job began).
+    """
+    fixture.apply("run.json", _run_meta(sha=HEAD_OLD))
+    fixture.apply("prs.json", pr(PR_HEAD_MOVED))
+    fixture.apply("jobs.json", {"total_count": 2, "jobs": [
+        {"name": "test (a)", "status": "queued", "started_at": "2026-11-05T05:27:19Z",
+         "runner_name": "", "completed_at": None},
+        {"name": "test (b)", "status": "queued", "started_at": "2026-11-05T05:27:19Z",
+         "runner_name": "", "completed_at": None,
+         "steps": [{"name": "Set up job", "status": "completed",
+                    "started_at": "2026-11-05T04:02:11Z",
+                    "completed_at": "2026-11-05T04:02:19Z"}]}]})
+    r = guard(fixture, "41840910128", "--apply")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert fixture.cancelled() == ["41840910128"], (
+        "a previous attempt's steps were read as work at risk in the requeued attempt")
+
+
 def test_a_COMPLETED_job_with_no_runner_name_is_refused(fixture):
     """The `completed_at` arm. A finished job is not cancellable, even when the run
     still reads `queued` and GitHub has dropped the job's `runner_name`."""

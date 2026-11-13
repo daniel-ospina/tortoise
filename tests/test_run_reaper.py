@@ -865,6 +865,13 @@ class RunReaperTestCase(unittest.TestCase):
         steps at all, so deleting the arm left the suite green and every begun
         shard's clock silently became the claim time. A claimed job whose first
         step is the true start must be judged from that step.
+
+        ⛔ AND THE REFINEMENT IS FLOORED AT THE CLAIM (rev12421 review, F1). A step
+        cannot start before the attempt that ran it was claimed, so a step stamp
+        EARLIER than `started_at` is a previous attempt's residue (the requeue
+        premise the gate above rests on) and must not be charged to this attempt.
+        Both halves are pinned below: (b) reds if the `steps` arm is deleted, (c)
+        reds if the FLOOR is deleted.
         """
         mod = _load_tool_module()
         green = [[{"name": "test (g)", "status": "completed", "conclusion": "success",
@@ -881,16 +888,55 @@ class RunReaperTestCase(unittest.TestCase):
                          "steps must not establish that an unclaimed job began")
         self.assertIsNone(row["shard_elapsed_s"])
 
-        # (b) a CLAIMED job's clock is its FIRST STEP, not its claim stamp
-        claimed = job("test (g)", None, status="in_progress", started_s=1200)
+        # (b) a CLAIMED job's clock is its FIRST STEP, not its claim stamp — the step
+        #     is LATER than the claim (1800 s ago vs the claim's 2400 s ago), which is
+        #     the only ordering a single attempt can produce.
+        claimed = job("test (g)", None, status="in_progress", started_s=2400)
         claimed.update({"runner_name": "pi-runner-x64-1",
-                        "steps": [{"started_at": iso(NOW - 2400)}]})
+                        "steps": [{"started_at": iso(NOW - 1800)}]})
         row = mod.decide({"id": 111, "status": "in_progress",
                           "run_started_at": iso(NOW - 7200)},
                          [job("test (a)", 600), claimed], green, now=NOW, floor=300)
-        self.assertEqual(row["shard_elapsed_s"], 2400,
+        self.assertEqual(row["shard_elapsed_s"], 1800,
                          "the first step's start IS the shard's work clock")
         self.assertEqual(row["action"], "cancel")
+
+        # (c) a step EARLIER than the claim is a PREVIOUS attempt's residue: the claim
+        #     floors it, so the shard is judged on the attempt that is running now
+        #     (1200 s, inside its 1200 s bound) instead of on the requeue gap (2400 s).
+        requeued = job("test (g)", None, status="in_progress", started_s=1200)
+        requeued.update({"runner_name": "pi-runner-x64-1",
+                         "steps": [{"started_at": iso(NOW - 2400)}]})
+        row = mod.decide({"id": 111, "status": "in_progress",
+                          "run_started_at": iso(NOW - 7200)},
+                         [job("test (a)", 600), requeued], green, now=NOW, floor=300)
+        self.assertEqual(row["shard_elapsed_s"], 1200,
+                         "a stale step from a previous attempt must not be charged to "
+                         "this one — the claim stamp is the floor")
+        self.assertEqual(row["action"], "skip",
+                         "a shard claimed 1200 s ago inside a 1200 s bound was cancelled "
+                         "on a previous attempt's step")
+
+        # (d) NO CLAIM STAMP → NO CLOCK (rev12421 review, cycle 1 F1). A step stamp
+        #     alone is not a work clock: with `started_at` absent there is nothing to
+        #     floor a retained step against, and the pre-fix answer for this payload
+        #     was CLOCKLESS → `unstarted` → bound underivable → no cancel. Handing out
+        #     the step re-opens the residue path the floor closes, so the clock is None
+        #     and the run is not cancelled.
+        unstamped = {"name": "test (g)", "status": "in_progress",
+                     "runner_name": "pi-runner-x64-1", "completed_at": None,
+                     "started_at": None,
+                     "steps": [{"started_at": iso(NOW - 2400)}]}
+        self.assertIsNone(
+            mod.job_work_start(unstamped),
+            "a step stamp with no claim stamp is not a work clock — there is nothing "
+            "to floor a previous attempt's residue against")
+        row = mod.decide({"id": 111, "status": "in_progress",
+                          "run_started_at": iso(NOW - 7200)},
+                         [job("test (a)", 600), unstamped], green, now=NOW, floor=300)
+        self.assertEqual(row["action"], "skip",
+                         "a shard with no measured start was cancelled on a step stamp")
+        self.assertIsNone(row["shard_elapsed_s"])
 
     def test_a_NON_STRING_runner_name_does_not_claim_a_job(self):
         """T5, review cycle 2: the permitting-direction flip is closed.

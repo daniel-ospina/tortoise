@@ -61,6 +61,18 @@ same head), and `tools/run_reaper.py` (a verified-in-progress wedge) — plus
 agent-infra's sweep, which is not in this index (four in total). Wiring them in is
 the follow-up.
 
+⛔ A COMPLETED JOB IS COUNTED AS "STARTED", AND THAT IS A DECLARED GAP (#12437).
+Clause 2 asks the wide question — "has any job of this run started?" — rather than
+"is any WORK still at risk?". The predicate is the one #11045's own body proposed,
+so this guard implements its contract; but a FINISHED job's work cannot be
+destroyed, and a superseded run whose matrix has completed apart from one unclaimed
+queue-waiter is still REFUSED. MEASURED 2026-11-13: run `43460904804` — 30 jobs
+`completed`, 1 `python-ci-gate` `queued` with `runner_name: ""` and `steps: 0` —
+refused with "job(s) already started (30 of 31)", while clauses 1/3/4/5 all held.
+Across 27 live dry runs of this guard that minute: 0 PERMIT. Narrowing clause 2 to
+"refuse on an `in_progress` job, or on any assigned `runner_name` while unfinished"
+ADDS a permitting path, so it is filed as **#12437** and not folded in here.
+
 ⛔ THE `started_at` MISREADING WAS CROSS-CHECKED AT ALL THREE (#11045 item 3,
 2026-11-13). Only `tools/run_reaper.py` carried it, and it is fixed in the same
 commit (`job_work_start`). The other two read no work-start signal at all:
@@ -243,6 +255,16 @@ def job_has_started(job: dict[str, Any]) -> bool:
     a verdict — so an ABSENT or non-string `status` reads as started rather than
     raising (membership on an unhashable status would `TypeError` out of a pure
     predicate, and a second caller would inherit that as an aborted pass).
+
+    ⛔ `steps` IS DELIBERATELY NOT READ HERE, AND THE ASYMMETRY WITH
+    `run_reaper.job_work_start` IS INTENTIONAL (#12421 review, cycle 1 F2). That
+    function reads `steps` because its question is WHEN this attempt's work began;
+    this one's question is whether the RUN's work is still at risk, and a `steps`
+    list on an UNCLAIMED job belongs to a PREVIOUS attempt, whose work is already
+    gone — what a cancel would destroy is the requeued attempt, and no runner has
+    claimed it. Both tools gate `steps` the same way (it can never establish that a
+    job began); only the clock uses them. Pinned by
+    `test_a_requeued_unclaimed_job_with_steps_is_PERMITTED`.
     """
     if job.get("runner_name"):
         return True

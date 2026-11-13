@@ -474,8 +474,38 @@ def job_work_start(job: dict) -> float | None:
     order is therefore:
       1. GATE: a `BEGUN_JOB_STATUSES` status or an assigned `runner_name`, else None
          — the job is a CAPACITY WAIT, not a wedge;
-      2. REFINE: the earliest step `started_at`, when the payload carries steps;
+      2. REFINE: the earliest step `started_at`, when the payload carries steps —
+         ⛔ FLOORED AT THE CLAIM STAMP (rev12421 review, F1);
       3. otherwise the job's own claim-time `started_at`.
+
+    ⛔ AND WITH NO READABLE CLAIM STAMP THERE IS NO CLOCK AT ALL (rev12421 review,
+    cycle 1 F1). An early draft handed out `min(steps)` in that case — the floor's
+    input with the floor bypassed — so a begun job whose `started_at` was absent or
+    unparseable could be judged on a retained step from a PREVIOUS attempt and cancel
+    a shard claimed seconds ago. That was a permitting branch introduced by this
+    change (pre-fix such a job was clockless → `unstarted` → bound underivable → no
+    cancel) and nothing pinned it: replacing it with `None` left the whole suite
+    green. It is now `None`, the fail-closed answer, and the no-claim shape is pinned
+    by `test_STEPS_refine_a_begun_clock_and_never_establish_one` case (d).
+
+    ⛔ THE FLOOR, AND WHY THE GATE ALONE WAS NOT ENOUGH. Gating `steps` behind the
+    begun-check closes the queue-wait hole, but it says nothing about WHICH attempt
+    the steps belong to — and the premise that justifies the gate is that a requeued
+    job CAN RETAIN ITS STEP LIST. If it does, the earliest retained step predates the
+    current claim, so `min(stamps)` returns a clock from the PREVIOUS attempt and the
+    shard is charged the failure+requeue gap: `shard_elapsed_s` inflates, the shard
+    blows past its bound, and a run whose shard was claimed seconds ago is CANCELLED.
+    That is the same class the `(3b)` comment forbids ("a shard that started 5 minutes
+    ago … is judged at ~2h and cancelled while healthy"), reached through the other
+    input. A step cannot START before the attempt that ran it was claimed, so a stamp
+    earlier than `started_at` is residue by construction, and the clock is
+    `max(claim, min(steps))`.
+
+    ⛔ MEASURED 2026-11-13, and it is why this is a one-line floor rather than a
+    redesign: across 164 jobs on 60 recent runs (33 of them carrying step lists),
+    **0 had a first step earlier than the job's claim stamp** and 33/33 were at or
+    after it — the residue shape is real but UNOBSERVED, so the floor changes no
+    live decision and removes the path rather than re-tuning anything.
     """
     status = job.get("status")
     runner = job.get("runner_name")
@@ -492,14 +522,27 @@ def job_work_start(job: dict) -> float | None:
             status not in BEGUN_JOB_STATUSES
             and not (isinstance(runner, str) and runner)):
         return None
+    claim = _parse_ts(job.get("started_at"))
+    if claim is None:
+        # ⛔ NO CLAIM STAMP, NO CLOCK (rev12421 review, cycle 1 F1) — see the docstring.
+        # The only number left is a step stamp, and a retained step can belong to a
+        # PREVIOUS attempt, which is exactly what the floor below exists to distrust;
+        # with nothing to floor it against, the bound stays UNDERIVABLE and the run is
+        # not cancelled. This is the pre-fix answer, and the non-cancelling one.
+        return None
+    refined = None
     steps = job.get("steps")
     if isinstance(steps, list) and steps:
         stamps = [_parse_ts(s.get("started_at")) for s in steps if isinstance(s, dict)]
         stamps = [t for t in stamps if t is not None]
         if stamps:
-            return min(stamps).timestamp()
-    ts = _parse_ts(job.get("started_at"))
-    return ts.timestamp() if ts is not None else None
+            refined = min(stamps)
+    # THE FLOOR: a step cannot predate the claim of the attempt that ran it, so an
+    # earlier stamp is a PREVIOUS attempt's residue (see the docstring) and must not
+    # be charged to this one.
+    if refined is None or refined < claim:
+        return claim.timestamp()
+    return refined.timestamp()
 
 
 def derive_bound(target_jobs: list[dict], green_job_lists: list[list[dict]],
@@ -549,10 +592,12 @@ def derive_bound(target_jobs: list[dict], green_job_lists: list[list[dict]],
             # was judged against a clock that included its whole queue wait — the P0
             # this guard exists to stop. A job that has not begun now stays
             # CLOCKLESS, which routes it to `unstarted` and makes the bound
-            # UNDERIVABLE. The direction is fail-closed but it is NOT "never more
-            # cancels": a CLAIMED `in_progress` job carrying `steps` but no
-            # `started_at` was clockless pre-fix (underivable) and is now clocked
-            # from its first step, so that run becomes cancellable (review cycle 2).
+            # UNDERIVABLE. The direction is fail-closed and it is NOT "never more
+            # cancels": a CLAIMED `in_progress` job carrying `steps` but no readable
+            # `started_at` stays CLOCKLESS too (rev12421 review, cycle 1 F1) — the
+            # clock is floored at the claim stamp, so with no claim stamp there is
+            # nothing to floor a retained step against, and handing one out here
+            # would re-open the residue path. Fail closed.
             ts = job_work_start(job)
             if ts is not None:
                 rec["started_at"] = ts
