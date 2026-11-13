@@ -35,7 +35,6 @@ issue #1791) so a degenerate input like ``10:00`` parses instead of raising
 from __future__ import annotations
 
 import re
-import unicodedata
 
 from .env_truthy import env_flag
 
@@ -267,21 +266,42 @@ def _continues_a_word(ch: str) -> bool:
 
     Used by :func:`underscore_run_terms` to refuse a run that
     :data:`_COMPOSITE_SPLIT_RE` produced by TRUNCATING a longer Unicode word
-    (#12368 review). Two kinds of character continue a word:
+    (#12368 review).
 
-    * an ALPHANUMERIC (``ñ``, ``é``, ``Ω``) — the obvious case; and
-    * a COMBINING MARK (``U+0301`` and friends), which is NOT alphanumeric but
-      composes onto the preceding letter. Without this arm a DECOMPOSED (NFD)
-      spelling still emitted the truncation — measured: the NFD spelling of
-      ``_café`` built the literal plus ``_cafe`` as a second alternative, and the
-      probe guard REFUSED it while the switch-OFF arm accepted it.
+    ⛔ MEASURED ANSWER: on FalkorDB 4.20.6 **every non-ASCII character stays
+    INSIDE the word** — none of them separates it. Probe (a lane graph, one
+    ``:Object`` per shape, the segment ``b_c`` queried against the ``Object``
+    FULLTEXT index, reported by WHICH document comes back):
 
-    ⛔ NOT ``not ch.isascii()``: U+00A0 (NBSP) and U+2009 (thin space) are
-    non-ASCII SEPARATORS, so ``'<NBSP>b_c'`` genuinely holds ``b_c`` as an index
-    term and skipping it would lose recall — the defect this module repairs. A
-    combining mark JOINS a word; a non-ASCII space SEPARATES one.
+    ==================  ===========================  ==============
+    stored name          ``queryNodes(…,'b_c')``      split there?
+    ==================  ===========================  ==============
+    ``' b_c'`` (U+0020)  ``['o-ascii']``                **YES**
+    ``U+00A0 b_c``       ``['o-ascii']`` only            no
+    ``U+2009 b_c``       ``['o-ascii']`` only            no
+    ``U+3000 b_c``       ``['o-ascii']`` only            no
+    ``U+2028 b_c``       ``['o-ascii']`` only            no
+    ``U+202F b_c``       ``['o-ascii']`` only            no
+    ``🎉b_c``             ``['o-ascii']`` only            no
+    ``中b_c``             ``['o-ascii']`` only            no
+    ==================  ===========================  ==============
+
+    So the test is simply **non-ASCII**, and it covers the combining marks
+    (``U+0301`` and friends) as a SIDE EFFECT rather than as a special case: a
+    combining mark is not alphanumeric, so an ``isalnum()`` test left the
+    truncation in place for DECOMPOSED (NFD) text — measured: NFD ``_café`` built
+    the literal plus ``_cafe`` as a second alternative and the probe guard REFUSED
+    it, while the switch-OFF arm accepted it.
+
+    ⚠️ An earlier revision of this docstring claimed the opposite — that NBSP and
+    thin space "are non-ASCII SEPARATORS, so ``<NBSP>b_c`` genuinely holds ``b_c``"
+    — and used that to justify a NARROWER predicate. That claim was FALSE and the
+    probe above refutes it: ``b_c`` matches only the ASCII-space document. The
+    narrower predicate's residual is therefore an INERT term (one that matches
+    nothing), never a recovered one, which is why widening here is correct and
+    not a recall risk.
     """
-    return ch.isalnum() or bool(unicodedata.combining(ch))
+    return not ch.isascii()
 
 def identifier_tokens_enabled() -> bool:
     """Is identifier preservation on for this process? (#8933)
@@ -503,22 +523,21 @@ def underscore_run_terms(text: str) -> list[str]:
     than silent — plus a third that is not a bound but a CORRECTNESS refusal
     (#12368 review), also declared:
 
-    * **a run that ABUTS a non-ASCII alphanumeric is dropped, and it is NOT
-      lossy** — because the emitted term never existed. ``[A-Za-z0-9_]+`` is an
-      ASCII class while RediSearch treats Unicode letters as word characters, so
-      in ``año_actual`` the ASCII splitter sees ``o_actual``: a fragment of the
-      real index term, which nothing holds. Dropping it is what keeps this
-      function ADDITIVE in the only sense that matters (no term is removed that
-      the index could match) and keeps a `_` token that is ONE index term
-      PROBE-ABLE — emitting the fragment made the read send two alternatives, so
-      the probe guard refused a valid probe (measured false block on
-      ``año_actual``/``the_café``/``_café``/``dé_installer``/``x_café``, in both
+    * **a run that ABUTS a NON-ASCII character is dropped, and it is NOT lossy**
+      — because the emitted term never existed. ``[A-Za-z0-9_]+`` is an ASCII
+      class while the index keeps every NON-ASCII character inside the word
+      (measured, eight shapes — see :func:`_continues_a_word`), so in
+      ``año_actual`` the ASCII splitter sees ``o_actual``: a fragment of the real
+      index term, which nothing holds. Dropping it keeps THIS DROP non-lossy (no
+      term removed that the index could match) and keeps a `_` token that is ONE
+      index term PROBE-ABLE — emitting the fragment made the read send two
+      alternatives, so the probe guard refused a valid probe (measured false block
+      on ``año_actual``/``the_café``/``_café``/``dé_installer``/``x_café``, in both
       the precomposed and the NFD spelling).
-      ⚠️ Scoped to THIS drop (#12368 second review): it keeps *this refusal*
-      additive, and it is the only bullet here that is non-lossy. The two bounds
-      below are both DECLARED LOSSY (``___``, and a run past
-      ``MAX_COMPOSITE_RUN_LEN``), so 'additive in the only sense that matters' was
-      an over-general that the surrounding text already contradicts.
+      ⚠️ Scoped (#12368 second and third reviews): only THIS bullet is non-lossy.
+      The two bounds below are both DECLARED LOSSY (``___``, and a run past
+      ``MAX_COMPOSITE_RUN_LEN``), so an earlier "additive in the only sense that
+      matters" generalised past what the surrounding text supports.
 
     * no alphanumeric character in the run -> dropped (``___``), and it is
       **LOSSY TOO** — corrected by measurement (#12360 review round 8): the
@@ -562,19 +581,25 @@ def underscore_run_terms(text: str) -> list[str]:
     # `año_actual`/`the_café`/`_café`/`dé_installer`/`x_café`, every one of which
     # is a valid, reachable ONE-index-term probe the switch-OFF arm accepted: a
     # FALSE BLOCK, measured on both arms. A run is therefore emitted only when
-    # nothing WORD-CONTINUING abuts it, i.e. when the splitter did not truncate a
-    # longer Unicode word.
+    # nothing WORD-CONTINUING abuts it — where "word-continuing" means NON-ASCII,
+    # which is what the lane actually does (see :func:`_continues_a_word` for the
+    # eight-shape probe).
     #
-    # ⚠️ "WORD-CONTINUING" IS `isalnum() OR A COMBINING MARK`, deliberately NOT
-    # `not ch.isascii()` (#12368 second review). A COMBINING MARK (`Mn`) is not
-    # alphanumeric, so an `isalnum()`-only test STILL emitted the truncation for
-    # DECOMPOSED (NFD) text — measured on the NFD spelling of the very shape this
-    # fix exists for, where the probe was REFUSED on the ON arm and accepted on
-    # the OFF arm. Widening instead to "any non-ASCII neighbour" would be WORSE in
-    # the other direction: U+00A0 (NBSP) and U+2009 (thin space) are non-ASCII
-    # SEPARATORS, so `<NBSP>b_c` really does hold `b_c` as an index term and
-    # skipping it would LOSE recall. Both arms live in :func:`_continues_a_word`;
-    # neither is guessed.
+    # ⚠️ Reaching that rule took TWO corrections (#12368 second and third
+    # reviews), and both wrong answers are recorded here because each one is the
+    # tempting shortcut:
+    #
+    # 1. ``isalnum()`` — too NARROW. A COMBINING MARK is not alphanumeric, so the
+    #    truncation survived for DECOMPOSED (NFD) text: the NFD spelling of
+    #    ``_café`` was REFUSED on the ON arm and accepted on the OFF arm.
+    # 2. ``isalnum() or combining()`` — closer, still narrow, and justified by a
+    #    FALSE premise. It was argued from "NBSP/thin space are non-ASCII
+    #    SEPARATORS, so skipping them would lose recall". MEASURED: they are NOT
+    #    separators — ``b_c`` matches only the ASCII-space document — so the
+    #    residual was an INERT term and no recall was at stake.
+    #
+    # The measured rule is plain non-ASCII, and it subsumes the combining-mark
+    # case rather than special-casing it.
     for match in _COMPOSITE_RUN_RE.finditer(text):
         run = match.group(0)
         start, end = match.span()

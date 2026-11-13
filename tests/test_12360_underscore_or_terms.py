@@ -309,16 +309,34 @@ class TestAdditive:
             assert build_or_query(nfd) == off_built, word
             assert (probe_phrase_rejection(nfd) is None) == off_ok, word
 
-        # …and the abutment test must NOT over-reach into a real SEPARATOR: NBSP and
-        # thin space are non-ASCII but they separate, so the run after one really is
-        # an index term and its composite must still be emitted.
-        for sep in ("\u00a0", "\u2009"):
+        # ⛔ NON-ASCII SEPARATORS DO NOT EXIST ON THIS LANE (#12368 third review).
+        # An earlier revision of this test asserted the OPPOSITE — that the run
+        # after a NBSP/thin space "really is an index term and its composite must
+        # still be emitted" — and that premise was FALSE. Measured on FalkorDB
+        # 4.20.6 (one `:Object` per shape, segment `b_c` queried against the
+        # `Object` FULLTEXT index, reported by WHICH document comes back): `b_c`
+        # returns ONLY the ASCII-space document; for U+00A0, U+2009, U+3000,
+        # U+2028, U+202F, an emoji and a CJK character the whole string stayed ONE
+        # index term. So these must gain NO composite — and they do not.
+        for sep in ("\u00a0", "\u2009", "\u3000", "\u2028", "\u202f",
+                    "\U0001f389", "\u4e2d"):
             word = f"{sep}b_c"
             monkeypatch.setenv(UNDERSCORE_ENV, "0")
             before = build_or_query(word)
             monkeypatch.setenv(UNDERSCORE_ENV, "1")
-            assert build_or_query(word) != before, (word, before)
-            assert "b_c" in _or_terms(build_or_query(word)), word
+            assert build_or_query(word) == before, (word, before)
+            assert underscore_run_terms(word) == [], word
+
+        # …but the ASCII space IS a real separator: the composite after it is a
+        # genuine index term (the same probe returns the ASCII-space document for
+        # `b_c`) and must keep being emitted. This is the control that stops the
+        # non-ASCII rule from swallowing everything.
+        word = " b_c"
+        monkeypatch.setenv(UNDERSCORE_ENV, "0")
+        before = build_or_query(word)
+        monkeypatch.setenv(UNDERSCORE_ENV, "1")
+        assert build_or_query(word) != before, (word, before)
+        assert "b_c" in _or_terms(build_or_query(word)), word
 
         # …and the refusal must NOT over-reach: a pure-ASCII word still gains its
         # composite, which is the mechanism this PR exists for.
