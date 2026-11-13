@@ -869,6 +869,33 @@ class TestDoctorHostedCredential:
         assert "degraded" in hosted, hosted
         assert "/v1/team accepted" in hosted, hosted
 
+    def test_an_env_key_is_told_about_its_own_url_override(
+            self, clear_db_env, tmp_path, capsys, monkeypatch):
+        """The OTHER half of the source-aware remedy (fresh review round 19).
+
+        `TORTOISE_API_URL` is the knob for an ENV-sourced key, so that row must
+        keep naming it: making the remedy store-only would leave the env user
+        without the one override they have.
+        """
+        monkeypatch.setenv("TORTOISE_API_KEY", _FAKE_ENV_KEY)
+        monkeypatch.setenv("TORTOISE_API_URL", "http://127.0.0.1:1")
+
+        def handler(url, req):
+            raise ConnectionRefusedError("[Errno 111] Connection refused")
+
+        _stub_hosted(monkeypatch, handler)
+        db_path = str(tmp_path / "env-unreachable.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor env unreachable seed")
+
+        _run_doctor([])
+        out = capsys.readouterr().out
+
+        assert "env:TORTOISE_API_KEY" in (_row(out, "Credentials") or ""), out[-1500:]
+        hosted = _row(out, "Hosted")
+        assert hosted is not None and "UNGRADED" in hosted, out[-1500:]
+        assert "TORTOISE_API_URL" in hosted, hosted
+
     def test_env_key_names_its_source(self, clear_db_env, tmp_path, capsys,
                                      monkeypatch):
         """The env key is the highest-precedence candidate and is NAMED as such.
@@ -1162,6 +1189,14 @@ class TestDoctorHostedCredential:
         # asked nothing of the credential, and the same event on the authenticated
         # leg is ⚠️ too.
         assert "UNGRADED" in hosted, hosted
+        # ⛔ The remedy names the knob that CAN move this endpoint (fresh review
+        # round 19). This credential is STORE-sourced, and `_resolve_config_path`
+        # takes a file-sourced key's URL from the same file or the built-in
+        # default (#2369 D1.1) — so naming `TORTOISE_API_URL` here aimed the user
+        # at a knob that cannot change the result. Measured under the exact
+        # regression (remedy made unconditional for both sources): 197 passed.
+        assert "TORTOISE_API_URL" not in hosted, hosted
+        assert "config show" in hosted, hosted
         # EXACTLY ONE `Hosted` row (fresh review at `77c1f364b6`): `_row()` returns
         # the FIRST match, so without this line deleting the `return` that
         # follows this arm leaves the mutation SILENT — this `except` block's
