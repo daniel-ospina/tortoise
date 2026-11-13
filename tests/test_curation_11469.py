@@ -4659,14 +4659,34 @@ def test_the_architecture_doc_no_longer_claims_the_event_layer_is_unread():
     source_text = (_pathlib.Path(__file__).resolve().parent.parent
                    / "tools" / "curate_graph.py").read_text(encoding="utf-8")
     source_flat = _re.sub(r"\s*#:\s*", " ", _re.sub(r"\s+", " ", source_text))
-    assert "sized to `counts.Event + 1`" not in source_flat, (
+    # ⚠️ Each assertion below is SCOPED, for three measured reasons (PR-review cycle 6):
+    # a bare whole-file occurrence count cannot attribute anything — `limit_sent =
+    # EVENT_READ_CEILING + 1` supplies one for free, so `count(...) >= 2` stayed GREEN with
+    # the constant's comment reverted; and a whole-file absence test FALSE-REDS on a
+    # legitimate historical sentence ("the request WAS sized to `counts.Event + 1` before
+    # cycle 4" is exactly the kind of note this file keeps and must keep).
+    #
+    # The two ABSENCE assertions are therefore pinned to the PRESENT-TENSE prescription —
+    # `is sized to` / `sizes each request to`, which a past-tense note cannot contain — and
+    # they are checked against text with `#:` markers stripped, because the constant's
+    # comment WRAPS and the phrase would otherwise straddle a marker and match nothing
+    # (measured: an earlier revision of this pin passed over the very defect it was written
+    # for). ⚠️ Plain-`#` comments are deliberately NOT stripped: the corrective comments at
+    # `read_events`'s call site legitimately quote the old sizing to explain why it was
+    # removed, and stripping them would red on that history.
+    #
+    # The two PRESENCE assertions are the ones that catch a revert ATTRIBUTABLY — each names
+    # its own site's sentence, so no historical mention can satisfy them and neither can the
+    # code line.
+    assert "is sized to `counts.Event + 1`" not in source_flat, (
         "curate_graph.py still prescribes sizing the Event request to the count; the code "
         "sends EVENT_READ_CEILING + 1")
     assert "sizes each request to `counts.Event + 1`" not in source_flat, (
         "the EVENT_READ_CEILING comment still prescribes sizing the request to the count")
-    assert source_flat.count("EVENT_READ_CEILING + 1") >= 2, (
-        "curate_graph.py must state the request the code actually sends, in the "
-        "read_events contract AND at the constant it is derived from")
+    assert "request is sized to `EVENT_READ_CEILING + 1`" in source_flat, (
+        "the read_events contract does not state the request the code sends")
+    assert "bound PLUS ONE (`EVENT_READ_CEILING + 1`)" in source_flat, (
+        "the EVENT_READ_CEILING comment does not state the request the code sends")
 
     # ...and the row records the change rather than dropping the subject.
     assert "enumerated** since #12378" in doc or "**enumerated** — agent-session" in doc, (

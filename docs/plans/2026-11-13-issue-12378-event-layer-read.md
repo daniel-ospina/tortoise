@@ -144,11 +144,13 @@ Pointer: the `<!-- research: v1 -->` comment on #12378. Decisions it supports:
    wholeness there.
 2. Content lane: `content := name`, fallbacks `title` then `subject`; rows carrying
    none are COUNTED on `read_note`. ⚠️ Round-2 correction: the note says only what is
-   TRUE — those rows are keyed `node_type:kind:sha`, so **same-kind** ones share a
-   `stable_key` in `--rows`, and **no duplicate claim is made for them** (`classify_event`
-   takes no `duplicate_of`/`keeper_id`, every Event arm is `undecidable`, `Decision` has
-   no duplicate field). A first draft claimed the plan's duplicate fold reported them;
-   measured, it never does. **Test:**
+   TRUE — those rows are keyed `curate-11469:event:<kind>:<contentHash or sha256(text)>`,
+   so **same-kind** ones share a `stable_key` in `--rows` **only WHEN they carry no
+   `contentHash` of their own** (an empty-text row with its own `contentHash` gets its own
+   key, which is the narrower claim `7e6dc50d87` corrected the note to), and **no duplicate
+   claim is made for them** (`classify_event` takes no `duplicate_of`/`keeper_id`, every
+   Event arm is `undecidable`, `Decision` has no duplicate field). A first draft claimed
+   the plan's duplicate fold reported them; measured, it never does. **Test:**
    `test_an_events_text_is_its_name_with_title_and_subject_fallbacks` +
    `test_an_event_with_no_text_is_counted_on_the_report` (which reds if the false claim
    returns).
