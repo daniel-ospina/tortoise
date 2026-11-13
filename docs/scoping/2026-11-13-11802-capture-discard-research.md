@@ -21,6 +21,13 @@ agent-infra#3921.
 > entry *is*, which deployed copy is being patched, and what the field converges on outside. Every
 > internal claim carries a `file:line`. Nothing here re-derives the causal chain the issue already
 > measured — it points at it.
+>
+> **Every `file:line` here is pinned to the BASE, `origin/main` @ `2dbfb046d7e3`** (the pre-fix
+> tree), because the citations mostly name the *defect sites* and this change moves those lines.
+> Reading them against the post-fix head yields an off-by-N that is an artefact of the diff, not
+> drift. **One exception, because it is a different kind of claim:** the copies table in §3
+> describes the artifact *this branch ships* and the deployed copies it is compared against, so its
+> sizes/markers are the SHIPPING tree's (`8ad837711f`), labelled as such there.
 
 ---
 
@@ -55,7 +62,7 @@ Now read what the spool meta actually holds (`tortoise/pi-hooks/tortoise-capture
 retry/idempotency state**.
 
 The repo already states this consequence about the same file, in its own words
-(`tortoise/capture_spool.py:789-794`):
+(`tortoise/capture_spool.py:855-860`):
 
 > `NOT re-fileable` — … the entry's key is `sha256(session_id)[:32]` and **the corrupt meta (the only
 > copy of the session id) is REMOVED, so no verb can reconstruct the session id the server needs.**
@@ -99,7 +106,7 @@ applies them everywhere except here.** The fix introduces no new doctrine.
 
 ### 2.1 The read path already says unreadable ≠ corrupt
 
-`tortoise/pi-hooks/tortoise-capture.ts:3317-3320` (`healthScan`), on the same files:
+`tortoise/pi-hooks/tortoise-capture.ts:3353-3357` (`healthScan`), on the same files:
 
 > A meta we cannot read **still counts as PENDING (it may be waiting)** and is EXCLUDED from the
 > saturation metas.
@@ -126,25 +133,25 @@ failure — on the transcript. The meta is the one sibling that never got the sa
 ### 2.3 The mechanisms the fix needs already exist
 
 - **A `retained` flag on the record**, with defined precedence over the reason:
-  `tortoise/pi-hooks/tortoise-capture.ts:1148-1161` (`DiscardRecord.retained`),
-  `tortoise/capture_spool.py:251-288` (`RETAINED_DISCARD_REASONS`, `is_lost_discard` — "an explicit
+  `tortoise/pi-hooks/tortoise-capture.ts:1162-1168` (`DiscardRecord.retained`),
+  `tortoise/capture_spool.py:230-262` (`RETAINED_DISCARD_REASONS`, `is_lost_discard` — "an explicit
   `retained` flag on the record WINS over the reason").
-- **`recordDiscard` already accepts `retained`** (`tortoise/pi-hooks/tortoise-capture.ts:1583-1602`)
-  and writes it to the append-only `discarded.jsonl` ledger (`:1293`).
+- **`recordDiscard` already accepts `retained`** (`tortoise/pi-hooks/tortoise-capture.ts:1591-1601`)
+  and writes it to the append-only `discarded.jsonl` ledger (`:1605`).
 - **Precedent arms that keep + record**: `DISCARD_ENTRY_GROWTH_REFUSED` and `DISCARD_SPOOL_SATURATED`
-  both write `retained: true` (`tortoise/pi-hooks/tortoise-capture.ts:2136`, `:2191`), with the
+  both write `retained: true` (`tortoise/pi-hooks/tortoise-capture.ts:2168`, `:2223`), with the
   comment "a refused growth is a delay, not a loss".
 - **A `repair: false` reader** already skips corrupt entries without mutating
-  (`tortoise/pi-hooks/tortoise-capture.ts:1418-1421`).
+  (`tortoise/pi-hooks/tortoise-capture.ts:1459`, and `healthScan` calls it that way at `:3357`).
 
 ### 2.4 Discard reasons are not a closed set at the server
 
 Only `tortoise/capture_spool.py`, `tests/test_capture_spool.py` and
 `tests/test_3516_client_captured_at.py` name the `DISCARD_*` values. (By contrast the *closed* sets
-are `CAPTURE_LANES` and `CLIENT_CAPTURED_AT_SOURCES`, `tortoise/capture_spool.py:1332-1341`, which
+are `CAPTURE_LANES` and `CLIENT_CAPTURED_AT_SOURCES`, `tortoise/capture_spool.py:1406-1418`, which
 the server does validate.) So a new reason needs no server change — but it must be added to **both**
 legs, because the two legs drain one shared directory
-(`tortoise/pi-hooks/tortoise-capture.ts:2554-2556`).
+(`tortoise/capture_spool.py:120`; the TS leg resolves it at `tortoise-capture.ts:1291`).
 
 ### 2.5 Both legs carry the defect
 
@@ -154,10 +161,10 @@ legs, because the two legs drain one shared directory
 
 | Leg | Site | `catch` |
 |---|---|---|
-| TypeScript (the deployed harness seam) | `tortoise-capture.ts` `listSpoolEntries` (main: `:1454`) | `catch { meta = undefined }` — collapses *read failure* and *parse failure* into one outcome, then renders it as `meta is not valid JSON` (`:1456`). |
-| Python (the CLI drain) | `capture_spool.py` `list_spool_metas` (main: `:1372`-`1382`) | `except (OSError, json.JSONDecodeError, UnicodeDecodeError): meta = None` — `OSError` **includes `PermissionError`**. Same collapse, same `corrupt_entry`, same quarantine + unlink (`:1315-1326`). |
+| TypeScript (the deployed harness seam) | `tortoise/pi-hooks/tortoise-capture.ts:1453-1457` | `catch { meta = undefined }` — collapses *read failure* and *parse failure* into one outcome, then renders it as `meta is not valid JSON` (`:1465`). |
+| Python (the CLI drain) | `tortoise/capture_spool.py:1370-1375` | `except (OSError, json.JSONDecodeError, UnicodeDecodeError): meta = None` — `OSError` **includes `PermissionError`**. Same collapse, same `corrupt_entry`, same quarantine + unlink (`:1392-1395`). |
 
-The TS comment at `tortoise/pi-hooks/tortoise-capture.ts:1415` claims the function "Mirrors
+The TS comment at `tortoise/pi-hooks/tortoise-capture.ts:1422` claims the function "Mirrors
 `capture_spool.list_spool_metas`" — it does, which is why fixing one leg alone would leave the other
 leg destroying the same files on the next tick.
 
@@ -165,7 +172,9 @@ leg destroying the same files on the next tick.
 
 ## 3 · Which deployed copy is being patched, and how that was proved
 
-**The brief warned not to guess. Measured:**
+**The brief warned not to guess. Measured** (this table is the SHIPPING tree, not the base — it
+answers "what does this branch produce", so base line numbers would be wrong here. The sizes/marker
+are re-measured at every code push; the citations-only edit after it changes neither):
 
 | Copy | Path | Size / lines | Marker |
 |---|---|---|---|
@@ -182,14 +191,16 @@ from `tortoise/pi-hooks/tortoise-capture.ts`** by `tortoise install pi`, and the
 contract number the installer and its drift detector both read.
 
 **Disposition.** The repo copy is patched — it is the source of truth and the only copy the installer
-reads. The deployed copy is **generation 18, three behind at this head** (18 when this was measured;
-main then carried 20 and this branch ships 21, whose
-header comment at `tortoise/pi-hooks/tortoise-capture.ts:44-53` exists only to move the marker so
-stale installs reinstall — the bytes themselves are generation-18 behaviour plus the `captureOutcome`
-parity block). Consequence stated plainly: **patching the repo does not fix the running fleet until
-`tortoise install pi` is re-run.** That is the installer's contract, not a gap this lane may paper
-over by hand-editing `~/.pi/agent/extensions/`; the lane reports it and the fix ships in the
-artifact the installer distributes.
+reads. The deployed copy measured here is **generation 18**, while the base `origin/main` carried
+**generation 20** (`head -1 tortoise/pi-hooks/tortoise-capture.ts` → `// tortoise-hook-version: 20`,
+same for `tortoise-volunteer.ts`) — the doc's first draft read the highest *changelog* block
+(`:44-53`, generation 19's note) instead of the marker, which is the number the installer and its
+drift detector actually read. So the fleet was **two generations behind**, and this change moves the
+repo copy to **generation 21**, leaving an un-reinstalled seam three behind. Consequence stated
+plainly: **patching the repo does not fix the running fleet until `tortoise install pi` is re-run.**
+That is the installer's contract, not a gap this lane may paper over by hand-editing
+`~/.pi/agent/extensions/`; the lane reports it and the fix ships in the artifact the installer
+distributes.
 
 ---
 
@@ -417,7 +428,7 @@ separately rather than widened here.
   version recorded the read refusal with an unconditional `recordDiscard`/`record_discard`; because the
   repairing scan also runs on the **per-turn** write path and the entry never becomes readable, that
   appends one line **per turn** into an uncapped `discarded.jsonl` in the spool root — the exact
-  amplification class `_record_refusal`/`recordRefusal` exists to prevent (`capture_spool.py:1066-1082`).
+  amplification class `_record_refusal`/`recordRefusal` exists to prevent (`capture_spool.py:1058-1088`).
   Cycle 1 switched both legs to the refusal recorder and claimed "5 scans → 1 line" — **but the refusal
   key is `(session_id, reason, entries/ stamp)` and that stamp includes `entries/` mtime, which every
   turn moves** by writing a new meta. So the claim held only on a STATIC directory and was false on the
