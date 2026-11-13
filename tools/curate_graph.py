@@ -779,6 +779,7 @@ def _disarmed_artifact(
     refused: str = "off-switch active",
     census_measured: bool | None = None,
     read_note: str | None = None,
+    operators: tuple[int, int | None] | None = None,
 ) -> int:
     """A DISARMED run that stopped early: exit 0, the reason on the artifact.
 
@@ -819,6 +820,15 @@ def _disarmed_artifact(
     """
     # Resolved ONCE: the artifact and the operator-facing line must not disagree.
     measured = (census is not None) if census_measured is None else census_measured
+    # ⛔ The reasoning layer's three fields travel HERE too, and they are TRI-STATE for a
+    # reason: `None` means the layer was never read (the census is `null` on these arms,
+    # so "not read" and "read but unreconciled" must not collapse into one value). The
+    # ledger-stopped arm DID read it and passes the real pair. Without this, a driver
+    # doing the round-7-mandated switch on a ledger stop found `census_measured: true`
+    # — the strongest completeness claim the artifact makes — with the only contrary
+    # fact in `read_note` prose, which is the defect the field exists to close, one
+    # artifact over (round-2 review).
+    operators_read, operators_reported = (None, None) if operators is None else operators
     payload = {
         # `null` when the census could not be measured — never a zeroed census, which
         # is indistinguishable from "the graph is empty" (the silent-zero class R7
@@ -835,6 +845,10 @@ def _disarmed_artifact(
         "disarmed_reason": reason,
         "read_failure": read_failure,
         "read_note": read_note,
+        "operators_read": operators_read,
+        "operators_total_reported": operators_reported,
+        "operators_reconciled": (None if operators is None
+                                 else operators_reported is not None),
         "run": {
             "applied": False, "off": True, "skipped_known": 0, "written": 0,
             "target_graph": args.target, "digest": None, "refused": refused,
@@ -905,8 +919,14 @@ def cmd_plan(args: argparse.Namespace) -> int:
         # `"off-switch active"` default made ONE state (a census read failed on a
         # disarmed run) read two ways in one field, and the off switch is not what
         # refused it here.
+        # ⛔ `read_note` travels here too, for the SAME reason the sibling
+        # `CurationRefused` arm passes it: a section that fell back to the credential's
+        # own graph is disclosed only there, and this arm is one of the two places a
+        # disarmed run can end. One state, one spelling — the asymmetry was this
+        # commit's own `run.refused` defect, one field over (round-2 review).
         return _disarmed_artifact(args, f"{type(exc).__name__}: {exc}",
                                   refused=f"{type(exc).__name__}: {exc}",
+                                  read_note=reader.note,
                                   read_failure=f"{type(exc).__name__}: {exc}")
     gap = _source_gap(counts, len(sources))
     unreconciled = _unreconciled_sources(len(sources), gap)
@@ -965,6 +985,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
             return _disarmed_artifact(args, str(exc), census=plan.census(),
                                       pending=len(plan.carry_rows()), refused=str(exc),
                                       census_measured=unreconciled is None,
+                                      operators=(len(operators), operators_reported),
                                       read_note=reader.note)
         print(f"REFUSED: {exc}", file=sys.stderr)
         return 3

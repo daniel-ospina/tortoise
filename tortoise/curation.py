@@ -380,20 +380,22 @@ def classify_point(
                         "text has no row of record and needs a per-row decision",
                         pack, key, row.content)
 
-    # ⛔ Reachability of the four `!= "operator"` clauses below, so none of them reads as
-    # protection it does not provide (round-7 review). `build_plan` is the only caller
-    # that passes `duplicate_of`, and it passes a KEEPER's disposition. For an operator
-    # the keeper can only be another operator with the SAME id-scoped key, and the
-    # operator branch at the bottom decides every operator row `UNDECIDABLE` — so an
-    # operator's `duplicate_of` is always `UNDECIDABLE`:
-    #   · the `content_mismatch` arm ABOVE is live (two same-id operators with different
-    #     labels) and the `UNDECIDABLE` arm below is live (the ordinary same-id case);
-    #   · the `CARRY` arm and the generic `is not None` arm are UNREACHABLE for operators
-    #     today and are kept as DEFENCE IN DEPTH — deleting them would not change a
-    #     single disposition, and they are pinned only through the synthetic
-    #     `duplicate_of=` arm in `test_two_operator_rows_sharing_an_id_do_not_get_a_
-    #     content_duplicate_reason`. They exist so that a future keeper rule (or a moved
-    #     operator branch) cannot make an operator inherit a content fold.
+    # ⛔ Reachability of the `!= "operator"` clauses in this block, so none of them
+    # reads as protection it does not provide (round-7 review, corrected round-2). ALL
+    # FOUR are DEAD for an operator row — each carries `row.node_type != "operator"`,
+    # so the operator branch at the bottom decides every operator row unconditionally.
+    # `build_plan` is the only caller that passes `duplicate_of`, and it passes a
+    # KEEPER's disposition; an operator's keeper can only be another operator under the
+    # id-scoped key, which is classified `UNDECIDABLE`, so an operator's `duplicate_of`
+    # would be `UNDECIDABLE` — and even that never reaches the `UNDECIDABLE` arm below.
+    # They are kept as DEFENCE IN DEPTH, for the day the operator branch moves or is
+    # narrowed: without them an operator would silently inherit a content fold (a
+    # "duplicate" reason computed over a label) or a keeper's `CARRY`. The
+    # `content_mismatch` arm ABOVE and the `UNDECIDABLE` and generic arms here are
+    # pinned by the synthetic `duplicate_of=` calls in
+    # `test_two_operator_rows_sharing_an_id_do_not_get_a_content_duplicate_reason`; the
+    # `CARRY` arm is pinned there too, by its own call — it is the one this block's
+    # first wording wrongly called "live", and pinning it is what keeps the claim true.
     if duplicate_of == CARRY and row.node_type != "operator":
         return Decision(row.node_id, row.node_type, row.kind, NOT_CARRIED,
                         "exact content duplicate of a carried row (same content hash); "

@@ -2975,6 +2975,14 @@ def test_a_disarmed_run_over_a_damaged_ledger_reports_what_it_still_owes(monkeyp
     assert run["skipped_known"] + run["duplicate_rows"] + run["pending"] == carried, run
     # and the `refused` field names the LEDGER, not the switch the operator set
     assert "damaged" in run["refused"], run["refused"]
+    # ⛔ The reasoning layer's fields ride this artifact too. It hands over a FULL census
+    # stopped by the ledger, so it is the one disarmed arm where the layer WAS read — and
+    # without these keys a driver doing the switch found `census_measured: true` with the
+    # only contrary fact in prose (round-2 review). `None` would be wrong here: the read
+    # completed, so the value is a real boolean.
+    assert payload["operators_read"] == 0, payload
+    assert payload["operators_total_reported"] == 0, payload
+    assert payload["operators_reconciled"] is True, payload
 
 
 def test_a_name_spelled_target_scopes_literally_and_never_skips(tmp_path):
@@ -3707,15 +3715,26 @@ def test_two_operator_rows_sharing_an_id_do_not_get_a_content_duplicate_reason()
     assert "content hash" not in mismatch.reason, mismatch.reason
     assert "endpoint" in mismatch.reason, mismatch.reason
 
-    # ⛔ The REACHABLE limb: an operator keeper is always UNDECIDABLE (the operator branch
-    # decides it that way), so `duplicate_of` on an operator row can only be UNDECIDABLE —
-    # `CARRY` is unreachable here and pinning only that left the guard that actually fires
-    # unpinned (round-6 review). Drive it through `build_plan` too, which is the shape the
-    # census produces: two enumeration rows sharing one id.
+    # ⛔ EVERY limb here is SYNTHETIC: each duplicate arm carries `row.node_type !=
+    # "operator"`, so no operator row reaches one through `build_plan` at all — the
+    # operator branch decides it. The calls below are what keeps those clauses honest,
+    # one arm each; the `build_plan` case after them is the REAL path (`build_plan` is
+    # the only caller that passes `duplicate_of`, and an operator keeper is always
+    # `UNDECIDABLE`). Round-6 called the `UNDECIDABLE` arm "the one that actually fires"
+    # and round-7 pinned only that; both were wrong in the same direction — the arm that
+    # fires is the operator branch, and every duplicate arm here is defence in depth
+    # (round-2 review).
     same = C.classify_point(other, {}, duplicate_of=C.UNDECIDABLE, keeper_id="o9")
     assert same.disposition == C.UNDECIDABLE, same
     assert "duplicate" not in same.reason.lower(), same.reason
     assert "content hash" not in same.reason, same.reason
+
+    # …and the `CARRY` arm, which nothing pinned: without its `!= "operator"` clause an
+    # operator would inherit a NOT_CARRIED "exact content duplicate of a carried row"
+    # reason — a content fold asserted over a LABEL, on a class that is never carried.
+    carried = C.classify_point(other, {}, duplicate_of=C.CARRY, keeper_id="o9")
+    assert carried.disposition == C.UNDECIDABLE, carried
+    assert "duplicate" not in carried.reason.lower(), carried.reason
 
     plan = C.build_plan([
         C.Row(node_id="o1", node_type="operator", kind="IMPL", content="",
@@ -3767,3 +3786,61 @@ def test_an_operator_payload_that_is_not_a_row_listing_is_refused(monkeypatch, c
     with pytest.raises(RuntimeError, match="unrecognised shape"):
         mod.main(["inventory", "--graph", "org_x_g_old", "--no-verify-read",
                   "--out", str(tmp_path / "i.json")])
+
+
+@pytest.mark.parametrize("failure", ["refused", "raised"])
+def test_a_disarmed_census_failure_carries_the_sections_fallback_note(
+        monkeypatch, capsys, tmp_path, failure):
+    """BOTH disarmed census-failure arms carry `read_note` — one state, one spelling.
+
+    A section whose explicit `graph` argument is refused falls back to the credential's
+    own graph, and `_section` records that on `reader.note`. Dropping the note when a
+    LATER read ends the run loses the only record that part of the census came from a
+    different graph than `--graph` names — and round-2 review measured that deleting
+    `read_note=reader.note` from the `CurationRefused` arm left all 198 tests green, so
+    the disclosure was one refactor away from vanishing silently.
+
+    `refused` drives the DESIGNED arm (`CurationRefused`, from an `is_error` payload on
+    the source listing); `raised` drives the generic one (`RuntimeError` from an
+    unmeasurable points read). Both must answer the same way on this field.
+    """
+    mod = _tool_module()
+
+    def call(name, args):
+        args = args or {}
+        section = args.get("section")
+        if section == "status":
+            if "graph" in args:
+                return {"error": "unknown graph 'org_x_g_old' is not reachable from this "
+                                 "workspace"}
+            return {"counts": {"Point": 1, "Source": 0}}
+        if section == "structure":
+            return {"total": 1, "operators": len(OPERATOR_ROWS)}
+        if section == "sources":
+            if failure == "refused":
+                return RealCallToolResult({"error": "429 Too Many Requests"}, is_error=True)
+            return {"result": [], "total": 0}
+        if section == "graphs":
+            return {"result": [{"namespace": "org_x_g_old"},
+                               {"namespace": "org_x_g_new"}]}
+        if name == "tortoise_query":
+            if failure == "raised":
+                return {"result": [], "total": 0}      # the unmeasurable points read
+            return {"result": [{"id": "p1", "kind": "decision", "content": "a"}], "total": 1}
+        if name == "tortoise_search":
+            return {"result": list(OPERATOR_ROWS)}
+        return {"result": []}
+
+    monkeypatch.setattr(mod, "_live_call_tool", call)
+    rc = mod.main(["plan", "--graph", "org_x_g_old", "--target", "org_x_g_new",
+                   "--off", "--no-verify-read", "--ledger", str(tmp_path / "l.jsonl"),
+                   "--out", str(tmp_path / "p.json")])
+    assert rc == 0, (rc, capsys.readouterr())
+    payload = json.loads((tmp_path / "p.json").read_text())
+    assert payload["census"] is None, payload
+    assert "credential's own graph" in (payload["read_note"] or ""), payload["read_note"]
+    # The census was never read on either arm, so the layer's three fields say so —
+    # `None`, never `False`: "not read" and "read but unreconciled" are different facts.
+    assert payload["operators_read"] is None, payload
+    assert payload["operators_total_reported"] is None, payload
+    assert payload["operators_reconciled"] is None, payload
