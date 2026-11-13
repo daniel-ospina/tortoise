@@ -2850,17 +2850,20 @@ def flag_in_shipped_configs(flag: str) -> dict:
     deployment surface holding an unreadable file is `UNMEASURED`, never silent.
 
     ⛔ **The same doctrine, one shape over (#12022): an assignment the walk cannot
-    RESOLVE is also `UNMEASURED` — unless a LATER resolvable assignment decides
-    it.** `export FLAG="${OTHER}"` may arm the flag, so reading it as silence would
-    be a claim about half an assignment; it lands in
-    ``indeterminate`` and the file holds as `UNMEASURED`. ⚠️ The qualifier is the
-    LAST-WINS rule above, not a weakening of it: `ENV FLAG="${OTHER}"` followed by
-    `ENV FLAG=1` is `ON`, because the later line genuinely decides the file, and only
-    the reverse order (a truthy assignment, then an unresolvable one) holds
-    `UNMEASURED`. The unresolvable line is REPORTED in ``indeterminate`` in BOTH
-    orders, so the qualifier cannot turn a half-read assignment back into silence
-    (fresh review of PR #12474, P2 — this sentence was unconditional and the walk's
-    own control arm falsified it). And an assignment in a
+    RESOLVE holds the file `UNMEASURED`, with ONE exception measured below.**
+    `export FLAG="${OTHER}"` may arm the flag, so reading it as silence would be a
+    claim about half an assignment; it lands in ``indeterminate`` and the file holds
+    as `UNMEASURED`. ⚠️ The exception is the ARM direction only, and it is NARROWER
+    than "the last assignment wins": the file is `ON` when a LATER resolvable
+    **truthy** assignment arms it (`ENV FLAG="${OTHER}"` then `ENV FLAG=1` → `ON`),
+    while a later resolvable **falsy** one does NOT clear the `UNMEASURED`
+    (`ENV FLAG="${OTHER}"` then `ENV FLAG=0` still holds `UNMEASURED`, not `OFF`) —
+    a known over-reading in the CONSERVATIVE direction, declared here and pinned as
+    such rather than described as a rule the walk implements. The unresolvable line
+    is REPORTED in ``indeterminate`` in EVERY order, so the exception cannot turn a
+    half-read assignment back into silence. (Fresh review of PR #12474, twice: the
+    first version of this sentence was unconditional, and the second said
+    "resolvable" where the walk honours only truthy.) And an assignment in a
     place a deployed process never reads — a TOML key outside `[env]`, a shell
     variable the entrypoint never `export`s — lands in ``outside_runtime`` and is
     REPORTED rather than silently discounted, because a reader has to be able to

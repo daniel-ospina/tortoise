@@ -3368,50 +3368,63 @@ def test_the_per_file_caveat_names_the_MEASURED_build_edge(tmp_path, monkeypatch
     assert "OUTSIDE the walked population" not in caveat, caveat
 
 
-def test_the_UNMEASURED_doctrine_names_the_ORDERING_it_does_not_cover(
+def test_the_UNMEASURED_doctrine_is_no_wider_than_the_walk_in_EITHER_direction(
         tmp_path, monkeypatch):
-    """An unresolvable assignment holds the file UNMEASURED — but only as the LAST word.
+    """`UNMEASURED` holds, EXCEPT when a later resolvable TRUTHY assignment arms it.
 
-    ⛔ Measured (fresh review of PR #12474, P2): the docstring stated the rule
-    UNCONDITIONALLY (*"an assignment the walk cannot RESOLVE is also `UNMEASURED` … it
-    lands in `indeterminate` and the file holds as `UNMEASURED`"*) while the walk's own
-    control arm — a resolvable truthy assignment AFTER the unresolvable one — returns
-    `ON`. Both behaviours are right; only the sentence was wider than the code, which is
-    the defect class this probe exists to remove, and a maintainer scoping follow-up
-    work off that sentence would not add the guard where it is missing.
+    ⛔ Measured twice (fresh reviews of PR #12474). The docstring first said the rule
+    UNCONDITIONALLY — "an assignment the walk cannot RESOLVE is also `UNMEASURED` … it
+    lands in `indeterminate` and the file holds as `UNMEASURED`" — while the walk's own
+    control arm returns `ON` for a later truthy assignment. The first correction then
+    said "unless a LATER resolvable assignment decides it", which is STILL wider than
+    the walk: a later resolvable **falsy** assignment does NOT clear the `UNMEASURED`.
+    Both errors are the defect class this probe exists to remove — a sentence wider
+    than the measurement under it — and a maintainer scoping follow-up work off either
+    one would conclude the falsy ordering is already handled.
+
+    So this pin drives EVERY ordering and states what the walk does, including the
+    conservative over-reading it now declares in prose. The two must move TOGETHER: if
+    a later falsy assignment is made to decide the file, the docstring's "does NOT
+    clear" half becomes false and this arm reds — which is the point.
     """
-    # ⛔ NORMALISED before matching: a phrase pin that depends on the DOCSTRING'S
-    # line wrapping reds on a reflow that changes no meaning, and the first version of
-    # this pin did exactly that (the phrase straddled a wrap and the arm was red on a
-    # correct docstring — measured). `" ".join(split())` asserts the SENTENCE.
+    # ⛔ NORMALISED before matching: a phrase pin that depends on the DOCSTRING'S line
+    # wrapping reds on a reflow that changes no meaning, and the first version of this
+    # pin did exactly that (the phrase straddled a wrap and the arm was red on a
+    # CORRECT docstring — measured). `" ".join(split())` asserts the SENTENCE.
     doc = " ".join((probe.flag_in_shipped_configs.__doc__ or "").split())
-    assert "unless a LATER resolvable assignment decides it" in doc, (
-        "the docstring's UNMEASURED doctrine is unconditional again: "
-        "an unresolvable assignment is ONLY the final word, so a later resolvable "
-        "assignment still decides the file (fresh review of PR #12474, P2)")
-    assert "REPORTED in ``indeterminate`` in BOTH" in doc, (
-        "the docstring must say the unresolvable line is still REPORTED in BOTH "
-        "orders, or the qualifier reads as permission to drop it")
+    for phrase, why in (
+        ("a LATER resolvable **truthy** assignment arms it",
+         "the exception is the ARM direction only — the walk honours truthy, not any "
+         "resolvable value (a later falsy does NOT clear the UNMEASURED)"),
+        ("does NOT clear the `UNMEASURED`",
+         "the conservative over-reading must be DECLARED, not implied away"),
+        ("in EVERY order",
+         "the unresolvable line stays REPORTED in every order, or the exception reads "
+         "as permission to drop it"),
+    ):
+        assert phrase in doc, f"the UNMEASURED doctrine's sentence lost: {why}"
 
-    # Both orderings, measured — the sentence's two arms, not just the one it shipped for.
-    (tmp_path / "Dockerfile.hosted").write_text(
-        'FROM python:3.12\nENV TORTOISE_EMBED_GATE="${OTHER}"\n'
-        "ENV TORTOISE_EMBED_GATE=1\n", encoding="utf-8")
+    # Every ordering the sentence now covers, MEASURED — not just the one it shipped for.
+    cases = {
+        'ENV TORTOISE_EMBED_GATE="${OTHER}"\nENV TORTOISE_EMBED_GATE=1\n': "ON",
+        'ENV TORTOISE_EMBED_GATE="${OTHER}"\nENV TORTOISE_EMBED_GATE=0\n': "UNMEASURED",
+        'ENV TORTOISE_EMBED_GATE="${OTHER}"\n': "UNMEASURED",
+        "ENV TORTOISE_EMBED_GATE=0\n" 'ENV TORTOISE_EMBED_GATE="${OTHER}"\n': "UNMEASURED",
+        'ENV TORTOISE_EMBED_GATE=1\nENV TORTOISE_EMBED_GATE="${OTHER}"\n': "UNMEASURED",
+    }
     monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
-    later_truthy = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
-    assert later_truthy["deployment"]["files"]["Dockerfile.hosted"] == "ON", (
-        later_truthy["deployment"])
-    assert later_truthy["indeterminate"], (
-        "the unreadable line must stay REPORTED even though a later line decides: "
-        f"{later_truthy['indeterminate']}")
-
-    (tmp_path / "Dockerfile.hosted").write_text(
-        'FROM python:3.12\nENV TORTOISE_EMBED_GATE=1\n'
-        'ENV TORTOISE_EMBED_GATE="${OTHER}"\n', encoding="utf-8")
-    last_unknown = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
-    assert last_unknown["deployment"]["files"]["Dockerfile.hosted"] == "UNMEASURED", (
-        last_unknown["deployment"])
-    assert last_unknown["indeterminate"], last_unknown["indeterminate"]
+    for body, expected in cases.items():
+        (tmp_path / "Dockerfile.hosted").write_text(
+            'FROM python:3.12\n' + body, encoding="utf-8")
+        shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+        state = shipped["deployment"]["files"]["Dockerfile.hosted"]
+        assert state == expected, (
+            f"{body!r} -> {state!r}, the docstring now says {expected!r}: "
+            "if the walk changed, the sentence must be re-derived WITH it")
+        # The unreadable line is REPORTED in every one of these orders.
+        assert shipped["indeterminate"], (
+            f"the unresolvable line vanished from `indeterminate` on {body!r}: "
+            f"{shipped['indeterminate']}")
 
 
 def test_a_value_less_compose_environment_entry_is_reported_as_UNSET(
