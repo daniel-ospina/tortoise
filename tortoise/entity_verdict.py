@@ -52,16 +52,20 @@ to `review`; it never licenses `new`, because a conflict is not an absence.
 The four deterministic vetoes, each with the substrate it reads:
 
 ``identifier_conflict``
-    Both sides carry identifier-shaped tokens and the sets are disjoint
-    (`billing v2 ledger` vs `billing v3 ledger`). Separator and case are folded,
-    so the #8933 class (`ERR-4032` → `err4032`) does NOT fire — a deliberate
-    property: the fold that makes the identifier class measurable also makes its
-    variants agree.
+    Both sides carry identifier-shaped tokens, the sets are disjoint, **and the
+    two names are otherwise the same** (`billing v2 ledger` vs `billing v3
+    ledger`). Separator and case are folded, so the #8933 class (`ERR-4032` →
+    `err4032`) does NOT fire — a deliberate property: the fold that makes the
+    identifier class measurable also makes its variants agree. The skeleton
+    equality is the second half and it is load-bearing: without it the `#11901`
+    `basename-only` variant class reads as a conflict.
 
 ``date_conflict``
-    Both sides carry a year and/or a quarter token and the like-kind sets are
-    disjoint (`the Q3 plan` vs `the Q4 plan`). Evaluated per kind, so a side with
-    a year does not conflict with a side carrying only a quarter.
+    Both sides carry a year and/or a quarter token, the values are disjoint for a
+    SHARED kind, **and the names are otherwise the same** (`the Q3 plan` vs `the
+    Q4 plan`). Evaluated per kind, so `Q3 plan` against `2026 plan` is not a
+    conflict: nothing there is contradicted, and those two spellings can name one
+    entity.
 
 ``kind_conflict``
     Both sides carry a SPECIFIC kind and they differ. `other`/empty is the
@@ -232,7 +236,7 @@ def date_tokens(name: str) -> dict[str, set[str]]:
     text = str(name or "").casefold()
     years = set(_YEAR.findall(text))
     quarters = {f"q{q}" for q in _QUARTER.findall(text)}
-    months = {f"{m:02d}" for m, label in _MONTHS.items()
+    months = {f"{m:02d}" for label, m in _MONTHS.items()
               if re.search(rf"\b{label}\b", text)}
     out: dict[str, set[str]] = {}
     if years:
@@ -244,6 +248,35 @@ def date_tokens(name: str) -> dict[str, set[str]]:
     if years and quarters:
         out["year_quarter"] = {f"{y}-{q}" for y in years for q in quarters}
     return out
+
+
+def skeleton(name: str, *, replace_ids: bool = False,
+             replace_dates: bool = False) -> tuple[str, ...]:
+    """The name's folded token sequence, with the named token class abstracted.
+
+    This is what makes the identifier and date vetoes PRECISE rather than
+    trigger-happy: the rule is not *"the tokens disagree"* but *"the tokens
+    disagree and nothing else does"*. Without it, the `#11901` variant class
+    `basename-only` (`tortoise/sdk.py` → `sdk.py`) reads as two disjoint identifier
+    sets — a genuine variant vetoed as a conflict — because a path's stem really
+    does carry digits. With it, the skeletons differ (`tortoise <ID> py` vs
+    `<ID> py`) and the veto stays silent, while `billing v2 ledger` /
+    `billing v3 ledger` both reduce to `billing <ID> ledger` and the conflict is
+    real.
+    """
+    out: list[str] = []
+    for tok in _TOKEN.findall(str(name or "")):
+        folded = _SEPARATORS.sub("", tok.casefold())
+        if not folded:
+            continue
+        if replace_ids and folded in identifier_tokens(tok):
+            out.append("<id>")
+        elif replace_dates and (_TEMPORAL_TOKENS.match(folded)
+                               or folded in _MONTHS):
+            out.append("<date>")
+        else:
+            out.append(folded)
+    return tuple(out)
 
 
 def _fold_kind(kind) -> str:
@@ -287,16 +320,20 @@ def hard_vetoes(mention: dict, candidate: dict,
 
     m_ids = identifier_tokens(mention.get("name", ""))
     c_ids = identifier_tokens(candidate.get("name", ""))
-    if m_ids and c_ids and not (m_ids & c_ids):
+    if (m_ids and c_ids and not (m_ids & c_ids)
+            and skeleton(mention.get("name", ""), replace_ids=True)
+            == skeleton(candidate.get("name", ""), replace_ids=True)):
         got.append(VETO_IDENTIFIER_CONFLICT)
 
     m_dates = date_tokens(mention.get("name", ""))
     c_dates = date_tokens(candidate.get("name", ""))
-    for kind in ("year_quarter", "year", "quarter", "month"):
-        mine, theirs = m_dates.get(kind), c_dates.get(kind)
-        if mine and theirs and not (mine & theirs):
-            got.append(VETO_DATE_CONFLICT)
-            break
+    if (skeleton(mention.get("name", ""), replace_dates=True)
+            == skeleton(candidate.get("name", ""), replace_dates=True)):
+        for kind in ("year_quarter", "year", "quarter", "month"):
+            mine, theirs = m_dates.get(kind), c_dates.get(kind)
+            if mine and theirs and not (mine & theirs):
+                got.append(VETO_DATE_CONFLICT)
+                break
 
     m_kind, c_kind = _fold_kind(mention.get("kind")), _fold_kind(candidate.get("kind"))
     if (m_kind not in _UNSTATED_KINDS and c_kind not in _UNSTATED_KINDS

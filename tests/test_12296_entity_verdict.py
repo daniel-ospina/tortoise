@@ -320,6 +320,60 @@ class _Model:
         return self.payload
 
 
+class TestVetoesAreSilentOnTheGenuineVariantCorpus:
+    """The available half of #12296's falsifier, run against `#11901`'s own generator.
+
+    The issue's falsifier asks whether the bands are materially better than
+    "always merge the top candidate" — which needs a hand-labelled gold set and a
+    model, neither available here. What IS available and is the direction that
+    matters first: the vetoes must not refuse the variant classes `#11901`
+    measured, because those are the MERGES we want. A veto that fires on
+    `tortoise/sdk.py` → `sdk.py` buys precision by re-opening the recall defect
+    the epic exists to close.
+
+    The variant list is the instrument's (`tools/candidate_recall_11901.py::
+    variants`), not a fixture written to pass: same classes, same shapes.
+    """
+
+    def _variants(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "candidate_recall_11901",
+            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                         "tools", "candidate_recall_11901.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.variants
+
+    @pytest.mark.parametrize("name,cls", [
+        ("the owner", "definite"),
+        ("the play doc", "definite"),
+        ("release-notes", "definite"),
+        ("reconcile-ledger", "definite"),
+        ("the Q3 plan", "definite"),
+        ("#11901", "ident"),
+        ("hosts.yml", "path"),
+        ("tortoise/sdk.py", "path"),
+        ("test_12047_entity_resolution.py", "path"),
+        ("docs/research/2026-11-12-12186-search-inventory/research-brief.md",
+         "path"),
+    ])
+    def test_no_veto_fires_on_a_measured_variant_class(self, name, cls):
+        variants = self._variants()
+        for variant_cls, surface in variants(name, cls):
+            out = verdict.judge({"name": surface, "kind": "core:plan"},
+                                {"name": name, "kind": "core:plan"})
+            assert out["vetoes"] == [], (variant_cls, surface, name, out)
+
+    def test_the_dated_path_class_is_the_case_that_needs_the_skeleton(self):
+        """`basename-only` on a path carrying a DATE would otherwise read as a
+        conflict: the stem `2026-11-12-12186-...` versus the basename. Pinned as its
+        own case because it is the reason `skeleton` exists."""
+        long = "docs/research/2026-11-12-12186-search-inventory/research-brief.md"
+        assert verdict.judge({"name": "research-brief.md", "kind": "k"},
+                             {"name": long, "kind": "k"})["vetoes"] == []
+
+
 class TestTheResolverBands:
     def test_a_vetoed_proposal_is_held_neither_resolved_nor_new(self, monkeypatch):
         monkeypatch.setattr(
