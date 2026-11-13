@@ -242,6 +242,12 @@ def _point_id(result) -> tuple[str | None, str | None]:
     `isError: true`), so `_write` converts it to the dict shape this function reads.
     The `is_error`/JSON-text arms below cover a refusal that still arrives IN BAND
     (a self-hosted server, or a tool whose payload carries the error as data).
+
+    ⚠️ The in-band text is passed through as-is, NOT `describe_failure`-redacted
+    (#10605): it is the SERVER's answer inside an ordinary result, the pre-#11153
+    shape, and this function has no exception to redact. The RAISED arm is the one
+    that reaches stdout from `main()`, and `_write` redacts it — named here so the
+    asymmetry is a decision rather than an oversight (review round 12).
     """
     import json as _json
 
@@ -310,10 +316,19 @@ def push_to_tortoise(frontmatter: dict) -> dict:
             """
             from fastmcp.exceptions import ToolError
 
+            from tortoise.mcp_client import describe_failure
+
             try:
                 return call_tool(name, payload)
             except ToolError as exc:
-                return {"error": str(exc)[:200]}
+                # ⛔ `describe_failure`, not `str(exc)`: this dict travels to
+                # `push_to_tortoise`'s result and `main()` PRINTS it on stdout, where
+                # scripted callers log it — and fastmcp carries the server's own
+                # JSON-RPC text, which may echo the credential it rejected (#10605,
+                # the same rule `client/tortoise_client/cli.py` applies to this exact
+                # refusal shape). Measured: the arm shipped unredacted while the CLI's
+                # arm was redacted in the same change (review round 12).
+                return {"error": describe_failure(exc)[:200]}
 
         meeting_point = _write("tortoise_create_point", {
             "kind": "event",

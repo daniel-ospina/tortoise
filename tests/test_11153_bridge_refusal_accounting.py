@@ -16,6 +16,7 @@ it safe on the default (`core`) surface. The daemon-backed end-to-end push stays
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 
@@ -100,6 +101,36 @@ def test_a_push_where_nothing_landed_is_not_called_partial(monkeypatch):
     assert result["status"] == "error"
     assert result["reason"] == "tortoise_push_failed", result
     assert result["failed"], "the per-write detail must survive the report"
+
+
+def test_a_refused_write_reports_redacted_text(monkeypatch):
+    """#10605 on the BRIDGE arm (review round 12).
+
+    `_write`'s refusal dict travels to `push_to_tortoise`'s result and `main()` PRINTS
+    it on stdout, where scripted callers log it — and fastmcp carries the server's own
+    JSON-RPC text, which may echo the credential it rejected. The CLI's arm for this
+    same refusal shape was redacted in the same change; the bridge's was not.
+    """
+    from fastmcp.exceptions import ToolError
+
+    import tortoise.mcp_client as mcp_client
+
+    bridge = _bridge()
+    monkeypatch.setattr(bridge, "tortoise_available", lambda: True)
+    monkeypatch.setenv("TORTOISE_API_KEY", "tt_bridge_secret_value")
+
+    def _refuse_echoing(_name, _args):
+        raise ToolError('{"error": "rejected key tt_bridge_secret_value", '
+                        '"code": -32001}')
+
+    monkeypatch.setattr(mcp_client, "call_tool", _refuse_echoing)
+
+    result = bridge.push_to_tortoise(SAMPLE_FRONTMATTER)
+
+    printed = json.dumps(result)
+    assert "tt_bridge_secret_value" not in printed, printed
+    assert "<redacted>" in printed, printed
+    assert result["status"] == "error", result
 
 
 def test_an_escape_between_writes_keeps_the_ids_too(monkeypatch):

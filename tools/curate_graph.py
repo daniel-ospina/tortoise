@@ -1063,9 +1063,12 @@ def _is_refusal_envelope(text: str) -> bool:
     count here, because this docstring has already gone stale doing exactly that
     ("FOUR shapes" while the delegate matched six). A bare "Graph " lead was tried
     and REMOVED for the reason above. Each
-    graph-target entry exists because the census sites that take a graph fallback
-    (`_section`, `read_operators`, `read_events`, and now `read_points`) receive that
-    family as `ToolError` and must classify it as a refusal, not a crash. A
+    graph-target entry exists because a reader site receives that family as
+    `ToolError` and must answer it as the refusal it is, not as a crash: the three
+    sites that take a graph FALLBACK (`_section`, `read_operators`, `read_events`)
+    and `read_points`, whose refusal is terminal — it has no fallback ON PURPOSE, and
+    adding one would re-read a different graph under the requested graph's identity,
+    so it answers rc 3 with its offset/row diagnostic instead. A
     server-side CRASH's text (`Error calling tool: TypeError: …`) matches none and
     stays a `ToolError`, so a driver paging on "the run crashed" is not silenced.
 

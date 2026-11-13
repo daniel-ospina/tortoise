@@ -859,8 +859,11 @@ _REFUSAL_RATE_LIMIT_LEAD = "Rate limit exceeded for "
 #: credential declining to be re-targeted is the surface working correctly. Two
 #: consumers need the classification (#11153 review round 10, measured):
 #: `read_points` has only `except C.CurationRefused` around its query, so an
-#: unclassified refusal escaped as an uncaught `ToolError` traceback (rc 1, losing
-#: the offset/row diagnostics) instead of taking the documented graph fallback; and
+#: unclassified refusal escaped as an uncaught `ToolError` traceback (rc 1) instead of
+#: the rc-3 path that keeps its offset/row diagnostic — ⛔ and NOT because it takes a
+#: graph fallback: it deliberately does NOT (it has no `_looks_like_graph_refusal` arm,
+#: and adding one would re-read a DIFFERENT graph while the artifact is stamped with the
+#: requested one, the census-mixing failure `_section`'s own comment forbids); and
 #: `tortoise-client call` printed `call failed:` for a refusal.
 #: ⛔ LEADS, not whole messages: each embeds caller-specific detail (the requested
 #: graph, this transport's capabilities), and they live HERE beside their siblings so
