@@ -2341,14 +2341,14 @@ def removal_report(
     a dropped TOOL and a dropped SDK METHOD of the same name at once is ambiguous and is
     refused rather than counted as one record for two removals (review of PR #12313).
     """
-    bare: set[str] = set()
-    qualified: dict[str, str] = {}
-    for entry in allowed or ():
-        entry_cls, entry_symbol = parse_waiver(entry)
-        if entry_cls is None:
-            bare.add(entry_symbol)
-        else:
-            qualified[entry_symbol] = entry_cls
+    entries = [parse_waiver(e) for e in (allowed or ())]
+
+    def _waived(symbol: str, cls: str) -> bool:
+        """Is this removal waived — by a bare waiver, or by one naming THIS surface?"""
+        return any(c is None or c == cls for c, s in entries if s == symbol)
+
+    def _waived_by_bare(symbol: str) -> bool:
+        return any(c is None and s == symbol for c, s in entries)
     problems: list[str] = []
     accounting: dict[tuple[str, str], str] = {}
     # `{(symbol, class): …}` — ONE entry per REMOVAL, not per symbol. Keyed by symbol (as it
@@ -2385,7 +2385,7 @@ def removal_report(
             )
             continue
         if found:
-            if symbol in bare or qualified.get(symbol) == cls:
+            if _waived(symbol, cls):
                 # A record ALREADY accounts for this removal, so the waiver waives nothing —
                 # and honouring it would REPLACE that record in the printed log, telling the
                 # next reader to look for a rename that did not happen. Same false-record
@@ -2400,8 +2400,14 @@ def removal_report(
                 continue
             accounting[(symbol, cls)] = found[0]
             continue
-        if symbol in bare or qualified.get(symbol) == cls:
-            waived.setdefault(symbol, []).append(cls)
+        if _waived(symbol, cls):
+            if _waived_by_bare(symbol):
+                # ONLY a bare waiver can be ambiguous. An explicitly named surface is the
+                # remedy the ambiguity refusal prescribes, so `tool:X` + `sdk:X` must NOT be
+                # counted as one waiver covering two removals — that refused the very case
+                # the grammar exists for, and reported it as "dropped with no record"
+                # (review of PR #12313, round 9).
+                waived.setdefault(symbol, []).append(cls)
             accounting[(symbol, cls)] = (
                 "`--allow-removal` (deliberate rename, stated in the PR)"
             )

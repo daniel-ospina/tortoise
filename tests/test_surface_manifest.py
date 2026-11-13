@@ -5537,6 +5537,16 @@ def test_an_override_cannot_waive_TWO_surfaces_at_once():
     assert accounting == {("tortoise_x", "tool"): "`--allow-removal` (deliberate rename, stated in the PR)"}, accounting
     assert len(problems) == 1 and "tortoise_x (sdk)" in problems[0], problems
 
+    # …and naming BOTH surfaces is the remedy the refusal above prescribes, so it must PASS
+    # with two records. Keyed by symbol the two qualified entries collapsed into one class and
+    # this legitimate case was refused as "dropped with no record" — the refusal recommending
+    # a path the tool could not execute (review of PR #12313, round 9).
+    problems, accounting = sm.removal_report(
+        prior, set(), records, allowed={"tool:tortoise_x", "sdk:tortoise_x"}
+    )
+    assert problems == [], problems
+    assert sorted(accounting) == [("tortoise_x", "sdk"), ("tortoise_x", "tool")], accounting
+
 
 def test_an_override_for_an_ALREADY_recorded_symbol_is_a_false_record():
     """An override for a symbol a REAL record already accounts for waives nothing — and
