@@ -403,32 +403,27 @@ def test_a_tag_read_without_filters_still_serves(stub) -> None:
     assert [c[0] for c in stub.calls] == ["query_points_by_tag"], stub.calls
 
 
-#: Wordings that ACTUALLY SHIPPED and described behaviour the code does not
-#: have. Pinned VERBATIM so they cannot come back.
+#: The stale sentence that ACTUALLY SHIPPED in the tool's served docstring, and
+#: is pinned against it. `origin/main`, `44b9d1839d` and `74b73b9a46` all carried
+#: it; the fix removed it.
 #:
-#: Why a pin and not a proof (#12455 rounds 3-5): each earlier version of this
-#: guard tried to establish "no wording in this bullet states a wrong claim
-#: about `filters`", and each was falsified by a wording the previous one
-#: admitted — head-line-only reads missed a continuation line; an anchored regex
-#: admitted "does NOT refuse `filters=`"; a negation-aware predicate admitted
-#: "nothing in this arm ever REFUSES `filters=`" and a refusal clause that
-#: belonged to the OTHER arm in the same bullet. Prose has no closed set of wrong
-#: phrasings, so that property is not decidable by a test — and a test that
-#: claims it is becomes a false PASS on the very thing it guards, which is the
-#: defect class this whole issue is about.
+#: A FRAGMENT, not the full slashed list, on purpose (#12455 round 6): the
+#: docstring wraps, and a mid-token wrap (`ignores kind/` + newline +
+#: `filters/min_confidence/order_by`) normalises with a space and slipped past the
+#: full spelling — measured green. `ignores kind/filters` is contiguous in every
+#: wrap position that could carry the claim.
+_DOCSTRING_STALE = ("ignores kind/filters",)
+
+#: The stale sentence that shipped in THIS FILE's header (the round-1 "BOUNDARY"
+#: paragraph), pinned against this module's own docstring.
 #:
-#: What IS decidable is pinned here:
-#:   * each arm's bullet still DISCUSSES `filters` at all (a docstring that
-#:     silently stops mentioning it leaves a caller to infer the old behaviour);
-#:   * the exact sentences that shipped are gone and stay gone.
-#: Everything else about the wording is review's job, and the BEHAVIOUR is owned
-#: by the tests above, which are mutation-verified against the real guard.
-_STALE_WORDINGS = (
-    # origin/main's tag bullet: `filters` presented as merely ignored.
-    "ignores kind/filters/min_confidence/order_by",
-    # the round-1 boundary section: the text= arm did not apply the flag.
-    "the ``text=`` arm still does not apply it",
-)
+#: It never appeared in the tool's docstring at any revision — round 6 measured
+#: that — so pinning it there was inert: an entry that could never fire while its
+#: neighbour made the list look substantive. It came from a claim that the `text=`
+#: arm "still does not apply" `include_retracted`, which this PR made false by
+#: forwarding it. Guarded where it lived, because the round-5 finding was a reader
+#: restoring the boundary from history.
+_HEADER_STALE = ("arm still does not apply it",)
 
 
 def _bullet_texts(doc: str, head_prefix: str) -> list[str]:
@@ -471,30 +466,40 @@ def test_each_refusing_arm_still_discusses_filters_at_all() -> None:
         )
 
 
-def test_the_shipped_stale_wordings_are_gone_and_stay_gone() -> None:
-    """The regression pin: sentences that shipped and were false must not return.
+def test_the_shipped_docstring_wording_is_gone_and_stays_gone() -> None:
+    """The pin: the sentence that shipped in the tool docstring must not return.
 
-    This replaces the round-2/3/4 attempts at a lexical proof of "the docstring
-    says nothing wrong" — see `_STALE_WORDINGS` for why that property is not
-    decidable and why claiming it made the test a false PASS. Each entry below
-    describes behaviour the code does not have:
-
-    * ``ignores kind/filters/min_confidence/order_by`` — origin/main's tag
-      bullet; the tool REFUSES ``filters=`` there;
-    * ``the text= arm still does not apply it`` — the round-1 boundary section;
-      the arm forwards ``include_retracted`` as ``include_terminal``.
-
-    Fails if either sentence reappears anywhere in the served docstring.
+    Fails if ``origin/main``'s "``tag`` mode ignores kind/filters/…" wording
+    reappears in the served docstring. Load-bearing, measured by restoring it:
+    reds. See ``_DOCSTRING_STALE`` for why it is a fragment rather than the full
+    list.
     """
     from tortoise.mcp_server import tortoise_query
 
-    doc = " ".join((inspect.getdoc(tortoise_query) or "").split())
-    present = [wording for wording in _STALE_WORDINGS if wording in doc]
+    # ""-join on BOTH sides: a mid-token wrap (`ignores kind/` + newline +
+    # `filters/…`) survives a `" ".join(split())` normalisation with a space in
+    # the middle and slipped past the pin (measured, round 6). Collapsing all
+    # whitespace makes the pin position-independent, which is what a phrase pin
+    # wants — it matches a CLAIM, not a line break.
+    doc = "".join((inspect.getdoc(tortoise_query) or "").split())
+    present = [w for w in _DOCSTRING_STALE if "".join(w.split()) in doc]
     assert present == [], (
-        "a docstring sentence that describes behaviour this code does not have "
-        f"came back: {present}"
+        f"a docstring sentence describing behaviour this code does not have came "
+        f"back: {present}"
     )
-    assert len(_STALE_WORDINGS) >= 2, (
-        "the pin must carry at least the two wordings that shipped, or it "
-        "silently stops protecting anything"
+    assert _DOCSTRING_STALE, "the pin carries no wording, so it protects nothing"
+
+
+def test_this_modules_own_header_did_not_restore_the_stale_boundary() -> None:
+    """The header pin — a different artifact, and it says so.
+
+    Round 6 measured that the round-5 pin's second entry never existed in the
+    tool's docstring (it lived in this file's header), so it could never fire;
+    this test is where it CAN fire. Fails if the header again claims the `text=`
+    arm does not apply the flag — which this PR made false by forwarding it.
+    """
+    doc = "".join((__doc__ or "").split())
+    present = [w for w in _HEADER_STALE if "".join(w.split()) in doc]
+    assert present == [], (
+        f"this file's header re-states the pre-fix boundary: {present}"
     )
