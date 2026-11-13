@@ -2845,9 +2845,15 @@ def _carrier_issues_a_call(statement: ast.stmt) -> bool:
     `_carrier_stores` container deferral accepts it — so naming one of them would be the same
     claim-wider-than-mechanism defect this paragraph exists to catch. Listing either as residual
     invited a maintainer to "decide" them — which would WIDEN the hole instead of narrowing it.
-    The REJECT direction and the residual list are both pinned by
+    The REJECT direction and the residual list's DIRECTION are both pinned by
     `test_WITH_and_YIELD_are_REJECTED_so_they_are_not_in_the_residual_list`, which also pins this
     paragraph's own wording so the prose cannot drift away from the mechanism again.
+    ⛔ It pins the DIRECTION, not the coverage: measured (`#12182` cycle 15, P3) mutating
+    `_carrier_issues_a_call` so `AnnAssign` / `AugAssign` / tuple-or-attribute targets are
+    DECIDED-AGAINST leaves the file green, so those entries are NAMED and undefended — the
+    accounting below says exactly how many ARE pinned (FOUR), and an earlier draft of THIS sentence
+    claimed "the residual list" was pinned, which that accounting then contradicted three lines
+    later.
     ⛔ `#12182` review: FOUR of the shapes above are pinned, not the list. The plain `Assign` by
     `test_a_carrier_that_only_HOLDS_the_store_text_is_the_named_residual` (it rewrites the shipped
     statement to `_unused = (…`), `raise` by
