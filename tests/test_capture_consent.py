@@ -448,7 +448,7 @@ def test_doctor_reports_consent_without_a_false_warning(capsys):
     """The doctor row is the migration's diagnostic surface; capture-off is the
     privacy-correct default, so it must NOT be painted as a warning (every
     healthy install would then never read 'All checks passing')."""
-    assert main(["doctor"]) in (0, 1)
+    assert main(["doctor", "--offline"]) in (0, 1)
     out = capsys.readouterr().out
     row = next((ln for ln in out.splitlines() if "Session capture" in ln), None)
     assert row is not None, out[-2000:]
