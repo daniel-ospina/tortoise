@@ -5,8 +5,10 @@
 its disk line* (STORAGE-ARCHITECTURE.md §17.4.4). §17.4 prices those lines and
 leaves their MAGNITUDE unmeasured, which is why every hybrid total in the doc is
 a `≥`. This probe measures the magnitudes that a bench can measure, on the
-committed record schema (`supabase/migrations/2026101200000{1..4}_record_*.sql`)
-and the committed record read shape (`cache_projection.read_record_view`):
+committed record schema — every migration named by `record_projection.
+RECORD_MIGRATIONS`, which is exactly this file's `MIGRATIONS` list, pinned in
+EQUALITY by `tests/test_7950_capstone_probe.py` (#9550) — and the committed
+record read shape (`cache_projection.read_record_view`):
 
   * bytes per RECORD ROW, per label           -> the disk line's true unit
   * LOGICAL BLOCKS per keyed miss fetch       -> IOPS per cache miss
@@ -72,6 +74,33 @@ MIGRATIONS = [
     # `record_projection.RECORD_MIGRATIONS` would measure five columns short.
     # Pinned by `tests/test_7950_capstone_probe.py`.
     "20261018000001_record_point_money_value_2782.sql",
+    # #11827's retirement of `public.point.as_of` — the SAME column the entry
+    # above CREATES (that file's five-column `ADD COLUMN … as_of text`), dropped
+    # here by `ALTER TABLE public.point DROP COLUMN IF EXISTS as_of`.
+    #
+    # ⚠️ What this entry does NOT do, stated because it is the easy over-claim:
+    # this probe's own `public.point` INSERT does not name `as_of`, so on a
+    # schema that still carries the column every row stores NULL there — the
+    # difference is a null-bitmap bit, not a widened value. Nothing else in
+    # §17.4's row-width or `pg_total_relation_size` figures moves because of
+    # THIS entry, and the re-measurement those figures still owe (the STORED
+    # `embedding_vec` columns, `cache_tier`) is a different, already-noted
+    # follow-up — see this bundle's README and `rho-bench.log`'s basis note.
+    #
+    # It is listed for two reasons, neither of which is a byte count: it
+    # contributes no column the read parses, and `RECORD_MIGRATIONS` is the
+    # record's migration REGISTRY (the filename is the only total partition of
+    # "is this the record's schema"), so a list that omits an applied migration
+    # is not the registry's list. This file's list is pinned to that tuple in
+    # EQUALITY (#9550), and an entry's POSITION is part of the pin — this one
+    # sits at index 7, where the registry puts it.
+    #
+    # ⛔ The entry was missing from all three copies since #11827 (#12155). The
+    # pin aborts at the FIRST mismatch, so on `main` only the bootstrap copy was
+    # ever named, and this copy's staleness surfaced only once that one was
+    # fixed — each copy is checked, but they are not independently reported.
+    # `IF EXISTS` keeps it idempotent on re-apply.
+    "20261110000001_record_point_retire_as_of_11827.sql",
     # #9264's forward migration (the narrowed count column). The row width this
     # probe measures is the SHIPPED schema's, so the list must match.
     "20261022000001_record_session_capture_redactions_integer.sql",

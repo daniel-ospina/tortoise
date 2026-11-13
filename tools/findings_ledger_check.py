@@ -97,12 +97,27 @@ that no job supplies.
 
 from __future__ import annotations
 
+import sys
+
+# #5128 (the repo's entry-point contract): refuse a <3.12 interpreter HERE, before the rest of the
+# imports, so a stale local `python3` fails LOUDLY with a remedy instead of with whichever 3.12-only
+# construct happens to trip first. `tests/test_entry_point_python_guard.py` asserts structurally that
+# this guard precedes every other import and behaviourally that it names the floor, the interpreter it
+# got, and the invocation that works.
+if sys.version_info < (3, 12):  # noqa: UP036 -- intentional RUNTIME guard
+    print(
+        f"tools/findings_ledger_check.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/findings_ledger_check.py`",
+        file=sys.stderr,
+    )
+    raise SystemExit(70)
+
 import argparse
 import bisect
 import html
 import re
 import subprocess
-import sys
 from collections.abc import Callable
 from pathlib import Path
 
@@ -3163,7 +3178,7 @@ def check_measured_commit(text: str, root: Path = REPO) -> list[str]:
             # escape `main()` returns Python's traceback exit **1**, which this
             # module defines as DRIFT — "a named claim is false, and the message
             # names the claim" — over a document nothing ever faulted (measured:
-            # `env PATH=/tmp/nogit python3 tools/findings_ledger_check.py --check`
+            # `env PATH=/tmp/nogit uv run python tools/findings_ledger_check.py --check`
             # exited 1 with a traceback and no claim). The ancestry question is
             # exactly the one `tools/problem_map_check.py`'s `_git` exists to
             # answer with a refusal, so this maps to the UNVERIFIED code.
