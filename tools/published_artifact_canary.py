@@ -13,7 +13,7 @@ clean venv + clean ``HOME``, ``pip install tortoise-graph`` (0.2.0, uploaded
     No such file or directory
 
 because the wheel predates #2204's ``os.makedirs`` in the embedded choke point,
-and ``pip install tortoise-client`` — documented twice in README.md — 404s
+and ``pip install tortoise-client`` — documented in README.md — 404s
 (the project was never created on PyPI).
 
 Nothing in this repo read the published artifact. Every existing instrument
@@ -32,8 +32,8 @@ What it reads (all four arms, none of them inferred)
                           the documented first command ``tortoise init``. PASS
                           requires exit 0 AND the DB file to exist.
 2. ``client-published``   ``tortoise-client`` resolves on the index. README.md
-                          offers it twice as a supported install ("Scripting /
-                          integration / agent tooling"), so a 404 is a broken
+                          lists it in the package table and documents
+                          `pip install tortoise-client`, so a 404 is a broken
                           documented path, not a missing nice-to-have.
 3. ``engine-index``       (precondition) the ``tortoise-graph`` index metadata is
                           readable. Fail-closed: an index that cannot be read is
@@ -161,24 +161,15 @@ _STRIPPED_ENV_PREFIXES = (
 #: so a ``PYTHONPATH`` entry pointing at a checkout puts that tree's ``tortoise/``
 #: ahead of the fresh venv's site-packages and the documented command executes the
 #: TREE instead of the artifact under test — the #2204 shape (``grep -c makedirs``:
-#: 1 in the tree, 0 in the 0.2.0 wheel) would report PASS. ``VIRTUAL_ENV``/
-#: ``PIP_TARGET``/``PIP_PREFIX`` do the same by redirecting the install or the
-#: interpreter, and the pip INDEX variables choose WHICH INDEX the install resolves
-#: from: on a box with a mirror configured, the canary would grade the mirror's copy
-#: instead of what PyPI serves. Same reasoning as the prefix list above, one layer
-#: lower. (``PIP_DISABLE_PIP_VERSION_CHECK`` is NOT here — the tool sets it itself.)
+#: 1 in the tree, 0 in the 0.2.0 wheel) would report PASS. ``VIRTUAL_ENV`` does the
+#: same by redirecting the interpreter. Only NON-pip names belong here: every ``PIP_``
+#: variable is stripped by the prefix above, and a member list of them was a second
+#: copy of that rule which could only ever drift from it (#12363 round 5).
 _STRIPPED_ENV_NAMES = (
     "PYTHONPATH",
     "PYTHONHOME",
     "PYTHONSTARTUP",
     "VIRTUAL_ENV",
-    "PIP_TARGET",
-    "PIP_PREFIX",
-    "PIP_INDEX_URL",
-    "PIP_EXTRA_INDEX_URL",
-    "PIP_NO_INDEX",
-    "PIP_CONFIG_FILE",
-    "PIP_FIND_LINKS",
 )
 
 #: Index readings, so "this project does not exist" and "I could not reach the
@@ -390,7 +381,7 @@ def build_report(
                 (
                     f"{CLIENT_PACKAGE} is not resolvable on the index "
                     f"({client_error or 'no result'}) — README.md documents "
-                    f"`pip install {CLIENT_PACKAGE}` twice"
+                    f"`pip install {CLIENT_PACKAGE}` as a supported install"
                     if client_state == INDEX_ABSENT
                     else f"could not read the {CLIENT_PACKAGE} index metadata "
                     f"({client_error or 'no result'}) — the distribution's presence "
@@ -436,7 +427,16 @@ def build_report(
         )
         if tree_version:
             if tree_version == published:
-                relationship = "the tree's version (no bump pending)"
+                # ⛔ At the same version a FAIL means the PUBLISHED BUILD is stale at
+                # that version — today's exact state (0.2.0 published, 0.2.0 in the
+                # tree, wheel missing #2204). Saying "no bump pending" here tells the
+                # operator the opposite of what the summary row requires (#12363 round 5).
+                relationship = (
+                    "the tree carries the same version — a bump IS required: the "
+                    "published build at this version predates the fix"
+                    if report.verdict == FAIL
+                    else "the tree's version (no bump pending)"
+                )
             else:
                 relationship = "the tree's version differs (a release is owed or in flight)"
             report.add(
@@ -467,9 +467,18 @@ def render_summary(report: Report) -> str:
         lines.append(f"| `{arm.name}` | {'yes' if arm.gated else 'no'} | {detail} |")
     if report.verdict == FAIL:
         if report.wheel_mode:
+            # Branch on which arm actually failed: an install failure is not a
+            # "first command" failure, and a reader chasing the wrong step loses the
+            # whole release window (#12363 round 5).
+            step = next((arm for arm in report.arms if arm.gated and arm.status == FAIL), None)
+            what = (
+                "does not install"
+                if step is not None and "install" in step.detail
+                else "fails its documented first command"
+            )
             lines += [
                 "",
-                "The BUILT wheel fails its documented first command. Nothing has been "
+                f"The BUILT wheel {what}. Nothing has been "
                 "uploaded: fix the tree and re-dispatch this publish. This is a code "
                 "defect, not a release-owed finding. See #12363.",
             ]
@@ -553,7 +562,7 @@ def install_and_run(
     runner=subprocess.run,
     wheel: Path | None = None,
     transcript_path: Path | None = None,
-    absent_probe=index_absence_probe,
+    absent_probe=None,
 ) -> tuple[Arm, str]:
     """Install the PUBLISHED wheel and run the documented first command.
 
@@ -653,7 +662,8 @@ def install_and_run(
             # pip's absence vocabulary matched — but pip prints it for an UNREACHABLE
             # index too (measured), so confirm independently before telling a human
             # that users cannot install the release.
-            confirmed = absent_probe(package)
+            probe = absent_probe or (lambda name: index_absence_probe(name))
+            confirmed = probe(package)
             if confirmed != INDEX_ABSENT:
                 return (
                     Arm(
@@ -680,10 +690,23 @@ def install_and_run(
                 ),
                 "\n".join(transcript),
             )
-        swept = run(
-            [str(venv / "bin" / "tortoise"), "init"],
-            "the documented first command, fresh HOME",
-        )
+        console = venv / "bin" / "tortoise"
+        if not console.exists():
+            # The install SUCCEEDED, so this is not a detector outage: the artifact
+            # ships no `tortoise` console script and the documented first command
+            # cannot exist. Reporting it as UNKNOWN ("could not run") would file an
+            # artifact defect under "the canary is broken" (#12363 round 5).
+            return (
+                Arm(
+                    "engine-init",
+                    FAIL,
+                    f"the installed artifact provides no `tortoise` console script at "
+                    f"{console} — the documented first command cannot be run"
+                    + ("" if wheel is None else f" (BUILT wheel {wheel.name})"),
+                ),
+                "\n".join(transcript),
+            )
+        swept = run([str(console), "init"], "the documented first command, fresh HOME")
     except subprocess.TimeoutExpired as exc:
         return (
             Arm("engine-init", UNKNOWN, f"timed out after {exc.timeout}s"),
@@ -803,6 +826,9 @@ def main(argv: list[str] | None = None) -> int:
                 timeout=args.timeout,
                 wheel=wheel,
                 transcript_path=log_path,
+                # The probe is a THIRD index fetch and must be bounded by the same
+                # budget the workflow's arithmetic counts (#12363 round 5).
+                absent_probe=lambda name: index_absence_probe(name, args.fetch_timeout),
             )
 
     report = build_report(

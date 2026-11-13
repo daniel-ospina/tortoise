@@ -152,14 +152,20 @@ def test_the_fixture_does_not_leak_a_client_into_the_lifecycle_registry(guarded,
     leftovers (#12363 round 4)."""
     from tortoise import embedded_lifecycle
 
-    before = len(getattr(embedded_lifecycle, "_embedded_clients", {}) or {})
+    # A DEFAULT here would make the pin vacuous: if the registry is renamed or removed,
+    # `before == after == 0` and the test passes while the leak it claims to catch lives
+    # on. The attribute must EXIST for the assertion to mean anything (#12363 round 5).
+    assert hasattr(embedded_lifecycle, "_embedded_clients"), (
+        "embedded_lifecycle no longer exposes _embedded_clients — this pin's subject moved"
+    )
+    before = len(embedded_lifecycle._embedded_clients)
     # HOLD the instances: the registry is WEAK, so a dropped reference would collect the
     # client and hide a live registration behind refcounting — which is exactly how this
     # test first passed under a mutation (#12363 round 4).
     kept = [
         guarded(str(tmp_path / f"home{index}" / ".tortoise" / "tortoise.db")) for index in range(3)
     ]
-    after = len(getattr(embedded_lifecycle, "_embedded_clients", {}) or {})
+    after = len(embedded_lifecycle._embedded_clients)
     assert len(kept) == 3
     assert after == before, (
         f"{after - before} stand-in client(s) registered in embedded_lifecycle — the "
