@@ -5468,7 +5468,11 @@ _WAIT_BOUND_LONG_ROUTES = (
     re.compile(r"^/v1/(agent/)?(signup|recover)/?$"),
     re.compile(r"^/v1/signup/email/?$"),
     re.compile(r"^/v1/claim(/email)?/?$"),
-    re.compile(r"^/v1/user/identity/resend-confirmation/?$"),
+    re.compile(r"^/v1/user/identity/(resend-confirmation|unlink)/?$"),
+    # `GitHubIndexer._get_client` is `httpx.AsyncClient(timeout=20)` with bounded
+    # retry-with-backoff — a designed ceiling above the bound at a moderate
+    # upstream hiccup, for the same reason `/webhooks/github` is above
+    re.compile(r"^/v1/onboarding/github/(repos|branches)/?$"),
     re.compile(r"^/webhooks/(github|stripe)/?$"),
 )
 
@@ -5532,6 +5536,35 @@ def _windowed_breach(traffic_class: str) -> bool:
     return not _embedder_load_in_flight()
 
 
+#: How much of the wait bound a SERVED request must have spent inside the app
+#: for its serving to count as data-plane demand.
+#:
+#: ⛔ THE DENOMINATOR IS NOT "REQUESTS THAT MATCHED A ROUTE" — that was round 6's
+#: fix, and round 7 measured the hole it leaves. A request can be served from
+#: memory in microseconds, so counting its serving as evidence the plane works
+#: lets ANY credential-less client neutralize a fully refusing plane: 7 refusals
+#: (the incident shape) + 8 served `GET /.well-known/oauth-authorization-server`
+#: measured `attempts 15, share 0.467 -> 200` — dilution with no attacker at all,
+#: since a platform polls `/health/ready` continuously and RFC 8414/9728
+#: discovery is public BY CONSTRUCTION. The share only reds while refused
+#: requests outnumber served cheap ones, so that is a permanent ceiling on the
+#: term, not a marginal attack.
+#:
+#: What separates the two populations is not AUTHENTICATION (the session-JWT lane
+#: resolves an org without publishing it, and an MCP call's org lives in a
+#: ContextVar this layer does not own, so an auth test would undercount those
+#: lanes and inflate the share). It is LATENCY: a request the plane can answer
+#: without being asked to do work returns immediately, while a request that
+#: waited on the plane — served or refused — spends a measurable share of the
+#: bound inside the app. A floor expressed as a FRACTION OF THE BOUND keeps the
+#: property under a test's shortened bound (see `fast_bound`).
+#:
+#: Diluting now costs what the failure costs: to inflate the denominator an
+#: attacker must make real requests sit here, which is the very condition the
+#: gate reports.
+_WAIT_BOUND_ATTEMPT_MIN_FRACTION = 0.1
+
+
 def _exchange_reached_a_route(scope) -> bool:
     """Did a ROUTE of this app handle the exchange?
 
@@ -5548,12 +5581,25 @@ def _exchange_reached_a_route(scope) -> bool:
     """
     if scope.get("endpoint") is not None:
         return True
+    # ⛔ `/mcp` NEVER SHOWS AN ENDPOINT HERE, and not because nothing matched it:
+    # `McpPathCanonicalizerMiddleware` COPIES the scope (`scope = dict(scope)`)
+    # before rewriting it to `/mcp/`, so the router writes `endpoint` onto a dict
+    # this outermost layer never sees. Measured: `GET /mcp` -> 200 with
+    # `endpoint=None`, `GET /mcp/` -> 200 with an endpoint. `/mcp` is the
+    # canonical connector URL clients are given, so every real MCP call was
+    # invisible to the denominator while the dispatch seam counted its breaches —
+    # a healthy MCP-heavy deployment therefore read `share 1.0` and failed its
+    # own Fly check (#12477 review round 7). The mount always matches this
+    # surface; `_is_jsonrpc_surface` excludes the `/mcpfoo` sibling.
+    if _is_jsonrpc_surface(str(scope.get("path") or "")):
+        return True
     return not getattr(scope.get("app"), "routes", None)
 
 
 def _count_wait_bound_attempt_if_served(traffic_class: str, surface: str,
                                         status: int | None,
-                                        reached_route: bool = True) -> None:
+                                        reached_route: bool = True,
+                                        waited_s: float | None = None) -> None:
     """Count ONE attempt when the exchange shows the plane was actually asked.
 
     ⛔ THE DENOMINATOR IS DEMAND THAT REACHED THE PLANE, not "a socket accepted an
@@ -5575,6 +5621,17 @@ def _count_wait_bound_attempt_if_served(traffic_class: str, surface: str,
     # review round 6).
     if not reached_route:
         return
+    # ⛔ AND A SERVED REQUEST ONLY COUNTS IF IT WAITED ON THE PLANE. See
+    # `_WAIT_BOUND_ATTEMPT_MIN_FRACTION`: an instant 200 proves nothing about the
+    # data plane, and counting it lets credential-less cheap traffic hold the
+    # check green over a fully refusing plane. `waited_s is None` is the refusal
+    # path — the request was refused BY this bound, so it is demand by
+    # construction — and is never latency-filtered.
+    if waited_s is not None:
+        floor = (_mcp_auth._TRANSPORT_WAIT_BOUND_S
+                 * _WAIT_BOUND_ATTEMPT_MIN_FRACTION)
+        if waited_s < floor:
+            return
     try:
         _monitoring.record_wait_bound_attempt(surface)
     except Exception:  # measurement must never be a new failure mode
@@ -5863,9 +5920,10 @@ class WaitBoundMiddleware:
             if attempt_counted:
                 return
             attempt_counted = True
-            _count_wait_bound_attempt_if_served(traffic_class, surface,
-                                                status_seen,
-                                                _exchange_reached_a_route(scope))
+            _count_wait_bound_attempt_if_served(
+                traffic_class, surface, status_seen,
+                _exchange_reached_a_route(scope),
+                time.monotonic() - t0)
 
         async def _guarded_send(message):
             nonlocal response_started, status_seen
