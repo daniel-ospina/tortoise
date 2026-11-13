@@ -5235,7 +5235,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("16323", '"extraction_mode": "llm:<route>"'),
         ), "sdk"),
         ("04-plan.md", "operator / label path", (
-            ("25147", "declared = declared_relation_predicates()"),
+            ("25153", "declared = declared_relation_predicates()"),
         ), "sdk"),
         # The manifest's own `carve_out:` entry, cited from the artifact table.
         # ⛔ The 5th element is the SECTION the cite must fall inside: this exact
