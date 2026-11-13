@@ -1056,7 +1056,6 @@ def _git_head() -> str | None:
         return None
 
 
-
 def _allocate_shares(sample: int, pop: list[dict]) -> dict[str, int]:
     """Largest-remainder allocation of ``sample`` across the harvested classes.
 

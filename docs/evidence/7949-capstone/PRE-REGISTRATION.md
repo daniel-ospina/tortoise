@@ -2720,7 +2720,7 @@ to answer.
   numbers by §10.32 — not because they were wrong, but because they were measured at `b6a630d` and
   a later rebase+merge (`bb88463894f5`, onto `main` `ca74f2375ef4`) moved every one of them. The
   three numbers it owns, `:10619`/`:14359`/`:14512`, were correct at that head; §10.32 re-derives
-  them for the shipping tree (`:11499`/`:15239`/`:15392`).
+  them for the shipping tree (`:11451`/`:15191`/`:15344`).
 
 ### 10.31 — §10.30's declared follow-up: `_collect_classify_items`, the fail-open pair, and §9/§11's carriers (2026-11-13, `#12295`)
 
@@ -2780,18 +2780,18 @@ to answer.
   claimed to discharge. A follow-up recorded as done while the pin that reads it is red is a false
   claim, so the numbers are re-derived here instead of restated.
 - **New values — each MEASURED at `bb88463894f5` by opening the line, not by adding an offset:**
-  `_collect_classify_items` at `:12820`, its extent `:12820-12842` (`def` to `return items`); the two
-  `if items:` gates at `:15239` (the S2 pass) and `:15392` (the post-S4 pass); the two fail-open
-  `except` arms at `:15252` (`classify(S2) failed`) and `:15403` (`classify(union) failed`); and the
+  `_collect_classify_items` at `:12772`, its extent `:12772-12794` (`def` to `return items`); the two
+  `if items:` gates at `:15191` (the S2 pass) and `:15344` (the post-S4 pass); the two fail-open
+  `except` arms at `:15204` (`classify(S2) failed`) and `:15355` (`classify(union) failed`); and the
   `#10360` read-back the pin opens, `_value_fidelity_judged = _state_value_verbatim_enforced()`, at
-  `:11499`.
-- **Verified by content, not arithmetic.** `:12820` is
-  `def _collect_classify_items(embed_list: dict) -> list[dict]:` and `:12842` is `return items`;
-  `:15252`/`:15403` are the two `except` arms whose appended warnings literally name
+  `:11451`.
+- **Verified by content, not arithmetic.** `:12772` is
+  `def _collect_classify_items(embed_list: dict) -> list[dict]:` and `:12794` is `return items`;
+  `:15204`/`:15355` are the two `except` arms whose appended warnings literally name
   `classify(S2) failed` / `classify(union) failed` (a THIRD `except Exception as e:  # never block
-  capture (P1)` at `:14950` is the S2.2 arm-restore path and is NOT one of these two, which is why
+  capture (P1)` at `:14902` is the S2.2 arm-restore path and is NOT one of these two, which is why
   the number is confirmed by the warning text and not by the `except` line, byte-identical across
-  all three); `:11499` carries the receiving variable `_value_fidelity_judged`, not the `def`
+  all three); `:11451` carries the receiving variable `_value_fidelity_judged`, not the `def`
   (`:5793`) and not the `armed =` site (`:5883`).
 - **Carriers updated, all LIVE:** §11's `steps:` condition, §9's provenance row, and §11.1's and
   §11.3's prose — the four `_live_blocks` carriers the pin binds. §10.29's, §10.30's and §10.31's own
@@ -2846,5 +2846,44 @@ to answer.
   threshold, class set or corpus pin is changed — every §1–§9 criterion VALUE and the E4 denominator
   are the ones this record froze. `document_sha256` is re-cut in this same commit, per §8's rule for
   *any* edit to this file, and the bundle README's present-tense digest with it.
-- **This entry is LIVE for the merged tree** — it has no successor, so it must not carry a
-  supersede marker.
+- **This entry was LIVE for the merged tree at the head it shipped at** — it now has a successor
+  (§10.34), which re-derives the same carriers onto the tree that merges `main` `2dbfb046d`. Its own
+  numbers are untouched here, and the supersede marker above is the record of what moved.
+
+### 10.34 — the merge with `main` `2dbfb046d` re-derives §9/§11's carriers again, and those carriers only (2026-11-13, `#12295`)
+
+> **A successor entry, not an edit to §10.30, §10.32 or §10.33.** Each of those measured its own
+> head, and re-numbering any of them in place would be the false record §10.19/§10.22/§10.24 forbid.
+> This entry supersedes them on the four LIVE carriers and on nothing else — §10.30's
+> `:10619`/`:14359`/`:14512`, §10.32's `bb88463894f5` set and §10.33's `14272-14274` window stay
+> exactly as those entries measured them.
+
+- **Why it exists.** `#12304` went `CONFLICTING` while this lane was open: `main` landed `#11739`'s
+  composed-text gate and ~24.7k lines across 89 files, `extractor_v2.py` moved again, and the four
+  live carriers below still named the pre-merge lines. `test_the_pre_registration_cites_the_classify
+  _sites_the_tree_actually_has` red on them, so the merge re-derives them rather than carrying a
+  parent's number.
+- **New values — each MEASURED at this entry's own head by opening the line, not by adding an
+  offset:** `_collect_classify_items` at `:12820`, its extent `:12820-12842` (`def` to `return
+  items`); the two `if items:` gates at `:15239` (the S2 pass) and `:15392` (the post-S4 pass); the
+  two fail-open `except` arms at `:15252` (`classify(S2) failed`) and `:15403` (`classify(union)
+  failed`); and the `#10360` read-back the pin opens,
+  `_value_fidelity_judged = _state_value_verbatim_enforced()`, at `:11499`.
+- **Verified by content, not arithmetic.** `:12820` is
+  `def _collect_classify_items(embed_list: dict) -> list[dict]:` and `:12842` is `return items`;
+  `:15252`/`:15403` are the two `except` arms whose appended warnings literally name `classify(S2)
+  failed` / `classify(union) failed` (a THIRD `except Exception as e:  # never block capture (P1)`
+  at `:14950` is the S2.2 arm-restore path and is NOT one of these two, which is why the number is
+  confirmed by the warning text and not by the `except` line, byte-identical across all three);
+  `:11499` carries the receiving variable `_value_fidelity_judged`, not the `def` (`:5841`) and not
+  the `armed =` site (`:5931`).
+- **Carriers updated, all LIVE:** §11's `steps:` condition, §9's provenance row, and §11.1's and
+  §11.3's prose — the four `_live_blocks` carriers the pin binds. §10.30's, §10.32's and §10.33's own
+  bodies are NOT touched: they are change-control history, `_without_change_history` strips them, and
+  they stay as the record of what each head measured.
+- **What moved: citations and nothing that is a protocol value.** No metric, denominator, threshold,
+  class set or corpus pin is changed — every §1–§9 criterion VALUE and the E4 denominator are the ones
+  this record froze. `document_sha256` is re-cut in this same commit, per §8's rule for *any* edit to
+  this file, and the bundle README's present-tense digest with it.
+- **This entry is LIVE for the merged tree** — it has no successor, so it must not carry a supersede
+  marker.

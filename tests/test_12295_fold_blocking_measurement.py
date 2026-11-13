@@ -37,7 +37,7 @@ BRIEF = DOC_DIR / "research-brief.md"
 
 
 def _quotes(text: str, value: object) -> bool:
-    """True iff ``text`` quotes ``value`` as a COMPLETE number, not a prefix of one.
+    r"""True iff ``text`` quotes ``value`` as a COMPLETE number, not a prefix of one.
 
     ⛔ A bare ``str(value) in text`` needle is satisfied by a SHORTER artifact
     value: with the artifact mutated ``reduction_ratio`` 0.0255 -> 0.02 the

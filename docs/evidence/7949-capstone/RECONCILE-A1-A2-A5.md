@@ -733,7 +733,7 @@ git grep -nE '(^|[^[:alnum:]_])(create_edge|create_about_edge|create_operator)[[
 # ⛔ AND THE CONCLUSION THIS ROW WAS WRITTEN WITH IS NOW FALSE — `relation_write.py` IS that
 # consumer. Its own docstring says so ("#10999 built the `relations` channel as transport only …
 # and nothing consumed it. … This module is that consumer"), and `_extract_session_v2` calls it at
-# sdk.py:19009 (`_capture_session` reaches it at `sdk.py:16802`). Of the three hits only ONE was still prose-about-absence (the stale comment at
+# sdk.py:19009 (`_capture_session` reaches it at `sdk.py:16911`). Of the three hits only ONE was still prose-about-absence (the stale comment at
 # `extractor_v2.py:12487`); the other two are the consumer announcing itself. Read §0's amendment
 # above, never "nothing consumes it".
 # ⛔ AND AS OF `#11001`'s LANE NONE OF THE THREE IS: the comment at `extractor_v2.py:12487` was
