@@ -1003,8 +1003,20 @@ def test_the_handler_signatures_are_unchanged():
         assert "graph" not in inspect.signature(fn).parameters, (
             f"{name}'s signature grew a `graph` parameter")
     # ⛔ `tortoise_packs_list` was the third arm of this baseline and is ARCHIVED in
-    # #11609 batch 1; the archived handler's signature is checked below so the
-    # restore path keeps the same shape.
+    # #11609 batch 1. Its signature is pinned on the archive record instead (the
+    # restore path has to keep the same shape), since the live name no longer
+    # exists to `getattr`:
+    import ast as _ast
+    import pathlib as _pathlib
+    _rec = (_pathlib.Path(__file__).resolve().parent.parent
+            / "archive/mcp-tools/b1-removed-no-destination/tortoise_packs_list.py")
+    _src = _rec.read_text(encoding="utf-8")
+    _fn = next(n for n in _ast.parse(_src[_src.index("def tortoise_packs_list("):]).body
+               if isinstance(n, _ast.FunctionDef))
+    _params = {a.arg for a in _fn.args.args} | {a.arg for a in _fn.args.kwonlyargs}
+    assert "graph" not in _params, (
+        "the archived `tortoise_packs_list` grew a `graph` parameter — a restore "
+        "would re-stamp every `served_attributes` row for one uniform argument")
 
 
 # ── the argument must be HONOURED where it is advertised ───────────────────

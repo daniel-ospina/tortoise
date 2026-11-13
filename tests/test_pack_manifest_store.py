@@ -767,9 +767,16 @@ class TestDeploymentGateAndView:
         self-host refusal (#1935 R10). Re-adding a door to keep the assertion is not
         an option, and dropping it would let a restore re-ship an ungated install.
 
-        So the gate is asserted on the ARCHIVED handler — the restore path — and
-        the live REST twin `POST /v1/packs/manifests` keeps its own 404/503 gate
-        coverage in `TestDeploymentGateAndView` below.
+        So the gate is asserted on the ARCHIVED handler — the restore path. The
+        live REST twin `POST /v1/packs/manifests` is NOT the same gate: no test in
+        the tree asserts a 404/503 on that route (`rg -c '404|503'
+        tests/test_pack_manifest_store.py` finds only this docstring), so nothing
+        below stands in for the deleted arm. What the surviving door does have is
+        `TestUploadRateLimit::{test_upload_rate_limited_429,
+        test_upload_rate_limit_independent_of_export,
+        test_upload_401_does_not_consume_budget}` and
+        `test_upload_malformed_json_500` — its own refusals, not the deployment
+        gate.
         """
         import pathlib as _pathlib
 
@@ -779,7 +786,11 @@ class TestDeploymentGateAndView:
         assert "HOSTED-only" in frozen, (
             "the archived install handler lost its self-host refusal — a restore "
             "would ship an install path that runs where hosted_api does not")
-        assert 'sys.modules' in frozen or ".get(" in frozen, (
+        # The EXACT discriminator, not a `.get(`-shaped proxy: the archived handler
+        # carries its own `_transport_mode.get() != "http"` two gates below, so an
+        # `or ".get(" in frozen` disjunct stayed green while the `sys.modules`
+        # lookup it claims to pin could be deleted outright.
+        assert '_sys.modules.get("tortoise.hosted_api")' in frozen, (
             "the deployment discriminator (a `sys.modules` lookup on "
             "`tortoise.hosted_api`) is gone from the archived handler")
         # ...and the tool really is off the surface, so this file cannot pass by

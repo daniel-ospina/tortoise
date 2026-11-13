@@ -21,8 +21,11 @@ reappears on the live surface — the archive must not be a slow leak back.
 from __future__ import annotations
 
 import ast
+import builtins
+import importlib
 import importlib.util
 import json
+import re
 import subprocess
 import tomllib
 from pathlib import Path
@@ -1115,3 +1118,96 @@ def test_a_pre_mechanism_in_package_archive_location_is_reported(tree: Path) -> 
     (tree / "tortoise" / "archived").mkdir()
     problems = arch.package_violations(tree)
     assert any("tortoise/archived exists" in problem for problem in problems)
+
+
+# ── the restore path's RUNTIME dependencies ─────────────────────────────────────
+
+class TestRestoreDependenciesResolve:
+    """A restore recipe is "copy the block back into the module it names".
+
+    That works only if every MODULE-LEVEL name the frozen handler reads still exists in
+    its target module. `archive_surface.py` cannot see this: `file_violations` digests the
+    archived file against the manifest and `surface_violations` proves the symbol is not
+    live — neither reads the target module. So deleting a name the archived handler needs
+    leaves every gate green while a restore raises `NameError` on its FIRST call.
+
+    Measured (#11609 batch 1 review, P2): `ERR_UNAUTHORIZED` was used only by the
+    archived `tortoise_packs_list` handler, so it left `mcp_server`'s import block with
+    the tool — `'ERR_UNAUTHORIZED' in dir(tortoise.mcp_server)` was False, and
+    `verify-anchors` was still green.
+
+    The check is DERIVED, not a hand-kept list: it walks the frozen handler's AST and
+    collects the free names (loads minus parameters, assignments, comprehension targets,
+    handlers, and imports), so a dependency added to the archive later is covered without
+    anyone remembering to list it.
+    """
+
+    BANNER = re.compile(r"^# ── verbatim from (\S+) ──$", re.M)
+
+    def _free_names(self, handler: ast.FunctionDef) -> set[str]:
+        local: set[str] = {a.arg for a in (*handler.args.posonlyargs,
+                                           *handler.args.args,
+                                           *handler.args.kwonlyargs)}
+        for extra in (handler.args.vararg, handler.args.kwarg):
+            if extra is not None:
+                local.add(extra.arg)
+        for node in ast.walk(handler):
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+                local.add(node.id)
+            elif isinstance(node, ast.comprehension):
+                local.update(t.id for t in ast.walk(node.target)
+                             if isinstance(t, ast.Name))
+            elif isinstance(node, ast.ExceptHandler) and node.name:
+                local.add(node.name)
+            elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                local.update(a.asname or a.name.split(".")[0] for a in node.names)
+        loads = {n.id for n in ast.walk(handler)
+                 if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+        return loads - local - set(dir(builtins))
+
+    def test_every_free_name_in_a_frozen_handler_resolves_in_its_module(self) -> None:
+        records = sorted((arch.ARCHIVE_DIR / "mcp-tools"
+                          / "b1-removed-no-destination").glob("*.py"))
+        assert records, "the b1 archive is empty — this test would be vacuous"
+        missing: list[str] = []
+        checked = 0
+        for record in records:
+            text = record.read_text(encoding="utf-8")
+            symbol = record.stem
+            at = text.index(f"def {symbol}(")
+            tail = text[at:]
+            nxt = tail.find("# ── verbatim from ")
+            segment = tail[:nxt] if nxt != -1 else tail
+            handler = next(n for n in ast.parse(segment).body
+                           if isinstance(n, ast.FunctionDef))
+            assert handler.name == symbol, handler.name
+
+            banner = None
+            for match in self.BANNER.finditer(text):
+                if match.start() < at:
+                    banner = match.group(1)
+            assert banner is not None, f"{record.name}: no `verbatim from` banner"
+            module = importlib.import_module(
+                banner.removesuffix(".py").replace("/", "."))
+
+            # Non-vacuity: the handler must actually read module-level names, or this
+            # arm proves nothing about the restore path.
+            free = self._free_names(handler)
+            assert free, f"{symbol}: no module-level names found — parser drift"
+            checked += 1
+            missing.extend(f"{symbol} -> {banner}: {name}"
+                           for name in sorted(free) if not hasattr(module, name))
+        assert checked == len(records)
+        assert missing == [], (
+            "a frozen handler reads a name its target module no longer defines, so the "
+            "archive's own restore recipe raises NameError on the first call while "
+            "`archive_surface.py verify-anchors` stays green (it proves byte-identity "
+            f"only): {missing}")
+
+    def test_the_arm_reds_when_a_restore_dependency_is_deleted(
+            self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Positive control: delete the dependency and the arm above must fail."""
+        import tortoise.mcp_server as mcp_mod
+        monkeypatch.delattr(mcp_mod, "ERR_UNAUTHORIZED", raising=True)
+        with pytest.raises(AssertionError, match="NameError on the first call"):
+            self.test_every_free_name_in_a_frozen_handler_resolves_in_its_module()

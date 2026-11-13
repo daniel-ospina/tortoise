@@ -40,6 +40,15 @@ from tortoise.mcp_auth import (_current_org_id, _current_org_limits,
                                _current_graph_id, _transport_mode, _tool_group,
                                _get_org_sdk, HTTP_ALLOWED,
                                ERR_EXCLUDED, ERR_TIMEOUT, SELFHOST_ORG_ID)
+# ⛔ `ERR_UNAUTHORIZED` is KEPT although no live handler uses it (#11609 batch 1 review
+# P2): the frozen `tortoise_packs_list` handler in
+# `archive/mcp-tools/b1-removed-no-destination/tortoise_packs_list.py` raises it on its
+# fail-closed path, and that record's restore recipe is "copy each block back into the
+# file named in ITS OWN banner" — dropping the name makes a restore `NameError` on its
+# first unauthenticated call while `archive_surface.py verify-anchors` stays green (it
+# proves byte-identity only). It is the archived tool's runtime dependency, not the
+# tool, so `dir(tortoise.mcp_server)` carrying it is the intended state.
+from tortoise.mcp_auth import ERR_UNAUTHORIZED  # noqa: F401  (archived-handler dependency)
 # #3834: the transport wait-bound vocabulary is read as a MODULE attribute
 # (``tortoise.mcp_auth`` is its single home), so the fast path pays no
 # ``hosted_api`` import — that import is ~1.7 s and builds the whole hosted
@@ -3030,8 +3039,18 @@ def _dry_run_tool_names() -> frozenset[str]:
 # `_scrub_analyze_answer` below, and that file's restore path is "copy each block back" —
 # so deleting them would make a restore `NameError` on its first call while
 # `archive_surface.py verify-anchors` stayed green. They are the tool's runtime
-# dependencies, not the tool: no live registry row reaches them, and ruff sees them as
-# used because the module still defines them for that path.
+# dependencies, not the tool: no live registry row reaches them. What keeps them alive is
+# two guards, and they are different guards — `_ANALYZE_LLM_BUDGET` /
+# `_analyze_llm_budget_available` is driven by
+# `tests/test_mcp_server.py::TestAnalyzeLlmBudget::test_budget_exhausted_disables_llm`
+# (which also asserts the frozen handler still CALLS it), while `_scrub_analyze_answer` had
+# no guard at all until
+# `tests/test_archive.py::TestRestoreDependenciesResolve` — a DERIVED arm that walks each
+# frozen handler's AST and asserts every free name resolves in the module its `verbatim
+# from` banner names. (Correction of a correction: this note first claimed "ruff sees them
+# as used because the module still defines them" — ruff has no unused-function check —
+# and the replacement named `tests/test_archive.py` for coverage it did not have at the
+# time. The arm exists now.)
 _ANALYZE_LLM_BUDGET: dict[str, list[float]] = {}
 
 

@@ -43,7 +43,8 @@ HOW THIS COMPOSES WITH THE TWO EXISTING RETIREMENT MECHANISMS — AND WHAT IT RE
         accounted for — enforced below. The archive adds the code; the map keeps the
         failure.
     The existing 23 `RETIRED_USE_INSTEAD` entries are therefore NOT in this archive's
-    scope. They are off the *advertised* count (72) already, and
+    scope. They are off the *advertised* count (68 — it was 72 before #11609 batch 1,
+    which is the number this note was written against) already, and
     `docs/product/canonical-mcp-tools.md` records (2026-10-27 amendment) that removing
     the forward entries "is a separate decision" — so archiving them here would be a
     different ruling, not this one.

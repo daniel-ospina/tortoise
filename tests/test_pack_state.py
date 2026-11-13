@@ -661,8 +661,9 @@ class TestMcpPacksListRemoved:
     by the REST doors in `hosted_api` — `GET /v1/packs` and
     `POST /v1/packs/manifests` — covered by
     `tests/test_pack_manifest_store.py::TestUploadEndpoint::test_list_includes_tenant_pack`
-    and `::TestIsolation::test_tenant_a_pack_invisible_to_tenant_b` (NOT by
-    `tests/test_hosted_api.py`, which does not mention packs at all).
+    and `::TestIsolation::test_tenant_a_pack_invisible_to_tenant_b`, and by
+    `tests/test_hosted_api.py`'s own pack-state arms (#5475's non-self-widening
+    approval set, `:PackInstall` activation records, #2714 indicator 3).
     """
 
     def test_the_name_is_not_served_in_any_mode(self):

@@ -75,7 +75,7 @@ class TestRegistryEquivalence:
         )
 
     def test_registry_count(self):
-        """72 live tools = 98 − the 16 owner-approved retirements (#3863) − 1 − 5 + 1 − 5.
+        """68 live tools = 98 − 16 owner-approved retirements (#3863) − 1 − 5 + 1 − 5 − 4.
 
         The −1 is #3540 ruling B: the two per-source switches were consolidated into
         `tortoise_manage_sources`, which is the ruling's own requirement ("the surface
@@ -97,6 +97,14 @@ class TestRegistryEquivalence:
         so they are neither live nor retired — they have no replacement NAME to
         redirect to. 77 − 5 = 72. The two moves are independent (disjoint name
         sets) and compose: neither side's own figure survives the merge.
+
+        #11609 batch 1 (this change): four no-destination tools were ARCHIVED —
+        `tortoise_analyze`, `tortoise_backfill_v25`, `tortoise_packs_list`,
+        `tortoise_pack_install` — so they are off the LIVE count while staying
+        declared in `RETIRED_TOOL_REGISTRY` (a caller still fails cleanly, and
+        `tools/archive_surface.py check` fails if a name resolves again).
+        72 − 4 = **68** live, 23 retired. The archival is its own move, disjoint from
+        both above — which is why this docstring's arithmetic has to name it.
         """
         from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
         assert len(TOOL_REGISTRY) == 68, f"Expected 68, got {len(TOOL_REGISTRY)}"
@@ -1393,6 +1401,11 @@ class TestCapabilityModel:
         # ... and the live ledger genuinely declares no read-through op (the premise
         # of the finding, restated: the declaration is what makes the arm necessary).
         assert not any(e.sdk_method == "get_tenant_packs" for e in served_registry())
+        # ⚠ The EMPTINESS is the premise, not a property: with the ledger empty this
+        # intersection cannot be non-empty, so asserting it alone would be a tautology.
+        # What is asserted here is the state, and the probe below proves the invariant
+        # has a false branch (a read-through op bound to a handler-served tool).
+        assert tsc.NON_SDK_READ_BINDINGS == {}, tsc.NON_SDK_READ_BINDINGS
         assert not (set(tsc.READ_THROUGH_WRITE_METHODS) & set(tsc.NON_SDK_READ_BINDINGS))
 
         probe_op, probe_tool = "probe_read_through", "tortoise_entity_profile"
@@ -1401,6 +1414,11 @@ class TestCapabilityModel:
         monkeypatch.setitem(tsc.NON_SDK_READ_OPERATIONS, probe_op,
                             "synthetic handler-served read (probe)")
         monkeypatch.setitem(tsc.NON_SDK_READ_BINDINGS, probe_op, probe_tool)
+
+        # Non-vacuity of the invariant above: for a read-through op bound to a
+        # handler-served tool the SAME expression is false, so it is not a tautology
+        # that can never red.
+        assert set(tsc.READ_THROUGH_WRITE_METHODS) & set(tsc.NON_SDK_READ_BINDINGS) == {probe_op}
 
         # Non-vacuity: the probe binds a LIVE handler-served row with no sdk_method,
         # i.e. exactly the shape the `by_method` loop cannot see.
