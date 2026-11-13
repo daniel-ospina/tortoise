@@ -449,12 +449,13 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
           # `tr` (which keeps the same `0a 0a`) is stripped the same way. Measured: `printf
           # '\n\n\xff'` → `iconv -c` rc 0 emitting `0a 0a`, capture `[]`. All three causes named
           # before this round are FALSE there — the host's converter worked — so the parenthetical
-          # now enumerates the blank-line case as well. Case 17n drives it with the REAL converter,
-          # because every earlier case that reached this sentence used a stub that emits NOTHING
-          # (17b arm b, 17i, 17m) or an all-undecodable tail (17l) — only the real converter makes
-          # "present, succeeds, and emits the tail's line breaks" true. (A forwarding shim that
-          # passes the real converter's output through DOES reach it too; what none of the
-          # emit-nothing stubs can do is produce it.)
+          # now enumerates the blank-line case as well. Case 17n drives it with the REAL converter.
+          # The cases that reached this sentence before it (each reproduced at round 9): 17h — a
+          # failing `tr` besides — and 17i via a converter that emits NOTHING, and 17l (real
+          # converter) plus 17m (failing `tr`) via an all-undecodable tail. 17b arm (b) does NOT
+          # reach it: its fallback carries text, so it lands in the first sentence. A forwarding
+          # shim that passes the real converter's output through DOES reach it — what no
+          # emit-nothing stub can do is make "present, succeeds, emits the tail's line breaks" true.
           if [ -n "$excerpt" ]; then
             echo "⚠️ **The report could not be byte-squeezed** (\`iconv\` is unavailable or refused to emit); it is pasted with its non-ASCII bytes dropped, so any non-ASCII character in it is LOST — the run link above holds the full text."
           else

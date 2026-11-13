@@ -31,7 +31,9 @@
 #      nudge — a paging outage must never cost the record)
 #  13. the ledger leg is what fails the step when it cannot file
 #  14. `--job` is required and an unknown argument is a usage error (exit 2)
-#  15. the body file is written under RUNNER_TEMP and is the issue's body
+#  15. the body file is written under RUNNER_TEMP, and every body assertion here reads THAT
+#      file. ⚠️ NOT pinned: that the body the substrate FILES is the one that was built — a
+#      decoy payload still passes (measured, review round 10); pre-existing, tracked on #12283.
 #  16. a NON-Actions author is refused by the shared substrate on this path too
 #      (the PAT trap: it would file a duplicate on every failing run)
 #  17. the pasted report cannot break the body it is pasted into (a fence longer than
