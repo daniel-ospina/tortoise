@@ -1007,10 +1007,15 @@ _GONE_PROBE = "MATCH (n) WHERE n.id = $id RETURN n.id LIMIT 1"
 #: carrying MANY genuinely-deleted goals makes it O(N) per goal; the honest remedy
 #: there is an ``id`` index over all labels, not weakening this probe.
 GONE_UNPROVEN = (
-    "the goal node still exists but the entity surface cannot address it by its "
-    "id (no id-addressed canonical label: the sweep matched it label-agnostically "
-    "while sdk.get_entity resolves canonical labels by their own identity prop), "
-    "so its cache was NOT reconciled and it is COUNTED rather than reported gone"
+    "a node carrying this goal id is still in the graph, but the entity surface "
+    "cannot resolve it by that id — it is not on a label resolved by `id` (the "
+    "sweep matched it label-agnostically by `n.id`, while the door resolves only "
+    "the canonical labels, each by its OWN primary identity prop) — so its cache "
+    "was NOT reconciled and it is COUNTED rather than reported gone. ⛔ The probe "
+    "behind this (:data:`_GONE_PROBE`) is id-WIDE, so what it establishes is that "
+    "A node with this id exists — not, strictly, that the goal node does. That "
+    "asymmetry is kept deliberately: a same-id stranger that outlives a real "
+    "deletion can only make the sweep under-report a `gone`, never assert one"
 )
 
 
@@ -1136,8 +1141,10 @@ def reconcile_goal_states(
       includes a canonical label whose identity is not ``id``**: ``Event`` is keyed
       by ``eventId``, so a ``:Event {id:'…'}`` is unaddressable even though the
       surface CAN resolve an Event that carries its real ``eventId``. Such a node is
-      classified ``counts.unaddressable`` when the ``gone`` arm probes the graph
-      (:data:`GONE_UNPROVEN`), NOT by pre-filtering on the label — a label filter
+      classified ``counts.unaddressable`` on a LIVE sweep, when the ``gone`` arm
+      probes the graph (:data:`GONE_UNPROVEN`) — not by pre-filtering on the label,
+      and not under ``dry_run``: the door is what ``dry_run`` skips, and the probe
+      hangs off the door's own answer (see the ``dry_run`` paragraph). A label filter
       over-excludes and would sweep every repairable ``:Event`` in with them
       (#12457 review cycle 2 measured both directions). Reachability is
       raw/legacy-write only, like the no-``id`` shape above, because no SDK create
@@ -1173,7 +1180,13 @@ def reconcile_goal_states(
 
     ``dry_run=True`` reports what it WOULD do and writes nothing: the safe
     preview for a graph-wide call, which is the one shape that can touch every
-    goal.
+    goal. ⛔ ONE DISCLOSED DIVERGENCE, structural rather than an oversight: the
+    door is never called under ``dry_run`` (it WRITES), and the probe that
+    reveals an id-unaddressable goal is reachable only from the door's ``gone``
+    answer — so a live sweep reports such a goal ``unaddressable`` while a dry run
+    of the SAME graph reports ``would-clear``/``would-rewrite`` for it. Nothing is
+    mis-written either way (a dry run writes nothing at all), but a preview cannot
+    promise the ``unaddressable`` count of the run it previews.
 
     ⛔ A FAILED SCAN RAISES. A summary of zero goals over a scan that never ran is
     exactly the false PASS this module exists against, so an unreadable
@@ -1193,9 +1206,14 @@ def reconcile_goal_states(
     ``gone``/``failed``/``unaddressable``, or ``would-clear``/``would-rewrite``
     under ``dry_run`` — plus ``error`` on a failure and ``reason`` where one was
     given), and ``counts``. ⛔ The actions with NO ``to`` are exactly ``failed``,
-    ``gone`` and ``unaddressable`` — the three where nothing was written; ``failed``
-    carries ``error`` in its place and the other two carry ``reason``. A consumer
-    reading ``to`` unconditionally gets a ``KeyError`` on those. ``unaddressable``'s
+    ``gone`` and ``unaddressable`` — the three where the sweep has no cache value to
+    name as the outcome; ``failed`` carries ``error`` in its place and the other two
+    carry ``reason``. A consumer reading ``to`` unconditionally gets a ``KeyError``
+    on those. ⚠️ That is NOT the same statement as "nothing was written":
+    ``consistent`` writes nothing and DOES carry ``to`` (the word that already
+    stood), as do ``would-clear``/``would-rewrite``, so a consumer must branch on
+    ``action`` and must never infer a write from the mere presence of ``to``.
+    ``unaddressable``'s
     ``reason`` is the SWEEP's own :data:`GONE_UNPROVEN`, not the door's: the door
     reported ``gone``, and this arm is the sweep saying it does not believe a
     deletion it can disprove. The list is CLOSED — a consumer branching on
@@ -1342,9 +1360,26 @@ def reconcile_goal_states(
             # while this scan matched the node label-agnostically by `n.id`. So ask
             # the graph, once, on this already-rare arm: a node that is still there
             # is UNADDRESSABLE and counted — never reported as deleted.
-            present = sdk._get_proj().g.query(
-                _GONE_PROBE, params={"id": goal_id},
-            ).result_set or []
+            # ⛔ A PROBE THAT COULD NOT RUN IS NOT A DELETION, and it is not the
+            # end of the sweep either: this is a PER-GOAL read, so it is reported
+            # on this goal and the rest still lands (the same isolation contract
+            # the `latest_judgement` and door calls above honour — see the
+            # docstring's "A FAILED SCAN RAISES … unlike a PER-GOAL failure").
+            # Letting it escape would discard `goals` for every goal already
+            # reconciled in this sweep, which is a throw-away a caller cannot
+            # diagnose. `failed` is the module's own word for "the reconcile could
+            # not run", and a sweep may not read clean over a word it could not
+            # account for.
+            try:
+                present = sdk._get_proj().g.query(
+                    _GONE_PROBE, params={"id": goal_id},
+                ).result_set or []
+            except Exception as exc:
+                record.update(action="failed",
+                              error=f"{type(exc).__name__}: {exc}")
+                counts["failed"] += 1
+                goals.append(record)
+                continue
             if present:
                 record.update(action="unaddressable", reason=GONE_UNPROVEN)
                 counts["unaddressable"] += 1

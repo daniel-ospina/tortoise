@@ -26,6 +26,7 @@ import hashlib
 import pytest
 
 from tortoise.derived_invalidation import (
+    _GONE_PROBE,
     GONE_UNPROVEN,
     RETIRED_GOAL_STATES,
     STALE_REASONS,
@@ -2021,6 +2022,97 @@ def test_a_word_a_HUMAN_sets_mid_sweep_is_PRESERVED_and_reported(sdk):
     assert record["action"] == "preserved", record
     assert [w for w in writes if w[0] == g["id"]] == [], (
         f"the sweep wrote over the word it reported as preserved: {writes}")
+
+
+def test_a_probe_that_cannot_run_is_REPORTED_on_its_goal_and_the_sweep_survives(sdk):
+    """A per-goal read that RAISES is recorded on that goal, not thrown past the
+    caller (#12457 review, cycle 2, P1).
+
+    The `gone` arm probes the graph with a raw driver read. That read is a
+    PER-GOAL operation, and this module's own contract is that per-goal failures
+    are reported on the goal while the rest of the sweep still lands — the
+    docstring says it in as many words ("A FAILED SCAN RAISES … unlike a PER-GOAL
+    failure, which IS reported"), and the two operations beside it in the loop
+    (`latest_judgement`, `reconcile_goal_state_cache`) are both wrapped for it.
+
+    ⛔ THE FAILURE MODE THIS PINS, measured: an unguarded probe that raises (a
+    driver timeout on the label-less All-Node scan the probe's own cost note
+    describes, a connection reset) aborts `reconcile_goal_states` mid-loop. The
+    caller gets an exception instead of a payload, so every goal already
+    reconciled in this sweep is discarded from the report and the caller cannot
+    tell which writes landed — the exact throw-away `invalidate_stale` refuses on
+    its own per-finding arm.
+
+    The probe is distinguished from the SCAN by its query text, not by call order:
+    both go through `sdk._get_proj().g.query`, and failing the wrong one would test
+    the wrong contract (a scan failure is SUPPOSED to raise).
+    """
+    # the goal whose `gone` answer will be probed: id present, unaddressable label
+    sdk._get_proj().g.query(
+        "CREATE (n:Widget {id:'probe-raise-1', goalState:'met'})")
+    # a second, perfectly repairable goal that must still be reconciled
+    i, t, g = _world(sdk, tag="sweep-probe-raise")
+    made = _judge(sdk, i, t, g)
+    sdk.delete_entity(made["point_id"])
+
+    real_get_proj = sdk._get_proj
+
+    class _ProbeBoom:
+        """Delegates everything EXCEPT the probe query, which raises.
+
+        ⛔ The delegation must be TOTAL (``__getattr__``), not just ``g``: the door
+        resolves entities through the SAME projection, and a wrapper that answered
+        only ``g`` broke every reconcile in the sweep with
+        ``AttributeError: '_ProbeBoom' object has no attribute '_resolve_entity'``
+        (measured — it reds the `failed == 1` assertion below with `failed == 2`,
+        i.e. the test would have been pinning the wrapper's own bug rather than
+        the probe's isolation).
+        """
+
+        def __init__(self, proj):
+            self._proj = proj
+
+        @property
+        def g(self):
+            return self
+
+        def __getattr__(self, name):
+            return getattr(self._proj, name)
+
+        def query(self, cypher, params=None, **kwargs):
+            if _GONE_PROBE in cypher:
+                raise RuntimeError("transient probe failure")
+            return self._proj.g.query(cypher, params=params, **kwargs)
+
+    sdk._get_proj = lambda: _ProbeBoom(real_get_proj())
+    try:
+        report = reconcile_goal_states(sdk)
+    finally:
+        sdk._get_proj = real_get_proj
+
+    # the probe failure is REPORTED, and in the module's own bucket for it
+    assert report["counts"]["failed"] == 1, report
+    assert report["counts"]["unaddressable"] == 0, (
+        f"a probe that could not run was counted as unaddressable: {report}")
+    assert report["counts"]["gone"] == 0, (
+        f"a probe that could not run was believed as a deletion: {report}")
+    failed = _only([r for r in report["goals"] if r.get("error")])
+    assert failed["goalId"] == "probe-raise-1", failed
+    assert "transient probe failure" in failed["error"], failed
+    # ⛔ THE ISOLATION HALF — this is what an unguarded probe destroys
+    assert report["counts"]["repaired"] == 1, (
+        f"one probe failure discarded the rest of the sweep: {report}")
+    assert sdk.get_entity(g["id"]).get("goalState") is None, (
+        "the sweep abandoned a repairable goal because another goal's probe raised")
+    # and the probed goal's word must still stand: nothing may read clean over a
+    # goal whose cache could not be accounted for. ⛔ READ IT FROM THE GRAPH, not
+    # through `get_entity` — this node is unaddressable by the entity surface, which
+    # is the whole premise of the PR, so the door answers `{}` for it and a
+    # door-read assertion would pass vacuously (`{}` has no `goalState`).
+    standing = sdk._get_proj().g.query(
+        "MATCH (n {id:'probe-raise-1'}) RETURN n.goalState").result_set
+    assert standing and standing[0][0] == "met", (
+        f"the sweep touched a goal whose gone answer it could not verify: {standing}")
 
 
 def test_a_goal_DELETED_mid_sweep_is_reported_GONE_not_repaired(sdk):
