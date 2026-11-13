@@ -322,7 +322,9 @@ class TestDoctorHostedCredential:
         assert hosted is not None, out[-1500:]
         assert "✅" in hosted, hosted
         assert "/v1/team accepted" in hosted, hosted
-        assert "in " in hosted and "s" in hosted  # measured latency, not a bare OK
+        # A MEASURED latency, not a bare OK: `… /health 200 in 0.00s; …`.
+        import re as _re
+        assert _re.search(r"/health 200 in \d+\.\d+s", hosted), hosted
         assert "org-9" in hosted and "tier anon" in hosted, hosted
         assert "❌ Hosted" not in out, out[-1200:]
         assert _FAKE_HOSTED_KEY not in out
@@ -752,9 +754,12 @@ class TestDoctorHostedCredential:
         assert [t for u, t in team_calls] == [
             _expected_team_timeout(), _expected_team_retry_timeout()], team_calls
         hosted = _row(out, "Hosted")
-        assert hosted is not None and "❌" in hosted, out[-1500:]
+        assert hosted is not None, out[-1500:]
         assert "no answer in 10s" in hosted and "on retry" in hosted, hosted
-        assert rc == 1
+        # `/health` ANSWERED, so an exhausted authenticated leg is a service
+        # blip: the key is unproven, not wrong — ⚠️, never `❌` (round 7).
+        assert "⚠️" in hosted and "❌" not in hosted, hosted
+        assert rc == 0
 
     def test_a_2xx_without_an_identity_is_not_an_accepted_key(
             self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
@@ -948,10 +953,9 @@ class TestDoctorHostedCredential:
         _run_doctor([])
         out = capsys.readouterr().out
 
-        assert None not in caps_seen, (
-            "an unbounded read() reached the wire — the body cap is not applied "
-            f"on every leg: {caps_seen}")
-        assert caps_seen == [65536, 65536], caps_seen
+        assert caps_seen == [65536, 65536], (
+            "an unbounded or differently-capped read() reached the wire on some "
+            f"leg — the body cap is not applied uniformly: {caps_seen}")
         hosted = _row(out, "Hosted")
         assert hosted is not None and "✅" in hosted, out[-1200:]
 
@@ -1026,6 +1030,70 @@ class TestDoctorHostedCredential:
         assert "⚠️" in hosted, hosted
         assert "degraded" in hosted, hosted
         assert "All checks passing" not in out, out[-1200:]
+
+    def test_a_crash_in_the_hosted_block_fails_the_report(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """A hosted verdict that could not be produced is NOT a passing verdict.
+
+        `_cmd_doctor` counts only ❌ toward its exit code, so the block's own
+        `except Exception` must not degrade to ⚠️: that would print
+        `N pass, 0 fail` / `All checks passing!` and exit 0 on a box whose
+        credential is broken — #11912's target reachable through any bug in the
+        new code (fresh review round 7 — the arm was unpinned, and reverting it to
+        ⚠️ left every test green).
+        """
+        from tortoise import __main__ as _m
+
+        def _boom(_results, offline=False):
+            raise RuntimeError("deliberate: the hosted block failed")
+
+        monkeypatch.setattr(_m, "_doctor_hosted_rows", _boom)
+        db_path = str(tmp_path / "crash.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor crash seed")
+
+        rc = _run_doctor([])
+        out = capsys.readouterr().out
+
+        hosted = _row(out, "Hosted")
+        assert hosted is not None and "❌" in hosted, out[-1200:]
+        assert "UNGRADED" in hosted, hosted
+        assert "All checks passing" not in out, out[-1200:]
+        assert rc == 1
+
+    def test_the_team_legs_transport_error_is_scrubbed_too(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """The AUTHENTICATED leg's exception text must not print the api_url password.
+
+        The other scrub test makes every request fail, so `/health` fails first and
+        the team-leg scrub is never reached — dropping `_scrub` from that line kept
+        every test green (fresh review round 7), while a userinfo `api_url` printed
+        `nonnumeric port: '<password>@host'` into the transcript (#5109).
+        """
+        password = "hunter2pass"
+        _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY,
+                          api_url=f"https://svc:{password}@api.example.test/")
+
+        def handler(url, req):
+            if url.endswith("/health"):
+                return _FakeResponse(200, b'{"status":"ok"}')
+            raise ValueError(f"nonnumeric port: '{password}@api.example.test'")
+
+        _stub_hosted(monkeypatch, handler)
+        db_path = str(tmp_path / "team-scrub.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor team scrub seed")
+
+        _run_doctor([])
+        out = capsys.readouterr().out
+
+        hosted = _row(out, "Hosted")
+        assert hosted is not None, out[-1200:]
+        assert password not in out, "the api_url password reached the transcript"
+        # The endpoint ANSWERED /health, so a reset on the authenticated leg is a
+        # service blip: unproven, not a broken key (round 7).
+        assert "⚠️" in hosted and "UNPROVEN" not in hosted, hosted
+        assert "could not complete" in hosted, hosted
 
 
 class TestDoctorPath:

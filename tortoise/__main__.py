@@ -13115,6 +13115,31 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
                             "TORTOISE_API_URL, then `tortoise config show`"))
             return
 
+    # ── the `/health` verdict, computed ONCE (#11912 review round 5) ──
+    # It used to be consulted only inside the 2xx-accepted arm, so a graph-scoped
+    # key (a DOCUMENTED, supported key type) dropped `/health`'s own answer
+    # entirely: `200 {"status":"degraded"}` rendered `ℹ️ … /health 200` — counted
+    # in neither column — and `doctor` printed `✅ All checks passing!` during a
+    # real outage, which is the under-block the health note exists to remove.
+    _health_notes: list[str] = []
+    if isinstance(health_status, str) and health_status.strip().lower() not in (
+            "ok", "healthy", "pass"):
+        _health_notes.append(f"the service reports `{_printable(health_status)}` on /health")
+    if not (isinstance(health_code, int) and 200 <= health_code < 400):
+        _health_notes.append(f"/health returned {health_code}")
+    _health_note = (" — " + "; ".join(_health_notes)) if _health_notes else ""
+
+    def _combine(icon: str, detail: str) -> tuple[str, str, str]:
+        """The `Hosted` row, carrying the health verdict and the provenance note.
+
+        A reachable-but-unhealthy SERVICE is a ⚠️ whatever the credential's own
+        verdict is: the user cannot fix it, and it must never leave `doctor` able
+        to print `All checks passing!` over a `degraded` endpoint.
+        """
+        if _health_notes and icon in ("✅", "ℹ️"):
+            icon = "⚠️"
+        return ("Hosted", icon, f"{detail}{_health_note}{_provenance_note}")
+
     # ── the authenticated read: the ONLY thing that proves the key ──
     team_code: int | None = None
     team_body = ""
@@ -13156,11 +13181,21 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
                     f"({_printable(_scrub(str(retry_reason), api_url, api_key))})")
 
     if reach_error is not None:
-        # The credential is UNPROVEN — never green, whatever /health said.
-        results.append(("Hosted", "❌",
-                        f"{base} — {reach_error}. Check "
-                        "https://api.premiselabs.co/health or your "
-                        "TORTOISE_API_URL, then `tortoise config show`"))
+        # ⛔ The credential is UNPROVEN, NOT wrong — and that is a ⚠️ (fresh review
+        # round 7). This arm is only reachable once `/health` has ANSWERED (a
+        # transport failure on the reachability leg returns above), so the
+        # endpoint is up and something reset/dropped the authenticated leg: a
+        # restart, a drained machine, a proxy hiccup. The SAME event answered as
+        # `503` is a warning two arms below, so grading the reset as `❌` + exit 1
+        # redded `doctor` (and anything gating on its exit code) on a Fly restart
+        # and blamed the user's own config — contradicting
+        # `docs/quickstart-cloud.md`, which promises a blip leaves the key
+        # unproven rather than wrong.
+        results.append(_combine("⚠️",
+                        f"{base} — the authenticated check could not complete: "
+                        f"{reach_error}. The endpoint answered, so this is the "
+                        "SERVICE rather than your key — re-run shortly. "
+                        "`tortoise config show` reports what this machine knows"))
         return
 
     health_part = (f"/health {health_code}"
@@ -13175,31 +13210,6 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
         parsed = _json.loads(body) if body else None
     except (ValueError, TypeError, RecursionError):
         parsed = None
-
-    # ── the `/health` verdict, computed ONCE (#11912 review round 5) ──
-    # It used to be consulted only inside the 2xx-accepted arm, so a graph-scoped
-    # key (a DOCUMENTED, supported key type) dropped `/health`'s own answer
-    # entirely: `200 {"status":"degraded"}` rendered `ℹ️ … /health 200` — counted
-    # in neither column — and `doctor` printed `✅ All checks passing!` during a
-    # real outage, which is the under-block the health note exists to remove.
-    _health_notes: list[str] = []
-    if isinstance(health_status, str) and health_status.strip().lower() not in (
-            "ok", "healthy", "pass"):
-        _health_notes.append(f"the service reports `{_printable(health_status)}` on /health")
-    if not (isinstance(health_code, int) and 200 <= health_code < 400):
-        _health_notes.append(f"/health returned {health_code}")
-    _health_note = (" — " + "; ".join(_health_notes)) if _health_notes else ""
-
-    def _combine(icon: str, detail: str) -> tuple[str, str, str]:
-        """The `Hosted` row, carrying the health verdict and the provenance note.
-
-        A reachable-but-unhealthy SERVICE is a ⚠️ whatever the credential's own
-        verdict is: the user cannot fix it, and it must never leave `doctor` able
-        to print `All checks passing!` over a `degraded` endpoint.
-        """
-        if _health_notes and icon in ("✅", "ℹ️"):
-            icon = "⚠️"
-        return ("Hosted", icon, f"{detail}{_health_note}{_provenance_note}")
 
     if team_code == 401:
         results.append(_combine("❌",
