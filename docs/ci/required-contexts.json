@@ -416,6 +416,12 @@
         "repo-harnesses"
       ]
     ],
+    "report": [
+      [
+        "release-artifact-canary.yml",
+        "report"
+      ]
+    ],
     "schema-drill": [
       [
         "ci.yml",
@@ -541,7 +547,7 @@
       ]
     ]
   },
-  "gate_digest": "ac6041c0d23b20daa3842c6be4f25bcddf41f7b388d979759b9542d869de1179",
+  "gate_digest": "9a9e27bbb62407180dfdb74ba705577ae2f209d50e5de16f273de87f531e4d75",
   "live_checked_at": "2026-09-29T02:35:26Z",
   "live_observed_contexts": [
     "ai-review-gate",
@@ -565,5 +571,5 @@
     "test-isolation"
   ],
   "settings_home_consistent": false,
-  "verified_at": "2026-11-13T14:56:39Z"
+  "verified_at": "2026-11-13T17:25:55Z"
 }

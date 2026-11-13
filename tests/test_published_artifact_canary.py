@@ -390,8 +390,15 @@ def test_the_install_cannot_resolve_from_a_configured_MIRROR(tmp_path, monkeypat
         "all_proxy",
         "ALL_PROXY",
         "HTTP_PROXY",
+        # ⛔ Spellings that are NOT in the strip list: pip's vendored requests LOWERCASES
+        # every env name, so a case-SENSITIVE strip walks past these while the child
+        # honours them (#12363 round 8).
+        "Http_Proxy",
+        "All_Proxy",
+        "HtTpS_pRoXy",
     ):
         monkeypatch.setenv(name, "https://mirror.internal/simple")
+    monkeypatch.setenv("pythonPath", "/some/checkout")  # case-bLIND strip: this IS PYTHONPATH
     captured = {}
 
     class _Capture(_Runner):
@@ -413,6 +420,15 @@ def test_the_install_cannot_resolve_from_a_configured_MIRROR(tmp_path, monkeypat
         for k in captured["env"]
         if k.startswith("PIP_") and k not in ("PIP_DISABLE_PIP_VERSION_CHECK", "PIP_CONFIG_FILE")
     ]
+    assert "pythonPath" not in captured["env"], (
+        "the strip is case-BLIND: `pythonPath` IS PYTHONPATH to the child's import machinery"
+    )
+    assert not [
+        k
+        for k in captured["env"]
+        if k.lower() in ("http_proxy", "https_proxy", "all_proxy")
+        and k not in ("https_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY")
+    ], "a mixed-case proxy spelling survived — pip lowercases names, so it IS obeyed"
     for spelling in ("https_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY"):
         assert spelling not in captured["env"], (
             f"{spelling} survived into the child — pip obeys every proxy spelling it "
@@ -1113,9 +1129,13 @@ def test_the_canary_files_a_durable_alert_and_reads_its_own_exit_code():
     """A step summary lives inside ONE run. The sibling detectors this workflow is
     modelled on file an issue and close it on recovery — without that, a red the canary
     produces is a red nobody opens, which is the 97-day-invisible class it exists to end
-    (#12363 round 5). The alarm text must also BRANCH on the exit code: leading an exit-2
-    detector outage with "this clears when a release lands" is the sentence that ends in
-    an irreversible upload."""
+    (#12363 round 5).
+
+    ⛔ The report runs in its OWN job. `if: failure()` is JOB-scoped, and a job killed at
+    its own `timeout-minutes` runs NONE of its remaining steps — `always()` included — so
+    every in-job gate left the alert silent in exactly the terminal state the `always()`
+    transcript upload exists for (#12363 round 8).
+    """
     import yaml
 
     workflow = yaml.safe_load(
@@ -1125,37 +1145,47 @@ def test_the_canary_files_a_durable_alert_and_reads_its_own_exit_code():
         "filing the alert issue needs issues: write — the repo's default token is "
         "restricted (#2140), so without it the detector is deaf while looking green"
     )
-    steps = {step.get("name"): step for step in workflow["jobs"]["canary"]["steps"]}
-
-    alarm = steps["What a red here means"]
-    assert "steps.canary.outputs.exit_code" in str(alarm), (
-        "the alarm must branch on the canary's exit code: exit 2 is a detector outage"
+    jobs = workflow["jobs"]
+    assert "report" in jobs, "the alert must live in a DOWNSTREAM job (a killed job runs no steps)"
+    report = jobs["report"]
+    assert report.get("needs") == "canary"
+    assert "always()" in str(report.get("if")), (
+        "the report job must run however the canary ended, else a timed-out canary is silent"
     )
+    assert jobs["canary"].get("outputs", {}).get("exit_code"), (
+        "the canary job must PUBLISH its exit code — it is the only severity signal"
+    )
+
+    steps = {step.get("name"): step for step in report["steps"]}
+    alarm = steps["What a red here means"]
+    # The comparison, not just the words: only an explicit 1 means "the artifact is
+    # broken". Reverting `!= "1"` to `= "2"` left the suite green, after which a cancelled
+    # canary (no exit code) rendered "### This is a RELEASE finding" (#12363 round 8).
+    assert '!= "1"' in str(alarm), "the alarm must treat anything other than exit 1 as an outage"
+    assert '= "2"' not in str(alarm), (
+        "matching only 2 lets a cancelled canary read as a release finding"
+    )
+    assert "needs.canary.outputs.exit_code" in str(alarm.get("env", {}))
     assert "DETECTOR outage" in str(alarm)
 
-    assert "steps.canary.outputs.exit_code" in str(
+    for name, condition in (
+        ("File or refresh the alert issue", "!= 'success'"),
+        ("Close the alert issue on a green run", "== 'success'"),
+    ):
+        step = steps[name]
+        assert condition in str(step.get("if")), (name, step.get("if"))
+        assert "needs.canary.result" in str(step.get("if")), (
+            f"{name} must key on the canary JOB's result, not a step outcome"
+        )
+        assert "published-artifact-alert.sh" in str(step.get("run")), (
+            f"{name} must go through the shared script — inlined shell here is what drifts"
+        )
+    assert "needs.canary.outputs.exit_code" in str(
         steps["File or refresh the alert issue"].get("env", {})
     ), (
         "EXIT_CODE is the ONLY carrier of severity into the script: without it every "
         "exit-2 detector outage renders as 'it clears when a release lands'"
     )
-    assert "cancelled" in str(steps["File or refresh the alert issue"].get("if", "")), (
-        "the alert must also fire when the canary step was CANCELLED (killed at its own "
-        "timeout-minutes) — that is the terminal state the always() upload exists for"
-    )
-
-    for name, condition in (
-        ("File or refresh the alert issue", "cancelled()"),
-        ("Close the alert issue on a green run", "success()"),
-    ):
-        step = steps[name]
-        assert "steps.canary.outcome" in str(step.get("if")), (
-            f"{name} must be gated on the canary's OWN outcome, not the job's"
-        )
-        assert condition in str(step.get("if"))
-        assert "published-artifact-alert.sh" in str(step.get("run")), (
-            f"{name} must go through the shared script — inlined shell here is what drifts"
-        )
 
     script = REPO_ROOT / ".github" / "scripts" / "published-artifact-alert.sh"
     assert script.is_file()
@@ -1171,6 +1201,10 @@ def test_the_canary_files_a_durable_alert_and_reads_its_own_exit_code():
         "inline filing is the drift the substrate exists to prevent"
     )
     assert "tail -n 40" in text, "the body must carry the transcript's TAIL (the failure)"
+    assert "TITLE_OUTAGE=" in text and "TITLE_RELEASE=" in text, (
+        "the two severities need SEPARATE stable titles, or one severity's recurrence lands "
+        "on the other's issue with no severity in the text"
+    )
     harness = REPO_ROOT / ".github" / "scripts" / "published-artifact-alert.test.sh"
     assert harness.is_file(), "an alert script with no executable harness is unpinned"
     ci = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text()
