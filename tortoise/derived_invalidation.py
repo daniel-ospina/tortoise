@@ -856,8 +856,9 @@ def invalidate(
         # docstring states that rule and the arm list it applies to. A claim-sourced
         # id is UNREACHABLE here BY CONSTRUCTION, because `_read_claim` folded to
         # `MISSING`. So `invalidation.goal_id` is all there is, and a caller that
-        # omits it (a supported shape —
-        # `tests/test_11926_derived_invalidation.py:489`) reconciles nothing.
+        # omits it reconciles nothing — a supported shape, pinned by
+        # `test_retiring_a_missing_claim_reports_it_rather_than_raising`, which
+        # expects `cache["checked"] is False` on exactly this arm.
         # That is correct for THIS arm rather than a defect: there is no claim
         # whose `goalId` could have named the goal instead.
         # ⚠️ The reconcile is still ATTEMPTED, so the record still says what it
