@@ -3696,7 +3696,8 @@ def test_a_DISCARDED_clause_stores_nothing_on_EVERY_claim_kind() -> None:
     # FOUR times — including the historical "the assignment and `raise` mutations stayed GREEN" and
     # the shape list — so `"raise" in doc` was satisfied after deleting the residual clause it
     # claims to defend, and by a coherent inversion that kept the word (measured). The sibling pin
-    # in `test_the_seam_shadow_clause_...` records the same weakness at round 12.
+    # in `test_the_register_scopes_its_SHADOW_claim_to_the_SEAM_and_names_the_builder_residual`
+    # records the same weakness at round 12.
     assert "`raise` is NAMED rather than decided" in (_carrier_issues_a_call.__doc__ or ""), (
         "`raise` is credited by the choke point and no longer NAMED as a residual — an undisclosed "
         "fail-open is the claim being wider than the mechanism")
