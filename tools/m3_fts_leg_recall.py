@@ -96,11 +96,20 @@ The artifact lands in ``docs/research/2026-11-13-12298-m3-fts-leg/``: one
 ``population.json`` (the pinned sample) and one ``artifact.json`` (both arms +
 the paired comparison).
 
-⛔ **Reproduce the committed artifact with ``--recovery-arm``**: without it the
-recovery arm is not measured and the artifact carries three arms, not four. The
-flag is off by default because that arm measures a fix that is NOT shipped
-(``#12350``); a reader who runs the command above gets the artifact this repo
-holds, and the pinned ``population.json`` makes the run paired rather than a
+⛔ **Use ``--recovery-arm`` to measure all four arms**: without it the recovery
+arm is not measured and the artifact carries three, not four. The flag is off by
+default because that arm measures a fix that is NOT shipped (``#12350``).
+
+⛔ **A re-run reproduces the POPULATION and the four arms — not the committed
+byte-for-byte artifact, and it must not be described as doing so.** This harness
+has been repaired since the measurement, and each repair is recorded in the
+artifacts' ``measurement_notes``: the two FalkorDB arms now write to separate
+graphs (a re-run measures ``index_numDocuments`` 300 on both, where the committed
+artifacts record 305 for the recovery arm), the Postgres engine string no longer
+reads "PostgreSQL PostgreSQL", and a run emits no ``measurement_notes`` at all.
+The NUMBERS are the measurement; the differences above are the state of the
+instrument, which §3.5 of the brief discloses and calls a re-run the confirmation
+of. The pinned ``population.json`` is what makes a re-run paired rather than a
 fresh harvest.
 
 WHAT THIS DOES NOT MEASURE (declared, not buried)

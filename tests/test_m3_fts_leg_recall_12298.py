@@ -981,6 +981,65 @@ def test_changelog_does_not_restate_superseded_numbers(artifact, changelog: str)
 
 # ── 6. the two things a re-run would otherwise decide wrongly ───────────────
 
+def test_the_degraded_leg_refusal_is_WIRED_at_every_shipped_leg_call(tool_mod) -> None:
+    """The refusal must be called AT the call site, with the trace actually passed.
+
+    ⛔ A unit test of `_refuse_degraded_legs` alone cannot see the two regressions
+    that matter (#12349 review cycle 5, finding 3 — both measured GREEN before
+    this test existed): deleting the call from the sweep, and calling
+    `_refuse_degraded_legs(trace, q)` while dropping `leg_trace=trace` from
+    `run_fts_query`. The second leaves the trace EMPTY, so the refusal is a
+    silent no-op — which is the fail-open it was written to close. Neither needs
+    a database to detect: they are properties of the source.
+
+    So this parses the harness and asserts the wiring: every `run_fts_query(...)`
+    call in `arm_falkordb` passes `leg_trace=`, and each is followed by a
+    `_refuse_degraded_legs(...)` call naming that same trace variable.
+    """
+    import ast
+
+    src = TOOL.read_text()
+    tree = ast.parse(src)
+    sweep = next((n for n in ast.walk(tree)
+                  if isinstance(n, ast.FunctionDef) and n.name == "arm_falkordb"), None)
+    assert sweep is not None, "arm_falkordb is the measurement's sweep"
+
+    def _calls(node, name):
+        return [n for n in ast.walk(node)
+                if isinstance(n, ast.Call)
+                and (getattr(n.func, "id", None) == name
+                     or getattr(n.func, "attr", None) == name)]
+
+    def _is_warmup(call) -> bool:
+        """The pre-wait warm query, whose RESULT is discarded.
+
+        ⛔ Excluded deliberately, and the exclusion is the only one: it runs
+        BEFORE `_wait_indexed`, so on a cold start the index legitimately is not
+        built yet and a refusal there would abort every honest run. It measures
+        nothing, so it cannot publish a degraded read as a number.
+        """
+        return any(isinstance(a, ast.Constant) and a.value == "warm"
+                   for a in call.args)
+
+    legs = [c for c in _calls(sweep, "run_fts_query") if not _is_warmup(c)]
+    assert legs, "the shipped leg must be called from the sweep"
+    refusals = _calls(sweep, "_refuse_degraded_legs")
+    assert len(refusals) >= len(legs), (
+        f"{len(legs)} `run_fts_query` call(s) but only {len(refusals)} "
+        "`_refuse_degraded_legs` call(s) — an unguarded shipped-leg call books a "
+        "degraded read as a measurement")
+    for call in legs:
+        kw = {k.arg for k in call.keywords}
+        assert "leg_trace" in kw, (
+            "a `run_fts_query` call does not pass `leg_trace=` — the trace stays "
+            "empty and `_refuse_degraded_legs` becomes a silent no-op")
+    # The fixture loop is the second published verdict that rests on this leg.
+    assert len(refusals) >= len(legs), (
+        "both the recall sweep AND the #8933 fixture loop must guard the shipped "
+        "leg: an unguarded fixture read publishes a degraded read as "
+        "`rank=None`, i.e. a capability FAIL")
+
+
 def test_a_degraded_shipped_leg_is_a_REFUSAL_not_a_miss(tool_mod) -> None:
     """`run_fts_query` returns `[]` for a failed read as well as for a miss.
 
@@ -1031,6 +1090,7 @@ def test_brief_production_estimate_rederives_from_the_per_class_cells(
 
     snake = [n["id"] for n in population["names"]
              if n["cls"] == "ident" and "#" not in n["name"]]
+    path_cls = [n["id"] for n in population["names"] if n["cls"] == "path"]
     shipped, fixed = (artifact["arms"][a]["ranks"] for a in (
         "falkordb_tfidf", "falkordb_tfidf__tokens_fixed"))
 
@@ -1040,13 +1100,26 @@ def test_brief_production_estimate_rederives_from_the_per_class_cells(
     snake_delta = (hit(fixed, snake) - hit(shipped, snake)) / len(snake) * 100
     assert len(snake) == 73
     assert round(snake_delta, 1) == 91.8, snake_delta
+    # ⛔ THE CELL, not a whole-document substring (#12349 review cycle 5,
+    # finding 5). `"91.8" in brief_text` passed while the §4.3 CELL could be
+    # rewritten to `191.8` — the exact hole this file's module docstring
+    # condemns for §0, reproduced three hundred lines lower. The cells are read
+    # from the row they belong to and compared to the recomputed value.
+    path_delta = (hit(fixed, path_cls) - hit(shipped, path_cls)) / len(path_cls) * 100
+    table_rows = _table(brief_text, "class / sub-class", "weighted")
+    assert len(table_rows) == 5, [r[0] for r in table_rows]
+    assert round(_num(table_rows[2][2]), 1) == 91.8, (
+        f"§4.3's `snake_case` Δ cell says {table_rows[2][2]!r}; the artifact "
+        f"recomputes {round(snake_delta, 1)}")
+    assert round(_num(table_rows[3][2]), 1) == round(path_delta, 1), (
+        f"§4.3's `path` Δ cell says {table_rows[3][2]!r}; the artifact "
+        f"recomputes {round(path_delta, 1)}")
 
     # The sentence the table's remainder rests on, arithmetic included. The
     # shares are read from the rows the brief prints them in: the definite cell,
     # the `#n` cell, and the code-token share the `snake_case` row NAMES (that
     # cell says NOT RECORDED, which is the point of the row).
-    table = _table(brief_text, "class / sub-class", "weighted")
-    assert len(table) == 5, [r[0] for r in table]
+    table = table_rows
     definite = _num(table[0][1])
     hashed = _num(table[1][1])
     assert (round(definite, 1), round(hashed, 1)) == (62.3, 2.2)

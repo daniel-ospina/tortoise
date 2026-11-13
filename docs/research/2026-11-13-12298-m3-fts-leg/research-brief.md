@@ -70,7 +70,7 @@ beat the current scorer (Reading 1). A lane may not decline pre-authorised scope
 more than it may adopt something over a decision: both are reversals of the same ruling, and the route
 in either direction is a **reopen argued in front of the owner**, in this issue's own home. So what this
 brief records is the **measurement, plus a recommendation** — that C3's premise is falsified and the
-learned-sparse lever should be reconsidered — and it leaves the ruling on `#12298` open for the owner.
+learned-sparse lever should be reconsidered — and it leaves the ruling open for the owner. ⛔ **`#12298` is CLOSED** (`COMPLETED`, 2026-11-13T05:21:53Z) on the reading *"M3 FAILS"*, which this measurement contradicts: its own falsifier sentence is **satisfied** by the deployable arm. The C3 ruling therefore lives in the OPEN homes — epic `#12186` and the pre-registration issue `#12192` — not in `#12298`, which records a closure this PR's numbers do not support and which needs the owner's correction rather than a lane's.
 **Until that ruling, C3 is neither closed nor proceeding.** Everything downstream of the deferral
 (§6.2's decision, V1, `#12186`) therefore keeps its existing status rather than being re-stated here;
 the evidence for the reopen is in §0 and §3.
@@ -430,7 +430,7 @@ remainder without a derivation; it is removed rather than re-guessed.
    M3's score distributions are for"; `:268` "the text index **stays** until **M3** measures …"), and a
    reader arriving after this PR would be told to go and do work that is done. §6.2 carries a status
    line pointing here rather than a re-statement of the numbers. **C3 (SPLADE) is NOT closed here** —
-   that ruling is the owner's and is left open on `#12298` (§0).
+   that ruling is the owner's and is left open in `#12186` / `#12192` (§0). ⛔ `#12298` was closed `COMPLETED` on 2026-11-13T05:21:53Z — five minutes after this lane's first report and on the reading *"M3 FAILS"*, which the measurement contradicts — so it is NOT the live home of the C3 ruling, and citing it as one (as an earlier revision of this brief, the changelog, `SEARCH-ARCHITECTURE.md` and PR #12349 all did) pointed a reader at a dead record.
 2. **The one real lever this measurement found is filed: `#12350`** — the tokenizer contract between
    `sparse.tokenize_sparse_query` and RediSearch's `_`-as-word-character. **Measured, not shipped** here:
    the additive term is an arm of this harness, because a query-bytes change touches every label and
