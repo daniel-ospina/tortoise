@@ -19,6 +19,7 @@ visible without a graph.
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 
@@ -28,6 +29,7 @@ import pytest
 
 from tortoise import entity_verdict as verdict
 from tortoise import extractor_v2 as v2
+from tortoise import failure_policy as _failure_policy
 from tortoise.entity_resolver import apply_entity_merge
 
 # ── helpers ───────────────────────────────────────────────────────────────
@@ -156,6 +158,73 @@ class TestThePriorSetNeverCarriesARetiredNode:
         rows = [{"id": "obj-a", "name": "the plan", "kind": ""}]
         assert v2._current_entity_priors(_NoProj(), rows, {"obj-a": "Object"}) == rows
 
+    def test_a_fold_failure_is_PARTIAL_and_keeps_the_rows_it_did_resolve(
+            self, sdk_factory, monkeypatch):
+        """The ENTRY POINT's contract, not the helper's — and the right GRADE.
+
+        Not `degraded`: `degraded` means the search never got through its FIRST
+        query and therefore carries ZERO priors, and `_render_search_results`
+        acts on it by withholding every prior AND telling the gap reviewer the
+        lookup did not run. Here the queries RAN and their point/event priors are
+        real, so the honest grade is PARTIAL (#5095 §4.4 G3): keep what the fold
+        resolved, record the entity legs as failed, and never emit a pre-hop row.
+        """
+        sdk = sdk_factory()
+        _create_object(sdk, "obj-good", "the ledger")
+        depth = v2._PRIOR_HOP_BOUND + 2
+        graph = sdk._get_proj().g
+        for i in range(depth):
+            _create_object(sdk, f"obj-d{i}", f"deep {i}")
+        for i in range(depth - 1):
+            graph.query("MATCH (n:Object {id:$id}) SET n.resolved_from = $r",
+                        params={"id": f"obj-d{i}", "r": f"obj-d{i + 1}"})
+        monkeypatch.setattr(v2, "_is_searchable_backend",
+                            lambda mode, sdk=None: True)
+        # The good row comes FIRST, so the fold has already resolved it when the
+        # unresolvable row is met — the per-row failure must not discard it.
+        monkeypatch.setattr(
+            v2, "_fts_rows",
+            lambda *a, **kw: [{"id": "obj-good", "name": "the ledger",
+                               "kind": "core:plan"},
+                              {"id": "obj-d0", "name": "deep 0",
+                               "kind": "core:plan"}])
+        search = v2.search_graph(sdk, {"entities": [{"name": "the ledger"}]},
+                                 "the story", max_queries=1, limit=3)
+        assert search["degraded"] is False, search
+        assert [r["id"] for r in search["entities"]] == ["obj-good"], search
+        assert "prior-set fold" in (search["reason"] or "")
+        assert _failure_policy.lookup_state(search) == _failure_policy.LOOKUP_PARTIAL
+        # An entity candidate's fixpoint was NOT established, so its own query
+        # must not read as "ran and matched nothing": found None, never false.
+        assert v2._candidate_covered(search, "object", "the ledger") is False
+
+    def test_a_chain_longer_than_the_hop_bound_is_cannot_answer(self, sdk_factory):
+        """A chain the bound cannot resolve must NOT be emitted as a carrier.
+
+        `apply_entity_merge` hops the survivor first, so a chain longer than 1
+        cannot be CREATED — a longer one is a corrupt/legacy record, i.e. exactly
+        when a silent misreport is worst. The row's fixpoint is unknown, so the
+        honest answer is cannot-answer — carrying the rows already folded, so one
+        bad row cannot void the whole prior set.
+        """
+        sdk = sdk_factory()
+        _create_object(sdk, "obj-good", "the ledger")
+        depth = v2._PRIOR_HOP_BOUND + 2
+        graph = sdk._get_proj().g
+        for i in range(depth):
+            _create_object(sdk, f"obj-c{i}", f"link {i}")
+        for i in range(depth - 1):
+            graph.query("MATCH (n:Object {id:$id}) SET n.resolved_from = $r",
+                        params={"id": f"obj-c{i}", "r": f"obj-c{i + 1}"})
+        rows = [{"id": "obj-good", "name": "the ledger", "kind": ""},
+                {"id": "obj-c0", "name": "link 0", "kind": ""}]
+        with pytest.raises(v2._PriorFoldUnresolvable,
+                           match="resolved_from hops") as exc:
+            v2._current_entity_priors(
+                sdk, rows, {"obj-good": "Object", "obj-c0": "Object"})
+        assert [r["id"] for r in exc.value.folded] == ["obj-good"], exc.value
+        assert exc.value.unresolved == ["obj-c0"]
+
     def test_search_graph_folds_the_set_it_returns(self, sdk_factory, monkeypatch):
         """The wiring, not only the helper: S3's OWN return carries the survivor."""
         sdk = sdk_factory()
@@ -246,6 +315,26 @@ class TestHardVetoes:
         assert verdict.judge(mention, cand, {"suppressed": True})["vetoes"] == [
             verdict.VETO_TARGET_SUPPRESSED]
         assert verdict.judge(mention, cand, {"dependents": 0})["band"] == "merge"
+
+    def test_a_group_join_stands_down_when_the_alias_proves_the_spelling(self):
+        """M-4 RE-VERIFIES a group join; it must not refuse the case the tree has
+        already decided.
+
+        `apply_entity_merge` writes the candidate's folded spelling into the
+        survivor's `aliases[]`, and the by-name resolver reads `$k IN n.aliases`
+        AS a resolution (`entity_resolver.py:611`) — so this spelling's membership
+        is RECORDED, not inferred, and no group-level comparison is being skipped.
+        Refusing it is not merely conservative: an ENTITY hold is not carried
+        forward (`extractor_v2.execute_embed`, the `"ENTITY hold(s) are NOT carried forward"` branch (~`:12156`)), so the mention is dropped on
+        every run for the lifetime of the merge.
+        """
+        mention = {"name": "the team", "kind": "k"}
+        cand = {"name": "Acme Holdings", "kind": "k"}
+        assert verdict.judge(mention, cand, {"dependents": 2})["vetoes"] == [
+            verdict.VETO_GROUP_JOIN]
+        assert verdict.judge(mention, cand, {"dependents": 2,
+                                            "mention_is_alias": True})[
+            "band"] == verdict.BAND_MERGE
 
     def test_the_veto_record_is_ordered_and_carries_a_sentence_each(self):
         mention = {"name": "billing v2 ledger Q3", "kind": "core:plan"}
@@ -447,6 +536,118 @@ class TestTheResolverBands:
         assert v2.HOLD_VETOED in v2.HOLD_REASONS
         assert len(set(v2.HOLD_REASONS)) == len(v2.HOLD_REASONS)
 
+    def test_a_repeat_mention_of_a_folded_alias_merges_instead_of_being_lost(
+            self, sdk_factory, monkeypatch):
+        """The case `group_join` must NOT refuse, end to end on a real graph.
+
+        After `the team → Acme Holdings` the survivor's `aliases[]` holds the
+        folded `team`, so phase 2's proposal to bind to it carries the tree's own
+        record of the decision. Before the alias escape this was HELD — and an
+        entity hold is not carried forward, so the mention was dropped on every
+        run, for the lifetime of the merge.
+        """
+        sdk = sdk_factory()
+        _merged_pair(sdk)
+        facts = v2._entity_verdict_facts(sdk, [{"id": "obj-survivor"}])
+        assert facts["obj-survivor"]["dependents"] == 1, facts
+        monkeypatch.setattr(
+            v2, "_complete",
+            lambda *a, **kw: '{"resolutions": [{"name": "the team", '
+                             '"resolves_to": "obj-survivor"}], "new": []}')
+        res = v2.resolve_entities(
+            [{"name": "the team", "kind": "core:plan"}],
+            {"entities": [{"id": "obj-survivor", "name": "Acme Holdings",
+                           "kind": "core:plan"}], "degraded": False},
+            model=object(), facts=facts)
+        assert res["map"].get("the team", {}).get("id") == "obj-survivor", res
+        assert res["held"] == [], res
+        assert res["records"][0]["band"] == verdict.BAND_MERGE
+
+    def test_the_facts_reader_and_the_resolver_are_wired_together(
+            self, sdk_factory):
+        """The two FUNCTIONS compose: a foreign `search` table + the real reader.
+
+        A `search` table built by another caller (a replay, `_index_search`, a
+        test) can still carry a merge-retired carrier; feeding the REAL facts
+        reader into the resolver is what holds it. This covers the pair — the
+        argument at the `extract_session_v2` call site is pinned separately by
+        `test_the_orchestrator_passes_the_facts_reader_output_to_the_resolver`.
+        """
+        sdk = sdk_factory()
+        _merged_pair(sdk)
+        rows = [{"id": "obj-carrier", "name": "the team",
+                 "kind": "core:plan"}]
+        res = v2.resolve_entities(
+            [{"name": "the team", "kind": "core:plan"}],
+            {"entities": rows, "degraded": False},
+            facts=v2._entity_verdict_facts(sdk, rows))
+        assert res["map"] == {}, res
+        assert [h["reason"] for h in res["held"]] == [v2.HOLD_VETOED]
+        assert res["held"][0]["vetoes"] == [verdict.VETO_TARGET_RETIRED]
+
+    def test_the_orchestrator_passes_the_facts_reader_output_to_the_resolver(
+            self, monkeypatch):
+        """The PRODUCTION call site's `facts=` argument (P2 round 1, unfixed then).
+
+        Nothing else pins it: delete `facts=_entity_verdict_facts(...)` from
+        `extract_session_v2` and every other test still passes, because the
+        orchestrator suites stub `search_graph` with `sdk=None` (so the reader
+        returns `{}` and no veto is reachable). Here the argument's PRESENCE is
+        the assertion — its value is covered by the facts-reader tests.
+
+        The extraction harness is `tests/test_11653_s3_hold_not_add.py`'s: a
+        model double keyed on the stage prompt, and `search_graph` stubbed.
+        """
+        embed = {"entities": [{"name": "Acme", "kind": "core:organisation"}],
+                 "events": [],
+                 "points": [{"content": "Acme signed the deal",
+                             "pointKind": "statement",
+                             "about_entities": ["Acme"]}],
+                 "operators": [], "chain_notes": [],
+                 "link_before_create": []}
+        empty_gaps = {"entities": [], "events": [], "points": [],
+                      "operators": [], "chain_notes": [],
+                      "link_before_create": []}
+
+        def responder(system, user):
+            if "STORY SUMMARIZER" in system:
+                return "Acme signed the deal."
+            if "GRAPH MAPPER" in system:
+                return json.dumps(embed)
+            if "GAP REVIEWER" in system:
+                return json.dumps(empty_gaps)
+            if "ENTITY RESOLUTION" in system:
+                return json.dumps({"resolutions": [], "new": ["Acme"]})
+            raise AssertionError(f"unexpected system prompt: {system[:50]}")
+
+        class _M:
+            def complete(self, *, system: str, user: str):
+                return responder(system, user)
+
+        seen: dict = {}
+        real = v2.resolve_entities
+
+        def recorder(*a, **kw):
+            seen.update(kw)
+            return real(*a, **kw)
+
+        monkeypatch.setattr(v2, "resolve_entities", recorder)
+        monkeypatch.setattr(
+            v2, "search_graph",
+            lambda sdk, embed_list, story, **kw: {
+                "entities": [{"id": "obj-acme", "name": "Acme",
+                              "kind": "core:organisation"}],
+                "points": [], "events": [], "degraded": False})
+        out = v2.extract_session_v2(
+            _M(), [{"role": "user", "content": "Acme signed the deal."}],
+            session_id="s1")
+        assert out["payload"] is not None, out
+        assert "facts" in seen, (
+            "extract_session_v2 did not pass the facts reader's output to "
+            "resolve_entities — the D-1 second door is open for every search "
+            "table built by another caller")
+        assert isinstance(seen["facts"], dict), seen
+
 
 class TestTheFactsReader:
     def test_a_merged_carrier_reads_as_retired_and_the_survivor_as_a_group(
@@ -476,6 +677,18 @@ class TestTheFactsReader:
                        dedup_target_id="obj-other")
         facts = v2._entity_verdict_facts(sdk, [{"id": "obj-rejected"}])
         assert facts["obj-rejected"]["suppressed"] is False
+
+    def test_the_survivor_facts_carry_its_aliases(self, sdk_factory):
+        """The alias escape's input, read from a real merge.
+
+        `normalize_entity_name` drops a leading article, so `the team` is stored as
+        `team` — and the veto compares with the SAME fold, so the two cannot
+        disagree about a spelling.
+        """
+        sdk = sdk_factory()
+        _merged_pair(sdk)
+        facts = v2._entity_verdict_facts(sdk, [{"id": "obj-survivor"}])
+        assert "team" in facts["obj-survivor"]["aliases"], facts
 
     def test_no_candidates_means_no_read(self):
         class _Sdk:

@@ -191,6 +191,7 @@ from . import referentiality as _referentiality  # #11021: the referentiality te
 from . import value_gate as _value_gate  # #4899: the S2.2b identifier-only predicate
 from . import vet_gate as _vet_gate  # #5005: S2.2 VET (stdlib-only module)
 from ._gate_memo import GateMemo
+from .entity_resolver import normalize_entity_name  # #12296: the alias fold
 from .env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
 
 # #5006: D12/O4's FUSION half — the union of both sides' attachments, executed
@@ -2999,7 +3000,8 @@ _ENTITY_LABEL = {"object": "Object", "subject": "Subject"}
 #: cycle guard; this bound exists because the walk here is BATCHED. It is
 #: deliberately small: ``apply_entity_merge`` hops the survivor to ITS fixpoint
 #: before writing, so a chain longer than 1 cannot be created — a longer walk is a
-#: corrupt-record signal rather than normal traffic.
+#: corrupt-record signal rather than normal traffic, and hitting the bound on a
+#: still-retired node RAISES rather than emitting the carrier (#12296 review).
 _PRIOR_HOP_BOUND = 8
 
 
@@ -3021,6 +3023,21 @@ def _entity_facts(graph, label: str, ids: list[str]) -> dict[str, tuple]:
         params={"ids": list(ids)}).result_set
     return {str(r[0]): (r[1], r[2], r[3]) for r in rows
             if r and r[0] is not None and str(r[0])}
+
+
+class _PriorFoldUnresolvable(RuntimeError):
+    """A ``resolved_from`` chain the batched fold cannot resolve (#12296, D-1).
+
+    Carries the rows the fold DID resolve. The failure is known for ONE row, and
+    discarding the whole entity prior set would turn a per-row unknown into a
+    whole-capture unknown — whose only answer downstream is a CREATE.
+    """
+
+    def __init__(self, message: str, *, folded: list[dict],
+                 unresolved: list[str]) -> None:
+        super().__init__(message)
+        self.folded = folded
+        self.unresolved = unresolved
 
 
 def _current_entity_priors(sdk, rows: list[dict],
@@ -3053,10 +3070,12 @@ def _current_entity_priors(sdk, rows: list[dict],
     different question from a terminal incarnation.
 
     ⛔ **Cannot-answer is not an answer.** A read that fails after a projection was
-    resolved RAISES: ``search_graph`` counts it as a failed leg rather than
-    returning the pre-hop rows, because returning them is precisely the binding
-    this guard exists to prevent — the same rule ``follow_resolved_from`` states
-    at ``entity_resolver.py:562-572``. The one client SKIPPED is one with no
+    resolved RAISES: this helper never returns the pre-hop rows, because returning
+    them is precisely the binding this guard exists to prevent — the same rule
+    ``follow_resolved_from`` states at ``entity_resolver.py:562-572``. (The raise
+    is caught by ``search_graph``, which grades the lookup PARTIAL and keeps the
+    rows this helper already folded — never the pre-hop rows, and never an aborted
+    capture; see the call site.) The one client SKIPPED is one with no
     projection at all (a lightweight test double, the ``_sdk_backend_is_embedded``
     and ``_enrich_point_priors`` idiom): such a client holds no ``resolved_from``
     state, so there is nothing to withhold.
@@ -3108,6 +3127,19 @@ def _current_entity_priors(sdk, rows: list[dict],
             if not fact or not fact[0]:
                 break
             current, hops = str(fact[0]), hops + 1
+        if hops >= _PRIOR_HOP_BOUND and (facts.get((label, current))
+                                          or (None,))[0]:
+            # ⛔ The walk did not reach a fixpoint. `apply_entity_merge` hops the
+            # survivor first, so no chain of length >= 2 can be CREATED — a longer
+            # one is a corrupt/legacy record. Emitting `current` here would return
+            # a still-retired carrier (the exact node this guard exists to exclude)
+            # with no marker; the honest answer is cannot-answer, and the rows
+            # already folded travel with it so the caller keeps them.
+            raise _PriorFoldUnresolvable(
+                f"entity prior {rid!r} resolves through >= {_PRIOR_HOP_BOUND} "
+                "resolved_from hops — refusing to return a carrier with no "
+                "fixpoint (#12296 D-1)",
+                folded=list(out), unresolved=[rid])
         if current in seen:
             continue
         seen.add(current)
@@ -3246,8 +3278,36 @@ def search_graph(sdk, embed_list: dict, story: str, *,
     # the candidate set the verdict sees must exclude every node a merge retired.
     # One pass, after the union, so BOTH exits carry the same folded set and a
     # degraded run cannot smuggle a retired carrier through the other door.
-    entities = _current_entity_priors(
-        sdk, list(results["entities"].values()), entity_labels)
+    #
+    # ⛔ **Cannot-answer is not an answer, and it is not an ABORT either — and it
+    # is not `degraded` either.** A read that fails after a projection resolved
+    # must never be answered with the pre-hop rows (that is the binding this guard
+    # exists to prevent), and its raise must not escape this function: the callers
+    # (`extract_session_v2`, `commit_session`) hold no `try`, so it would abort a
+    # capture. But `degraded` is the wrong grade for it — `degraded` means the
+    # search never got through its FIRST query and therefore carries ZERO priors
+    # (`:3172-3176`, `failure_policy.py`), and `_render_search_results` acts on
+    # that by withholding every prior and telling the gap reviewer the lookup did
+    # not run. Here the queries RAN and their point/event priors are real, so the
+    # honest grade is PARTIAL (#5095 §4.4 G3): keep the rows the fold did resolve,
+    # report the entity legs as failed, and record a reason.
+    reason: str | None = None
+    try:
+        entities = _current_entity_priors(
+            sdk, list(results["entities"].values()), entity_labels)
+    except Exception as e:  # noqa: BLE001, RUF100 — degrade the leg, not capture
+        entities = list(getattr(e, "folded", None) or [])
+        reason = ("S3 partial: the entity prior-set fold could not resolve every "
+                  f"row ({type(e).__name__}: {e}) — refusing pre-hop rows")
+        for _leg in ("object", "subject"):
+            if _leg in coverage["failed"]:
+                coverage["failed"][_leg] += 1
+        # An entity candidate whose fixpoint was not established has NO resolved
+        # identity, so its own query must not read as "ran and matched nothing":
+        # dropping the entity keys makes `_candidate_covered` answer False and the
+        # create record say `found: None`, never `found: false` (#5095).
+        ran_keys = [k for k in ran_keys
+                    if not k.startswith(("object:", "subject:"))]
     if degraded is not None:
         return {
             "mode": mode, "degraded": True, "reason": degraded,
@@ -3263,7 +3323,7 @@ def search_graph(sdk, embed_list: dict, story: str, *,
             "query_results": {"ran": [], "failed": []},
         }
     return {
-        "mode": mode, "degraded": False, "reason": None,
+        "mode": mode, "degraded": False, "reason": reason,
         "entities": entities,
         "points": list(results["points"].values()),
         "events": list(results["events"].values()),
@@ -5937,7 +5997,7 @@ def _find_existing_entity(entities: list[dict], name: str, kind: str) -> tuple[d
     return None, "none"
 
 
-def _verdict_facts(facts, node_id) -> dict:
+def _verdict_facts(facts, node_id, mention_name: str = "") -> dict:
     """The graph facts the verdict reads about ONE candidate id (#12296).
 
     Tolerant on purpose: a caller with no fact map (a test, a replayed `search`
@@ -5946,11 +6006,27 @@ def _verdict_facts(facts, node_id) -> dict:
     offline caller does not, and inventing a default ("not retired", "no
     dependents") for a node nobody read is how a guard reports protection it does
     not have.
+
+    ``mention_name`` closes the one case where the group-join veto would refuse
+    evidence the tree already holds: when the mention's FOLDED spelling is already
+    in the candidate's ``aliases[]`` (`entity_resolver.apply_entity_merge` writes
+    it there, and the by-name resolver reads `$k IN n.aliases` as a resolution),
+    the membership is *recorded* rather than inferred, so the veto stands down.
+    The fold is the tree's own (`normalize_entity_name`) — the same one the alias
+    was written with, so the two cannot disagree about a spelling.
     """
     if not isinstance(facts, dict):
         return {}
     entry = facts.get(str(node_id or ""))
-    return entry if isinstance(entry, dict) else {}
+    if not isinstance(entry, dict):
+        return {}
+    out = dict(entry)
+    aliases = entry.get("aliases")
+    out["mention_is_alias"] = bool(
+        mention_name and isinstance(aliases, (list, tuple, set))
+        and normalize_entity_name(mention_name) in {
+            str(a) for a in aliases if a is not None})
+    return out
 
 
 #: Why a candidate's identity is UNRESOLVED — the reason a HOLD record carries
@@ -6315,7 +6391,7 @@ def resolve_entities(entity_refs: list[dict], search: dict,
                     {"name": cand, "kind": _kinds.get(cand, "")},
                     {"name": hit.get("name") or "",
                      "kind": hit.get("kind") or ""},
-                    _verdict_facts(facts, hit.get("id")))
+                    _verdict_facts(facts, hit.get("id"), cand))
                 if verdict["band"] != _entity_verdict.BAND_MERGE:
                     vetoed[cand] = (_kinds.get(cand, ""), verdict["vetoes"])
                     warnings.append(
@@ -6402,7 +6478,16 @@ def _entity_verdict_facts(sdk, entities: list[dict]) -> dict:
 
         {id: {"retired": bool,      # carries `resolved_from`
               "dependents": int,    # nodes already folded into this one
-              "suppressed": bool}}  # `reject` that named no survivor
+              "suppressed": bool,   # `reject` that named no survivor
+              "aliases": [str]}}    # the folded spellings this id answers to
+
+    ⛔ ``aliases`` is read here because the ``group_join`` veto needs it: a
+    mention whose folded spelling is already one of the candidate's aliases is a
+    membership the MERGE RECORDED, not one the verdict must infer — see
+    ``_verdict_facts``, which derives ``mention_is_alias`` from this list (this
+    function cannot: it never sees the mention). A caller that hands this map
+    straight to ``entity_verdict.judge`` gets the alias escape only if it adds
+    that key itself.
 
     What each fact is FOR, so a later reader does not have to reverse-engineer it:
 
@@ -6421,6 +6506,12 @@ def _entity_verdict_facts(sdk, entities: list[dict]) -> dict:
       `reject` that recorded NO survivor, which *"suppresses the candidate
       outright — re-offering it against a different survivor would re-ask a
       question the reviewer already answered"* (`entity_resolver.py:236-250`).
+    * ``aliases`` — the folded spellings this id answers to. ``apply_entity_merge``
+      writes them (`entity_resolver.apply_entity_merge`), and the by-name resolver
+      reads `$k IN n.aliases` AS a resolution — so ``_verdict_facts`` turns a
+      mention that is one of them into ``mention_is_alias``, which stands
+      ``group_join`` down. This reader cannot derive that key: it never sees the
+      mention.
 
     ⛔ **Cannot-answer is not an answer, and this read RAISES.** A verdict computed
     from a fact map that silently omitted the graph's own state would report
@@ -6444,7 +6535,7 @@ def _entity_verdict_facts(sdk, entities: list[dict]) -> dict:
         rows = graph.query(
             f"MATCH (n:{label}) WHERE n.id IN $ids RETURN n.id, "
             "n.resolved_from, n.dedup_reviewed, n.dedup_target_id, "
-            "n.dedup_rejected_targets",
+            "n.dedup_rejected_targets, n.aliases",
             params={"ids": ids}).result_set
         if not rows:
             continue
@@ -6457,10 +6548,21 @@ def _entity_verdict_facts(sdk, entities: list[dict]) -> dict:
                 row[4], (list, tuple)) else []
             if row[3] is not None:
                 targets.append(row[3])
+            # `aliases` is undeclared-but-writable, so a caller may have stored a
+            # bare string (`update_entity(id, aliases="foo")` is reachable) — the
+            # same trap `apply_entity_merge` guards when it reads them back.
+            raw_aliases = row[5]
+            if isinstance(raw_aliases, str):
+                alias_list = [raw_aliases]
+            elif isinstance(raw_aliases, (list, tuple, set)):
+                alias_list = [str(a) for a in raw_aliases if a is not None]
+            else:
+                alias_list = []
             out[str(row[0])] = {
                 "retired": bool(row[1]),
                 "dependents": 0,
                 "suppressed": reviewed == "reject" and not targets,
+                "aliases": alias_list,
             }
         dep_rows = graph.query(
             f"MATCH (d:{label}) WHERE d.resolved_from IN $ids "

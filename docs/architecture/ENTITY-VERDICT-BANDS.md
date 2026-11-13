@@ -62,11 +62,30 @@ Three properties are load-bearing and each is pinned by a test:
   entities (`#3301`); a merge-retired carrier is a different question from a
   terminal incarnation, and a guard that conflated them would silently drop the
   supersession prior.
-* **Cannot-answer is not an answer.** A read that fails after a projection
-  resolved **raises** (`search_graph` counts it as a failed leg) rather than
-  returning the pre-hop rows — the rule `follow_resolved_from` already states at
-  `entity_resolver.py:562-572`. The only client skipped is one with no projection
-  at all (a test double: no `resolved_from` state exists to withhold).
+* **Cannot-answer is not an answer — and not an abort, and not `degraded`.**
+  A read that fails after a projection resolved never returns the pre-hop rows
+  (that is the binding the guard exists to prevent) and never escapes
+  `search_graph` either: its callers (`extract_session_v2`, `commit_session`) hold
+  no `try`, so a raise would abort a capture. It is graded **PARTIAL** (§4.4 G3 /
+  `#5095`), not `degraded` — `degraded` means the search never got through its
+  first query and `_render_search_results` acts on it by withholding every prior
+  and telling the gap reviewer the lookup did not run, whereas here the queries
+  ran and their point/event priors are real. So the fold failure keeps every row
+  it did resolve, records the entity legs as failed (`coverage["failed"]`), sets
+  a reason naming the fold, and drops the entity legs from `query_results.ran` so
+  an entity candidate whose fixpoint was not established is recorded
+  `found: None`, never `found: false`. Pinned by
+  `test_a_fold_failure_is_PARTIAL_and_keeps_the_rows_it_did_resolve`. The only
+  client skipped is one with no projection at all (a test double: no
+  `resolved_from` state exists to withhold).
+* **A chain the bound cannot resolve is cannot-answer, not a carrier.**
+  `_PRIOR_HOP_BOUND` (8) exists because the walk is batched;
+  `apply_entity_merge` cannot create a chain ≥ 2, so a longer one is a
+  corrupt/legacy record. Hitting the bound on a still-retired node raises
+  `_PriorFoldUnresolvable` — carrying the rows already folded — instead of
+  emitting the retired row, which would be the guard's own failure with no
+  marker. The failure is per-ROW: one unresolvable row must not void the prior
+  set the fold could answer.
 
 ⚠️ **Residual, stated:** the guard runs on every entity prior row and costs one
 read per label (plus one per hop round, normally zero). It does not change which
@@ -131,6 +150,21 @@ not a shared threshold — precision needs hard rule-based vetoes"*
 | `target_retired` | the candidate carries `resolved_from` | D-1 at the candidate-table layer — the belt to `_current_entity_priors`' braces, for any caller that built the table another way |
 | `group_join` | the candidate is itself a merge survivor (`dependents >= 1`) | **M-4.** It stands for a group; binding a name-only mention to it asserts membership from a pairwise comparison never made against the group's other members |
 
+⛔ **`group_join` stands down when the alias already proves the spelling**
+(`facts["mention_is_alias"]`). `apply_entity_merge` writes the candidate's folded
+spelling into the survivor's `aliases[]`, and the by-name resolver reads
+`$k IN n.aliases` **as a resolution** (`entity_resolver.py:611`) — so that
+spelling's membership is *recorded*, not inferred, and no group-level comparison
+is being skipped. Without the escape, every later re-mention of an already-folded
+variant is refused **on every run for the lifetime of the merge**, and an entity
+hold is **not carried forward** (`extractor_v2.execute_embed`, the `"ENTITY hold(s) are NOT carried forward"` branch (~`:12156`)), so the mention is
+dropped rather than queued. Pinned by
+`test_a_repeat_mention_of_a_folded_alias_merges_instead_of_being_lost`.
+
+The fuller M-4 reading — compare the mention against the group's **members**, not
+only the survivor — remains available and is the next widening; the alias case is
+the provable subset and the one that recurs.
+
 ⛔ **On the issue's "an explicit `DIFFERENT_FROM`" veto: that predicate does not
 exist in this tree** (`grep -rn 'DIFFERENT_FROM' tortoise/ tests/` → **0 hits**;
 `_VALID_EDGE_PREDICATES` has no such edge). The recorded analogue is the persisted
@@ -144,6 +178,11 @@ is evaluable here; the targeted form is honoured by the merge verb
 exactly-equal folded name+kind, so no name/kind veto can fire by construction, and
 `group_join` must NOT: an exactly-equal spelling is the strongest evidence the
 tree has, and the merge queue's own rule lets an exact re-mention bind.
+
+`facts` reaches both phases through `_verdict_facts`, which adds
+`mention_is_alias` from the candidate's `aliases[]` and the mention's own
+`normalize_entity_name` fold — the same fold the alias was written with, so the
+two cannot disagree about a spelling.
 
 ---
 

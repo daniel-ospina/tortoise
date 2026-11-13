@@ -49,7 +49,12 @@ reading. The bands are therefore **precision-first**, in the field's own words �
 from round 1's stage-B row). A veto can only ever move a proposal from `merge`
 to `review`; it never licenses `new`, because a conflict is not an absence.
 
-The four deterministic vetoes, each with the substrate it reads:
+Six deterministic vetoes, each with the substrate it reads. The first three are
+name/kind rules over the two spellings; the last three read ``facts`` — what the
+graph says about the candidate — and the final two are the closure
+re-verification, described at length under "Closure re-verification" below. All
+six are applied by the one function, so a reader never has to know which layer a
+veto lives in to know that it fired:
 
 ``identifier_conflict``
     Both sides carry identifier-shaped tokens, the sets are disjoint, **and the
@@ -118,6 +123,17 @@ reported. Two closure vetoes make that hazard decidable at the verdict:
     the precision-first answer is `review`: a human can accept it, the band may
     not infer it.
 
+    ⛔ **Except where the group membership of THIS spelling is already proven.**
+    `facts["mention_is_alias"]` is the caller's answer to "is the mention's
+    folded name already in the target's `aliases[]`?" — and `aliases[]` holds
+    exactly the folded spellings `apply_entity_merge` folded INTO this survivor
+    (`entity_resolver.apply_entity_merge`), which the tree's own by-name resolver
+    treats as a resolution (`$k IN n.aliases`). That is not an inference about the
+    group; it is the record of the decision that put this spelling in it. Without
+    the escape, every later re-mention of an already-folded variant is refused
+    forever — and an entity hold is not carried forward, so the mention is lost
+    rather than queued.
+
 ⚠️ **The guard's other half is positive, and it lives in the merge verb.**
 `entity_resolver.apply_entity_merge` hops the survivor to its fixpoint before
 writing, so no merge can ever CREATE a chain of length >= 2. With that, "no
@@ -136,6 +152,7 @@ ground: nothing recorded covers it, so the external convergence (Zep's four
 rungs then a select-over-supplied-list prompt, Mem0's boost that never decides
 identity) is informative and not authoritative.
 """
+
 from __future__ import annotations
 
 import re
@@ -193,9 +210,24 @@ _QUARTER = re.compile(r"\bq([1-4])\b")
 #: worse than no record.
 _TEMPORAL_TOKENS = re.compile(r"^(q[1-4]|1[89]\d\d|2\d\d\d)$")
 _MONTHS = {
-    name: idx for idx, name in enumerate(
-        ("january", "february", "march", "april", "may", "june", "july",
-         "august", "september", "october", "november", "december"), start=1)
+    name: idx
+    for idx, name in enumerate(
+        (
+            "january",
+            "february",
+            "march",
+            "april",
+            "may",
+            "june",
+            "july",
+            "august",
+            "september",
+            "october",
+            "november",
+            "december",
+        ),
+        start=1,
+    )
 }
 
 
@@ -236,8 +268,7 @@ def date_tokens(name: str) -> dict[str, set[str]]:
     text = str(name or "").casefold()
     years = set(_YEAR.findall(text))
     quarters = {f"q{q}" for q in _QUARTER.findall(text)}
-    months = {f"{m:02d}" for label, m in _MONTHS.items()
-              if re.search(rf"\b{label}\b", text)}
+    months = {f"{m:02d}" for label, m in _MONTHS.items() if re.search(rf"\b{label}\b", text)}
     out: dict[str, set[str]] = {}
     if years:
         out["year"] = years
@@ -250,8 +281,9 @@ def date_tokens(name: str) -> dict[str, set[str]]:
     return out
 
 
-def skeleton(name: str, *, replace_ids: bool = False,
-             replace_dates: bool = False) -> tuple[str, ...]:
+def skeleton(
+    name: str, *, replace_ids: bool = False, replace_dates: bool = False
+) -> tuple[str, ...]:
     """The name's folded token sequence, with the named token class abstracted.
 
     This is what makes the identifier and date vetoes PRECISE rather than
@@ -271,8 +303,7 @@ def skeleton(name: str, *, replace_ids: bool = False,
             continue
         if replace_ids and folded in identifier_tokens(tok):
             out.append("<id>")
-        elif replace_dates and (_TEMPORAL_TOKENS.match(folded)
-                               or folded in _MONTHS):
+        elif replace_dates and (_TEMPORAL_TOKENS.match(folded) or folded in _MONTHS):
             out.append("<date>")
         else:
             out.append(folded)
@@ -298,8 +329,7 @@ def _fold_kind(kind) -> str:
 # ── Vetoes ───────────────────────────────────────────────────────────────
 
 
-def hard_vetoes(mention: dict, candidate: dict,
-                facts: dict | None = None) -> list[str]:
+def hard_vetoes(mention: dict, candidate: dict, facts: dict | None = None) -> list[str]:
     """The vetoes that refuse ``candidate`` as the entity ``mention`` names.
 
     ``mention`` / ``candidate`` are ``{name, kind}`` dicts — the same shape the
@@ -309,7 +339,14 @@ def hard_vetoes(mention: dict, candidate: dict,
 
         {"retired": bool,        # candidate carries `resolved_from`
          "dependents": int,      # nodes whose `resolved_from` is the candidate
-         "suppressed": bool}     # `dedup_reviewed='reject'` naming no survivor
+         "suppressed": bool,     # `dedup_reviewed='reject'` naming no survivor
+         "mention_is_alias": bool}  # the mention's folded name is in the
+                                    # candidate's `aliases[]` — the record that
+                                    # this spelling was already folded into it.
+                                    # ⛔ DERIVED by the caller's shim
+                                    # (`extractor_v2._verdict_facts`), never by
+                                    # the facts reader: only the shim sees the
+                                    # mention.
 
     Returns the veto codes (empty = no objection). **Order is the published
     ``VETO_CODES`` order**, so two runs over the same inputs produce the same
@@ -320,15 +357,20 @@ def hard_vetoes(mention: dict, candidate: dict,
 
     m_ids = identifier_tokens(mention.get("name", ""))
     c_ids = identifier_tokens(candidate.get("name", ""))
-    if (m_ids and c_ids and not (m_ids & c_ids)
-            and skeleton(mention.get("name", ""), replace_ids=True)
-            == skeleton(candidate.get("name", ""), replace_ids=True)):
+    if (
+        m_ids
+        and c_ids
+        and not (m_ids & c_ids)
+        and skeleton(mention.get("name", ""), replace_ids=True)
+        == skeleton(candidate.get("name", ""), replace_ids=True)
+    ):
         got.append(VETO_IDENTIFIER_CONFLICT)
 
     m_dates = date_tokens(mention.get("name", ""))
     c_dates = date_tokens(candidate.get("name", ""))
-    if (skeleton(mention.get("name", ""), replace_dates=True)
-            == skeleton(candidate.get("name", ""), replace_dates=True)):
+    if skeleton(mention.get("name", ""), replace_dates=True) == skeleton(
+        candidate.get("name", ""), replace_dates=True
+    ):
         for kind in ("year_quarter", "year", "quarter", "month"):
             mine, theirs = m_dates.get(kind), c_dates.get(kind)
             if mine and theirs and not (mine & theirs):
@@ -336,8 +378,7 @@ def hard_vetoes(mention: dict, candidate: dict,
                 break
 
     m_kind, c_kind = _fold_kind(mention.get("kind")), _fold_kind(candidate.get("kind"))
-    if (m_kind not in _UNSTATED_KINDS and c_kind not in _UNSTATED_KINDS
-            and m_kind != c_kind):
+    if m_kind not in _UNSTATED_KINDS and c_kind not in _UNSTATED_KINDS and m_kind != c_kind:
         got.append(VETO_KIND_CONFLICT)
 
     if facts.get("suppressed"):
@@ -349,14 +390,17 @@ def hard_vetoes(mention: dict, candidate: dict,
         # when it does, the correct answer is a refusal, not a hop: a caller
         # that reached here lost the evidence the hop needs.
         got.append(VETO_TARGET_RETIRED)
-    if int(facts.get("dependents") or 0) >= 1:
+    if int(facts.get("dependents") or 0) >= 1 and not facts.get("mention_is_alias"):
+        # The alias escape: the survivor's `aliases[]` already records that this
+        # exact spelling was folded into it, so no group-level inference is being
+        # made. Refusing here would refuse the one case the tree proved, and the
+        # refusal is permanent (an entity hold is not carried forward).
         got.append(VETO_GROUP_JOIN)
 
     return [code for code in VETO_CODES if code in got]
 
 
-def judge(mention: dict, candidate: dict,
-          facts: dict | None = None) -> dict:
+def judge(mention: dict, candidate: dict, facts: dict | None = None) -> dict:
     """The band for one (mention, candidate) proposal.
 
     ``{"band": ..., "vetoes": [...], "reasons": [...]}`` where ``reasons`` are
@@ -370,8 +414,7 @@ def judge(mention: dict, candidate: dict,
     """
     vetoes = hard_vetoes(mention, candidate, facts)
     band = BAND_REVIEW if vetoes else BAND_MERGE
-    return {"band": band, "vetoes": vetoes,
-            "reasons": [VETO_REASONS[v] for v in vetoes]}
+    return {"band": band, "vetoes": vetoes, "reasons": [VETO_REASONS[v] for v in vetoes]}
 
 
 #: One readable sentence per veto code. Kept beside the codes rather than at the
@@ -380,23 +423,30 @@ def judge(mention: dict, candidate: dict,
 VETO_REASONS: dict[str, str] = {
     VETO_IDENTIFIER_CONFLICT: (
         "the two spellings carry disjoint identifier tokens — the identifier is "
-        "a contradicting identity, so this is not a merge"),
+        "a contradicting identity, so this is not a merge"
+    ),
     VETO_DATE_CONFLICT: (
         "the two spellings carry disjoint date tokens of the same kind — the "
-        "dates contradict, so this is not a merge"),
+        "dates contradict, so this is not a merge"
+    ),
     VETO_KIND_CONFLICT: (
         "the two spellings declare different kinds — a typed identity conflict, "
-        "so this is not a merge"),
+        "so this is not a merge"
+    ),
     VETO_TARGET_SUPPRESSED: (
         "the candidate carries a rejection that named no survivor, which "
-        "suppresses it outright rather than for one pair"),
+        "suppresses it outright rather than for one pair"
+    ),
     VETO_TARGET_RETIRED: (
         "the candidate carries resolved_from — a merge already retired it, so "
-        "binding here would bind to a retired carrier"),
+        "binding here would bind to a retired carrier"
+    ),
     VETO_GROUP_JOIN: (
         "the candidate is itself a merge survivor, so binding to it asserts "
         "membership of a group this mention was never compared against "
-        "(cross-group merge re-verification, M-4)"),
+        "(cross-group merge re-verification, M-4) — no alias of the candidate "
+        "carries this spelling"
+    ),
 }
 
 
