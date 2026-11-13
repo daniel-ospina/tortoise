@@ -375,9 +375,10 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
         #
         # ⛔ `-f`, BECAUSE THAT IS THE PROPERTY THAT MAKES THE READ TERMINATE (#12272 review round 8).
         # The read guard above admits anything that is `-e`-true and not a FIFO, and `tail -c 6000`
-        # is BOUNDED — it stops after 6000 bytes — but `wc -c` is not: unless its metadata reports a
-        # non-zero size it READS, and a character device such as `/dev/zero` (which `[ -p ]` does not
-        # catch) never reaches one, so
+        # is BOUNDED — it stops after 6000 bytes — but `wc -c` is not: it skips the read only for a
+        # REGULAR file whose metadata reports a non-zero size (a directory reports one and is read
+        # anyway, failing EISDIR — measured), so a character device such as `/dev/zero` (which `[ -p ]`
+        # does not catch) never reaches EOF and
         # `build_body` never returns and NOTHING is filed: no ledger entry, no exit status, the
         # #2240 silence this script exists to remove, one primitive past the FIFO guard. It is
         # the same class as that guard, so it takes the same shape: name the property that makes
