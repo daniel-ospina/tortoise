@@ -1450,6 +1450,32 @@ def test_the_control_artifact_covers_both_pools_and_all_three_scorers(lexical):
             f"{arm} does not carry the note saying it is a control")
 
 
+def test_the_artifacts_ceiling_note_is_the_one_the_tool_emits(lexical, tool_mod):
+    """The artifact's ceiling_note must be REPRODUCIBLE by the tool that writes it.
+
+    §7 points at this JSON as its citation, so a note left over from an earlier
+    draft hands an auditing reader an inference the PR says it removed: the
+    committed file still called the ceiling "arm 1's miss_past_k" — which is 0 at
+    k=P BY CONSTRUCTION, and therefore no bound at all — two revisions after the
+    brief and the body were corrected. The note is a GENERATED string, so the pin
+    is against the generator, not against a copy of its text: change either side
+    and this reds.
+    """
+    source = Path(tool_mod.__file__).read_text()
+    start = source.index('"ceiling_note": (')
+    literal = source[start:source.index("}", start)]
+    literal = literal[literal.index("(") + 1:]
+    emitted = "".join(re.findall(r'"([^"]*)"', literal))
+    assert emitted, "could not read the tool's ceiling_note literal"
+    for arm in ("rerank", "lexical_difflib", "lexical_overlap"):
+        got = lexical["arms"][arm]["ceiling_note"]
+        assert got == emitted, (
+            f"{arm}: the artifact's ceiling_note is not what the tool emits — "
+            f"regenerate the artifact (it is generated, never hand-edited)")
+        assert "its ceiling is arm 1" not in got, (
+            f"{arm}: the retracted 'arm 1's miss_past_k' reading is back")
+
+
 def test_the_control_arms_are_not_labelled_with_the_models_cost_story(lexical):
     """A lexical arm must not carry the cross-encoder's latency note.
 

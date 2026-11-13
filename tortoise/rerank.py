@@ -104,9 +104,11 @@ DEFAULT_FUSED_RERANK_POOL = 40
 #: have been scored — not the number that were. ⛔ THE OTHER TWO ARE COUNTED
 #: AGAINST DIFFERENT DENOMINATORS, so do not cross-check them against the bound:
 #: ``rerank_scored`` is how many were actually scored, and ``rerank_unscored`` is
-#: the CANDIDATE LIST minus ``rerank_scored`` — every row past the width, which is
-#: why it exceeds ``rerank_pool - rerank_scored`` as soon as the pool is wider
-#: than the bound (a 60-candidate read at width 40 reports
+#: the CANDIDATE LIST minus ``rerank_scored`` — every row past the width PLUS the
+#: rows inside the width that had no usable text (an operator with no ``content``
+#: that no label could supply, a ``:Source`` with no title) — which is why it
+#: exceeds ``rerank_pool - rerank_scored`` as soon as the pool is wider than the
+#: bound (a 60-candidate read at width 40 reports
 #: ``pool=40, scored=40, unscored=20``; ``tests/test_rerank_pool.py`` pins that
 #: shape at width 2). ⛔ The two readings coincide at EXACTLY ONE width —
 #: ``len(candidates) == rerank_pool`` — because ``unscored`` is ``candidates -

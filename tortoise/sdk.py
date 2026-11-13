@@ -4740,7 +4740,10 @@ def _fetch_rerank_pool_texts(graph, entity_type: str, graph_label: str,
         return {}
     if entity_type == "operator":
         match = "MATCH (n:Point {is_operator: true}) WHERE n.id IN $ids "
-    elif entity_type == "document":
+    elif entity_type in ("document", "source"):
+        # BOTH SPELLINGS are the same ``:Source`` read (``id_field="url"`` for each),
+        # so the predicate step 7 restates must apply to both — otherwise a
+        # ``source`` read scores exactly the rows the ``document`` path excludes.
         match = ("MATCH (n:Source) WHERE n.url IN $ids "
                  "AND n.documentKind IS NOT NULL ")
     else:
@@ -41935,15 +41938,17 @@ class TortoiseSDK:
                 _scored_rows = [{"id": pid, "content": _pool_texts[pid]}
                                 for pid in _scored_ids]
                 _scored_n = len(_scored_rows)
-                # ⛔ GUARD ON THE SCORED HEAD, NOT ONLY ON ``_pool_texts``.
-                # ``rerank_pool`` resolves ``pool`` through ``_clamp_int``, whose
-                # ``< 1`` rule turns a ZERO into the DEFAULT width (40) — so a read
-                # that returned rows but no USABLE text (every property null) would
-                # score the whole list of empty-content rows and report
-                # ``scored = len(rows)``, reproducing the very inversion above with
-                # a clean-looking trace. Falling through to the honest
-                # ``pool_text_read_failed`` arm is the correct report: this pool has
-                # nothing to score.
+                # ⛔ DO NOT SPEND A MODEL CALL ON A POOL WITH NOTHING TO SCORE.
+                # The REPORTING half of this case is the ``if not _scored_rows``
+                # arm below (it overwrites ``_rr_stats``, so the trace is honest
+                # whether or not this guard exists — measured, reverting this to
+                # ``if True:`` leaves the trace IDENTICAL). What only this guard
+                # prevents is the WORK: ``rerank_pool`` resolves ``pool`` through
+                # ``_clamp_int``, whose ``< 1`` rule turns a ZERO into the DEFAULT
+                # width (40), so a read that returned rows but no USABLE text
+                # (every property null) would load the model, lock it, and score
+                # twenty empty passages — for a result that cannot differ.
+                # ``test_a_pool_with_no_usable_text_makes_no_scorer_call`` pins it.
                 if _scored_rows:
                     _rows = _scored_rows + [
                         {"id": pid, "content": ""}
