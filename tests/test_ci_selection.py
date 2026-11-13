@@ -3001,12 +3001,17 @@ def test_root_file_read_by_a_test_is_never_allowlisted():
     the removed blanket `*.md`-at-root clause is reintroduced (it admitted
     README.md).
 
-    #8785: CHANGELOG.md, CONTRIBUTING.md and CLAUDE.md are deliberately NOT in
-    this list. They are prose whose CONTENT no test or tool reads (their only
-    mentions are docstrings, a generated-doc link, or `record-review.sh`'s
-    basename case), so they are reprieved to the tier-1 smoke by
-    `NON_CODE_DOC_PATHS` — pinned by
-    `test_non_code_doc_paths_have_no_content_reader`. Every name below IS read
+    #8785: CHANGELOG.md and CLAUDE.md are deliberately NOT in this list. They are
+    prose whose CONTENT no test or tool reads (their only mentions are docstrings,
+    a generated-doc link, or `record-review.sh`'s basename case), so they are
+    reprieved to the tier-1 smoke by `NON_CODE_DOC_PATHS` — pinned by
+    `test_non_code_doc_paths_have_no_content_reader`.
+    ⛔ CONTRIBUTING.md is NOT reprieved (it was, until #12313's
+    `tests/test_surface_manifest.py` started READING its text to hold the
+    documented surface rule to the shipped one). A doc a guard reads must run the
+    full matrix on the PR that edits it, so it left the list and
+    `test_doc_reprieve_is_per_path_not_per_diff` pins the FULL selection it now
+    takes. Every name below IS read
     (README.md by `test_embedded_durability_claim.py:62`; AGENTS.md by the
     base-subset pin; `.gitignore` by `test_kind_index.py:290`; …) and keeps FULL.
     """

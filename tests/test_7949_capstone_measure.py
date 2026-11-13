@@ -6905,6 +6905,28 @@ def test_the_neighbour_population_includes_the_line_that_names_the_manifest_file
             f"{position!r} — there is no tail allow-list to slip past any more")
 
 
+def _move_block_above(text: str, block: str, above: str) -> str:
+    """The same manifest with a column-0 `block:` section moved above `above:`.
+
+    ⛔ WHY THIS EXISTS (#12369 review, P2): the ordering arm's case used to delete
+    the `carve_out:` header and re-insert one entry before `uri_requiring:` — which
+    leaves `surfaces:` ABOVE `carve_out:` (measured: surfaces idx 123, carve_out idx
+    10279), so `not top < here` was never exercised and the arm could be deleted
+    with the whole table green. A case for an ORDERING arm has to move the block,
+    not rewrite its contents.
+    """
+    lines = text.splitlines(keepends=True)
+    start = next(i for i, ln in enumerate(lines) if ln.rstrip("\n") == f"{block}:")
+    end = start + 1
+    while end < len(lines) and not re.match(r"[a-z_][a-z0-9_]*:", lines[end]):
+        end += 1
+    moved = lines[start:end]
+    rest = lines[:start] + lines[end:]
+    at = next(i for i, ln in enumerate(rest) if ln.rstrip("\n") == f"{above}:")
+    rest[at:at] = moved
+    return "".join(rest)
+
+
 def _drop_block_entries(text: str, section: str) -> str:
     """The same manifest with one top-level block's `- ` entry rows removed."""
     lines = text.splitlines(keepends=True)
@@ -6957,10 +6979,10 @@ def test_the_arm_table_is_not_satisfied_by_an_unrelated_red():
     The table mutates a copy and requires the pin to raise. At a head where a stale
     TABLE ROW already raises, every case passes unconditionally — so the table's
     evidence is only valid while the UNMUTATED pin produces no block/document
-    finding. Measured at this head: the only failure is
-    `tortoise/sdk.py:25189 (cited by 04-plan.md)`, a row finding (root #12381), so
-    this baseline holds and the table is a live instrument. If this test ever reds,
-    the table has become inert and every case in it is worthless until it is fixed.
+    finding. (No count of such rows is stated here: a count is a tree state and
+    re-stales — an earlier revision of this paragraph named a specific stale row
+    that this same PR then re-derived.) If this test ever reds, the table has
+    become inert and every case in it is worthless until it is fixed.
     """
     try:
         test_the_epic_bundle_cites_the_branch_rederived_resolve()
@@ -7036,14 +7058,26 @@ def test_the_section_entries_membership_paragraph_is_rederived():
                              "`test_pack_logic_writeprobe_11083.py` sits at `:9987` "
                              "on this head.\n", man),
      "neighbour loop (a number on a line naming the ENTRY)"),
-    # ⛔ IT MUST BE A CITE THE NEIGHBOUR ARM EXEMPTS, or the case is satisfied by a
-    # sibling arm and the doc-wide arm can be deleted unnoticed (measured: appending
-    # a bare "line 9987" was caught by the neighbour loop instead). `_OTHER_FILE`
-    # exempts a line that cites another module, so this one is the doc-wide arm's
-    # alone.
-    (lambda doc, man: (doc + "\nSee `tools/ci_selection.py` and "
-                             "`config/ci-surfaces.yml:9987`.\n", man),
-     "doc-wide `_MANIFEST_CITE` (a cite the neighbour arm exempts)"),
+    # ⛔ THE DOC-WIDE ARM'S FIRST ROW WAS A DUPLICATE, NOT A SOLE CATCHER (#12369
+    # review, P3): it appended ``See `tools/ci_selection.py` and
+    # `config/ci-surfaces.yml:9987`.`` and claimed `_OTHER_FILE` exempted it, which is
+    # false — the line names the manifest's FILENAME, so `_MANIFEST_FILE` subtracts it
+    # and `_neighbour_number_strays` catches `:9987` too (measured: `[':9987\'`',
+    # `'9987']`), i.e. the case was a duplicate of the row above with a false label.
+    # The replacement is the shape ONLY this arm refuses, measured on the CLAIM
+    # sentence (which the neighbour loop SKIPS, `_in_neighbour_population` returns
+    # False for `line == claim_line`) where the sentence's own bare-number arm
+    # (`sentence_numbers` → `_bare_number_hits`) refuses `2026` as a YEAR (`_BARE_YEAR`)
+    # and `_LINE_CITE` needs a separator the positional form does not carry:
+    #
+    #     2026 lines into `config/ci-surfaces.yml`
+    #     _MANIFEST_CITE -> True   _LINE_CITE -> False   _bare_number_hits -> []
+    #
+    # Measured this way: RED here, and GREEN with the `if numbered:` arm deleted.
+    (lambda doc, man: (doc.replace(
+        "The pin reads the block",
+        "The pin reads the block (2026 lines into `config/ci-surfaces.yml`)", 1), man),
+     "the doc-wide `_MANIFEST_CITE` arm (a YEAR-shaped number the other two refuse)"),
     (lambda doc, man: (doc, man.replace(
         "\nslow_files:\n", "\nslow_files:\n- test_capstone_leak_7949.py\n", 1)),
      "the `slow_files:` leak arm"),
@@ -7068,25 +7102,22 @@ def test_the_section_entries_membership_paragraph_is_rederived():
      "the basename comparison (a PATH-PREFIXED entry in `slow_files:`)"),
     (lambda doc, man: (doc, ""),
      "the empty-manifest refusal (`_parse_manifest` returns None)"),
-    (lambda doc, man: (doc, man.replace("\ncarve_out:\n", "\n", 1).replace(
-        "\nuri_requiring:\n", "\ncarve_out:\n- test_pack_logic_writeprobe_11083.py\n"
-        "\nuri_requiring:\n", 1)),
+    (lambda doc, man: (doc, _move_block_above(man, "carve_out", "surfaces")),
      "the `surfaces:`-above-`carve_out:` ordering arm"),
     # ⛔ SIX SOLE-CATCHER ARMS A REVIEW DELETED WITH THE SUITE STILL GREEN (measured
     # one at a time). Each case below is the shape ONLY its arm refuses; the comment
     # on each says which deletion turns it green.
-    #   `if numbered:` (the doc-wide arm) — needs a cite the NEIGHBOUR arm cannot
-    #   see, i.e. one whose line does not name the manifest filename; the earlier
-    #   case here DID name it, so the neighbour loop caught it and the doc-wide arm
-    #   was unpinned.
-    # ⚠️ THE DOC-WIDE `_MANIFEST_CITE` ARM HAS NO ROW HERE AND THAT IS THE MEASURED
-    # ANSWER, not an omission: every line it can see names the manifest, and every
-    # manifest-naming line is already in the neighbour population
-    # (`_BLOCK_WORDS_WITH_MANIFEST`), so the neighbour loop refuses the same cites
-    # first. Deleting the doc-wide arm leaves this whole table green (measured). It
-    # is kept as a second, stricter reader over the same population — a refinement,
-    # like `elif len(carve) > 1:` below — and it is listed here as such rather than
-    # given a case that would pass either way.
+    #   `if numbered:` (the doc-wide arm) — needs a cite the OTHER two arms cannot
+    #   see. Every line it can see names the manifest, and every manifest-naming line
+    #   is in the neighbour population (`_BLOCK_WORDS_WITH_MANIFEST`) — EXCEPT the
+    #   claim sentence, which that loop skips by construction. There `_LINE_CITE` and
+    #   `sentence_numbers` read the same line, so the arm's unique class is narrow and
+    #   the row pins exactly it: a NUMBER both of those refuse (a bare 19xx/20xx run
+    #   is a YEAR to `_BARE_YEAR`; `_LINE_CITE` needs a separator) bound to the
+    #   manifest with a POSITIONAL tail. Two earlier cuts of this row did NOT reach
+    #   that shape: one appended a line that names the manifest (the neighbour loop
+    #   caught it, duplicate) and one was deleted on the reading that no such row
+    #   exists — both refuted by measurement, the second by the row above.
     #
     # ⚠️ ONE MORE REFINEMENT, DECLARED FOR THE SAME REASON (measured): the non-list
     # shape guard in `_section_entries` raises into the same collected
