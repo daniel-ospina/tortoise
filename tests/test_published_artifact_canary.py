@@ -633,6 +633,15 @@ def test_the_transcript_DIRECTORY_is_paired_at_every_site_that_names_it():
     job …)" — the exact evidence loss round 6 fixed by making the log incremental, one
     level out. This is the same class the authors already recognised for the artifact
     NAME and left unpinned for the PATH.
+
+    ⛔ SIBLING PIN, kept deliberately: `test_the_transcript_RELAY_is_one_agreement_across_four_sites`
+    pins the SAME agreement as "four strings" (the round-10 pass, scoped to
+    `release-artifact-canary.yml`). The counts differ because they count different things —
+    four STRINGS vs five SITES — not because the contract differs. This one is kept because
+    it also covers `publish-pypi.yml`'s build job, which the sibling does not, and because it
+    compares the WHOLE normalised path at every site (round 12: the last-component form was
+    blind to `$RUNNER_TEMP/logs/canary`). Neither is redundant; do not delete one as a
+    duplicate without checking the other's scope.
     """
     import re
 
