@@ -127,6 +127,13 @@ subject a 100-word `content` carried, so distinct facts in the same session crow
 Numbers in `gate.json` (the three gates, ~15 min: it encodes 15,008 composed texts) and in
 `quote_identity.json` (root cause, ~30 s, no encoding — it reads the same row cache):
 
+⚠️ **The probes' own `Usage` docstrings still show the HISTORICAL in-place invocation**
+(`--out docs/evidence/11739-composed-gate/gate.json`, and the same for `quote_identity.py`). The
+recipe below supersedes them. That is deliberate: the probes are byte-frozen because
+`provenance.probe_sha256` is the bundle's entire binding, and `quote_identity.py` has no `--attest`,
+so correcting its docstring would permanently red the digest with no repair short of a re-run that
+re-stamps `measured_at` — i.e. it would replace the baseline this note exists to protect.
+
 ```bash
 cd <checkout>
 set -a; . ~/keys.env; set +a      # TORTOISE_MCP_API_KEY
