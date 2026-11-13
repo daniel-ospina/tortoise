@@ -225,16 +225,27 @@ do not: a warning that names nothing serves a caller who does not exist. The **9
 > ⚠️ **Measured again at #4282 Phase 3.2:** the five `run_onboarding` names in that list have
 > since been REMOVED — `tortoise_onboarding_state`, `tortoise_onboarding_seed`,
 > `tortoise_onboarding_demo_create`, `tortoise_onboarding_github_connect`,
-> `tortoise_onboarding_github_status` are no longer in `TOOL_REGISTRY` (76 live tools then). The
-> remaining four — `tortoise_analyze`, `tortoise_backfill_v25`, `tortoise_packs_list`,
-> `tortoise_pack_install` — are still live and keep their own entries here. **This branch's
-> `graph_overview` container then took the live surface 76 → 72**, so 72 is the figure at this
-> head (`uv run python tools/surface_manifest.py check` is the live count).
+> `tortoise_onboarding_github_status` are no longer in `TOOL_REGISTRY` (76 live tools then).
+> **This branch's `graph_overview` container then took the live surface 76 → 72**, so 72 is the
+> figure at that head (`uv run python tools/surface_manifest.py check` is the live count).
 > **The five REMOVED tools'** capabilities survive as hand-written REST
 > routes in `tortoise/hosted_api.py` (`POST /v1/demo`, `GET|PATCH /v1/onboarding/state`,
 > `POST /v1/onboarding/seed`, `POST /v1/onboarding/github/connect`,
 > `GET /v1/onboarding/github/status`); `tortoise/selfhost_api.py` serves only the state and
 > seed routes, so the other three are hosted-only.
+>
+> ⚠️ **Measured again at #11609 batch 1:** the remaining four — `tortoise_analyze`,
+> `tortoise_backfill_v25`, `tortoise_packs_list`, `tortoise_pack_install` — are now REMOVED as
+> well, and unlike the five above they are **ARCHIVED** rather than merely deleted:
+> `archive/mcp-tools/b1-removed-no-destination/<tool>.py` holds each one's verbatim
+> `ToolDefinition` + handler, per the owner ruling of 2026-11-12
+> ([comment `6831894340`](https://github.com/daniel-ospina/tortoise/issues/11609#issuecomment-6831894340)):
+> *"Anything outside the target gets removed — archived code, so not available … but ultimately
+> outside the product because we don't want it."* No replacement is named, because there is
+> none (the ruling above: no warning that names nothing). Their capabilities survive on
+> SDK/REST where one exists — `GET /v1/packs` and `POST /v1/packs/manifests` for the two pack
+> tools — and the live surface is **68** MCP tools after this batch (`surface_manifest.py
+> check` is the live count; the target is 27, and batches 2+ are the containers).
 
 **What this does NOT authorise — stated because the answer was broader than the question.** The
 **18** existing `RETIRED_USE_INSTEAD` forward entries are a *different population*: every one of them

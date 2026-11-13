@@ -38,7 +38,7 @@ from tortoise.live import EPISTEMIC_LABELS
 from tortoise.mcp_auth import (_current_org_id, _current_org_limits,
                                _current_scopes, _current_legacy_full_access,
                                _current_graph_id, _transport_mode, _tool_group,
-                               _get_org_sdk, HTTP_ALLOWED, ERR_UNAUTHORIZED,
+                               _get_org_sdk, HTTP_ALLOWED,
                                ERR_EXCLUDED, ERR_TIMEOUT, SELFHOST_ORG_ID)
 # #3834: the transport wait-bound vocabulary is read as a MODULE attribute
 # (``tortoise.mcp_auth`` is its single home), so the fast path pays no
@@ -1534,23 +1534,29 @@ def _reject_graph_bound_mcp_org_surface(surface: str) -> None:
 #: dispatch point below, NEVER inside a handler: a handler that charges its own
 #: limit is the second implementation of one budget that this seam exists to
 #: prevent, and it is the entry point the REST twin cannot see.
-_MCP_BUDGETED_OPS: dict[str, str] = {
-    # tortoise_pack_install reaches pack_manifest_store.upsert_tenant_manifest
-    # directly (no HTTP), so #2038's per-IP budget on the REST twin
-    # POST /v1/packs/manifests never applied to it.
-    "tortoise_pack_install": "pack_manifest",
-}
+#:
+#: ⛔ EMPTY since #11609 batch 1 removed `tortoise_pack_install` (owner ruling
+#: comment 6831894340 — no destination in the approved 27-tool target), which was
+#: this map's only member: `upsert_tenant_manifest` is unreachable from the MCP
+#: without it, so `pack_manifest` (REST twin `POST /v1/packs/manifests`) has no
+#: in-process MCP caller left. The SEAM stays — the dispatch point below is the one
+#: funnel every client tool call passes through, so the next budgeted op belongs in
+#: this map rather than in a second implementation inside its own handler.
+_MCP_BUDGETED_OPS: dict[str, str] = {}
 
 
 async def _check_mcp_op_budget(name: str, org_id: str) -> None:
     """#2050: charge the sensitive-op budget for an MCP tool, or refuse.
 
-    `tortoise_pack_install` is the cheapest path to the same expensive
-    operation the REST surface bounds: it calls `upsert_tenant_manifest`
-    in-process, consuming no `pack_manifest` budget at all and bounded only by
-    the generic 100/min per-key middleware — a ~1200x looser bound than the
-    REST twin's 5/hr. The dispatch point is the ONE funnel every client tool
-    call passes through on every transport, so the budget is applied HERE.
+    `tortoise_pack_install` WAS the cheapest path to the same expensive operation
+    the REST surface bounds: it called `upsert_tenant_manifest` in-process,
+    consuming no `pack_manifest` budget at all and bounded only by the generic
+    100/min per-key middleware — a ~1200x looser bound than the REST twin's 5/hr.
+    That tool is REMOVED (#11609 batch 1), so `_MCP_BUDGETED_OPS` is empty and this
+    function returns on its first line; the seam is kept for the next budgeted op
+    (see the map's own note). The dispatch point is the ONE funnel every client
+    tool call passes through on every transport, so a budget applied HERE is
+    applied everywhere.
 
     Team scope, not IP: the caller is an authenticated agent server, and a
     per-IP frame would be both wrong (shared egress addresses) and unavailable
@@ -3018,8 +3024,14 @@ def _dry_run_tool_names() -> frozenset[str]:
     return _DRY_RUN_TOOLS
 
 
-# #329: per-org per-minute LLM-call budget for tortoise_analyze (operator LLM
-# keys back outbound calls; the rate limiter alone is not the bound).
+# #329: per-org per-minute LLM-call budget for the ARCHIVED `tortoise_analyze` tool.
+# ⛔ KEPT, not deleted with the tool (#11609 batch 1 review P2): the frozen handler in
+# `archive/mcp-tools/b1-removed-no-destination/tortoise_analyze.py` calls this and
+# `_scrub_analyze_answer` below, and that file's restore path is "copy each block back" —
+# so deleting them would make a restore `NameError` on its first call while
+# `archive_surface.py verify-anchors` stayed green. They are the tool's runtime
+# dependencies, not the tool: no live registry row reaches them, and ruff sees them as
+# used because the module still defines them for that path.
 _ANALYZE_LLM_BUDGET: dict[str, list[float]] = {}
 
 
@@ -3408,7 +3420,9 @@ def _scrub_analyze_answer(answer: str) -> str:
     """#329: boundary scrub for analyze() answers — strip common internals.
 
     analyze() already redacts its own error paths; this is defense-in-depth
-    against future regressions (paths, hostnames, credentials).
+    against future regressions (paths, hostnames, credentials). KEPT with the
+    archived `tortoise_analyze` handler (#11609 batch 1 review P2) — see the note
+    above `_ANALYZE_LLM_BUDGET`.
     """
     import re
     answer = re.sub(r"://[^@\s]*@", "://***@", answer)
@@ -4031,71 +4045,6 @@ def tortoise_list_batch(batch_id: str) -> dict:
 def tortoise_list_batches(limit: int = 20) -> list[dict]:
     """Batch discovery — recent distinct ingest batch_ids (epic #902 A13)."""
     return _safe(_get_org_sdk().list_batches, limit=limit)
-
-
-def tortoise_packs_list() -> list[dict]:
-    """List this org's ACTIVE packs (#318 — multi-tenant pack isolation).
-
-    Shared pack catalog + the tenant graph's PackInstall activation records
-    (ensure-then-read core shared with REST GET /v1/packs — no REST/MCP
-    divergence). Auth-only scoping via the _current_org_id contextvar seam:
-    cross-tenant access is structurally impossible. D6 masking: empty result
-    when nothing is installed (never an error); the only error surface is
-    auth/transport failure.
-    """
-    # Fail-closed (#318): in HTTP/tenant mode a missing org context must
-    # NEVER fall back to the base (default-namespace) SDK for pack
-    # introspection — pack state is per-tenant. (stdio/selfhost keeps the
-    # base SDK: single-tenant, the base graph IS the tenant.)
-    if _current_org_id.get() is None and _transport_mode.get() == "http":
-        return _SafeError({"error": "Authentication required. No team context.",
-                           "code": ERR_UNAUTHORIZED})
-    from tortoise.pack_state import get_tenant_packs
-    return _safe(lambda: get_tenant_packs(_get_org_sdk()))
-
-
-def tortoise_pack_install(manifest_yaml: str) -> dict:
-    """#1935: install a custom expansion pack on the HOSTED surface.
-
-    Validates against the shared registry validator (schema + cross-pack)
-    plus the tenant policy (reserved starter namespace + ontology-only v1),
-    stores the manifest graph-natively in the tenant's graph
-    (``:PackManifest``) and activates it (idempotent).
-
-    DEPLOYMENT-GATED (#1935 R10): on SELF-HOST this tool is an actionable
-    stub — self-host configures packs via the filesystem packs dir
-    (``TORTOISE_PACKS_DIR``) + the ``tortoise pack`` CLI instead. The gate
-    is the serving app: ``tortoise.hosted_api`` is only imported in the
-    hosted deployment.
-    """
-    # C5 #2114 (final-gate P2): packs are DEFAULT-graph org-level state —
-    # graph-bound keys rejected (REST twin upload_pack_manifest parity; a
-    # per-graph install would orphan pack state list_packs never sees).
-    _reject_graph_bound_mcp_org_surface("pack install")
-    import sys as _sys
-
-    from tortoise.pack_manifest_store import upsert_tenant_manifest
-    if _sys.modules.get("tortoise.hosted_api") is None:
-        return _SafeError({
-                       "installed": False,
-                       "error": "tortoise_pack_install is HOSTED-only — on self-host add "
-                                 "custom packs via the filesystem packs dir "
-                                 "(TORTOISE_PACKS_DIR) + the 'tortoise pack' CLI.",
-                   })
-    if _transport_mode.get() != "http":
-        return _SafeError({"installed": False,
-                           "error": "pack install requires the HTTP transport."})
-    try:
-        record = upsert_tenant_manifest(_get_org_sdk(), manifest_yaml)
-    except ValueError as e:
-        # A REJECTED manifest is a refusal, even though it carries no `error`
-        # key (`validation_errors` names the reason). Left as a plain dict the
-        # seam recorded the dispatch `ok` (#9609 review): the exact-payload arm
-        # of `_returned_safe_failure` classifies it once it IS an `_SafeError`,
-        # and the wire shape does not move (dict subclass).
-        return _SafeError({"installed": False,
-                           "validation_errors": [str(e)]})
-    return {"installed": True, **record}
 
 
 def tortoise_list_tags() -> list[dict]:
@@ -5235,98 +5184,6 @@ def tortoise_topic_summarize(topic: str,
                  include_relationships=include_relationships)
 
 
-# ── Graph Analysis ──────────────────────────────────────────────
-
-def tortoise_analyze(question: str,
-                    entityId: str | None = None,
-                    anchor_ids: Any = None,
-                    max_hops: int = 1,
-                    rel_filter: str = "IMPL|NAND",
-                    direction: str = "both") -> dict:
-    """Answer natural language questions about the Tortoise epistemic graph.
-
-    Ask things like: "where is the disagreement?" "what supports claim X?"
-    "what are we most uncertain about?" "show me the evidence chain for Y."
-
-    Optional entityId scopes the analysis to a specific entity's subgraph.
-    Optional anchor_ids (list of Point IDs) scopes via BFS subgraph selection.
-    max_hops: BFS depth from anchors (default 1).
-    rel_filter: edge types — "IMPL", "NAND", or "IMPL|NAND" (default).
-    direction: IMPL traversal — "incoming", "outgoing", or "both" (default).
-    Returns {"answer": "...", "raw": [...], "pattern": "...", "query": "..."}
-    — plus, with the W4 enrichment flag ON (epic #2080), an additive ``why``
-    array of canonical why-blocks (support_chain/ep/conflicts/supersession/
-    assessment/tradeoffs/dig_deeper) for the ids surfaced in ``raw`` (zero-LLM,
-    bounded batch reads; absent with the flag OFF — byte-identical). #11928:
-    the anchors are the four epistemic labels, not ``:Point`` only — a goal
-    (``:Object``) or a reading (``:Event``) gets a block, and ``assessment``
-    names the derived judgement that decided its belief.
-    """
-    from tortoise.analyze import analyze
-    from tortoise.navigation import entityProfile
-
-    anchor_ids = _parse(anchor_ids)
-
-    entity_subgraph_ids = None
-    if entityId:
-        try:
-            proj = _get_org_sdk()._get_proj()
-            # #236: HTTP mode must use the org graph, NOT the hardcoded
-            # "tortoise" graph — that hardcode bypasses org isolation via
-            # db.select_graph() (cross-tenant read). Stdio keeps "tortoise".
-            # #9340: the SELECTED graph wins over the workspace default, or
-            # the anchors come from a different graph than the analysis runs on.
-            gname = (_dispatch_graph_name()
-                     if _transport_mode.get() == "http" else "tortoise")
-            profile = entityProfile(proj.db, gname, entityId, hops=2)
-            ids = {entityId}
-            for category in profile.get("connected", {}).values():
-                for node in category:
-                    if node.get("id"):
-                        ids.add(node["id"])
-            entity_subgraph_ids = ids
-        except Exception:
-            pass  # fall back to full-graph analysis
-
-    # #329: bound paid outbound LLM calls per org per minute — beyond budget
-    # the tool degrades to keyword-only classification.
-    use_llm = _analyze_llm_budget_available()
-    result = _safe(analyze, question, _get_org_sdk()._get_proj(),
-                   entity_subgraph_ids=entity_subgraph_ids,
-                   anchor_ids=anchor_ids,
-                   max_hops=max_hops,
-                   rel_filter=rel_filter,
-                   direction=direction,
-                   use_llm=use_llm)
-    # #329 defense-in-depth: analyze() self-redacts, but scrub the answer at the
-    # boundary too in case a future error path leaks internals.
-    if isinstance(result, dict) and isinstance(result.get("answer"), str):
-        result["answer"] = _scrub_analyze_answer(result["answer"])
-    # W4 (#2101): additive why-layer enrichment — the additive keys ride the
-    # ``why`` entries for the epistemic ids surfaced in ``raw`` (flag-gated;
-    # absent with the flag OFF — the response stays byte-identical). #11928:
-    # the anchors are the four labels, not ``:Point`` only — do NOT narrow them
-    # back to "the Point ids", which is the #7927 partial-widening shape.
-    # Zero-LLM, bounded batch reads, fail-open (no key on assembly error).
-    if isinstance(result, dict) and result.get("raw"):
-        try:
-            from tortoise.why import (  # noqa: I001
-                assemble_why_blocks, point_ids_in_raw, w4_enrichment_enabled,
-            )
-            if not w4_enrichment_enabled():
-                return result
-            _proj = _get_org_sdk()._get_proj()
-            _ids = point_ids_in_raw(result["raw"])[:20]
-            if _ids:
-                _blocks = assemble_why_blocks(_proj, _ids)
-                result["why"] = [b for pid, b in _blocks.items()
-                                  if pid in _ids]
-        except Exception as e:  # noqa: BLE001, RUF100 — fail-open, never break the turn
-            _log.warning("W4 why-layer enrichment failed (analyze): %s", e)
-            pass
-    return result
-
-
 # ── P1-3: Staleness Detection ─────────────────────────────────
 
 def tortoise_stale(days: int = 30, limit: int = 50) -> dict:
@@ -6251,16 +6108,6 @@ def tortoise_get(id: str, type: str | None = None,
         return tortoise_get_governance(id)
     return _SafeError({"error": f"get: unknown type {type!r}. "
                                 f"Valid types: {', '.join(_GET_TYPES)}"})
-
-
-def tortoise_backfill_v25(dry_run: bool = True) -> dict:
-    """Backfill database to ONTOLOGY v2.5 schema.
-
-    #236: EXCLUDED from tenant HTTP — schema-level migration (operator-only).
-    """
-    if _transport_mode.get() == "http":
-        return _http_excluded_error()
-    return _safe(_get_org_sdk().backfill_v25, dry_run=dry_run)
 
 
 # ── Phase-4 mining/promotion/dedup/timeline surface (#787, DE2E-7) ──

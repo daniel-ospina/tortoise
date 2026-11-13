@@ -312,10 +312,6 @@ def drive_handler(name: str, fn: Any) -> DriveResult:
 # LISTED condition, closed in both directions — an unlisted no-read entry fails,
 # and a listed entry that starts reading fails as a stale ledger row.
 _HANDLER_SERVED_NO_SDK_READ: dict[str, str] = {
-    "tortoise_pack_install": (
-        "hosted-only (#1935): on self-host it returns the actionable stub before "
-        "importing the hosted pack store, so no SDK attribute is read."
-    ),
     "tortoise_session_capture": (
         "hosted-only: with no org (or the self-host sentinel) it returns the "
         "requires-hosted-mode error before any SDK access."

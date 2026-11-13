@@ -437,8 +437,9 @@ path is a pre-release backup per the drill above, not a downgrade.
 Tortoise ships five starter expansion packs by default (`dev`, `marketing`,
 `product-strategy`, `pm`, `agent-ops`) — YAML manifests that extend the core
 ontology with a domain vocabulary, chains, and extraction guidance. The
-starter set loads automatically on every install; `tortoise_packs_list` shows
-your active packs.
+starter set loads automatically on every install; `GET /v1/packs` shows
+your active packs (the MCP `tortoise_packs_list` tool was removed in #11609 —
+packs are SDK/REST-only).
 
 - **Use a custom pack:** put `packs/<namespace>/manifest.yaml` under
   `TORTOISE_PACKS_DIR` and restart (missing/empty dirs warn and fall back —

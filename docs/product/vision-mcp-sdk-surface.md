@@ -82,15 +82,28 @@ the map and the registry disagree — a mismatch is a finding, not something to 
 
 | | |
 |---|---|
-| Registry tools | **95** |
+| Registry tools | **91** |
 | Absorbed into the 27 MCP targets | **88** |
 | Absorbed into a builder-only SDK method (not on the MCP) | **1** |
 | Tenancy (SDK/REST only) | **2** |
-| Retired | **4** |
+| Retired | **0** |
 | MCP target tools | **27** |
 
-**The four bucket rows sum to 95.** (The last row is the target *surface*, not a bucket —
+**The four bucket rows sum to 91.** (The last row is the target *surface*, not a bucket —
 27 targets received those 88 absorbed tools many-to-one, so it is not part of the sum.)
+
+The **Retired** row fell **4 → 0** in #11609 **batch 1**: the last four
+no-destination tools — `tortoise_analyze`, `tortoise_backfill_v25`, `tortoise_packs_list`,
+`tortoise_pack_install` — left the served registry entirely, per the owner ruling of
+2026-11-12 (comment
+[`6831894340`](https://github.com/daniel-ospina/tortoise/issues/11609#issuecomment-6831894340):
+*"there is no per-tool destination … Anything outside the target gets removed — archived
+code, so not available"*). They are **archived**, not retired-forward: each one's verbatim
+`ToolDefinition` + handler is in `archive/mcp-tools/b1-removed-no-destination/`, so a
+removal is inspectable and reversible without a serving shim, and the reasons are recorded
+in `tools/bridge_table.py`'s `REMOVED_IN_BATCH_1`. The registry fell **95 → 91** (72 live +
+23 retired shims → 68 live + 23 retired shims). The absorbed, SDK-only and tenancy buckets
+are unmoved — a removal absorbs nothing.
 
 The **Retired** row fell **9 → 4** in #4282 **Phase 3.2** (2026-11-04): five of the nine were
 DELETED from the served registry rather than retired into nothing, because the owner's
@@ -98,9 +111,10 @@ DELETED from the served registry rather than retired into nothing, because the o
 `tortoise_onboarding_seed`, `tortoise_onboarding_demo_create`,
 `tortoise_onboarding_github_connect`, `tortoise_onboarding_github_status`). The registry fell
 **99 → 94** with them (81 live + 18 retired shims → 76 live + 18 retired shims), the first
-movement of the advertised surface since #3540. This branch's `graph_overview` container then
-moved the same population to **72 live + 23 retired shims = 95 served**, which is the figure
-the table above records. Every capability those five carried survives
+movement of the advertised surface since #3540. The `graph_overview` container then moved the
+same population to **72 live + 23 retired shims = 95 served**, and #11609 batch 1 moved it to
+**68 live + 23 retired shims = 91 served** — the figures the table above records. Every
+capability those five carried survives
 on REST — each route is hand-written in `tortoise/hosted_api.py` — and the two tenant-visible
 reads are rehomed to the tenancy block. Their recorded reasons live in
 `tools/bridge_table.py::REMOVED_IN_PHASE_3_2`.

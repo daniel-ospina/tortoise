@@ -423,12 +423,14 @@ For bulk, use the REST API (`POST /v1/points`) or the SDK — both accept the sa
 Tortoise ships five starter packs by default (`dev`, `marketing`,
 `product-strategy`, `pm`, `agent-ops`) — declarative YAML that extends the
 core ontology with domain vocabulary, chains, and extraction guidance.
-`tortoise_packs_list` shows your active packs.
+`GET /v1/packs` shows your active packs (the MCP `tortoise_packs_list` tool was
+removed in #11609 — packs are SDK/REST-only).
 
 - **Install a custom pack per team:** `POST /v1/packs/manifests` with the
-  manifest YAML (or the `tortoise_pack_install` MCP tool) — validated against
+  manifest YAML — validated against
   the shared schema; ontology-only v1 (no connectors/tools on tenant packs).
-  Reserved starter namespaces are rejected.
+  Reserved starter namespaces are rejected. (The MCP `tortoise_pack_install` tool
+  was removed in #11609; the REST route is the hosted install path.)
 - **Author one:** same manifest format as self-host
   ([docs/EXPANSION_PACKS.md](EXPANSION_PACKS.md)).
 

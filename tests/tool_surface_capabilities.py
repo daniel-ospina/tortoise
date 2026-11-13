@@ -37,8 +37,14 @@ from tortoise.tool_registry import MAINTENANCE_TIER, WRITE_RISK_TIERS
 # Operator-only operations whose exclusion from tenant HTTP is a *policy*
 # decision, not a structural capability (#329).  Keyed on the operation, not
 # the tool name.
+#
+# ⛔ `backfill_v25` LEFT this set in #11609 batch 1: its only MCP binding,
+# `tortoise_backfill_v25`, is ARCHIVED
+# (`archive/mcp-tools/b1-removed-no-destination/tortoise_backfill_v25.py`), so there is no
+# `http_policy` left to check and the "has no tool binding" arm would (correctly) red.
+# The SDK method itself still exists — the SDK surface is trimmed by its own batch — so a
+# future MCP row that re-declares `backfill_v25` must re-add it here.
 HTTP_EXCLUDED_SDK_METHODS: dict[str, str] = {
-    "backfill_v25": "whole-schema migration",
     "dream": "CPU-heavy whole-graph EP (#329)",
 }
 
@@ -54,15 +60,21 @@ HTTP_EXCLUDED_SDK_METHODS: dict[str, str] = {
 READ_THROUGH_WRITE_METHODS: dict[str, str] = {
     "compute_confidence": "persists computed `SET n.confidence` (#1157/#4122)",
     "get_confidence": "lazy `dream(dirty_only=True)` writes n.confidence (#1157/#4122)",
-    "get_tenant_packs": "self-heal `ensure_tenant_packs` MERGE (:PackInstall) (#4122)",
+    # `get_tenant_packs` LEFT this set in #11609 batch 1 with its only MCP door
+    # (`tortoise_packs_list`, ARCHIVED); the read-through posture it recorded is
+    # unchanged on the REST twin `GET /v1/packs`. A future MCP door must re-add it.
 }
 
 # Graph writers reached through helpers OUTSIDE the sdk.py derivation boundary
 # (pack_manifest_store.py, mining.py, hosted_api.py).  Each must be bound to a
 # writer-annotated tool that is in WRITE_TOOL_NAMES.
 NON_SDK_WRITER_OPERATIONS: dict[str, str] = {
-    "upsert_tenant_manifest": "MERGE (:PackManifest)/(:PackInstall) — "
-                              "tortoise/pack_manifest_store.py",
+    # EMPTY since #11609 batch 1: `upsert_tenant_manifest` was reached from the MCP by
+    # `tortoise_pack_install`, which is now ARCHIVED
+    # (`archive/mcp-tools/b1-removed-no-destination/tortoise_pack_install.py`). The
+    # helper itself is untouched — `POST /v1/packs/manifests` still calls it, inside
+    # `hosted_api`, where the writer annotation is the REST route's business rather than a
+    # registry row's. A future MCP door onto it must re-declare it here AND bind it below.
 }
 
 # The TOOL that carries each non-SDK writer operation.  #4035 corrected the
@@ -70,7 +82,7 @@ NON_SDK_WRITER_OPERATIONS: dict[str, str] = {
 # (`sdk_method=""`; the helper is reached from `mcp_server.py`), so the
 # operation is no longer a declared SDK label — the binding is by TOOL NAME.
 NON_SDK_WRITER_BINDINGS: dict[str, str] = {
-    "upsert_tenant_manifest": "tortoise_pack_install",
+    # EMPTY since #11609 batch 1, with NON_SDK_WRITER_OPERATIONS above.
 }
 
 # Reads reached through helpers OUTSIDE the sdk.py derivation boundary.  A
@@ -81,8 +93,11 @@ NON_SDK_WRITER_BINDINGS: dict[str, str] = {
 # (`tortoise_packs_list.sdk_method=""` — handler-served, #4035) and a
 # declared-set entry with no declaring registry row is otherwise unchecked.
 NON_SDK_READ_OPERATIONS: dict[str, str] = {
-    "get_tenant_packs": "pack_state.get_tenant_packs → self-heal "
-                        "`ensure_tenant_packs` MERGE (:PackInstall) (#4122)",
+    # EMPTY since #11609 batch 1: `get_tenant_packs`' only MCP declaration was
+    # `tortoise_packs_list` (`sdk_method=""`), and that tool is ARCHIVED
+    # (`archive/mcp-tools/b1-removed-no-destination/tortoise_packs_list.py`). The read is
+    # still served by `GET /v1/packs` (`hosted_api`), which is outside this file's
+    # MCP-surface population. A future MCP door onto it must re-declare it here.
 }
 
 # The TOOL that carries each non-SDK read operation, mirroring
@@ -90,7 +105,7 @@ NON_SDK_READ_OPERATIONS: dict[str, str] = {
 # `by_method` index, so the read-classification property must also be asserted
 # per TOOL NAME or it silently stops being checked (#4035 review).
 NON_SDK_READ_BINDINGS: dict[str, str] = {
-    "get_tenant_packs": "tortoise_packs_list",
+    # EMPTY since #11609 batch 1, with NON_SDK_READ_OPERATIONS above.
 }
 
 # ── #9576: read-classified RETENTION housekeeping through another module ─────

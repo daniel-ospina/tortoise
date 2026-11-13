@@ -188,7 +188,6 @@ DESTINATION = {
     "tortoise_ingest": "sdk:write_knowledge_batch",
     "tortoise_session_capture": "mine_knowledge_from_session",
     "tortoise_mine_conversations": "mine_knowledge_from_directory",
-    "tortoise_backfill_v25": "REMOVED",
     # ── Operators / relations ───────────────────────────────────────
     "tortoise_mitigate_operator": "adjust_relationship",
     "tortoise_operator_action": "adjust_relationship",
@@ -231,13 +230,16 @@ DESTINATION = {
     # #3540 ruling B: retired INTO the consolidated operation — the 0.1
     # destination is the tool that replaces it, so the redirect agrees.
     "tortoise_onboarding_session_recording": "manage_sources",
-    "tortoise_pack_install": "REMOVED",
-    "tortoise_packs_list": "REMOVED",
+    # ⛔ #11609 batch 1 REMOVED `tortoise_packs_list` / `tortoise_pack_install` (and
+    # below, `tortoise_analyze` / `tortoise_backfill_v25`) with NO destination: they are
+    # archived, not mapped. Their DESTINATION rows left with them because `_validate`
+    # requires this map's keys to be registry tools, and their reasons moved to
+    # `REMOVED_IN_BATCH_1` — the record of WHY a name left, which no validator can read
+    # once the registry no longer carries it.
     # ── Tenancy / admin ─────────────────────────────────────────────
     "tortoise_org_create": "tenancy:create_memory_graph",
     "tortoise_graph_set_recording": "graph_set_recording",
     # ── Analytics ───────────────────────────────────────────────────
-    "tortoise_analyze": "REMOVED",
 }
 
 # Namespaces whose suffix must be a real method name. `tenancy:` = the tenancy block
@@ -300,24 +302,39 @@ VALID_DEST = set(TARGET_MCP) | {"REMOVED"}
 # builder-only SDK method — neither is a retirement, and neither owes a reason here.
 # ─────────────────────────────────────────────────────────────────────
 REMOVALS: dict[str, str] = {
+    # EMPTY: #11609 batch 1 removed the last four (`REMOVED_IN_BATCH_1`). A new
+    # `REMOVED` destination re-opens this map — `_validate` requires its key set to be
+    # EXACTLY the tools mapped to `REMOVED`, in both directions.
+}
+
+#: The four tools #11609 batch 1 REMOVED from the served surface with NO destination.
+#: NOT read by the validator — they are gone from the registry, so there is nothing left
+#: to validate — and kept because the reason a name left the surface is what a future
+#: "why can't I call X?" has to find (same form as `REMOVED_IN_PHASE_3_2`).
+#: Each is ARCHIVED: `archive/mcp-tools/b1-removed-no-destination/<tool>.py` holds the
+#: verbatim `ToolDefinition` + handler (owner ruling 2026-11-17, #11609 comment
+#: 6831894340 — outside the approved 27 is removed, not mapped).
+REMOVED_IN_BATCH_1: dict[str, str] = {
     "tortoise_analyze": (
         "canonical-mcp-tools.md §Removed entirely — spends LLM tokens at read "
-        "time; read-time LLM is not offered (write-time LLM cost is ours)"
+        "time; read-time LLM is not offered (write-time LLM cost is ours). "
+        "ARCHIVED in #11609 batch 1; `tortoise/analyze.py` stays (non-MCP callers)"
     ),
     "tortoise_backfill_v25": (
         "canonical-mcp-tools.md §Removed entirely — a one-shot migration to "
-        "ONTOLOGY v2.5; pre-beta there are no legacy v2.5 graphs to migrate, so "
-        "the tool has no caller"
+        "ONTOLOGY v2.5 against a v3.13 schema; pre-beta there are no legacy v2.5 "
+        "graphs to migrate, so the tool has no caller. ARCHIVED in #11609 batch 1"
     ),
     "tortoise_packs_list": (
         "settled 2026-09-22 — SDK/REST only and POST-BETA (#4663); the tenant read "
-        "is preserved on the SDK/REST pack surface, and no competitor exposes pack "
-        "installation on its agent API"
+        "is preserved on the SDK/REST pack surface (`GET /v1/packs`), and no "
+        "competitor exposes pack installation on its agent API. ARCHIVED in "
+        "#11609 batch 1"
     ),
     "tortoise_pack_install": (
         "settled 2026-09-22 — SDK/REST only and POST-BETA (#4663); the "
-        "tenant-visible WRITE is preserved there rather than folded into an "
-        "operator-only tool"
+        "tenant-visible WRITE is preserved there (`POST /v1/packs/manifests`) rather "
+        "than folded into an operator-only tool. ARCHIVED in #11609 batch 1"
     ),
 }
 
