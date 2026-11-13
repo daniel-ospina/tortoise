@@ -140,7 +140,10 @@ def _table(text: str, *header_needles: str) -> list[list[str]]:
     for i, line in enumerate(lines):
         if not line.lstrip().startswith("|"):
             continue
-        if not all(any(n in c for c in _cells(line)) for n in header_needles):
+        # ⛔ Header needles are compared on the CELL TEXT, not its markup
+        # (round-25 review, cycle 4): `Δ vs **shipped**` carries the same words.
+        if not all(any(n in _plain(c) for c in _cells(line))
+                   for n in header_needles):
             continue
         rows = []
         for body in lines[i + 1:]:
@@ -891,12 +894,17 @@ def test_the_claim_shape_identifies_its_claim_and_reds_the_plant() -> None:
     with pytest.raises(AssertionError, match="DIRECTION words are not all named"):
         _only_claim("the shipped leg ahead 2–0", "the shipped leg ahead 2–0",
                     "scope", values=("2", "0"))
-    # ⛔ …and the inflected pair, because a vocabulary entry that is REMOVED again
+    # ⛔ …and the INFLECTED forms, because a vocabulary entry that is REMOVED again
     # (this list has regressed five times) must red a row, not just the reviewer
-    # (round-25 re-review, P3).
+    # (round-25 re-review, P3). One case per word: `stricter` here, `looser`
+    # below — deleting either one alone now reds.
     with pytest.raises(AssertionError, match="DIRECTION words are not all named"):
         _only_claim("measures a stricter leg than the prior uses",
                     "measures a stricter leg than the prior uses", "scope",
+                    free=("uses",))
+    with pytest.raises(AssertionError, match="DIRECTION words are not all named"):
+        _only_claim("measures a looser leg than the prior uses",
+                    "measures a looser leg than the prior uses", "scope",
                     free=("uses",))
     # 14. …and an ALTERNATION entry keeps two ADJACENT freed words precise instead
     #     of collapsing them into `\S+ \S+` (which matched the whole section).
@@ -1443,10 +1451,12 @@ def test_section_1_locators_still_point_at_the_code_they_name(brief: str) -> Non
     """
     scope = _scope_slice(brief, "1")
     marker = "The pinned read of the code"
-    assert marker in scope, (
+    # ⛔ Emphasis is not content HERE either (round-25 review, cycle 4): matching
+    # the raw slice made an interior bold a false red.
+    assert marker in scope.replace("*", ""), (
         "§1 lost the 'pinned read of the code' table — the locators it carries "
         "are the only record of which lines the mechanism claims rest on")
-    table = scope[scope.index(marker):]
+    table = scope[scope.replace("*", "").index(marker):]
 
     for rel, line, symbol, cited in _S1_LOCATORS:
         assert cited in table, (
@@ -1607,7 +1617,10 @@ def test_the_scorers_do_not_rank_identically(artifact, brief_text) -> None:
     # and the brief must state it — the false reading must not come back. The two
     # POSITIVE claims are §0-scoped (#12349 round 19); the NEGATIVE one stays
     # document-wide on purpose — a false reading must not appear ANYWHERE.
-    assert "rank these documents identically" not in brief_text
+    # ⛔ …and the negative half is matched on the STRIPPED document, or a
+    # retracted reading with one emphasised word slips through (round-25
+    # review, cycle 4).
+    assert "rank these documents identically" not in brief_text.replace("*", "")
     _s0 = _scoped(brief_text, "0").replace("*", "")
     assert "45 rank differently" in _s0
     assert "1.452 vs 1.285" in _s0
@@ -3703,7 +3716,10 @@ def test_brief_derived_prose_figures_are_the_artifact(
         "§3.5's mechanism sentence says the shipped leg never returns `abc_def`; "
         f"the artifact now records {fixture_rows.get('abc_def')}")
     # ⛔ Emphasis is NOT content: EVERY prose scope a claim is matched against
-    # strips `*` (and no claim literal carries `**`), or bolding a word
+    # strips `*` (and no claim literal carries `**`), and the STRUCTURAL matches
+    # go through the same rule — table header needles compare `_plain(cell)`, §1's
+    # marker and the document-wide negative assertion match a stripped view — or
+    # bolding a word
     # in a correct document false-reds the pin (round-25 re-review, P2 — the same
     # shape the previous round graded).
     _only_claim(
