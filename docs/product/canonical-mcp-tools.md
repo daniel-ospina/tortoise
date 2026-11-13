@@ -336,10 +336,14 @@ read permission can be granted generously with no path to a destructive action.
 > `pg_maintain` role, added in 17 — a SEPARATE grant from SELECT/INSERT/UPDATE/DELETE).
 > PostgreSQL mints its own grant; we deliberately do not, because a new scope would be a
 > surface change, so the read key stays and only the read-only CLAIM is dropped.
-> `tortoise_get_confidence`, `tortoise_compute_confidence` and
-> `tortoise_packs_list` are `maintenance`: a `graphs:read` key may call them, they never
-> require `graphs:write`, and they do NOT declare `readOnlyHint: true` (that literal hint is
-> what clients auto-approve on). The declaration is `risk` on the registry entry; `writes`,
+> `tortoise_get_confidence` and `tortoise_compute_confidence` are `maintenance`: a
+> `graphs:read` key may call them, they never require `graphs:write`, and they do NOT declare
+> `readOnlyHint: true` (that literal hint is what clients auto-approve on). **They are the
+> whole tier today — `tortoise_packs_list` was the third member until #11609 batch 1 archived
+> it** (`archive/mcp-tools/b1-removed-no-destination/tortoise_packs_list.py`), so
+> `MAINTENANCE_TOOLS` is TWO, pinned by
+> `tests/test_tool_risk_tiers.py::test_the_maintenance_tier_is_exactly_the_ruling`. The
+> RULING is unchanged. The declaration is `risk` on the registry entry; `writes`,
 > `readOnlyHint`, `destructiveHint` and `idempotentHint` are **derived** from it
 > (`tortoise/tool_registry.py`) and pinned by `tests/test_tool_risk_tiers.py`, so a hint
 > cannot be "fixed" in one place and left wrong in the other. A future lane that wants these
@@ -365,8 +369,8 @@ move to the SDK/REST pack surface. See **Open items**.
 
 Grantable freely. The one item that used to block this — `recall_beliefs` absorbing
 `get_confidence`, which is read-labelled but writes — is **resolved by the #4122 ruling**
-(the trio is `risk="maintenance"`: a `graphs:read` key may call it and it no longer claims
-`readOnlyHint: true`). See **Open items**.
+(the maintenance tier is `risk="maintenance"`: a `graphs:read` key may call the two confidence
+tools and they no longer claim `readOnlyHint: true`). See **Open items**.
 
 | # | Tool | Absorbs |
 |---|---|---|
