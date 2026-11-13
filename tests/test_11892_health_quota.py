@@ -327,6 +327,35 @@ def test_an_unreadable_allowance_gate_module_is_closed(tmp_path, monkeypatch):
 # ── "never raises" on shapes the caller can pass ─────────────────────────
 
 
+def _expected_pre_gate_state(limits, resource) -> str:
+    """The state each PRE-GATE arm must publish, derived from the guard ORDER.
+
+    ⛔ Round 4 of #12426: this file used to assert only
+    `state in {"unknown", "not_applicable", "closed", "open"}` — a four-element
+    membership over a FOUR-VALUED enum, which pinned nothing. Mutating either
+    pre-gate arm below to `open` survived the whole file **and** the repo's
+    quota/monitoring regression set (283 passed), so a refactor could publish
+    `open` for a shape this report never measured with every case green — the
+    exact false PASS the report exists to remove, one layer in. The expectation
+    is therefore derived from `org_quota_state`'s own order, not by membership.
+
+    `tortoise/quota.py` checks, in this order: (0) a non-dict `limits`,
+    (0b) a non-str `resource`, (0c) `limits is None`, (0d) a missing/falsy
+    `org_id`. The FIRST match decides — which is why a non-dict `limits` is
+    `unknown` even when the resource is ALSO unreadable, and why a dict with no
+    `org_id` plus an unreadable resource is `unknown`, not `not_applicable`.
+    """
+    if limits is not None and not isinstance(limits, dict):
+        return "unknown"
+    if not isinstance(resource, str):
+        return "unknown"
+    if limits is None or not limits.get("org_id"):
+        return "not_applicable"
+    raise AssertionError(
+        f"this table covers only the PRE-GATE arms; {limits!r}/{resource!r} "
+        "reaches the allowance gate, so it belongs to a boundary case")
+
+
 @pytest.mark.parametrize("limits", [[], "str", 7, {"org_id": None}])
 @pytest.mark.parametrize("resource", ["points", ["points"], None, "documents"])
 def test_it_never_raises_on_a_shape_it_cannot_read(limits, resource):
@@ -335,10 +364,43 @@ def test_it_never_raises_on_a_shape_it_cannot_read(limits, resource):
     `health` was safe because `_org_quota_block` has a blanket except, but the
     docstring promises "never raises" for THIS function, and a future caller
     wiring it on that promise would get an exception instead of the dict.
+
+    ⛔ "Never raises" is only HALF of it. Each arm is asserted against the state
+    its own guard must publish (see `_expected_pre_gate_state`) and against
+    `!= "open"`, because an unreadable shape is the one thing this report must
+    never call admit-worthy.
     """
     state = org_quota_state(limits, resource)  # must not raise
-    assert state["state"] in {"unknown", "not_applicable", "closed", "open"}
-    assert "points_used" in state and "error" in state
+    assert state["state"] == _expected_pre_gate_state(limits, resource), (
+        f"pre-gate arm published {state['state']!r} for {limits!r}/{resource!r}")
+    assert state["state"] != "open"
+    # Unmeasured is `None`, never `0` — the arm measured nothing at all.
+    assert state["points_used"] is None
+    assert state["points_limit"] is None
+    assert state["points_remaining"] is None
+    assert state["error"]
+
+
+def test_a_non_mapping_limits_shape_is_unknown_because_the_gate_RAISES():
+    """The materially-false arm: `open` here would be a lie, not a lost nuance.
+
+    `enforce_org_limit` cannot evaluate this dict either — `limits.get("org_id")`
+    raises `AttributeError` on a list/str/int — so the WRITE PATH errors while a
+    report calling it `open` says the write would be admitted. Round 4 of #12426
+    measured exactly that mutation surviving; this pins the classification, so
+    the surviving mutant now reds.
+
+    (The sibling arm — a dict with a falsy `org_id` — is the milder one: the gate
+    really does return early there, so `not_applicable` is a precision claim
+    about measured-vs-not rather than a claim `open` would falsify.)
+    """
+    for bad in ([], "str", 7, object()):
+        state = org_quota_state(bad, "points")
+        assert state["state"] == "unknown", (
+            f"a non-mapping limits shape must be `unknown`, got "
+            f"{state['state']!r} for {bad!r}")
+        assert "not a mapping" in state["error"], state["error"]
+        assert state["points_used"] is None
 
 
 def test_a_non_numeric_count_is_unknown_never_a_number(tmp_path, monkeypatch):
