@@ -1128,8 +1128,8 @@ def latest_readings(
     # other relationship property, duplicate edges become duplicate ROWS — and
     # then a `dwell` of N can be satisfied by ONE measurement repeated. That is
     # this projection's OWN hazard and nothing else in the repo records it: the
-    # note at ``hosted_backup.py:359-370`` is the #4515 "TOTAL OR FAIL" rule and
-    # its load-bearing aggregate, and the operand table at ``:363-393`` is about
+    # note at ``hosted_backup.py:360-370`` is the #4515 "TOTAL OR FAIL" rule and
+    # its load-bearing aggregate, and the operand table at ``:372-400`` is about
     # ``id(n) > -1`` disagreeing across the v4/v6 cores — an OPERAND edge case,
     # not duplicated rows.
     #
