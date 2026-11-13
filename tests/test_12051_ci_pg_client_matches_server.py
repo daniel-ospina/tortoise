@@ -1460,7 +1460,11 @@ _EXEC_PRIMARY_WORDS = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
 #: that reaches the guard, and the first version of this note attributed that to the
 #: wrong mechanism — the same "a comment that attributes coverage to the wrong
 #: mechanism" class this change exists to remove.
-_TERMINATOR_TRAILING_OPERATORS = ")]`"
+#: ⛔ A TRAILING BACKSLASH IS A CONTINUATION, NOT PART OF THE WORD (#12279 FINAL
+#: REVIEW, P2). `find ... -exec cp {} dest ';'\` at EOF is the word `';\`' to bash, so
+#: without `\` here it became the LAST OPERAND and the destination read as a
+#: SOURCE (measured: bash LANDED the replacement, the guard said GREEN).
+_TERMINATOR_TRAILING_OPERATORS = ")]`\\"
 
 
 def _bare_terminator(text: str) -> str:
@@ -6200,6 +6204,22 @@ def test_a_substitution_closer_is_not_a_comment_boundary() -> None:
         # bash prints ` # y` (or `a # b`) and runs the replacement.
         "unset x; echo ${x:- # y}",
         "unset x; echo ${x:-a # b}",
+        # ⛔ A NESTED QUOTING CONTEXT INSIDE A DOUBLE-QUOTED SPAN (#12279 FINAL
+        # REVIEW, P1, measured FAIL-OPEN on main AND on this head before the fix):
+        # `$( … )`/`${…}` opens a NEW quoting context, so the inner `"` does not
+        # close the outer string and the `#` is DATA. 9 of 12 spellings LANDED in
+        # bash; the scanner cannot follow the scope, so it fails CLOSED.
+        'echo "$(echo " #note")"',
+        'echo "${x:-" #note"}"',
+        'echo "$(printf %s " #note")"',
+        'echo "$(basename " #note")"',
+        'echo "x $(echo " #note") y"',
+        'echo "$(true; echo " #note")"',
+        # ⛔ AND A QUOTED TERMINATOR FOLLOWED BY A LINE CONTINUATION AT EOF
+        # (#12279 FINAL REVIEW, P2): bash eats `\`+newline, so the word IS `';'`;
+        # without the trailing `\\` in `_TERMINATOR_TRAILING_OPERATORS` it became
+        # "the last operand" and the destination read as a SOURCE.
+        "find \"$b/17/bin\" -type f -exec cp {} \"$b/16/bin/\" ';'\\",
         # ⛔ A FRAME'S INTERIOR IS READ BY THE *FRAME*, NOT BY THE FLAT CLASS (#12279
         # REVIEW 6, P1 — one mechanism, three measured RED→GREEN faces). (a) An
         # extglob word is ONE word inside too: `shopt -s extglob; echo @(a|#b)`
@@ -6266,6 +6286,20 @@ def test_a_substitution_closer_is_not_a_comment_boundary() -> None:
     step = {"run": f'b=/usr/lib/postgresql; a=(#c); {replacement}'}
     assert replacement not in _run_commands(step), (
         f"a `#` right after `=(` is a comment (bash: unexpected EOF), not data: {_run_commands(step)!r}"
+    )
+
+    # ⛔ AND A TRAILING BACKSLASH IS A CONTINUATION, NOT PART OF THE WORD
+    # (#12279 FINAL REVIEW, P2). A `run: |` block whose last line ends `';'` + `\`
+    # is the word `';'` to bash (the `\`+newline is deleted), but `_run_code` drops
+    # the trailing newline so the continuation join never fires and the backslash
+    # survives into `_bare_terminator` — where it did not match the terminator set,
+    # so the destination became "the last operand" and read as a SOURCE (measured:
+    # bash LANDED the replacement, the guard said GREEN). Pinned directly: the row
+    # above alone is also refused by a neighbouring arm, so it cannot isolate this.
+    _continued = "';'" + chr(92)  # a quoted terminator, then a continuation
+    assert _bare_terminator(_continued) == ";", (
+        "a quoted terminator followed by a line continuation was not read as a "
+        f"terminator: {_bare_terminator(_continued)!r} (bash runs the replacement)"
     )
 
     # CONTROL: a GROUP-closing `)` IS an operator, so the rest of the line is a
@@ -7187,6 +7221,7 @@ def _strip_trailing_comment(line: str) -> str:
     quote = ""
     stack: list[str] = []
     braces = 0
+    nested_quote = False
     #: `[[ … ]]` and `(( … ))` are WHOLE WORD PARTS (#12279 REVIEW 4, P1, measured
     #: RED→GREEN — `main` refused every row below, the head ERASED the line). Inside
     #: them a `#` is not reliably a comment: bash keeps it as DATA after a regex
@@ -7213,6 +7248,18 @@ def _strip_trailing_comment(line: str) -> str:
             # closed the span at the `\"`'s quote, so the `#` — which bash keeps
             # INSIDE the string — was read as a boundary and erased the rest of the
             # line (a live replacement with it). Single quotes have no escapes.
+            # ⛔ A NESTED QUOTING CONTEXT INSIDE A DOUBLE-QUOTED SPAN (#12279 FINAL
+            # REVIEW, P1 — measured FAIL-OPEN, 9 of 12 spellings LANDED in bash):
+            # `echo "$(echo " #note")"` prints ` #note`, because `$( … )` opens a NEW
+            # quoting context and the inner `"` does not close the outer string. A
+            # flat `quote` reads it the other way, so the `#` looked like a comment
+            # and the live replacement after it was erased. Reaching the `$(`/`${`
+            # OPENERS here (they are inside the span, so this block owns them) is
+            # enough to know the scope is beyond this scanner: from that point on no
+            # `#` on the line is trusted as a comment — fail CLOSED, which can only
+            # over-refuse.
+            if quote == '"' and (line.startswith("$(", index) or line.startswith("${", index)):
+                nested_quote = True
             if quote == '"' and char == "\\" and index + 1 < len(line):
                 index += 2
                 continue
@@ -7237,7 +7284,7 @@ def _strip_trailing_comment(line: str) -> str:
             boundary = False
             index += 1
             continue
-        if char == "#" and (braces or conditional or arith or "extglob" in stack):
+        if char == "#" and (braces or conditional or arith or "extglob" in stack or nested_quote):
             boundary = False
             index += 1
             continue
@@ -7253,6 +7300,17 @@ def _strip_trailing_comment(line: str) -> str:
         # group frame it used to open let its `)` set a boundary and the `#`, which
         # bash keeps as DATA, was read as a comment that erased the live line.
         if char == "$" and index + 1 < len(line) and line[index + 1] == "{":
+            # ⛔ A NESTED QUOTING CONTEXT ENDS THE OUTER SPAN'S AUTHORITY (#12279
+            # FINAL REVIEW, P1). Inside `$( … )` and `${…}` bash opens a NEW quoting
+            # context, so `echo "$(echo " #note")"` prints ` #note` — the inner `"`
+            # does not close the outer string. A flat `quote` gets that backwards,
+            # reads the `#` as a comment and erases a live replacement (measured: 9
+            # of 12 spellings LANDED in bash and went GREEN). The scanner cannot
+            # follow a scope it does not model, so it FAILS CLOSED: once a
+            # substitution/expansion opens while a double-quoted span is live, no
+            # `#` later on the line is a comment. Keeping text only over-refuses.
+            if quote == '"':
+                nested_quote = True
             braces += 1
             boundary = False
             index += 2
@@ -7331,6 +7389,8 @@ def _strip_trailing_comment(line: str) -> str:
                 stack.append("arith")
                 boundary = False
             elif index and previous in "$<>":
+                if quote == '"':
+                    nested_quote = True
                 stack.append("sub")
                 boundary = True
             elif previous == "=":
