@@ -5246,7 +5246,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("16347", '"extraction_mode": "llm:<route>"'),
         ), "sdk"),
         ("04-plan.md", "operator / label path", (
-            ("25284", "declared = declared_relation_predicates()"),
+            ("25393", "declared = declared_relation_predicates()"),
         ), "sdk"),
         # The manifest's own `carve_out:` entry. ⛔ PRE-#12266 HISTORY — and it is the
         # history of a row THIS TABLE NO LONGER CONTAINS: the tuple that lived here
@@ -5368,11 +5368,17 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # own review).
     # ⛔ AND IT IS CALLED **BEFORE** `assert not failures` ON PURPOSE — THE ORDER IS
     # LOAD-BEARING, so do not tidy it down beside that assert. This test is RED on
-    # `main` for an unrelated row — `04-plan.md` cites `tortoise/sdk.py:25284` for
-    # `declared = declared_relation_predicates()`, which the merged tree carries at
-    # `25393` — and it was no better at this branch's old base: at `ca74f2375e` the row
-    # cited `25189` and `git show ca74f2375e:tortoise/sdk.py | sed -n '25189p'` is a
-    # bare `)`; the same cite rot is tracked in #12456 / #12381. And
+    # `main` for unrelated rows, and THIS PR REPAIRS ONE OF THEM — `04-plan.md` cited
+    # `tortoise/sdk.py:25284` for `declared = declared_relation_predicates()`, which the
+    # merged tree carries at `25393`, and the row above now reads `25393` — while
+    # SEVEN other rows stay red on the same tree, ten failure messages across four
+    # documents (`00-plan.md` and `03-test-design.md` both cite
+    # `sdk.py:9955`/`10008`, `00-plan.md` also `18547`, `00-align.md`
+    # `16346`/`16347`, and `RECONCILE-A1-A2-A5.md`
+    # `18887`/`18899`/`18900`), so the order still decides whether this pin runs. Nor was it
+    # better at this branch's old base: at `ca74f2375e` the row cited `25189` and
+    # `git show ca74f2375e:tortoise/sdk.py | sed -n '25189p'` is a bare `)`; the same
+    # cite rot is tracked in #12456 / #12381. And
     # an `assert` that raises ends the test: placed after it, this pin was **never
     # executed at the head that merged** and every arm below was unexercised — measured
     # at `ca74f2375e` by appending a `config/ci-surfaces.yml:10076` cite to the
