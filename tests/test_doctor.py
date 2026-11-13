@@ -1296,8 +1296,10 @@ class TestDoctorHostedCredential:
         # takes a file-sourced key's URL from the same file or the built-in
         # default (#2369 D1.1) — so naming `TORTOISE_API_URL` here aimed the user
         # at a knob that cannot change the result. Measured under that exact
-        # regression (remedy made unconditional for both sources): 1 failed, 130
-        # passed — `test_transport_failure_scrubs_a_url_password`.
+        # regression (remedy made unconditional for both sources) on THIS head:
+        # 2 failed, 132 passed — `test_transport_failure_scrubs_a_url_password`
+        # and `test_a_2xx_without_an_identity_is_not_an_accepted_key`, i.e. BOTH
+        # arms are pinned, not just the transport one.
         assert "TORTOISE_API_URL" not in hosted, hosted
         assert "config show" in hosted, hosted
         # EXACTLY ONE `Hosted` row (fresh review at `77c1f364b6`): `_row()` returns

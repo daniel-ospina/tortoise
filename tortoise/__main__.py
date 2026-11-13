@@ -13006,11 +13006,8 @@ def _doctor_read_capped(resp, cap: int, deadline: float) -> tuple[bytes, bool]:
     # and `cut=True` with the watchdog disarmed — the interrupt caused the false
     # red). The flag is the difference between "the peer ended the body" and "we
     # ended it", and the reader must never claim the first about the second.
-    interrupted = False
     if sock is not None:
         def _interrupt() -> None:
-            nonlocal interrupted
-            interrupted = True
             with contextlib.suppress(OSError):
                 sock.shutdown(socket.SHUT_RDWR)     # `close()` does not wake a blocked recv
 
@@ -13068,8 +13065,6 @@ def _doctor_read_capped(resp, cap: int, deadline: float) -> tuple[bytes, bool]:
                 # `length` is the bytes still OWED; `None` (chunked OR
                 # close-delimited) carries NO information — and OUR OWN interrupt
                 # produces exactly that shape, so the flag is checked FIRST.
-                if interrupted:
-                    return b"".join(chunks), True
                 outstanding = getattr(resp, "length", None)
                 if outstanding is None:
                     inner = getattr(resp, "fp", None)
@@ -13127,7 +13122,7 @@ def _doctor_read_capped(resp, cap: int, deadline: float) -> tuple[bytes, bool]:
         # a double with no socket never sets the flag). A "cut" claim is the safe
         # one; "complete" is the one that puts a fragment in front of the verdict.
         return (b"".join(chunks),
-                bool(probe) or interrupted or time.monotonic() >= deadline)
+                bool(probe) or time.monotonic() >= deadline)
     finally:
         if watchdog is not None:
             watchdog.cancel()
@@ -13245,10 +13240,21 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
     # (#2369 D1.1), so naming the env override to a store-credential user sends
     # them at a knob that cannot change the result — the "remedy names an inert
     # knob" class this file has already paid for twice.
-    _endpoint_remedy = (
+    _from_env = source == "env:TORTOISE_API_KEY"
+    #: For a transport failure (nothing answered): the open question is whether
+    #: the endpoint is reachable, and which knob moves it.
+    _transport_remedy = (
         "check https://api.premiselabs.co/health or your TORTOISE_API_URL, then "
         "`tortoise config show`"
-        if source == "env:TORTOISE_API_KEY" else
+        if _from_env else
+        "check the endpoint is reachable, then `tortoise config show` to see the "
+        "`api_url` this store supplies")
+    #: For an answered-but-not-an-identity reply: reachability is PROVEN, so the
+    #: only useful fact is which `api_url` is being answered by something else.
+    _identity_remedy = (
+        "check your TORTOISE_API_URL points at the Tortoise API, then `tortoise "
+        "config show`"
+        if _from_env else
         "`tortoise config show` to see the `api_url` this store supplies — if it "
         "is not the Tortoise API, that is what answered")
     api_url = api_url if isinstance(api_url, str) else str(api_url or "")
@@ -13577,7 +13583,7 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
                             f"cannot reach {base} — "
                             f"{_reason_text(reason)}"
                             ". The credential is UNGRADED (nothing was asked of "
-                            f"it) — {_endpoint_remedy}"
+                            f"it) — {_transport_remedy}"
                             f"{_provenance_note}"))
             return
         # ⛔ A HEALTHY endpoint is allowed to time out here. The hosted app
@@ -13604,7 +13610,7 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
                             f"cannot reach {base} — "
                             f"{_retry_wait_claim(retry_reason, silent=(f'no answer in {_fmt_bound(health_first_bound)}s, and none in {_fmt_bound(health_retry_bound)}s on retry'), refused=(f'refused on retry after the first attempt timed out at {_fmt_bound(health_first_bound)}s'), failed=(f'the retry failed after the first attempt timed out at {_fmt_bound(health_first_bound)}s'))}"
                             ". The credential is UNGRADED (nothing was asked of "
-                            f"it) — {_endpoint_remedy}"
+                            f"it) — {_transport_remedy}"
                             f"{_provenance_note}"))
             return
 
@@ -13860,7 +13866,7 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
                             # (fresh review round 19): for a STORE-sourced key
                             # `TORTOISE_API_URL` cannot move the endpoint, so this
                             # row sent the user at a knob that does nothing.
-                            f"{_endpoint_remedy}"))
+                            f"{_identity_remedy}"))
             return
         org = None
         if isinstance(parsed, dict):
