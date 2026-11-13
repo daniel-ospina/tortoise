@@ -3795,7 +3795,8 @@ _ENTITY_TYPE_REMEDY: dict[str, str] = {
         "kind=<eventKind>, limit=10000) — one kind per call, which also "
         "slices at `limit` (default 10, no total)."),
     "source": (
-        "Enumerate it with tortoise_list_sources()."),
+        "Enumerate it with tortoise_graph_overview(section='sources') — it "
+        "lists every provenance Source with its point count, in one call."),
     "document": (
         "No bulk listing: tortoise_search(entity_type='document', "
         "kind=<documentKind>, limit=10000) answers ONE kind at a time and "
@@ -3805,15 +3806,19 @@ _ENTITY_TYPE_REMEDY: dict[str, str] = {
     "object": (
         "No bulk listing — and none is planned (#12378 keeps these as counts): "
         "tortoise_search(entity_type='object', kind=<objectKind>, "
-        "limit=10000) answers ONE kind at a time and slices at `limit` "
-        "(default 10, no total); the layer's size is counts.Object in "
-        "tortoise_graph_overview(section='status')."),
+        "limit=10000) answers ONE kind at a time, slices at `limit` (default "
+        "10, no total) and reads the CURRENT VIEW — a terminal-status Object "
+        "is excluded (`search_engine._STATUS_FILTERED_LABELS`) — so a gap "
+        "against counts.Object in tortoise_graph_overview(section='status') "
+        "has two causes: the status filter, and the kinds you did not name."),
     "subject": (
         "No bulk listing — and none is planned (#12378 keeps these as counts): "
         "tortoise_search(entity_type='subject', kind=<subjectKind>, "
-        "limit=10000) answers ONE kind at a time and slices at `limit` "
-        "(default 10, no total); the layer's size is counts.Subject in "
-        "tortoise_graph_overview(section='status')."),
+        "limit=10000) answers ONE kind at a time, slices at `limit` (default "
+        "10, no total) and reads the CURRENT VIEW — a terminal-status Subject "
+        "is excluded (`search_engine._STATUS_FILTERED_LABELS`) — so a gap "
+        "against counts.Subject in tortoise_graph_overview(section='status') "
+        "has two causes: the status filter, and the kinds you did not name."),
 }
 
 #: #12372 — the remedy for a vocabulary member that arrives without an entry: a

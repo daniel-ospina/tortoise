@@ -38,6 +38,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import re
+
 import pytest
 
 
@@ -373,7 +375,7 @@ def test_the_remedy_for_operator_is_the_call_that_lists_the_layer() -> None:
 
 @pytest.mark.parametrize("entity_type,expected", [
     ("event", "tortoise_get_entity(None, type='events'"),
-    ("source", "tortoise_list_sources()"),
+    ("source", "tortoise_graph_overview(section='sources')"),
 ])
 def test_the_remedy_names_a_call_that_answers_without_a_kind(entity_type,
                                                              expected) -> None:
@@ -670,7 +672,9 @@ def test_a_non_string_text_does_not_raise_out_of_the_tool_body(stub_factory) -> 
 
     out = tortoise_query(text=5, entity_type="event", limit=1)  # type: ignore[arg-type]
 
-    assert out is not None, "the call must answer, not raise"
+    assert out == [{"id": "op0", "is_operator": True}], (
+        f"a non-str text must reach the leg unchanged and answer, not raise: {out!r}"
+    )
 
 
 @pytest.mark.parametrize("entity_type", ["document", "object", "subject"])
@@ -796,4 +800,73 @@ def test_the_event_remedys_alternative_branch_is_bounded_where_it_truncates() ->
     )
     assert "limit=10000" in message, (
         f"the tortoise_search branch truncates at 10 without a limit: {message!r}"
+    )
+
+# ── review round 7: the last three remedies that still overpromised ──────────
+
+
+@pytest.mark.parametrize("entity_type,count_key", [
+    ("object", "counts.Object"),
+    ("subject", "counts.Subject"),
+])
+def test_the_object_and_subject_remedies_disclose_the_status_filter(
+        entity_type, count_key) -> None:
+    """`Point`, `Object` and `Subject` are ALL status-filtered, not just `Point`.
+
+    Verified in `tortoise/search_engine.py`: `_STATUS_FILTERED_LABELS =
+    ("Point", "Object", "Subject")` (`:148`) and the exclusion clause is
+    appended for each of those labels (`:2967`), while the count these remedies
+    tell the caller to reconcile against — `taxonomy()` served as
+    `status().counts` — is `MATCH (n:<Label>) RETURN count(n)` over EVERY
+    status. So a reconciled gap for `object`/`subject` has two causes (the
+    status filter and the un-named kinds) and the remedies named one of them
+    only. Round 5 fixed exactly this for `operator`. Fails on `CURRENT VIEW`
+    and on the terminal-status clause; replacing either entry with an
+    unconditional "answers the COMPLETE layer" reds it.
+    """
+    message = _message_for(entity_type)
+
+    assert "CURRENT VIEW" in message, (
+        f"the {entity_type!r} remedy implies the layer while the read is "
+        f"status-filtered: {message!r}"
+    )
+    assert "terminal-status" in message, (
+        f"the {entity_type!r} remedy must name the exclusion: {message!r}"
+    )
+    assert count_key in message, (
+        f"the {entity_type!r} remedy must keep its size source: {message!r}"
+    )
+
+
+def test_no_remedy_names_a_tool_the_registry_has_retired() -> None:
+    """A refusal may not send the caller to a name that is off `tools/list`.
+
+    `tortoise/tool_registry.py` builds `TOOL_REGISTRY` as every entry whose name
+    is NOT in `RETIRED_USE_INSTEAD` (`:2187`), and the retired ones answer only
+    through a warning shim that redirects to the advertised path. The `source`
+    remedy used to say `tortoise_list_sources()` — which is in that map
+    (`:2109`, pointer `tortoise_graph_overview(section="sources")`) — so the one
+    place a caller is told where to go was telling them to a deprecated door.
+    Fails on every retired name; the vocabulary is READ from the registry's own
+    map, never re-typed here, so a future retirement reds this too.
+    """
+    from tortoise.mcp_server import _ENTITY_TYPE_REMEDY, _ENTITY_TYPE_REMEDY_FALLBACK
+    from tortoise.tool_registry import RETIRED_USE_INSTEAD
+
+    messages = {k: v for k, v in _ENTITY_TYPE_REMEDY.items()}
+    messages["<fallback>"] = _ENTITY_TYPE_REMEDY_FALLBACK
+    # A retired name is only an offence where it is named AS A CALL — a bare
+    # substring test would red a live name that merely CONTAINS a retired one
+    # (`tortoise_get_entity(` contains `tortoise_get`).
+    call = re.compile(
+        r"\b(" + "|".join(re.escape(n) for n in RETIRED_USE_INSTEAD) + r")\s*\("
+    )
+    offenders = {
+        f"{entity_type}: {m.group(1)}"
+        for entity_type, message in messages.items()
+        if (m := call.search(message))
+    }
+    assert offenders == set(), (
+        f"remedies naming retired tools (they answer only via the shim): "
+        f"{sorted(offenders)}"
     )
