@@ -2342,8 +2342,13 @@ def test_a_repeatedly_unreadable_meta_records_ONCE_not_once_per_turn(tmp_path):
     appends one ledger line per turn, forever, into a file that lives in the
     spool root and is counted against no ceiling (#4714's amplification class).
 
-    MUTATION THAT REDS THIS: use `record_discard` instead of `record_refusal` →
-    the count grows with the number of scans.
+    MUTATION THAT REDS THIS: use `record_discard` instead of `record_refusal`, or
+    key the dedupe on `_entries_dir_stamp` instead of the unreadable stem set.
+
+    ⚠️ Each iteration writes a NEW (readable) meta first, because that is what a
+    real turn does — and it moves `entries/` mtime. Asserting the dedupe on a
+    STATIC directory passes against a dir-stamp key that suppresses NOTHING on
+    the per-turn path this exists for (found in review cycle 2).
     """
     entries = tmp_path / "entries"
     entries.mkdir(parents=True)
@@ -2352,11 +2357,15 @@ def test_a_repeatedly_unreadable_meta_records_ONCE_not_once_per_turn(tmp_path):
     meta_path.chmod(0o000)
     try:
         from tortoise.capture_spool import list_spool_metas, read_discards
-        for _ in range(5):
+        for turn in range(5):
+            # a new session spooled this turn — readable, exactly as in production
+            (entries / f"live{turn}.meta.json").write_text(
+                json.dumps({"version": 1, "session_id": f"live{turn}"}), encoding="utf-8")
             list_spool_metas(tmp_path)
-        lines = read_discards(tmp_path)
+        lines = [l for l in read_discards(tmp_path) if l.get("reason") == "meta_unreadable"]
         assert len(lines) == 1, f"one event, not one per scan — got {len(lines)}"
-        assert lines[0]["reason"] == "meta_unreadable"
+        assert lines[0]["retained"] is True
+        assert "cannot read 1 spool meta" in lines[0]["detail"]
     finally:
         if meta_path.exists():
             meta_path.chmod(0o600)

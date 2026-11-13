@@ -949,6 +949,24 @@ def _read_refusal_stamps(root: Path) -> list[dict]:
     return [parsed] if "session_id" in parsed else []
 
 
+def _stem_set_stamp(stems: list[str]) -> str:
+    """A stable dedupe stamp for a SET of names (#11802).
+
+    ``_entries_dir_stamp`` answers "is this refusal verdict still true?", so it
+    deliberately includes ``entries/`` mtime — which ANY write to the directory
+    moves. That is right for an admission refusal and wrong for a set of
+    unreadable files: a turn writes a new (readable) meta, the mtime moves, and a
+    dir-stamp key therefore suppresses nothing on exactly the per-turn path the
+    dedupe exists for. This stamp changes only when the SET changes.
+
+    The TS leg's ``stemSetStamp`` produces the SAME string, so the two legs —
+    which share one spool root and one ledger — dedupe each other's records
+    rather than each writing its own.
+    """
+    digest = hashlib.sha256("\n".join(stems).encode("utf-8")).hexdigest()[:16]
+    return f"set:{digest}"
+
+
 def _entries_dir_stamp(root: Path) -> str:
     """A cheap fingerprint of the spool state a refusal was measured against.
 
@@ -1088,6 +1106,7 @@ def _record_refusal(
     bounds: Bounds | None = None,
     projected_bytes: int | None = None,
     replaces_session_id: str | None = None,
+    stamp: str | None = None,
 ) -> dict:
     """Record a REFUSAL once per (session, reason, spool state).
 
@@ -1116,7 +1135,7 @@ def _record_refusal(
     fingerprint: dict = {
         "session_id": key[0],
         "reason": key[1],
-        "entries_stamp": _entries_dir_stamp(root),
+        "entries_stamp": stamp if stamp is not None else _entries_dir_stamp(root),
         # The verdict's INPUTS, alongside its key. `_admission_saturated` reuses
         # this stamp to answer "is this refusal still true?" without a scan, and
         # that reuse is only sound for the same ceilings and a projection no
@@ -1380,6 +1399,10 @@ def list_spool_metas(root: Path, *, repair: bool = True) -> tuple[list[dict], li
     """
     metas: list[dict] = []
     discards: list[dict] = []
+    # #11802 review cycle 2: an unreadable meta is STATE, not a per-turn event, so
+    # it is recorded ONCE per distinct unreadable SET (the aggregate after this
+    # loop) rather than once per file per scan.
+    unreadable: list[tuple[str, str]] = []
     d = _entries_dir(root)
     # `Path.is_dir()` is True for a mode-000 directory and `Path.glob` SWALLOWS
     # the EACCES its `scandir` hits — so the old `is_dir()` + glob returned an
@@ -1417,21 +1440,9 @@ def list_spool_metas(root: Path, *, repair: bool = True) -> tuple[list[dict], li
             # Every errno in this arm is the same class: the entry was not read,
             # so nothing may be concluded about it. ENOENT here is a race with
             # another drain's unlink — wrong MOMENT, not wrong bytes.
-            if not repair:
-                continue
-            stem = path.name[: -len(".meta.json")]
-            discards.append(_record_refusal(root, {
-                "session_id": f"unreadable:{stem}",
-                "reason": DISCARD_META_UNREADABLE,
-                # RETAINED: the meta AND the turn log stay on disk, unquarantined
-                # and un-unlinked, so the next drain retries. Never a loss — a
-                # read refusal is reversible (fix the permission, or run as the
-                # uid that owns the file), and the entry keeps its ONLY copy of
-                # the session id and the retry state.
-                "retained": True,
-                "detail": (f"cannot read {path}: {exc} — left in place and retryable;"
-                           " the bytes were never seen, so this is NOT a corrupt entry"),
-            }))
+            # Collected, not recorded: see the aggregate after this loop.
+            if repair:
+                unreadable.append((name[: -len(".meta.json")], str(exc)))
             continue
         except UnicodeDecodeError as exc:
             # The bytes were read in full; they are just not UTF-8. That is a
@@ -1471,6 +1482,41 @@ def list_spool_metas(root: Path, *, repair: bool = True) -> tuple[list[dict], li
                 path.unlink()
             continue
         metas.append(meta)
+    # ── #11802: ONE record per distinct unreadable SET ─────────────────────┐
+    # An unreadable meta is STATE ("these entries cannot be read by this uid"),
+    # not a per-turn event. Recorded per FILE per scan, `discarded.jsonl` grows
+    # with turns: the repairing scan also runs on the per-turn write path
+    # (`prune_spool`), and 1,356 unreadable entries is the measured population.
+    #
+    # Two things make this bounded, and the FIRST is the subtle one:
+    #  - The dedupe stamp is a digest of the unreadable STEM SET, NOT `entries/`
+    #    mtime. A turn writes a NEW (readable) meta, which moves `entries/` mtime
+    #    on every turn — so a dir-stamp key suppresses nothing on exactly the path
+    #    this exists for. The stem set is unchanged by a new session, so a steady
+    #    state is ONE line no matter how many turns pass.
+    #  - ONE aggregate consumes ONE slot of the (32-wide) refusal window, not N,
+    #    so unreadable entries cannot crowd the admission refusals out of it and
+    #    defeat `_refused_at_current_state`'s fast path.
+    if unreadable:
+        stems = sorted(stem for stem, _msg in unreadable)
+        _stem, example = unreadable[0]
+        discards.append(_record_refusal(
+            root,
+            {
+                "session_id": "unreadable",
+                "reason": DISCARD_META_UNREADABLE,
+                # RETAINED: every one of these metas AND its turn log stay on
+                # disk, unquarantined and un-unlinked, so the next drain retries.
+                # Never a loss — a read refusal is reversible (fix the
+                # permission, or run as the uid that owns the file), and each
+                # entry keeps its ONLY copy of the session id and retry state.
+                "retained": True,
+                "detail": (f"cannot read {len(unreadable)} spool meta(s): {example}"
+                           " — left in place and retryable; the bytes were never"
+                           " seen, so these are NOT corrupt entries"),
+            },
+            stamp=_stem_set_stamp(stems),
+        ))
     return metas, discards
 
 

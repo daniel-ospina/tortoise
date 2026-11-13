@@ -1467,6 +1467,10 @@ export function listSpoolEntries(
   const repair = opts.repair !== false;
   const metas: SpoolMeta[] = [];
   const discards: DiscardRecord[] = [];
+  // #11802 review cycle 2: an unreadable meta is STATE, not a per-turn event, so
+  // it is recorded ONCE per distinct unreadable SET (see the aggregate below)
+  // rather than once per file per scan.
+  const unreadable: { stem: string; message: string }[] = [];
   const root = entriesDir(dir);
   let names: string[];
   try {
@@ -1505,35 +1509,12 @@ export function listSpoolEntries(
       // ENOENT here is a race with another drain's unlink, not a corruption —
       // wrong MOMENT, not wrong bytes. Every errno in this arm is the same
       // class: the entry was not read, so nothing may be concluded about it.
-      if (!repair) continue;
-      const stem = name.replace(/\.meta\.json$/, "");
-      const code = (err as NodeJS.ErrnoException | undefined)?.code;
-      discards.push(
-        // `recordRefusal`, NOT `recordDiscard`: the repairing scan runs on the
-        // per-TURN write path (`pruneSpool` → here) as well as every drain, and
-        // the entry never becomes readable, so an unconditional record appends
-        // one line per turn for the life of the box. `discarded.jsonl` lives in
-        // the spool root and is counted against no ceiling — unbounded growth in
-        // the very directory the "bounded disk" claim is about, the same
-        // amplification class (#4714) `DISCARD_SPOOL_SATURATED` already guards.
-        // Its key is (session_id, reason, entries/ stamp), so an
-        // indistinguishable repeat of the same entry in an unchanged spool is
-        // ONE event.
-        recordRefusal(dir, {
-          session_id: `unreadable:${stem}`,
-          reason: DISCARD_META_UNREADABLE,
-          // RETAINED: the meta AND the turn log stay on disk, unquarantined and
-          // un-unlinked, so the next drain retries. Never a loss — a read
-          // refusal is reversible (fix the permission / run as the right uid),
-          // and the entry keeps its ONLY copy of the session id and retry state.
-          retained: true,
-          detail:
-            `cannot read ${path}: ${err instanceof Error ? err.message : String(err)}` +
-            (code ? ` [${code}]` : "") +
-            " — left in place and retryable; the bytes were never seen, so this is" +
-            " NOT a corrupt entry",
-        }),
-      );
+      if (repair) {
+        unreadable.push({
+          stem: name.replace(/\.meta\.json$/, ""),
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
       continue;
     }
     let meta: SpoolMeta | undefined;
@@ -1566,6 +1547,45 @@ export function listSpoolEntries(
       continue;
     }
     metas.push(meta);
+  }
+  // ── #11802: ONE record per distinct unreadable SET ─────────────────────────
+  // An unreadable meta is STATE ("these entries cannot be read by this uid"),
+  // not a per-turn event. Recorded per FILE per scan, `discarded.jsonl` grows
+  // with turns: the repairing scan also runs on the per-turn write path
+  // (`pruneSpool`), and 1,356 unreadable entries is the measured population.
+  //
+  // Two things make this bounded, and the FIRST is the subtle one:
+  //  - The dedupe stamp is a digest of the unreadable STEM SET, NOT `entries/`
+  //    mtime. A turn writes a NEW (readable) meta, which moves `entries/` mtime
+  //    on every turn — so a dir-stamp key suppresses nothing on exactly the path
+  //    this exists for. The stem set is unchanged by a new session, so a steady
+  //    state is ONE line no matter how many turns pass.
+  //  - ONE aggregate consumes ONE slot of the (32-wide) refusal window, not N,
+  //    so unreadable entries cannot crowd the admission refusals out of it and
+  //    defeat `refusedAtCurrentState`'s fast path.
+  if (unreadable.length) {
+    const stems = unreadable.map((u) => u.stem).sort();
+    const example = unreadable[0]!.message;
+    discards.push(
+      recordRefusal(
+        dir,
+        {
+          session_id: "unreadable",
+          reason: DISCARD_META_UNREADABLE,
+          // RETAINED: every one of these metas AND its turn log stay on disk,
+          // unquarantined and un-unlinked, so the next drain retries. Never a
+          // loss — a read refusal is reversible (fix the permission / run as
+          // the right uid), and each entry keeps its ONLY copy of the session
+          // id and the retry state.
+          retained: true,
+          detail:
+            `cannot read ${unreadable.length} spool meta(s): ${example}` +
+            " — left in place and retryable; the bytes were never seen, so these" +
+            " are NOT corrupt entries",
+        },
+        { stamp: stemSetStamp(stems) },
+      ),
+    );
   }
   return { metas, discards };
 }
@@ -1740,6 +1760,18 @@ function readRefusalStamps(dir: string): RefusalStamp[] {
  * dropped from the ledger — the one surface a refusal has.
  *
  * Fails toward RECORDING, exactly like the Python leg. */
+/** A stable dedupe stamp for a SET of names (#11802).
+ *
+ *  `entriesDirStamp` exists to answer "is this refusal verdict still true?", so
+ *  it deliberately includes `entries/` mtime — which ANY write to the directory
+ *  moves. That is right for an admission refusal and wrong for a set of
+ *  unreadable files: a turn writes a new (readable) meta, the mtime moves, and a
+ *  dir-stamp key therefore suppresses nothing on exactly the per-turn path the
+ *  dedupe is for. This stamp changes only when the SET changes. */
+function stemSetStamp(stems: string[]): string {
+  return `set:${createHash("sha256").update(stems.join("\n"), "utf8").digest("hex").slice(0, 16)}`;
+}
+
 function entriesDirStamp(dir: string): string {
   try {
     const names = readdirSync(entriesDir(dir))
@@ -1881,12 +1913,16 @@ export function recordRefusal(
     bounds?: SpoolBounds;
     projectedBytes?: number;
     replacesSessionId?: string;
+    /** Override the `entries/` dir stamp as the dedupe stamp. Used by the
+     *  unreadable-set aggregate (#11802), whose identity is the SET of stems and
+     *  NOT the directory state — see {@link stemSetStamp}. */
+    stamp?: string;
   },
 ): DiscardRecord {
   const fingerprint = {
     session_id: rec.session_id,
     reason: rec.reason,
-    entries_stamp: entriesDirStamp(dir),
+    entries_stamp: verdict?.stamp ?? entriesDirStamp(dir),
     // The verdict's INPUTS, alongside its key — `admissionSaturated` reuses this
     // stamp to answer "is this refusal still true?" without a scan, and that
     // reuse is only sound for the same ceilings and a projection no smaller than

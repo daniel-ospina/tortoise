@@ -75,9 +75,13 @@ ahead of both delivery classes**.
 > delayed delete. The order only changes *how long* the delay is.
 
 Confirmed in code: `tortoise/capture_spool.py:26-33` allows an `.orphan` to be reclaimed because it is
-"unreachable to every surface", and the orphan pass sits between the filed-entry pass and the unfiled
-entries (`capture_spool.py:2250-2265`), because "an orphan's delivered-ness is unknowable" while a
-filed entry's reclaim is certain.
+"unreachable to every surface". The order is **filed entries → orphans → UNFILED, which are never
+evicted**: there is no unfiled eviction pass at all — the unfiled arm is a bare `continue`
+(`capture_spool.py:2281-2282`, TS `:2425-2446`) guarded by *"an UNDELIVERED entry is the only copy of a
+conversation … the cap therefore stops here and the spool reports SATURATED instead"*. An earlier draft of
+this document read the orphan pass as sitting *"between"* filed and unfiled and thereby implied a third
+pass that reaps unfiled work — corrected here, because that misreading is exactly the one this section
+exists to remove.
 
 **Therefore the current behaviour is not "preserve the transcript for forensics". It is a delayed
 delete**: quarantine strips the transcript of the only key that can re-address it, and the cap
@@ -369,12 +373,28 @@ and `spool_saturated(root, Bounds(max_total_bytes=1000))` returned **`False`** �
 admitted past the ceiling with no refusal and no `capture: SATURATED`. Before the change this was
 bounded only because the entry was *destroyed*; the retained path trades that for uncounted growth.
 
-**Why it is not fixed here:** grading those bytes against the ceiling changes effective cap semantics,
-which **#10175 explicitly holds** and the lane brief forbids touching. Per the contradiction test, a
-design that reverses a held decision is **not adopted** — it is reopened in the decision's own home.
-So this is declared and filed, not silently shipped. Bounded in practice by `SPOOL_MAX_ENTRY_BYTES`
-per entry, and fully relieved the moment the permission mismatch is repaired (the entries become
-parsable and re-enter the accounting).
+**Why it is not fixed here** — and the reason is NOT #10175, which the first draft wrongly cited.
+Review cycle 2 is right that #10175 holds a cap which *refuses rather than deletes*, and that counting
+**more** bytes moves in that same direction, so it is not the obstacle. The repo even has the precedent one
+class over: orphan bytes are already credited to `total` for exactly this reason
+(`capture_spool.py:2238-2243` — *"the byte ceiling stopped applying the moment a meta was quarantined"*).
+The real reason is **risk and scope**: this is a behavioural change to the adjudication inside
+`prune_spool` / `spoolSaturated` (and both TS twins), the highest-consequence function in the module, and it
+needs its own review plus the cap owner's sign-off — not a rider on a data-loss fix. A naive `total +=`
+would also make the eviction loop spend every **filed** entry chasing a ceiling it cannot reach, because
+the retained bytes are unevictable; the correct shape credits them to `total` **and** exempts them from
+the eviction budget, which is a design, not a line. Filed as **tortoise#12483** with that shape spelled
+out. Bounded in practice meanwhile by `SPOOL_MAX_ENTRY_BYTES` per entry, and fully relieved the moment
+the permission mismatch is repaired (the entries become parsable and re-enter the accounting).
+
+**(3) The WRITE path still concludes "absent" from a read refusal — same class, one layer over.**
+`capture_spool.py:738-743` (`read_spool_meta` returns `None` on `OSError`), used at `:1655`; twin
+`tortoise-capture.ts:2047-2053`, `:3138-3144`. If the session being written is the unreadable one, `prior`
+is `None`, so `write_spool_entry` treats it as a fresh snapshot and `_atomic_write` **replaces** both the
+meta and the log — dropping any stored turns outside the current `MAX_TURNS` window and discarding
+`filed_key`/`attempts`. Pre-existing (the drain fix does not reach it), lower frequency (it needs the same
+session to be the writer), but it is the same defect shape and it is **not** fixed here — the lane's scope
+is the drain. Filed as its own issue with this analysis.
 
 **(4) The two legs disagree destructively on non-UTF-8 metas — pre-existing, not introduced here.**
 Python's decoder raises `UnicodeDecodeError` (→ `corrupt_entry`, entry destroyed); Node's
@@ -385,16 +405,24 @@ introduced by the read/parse split — but the first version of the change *docu
 faithful mirror*, which is false on this axis; the comment now names the divergence explicitly. Filed
 separately rather than widened here.
 
-**Fixed in review cycle 1 (recorded so the correction is not later re-litigated):**
+**Fixed over review cycles 1–2 (recorded so the corrections are not later re-litigated):**
 
-- **(2) Unbounded ledger growth.** The first version recorded the read refusal with an unconditional
-  `recordDiscard`/`record_discard`. Because the repairing scan also runs on the **per-turn** write
-  path and the entry never becomes readable, that appends one line **per turn** into an uncapped
-  `discarded.jsonl` in the spool root — the exact amplification class `_record_refusal`/`recordRefusal`
-  exists to prevent (`capture_spool.py:1025-1041`). Both legs now use the refusal recorder, keyed on
-  `(session_id, reason, entries/ stamp)`. Pinned both sides: 5 scans now produce **1** line, and
-  mutating back to the unconditional recorder reds it (`assert 5 == 1` in Python; a TS failure too).
-- **(3) An inverted eviction-order claim.** Corrected in §1 above and in both code comments.
+- **(2) Unbounded ledger growth — cycle 1's fix was INSUFFICIENT, and cycle 2 caught it.** The first
+  version recorded the read refusal with an unconditional `recordDiscard`/`record_discard`; because the
+  repairing scan also runs on the **per-turn** write path and the entry never becomes readable, that
+  appends one line **per turn** into an uncapped `discarded.jsonl` in the spool root — the exact
+  amplification class `_record_refusal`/`recordRefusal` exists to prevent (`capture_spool.py:1025-1041`).
+  Cycle 1 switched both legs to the refusal recorder and claimed "5 scans → 1 line" — **but the refusal
+  key is `(session_id, reason, entries/ stamp)` and that stamp includes `entries/` mtime, which every
+  turn moves** by writing a new meta. So the claim held only on a STATIC directory and was false on the
+  real per-turn path; the N-wide window also crowded admission refusals out at N>32. **Cycle 2's fix,
+  now in this change:** the arm records **ONE aggregate** for the whole unreadable SET, keyed on a
+  digest of the **stem set alone** (`stemSetStamp` / `_stem_set_stamp` — byte-identical across the two
+  legs, so they dedupe each other's records), and consumes ONE refusal-window slot instead of N.
+  Pinned in both legs **with a new readable meta written between every scan** — the mutation test now
+  reds at `got 5` when the dir-stamp key is restored, which is precisely the cycle-2 measurement.
+- **(3) An inverted eviction-order claim.** Corrected in §1 above and in both code comments; the
+  "between filed and unfiled" wording that implied a third reaping pass is corrected too (cycle 2).
 
 ---
 

@@ -3544,17 +3544,31 @@ test("a repeatedly unreadable meta records ONCE, not once per turn (#11802)", ()
   // unconditional record appends one line per turn, forever, into a file in the
   // spool root that is counted against no ceiling (#4714's amplification class).
   //
-  // MUTATION THAT REDS THIS: use `recordDiscard` instead of `recordRefusal`.
+  // Each iteration writes a NEW (readable) meta first, because that is what a
+  // real turn does — and it moves `entries/` mtime. Asserting the dedupe on a
+  // STATIC directory passes against a dir-stamp key that suppresses NOTHING on
+  // the per-turn path this exists for (found in review cycle 2).
+  //
+  // MUTATION THAT REDS THIS: use `recordDiscard` instead of `recordRefusal`; or
+  // key the dedupe on `entriesDirStamp` instead of the unreadable stem set.
   const spool = tmpSpool();
   mkdirSync(join(spool, "entries"), { recursive: true });
   const metaPath = join(spool, "entries", "locked.meta.json");
   writeFileSync(metaPath, JSON.stringify({ version: 1, session_id: "s" }));
   chmodSync(metaPath, 0o000);
   try {
-    for (let i = 0; i < 5; i++) listSpoolEntries(spool);
-    const lines = readDiscards(spool);
+    for (let turn = 0; turn < 5; turn++) {
+      // a new session spooled this turn — readable, exactly as in production
+      writeFileSync(
+        join(spool, "entries", `live${turn}.meta.json`),
+        JSON.stringify({ version: 1, session_id: `live${turn}` }),
+      );
+      listSpoolEntries(spool);
+    }
+    const lines = readDiscards(spool).filter((d) => d.reason === DISCARD_META_UNREADABLE);
     assert.equal(lines.length, 1, `one event, not one per scan — got ${lines.length}`);
-    assert.equal(lines[0].reason, DISCARD_META_UNREADABLE);
+    assert.equal(lines[0].retained, true);
+    assert.match(lines[0].detail ?? "", /cannot read 1 spool meta/);
   } finally {
     if (existsSync(metaPath)) chmodSync(metaPath, 0o600);
   }
