@@ -431,12 +431,14 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
           # ⛔ NAME THE STATE, NOT ONE CAUSE (review round 5, note 1). An EMPTY `iconv`
           # output has THREE reachable causes — no `iconv` at all, one that refused/failed, and
           # one that is perfectly healthy and emits NOTHING because it could decode nothing from
-          # the tail — but they do not all reach the same sentence (corrected, review round 7):
-          # a tail a HEALTHY converter emits nothing for holds no byte under 0x80 (every
-          # remaining byte is a complete valid sequence, which `-c` emits), so `tr -d '\200-\377'`
-          # keeps nothing either, and that cause lands in the SECOND sentence below, never this
+          # the tail — but they do not all reach the same sentence (corrected, review rounds 7-8):
+          # a tail a HEALTHY converter emits nothing for contains no byte BELOW 0x80 — each such
+          # byte is itself a complete UTF-8 sequence (ASCII), so `-c` emits it and the output
+          # would not be empty — while `tr -d '\200-\377'` deletes every byte at or ABOVE 0x80,
+          # so it keeps nothing either. That cause therefore lands in the SECOND sentence below,
+          # never this
           # one. THIS arm is entered only when the fallback has just produced text, so the tail
-          # did hold an ASCII byte and a working converter would have emitted it — which leaves
+          # did hold a byte below 0x80 and a working converter would have emitted it — which leaves
           # exactly the two broken-converter causes here, and `emitted nothing it could convert`
           # is deliberately NOT in this sentence's parenthetical for that reason. Case 17l pins
           # the third cause in the second sentence, where it is the operative one.
