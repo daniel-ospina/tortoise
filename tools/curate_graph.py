@@ -488,7 +488,10 @@ class MCPReader:
                 "OR op_type IS NOT NULL`, this read serves `is_operator = true` only — "
                 "`graph-scripts/backfill_is_operator.py` exists for that shape); a "
                 "terminal/`outdated` operator (counted, excluded from the read by the "
-                "#1391 status clause); or a genuinely partial read")
+                "#1391 status clause); a genuinely partial read; or the layer CHANGED "
+                "between the `structure` count and this read (a concurrent create — "
+                "`structure` is read immediately before this call to keep that window "
+                "to two requests, but it is still two requests)")
         if reported is None:
             self._note("the structure section reported no `operators` count, so the operator "
                        "layer read is unreconciled (it is still the read's rows, not a count)")
@@ -897,10 +900,13 @@ def cmd_plan(args: argparse.Namespace) -> int:
     layer: tuple[int, int | None] | None = None   # set only when the read COMPLETES
     try:
         counts = reader.counts()
-        structure = reader.structure()
         points, points_total = reader.read_points(page=args.page, verify=args.verify_read)
         sources, source_total = reader.read_sources()
-        # ⛔ The reasoning layer, read and reconciled — see `read_operators`.
+        # ⛔ The reasoning layer, read and reconciled — see `read_operators`, and `structure`
+        # read IMMEDIATELY before it so the count and the rows describe one instant: a full
+        # point walk between them lets a concurrent create make `read > reported`, a
+        # direction none of the refusal's named causes produces (see `cmd_inventory`).
+        structure = reader.structure()
         operators, operators_reported = reader.read_operators(structure)
         # ⛔ Bound the moment the read COMPLETES, and bound before the `try` so every
         # disarmed arm can report it truthfully: `graphs()` below is a LATER read, so a

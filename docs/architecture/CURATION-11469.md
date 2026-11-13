@@ -155,9 +155,11 @@ measurement, not a guarantee.** `structure.operators` counts
 (`search_engine`, #1391). So a legacy `op_type`-only operator (`graph-scripts/backfill_is_operator.py`
 exists for that shape) is COUNTED and not served, and a terminal operator is counted and excluded;
 either makes a *correct* read refuse. Both causes push the SAME way — the count's predicate is a
-superset of the read's and applies no status filter, while the read subtracts — so the read can
-never exceed the count: a mismatch can only present as `reported > read`, and equality cannot be
-manufactured by two errors cancelling. What it CAN hide is the one-directional kind: a surface
+superset of the read's and applies no status filter, while the read subtracts — so at ONE INSTANT
+the read cannot exceed the count and equality cannot be manufactured by two errors cancelling.
+The two are not taken at one instant: `structure` is read immediately before the layer (the window
+is two requests, not a whole point walk), so a concurrent create still presents as
+`read > reported` — the refusal message names that as its fourth cause. What it CAN hide is the one-directional kind: a surface
 that returns fewer rows while still reporting the full count is caught by equality, but a
 short layer with NO reported count is only noted (below) — and carried as a field,
 `operators_reconciled: false` (see the guarantees table), because a note is not something a driver
