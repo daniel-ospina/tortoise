@@ -197,8 +197,8 @@ Each artifact binds itself twice, and the two bindings answer different question
 definition — in-toto's Statement itself has no build-definition field):
 
 * `provenance.probe_sha256` binds it to the **code** that produced it (gate.json:
-  `6dbb87f488fafde74e401bbbaac46ce839bf8d0015229b358d7197cde3026c0f`; quote_identity.json:
-  `0ef9fe88f04b86b90005a0042afedec6cdc4697098389c6058477b40f5afaf6f`), and
+  `4f066693fbc1c742e36d29875f4b970af7ee12df264217cf95911f480b47a411`; quote_identity.json:
+  `b66f8a174708f855501ac02ae3e5da57dd9e7ae62fac5721cb77c2036f3dfc65`), and
 * `provenance.payload_sha256` binds it to the **numbers** it produced **and to the row cache they
   are attributed to** — sha256 over `{"artifact": <every field except provenance>,
   "rows_source": …}`, canonicalised `indent=2, sort_keys=True` (gate.json:
@@ -215,12 +215,17 @@ the probe to check it (the same binding the #11838 census uses). `_provenance()`
 the ONE producer of its block: a fresh run calls it, and `--attest` calls it on an existing artifact.
 `--attest` fails closed, exit `2`, under four markers — and the ARM SURFACE differs per probe,
 because the two artifacts answer different questions. `composed_gate.py` refuses an unreadable or
-unparseable artifact (`ATTEST-UNREADABLE`); no gate verdicts, no `verdict.gates` block (so a deleted
-flag cannot be blessed) or no `source` to record as `rows_source` (`ATTEST-REFUSED`); `all_pass`
-disagreeing with the three gate flags (`ATTEST-INCONSISTENT`); and an unwritable target
-(`PROBE-WRITE`). `quote_identity.py` refuses an unreadable artifact (`ATTEST-UNREADABLE`); no
-root-cause measurement or no `provenance.rows_source` (`ATTEST-REFUSED`); and an unwritable target
-(`PROBE-WRITE`) — it carries no verdict block, so it has no inconsistent-verdict arm. It exists
+unparseable artifact (`ATTEST-UNREADABLE`); an artifact whose ROOT is not an object, no gate
+verdicts, a `verdict` that is not an object, a `verdict.gates` block that does not carry **exactly**
+the three gate names (so neither a deleted block nor a partially deleted flag can be blessed — the
+same guard subsumes both, `#12476`) or no `source` to record as `rows_source` (`ATTEST-REFUSED`);
+`all_pass` disagreeing with the three gate flags (`ATTEST-INCONSISTENT`); and an unwritable target
+(`PROBE-WRITE`). `quote_identity.py` refuses an unreadable artifact (`ATTEST-UNREADABLE`); an
+artifact whose root or `provenance` is not an object, no root-cause measurement, or no
+`provenance.rows_source` (`ATTEST-REFUSED`); and an unwritable target (`PROBE-WRITE`) — it carries
+no verdict block, so it has no inconsistent-verdict arm. ⛔ **Every one of these exits `2` and none
+raises**: the shape checks come before any `.get`/`.values()` call, because a lane script cannot
+tell an `AttributeError` out of `main()` (exit `1`) from a refusal. It exists
 because a fresh run is ~16 minutes of
 encoding while the binding is a pure function of the probe's bytes and the artifact's own payload;
 it rewrites ONLY `provenance`, so it cannot move a number. What a re-run reproduces is the
