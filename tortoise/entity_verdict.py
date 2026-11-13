@@ -242,11 +242,27 @@ def _scan(text: str) -> list[str]:
     """
     out: list[str] = []
     for tok in _TOKEN_OR_HASH.findall(str(text or "")):
-        if ("/" in tok and not tok.startswith("#")
-                and not _temporal_compound(tok)):
-            out.extend(part for part in tok.split("/") if part)
-        else:
+        if ("/" not in tok or tok.startswith("#")
+                or _temporal_compound(tok)):
             out.append(tok)
+            continue
+        # ⛔ A slash-written date INSIDE a path (`blog/2026/11/post.md`) must stay
+        # one token: split into `2026` + `11` the `year_month`/`date` kinds vanish,
+        # the skeletons then DIFFER on the peeled numbers, and the pair merges with
+        # no veto. Re-join any adjacent year/month(/day) run.
+        parts = [part for part in tok.split("/") if part]
+        i = 0
+        while i < len(parts):
+            if _YEAR_PART.match(parts[i]) and i + 1 < len(parts) \
+                    and _MONTH_PART.match(parts[i + 1]):
+                end = i + 2
+                if end < len(parts) and _DAY_PART.match(parts[end]):
+                    end += 1
+                out.append("/".join(parts[i:end]))
+                i = end
+                continue
+            out.append(parts[i])
+            i += 1
     return out
 
 
@@ -255,13 +271,22 @@ def _scan(text: str) -> list[str]:
 #: `date_tokens`, so `2026-11 report` / `2026-12 report` reports `date_conflict` —
 #: the rule that actually fired — instead of `identifier_conflict`.
 _YEAR_MONTH_RAW = re.compile(
-    r"^(?:1[89]\d\d|2\d\d\d)[-/](?:0?[1-9]|1[0-2]|q[1-4])$")
+    r"^(?:1[89]\d\d|2\d\d\d)[-/](?:0?[1-9]|1[0-2])$")
+#: `YYYY-Qn` — a QUARTER, not a month. Kept out of `_YEAR_MONTH_RAW` so the two
+#: kinds cannot both claim it: filed under `year_month` it made
+#: `the 2026-11 report` vs `the 2026/Q4 report` a same-kind contradiction, which
+#: is the like-with-like rule this module exists to keep.
+_YEAR_QUARTER_RAW = re.compile(r"^(?:1[89]\d\d|2\d\d\d)[-/]q[1-4]$")
 #: A full `YYYY-MM-DD` / `YYYY/MM/DD`. Same rule: temporal, not an identifier, so
 #: two different dates are reported under the date rule that fired.
 _YEAR_MONTH_DAY_RAW = re.compile(
     r"^(?:1[89]\d\d|2\d\d\d)[-/](?:0?[1-9]|1[0-2])[-/](?:0?[1-9]|[12]\d|3[01])$")
 #: The quarter-first spelling of the same compound (`Q3-2026`).
 _QUARTER_YEAR_RAW = re.compile(r"^q[1-4][-/](?:1[89]\d\d|2\d\d\d)$")
+#: The parts a slash-written date is rebuilt from inside a path (`blog/2026/11/x`).
+_YEAR_PART = re.compile(r"^(?:1[89]\d\d|2\d\d\d)$")
+_MONTH_PART = re.compile(r"^(?:0?[1-9]|1[0-2])$")
+_DAY_PART = re.compile(r"^(?:0?[1-9]|[12]\d|3[01])$")
 
 
 def _temporal_compound(tok: str) -> bool:
@@ -275,6 +300,7 @@ def _temporal_compound(tok: str) -> bool:
     """
     folded = str(tok or "").casefold()
     return bool(_YEAR_MONTH_RAW.match(folded)
+                or _YEAR_QUARTER_RAW.match(folded)
                 or _QUARTER_YEAR_RAW.match(folded)
                 or _YEAR_MONTH_DAY_RAW.match(folded))
 _YEAR = re.compile(r"\b(1[89]\d\d|2\d\d\d)\b")
@@ -377,7 +403,16 @@ def date_tokens(name: str) -> dict[str, set[str]]:
     year_months = {tok for tok in _scan(name)
                    if _YEAR_MONTH_RAW.match(tok.casefold())}
     if year_months:
-        out["year_month"] = {tok.replace("/", "-") for tok in year_months}
+        # Case-folded like every sibling kind: `_YEAR_MONTH_RAW` matched on the
+        # folded token, so an un-folded set here made `2026-Q4` vs `2026-q4` a
+        # contradiction while `year`, `quarter` and `year_quarter` all agreed.
+        out["year_month"] = {tok.casefold().replace("/", "-")
+                             for tok in year_months}
+    year_quarters = {tok for tok in _scan(name)
+                     if _YEAR_QUARTER_RAW.match(tok.casefold())}
+    if year_quarters:
+        out["year_quarter"] = out.get("year_quarter", set()) | {
+            tok.casefold().replace("/", "-") for tok in year_quarters}
     quarter_years = {tok for tok in _scan(name)
                      if _QUARTER_YEAR_RAW.match(tok.casefold())}
     if quarter_years:

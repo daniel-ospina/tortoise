@@ -106,10 +106,15 @@ Four properties are load-bearing and each is pinned by a test:
   set the fold could answer.
 
 ⚠️ **Residual, stated:** the guard runs on every entity prior row and costs one
-read per label (plus one per hop round, normally zero). It does not change which
-rows S3's `LIMIT` selected — a carrier that consumed a window slot still consumed
-it. `#12244` owns the write-side attachment sites; this is the read/prior side and
-its acceptance does not reach them.
+read per label (plus one per hop round, normally zero), and the verdict's facts
+reader adds a REVERSE read per label ("which nodes were folded into these ids?").
+That reverse read is now index-backed — `resolved_from` was added to
+`_RANGE_INDEX_LABEL_PROPS` and to `_REQUIRED_RANGE_INDEXES` for both identity
+labels, because un-indexed it measured 6.17 ms/query at 20k Objects (0.95 ms
+indexed) on every capture, twice per run. It does not change which rows S3's
+`LIMIT` selected — a carrier that consumed a window slot still consumed it.
+`#12244` owns the write-side attachment sites; this is the read/prior side and its
+acceptance does not reach them.
 
 ---
 

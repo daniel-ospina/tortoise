@@ -498,9 +498,16 @@ class TestHardVetoes:
             out = verdict.judge({"name": a, "kind": "k"},
                                 {"name": b, "kind": "k"})
             assert out["vetoes"] == [verdict.VETO_DATE_CONFLICT], (a, b, out)
-        # A different SPELLING of the same quarter contradicts nothing.
+        # A different SPELLING of the same quarter contradicts nothing — including
+        # case, and including month-vs-quarter, which are different KINDS.
         assert verdict.judge({"name": "Q3-2026 plan", "kind": "k"},
                              {"name": "Q3 2026 plan", "kind": "k"})[
+                                 "vetoes"] == []
+        assert verdict.judge({"name": "the 2026-Q4 plan", "kind": "k"},
+                             {"name": "the 2026-q4 plan", "kind": "k"})[
+                                 "vetoes"] == []
+        assert verdict.judge({"name": "the 2026-11 report", "kind": "k"},
+                             {"name": "the 2026/Q4 report", "kind": "k"})[
                                  "vetoes"] == []
 
     def test_graph_facts_are_their_own_vetoes(self):
@@ -720,6 +727,11 @@ class TestVetoesAreSilentOnTheGenuineVariantCorpus:
             ("docs/v1/notes.md", "docs/v2/notes.md",
              verdict.VETO_IDENTIFIER_CONFLICT),
             ("docs/2026-11/report.md", "docs/2026-12/report.md",
+             verdict.VETO_DATE_CONFLICT),
+            # …and the SLASH date inside a path: split into `2026` + `11` the
+            # `year_month` kind vanishes and the peeled numbers make the
+            # skeletons DIFFER, which kills both vetoes.
+            ("blog/2026/11/post.md", "blog/2026/12/post.md",
              verdict.VETO_DATE_CONFLICT),
         ):
             out = verdict.judge({"name": a, "kind": "k"},

@@ -6152,13 +6152,17 @@ def _verdict_facts(facts, node_id, mention_name: str = "") -> dict:
     dependents") for a node nobody read is how a guard reports protection it does
     not have.
 
-    ``mention_name`` closes the one case where the group-join veto would refuse
-    evidence the tree already holds: when the mention's FOLDED spelling is already
-    in the candidate's ``aliases[]`` (`entity_resolver.apply_entity_merge` writes
-    it there, and the by-name resolver reads `$k IN n.aliases` as a resolution),
-    the membership is *recorded* rather than inferred, so the veto stands down.
-    The fold is the tree's own (`normalize_entity_name`) — the same one the alias
-    was written with, so the two cannot disagree about a spelling.
+    ``mention_name`` closes the cases where the group-join veto would refuse
+    evidence the tree already holds: when the mention's FOLDED spelling is the
+    candidate's OWN name, or one already in its ``aliases[]``
+    (`entity_resolver.apply_entity_merge` writes it there, and the by-name resolver
+    reads `$k IN n.aliases` as a resolution), the membership is *recorded* rather
+    than inferred, so the veto stands down. The own-name half is load-bearing on
+    its own: phase 1's name rungs are kind-gated, so a mention with an UNSTATED
+    kind reaches phase 2, and a spelling test over `aliases` alone refused a
+    mention spelled exactly like its target. The fold is the tree's own
+    (`normalize_entity_name`) — the same one the alias was written with, so the
+    two cannot disagree about a spelling.
     """
     if not isinstance(facts, dict):
         return {}
@@ -6409,8 +6413,12 @@ def resolve_entities(entity_refs: list[dict], search: dict,
     the candidate-table validation below is untouched.
 
     ``facts`` (#12296) is what the GRAPH says about the candidate ids, as
-    ``{id: {"retired", "dependents", "suppressed"}}`` (built by
-    ``_entity_verdict_facts``). It feeds the verdict's hard vetoes and its
+    ``{id: {"retired": bool, "dependents": int, "suppressed": bool,
+    "name": str, "aliases": [str]}}`` (built by ``_entity_verdict_facts``; the
+    last two are the spellings the candidate answers to, and ``_verdict_facts``
+    turns a mention that matches one of them into ``mention_is_alias`` — a map
+    WITHOUT them silently re-creates the ``group_join`` refusal of a mention
+    spelled exactly like its target). It feeds the verdict's hard vetoes and its
     closure re-verification; absent, only the name/kind vetoes run. A phase-2
     proposal that a veto or the closure refuses is not resolved and not `new` —
     it is HELD with reason ``vetoed``, and every successful record carries the
