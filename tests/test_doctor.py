@@ -407,15 +407,14 @@ class TestDoctorHostedCredential:
 
     def test_a_spent_budget_stops_the_probe_instead_of_hanging(
             self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
-        """The probe's 75 s is WALL CLOCK, and a spent budget is ⚠️, not a hang.
+        """A spent budget is ⚠️, not a hang — and it bounds leg STARTS.
 
-        `urlopen(timeout=n)` bounds each `recv`; `resp.read(_DOCTOR_BODY_CAP)` is
-        unbounded while every inter-byte gap stays under `n`, so four legs on a
-        dripping proxy could hold `doctor` (and `onboard`'s last step) for hours
-        while the constant comment claimed 75 s worst case (fresh review round
-        13). A leg the budget cannot fit must NOT be begun, and the row must say
-        UNPROVEN — ⚠️, never `❌` + exit 1, which would blame the credential for a
-        slow link.
+        ⛔ What this pins, precisely: a leg the budget cannot fit is NOT BEGUN.
+        It does NOT pin an in-flight read (a server dripping bytes just under the
+        per-recv bound can still outlive the budget inside one leg) — that
+        residual is filed as tortoise#12398 and named in the constant's comment,
+        not claimed fixed. The row must say UNPROVEN — ⚠️, never `❌` + exit 1,
+        which would blame the credential for a slow link (fresh review round 13).
         """
         _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY)
         calls = _stub_hosted(monkeypatch, lambda url, req: pytest.fail(
@@ -436,6 +435,37 @@ class TestDoctorHostedCredential:
         assert "budget" in hosted and "UNPROVEN" in hosted, hosted
         assert "❌ Hosted" not in out, out[-1200:]
         assert rc == 0, "a slow link is not a failing credential"
+
+    def test_the_report_names_the_bound_actually_used(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """A truncated retry must be reported as truncated, not as the constant.
+
+        The retry rows print the wait that was ATTEMPTED. When the total budget
+        truncates a leg (`min(own, left)`), printing the configured 30 s reports
+        a wait that never happened — an over-claim inside the verdict report, the
+        surface a user reads to decide whether to re-run (fresh review round 14).
+        Here the budget is 6 s and the `/health` leg used its own 5 s, so the
+        retry can only be 6 s: the row must say 6, never 30.
+        """
+        _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY)
+
+        def handler(url, req):
+            raise TimeoutError("timed out")
+
+        _stub_hosted(monkeypatch, handler)
+        import tortoise.__main__ as _m
+        monkeypatch.setattr(_m, "_DOCTOR_TOTAL_BUDGET_S", 6.0)
+        db_path = str(tmp_path / "used-bound.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor used bound seed")
+
+        _run_doctor([])
+        out = capsys.readouterr().out
+
+        hosted = _row(out, "Hosted")
+        assert hosted is not None, out[-1500:]
+        assert "none in 6s on retry" in hosted or "none in 6.0s on retry" in hosted, hosted
+        assert "none in 30s on retry" not in hosted, hosted
 
     def test_an_unreadable_health_body_is_never_green(
             self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
