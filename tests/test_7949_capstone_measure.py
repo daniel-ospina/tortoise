@@ -4942,8 +4942,8 @@ def _bare_number_hits(text: str) -> list[str]:
 #: block, and it is the population the neighbour arm scans.
 _BLOCK_WORDS = re.compile(r"carve[_-]?out|carve out|\b(?:entry|block|manifest)\b")
 #: ⛔ …AND THE MANIFEST'S OWN FILENAME BELONGS IN THE POPULATION, because this arm's
-#: failure message promises a line number "must not reappear ANYWHERE in the
-#: document" and `_MANIFEST` already treats `ci-surfaces.yml` as the manifest — while
+#: RULE is that no manifest line cite may appear anywhere in the document, and
+#: `_MANIFEST` already treats `ci-surfaces.yml` as the manifest — while
 #: this gate did not, so the loop below `continue`d before `_neighbour_number_strays`
 #: ever ran on the most natural such line (#12369 review, P2, measured GREEN):
 #:
@@ -6464,7 +6464,7 @@ def test_the_manifest_line_cite_matcher_does_not_fire_on_correct_prose(prose):
     # ⛔ THE SEPARATOR CARRIES A FILLER WORD IN ORDINARY ENGLISH, and that was the
     # last reproduced bypass: `… sits at line number 9987 this week` inserted into
     # `03-test-design.md` left the pin GREEN end-to-end while the arm that claims no
-    # such cite can reappear ANYWHERE in the document stayed silent. `→`, `#` and the
+    # such cite can appear anywhere in the document stayed silent. `→`, `#` and the
     # `line number` / `no.` forms are covered by `_SEP`'s optional tail and `_WRAP`.
     "`config/ci-surfaces.yml` line number 9987",
     "`config/ci-surfaces.yml` line no. 9987",
@@ -6660,8 +6660,8 @@ def test_the_neighbour_population_includes_the_line_that_names_the_manifest_file
 
     The identical sentence with the WORD "manifest" instead of the filename WAS
     scanned and red. One vocabulary admitted, the other not, for the same file — and
-    the arm's own failure message promises a line number "must not reappear ANYWHERE
-    in the document". An ORDINAL (`9987th line`) is unambiguously a POSITION, not the
+    the arm's own RULE is that no manifest line cite may appear anywhere in the
+    document. An ORDINAL (`9987th line`) is unambiguously a POSITION, not the
     count-ambiguous `number + lines` residual the regex states, so no spelling
     exemption applies here.
 
@@ -6824,7 +6824,7 @@ def test_each_block_arm_reds_on_the_mutation_it_guards(mutation, arm, monkeypatc
       * for the arms below that are a shape's ONLY guard (the hold-none clause, the
         one-entry grammar, the neighbour loop, the doc-wide cite, the leak arm), the
         case fails if the arm is deleted — verified by deleting each one;
-      * `ceil(len(carve) > 1)` is a MESSAGE refinement: `elif carve != [ENTRY]`
+      * `elif len(carve) > 1:` is a MESSAGE refinement: `elif carve != [ENTRY]`
         refuses the same state, so its case stays RED with the arm deleted. It is
         listed for the message it produces, not for coverage.
     """
