@@ -705,3 +705,43 @@ def test_a_remedys_named_count_is_a_key_the_status_section_serves(
             f"tortoise_graph_overview(section='status') does not serve "
             f"({sorted(served)})"
         )
+
+
+# ── review round 5: the two emptiness BOUNDARIES, one test each ─────────────
+
+
+def test_an_empty_string_tag_is_still_tag_mode_and_must_refuse(stub_factory) -> None:
+    """The body enters tag mode on `if tag is not None`, so `tag=""` IS a tag read.
+
+    The guard's `tag is not None` is therefore load-bearing: rewritten as `tag`
+    (truthiness) it passes every other test and `tag="", text="q",
+    entity_type="object"` reaches `query_points_by_tag` and answers the tagged
+    Points to a caller who asked for objects. Fails on `stub.calls == []` AND on
+    the refusal — the first alone would let a read-then-refuse slip by.
+    """
+    from tortoise.mcp_server import tortoise_query
+    stub = stub_factory()
+
+    result = tortoise_query(tag="", text="q", entity_type="object", offset=0, limit=2)
+
+    assert _is_refusal(result), (
+        f"tag='' is tag mode and served the tagged Points: {result!r}"
+    )
+    assert stub.calls == [], f"the tag arm read before refusing: {stub.calls}"
+
+
+def test_a_falsy_non_none_text_must_still_refuse(stub_factory) -> None:
+    """The guard's `not text` covers a FALSY text (`0`, `[]`, `False`), not just None.
+
+    Rewritten as `text is None` it passes every other test, and `text=0` with a
+    non-point type falls through to the plain structural arm and answers the
+    Points population with a `total`. Fails on `stub.calls == []` and on the
+    refusal; the fixture reaches it because `0` is falsy but not `None`.
+    """
+    from tortoise.mcp_server import tortoise_query
+    stub = stub_factory()
+
+    result = tortoise_query(text=0, entity_type="event", limit=2)  # type: ignore[arg-type]
+
+    assert _is_refusal(result), f"a falsy text served the Points: {result!r}"
+    assert stub.calls == [], f"the structural arm read before refusing: {stub.calls}"
