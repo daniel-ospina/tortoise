@@ -1011,13 +1011,14 @@ def _is_refusal_envelope(text: str) -> bool:
     """True when a client error's message IS one of the surface's refusals.
 
     Delegates to `tortoise.mcp_client.refusal_message`, which OWNS the
-    classification (it owns `call_tool`, the boundary that raises). Three shapes
+    classification (it owns `call_tool`, the boundary that raises). FOUR shapes
     are rc-3 material in this file: a `_safe`/`_quota_gated` refusal (fastmcp
     raises `content[0].text` — for a `_safe` payload the JSON error dict), and the
-    transport wait-bound refusal's two prose arms (`-32009`, dispatched vs
-    never-dispatched — the routine refusal for an expensive census read). A
-    server-side CRASH's text (`Error calling tool: TypeError: …`) matches none and
-    stays a `ToolError`, so a driver paging on "the run crashed" is not silenced.
+    transport wait-bound refusal's THREE prose arms (`-32009`: dispatched,
+    never-dispatched, and a refused WRITE — the routine refusal for an expensive
+    census read). A server-side CRASH's text (`Error calling tool: TypeError: …`)
+    matches none and stays a `ToolError`, so a driver paging on "the run crashed"
+    is not silenced.
 
     The rationale for the split, measured: review round 4 (the prose arm, which
     turned the routine refusal into an uncaught traceback with rc 1) and round 8
