@@ -2233,6 +2233,7 @@ surfaces:
   # it guards span `tortoise/` — a battery-only or sdk-only change must run it.
   - test_vector_write_seam_4520.py
   core:
+  - test_12364_mcp_list_return_annotations.py
   - test_candidate_recall_11901.py
   # #12294: the ported predicate and the falsification that declined it. `core`
   # classifies it (the guard is a product-surface one: `_derive_queries` must
