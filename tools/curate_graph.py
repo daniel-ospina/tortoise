@@ -289,8 +289,9 @@ class MCPReader:
                                    self._q, **args))
                 err2 = _error_of(res2)
                 if err2:
-                    raise RuntimeError(f"verification read of the {label} page was refused: "
-                                       f"{err2[:300]}")
+                    raise C.CurationRefused(
+                        f"verification read of the {label} page was refused: "
+                        f"{err2[:300]}")
                 got = tuple(f"{r.get('id') or ''}\x00{r.get('content') or ''}"
                             for r in _rows_from_tool(res2))
                 if got != want:
@@ -346,7 +347,8 @@ class MCPReader:
                 # An error envelope is the NORMAL delivery shape on this surface, so
                 # the gate has to be here too: a quota/DB error must not re-read a
                 # different graph and label the artifact with the requested one.
-                raise RuntimeError(f"read of section {section!r} failed: {reason[:300]}")
+                raise C.CurationRefused(
+                    f"read of section {section!r} failed: {reason[:300]}")
         if reason:
             self._note(f"section {section!r}: the explicit graph argument was refused "
                        f"({reason[:160]}); read from the credential's own graph instead")

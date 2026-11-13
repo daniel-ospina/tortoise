@@ -4806,6 +4806,13 @@ def tortoise_get_operator(id: str) -> dict:
     if isinstance(point, _SafeError):
         return point
     if isinstance(point, dict) and point and not point.get("is_operator"):
+        # ⛔ DELIBERATELY a plain dict, NOT `_SafeError` (#4576, pinned by
+        # `test_get_operator_still_rejects_real_non_operator` and named as a
+        # deliberate residual in `tortoise/activation_scorecard.py`'s refusal
+        # telemetry contract): this is a SUCCESSFUL fetch reporting a domain fact,
+        # not a refused call. Typing it would classify it `exec_error`/`safe_error`
+        # and hand a caller a failure verdict for an answer that arrived.
+        # #11153's verdict flip does NOT reach it, on purpose.
         return {"error": f"Point {id!r} is not an operator"}
     return point
 

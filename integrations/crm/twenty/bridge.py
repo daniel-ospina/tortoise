@@ -233,10 +233,15 @@ def tortoise_available() -> bool:
 def _point_id(result) -> tuple[str | None, str | None]:
     """Extract (point_id, error) from an MCP call_tool result.
 
-    Fail-closed (code-review P1, #338): a rejected engine call surfaces as JSON
-    text with an "error" key (and is_error may be False) — detect it so the
-    caller never reports success for a failed write. Returns (None, error_msg)
-    on failure.
+    Fail-closed (code-review P1, #338): a rejected engine call carries an "error"
+    key in its JSON text — detect it so the caller never reports success for a
+    failed write. Returns (None, error_msg) on failure.
+
+    ⚠️ Delivery shape, since #11153: a rejected hosted call now RAISES `ToolError`
+    (the client runs `raise_on_error=True`, and the surface flags the refusal with
+    `isError: true`), so `_write` converts it to the dict shape this function reads.
+    The `is_error`/JSON-text arms below cover a refusal that still arrives IN BAND
+    (a self-hosted server, or a tool whose payload carries the error as data).
     """
     import json as _json
 
@@ -344,7 +349,15 @@ def push_to_tortoise(frontmatter: dict) -> dict:
                 failures.append({"type": "commitment", "index": idx, "error": cerr})
 
         if failures:
-            return {"status": "error", "reason": "tortoise_push_partial",
+            # The TERM says what actually landed. `tortoise_push_partial` means
+            # "some rows are on the graph, reconcile the ids"; a push where NOTHING
+            # landed (a server crash on every write — `_write` hands back any
+            # `ToolError`, not only a refusal) is a different report, and reporting
+            # it as `partial` would stop the `tortoise_push_failed` alarm firing for
+            # a bridge that is simply broken (review round 5, measured).
+            landed = any(p.get("id") for p in point_ids)
+            return {"status": "error",
+                    "reason": "tortoise_push_partial" if landed else "tortoise_push_failed",
                     "points": point_ids, "failed": failures}
         return {"status": "ok", "points": point_ids}
 

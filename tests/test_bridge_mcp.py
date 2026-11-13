@@ -188,6 +188,34 @@ def test_a_refused_write_keeps_the_ids_that_already_landed(monkeypatch):
     assert any("points limit" in f["error"] for f in result["failed"]), result
 
 
+def test_a_push_where_nothing_landed_is_not_called_partial(monkeypatch):
+    """The TERM has to follow what actually landed (review round 5).
+
+    `tortoise_push_partial` means "some rows are on the graph, reconcile the ids";
+    a push where every write failed — including a server CRASH, which is also a
+    `ToolError` — must keep the `tortoise_push_failed` alarm rather than read as a
+    partial reconciliation case.
+    """
+    from fastmcp.exceptions import ToolError
+
+    import tortoise.mcp_client as mcp_client
+    from integrations.crm.twenty import bridge
+
+    monkeypatch.setattr(bridge, "tortoise_available", lambda: True)
+
+    def _always_refuse(_name, _args):
+        raise ToolError("Error calling tool: TypeError: 'NoneType' object is not "
+                        "subscriptable")
+
+    monkeypatch.setattr(mcp_client, "call_tool", _always_refuse)
+
+    result = bridge.push_to_tortoise(SAMPLE_FRONTMATTER)
+
+    assert result["status"] == "error"
+    assert result["reason"] == "tortoise_push_failed", result
+    assert result["failed"], "the per-write detail must survive the report"
+
+
 class TestPointIdExtraction:
     """`_point_id` reads `content[0]`, the block the dispatch seam guarantees is the
     payload (#10084). Later blocks are PROSE — the graph disclosure, a retired-name
