@@ -2762,6 +2762,7 @@ to answer.
   threshold, class set or corpus pin is changed — every §1–§9 criterion VALUE and the E4
   denominator are the ones this record froze. `document_sha256` is re-cut in this same commit, per
   §8's rule for *any* edit to this file, and the bundle README's present-tense digest with it.
+
 ### 10.32 — the rebase+merge onto `main` `ca74f2375ef4`: every §10.29–§10.31 cite re-derived (2026-11-13, `#12295`)
 
 > **A successor entry, not an edit to §10.30 or §10.31.** Both are faithful records of the head they
