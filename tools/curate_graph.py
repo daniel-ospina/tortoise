@@ -144,7 +144,7 @@ class MCPReader:
             res = C.normalise_tool_result(raw)
             err = _error_of(res)
             if err:
-                raise RuntimeError(f"verification pass was refused: {err[:300]}")
+                raise C.CurationRefused(f"verification pass was refused: {err[:300]}")
             batch = _rows_from_tool(res)
             if not batch:
                 break
@@ -201,7 +201,7 @@ class MCPReader:
             # offset/row diagnostic is re-raised on the client-raise shape too.
             page_refusal = _error_of(res)
             if page_refusal:
-                raise RuntimeError(
+                raise C.CurationRefused(
                     f"read refused at offset {offset} after {len(rows)} rows: "
                     f"{page_refusal[:300]} — refusing a partial census")
             batch = _rows_from_tool(res)
@@ -373,7 +373,7 @@ class MCPReader:
         res = C.normalise_tool_result(raw)
         err = _error_of(res)
         if err:
-            raise RuntimeError(f"read of section {section!r} was refused: {err[:300]}")
+            raise C.CurationRefused(f"read of section {section!r} was refused: {err[:300]}")
         return res
 
     def read_sources(self) -> tuple[list[C.Row], int | None]:
@@ -516,7 +516,7 @@ class MCPReader:
         res = self._search_operators()
         err = _error_of(res)
         if err:
-            raise RuntimeError(f"read of the operator layer was refused: {err[:300]}")
+            raise C.CurationRefused(f"read of the operator layer was refused: {err[:300]}")
         if not _is_row_listing(res):
             raise RuntimeError(
                 "read of the operator layer answered in an unrecognised shape "
@@ -599,17 +599,22 @@ class MCPReader:
         graph's identity is how a census mixes two graphs.
         """
         args: dict[str, Any] = {"entity_type": "operator", "limit": OPERATOR_READ_CEILING}
+        label = "read of the operator layer was refused"
         if not self.graph:
-            return C.normalise_tool_result(self._call("tortoise_search", dict(args)))
+            return C.normalise_tool_result(
+                self._labelled(label, self._call, "tortoise_search", dict(args)))
         try:
-            res = C.normalise_tool_result(self._call("tortoise_search", {**args, "graph": self.graph}))
+            res = C.normalise_tool_result(
+                self._labelled(label, self._call, "tortoise_search",
+                               {**args, "graph": self.graph}))
         except Exception as exc:
             reason = str(exc) or type(exc).__name__
             if not _looks_like_graph_refusal(reason):
                 raise
             self._note(f"the operator read: the explicit graph argument was refused "
                        f"({reason[:160]}); read from the credential's own graph instead")
-            return C.normalise_tool_result(self._call("tortoise_search", dict(args)))
+            return C.normalise_tool_result(
+                self._labelled(label, self._call, "tortoise_search", dict(args)))
         reason = _error_of(res)
         if reason and _looks_like_graph_refusal(reason):
             self._note(f"the operator read: the explicit graph argument was refused "
@@ -961,14 +966,37 @@ def _live_call_tool(name: str, args: dict[str, Any] | None = None) -> Any:
 
 
 def _is_refusal_envelope(text: str) -> bool:
-    """True when a client error's message IS the surface's refusal payload.
+    """True when a client error's message IS one of the surface's refusals.
 
-    The message fastmcp raises is `content[0].text`, and for a `_safe` refusal that
-    text is the JSON error dict (`{"error": "Team points limit reached (25000)…",
-    "code": -32006}`). A crash's text is prose (`Error calling tool: TypeError: …`),
-    which does not parse. Deliberately strict: a payload with no `error` key is not
-    this file's refusal class either.
+    TWO designed refusal shapes reach a caller as `ToolError`, and both are rc-3
+    material in this file:
+
+    * a `_safe` refusal — fastmcp raises `content[0].text`, which for a `_safe`
+      payload is the JSON error dict (`{"error": "Team points limit reached …",
+      "code": -32006}`);
+    * the TRANSPORT WAIT-BOUND refusal (`-32009`) — its `content` is PROSE, not
+      JSON, and on the hosted surface it is the ROUTINE refusal for a census read
+      (a 34+ call walk of `tortoise_query`/`tortoise_search` against a 10 s
+      budget). Missing it turned the routine refusal into an uncaught traceback
+      with rc 1, which is the wrong signal for a designed refusal (review round 4,
+      measured).
+
+    A server-side CRASH's text is prose too (`Error calling tool: TypeError: …`),
+    which matches neither arm — that stays a `ToolError` so a driver paging on
+    "the run crashed" is not silenced.
     """
+    from tortoise.mcp_auth import (
+        _TRANSPORT_WAIT_BOUND_MESSAGE,
+        _TRANSPORT_WAIT_BOUND_NOT_SENT_MESSAGE,
+    )
+
+    if isinstance(text, str):
+        for prose in (_TRANSPORT_WAIT_BOUND_MESSAGE,
+                      _TRANSPORT_WAIT_BOUND_NOT_SENT_MESSAGE):
+            # `startswith` and not equality: a wrapped message keeps its prefix,
+            # and the refusal prose itself is the leading sentence either way.
+            if text.startswith(prose[:60]):
+                return True
     try:
         payload = json.loads(text)
     except (TypeError, ValueError):

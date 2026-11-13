@@ -282,10 +282,29 @@ def push_to_tortoise(frontmatter: dict) -> dict:
     try:
         from tortoise.mcp_client import call_tool
 
+        def _write(name: str, payload: dict) -> dict:
+            """One write, with a REFUSAL handed back as a payload.
+
+            #11153: the surface now flags a refused call with `isError: true`, and
+            `tortoise.mcp_client` runs fastmcp's client with
+            `raise_on_error=True`, so a refusal arrives as a raised `ToolError`.
+            Left uncaught it aborted this loop into `tortoise_push_failed`,
+            DISCARDING the ids of the points that had already landed — a partial
+            minutes push that cannot be reconciled, from a DESIGNED refusal. The
+            payload shape keeps `_point_id`'s existing accounting, so the result
+            stays `tortoise_push_partial` with the ids AND the refusal detail.
+            """
+            from fastmcp.exceptions import ToolError
+
+            try:
+                return call_tool(name, payload)
+            except ToolError as exc:
+                return {"error": str(exc)[:200]}
+
         point_ids = []
         failures = []
 
-        meeting_point = call_tool("tortoise_create_point", {
+        meeting_point = _write("tortoise_create_point", {
             "kind": "event",
             "content": f"Meeting: {frontmatter['title']} ({frontmatter['date']})",
             "authoredBy": "minutes-bridge",
@@ -299,7 +318,7 @@ def push_to_tortoise(frontmatter: dict) -> dict:
         for idx, decision in enumerate(frontmatter.get("decisions", [])):
             if not decision.get("text"):
                 continue
-            dp = call_tool("tortoise_create_point", {
+            dp = _write("tortoise_create_point", {
                 "kind": "decision",
                 "content": decision["text"],
                 "authoredBy": "minutes-bridge",
@@ -313,7 +332,7 @@ def push_to_tortoise(frontmatter: dict) -> dict:
         for idx, commitment in enumerate(frontmatter.get("commitments", [])):
             if not commitment.get("text"):
                 continue
-            cp = call_tool("tortoise_create_point", {
+            cp = _write("tortoise_create_point", {
                 "kind": "commitment",
                 "content": commitment["text"],
                 "authoredBy": "minutes-bridge",

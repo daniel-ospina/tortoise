@@ -319,3 +319,42 @@ def test_a_refused_section_still_names_the_section():
         reader._section("status")
     assert "status" in str(caught.value), str(caught.value)
     assert "points limit" in str(caught.value), str(caught.value)
+
+
+def test_the_operator_read_is_labelled_too(monkeypatch):
+    """The same label defect one site over (review round 4): the operator-layer
+    read propagated a raw refusal while `_section` named itself."""
+    from tortoise import curation as C
+
+    mod = _curate_graph_module("11153_operators")
+
+    def _refuse(*_a, **_k):
+        raise C.CurationRefused('{"error": "Team points limit reached (25000)"}')
+
+    reader = mod.MCPReader(_refuse)
+    with pytest.raises(C.CurationRefused) as caught:
+        reader.read_operators()
+    assert "operator layer" in str(caught.value), str(caught.value)
+
+
+def test_the_routine_wait_bound_refusal_is_still_a_designed_refusal(monkeypatch):
+    """A census read breaching the transport wait bound is the ROUTINE refusal on
+    the hosted surface, and its `content` is PROSE, not the JSON error dict — so a
+    translation that only parses JSON re-raised it and the reader exited 1 with a
+    traceback instead of the rc-3 designed refusal (review round 4, measured)."""
+    from fastmcp.exceptions import ToolError
+
+    from tortoise import curation as C
+    from tortoise import mcp_client
+    from tortoise.mcp_auth import _TRANSPORT_WAIT_BOUND_MESSAGE
+
+    mod = _curate_graph_module("11153_waitbound")
+
+    def _refuse(*_a, **_k):
+        raise ToolError(_TRANSPORT_WAIT_BOUND_MESSAGE)
+
+    monkeypatch.setattr(mcp_client, "call_tool", _refuse)
+    assert mod._is_refusal_envelope(_TRANSPORT_WAIT_BOUND_MESSAGE) is True
+    with pytest.raises(C.CurationRefused) as caught:
+        mod._live_call_tool("tortoise_query", {})
+    assert "wait budget" in str(caught.value), str(caught.value)

@@ -152,6 +152,42 @@ class TestBridgePush:
         assert result == {"status": "skipped", "reason": "tortoise_unavailable"}
 
 
+def test_a_refused_write_keeps_the_ids_that_already_landed(monkeypatch):
+    """#11153's audit item, for THIS caller: the surface now flags a refusal with
+    `isError: true`, and `tortoise.mcp_client` runs the fastmcp client with
+    `raise_on_error=True` — so a refusal arrives as a raised `ToolError`.
+
+    Left uncaught it aborted the loop into `tortoise_push_failed`, DISCARDING the
+    ids of the points that had already landed: a partial minutes push that cannot
+    be reconciled, produced by a DESIGNED refusal (review round 4, measured).
+    """
+    from fastmcp.exceptions import ToolError
+
+    import tortoise.mcp_client as mcp_client
+    from integrations.crm.twenty import bridge
+
+    monkeypatch.setattr(bridge, "tortoise_available", lambda: True)
+
+    calls = {"n": 0}
+
+    def _refusing_call_tool(_name, _args):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {"id": "p1"}
+        raise ToolError('{"error": "Team points limit reached (25000)", '
+                        '"code": -32006}')
+
+    monkeypatch.setattr(mcp_client, "call_tool", _refusing_call_tool)
+
+    result = bridge.push_to_tortoise(SAMPLE_FRONTMATTER)
+
+    assert result["status"] == "error"
+    assert result["reason"] == "tortoise_push_partial", (
+        "a refused write reported the whole push as failed, discarding what landed")
+    assert result["points"][0]["id"] == "p1", result["points"]
+    assert any("points limit" in f["error"] for f in result["failed"]), result
+
+
 class TestPointIdExtraction:
     """`_point_id` reads `content[0]`, the block the dispatch seam guarantees is the
     payload (#10084). Later blocks are PROSE — the graph disclosure, a retired-name

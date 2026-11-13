@@ -1275,8 +1275,10 @@ def test_an_unknown_kind_prefix_is_not_pack_ownership():
 
 
 def test_a_points_refusal_names_its_real_cause():
-    """Round-12: a `_safe` quota envelope reads as "0 rows" (is_error=False), and the
-    refusal discarded the cause, sending the operator to the wrong remedy."""
+    """Round-12: a `_safe` quota envelope must not read as "0 rows", and the
+    refusal must keep its cause. Since #11153 that envelope arrives with
+    `is_error=True` (it used to arrive false — the false PASS), so the reader sees
+    it as a `CurationRefused` either way; the cause still has to survive."""
     mod = _tool_module()
 
     def call(_name, args):
