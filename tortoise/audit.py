@@ -1829,8 +1829,22 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 # (#12210 review, P3). A refused SUPERSEDED endpoint never carried
                 # belief, so "the same posteriors" is false there; every other row
                 # keeps it.
+                # ⛔ THE OPERATOR LANE MAKES NO ARITY CLAIM. ``sup_refused`` is
+                # reachable on BOTH lanes (``_4b_state``: the operator lane's is the
+                # flag test), and the figure below is a DIRECT-lane measurement — on
+                # an operator row the SAME repair restores one confidence per input
+                # that survives, which this check deliberately does not project
+                # (measured: two inputs → ``[2.5255, 2.5255]``; three inputs →
+                # ``[2.2627, 2.5256, 2.2629]``, i.e. n_conf 3, not 2). Stating a
+                # count there is the arity assertion ``audit.py`` refuses to make
+                # ("The strings therefore do not assert an arity"), and the operator
+                # lane already carries the arity-safe ladder in ``_dropped_input``
+                # (#12210 review, P3).
                 + (" (measured: the carry described above restores two confidences)"
                    if neither_arm else
+                   " (measured: the factor runs again once the edge lands on a "
+                   "node EP reads)"
+                   if s["is_operator"] else
                    " (measured: the prescribed edge onto a live claim successor "
                    "restores two confidences, ``effective_n 2.5255``)"
                    if s["sup_refused"] else
@@ -2018,6 +2032,14 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         # so the draft IS the destination — one promotion away. Withdrawing the name
         # here made the string deny the node its OWN triage and ``_chain_tail`` send
         # the reader to (#12210 review, P2).
+        # ⛔ ``not s["neutral_row"]`` IS DEFENSIVE, and that is stated rather than
+        # implied: every neutral path in this function RETURNS before it consumes
+        # ``dest``/``refused`` (the shape arm guards them with ``"" if neutral``, the
+        # direct arm and the operator arm each hit their own `return … DELETE` first),
+        # so removing the conjunct changes no emitted string and no test can see it —
+        # a mutation that drops it leaves the suite green. It stays so that a future
+        # arm cannot name a RE-POINT destination on a neutral row, where no carry can
+        # transfer anything (#12210 review, P3).
         carrier_unread = (s["carrier_count"] == 1 and not s["neutral_row"]
                           and _succ_unread(s))
         if carrier_unread:
