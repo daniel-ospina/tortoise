@@ -5292,12 +5292,14 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `test_candidate_recall_11901.py` at `config/ci-surfaces.yml:2236`, ONE
         # insertion that moved every number below it. That is the class here — a
         # line-number pin over a number another tool owns, not a citation anyone
-        # mis-copied. The entry is NOT pinned here any more (#12266): its line is
-        # owned by `tools/ci_selection.py::register_tests`, so a number in this
-        # table re-stales on somebody else's merge — it read 9943 at `9828250732`,
-        # then 9949 (+6 @6721), 9965 (+16 @7514), 9973 (+8 @2725), and **9987
-        # twenty-six seconds after 9973's repair merged** (`f1f74135a1`, +13 @2237
-        # and +1 @9150, #12294 / PR #12302 — not #12246, which does not touch the
+        # mis-copied. The entry is NOT pinned here any more (#12266): its line is MOVED
+        # by any insertion above it, so a number in this table re-stales on somebody
+        # else's merge — `tools/ci_selection.py::register_tests`' registration splices
+        # account for 43 of the 44 lines it had travelled and a hand-authored `tier1:`
+        # row (the #12294 name-entropy gate) for the last one. Measured, it read 9943 at
+        # `9828250732`, then 9949 (+6 @6721), 9965 (+16 @7514), 9973 (+8 @2725), and
+        # **9987 twenty-six seconds after 9973's repair merged** (`f1f74135a1`, +13
+        # @2237 and +1 @9150, #12294 / PR #12302 — not #12246, which does not touch the
         # file), a **+44** move re-derived at `abf186f1109`. Four re-points of
         # one number in one day is the row's own defect, not a transcription slip, so the
         # entry is now held by SYMBOL + SECTION in
@@ -5491,6 +5493,36 @@ def _assert_carve_out_entry_is_pinned_by_symbol():
             f"`{entry}` sits in the `{key}:` block at {stray} — the bundle's capstone "
             f"row states `uri_requiring:` and `slow_files:` hold NONE of this file, "
             f"and this pin is what reads that claim")
+
+    # ⛔ And the row's THIRD claim — "`carve_out:` holds **one**" — is a claim about the
+    # capstone FAMILY, not about this one file (#12266 review, P3). The two arms above
+    # read only whether THIS entry moved; neither reads the count the row states, so a
+    # second capstone-family file registered into `carve_out:` makes the row false with
+    # every arm green — the same false PASS the sibling `uri_requiring:` /
+    # `slow_files:` loop above exists to close. The family is READ from the row that
+    # defines it ("Σ over the `durations:` rows matching `*capstone*` / `*7949*` /
+    # `*v4_declared*` / `*graph_census*`"), so this arm cannot drift from the document
+    # whose claim it grades.
+    family_rows = [ln for ln in doc.splitlines() if "`durations:` rows matching" in ln]
+    assert len(family_rows) == 1, (
+        f"{len(family_rows)} rows of 03-test-design.md define the capstone-adjacent "
+        "family — this pin reads exactly one, and cannot grade `carve_out:` holds "
+        "**one** without it")
+    family = re.findall(r"`\*(\w+)\*`", family_rows[0])
+    assert len(family) >= 3, (
+        f"the capstone-adjacent row names only {family} — the family globs this arm "
+        "reads are gone, so it would grade a population of nothing")
+    kin = [(n + 1, lines[n].strip())
+           for n in range(start, end)
+           if lines[n].strip().startswith("- ")
+           and lines[n].strip().split("#", 1)[0].rstrip() != entry
+           and any(glob in lines[n] for glob in family)]
+    assert not kin, (
+        f"`carve_out:` holds {len(kin)} OTHER capstone-family entry/entries beyond "
+        f"`{entry}` — {kin} — and the bundle's capstone row states `carve_out:` holds "
+        "**one**. Either the new file is not carve-out and belongs in a gated "
+        "surface, or the row's count is stale; this pin grades the row, so fix "
+        "whichever is wrong rather than deleting the arm")
 
 
 def test_a_cite_that_names_a_directory_names_a_file_that_exists():
