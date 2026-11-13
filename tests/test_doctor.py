@@ -721,7 +721,7 @@ class TestDoctorHostedCredential:
         """`TORTOISE_API_KEY` alone is NOT a hosted identity — never dial with it.
 
         The SAME variable is the documented shared secret for a self-hosted
-        `serve --http --auth static` (`.env.example:152-153`,
+        `serve --http --auth static` (`.env.example:149-150`,
         `docs/quickstart-selfhosted.md:65`), and the resolver aims any env key at
         `TORTOISE_API_URL` or the production default. So an env-only static
         secret was sent to api.premiselabs.co, 401'd there, and read a HEALTHY
@@ -811,6 +811,101 @@ class TestDoctorHostedCredential:
         assert calls and calls[0][0] == "https://self.example.test/health", calls
         hosted = _row(out, "Hosted")
         assert hosted is not None and "✅" in hosted, out[-1500:]
+
+    def test_a_read_error_is_scrubbed_before_it_is_truncated(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """The display bound must land AFTER the scrub, never before it.
+
+        A 200-char cut that slices through a userinfo password leaves a fragment
+        `_scrub` can no longer match — measured at `e19d160c27` by swapping
+        `_scrub(text)[:200]` for `_scrub(text[:200])`: the row printed
+        `SUPERSECRE` (and `SUPERSECRETPASSWORD0` for a 1-char shift) while the
+        whole module stayed green. The correct order and the leaking order are
+        indistinguishable to every other test, which is why this one exists.
+        `#5109` is the rule this file applies at every interpolation site.
+        """
+        password = "SUPERSECRETPASSWORD"
+        _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY,
+                          api_url=f"https://svc:{password}@api.example.test/")
+        # The rendered text is `f"{type(exc).__name__}: {exc}"` around a reason
+        # that itself starts with `OSError: ` — 18 chars of prefix the padding
+        # has to account for, or the cut lands one byte into the password and a
+        # 1-char fragment slips past every assertion (measured: that is exactly
+        # how the first version of this test passed under the leaking mutation).
+        # Sized so the password STARTS at index 190: the 200-char bound then
+        # retains its first 10 chars.
+        reason = f"OSError: {'x' * (190 - 18 - 13)}https://svc:{password}@api.example.test/health"
+
+        class _StallingBody(_FakeResponse):
+            """Headers arrive, then the body read raises the URL-bearing error."""
+
+            def __init__(self):
+                super().__init__(200, b"")
+
+            def read1(self, n: int = -1):
+                raise OSError(reason)
+
+            def read(self, n: int = -1):
+                raise OSError(reason)
+
+        def handler(url, req):
+            if url.endswith("/health"):
+                return _StallingBody()
+            return _FakeResponse(200, b'{"org_id":"org-t"}')
+
+        _stub_hosted(monkeypatch, handler)
+        db_path = str(tmp_path / "scrub-order.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor scrub order seed")
+
+        _run_doctor([])
+        out = capsys.readouterr().out
+
+        assert password not in out, "the api_url password reached the transcript"
+        # No PREFIX of it either — a fragment is enough to brute-force the rest.
+        for cut_len in (3, 6, 10, 14):
+            assert password[:cut_len] not in out, (
+                f"a {cut_len}-char fragment of the password survived: {password[:cut_len]!r}")
+        assert "SUPERSECRE" not in out, out[-1200:]
+        # …and the row still carries a usable diagnosis, not a scrubbed-to-nothing
+        # fragment (scrubbing the WHOLE text keeps the head of the message).
+        hosted = _row(out, "Hosted")
+        assert hosted is not None, out[-1500:]
+
+    def test_an_env_oauth_token_is_refused_with_its_own_remedy(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """An `oat_` token is MCP-only — this probe asks REST, so do not send it.
+
+        The tree accepts a THIRD Bearer family: `oat_` OAuth 2.1 access tokens,
+        "hosted-only, introspected … at the MCP boundary"
+        (`tortoise/mcp_auth.py:1251-1258`), while REST `/v1/*` "stays
+        key/JWT-only — `oat_` tokens are MCP-only"
+        (`docs/adr/ADR-010-auth-planes-session-agent-key.md:62-64`). Probing one
+        here is a guaranteed 401 BY DESIGN, and the generic env-key remedy
+        ("set `TORTOISE_API_URL`") would then produce `❌ … re-mint it` for a
+        working OAuth setup — a false FAIL for a correct configuration, the same
+        defect class as the gate itself (fresh review at `e19d160c27`).
+        """
+        monkeypatch.setenv("TORTOISE_API_KEY", "oat_" + "a1b2c3d4e5f6" * 3)
+        calls = _stub_hosted(monkeypatch, lambda url, req: pytest.fail(
+            f"an MCP-only OAuth token must not be sent to the REST probe — {url}"))
+        db_path = str(tmp_path / "oat.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor oat seed")
+
+        rc = _run_doctor([])
+        out = capsys.readouterr().out
+
+        assert calls == [], "an MCP-only token was sent to a REST endpoint"
+        hosted = _row(out, "Hosted")
+        assert hosted is not None, out[-1500:]
+        assert "not probed" in hosted, hosted
+        assert "OAuth" in hosted and "MCP" in hosted, hosted
+        # The generic remedy would be a FALSE FAIL for this family: the REST
+        # endpoint answers 401 to `oat_` by design, so it must not be offered.
+        assert "set `TORTOISE_API_URL`" not in hosted, hosted
+        assert "⚠️" in hosted and "❌ Hosted" not in out, out[-1200:]
+        assert rc == 0
 
     def test_the_hosted_prefixes_match_the_auth_contract(self):
         """`_HOSTED_KEY_PREFIXES` must stay the ONE prefix contract.
