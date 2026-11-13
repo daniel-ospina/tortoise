@@ -914,7 +914,7 @@ _ALLOWED_OPERATOR = {
         # docstring, name and `-> list` annotation deny), so the census entry
         # follows the statement — the coordinate is unchanged, only the row
         # reshaping is: still ONE entry for this one read.
-        'return [r[0] for r in proj.g.query( f"MATCH (s:Subject) WHERE {space} AND s.name = $ref RETURN s.id", params={**params, "ref": ref}).result_set if r and r[0]]': 1,
+        'return [r[0] for r in proj.g.query( f"MATCH (s:Subject) WHERE {space} AND s.name = $ref RETURN s.id", params={**params, "ref": ref}).result_set if r]': 1,
         # ⛔ TWO ENTRIES REMOVED by #12120 supersession-probe site — the ref-side probes of the
         # supersession fold (`o.name = $ref` / the #1423 Subject twin
         # `s.name = $ref`). Both were candidate-ENUMERATION reads over a key space

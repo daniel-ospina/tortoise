@@ -5477,10 +5477,21 @@ class TestThe12120ReviewRound25:
     `ambiguous-name`), `_ref_is_one_gone_entity`'s docstring states the rule for the
     sibling arm (round 17), and `test_an_id_less_holder_is_not_a_gone_entity` pins
     it. The two-entity direction is pinned by `TestThe12120ReviewRound21` (Object)
-    and `TestThe12120ReviewRound22SubjectTwin` (Subject); the ONE-entity direction
-    on this arm was pinned nowhere, so it is pinned here — otherwise the fix could
-    be "completed" by flipping both shapes and dropping the `unaddressable-name`
-    report the round-17 test demands.
+    and `TestThe12120ReviewRound22SubjectTwin` (Subject).
+
+    ⛔ WHERE THE ONE-ENTITY DIRECTION WAS ALREADY PINNED, stated precisely (review
+    round 26): the OBJECT family's one-entity direction was already pinned by
+    `TestThe12120ReviewRound18::test_the_gone_survivor_refusal_is_recorded_durably`
+    — same `not by_name` arm, an `unaddressable-name` demand — so
+    `test_two_terminal_carriers_of_one_object_entity_report_the_pointer` is an
+    OVER-CORRECTION GUARD for that family, not a new pin. Only the SUBJECT family's
+    one-entity direction was unpinned, and that is the coverage this class adds.
+    The `unaddressable-name` demand is ROUND 18's; round 17's
+    (`test_two_gone_survivors_keep_the_ambiguous_name_record`) is the opposite —
+    it demands `ambiguous-name` for two distinct entities, which is the rule this
+    round enforces. Flipping both shapes to `ambiguous-name` reddens round 18's pin
+    and both tests here (measured: 3 failed); flipping both to the pre-fix branch
+    reddens the two 2-entity pins.
     """
 
     @staticmethod
@@ -5590,5 +5601,55 @@ class TestThe12120ReviewRound25:
             assert set(ids) == set(created), (
                 "the helper must answer ids, not `[id]` rows: "
                 f"{ids!r} (created {created!r})")
+        finally:
+            sdk.close()
+
+    def test_an_id_less_exact_subject_still_defers_the_object_lane(
+            self, sdk_factory):
+        """The family defer is a PRESENCE question, and an id-less Subject counts.
+
+        `_exact_subject_ref_ids` was flattened to ids in round 25, and the first
+        form filtered falsy ids (`if r and r[0]`) — which answered `[]` for a
+        Subject holding the ref by its exact name with a NULL `id`. The defer then
+        did not fire and the OBJECT lane folded a fold-only carrier, writing a
+        journaled (replaying) fold onto the wrong node where `main` refuses with
+        `id-less subject target` (review round 26, P1). The filter is now `if r`:
+        presence, not identity.
+        """
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            # The SUCCESSOR must exist, or the record refuses for a reason of its
+            # own and this pin passes vacuously (the vacuity this file has already
+            # been bitten by twice — the fixture, not the assertion, is the risk).
+            sdk.create_object("New Team", "document")
+            # An ID-LESS Subject named exactly as the ref, beside an Object whose
+            # FOLDED name matches — the Object lane would fold that carrier if the
+            # defer were asked the wrong question.
+            from tortoise.entity_identity import clear_non_folded_entries
+            g.query(
+                "CREATE (s:Subject {name:'Old Team', "
+                "subjectKind:'organization', status:'live'}) "
+                "CREATE (o:Object {id:'r26-o', name:'old team', "
+                "canonical_name:'old team', objectKind:'document', "
+                "status:'live'})")
+            clear_non_folded_entries()
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "Old Team", "supersedes_by": "New Team",
+                 "evidence": "r26"}], "s-12120-r26")
+            assert applied == 0, (
+                "an id-less exact-named Subject must still defer the Object "
+                f"lane: applied={applied} skips={skips!r} {msgs!r}")
+            reasons = [str(s_.get("reason") or "") for s_ in skips]
+            assert reasons[:1] == ["id-less subject target"], (
+                "the refusal must be the Subject lane's own id-less answer — the "
+                "one `main` gives — not a different arm's: "
+                f"{skips!r} {msgs!r}")
+            rows = g.query(
+                "MATCH (o:Object {id:'r26-o'}) "
+                "RETURN o.status, o.supersededBy").result_set
+            assert rows == [["live", None]], (
+                "the fold-only Object carrier was folded although an exact-named "
+                f"(id-less) Subject holds the ref: {rows}")
         finally:
             sdk.close()

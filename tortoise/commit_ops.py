@@ -1290,6 +1290,11 @@ def _successor_candidates(g, label: str, space: str, params: dict) -> list:
 def _exact_subject_ref_ids(proj, ref: str) -> list:
     """`:Subject` ids whose own ``name`` IS ``ref`` — the family-defer exactness test.
 
+    ⛔ The answer is about PRESENCE, and an ID-LESS holder counts: a `None` entry
+    means "an exact-named Subject holds this name and carries no id", which is
+    still a yes to the family question and still a refusal the Subject lane owns.
+    See the body for the measured regression that filtering it caused.
+
     #12120 review: a Subject that holds the ref only by FOLD is a TIE, and a tie
     must not silently pick a family; a Subject that holds it EXACTLY is the one
     case where the Object lane was demonstrably the wrong family. The same
@@ -1303,13 +1308,23 @@ def _exact_subject_ref_ids(proj, ref: str) -> list:
         return []
     # ⛔ FLATTENED to ids (review round 25): this returned the query's raw
     # `result_set` — one `[id]` ROW per holder — while its name, its `-> list`
-    # annotation and its docstring all promise *ids*. The only caller today uses it
-    # as a boolean, so nothing was wrong yet; the next caller that iterates or sets
-    # it would get a list of one-element lists (`unhashable type: 'list'`). The
+    # annotation and its docstring all promise *ids*. The next caller that iterates
+    # or sets it got a list of one-element lists (`unhashable type: 'list'`). The
     # siblings (`_live_holders_same_entity`) already flatten.
+    # ⛔ PRESENCE, NOT IDENTITY (review round 26, P1): the filter is `if r`, NOT
+    # `if r and r[0]`. The caller asks "does the SUBJECT family hold this ref by its
+    # exact spelling?" — a PRESENCE question — and an ID-LESS `:Subject` still holds
+    # the name. Filtering the falsy id returned `[]` for that holder, which read as
+    # "no exact Subject" and let the Object lane fold a fold-only carrier where
+    # `main` refused with `id-less subject target` (measured both directions on a
+    # lane graph: `if r and r[0]` → `applied=1` and a journaled fold onto the wrong
+    # node; `if r` → `applied=0`, the refusal `main` gives). So an id-less holder
+    # contributes `None` to the list ON PURPOSE: non-empty is the answer, and a
+    # caller that needs real ids must filter `None` itself rather than inherit a
+    # silently different question.
     return [r[0] for r in proj.g.query(
         f"MATCH (s:Subject) WHERE {space} AND s.name = $ref RETURN s.id",
-        params={**params, "ref": ref}).result_set if r and r[0]]
+        params={**params, "ref": ref}).result_set if r]
 
 
 def _subject_family_holds_ref(proj, ref: str) -> bool:

@@ -148,14 +148,23 @@ class NonFoldedEntry(NamedTuple):
     #      exists to prevent. So "ONE merged entity" is a PRECONDITION of the
     #      shape on all four, not a description of whatever reaches them.
     #  (b) the ID-LESS-TARGET arms — a resolved target that carries no id, so the
-    #      journaled fold cannot address it (`commit_ops` id-less Object arm,
-    #      `entity_identity._refuse`'s twin here).
+    #      journaled fold cannot address it (`commit_ops` id-less Object arm, and
+    #      `entity_identity._record_unaddressable` — NOT `_refuse`, which has no
+    #      `unaddressable-name` caller: review round 26).
     # They differ in cause, not in shape: in both the name cannot be addressed
-    # one-of-them, so neither may be silently picked. ⛔ `candidate_ids` does NOT
-    # tell them apart: four sites record a plain carrier list, and the id-less one
-    # records `('<id-less>',)` when the id is NULL but `('',)` when it is the empty
-    # string — indistinguishable from a carrier list. The cause must be taken from
-    # the call site.
+    # one-of-them, so neither may be silently picked.
+    # ⛔ THE SHAPE ALONE CANNOT SEPARATE THEM; `candidate_ids` CAN (review round 26,
+    # correcting this note's previous claim that it could not). Every cause-(a) site
+    # records a tuple of REAL ids — the two `_ref_is_one_gone_entity` arms reach
+    # their recorder only when every row's id is truthy and in `widened`, and the
+    # two `if not by_name` twins filter falsy ids out — so a carrier list is either
+    # `()` or real ids. The id-less target records through `display_holder_ids`, i.e.
+    # exactly `('<id-less>',)` for a NULL id or `('',)` for an empty-string one.
+    # So `('<id-less>',) | ('',)` ⇒ id-less target; `()` or a tuple of real ids ⇒
+    # gone-survivor. The one theoretical collision is a genuine carrier whose id is
+    # literally the string `"<id-less>"`; treat that as a caveat, not as the rule.
+    # Keeping this note WRONG was the round-24 claim and it is not restored: a
+    # repair consumer reads `non_folded_entries()` and has no call site to consult.
 
 
 _non_folded: list[NonFoldedEntry] = []
