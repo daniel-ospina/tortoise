@@ -676,6 +676,61 @@ def test_an_install_failure_is_only_RED_when_the_INDEX_confirms_the_absence(tmp_
         )
         assert "users cannot even install" not in unnamed_arm.detail, unnamed_arm.detail
         assert "detector outage" in unnamed_arm.detail, unnamed_arm.detail
+    # ⛔ A DEPENDENCY'S ABSENCE IS NOT THIS ARTIFACT'S ABSENCE (#12422 round-21 review P2).
+    # `pip install tortoise-graph` prints the SAME absence vocabulary when a TRANSITIVE
+    # dependency cannot be resolved, and in index mode the probe then answers `ok` about
+    # `tortoise-graph` — which this allow-list routes to FAIL. Measured before the fix:
+    # FAIL / exit 1, "users cannot even install it; a release is owed", i.e. an
+    # irreversible PyPI release ordered for a defect no release can fix. Wheel mode already
+    # refused this attribution
+    # (`test_the_wheel_mode_install_failure_is_never_attributed_to_the_index`); index mode
+    # now does too — the failure must NAME the package under test.
+    dependency_marks = (
+        "ERROR: Could not find a version that satisfies the requirement "
+        "falkordblite==0.9 (from versions: none)\n"
+        "ERROR: No matching distribution found for falkordblite==0.9"
+    )
+    dependency_arm = canary.install_and_run(
+        package="tortoise-graph",
+        version="0.2.0",
+        workdir=tmp_path,
+        timeout=10,
+        runner=_Runner({"pip": _completed(["pip", "install"], 1, "", dependency_marks)}),
+        absent_probe=lambda package: canary.INDEX_OK,
+    )[0]
+    assert dependency_arm.status == canary.UNKNOWN, (
+        f"a missing THIRD-PARTY dependency is not a finding about tortoise-graph, so it "
+        f"must not order a release (got {dependency_arm.status}: {dependency_arm.detail})"
+    )
+    assert "users cannot even install" not in dependency_arm.detail, dependency_arm.detail
+    # it takes the "could not be evaluated" UNKNOWN arm, not a verdict arm — and the
+    # detail must still SHOW the evidence, so a human can see WHOSE absence pip reported.
+    assert "could not be evaluated" in dependency_arm.detail, dependency_arm.detail
+    assert "falkordblite" in dependency_arm.detail, dependency_arm.detail
+    # …and the arm is NARROWED, not disabled: the attribution is PEP 503-normalised, so a
+    # failure that names this package in another spelling still reaches the probe verdict.
+    respelled_arm = canary.install_and_run(
+        package="tortoise-graph",
+        version="0.2.0",
+        workdir=tmp_path,
+        timeout=10,
+        runner=_Runner(
+            {
+                "pip": _completed(
+                    ["pip", "install"],
+                    1,
+                    "",
+                    "ERROR: No matching distribution found for Tortoise_Graph==0.2.0",
+                )
+            }
+        ),
+        absent_probe=lambda package: canary.INDEX_OK,
+    )[0]
+    assert respelled_arm.status == canary.FAIL, (
+        f"a failure that names THIS package must still reach the probe verdict, or the "
+        f"dependency fix has disabled the arm it narrowed (got {respelled_arm.status}: "
+        f"{respelled_arm.detail})"
+    )
     # and a failure pip does not attribute to a missing distribution is never a FAIL
     arm = canary.install_and_run(
         package="tortoise-graph",

@@ -96,6 +96,7 @@ import argparse
 import http.client
 import json
 import os
+import re
 import subprocess
 import tempfile
 import urllib.error
@@ -123,8 +124,31 @@ _INSTALL_ABSENCE_MARKERS = (
     "from versions: none",
 )
 
+#: The half of pip's absence vocabulary that NAMES what it could not resolve. The other
+#: markers are corroboration only: `from versions: none` is printed on the same line and
+#: names nothing, so it cannot say WHOSE absence this is. ⛔ THAT DISTINCTION IS THE
+#: DIFFERENCE BETWEEN A VERDICT AND A RELEASE CALL — `pip install tortoise-graph` fails
+#: with the same vocabulary when a TRANSITIVE DEPENDENCY is missing, and in index mode
+#: the probe then answers `ok` (the project IS served), which the caller routes to FAIL.
+#: Without this, a yanked third-party dependency tells a human to cut an irreversible
+#: PyPI release that cannot possibly fix it (#12422 round-21 review P2).
+_ABSENCE_NAMED = re.compile(
+    r"(?:no matching distribution found for|could not find a version that satisfies the requirement)"
+    r"\s+(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)",
+    re.IGNORECASE,
+)
 
-def _install_failure_is_absence(stderr: str, wheel: Path | None = None) -> bool:
+
+def _canonical_dist_name(name: str) -> str:
+    """PEP 503 normalisation, so `Tortoise_Graph`, `tortoise-graph` and `tortoise.graph`
+    are one name. pip echoes the requirement as the caller wrote it, which is not
+    guaranteed to be the spelling the console script or the index uses."""
+    return re.sub(r"[-_.]+", "-", name.strip().lower())
+
+
+def _install_failure_is_absence(
+    stderr: str, wheel: Path | None = None, package: str | None = None
+) -> bool:
     """True when pip's output is about the ARTIFACT rather than pip's environment.
 
     ⛔ pip's "absence" vocabulary is NOT proof of absence. MEASURED: against an
@@ -145,11 +169,26 @@ def _install_failure_is_absence(stderr: str, wheel: Path | None = None) -> bool:
       buys is a SECOND look at the index (did the project vanish, or does it still
       answer?), not a different vantage point — and reading it as independence is how
       the round-11 dead arm got written.
+
+    ⛔ AND THE FAILURE MUST NAME **THIS** DISTRIBUTION (#12422 round-21 review P2).
+    Index mode used to accept any absence marker, so `pip install tortoise-graph` failing
+    because a TRANSITIVE dependency (`falkordblite`, measured) is unavailable was graded
+    as `tortoise-graph`'s absence: the probe — which reports on `tortoise-graph` alone —
+    answered `ok`, and `ok` is the FAIL that orders an irreversible release. Wheel mode
+    already refused to attribute a dependency's failure to the artifact; index mode now
+    does the same. Anything that does not POSITIVELY name this package is not evidence
+    about this package, so it returns False and the caller takes the UNKNOWN path.
     """
     text = (stderr or "").lower()
     if wheel is not None:
         return Path(wheel).name.lower() in text
-    return any(marker in text for marker in _INSTALL_ABSENCE_MARKERS)
+    if package is None or not any(marker in text for marker in _INSTALL_ABSENCE_MARKERS):
+        return False
+    wanted = _canonical_dist_name(package)
+    return any(
+        _canonical_dist_name(match.group("name")) == wanted
+        for match in _ABSENCE_NAMED.finditer(text)
+    )
 
 
 def index_absence_probe(package: str, timeout: float = 30.0) -> str:
@@ -899,7 +938,7 @@ def install_and_run(
             f"install {spec}" if wheel is not None else f"install the PUBLISHED artifact {spec}",
         )
         if installed.returncode != 0 and not _install_failure_is_absence(
-            installed.stderr or "", wheel
+            installed.stderr or "", wheel, package
         ):
             # A pip failure is not evidence that the ARTIFACT is broken: a DNS blip,
             # an index outage or a proxy 502 all land here, and reporting those as
