@@ -2234,6 +2234,17 @@ surfaces:
   - test_vector_write_seam_4520.py
   core:
   - test_candidate_recall_11901.py
+  # #12298 M3 (the measurement PR #12349): the brief's tables must equal the
+  # committed `artifact.json`, and the brief's DEFECT claim must still match the
+  # shipped tokenizer. The guarded production module is `tortoise/sparse.py`
+  # (`tokenize_sparse_query` / `_SPLIT_RE`), which matches NO `SOURCE_PATTERNS`
+  # entry — measured `select(['tortoise/sparse.py'], 'pull_request', ...)` →
+  # `surfaces: ['core']` — so `core` is the surface a tokenizer repair selects,
+  # and this is the row that must run on it. The docs/ + tools/ class reaches it
+  # through `tier1` (see that row; `docs/` selects NO surface and `tools/`-only
+  # diffs are #11363's open gap, not this row's). Same #11901 convention as the
+  # file above: hermetic, no DB, no graph, no network.
+  - test_m3_fts_leg_recall_12298.py
   # #11767: the runtime URL surface (#11762 child 5). `tortoise/abuse.py` matches
   # NO `SOURCE_PATTERNS` entry, so an abuse.py-only diff falls through to this
   # `core` fallback (measured: `select(['tortoise/abuse.py'])` → ['core']) — and
@@ -9133,6 +9144,7 @@ surfaces:
   # (#2938).
   - test_session_schema_3554.py
 tier1:
+- test_m3_fts_leg_recall_12298.py  # #12298 M3 (PR #12349): the M3 brief's headline tables must re-derive from its committed `artifact.json`, and its defect claim must match the shipped tokenizer. LOAD-BEARING here: every guarded artifact is under `docs/research/2026-11-13-12298-m3-fts-leg/` and the harness under `tools/`, i.e. the two paths a selective runner does NOT track (undeclared file reads) — measured `select(['docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md'])` and `select(['tools/m3_fts_leg_recall.py'])` → `surfaces: []` (tier1-only, 90 files), so without this row a docs-only edit of the brief re-stales every number in it with the pin never running — the #11739/#11810 silent-drop class. Hermetic: stdlib only, the harness module is `importlib`-loaded and its own heavy imports are function-local, plus two JSON reads; measured `44 passed in 5.97s` on a private lane, no DB, no graph, no network — dual-registered with `core`
 - test_11739_quote_population_probe.py  # #11739: the `quote` population evidence bundle's arithmetic + fail-closed walk (whitespace is not a quote, the embedded-only denominator, the endpoint shaping, and exit 4 on an unprovable walk) — a docs-only diff runs tier1 only, and every guarded artifact is under `docs/`; dual-registered with `core`
 - test_11656_endpoint_kind_binding_scope.py  # #11656 review F1: this pin's own docstring says it exists so "a manifest edit that makes a scope claim false reds here instead of rotting in prose", and it also pins the two DOC defects (the `docs/00_index.md` row, the ambiguous bare citation). Before this row it was registered in `core` ONLY, and `core` is the not-found FALLBACK — so a docs-only diff took the tier1 early return and ran it ZERO times (measured: `--changed-files docs/plans/2026-11-09-11656-endpoint-kind-binding.md` → `surfaces: []`, 84 files, pin absent; `docs/research/…` likewise) while the `docs/00_index.md` edit DID select `core` and reach it. That is the silent-drop class this manifest documents at `test_10156_alert_registers.py` above, and the exact change class that re-stales the figures a lane implements against. Same shape and reasoning as `test_8093_registry_namespace_doc.py`, `test_extractor_v4_doc_citations.py`, `test_7949_capstone_measure.py`, `test_capstone_*` — every sibling doc/citation pin is dual-registered. Import weight is not a reason to withhold tier1 (`test_config.py`/`test_ids.py`/`test_taxonomy.py` already import `tortoise.*`); hermetic, ~5s, no DB, no graph. — dual-registered with `core`
 - test_8093_registry_namespace_doc.py  # #8093: `docs/registry-graph-schema.md` §Graph namespace cell vs the derived namespace (hermetic doc↔code pin; a docs-only diff runs tier1 only) — dual-registered with `core`
