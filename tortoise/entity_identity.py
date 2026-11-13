@@ -141,8 +141,10 @@ class NonFoldedEntry(NamedTuple):
     # reads the shape must not assume the first:
     #  (a) the GONE-SURVIVOR arms — every holder is a carrier of ONE merged entity
     #      whose survivor is deleted (`_ref_is_one_gone_entity` and the `if not
-    #      by_name` twins, four of the five sites); `candidate_ids` is the carrier
-    #      list there, always two or more ids. ⛔ Those four answer by ENTITY COUNT
+    #      by_name` twins, four of the five sites); `candidate_ids` there holds only
+    #      REAL ids (falsy ones are filtered out), so it may carry one id — or none,
+    #      when the lone carrier is itself id-less — but never the `<id-less>`
+    #      placeholder. ⛔ Those four answer by ENTITY COUNT
     #      (review round 25): two DISTINCT entities holding the ref keep
     #      `"ambiguous-name"`, because telling a consumer to fix ONE dangling
     #      pointer where the graph holds two is the same false repair this note
