@@ -230,7 +230,7 @@ USAGE
 
 build_body() { # <out-file> <job> <step-id> <failed-step-raw>
   local out="$1" job="$2" sid="$3" raw="$4" label excerpt
-  local raw_tail squeeze_incomplete report_bytes cut_note
+  local raw_tail squeeze_incomplete report_bytes report_bytes_known cut_note
   local failed_names="" pair id outcome pretty
   if [ -n "$raw" ]; then
     for pair in $raw; do
@@ -355,9 +355,27 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
         # `tr`), silently setting the size to 0 and reverting to the cut-undeclared sentence —
         # measured. Parameter expansion strips a right-padded `wc` count without a subprocess;
         # the guard maps "cannot read it" (a directory: `wc` fails) to 0.
-        report_bytes="$(wc -c 2>/dev/null < "$DRIFT_REPORT_FILE")" || report_bytes=""
+        #
+        # ⛔ `-f`, BECAUSE `wc -c` READS TO EOF AND A DEVICE NEVER REACHES ONE (#12272 review
+        # round 8). The read guard above admits anything that is `-e`-true and not a FIFO, and
+        # `tail -c 6000` is BOUNDED — it stops after 6000 bytes — but `wc -c` is not: a
+        # character device such as `/dev/zero` (which `[ -p ]` does not catch) reads forever, so
+        # `build_body` never returns and NOTHING is filed: no ledger entry, no exit status, the
+        # #2240 silence this script exists to remove, one primitive past the FIFO guard. It is
+        # the same class as that guard, so it takes the same shape: name the property that makes
+        # the read safe instead of trusting the caller. Measured on the unguarded form:
+        # `--drift-report /dev/zero` rc=124 at 8 s (hung), where `origin/main` reaches its
+        # ledger leg — i.e. this line, not the report, was the regression.
+        # A path that is not a regular file therefore stays unmeasured (`report_bytes` empty,
+        # mapped to 0 below), which is the branch a DIRECTORY already takes (case 17d) — a size
+        # nobody can measure is not asserted as a size.
+        report_bytes_known=0
+        report_bytes=""
+        if [ -f "$DRIFT_REPORT_FILE" ]; then
+          report_bytes="$(wc -c 2>/dev/null < "$DRIFT_REPORT_FILE")" || report_bytes=""
+        fi
         report_bytes="${report_bytes//[[:space:]]/}"
-        case "${report_bytes:-}" in '' | *[!0-9]*) report_bytes=0 ;; esac
+        case "${report_bytes:-}" in '' | *[!0-9]*) report_bytes=0 ;; *) report_bytes_known=1 ;; esac
         # `2>/dev/null`: a converter that is absent prints its own "command not found" or
         # refusal on stderr, which lands in the job log beside an alert that went out
         # perfectly well. ⛔ THE HISTORY, CHECKED RATHER THAN ASSUMED (#12200): the
@@ -492,9 +510,25 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
           # `tail -c` can start mid-line; a fenced block is still closed below.
           echo
           echo "$fence"
-          if [ "$(wc -c < "$DRIFT_REPORT_FILE")" -gt 6000 ]; then
+          # ⛔ THE SIZE IS THE ONE MEASURED ABOVE — never a second read of the path. A re-read
+          # here was unbounded in exactly the way the measurement above now guards against
+          # (#12272 review round 8: `origin/main` hangs on `--drift-report /dev/urandom` at this
+          # same read, measured rc=124 at 8 s), and re-reading a file whose size was already
+          # measured can only disagree with it. One measurement, every site.
+          if [ "$report_bytes_known" = "1" ] && [ "$report_bytes" -gt 6000 ]; then
             echo
             echo "_(report truncated to its LAST 6000 bytes — the gate prints the actionable block last; the full text is in the run link above)_"
+          elif [ "$report_bytes_known" != "1" ]; then
+            # ⛔ AND THE CUT IS STILL DECLARED WHEN THE SIZE CANNOT BE MEASURED. The intro
+            # promises "any of the 6000-byte cut … is declared beside it"; a path whose size is
+            # unmeasurable (not a regular file) is still read through the same 6000-byte window,
+            # so the reader is told what the window IS rather than left to assume the excerpt is
+            # whole. True unconditionally in this branch — "only the last 6000 bytes are shown"
+            # needs no measurement — which is why it does not depend on the window coming back
+            # full (`tail -c` output also has NULs stripped by the substitution above, so a
+            # length check here would under-report the bytes actually read).
+            echo
+            echo "_(only the report's LAST 6000 bytes are shown — its own size could not be measured, and the gate prints the actionable block last; the full text is in the run link above)_"
           fi
           if [ "$squeeze_incomplete" = "1" ]; then
             echo

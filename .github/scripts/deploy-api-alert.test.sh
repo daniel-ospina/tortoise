@@ -73,6 +73,9 @@
 #  17n. a tail whose only ASCII is LINE BREAKS is a FOURTH cause of an empty excerpt — the
 #      converter is present and succeeds and the shell strips its trailing newlines, so the
 #      body must name that cause instead of blaming the converter (#12200, round 8)
+#  17o. a NON-REGULAR report path (a character device) must not HANG the alert — `wc -c` reads
+#      to EOF and a device never reaches one — and a size it could not measure must not be
+#      asserted: the carrying arm declares the 6000-byte WINDOW instead (#12272, round 8)
 #  18. a LATE `deploy-api` failure must not read as "nothing shipped"
 #  19-21. `--resolve` (#8841) retires EXACTLY the keys whose steps reported
 #      `success` in this run (plus the job-level key only when `job.status` is
@@ -1102,6 +1105,55 @@ reset_case
 run_alert --help
 assert_eq "$RC" "0" "--help exits 0, as it claims"
 assert_eq "$(count_calls 'GH')" "0" "--help contacts nothing"
+
+# ── case 17o: a NON-REGULAR report path must neither HANG the alert nor claim a size ──
+# `-e` admits anything that exists and `[ ! -p ]` refuses only a FIFO, so a CHARACTER DEVICE
+# (`/dev/zero`) passes both. `tail -c 6000` is BOUNDED and returns; the size probe this PR added
+# was `wc -c`, which reads to EOF — and a device never reaches one, so `build_body` never
+# returned and NOTHING was filed: no ledger entry, no exit status, the #2240 silence this script
+# exists to remove, one primitive past the FIFO guard. Measured on the unguarded form:
+# `--drift-report /dev/zero` rc 124 at 8 s, where `origin/main` reaches its ledger leg — so the
+# regression was this line, not the report. The fix measures a size only from a REGULAR file
+# (`-f`), and both arms below pin the consequence:
+#   * `/dev/zero` (NULs only → the EMPTY arm) must file, name the empty state, and paste nothing;
+#   * `/dev/urandom` with a converter shim emitting fixed text (→ the CARRYING arm) must carry the
+#     excerpt AND declare the 6000-byte WINDOW, because the total size is exactly what cannot be
+#     measured here — while never claiming the measured-size truncation note.
+# `timeout`-gated for case 17f's reason: macOS dev hosts have none, and a hang is the property
+# under test — an unbounded pin would BE the defect it pins.
+if command -v timeout >/dev/null 2>&1; then
+  export PATH="$PATH_BEFORE_ICONV_SHIM"
+  reset_case
+  timeout 20 "$HELPER" --job deploy-api --steps "$DRIFT_STEPS" --drift-report /dev/zero >/dev/null 2>&1
+  assert_eq "$?" "0" "case 17o: a character-device report does not hang the alert (a hang returns 124 here)"
+  assert_eq "$(count_creates)" "1" "case 17o: and the ledger issue IS filed — a hang files nothing at all"
+  DEVZERO_BODY="$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)"
+  assert_contains "$DEVZERO_BODY" "held no excerpt-able text" "case 17o: and the empty state is named rather than a report claimed"
+  assert_not_contains "$DEVZERO_BODY" '```' "case 17o: and it pastes no fenced block it does not have"
+  assert_not_contains "$DEVZERO_BODY" "follows verbatim" "case 17o: and no verbatim claim survives in it"
+
+  DEV_ICONV_DIR="$FIX/bin-iconv-dev"
+  mkdir -p "$DEV_ICONV_DIR"
+  cat > "$DEV_ICONV_DIR/iconv" <<'DEV_ICONV_EOF'
+#!/usr/bin/env bash
+# Emits FIXED long ASCII whatever it is fed, so the CARRYING arm is reached DETERMINISTICALLY
+# on a path whose size cannot be measured (a device yields random bytes; the excerpt must not).
+seq 1 400 | sed 's/^/BLOCKING 20260926000002 non-conforming file row /'
+DEV_ICONV_EOF
+  chmod +x "$DEV_ICONV_DIR/iconv"
+  reset_case
+  export PATH="$DEV_ICONV_DIR:$PATH_BEFORE_ICONV_SHIM"
+  timeout 20 "$HELPER" --job deploy-api --steps "$DRIFT_STEPS" --drift-report /dev/urandom >/dev/null 2>&1
+  assert_eq "$?" "0" "case 17o: a device that DOES yield a report does not hang the alert either"
+  export PATH="$PATH_BEFORE_ICONV_SHIM"
+  assert_eq "$(count_creates)" "1" "case 17o: and that alert's ledger issue IS filed too"
+  DEVRAND_BODY="$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)"
+  assert_contains "$DEVRAND_BODY" '```' "case 17o: and the excerpt is CARRIED (the shim emits text, so this arm is not vacuous)"
+  assert_contains "$DEVRAND_BODY" "only the report's LAST 6000 bytes are shown" "case 17o: and the 6000-byte WINDOW is declared although the file's size could not be measured — the intro promises a cut beside the excerpt"
+  assert_not_contains "$DEVRAND_BODY" "report truncated to its LAST 6000 bytes" "case 17o: and it does NOT claim a measured truncation — no size was measured, so asserting one is the class this PR removes"
+else
+  ok "case 17o: SKIPPED on this host — no \`timeout\` binary (macOS); the device guard is pinned by CI (ubuntu-latest)"
+fi
 
 # ── #8841: the RESOLVE leg — retiring a recovered finding's ledger key ──────
 # Filing without closing is a ledger that can only grow. Measured on this
