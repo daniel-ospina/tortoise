@@ -696,9 +696,7 @@ def test_the_transcript_DIRECTORY_is_paired_at_every_site_that_names_it():
         )
         return written
 
-    canary_dir = paired(
-        "release-artifact-canary.yml", "canary", "published-artifact-canary-log"
-    )
+    canary_dir = paired("release-artifact-canary.yml", "canary", "published-artifact-canary-log")
     paired("publish-pypi.yml", "build", "publish-canary-log")
 
     # 3 + 4: the report job DOWNLOADS into the directory the alert script then reads.
@@ -727,7 +725,7 @@ def test_the_transcript_DIRECTORY_is_paired_at_every_site_that_names_it():
     alert_dir, _, alert_base = alert_path.rpartition("/")
     assert alert_dir == canary_dir, (
         f"the alert reads `{alert_dir}` but the canary uploads `{canary_dir}` — the body's "
-        f"TAIL would be unreachable and every issue would degrade to \"(no transcript …)\""
+        f'TAIL would be unreachable and every issue would degrade to "(no transcript …)"'
     )
 
     # 5: the BASENAME, in the tool itself.
@@ -774,8 +772,11 @@ def test_the_transcript_STEPS_are_ordered_so_the_evidence_can_be_collected():
         )
         uploaded = index_of(
             steps,
-            lambda s: str(s.get("uses", "")).startswith("actions/upload-artifact")
-            and s.get("with", {}).get("name") in ("publish-canary-log", "published-artifact-canary-log"),
+            lambda s: (
+                str(s.get("uses", "")).startswith("actions/upload-artifact")
+                and s.get("with", {}).get("name")
+                in ("publish-canary-log", "published-artifact-canary-log")
+            ),
             wf_file,
         )
         assert invoked < uploaded, (
@@ -784,9 +785,9 @@ def test_the_transcript_STEPS_are_ordered_so_the_evidence_can_be_collected():
             f"collects nothing, so the evidence is missing on every run including a red"
         )
 
-    report_steps = yaml.safe_load(
-        (workflows / "release-artifact-canary.yml").read_text()
-    )["jobs"]["report"]["steps"]
+    report_steps = yaml.safe_load((workflows / "release-artifact-canary.yml").read_text())["jobs"][
+        "report"
+    ]["steps"]
     downloaded = index_of(
         report_steps,
         lambda s: str(s.get("uses", "")).startswith("actions/download-artifact"),
@@ -801,7 +802,7 @@ def test_the_transcript_STEPS_are_ordered_so_the_evidence_can_be_collected():
     assert downloaded < min(alert_steps), (
         f"the transcript is downloaded at step {downloaded} but the alert runs at step "
         f"{min(alert_steps)} — the alert would TAIL a file that is not there yet and every "
-        f"filed issue body would say \"(no transcript reached this job …)\", silently "
+        f'filed issue body would say "(no transcript reached this job …)", silently '
         f"(`continue-on-error: true`)"
     )
 
@@ -1385,18 +1386,60 @@ def test_the_canary_files_a_durable_alert_and_reads_its_own_exit_code():
     )
     assert "needs.canary.outputs.exit_code" in str(alarm.get("env", {}))
     assert "DETECTOR outage" in str(alarm)
+    alarm_text = str(alarm.get("run"))
+    assert "RUNNER fault" in alarm_text, (
+        "the alarm needs its own branch for a run that REACHED a verdict (exit 0) and then "
+        "hit a runner fault, or that state stays unexplained"
+    )
+    # ⛔ ANCHORED, never `'= "0"'` (round 12 re-review): that form is a SUBSTRING of
+    # `'!= "0"'`, so the runner-fault predicate could be INVERTED (`= "0"` -> `!= "0"`)
+    # with both assertions still green — and then exit 2 and exit 1 both enter the
+    # runner-fault branch, so the summary explains a REAL release finding as "a runner
+    # fault … nothing is owed". Measured: that mutation left the suite green.
+    assert '[ "${EXIT_CODE:-}" = "0" ]' in alarm_text, (
+        'the runner-fault branch must test exit code 0 positively — `= "0"` matches '
+        '`!= "0"` as a substring, which inverts the branch (#12363 round 12)'
+    )
+    # ⛔ ORDER, not presence (round 12): swapping the `= "0"` and `!= "1"` branches left the
+    # suite green, and the summary then explained an exit-0 runner fault as a DETECTOR outage.
+    assert alarm_text.index('[ "${EXIT_CODE:-}" = "0" ]') < alarm_text.index(
+        '[ "${EXIT_CODE:-}" != "1" ]'
+    ), (
+        "the exit-0 runner-fault branch must be tested BEFORE the not-1 outage branch, else "
+        "an exit-0 post-reading failure is reported as a detector outage"
+    )
 
-    for name, condition in (
-        ("File or refresh the alert issue", "!= 'success'"),
-        ("Close the alert issue on a green run", "== 'success'"),
-    ):
-        step = steps[name]
-        assert condition in str(step.get("if")), (name, step.get("if"))
-        assert "needs.canary.result" in str(step.get("if")), (
-            f"{name} must key on the canary JOB's result, not a step outcome"
-        )
-        assert "published-artifact-alert.sh" in str(step.get("run")), (
+    file_step = steps["File or refresh the alert issue"]
+    assert "!= 'success'" in str(file_step.get("if")), file_step.get("if")
+    assert "needs.canary.result" in str(file_step.get("if")), (
+        "filing must key on the canary JOB's result, not a step outcome"
+    )
+    for name in ("File or refresh the alert issue", "Close the alert issue on a green run"):
+        assert "published-artifact-alert.sh" in str(steps[name].get("run")), (
             f"{name} must go through the shared script — inlined shell here is what drifts"
+        )
+    # ⛔ The close step is the ONE gate that must NOT key on `needs.canary.result` (round 12):
+    # a step that ends on an `echo` reads success while the tool exited 1, so a result-keyed
+    # close resolves the release-owed ledger over a broken artifact. Its gate is `exit_code`
+    # alone — asserted positively below.
+    close_if = str(steps["Close the alert issue on a green run"].get("if"))
+    assert "needs.canary.result" not in close_if, (
+        'close must not key on the job result: a lost `exit "$rc"` makes the job read '
+        f"success while the tool exited 1, resolving the release-owed ledger — got {close_if!r}"
+    )
+    # ⛔ `!cancelled()` on EVERY step of the report job (round 12): the implicit `success()`
+    # otherwise skips a step whose predecessor failed, so a failed `Runner tool contract`
+    # step silently skipped the transcript fetch, or filed nothing, or never resolved the
+    # ledgers on a green run — while the comment above them said they all carry it.
+    for name in (
+        "Fetch the canary transcript",
+        "What a red here means",
+        "File or refresh the alert issue",
+        "Close the alert issue on a green run",
+    ):
+        assert "!cancelled()" in str(steps[name].get("if")), (
+            f"{name} must carry !cancelled(): without it the implicit success() skips it "
+            "when an earlier report step failed"
         )
     # ── the three gates and the transcript pair ──────────────────────────────────────
     # A post-reading runner failure (`result: failure`, `exit_code: 0`) is NOT a finding:
@@ -1407,10 +1450,18 @@ def test_the_canary_files_a_durable_alert_and_reads_its_own_exit_code():
             assert "needs.canary.outputs.exit_code != '0'" in gate, (
                 f"{name} must skip a run that REACHED a verdict: {gate}"
             )
-    close_if = str(steps["Close the alert issue on a green run"].get("if"))
     assert "needs.canary.outputs.exit_code == '0'" in close_if, (
         "close must follow the READING, not the job result: a failed transcript upload on a "
         "green artifact would otherwise leave a stale release-owed issue open forever"
+    )
+    # The canary JOB's published output is the ONLY thing the close gate now reads, so the
+    # expression that publishes it is pinned: repointing `outputs.exit_code` at a renamed or
+    # nonexistent step id leaves it empty forever while the job reads success, and with the
+    # `result == 'success'` disjunct gone nothing then resolves the release-owed ledger on a
+    # green artifact. Measured: that mutation left the whole suite green (#12363 round 12).
+    assert "steps.canary.outputs.exit_code" in str(jobs["canary"]["outputs"]["exit_code"]), (
+        "the canary job must publish the CANARY STEP's own exit code — anything else leaves "
+        "`exit_code` empty while the job reads success, so the close gate never fires"
     )
     # the upload ↔ download pair: `continue-on-error: true` means a rename here can never
     # red anything, it just silently reverts every issue body to "no transcript".
@@ -1427,6 +1478,8 @@ def test_the_canary_files_a_durable_alert_and_reads_its_own_exit_code():
     assert fetch.get("continue-on-error") is True, (
         "a job killed before its upload genuinely has no artifact; that must not fail the report"
     )
+    # `!cancelled()` is asserted on the fetch step in the loop above, together with the three
+    # gates it shares its rationale with (#12363 round 12).
     assert "published-artifact-alert.sh" in str(
         steps["File or refresh the alert issue"].get("run", "")
     )
@@ -1469,9 +1522,7 @@ def test_the_canary_files_a_durable_alert_and_reads_its_own_exit_code():
     # nothing executes the harness even when selected).
     import yaml as _yaml
 
-    ci_jobs = _yaml.safe_load(
-        (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text()
-    )["jobs"]
+    ci_jobs = _yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text())["jobs"]
     harness_runs = [
         (job, step.get("name"))
         for job, body in ci_jobs.items()
@@ -1484,7 +1535,7 @@ def test_the_canary_files_a_durable_alert_and_reads_its_own_exit_code():
         "while this suite stays green (a filter/paths entry is not a step)"
     )
     ci_text = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text()
-    assert "startswith(\".github/scripts/published-artifact-alert\")" in ci_text, (
+    assert 'startswith(".github/scripts/published-artifact-alert")' in ci_text, (
         "the ops-harnesses paths filter must also list this harness, or the job that runs "
         "it is not selected when the harness changes"
     )
@@ -1537,24 +1588,28 @@ def test_the_canary_cannot_be_SILENCED_without_reding_this_file():
     # ⛔ THE STEP MUST PROPAGATE THE TOOL'S EXIT STATUS (#12363 round 12). The tool is
     # invoked as `… || rc=$?`, so on a FAIL the NEXT command decides the step's status. If
     # the trailing `exit "$rc"` is dropped, the step's last command is the
-    # `echo … >> $GITHUB_OUTPUT` redirect, the step exits 0, the `canary` JOB reports
-    # SUCCESS — and then `File or refresh the alert issue` (`needs.canary.result !=
-    # 'success'`) is SKIPPED while `Close the alert issue on a green run` (`result ==
-    # 'success'`) RUNS: the release-owed ledger is resolved by a run whose own step
-    # summary says FAIL. Measured: deleting the line left this whole suite green.
+    # `echo … >> $GITHUB_OUTPUT` redirect: the step exits 0 and the `canary` JOB reports
+    # SUCCESS while `exit_code=1` is published — so the alarm and `File or refresh the alert
+    # issue` (`needs.canary.result != 'success'`) are both SKIPPED, `Close …` skips too
+    # (`1 != '0'`), and the report job does NOTHING: a broken artifact, a green run, and not
+    # one word anywhere. (Before round 12 the same mutation CLOSED the release-owed ledger,
+    # because the close step also keyed on `result == 'success'`; that disjunct is gone, so
+    # the failure mode is now SILENCE rather than a false close.) Measured: deleting the line
+    # left this whole suite green.
     smoke_run = str(smoke.get("run"))
-    assert '|| rc=$?' in smoke_run, (
+    assert "|| rc=$?" in smoke_run, (
         "the canary call must capture the tool's exit status (the `|| rc=$?` idiom)"
     )
     assert 'exit "$rc"' in smoke_run, (
-        "the canary step must END with `exit \"$rc\"` — without it the step exits 0 whatever "
-        "the tool said, the job reports success, and the alert CLOSES the ledger on a FAIL"
+        'the canary step must END with `exit "$rc"` — without it the step exits 0 whatever '
+        "the tool said, the job reports success, and the alert goes SILENT on a FAIL: "
+        "nothing filed, nothing closed"
     )
     # ORDER: the output must be published BEFORE the exit, or the redirect never runs and
     # `steps.canary.outputs.exit_code` is empty (which the report job reads as "detector
     # outage" for every severity, including a real release finding).
     assert smoke_run.index("GITHUB_OUTPUT") < smoke_run.index('exit "$rc"'), (
-        "`echo exit_code=… >> $GITHUB_OUTPUT` must come BEFORE `exit \"$rc\"`"
+        '`echo exit_code=… >> $GITHUB_OUTPUT` must come BEFORE `exit "$rc"`'
     )
 
 
