@@ -3396,8 +3396,9 @@ through — a directory, or a path that could not be re-read) sends them to the
 **run link**. In the two states that carry **no** excerpt, a report **larger than the cap** is named by
 its real size, with the statement that only its last 6000 bytes were read, so a blank or undecodable
 tail is never mistaken for a blank report (a path that cannot be read at all yields no size to
-name, and the sentence says that instead). A report that **is** carried states only that it was
-truncated to its last 6000 bytes — the excerpt is there to read, so the size adds nothing. It never claims an excerpt it is not showing, never guesses the cause when two states are
+name, and the sentence says that instead). A carried report **larger than the cap** states only that
+it was truncated to its last 6000 bytes — the excerpt is there to read, so the size adds nothing —
+and one under the cap states nothing about its extent, because nothing was cut. It never claims an excerpt it is not showing, never guesses the cause when two states are
 indistinguishable from there, and the section intro no longer promises a "verbatim" report it
 may not be carrying (#12200): on-call reads the body, so a false claim there costs the reader
 the trip they were trying to avoid.
