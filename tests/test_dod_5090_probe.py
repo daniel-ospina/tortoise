@@ -3601,6 +3601,64 @@ def test_an_INDETERMINATE_last_assignment_holds_the_file_UNMEASURED(tmp_path, mo
     assert shipped["deployment"]["on"] is True, shipped["deployment"]
 
 
+def test_a_shell_UNSET_disarms_the_file_and_is_REPORTED(tmp_path, monkeypatch):
+    """`unset FLAG` is the shell channel's DISARMING direction, and it is LAST WINS.
+
+    ⛔ Measured (fresh review of PR #12474, P2): `unset FLAG` is not an assignment, so
+    `_assigned_value` returned `None` and it landed in NO bucket at all — it was neither
+    scored nor reported, and an earlier `export FLAG=1` stood. `export FLAG=1` followed
+    by `unset FLAG` therefore read the file `ON` (surface `ON`, nothing in any bucket)
+    over a script whose executed process has no such variable. The compose value-less
+    spelling has been reported since this PR's compose reader landed; the shell channel,
+    which this PR ADDS, did not.
+    """
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    (tmp_path / "Dockerfile").write_text(
+        'FROM python:3.12\nENTRYPOINT ["/entrypoint.sh"]\n', encoding="utf-8")
+
+    # …arm then UNSET: the file is OFF and the disarming line is REPORTED, not silent.
+    (tmp_path / "entrypoint.sh").write_text(
+        "#!/bin/bash\nexport TORTOISE_EMBED_GATE=1\nunset TORTOISE_EMBED_GATE\n",
+        encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["entrypoint"]["state"] == "OFF", (
+        shipped["per_surface"]["entrypoint"])
+    assert any("unset TORTOISE_EMBED_GATE" in entry
+               for entry in shipped["unset_declarations"]), shipped[
+                   "unset_declarations"]
+
+    # …`unset -v FLAG`, the multi-name form, and a trailing comment are the same fact.
+    for script in (
+        "#!/bin/bash\nexport TORTOISE_EMBED_GATE=1\nunset -v TORTOISE_EMBED_GATE\n",
+        "#!/bin/bash\nexport TORTOISE_EMBED_GATE=1\nunset A B TORTOISE_EMBED_GATE\n",
+        "#!/bin/bash\nexport TORTOISE_EMBED_GATE=1\n"
+        "unset TORTOISE_EMBED_GATE # disarmed\n",
+    ):
+        (tmp_path / "entrypoint.sh").write_text(script, encoding="utf-8")
+        assert probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")[
+            "per_surface"]["entrypoint"]["state"] == "OFF", script
+
+    # …CONTROLS, so the fix cannot over-reach: an `unset` of ANOTHER name, and one of a
+    # longer name the flag PREFIXES, both leave the arm standing.
+    for script in (
+        "#!/bin/bash\nexport TORTOISE_EMBED_GATE=1\nunset OTHER_VAR\n",
+        "#!/bin/bash\nexport TORTOISE_EMBED_GATE=1\nunset TORTOISE_EMBED_GATE_EXTRA\n",
+    ):
+        (tmp_path / "entrypoint.sh").write_text(script, encoding="utf-8")
+        shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+        assert shipped["per_surface"]["entrypoint"]["state"] == "ON", script
+        assert not shipped["unset_declarations"], shipped["unset_declarations"]
+
+    # …and the ORDER decides, as everywhere else: an `unset` BEFORE the `export` leaves
+    # the export as the last word, so the file is ON.
+    (tmp_path / "entrypoint.sh").write_text(
+        "#!/bin/bash\nunset TORTOISE_EMBED_GATE\nexport TORTOISE_EMBED_GATE=1\n",
+        encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["entrypoint"]["state"] == "ON", (
+        shipped["per_surface"]["entrypoint"])
+
+
 def test_the_LEGACY_ENV_space_form_is_a_deployment_hit(tmp_path, monkeypatch):
     """`ENV KEY value` (no `=`) sets KEY — the third form the Dockerfile grammar has.
 
@@ -8864,7 +8922,7 @@ def test_the_census_doc_collects_what_the_file_collects():
     a `TORTOISE_DB_URI` satisfies) — one more skip and one fewer pass than the docker
     lane, which is the invariant that lasts; the two figures above are bound to the sha
     for exactly that reason. The two splits therefore add to the tree's OWN collected
-    count: `209 + 1` and `208 + 2` at THIS tree, both equal to the `210` the pin re-derives
+    count: `210 + 1` and `209 + 2` at THIS tree, both equal to the `211` the pin re-derives
     below (the `eee465029a` pair, `185/1` and `184/2`, adds to that tree's 186 instead),
     which is why the doc states its split as
     lane-bound: a carve-out run must not "correct" the docker lane's figure.

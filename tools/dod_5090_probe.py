@@ -2407,6 +2407,27 @@ _SHELL_BARE_EXPORT = re.compile(
 _SHELL_ASSIGN = re.compile(r"^\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)=")
 _SHELL_ALLEXPORT = re.compile(r"^\s*set\s+-[a-zA-Z]*a[a-zA-Z]*\s*$")
 
+#: `unset NAME`, `unset -v NAME`, and the multi-name form. `unset` is a shell
+#: BUILTIN, so it is matched CASE-SENSITIVELY — `UNSET` is a different (nonexistent)
+#: command, unlike the Dockerfile instructions, which are case-insensitive.
+_SHELL_UNSET = re.compile(r"^\s*unset[ \t]+(?:-v[ \t]+)?(?P<names>[^#]*?)\s*(?:#.*)?$")
+
+
+def _shell_line_unsets(line: str, flag: str) -> bool:
+    """Does ``line`` REMOVE ``flag`` from the shell's environment?
+
+    ⛔ A shell `unset FLAG` is the shell channel's DISARMING direction, and it matched
+    NOTHING here: it is not an assignment (`_assigned_value` returns `None` for it), so
+    it fell through every bucket and vanished, leaving an earlier `export FLAG=1`
+    standing — `export FLAG=1` then `unset FLAG` read the file `ON`. The compose
+    value-less spelling has been reported since this PR's compose reader landed; the
+    shell channel, which this PR ADDS, did not (fresh review of PR #12474, P2, measured).
+    """
+    match = _SHELL_UNSET.match(line)
+    if not match:
+        return False
+    return any(word.strip("'\"") == flag for word in match.group("names").split())
+
 
 def _shell_exported_names(text: str) -> set[str] | None:
     """The names a shell script EXPORTS by a bare `export NAME`, or `None` = all.
@@ -2942,6 +2963,22 @@ def flag_in_shipped_configs(flag: str) -> dict:
                         and toml_tables.get(number, "") != TOML_RUNTIME_ENV_TABLE):
                     if _assigned_value(line, flag) is not None:
                         outside_runtime.append(f"{posix}:{number}: {line.strip()[:90]}")
+                    continue
+                # ⛔ The shell channel's DISARMING direction, and a LAST-WINS decision:
+                # `unset FLAG` removes the variable, so it cannot leave an earlier
+                # `export FLAG=1` standing. It landed in NO bucket at all before this —
+                # not an assignment, not the compose unset spelling — so the file read
+                # `ON` with `measured: True` and nothing reported it (fresh review of PR
+                # #12474, P2, measured). Reported in `unset_declarations` exactly as the
+                # compose value-less spelling is, so the direction is visible, not just
+                # scored. ⛔ BEFORE the exported-assignment gate, which `continue`s on any
+                # line that is not an export and would swallow this one.
+                if shell_exports is not None and _shell_line_unsets(line, flag):
+                    unset_declarations.append(
+                        f"{posix}:{number}: {line.strip()[:90]}")
+                    decisions.append((False,
+                                      f"{posix}: {line.strip()[:90]}",
+                                      f"{posix}:{number}: {line.strip()[:90]}"))
                     continue
                 if (shell_exports is not None
                         and not _shell_line_is_exported(line, flag, shell_exports)):
@@ -3906,9 +3943,13 @@ def score_rule_bullet() -> Row:
             # carries the flag". ⛔ `ARG TORTOISE_EMBED_GATE=1` is no longer one of the
             # divergence shapes READ ON — it is build-time only and never reaches the
             # container's environment, so `#12022` routes it to `outside_runtime`
-            # (a deployed process never reads it) instead of counting it as a hit. ONE
-            # remaining shape is `ENV …=1` followed by `ENV …=0`: last-wins, so a build
-            # from that file carries 0, and the walk still reads the file ON; ANOTHER is
+            # (a deployed process never reads it) instead of counting it as a hit. ⛔ THE
+            # `ENV …=1` / `ENV …=0` SHAPE IS NO LONGER ONE OF THEM EITHER: last-wins makes
+            # the walk read the file OFF, which
+            # `test_the_LAST_assignment_in_a_file_decides_its_arming` pins — an earlier
+            # revision of this comment still claimed it read ON, the "a sentence wider
+            # than the measurement under it" class this probe exists to police (fresh
+            # review of PR #12474, P3, measured). The one remaining shape is
             # a builder-stage-only `ENV` in a multi-stage build, since nothing here reads
             # stage semantics. Stated as examples, never as an enumeration — a list here
             # is what `#12070` item 1 recorded rotting. The claim
