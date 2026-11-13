@@ -57,6 +57,28 @@ no fail-safe and no global constant here. The start clock is ``run_started_at``
 ``run_started_at`` and would inflate elapsed by the whole queue wait — biasing a
 cancel tool toward cancelling a healthy run that only just started.
 
+The SAME argument applies to a shard's own clock (`job_work_start`): an
+UNFINISHED shard with no work clock — one no runner has claimed, i.e. every
+`queued`/`waiting`/`requested`/`pending` job — makes the bound **UNDERIVABLE**
+(#11045). That is the dominant skip on a starved fleet: a run whose only
+unfinished shards are queueing is a CAPACITY WAIT. ⛔ AND IT IS THE DEFAULT OUTCOME
+FOR A MIXED MATRIX — one claimed shard plus any queued sibling — which is a
+CAPABILITY LOSS, stated plainly rather than argued away (review E, cycle 2):
+
+  * the claimed sibling IS in_progress and DOES hold a runner slot, so cancelling
+the run would reclaim a slot — the job #6868 exists for;
+  * and pre-fix the tool could make that cancel CORRECTLY, whenever the claimed
+shard won the `max`-ceiling selection, because it was then judged on its own
+claim-time clock. So this is not "the removal of a false-cancel generator": it
+removes correct reclaim of genuinely wedged runs for every matrix that has any
+unclaimed sibling;
+  * it is also AVOIDABLE rather than inherent — the bound can be judged over the
+CLAIMED unfinished shards only (a queued shard can neither be wedged nor supply a
+valid clock), which keeps the correct cancel with no queue-wait risk. That restore
+is filed as a follow-up (it adds a cancel path, so it is not smuggled in here);
+  * nothing is DESTROYED by the gap: it is fail-closed, and a wedge simply persists
+for an operator or another instrument to reclaim.
+
 Exit codes
 ----------
   0  complete (dry-run or apply)
@@ -144,6 +166,12 @@ REASON_NO_WORKFLOW = "workflow-unreadable"
 
 class Incomplete(Exception):
     """A surface could not be read. Nothing is cancelled for that run."""
+
+
+#: Job statuses that POSITIVELY mean the job's work has begun. An allow-list: a
+#: status GitHub has not documented yet must never be read as "begun", because the
+#: only consumer records a work CLOCK and a wrong clock biases toward cancelling.
+BEGUN_JOB_STATUSES = frozenset({"in_progress", "completed"})
 
 
 # ── subprocess / env seams ──────────────────────────────────────────────────
@@ -406,6 +434,74 @@ def job_seconds(job: dict) -> int | None:
     return n if n >= 0 else None
 
 
+def job_work_start(job: dict) -> float | None:
+    """When this job's WORK began (epoch seconds), or None when it has NOT begun.
+
+    ⛔ `started_at` ALONE IS NOT EVIDENCE OF WORK — the same defect `ci_cancel_guard`
+    had (#11045), one layer out, and here it points at a DESTRUCTIVE decision: the
+    returned value becomes `shard_started_at`, the clock `decide()` compares against
+    the shard's own derived bound.
+
+    ⛔ THE STAMP ON AN UNCLAIMED JOB IS **THE JOB'S OWN `created_at`**, and the
+    equality is exact — not "the run's creation", which an earlier draft of this
+    docstring claimed and both reviewers refuted by measurement (2026-11-13):
+
+        run 43433269949  run.created_at = 13:23:45Z
+        test (i)  queued  job.created_at = 13:30:58Z  started_at = 13:30:58Z  runner=(none)  steps=0
+        test (k)  queued  job.created_at = 13:30:58Z  started_at = 13:30:58Z  runner=(none)  steps=0
+        test (f)  in_progress  started_at = 14:00:51Z  runner=pi-runner-vm-6  first_step = 14:01:03Z
+
+    The job's queue-entry moment is 7m13s AFTER its run was created (the matrix
+    expands late), so "equals the run clock" was false. The general rule, MEASURED
+    across 40 non-completed runs on 2026-11-13 — **144 of 144 queued jobs carried
+    `started_at == job.created_at` exactly, and 0 differed** — is: GitHub freezes
+    `started_at` at the moment the job JOINS THE QUEUE and moves it only when a
+    runner CLAIMS the job, at which point it becomes the claim time and sits within
+    a container's setup lag of the first step (1, 1, 2, 2 s measured; 12 s on the
+    one job that pulled an image — MEASURED, not "within 1-2 s" as an earlier draft
+    said). Using the queue stamp as the shard clock charges the shard the ENTIRE
+    queue wait — exactly the overrun this module's `(3b)` comment says must never
+    happen ("a shard that started 5 minutes ago inside a 2h-old run is judged at ~2h
+    and cancelled while healthy").
+
+    ⛔ GATE FIRST, REFINE SECOND. `steps` REFINES the clock of a job already shown to
+    have begun; it never establishes that it began. A requeued job can retain its
+    step list, and reading `steps` first let a `queued`/unclaimed job return a clock,
+    escape the `unstarted` guard, and be cancelled on a clock that included its queue
+    wait — the very outcome this function exists to prevent, and it would have made
+    this predicate disagree with `ci_cancel_guard.job_has_started` (which ignores
+    `steps` entirely) on the same job, in the destructive direction. The evidence
+    order is therefore:
+      1. GATE: a `BEGUN_JOB_STATUSES` status or an assigned `runner_name`, else None
+         — the job is a CAPACITY WAIT, not a wedge;
+      2. REFINE: the earliest step `started_at`, when the payload carries steps;
+      3. otherwise the job's own claim-time `started_at`.
+    """
+    status = job.get("status")
+    runner = job.get("runner_name")
+    # TWO isinstance arms, and both are load-bearing. Set membership on an
+    # unhashable status (a list/dict in a degraded payload) raises TypeError out of
+    # this PURE function, and `decide` is called per candidate with no per-run
+    # `except` — so one bad row aborted the whole sweep (exit 5, no report, decided
+    # candidates never acted on). And a non-string TRUTHY `runner_name` (a dict, a
+    # list, a number) is not evidence that a runner claimed the job; treating it as
+    # such flips this predicate in the PERMITTING direction, because an unclaimed
+    # `queued` job would then hand its queue stamp out as a work clock (review cycle
+    # 2, T5). Both arms fail to None, the non-cancelling answer.
+    if not isinstance(status, str) or (
+            status not in BEGUN_JOB_STATUSES
+            and not (isinstance(runner, str) and runner)):
+        return None
+    steps = job.get("steps")
+    if isinstance(steps, list) and steps:
+        stamps = [_parse_ts(s.get("started_at")) for s in steps if isinstance(s, dict)]
+        stamps = [t for t in stamps if t is not None]
+        if stamps:
+            return min(stamps).timestamp()
+    ts = _parse_ts(job.get("started_at"))
+    return ts.timestamp() if ts is not None else None
+
+
 def derive_bound(target_jobs: list[dict], green_job_lists: list[list[dict]],
                  floor: int) -> dict | None:
     """The run's own derived bound, or ``None`` when it cannot be derived.
@@ -437,13 +533,29 @@ def derive_bound(target_jobs: list[dict], green_job_lists: list[list[dict]],
         if job.get("status") != "completed":
             rec["unfinished"] = True
             # THE SHARD'S OWN START CLOCK. A job that is still queued/waiting/
-            # requested has no started_at: it holds no runner slot and has made
+            # requested has no work clock: it holds no runner slot and has made
             # no progress to measure. It is a CAPACITY WAIT, not a wedge, so it
             # must never be counted as an overrun (see the `unstarted` guard
             # below, and the per-shard clock in decide()).
-            ts = _parse_ts(job.get("started_at"))
+            #
+            # ⛔ SO THE CLOCK COMES FROM `job_work_start`, NEVER FROM
+            # `job.get("started_at")` DIRECTLY (#11045). An UNCLAIMED job's stamp is
+            # that JOB's own `created_at` — the moment it entered the runner queue —
+            # NOT the run's creation (measured 2026-11-13: run 43433269949 created
+            # 13:23:45Z, its queued jobs `created_at = started_at = 13:30:58Z`,
+            # 7m13s later; 144 of 144 queued jobs across 40 runs carried that exact
+            # equality). Reading it here made a capacity wait look begun: the shard
+            # escaped the `unstarted` guard, the bound became derivable, and the run
+            # was judged against a clock that included its whole queue wait — the P0
+            # this guard exists to stop. A job that has not begun now stays
+            # CLOCKLESS, which routes it to `unstarted` and makes the bound
+            # UNDERIVABLE. The direction is fail-closed but it is NOT "never more
+            # cancels": a CLAIMED `in_progress` job carrying `steps` but no
+            # `started_at` was clockless pre-fix (underivable) and is now clocked
+            # from its first step, so that run becomes cancellable (review cycle 2).
+            ts = job_work_start(job)
             if ts is not None:
-                rec["started_at"] = ts.timestamp()
+                rec["started_at"] = ts
     if not shards:
         return None
 
