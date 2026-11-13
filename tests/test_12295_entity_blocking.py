@@ -876,3 +876,42 @@ def test_the_folded_bare_arm_attaches_only_when_the_bare_kind_carrier_is_UNIQUE(
     assert method == "ambiguous", (
         f"two colliding bare-kind carriers reported {method!r}, not `ambiguous` — the "
         "uniqueness condition on the folded_bare arm is gone")
+
+
+def test_the_capture_path_cannot_attach_on_a_bare_basename():
+    """Pins refusal #3 AT THE CALL SITE — a basename never decides at capture time.
+
+    ⛔ MEASURED before this test: `entity_blocking.attach_matches` documents that
+    "no production caller passes ``complete=True`` today", and
+    `_find_existing_entity` relies on exactly that — its `attach_matches(name,
+    entities)` call omits the flag, so a basename carrier is never attached. NO
+    test asserted it. Adding `complete=True` at that one call site left
+    `tests/test_12295_entity_blocking.py tests/test_candidate_recall_11901.py` at
+    71 passed, and `tests/test_extractor_v2.py tests/test_12047_entity_resolution.py`
+    at 471 passed / 1 xfailed — zero reds — while `lib/config.py` then attached to
+    a lone `server/config.py` carrier. The only related pin called the HELPER with
+    an explicit `complete=False`, which cannot see a caller's default.
+
+    A capture window is not the live population (`#2730` §6.7): one basename hit in
+    a handful of rows proves nothing, and the false merge it would make is
+    invisible and hard to undo. Both halves are asserted below — the shipped
+    refusal, AND the fact that the helper still attaches when the caller certifies
+    a complete population — so the first assertion cannot go vacuous by the helper
+    silently refusing basenames altogether.
+    """
+    from tortoise.extractor_v2 import _find_existing_entity
+
+    lone = [{"id": "o1", "name": "server/config.py", "kind": "core:other"}]
+    node, method = _find_existing_entity(lone, "lib/config.py", "core:other")
+    assert (node, method) == (None, "none"), (
+        f"the capture path attached on a shared BASENAME (got {(node, method)!r}) — a "
+        "capture window is not the complete population, so a lone carrier must never "
+        "decide (entity_blocking.py invariant 3, #2730 §6.7)")
+
+    #: The discriminator. Without it, a helper that had stopped attaching basenames
+    #: at all would satisfy the assertion above and the refusal would be unpinned
+    #: again from the other side — the cost invariant 3 deliberately pays.
+    certified = attach_matches("lib/config.py", lone, complete=True)
+    assert [(r["id"], r["basename_only"]) for r in certified] == [("o1", True)], (
+        f"a COMPLETE population no longer attaches the shared basename (got {certified!r}) "
+        "— refusal #3 then costs nothing, and the pin above proves nothing")

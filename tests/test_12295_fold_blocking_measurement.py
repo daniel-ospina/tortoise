@@ -281,13 +281,21 @@ def test_the_blocker_is_NOT_earned_on_this_corpus_and_the_artifact_says_so(repor
     assert mk["k_independent"] is True
 
 
-def test_the_residual_is_the_two_named_classes_and_nothing_unexplained(report):
+def test_the_residual_is_the_DECLARED_classes_and_nothing_unexplained(report):
     """Every unattached pair is attributed — the brief's §4 table is this test.
 
     The unattached remainder must be exactly the DECLARED classes:
-    ``space-to-hyphen`` (the article anchor, #12047 round-4 finding 5) and
+    ``space-to-hyphen`` (the article anchor, #12047 round-4 finding 5),
     ``basename-only`` (the precision rule: a basename attaches only on a complete
-    population). An unexplained gap means the explanation is incomplete.
+    population), and ``article-drop`` (the pre-existing retrieval miss #11901 owns,
+    out of window at k=3). An unexplained gap means the explanation is incomplete.
+
+    ⛔ Only the first TWO are decisions this lane explains; ``article-drop`` is
+    tolerated because #11901 owns it, and it is LOAD-BEARING in the tolerated set —
+    `arms.variant_by_class["article-drop"]["3"]` is 180 pairs / 175 attached, so its
+    5 unattached pairs must be tolerated or this test reds on work it did not do.
+    The docstring previously listed two classes while `declared` held three, which
+    told a reader that a newly unattached ``article-drop`` pair would fail here.
     """
     by_class = report["arms"]["variant_by_class"]
     total = sum(d["3"]["pairs"] for d in by_class.values())

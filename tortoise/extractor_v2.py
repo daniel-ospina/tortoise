@@ -5836,14 +5836,12 @@ def _find_by_folded_key(entities: list[dict], name: str, kind_folded: str,
 
     * ``folded``     — one candidate folds to the mention's key, same kind;
     * ``folded_bare`` — same, across namespace-folded kinds, only when unique;
-    * ``ambiguous``  — the fold collides **within one arm** — two candidates of
-      the same kind (``folded``), or two of the same namespace-folded kind
-      (``folded_bare``) — so that arm cannot choose. The two callers differ, and
-      both are deliberate: ``resolve_entities`` HOLDS it
-      (an unresolved identity is never asserted ``new`` — §4.4 I1, ``#11653``),
-      while the capture create path persists it under the EXPLICIT kind and says
-      so in a warning. Neither guesses which of the colliding carriers was
-      meant.
+    * ``ambiguous``  — the fold collides **within one arm**: two of the same kind
+      (``folded``), or two of the same namespace-folded kind (``folded_bare``).
+      The two callers differ, and both are deliberate: ``resolve_entities`` HOLDS
+      it (an unresolved identity is never asserted ``new`` — §4.4 I1, ``#11653``);
+      the capture create path persists it under the EXPLICIT kind and warns. Neither
+      guesses which of the colliding carriers was meant.
 
     The non-injective keys are checked in ``entity_blocking.attach_matches``,
     which refuses to pick between two basename carriers.

@@ -243,10 +243,15 @@ is separator-normalised before the comparison** — a lever on the matcher's inp
 does **not** require the `#12047` round-4 finding-5 article anchor to be reopened. Neither number is
 "the fold works" on its own, which is why both are in the artifact.
 
-## 4. The residual is exactly two declared classes, and one of them is a decision
+## 4. The residual is exactly three declared classes — two of them decisions, one a retrieval miss
 
 215 pairs remain unattached. **Every one of them is attributed** (the pinned test
-`test_the_residual_is_the_two_named_classes_and_nothing_unexplained` fails on an undeclared class):
+`test_the_residual_is_the_DECLARED_classes_and_nothing_unexplained` fails on an undeclared class).
+The tolerated set is `space-to-hyphen`, `basename-only` and `article-drop`; only the first two are
+*decisions* this lane explains — `article-drop` is the pre-existing retrieval miss `#11901` owns,
+tolerated so the test reds on a NEW unexplained class rather than on that one. A reader who takes
+the shorter title literally believes a newly unattached `article-drop` pair fails the test; it
+does not.
 
 **`space-to-hyphen` — 180 pairs (100 % of the class; 42.7 % of the 422 pairs), 180/180 reachable by the blocker, 0 attach.**
 Mechanism, in one line: `normalize_entity_name` anchors the article strip on a real whitespace
