@@ -332,6 +332,70 @@ def test_composition_parity_document(proj, monkeypatch):
     assert _embedding(g, "Source", "url", "doc-1") == pytest.approx(fake(expected))
 
 
+def test_composition_parity_point_prefers_embedding_text(proj, monkeypatch):
+    """#12489 / #4194: the Point surface embeds the text the node HOLDS as its
+    embedding input — ``embeddingText`` when present, ``content`` otherwise.
+
+    The Point sweep encoded bare ``content``, so on an armed graph a backfill
+    replaced every composed vector with a paraphrase-derived one and reported
+    the row ``updated``. Not tautological: both Points below hold DIFFERENT
+    ``content`` and ``embeddingText``, so a regression to bare ``content``
+    encodes a different string and reds here — and ``p-plain`` (no
+    ``embeddingText``) pins the ``coalesce`` fallback in the other direction, so
+    "always prefer embeddingText" cannot pass either.
+
+    ``force=True`` is the destroying path (the operator runbook), so it is
+    asserted separately from the NULL-only repair: a fix that only changed the
+    repair pass would leave the overwrite intact.
+
+    ⚠️ Both halves are pinned against mutants measured in review (round 1):
+    ``coalesce(n.embeddingText, n.content)`` reds the ``p-empty-et`` case,
+    because ``''`` is non-NULL in Cypher so an empty-string ``embeddingText``
+    SHADOWED ``content`` — Python's ``or`` falls back, and the expression must
+    translate THAT. The dry-run/live agreement assertion is the other half of
+    the same defect: under ``coalesce`` the dry run counted ``p-empty-et`` as
+    repairable while the live pass dropped it as text-less (#5126's shape).
+    """
+    g = _g(proj)
+    composed = "`ISSUES 2` — the verbatim quote another Point also carries"
+    paraphrase = "the paraphrase that dropped the quote"
+    _create(g, "Point", {"id": "p-composed", "content": paraphrase,
+                         "embeddingText": composed})
+    _create(g, "Point", {"id": "p-plain", "content": "plain content point"})
+    # An EMPTY-STRING `embeddingText` is falsy to Python's `or` but PRESENT to
+    # Cypher's `coalesce` — the one row where the two spellings of the rule
+    # disagree. It must embed `content`.
+    _create(g, "Point", {"id": "p-empty-et", "content": "empty-et content",
+                         "embeddingText": ""})
+
+    mod = _load_backfill()
+    fake = _FakeEmbed()
+    monkeypatch.setattr("tortoise.embeddings.compute_embedding", fake)
+
+    # The dry run and the live pass must promise the SAME rows (#5126).
+    dry_total, _ = mod._dry_run(proj.db, proj.graph_name, ["Point"])
+
+    # NULL-only repair pass.
+    stats = _backfill_run(mod, proj, ["Point"])
+    assert stats["updated"] == dry_total, (dry_total, stats)
+    assert composed in fake.calls, fake.calls
+    assert paraphrase not in fake.calls, fake.calls
+    assert "plain content point" in fake.calls, fake.calls
+    assert "empty-et content" in fake.calls, fake.calls
+    assert _embedding(g, "Point", "id", "p-composed") == pytest.approx(
+        fake(composed))
+    assert _embedding(g, "Point", "id", "p-empty-et") == pytest.approx(
+        fake("empty-et content"))
+
+    # Force pass — the path that overwrites an existing (composed) vector.
+    fake.calls.clear()
+    _backfill_run(mod, proj, ["Point"], force=True)
+    assert composed in fake.calls, fake.calls
+    assert paraphrase not in fake.calls, fake.calls
+    assert _embedding(g, "Point", "id", "p-composed") == pytest.approx(
+        fake(composed))
+
+
 def test_source_and_document_surfaces_are_disjoint(proj, monkeypatch):
     """#5126: one node label, two surfaces. ``Source`` sweeps the provenance
     Source (``documentKind`` NULL, text = ``url`` per #448); ``Document`` sweeps

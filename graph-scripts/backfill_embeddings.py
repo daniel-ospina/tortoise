@@ -102,8 +102,47 @@ DEFAULT_BATCH = 500
 #                   ``IS NOT NULL`` is not the live run's own test (``''`` is
 #                   non-NULL in Cypher) — kept in ONE place so the dry run and
 #                   the live run cannot disagree (#5126).
+#: The Point surface's embedding text — the text the vector DESCRIBES (#4194).
+#:
+#: ``embeddingText`` is a STORED Point property (``tortoise/embed_compose.py``:
+#: "What this text is served as"), written when the composed-text seam composes
+#: a text different from ``content``. The rule is the read/replay side's,
+#: verbatim: ``projection/entities.py`` does
+#: ``p.get("embeddingText") or p.get("content")`` (#8488), so an ABSENT **or
+#: EMPTY** ``embeddingText`` falls back to ``content``.
+#:
+#: ⚠️ ``coalesce(n.embeddingText, n.content)`` is NOT that rule and was measured
+#: to diverge: ``''`` is non-NULL in Cypher, so an empty-string ``embeddingText``
+#: SHADOWED ``content``, the composed text became ``''``, the live pass dropped
+#: the row as text-less while ``--dry-run`` counted it as repairable — the exact
+#: dry-run/live disagreement ``text_pred`` exists to prevent (#5126). The
+#: ``CASE`` is the faithful translation of Python ``or``. (``nullif`` is not
+#: available in this Cypher dialect — measured: “Unknown function 'nullif'”.)
+#:
+#: One constant for BOTH ``text_expr`` and ``text_pred`` on purpose: the file's
+#: own rule is that the two passes share ONE predicate, and two literals would
+#: let them drift apart one edit at a time.
+_POINT_EMBEDDING_TEXT_EXPR = (
+    "CASE WHEN n.embeddingText IS NULL OR n.embeddingText = '' "
+    "THEN n.content ELSE n.embeddingText END"
+)
+
 LABEL_CONFIG: dict[str, dict[str, str]] = {
-    "Point":    {"label": "Point", "text_prop": "content", "id_prop": "id"},
+    # #12489 / #4194: a Point's vector must describe the text the node HOLDS as
+    # its embedding input. Bare ``content`` here was the one writer in the tree
+    # that did not apply the rule the read/replay side has applied since #8488
+    # (``projection/entities.py``: ``p.get("embeddingText") or p.get("content")``):
+    # on an armed graph this sweep CLEAR-THEN-SET the composed vector from the
+    # paraphrase and left ``embeddingText`` describing a text the vector no
+    # longer is — while the completeness marker counted the row ``updated``.
+    # ``text_prop`` stays ``content`` as the declared fallback the docstring
+    # above describes; the EXPRESSION carries the identity. Ordering matters:
+    # composition is invariant to which of #12436's three design options lands
+    # (option 3 leaves ``embeddingText`` NULL for a shared quote, which the
+    # fallback catches).
+    "Point":    {"label": "Point", "text_prop": "content", "id_prop": "id",
+                 "text_expr": _POINT_EMBEDDING_TEXT_EXPR,
+                 "text_pred": f"trim({_POINT_EMBEDDING_TEXT_EXPR}) <> ''"},
     "Event":    {"label": "Event", "text_prop": "subject", "id_prop": "eventId"},
     # #5126 / D10 (ONTOLOGY v3.15 §4.4): a document IS a ``:Source``. The
     # pre-fix entry named the retired ``:Document`` LABEL and read the retired
@@ -484,8 +523,8 @@ def _dry_run(db, graph_name: str, labels: list[str], *,
 
     "Text-less" is taken from ``_label_branches``' predicate, so the count and
     the live pass agree BY CONSTRUCTION wherever a surface declares a
-    ``text_pred`` (the Document surface does: ``''`` is non-NULL in Cypher, so
-    a bare ``IS NOT NULL`` counted rows the live pass skipped — #5126).
+    ``text_pred`` (Document and Point do: ``''`` is non-NULL in Cypher, so a
+    bare ``IS NOT NULL`` counted rows the live pass skipped — #5126, #12489).
     Residual, recorded rather than silently over-reported: a surface with only
     a bare property still uses ``IS NOT NULL``, so a *non-empty-check* miss is
     limited to a whitespace-only value on those surfaces.
