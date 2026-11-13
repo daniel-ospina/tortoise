@@ -6415,6 +6415,47 @@ def test_a_substitution_closer_is_not_a_comment_boundary() -> None:
         f"{_run_commands(step)!r}"
     )
 
+    # ⛔ THE DISTRUST OF A `#` INSIDE A NESTED QUOTING CONTEXT LASTS EXACTLY AS LONG
+    # AS THE SUBSTITUTION — NOT THE LINE (#12279 FINAL REVIEW 2, P1, measured
+    # RED→GREEN in 12 of 12 spellings). The first cut of that fix used a LINE-SCOPED
+    # latch, so every later `#` on the line stopped being a comment. A step is
+    # written exactly like these rows — a `$(…)` in its message, the real work after
+    # it, and a comment on that work — so bash RAN the copy while the latch kept `#`,
+    # `16`, `gets`, `17` as live words, made them the segment's last tokens, and
+    # spared the replacement (`main` refuses all of them).
+    for line in (
+        'echo "$(true)"; cp -a "$b/17/bin/." "$b/16/bin/" # x',
+        'echo "$(date +%T) syncing"; sudo cp -a "$b/17/bin/." "$b/16/bin/"  # 16 gets 17',
+        'echo "$(date)"; cp -a "$b/17/bin/." "$b/16/bin/" # was: old',
+    ):
+        step = {"run": line}
+        assert any(_replaces_a_client_binary(ln) for ln in _executed_lines(None, step)), (
+            f"a live replacement after a `$(…)` and a trailing COMMENT was spared: "
+            f"{_run_commands(step)!r}. The comment's words must not become the "
+            "segment's last operands — the distrust of `#` ends where the "
+            "substitution ends."
+        )
+
+    # CONTROL: and a REAL trailing comment after a CLOSED substitution still strips
+    # (the same finding's other direction). bash comments these out, so nothing is
+    # copied; a guard that refuses them is a false RED, and the latch above caused
+    # one on every `$(…)`-bearing step.
+    for line in (
+        'echo "$(date)" # lead; ' + replacement,
+        'echo "$(date)"; # ' + replacement,
+        'echo "$(date +%T) syncing"; # ' + replacement,
+    ):
+        step = {"run": line}
+        assert replacement not in _run_commands(step), (
+            "a REAL comment after a closed substitution survived, so the line still "
+            f"ran: {_run_commands(step)!r}"
+        )
+        assert not any(_replaces_a_client_binary(ln) for ln in _executed_lines(None, step)), (
+            f"a commented-out replacement after a `$(…)` was refused: {step['run']!r}. "
+            "bash comments it out; refusing it is a false RED, and the latch that "
+            "caused it also spared live replacements."
+        )
+
     # CONTROL: and a `#` right after a PLAIN `(` IS a comment (the round-4 fix must
     # not turn every opener into data — `( #c )` really is a comment to bash).
     step = {"run": f"( #c ); {replacement}"}
@@ -7326,7 +7367,12 @@ def _strip_trailing_comment(line: str) -> str:
     quote = ""
     stack: list[str] = []
     braces = 0
-    nested_quote = False
+    #: How many substitution/expansion contexts are open INSIDE the current
+    #: double-quoted span (see the block in the quote branch). A `#` is DATA while
+    #: this is above zero, and NOT a comment once it returns to zero — the scope of
+    #: the distrust is the substitution, never the rest of the line.
+    nested_depth = 0
+    inner_quote = False
     #: `[[ … ]]` and `(( … ))` are WHOLE WORD PARTS (#12279 REVIEW 4, P1, measured
     #: RED→GREEN — `main` refused every row below, the head ERASED the line). Inside
     #: them a `#` is not reliably a comment: bash keeps it as DATA after a regex
@@ -7358,13 +7404,31 @@ def _strip_trailing_comment(line: str) -> str:
             # `echo "$(echo " #note")"` prints ` #note`, because `$( … )` opens a NEW
             # quoting context and the inner `"` does not close the outer string. A
             # flat `quote` reads it the other way, so the `#` looked like a comment
-            # and the live replacement after it was erased. Reaching the `$(`/`${`
-            # OPENERS here (they are inside the span, so this block owns them) is
-            # enough to know the scope is beyond this scanner: from that point on no
-            # `#` on the line is trusted as a comment — fail CLOSED, which can only
-            # over-refuse.
+            # and the live replacement after it was erased.
+            #
+            # ⛔ AND THE DISTRUST MUST LAST EXACTLY AS LONG AS THE SUBSTITUTION, NOT
+            # THE LINE (#12279 FINAL REVIEW 2, P1, measured RED→GREEN in 12 of 12
+            # spellings). The first cut of this fix set a LINE-SCOPED latch, so every
+            # later `#` on the line stopped being a comment — and a step is written
+            # with a `$(…)` in its message and a comment on its real work:
+            #
+            #     echo "$(date +%T) syncing"; sudo cp -a "$b/17/bin/." "$b/16/bin/"  # 16 gets 17
+            #
+            # bash RUNS the copy (the `#` starts a comment), but the latch kept `#`,
+            # `16`, `gets`, `17` as live words, they became the segment's last tokens,
+            # the destination was no longer last, and the replacement went GREEN — a
+            # RED→GREEN against `main`, which refuses it. So the depth is COUNTED: it
+            # rises at an opener inside the span and falls at the `)`/`}` that closes
+            # it, and only while it is above zero is a `#` DATA. When it returns to
+            # zero the outer span is still open (bash's `"…"` continues after `$(…)`)
+            # and the next `"` closes it normally.
             if quote == '"' and (line.startswith("$(", index) or line.startswith("${", index)):
-                nested_quote = True
+                nested_depth += 1
+                inner_quote = False
+            if quote == '"' and nested_depth and not inner_quote and char in ")}":
+                nested_depth -= 1
+            if quote == '"' and char == '"' and nested_depth:
+                inner_quote = not inner_quote
             if quote == '"' and char == "\\" and index + 1 < len(line):
                 index += 2
                 continue
@@ -7389,7 +7453,7 @@ def _strip_trailing_comment(line: str) -> str:
             boundary = False
             index += 1
             continue
-        if char == "#" and (braces or conditional or arith or "extglob" in stack or nested_quote):
+        if char == "#" and (braces or conditional or arith or "extglob" in stack or nested_depth):
             boundary = False
             index += 1
             continue
@@ -7410,12 +7474,12 @@ def _strip_trailing_comment(line: str) -> str:
             # context, so `echo "$(echo " #note")"` prints ` #note` — the inner `"`
             # does not close the outer string. A flat `quote` gets that backwards,
             # reads the `#` as a comment and erases a live replacement (measured: 9
-            # of 12 spellings LANDED in bash and went GREEN). The scanner cannot
-            # follow a scope it does not model, so it FAILS CLOSED: once a
-            # substitution/expansion opens while a double-quoted span is live, no
-            # `#` later on the line is a comment. Keeping text only over-refuses.
-            if quote == '"':
-                nested_quote = True
+            # of 12 spellings LANDED in bash and went GREEN). That shape is handled
+            # by the depth counter in the QUOTE branch of this loop (which owns every
+            # character of a double-quoted span, so this branch is only reached when
+            # no span is open) — and it is scoped to the substitution, not the line:
+            # see the correction there, where a line-scoped latch was measured as a
+            # RED→GREEN of its own.
             braces += 1
             boundary = False
             index += 2
@@ -7494,8 +7558,6 @@ def _strip_trailing_comment(line: str) -> str:
                 stack.append("arith")
                 boundary = False
             elif index and previous in "$<>":
-                if quote == '"':
-                    nested_quote = True
                 stack.append("sub")
                 boundary = True
             elif previous == "=":
