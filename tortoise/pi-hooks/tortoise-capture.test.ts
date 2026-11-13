@@ -592,6 +592,53 @@ test("a refused instant does not repost an already-filed entry", async () => {
   assert.equal(server.posts(), 1, "an already-filed entry was re-POSTed");
 });
 
+test("the Python drain's unrecorded-outcome marker survives a Pi re-snapshot (#12379)", () => {
+  // The two legs SHARE this directory, and this leg builds a FRESH meta literal
+  // on every snapshot — so a marker the Python drain stamped
+  // (`extraction_outcome: "unknown"`, #12379) is erased by the next Pi
+  // `turn_end` unless it is carried. That would delete the only durable trace of
+  // a session that can never gain memory points, on the most routine path there
+  // is: the session simply took another turn.
+  const spool = tmpSpool();
+  const sid = "sess-cross-leg-unrecorded";
+  const turns = [{ role: "user" as const, content: "hi" }];
+  writeSpoolEntry(spool, snapshot(sid, turns));
+
+  // Simulate the Python drain's stamp (this leg never writes it).
+  const metaPath = join(spool, "entries", `${entryKey(sid)}.meta.json`);
+  const stamped = JSON.parse(readFileSync(metaPath, "utf8"));
+  writeFileSync(
+    metaPath,
+    `${JSON.stringify({ ...stamped, extraction_outcome: "unknown" }, null, 2)}\n`,
+  );
+
+  // The session grows — the routine re-snapshot that rebuilds the meta.
+  const res = writeSpoolEntry(spool, {
+    ...snapshot(sid, [...turns, { role: "user" as const, content: "one more" }]),
+  });
+  assert.equal(res.written, true, "a grown session must rewrite the entry");
+
+  assert.equal(
+    readSpoolEntry(spool, sid)?.extraction_outcome,
+    "unknown",
+    "the unrecorded-outcome marker was DROPPED by a re-snapshot — the durable " +
+      "trace now survives exactly one turn, and nothing else records the state",
+  );
+});
+
+test("a session with no unrecorded outcome gains no marker on a re-snapshot (#12379)", () => {
+  // The carry is preserve-only: this leg must never INVENT the marker, or
+  // `session health` would name a healthy session as unrecorded.
+  const spool = tmpSpool();
+  const sid = "sess-no-marker";
+  writeSpoolEntry(spool, snapshot(sid, [{ role: "user" as const, content: "hi" }]));
+  writeSpoolEntry(spool, snapshot(sid, [
+    { role: "user" as const, content: "hi" },
+    { role: "user" as const, content: "again" },
+  ]));
+  assert.equal(readSpoolEntry(spool, sid)?.extraction_outcome, undefined);
+});
+
 test("a refused STORED instant does not repost forever (skip + CAS normalise)", async () => {
   // A meta on disk carrying a value the guards refuse, while the payload posts the
   // NORMALISED one. Comparing the raw disk value against the normalised posted one

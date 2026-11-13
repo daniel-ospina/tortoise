@@ -477,7 +477,7 @@ just E1b.
 **E2a, the value-bearing class (14 units).** The gold has no `state_value` kind, so the class is
 **derived by rule, not by hand**: a planted unit is value-bearing iff its `verbatim_anchor` contains a
 digit (**16** units), **minus two exclusions**, each argued against `STATE_VALUE_CARVE_OUT`'s own text
-(`tortoise/extractor_v2.py:325-341`, the constant's own extent, which keeps *"measurements,
+(`tortoise/extractor_v2.py:327-343`, the constant's own extent, which keeps *"measurements,
 deadlines/freezes, thresholds/TTLs, versions, and counts"* and drops only *"ids, hashes, and
 ephemeral counters"*):
 
@@ -1071,7 +1071,7 @@ steps:
     - step: S2.3
       condition: >-
         the S2 map left at least one candidate's kind missing or `unclassified`, so
-        `_collect_classify_items` (tortoise/extractor_v2.py:12772, `def _collect_classify_items`) had an item to hand the classifier;
+        `_collect_classify_items` (tortoise/extractor_v2.py:12820, `def _collect_classify_items`) had an item to hand the classifier;
         when the map types every candidate the pass has no work and neither classify pass runs
       idle_evidence: >-
         the run's own classify surface reads enabled=true with empty s2/union, the receipt's
@@ -1200,7 +1200,7 @@ except where noted; the alternative was to omit the provenance and let a reader 
 | 90 of 90 m2 baseline | `tests/eval/write_path/baselines/m2.json` at this `fixtures_hash` |
 | 53/37, 7/8, 5/9, 21/8 split counts | the per-session sums above, partitioned by §2.1 |
 | 9 of 15 shape coverage (60%) | §1.3, `is_positively_bare_definite_description` |
-| 7 unconditional / 1 conditional step (§11) | `tortoise/extractor_v2.py:12772-12794` (`_collect_classify_items`, the collector's item set), `:15191` and `:15344` (the two `if items:` gates, one per classify pass) |
+| 7 unconditional / 1 conditional step (§11) | `tortoise/extractor_v2.py:12820-12842` (`_collect_classify_items`, the collector's item set), `:15239` and `:15392` (the two `if items:` gates, one per classify pass) |
 | 148 / 433 (0.34180), 148 / 383 (0.38642) | `capstone-measured-e0fc940b.log`'s `E3 census` block: `e3 label=Point nodes=338 anchored=141`, `Object 50/0`, `Event 45/7`, no `Document` written (§10.1) |
 | 141/150 (0.940000), 159 turn rows, 29 operator Points | the same census block's `point composition` line — reported, NOT adopted as E3's denominator (§10.1) |
 | 5/25 (20%) vs 13/25 (52%) recovered; 0.4800 raw absolute on n=25 | §10 @ `ecc7bc8ca` (run 1 losses 80.0%/48.0%) and `capstone-measured-e0fc940b.log`'s E5 row (§10.2) |
@@ -2163,9 +2163,9 @@ the condition; the gate reads the declaration below instead of asserting eight.
 
 ### 11.1 The finding, and what it is not
 
-`_collect_classify_items` (`tortoise/extractor_v2.py:12772-12794`) collects only candidates whose kind
+`_collect_classify_items` (`tortoise/extractor_v2.py:12820-12842`) collects only candidates whose kind
 is **missing or the `unclassified` sentinel**. Both classify passes are gated on that list being
-non-empty — `if items:` at `:15191` (the S2 pass) and `:15344` (the post-S4 pass). So S2.3 has work **iff the S2 map left
+non-empty — `if items:` at `:15239` (the S2 pass) and `:15392` (the post-S4 pass). So S2.3 has work **iff the S2 map left
 something untyped** — and that is a property of the candidate set, not of the pipeline's health. A
 corpus whose map assigns a concrete kind to every candidate legitimately idles the pass.
 
@@ -2209,7 +2209,7 @@ evidence or its evidence issue.
    run log, so making a step conditional is a reviewed edit to a hash-pinned artefact rather than a
    lane's local choice. A log whose declaration the frozen record does not confirm is **refused**.
 
-**Why (2) is a witness and not a loophole.** The extractor's fail-open `except` (`:15204`, `classify(S2) failed` / `:15355`, `classify(union) failed`) leaves
+**Why (2) is a witness and not a loophole.** The extractor's fail-open `except` (`:15252`, `classify(S2) failed` / `:15403`, `classify(union) failed`) leaves
 the *same* empty `s2`/`union` block as an idle pass — `#9823` measured that. Accepting a bare empty
 block would therefore hand a **crashed** classify pass the same verdict as a pass with nothing to do,
 which is the fail-open shape a gate may not have. The failure is visible: the extractor appends
@@ -2720,7 +2720,7 @@ to answer.
   numbers by §10.32 — not because they were wrong, but because they were measured at `b6a630d` and
   a later rebase+merge (`bb88463894f5`, onto `main` `ca74f2375ef4`) moved every one of them. The
   three numbers it owns, `:10619`/`:14359`/`:14512`, were correct at that head; §10.32 re-derives
-  them for the shipping tree (`:11451`/`:15191`/`:15344`).
+  them for the shipping tree (`:11499`/`:15239`/`:15392`).
 
 ### 10.31 — §10.30's declared follow-up: `_collect_classify_items`, the fail-open pair, and §9/§11's carriers (2026-11-13, `#12295`)
 
@@ -2780,18 +2780,18 @@ to answer.
   claimed to discharge. A follow-up recorded as done while the pin that reads it is red is a false
   claim, so the numbers are re-derived here instead of restated.
 - **New values — each MEASURED at `bb88463894f5` by opening the line, not by adding an offset:**
-  `_collect_classify_items` at `:12772`, its extent `:12772-12794` (`def` to `return items`); the two
-  `if items:` gates at `:15191` (the S2 pass) and `:15344` (the post-S4 pass); the two fail-open
-  `except` arms at `:15204` (`classify(S2) failed`) and `:15355` (`classify(union) failed`); and the
+  `_collect_classify_items` at `:12820`, its extent `:12820-12842` (`def` to `return items`); the two
+  `if items:` gates at `:15239` (the S2 pass) and `:15392` (the post-S4 pass); the two fail-open
+  `except` arms at `:15252` (`classify(S2) failed`) and `:15403` (`classify(union) failed`); and the
   `#10360` read-back the pin opens, `_value_fidelity_judged = _state_value_verbatim_enforced()`, at
-  `:11451`.
-- **Verified by content, not arithmetic.** `:12772` is
-  `def _collect_classify_items(embed_list: dict) -> list[dict]:` and `:12794` is `return items`;
-  `:15204`/`:15355` are the two `except` arms whose appended warnings literally name
+  `:11499`.
+- **Verified by content, not arithmetic.** `:12820` is
+  `def _collect_classify_items(embed_list: dict) -> list[dict]:` and `:12842` is `return items`;
+  `:15252`/`:15403` are the two `except` arms whose appended warnings literally name
   `classify(S2) failed` / `classify(union) failed` (a THIRD `except Exception as e:  # never block
-  capture (P1)` at `:14902` is the S2.2 arm-restore path and is NOT one of these two, which is why
+  capture (P1)` at `:14950` is the S2.2 arm-restore path and is NOT one of these two, which is why
   the number is confirmed by the warning text and not by the `except` line, byte-identical across
-  all three); `:11451` carries the receiving variable `_value_fidelity_judged`, not the `def`
+  all three); `:11499` carries the receiving variable `_value_fidelity_judged`, not the `def`
   (`:5793`) and not the `armed =` site (`:5883`).
 - **Carriers updated, all LIVE:** §11's `steps:` condition, §9's provenance row, and §11.1's and
   §11.3's prose — the four `_live_blocks` carriers the pin binds. §10.29's, §10.30's and §10.31's own

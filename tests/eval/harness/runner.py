@@ -476,6 +476,9 @@ def replay_reflex(sdk, turns: list[dict], *, log: list[str] | None = None
             min_confidence=REFLEX_MIN_CONFIDENCE,
             max_pointers=REFLEX_MAX_POINTERS,
             _search_fn=sdk.tortoise_fts_query,
+            # #12297: graded-reflex eval — the same re-owned-order seam as the
+            # product read; a re-picked page would move the injected pointer set.
+            _search_kwargs={"_rerank_candidates": False},
         )
         if not decision["fire"]:
             continue
