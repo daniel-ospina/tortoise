@@ -338,11 +338,15 @@ def test_composition_parity_point_prefers_embedding_text(proj, monkeypatch):
 
     The Point sweep encoded bare ``content``, so on an armed graph a backfill
     replaced every composed vector with a paraphrase-derived one and reported
-    the row ``updated``. Not tautological: both Points below hold DIFFERENT
+    the row ``updated``. Not tautological: ``p-composed`` holds DIFFERENT
     ``content`` and ``embeddingText``, so a regression to bare ``content``
-    encodes a different string and reds here — and ``p-plain`` (no
-    ``embeddingText``) pins the ``coalesce`` fallback in the other direction, so
-    "always prefer embeddingText" cannot pass either.
+    encodes a different string and reds here. Each remaining row pins ONE arm:
+    ``p-plain`` (no ``embeddingText``) pins the NULL arm of the fallback — it
+    reds an "always prefer embeddingText" mutant (measured) — while
+    ``p-empty-et`` is the row that pins the EMPTY-STRING arm that
+    ``coalesce`` gets wrong. ``p-empty-content`` pins the ``text_pred``: with
+    the predicate deleted, the dry run over-promises this row while the live
+    pass skips it (measured: dry 4 vs updated 3 over the pre-predicate set).
 
     ``force=True`` is the destroying path (the operator runbook), so it is
     asserted separately from the NULL-only repair: a fix that only changed the
@@ -372,6 +376,11 @@ def test_composition_parity_point_prefers_embedding_text(proj, monkeypatch):
     # disagree. It must embed `content`.
     _create(g, "Point", {"id": "p-empty-et", "content": "empty-et content",
                          "embeddingText": ""})
+    # A content-less Point is the row the ADDED ``text_pred`` exists for: ``''``
+    # is non-NULL in Cypher, so ``IS NOT NULL`` would count it in the dry run
+    # while the live pass drops it as text-less. Deleting ``text_pred`` from the
+    # Point entry must red the parity assertion below.
+    _create(g, "Point", {"id": "p-empty-content", "content": ""})
 
     mod = _load_backfill()
     fake = _FakeEmbed()
@@ -391,6 +400,9 @@ def test_composition_parity_point_prefers_embedding_text(proj, monkeypatch):
         fake(composed))
     assert _embedding(g, "Point", "id", "p-empty-et") == pytest.approx(
         fake("empty-et content"))
+    # text-less: excluded from BOTH the count and the write, not just the write.
+    assert "" not in fake.calls, fake.calls
+    assert _embedding(g, "Point", "id", "p-empty-content") is None
 
     # Force pass — the path that overwrites an existing (composed) vector.
     fake.calls.clear()

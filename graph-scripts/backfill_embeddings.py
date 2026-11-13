@@ -527,10 +527,13 @@ def _dry_run(db, graph_name: str, labels: list[str], *,
     and text-less rows are the unaffected set and are NOT counted. Dry-run
     never computes embeddings and never writes.
 
-    "Text-less" is taken from ``_label_branches``' predicate, so the count and
-    the live pass agree BY CONSTRUCTION wherever a surface declares a
-    ``text_pred`` (Document and Point do: ``''`` is non-NULL in Cypher, so a
-    bare ``IS NOT NULL`` counted rows the live pass skipped — #5126, #12489).
+    "Text-less" is taken from ``_label_branches``' predicate, so wherever a
+    surface declares a ``text_pred`` the count and the live pass cannot DRIFT
+    apart: they read ONE spelling, and an edit to it moves both (Document and
+    Point do; a bare ``IS NOT NULL`` counted rows the live pass skipped because
+    ``''`` is non-NULL in Cypher — #5126, #12489). That is a guarantee about
+    DRIFT, not about semantic equality between the Cypher construct and the
+    Python guard — see the two residuals below, (b) especially.
     Residual, recorded rather than silently over-reported, in TWO parts:
     (a) a surface with only a bare property still uses ``IS NOT NULL``, so a
     *non-empty-check* miss is limited to a whitespace-only value on those
