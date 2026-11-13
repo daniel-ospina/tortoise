@@ -384,3 +384,97 @@ class TestLiveReachability:
         assert "o-12360-abc" not in before, (
             "the OFF arm found the record — the fixture is not measuring the "
             f"defect ({before!r}); if the tokenizer changed, re-measure #12360")
+
+
+# ── the committed evidence ────────────────────────────────────────────────
+
+_EVIDENCE = (__import__("pathlib").Path(__file__).resolve().parent.parent
+             / "docs" / "research" / "2026-11-13-12360-underscore-or-terms")
+
+
+class TestTheRecordedMeasurement:
+    """The artifact is a record, so an edit to it must red.
+
+    Not a re-measurement (that needs a live lane and 300 queries —
+    ``tools/underscore_or_terms_12360.py`` does it): what this pins is that the
+    numbers the PR and the brief quote are the numbers the artifact holds, on
+    BOTH surfaces, and that the artifact still describes the population
+    committed beside it.
+    """
+
+    @staticmethod
+    def _artifact(name="artifact.json") -> dict:
+        import json
+
+        path = _EVIDENCE / name
+        assert path.exists(), f"missing evidence artifact {path}"
+        return json.loads(path.read_text())
+
+    def test_both_surfaces_clear_the_falsifier(self):
+        art = self._artifact()
+        for surface in ("mcp_search", "capture_prior"):
+            v = art["verdict"][surface]
+            assert v["delta_pts"] >= 10.0, (surface, v)
+            assert v["regressions"] == 0, (surface, v)
+            assert v["p"] < 1e-12, (surface, v)
+        assert art["verdict"]["passes"] is True
+
+    def test_the_isolation_arm_reproduces_12298(self):
+        # The port must land on the SAME numbers #12298 published (0.7133 ->
+        # 0.9633, 75 gains / 0 losses). A drift here means this is measuring
+        # something else.
+        arm = self._artifact()["arms"]["fts_leg"]
+        assert arm["off"]["recall"]["3"] == 0.7133
+        assert arm["on"]["recall"]["3"] == 0.9633
+        assert arm["paired"]["3"]["gains"] == 75
+        assert arm["paired"]["3"]["losses"] == 0
+        assert arm["off"]["rows_zero"]["15"] == 21
+        assert arm["on"]["rows_zero"]["15"] == 0
+
+    def test_the_identifier_fixture_moves(self):
+        for surface in ("mcp_search", "capture_prior"):
+            fx = self._artifact()["fixtures"][surface]
+            assert fx["reachable"]["off"] == 3, (surface, fx["reachable"])
+            assert fx["reachable"]["on"] == 5, (surface, fx["reachable"])
+
+    def test_the_population_is_the_one_the_artifact_names(self):
+        import hashlib
+
+        art = self._artifact()
+        raw = (_EVIDENCE / "population.json").read_bytes()
+        assert hashlib.sha256(raw).hexdigest() == art["population"]["sha256"]
+        assert art["population"]["n"] == 300
+
+    def test_the_repeat_run_agrees_on_the_numbers(self):
+        a = self._artifact("artifact.json")["arms"]
+        b = self._artifact("artifact-repeat.json")["arms"]
+        for surface in ("mcp_search", "capture_prior", "fts_leg"):
+            for arm in ("off", "on"):
+                assert a[surface][arm]["recall"] == b[surface][arm]["recall"], (
+                    surface, arm)
+                assert a[surface][arm]["ndcg@10"] == b[surface][arm]["ndcg@10"], (
+                    surface, arm)
+
+
+class TestHarnessStatistics:
+    """The two numbers the verdict rests on, checked against hand values."""
+
+    def test_mcnemar_unanimous_is_the_tail(self):
+        from tools.underscore_or_terms_12360 import mcnemar_exact
+
+        # 5 discordant pairs, all one direction: 2 * 0.5**5
+        assert mcnemar_exact(5, 0) == pytest.approx(2 * 0.5 ** 5)
+        assert mcnemar_exact(0, 0) == 1.0
+        # symmetric in the discordant counts
+        assert mcnemar_exact(3, 7) == mcnemar_exact(7, 3)
+
+    def test_ndcg_decays_with_rank_and_stops_at_ten(self):
+        import math
+
+        from tools.underscore_or_terms_12360 import ndcg10
+
+        assert ndcg10(1) == 1.0
+        assert ndcg10(2) == pytest.approx(1 / math.log2(3))
+        assert ndcg10(10) == pytest.approx(1 / math.log2(11))
+        assert ndcg10(11) == 0.0
+        assert ndcg10(None) == 0.0
