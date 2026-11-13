@@ -347,6 +347,7 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
         raw_tail="$(tail -c 6000 "$DRIFT_REPORT_FILE" 2>/dev/null)" || raw_tail=""
         excerpt=""
         squeeze_incomplete=0
+        squeeze_unmeasured=0
         # How big the report ACTUALLY is, measured once here for BOTH empty arms: they each
         # have to declare the 6000-byte cut the section intro promises (review rounds 5-6).
         # ⛔ NO EXTERNAL TOOL IN THE MEASUREMENT beyond `wc` itself, and no `tr`: the states
@@ -354,18 +355,49 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
         # broken, and a `| tr -d ' '` here FAILED under `pipefail` in case 17h's state (broken
         # `tr`), silently setting the size to 0 and reverting to the cut-undeclared sentence —
         # measured. Parameter expansion strips a right-padded `wc` count without a subprocess;
-        # the guard maps "cannot read it" (a directory: `wc` fails) to 0.
+        # the guard maps "no size to be had" to 0. What is MEASURED to reach that arm:
+        #   · the property check refuses (`-f` false — a directory, a device);
+        #   · the READ fails before `wc` starts (an unreadable regular file: bash's `<` fails and `wc`
+        #     is never invoked — a logging `wc` on PATH logs 0 calls for a `chmod 000` file);
+        #   · `wc` RUNS and ITS read fails (`-f` true and `<` fine, but `read(2)` errors —
+        #     `/proc/<pid>/mem` gives EIO, a healthy `wc` exits 1, and the `||` below discards the
+        #     partial count so the `case` sees '');
+        #   · a `wc` ABSENT from `PATH` (rc 127, capture empty);
+        #   · a `wc` PRESENT that yields no numeric count (a shim exiting 1 → capture empty; one
+        #     printing text → capture "not-a-number").
+        # The last two are absorbed as well: the `case` matches '' or any value containing a non-digit.
+        # ⛔ AND THE LENGTH COMPARISON FURTHER DOWN IS A SECOND MEASUREMENT SITE (review round 9,
+        # case 17p). An unguarded `[ … -lt … ]` there, fed by a `wc` that yields no number, prints
+        # `integer expression expected` into the job log AND silently clears the squeeze-loss
+        # disclosure — the excerpt really is shorter than the report and the body says nothing,
+        # which is #12200's own class at the one site the `-f` guard above does not cover. It
+        # therefore takes the same treatment: unmeasurable ⇒ DECLARED as unmeasured, never read
+        # as "no loss".
+        # ⛔ THE HISTORY IS WHY THIS ENUMERATES AND DOES NOT CLOSE THE SET. This block has said, in
+        # turn: "a directory: `wc` fails" (false — `-f` refuses a directory before `wc` exists in the
+        # pipeline); "or a `wc` that fails", as its correction (right about reachability, wrong to
+        # imply a broken BINARY was the only route — an `-f`-true path whose read errors reaches it
+        # with a healthy `wc`); then "the ONE state … a `wc` MISSING from `PATH`" (false — a present
+        # `wc` that exits non-zero reaches the same arm). Each was falsified by measuring one more
+        # state, so this lists every state measured so far and claims no more than that.
         #
-        # ⛔ `-f`, BECAUSE `wc -c` READS TO EOF AND A DEVICE NEVER REACHES ONE (#12272 review
-        # round 8). The read guard above admits anything that is `-e`-true and not a FIFO, and
-        # `tail -c 6000` is BOUNDED — it stops after 6000 bytes — but `wc -c` is not: a
-        # character device such as `/dev/zero` (which `[ -p ]` does not catch) reads forever, so
+        # ⛔ `-f`, BECAUSE A PATH THAT NEVER REACHES EOF HANGS THE ALERT (#12272 review round 8).
+        # The read guard above admits anything that is `-e`-true and not a FIFO. `tail -c 6000` is
+        # BOUNDED on a seekable path — it stops after 6000 bytes — but `wc -c` has no such bound: it
+        # either takes a size without reading, or reads until it fails or reaches EOF. So a character
+        # device such as `/dev/zero` (which `[ -p ]` does not catch) never reaches EOF, and
         # `build_body` never returns and NOTHING is filed: no ledger entry, no exit status, the
         # #2240 silence this script exists to remove, one primitive past the FIFO guard. It is
         # the same class as that guard, so it takes the same shape: name the property that makes
         # the read safe instead of trusting the caller. Measured on the unguarded form:
         # `--drift-report /dev/zero` rc=124 at 8 s (hung), where `origin/main` reaches its
         # ledger leg — i.e. this line, not the report, was the regression.
+        # ⛔ AND NO CLAIM ABOUT WHEN `wc -c` TAKES THE FAST PATH, because the rule is not one rule:
+        # a directory is read whatever `st_size` reports, and a sysfs regular file reports 4096 while
+        # `wc -c` reads 23 (`/sys/kernel/mm/transparent_hugepage/enabled`, measured) — metadata is a
+        # hint, not the criterion. This paragraph said "skips the read only for a REGULAR file whose
+        # metadata reports a non-zero size" until a reviewer falsified it with that file; it is
+        # recorded here so the rule is not helpfully reintroduced (#12272 review cycles 6-7).
         # A path that is not a regular file therefore stays unmeasured (`report_bytes` empty,
         # mapped to 0 below), which is the branch a DIRECTORY already takes (case 17d) — a size
         # nobody can measure is not asserted as a size.
@@ -375,7 +407,20 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
           report_bytes="$(wc -c 2>/dev/null < "$DRIFT_REPORT_FILE")" || report_bytes=""
         fi
         report_bytes="${report_bytes//[[:space:]]/}"
-        case "${report_bytes:-}" in '' | *[!0-9]*) report_bytes=0 ;; *) report_bytes_known=1 ;; esac
+        # ⛔ A DIGIT-ONLY COUNT PAST int64 IS NOT COMPARABLE EITHER (verification round 2): bash's
+        # `[` refuses it (`integer expression expected`, status 2), so the numeric tests below
+        # would error and the body would describe a state nobody measured. 18 digits cannot
+        # overflow a 64-bit comparison; anything longer maps to "unmeasured", exactly like a `wc`
+        # that yielded nothing. Measured: a `wc` printing 20 digits.
+        # ⛔ `[!0123456789]`, NOT `[!0-9]`: a bracket RANGE is collation-dependent, and under
+        # `en_US.UTF-8` (installed on the runner image) `[0-9]` also matches non-ASCII decimal
+        # digits — so `١٢٣` from a shim `wc` would pass as "all digits" and then fail the numeric
+        # test with the very diagnostic this guard removes (measured under `en_US.utf8`; under
+        # `C`/`C.UTF-8` both spellings agree). A literal list cannot be widened by a locale.
+        case "${report_bytes:-}" in
+          '' | *[!0123456789]*) report_bytes=0 ;;
+          *) if [ "${#report_bytes}" -le 18 ]; then report_bytes_known=1; else report_bytes=0; fi ;;
+        esac
         # `2>/dev/null`: a converter that is absent prints its own "command not found" or
         # refusal on stderr, which lands in the job log beside an alert that went out
         # perfectly well. ⛔ THE HISTORY, CHECKED RATHER THAN ASSUMED (#12200): the
@@ -497,8 +542,33 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
             echo "⚠️ **The report could not be byte-squeezed** (\`iconv\` is unavailable, refused to emit, emitted nothing it could convert, or emitted only blank lines — which a command substitution strips), and the ASCII fallback produced no excerpt either — so NOTHING is pasted below${cut_note}; the full report is at the run link above."
           fi
           echo
-        elif [ "$(printf '%s' "$excerpt" | wc -c)" -lt "$(printf '%s' "$raw_tail" | wc -c)" ]; then
-          squeeze_incomplete=1
+        elif [ -n "$raw_tail" ]; then
+          # ⛔ THIS COMPARISON IS A MEASUREMENT TOO, and `wc` is exactly the tool that can be the
+          # broken thing in these arms (case 17p). Unguarded, a `wc` printing text or exiting
+          # non-zero made `[ … -lt … ]` emit `integer expression expected` into the job log and
+          # then CLEAR the disclosure: the excerpt really is shorter than the report and the body
+          # said nothing. Non-numeric ⇒ UNMEASURED, never "no loss": the reader is told the
+          # comparison could not be made and must open the run link to check.
+          excerpt_bytes="$(printf '%s' "$excerpt" | wc -c 2>/dev/null)" || excerpt_bytes=""
+          raw_tail_bytes="$(printf '%s' "$raw_tail" | wc -c 2>/dev/null)" || raw_tail_bytes=""
+          excerpt_bytes="${excerpt_bytes//[[:space:]]/}"
+          raw_tail_bytes="${raw_tail_bytes//[[:space:]]/}"
+          # Each count is checked on its OWN: a combined "a:b" test has to tolerate the
+          # separator, and a `wc` printing `1:2` would then slip through to the numeric
+          # compare and print the very diagnostic this guard exists to remove (measured by
+          # the verification dispatch: `1:2:6000` matched no arm).
+          case "$excerpt_bytes" in '' | *[!0123456789]*) squeeze_unmeasured=1 ;; esac
+          case "$raw_tail_bytes" in '' | *[!0123456789]*) squeeze_unmeasured=1 ;; esac
+          # A digit-only count can still exceed what `[` will compare: bash's test rejects
+          # anything past int64 (`[: 9223372036854775808: integer expression expected`,
+          # status 2), which leaves BOTH flags 0 — the same cleared disclosure, one shim shape
+          # further out (measured, verification round 2). 18 digits is the bound that cannot
+          # overflow a 64-bit comparison.
+          [ "${#excerpt_bytes}" -le 18 ] || squeeze_unmeasured=1
+          [ "${#raw_tail_bytes}" -le 18 ] || squeeze_unmeasured=1
+          if [ "$squeeze_unmeasured" = "0" ] && [ "$excerpt_bytes" -lt "$raw_tail_bytes" ]; then
+            squeeze_incomplete=1
+          fi
         fi
         if [ -n "$excerpt" ]; then
           fence='```'
@@ -528,11 +598,17 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
             # full (`tail -c` output also has NULs stripped by the substitution above, so a
             # length check here would under-report the bytes actually read).
             echo
-            echo "_(only the report's LAST 6000 bytes are shown — its own size could not be measured, and the gate prints the actionable block last; the full text is in the run link above)_"
+            echo "_(only the report's LAST 6000 bytes are shown — its own size was not used (it could not be measured, or it was longer than the 18 digits this guard will compare), and the gate prints the actionable block last; the full text is in the run link above)_"
           fi
           if [ "$squeeze_incomplete" = "1" ]; then
             echo
             echo "_(the excerpt is NOT byte-identical to the report: characters that are not valid UTF-8 were dropped — the 6000-byte cut can split one, and the report itself may hold others — so it can be shorter than the report)_"
+          elif [ "$squeeze_unmeasured" = "1" ]; then
+            # ⛔ TWO STATES, ONE PER WHAT WAS MEASURED (#12200, review round 9). The comparison
+            # failing is NOT the comparison saying "no loss": a report whose cut split a
+            # character is exactly the input this arm sees, and `wc` may be the broken tool.
+            echo
+            echo "_(whether the excerpt is byte-identical to the report could NOT be measured — the length comparison was not made, because the count was not one this guard will compare (no count, or longer than 18 digits), so a dropped character cannot be ruled out and the excerpt may be shorter than the report; the full text is in the run link above)_"
           fi
         fi
       else
