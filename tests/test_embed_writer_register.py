@@ -4013,7 +4013,7 @@ def test_a_no_live_vector_declaration_executes_no_store_clause() -> None:
 #: store it feeds exists in the writer it names"*. The first half is re-derived by
 #: `test_a_no_live_vector_declaration_executes_no_store_clause` (absence in its own body). The second
 #: half had NO pin at all, and it is the half that can go quiet — measured **at `ca74f2375e`, before
-#: this pin existed**: delete `"embedding"` from `Projection._SOURCE_EXTRA_PROPS` and the caller's
+#: this pin existed**: delete `"embedding"` from `_EntityHandlers._SOURCE_EXTRA_PROPS` and the caller's
 #: vector is **denied on the node** (`#3998` deny-and-log: measured node value `None` while the
 #: `SourceCreated` record still carries the 4-float vector), so a vector is journalled and unreadable,
 #: the declaration above still says the store is delegated to that passthrough, whose closed surface
@@ -4047,7 +4047,9 @@ def _constant_strings(tree: ast.Module, name: str) -> set[str] | None:
     """Every string literal a binding of `name` carries, or None when the name is not bound.
 
     ⛔ Not `tree.body` only: the allowlist this pin reads is a CLASS attribute
-    (`_SOURCE_EXTRA_PROPS` sits in the `Projection` body), so a module-level-only walk would report
+    (`_SOURCE_EXTRA_PROPS` sits in `_EntityHandlers`' body, inherited by `FalkorProjection` — NOT in
+    `Projection`, which is a `Protocol` and carries no such attribute; measured, `hasattr(Projection,
+    "_SOURCE_EXTRA_PROPS")` is False), so a module-level-only walk would report
     the constant as gone and red the control arm — a false hold naming the wrong cause.
 
     ⚠️ STATED RESIDUAL — what this walk does NOT see, measured on this head rather than assumed:

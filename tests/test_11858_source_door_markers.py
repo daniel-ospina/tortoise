@@ -243,7 +243,7 @@ def test_a_caller_vector_still_gets_a_truthfully_minted_marker(tmp_path):
     for the vector retrieval leg to read" phrasing is the probe's census row
     (`tools/dod_5090_probe.py`, the `#5004` disposition), not the register's. Measured **at
     `ca74f2375e`, before the node assertion below existed**: dropping `embedding` from
-    `Projection._SOURCE_EXTRA_PROPS` denies it on the node (`#3998` deny-and-log, node
+    `_EntityHandlers._SOURCE_EXTRA_PROPS` denies it on the node (`#3998` deny-and-log, node
     value `None`) while this test, the register suite, the probe suite and `#11641`'s
     all stayed green (390 passed) — a journalled vector nothing can read. The node
     assertion below is what makes that mutation red.
