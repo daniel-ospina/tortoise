@@ -14,20 +14,24 @@ the shipped code**. Both rot the same two ways this repo already knows:
 2. **The tables drift away from the artifact.** The brief's published tables are
    recomputed from the committed `artifact.json` and compared CELL BY CELL —
    §0, §3.1, §3.2, §3.3 and §3.5 below, plus §2's census and §3.4's identifier
-   decomposition — and the same numbers repeated in
-   `docs/architecture/SEARCH-ARCHITECTURE-CHANGELOG.md` are compared too. A
+   decomposition — and the changelog's recall@3 table and fixture-count sentence
+   are compared too (⛔ NOT the whole changelog: its paired-p and Δ columns are
+   not pinned — saying "the changelog is compared" was wider than the tests, so
+   the claim is the narrow true one, #12349 review cycle 3). A
    re-run that moves a number therefore reds here instead of leaving prose that
    the committed artifact contradicts (#12298 review cycle 2, findings 1–3: an
    earlier revision compared FOUR values by whole-document substring and claimed
    in three places that every headline number was covered — a coverage claim the
    pin did not enforce is the silent-rot class this file exists to close).
    ⛔ The cell comparisons are backed by a recomputation from the arms' per-query
-   `ranks`: `recall_by_k` and every paired statistic are re-derived from the
+   `ranks`: `recall_by_k`, every paired `both`/`only_a`/`only_b`/`discordant` AND
+   the McNemar p (a pure function of the discordant split) are re-derived from the
    ranks that produced them, so the summary cells and the prose cannot agree with
    each other while disagreeing with the run (#12349 review, P2). `ranks` is the
    only per-query record the artifacts carry, and two populations live in them —
-   `tokens_controlled_subset` is computed over 174 rows, not 300 — so that
-   comparison is made against each comparison's OWN `n`.
+   `tokens_controlled_subset` is computed over 174 rows, not 300 — so the subset's
+   cells are recomputed from the ranks restricted to the NON-degenerate ids, which
+   the artifact records (`arms["<b>"]["degenerate_ids"]`).
 
 The recovery arm's own terms are pinned as a CLASS, not as strings: an additive
 arm that could ever *remove* a term would not be the #8933 pattern the brief
@@ -280,7 +284,8 @@ def test_the_artifact_ranks_reproduce_the_recall_table(artifact) -> None:
             assert cell["rows_zero"] <= n, (arm_name, k)
 
 
-def test_the_paired_comparison_recomputes_from_both_arms_ranks(artifact) -> None:
+def test_the_paired_comparison_recomputes_from_both_arms_ranks(
+        artifact, tool_mod) -> None:
     """Every paired statistic must fall out of the two arms' ranks.
 
     Same reasoning as the test above: ``delta_pts``/``only_a``/``only_b`` are one
@@ -319,11 +324,26 @@ def test_the_paired_comparison_recomputes_from_both_arms_ranks(artifact) -> None
                 round(100.0 * (b_found - a_found) / n, 2)), (key, k)
             assert cell["a_recall"] == pytest.approx(round(a_found / n, 4)), (key, k)
             assert cell["b_recall"] == pytest.approx(round(b_found / n, 4)), (key, k)
-            if subset:
-                continue
-            # The discriminating half: recomputed straight from the ranks.
+            # ⛔ The p value is a pure function of the discordant split, so it is
+            # recomputed here rather than trusted: a hand-edited significance is
+            # the single cell a reader will quote to settle an argument.
+            assert cell["mcnemar_p_two_sided"] == pytest.approx(
+                round(tool_mod._binom_two_sided(
+                    cell["only_b"], cell["discordant"]), 5)), (key, k)
+            # The discriminating half: the cells recomputed straight from the
+            # ranks. For the SUBSET comparison the population is the non-degenerate
+            # one, and the artifact records WHICH ids are degenerate
+            # (`arms["<b>"]["degenerate_ids"]`), so this is done from the ranks
+            # there too instead of being skipped (#12349 review cycle 2,
+            # finding 4: a self-consistent rewrite of the subset's cells passed).
             a_ids = {i for i, r in ra.items() if r is not None and r <= k}
             b_ids = {i for i, r in rb.items() if r is not None and r <= k}
+            if subset:
+                deg = set(artifact["arms"][cmp["b"]]["degenerate_ids"])
+                a_ids -= deg
+                b_ids -= deg
+                assert deg <= set(ra), (key, len(deg - set(ra)))
+                assert len(ra) - len(deg) == cmp["n"], (key, cmp["n"])
             assert cell["only_a"] == len(a_ids - b_ids), (key, k)
             assert cell["only_b"] == len(b_ids - a_ids), (key, k)
             assert cell["both"] == len(a_ids & b_ids), (key, k)
@@ -644,6 +664,51 @@ def test_a_second_independent_run_reproduced_every_table() -> None:
         "live index")
 
 
+def test_the_fixture_ordering_defect_is_recorded_in_both_artifacts() -> None:
+    """The 305-vs-300 disclosure must exist, and be true of what the artifacts hold.
+
+    ⛔ This pins a DISCLOSURE, which is the one thing the rest of this file does
+    not do for the harness's own defect (#12349 review cycle 2, finding 8). The
+    brief states the caveat and points a reader at `measurement_notes`; with no
+    assertion behind it, an artifact edit — or a re-run — leaves the prose
+    claiming a defect the record no longer shows, which is the same rot this file
+    exists to stop for every published NUMBER.
+
+    The relationship, not the literal: both FalkorDB arms share one population, so
+    the recovery arm's index must carry exactly the five `#8933` fixture rows the
+    shipped arm inserted before it. ⛔ If the re-run that the harness fix makes
+    possible lands, BOTH counts become the population size and this reds — that is
+    intended: whoever re-runs must replace the caveat in the brief and this pin in
+    the same change, rather than leaving a disclosure that describes a run nobody
+    can reproduce.
+    """
+    fixture_rows = 5
+    for name in ("artifact.json", "artifact-repeat.json"):
+        path = DOC_DIR / name
+        assert path.exists(), f"missing committed artifact {path}"
+        doc = json.loads(path.read_text())
+        notes = doc.get("measurement_notes")
+        assert notes, f"{name} must carry `measurement_notes` — the brief cites it"
+        assert "FIXTURE ORDERING" in notes, (name, "the note must name the defect")
+        shipped = doc["arms"]["falkordb_tfidf"]["index_numDocuments"]
+        recovery = doc["arms"]["falkordb_tfidf__tokens_fixed"]["index_numDocuments"]
+        assert shipped == doc["sample"], (name, shipped, doc["sample"])
+        assert recovery == shipped + fixture_rows, (
+            f"{name}: the recovery arm's index is {recovery} against the shipped "
+            f"arm's {shipped} — the fixture-ordering defect has changed shape, so "
+            "the brief's caveat and this pin must be re-derived together")
+
+
+def test_an_authoring_path_did_not_leak_into_the_artifacts() -> None:
+    """`population_file` must be repo-relative — an absolute path is one box's fact."""
+    for name in ("artifact.json", "artifact-repeat.json"):
+        doc = json.loads((DOC_DIR / name).read_text())
+        rel = doc["population_file"]
+        assert not rel.startswith("/"), (
+            f"{name}: `population_file` is an absolute authoring path ({rel})")
+        assert (REPO_ROOT / rel).exists(), (name, rel)
+
+
 # ── 5. every published table is the artifact's, CELL BY CELL ────────────────
 # Review cycle 2, finding 1: the pins above compare the ARTIFACT to itself. The
 # brief's published tables — the per-class decomposition §4.3's argument rests
@@ -836,6 +901,9 @@ def test_brief_census_and_identifier_decomposition_are_the_artifact(
         # recomputes recall@2 while the brief publishes the result as recall@3
         # (review r3: inert in the committed artifact only because no `ident`
         # name sits at exactly rank 3, which is a property of a FROZEN file).
+        # `ranks` is 1-BASED — `ids.index(row["id"]) + 1` in the harness — which
+        # is what makes the off-by-one invisible to a reader comparing it against
+        # a 0-based mental model of `index()`.
         return sum(1 for i in ids if ranks.get(i) is not None and ranks[i] <= 3)
 
     sh = found("falkordb_tfidf", hashed)
