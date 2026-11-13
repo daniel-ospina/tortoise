@@ -850,9 +850,9 @@ def invalidate(
         # so an absent `cache` key can never be read as "clean".
         #
         # ⛔ THIS ARM IS THE ONE WITH NO CLAIM, SO IT HAS ONLY THE CALLER'S ID.
-        # Every other arm sources the goal from the claim it read — claim-first,
-        # stated once in `_reconcile_or_report`'s docstring. A claim-sourced id is
-        # UNREACHABLE here BY CONSTRUCTION, because `_read_claim` folded to
+        # Every other arm sources the goal from the claim — `_reconcile_or_report`'s
+        # docstring states that rule and the arm list it applies to. A claim-sourced
+        # id is UNREACHABLE here BY CONSTRUCTION, because `_read_claim` folded to
         # `MISSING`. So `invalidation.goal_id` is all there is, and a caller that
         # omits it (a supported shape —
         # `tests/test_11926_derived_invalidation.py:489`) reconciles nothing.
@@ -1018,11 +1018,11 @@ def reconcile_goal_state_cache(sdk: Any, goal_id: str | None) -> dict:
     """
     if not goal_id:
         # ⛔ NOT "the claim names no goal" — this function cannot know that: it
-        # was handed nothing. Every arm that reads a claim sources the id from it,
-        # CLAIM FIRST (the already-terminal, vanish-before-retirement and success
-        # arms from `claim`; the post-exception arm from its re-read `after` when
-        # that re-read is a dict, and from `claim` again when it is `MISSING`), so
-        # a call that lands here means no caller supplied one — and the message
+        # was handed nothing. Every arm that reads a claim sources the id from it
+        # (the claim-first rule AND its arm list are stated in
+        # `_reconcile_or_report`'s docstring, which is the single place to keep
+        # them true — a fifth arm must update that docstring, not this comment),
+        # so a call that lands here means no caller supplied one — and the message
         # says exactly that rather than asserting a fact about a claim it never
         # read.
         return {"checked": False,
