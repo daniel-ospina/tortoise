@@ -135,12 +135,12 @@ cut**.
 > **The bound is width-dependent, and an earlier version of this paragraph said
 > otherwise.** It cited `miss_past_k = 0` as the ceiling proof and called the
 > `miss_absent_at_max_k` rows unreachable "at every pool width". Both are wrong, and
-> in the same direction: `miss_past_k` at k=P is **0 by construction** (a response
-> has at most P rows, so "its rank is past P" cannot occur) — a property of the
-> counter, not a measurement of the legs — and ⛔ only at arm 1's **widest** measured
-> window: at a narrower k it **can** be non-zero (a gold the legs returned further down is
-> then genuinely past the cut) and it is forced to 0 only at the widest one — this run reads
-> 33 / 27 / 13 at k = 3 / 5 / 10 and 0 at 15 — so it is never a width-independent bound; and
+> in the same direction: `miss_past_k` is **0 by construction only at arm 1's widest
+> measured window** (the reference window IS that window, so "in the wider window but not
+> in this k" is empty there) — a property of the counter, not a measurement of the legs —
+> and at a narrower k it **can** be non-zero, where a gold the legs returned further down is
+> then genuinely past the cut; this run reads 33 / 27 / 13 at k = 3 / 5 / 10 and 0 at 15,
+> so it is never a width-independent bound; and
 > the pool-40 arm of **this same run**
 > reaches **300/300**, so those 23 rows are reachable at a modestly wider pool.
 > `miss_absent_at_max_k` therefore means "absent within arm 1's **maximum** window
