@@ -3429,14 +3429,13 @@ def search_graph(sdk, embed_list: dict, story: str, *,
         entities = list(getattr(e, "folded", None) or [])
         entities_unresolved = list(getattr(e, "unresolved_names", None) or [])
         if not isinstance(e, _PriorFoldUnresolvable):
-            # ⛔ A read that failed BEFORE any hop resolved (`_entity_facts` raised
-            # — a driver error, a timeout, or the pre-sweep unindexed dependents
-            # scan) carries no per-row payload, so the arm above would withhold
-            # every prior row and NAME NONE of them: the candidate set empties, D3
-            # is skipped outright, `resolution_held` stays `[]` and the run CREATES
-            # the mention the FTS read had just found. Every prior row is
-            # unreadable, so every one is WITHHELD (never absent) — the per-row
-            # arm's disposition, applied whole-arm.
+            # ⛔ A read that failed BEFORE any hop resolved (`_entity_facts`
+            # raised — a driver error, a timeout) carries no per-row payload, so
+            # the arm above would withhold every prior row and NAME NONE of them:
+            # the candidate set empties, D3 is skipped outright, `resolution_held`
+            # stays `[]` and the run CREATES the mention the FTS read had just
+            # found. Every prior row is unreadable, so every one is WITHHELD
+            # (never absent) — the per-row arm's disposition, applied whole-arm.
             entities_unresolved = [str(r.get("name") or "").strip()
                                    for r in results["entities"].values()]
             entities_unresolved = [n for n in entities_unresolved if n]
@@ -15294,13 +15293,18 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     #: rather than left to read as measured absence, and the pass still runs even
     #: when the fold withheld every row: an empty candidate set from THIS cause
     #: must not turn a partial lookup into a create window — for the spellings it
-    #: names. BOTH fold arms name their withheld rows: the per-row one carries the
-    #: spellings it refused, and a PLAIN pre-hop read failure (no `folded` payload
-    #: to carry) names EVERY prior row on `entities_unresolved`, so this gate still
-    #: fires and the run HOLDS them. What #10998 still owns is narrower: a lookup
-    #: that produced no rows at all, or a client with no projection. ⚠️ The hold key
-    #: is `_norm` (F3), so an ARTICLE variant of a withheld spelling is a different
-    #: key and is not caught (#12424, residual).
+    #: names. TWO producers fill this list, and both are stated because they
+    #: reached it in different rounds: (1) the fold's PER-ROW withholding, which
+    #: carries the names it refused (`_PriorFoldUnresolvable.unresolved_names`);
+    #: and (2) a read that failed BEFORE any hop resolved (`_entity_facts`
+    #: raising — a driver error, a timeout), which carries no per-row payload at
+    #: all, so `search_graph` names EVERY prior row (round-27); this gate still
+    #: fires on that key, and the run HOLDS them.
+    #: Neither arm may be reverted to "empty set, no names": that is the create
+    #: window this key exists to close. What #10998 still owns is narrower — a
+    #: lookup that produced no rows at all, or a client with no projection.
+    #: ⚠️ The hold key is `_norm` (F3), so an ARTICLE variant of a withheld
+    #: spelling is a different key and is not caught (#12424, residual).
     _unresolved_names = [str(n).strip()
                          for n in (search or {}).get("entities_unresolved") or []
                          if str(n or "").strip()]

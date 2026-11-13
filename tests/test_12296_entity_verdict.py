@@ -300,10 +300,17 @@ class TestThePriorSetNeverCarriesARetiredNode:
         assert search["degraded"] is False, search
         assert search["entities"] == [], search
         assert search.get("entities_unresolved") == ["Acme"], search
-        # …and a healthy lookup never takes this arm.
-        monkeypatch.undo()
+        # …and a healthy lookup never takes this arm. The stubs stay in place:
+        # `undo()` would also drop `_fts_rows`, so the second call would query the
+        # real graph (empty prior set on the docker lane) and the assertion would
+        # prove nothing about the naming arm — and on the embedded carve-out lane
+        # it would also drop `_is_searchable_backend`, where `search_graph`
+        # early-returns `degraded: True` before the fold is reached at all. Either
+        # way the control must keep its own fixtures.
+        monkeypatch.setattr(v2, "_entity_facts", lambda *a, **kw: {})
         ok = v2.search_graph(sdk, {"entities": [{"name": "Acme"}]},
                              "the story", max_queries=1, limit=3)
+        assert ok["degraded"] is False, ok
         assert "entities_unresolved" not in ok, ok
 
     def test_a_dangling_resolved_from_is_cannot_answer_not_a_pre_hop_row(

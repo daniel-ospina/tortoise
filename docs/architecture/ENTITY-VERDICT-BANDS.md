@@ -95,12 +95,31 @@ Four properties are load-bearing and each is pinned by a test:
   an entity candidate whose fixpoint was not established is recorded
   `found: None`, never `found: false`. Pinned by
   `test_a_fold_failure_is_PARTIAL_and_keeps_the_rows_it_did_resolve`. ⚠️ **The
+  other arm of the same `except` withholds EVERYTHING, by name.** A read that fails
+  BEFORE any hop resolves (a query error, not a per-row unresolvable) has no
+  `folded` rows to carry — so `entities` comes back EMPTY and every prior row's
+  spelling is named on `entities_unresolved`. The pass therefore still runs (the
+  gate accepts the named set), the resolver declares those spellings unmatched,
+  and the run appends one HOLD per fold — and every spelling it holds is withheld
+  from the commit's create list (`payload["entities"]`), so none of THEM is created.
+  ⚠️ Scope is per held key: a mention with no prior row, or one `_norm`-distinct
+  from the withheld spelling (the #12424 residual below), is still created — the
+  create window is closed per withheld spelling, not for the whole arm. No pre-hop
+  row is emitted by either arm. Pinned by
+  `test_a_prior_set_read_failure_withholds_every_row_by_name` (producer) and by
+  the withheld-hold tests (consumer: `…is_held_rather_than_read_as_absent`,
+  `…is_held_even_when_the_resolver_raises`). The only client skipped is one with
+  no projection at all (a test double: no `resolved_from` state to withhold).
+
 * **A withheld spelling is HELD, never absent — on both arms.** The fold's
   refusal is per-ROW, and a row it withheld is unreadable, not missing: reading it
   as measured absence is the one state §4.4 I1 makes license a CREATE, so the
-  machinery names it end to end. `_PriorFoldUnresolvable` carries
-  `unresolved_names`; `search_graph` publishes them as **`entities_unresolved`** on
-  its PARTIAL exit (the key is absent when nothing was withheld); the orchestrator
+  machinery names it end to end. TWO producers publish **`entities_unresolved`**
+  on `search_graph`'s PARTIAL exit (the key is absent when nothing was withheld):
+  the fold's PER-ROW refusal, where `_PriorFoldUnresolvable` carries
+  `unresolved_names`; and a read that failed BEFORE any hop resolved
+  (`_entity_facts` raising), which carries no per-row payload and therefore names
+  **every** prior row — the same disposition applied whole-arm. The orchestrator
   keeps the D3 pass alive when the fold withheld EVERY row and appends each named
   spelling to `resolution_held`. It does so on the resolver's FAILURE arm as well
   as its success arm — a raising `resolve_entities` is exactly when the create
