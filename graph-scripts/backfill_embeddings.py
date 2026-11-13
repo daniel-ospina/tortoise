@@ -105,9 +105,11 @@ DEFAULT_BATCH = 500
 #: The Point surface's embedding text — the text the vector DESCRIBES (#4194).
 #:
 #: ``embeddingText`` is a STORED Point property (``tortoise/embed_compose.py``:
-#: "What this text is served as"), written when the composed-text seam composes
-#: a text different from ``content``. The rule is the read/replay side's,
-#: verbatim: ``projection/entities.py`` does
+#: "What this text is served as"). It is written by the create door only under
+#: three conditions (``sdk.py``: the composed text DIFFERS from ``content``, a
+#: derived vector exists, and the caller supplied none), so on a graph where
+#: composition never ran the property is absent. The rule is the read/replay
+#: side's, verbatim: ``projection/entities.py`` does
 #: ``p.get("embeddingText") or p.get("content")`` (#8488), so an ABSENT **or
 #: EMPTY** ``embeddingText`` falls back to ``content``.
 #:
@@ -529,11 +531,14 @@ def _dry_run(db, graph_name: str, labels: list[str], *,
 
     "Text-less" is taken from ``_label_branches``' predicate, so wherever a
     surface declares a ``text_pred`` the count and the live pass cannot DRIFT
-    apart: they read ONE spelling, and an edit to it moves both (Document and
-    Point do; a bare ``IS NOT NULL`` counted rows the live pass skipped because
-    ``''`` is non-NULL in Cypher — #5126, #12489). That is a guarantee about
-    DRIFT, not about semantic equality between the Cypher construct and the
-    Python guard — see the two residuals below, (b) especially.
+    apart WITHIN that surface: they read the surface's ONE predicate (a bare
+    ``IS NOT NULL`` counted rows the live pass skipped because ``''`` is
+    non-NULL in Cypher — #5126, #12489). ⚠️ Only the Point surface additionally
+    derives ``text_expr`` AND ``text_pred`` from ONE constant
+    (``_POINT_EMBEDDING_TEXT_EXPR``), so only there does an edit to the
+    expression move both keys; Document's two keys are separate literals and
+    can still be edited apart. And no ``text_pred`` makes the Cypher construct
+    semantically EQUAL to the Python guard — see residual (b).
     Residual, recorded rather than silently over-reported, in TWO parts:
     (a) a surface with only a bare property still uses ``IS NOT NULL``, so a
     *non-empty-check* miss is limited to a whitespace-only value on those
@@ -542,9 +547,11 @@ def _dry_run(db, graph_name: str, labels: list[str], *,
     pass's Python ``str.strip()`` also strips tab, NBSP and em-space — measured
     on this surface: four Points whose ``content`` was ``"\\t"``, ``"\\u00a0"``,
     ``"\\u2003"``, ``"\\t \\t"`` gave ``dry_total=4`` against ``updated=0,
-    skipped=4``. Pre-existing and unchanged by #12489 (the pre-fix bare
-    ``IS NOT NULL`` counted the same four); the claim of exactness is corrected
-    here rather than left to be discovered.
+    skipped=4``. Pre-existing as a CLASS (the pre-fix bare ``IS NOT NULL``
+    counted the same four), but #12489 WIDENS the population: a whitespace-only
+    ``embeddingText`` over a non-empty ``content`` now takes this skip path,
+    where the pre-fix expression embedded ``content`` (measured: dry 1 /
+    updated 0 with the fix, dry 1 / updated 1 without it).
     """
     g = db.select_graph(graph_name)
     total = 0
