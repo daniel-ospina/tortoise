@@ -487,11 +487,8 @@ def test_the_brief_scopes_the_lexical_identical_to_the_EXACT_arm(lexical):
         "§7 generalises the lexical match past the exact arm — §8 and the "
         "artifact both contradict it")
     def _variant(arm: dict, pool: str) -> int:
-        """⛔ The two arms nest the SAME figure differently — the rerank arm is
-        ``arm[pool][mode]`` and the lexical arms are ``arm[mode][pool]`` — so a
-        single accessor path reads one of them as a KeyError, not a number."""
-        node = arm[pool]["variant"] if pool in arm else arm["variant"][pool]
-        return node["in_window_3_after"]
+        """Both arms nest it the same way: ``arm[str(pool)]["variant"]``."""
+        return arm[str(pool)]["variant"]["in_window_3_after"]
 
     before = lexical["arms"]["rerank"]
     lex_arm = lexical["arms"]["lexical_overlap"]
@@ -1568,23 +1565,34 @@ def test_the_artifacts_ceiling_note_is_the_one_the_tool_emits(lexical, tool_mod)
             f"{arm}: the retracted 'arm 1's miss_past_k' reading is back")
 
 
-def test_the_rerank_arm_measures_the_model_the_PRODUCT_would_load(tool_mod):
-    """The arm's default must come from the resolver the shipped read uses.
+def test_the_rerank_arm_measures_the_model_the_PRODUCT_would_load(
+        tool_mod, monkeypatch):
+    """The arm's model must come from the resolver the shipped read uses.
+
+    ⛔ BEHAVIOURAL, not a source grep: ``inspect.getsource`` returns comments
+    too, so the first version of this test was satisfied by its own docstring —
+    measured, swapping the code for a hard-coded model id left it green. This
+    drives the resolver the arm actually calls.
 
     The read passes no model to ``rerank_pool``, which resolves through
-    ``load_scorer(model or fused_rerank_model())`` — so
+    ``load_scorer(model or fused_rerank_model())``, so
     ``TORTOISE_FUSED_RERANK_MODEL`` decides which cross-encoder the product
     loads. A hard-coded ``RERANK_MODEL_DEFAULT`` measured (and recorded, in the
     arm's own ``model`` field) a model the product would not load whenever that
     knob was set: an artifact misnaming its model is worse than one that says
     nothing.
     """
-    import inspect
-    src = inspect.getsource(tool_mod.run)
-    assert "fused_rerank_model()" in src, (
-        "the rerank arm must default to the resolver the shipped read uses")
-    assert "args.rerank_model or RERANK_MODEL_DEFAULT" not in src, (
-        "the constant is not the product's model — the resolver is")
+    from tortoise import rerank
+
+    monkeypatch.setattr(rerank, "fused_rerank_model",
+                        lambda: "cross-encoder/from-the-knob")
+    bare = type("NS", (), {"rerank_model": None})()
+    assert tool_mod.resolve_rerank_model(bare) == "cross-encoder/from-the-knob", (
+        "the arm must measure the model the product's own resolver returns")
+
+    pinned = type("NS", (), {"rerank_model": "cross-encoder/pinned-by-flag"})()
+    assert tool_mod.resolve_rerank_model(pinned) == "cross-encoder/pinned-by-flag", (
+        "--rerank-model must still override the resolver")
 
 
 def test_the_control_arms_are_not_labelled_with_the_models_cost_story(lexical):

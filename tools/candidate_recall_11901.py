@@ -407,6 +407,27 @@ NDCG_K = 10
 #: `max_queries=15` budget (research-brief §1, consequence 1). Both are
 #: MEASURED; neither is adopted.
 RERANK_POOLS: tuple[int, ...] = (15, 40)
+
+
+def resolve_rerank_model(args) -> str:
+    """The cross-encoder this arm measures — resolved the way the PRODUCT does.
+
+    ⛔ ``fused_rerank_model()``, not the constant: the shipped read passes no
+    model to ``rerank_pool``, which resolves through ``load_scorer(model or
+    fused_rerank_model())``, so ``TORTOISE_FUSED_RERANK_MODEL`` decides which
+    cross-encoder the product actually loads. Hard-coding
+    ``RERANK_MODEL_DEFAULT`` measured — and RECORDED, in the arm's own ``model``
+    field — a model the product would not load whenever that knob was set; the
+    sibling ``tools/rerank_calibration_12297.py`` resolved the same defect.
+
+    A function rather than an inline expression so the pin on it is BEHAVIOURAL:
+    a source-text check is satisfied by this docstring's own prose (measured —
+    the first version of that test stayed green over a hard-coded model id).
+    """
+    if args.rerank_model:
+        return args.rerank_model
+    from tortoise.rerank import fused_rerank_model
+    return fused_rerank_model()
 #: #12297: torch threads for the rerank arm. PINNED to 1 and recorded in the
 #: artifact: the unpinned default (one thread per core, 16 here) thrashes under
 #: fleet load and measured ~20x slower per pair on identical input, so an
@@ -1511,19 +1532,9 @@ def run(args: argparse.Namespace) -> int:
         #           the failure a rerank-only story hides, and the reason the
         #           net is reported beside both components.
         if args.rerank:
-            # ⛔ ``fused_rerank_model()``, NOT the constant: the shipped read
-            # passes no model to ``rerank_pool``, which resolves through
-            # ``load_scorer(model or fused_rerank_model())`` — so
-            # ``TORTOISE_FUSED_RERANK_MODEL`` decides which cross-encoder the
-            # product actually loads. Hard-coding the default measured (and
-            # recorded) a model the product would not load whenever that knob
-            # was set, which is the same defect the sibling
-            # ``tools/rerank_calibration_12297.py`` was fixed for.
-            from tortoise.rerank import fused_rerank_model
-            _rerank_model = args.rerank_model or fused_rerank_model()
             arms["rerank"] = _rerank_arm(
                 sample, window, variants,
-                model=_rerank_model,
+                model=resolve_rerank_model(args),
                 pools=tuple(args.rerank_pool or RERANK_POOLS),
                 top_k=TOP_K_RERANK_CUT, ndcg_k=NDCG_K,
                 threads=args.rerank_threads)

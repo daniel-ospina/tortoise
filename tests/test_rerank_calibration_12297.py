@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -139,6 +140,42 @@ def test_the_default_pool_is_the_wired_default():
     assert cal.POOL == rerank.DEFAULT_FUSED_RERANK_POOL
 
 
+def test_the_briefs_cost_table_is_the_artifacts_and_names_the_admitted_range():
+    """§5's two cells are the artifacts' figures, and its range is the harness's.
+
+    ⛔ The first version of this cell said "~150 words", which is the corpus CAP
+    (MAX_CHARS) presented as the typical — and "~20 words", which the harvest's
+    own ``len(words) < 40`` floor excludes. Both were the class of claim a reader
+    would size a decision on, so the range is recomputed from the tool's own
+    constants here rather than restated as prose.
+    """
+    doc = ROOT / "docs" / "research" / "2026-11-12-12297-rerank-calibration"
+    text = (doc / "research-brief.md").read_text()
+    noun = json.loads((doc / "measurement-noun-path.json").read_text())
+    user = json.loads((doc / "measurement-user-search.json").read_text())
+
+    for art, label in ((noun, "noun-path"), (user, "user-search")):
+        ms = art["latency"]["ms_per_pair"] if "latency" in art else (
+            art["arms"]["rerank"]["latency"]["ms_per_pair"])
+        assert f"{ms:.3f}" in text, (
+            f"§5 does not carry the {label} artifact's ms/pair ({ms})")
+
+    assert f"{cal.MIN_CHARS}–{cal.MAX_CHARS} chars" in text, (
+        "§5 must name the harness's own char admission range")
+    # …and the STATED word floor must be the harvest's (a passage under 40 words
+    # never enters the corpus, so it cannot be in the population a cost figure
+    # describes).
+    # …scoped to the §5 cell itself: the brief legitimately discusses 2/4/8-word
+    # spans elsewhere, so a document-wide sweep would read those as cost cells.
+    cell = next((ln for ln in text.splitlines()
+                 if ln.startswith("|") and "passage-length" in ln), "")
+    assert cell, "§5's passage-length cost cell is gone"
+    floor = min(int(w) for w in re.findall(r"(\d+)\s*words", cell))
+    assert floor >= 40, (
+        f"§5's passage-length cell states {floor} words, below the harvest's "
+        f"40-word floor: {cell}")
+
+
 # ── 6. the run refuses a baseline that is not the fused order ──────────────
 
 def _run_ns(**over):
@@ -150,6 +187,44 @@ def _run_ns(**over):
               out=None)
     ns.update(over)
     return type("NS", (), ns)()
+
+
+def test_a_degraded_arm_is_refused_and_says_so():
+    """A degrade is a PERMUTATION, so every other check in the loop passes it.
+
+    `rerank_pool` returns `applied: False` (the order untouched) on a score
+    exception, a length-mismatched score vector, a non-numeric or non-finite
+    score. The arm would then report gained 0 / lost 0 with identical nDCG —
+    indistinguishable in the artifact from a real zero — while the permutation
+    asserts stay green, because a degraded rerank IS a permutation. The scorer
+    LOADING successfully proves nothing about whether it scored.
+
+    ⛔ The pure function is pinned here because the run path needs a store before
+    it can reach a real degrade; the run's own call is pinned in the test below.
+    """
+    assert cal.rerank_degrade_refusal({"applied": True, "scored": 40}) is None
+
+    msg = cal.rerank_degrade_refusal(
+        {"applied": False, "degrade_reason": "score_exception", "scored": 0})
+    assert msg is not None
+    assert msg.startswith("REFUSED:"), msg
+    assert "score_exception" in msg, msg
+    # …and a degrade with no reason at all is still refused, naming that.
+    bare = cal.rerank_degrade_refusal({"applied": False})
+    assert bare is not None and "no reason given" in bare, bare
+
+
+def test_the_run_refuses_on_the_degrade_it_detects():
+    """The loop must actually CALL the refusal — the helper returning a string
+    is worth nothing if `run` prints it and keeps measuring."""
+    import inspect
+    src = inspect.getsource(cal.run)
+    assert "_refusal = rerank_degrade_refusal(stats)" in src, (
+        "the arm no longer consults the degrade refusal")
+    assert "return 3" in src[src.index("_refusal = rerank_degrade_refusal"):], (
+        "the degrade refusal must END the run, not warn")
+    assert '"degraded_queries": 0' in src, (
+        "the artifact must state the invariant the refusal establishes")
 
 
 def test_an_armed_read_gate_refuses_the_run(monkeypatch, capsys):

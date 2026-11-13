@@ -205,6 +205,31 @@ def _arm_block() -> dict:
             "_found_before": 0, "_found_after": 0}
 
 
+def rerank_degrade_refusal(stats: dict) -> str | None:
+    """The stderr line when the arm DEGRADED, else ``None``.
+
+    ⛔ ``rerank_pool`` returns ``applied: False`` — the order untouched — on a
+    score exception, a length-mismatched score vector, a non-numeric or
+    non-finite score. A degraded pass is still a PERMUTATION, so the wiring
+    asserts below pass, and the arm then reports ``gained 0 / lost 0`` with
+    identical nDCG: indistinguishable in the artifact from a real zero, on the
+    one instrument whose job is to decide whether the lever earns its gate. The
+    ambient-gate refusal exists because of exactly this shape; a degrade needs
+    the same treatment, and the scorer LOADING successfully does not prove it
+    scored anything.
+
+    A pure function so the refusal is testable without a store — the run path
+    needs a DB before it can reach a real degrade.
+    """
+    if stats.get("applied"):
+        return None
+    return (f"REFUSED: the rerank DEGRADED on this query "
+            f"({stats.get('degrade_reason') or 'no reason given'}) — the arm did "
+            f"not measure the reranker. A degraded pass leaves the order "
+            f"untouched, so it would report a gained/lost 0 that looks exactly "
+            f"like a real one, and the permutation asserts cannot see it.")
+
+
 def run(args: argparse.Namespace) -> int:
     # ⛔ THE AMBIENT GATE WOULD SILENTLY FALSIFY THE BASELINE, and this check runs
     # FIRST because it needs no store — a mis-shaped run should fail before paying
@@ -334,6 +359,10 @@ def run(args: argparse.Namespace) -> int:
                     query, pool_rows, text_key="content",
                     pool=args.limit, enabled=True, model=model)
                 score_s += time.perf_counter() - t1
+                _refusal = rerank_degrade_refusal(stats)
+                if _refusal:
+                    print(_refusal, file=sys.stderr)
+                    return 3
                 pairs_scored += stats.get("scored") or 0
                 after_ids = [r.get("id") for r in reordered]
                 after = next((i for i, x in enumerate(after_ids)
@@ -415,6 +444,13 @@ def run(args: argparse.Namespace) -> int:
                 # ``--allow-reranked-baseline``), and recording it is what makes
                 # that decidable from the artifact instead of from memory.
                 "fused_rerank_gate_armed": _ambient_gate,
+                # ⛔ An ASSERTED INVARIANT, not a measurement: the loop refuses
+                # (exit 3) on the first degraded query, so a finished run scored
+                # every pair it counted. Recording it is what makes that
+                # decidable from the artifact instead of from trust — without
+                # it, "gained 0 / lost 0" cannot be told from a degrade.
+                "rerank_applied_on_every_query": True,
+                "degraded_queries": 0,
                 "loadavg_1m": round(os.getloadavg()[0], 2),
             },
             "arms": arms,

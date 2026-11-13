@@ -958,8 +958,17 @@ def test_an_all_tied_page_is_NOT_a_recency_order_in_force(sdk, monkeypatch):
     # spread predicate and the reverted sign test, covering nothing. The factor
     # map must be NONZERO and UNIFORM: that is what makes the multiplier the
     # identity, and it is the shape the sign test misreads as an order in force.
+    # ⛔ From what the GRAPH stores, not from a literal re-statement of the seed:
+    # feeding `[(i, "2026-01-01")]` here would keep this test green over a pool
+    # that had become genuinely UNDATED (measured — the SET reverted to a REMOVE
+    # left it passing), i.e. it would stop covering the case it exists for.
     from tortoise.search_engine import _recency_factors
-    factors = _recency_factors([(i, "2026-01-01") for i in ids])
+    stored = sdk._get_proj().g.query(
+        "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, n.createdAt",
+        params={"ids": ids}).result_set
+    assert len(stored) == len(ids) and {d for _i, d in stored} == {"2026-01-01"}, (
+        f"premise: every row must carry the ONE shared date (stored={stored})")
+    factors = _recency_factors([(i, d) for i, d in stored])
     assert set(factors.values()) == {1.0}, factors
     # …and at the ORDER too: on this page the weighting is a proven no-op — the
     # order with recency is the order without it.
@@ -1008,8 +1017,15 @@ def test_a_declared_RECENCY_order_is_never_inverted_by_the_rerank(
         pt = sdk.create_point(kind="statement",
                               content=f"{q} recency probe {i}")
         pid = pt["id"] if isinstance(pt, dict) else pt.id
-        # distinct increasing timestamps, so "newest" is unambiguous
-        sdk.update_point(pid, properties={"createdAt": f"2026-01-0{i + 1}"})
+        # distinct increasing timestamps, so "newest" is unambiguous.
+        # ⛔ `createdAt=`, not `properties={"createdAt": …}`: `update_point`'s
+        # signature is `(self, id, *, is_episodic=None, **props)` — there is no
+        # `properties` parameter, so that call wrote a property literally NAMED
+        # `properties` (which FalkorDB refuses, #7369) and never touched
+        # `createdAt`. The premise still held only because `create_point` had
+        # already stamped microsecond-increasing dates, so no update was
+        # exercised at all (measured — review round 11).
+        sdk.update_point(pid, createdAt=f"2026-01-0{i + 1}")
         ids.append(pid)
 
     off = [r["id"] for r in sdk.tortoise_fts_query(

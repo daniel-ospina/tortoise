@@ -238,7 +238,7 @@ a run behind it and they are directly comparable in provenance if not in load:
 | candidate text | ms/pair | artifact |
 |---|---|---|
 | name-length (~4 words) | **5.179** | `measurement-noun-path.json` → `arms.rerank.latency` |
-| passage-length (~20–150 words; the harness admits 120–900 chars) | **85.227** | `measurement-user-search.json` → `latency` |
+| passage-length (~40–150 words: the harness admits 120–900 chars AND ≥40 words) | **85.227** | `measurement-user-search.json` → `latency` |
 
 ⛔ **The 16× gap is real; the absolute figures are not load-matched.** The user-search
 run recorded `loadavg_1m = 14.0` and the noun-path run did not record one, so read
