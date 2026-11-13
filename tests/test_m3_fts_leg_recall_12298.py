@@ -61,6 +61,7 @@ POPULATION = DOC_DIR / "population.json"
 TOOL = REPO_ROOT / "tools" / "m3_fts_leg_recall.py"
 CHANGELOG = (REPO_ROOT / "docs" / "architecture"
              / "SEARCH-ARCHITECTURE-CHANGELOG.md")
+SEARCH_ARCH = REPO_ROOT / "docs" / "architecture" / "SEARCH-ARCHITECTURE.md"
 
 
 @pytest.fixture(scope="module")
@@ -100,6 +101,12 @@ def brief_text(brief: str) -> str:
 def changelog() -> str:
     assert CHANGELOG.exists(), f"missing committed changelog {CHANGELOG}"
     return CHANGELOG.read_text(encoding="utf-8")
+
+
+@pytest.fixture(scope="module")
+def search_arch() -> str:
+    assert SEARCH_ARCH.exists(), f"missing committed decision doc {SEARCH_ARCH}"
+    return SEARCH_ARCH.read_text(encoding="utf-8")
 
 
 # ── 0. reading the published tables, to the CELL ───────────────────────────
@@ -1045,3 +1052,95 @@ def test_brief_production_estimate_rederives_from_the_per_class_cells(
     assert round(total, 1) == 73.5
     assert round(100 - total, 1) == 26.5
     assert "73.5 %" in brief_text and "26.5 %" in brief_text
+
+
+def test_brief_reading_two_bullets_are_the_artifact(artifact, brief: str) -> None:
+    """§0's Reading-2 bullets — the summary §0 tells a reader to quote from.
+
+    ⛔ §0 is the section the PR body instructs a reader to consult before quoting
+    any number, and its bullets DUPLICATE figures that §3.1–§3.3 publish. With
+    only the tables pinned, a re-run that legitimately moved a §3.2 cell could
+    leave these bullets quoting the superseded figures with every gate green —
+    the condition the file claims is impossible (review cycle 5, finding 2).
+    """
+    plain = " ".join(brief.replace("**", "").split())
+    cmp = artifact["comparisons"]
+    k3 = cmp["falkordb_tfidf__vs__postgres_bm25/tokens"]["k3"]
+    k15 = cmp["falkordb_tfidf__vs__postgres_bm25/tokens"]["k15"]
+    subset = artifact["verdict"]["primary_arm_tokens_controlled_subset"]
+    dep = artifact["verdict"]["deployable_arm"]
+    recovery = artifact["verdict"]["recovery_arm_no_index_move"]
+    inplace = cmp["falkordb_tfidf__vs__falkordb_tfidf__tokens_fixed"]["k3"]
+
+    assert (
+        "with the query terms held constant, BM25 buys "
+        f"+{k3['delta_pts']:.2f} pts (p = {k3['mcnemar_p_two_sided']:.2f}) overall, "
+        f"+{subset['delta_pts']:.2f} pts (p = {subset['mcnemar_p_two_sided']:.2f}) on "
+        "the subset where the control holds, and "
+        f"+{k15['delta_pts']:.2f} pts at k=15 with "
+        f"{'ZERO' if k15['discordant'] == 0 else k15['discordant']} discordant pairs"
+    ) in plain, "§0's scorer bullet no longer matches the artifact's paired tests"
+
+    shipped = artifact["arms"]["falkordb_tfidf"]["ranks"]
+    tokens = artifact["arms"]["postgres_bm25/tokens"]["ranks"]
+    both = [q for q in shipped if shipped[q] is not None and tokens[q] is not None]
+    moved = {q: abs(shipped[q] - tokens[q]) for q in both if shipped[q] != tokens[q]}
+    mean_sh = artifact["arms"]["falkordb_tfidf"]["recall_by_k"]["15"]["mean_rank_when_found"]
+    mean_tk = artifact["arms"]["postgres_bm25/tokens"]["recall_by_k"]["15"]["mean_rank_when_found"]
+    assert mean_sh > mean_tk, (
+        "the shipped leg no longer ranks worse on mean rank — §0's 'rank differently' "
+        "warning has lost its evidence")
+    assert (
+        f"of the {len(both)} names both arms find inside k=15, {len(moved)} rank "
+        f"differently (mean rank when found {mean_sh:.3f} vs {mean_tk:.3f}, "
+        f"largest move {max(moved.values())} places"
+    ) in plain, "§0's window-vs-order bullet no longer matches the artifact's ranks"
+
+    assert (
+        f"the same +{recovery['delta_pts']:.2f} pts is recovered inside the current "
+        f"index ({dep['recall_at_3']:.4f}, "
+        f"{'zero' if inplace['only_a'] == 0 else inplace['only_a']} regressions)"
+    ) in plain, "§0's recovery bullet no longer matches the artifact"
+
+    # §4's verdict line restates the same two deltas; it is the sentence a reader
+    # quotes as the RESULT, so it is pinned with them rather than left as prose.
+    assert (
+        "Result: FAIL — on the full arm "
+        f"(+{k3['delta_pts']:.2f} pts, p = {k3['mcnemar_p_two_sided']:.3f}) and on "
+        f"the tokens-controlled subset (+{subset['delta_pts']:.2f} pts, "
+        f"p = {subset['mcnemar_p_two_sided']:.3f})"
+    ) in plain, "§4's Result line no longer matches the artifact"
+
+
+def test_the_decision_documents_status_note_is_the_artifact(artifact, search_arch: str) -> None:
+    """`SEARCH-ARCHITECTURE.md` §6.2's STATUS note restates three figures.
+
+    It is the DECISION document — the record a lane reads to learn why the text
+    index did not move — and nothing opened it before this test, so a re-run could
+    move every pinned figure in the brief and the changelog and leave the note
+    asserting the superseded swing (review cycle 5, finding 3).
+    """
+    # A blockquote in the decision doc puts a `>` between the words a sentence
+    # spans on two lines; drop the marker before comparing prose.
+    text = " ".join(re.sub(r"(?m)^\s*>\s?", "", search_arch).split())
+    cmp = artifact["comparisons"]
+    k3 = cmp["falkordb_tfidf__vs__postgres_bm25/tokens"]["k3"]
+    k15 = cmp["falkordb_tfidf__vs__postgres_bm25/tokens"]["k15"]
+    dep = artifact["verdict"]["deployable_arm"]
+    recovery = artifact["verdict"]["recovery_arm_no_index_move"]
+
+    assert k3["mcnemar_p_two_sided"] > 0.05, (
+        "the primary comparison is now significant — the status note's "
+        "'not significant' is wrong; re-measure and re-decide")
+    assert f"by ~{round(k3['delta_pts'])} point (not significant)" in text, (
+        "the status note's '~N point (not significant)' must be the primary "
+        f"comparison's delta {k3['delta_pts']} and p {k3['mcnemar_p_two_sided']}")
+    assert f"by **zero** at k={15}" in text, (
+        "the status note's 'zero at k=15' must be the k=15 delta "
+        f"{k15['delta_pts']}")
+    assert k15["delta_pts"] == 0.0
+    assert f"the whole {dep['delta_pts']:g}-point swing" in text, (
+        f"the status note's swing must be the deployable arm's {dep['delta_pts']}")
+    assert recovery["delta_pts"] == dep["delta_pts"], (
+        "the recovery arm no longer reproduces the deployable arm's swing, so the "
+        "status note's 'reproduces inside the current index' is now false")
