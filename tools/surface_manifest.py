@@ -2134,7 +2134,11 @@ ARCHIVE_KIND_BY_CLASS = {"tool": "mcp-tool", "sdk": "sdk-method"}
 REMOVAL_WAYS = (
     "an `archive/MANIFEST.json` entry of the matching kind (freeze the code FIRST: "
     "`uv run python tools/archive_surface.py archive <mcp-tool|sdk-method> <symbol> "
-    "--batch <slug> --reason <text>`)",
+    "--batch <slug> --reason <text>`) — for an `sdk-method` this is ONE HALF: it must be "
+    "paired with `RETIRED_SDK_METHODS` / `REMOVED_SDK_METHODS`, because a frozen method "
+    "without the map entry strips the caller with a bare `AttributeError` instead of a "
+    "recorded departure (the freeze and the map entry are ONE record, and `CONTRIBUTING.md` "
+    "says so)",
     "`RETIRED_USE_INSTEAD` (an MCP tool only — it keeps SERVING the name and names its "
     "replacement, so it is a retirement, not a removal)",
     "`RETIRED_SDK_METHODS` / `REMOVED_SDK_METHODS` (an SDK method only — the fail-closed "
