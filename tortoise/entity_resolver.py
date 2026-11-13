@@ -317,11 +317,15 @@ def _semantic_matrix(entities: list[dict], encode_fn) -> dict:
 
     The rung is not a second identity authority: it only proposes pairs the
     deterministic + fuzzy rungs could not see. ⚠️ It is scoped by the SAME block
-    as every other rung — a semantically-close pair whose folded names share no
-    3-character prefix is not proposed. That is deliberate: cross-block
-    all-pairs is the pair explosion the ladder forbids, and a bounded rung that
-    says so is better than an unbounded one. (The semantic test therefore places
-    its pair inside one block.) ⛔ It is NOT scoped by any other rung's arithmetic:
+    SET as every other rung — since #12295 that is the multi-key union, not one
+    prefix — so a pair that shares NO block with this mention is not proposed.
+    (It is NOT scoped by a 3-character prefix: a semantically-close pair whose
+    folded names share no prefix is compared whenever any key of the union — a
+    token, a shingle band — puts them in one block, and the union is a superset of
+    the old prefix key, so the semantic pool is WIDER than it was.) That is
+    deliberate: cross-block all-pairs is the pair explosion the ladder forbids,
+    and a bounded rung that says so is better than an unbounded one. (The semantic
+    test therefore places its pair inside one block.) ⛔ It is NOT scoped by any other rung's arithmetic:
     the fuzzy rung's length prune is a LEXICAL bound, so `entity_candidates` only
     applies it to a pair the vectors cannot answer for (#12047 round-3 P2) — a
     lexical omission must never cap the vector pool's recall. The threshold it

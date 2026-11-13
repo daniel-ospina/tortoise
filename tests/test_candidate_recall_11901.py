@@ -1420,3 +1420,42 @@ def test_the_artifact_records_every_miss_so_a_cap_cannot_return(tool_mod, monkey
     assert arms["exact_misses_total"] == arms["exact_misses_recorded"] == 300, (
         f"total={arms['exact_misses_total']} vs "
         f"recorded={arms['exact_misses_recorded']}: with no cap these are equal")
+
+
+def test_a_degenerate_run_publishes_None_not_a_zero_figure(tool_mod, monkeypatch, tmp_path):
+    """A run that measured nothing must not publish `0.0` as if it measured zero.
+
+    ⛔ MEASURED BEFORE THE FIX: a one-name population (so every pooled group falls
+    below 2 and the blocker has no pair to reduce) published
+    `reduction_ratio: 0.0` — and, through the same `or 0.0` shape, `0.0` for both
+    pooled cost fields. `0.0` reads as "the blocker proposed zero pairs" and "a
+    capture sees zero candidates", which the run never observed: it is the
+    flattering-half false label `entity_blocking.reduction_ratio` returns `None`
+    to prevent, and `pooled_candidates_per_capture` is exactly the figure a brief
+    compares against the blocker. Restoring `or 0.0` (or any `0.0` default) reds
+    this test and nothing else.
+    """
+    rc, out = _drive(tool_mod, monkeypatch, tmp_path,
+                     stored_names=["the alpha"],
+                     trace_maker=lambda: {"leg": "vector", "ran": True,
+                                          "degraded": False},
+                     pop=[{"cls": "definite", "name": "the alpha"}],
+                     argv=["--population", "1", "--sample", "1",
+                           "--captures", "2", "--out", str(tmp_path / "artifact.json")])
+    assert rc == 0, f"a one-name run was refused (rc={rc})"
+    rep = json.loads(out.read_text())
+    mk = rep["arms"]["blocking"]["multikey"]
+    #: The population is below 2, so `reduction_ratio` has nothing to measure.
+    assert mk["reduction_ratio"] is None, (
+        f"reduction_ratio is {mk['reduction_ratio']!r} on a run with no pair to "
+        "reduce — a `0.0` here reads as 'the blocker proposed zero pairs'")
+    #: Zero capture groups reached the window, so NO pooled set was measured.
+    pooled = next(iter(rep["arms"]["pooled"].values()))
+    assert pooled["captures"] == 0, f"expected no capture group, got {pooled['captures']}"
+    fts = rep["arms"]["blocking"]["fts_only"]
+    assert fts["pooled_candidates_per_capture"] is None, (
+        f"pooled_candidates_per_capture is {fts['pooled_candidates_per_capture']!r} "
+        "with zero capture groups — that is a measurement the run never made")
+    assert fts["pooled_candidates_per_mention"] is None, (
+        f"pooled_candidates_per_mention is {fts['pooled_candidates_per_mention']!r} "
+        "with zero capture groups")
