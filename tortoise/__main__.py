@@ -8030,7 +8030,11 @@ def _session_post(api_key: str, api_url: str):
     from urllib.error import HTTPError, URLError
     from urllib.request import Request, urlopen
 
-    from tortoise.capture_spool import PostOutcome
+    from tortoise.capture_spool import (
+        UNRECORDED_OUTCOME_KEY,
+        UNRECORDED_OUTCOME_VALUE,
+        PostOutcome,
+    )
 
     def handle(payload: dict) -> PostOutcome:
         def _refused(outcome: PostOutcome) -> PostOutcome:
@@ -8097,7 +8101,12 @@ def _session_post(api_key: str, api_url: str):
                     from tortoise.sdk import _CAPTURE_NO_PROVIDER_MODE
                     body["extraction_mode"] = _CAPTURE_NO_PROVIDER_MODE
                 elif verdict == PENDING:
-                    body["extraction_outcome"] = "unknown"
+                    # ⛔ The marker is spelled ONCE, in `capture_spool` — this
+                    # writes it and two readers in this file compare against it,
+                    # so a literal here is a rename that silently stops the
+                    # durable trace (`session health`, the drain's
+                    # "outcome unrecorded" line) without reding anything.
+                    body[UNRECORDED_OUTCOME_KEY] = UNRECORDED_OUTCOME_VALUE
                 return PostOutcome(
                     ok=True, status=200,
                     detail=f"{outcome.status} after commit — confirmed {verdict}",
@@ -8368,6 +8377,7 @@ def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
         DISCARD_SPOOL_SATURATED,
         _terminal_marker,
         flush_spool,
+        outcome_unrecorded,
         read_spool_meta,
     )
     if not capture_consent_enabled():
@@ -8536,7 +8546,7 @@ def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
     # failure) and NO backlog deferral is written: a deferral is a priced offer
     # to re-extract, and offering it for work already done is how the false
     # negative became actionable.
-    if body.get("extraction_outcome") == "unknown":
+    if outcome_unrecorded(body):
         # ⛔ #12362 review: name NO cause as fact and assert no outcome. The
         # state is reached by two different histories — the abandoned handler
         # still extracting, and one that stopped before writing its outcome
@@ -8593,7 +8603,7 @@ def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
             reason=(_CAPTURE_NO_PROVIDER_MODE
                     if _capture_mode == _CAPTURE_NO_PROVIDER_MODE
                     else _CAPTURE_EXTRACTION_DISABLED_MODE))
-    elif body.get("extraction_outcome") != "unknown":
+    elif not outcome_unrecorded(body):
         # #4197: extraction ran for this session — if it had been deferred
         # before, its backlog entry is now retired. No offer here (see
         # `_flush_backlog_offer`): this path is the hook's, and it runs on

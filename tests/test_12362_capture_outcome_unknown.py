@@ -70,13 +70,24 @@ def _wait_bound_refusal(url: str = "https://api.example/v1/sessions"):
 
 
 def _served_detail(turns: list[dict], *, extracted: int,
-                   outcome_known: bool) -> dict:
-    """A `GET /v1/sessions/<id>` payload: role and body served as own fields."""
+                   outcome_known: bool, extractor: str | None = None) -> dict:
+    """A `GET /v1/sessions/<id>` payload: role and body served as own fields.
+
+    ⛔ `extractor` is a PARAMETER, not a constant (#12362 review, P3).
+    `session_projection.session_extraction_status` serves
+    `stored-and-processed` for `(capture_ok=True, extractor=None)` and
+    `stored-extraction-failed` for `(False, None)`, so the `(stored,
+    outcome_known=True)` triple is only derivable when a STORE-ONLY lane is
+    recorded (`SESSION_STORE_ONLY_LANES` = `none`/`disabled`). Hardcoding
+    `None` made the "the #4188 keyless direction survives" row serve a payload
+    no server sends — the failed-lane shape — so it could not distinguish the
+    two histories it exists to tell apart.
+    """
     rows = [{"id": tid, "role": role, "content": body}
             for tid, (role, body) in expected_turns(SESSION, turns).items()]
     return {"id": SESSION, "turns": len(turns), "extracted": extracted,
             "turn_points": rows,
-            "extraction": {"status": "stored", "extractor": None,
+            "extraction": {"status": "stored", "extractor": extractor,
                            "outcome_known": outcome_known}}
 
 
@@ -142,6 +153,20 @@ def test_an_unrecorded_outcome_is_not_reported_as_extraction_failure(
     assert backlog.sessions() == [], (
         "a deferral is a PRICED offer to re-extract; offering it for a capture "
         "whose extraction is still running is the actionable half of the bug")
+    # ⛔ PRODUCER → THE ONE DEFINITION (#12362 review, P2). `__main__` stamps the
+    # spool entry through `capture_spool.UNRECORDED_OUTCOME_KEY`/`_VALUE`, and
+    # this reads it back through the SAME constants. Without this row the tie is
+    # documentation only: a rename confined to `__main__.py` (writer AND both
+    # readers — it reads exactly like a local rename) leaves every assertion
+    # above green, because both literals lived in that one file, and silently
+    # stops stamping the DURABLE half of the trace — `session health` and the
+    # drain's "outcome unrecorded" line go quiet, and the only surviving trace
+    # is the stderr line the SessionEnd hook discards (`2>/dev/null`).
+    from tortoise import capture_spool as _spool
+    assert _spool.unrecorded_captures(_spool.spool_dir()) == [SESSION], (
+        "the spool entry must carry the unrecorded marker under the SHARED key "
+        "and value; a literal spelled in `__main__` alone is invisible to the "
+        "scanner that reports it")
 
 
 def test_a_known_store_only_outcome_still_records_the_deferral(places, tmp_path,
@@ -150,7 +175,8 @@ def test_a_known_store_only_outcome_still_records_the_deferral(places, tmp_path,
     transcript = _text_transcript(tmp_path)
     rc = _run_capture(
         places, transcript,
-        lambda turns: _served_detail(turns, extracted=0, outcome_known=True))
+        lambda turns: _served_detail(turns, extracted=0, outcome_known=True,
+                                     extractor="none"))
 
     err = capsys.readouterr().err
     assert rc == 0
