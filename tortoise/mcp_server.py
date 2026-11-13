@@ -3872,9 +3872,10 @@ def tortoise_query(kind: str | None = None,
       (default 100 — see the #10602 note below).
     - tag=<name>: filter Points by TAGGED edge (previously
       tortoise_query_points_by_tag). Tag mode takes precedence over text and
-      ignores kind/filters/min_confidence/order_by; a non-Point `entity_type`
-      is REFUSED there (and on the structural arms) rather than dropped —
-      those arms read the Point label only, and the refusal names the
+      ignores kind/min_confidence/order_by, and REFUSES `filters=` (see the
+      tag= bullet below — it used to ignore it silently, #12455); a non-Point
+      `entity_type` is REFUSED there (and on the structural arms) rather than
+      dropped — those arms read the Point label only, and the refusal names the
       per-type enumerator to use instead (#12372).
     - Pagination: pass offset=/limit= (or 1-based page=). When offset=/page= is
       set, returns {results, total, hasMore} (previously
@@ -3882,9 +3883,26 @@ def tortoise_query(kind: str | None = None,
       alone does NOT switch the return shape — it BOUNDS the plain list. Not
       combinable with text= (fts has no offset/skip) — error dict returned.
     - text=<query>: routes through tortoise_fts_query() for hybrid search
-      (unchanged behavior; limit defaults to 100).
+      (unchanged behavior; limit defaults to 100). `filters=` is REFUSED on
+      this arm rather than dropped (#12455): the fts leg takes named knobs
+      (exclude_status, claim_class, relationship_filter, …) and has no
+      property-filter parameter, so an accepted dict used to be silently
+      discarded and the UNFILTERED population served as if it applied. Use the
+      structural path for property filters. `include_retracted` is the one
+      exception: it is promoted to the parameter (never a property filter) and
+      IS applied here, forwarded as the fts leg's include_terminal.
+    - tag=<name> mode: a Point reader keyed on the tag only. It has no
+      property-filter parameter either, so `filters=` is REFUSED here too rather
+      than dropped (#12455). `kind`/`min_confidence`/`order_by` are NOT applied
+      by this arm: the same accepted-and-dropped class as #12500, which tracks
+      the STRUCTURAL arms — this arm's `kind`/`min_confidence`/`order_by` drop is
+      recorded in #12500's comment thread (its body scopes the structural arms
+      only), and is a known gap rather than a documented feature.
     - include_retracted=True surfaces tombstones on every path (structural,
-      paginated, and tag modes); default False excludes them.
+      paginated, text, and tag modes); default False excludes them. Known gap, tracked
+      in #12502: the TAG arm's own exclusion is `status != "retracted"` only, so
+      it still serves superseded/archived/outdated/deprecated rows by default,
+      where the structural and fts arms exclude the whole terminal vocabulary.
 
     Validation: page must be >= 1, offset >= 0, limit >= 1 — violations return
     a structured error dict.
@@ -3977,6 +3995,57 @@ def tortoise_query(kind: str | None = None,
             f"one. {_ENTITY_TYPE_REMEDY.get(entity_type, _ENTITY_TYPE_REMEDY_FALLBACK)} "
             f"For a structural Point read, omit entity_type or pass 'point' "
             f"(its default).")})
+    # ── #12455: `filters=` was ACCEPTED on the `text=` and `tag=` arms and DROPPED
+    # `filters` is a STRUCTURAL-path argument. `text=` forwards
+    # kind/entity_type/limit/min_confidence/order_by (plus `include_terminal`,
+    # promoted from `include_retracted` — never a property filter) into
+    # `sdk.tortoise_fts_query`, whose knobs are named (`exclude_status`,
+    # `claim_class`, `exclude_turn_echo_session`, `relationship_filter`, …) and
+    # which has NO property-filter parameter (sdk.py:40637-40710). `tag=` reads
+    # `query_points_by_tag(tag)`, which has no filter parameter either. So a dict
+    # a caller passed on EITHER arm was never looked at, and the answer was the
+    # unfiltered population with `total`/ordering computed over it — the #6146
+    # wrong-answer-indistinguishable-from-right class, the same one #12372
+    # removed for `entity_type`.
+    #
+    # Both arms are covered by ONE guard, placed above them, for the reason
+    # #12372 records at length: close the CLASS, not the instance. A guard on
+    # `text=` alone left `tag=…, filters=…` (and `tag=…, text=…, filters=…`,
+    # where tag takes precedence) still answering the unfiltered tag population
+    # — round-1 review proved it with a stub: `[('tag', 'pricing')]`, no error,
+    # every row.
+    #
+    # Honouring it is not the smaller change: it means teaching the fts leg (and
+    # the tag reader) to apply property filters at a pre-truncation seam, i.e.
+    # SDK SURFACE changes, which this repo's rule reserves to the owner. So the
+    # fail-open is closed by REFUSING — the shape `offset=`/`page=` already have
+    # on the `text=` arm.
+    #
+    # `include_retracted` is NOT refused and NOT dropped: it is popped out of
+    # `filters` into its own parameter above, and the `text=` arm now forwards it
+    # as the fts leg's `include_terminal`. Refusing a name that is not a property
+    # filter would be a false block; leaving it unapplied was the same defect one
+    # level down. NOTE the `tag=` arm APPLIES the flag but with a narrower
+    # vocabulary than the other arms (`status != "retracted"` only) — a real gap
+    # filed as #12502, and the reason this comment does not say the arms agree.
+    if filters and (text or tag is not None):
+        _arm = "tag=" if tag is not None else "text="
+        # A caller who set BOTH must drop both to reach the structural path —
+        # naming only `tag=` (which wins) sends them back into the guard with
+        # `_arm="text="` and the structural path still unreachable (#12455
+        # round-2 finding 4, measured by re-running with `tag` removed).
+        _also = " and text=" if (tag is not None and text) else ""
+        return _SafeError({"error": (
+            f"filters= is not applied on the {_arm} arm, and it used to be "
+            f"dropped silently (#12455): that arm reads through a leg with no "
+            f"property-filter parameter, so your filters would be ignored and "
+            f"the UNFILTERED population returned as if they had applied. Drop "
+            f"{_arm}{_also} to use the structural path "
+            f"(tortoise_query(kind=..., filters={{...}})), or drop filters= for "
+            f"this read. (`include_retracted` is NOT affected: it is promoted to "
+            f"its own parameter, and the text= arm forwards it as the fts leg's "
+            f"include_terminal.)"
+        )})
     if tag is not None:
         # #7983: record what this call SERVES — the page delivered from the
         # post-filter list (at most `limit`), for a paginated or un-paginated
@@ -4013,10 +4082,18 @@ def tortoise_query(kind: str | None = None,
         if paginated:
             return _SafeError({"error": "offset/page not supported with text — "
                                         "use limit only, or tortoise_search"})
+        # #12455 round-1 (P2): `include_retracted` was the same accepted-and-
+        # dropped defect one level down — the tool's docstring promises it
+        # "surfaces tombstones on every path", and this arm never applied it, so
+        # a caller who asked for tombstoned rows got them excluded with no
+        # signal. The fts leg already has the knob (`include_terminal`, an
+        # EXISTING parameter — no surface change), and its documented semantics
+        # are exactly this flag (sdk.py:40823).
         return _safe(_get_org_sdk().tortoise_fts_query, text, kind=kind,
                      entity_type=entity_type, limit=eff_limit,
                      min_confidence=min_confidence or 0.0,
-                     order_by=order_by or "relevance")
+                     order_by=order_by or "relevance",
+                     include_terminal=include_retracted)
     # #10602 review (F3, then round-6 finding 2): `kind`, `skip` and `limit` are
     # reserved filter keys (`security.validate_filter_key`) AND names the binding
     # below already binds, so a caller's `filters={"limit": 5}` collides. The two
