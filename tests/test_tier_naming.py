@@ -201,48 +201,97 @@ class TestEverySurfaceAgreesWithTheDeclaration:
 
 #: The denial this pin exists for, plus the paraphrases a re-edit reaches for.
 #:
-#: ⚠️ A heuristic, and stated as one — in BOTH directions:
+#: ⚠️ A heuristic, and stated as one — in BOTH directions, with the measured limits
+#: of each written down rather than discovered by the next author:
 #:
-#:   * **False negatives.** It cannot catch every way of being wrong. A hard-wrapped
-#:     denial, or one phrased in a shape below, slips through; a green run is not a
-#:     proof of prose correctness.
-#:   * **False positives are the expensive half** and are why these patterns demand
-#:     an actual assertion of NON-EXISTENCE rather than the bare token sequence
-#:     ``no Builder tier``. Correct prose such as *"self-hosted installs require no
-#:     Builder tier at all"* or *"there is no Builder plan requirement in the OSS
-#:     path"* states a REQUIREMENT, not the plan's absence, and must stay green —
-#:     a lint that blocks correct docs is worse than the drift it guards (measured
-#:     in review: the first cut of these patterns flagged both).
+#:   * **False positives are the expensive half.** A lint that blocks CORRECT docs
+#:     is worse than the drift it guards, and it is the half that is easy to get
+#:     wrong: two review cycles each found one. The patterns therefore demand an
+#:     unqualified assertion of NON-EXISTENCE — not a bare token sequence, and not
+#:     a qualified true statement:
+#:       * `no Builder tier at all` / `require no Builder tier` / `is needed` — a
+#:         statement about a REQUIREMENT, not the plan's absence (cycle 1).
+#:       * `there is no Builder plan cheaper than Solo`, `… without unlimited
+#:         graphs`, `… in your region` — a QUALIFIED true statement (cycle 2).
+#:         Hence :data:`_CLAUSE_END`: the assertion must END its clause.
+#:       * `The Builder plan exists` — the AFFIRMATIVE (cycle 2). A denial regex
+#:         whose `no` is optional matches the sentence a correct doc must write;
+#:         `no` is therefore mandatory in every pattern that spells it.
+#:   * **False negatives.** A hard-wrapped denial, or a shape below, slips through;
+#:     a green run is not a proof of prose correctness.
 #:
-#: A sentence that records the RETRACTION is also exempt (:data:`_RETRACTION_CUES`),
-#: because this repo's convention for superseding a claim is to quote the old one
-#: with a date — and a pin that reds the doc recording the fix punishes exactly the
-#: behaviour it wants.
+#: A sentence recording the RETRACTION is exempt — but only with EVIDENCE that it is
+#: a record (:func:`_quotes_a_retracted_claim`). A cue word alone was a bypass: it
+#: let `The docs are stale: there is no Builder plan.` escape (cycle 2), and a cue
+#: word plus a quoted single word was still one.
 _BUILDER_PLAN = r"['\"`]?builder['\"`]?\s+(?:plan|tier)"
 
+#: The assertion must END its clause. Without this the patterns match the HEAD of a
+#: qualified true statement ("there is no Builder plan cheaper than Solo"), which is
+#: the cycle-2 false block. `$` inside a lookahead is the end of the STRING, which is
+#: what a line-based scan gives us.
+_CLAUSE_END = r"(?=\s*(?:$|[.;,)]|—|–|--|;))"
+
 _DENIAL_PATTERNS = (
-    # "there is no 'builder' plan" — asserted absence, not asserted absence of a
-    # REQUIREMENT ("there is no Builder plan requirement in the OSS path" is true).
-    re.compile(r"\bthere(?:'s| is| are)\s+no\s+" + _BUILDER_PLAN +
-               r"(?!\s*(?:requirement|needed|required|necessary|required\b))", re.I),
-    # "no 'builder' plan exists", "no such thing as a builder tier"
-    re.compile(r"\b(?:no\s+such\s+(?:thing\s+as\s+(?:a\s+)?)?)?" + _BUILDER_PLAN +
+    # "there is no 'builder' plan" — asserted, unqualified absence.
+    re.compile(r"\bthere(?:'s| is| are)\s+no\s+" + _BUILDER_PLAN + _CLAUSE_END, re.I),
+    # "no 'builder' plan exists" (with an explicit non-existence predicate)
+    re.compile(r"\bno\s+(?:such\s+(?:thing\s+as\s+(?:a\s+)?)?)?" + _BUILDER_PLAN +
                r"\s+exists\b", re.I),
+    # "no such thing as a builder tier"
     re.compile(r"\bno\s+such\s+(?:thing\s+as\s+(?:a\s+)?)?" + _BUILDER_PLAN, re.I),
-    # "the builder plan does not exist", "Builder is not a plan/tier"
+    # "the builder plan does not exist"
     re.compile(r"\bbuilder\b[^.]{0,40}\b(?:does|do)\s+not\s+exist\b", re.I),
-    re.compile(r"\bbuilder\b[^.]{0,40}\b(?:is|are)\s+not\s+(?:a\s+)?(?:plan|tier)\b",
-               re.I),
+    # "Builder is not a plan/tier" — predicate nominative, clause-final, so a plan
+    # name used as an OBJECT ("the Builder tier is not a tier you can downgrade
+    # to") does not match.
+    re.compile(r"\bbuilder\s+(?:plan\s+|tier\s+)?(?:is|are)\s+not\s+(?:a\s+)?"
+               r"(?:plan|tier)" + _CLAUSE_END, re.I),
     # the measured sentence's own tail: "a builder buys pro or team"
     re.compile(r"\bbuilder\s+buys\s+(?:the\s+)?(?:pro|team|builder)\b", re.I),
 )
 
-#: A sentence carries the retraction record, not the claim. `#4336` protects
-#: historical records that state the name "as it was at the time"; a doc that quotes
-#: the retracted denial is doing exactly that, correctly.
+#: A retraction RECORD, not the claim. `#4336` protects historical records that state
+#: the name "as it was at the time", and quoting the superseded claim is this repo's
+#: convention for recording a supersession — so a pin that reds that document punishes
+#: exactly the behaviour it wants.
 _RETRACTION_CUES = re.compile(
     r"\b(?:previously|formerly|used\s+to|no\s+longer|retract\w*|stale\w*|"
     r"corrected|corrects|outdated|supersed\w*|before\s+#\d+)\b", re.I)
+
+#: …but a cue word alone is not a record — it is a bypass: it exempted
+#: `The docs are stale: there is no Builder plan.`, a live denial (cycle 2). Exemption
+#: requires ONE piece of evidence that the sentence CITES what it retracts: an issue/
+#: PR, a date, or an attribution verb introducing a quotation. A quoted single word is
+#: NOT enough — the denial's own subject is usually quoted (`"builder"`).
+_RETRACTION_EVIDENCE = re.compile(
+    r"#\d+"                                                   # cites the retraction
+    r"|\b(?:19|20)\d\d-\d\d-\d\d\b"                         # dates the record
+    r"|\b(?:read|said|says|claimed|asserted|stated|wrote|worded)\b[^.]{0,40}"
+    r"['\"“”`]",                                            # quotes it AS a claim
+    re.I)
+
+
+def _quotes_a_retracted_claim(sentence: str) -> bool:
+    """Is this sentence a RECORD of the retraction rather than a live denial?"""
+    return bool(_RETRACTION_CUES.search(sentence)
+                and _RETRACTION_EVIDENCE.search(sentence))
+
+
+def _denial_in(sentence: str) -> bool:
+    """Does ``sentence`` ASSERT that a Builder plan/tier does not exist?
+
+    **THE single decision.** The scan loop and every test below call this, and no
+    test may assert against :data:`_DENIAL_PATTERNS` directly. That is a cycle-2
+    review finding, and it is the structural half of this pin: the first cut had the
+    tests matching the *patterns* while the loop applied the *exemption* at a
+    separate call site, so appending `" (stale)"` to every denial in the
+    true-positive tuple left the tests green while the loop reported nothing. A pin
+    whose tests can diverge from the guard is not a pin.
+    """
+    if not any(pattern.search(sentence) for pattern in _DENIAL_PATTERNS):
+        return False
+    return not _quotes_a_retracted_claim(sentence)
 
 
 def _doc_sentences(text: str) -> list[tuple[int, str]]:
@@ -261,28 +310,36 @@ def _doc_sentences(text: str) -> list[tuple[int, str]]:
 class TestNoDocDeniesABuilderPlanExists:
     def test_the_lint_does_not_flag_correct_prose(self):
         """The false-positive half, pinned — because a lint that blocks correct
-        docs is worse than the drift it guards, and the first cut of these
-        patterns really did flag the first two sentences below (review finding,
-        #12503)."""
+        docs is worse than the drift it guards. Both review cycles found one, so
+        the cases are grouped by the CLASS each belongs to."""
         correct = (
+            # A statement about a REQUIREMENT, not the plan's absence (cycle 1).
             "Self-hosted installs require no Builder tier at all.",
             "There is no Builder plan requirement in the OSS path.",
             "No Builder tier is needed to run the local engine.",
+            "No Builder tier is required for self-hosting.",
+            # A QUALIFIED true statement (cycle 2).
+            "There is no Builder plan cheaper than Solo.",
+            "There is no Builder plan without unlimited graphs.",
+            "If there is no Builder plan in your region, contact us.",
+            "The Builder tier is not a tier you can downgrade to.",
+            # The AFFIRMATIVE — the sentence a correct doc must be able to write
+            # (cycle 2: an optional `no` made the denial regex match this).
+            "The Builder plan exists and is called `pro`.",
+            "A Builder tier exists for teams that outgrow Solo.",
             "The Builder plan and the Team plan are both unlimited.",
-            # A doc recording the retraction quotes the old claim, which is the
-            # repo's own convention (#4336 protects as-it-was records).
+            # A doc recording the retraction — cue AND evidence (#12444 cited).
             "docs/product/beta-sdk-surface.md previously read 'there is no "
             "\"builder\" plan'; #12444 corrected it.",
+            "The denial is no longer present since 2026-09-21.",
         )
         for sentence in correct:
-            hits = [p.pattern for p in _DENIAL_PATTERNS if p.search(sentence)]
-            exempt = bool(_RETRACTION_CUES.search(sentence))
-            assert not hits or exempt, (
-                f"the lint false-blocks correct prose: {sentence!r} matched {hits}")
+            assert not _denial_in(sentence), (
+                f"the lint false-blocks correct prose: {sentence!r}")
 
     def test_the_lint_does_flag_the_real_denial(self):
         """The true-positive half, pinned so the false-positive fix cannot have
-        been bought by disarming the lint."""
+        been bought by disarming the guard."""
         denials = (
             'the tiers are free, solo, pro, team, anon — there is no "builder" '
             "plan; a builder buys pro or team",
@@ -293,9 +350,50 @@ class TestNoDocDeniesABuilderPlanExists:
             "Builder is not a plan.",
         )
         for sentence in denials:
-            assert any(p.search(sentence) for p in _DENIAL_PATTERNS), (
+            assert _denial_in(sentence), (
                 f"the lint MISSES a real denial, so it no longer guards #12444: "
                 f"{sentence!r}")
+
+    def test_a_cue_word_alone_cannot_exempt_a_denial(self):
+        """The BYPASS, pinned (cycle-2 review). The first cut exempted any sentence
+        containing a retraction cue, so the drift was re-introducible by appending
+        one word — measured: 3 of 3 real denials escaped. Exemption now requires
+        EVIDENCE that the sentence cites what it retracts."""
+        for denial in (
+            "There is no Builder plan.",
+            "No Builder plan exists.",
+            "The builder tier does not exist.",
+        ):
+            for dressed in (
+                f"The docs are stale: {denial[0].lower()}{denial[1:]}",
+                f"{denial} That statement was corrected.",
+                f"{denial} (previously there was one)",
+                f"{denial} (stale)",   # the cycle-2 probe, verbatim
+            ):
+                assert _denial_in(dressed), (
+                    f"a cue word exempted a live denial, so #12444's drift is "
+                    f"re-introducible by adding one word: {dressed!r}")
+
+    def test_the_tests_assert_the_decision_not_the_patterns(self):
+        """The structural half: no test above may bypass :func:`_denial_in`.
+
+        Cycle 2 proved this matters — with the tests matching `_DENIAL_PATTERNS`
+        directly and the loop applying the exemption at a separate call site,
+        appending `" (stale)"` to every denial kept the tests green while the loop
+        reported nothing. Assert on the decision, never on its ingredients.
+        """
+        source = Path(__file__).read_text(encoding="utf-8")
+        # Scan the tests ABOVE this one (this check's own source necessarily names
+        # the ingredients it bans).
+        body = source[
+            source.index("class TestNoDocDeniesABuilderPlanExists"):
+            source.index("    def test_the_tests_assert_the_decision_not_the_patterns")]
+        bypasses = [line.strip() for line in body.splitlines()
+                    if "_DENIAL_PATTERNS" in line or "_RETRACTION_CUES" in line]
+        assert not bypasses, (
+            f"a test asserts against the lint's INGREDIENTS rather than its "
+            f"decision (`_denial_in`), so it can stay green while the guard is "
+            f"bypassed: {bypasses}")
 
     def test_no_doc_asserts_a_builder_plan_does_not_exist(self):
         offenders: list[str] = []
@@ -309,14 +407,10 @@ class TestNoDocDeniesABuilderPlanExists:
                     continue
                 if "plan" not in low and "tier" not in low:
                     continue
-                if _RETRACTION_CUES.search(sentence):
-                    continue  # records the retraction; quoting the old claim is correct
-                for pattern in _DENIAL_PATTERNS:
-                    if pattern.search(sentence):
-                        offenders.append(
-                            f"{doc.relative_to(REPO_ROOT)}:{lineno}: "
-                            f"{sentence.strip()}")
-                        break
+                if _denial_in(sentence):
+                    offenders.append(
+                        f"{doc.relative_to(REPO_ROOT)}:{lineno}: "
+                        f"{sentence.strip()}")
         assert not offenders, (
             "doc(s) assert that a Builder plan does not exist, contradicting #4336 "
             "(Builder IS the `pro` tier) and #12444:\n  "
