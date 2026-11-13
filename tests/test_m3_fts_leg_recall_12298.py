@@ -67,6 +67,12 @@ def brief() -> str:
     return BRIEF.read_text(encoding="utf-8")
 
 
+@pytest.fixture(scope="module")
+def brief_text(brief: str) -> str:
+    """The brief as text, for the claims that must be PRESENT rather than equal."""
+    return brief
+
+
 # ── 1. the defect claim, asserted against the shipped tokenizer ─────────────
 
 @pytest.mark.parametrize("name,run", [
@@ -124,11 +130,17 @@ def test_the_identifier_class_cannot_match_its_own_node(tool_mod) -> None:
     "diff", "2258", "the", "", "10:00",
 ])
 def test_production_terms_reproduce_build_or_query(tool_mod, query: str) -> None:
-    """The controlled arm hands Postgres `build_or_query`'s terms, byte-exactly.
+    """The term list reproduces `build_or_query`, byte-exactly.
 
     A control that silently drifted would measure a tokenizer that is not the
     product's and look perfectly healthy — so the tool refuses at run time
     (`assert_terms_match`) and this pins the same property at test time.
+
+    ⚠️ Reproducing `build_or_query` is NOT the same as handing Postgres terms:
+    on the DEGENERATE branch `build_or_query` returns the escaped RAW string, so
+    there is no term list to hand over and `arm_terms` sends the raw text — the
+    declared break in the control, pinned by
+    `test_the_degenerate_branch_is_declared_not_hidden`.
     """
     from tortoise.sparse import build_or_query, escape_redisearch_literal
 
@@ -224,7 +236,7 @@ def test_all_arms_measured_the_same_population(artifact) -> None:
 @pytest.mark.parametrize("arm,want", [
     ("falkordb_tfidf", 0.7133),
     ("postgres_bm25/tokens", 0.7267),
-    ("postgres_bm25/native", 0.9700),
+    ("postgres_bm25/native", 0.9633),
     ("falkordb_tfidf__tokens_fixed", 0.9633),
 ])
 def test_brief_headline_matches_the_artifact(artifact, brief, arm: str, want: float) -> None:
@@ -234,7 +246,7 @@ def test_brief_headline_matches_the_artifact(artifact, brief, arm: str, want: fl
         f"the brief no longer states {arm} recall@3 = {want:.4f}")
 
 
-def test_the_scorer_control_is_a_tie_and_the_rule_says_fail(artifact) -> None:
+def test_the_scorer_control_is_a_tie_and_the_rule_says_fail(artifact, brief_text) -> None:
     """M3's verdict, pinned with BOTH of its parts.
 
     ⛔ A later lane must not read the deployable arm's 25-point swing as M3
@@ -246,6 +258,17 @@ def test_the_scorer_control_is_a_tie_and_the_rule_says_fail(artifact) -> None:
     assert primary["mcnemar_p_two_sided"] > 0.05, (
         "the scorer control is now significant — re-run and re-decide")
     assert artifact["verdict"]["M3"] == "FAIL"
+    # ⛔ The issue's OWN falsifier sentence is satisfied by the deployable arm.
+    # The brief must present BOTH readings; this pin makes the second one
+    # impossible to drop when the first is quoted.
+    subset = artifact["verdict"]["primary_arm_tokens_controlled_subset"]
+    assert subset["n"] < artifact["sample"], (
+        "the tokens control is only real on the non-degenerate queries; the "
+        "artifact must record the subset it holds on")
+    assert subset["mcnemar_p_two_sided"] > 0.05
+    assert "Reading 1" in brief_text and "Reading 2" in brief_text, (
+        "the brief must state the literal-falsifier reading as well as the "
+        "decomposition — M3 is not simply 'FAIL'")
     dep = artifact["verdict"]["deployable_arm"]
     assert dep["delta_pts"] > 20, (
         "the deployable arm's swing is the whole finding; if it shrank, the "
@@ -272,3 +295,116 @@ def test_both_engines_are_named_with_their_versions(artifact) -> None:
     assert "no OPTIONS" in artifact["arms"]["falkordb_tfidf"]["engine"], (
         "the shipped index's option surface is part of the finding: the "
         "score is TF-IDF because the index is created with none")
+
+
+# ── 5. the declared break in the control, and the DoD's own requirements ────
+
+def test_the_degenerate_branch_is_declared_not_hidden(tool_mod, artifact) -> None:
+    """126 of 300 queries have no term list to control — and the artifact says so.
+
+    On the degenerate branch `build_or_query` returns the escaped RAW string, so
+    `arm_terms` sends the raw text and the two Postgres arms are ONE arm. That
+    was a P1 review finding on the first version of this harness, which claimed
+    a constant tokenizer everywhere; the census is now recorded as data.
+    """
+    census = artifact["terms_census"]
+    assert census["queries"] == artifact["sample"]
+    assert 0 < census["degenerate"] < census["queries"]
+    assert census["degenerate"] + census["tokens_controlled"] == census["queries"]
+    # the arm agrees with the census
+    assert artifact["arms"]["postgres_bm25/tokens"]["degenerate_n"] == census["degenerate"]
+
+    # What the two arms do on a degenerate query, stated as behaviour.
+    assert tool_mod.arm_terms("the diff") == ("the diff", True)
+    assert tool_mod.arm_terms("web_search") == ("search web", False)
+
+
+def test_degenerate_rows_are_identical_across_the_two_postgres_arms(artifact) -> None:
+    """The mechanism of the break, pinned: on those rows the arms coincide."""
+    deg = artifact["arms"]["postgres_bm25/tokens"]["degenerate_ids"]
+    tok = artifact["arms"]["postgres_bm25/tokens"]["ranks"]
+    nat = artifact["arms"]["postgres_bm25/native"]["ranks"]
+    differing = [i for i in deg if tok[i] != nat[i]]
+    assert not differing, (
+        f"{len(differing)} degenerate rows differ between the arms — the "
+        f"declared break is no longer what the artifact says it is")
+
+
+def test_the_tie_rule_is_matched(artifact) -> None:
+    """Requirement 6: both stores break score ties the same way (id DESC)."""
+    for arm in ("postgres_bm25/tokens", "postgres_bm25/native"):
+        assert "id DESC" in artifact["arms"][arm]["engine"], (
+            f"{arm} does not state the tie key it ordered by")
+    assert "DESC on every label" in artifact["verdict"]["requirements"]["6_tie_rule"]
+
+
+def test_the_threshold_arm_is_recorded_as_not_exercised(artifact) -> None:
+    """Requirement 4: the single-leg floor arm must be stated, not implied."""
+    thr = artifact["threshold_arm"]
+    assert thr["applied"] is False
+    assert thr["shipped_default"] == 0.0
+    assert "not exercised" in artifact["verdict"]["requirements"]["4_single_leg_floor_arm"]
+
+
+FIXTURES_EXPECTED = {
+    "m3fx-0": "ERR-4032",
+    "m3fx-1": "INV-2024-0091",
+    "m3fx-2": "abc_def",
+    "m3fx-3": "test_7949_capstone_verdict_check",
+    "m3fx-4": "ERR-4032 retry",
+}
+
+
+def test_the_identifier_fixture_runs_on_every_arm(artifact) -> None:
+    """Requirement 5 is the DoD's correctness gate — and it is on every arm."""
+    for name, arm in artifact["arms"].items():
+        fx = arm.get("identifier_fixture")
+        assert fx is not None, f"{name} carries no identifier fixture"
+        assert {r["id"] for r in fx["results"]} == set(FIXTURES_EXPECTED)
+        for r in fx["results"]:
+            assert r["stored"] == FIXTURES_EXPECTED[r["id"]]
+            assert "terms_sent" in r and "rank" in r and "rank_wide" in r
+        assert fx["PASS"] == all(r["rank_wide"] is not None
+                                 for r in fx["results"])
+
+
+def test_the_shipped_leg_fails_the_identifier_fixture_and_the_arms_differ(artifact) -> None:
+    """The finding the fixture exists to surface.
+
+    ⛔ If the shipped leg starts PASSING this, the tokenizer defect is fixed:
+    re-measure M3 and rewrite the brief §3.5 rather than relaxing this.
+    """
+    shipped = artifact["arms"]["falkordb_tfidf"]["identifier_fixture"]
+    fixed = artifact["arms"]["falkordb_tfidf__tokens_fixed"]["identifier_fixture"]
+    assert shipped["PASS"] is False, (
+        "the shipped leg now passes the #8933 fixture — the defect is repaired; "
+        "re-measure")
+    assert fixed["PASS"] is True
+    bad = {r["stored"] for r in shipped["results"] if r["rank_wide"] is None}
+    assert "abc_def" in bad, (
+        "abc_def returning zero rows for its own name is the crispest case in "
+        "the lane; if it stopped happening the mechanism moved")
+    # The scorer is not what fixes it: our terms fail, the analyser passes.
+    assert artifact["arms"]["postgres_bm25/tokens"]["identifier_fixture"]["PASS"] is False
+    assert artifact["arms"]["postgres_bm25/native"]["identifier_fixture"]["PASS"] is True
+
+
+def test_a_second_independent_run_reproduced_every_table() -> None:
+    """`artifact-repeat.json` is the repeatability evidence, and it must agree.
+
+    An earlier draft claimed a repeat in prose while committing one artifact; a
+    number a reader cannot check does not belong in the same table as one they
+    can.
+    """
+    rep = DOC_DIR / "artifact-repeat.json"
+    assert rep.exists(), "the repeatability artifact is missing"
+    a = json.loads(ARTIFACT.read_text())
+    b = json.loads(rep.read_text())
+    assert a["population_digest"] == b["population_digest"]
+    for name in a["arms"]:
+        assert a["arms"][name]["recall_by_k"] == b["arms"][name]["recall_by_k"], name
+        assert a["arms"][name]["per_class"] == b["arms"][name]["per_class"], name
+    assert a["verdict"] == b["verdict"]
+    assert a["falkordb_graph"] != b["falkordb_graph"], (
+        "each run must use its own graph — a reused graph re-upserts into a "
+        "live index")

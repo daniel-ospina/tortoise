@@ -164,6 +164,54 @@ DECISION_RULE = (
 )
 
 
+#: The ``#8933`` IDENTIFIER FIXTURE — #12186 round 3's requirement 5, and it is a
+#: **correctness** gate, not a quality one. ``to_tsvector`` cannot reproduce
+#: ``ERR-4032 -> err4032`` *plus* the adjacency phrase, so a candidate engine that
+#: loses either loses a capability the shipped leg has. Each tuple is
+#: ``(id, stored name, query text, what it gates)``; the fixture rows are added
+#: AFTER the recall sweep (so they cannot move a document frequency under it) and
+#: the query is asked at the production ``limit=3``.
+FIXTURES: tuple[tuple[str, str, str, str], ...] = (
+    ("m3fx-0", "ERR-4032", "ERR-4032",
+     "the composite identifier itself (#8933's own example)"),
+    ("m3fx-1", "INV-2024-0091", "INV-2024-0091",
+     "a longer composite identifier"),
+    ("m3fx-2", "abc_def", "abc_def",
+     "snake_case — the shape this measurement found broken"),
+    ("m3fx-3", "test_7949_capstone_verdict_check",
+     "test_7949_capstone_verdict_check", "a four-segment run"),
+    ("m3fx-4", "ERR-4032 retry", "ERR-4032",
+     "the ADJACENCY PHRASE: an identifier inside a container record"),
+)
+
+
+def _fixture_summary(name: str, results: list[dict]) -> dict:
+    """The fixture verdict: can the engine reach the record AT ALL (k=15)?
+
+    ⛔ The pass criterion is deliberately ``rank is not None`` at the widest
+    window, NOT "in the top 3". The DoD's question is a CAPABILITY one — *can
+    this store retrieve a record whose name carries a composite identifier* —
+    and a fixture row inserted beside 300 look-alike names is ranked among them,
+    which is a quality question #11901 already owns. Both ranks are reported so
+    neither reading is hidden: a fixture that only appears at k=15 passes here
+    and is visible as a rank-15 entry in the table.
+    """
+    return {
+        "arm": name,
+        "k_primary": PRIMARY_K,
+        "k_widest": 15,
+        "requirement": ("#12186 round 3 req 5 — the #8933 identifier fixture is "
+                        "a correctness gate: to_tsvector cannot reproduce "
+                        "ERR-4032 -> err4032 plus the adjacency phrase"),
+        "results": results,
+        "hits_at_primary_k": sum(1 for r in results
+                                 if r["rank"] is not None),
+        "reachable": sum(1 for r in results if r["rank_wide"] is not None),
+        "n": len(results),
+        "PASS": all(r["rank_wide"] is not None for r in results),
+    }
+
+
 def _import_instrument():
     """The #11901 instrument, imported — never re-implemented.
 
@@ -281,15 +329,22 @@ def production_terms(query: str) -> tuple[list[str], bool]:
     return terms, False
 
 
-def assert_terms_match(queries: list[str]) -> None:
-    """Fail closed unless the term list reproduces ``build_or_query`` byte-exactly."""
+def assert_terms_match(queries: list[str]) -> dict:
+    """Fail closed unless the term list reproduces ``build_or_query`` byte-exactly.
+
+    Returns the terms-mode census (how many queries ride the ordinary OR union
+    and how many are DEGENERATE), because that split is a property of the
+    measurement a reader is owed, not a footnote — see :func:`arm_terms`.
+    """
     from tortoise.sparse import (
         build_or_query,
         escape_redisearch_literal,
     )
     bad: list[tuple[str, str, str]] = []
+    degenerate_n = 0
     for q in queries:
         terms, degenerate = production_terms(q)
+        degenerate_n += int(degenerate)
         rebuilt = build_or_query(q)
         expected = (escape_redisearch_literal(q) if degenerate
                     else "|".join(terms))
@@ -301,6 +356,31 @@ def assert_terms_match(queries: list[str]) -> None:
             f"build_or_query for {len(bad)} of {len(queries)} queries "
             f"(first: {bad[0]!r}) — a tokenizer control that has drifted "
             "measures the wrong thing.")
+    return {"queries": len(queries), "degenerate": degenerate_n,
+            "tokens_controlled": len(queries) - degenerate_n}
+
+
+def arm_terms(q: str) -> tuple[str, bool]:
+    """``(terms, degenerate)`` as the ``tokens`` arm actually sends them.
+
+    ⛔ **The degenerate branch is a DECLARED BREAK in the tokenizer control, and
+    the first version of this harness did not say so** (found by review). When
+    ``build_or_query`` takes its degenerate branch it returns the **escaped raw
+    string**, so the shipped leg hands RediSearch one string and there is no
+    term list of ours to hand Postgres instead: this returns the raw sanitised
+    query, which is verbatim what the ``native`` arm sends. On those rows the
+    two Postgres arms are ONE arm and the analyser is NOT held constant.
+
+    Measured on the committed population: **126 of 300** queries are degenerate
+    (108 definite — a `the X` name whose only surviving token is `X` — and 18
+    ident/path), and for every one of them the two arms' ranks are identical.
+    The artifact therefore records the split and the tokens-controlled subset's
+    own comparison; the brief states it in §2. The alternative (inventing a
+    term list the shipped leg never sends) would be a different measurement, not
+    a fairer one.
+    """
+    tlist, degenerate = production_terms(q)
+    return (q if degenerate else " ".join(tlist)), degenerate
 
 
 # ── the FalkorDB arm ────────────────────────────────────────────────────────
@@ -475,6 +555,36 @@ def arm_falkordb(rows: list[dict], graph_name: str, namespace: str,
         ranks[row["id"]] = found_at
     elapsed = time.time() - t0
 
+    # ── the #8933 identifier fixture (req 5), AFTER the sweep so it cannot move
+    # a document frequency under a measured query.
+    for fid, stored, _q, _why in FIXTURES:
+        proj._upsert_object({"id": fid, "name": stored,
+                             "object_kind": "core:other"})
+    _wait_indexed(proj, len(rows) + len(FIXTURES))
+    fx: list[dict] = []
+    for fid, stored, query, why in FIXTURES:
+        q = _sanitise_query_text(query)
+        ranks_by_k: dict[int, int | None] = {}
+        sent = ""
+        for kk in (PRIMARY_K, 15):
+            if recovery:
+                built = build_or_query(q)
+                extra = [t for t in recovery_terms(q)
+                         if t not in built.split("|")]
+                sent = "|".join([built, *extra]) if extra else built
+                out = _fts_cypher(proj.g, sent, kk)
+            else:
+                sent = build_or_query(q)
+                out = run_fts_query(proj.g, q, entity_type="object", limit=kk)
+            ids = [pid for pid, _s in out]
+            ranks_by_k[kk] = ids.index(fid) + 1 if fid in ids else None
+        fx.append({"id": fid, "stored": stored, "query": query, "gates": why,
+                   "terms_sent": sent,
+                   "rank": ranks_by_k[PRIMARY_K],
+                   "rank_wide": ranks_by_k[15]})
+    fixture = _fixture_summary(
+        "falkordb_tfidf" + ("__tokens_fixed" if recovery else ""), fx)
+
     return _summarise("falkordb_tfidf" + ("__tokens_fixed" if recovery else ""),
                       per_k, ranks, by_class, top_scores,
                       rows, elapsed, n_q,
@@ -486,7 +596,8 @@ def arm_falkordb(rows: list[dict], graph_name: str, namespace: str,
                                       "additive OR alternatives (NOT shipped)"
                                       if recovery else "")),
                       extra={"index_numDocuments": indexed,
-                             "index_wait_s": waited_s})
+                             "index_wait_s": waited_s,
+                             "identifier_fixture": fixture})
 
 
 def _wait_indexed(proj, expected: int, timeout_s: float = 60.0) -> tuple[int, float]:
@@ -555,25 +666,30 @@ def arm_postgres(rows: list[dict], dsn: str, ks: tuple[int, ...]) -> dict:
         top_scores: list[float] = []
         by_class = collections.defaultdict(
             lambda: {"n": 0, **{str(k): 0 for k in ks}})
+        degenerate_ids: set[str] = set()
         t0 = time.time()
         n_q = 0
         for row in rows:
             q = _sanitise_query_text(row["name"])
             if mode == "tokens":
-                # Degenerate queries take the RAW string on both sides: the
-                # production leg sends it backslash-escaped, which Postgres'
-                # analyser would read as literal punctuation — the SEMANTICS
-                # ("match this text literally") is what is held constant here.
-                tlist, degenerate = production_terms(q)
-                terms = q if degenerate else " ".join(tlist)
+                terms, degenerate = arm_terms(q)
+                if degenerate:
+                    degenerate_ids.add(row["id"])
             else:
                 terms = q
             by_class[row["cls"]]["n"] += 1
             found_at = None
             for k in ks:
                 cur.execute(
+                    # ⛔ The tie rule is part of the measurement, not a detail
+                    # (#12186 round 3, requirement 6): the shipped leg reads
+                    # through ``recency_tie_clause``, whose id key is DESC on
+                    # EVERY label, so `id DESC` here breaks a score tie the same
+                    # way. `id` ASC — the first version — broke them in the
+                    # OPPOSITE direction, and the whole k=3 result lives at the
+                    # window boundary.
                     "SELECT id, paradedb.score(id) AS s FROM m3_objects "
-                    "WHERE name ||| %s ORDER BY s DESC, id LIMIT %s",
+                    "WHERE name ||| %s ORDER BY s DESC, id DESC LIMIT %s",
                     (terms, k))
                 out = cur.fetchall()
                 n_q += 1
@@ -591,14 +707,46 @@ def arm_postgres(rows: list[dict], dsn: str, ks: tuple[int, ...]) -> dict:
                         found_at = rank
             ranks[row["id"]] = found_at
         elapsed = time.time() - t0
-        return _summarise(f"postgres_bm25/{mode}", per_k, ranks, by_class,
-                          top_scores, rows, elapsed, n_q,
-                          engine_note=(f"PostgreSQL {pgver.split(' on ')[0]}, "
-                                       f"ParadeDB pg_search {extver}, "
-                                       f"USING bm25 (id, name); query "
-                                       f"`name ||| {terms!r}`"[:400]))
+        out = _summarise(f"postgres_bm25/{mode}", per_k, ranks, by_class,
+                         top_scores, rows, elapsed, n_q,
+                         engine_note=(f"PostgreSQL {pgver.split(' on ')[0]}, "
+                                      f"ParadeDB pg_search {extver}, "
+                                      f"USING bm25 (id, name); query "
+                                      f"`name ||| <terms>` with "
+                                      f"ORDER BY paradedb.score(id) DESC, "
+                                      f"id DESC LIMIT k"))
+        if degenerate_ids:
+            # The declared break in the control, recorded as DATA so a reader
+            # need not take the prose's word for it.
+            out["degenerate_ids"] = sorted(degenerate_ids)
+            out["degenerate_n"] = len(degenerate_ids)
+        return out
 
     out = {"tokens": _run("tokens"), "native": _run("native")}
+
+    # ── the #8933 identifier fixture (req 5), after both sweeps.
+    execute_values(cur, "INSERT INTO m3_objects (id, name) VALUES %s",
+                   [(f[0], f[1]) for f in FIXTURES], page_size=500)
+    cur.execute("ANALYZE m3_objects")
+    for mode in ("tokens", "native"):
+        fx: list[dict] = []
+        for fid, stored, query, why in FIXTURES:
+            q = _sanitise_query_text(query)
+            terms, _deg = arm_terms(q) if mode == "tokens" else (q, False)
+            ranks_by_k: dict[int, int | None] = {}
+            for kk in (PRIMARY_K, 15):
+                cur.execute(
+                    "SELECT id, paradedb.score(id) AS s FROM m3_objects "
+                    "WHERE name ||| %s ORDER BY s DESC, id DESC LIMIT %s",
+                    (terms, kk))
+                ids = [r[0] for r in cur.fetchall()]
+                ranks_by_k[kk] = ids.index(fid) + 1 if fid in ids else None
+            fx.append({"id": fid, "stored": stored, "query": query,
+                       "gates": why, "terms_sent": terms,
+                       "rank": ranks_by_k[PRIMARY_K],
+                       "rank_wide": ranks_by_k[15]})
+        out[mode]["identifier_fixture"] = _fixture_summary(
+            f"postgres_bm25/{mode}", fx)
     conn.close()
     return out
 
@@ -704,7 +852,10 @@ def run(args: argparse.Namespace) -> int:
     rows = pop["names"]
     print(f"population: {len(rows)} names (digest {pop['digest']}, "
           f"shares {pop['shares']}) from {pop_file}")
-    assert_terms_match([_sanitise(r["name"]) for r in rows[:50]])
+    # ALL rows, not a sample: the check is a pure function over the population
+    # and the degenerate QUERIES are the ones that matter (they are where the
+    # control breaks — see `arm_terms`), so a head-50 sample could miss them.
+    terms_census = assert_terms_match([_sanitise(r["name"]) for r in rows])
 
     ks = tuple(int(x) for x in args.ks.split(","))
     if PRIMARY_K not in ks:
@@ -720,6 +871,20 @@ def run(args: argparse.Namespace) -> int:
         "population_digest": pop["digest"],
         "sample": len(rows),
         "ks": list(ks),
+        "terms_census": terms_census,
+        # #12186 round 3 req 4 — the single-leg floor arm. No `threshold` is
+        # passed to EITHER arm: this harness calls the FTS leg directly, so the
+        # floor that lives in the SDK's single-leg arm never applies. The
+        # shipped default is 0.0 (filter off), so on this axis both arms are the
+        # shipped configuration; recorded rather than assumed.
+        "threshold_arm": {
+            "applied": False,
+            "shipped_default": 0.0,
+            "note": ("no threshold is passed on either arm — the harness calls "
+                     "run_fts_query directly, so the SDK's single-leg floor "
+                     "does not apply; equivalent to the shipped 0.0 (filter "
+                     "off), and therefore not exercised"),
+        },
         "arms": {},
         "comparisons": {},
     }
@@ -754,6 +919,23 @@ def run(args: argparse.Namespace) -> int:
         for other in ("postgres_bm25/tokens", "postgres_bm25/native"):
             art["comparisons"][f"falkordb_tfidf__vs__{other}"] = compare(
                 base, art["arms"][other], ks)
+        # ⛔ THE TOKENS-CONTROLLED SUBSET. On a DEGENERATE query the two
+        # Postgres arms are one arm (both send the raw string), so the control
+        # is only real on the other queries. This comparison restricts BOTH arms
+        # to those ids, and it is the number the brief quotes for `tokens`.
+        deg = {r["id"] for r in rows if arm_terms(_sanitise(r["name"]))[1]}
+        keep = {r["id"] for r in rows} - deg
+        base_c = dict(base, ranks={i: v for i, v in base["ranks"].items()
+                                   if i in keep})
+        tok_c = dict(art["arms"]["postgres_bm25/tokens"],
+                     ranks={i: v for i, v in
+                            art["arms"]["postgres_bm25/tokens"]["ranks"].items()
+                            if i in keep})
+        art["comparisons"]["tokens_controlled_subset"] = compare(
+            base_c, tok_c, ks)
+        art["comparisons"]["tokens_controlled_subset"]["n"] = len(keep)
+        art["comparisons"]["tokens_controlled_subset"]["excluded_degenerate"] = len(deg)
+
         primary = art["comparisons"][
             "falkordb_tfidf__vs__postgres_bm25/tokens"]["k3"]
         passed = (primary["b_recall"] > primary["a_recall"]
@@ -783,6 +965,29 @@ def run(args: argparse.Namespace) -> int:
                 "recall_at_3": rec["b_recall"], "delta_pts": rec["delta_pts"],
                 "mcnemar_p_two_sided": rec["mcnemar_p_two_sided"],
             }
+        cs = art["comparisons"]["tokens_controlled_subset"]["k3"]
+        art["verdict"]["primary_arm_tokens_controlled_subset"] = {
+            "n": art["comparisons"]["tokens_controlled_subset"]["n"],
+            "excluded_degenerate": art["comparisons"][
+                "tokens_controlled_subset"]["excluded_degenerate"],
+            "recall_at_3_base": cs["a_recall"],
+            "recall_at_3": cs["b_recall"],
+            "delta_pts": cs["delta_pts"],
+            "mcnemar_p_two_sided": cs["mcnemar_p_two_sided"],
+        }
+        art["verdict"]["requirements"] = {
+            "3_recall_at_k": "measured (k=3,5,10,15)",
+            "4_single_leg_floor_arm": "recorded in `threshold_arm` (not "
+                                      "exercised — the harness bypasses it)",
+            "5_identifier_fixture": {
+                a: (d.get("identifier_fixture") or {}).get("PASS")
+                for a, d in art["arms"].items()},
+            "6_tie_rule": ("both stores read through ORDER BY score DESC, id "
+                           "DESC — the shipped `recency_tie_clause` id key is "
+                           "DESC on every label; `createdAt` is not comparable "
+                           "across the two stores, so the recency component is "
+                           "declared, not modelled"),
+        }
         print(json.dumps(art["verdict"], indent=1))
 
     out = HERE / "artifact.json"
