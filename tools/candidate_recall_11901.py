@@ -447,7 +447,7 @@ _MIN_TOKEN_COUNT = 2
 def _name_char_entropy(normalized_name: str) -> float:
     """Shannon entropy over the name's CHARACTERS, spaces stripped, bits/char.
 
-    Zep's `_name_entropy` (`dedup_helpers.py:60-78`). Repetition, not length, is
+    Zep's `_name_entropy` (`dedup_helpers.py:53-77`). Repetition, not length, is
     what it measures: ``aaaaaaaa`` scores 0.0, ``deadline`` ~2.8.
     """
     cleaned = (normalized_name or "").replace(" ", "")
