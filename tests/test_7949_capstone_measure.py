@@ -5388,11 +5388,14 @@ def _assert_carve_out_entry_is_pinned_by_symbol():
     QUALIFIED `config/ci-surfaces.yml:<line>` form only. Bare digits in that row stay
     allowed (it legitimately carries the history `9943 … 9949 … 9965 … 9973 … 9987`),
     and history rows in OTHER documents legitimately keep the number they were read
-    at — `05-verify.md`'s D5 row records `:9906` → `:9933` and `:9934` at
+    at — `05-verify.md`'s D5 row records `:9917` → `:9933` and `:9934` at
     `0e281a900b` for exactly that reason (only `:9934` carries an explicit head in that
-    row; `:9906` and `:9933` are headed-less history that DOES resolve — `:9933` at
-    `c7499ac7a7`, `:9906` at `9f4c0bde5a` — which is the weaker shape this pin does not
-    police).
+    row; `:9917` and `:9933` are headed-less history that DOES resolve, both at the ONE
+    head the row names for them, `c7499ac7a7` — `:9917` is what the document's row
+    CITED there and `:9933` is where the entry actually sat, so the pair is one head's
+    stale cite and its same-head correction, not two heads spliced; `:9906`, which an
+    earlier revision of this docstring attributed to `9f4c0bde5a`, is the document's
+    cite at an EARLIER head and is not the value at `c7499ac7a7`).
     A bare number is not a cite; the file name is what makes a number
     checkable, and a headed history row is not a claim about today.
 
