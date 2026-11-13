@@ -2240,9 +2240,12 @@ surfaces:
   # from-the-AST census of every ``tortoise_fts_query`` mention. `core` is what
   # classifies it, and it is the ONLY row that does: a ``tortoise/rerank.py``-only
   # diff measured `surfaces: ['core']`, 833 files, and this file ABSENT from the
-  # selection before this row — i.e. the 37 pins that guard `rerank.py` ran ZERO
+  # selection before this row — i.e. this file's pins for `rerank.py` ran ZERO
   # times on exactly the diff they exist for (the #12294 class, one container
-  # over). Same reasoning and same repair as `test_name_entropy_12294.py` below.
+  # over). ⛔ No case count here: `tools/ci_selection.py --integrity` is the
+  # authority for what runs, and a hand-written number re-stales every round (the
+  # sibling `durations` row for this file says the same). Same reasoning and same
+  # repair as `test_name_entropy_12294.py` below.
   - test_rerank_pool.py  # #12297
   - test_rerank_calibration_12297.py  # #12297 — core classifies it; `tier1`
     # beside it is what makes it RUN on an artifact/brief diff (both take the

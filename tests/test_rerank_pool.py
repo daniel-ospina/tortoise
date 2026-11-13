@@ -151,9 +151,13 @@ def test_on_path_reorders_but_is_a_permutation(monkeypatch):
 def test_ties_break_on_the_original_index(monkeypatch):
     """A scorer that returns one constant must leave the order UNCHANGED.
 
-    Without the index tie-break a stable sort of equal keys is incidental to the
-    sort implementation; with it, a flat score is provably a no-op — which is
-    what makes `moved == 0` readable as "the reranker had nothing to say".
+    `sorted` is stable, so a flat score is a no-op — that is what makes
+    `moved == 0` readable as "the reranker had nothing to say". ⛔ The SLOT
+    tie-break is a different property and this test does not reach it: through
+    ``rerank_pool`` the scorable slots are ascending, so the second sort key can
+    never change the order (dropping it left every test green — measured). It is
+    pinned directly in
+    ``test_the_tie_break_is_the_original_SLOT_not_the_scorer_position``.
     """
     monkeypatch.setenv(rerank.FUSED_RERANK_ENV, "1")
 
@@ -165,6 +169,25 @@ def test_ties_break_on_the_original_index(monkeypatch):
     out, stats = rerank.rerank_pool(QUERY, ROWS)
     assert [r["id"] for r in out] == ["x0", "x1", "x2"]
     assert stats["applied"] is True and stats["moved"] == 0
+
+
+def test_the_tie_break_is_the_original_SLOT_not_the_scorer_position():
+    """Equal scores fall back to the SLOT index, not to the position in the
+    scorer's own input.
+
+    ⛔ Reachable only with a slot list that is not ascending, which
+    ``rerank_pool`` never produces (its ``scorable`` is
+    ``range(n_scored)`` filtered) — so this is the ONLY test that can
+    distinguish the two orderings, and it is why the second sort key exists:
+    ``rerank_pool``'s page correctness must not depend on the caller handing the
+    slots over in ascending order.
+    """
+    head = [{"id": f"x{i}"} for i in range(3)]
+    out, moved, top = rerank._reorder_scorable_slots(
+        head, [], 3, [2, 0, 1], [0.5, 0.5, 0.5])
+    # keyed on (-value, slot): slot 0 (which holds x1) first …
+    assert [r["id"] for r in out] == ["x1", "x2", "x0"], out
+    assert moved == 3 and top == 0.5
 
 
 # ── 3. pool bounds what is SCORED; the tail keeps its order ────────────────
@@ -182,6 +205,38 @@ def test_pool_width_bounds_scoring_and_preserves_the_tail(
     # rerank" means: a narrow pool cannot promote what it never scored.
     assert [r["id"] for r in out] == ["x1", "x0", "x2"]
     assert len(out) == len(ROWS)
+
+
+def test_the_SCORER_is_handed_the_knob_width_and_not_the_constant(
+        sdk, monkeypatch):
+    """A knob ABOVE the default must actually raise what gets SCORED.
+
+    ⛔ The only shape that can see it: candidates > DEFAULT. Below (or at) the
+    constant the text read hands the scorer at most DEFAULT ids, every row past
+    it carries ``""`` and is stripped as unscorable — so a constant passed as
+    ``pool=`` is indistinguishable from the knob, and reverting
+    ``pool=_pool_n`` to the constant left the whole file green (measured with
+    five candidates and a knob of four).
+    """
+    knob = rerank.DEFAULT_FUSED_RERANK_POOL + 5
+    _seed(sdk, knob)
+    off = sdk.tortoise_fts_query("zebra migration", entity_type="point",
+                                 limit=knob)
+    candidates = len(off)
+    assert candidates > rerank.DEFAULT_FUSED_RERANK_POOL, (
+        f"premise: the read must fuse MORE rows than the default width "
+        f"({rerank.DEFAULT_FUSED_RERANK_POOL}), got {candidates}")
+    monkeypatch.setenv(rerank.FUSED_RERANK_ENV, "1")
+    monkeypatch.setenv(rerank.FUSED_RERANK_POOL_ENV, str(knob))
+    _inject(rerank.FakeScorer(), monkeypatch)
+    trace: list[dict] = []
+    sdk.tortoise_fts_query("zebra migration", entity_type="point",
+                           limit=knob, leg_trace=trace)
+    entry = _rerank_entries(trace)[0]
+    assert entry[rerank.RERANK_POOL_KEY] == knob, entry
+    # …and the SCORER saw that many, not the constant: a trace that reports the
+    # knob while scoring fewer is the silent cap wearing the disclosure.
+    assert entry[rerank.RERANK_SCORED_KEY] == candidates, entry
 
 
 def test_pool_env_knob_and_explicit_kwarg_precedence(monkeypatch):
@@ -1026,6 +1081,15 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
                 "tools/longmem_eval/retrieve.py", "tools/fusion_formula_ab.py",
                 "tools/ask_pool_admission_probe.py",
                 "benchmarks/run_report.py", "benchmarks/load_test.py",
+                # ⛔ The docs half is NAMED as well as derived. It is the whole
+                # reason the derived floor was 3 short of the population: these
+                # five are the only files with no other row, so their quiet
+                # removal was exactly what a loose ``>=`` permitted.
+                "docs/runbook/4107_preference_abstention_diagnostic.py",
+                "docs/runbook/5534_a4_ab_diagnostic.py",
+                "docs/runbook/w6c_gold_rank_diagnostic.py",
+                "docs/runbook/w7a_gold_rank_diagnostic.py",
+                "docs/evidence/7983-cost-magnitudes/probes/ledger_probe.py",
                 # ⛔ the eval HARNESS is in the census for the same reason the
                 # seam block below exists: it binds the read as ``_search_fn=``
                 # and its opt-out rides in ``_search_kwargs``. It was added to
@@ -1073,7 +1137,7 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
                     f"{rel}:{owner} reads the rerankable page and neither opts "
                     "out nor is on the intentional-keep list — with the gate "
                     "armed it re-picks which rows survive limit, undisclosed")
-    assert len(seen_external) >= 13, (
+    assert len(seen_external) >= 16, (
         f"the derived census saw only {sorted(seen_external)} — the trees moved")
 
     # ⛔ AND THE CENSUS MUST SEE THE SEAM. A read bound as ``_search_fn=`` (the
