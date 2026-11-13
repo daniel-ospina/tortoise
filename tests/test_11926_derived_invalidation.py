@@ -1135,7 +1135,15 @@ def test_retiring_a_missing_claim_reports_it_rather_than_raising(sdk):
     assert report["invalidated"] is False
     assert report["alreadyRetired"] is True
     assert report["status"] is None
+    # ⛔ `found` is the MECHANICAL discriminator between the two facts
+    # `alreadyRetired` now covers; `status` is not, because a claim whose
+    # terminal predicate was the legacy `outdated` flag also reports None.
+    assert report["found"] is False
     assert "no such judgement" in report["detail"]
+    # no goal is named on this direct call, so there is nothing to reconcile —
+    # REPORTED as such rather than assumed clean (#12336)
+    assert report["cache"]["checked"] is False
+    assert "goalId" in report["cache"]["reason"]
 
 
 def test_a_claim_that_VANISHES_mid_sweep_lands_in_a_counts_bucket(sdk, monkeypatch):
@@ -1175,6 +1183,7 @@ def test_a_claim_that_VANISHES_mid_sweep_lands_in_a_counts_bucket(sdk, monkeypat
     per_finding = report["invalidated"][0]
     assert per_finding["invalidated"] is False
     assert per_finding["alreadyRetired"] is True
+    assert per_finding["found"] is False, per_finding
     assert "no such judgement" in per_finding["detail"]
 
     # ⛔ THE OVERLAP RULE — that `retired` and `failed` (or `gone`) can BOTH count
@@ -1187,9 +1196,74 @@ def test_a_claim_that_VANISHES_mid_sweep_lands_in_a_counts_bucket(sdk, monkeypat
     # where it can actually fail: `test_a_failed_cache_write_counts_as_a_FAILED_sweep`
     # (one finding counted in `retired` AND `failed`) and the goal-gone test
     # (`retired` 1 AND `gone` 1); it is documented on `invalidate_stale`.
+    #
+    # ⛔ AND THE GOAL'S CACHE IS RECONCILED, not just the bucket (#12336). The
+    # cached word named the claim that vanished, and nothing after this sweep
+    # would revisit the goal — `invalidate_stale` scans LIVE claims, so a goal
+    # whose last claim is gone is never a finding again. Without the reconcile
+    # the goal keeps displaying `met` with nothing behind it while the summary
+    # above reads clean.
+    assert sdk.get_entity(g["id"]).get("goalState") is None, (
+        "the goal still displays a word nothing backs: "
+        f"{sdk.get_entity(g['id']).get('goalState')!r}")
+    assert per_finding["cache"]["checked"] is True, per_finding["cache"]
     # nothing was written for a claim that no longer exists (a missing point reads
     # back as a falsy dict, which is why `_read_claim` folds it to MISSING)
     assert not sdk.get_entity(made["point_id"])
+
+
+def test_an_ALREADY_TERMINAL_claim_also_reconciles_the_goal_word(sdk):
+    """#12336's second door-side half, on the arm that used to skip it entirely.
+
+    A claim retired OUT OF BAND (a direct status write, a purge) leaves the goal's
+    ``goalState`` word naming it, and the door is the only thing that can clear it:
+    ``invalidate_stale`` scans LIVE claims, so the goal is never a finding again.
+    MEASURED before this round: ``goalState`` stayed ``met``, and the finding
+    carried NO ``cache`` key at all — so `(r.get("cache") or {})` read clean and
+    neither ``counts.failed`` nor ``counts.gone`` could see it.
+    """
+    i, t, g = _world(sdk, tag="terminal-reconciles")
+    made = _judge(sdk, i, t, g)
+    assert sdk.get_entity(g["id"]).get("goalState") == "met"
+    sdk.update_entity(made["point_id"], status="retracted")  # out of band
+
+    report = invalidate(sdk, Invalidation(judgement_id=made["point_id"],
+                                          goal_id=g["id"],
+                                          reason="target-revised", detail="…"))
+    assert report["alreadyRetired"] is True, report
+    assert report["found"] is True, report
+    assert report["cache"]["checked"] is True, report["cache"]
+    assert report["cache"]["cleared"] is True, report["cache"]
+    assert sdk.get_entity(g["id"]).get("goalState") is None, (
+        "the goal still displays a word nothing backs: "
+        f"{sdk.get_entity(g['id']).get('goalState')!r}")
+
+
+def test_an_absent_claim_whose_GOAL_is_gone_lands_in_GONE_too(sdk, monkeypatch):
+    """The clause #12315 forces onto ``counts.gone``'s docstring: a finding in the
+    ABSENT arm can set ``gone`` with NO retirement having landed (the reconcile
+    could not happen because there is no goal node), so ``gone`` there means
+    "the cache could not be reconciled", never "a retirement landed".
+    """
+    i, t, g = _world(sdk, tag="vanish-goal-gone")
+    _judge(sdk, i, t, g)
+    sdk.update_entity(t["id"], threshold=12.0)  # a real stale finding
+
+    from tortoise import derived_invalidation as di
+
+    real_invalidate = di.invalidate
+
+    def vanishing(sdk_, invalidation, **kwargs):
+        sdk_.delete_entity(invalidation.judgement_id)
+        sdk_.delete_entity(g["id"])
+        return real_invalidate(sdk_, invalidation, **kwargs)
+
+    monkeypatch.setattr(di, "invalidate", vanishing)
+    counts = invalidate_stale(sdk, goal_id=g["id"])["counts"]
+    assert counts["alreadyRetired"] == 1, counts
+    assert counts["gone"] == 1, counts        # the cache could not be reconciled
+    assert counts["retired"] == 0, counts     # nothing was retired here
+    assert counts["failed"] == 0, counts
 
 
 def test_the_derived_state_stops_feeding_the_goal(sdk):

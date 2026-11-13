@@ -720,6 +720,32 @@ def verdicts(
     return [invalidation_for(sdk, claim, nodes=reader) for claim in claims]
 
 
+def _reconcile_or_report(sdk: Any, goal_id: str | None) -> dict:
+    """Reconcile a goal's cached word, REPORTING a failure instead of raising.
+
+    Every ``alreadyRetired`` answer owes the goal's ``goalState`` cache a
+    reconcile (#12336): the retirement is a no-op there, but the WORD a goal
+    displays can still name a claim that vanished (#12315's arm) or was retired by
+    another route — and nothing else repairs it, because
+    :func:`invalidate_stale` scans LIVE claims, so a goal whose last claim is gone
+    is never a finding again. Measured before this existed: ``goalState`` stayed
+    ``met`` after the claim was deleted, through both the sweep and this door.
+
+    Reported, never raised, for the same reason the success arm reports its
+    reconcile failure: the retirement outcome is already the idempotent one, and a
+    cache that could not follow it is a failure of THIS sweep (``counts.failed``,
+    ``counts.gone``), not a reason to discard the sweep's other results. A falsy
+    ``goal_id`` is not a failure — ``reconcile_goal_state_cache`` says so itself.
+
+    ⚠️ It is deliberately the SAME function the retirement path calls, so there is
+    one reconcile and one set of predicates behind ``counts.failed``/``gone``.
+    """
+    try:
+        return reconcile_goal_state_cache(sdk, goal_id)
+    except Exception as exc:
+        return {"checked": False, "error": f"{type(exc).__name__}: {exc}"}
+
+
 def invalidate(
     sdk: Any,
     invalidation: Invalidation,
@@ -739,6 +765,10 @@ def invalidate(
        read paths use, so "already retired" here means the same thing it means
        everywhere else. An ABSENT claim is reported the same way: it cannot be
        stale, so there is nothing to retire because it is already gone (#12315).
+       ⛔ EVERY ``alreadyRetired`` answer still owes the goal's cache its
+       reconcile (step 4), including this one: the word a goal displays can name
+       a claim that vanished or was retired elsewhere, and nothing else repairs
+       it (#12336).
     3. ``retract_point`` — journal-first ORDER, so a rebuild replays the retirement
        instead of resurrecting a claim the live graph retired. ⚠️ ORDER is what
        the door guarantees and CONFIRMATION is not: its own docstring records
@@ -777,9 +807,27 @@ def invalidate(
         # retirement reported `stale: 1` with every counter at 0 — a summary a
         # consumer totalling the buckets cannot reconcile, which is the same rule
         # the `failed` and `gone` buckets exist to keep.
+        #
+        # ⛔ AND THE GOAL'S CACHE IS STILL OWED ITS RECONCILE (#12336). The
+        # retirement did not happen, but the WORD the goal displays may still name
+        # this claim — the vanish-mid-sweep race is exactly the shape where it
+        # does, because the claim WAS live when the scan read it. Nothing repairs
+        # it later: `invalidate_stale` scans LIVE claims, so a goal whose last
+        # claim is gone is never a finding again (measured: `goalState` stayed
+        # `met` after the claim was deleted, through both the sweep and this
+        # door). So the idempotent reading is reported AND the dependent state is
+        # reconciled — otherwise `alreadyRetired: True` would assert a clean no-op
+        # over a goal whose displayed word nothing backs.
+        #
+        # ⚠️ The two ALREADY-TERMINAL arms below owe the same reconcile, for the
+        # same reason: a claim retired OUT OF BAND (a direct status write, a
+        # purge) also leaves the goal's word naming it (#12336). All three
+        # already-retired arms go through `_reconcile_or_report`, so an absent
+        # `cache` key can never be read as "clean".
         return {"invalidated": False, "judgementId": judgement_id,
-                "alreadyRetired": True, "status": None,
+                "alreadyRetired": True, "status": None, "found": False,
                 "reason": invalidation.reason,
+                "cache": _reconcile_or_report(sdk, invalidation.goal_id),
                 "detail": "no such judgement — nothing to retire"}
     if claim is None:
         raise RuntimeError(
@@ -790,8 +838,9 @@ def invalidate(
     if (isinstance(status, str) and status in TERMINAL_EXCLUDED_STATUSES) or \
             bool(claim.get("outdated")):
         return {"invalidated": False, "judgementId": judgement_id,
-                "alreadyRetired": True, "status": status,
+                "alreadyRetired": True, "status": status, "found": True,
                 "reason": invalidation.reason,
+                "cache": _reconcile_or_report(sdk, invalidation.goal_id),
                 "detail": f"already terminal ({status or 'outdated'})"}
 
     stamp = at or invalidation.effective_at or _now()
@@ -810,7 +859,9 @@ def invalidate(
                 and after_status in TERMINAL_EXCLUDED_STATUSES) or after_flag:
             return {"invalidated": False, "judgementId": judgement_id,
                     "alreadyRetired": True, "status": after_status,
+                    "found": True,
                     "reason": invalidation.reason,
+                    "cache": _reconcile_or_report(sdk, invalidation.goal_id),
                     "detail": f"already terminal ({after_status or 'outdated'})"}
         raise exc
 
@@ -827,6 +878,7 @@ def invalidate(
     result: dict[str, Any] = {
         "invalidated": True,
         "judgementId": judgement_id,
+        "found": True,
         "reason": invalidation.reason,
         "detail": invalidation.detail,
         "validTo": stamp,
@@ -953,7 +1005,10 @@ def invalidate_stale(
     because there is no node to reconcile it on. It is not a failure of the
     retirement (which did land) and not a success of the reconcile (which did not
     happen) — it is its own bucket, and it exists so a sweep over deleted goals
-    cannot read clean.
+    cannot read clean. ⛔ A finding in #12315's ABSENT arm can also set ``gone``
+    (it carries ``found: False``); there the retirement did NOT need to happen, so
+    ``gone`` means "the cache could not be reconciled", never "a retirement
+    landed".
 
     ⛔ THE BUCKETS ARE PER-FINDING PREDICATES, NOT A PARTITION — do not read a
     bucket total as a finding count. A retirement that landed and whose cache
@@ -963,7 +1018,15 @@ def invalidate_stale(
 
     In a sweep that actually retires (``dry_run=False``) every finding lands in
     **at least one** bucket — the failure #12315 records was an arm landing in
-    none. ⚠️ That rule does NOT hold for ``dry_run=True``, and the asymmetry is
+    none. ⛔ ``counts.alreadyRetired`` names TWO distinguishable facts: a claim
+    that was FOUND and already terminal, and a claim that was NOT FOUND at all
+    (#12315's arm). ``found`` is the mechanical discriminator (``False`` on the
+    absent arm, ``True`` on the two already-terminal arms) — ``status`` is NOT,
+    because a claim whose terminal predicate was the legacy ``outdated`` flag also
+    reports ``status: None``. So a consumer that needs the distinction reads the
+    finding and not the total.
+
+    ⚠️ That rule does NOT hold for ``dry_run=True``, and the asymmetry is
     by design rather than an unhandled arm: a dry run retires nothing, so
     ``invalidated`` stays empty and the four RETIREMENT buckets — ``retired``,
     ``alreadyRetired``, ``failed``, ``gone`` — are 0 by construction, while
