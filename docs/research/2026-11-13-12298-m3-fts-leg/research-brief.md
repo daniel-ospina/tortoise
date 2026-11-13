@@ -183,9 +183,14 @@ fairer one — so the break is disclosed instead.
 (a) **The index builds on a background cycle.** `db.indexes()` reports `numDocuments`; a query issued
 straight after the writes can see a **partially built** index and book a present name as a miss — an
 artefact in the direction that flatters the wrong arm. The harness **waits** until `numDocuments`
-reaches the population size and **refuses** on timeout; it also **refuses a reused graph** outright,
-because `o.name` is an ON CREATE write (`#8919`) — a second run against the same graph would measure
-the previous population, and the count guard alone cannot see that.
+reaches the population size and **refuses** on timeout; it also **refuses a graph whose stored names do
+not match the pinned population**, because `o.name` is an ON CREATE write (`#8919`) — a second run
+against the same graph would measure the previous population, and the count guard alone cannot see that.
+⚠️ Both guards are narrower than "refuses any reused graph": the wait accepts `numDocuments >= n` (an
+over-full index passes it), and the name check compares the pinned names — so
+`--graph <a previous run's graph>` with the SAME population is ACCEPTED, and the shipped sweep then runs
+over its leftover fixture rows. That is the confound §3.5 and `measurement_notes` disclose; passing no
+`--graph` (the documented reproduction) is what avoids it.
 (b) **Re-upserting into a live graph is not free** — before the wait and run-scoped graphs existed, two
 runs differed by 2 names (0.7133 vs 0.7067, an uncommitted pre-run observation). With both, two
 independent runs return **identical** numbers, and the second one is committed as
@@ -293,8 +298,8 @@ confirmation, and it is what `#12350` should be measured with. See `artifact.jso
 
 Two of those are decisive and none of them is about the scorer:
 
-* **`abc_def` is unretrievable at ANY k on the shipped leg** — it returns **no row at the production
-  window and none at k=15** for its own name. ⛔ Stated as what the artifact records (`rank` and
+* **`abc_def` is unretrievable at ANY k on the shipped leg** — the row for its own name is **absent at the production
+  window and at k=15**. ⛔ Stated as what the artifact records (`rank` and
   `rank_wide`, both `None`), not as a row COUNT: the harness does not record the size of an empty
   result set, so "zero rows" was a stronger claim than the committed evidence carries.
   (`abc|def`, and the index holds `abc_def`). The `#8933` machinery does not help: its alias tail

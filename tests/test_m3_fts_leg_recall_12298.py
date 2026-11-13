@@ -1162,3 +1162,21 @@ def test_the_decision_documents_status_note_is_the_artifact(artifact, search_arc
     assert recovery["delta_pts"] == dep["delta_pts"], (
         "the recovery arm no longer reproduces the deployable arm's swing, so the "
         "status note's 'reproduces inside the current index' is now false")
+
+
+def test_the_index_wait_accepts_at_least_and_not_exactly(tool_mod) -> None:
+    """The inequality is a DECISION, so it is pinned where it is written.
+
+    ⛔ `>=` is why the 305-document index in §3.5 was accepted without a word:
+    `305 >= 300` returns immediately, where `==` would have timed out and
+    refused loudly. Reversing it (`<=`) would return `-1` at once and reopen the
+    partially-built-index artefact the wait exists to close — with every other
+    test in this file green, which is why the polarity is asserted here.
+    """
+    src = inspect.getsource(tool_mod._wait_indexed)
+    assert "last >= expected" in src, (
+        "the index wait no longer accepts an at-least-full index — re-read §3.5 "
+        "and the artifacts' `measurement_notes` before changing this")
+    assert "last <= expected" not in src and "last == expected" not in src, (
+        "the wait became an exact match or an upper bound; a partially built "
+        "index would then be measured as misses")
