@@ -4811,14 +4811,22 @@ _MANIFEST_CITE = re.compile(
 #: ("the entry read 9943 before the last re-derivation"). `_LINE_CITE` above needs a
 #: separator beside the number, so this passed it AND the doc-wide arm.
 #:
-#: ⛔ IT REFUSES A COMMIT HEAD TOO, AND THAT IS THE INTENDED CONTRACT, not a
-#: false red: the bundle's own D5 keeps the head-qualified history AT THE PIN
-#: ("the head-qualified history of the entry's line is kept at the pin"), so the
-#: document carries neither a line number nor a head. An earlier cut of the failure
-#: message told a maintainer to "describe the history by head", i.e. it prescribed
-#: the form this arm refuses — the MESSAGE was wrong, and it now says what the
-#: policy says. The `.` in the lookbehind is load-bearing in its own right: without
-#: it a DECIMAL FRAGMENT is read as an integer (`1.093 %` matched `093`).
+#: ⛔ IT REFUSES A DIGIT-HEAVY HEAD — EXACTLY, NOT "A HEAD". A hex head whose
+#: first three characters happen to be digits is refused (`9828250732`,
+#: `12345678`); a head that opens with a letter is NOT (`1a0ace24`, `e59e6076`),
+#: because `_NUM` needs `\d{3,}` behind a non-word character. Measured, and pinned
+#: below, rather than claimed wider than the regex is: the contract this arm
+#: actually enforces is "a bare run of 3+ digits", and a hex head that begins with
+#: two or fewer digits slips it. The sentence on the claim line is still guarded
+#: against the HISTORY form this matters for (`read 9943`, `was 9943`).
+#:
+#: ⛔ AND THE POLICY BEHIND THAT IS UNCHANGED (the bundle's own D5 keeps the
+#: head-qualified history AT THE PIN), so the document carries neither a line number
+#: nor a head. An earlier cut of the failure message told a maintainer to "describe
+#: the history by head", i.e. it prescribed the form this arm refuses — the MESSAGE
+#: was wrong, and it now says what the policy says. The `.` in the lookbehind is
+#: load-bearing in its own right: without it a DECIMAL FRAGMENT is read as an integer
+#: (`1.093 %` matched `093`).
 _BARE_NUM = re.compile(_LEADING_NUM)
 
 #: ⛔ A LONE FOUR-DIGIT 19xx/20xx RUN IS A YEAR AS OFTEN AS A LINE NUMBER, and the bare
@@ -4841,6 +4849,15 @@ _BLOCK_WORDS = re.compile(r"carve[_-]?out|carve out|\b(?:entry|block|manifest)\b
 #: …and a line that names ANOTHER source file is that file's, not this claim's: see
 #: `_neighbour_number_strays` for the measurement that made this necessary.
 _OTHER_FILE = re.compile(r"[\w/]+\.(?:py|ya?ml|json|md)\b")
+#: ⛔ BUT `config/ci-surfaces.yml` IS THE FILE THIS CLAIM IS ABOUT — it is never
+#: "another file". Without this subtraction the exemption was one file too WIDE and
+#: re-opened the hole the arm exists for (measured): a neighbour line that re-typed
+#: the number AND named the manifest was scanned by NEITHER arm —
+#: ``The `carve_out:` entry sits in `config/ci-surfaces.yml` and read 9943 before the
+#: last re-derivation.`` returned NO strays, and the strict arm did not see it either
+#: because the bare form has no separator. So the manifest's own name is removed
+#: before the other-file test, which is what makes "another file" mean another file.
+_MANIFEST_FILE = re.compile(r"[\w/]*ci-surfaces\.ya?ml")
 
 
 def _neighbour_number_strays(line: str) -> list[str]:
@@ -4863,11 +4880,14 @@ def _neighbour_number_strays(line: str) -> list[str]:
     therefore not seen. It is ambiguous by construction — nothing mechanical can tell
     a continuation of that file's cite from a re-typed manifest line — and the
     doc-wide STRICT arm (`_MANIFEST_CITE`) still catches a manifest-bound cite on any
-    line whatsoever.
+    line whatsoever. ⛔ THAT CONCLUSION DOES NOT EXTEND TO THE MANIFEST ITSELF: the
+    strict arm sees only a cite with a SEPARATOR, so exempting `ci-surfaces.yml`
+    would hide the separator-less form (`read 9943`) from BOTH arms — which is why
+    `_MANIFEST_FILE` is subtracted before this test.
 
     The caller passes the line with the claim ENTRY's own filename already removed.
     """
-    if _OTHER_FILE.search(line):
+    if _OTHER_FILE.search(_MANIFEST_FILE.sub("", line)):
         return []
     stray = [m.group(0) for m in _LINE_CITE.finditer(line)]
     stray += [n for n in _bare_number_hits(line) if n not in stray]
@@ -4910,9 +4930,12 @@ def _parse_manifest(lines: list[str], failures: list[str]) -> dict | None:
     already in `block_failures`". With an empty manifest there IS no refusal, so
     every `_entries_or_failure` short-circuited and every "holds one" / "hold none"
     guard was suppressed: the whole block arm reported GREEN over a file it never
-    read. A top-level list or scalar took the same path and was reported as
-    "the key is ABSENT entirely", which is true but names the wrong cause. So the
-    parsed TYPE is checked here, at the ONE place that can see it.
+    read. A top-level list or scalar was a DIFFERENT outcome and is not the same
+    finding: those parse to a non-`None` `list`/`str` (verified), so the pin went
+    RED — only its diagnostic then said "the key is ABSENT entirely", which is true
+    of every section and names the wrong cause. The parsed TYPE is checked here, at
+    the ONE place that can see both: a non-mapping parse is a collected finding, and
+    so is an empty document, because `None` is not a mapping either.
     """
     try:
         parsed = parse_manifest_text("\n".join(lines))
@@ -6128,6 +6151,14 @@ def test_the_manifest_line_cite_matcher_catches_every_spelling(prose):
     # half of this guard, so these are pinned here beside the ones that caught it.
     ("the entry moved 103 times", False),
     ("the block is 145 characters wide", False),
+    # ⛔ THE HEAD CONTRACT IS DIGIT-HEAVY, NOT "A HEAD" — the comment above `_BARE_NUM`
+    # claims the narrower thing, and these four measured shapes are the proof in both
+    # directions: a head that OPENS with 3+ digits is refused, one that opens with a
+    # letter (or with two digits) is not, because `_NUM` needs `\d{3,}`.
+    ("the entry sat at head `9828250732`", True),
+    ("the entry sat at head 12345678", True),
+    ("the entry sat at head `1a0ace24`", False),
+    ("the entry sat at head `e59e6076`", False),
 ])
 def test_the_bare_number_arm_catches_a_line_number_and_a_head_but_not_a_count(prose, should_match):
     """`_BARE_NUM` catches a bare line number OR head, and no count or decimal.
@@ -6160,6 +6191,14 @@ def test_the_bare_number_arm_catches_a_line_number_and_a_head_but_not_a_count(pr
     # a bypass: a bare cite with NO other file named, and the history-trimmed number.
     ("The entry itself sat at `:9987` at head `1a0ace24`.", [":9987`", "9987"]),
     ("the manifest entry read 9943 before the last re-derivation", ["9943"]),
+    # ⛔ THE EXEMPTION MUST NOT SWALLOW THE MANIFEST'S OWN NAME — measured: this line
+    # returned [] (and the strict arm cannot see it either, because the bare form has
+    # no separator), so the hole the arm exists for was re-opened by the fix for the
+    # false red. `_MANIFEST_FILE` is subtracted before the other-file test.
+    ("The `carve_out:` entry sits in `config/ci-surfaces.yml` and read 9943 before "
+     "the last re-derivation.", ["9943"]),
+    ("The `carve_out:` entry in `config/ci-surfaces.yml` moved to 9987 this week.",
+     ["9987"]),
     # ⚠️ THE RESIDUAL, pinned so it cannot widen silently: a bare `:NNNN` on a line
     # that also names another file is NOT seen. That is the deliberate cost of the
     # exemption above — nothing mechanical can tell a continuation of that file's cite
