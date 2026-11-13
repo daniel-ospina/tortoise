@@ -477,7 +477,7 @@ just E1b.
 **E2a, the value-bearing class (14 units).** The gold has no `state_value` kind, so the class is
 **derived by rule, not by hand**: a planted unit is value-bearing iff its `verbatim_anchor` contains a
 digit (**16** units), **minus two exclusions**, each argued against `STATE_VALUE_CARVE_OUT`'s own text
-(`tortoise/extractor_v2.py:325-341`, the constant's own extent, which keeps *"measurements,
+(`tortoise/extractor_v2.py:327-343`, the constant's own extent, which keeps *"measurements,
 deadlines/freezes, thresholds/TTLs, versions, and counts"* and drops only *"ids, hashes, and
 ephemeral counters"*):
 
@@ -2163,9 +2163,9 @@ the condition; the gate reads the declaration below instead of asserting eight.
 
 ### 11.1 The finding, and what it is not
 
-`_collect_classify_items` (`tortoise/extractor_v2.py:11857-11879`) collects only candidates whose kind
+`_collect_classify_items` (`tortoise/extractor_v2.py:12682-12704`) collects only candidates whose kind
 is **missing or the `unclassified` sentinel**. Both classify passes are gated on that list being
-non-empty — `if items:` at `:14276` (the S2 pass) and `:14429` (the post-S4 pass). So S2.3 has work **iff the S2 map left
+non-empty — `if items:` at `:15101` (the S2 pass) and `:15254` (the post-S4 pass). So S2.3 has work **iff the S2 map left
 something untyped** — and that is a property of the candidate set, not of the pipeline's health. A
 corpus whose map assigns a concrete kind to every candidate legitimately idles the pass.
 
@@ -2209,7 +2209,7 @@ evidence or its evidence issue.
    run log, so making a step conditional is a reviewed edit to a hash-pinned artefact rather than a
    lane's local choice. A log whose declaration the frozen record does not confirm is **refused**.
 
-**Why (2) is a witness and not a loophole.** The extractor's fail-open `except` (`:14289`, `classify(S2) failed` / `:14440`, `classify(union) failed`) leaves
+**Why (2) is a witness and not a loophole.** The extractor's fail-open `except` (`:15114`, `classify(S2) failed` / `:15265`, `classify(union) failed`) leaves
 the *same* empty `s2`/`union` block as an idle pass — `#9823` measured that. Accepting a bare empty
 block would therefore hand a **crashed** classify pass the same verdict as a pass with nothing to do,
 which is the fail-open shape a gate may not have. The failure is visible: the extractor appends
@@ -2263,7 +2263,7 @@ to answer.
 > `tortoise/extractor_v2.py` (28 of it above the `#10360` read-back below), so §10.23's block
 > and §10.24's block are both records of the heads they name. That includes the note below
 > that calls `:10508` "still live": at this head `:10508` is a comment line and the
-> read-back assignment is `:10536`, which §10.28 re-points.
+> read-back assignment is `:11361`, which §10.28 re-points.
 >
 > ⛔ **Superseded for the merged tree by §10.24** — the §11 cite-block numbers below are a faithful
 > record of the head this entry names, and §10.24 carries the live values for those cites in this

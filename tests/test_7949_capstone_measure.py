@@ -13773,7 +13773,13 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # `:10891` → `:11362` — the same **+15** §10.15 records for the collector.
     # Measured off the MERGED tree (`grep -n 'hasPart' tortoise/extractor_v2.py`
     # → `:1764`, `grep -n 'nothing in this tree consumes'` → `:11362`).
-    assert "`hasPart`" in text and "`tortoise/extractor_v2.py:1771`" in text, (
+    # ⛔ DERIVED, not typed: the relations schema line is the one line carrying both the
+    # `hasPart` spelling and the predicate allowance, so a merge that moves it moves the
+    # cite too. (Typed `:1771` here was correct at one head and two lines stale at the next.)
+    _schema_cite = next(
+        n for n, line in enumerate(ext, 1)
+        if "hasPart" in line and '"predicate":' in line)
+    assert "`hasPart`" in text and f"`tortoise/extractor_v2.py:{_schema_cite}`" in text, (
         "the record must cite the relations schema where `hasPart` is spelled")
     # ⛔ THE ADJACENCY IS DELIBERATELY NOT PINNED — recorded here, which is what the review of
     # the forward merge (#11519) asked for as the alternative to restoring it. Three forms were
@@ -13827,8 +13833,8 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     assert all("[^[:alnum:]_]" in _c and "[^[:alnum:]_.]" not in _c for _c in _all_a1), (
         "EVERY statement of the A1 proof command must use the non-dot-excluding class — a "
         f"`[^[:alnum:]_.]` copy is blind to a receiver-qualified call (found {_all_a1})")
-    assert "hasPart" in ext[1771 - 1] and '"predicate":' in ext[1771 - 1], (
-        f"extractor_v2.py:1771 reads {ext[1771 - 1].strip()[:90]!r}, not the schema "
+    assert "hasPart" in ext[_schema_cite - 1] and '"predicate":' in ext[_schema_cite - 1], (
+        f"extractor_v2.py:{_schema_cite} reads {ext[_schema_cite - 1].strip()[:90]!r}, not the schema "
         "line that spells the predicate allowlist")
     assert "`extractor_v2.py:11524`" in text, (
         "the record must cite the comment that says nothing consumes the channel")

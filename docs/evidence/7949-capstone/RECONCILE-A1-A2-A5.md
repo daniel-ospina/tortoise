@@ -67,7 +67,7 @@ landing from a branch. **So: an ancestry `1` and a `--all` grep both fail to ans
 ⚠️ **A fourth landing arrived between the base and this record's merge — and it is why one recipe below
 no longer prints its base number.** `#11205` (S5 Job 1, `316a572ce2`, 2026-11-06T22:40:32Z) added an
 **entity↔entity `relations` channel** to the extractor contract, whose predicate allowlist includes
-`hasPart` (`tortoise/extractor_v2.py:1771`). It does **not** discharge A1: it is **transport only** —
+`hasPart` (`tortoise/extractor_v2.py:1773`). It does **not** discharge A1: it is **transport only** —
 nothing in `tortoise/` consumes `result["relations"]` (`extractor_v2.py:11524`, and
 `git grep -n 'result\["relations"\]' -- tortoise/` prints that comment and no consumer at all), and
 materialising them as Object→Object edges is **`#11237`** (OPEN). ⛔ **FALSE in this record's merged
