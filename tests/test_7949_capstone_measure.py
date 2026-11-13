@@ -5153,11 +5153,12 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # whole sentence's three numbers, so a re-derivation of one cannot leave
         # its neighbours behind the way it did at `a08f7bce3d`.
         ("RECONCILE-A1-A2-A5.md", "`TortoiseSDK._extract_session_v2` at", (
-            # 17974 -> 18728: #12060 adds its own lines to sdk.py above this call,
-            # and every forward merge of `origin/main` (`1f28d107cf`, `c7499ac7a7`
+            # 17974 -> 18728 -> 18806: #12060 adds its own lines to sdk.py above this
+            # call, and every forward merge of `origin/main` (`1f28d107cf`, `c7499ac7a7`
             # carrying #12112/#12111, then `9828250732`) moved the region again, so
-            # every number in this table moved with them. Re-derived off THIS merged
-            # tree (`grep -nF 'relation_write = apply_relation_edges(' tortoise/sdk.py`),
+            # every number in this table moved with them — `18728` read at `14f96b7b3b`
+            # and again at `d571adef87`, `18806` read on THIS merged tree. Re-derived off
+            # THIS tree (`grep -nF 'relation_write = apply_relation_edges(' tortoise/sdk.py`),
             # never carried forward from either side. The anchors are unchanged —
             # that is the point of keying a row on the symbol.
             ("18806", "relation_write = apply_relation_edges("),
@@ -12304,10 +12305,12 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         # cites and only THREE are held (main's enumeration, re-measured on this tree at this
         # merge: 9 found, matching this list exactly). Held: `identity_hold.py:125` and
         # `tortoise/value_gate.py:81` (`_cite` loop below) and `sdk.py:18000-18024` (the count-3
-        # range arm — ⛔ NOT `17987-18001`: that is `main`'s numbering, 13 lines short, because
-        # this branch inserts 13 lines above the seam; the record's §2 and the range arm both
-        # name 18000-18024, and re-deriving on `main` instead of on the MERGED tree is how the
-        # wrong pair got written here once) — re-staling each inside §2 reds. UNHELD: `extractor_v2.py:1154`, `:8880`,
+        # range arm; ⛔ NOT `17987-18001`, which is `main`'s pair — the START moved +13 (13
+        # lines inserted above the seam) but the END moved +23 (a further 10 inserted INSIDE
+        # the range, `@@ -17989,0 +18003,10 @@`), so offsetting one endpoint misses the other
+        # and lands on `try:`; the arm reds all three of its asserts for it. Re-derive BOTH on
+        # the MERGED tree — measuring on `main` is how the wrong pair got written here once)
+        # — re-staling each inside §2 reds. UNHELD: `extractor_v2.py:1154`, `:8880`,
         # `:9617`, `:11731-11732`, and the `research-brief.md` / `02-research-brief.md` cites.
         # ⛔ Only ONE of those — `extractor_v2.py:1154` — is named by this file's SCOPE paragraph
         # (the `⛔ SCOPE` block at the top of this docstring; cited by SYMBOL, not by a line
