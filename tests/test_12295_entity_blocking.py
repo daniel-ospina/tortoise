@@ -114,15 +114,14 @@ def test_the_basename_gate_is_TWO_SIDED_and_each_side_alone_can_open_it():
     """Pins `mention_path or is_path_shaped(cand_name)` as a DISJUNCTION.
 
     ⛔ MEASURED, and this test is the reason it exists: no pre-existing fixture
-    discriminates the two operands. The fixtures that reach the basename GATE all
-    have BOTH sides path-shaped (`"api/config.py"` vs `"src/core/config.py"` above,
-    `"lib/config.py"` vs `"src/config.py"` below), so `and` and `or` agree on every
-    one of them; the fixtures that do not (`"12295"` vs `"#12295"`, `"ab"` vs a
-    stored fold) never reach that gate at all. Reverting the `or` to the `and` that
-    `attach_keys`' docstring used to describe therefore left the entity suite green
-    (measured: 215 passed with this test deselected), and so did dropping EITHER
-    operand alone — so the docstring fix that corrected that wording was unpinned, in
-    a PR whose subject is pins.
+    discriminates the two operands. The fixtures the gate DECIDES on (the two
+    `config.py` pairs below) have BOTH sides path-shaped, so `and` and `or` agree on
+    them; the rest of the suite short-circuits earlier or fails the gate on both
+    readings alike. Reverting the `or` to the `and` that `attach_keys`' docstring
+    used to describe therefore left the entity suite green, and so did dropping
+    EITHER operand alone — so the docstring fix that corrected that wording was
+    unpinned, in a PR whose subject is pins. ⛔ No COUNT is quoted for that: the
+    suite grows, and a number here outlives the run that produced it.
 
     The two cases below are one-operand each, so a per-OPERAND mutation reds one
     specific case:
