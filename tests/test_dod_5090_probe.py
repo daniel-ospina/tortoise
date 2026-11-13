@@ -8504,24 +8504,32 @@ _MIN_MODULES = {"tortoise": 100, "tools": 50, "tests": 500}
 
 
 class _JoinedKey:
-    """An F-STRING dict key, compared by the source CPython will compile.
+    """An F-STRING dict key that CARRIES a placeholder, compared by its source.
 
     Two byte-identical f-string keys are ONE key at runtime for any referentially
-    transparent expression (shown by `ruff`'s `F601`, measured: `{f"a": 1, f"a": 2}`
-    and `{f"{x}": 1, f"{x}": 2}`), and the placeholder-free form is constant-folded
-    by CPython, so it collides with itself for the same reason a `Constant` does.
+    transparent expression (shown by `ruff`'s `F601`, measured:
+    `{f"{x}": 1, f"{x}": 2}`), and `ast.unparse` normalises quoting, so `f"{x}"` and
+    `f'{x}'` are one key here as they are at runtime.
     ⛔ The transparency qualifier is MEASURED, not caution: `c = iter(["a", "b"]);
     D = {f"{next(c)}": 1, f"{next(c)}": 2}` builds `{'a': 1, 'b': 2}` — two DISTINCT
     keys — while this arm reports a duplicate. That is a false RED, never a false
     PASS, and `ruff 0.16.4 --select F601` flags the same shape (verified), so the
     guard is not weaker than the lint it backs; skipping impure JoinedStrs would
-    diverge from the oracle, so the residual is stated instead. `ast.unparse`
-    normalises quoting, so `f"a"` and `f'a'` are one key here as they are at runtime.
+    diverge from the oracle, so the residual is stated instead.
 
-    It is deliberately NOT equal to a plain `Constant`: `{f"a": 1, "a": 2}` IS one
-    key at runtime, but proving that needs evaluation — the guess this function
-    refuses — and `ruff` does not flag it either (measured), so matching the lint is
-    not a hole of the guard's own.
+    ⛔ THIS CLASS IS REACHED ONLY BY A PLACEHOLDER-BEARING F-STRING. A placeholder-free
+    one (`f"a"`, `f""`) is FOLDED to the plain `str` key CPython compiles it to,
+    inside `_constant_key_value` — and that distinction is the difference between a
+    FALSE PASS and a caught duplicate. `{f"a": 1, "a": 2}` IS one key at runtime
+    (`{'a': 2}`), it needs NO evaluation to prove (CPython has already dropped the
+    `FormattedValue`s, so the key is the `str` constants joined in order), and `ruff
+    0.16.4` does not flag that CROSS-FORM pair (measured; it flags only the
+    same-source `{f"a": 1, f"a": 2}`) — so an arm that refused to compare it caught
+    nothing on the one shape whose only other catcher can be a `noqa` on the
+    survivor, while reading as a deliberate limit. The earlier text here said proving
+    it "needs evaluation"; that was FALSE, and it is why the false PASS survived a
+    review round. Only a PLACEHOLDER-BEARING f-string genuinely needs evaluation to
+    be equated with a `Constant`, and that is the comparison refused here.
     """
     __slots__ = ("text",)
 
@@ -8556,18 +8564,35 @@ def _constant_key_value(node: ast.expr) -> tuple[bool, object]:
     `Constant`-only reading would skip the class, and a skipped duplicate is one that
     no lane catches at all when the survivor carries a `noqa` marker.
 
-    An F-STRING key is read too (`_JoinedKey`): the same argument applies, and the
-    arm was MEASURED missing by a fresh review — the scan reported `[]` where
-    `ruff --select F601` reported a duplicate, i.e. a FALSE PASS inside the guard
-    whose whole justification is the `noqa`-suppressed survivor lint cannot see.
+    An F-STRING key is read too, in the two arms its own AST separates:
+
+      * PLACEHOLDER-FREE (`f"a"`, `f""`) is folded to the `str` key CPython compiles it
+        to, so `{f"a": 1, "a": 2}` — one key at runtime, `{'a': 2}` — is caught. This
+        FOLD is the repaired arm: the scan used to answer `[]` for it, justified by a
+        claim that proving the equality "needs evaluation". That claim was FALSE (the
+        `ast` has no `FormattedValue` left to evaluate) and `ruff 0.16.4 --select F601`
+        does not flag the cross-form pair either, so the guard was WEAKER than nothing
+        on it: a FALSE PASS nobody else caught.
+      * PLACEHOLDER-BEARING (`f"{x}"`) is compared by SOURCE (`_JoinedKey`), because
+        equating that with a `Constant` genuinely does need evaluation. The same-source
+        duplicate was MEASURED missing by a fresh review — the scan reported `[]` where
+        `ruff --select F601` reported a duplicate.
     """
     if isinstance(node, ast.Constant):
         return True, node.value
     if isinstance(node, ast.JoinedStr):
-        # `ast.unparse` normalises quoting, so `f"a"` and `f'a'` are ONE key here as
-        # they are at runtime. A JoinedStr never equates to a plain `Constant` (see
-        # `_JoinedKey`) — comparing those needs evaluation, and `ruff` does not flag
-        # `{f"a": 1, "a": 2}` either (measured).
+        # A placeholder-free f-string is a CONSTANT FOLD, not a computation: `ast` has
+        # already removed every `FormattedValue`, so the key is the `str` constants
+        # joined in order. Reading it is the difference between catching
+        # `{f"a": 1, "a": 2}` (`{'a': 2}` at runtime, and NOT flagged by `ruff`) and
+        # missing it.
+        if all(isinstance(v, ast.Constant) and isinstance(v.value, str)
+               for v in node.values):
+            return True, "".join(v.value for v in node.values)
+        # A placeholder-bearing f-string cannot be equated with a `Constant` without
+        # evaluating it (see `_JoinedKey`), so it is compared by SOURCE — and two
+        # byte-identical sources are one key for a referentially transparent
+        # expression, which is exactly what `ruff` reports.
         return True, _JoinedKey(ast.unparse(node))
     if isinstance(node, ast.Tuple):
         values = []
@@ -8600,10 +8625,12 @@ def _duplicate_constant_key_sites(
 
     Only LITERAL keys can be compared without evaluating anything: a computed key
     (`SOME_NAME`) is not a declaration this can read, and guessing would report a
-    duplicate that is not one. An F-STRING key is the one exception, and it is not a
-    guess: two byte-identical f-string sources are ONE key for a referentially
-    transparent expression (`_JoinedKey`; an impure one is a stated false-RED residual
-    there, and `ruff` shares it), which is also exactly what `ruff`'s `F601` reports.
+    duplicate that is not one. An F-STRING key is read in its two arms, and neither is
+    a guess: a PLACEHOLDER-FREE one (`f"a"`, `f""`) is the `str` constant CPython
+    folds it to, and a PLACEHOLDER-BEARING one is compared by SOURCE — two byte-identical
+    sources are ONE key for a referentially transparent expression (`_JoinedKey`; an
+    impure one is a stated false-RED residual there, and `ruff` shares it), which is
+    also exactly what `ruff`'s `F601` reports.
     `**splat` in a
     literal parses as a `None` entry in
     `node.keys`, not a Constant, so it is skipped rather than mistaken for the key
@@ -8612,10 +8639,14 @@ def _duplicate_constant_key_sites(
     these roots, 308 of them fully literal).
 
     ⚠️ Still outside this population, stated so it is not mistaken for a total: a
-    COMPUTED key (`SOME_NAME`), an f-string key compared against a DIFFERENT expression
-    or against a plain literal (`{f"a": 1, "a": 2}` is one key at runtime, but proving
-    it needs evaluation, and `ruff` does not flag it either — measured), any tuple
-    containing one, and a key built by an operator outside `USub`/`UAdd`.
+    COMPUTED key (`SOME_NAME`), a PLACEHOLDER-BEARING f-string compared against a
+    DIFFERENT expression or against a plain literal (`{f"{x}": 1, "{x}": 2}` is one key
+    only if `x` is referentially transparent, which is the evaluation refused here),
+    any tuple containing one, and a key built by an operator outside `USub`/`UAdd`.
+    ⛔ The PLACEHOLDER-FREE cross-form pair, `{f"a": 1, "a": 2}`, USED to be listed
+    here as "needs evaluation" — that was FALSE and it hid a duplicate no other
+    instrument reported (see `_constant_key_value`); it is IN this population and is
+    pinned by its own case below.
 
     ⚠️ `filename` is threaded into `ast.parse` so a `SyntaxError` carries the module's
     REAL path rather than `<string>` — it does NOT affect any message. The
@@ -8705,21 +8736,33 @@ def test_the_duplicate_key_detector_catches_a_duplicate():
     # An F-STRING key is a gap a fresh review MEASURED in this guard: the scan returned
     # `[]` where `ruff --select F601` reported a duplicate, so the guard was WEAKER than
     # the lint it backstops — a false PASS on the one shape whose only other catcher can
-    # be a `noqa` marker on the survivor. Two byte-identical f-string sources are one
-    # key for a referentially transparent expression, so comparing the compiled source
-    # is evidence, and
-    # `ast.unparse` normalises the quoting (`f"a"` and `f'a'` are one key, as at runtime).
+    # be a `noqa` marker on the survivor.
+    # A PLACEHOLDER-FREE f-string FOLDS to the plain `str` key CPython compiles, so `f"a"`
+    # and `f'a'` are ONE key and render as the `str` they are rather than as a
+    # `_JoinedKey`. This arm used to refuse the fold on a FALSE claim that proving the
+    # equality "needs evaluation" — `ast` has no `FormattedValue` left to evaluate, and
+    # `ruff 0.16.4` does not flag the cross-form pair, so nothing else caught it.
     assert _duplicate_constant_key_sites('D = {f"a": 1, f"a": 2}\n') == [
-        (1, 1, "f-string key f'a'")]
+        (1, 1, "'a'")]
+    assert _duplicate_constant_key_sites("D = {f\"a\": 1, f'a': 2}\n") == [
+        (1, 1, "'a'")]
+    assert _duplicate_constant_key_sites('D = {f"": 1, "": 2}\n') == [(1, 1, "''")]
+    # ⛔ …and the CROSS-FORM pair specifically, which is the shape with NO other catcher
+    # at all: `{f"a": 1, "a": 2}` IS `{'a': 2}` at runtime and `ruff --select F601` does
+    # NOT flag it (measured on 0.16.4), so refusing it was a false PASS reading as a
+    # deliberate limit. Pinned so the wording cannot drift back.
+    assert _duplicate_constant_key_sites('D = {f"a": 1, "a": 2}\n') == [(1, 1, "'a'")]
+    # A PLACEHOLDER-BEARING f-string is compared by SOURCE instead, because equating it
+    # with a `Constant` genuinely needs evaluation: two byte-identical sources are one
+    # key for a referentially transparent expression, and
+    # `ast.unparse` normalises the quoting (`f"{x}"` and `f'{x}'` are one key, as at runtime).
     assert _duplicate_constant_key_sites('D = {f"{x}": 1, f"{x}": 2}\n') == [
         (1, 1, "f-string key f'{x}'")]
-    assert _duplicate_constant_key_sites("D = {f\"a\": 1, f'a': 2}\n") == [
-        (1, 1, "f-string key f'a'")]
-    # …while a DIFFERENT expression is a different key, and an f-string never equates to
-    # a plain literal: both need evaluation to compare, which is the guess this refuses
-    # (`ruff` reports neither — measured, so this is not a hole of the guard's own).
+    # …while a DIFFERENT expression is a different key, and a placeholder-bearing
+    # f-string never equates to a plain literal: both need evaluation to compare, which
+    # is the guess this refuses (`ruff` reports neither — measured, so this is not a
+    # hole of the guard's own).
     assert _duplicate_constant_key_sites('D = {f"{x}": 1, f"{y}": 2}\n') == []
-    assert _duplicate_constant_key_sites('D = {f"a": 1, "a": 2}\n') == []
     # ⛔ The one direction this arm gets WRONG, pinned so the wording cannot drift back
     # to "whatever the expression is": an IMPURE expression is re-evaluated per key, so
     # two byte-identical sources build two DISTINCT keys — and this reports a duplicate.
