@@ -42,7 +42,7 @@ import sys
 import tempfile
 import tokenize
 import types
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 import yaml
@@ -4818,14 +4818,14 @@ _RANGE_NUMS = (r"(?<![\d,-])\d{1,5}(?:,\d{3})*\s*[-–—]\s*\d{1,5}(?:,\d{3})*"
 _LINE_CITE = re.compile(rf"{_SEP}\s*{_WRAP}{_NUM}{_WRAP}")
 
 #: ⛔ THE BINDING MUST INCLUDE THE NAME THE DOCUMENT ACTUALLY USES. The document
-#: names the manifest BOTH ways: ``config/ci-surfaces.yml`` in the row's first
-#: column and *"`surfaces:` sits ABOVE `carve_out:` in the manifest"* on the claim's
-#: own sentence. Binding only the literal FILENAME left the doc-wide arm blind to
+#: names the manifest BOTH ways: ``config/ci-surfaces.yml`` in the intro prose and in
+#: another row's second cell, and *"the manifest"* on the claim's own sentence (whose
+#: row carries the filename NOWHERE — measured). Binding only the literal FILENAME left the doc-wide arm blind to
 #: the sentence's own vocabulary: appending *"the `carve_out:` entry the table above
 #: names sits on line 9987 of the manifest at this head"* was GREEN, while the same
 #: sentence with the literal filename was RED. That is the exact rot this arm
 #: removes, re-armable in the document's own words — measured, then closed here.
-_MANIFEST = r"(?:ci-surfaces\.yml|the\s+manifest)"
+_MANIFEST = r"(?:ci-surfaces\.ya?ml|the\s+manifest)"
 #: ⛔ THE SECOND ARM NEEDS `(?<![\w.])` IN FRONT OF ITS SEPARATOR. Without it
 #: ``sdk.py:9612`` — a legit cite of ANOTHER file that merely happens to sit before
 #: the manifest's name — matched as a manifest cite, and the pin accused the author of
@@ -5072,6 +5072,16 @@ def _stray_entry_finding(sentence: str, entry: str) -> str | None:
     was GREEN while the same name BARE was RED. The match is on the name
     anywhere, and it exempts exactly one thing: THIS module, whose basename the
     sentence cites beside the clause.
+
+    ⚠️ RESIDUAL, stated rather than discovered later: this arm refuses a TRUE
+    mention too. Appending *"Unlike `bench/test_smoke_embedded.py`, which is also
+    embedded-only."* to the claim row is RED, and that file IS a genuine
+    `carve_out:` entry (it is one of the block's own rows) — so the sentence is
+    refused for explaining itself accurately. Scoping the arm to names absent from
+    the block would fix it and would also let a second entry through whenever the
+    block and the sentence agreed, which is the state the claim exists to forbid:
+    the pin cannot read a sentence's intent. One filename on that sentence is the
+    rule; a sibling belongs in prose, not on the claim.
     """
     if entry not in sentence:
         return None
@@ -5931,13 +5941,17 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     ENTRY = "test_pack_logic_writeprobe_11083.py"
 
     def _is_capstone(name: str) -> bool:
-        """The document's four `durations:` globs, plus the entry ITSELF by equality.
+        """The document's four `durations:` globs, plus the entry ITSELF by basename.
 
-        Equality rather than a fifth/sixth marker: `pack_logic`/`writeprobe` are not
-        part of the document's definition, and using them over-matched a registered
-        sibling (`test_pack_logic_census_11083.py`) into a false block.
+        The basename, not the raw string: a PATH-PREFIXED entry is this file's own
+        convention (70 rows spell theirs that way, e.g. `- bench/test_smoke_embedded.py`
+        in `carve_out:`), and comparing `name == ENTRY` let
+        `- tests/test_pack_logic_writeprobe_11083.py` sit in `slow_files:` with the
+        document's "hold none" FALSE and the pin GREEN — and the same form in
+        `carve_out:` produced a false "it was deleted, renamed, or moved". The globs
+        already survive a prefix, being substrings.
         """
-        return name == ENTRY or any(g in name for g in capstone_globs)
+        return PurePosixPath(name).name == ENTRY or any(g in name for g in capstone_globs)
 
     # ⛔ PARSED ONCE. One strict parse is ~0.8 s on a shared cell; asking
     # `_section_entries` per section parsed it once per section (three parses), and
@@ -6001,7 +6015,10 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
                 f"into a surface block moves this entry, and `03-test-design.md` "
                 f"states it. If the manifest is reordered, the paragraph that "
                 f"explains the rot is now false; re-derive it, do not delete this")
-        carve = [e for e in carve_all if _is_capstone(e)]
+        # …compared by BASENAME, so a path-spelled row (`- tests/<entry>`, this file's
+        # own convention in 70 rows) is the same entry and not a false "different"
+        # capstone file.
+        carve = [PurePosixPath(e).name for e in carve_all if _is_capstone(e)]
         if not carve:
             block_failures.append(
                 f"config/ci-surfaces.yml's `carve_out:` block holds NO capstone "
@@ -6065,7 +6082,23 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # because the doc arm only looked for the phrase, the entry name and a
         # cite. Reproduced before this arm existed. D2 closed the REPLACEMENT case
         # only; this closes the ADDITION case.
-        for needed in ("`uri_requiring:`", "`slow_files:`", "hold none"):
+        # ⛔ AND THE CLAUSE MUST NOT BE SATISFIED BY ITS OWN NEGATION. Three substring
+        # tests passed a sentence rewritten to "… `uri_requiring:` and `slow_files:`
+        # do NOT hold none", i.e. the document asserted the OPPOSITE of the tree with
+        # the pin GREEN — measured, then closed with a positive pattern. The pattern
+        # requires the two block names adjacent to `hold none` with no negation
+        # between them, which is the shape the sentence actually uses.
+        # The two names, joined by `and`/`,`/`/` and nothing else, then `hold none`:
+        # any intervening word is where a negation lives.
+        _HOLD_NONE = r"`uri_requiring:`\s*(?:and|,|/)\s*`slow_files:`\s*hold none"
+        if not re.search(_HOLD_NONE, doc_hits[0]):
+            block_failures.append(
+                "03-test-design.md's `carve_out:` sentence does not state, POSITIVELY, "
+                "that `uri_requiring:` and `slow_files:` hold NONE — either the clause "
+                "is gone, or it is negated (\"do NOT hold none\"), which asserts the "
+                "opposite of the tree. The pin checks the tree half of that claim; a "
+                "sentence that denies it is a claim the pin can no longer check.")
+        for needed in ("`uri_requiring:`", "`slow_files:`"):
             if needed not in doc_hits[0]:
                 block_failures.append(
                     f"03-test-design.md's `carve_out:` sentence no longer carries "
@@ -6507,13 +6540,13 @@ def test_the_neighbour_population_includes_the_line_that_names_the_manifest_file
     POPULATION is not the same as yielding a finding, and only the second is the arm
     working.
     """
-    # ⛔ THESE THREE, not `` — 9987 lines into the manifest ``: the neighbour arm is
-    # deliberately UNIT-AWARE (`_bare_number_hits_unit_aware`), because a COUNT beside
-    # the manifest's name is ordinary prose this document writes. That `lines` spelling
-    # is a POSITION only when a positional TAIL follows, and it is the DOC-WIDE arm's
-    # `_POSITION_TAIL` alternative that catches it — measured, and asserted in the
-    # `_MANIFEST_CITE` spelling test instead of here, so neither arm claims the other's
-    # work. An ORDINAL is the spelling BOTH can see, which is why it leads.
+    # ⛔ THESE THREE, and the neighbour arm is STRICT here — it refuses a count beside
+    # the manifest's name as readily as a position, which is why `9987 lines` and
+    # `9987 rows` are asserted RED below rather than exempted. (An earlier cut of this
+    # comment claimed the arm was "deliberately UNIT-AWARE" and named a helper,
+    # `_bare_number_hits_unit_aware`, that no longer exists — stale text from the round
+    # that deleted the tail allow-list, and contradicting the assertions 20 lines on.
+    # An ORDINAL leads because it is the spelling every arm can see.)
     for line in (
             "Re-derived again: `config/ci-surfaces.yml` — its 9987th line at this head.",
             "`ci-surfaces.yml` holds that row, which read 9943 last week.",
