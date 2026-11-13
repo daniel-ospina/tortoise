@@ -5286,9 +5286,19 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # 9893 and `uri_requiring:` 10224, so 10019 is inside the section. The
         # identical text also sits at 6103 and 8534, which is what the 5th
         # element exists to refuse; the pair shows the two cases over
-        # `9828250732`'s 6082 / 8459 — 6103 is +21 (only the 2237 block is above
-        # it, this branch's 7522 one is not) while 8534 is +75 (both are, plus
-        # `main`'s 9150 line). ⚠️ Both of those are INDENTED sub-keys
+        # `9828250732`'s 6082 / 8459. Each insertion below is attributed to the
+        # LANDING COMMIT that made it (measured with `git diff -U0 <a> <b> --
+        # config/ci-surfaces.yml`), and its position is where that commit put it:
+        #   +8  @2725  `cd22562c24` (#12060)   → above BOTH twins
+        #   +6  @6721  `ba84fbfabf` (#11609)   → above the sdk twin only
+        #  +16  @7514  `e200623286` (#11926)   → above the sdk twin only
+        #  +13  @2237  `abf186f1109a` (the tip this merge brought in)   → above BOTH
+        #   +1  @9150  `abf186f1109a`           → BELOW both twins; it moves neither
+        #  +32  @7522  this branch's own block → above the entry and the sdk twin
+        # ⛔ So the FIRST twin reads 6103 = 6082 + 8 + 13 (only two of the six
+        # insertions are above it, which is why the two twins do not move
+        # together), and the sdk twin reads 8534 = 8459 + 8 + 6 + 16 + 13 + 32.
+        # ⚠️ Both of those are INDENTED sub-keys
         # (`core:` 2235, `sdk:` 8300) of `surfaces:`, so the resolver's
         # nearest-column-zero-key rule reports the PARENT: a cite onto 8534 refuses
         # with `sits in section 'surfaces:', not 'carve_out:'` — measured, so a
