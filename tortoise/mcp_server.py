@@ -3768,9 +3768,10 @@ def _public_filters(filters: Any) -> dict:
 #: (`tortoise/search_engine.py`, the `if not conditions` gate records
 #: `reason="empty_results"`), and `tortoise_search` slices at `limit`
 #: (default 10) with no total in the response. `operator` is the one type whose
-#: bare search lists its layer (the leg appends `n.is_operator = true`), and
-#: even that needs `limit` raised — which is why the generic advice looked
-#: plausible when this was written.
+#: bare search REACHES its layer directly (the leg appends
+#: `n.is_operator = true`) — but through a status-filtered view, and only for
+#: operators stated that way — and even that needs `limit` raised, which is why
+#: the generic advice looked plausible when this was written.
 _ENTITY_TYPE_REMEDY: dict[str, str] = {
     "operator": (
         "Enumerate it with tortoise_search(entity_type='operator', "
@@ -3780,12 +3781,13 @@ _ENTITY_TYPE_REMEDY: dict[str, str] = {
         "rows has no single-call read. It answers the CURRENT VIEW, not the "
         "label: the structural leg is status-filtered "
         "(`search_engine._STATUS_FILTERED_LABELS` includes `Point`), so a "
-        "terminally-stated operator is not returned. Reconciling a short "
-        "answer means two separate causes, not one: "
-        "tortoise_graph_overview(section='structure').operators counts "
-        "`is_operator = true OR op_type IS NOT NULL` over EVERY status, so it "
-        "also counts operators this leg cannot return at all (those carrying "
-        "only `op_type`) and operators a caller sees here as missing."),
+        "terminally-stated operator is not returned. A short answer therefore "
+        "has NAMED causes — that status filter, and operators carrying only "
+        "`op_type`, which this leg cannot see although "
+        "tortoise_graph_overview(section='structure').operators counts them "
+        "over EVERY status — and a SILENT one: the leg has a 500 ms driver "
+        "budget and a circuit breaker, and on either it answers [] with no "
+        "field reporting it."),
     "event": (
         "Enumerate it with tortoise_get_entity(None, type='events', "
         "limit=...) — reconcilable against the graph's own Event count — "

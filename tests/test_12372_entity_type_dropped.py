@@ -355,8 +355,12 @@ def _message_for(entity_type: str) -> str:
     return tortoise_query(entity_type=entity_type, offset=0, limit=5)["error"]
 
 
-def test_the_remedy_for_operator_is_the_call_that_lists_the_layer() -> None:
-    """`operator` is the one type a search CAN enumerate — with an explicit limit.
+def test_the_remedy_for_operator_names_the_search_with_its_limit() -> None:
+    """`operator` is the one type a search REACHES directly — with an explicit limit.
+
+    "Reaches", not "lists": the leg answers a status-filtered VIEW of operators
+    stated `is_operator = true`, so the remedy must bound the call and disclose
+    the view (the entry does; this test guards the bound half).
 
     `tortoise_search` defaults to `limit=10`, has no offset walk, and slices at
     `limit` (`sdk.py`: `result_ids = result_ids[:limit]`), returning a bare list
@@ -869,4 +873,26 @@ def test_no_remedy_names_a_tool_the_registry_has_retired() -> None:
     assert offenders == set(), (
         f"remedies naming retired tools (they answer only via the shim): "
         f"{sorted(offenders)}"
+    )
+
+
+def test_the_operator_remedy_names_the_silent_cause_too() -> None:
+    """A short answer has causes that are NOT population differences.
+
+    The structural leg runs under a 500 ms driver budget and a circuit breaker
+    (`tortoise/search_engine.py`: `runner_timeout = int(elevated_timeout_ms or
+    500)`, `except` -> `reason="query_failed"`, `_breaker_allow` ->
+    `reason="breaker_open"`), and BOTH answer `[]` with no field reporting it.
+    A message that enumerates only the two population causes tells a reconciler
+    to attribute the whole gap to them, which is the same false PASS this guard
+    removes, one level down. Fails on `500 ms` and `breaker`; a closed
+    enumeration of two causes reds it.
+    """
+    message = _message_for("operator")
+
+    assert "500 ms" in message, (
+        f"the remedy omits the leg's silent timeout: {message!r}"
+    )
+    assert "breaker" in message, (
+        f"the remedy omits the leg's silent breaker-open answer: {message!r}"
     )
