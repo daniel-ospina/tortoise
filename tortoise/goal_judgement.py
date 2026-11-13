@@ -863,6 +863,118 @@ def definition_boundary(sdk: Any, indicator_id: str) -> Any:
     return node.get(DEFINITION_BOUNDARY_PROP)
 
 
+#: Rows per keyset page of the readings read. It must stay under whatever
+#: ``RESULTSET_SIZE`` the server it is pointed at applies — and that is a
+#: DEPLOYMENT choice, not an engine constant. The docker image this repo pins
+#: declares ``FALKORDB_ARGS=… RESULTSET_SIZE 10000`` as an image ENV default
+#: (``docker image inspect falkordb/falkordb-server:v4.20.6``), which is what a
+#: container left on that default reports; a server whose args OMIT it — every
+#: ``tools/test_lane.py`` container — reports ``-1`` = NO CAP (measured:
+#: ``GRAPH.CONFIG GET RESULTSET_SIZE`` → ``-1``, and a 20 000-row ``UNWIND``
+#: returns all 20 000 rows, while the same query on an image-default container
+#: stops at 10 000). The local dev ``apps/graph-viz/docker-compose.yml:20`` pins
+#: 10000 explicitly; the HOSTED deployment passes no pin of its own — the server
+#: there is FalkorDB Cloud, reached through the ``FALKORDB_CLOUD_URI`` secret that
+#: ``entrypoint.sh`` resolves into ``TORTOISE_DB_URI`` (``fly.toml`` leaves that
+#: key empty on purpose) — and its effective value is NOT measured here. This
+#: constant sits ten times under the 10000 the image-default container applies
+#: (1000 vs 10000), and under no cap at all on a lane container (``-1``); the
+#: local dev compose service pins the same 10000. ⛔ ONE unbounded
+#: query is truncated BY THE SERVER in store order
+#: and says nothing about it — #4515's silent-truncation class (an UNPAGED read
+#: over ``RESULTSET_SIZE`` backs up silently partial and verifies GREEN), whose
+#: remedy is
+#: ``hosted_backup._paged_rows``. ⛔ A CAP PINNED BELOW THIS NUMBER IS **NOT**
+#: SILENT HERE: :func:`latest_readings` compares the rows it collected against an
+#: independent ``count(e)`` aggregate — the guard ``hosted_backup`` calls "the
+#: load-bearing" one, and the only shape a result-set cap cannot truncate to a
+#: lie, because it is ONE row — and RAISES rather than answering from the part it
+#: managed to read. ⛔ THE LOSS IS ARBITRARY BY INSTANT, WHICH IS THE POINT, and
+#: ``id(e)`` is CREATION order only while nothing has been deleted: the engine
+#: REUSES a freed node id (MEASURED on a FRESH lane graph, `graph ver 42006`:
+#: create A, B, C -> ids 0, 1, 2; delete the middle one and create D -> D takes
+#: id 1, the id that was freed — so the ids are relative to what the graph
+#: already held, and only the REUSE is the point). So a
+#: truncated tail costs whatever currently holds the HIGHEST LIVE ids, not the
+#: newest reading — and a backfilled row can be instant-OLD while landing last
+#: (MEASURED: create the 12.0/newest-instant reading first, an older one second,
+#: and truncation keeps the 12.0 while the guard reports the loss). The guard's
+#: honest guarantee is therefore narrower than "nothing was lost": it fires when
+#: the row COUNT comes back short of the count taken before the read (a create
+#: that reuses an id already paged past leaves the count equal — a CHANGED set is
+#: not a short one). It is fail-closed on "the answer would be taken from an
+#: incomplete set", never on "the newest reading is certainly gone" — the two are
+#: different claims and only the first is true.
+_READINGS_PAGE_SIZE = 1000
+
+
+def _newest_first_key(reading: Reading) -> tuple[int, Any, str]:
+    """Sort key for :func:`latest_readings` — by real INSTANT, never by bytes.
+
+    Total only when the third element differs (see "NOT TOTAL" below). It does
+    for every reading written through :meth:`TortoiseSDK.create_event`, whose
+    ``e.id`` is a non-empty opaque string, and distinct non-empty strings are
+    distinct under ``str``. It does NOT for an event written outside that path
+    with an ``id`` that is falsy, duplicated, or collides after ``str`` (``1``
+    beside ``"1"``) — the section below enumerates the shapes this rule
+    SUBSUMES, and the rule is what the scope is stated in rather than claimed.
+
+    ⛔ THE STORED STRING IS NOT THE ORDER (#12322). A graph holds the same slot
+    spelled ``Z``, ``+00:00``, date-only, and as the ingest producer's
+    ``2026/11/12 (Thu) 01:00``; their byte order DISAGREES with their instant
+    order — ``'…T05:00:00Z'`` sorts above ``'…T01:00:00-05:00'`` although the
+    second is an hour LATER, and ``'/'`` (0x2F) sorts above ``'-'`` (0x2D) at
+    index 4. Ordering a ``LIMIT``ed page by that string cropped the
+    instant-newest reading out of the page a judgement is computed from, and
+    ``compare()`` reported it as the current state: MEASURED at ``cd22562c24``,
+    a ``>= 10`` target went ``unmet`` from a page whose newest row held 5.0 while
+    the graph's newest reading held 12.0.
+
+    The measure is ``search_engine._created_sort_key`` — the repo's ONE notion of
+    "parseable instant" — imported lazily for the same reason
+    :func:`instant_at_or_after` does it: this module must not add a second
+    grammar. That key is ``(0, epoch)`` for a real instant and ``(1, string)``
+    for an unparseable value; the flag returned here INVERTS the bucket so the
+    caller can sort DESCENDING and still leave an undated reading LAST — an
+    unparseable as-of cannot PROVE it is recent, so it must never displace a
+    dated one. ``reading_id`` is the tie-break (the ``e.id DESC`` the query
+    itself used to carry), so two reads of an unchanged graph agree.
+
+    ⛔ NOT TOTAL, stated rather than implied — and stated as a RULE, because
+    enumerating the shapes is how this claim stayed wrong through two rounds.
+    The tie-break is ``str(reading_id or "")``, so the key is total exactly when
+    that third element DIFFERS; when two same-instant readings produce the same
+    string the sort falls back to a stable pass over ``rows``, i.e. ``id(e)``
+    ASCENDING — the OPPOSITE direction to the ``e.id DESC`` the pre-fix query
+    carried. ``str(id or "")`` is NOT injective on ids, and the reachable shapes
+    include (measured, not imagined) two readings that both lack an ``id``, two
+    distinct readings sharing one ``e.id`` — legitimate, and the reason no Python
+    de-duplication is layered on this read at all (see the projection note below
+    ``cypher``) — a stored ``id: 0`` beside one with no id (``0 or ""`` is
+    ``""``), and ``1`` beside ``"1"``. The rule subsumes all of them.
+
+    The result is still deterministic — two reads of an unchanged graph agree,
+    which is the property that keeps a judgement reproducible — but it is NOT
+    the documented direction, and that is the honest scope of the claim. It is
+    left as prose rather than repaired in the key because the two rows name the
+    SAME instant, so both orderings answer "newest first" equally: the defect is
+    the DIRECTION claim, not a wrong answer. What actually blocks the repair is
+    narrow and mechanical — ``Reading`` carries no field for ``id(e)``, so
+    restoring the documented direction means adding one (a public dataclass
+    field) plus its own pin. ⛔ It is NOT the v4/v6 ``id()`` hazard recorded on
+    ``hosted_backup.py``: that note is about an OPERAND edge case (``id(n) > -1``
+    returning no rows on v6) and says the mechanism there is "deliberately not
+    guessed at", while this read already orders and pages on ``id(e)`` in Cypher
+    (``ORDER BY id(e)``, ``id(e) >= $cursor``) — if integer ``id(e)`` ordering
+    were unsafe across cores, the FETCH would already be broken, not just the
+    tie-break.
+    """
+    from .search_engine import _created_sort_key
+
+    bucket, measure = _created_sort_key(reading.started_at)
+    return (1 if bucket == 0 else 0, measure, str(reading.reading_id or ""))
+
+
 def latest_readings(
     sdk: Any,
     indicator_id: str,
@@ -871,7 +983,44 @@ def latest_readings(
     limit: int = 100,
     since: Any = None,
 ) -> list[Reading]:
-    """The readings recorded about ``indicator_id``, newest first.
+    """Up to ``limit`` readings recorded about ``indicator_id``, newest first.
+
+    ⛔ ``limit`` IS A CAP, NOT A COURTESY (#11823 / #12322). It is applied to the
+    ORDERED list, so it keeps at most the ``limit`` most recent readings that
+    survive ``since`` — AT MOST, not exactly: a declared boundary can leave fewer,
+    and a caller reading a bare list cannot tell whether the bound was hit.
+    A caller that needs every reading must pass a bound it knows exceeds it;
+    the return shape carries no room for a ``truncated`` answer. A NEGATIVE bound
+    is refused rather than sliced: ``out[:-1]`` would silently drop the OLDEST
+    reading while reading as "everything", the same class of silent bound this
+    function exists to remove.
+
+    ⚠️ ``limit`` DOES NOT BOUND THE FETCH. The whole per-indicator history is
+    paged and parsed regardless of ``limit``, because the ordering cannot be
+    delegated to the server (see below) — so ``limit=1`` still costs ONE page
+    query when there is nothing to read (the loop always asks once; an empty
+    first page ends it) and ``ceil(N / _READINGS_PAGE_SIZE)`` page queries for
+    ``N > 0``, ONE MORE when ``N`` is an exact multiple of the page size (a FULL
+    page never ends the loop; only a short one does), PLUS the one aggregate
+    ``count(e)`` the truncation guard compares against. Instant PARSES are ``M`` —
+    the readings that SURVIVE ``since``, because the filter runs BEFORE the sort
+    (``M = N`` when no boundary is given) — and ONLY WHEN A BOUNDARY IS DECLARED
+    (``since is not None``) a further ``2N`` for it, because
+    ``instant_at_or_after`` parses BOTH operands per reading, boundary included.
+    The two cases therefore differ: **no boundary — ``M``, i.e. ``N``**, which is
+    what ``judge()`` pays whenever ``definition_boundary`` returns ``None``; **a
+    declared boundary — ``2N + M``**, which is ``3N`` when it drops nothing
+    (measured: 5 readings parse 15 times at a boundary that drops none, 14 at one
+    that drops one) and less when it drops more. Measured pin: 5
+    readings at a page size of 2 take 3 page queries. That is the price of a
+    correct order (:data:`_READINGS_PAGE_SIZE`); it is not a per-call constant.
+
+    "Newest first" is ordered by the INSTANT each reading names, using the
+    repo's one instant comparator (``search_engine._created_sort_key``) — never
+    by the stored string, whose byte order disagrees with instant order across
+    the spellings a graph actually holds. :func:`_newest_first_key` carries the
+    measurement and the pathology. A reading that names no parseable instant
+    sorts LAST, deterministically, because it cannot prove it is recent.
 
     A reading is an ``:Event`` wired ``(e)-[:aboutObject]->(indicator)`` — the
     #2782 value shape (a structural ``value`` + ``unit`` on the event, an
@@ -879,6 +1028,52 @@ def latest_readings(
     event kind defaults to ``measurement`` but is a parameter because the
     vocabulary for a machine reading is a downstream wave (#11081), and this
     module must not become the thing that decides it.
+
+    ⛔ THE RESULT IS ONE INDICATOR'S READINGS; NO PLAN ARM IS ANCHORED ON IT. The
+    query is ``MATCH (e:Event)-[:aboutObject]->(o) WHERE o.id = $indicator``, and
+    ``(o)`` carries no label, so ``o.id`` cannot be index-anchored. MEASURED on
+    the lane with ``GRAPH.EXPLAIN`` (core ``42006``), the leaf depends on whether
+    an ``eventKind`` predicate is present — and NONE of the three is a bounded
+    subgraph:
+
+    * PAGE arm, either way: ``Node By Label and ID Scan | (e:Event)`` — the
+      ``id(e) >= $cursor`` predicate anchors the label, then ``o.id`` is filtered.
+    * ``count(e)`` guard WITH a kind: ``Node By Label Scan | (e:Event)``.
+    * ``count(e)`` guard WITHOUT a kind (``event_kind=None`` / ``""``):
+      ``All Node Scan | (o)`` → ``Conditional Traverse | (o)->(e:Event)`` — it
+      touches EVERY node in the graph, not only the ``:Event`` label.
+
+    So every page scans the whole ``:Event`` label, and the guard scans either
+    that label or the entire node set: the cost above is per PAGE, not per
+    page-worth-of-rows, and an ``event_kind=None`` caller pays the worst arm.
+    Fixing that needs an anchored pattern (or an index the schema cannot express
+    for an unlabelled ``(o)``) and is filed as **#12351**; the correctness fix in
+    this function does not depend on it.
+
+    The rows are fetched by KEYSET PAGES on ``id(e)`` (see
+    :data:`_READINGS_PAGE_SIZE`) rather than in one query, so a server-side
+    result-set cap cannot silently truncate the set in store order (#4515; the
+    page-size PRECONDITION is stated at the constant). Ordering
+    happens in Python because no Cypher-computable instant key exists in this
+    codebase today (measured: no ``startedAtEpoch``/``startedAtMs`` property, and
+    no ``toInteger(substring(…))`` date arithmetic anywhere under ``tortoise/``),
+    so ANY server-side ``ORDER BY … LIMIT`` is a byte-ordered cut. Writing such a
+    key at ingest would store a HOST-DEPENDENT number for the producer's shape
+    (#11646's residual) — a separate, still-open decision — so ordering here is
+    the option that changes no stored byte.
+
+    ⚠️ THE ORDER INHERITS ``_created_sort_key``'s HOST DEPENDENCE for a zone-less
+    value. #3982 records that a date-TIME with no offset is read in the READER's
+    zone (ECMA-262 §21.4.3.2) while a date-only value is pinned to UTC midnight,
+    and #11646 measured the residual: the producer's ``2023/05/20 (Sat) 02:21``
+    lands on ``1684529460`` / ``1684549260`` / ``1684574460`` under
+    Asia/Kolkata / UTC / America/Los_Angeles — a **12.5 h** spread across those
+    three zones (26 h for the full UTC−12…UTC+14 offset range) — so its position
+    against a zoned row can differ between hosts. That divergence already existed
+    on the ``since`` path (:func:`instant_at_or_after`); this read makes it
+    visible in the ORDER too. It is a READ-time residual, not a stored byte: the
+    anchor decision is the one #11646 was closed with UNRESOLVED, and writing an
+    epoch at ingest would make the divergence durable instead of read-time.
 
     ``since`` EXCLUDES the readings taken before an instant — the definition
     boundary (#11926 capability 9). It is applied HERE rather than as a Cypher
@@ -899,33 +1094,187 @@ def latest_readings(
     ``mark_definition_change`` refuses to WRITE such a stamp and repairs one it
     finds, so this state is reachable only through an outside write.
     """
-    order = "coalesce(e.startedAt, e.createdAt, '')"
     where = "MATCH (e:Event)-[:aboutObject]->(o) WHERE o.id = $indicator"
-    params: dict[str, Any] = {"indicator": indicator_id, "lim": limit}
+    params: dict[str, Any] = {"indicator": indicator_id}
     if event_kind:
         where += " AND coalesce(e.eventKind, '') = $kind"
         params["kind"] = event_kind
+    # ⛔ NO INSTANT-ORDERED CUT HERE (#12322). A cut ordered by the stored string
+    # keeps rows by BYTE rank, and that string is not the instant (see
+    # `_newest_first_key`): the page kept the wrong readings and the judgement
+    # was computed from a stale one. The rows are instead fetched by KEYSET PAGES
+    # — deterministic, and immune to being SILENTLY truncated by the server's
+    # `RESULTSET_SIZE` (a single unbounded query is NOT: it returns a subset and
+    # says nothing), because the collected rows are compared with an independent
+    # `count(e)` and a short set RAISES — then ordered in Python with `limit`
+    # applied AFTER that ordering, so no bound can decide WHICH readings the
+    # judgement sees.
+    #
+    # ONE ROW PER (event, matched object NODE) PAIR — not per event — so `id(e)`
+    # alone is a sufficient cursor. MEASURED on a lane running core `graph ver
+    # 42006` (v4):
+    #   * TWO `aboutObject` edges from one event to the SAME indicator node:
+    #     `RETURN id(e), e.id` = **1 row**, while `RETURN count(r)` on the BOUND
+    #     spelling `-[r:aboutObject]->` = 2.
+    #   * TWO DISTINCT object nodes that SHARE `o.id`, one edge each from ONE
+    #     event: `count(e)` = **2** and the same projection returns **2
+    #     BYTE-IDENTICAL rows** (`[[2, 'b1', 9.0], [2, 'b1', 9.0]]`) — NOT
+    #     collapsed.
+    # So the engine IS scoping the pattern by node PAIR: two edges onto the SAME
+    # object node collapse, and identical projected tuples from two DIFFERENT
+    # object nodes do not. ⚠️ Do not reason from `count(*)` here: it counts PATH
+    # rows, and its answer depends on the spelling AND on how many object nodes
+    # share the id (measured 2 on both spellings on a two-object-node fixture,
+    # and 2-vs-1 on a single-object one), so it is not a stable discriminator —
+    # `count(r)` and an edge-derived projection are. What makes the cursor safe
+    # is therefore narrower and checkable: distinct events have distinct
+    # `id(e)`, and `>= last + 1` advances past EVERY copy of the last event, so
+    # a duplicate can never be left behind to be counted twice. ⛔ It can,
+    # however, be SKIPPED: when a duplicate group straddles a page boundary the
+    # second copy is never collected, so the row count comes back SHORT of
+    # `count(e)` and the truncation guard below fires on a graph that is not
+    # truncated (measured, page size 2, rows ascending `2,3,3,4`: page 1 is full
+    # at `[2,3]`, `cursor = 4` skips the second `3`, so 3 of 4 rows are
+    # collected). The rows it costs are COPIES of an event already returned,
+    # never a distinct reading — which is why that refusal is a false positive,
+    # and why its cause is named in the error instead of being left to a re-run
+    # that re-raises deterministically (#12511).
+    #
+    # ⛔ WHAT IS **NOT** SAFE: a repeated row means a `dwell` of N can be
+    # satisfied by ONE measurement counted N times, and the shipped projection
+    # does NOT exclude that — a duplicated `o.id` across two object nodes is
+    # enough (measured: 2 rows, one event, one reading). An edge-derived column
+    # (`id(r)`) is a SECOND route to the same defect, not the only one. Filed
+    # as **#12511** with the fixture; closing it needs a de-duplication keyed
+    # on `id(e)` (distinct events have distinct `id(e)`), not on `reading_id`.
+    #
+    # The doubled-edge test pins the OUTCOME (no reading LOST, none invented)
+    # for the graph the SDK's own ingest writes; it does not pin #12511's.
+    #
+    # ⛔ KEEP THE PROJECTION EDGE-FREE. If a later change returns `id(r)` or any
+    # other relationship property, duplicate edges become duplicate ROWS — and
+    # then a `dwell` of N can be satisfied by ONE measurement repeated. That is
+    # the SECOND route to the #12511 defect above, and the one a projection
+    # change would OPEN (the first — a duplicated `o.id` — needs no projection
+    # change at all, which is why closing that issue cannot be assumed to make
+    # this note redundant, and why this note cannot claim to be its only record;
+    # an earlier revision of this sentence did, ten lines below the block that
+    # contradicts it). The disambiguation still stands on its own: the
+    # note at ``hosted_backup.py:360-370`` is the #4515 "TOTAL OR FAIL" rule and
+    # its load-bearing aggregate, and the operand table at ``:372-400`` is about
+    # ``id(n) > -1`` disagreeing across the v4/v6 cores — an OPERAND edge case,
+    # not duplicated rows.
+    #
+    # No Python de-duplication is layered on top on purpose: keyed on
+    # `reading_id` it could DROP a distinct reading that legitimately shares an
+    # `e.id`.
     cypher = (
-        f"{where} RETURN e.id, e.value, e.unit, e.startedAt, e.createdAt "
-        f"ORDER BY {order} DESC, e.id DESC LIMIT $lim"
+        f"{where} AND id(e) >= $cursor "
+        "RETURN id(e), e.id, e.value, e.unit, e.startedAt, e.createdAt "
+        "ORDER BY id(e) LIMIT $batch"
     )
-    rows = sdk._get_proj().g.query(cypher, params=params).result_set
+    if limit < 0:
+        raise ValueError(
+            f"limit must be a non-negative cap, got {limit!r} — a negative slice "
+            "would drop the OLDEST reading and read as if nothing was bounded"
+        )
+    batch = int(_READINGS_PAGE_SIZE)
+    if batch < 1:
+        # ⛔ REFUSED BY NAME, because the count guard below would otherwise report
+        # it as something else: `LIMIT 0` returns an empty page on every page, so
+        # a MEASURED indicator would reach the truncation check and raise
+        # `RuntimeError` — "N row(s) never arrived" — blaming a server cap for a
+        # local misconfiguration, while an indicator with NO readings would return
+        # `[]`, which is the correct answer. The independent `count(e)` is what
+        # makes "nothing was ever measured" unreachable for a measured indicator;
+        # this guard's job is the remaining one — name the constant to fix.
+        raise ValueError(
+            f"_READINGS_PAGE_SIZE must be >= 1, got {_READINGS_PAGE_SIZE!r} — a "
+            "zero page size would make every measured indicator raise as if its "
+            "page had been truncated"
+        )
+    g = sdk._get_proj().g
+    # ⛔ THE INDEPENDENT COUNT, and it must be an AGGREGATE: #4515's incident is
+    # a truncated page set that reported nothing, and `tools/turn_parity_census.py`
+    # names the consequence ("silence, not an error"). One row, so a result-set
+    # cap cannot truncate it to a lie.
+    expected = int(g.query(f"{where} RETURN count(e)", params=params).result_set[0][0])
+    rows: list[Any] = []
+    cursor = 0
+    while True:
+        page = g.query(
+            cypher, params={**params, "cursor": cursor, "batch": batch}
+        ).result_set
+        # `if not page` FIRST (the order `_paged_rows` uses): an empty tail must
+        # end the loop, never reach `page[-1]`.
+        if not page or len(page) < batch:
+            rows.extend(page)
+            break
+        rows.extend(page)
+        # `>= last + 1`, never `> last`: the advance is strictly increasing (the
+        # loop always terminates), and it never compares a NODE id() negatively —
+        # that answers 0 rows on the v6 core (measured —
+        # `hosted_backup._paged_rows`, #9226).
+        cursor = int(page[-1][0]) + 1
+    if len(rows) < expected:
+        # A short page is indistinguishable from a last page by shape alone, and
+        # the rows it costs are whatever currently holds the highest LIVE ids
+        # (``id(e)`` is creation order only while nothing has been deleted — the
+        # engine reuses freed ids, measured), so the answer would be taken from an
+        # incomplete set. Refuse rather than answer from the part that arrived.
+        raise RuntimeError(
+            f"latest_readings read {len(rows)} of {expected} rows for indicator "
+            f"{indicator_id!r} at a page size of {batch} — {expected - len(rows)} "
+            f"row(s) never arrived. FIVE causes, "
+            "FOUR of which have a remedy: a server-side RESULTSET_SIZE pinned below "
+            "_READINGS_PAGE_SIZE (lower the constant below the cap), or the "
+            "matched set SHRANK after the count was taken — a concurrent DELETE "
+            "of a reading the count had already seen, OR a concurrent UPDATE that "
+            "moves a row OUT of the predicate (an ``eventKind`` change on the "
+            "event, or deleting/rewiring its ``aboutObject`` edge) — and those "
+            "take the same remedy, re-run, because no setting can prevent them — "
+            "or the INDICATOR ITSELF went away between the count and the pages: "
+            "it was DELETED, or its ``o.id`` was re-keyed, both of which empty "
+            "the predicate for EVERY row at once (the predicate matches on "
+            "``o.id``, so the indicator is the thing being matched). That fourth "
+            "cause is not a retry problem: the node the caller asked about is "
+            "gone or renamed, and a re-run does not raise — the count is 0 too, "
+            "so it answers an EMPTY reading set about a node that is no longer "
+            "the one asked for. Observe that rather than retry — OR the graph "
+            "carries a DUPLICATED ``o.id`` (two ``:Object`` nodes sharing "
+            "the indicator's id, each wired to the same events): a duplicate "
+            "group that straddles a page boundary has its second copy "
+            "skipped, so the count is SHORT by copies that were never a "
+            "distinct reading. That cause has NO remedy here — it is "
+            "deterministic, a re-run raises identically, and its root is tracked "
+            "as #12511. A CREATE that "
+            "lands mid-read is NOT among the five: it either reuses "
+            "an id already paged past (count unchanged) or appends one (count "
+            "short by nothing). Which rows a truncated tail costs is "
+            "whatever currently holds the highest live ids (``id(e)`` is creation "
+            "order only while nothing has been deleted, and a deleted row is "
+            "wherever it was), so the loss is arbitrary by instant: an answer "
+            "would be computed from an incomplete set, which is why this refuses "
+            "rather than returns."
+        )
     out: list[Reading] = []
     for row in rows:
-        raw = row[1] if len(row) > 1 else None
+        reading_id = row[1] if len(row) > 1 else None
+        raw = row[2] if len(row) > 2 else None
         out.append(
             Reading(
                 value=_num(raw),
                 raw_value=raw,
-                reading_id=row[0] if row else None,
-                unit=row[2] if len(row) > 2 else None,
-                started_at=(row[3] if len(row) > 3 else None)
-                or (row[4] if len(row) > 4 else None),
+                reading_id=reading_id,
+                unit=row[3] if len(row) > 3 else None,
+                started_at=(row[4] if len(row) > 4 else None)
+                or (row[5] if len(row) > 5 else None),
             )
         )
     if since is not None:
         out = [r for r in out if instant_at_or_after(r.started_at, since)]
-    return out
+    out.sort(key=_newest_first_key, reverse=True)
+    return out[:limit]
 
 
 def live_judgements(

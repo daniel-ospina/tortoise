@@ -11500,6 +11500,29 @@ def _db_value_source(key: str | None) -> str:
     return ("file" if _dotenv_file.applied_value(key, _path) == value else "env")
 
 
+def _ladder_deciding_key() -> str | None:
+    """The ladder key `config.daemon_db_target` reads FIRST — by ITS OWN test.
+
+    TRUTHINESS, not `.strip()`: the ladder is written `if uri:` /
+    `if os.environ.get("TORTOISE_DB_PATH"):`, so a WHITESPACE-ONLY value is a
+    DECIDING rung carrying a value it then REJECTS (a relative path), not an
+    unset one. A `.strip()` scan went blind to exactly those values, fell
+    through to the file's healthy key, and reported "the value is the one this
+    `.env` supplied" about a value the SHELL supplied — while the same payload's
+    `blank_graph_keys["env"]` named the environment (#12441). Where the blank is
+    a `TORTOISE_DB_PATH`, `resolve_db_path` strips it itself and falls through to
+    the canonical default, so `env_graph_keys`' non-blank filter stays right:
+    that one answers which key a RESOLVED target came from, not which rung the
+    ladder was ON when it raised.
+    """
+    import os
+
+    for key in _DB_LADDER_KEYS:
+        if os.environ.get(key):
+            return key
+    return None
+
+
 def _dotenv_already_applied() -> bool:
     """Has THIS process applied the daemon's `.env` yet? (Recorded in `LOADED_PATHS`)
 
@@ -11789,9 +11812,11 @@ def _dotenv_divergence(graded_target: str | None = None, *,
                         # (the file sets a healthy `TORTOISE_DB_PATH`, the shell
                         # exports a broken `TORTOISE_DB_URI`) makes the file a
                         # bystander, not a second cause (#12428 review).
-                        _overlay_key = next(
-                            (key for key in _DB_LADDER_KEYS
-                             if (os.environ.get(key) or "").strip()), None)
+                        # ⛔ The ladder's OWN test (truthiness), via the one
+                        # helper — a whitespace-only key is DECIDING and
+                        # rejected, so it is the file's cause only when the FILE
+                        # supplied that key. See `_ladder_deciding_key`.
+                        _overlay_key = _ladder_deciding_key()
                         payload["daemon_error_source"] = (
                             "both" if _overlay_key in effective else "env")
                     else:
@@ -11837,11 +11862,7 @@ def _dotenv_divergence(graded_target: str | None = None, *,
             # FILE put it there, or because the user exported it themselves —
             # and only the record can tell (#12428 review).
             daemon_target = None
-            _key = None
-            for _candidate in _DB_LADDER_KEYS:
-                if (os.environ.get(_candidate) or "").strip():
-                    _key = _candidate
-                    break
+            _key = _ladder_deciding_key()
             _source = _db_value_source(_key)
             daemon_error = _redact_db_value(
                 f"{type(exc).__name__}: {exc}"

@@ -6050,6 +6050,22 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         f"only {len(rows)} rows — an emptied table would pass vacuously, and these "
         "are the cites the review found wrong on the pre-fix documents plus the "
         "consume pair that sat beside them")
+    # ⛔ NO `_assert_carve_out_entry_is_pinned_by_symbol()` HERE, AND THAT IS THE MERGE
+    # RESOLUTION, NOT AN ACCIDENT (#12266 conflict, resolved by intent on 2026-11-13).
+    # `origin/main` calls that helper; THIS BRANCH DELETED IT (`1a1eb303`) and replaced
+    # the line-number binding with the BLOCK arm below, because the digit moved on every
+    # landing that registered a test file above the entry — the last re-stale landed 26
+    # SECONDS after the PR before it. Taking main's side here would call a function this
+    # file no longer defines: a `NameError`, not a merge.
+    #
+    # ⛔ THE PRINCIPLE MAIN'S HUNK CARRIES IS KEPT, THOUGH, because it is why that helper
+    # was called EARLY: "a guard that a neighbouring red row switches off is not a guard".
+    # Here the guarantee is structural rather than positional — `block_failures` is
+    # computed below and the TWO lists are asserted ONCE, together, at
+    # `assert not (row_failures or block_failures)`; nothing raises between them, so a
+    # red row cannot switch the block arm off. Do not re-add a separate
+    # `assert not row_failures` above it, and do not move the block arm below that
+    # assert — either one restores exactly the defect main's hunk was written about.
     sources = {name: path.read_text(encoding="utf-8").splitlines()
                for name, path in _EPIC_CITE_SOURCES.items()}
     row_failures = _pin_row_failures(rows, _EPIC_CITE_DOCS, sources)
