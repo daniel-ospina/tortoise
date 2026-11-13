@@ -118,7 +118,16 @@ def test_an_unrecorded_outcome_is_not_reported_as_extraction_failure(
         lambda turns: _served_detail(turns, extracted=0, outcome_known=False))
 
     err = capsys.readouterr().err
+    # `rc == 0` here is a SMOKE check, not this test's guard: the DEFERRED path
+    # returns 0 as well, so it holds under a mutant that drops `PENDING` from the
+    # terminal tuple. Measured (agent-infra#3442): that mutant prints "capture
+    # deferred: … is spooled and will retry (504)" and this line still passed.
+    # The discriminating rows are the retry-notice and sentence assertions below.
     assert rc == 0
+    assert "will retry" not in err, (
+        "a PENDING confirmation is terminal for TURN durability (#4675) — the "
+        "turns ARE stored, so spooling it for retry is the deferral this verdict "
+        "exists to stop re-asserting")
     assert "no memory points were extracted" not in err, (
         "the server said the outcome is NOT RECORDED; asserting an absence from "
         "it is the measured false negative (#12362)")
@@ -174,11 +183,19 @@ def test_an_unrecorded_outcome_never_retires_an_existing_deferral(places, tmp_pa
         places, transcript,
         lambda turns: _served_detail(turns, extracted=0, outcome_known=False))
 
+    err = capsys.readouterr().err
+    # Same smoke/guard split as the sibling above: `rc == 0` also holds on the
+    # DEFERRED path, so it cannot witness `PENDING` terminalising.
     assert rc == 0
+    assert "will retry" not in err, (
+        "a PENDING confirmation must not be spooled for retry")
     records = backlog.sessions()
-    assert [r["session_id"] for r in records] == [SESSION]
-    assert records[0]["status"] == backlog.STATUS_NOT_PROCESSED, (
+    # Id and status in ONE assertion (agent-infra#3442 rule 3): a retired record
+    # keeps its session id, so an id-only assertion is dominated by the status
+    # one and never faults — measured, retiring the deferral left it green.
+    assert [(r["session_id"], r["status"]) for r in records] == [
+        (SESSION, backlog.STATUS_NOT_PROCESSED)], (
         "an UNRECORDED extraction outcome is not proof that extraction ran; "
         "retiring the deferral here marks a possibly-unprocessed session "
         "`processed` and cannot be undone")
-    assert "outcome not recorded yet" in capsys.readouterr().err
+    assert "outcome not recorded yet" in err
