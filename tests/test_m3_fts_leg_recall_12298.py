@@ -485,16 +485,20 @@ def _unnamed_values(true: str, values: tuple[str, ...],
     residual = true
     for token in sorted(free, key=len, reverse=True):
         residual = residual.replace(token, " ")
+    named = {_magnitude(v) for v in values}
     out = []
     for match in re.finditer(_SIGNED_NUMBER, residual):
         token = match.group(0)
-        if _magnitude(token) in values:
+        if _magnitude(token) in named:
             continue
         before = residual[match.start() - 1] if match.start() else ""
         after = residual[match.end()] if match.end() < len(residual) else ""
         if before.isalnum() or before == "_" or after.isalnum() or after == "_":
             continue  # part of an IDENTIFIER, not a value (`BM25`, `m3-000014`)
-        if re.search(r"(?:k=|k<|k>|n=|§|#|=)\s*$", residual[:match.start()]):
+        # ⛔ NO bare `=` here (#12349 round-24 reviewer, cycle 4): `p = 0.34` is
+        # the form every p-value pin uses, so exempting `=` exempted the exact
+        # values this gate exists to require. Only real LABELS are exempt.
+        if re.search(r"(?:k=|k<|k>|n=|§|#|@)\s*$", residual[:match.start()]):
             continue
         out.append(token)
     return out
@@ -536,7 +540,12 @@ def _shape(text: str, values: tuple[str, ...] = (),
     includes DELETION of a free word — a shape can only match text that is
     PRESENT, so a pivot word removed outright (`not significant` → `significant`)
     is invisible here and needs the file's negative-assertion treatment at the
-    call site instead (see §6.2's status note).
+    call site instead (see §6.2's status note). ⛔ And the MIRROR of the
+    author-time gate: the gate requires every NUMBER to be named, and there is no
+    equivalent for a WORD — a single unnamed content word (`refuses` → `accepts`,
+    `inside` → `outside`, `two-sided` → `one-sided`) degrades the pin to a
+    presence check exactly as silently as an unnamed number did. So `free=` must
+    name every word the claim's direction turns on.
 
     ⛔ A SIGN is part of the value, not part of the wording (#12349 round-24
     reviewer, P2): every caller passes the MAGNITUDE, so with an unsigned token a
@@ -549,6 +558,7 @@ def _shape(text: str, values: tuple[str, ...] = (),
         [re.escape(f) for f in sorted(free, key=len, reverse=True)]
         + [_SIGNED_NUMBER]) + ")"
     out = []
+    named = {_magnitude(v) for v in values}
     for part in re.split(pattern, text):
         if part is None:
             continue
@@ -558,7 +568,7 @@ def _shape(text: str, values: tuple[str, ...] = (),
             # `\w+` wildcard there matched nothing at all (measured: the pin
             # reddened on the TRUE sentence).
             out.append(r"\S+")
-        elif _magnitude(part) in values:
+        elif _magnitude(part) in named:
             out.append(_SIGNED_NUMBER)
         else:
             out.append(re.escape(part))
@@ -666,12 +676,21 @@ def test_the_claim_shape_identifies_its_claim_and_reds_the_plant() -> None:
         _only_claim("p < 1e-6", "p < 1e-6", "scope", values=())
     _only_claim("p < 1e-6", "p < 1e-6", "scope", free=("1e-6",))
     # 10. …and it must NOT fire on an IDENTIFIER's digits (`BM25`, `m3-000014`) or
-    #     on a LABEL (`k=5`, `§4.1`, `#12298`) — those identify the claim.
+    #     on a LABEL (`k=5`, `§4.1`, `#12298`, `recall@3`) — those identify the claim.
     _only_claim("BM25 buys +1.33 pts (p = 0.34) in m3-000014",
                 "BM25 buys +1.33 pts (p = 0.34) in m3-000014", "scope",
                 values=("1.33", "0.34"))
     _only_claim("while at k=5 it is −0.67 pts", "while at k=5 it is −0.67 pts",
                 "scope", values=("0.67",))
+    _only_claim("recall@3 is higher", "recall@3 is higher", "scope")
+    # 11. a bare `=` is NOT a label (round-24 reviewer, cycle 4): `p = 0.34` is how
+    #     every p-value in these documents is written, so exempting `=` exempted
+    #     the very values the gate exists to require.
+    with pytest.raises(AssertionError, match="values are not all named"):
+        _only_claim("gives p = 0.34 overall", "gives p = 0.34 overall", "scope")
+    # 12. a value named EXACTLY as written (with its sign) must be accepted — the
+    #     gate normalises the token AND the entries.
+    _only_claim("it is -1.33 pts", "it is -1.33 pts", "scope", values=("-1.33",))
 
 
 # ── 1. the defect claim, asserted against the shipped tokenizer ─────────────
@@ -947,7 +966,7 @@ def test_artifact_carries_the_rule_as_the_harness_constant(
     # two-word claim turns the shape into `\S+ \S+`, which matched every
     # two-word pair in §4.1 (measured: 145 matches).
     for clause, pivot in (("strictly greater", ("greater",)),
-                          ("exact two-sided McNemar", ("exact",)),
+                          ("exact two-sided McNemar", ("exact", "two-sided")),
                           (threshold, ())):
         assert clause in artifact["decision_rule"], clause
         # §4.1 is where the brief states the rule's clauses (#12349 round 19).
@@ -1814,7 +1833,11 @@ def test_brief_census_and_identifier_decomposition_are_the_artifact(
         f"{strat['path']} `path`)",
         "§2's 300-name stratification",
         values=(str(len(population["names"])), str(strat["definite"]),
-                str(strat["ident"]), str(strat["path"])))
+                str(strat["ident"]), str(strat["path"])),
+        # ⛔ The CLASS NAMES are the claim here: swapping which class gets 90 and
+        # which gets 30 keeps every count in place, so the numbers alone cannot
+        # see it (round-24 reviewer, cycle 4).
+        free=("definite", "ident", "path"))
     assert sum(deg.values()) == census["degenerate"], (
         f"the degenerate ids cover {sum(deg.values())} of the census's "
         f"{census['degenerate']} — the split below would then describe a "
@@ -2381,7 +2404,11 @@ def test_brief_reading_two_bullets_are_the_artifact(artifact, brief: str) -> Non
         f"largest move {max(moved.values())} places",
         "§0's window-vs-order bullet",
         values=(str(len(both)), str(len(moved)), f"{mean_sh:.3f}",
-                f"{mean_tk:.3f}", str(max(moved.values()))))
+                f"{mean_tk:.3f}", str(max(moved.values()))),
+        # ⛔ `inside` is the claim's direction: `find INSIDE k=15` → `outside`
+        # inverts it, and a one-word rewrite with the truth restated was green
+        # (round-24 reviewer, cycle 4).
+        free=("inside",))
 
     _only_claim(
         plain,
@@ -2392,8 +2419,9 @@ def test_brief_reading_two_bullets_are_the_artifact(artifact, brief: str) -> Non
         values=(f"{recovery['delta_pts']:.2f}", f"{dep['recall_at_3']:.4f}",
                 str(inplace["only_a"])),
         # ⛔ Same shape as the scorer bullet's ZERO: when the count is 0 the claim
-        # says `zero`, so the word is the value (round-24 reviewer, P2).
-        free=("zero",) if inplace["only_a"] == 0 else ())
+        # says `zero`, so the word is the value (round-24 reviewer, P2). `inside`
+        # is the recovery's DIRECTION (`inside` → `outside` inverts it).
+        free=("zero", "inside") if inplace["only_a"] == 0 else ("inside",))
 
     # §4's verdict line restates the same two deltas; it is the sentence a reader
     # quotes as the RESULT, so it is pinned with them rather than left as prose.
@@ -2905,7 +2933,7 @@ def test_brief_states_what_the_reuse_guards_actually_do(brief_text,
     # acceptance's `accepted`, the operator pair in `` `==`, not `>=` ``.
     _only_claim(flat, "refuses a graph whose population differs, or that "
                 "population plus leftover rows",
-                "§2's reuse-guard scope", free=("differs",))
+                "§2's reuse-guard scope", free=("refuses", "differs"))
     _only_claim(flat, "the graph's total `:Object` count is asserted against "
                 "the population",
                 "§2's count guard", free=("asserted",))
