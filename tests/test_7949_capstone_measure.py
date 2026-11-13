@@ -5386,9 +5386,14 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # `test_12362_capture_outcome_unknown.py`, at `+9` and `+6` above the
             # entry). ⛔ BOTH parents of the #12416 rebase were stale: `main` at
             # `ca74f2375e` read 10076, and by its tip `6408da01ce90` — after #12416
-            # and the landings between — it reads 10132, so this branch's +15 makes
-            # the merged tree read 10147 (9943 + 204). Measured, not carried.
-            ("10147", "- test_pack_logic_writeprobe_11083.py"),
+            # and the landings between — it read 10132, which made the merged tree
+            # read 10147. ⛔ And `main` moved ONCE MORE under that rebase — #12434
+            # (`3c4d72a9a713`) registered `test_12372_entity_type_dropped.py` above
+            # the entry, so `main` now reads 10147 at its tip `2dbfb046d7` and this
+            # branch's +15 makes the merged tree read 10162 (9943 + 219). This is
+            # the pin's own doctrine firing on itself: re-derive at the head this
+            # PR LANDS on, because a value measured one landing earlier is a lie.
+            ("10162", "- test_pack_logic_writeprobe_11083.py"),
         ), "ci_surfaces", "carve_out:"),
     )
     assert len(rows) >= 9, (
