@@ -66,15 +66,18 @@ queries on `sonar`, ~$0.024 total, at the `research` skill's cost gate. The less
 smoothed over, because the failure mode ("the cheapest rung did not load" → "the owner must unblock it") is
 how a repairable gap becomes a permanent one.
 
-- **(a) binary float encodings in a text log.** A packed `float32` array is `4N` bytes raw; base64 spends
-  `4⌈N/3⌉` **characters** (≈ `5.33N`, i.e. **+33 %**) and keeps the JSON envelope and the surrounding
+- **(a) binary float encodings in a text log.** A packed `float32` array is `4N` bytes raw (`N` = elements); base64 spends
+  `4⌈4N/3⌉` **characters** — four per 3-byte input quantum, and the input is `4N` bytes, not `N`
+  (≈ `5.33N`, i.e. **+33 %**) and keeps the JSON envelope and the surrounding
   record greppable, while the *values* become opaque. The binary alternatives are cheaper and worse here:
   protobuf `packed repeated float` is `4N + h + ℓ` (≈ `4N+3`), MessagePack and CBOR are ≈ `5N` for an
   array of float32, and Arrow/Parquet add buffers, offsets and schema framing that dominate a single small
   record. **Only base64 keeps the log line a JSON object**, which is the property §2.5 needs. On
-  **corruption detection all six are the same**: none carries an intrinsic checksum, so a *validly
-  altered* payload decodes silently under every one of them — which is why §2.2's refusals are structural
-  (count, version, alphabet) and why this note does **not** claim integrity from the encoding. Recorded
+  **corruption detection all six give this note nothing**: none carries a checksum over *this* payload by
+  default (Parquet's optional page-level CRC32 is the exception, and it covers the page, not the vector),
+  and a checksum would not catch a **validly re-encoded** alteration in any case. That is why §2.2's
+  refusals are structural (count, version, alphabet) and why this note does **not** claim integrity from
+  the encoding. Recorded
   in-repo too: `STORAGE-ARCHITECTURE.md` §5.2 reads *"~4× more than base64 of the same information as the
   float32 the graph itself stores (2,048 B for a 384-d vector, against 8,414 B of decimal text)"* — so
   **base64 is 4.11× smaller than the float64 decimal text** (8,414 → 2,048), and **the decimal text is
@@ -196,14 +199,19 @@ The framing is 16 B on a 2,064 B field: **0.8 %**. That is the whole overhead of
 
 ### 1.4 ⛔ The headline "~4.1×" is a **pre-P0 → P2** figure, not the step this note decides
 
-#11821 and #12459 both say **~4.1×**. That is `8,414 / 2,048 = 4.11` — pre-P0 decimal text against the P2
-frame. **P0 already took the first 1.79× of it.** The step that is actually still on the table, and the
-only one a decision here can spend, is:
+#11821 and #12459 both say **~4.1×**. That is `8,414 / 2,048 = 4.11` — pre-P0 decimal text against the
+**bare base64**. **P0 already took the first 1.79× of it.** The step that is actually still on the table,
+and the only one a decision here can spend, is:
 
 ```
 vector payload   4,689 → 2,064 B   = 2.27×
 whole record     5,423 → 2,798 B   = 1.94×
 ```
+
+⚠️ **The 16 B frame sits at that join, so the legs do not multiply back to 4.11 exactly**: on the *framed*
+span the headline is `8,414 / 2,064 = 4.08`, and `1.79 × 2.27 = 4.08` closes it. Read `4.11` as
+*text-vs-bare-base64* and `4.08` as *text-vs-frame* — 1 % apart, each right on its own ruler, which is the
+whole point of §1.1.
 
 This is #11886's ruler lesson applied to #11821's own headline, and it changes the cost/benefit, so it is
 restated rather than inherited. It does not weaken the *format* (§2–§4 stand on their own); it weakens
@@ -518,8 +526,8 @@ keep its RAW form. `vecf32()` is the ONE form it must not take."* P0 named that 
 - **`embedding_verbatim`** — a vector the **caller** supplied (set by `TortoiseSDK.create_point`'s
   `_create_map`), which the store writes un-narrowed
   (`CASE WHEN $embedding_clear THEN NULL WHEN $embedding IS NULL THEN n.embedding WHEN
-  $embedding_verbatim THEN $embedding ELSE vecf32($embedding) END` — abridged to its last two arms here;
-  the full four-arm form is at `projection/entities.py:2976`);
+  $embedding_verbatim THEN $embedding ELSE vecf32($embedding) END` — all four arms, at
+  `projection/entities.py:2976`);
 - **`embedding_preserved`** — a vector copied from a **previous** capture (possibly anyone's), which the
   turn carrier does not mark verbatim, so it is the only signal there.
 
@@ -544,8 +552,8 @@ Two fixtures, because the **magnitude is a property of the text, not of the enco
 chars/float) gives **1.84×**.
 
 ⛔ **And the *sign* is a property of the text too — which is why §1's figures use a real vector.** The
-frame costs a flat **5.33 chars/float (`f32`) / 10.71 (`f64`)**, so it is a **floor the text can fall
-below**. Measured on a 384-d vector of degenerate shapes (the probe prints these):
+frame costs a flat **5.375 chars/float (`f32`) / 10.71 (`f64`)** — both the full framed span
+(2,064/384 and 4,112/384), not the bare base64 — so it is a **floor the text can fall below**. Measured on a 384-d vector of degenerate shapes (the probe prints these):
 
 ```
    shape                            f32: text    frame    ratio    f64: text    frame    ratio
@@ -557,8 +565,10 @@ below**. Measured on a 384-d vector of degenerate shapes (the probe prints these
 **Each column is on its own width's ruler**, which is the #11886 discipline applied inside the table: the
 `f32` text is **P0's shortest float32 text** (what the journal writes today — 4,689 B, the same figure as
 §1.4), and the `f64` text is the value's full float64 repr (what a caller-owned vector's text is). Printing
-both through one `json.dumps` would put the `f32` row on a ruler the journal has never written (8,031 B),
-and 3.89× is the ratio of *that* synthetic form — the real `f32` ratio is §1.4's **2.27×**.
+both through one `json.dumps` would put the `f32` row on a **form the journal does not write today** —
+8,031 B, the pre-P0 full-precision text re-serialised compactly (the journal wrote that same encoding at
+8,414 B with default separators; `log.py:1552` names both sides of that delta). 3.89× is the ratio of
+*that* intermediate; the real `f32` ratio is §1.4's **2.27×**.
 
 A ratio **below 1 means the frame is LARGER than the text**. So on zeros, base64 loses for **both** widths
 (the `f64` frame is 2.68× the text; even `f32` is 1.34×), and on small integers it loses for `f64` (1.87×)

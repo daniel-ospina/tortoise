@@ -98,9 +98,12 @@ it prints and returns non-zero if one fails.
 
 ## External research
 
-It was run, and the note's §0 carries it with citations — four `sonar` queries (~$0.024): encodings for a
-float array in a text log, the 9-digit float32 round-trip bound, per-record versioning on a replay path, and
-the comparables (Zep/Graphiti, Mem0, Letta, pgvector). The routing history is recorded because the first
+It was run — four `sonar` queries (~$0.024) on: encodings for a float array in a text log, the 9-digit
+float32 round-trip bound, per-record versioning on a replay path, and the comparables (Zep/Graphiti, Mem0,
+Letta, pgvector). ⚠️ **§0 records the findings, not the sources** — the search answers were summarised into
+§0(a)–(d) without transcribing their citation lists, so a reader cannot re-check them from this repository;
+§1–§4 stand on the probe and on in-repo sources and do not depend on §0. Re-running the four queries is the
+way to re-derive §0. The routing history is recorded because the first
 draft got it wrong: rung 1's `seo-intelligence` MCP server is absent, and `PERPLEXITY_API_KEY` is **not
 exported** in a fresh session's shell — but it **is** present in `$HOME/.env`, so `set -a; . ~/.env` makes
 rung 2 work. Declaring the survey impossible was a false inference from a true observation.
