@@ -391,10 +391,11 @@ def test_a_definite_bar_revision_OUTRANKS_an_undecidable_scope(sdk):
 
     ⛔ ALL THREE DIMENSIONS, because the fix is three guards and one pin does not
     cover them. MEASURED by review (cycle 9): with only the indicator arm pinned,
-    reverting the GOAL guard — or the TARGET guard — left all 72 cases green, so two
-    of the three arms could silently regress to shielding a definite finding. The
-    target arm is pinned through the BOUNDARY trigger rather than `target-revised`,
-    because a claim that names no target skips the bar check by design.
+    reverting the GOAL guard — or the TARGET guard — left the whole 73-case file
+    green, so two of the three arms could silently regress to shielding a definite
+    finding. The target arm is pinned through the BOUNDARY trigger rather than
+    `target-revised`, because a claim that names no target skips the bar check by
+    design.
     """
     i, t, g = _world(sdk, tag="scope-outranked")
     made = _judge(sdk, i, t, g)
@@ -430,9 +431,12 @@ def test_the_OTHER_scope_guards_also_defer_to_a_definite_finding(sdk, missing):
 
     ⛔ `goalId` is pinned through `target-revised` and `targetId` through
     `definition-changed`: a claim that names NO target skips the bar check BY DESIGN
-    (there is no bar to compare), so the only definite finding reachable behind that
-    guard is the boundary. Pinning both through the bar would have been a test that
-    cannot red for the right reason.
+    (there is no bar to compare — `derived_invalidation.py` returns before it when
+    no target is named), so `target-revised` is UNREACHABLE in that world and the
+    boundary is the definite finding this test pins. (It is not the only definite
+    finding behind that guard — `indicator-retired` also sits there, and superseding
+    the indicator would red this test for that reason instead.) Pinning both through
+    the bar would have been a test that cannot red for the right reason.
     """
     i, t, g = _world(sdk, tag=f"scope-outranked-{missing}")
     made = _judge(sdk, i, t, g, at="2026-11-11T10:00:00Z")
