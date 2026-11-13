@@ -2234,6 +2234,11 @@ surfaces:
   - test_vector_write_seam_4520.py
   core:
   - test_candidate_recall_11901.py
+  # #12294: the ported predicate and the falsification that declined it. `core`
+  # because the guard it carries is a product-surface one (`_derive_queries`
+  # must keep deriving a query for every entity name, and no `gated_entities`
+  # key may reappear) — the module itself reads only `tools/` + `tortoise/`.
+  - test_name_entropy_12294.py
   # #11767: the runtime URL surface (#11762 child 5). `tortoise/abuse.py` matches
   # NO `SOURCE_PATTERNS` entry, so an abuse.py-only diff falls through to this
   # `core` fallback (measured: `select(['tortoise/abuse.py'])` → ['core']) — and

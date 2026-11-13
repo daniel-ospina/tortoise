@@ -56,7 +56,9 @@ fixes:
                        decides the lever — was its CANONICAL in the window the
                        gate would remove? Two predicates (`zep_full_name`, the
                        verbatim port, and `shipped`, the same rule applied to
-                       the content tokens the leg actually searches), plus
+                       the name's STOPWORD-REMOVED content tokens — the set
+                       that would carry the query if the leg used it, see
+                       `_signal_tokens`), plus
                        `gate_variant` (what it removes from the variant pairs)
                        and `pooled_gate` (whether the OTHER names' queries in a
                        real capture union rescue a gated name). Measured and
@@ -460,7 +462,8 @@ def _name_char_entropy(normalized_name: str) -> float:
     """Shannon entropy over the name's CHARACTERS, spaces stripped, bits/char.
 
     Zep's `_name_entropy` (`dedup_helpers.py:53-77`). Repetition, not length, is
-    what it measures: ``aaaaaaaa`` scores 0.0, ``deadline`` ~2.8.
+    what it measures: ``aaaaaaaa`` scores 0.0, ``deadline`` ~2.5 (two chars at
+    1/4 and four at 1/8: 1.0 + 1.5).
     """
     cleaned = (normalized_name or "").replace(" ", "")
     if not cleaned:
@@ -806,8 +809,12 @@ def run(args: argparse.Namespace) -> int:
         #   ``zep_full_name`` — `_has_high_entropy` applied to the whole name,
         #                       exactly as Zep does (`dedup_helpers.py:80-86`).
         #   ``shipped``       — `_name_carries_signal`, i.e. the same predicate
-        #                       applied to the CONTENT tokens the sparse leg
-        #                       actually searches (stopwords already removed).
+        #                       applied to the name's STOPWORD-REMOVED content
+        #                       tokens — the set that WOULD carry the query if the
+        #                       leg used it, which is not the leg's surviving set
+        #                       (`_signal_tokens` says why: the leg also drops
+        #                       <2-char and all-digit tokens and the query may
+        #                       take the raw-literal path instead).
         # For each: how many names it gates, and — the number that decides the
         # issue — how many of them had the CANONICAL in the window, i.e. correct
         # candidates the gate would suppress.
