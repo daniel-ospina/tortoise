@@ -2581,6 +2581,23 @@ class _EntityHandlers:
         "judgementState", "judgementReason", "comparator", "threshold", "dwell",
         "goalId", "indicatorId", "targetId", "readingId", "readingValue",
         "evaluatedAt",
+        # #11926: the instant the reading this judgement consumed was taken — the
+        # fact that decides which DEFINITION it was measured under, so a claim
+        # minted after a back-dated definition change is still caught. Declared
+        # for the same measured reason as the row above: undeclared, every
+        # rebuild of every judged point logs a FALSE "Point prop %r is not
+        # declared" drift warning. ⛔ The RETIREMENT's own props
+        # (`invalidatedBy`/`invalidationReason`/`invalidatedAt`) are deliberately
+        # NOT here: they would be live-only (neither replay fold carries an
+        # arbitrary `PointRevised` prop), which reds `check-consistency` on a
+        # faithful graph — `derived_invalidation` records that measurement and
+        # returns the reason to its caller instead.
+        "readingAsOf",
+        # #11926: the OLDEST reading instant a `dwell` window consumed, written only
+        # when the window decided the flip. Same declared-for-replay reason as the
+        # row above: undeclared, every rebuild of a dwell-flipped judgement logs a
+        # FALSE "Point prop %r is not declared" drift warning.
+        "readingWindowFrom",
         # #11827: `asOf` is RETIRED — a value carries no temporal slot of its
         # own, its instant is the carrier's `validFrom` — but it is still
         # DECLARED here, deliberately, for one reason: legacy nodes hold the

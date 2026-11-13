@@ -150,12 +150,21 @@ not a fix (D2-5).
    `:Point`s participating in ≥1 `IMPL|NAND` edge to a live EPISTEMIC point (the far
    endpoint passes `epistemic_disjunction`, i.e. `Point|Subject|Object|Event`). It is **NOT** `len(_edged_claim_ids())`
    — that query is label-blind (`MATCH (n)-[r:IMPL|NAND]-(m)` + `epistemic_disjunction('n')` admits
-   `Point|Subject|Object|Event`, `live.py:509`), so reusing it here would mix a `:Point` numerator with
-   a wider denominator and produce `belief_coverage_pct > 1` and a NEGATIVE `no_belief` (measured on
-   this head: `belief_coverage_pct = 5.0`, `no_belief = -8.0` on a 2-chain + 10 baselined islands
-   fixture). A second query spelling is legitimate here precisely because it asks a different
-   question; the extraction in step 1 exists only so `_reachable_claim_count` keeps ONE copy of ITS
-   predicate.
+   `Point|Subject|Object|Event`, `live.py:509`), so a belief count taken over that wider epistemic
+   population — once the `IMPL|NAND` requirement is dropped too, which is what the cited measurement
+   does (its 10 baselined claims are operator-less) — put over this `:Point`-scoped denominator mixes a
+   wider numerator into a narrower one and produces `belief_coverage_pct > 1` and a NEGATIVE
+   `no_belief` (measured on this head: `belief_coverage_pct = 5.0`, `no_belief = -8.0` on a 2-chain + 10
+   baselined islands fixture — numerator 10 over denominator 2, which only this scope mix produces;
+   ⛔ #12138 §2 corrected this sentence's "wider denominator" label, which named the OTHER mistake —
+   the one the asserted ranges cannot see, and it credited the pair to `_edged_claim_ids`' own
+   population, where the ratio is 0/2 = 0.0, in range. That measurement's 2-chain carries NO baseline,
+   which is what leaves the wider numerator at 10; baseline its head the way the suite helper `_chain`
+   does and the same arithmetic reads 11 over 2 — 5.5 / -9.0 — with 1/2 = 0.5 here instead. Both
+   variants' *ratios* are in range (the scope-mix pairs themselves are not, which is the point —
+   #12138 §2); see R10 below). A second query spelling is legitimate
+   here precisely because it asks a different question; the extraction in step 1 exists only so
+   `_reachable_claim_count` keeps ONE copy of ITS predicate.
    - `operator_less_claims = graph_live_claims - points_edged`, where `points_edged` is the live
      non-operator `:Point` count with ANY `IMPL|NAND` edge — the `_trivial_stamp` population
      (`tortoise/dream.py::_trivial_stamp`) derived from the POSITIVE traversal (#12116 review P2: the
@@ -182,7 +191,8 @@ not a fix (D2-5).
      `ep_reachable_claims` unchanged at 3 while `_edged_claim_ids()` goes 3→5). This is the same
      correction R6 already carries; the two now agree with the code docstring
      (`sdk.py::_propagation_counts`). Tests: `test_operator_less_claims_are_not_in_the_denominator` +
-     `test_no_belief_stays_inside_its_invariants` (range, not identity).
+     `test_no_belief_stays_inside_its_invariants` (range, not identity) +
+     `test_counts_match_an_independent_query` (the denominator counted separately, #12138 §2).
 3. **`_propagation_counts()`** — live non-operator `:Point`s, their `lastDreamedAt` stamps, and their
    **`belief_present` count via the SHARED predicate** `ep_has_belief_cypher` (`search_engine.py:1181`)
    — never a private `IS NOT NULL`, per `analyze.py:41-45` (*"The presence gate is
@@ -295,13 +305,16 @@ unreadable test goes red; drop the closure term from `_reachable_claim_count` wh
   partition is exact).
 - R10 (added after review, #12116 C-P3; **corrected #12138 §2**) a mixed population is silently
   corrected by a clamp instead of being visible → the clamp is gone (and the counts are reported as
-  measured). ⚠️ The RANGES (`test_no_belief_stays_inside_its_invariants`) catch only the NARROWER /
-  label-blind direction — numerator > denominator ⇒ `no_belief < 0`, ratio > 1. The direction that
-  matters here is the WIDER one, and it is INVISIBLE to them: with `belief_present` fixed, a larger
-  denominator makes the ratio FALL and `no_belief` RISE, both in range (measured: denominator +4 ⇒
-  `pct 0.2`, `no_belief +4`). So the ranges are a lower bound, not the control:
-  `test_counts_match_an_independent_query` pins `ep_reachable_claims`, `belief_present` and
-  `points_edged` against independently written queries, which is what reddens on an inflated
+  measured). ⚠️ Only ONE direction is visible to the RANGES
+  (`test_no_belief_stays_inside_its_invariants`): a NARROWER denominator (or a label-blind NUMERATOR
+  over a narrower one) lets the numerator exceed it, so `no_belief < 0` or the ratio exceeds 1. A
+  label-blind DENOMINATOR is the opposite case — that set is a SUPERSET of the `:Point` reach, so it
+  is WIDER, the ratio FALLS and `no_belief` RISES, both in range, and the ranges are blind to it. That
+  second direction is the one that matters here (measured on the §2 fixture, `belief_present=1`:
+  denominator 4→5 gives `pct` 0.25→0.2 and `no_belief` 3→4 — absolute values, not a delta; the earlier
+  `denominator +4 ⇒ pct 0.2, no_belief +4` shorthand read as one and is not). So the ranges are a lower
+  bound, not the control: `test_counts_match_an_independent_query` pins `ep_reachable_claims`, `belief_present`
+  and `points_edged` against independently written queries, which is what reddens on an inflated
   denominator.
 - R7 the new reads make a polled endpoint expensive (`GET /v1/dream/health` is per-request; the
   census traverses every live `:Point` and its `IMPL|NAND` edges) → **two** controls, because the

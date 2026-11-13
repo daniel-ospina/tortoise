@@ -230,7 +230,7 @@ USAGE
 
 build_body() { # <out-file> <job> <step-id> <failed-step-raw>
   local out="$1" job="$2" sid="$3" raw="$4" label excerpt
-  local raw_tail squeeze_incomplete
+  local raw_tail squeeze_incomplete report_bytes report_bytes_known cut_note
   local failed_names="" pair id outcome pretty
   if [ -n "$raw" ]; then
     for pair in $raw; do
@@ -272,8 +272,22 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
     if [ "$sid" = "$DRIFT_STEP_ID" ]; then
       echo "### Migration-drift gate report"
       echo
-      echo "The gate's own report (\`check-migration-drift\`) for this run follows verbatim — it"
-      echo "names the blocking versions and the ordered remediation. **No production action is"
+      # ⛔ NOT "follows verbatim" (#12200). This intro is emitted for EVERY drift-step body,
+      # before the report is even READ, so an unconditional claim about what follows is false
+      # in every state that carries no report (not readable, 0-byte, blank, fallback-empty)
+      # and in the states that carry one but not verbatim (the ASCII fallback drops bytes,
+      # the 6000-byte excerpt is a TAIL, the squeeze drops a split character). It was the
+      # louder sibling of the arm sentence fixed further down: same class, same cause — a
+      # sentence authored at the BRANCH site describing an ARTIFACT decided later. Write the
+      # claim about the artifact, never about the code path that produced it. Pinned by
+      # case 17i/17c: the phrase is ABSENT from every report-less body, AND the presence
+      # claim must stay CONDITIONED (a `<verb> below;` with no condition reds) — pinning
+      # only the deleted phrase left the four-word deletion of `when it can be carried`
+      # green, measured at review round 3.
+      echo "The gate's own report (\`check-migration-drift\`) — the one that names the blocking"
+      echo "versions and the ordered remediation — is reproduced below when it can be carried; any of"
+      echo "the 6000-byte cut, a character dropped by the squeeze, or the bytes dropped by the ASCII"
+      echo "fallback is declared beside it. **No production action is"
       echo "taken by this alert, and none should be taken without the owner** (#2240 ruling: a lane"
       echo "must never run DDL or \`migration repair\` against production; a blanket repair hides"
       echo "real drift, #1001)."
@@ -297,10 +311,10 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
         # the SQUEEZE below drops the split sequence, so the pasted excerpt is valid
         # UTF-8; the FALLBACK (further down, when the squeeze yields NOTHING) drops
         # every non-ASCII byte, so its output is ASCII and therefore valid UTF-8 too.
-        # Both paths DECLARE what they dropped, so the body never reads as a verbatim
-        # report it does not carry. The fence is then made longer than any backtick
-        # run in the excerpt: the report carries repo-controlled text (migration
-        # filenames, version names), and a report containing ``` would close the
+        # Both paths DECLARE what they dropped, and the state that carries NOTHING says so
+        # (#12200), so the body never reads as a report it does not carry. The fence is then
+        # made longer than any backtick run in the excerpt: the report carries repo-controlled
+        # text (migration filenames, version names), and a report containing ``` would close the
         # block early and render the rest as live markdown. (Round-5 review, P3-2.)
         #
         # ⛔ #12077 — the SQUEEZE'S EXIT STATUS IS NOT THE ALERT'S, and it is not
@@ -333,7 +347,47 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
         raw_tail="$(tail -c 6000 "$DRIFT_REPORT_FILE" 2>/dev/null)" || raw_tail=""
         excerpt=""
         squeeze_incomplete=0
-        if ! excerpt="$(printf '%s' "$raw_tail" | iconv -f UTF-8 -t UTF-8 -c)"; then
+        # How big the report ACTUALLY is, measured once here for BOTH empty arms: they each
+        # have to declare the 6000-byte cut the section intro promises (review rounds 5-6).
+        # ⛔ NO EXTERNAL TOOL IN THE MEASUREMENT beyond `wc` itself, and no `tr`: the states
+        # these arms describe are exactly the ones where a converter or the ASCII fallback is
+        # broken, and a `| tr -d ' '` here FAILED under `pipefail` in case 17h's state (broken
+        # `tr`), silently setting the size to 0 and reverting to the cut-undeclared sentence —
+        # measured. Parameter expansion strips a right-padded `wc` count without a subprocess;
+        # the guard maps "cannot read it" (a directory: `wc` fails) to 0.
+        #
+        # ⛔ `-f`, BECAUSE `wc -c` READS TO EOF AND A DEVICE NEVER REACHES ONE (#12272 review
+        # round 8). The read guard above admits anything that is `-e`-true and not a FIFO, and
+        # `tail -c 6000` is BOUNDED — it stops after 6000 bytes — but `wc -c` is not: a
+        # character device such as `/dev/zero` (which `[ -p ]` does not catch) reads forever, so
+        # `build_body` never returns and NOTHING is filed: no ledger entry, no exit status, the
+        # #2240 silence this script exists to remove, one primitive past the FIFO guard. It is
+        # the same class as that guard, so it takes the same shape: name the property that makes
+        # the read safe instead of trusting the caller. Measured on the unguarded form:
+        # `--drift-report /dev/zero` rc=124 at 8 s (hung), where `origin/main` reaches its
+        # ledger leg — i.e. this line, not the report, was the regression.
+        # A path that is not a regular file therefore stays unmeasured (`report_bytes` empty,
+        # mapped to 0 below), which is the branch a DIRECTORY already takes (case 17d) — a size
+        # nobody can measure is not asserted as a size.
+        report_bytes_known=0
+        report_bytes=""
+        if [ -f "$DRIFT_REPORT_FILE" ]; then
+          report_bytes="$(wc -c 2>/dev/null < "$DRIFT_REPORT_FILE")" || report_bytes=""
+        fi
+        report_bytes="${report_bytes//[[:space:]]/}"
+        case "${report_bytes:-}" in '' | *[!0-9]*) report_bytes=0 ;; *) report_bytes_known=1 ;; esac
+        # `2>/dev/null`: a converter that is absent prints its own "command not found" or
+        # refusal on stderr, which lands in the job log beside an alert that went out
+        # perfectly well. ⛔ THE HISTORY, CHECKED RATHER THAN ASSUMED (#12200): the
+        # pre-#12110 form of this statement DID suppress it
+        # (`… | iconv -f UTF-8 -t UTF-8 -c 2>/dev/null || true`, `49cf519354`), and
+        # #12110's rewrite of the squeeze (`6e5ff01625`) did not carry the suppression
+        # over — no merge dropped it, and no commit has touched this file on main since.
+        # So this line ADDS it relative to main: one spurious diagnostic per alert on a
+        # runner without `iconv` (recorded on #12200). An earlier draft of this comment
+        # said "main already suppressed it; a merge dropped it", which is the same class
+        # this change removes — a sentence stating something the artifact does not show.
+        if ! excerpt="$(printf '%s' "$raw_tail" | iconv -f UTF-8 -t UTF-8 -c 2>/dev/null)"; then
           : # status only — the bytes `iconv` could convert have already been emitted
         fi
         if [ -z "$raw_tail" ]; then
@@ -341,8 +395,22 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
           # Claiming "could not be byte-squeezed" there (or pasting an empty block under
           # a heading that promises the report) would be two false statements; say only
           # what is true.
-          echo "⚠️ **The report file held no excerpt-able text** (nothing but line endings or NUL bytes, or it could not be re-read); the gate's own output is in the run link above."
-          echo
+          #
+          # ⛔ AND SAY WHICH BYTES WERE READ (review rounds 5-6, P3): the tail is only the
+          # report's LAST 6000 bytes, so a 15,400-byte report whose final bytes are blank
+          # holds plenty of text the alert never looked at. Calling that "the report file
+          # held no excerpt-able text" is false about the file — and it left the 6000-byte
+          # cut UNDECLARED, which made the section intro's "any of the 6000-byte cut … is
+          # declared beside it" false in this state. MEASURED ONCE, ABOVE (see the read), for
+          # BOTH empty arms: the excerpt-empty arm has the same obligation, and round 5's fix
+          # covered only this one.
+          if [ "$report_bytes" -gt 6000 ]; then
+            echo "⚠️ **The report's last 6000 bytes held no excerpt-able text** (nothing but line endings or NUL bytes, or it could not be re-read); the report itself is ${report_bytes} bytes, and only that tail is read — the gate's own output is in the run link above."
+            echo
+          else
+            echo "⚠️ **The report file held no excerpt-able text** (nothing but line endings or NUL bytes, or it could not be re-read); the gate's own output is in the run link above."
+            echo
+          fi
         elif [ -z "$excerpt" ]; then
           # An iconv that is absent, or that refuses without emitting anything, would
           # otherwise paste an EMPTY block under a heading that promises the report.
@@ -363,10 +431,71 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
           # ⛔ `|| true` is a GUARD, not decoration: under `set -euo pipefail` this is a
           # plain assignment, so a `tr` that fails would abort `build_body` BEFORE
           # anything is filed — a fail-CLOSED notifier, i.e. the very silence #2240
-          # exists to remove. The merge that brought this branch up to main dropped
-          # main's own `|| true` here (review P2, PR #12110); case 17h pins it.
-          excerpt="$(printf '%s' "$raw_tail" | LC_ALL=C tr -d '\200-\377' || true)"
-          echo "⚠️ **The report could not be byte-squeezed** (\`iconv\` is unavailable or refused to emit); it is pasted with its non-ASCII bytes dropped, so any non-ASCII character in it is LOST — the run link above holds the full text."
+          # exists to remove. The guard is on main and must stay there: `origin/main:368`
+          # carries the same `|| true`, it has survived every rewrite of this statement since
+          # 49cf519354, and case 17h pins it. (An earlier draft of this comment said a merge
+          # dropped main's `|| true` — false, and the same class this change removes: a
+          # sentence stating a mechanism the artifact does not show.)
+          excerpt="$(printf '%s' "$raw_tail" | LC_ALL=C tr -d '\200-\377' 2>/dev/null || true)"
+          # ⛔ The fallback has a SECOND empty state, and the sentence below is a claim
+          # about an artifact: a report whose excerpt-able text is entirely non-ASCII
+          # (e.g. `→→→`) squeezes to NOTHING, so the fenced block further down is skipped
+          # — and an unconditional "it is pasted with its non-ASCII bytes dropped" then
+          # promises an excerpt the body does not carry (#12200, P3-1 of PR #12110's
+          # review: the on-call reader is told the degraded report is here when the whole
+          # report is only at the run link). One sentence per state, each conditioned on
+          # what was actually produced, is the shape that cannot diverge again. Pinned by
+          # case 17i, whose not_contains row reds if this condition is removed.
+          # ⛔ NAME THE STATE, NOT ONE CAUSE (review round 5, note 1). An EMPTY `iconv`
+          # output has THREE reachable causes — no `iconv` at all, one that refused/failed, and
+          # one that is perfectly healthy and emits NOTHING because it could decode nothing from
+          # the tail — but they do not all reach the same sentence (corrected, review rounds 7-8):
+          # a tail a HEALTHY converter emits nothing for contains no byte BELOW 0x80 — each such
+          # byte is itself a complete UTF-8 sequence (ASCII), so `-c` emits it and the output
+          # would not be empty — while `tr -d '\200-\377'` deletes every byte at or ABOVE 0x80,
+          # so it keeps nothing either. That cause therefore lands in the SECOND sentence below,
+          # never this
+          # one. THIS arm is entered only when the fallback has just produced text, so the tail
+          # did hold a byte below 0x80 and a working converter would have emitted it — which leaves
+          # exactly the two broken-converter causes here, and `emitted nothing it could convert`
+          # is deliberately NOT in this sentence's parenthetical for that reason. Case 17l pins
+          # the third cause in the second sentence, where it is the operative one.
+          #
+          # ⛔ AND A FOURTH CAUSE THAT IS NEITHER BROKEN NOR UNDECODABLE (review round 8, P2): a tail
+          # whose only bytes below 0x80 are LINE BREAKS. `iconv` is present, succeeds, and emits
+          # them — but a command substitution strips TRAILING NEWLINES, so the capture is empty and
+          # `tr` (which keeps the same `0a 0a`) is stripped the same way. Measured: `printf
+          # '\n\n\xff'` → `iconv -c` rc 0 emitting `0a 0a`, capture `[]`. All three causes named
+          # before this round are FALSE there — the host's converter worked — so the parenthetical
+          # now enumerates the blank-line case as well. Case 17n drives it with the REAL converter.
+          # The cases that reached this sentence before it (each reproduced at round 9): 17h — a
+          # failing `tr` besides — and 17i via a converter that emits NOTHING, and 17l (real
+          # converter) plus 17m (failing `tr`) via an all-undecodable tail. 17b arm (b) does NOT
+          # reach it: its fallback carries text, so it lands in the first sentence. A forwarding
+          # shim that passes the real converter's output through DOES reach it — what no
+          # emit-nothing stub can do is make "present, succeeds, emits the tail's line breaks" true.
+          if [ -n "$excerpt" ]; then
+            echo "⚠️ **The report could not be byte-squeezed** (\`iconv\` is unavailable or refused to emit); it is pasted with its non-ASCII bytes dropped, so any non-ASCII character in it is LOST — the run link above holds the full text."
+          else
+            # ⛔ SAY ONLY WHAT IS TRUE IN THIS STATE, not what the BRANCH implies. `excerpt` is
+            # empty here for TWO reasons and the body cannot tell them apart: the tail may be
+            # entirely non-ASCII, OR the `tr` fallback itself may have failed (it is guarded by
+            # `|| true` precisely so a failing tr cannot go deaf — case 17h). An earlier version
+            # of this sentence asserted the first cause ("every byte … is non-ASCII"), which is
+            # FALSE in the second state: measured in case 17h's own state (broken iconv + broken
+            # tr, an ASCII report), the body claimed every byte of an ASCII report was non-ASCII
+            # — the exact class this whole change exists to remove, reintroduced one branch down.
+            # The reader's action is the same in both states, so name the state, not the cause.
+            # ⛔ AND DECLARE THE CUT HERE TOO (review round 6, P3): this arm fires on reports
+            # over the cap as readily as the arm above (case 17l's fixture is 15,400 bytes), so
+            # the intro's promise that a cut is declared beside the excerpt is false unless
+            # this sentence carries it as well.
+            cut_note=""
+            if [ "$report_bytes" -gt 6000 ]; then
+              cut_note=" (the report itself is ${report_bytes} bytes, and only its last 6000 were read)"
+            fi
+            echo "⚠️ **The report could not be byte-squeezed** (\`iconv\` is unavailable, refused to emit, emitted nothing it could convert, or emitted only blank lines — which a command substitution strips), and the ASCII fallback produced no excerpt either — so NOTHING is pasted below${cut_note}; the full report is at the run link above."
+          fi
           echo
         elif [ "$(printf '%s' "$excerpt" | wc -c)" -lt "$(printf '%s' "$raw_tail" | wc -c)" ]; then
           squeeze_incomplete=1
@@ -381,9 +510,25 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
           # `tail -c` can start mid-line; a fenced block is still closed below.
           echo
           echo "$fence"
-          if [ "$(wc -c < "$DRIFT_REPORT_FILE")" -gt 6000 ]; then
+          # ⛔ THE SIZE IS THE ONE MEASURED ABOVE — never a second read of the path. A re-read
+          # here was unbounded in exactly the way the measurement above now guards against
+          # (#12272 review round 8: `origin/main` hangs on `--drift-report /dev/urandom` at this
+          # same read, measured rc=124 at 8 s), and re-reading a file whose size was already
+          # measured can only disagree with it. One measurement, every site.
+          if [ "$report_bytes_known" = "1" ] && [ "$report_bytes" -gt 6000 ]; then
             echo
             echo "_(report truncated to its LAST 6000 bytes — the gate prints the actionable block last; the full text is in the run link above)_"
+          elif [ "$report_bytes_known" != "1" ]; then
+            # ⛔ AND THE CUT IS STILL DECLARED WHEN THE SIZE CANNOT BE MEASURED. The intro
+            # promises "any of the 6000-byte cut … is declared beside it"; a path whose size is
+            # unmeasurable (not a regular file) is still read through the same 6000-byte window,
+            # so the reader is told what the window IS rather than left to assume the excerpt is
+            # whole. True unconditionally in this branch — "only the last 6000 bytes are shown"
+            # needs no measurement — which is why it does not depend on the window coming back
+            # full (`tail -c` output also has NULs stripped by the substitution above, so a
+            # length check here would under-report the bytes actually read).
+            echo
+            echo "_(only the report's LAST 6000 bytes are shown — its own size could not be measured, and the gate prints the actionable block last; the full text is in the run link above)_"
           fi
           if [ "$squeeze_incomplete" = "1" ]; then
             echo
@@ -391,7 +536,16 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
           fi
         fi
       else
-        echo "⚠️ **The gate's report file was not readable** (\`${DRIFT_REPORT_FILE:-<unset>}\`)."
+        # ⛔ NAME THE PROPERTY THAT WAS MEASURED, NOT ONE THAT WAS NOT (review round 7, P3).
+        # This arm is reached for an unset/missing path AND for a named pipe. A FIFO IS
+        # readable — a reader gets its bytes — so "was not readable" is false there; what is
+        # true is that reading it can BLOCK (open(2) waits for a writer), which is exactly why
+        # the guard refuses it. The state is split so each body says what is true of it.
+        if [ -p "${DRIFT_REPORT_FILE:-}" ]; then
+          echo "⚠️ **The gate's report file was NOT READ** (\`${DRIFT_REPORT_FILE}\` is a named pipe, and reading it could block this alert indefinitely)."
+        else
+          echo "⚠️ **The gate's report file was not readable** (\`${DRIFT_REPORT_FILE:-<unset>}\`)."
+        fi
         echo "The blocking versions and the remediation are in the run's \`Check migration drift"
         echo "(fail-closed)\` step log — this alert deliberately does NOT re-run the gate, because a"
         echo "second reading of prod can name a different blocking set than the run that failed."

@@ -150,12 +150,12 @@ document, do not re-route**. See R11/E3 for why that constrains C3.
 vocabulary are comments). A1 cannot be satisfied by "enabling something"; something has to emit.
 
 **R4 · The declarations have two legs, and only one is unread.** `relation_write_paths` /
-`relation_write_verdict` (`tortoise/pack_registry.py:734` (`relation_write_paths` at `:701`), the `RELATION_WRITABLE` arm at `:743`) return **`writable`** for the relations
+`relation_write_verdict` (`tortoise/pack_registry.py:763` (`relation_write_paths` at `:730`), the `RELATION_WRITABLE` arm at `:772`) return **`writable`** for the relations
 above (they declare `mechanism: IMPL`, so the `operator` path binds; the predicate is in the structural
 set). The **`mechanism`** leg *is* read at the write door by `declared_mechanisms`
-(`pack_registry.py:1006-1118`, the `CORE_PREDICATES` membership test at `:1107`), consumed by `create_operator`. Unread: (i) the
-**`semantics`** leg — surfaced at `:3736`, and nothing derives an op_type or direction from it; and (ii)
-**`hierarchies`** — validated only (`pack_registry.py:2373-2387`). ⚠️ The operator writers (`commit_ops.py:426-429`,
+(`pack_registry.py:1035-1136`, the `CORE_PREDICATES` membership test at `:1136`), consumed by `create_operator`. Unread: (i) the
+**`semantics`** leg — surfaced at `:472-484`, and nothing derives an op_type or direction from it; and (ii)
+**`hierarchies`** — validated only (`pack_registry.py:2489-2503`). ⚠️ The operator writers (`commit_ops.py:426-429`,
 `sdk.create_operator`) are the **Point-layer** mechanism; they are not evidence about Object→Object.
 
 **R5 · The declared-mechanism registry is a contract, not a list.** `config/v4-mechanisms.yml` — 13 rows,
@@ -420,11 +420,11 @@ fan-out respected; C8 holds.
 **The contradiction to adjudicate:** `#4889` ("the Subject layer is unpopulated in production") is
 **CLOSED**, and the owner measured **26 Subjects against 19,300 points**. One of those is false.
 **Produces:** the binder's attach rate (`bind_point_subjects`, `tortoise/subject_binding.py:344`, called
-from `sdk.py`'s point-creation path at `:17968` — keyed by symbol: `bind_point_subjects(proj, self, point_id=pid`),
+from `sdk.py`'s point-creation path at `:18375` — keyed by symbol: `bind_point_subjects(proj, self, point_id=pid`),
 the four subject-edge family counts, and the **customer-visible** consequence
 (search `subject`, `get_org_structure`). The three candidate explanations — the binder never runs (note
 `subject_binding_available` is a **fail-OPEN** probe, defined at `tortoise/search_engine.py:6607` and
-consumed at `sdk.py:9612`/`:9665` — ⚠️ another probe's docstring sits in the same region of `sdk.py`, which is why
+consumed at `sdk.py:9867`/`:9920` — ⚠️ another probe's docstring sits in the same region of `sdk.py`, which is why
 this pair is keyed by **symbol**), the slots are absent in the
 corpus, or the graph served is not the graph measured — are decided by evidence.
 **Proof:** Subjects `26 → N` on a real corpus, four families non-zero, both customer readers non-empty —
