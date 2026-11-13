@@ -2075,7 +2075,8 @@ def read_runs(repo: str, status: str, max_pages: int = DEFAULT_MAX_PAGES) -> tup
             raise MeasureError(f"runs listing for status={status} had no workflow_runs list")
         collected.extend(item for item in items if isinstance(item, Mapping))
         if len(items) < PER_PAGE:
-            return collected, False
+            # A short page ends the feed only if total_count agrees with what was read (#12395).
+            return collected, total > len(collected)
     return collected, total > len(collected)
 
 
