@@ -45,7 +45,11 @@ import types
 from pathlib import Path
 
 import pytest
-import yaml
+
+from tools.ci_selection import (  # the manifest's strict reader
+    DuplicateManifestKeyError,
+    parse_manifest_text,
+)
 
 _REPO = Path(__file__).resolve().parents[1]
 if str(_REPO) not in sys.path:
@@ -4619,13 +4623,15 @@ def _pin_row_failures(rows, docs, sources, default_source: str = "extractor_v2")
         doc_label, phrase, cites = row[0], row[1], row[2]
         # a row may name its SOURCE; `default_source` is the caller's default
         source_key = row[3] if len(row) > 3 else default_source
-        # ...and it may name the SECTION its cited line must fall INSIDE. Without
-        # this, a number re-derived onto a byte-identical entry in a DIFFERENT
-        # section stays GREEN while the document's claim goes false: measured on
-        # the `03-test-design.md` `carve_out:` row, whose anchor line also exists
-        # under `core:` and its mirror, so "the anchor is on this line" alone
-        # cannot tell the three apart (#11837 review, P3).
-        section = row[4] if len(row) > 4 else None
+        # ⛔ NO SECTION ELEMENT. A 5th element used to name the SECTION a cited
+        # line had to fall inside — it existed for the `03-test-design.md`
+        # `carve_out:` row, whose anchor text also sits under `core:` and its
+        # mirror (#11837 review, P3). That row is gone: the claim is checked
+        # against the parsed BLOCK by `_section_entries`, where "which section"
+        # is not a comparison but the read itself. With no arity-5 row left in
+        # either caller the branch could never fire, and an enforcement path with
+        # no caller is an inert guard — so it is deleted rather than left to look
+        # like coverage.
         # ⛔ The label is the SOURCE's real path, not `<key>.py` (#11837 review P3):
         # `ci_surfaces` maps to `config/ci-surfaces.yml`, so the fabricated
         # `ci_surfaces.py` named a file that does not exist in the very failure
@@ -4660,18 +4666,6 @@ def _pin_row_failures(rows, docs, sources, default_source: str = "extractor_v2")
                     f"the file does not have, or this row's SOURCE key is wrong")
                 continue
             got = source_lines[int(number) - 1]
-            if section is not None:
-                # the nearest preceding COLUMN-ZERO `key:` is the cited line's
-                # section; a row that names one is refused when they disagree.
-                nearest = next(
-                    (ln.strip() for ln in reversed(source_lines[:int(number) - 1])
-                     if re.fullmatch(r"[a-z_][a-z0-9_]*:", ln)), None)
-                if nearest != section:
-                    failures.append(
-                        f"{source_label}:{number} (cited by {doc_label}) sits in "
-                        f"section {nearest!r}, not {section!r} — an identical entry "
-                        f"in another section satisfies the anchor text alone")
-                    continue
             if isinstance(anchor, tuple):
                 if got.strip() != anchor[1]:
                     failures.append(
@@ -4682,6 +4676,25 @@ def _pin_row_failures(rows, docs, sources, default_source: str = "extractor_v2")
                     f"{source_label}:{number} (cited by {doc_label}) reads "
                     f"{got.strip()!r}, which carries no {anchor!r}")
     return failures
+
+
+#: Any spelling that attaches a line NUMBER to the tool-maintained manifest:
+#: ``ci-surfaces.yml:9973``, `` `ci-surfaces.yml`, `:9987` ``, `` at :9987 ``,
+#: `` — :9987 ``. Spelling-blind ON PURPOSE — the BARE `` :NNNN `` continuation is
+#: the form this module documents as invisible to every sweep, so a matcher that
+#: only knew the `file:NNNN` shape would leave the rot re-introducible in the
+#: style the documents already use elsewhere.
+_FILE_THEN_NUMBER = re.compile(r"ci-surfaces\.yml[^|\n]{0,30}?(?<!\d)\d{3,}")
+
+
+class _ManifestShapeError(RuntimeError):
+    """`config/ci-surfaces.yml` is not readable in the shape this pin needs.
+
+    Raised instead of `assert`ed so the CALLER can collect it beside the
+    document-side findings: an assert here aborts the test and the reader sees one
+    terse shape complaint while the "does the sentence name the entry" answer —
+    which they also need — is never computed.
+    """
 
 
 def _section_entries(lines: list[str], section: str) -> list[str] | None:
@@ -4714,27 +4727,61 @@ def _section_entries(lines: list[str], section: str) -> list[str] | None:
     the document.
 
     So the claim is read off the BLOCK — which is what the document asserts
-    ("`carve_out:` holds **one**: …") and which no insertion can move. It is
-    parsed with `yaml` rather than scanned by hand, because the hand-rolled
-    version needed its own column-zero boundary rule and could not see an
-    indented entry: this very test file is registered that way under `core:`
-    (`config/ci-surfaces.yml:6103`) and `sdk:` (`:8502`), and a scan that misses
-    those cannot honestly claim a section "holds none".
+    ("`carve_out:` holds **one**: …") and which no insertion can move.
+
+    ⛔ IT IS PARSED WITH THE REPO'S STRICT LOADER, NOT `yaml.safe_load`.
+    `config/ci-surfaces.yml` is `merge=union` (`.gitattributes`), so a merge can
+    leave the SAME top-level key twice, and a plain YAML loader keeps only the
+    LAST block — silently discarding the shadowed one. On this pin that fails
+    OPEN in the worst possible direction: two `slow_files:` blocks where the
+    shadowed one holds a capstone file reads as "holds none", and two
+    `carve_out:` blocks where the shadowed one holds a second capstone entry reads
+    as "holds **one**". `tools/ci_selection.parse_manifest_text` exists for
+    exactly this class (its `DuplicateManifestKeyError` docstring records 24
+    duplicate keys measured on one merge), so this pin takes it.
+
+    ⛔ AND THE EXCEPTIONS ARE DELIBERATE, not an oversight to "align" later.
+    `ci_timing._manifest_of` uses a plain `yaml.safe_load` ON PURPOSE — its comment
+    says so in capitals (`#10790`, the merge conflict resolved toward the design
+    that survived on `main`) — because its job is to NAME a duplicate key as a red
+    rather than raise on it; `registry_integrity.py` reads the same text through
+    `yaml.compose` (no constructor) for the same reason. This pin is a third kind
+    of reader: neither of those can be reused for it, because a pin that silently
+    collapsed the map would FAIL OPEN on exactly the state it exists to catch, and
+    a pin that reported a duplicate as data would let it through as long as the
+    shadowed block happened to agree. Refusing is the correct behaviour HERE. Do
+    not "unify" these three readers.
+
+    The hand scan it replaces also could not see an INDENTED entry: this very
+    test file is registered that way under `core:` (`config/ci-surfaces.yml:6103`)
+    and `sdk:` (`:8502`), and a scan that misses those cannot honestly claim a
+    section "holds none".
 
     This is the bundle's own D5 policy applied to the one cite a tool owns: the
     symbol/block is authoritative, the line number is a convenience.
 
     ⚠️ Returns `None` for an ABSENT section, never `[]`, because `[]` makes a
     "holds none" assertion pass vacuously — a renamed or deleted block would then
-    disarm exactly the half of the claim that says "none".
+    disarm exactly the half of the claim that says "none". A block that exists but
+    is not a list raises `_ManifestShapeError`, which the CALLER collects into its
+    failure list: asserting here would abort the test and hide the document-side
+    diagnostics that a reader needs in the same run.
     """
-    manifest = yaml.safe_load("\n".join(lines))
+    try:
+        manifest = parse_manifest_text("\n".join(lines))
+    except DuplicateManifestKeyError as exc:
+        raise _ManifestShapeError(
+            f"config/ci-surfaces.yml carries a DUPLICATE top-level key ({exc}) — the "
+            f"file is `merge=union` (`.gitattributes`), and a plain YAML load would "
+            f"keep only the LAST block, so this pin refuses to read a collapsed view "
+            f"of a file whose shadowed copy could be the one holding the entry") from exc
     entries = manifest.get(section) if isinstance(manifest, dict) else None
     if entries is None:
         return None
-    assert isinstance(entries, list), (
-        f"config/ci-surfaces.yml `{section}:` is a {type(entries).__name__}, not a "
-        f"list — this pin compares entries and cannot read a mapping")
+    if not isinstance(entries, list):
+        raise _ManifestShapeError(
+            f"config/ci-surfaces.yml `{section}:` is a {type(entries).__name__}, not a "
+            f"list — this pin compares entries and cannot read a mapping")
     # a YAML `# comment` is already gone; keep the value verbatim otherwise.
     return [str(e).strip() for e in entries]
 
@@ -5139,7 +5186,8 @@ _EPIC_CITE_SOURCES = {
     # filename now, not by line number, because `tools/ci_selection.py::register_tests`
     # owns that block and every landing PR that registers a test file above the entry
     # moves the number (measured: 9943 -> 9949 -> 9965 -> 9973 -> 9987, the last move
-    # inside two hours). The entry is read off the block by `_section_entries`;
+    # 26 seconds later, by #12302). The entry is read off the block by
+    # `_section_entries`;
     # `#11837`'s point stands — nothing read it at all before that — but a reader that
     # has to be re-derived by hand on every landing PR is a reader that reds `main`
     # between landings.
@@ -5302,9 +5350,11 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # every landing PR above it moved the number. The recorded entry-line
         # series (twelve values, eleven moves) is in `_section_entries`' docstring;
         # the last move arrived 26 seconds after #12347 landed its predecessor.
-        # The class the deleted row's 5th element guarded is unchanged — an
-        # indented `core:`/`sdk:` mirror satisfies the anchor text alone — but a
-        # block read has no boundary to get wrong.
+        # The class that row guarded IS still enforced, by the block read below:
+        # an indented `core:`/`sdk:` mirror cannot satisfy membership in the
+        # parsed `carve_out:` list. What is gone is the mechanism — a section
+        # comparison with no caller left (see `_pin_row_failures`), not the
+        # coverage.
         # The `plan_hierarchy_edges` CALL, in the two documents that name it, keyed
         # by the sentence rather than by the number: `:631` is where `main` had it,
         # then #12112 moved it three times (`687`, `695`, `700`) and each move left a
@@ -5344,7 +5394,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # entry `tools/ci_selection.py::register_tests` OWNS, so every landing PR that
         # registered a test file above it moved the number and reddened `main`, and
         # every repair was another hand re-derivation: 9943 → 9949 → 9965 → 9973 →
-        # 9987. The fourth re-stale happened TWO HOURS after the PR that landed it.
+        # 9987. The last re-stale landed 26 SECONDS after the PR before it.
         # Three repairs to the same digit is the tell that the digit is the wrong
         # binding, so this claim is now checked against the BLOCK (below), which is
         # what the document actually asserts, and which no insertion can move.
@@ -5379,7 +5429,21 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     ci_lines = sources["ci_surfaces"]
     capstone = ("7949", "capstone", "pack_logic", "writeprobe")
     ENTRY = "test_pack_logic_writeprobe_11083.py"
-    carve_all = _section_entries(ci_lines, "carve_out")
+
+    def _entries_or_failure(section: str) -> list[str] | None:
+        """`_section_entries`, but a SHAPE error joins `block_failures`.
+
+        A duplicate top-level key or a non-list block is a finding like any other;
+        `assert`ing it would abort the test and hide the document-side answers
+        (`does the sentence name the entry`) the same reader needs.
+        """
+        try:
+            return _section_entries(ci_lines, section)
+        except _ManifestShapeError as exc:
+            block_failures.append(str(exc))
+            return None
+
+    carve_all = _entries_or_failure("carve_out")
     if carve_all is None:
         block_failures.append(
             "config/ci-surfaces.yml has no top-level `carve_out:` block at all — "
@@ -5395,7 +5459,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
                 f"falsifies the document's carve-out claim (and the E6 lane's "
                 f"embedded-only isolation)")
     for other in ("uri_requiring", "slow_files"):
-        entries = _section_entries(ci_lines, other)
+        entries = _entries_or_failure(other)
         if entries is None:
             block_failures.append(
                 f"config/ci-surfaces.yml has no top-level `{other}:` block — "
@@ -5424,27 +5488,31 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
                 f"— the sentence is the only place the document says WHICH entry it "
                 f"means, so a sentence that names another file, or none, is the "
                 f"defect this pin exists to catch")
-        if re.search(r"ci-surfaces\.yml:\d", doc_hits[0]):
+        if _FILE_THEN_NUMBER.search(doc_hits[0]):
             block_failures.append(
-                "03-test-design.md cites `config/ci-surfaces.yml:<line>` for the "
-                "`carve_out:` entry — that number is owned by "
-                "`tools/ci_selection.py::register_tests`, which rewrote it eleven "
-                "recorded times (the last 26 seconds after the PR that re-derived "
-                "it), so printing one re-creates the rot. Cite the BLOCK and the "
-                "filename (the bundle's own D5 policy, `05-verify.md`): the block "
-                "is authoritative, a number is a convenience.")
+                "03-test-design.md attaches a LINE NUMBER to "
+                "`config/ci-surfaces.yml` on the `carve_out:` sentence — the number "
+                "is owned by `tools/ci_selection.py::register_tests`, which rewrote "
+                "it eleven recorded times (the last 26 seconds after the PR that "
+                "re-derived it), so printing one re-creates the rot. The matcher is "
+                "deliberately spelling-blind (`:NNNN`, `at :NNNN`, `, `:NNNN``, "
+                "` — :NNNN`) because the bare continuation is the form this module "
+                "documents as invisible to every sweep. Cite the BLOCK and the "
+                "filename (the bundle's own D5 policy, `05-verify.md`).")
     # …and a line-number cite for that TOOL-MAINTAINED file must not reappear
     # ANYWHERE in the document: scoping the check to the phrase's line would let a
     # second sentence reintroduce the rot this arm removes.
-    numbered = re.findall(r"ci-surfaces\.yml:(\d+)", doc_text)
+    numbered = [m.group(0) for m in _FILE_THEN_NUMBER.finditer(doc_text)]
     if numbered:
+        more = f" (and {len(numbered) - 1} more)" if len(numbered) > 1 else ""
         block_failures.append(
-            f"03-test-design.md cites `config/ci-surfaces.yml:{numbered[0]}` (and "
-            f"{len(numbered) - 1} more) by LINE NUMBER — `tools/ci_selection.py::"
-            f"register_tests` rewrites that file, so any number in it is a value a "
-            f"tool moves under the sentence. Cite the BLOCK and the entry name "
-            f"(the bundle's own D5 policy, `05-verify.md`): the block is "
-            f"authoritative, a number is a convenience.")
+            f"03-test-design.md attaches a LINE NUMBER to "
+            f"`config/ci-surfaces.yml`: {numbered[0]!r}{more} — "
+            f"`tools/ci_selection.py::register_tests` rewrites that file, so any "
+            f"number in it is a value a tool moves under the sentence. Cite the "
+            f"BLOCK and the entry name (the bundle's own D5 policy, "
+            f"`05-verify.md`): the block is authoritative, a number is a "
+            f"convenience.")
     assert not block_failures, (
         "the `carve_out:` / `uri_requiring:` / `slow_files:` claim in "
         "03-test-design.md does not hold against `config/ci-surfaces.yml` — this "
