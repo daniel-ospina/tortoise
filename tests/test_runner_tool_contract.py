@@ -3227,10 +3227,11 @@ def test_the_enumerator_returns_every_workflow_file_github_would_run():
     with itself, the same reason `test_the_job_splitter_returns_exactly_the_jobs_yaml_declares`
     compares `_jobs` against `yaml.safe_load` rather than against a hand-written expectation.
 
-    The population assertion is not decoration: with an emptied or unreadable
-    `.github/workflows`, a two-sided comparison is `set() == set()` and passes while proving
-    nothing — a gate that reports OK when it examined nothing, which is the shape `#12238` is
-    about one layer up.
+    The population assertion is not decoration: with an EMPTIED `.github/workflows`, a
+    two-sided comparison is `set() == set()` and passes while proving nothing — a gate that
+    reports OK when it examined nothing, which is the shape `#12238` is about one layer up.
+    (An UNREADABLE directory is a different case and needs no help: `iterdir()` raises and the
+    test reds, which is the safe direction — this assertion is about the empty population.)
     """
     on_disk = {p.name for p in WORKFLOWS.iterdir() if p.is_file() and p.suffix in (".yml", ".yaml")}
     assert on_disk, (
@@ -3248,27 +3249,43 @@ def test_no_site_re_spells_the_workflow_glob_narrowly():
 
     STRUCTURAL on purpose. The narrow glob looked right at every one of its three sites, so
     a reader adding a fourth scan has no signal that `*.yaml` is missing. This pin gives them
-    one: the one-extension glob spelling may not appear anywhere in this module — the
-    enumeration derives from `_WORKFLOW_SUFFIXES` through `_workflow_paths()`. (That is also
-    why this docstring does not spell it: the pin reads THIS file's source, so prose counts.)
+    one: no `glob(`/`rglob(` call in this module may pass an argument naming only the `.yml`
+    extension — the enumeration derives from `_WORKFLOW_SUFFIXES` through `_workflow_paths()`.
+    (That is also why this docstring does not spell the offending literal: the pin reads THIS
+    file's source, so prose counts.)
 
-    SCOPE, so a green run is not read as more than it is: this is a pin on the GLOB IDIOM,
-    which is the idiom every site in this file used. A fourth site written without a glob at
-    all (`[p for p in WORKFLOWS.iterdir() if p.suffix == ".yml"]`) reads clean here — it is
-    out of this pin's reach by construction, and measured as such. What covers that shape is
-    `test_a_dot_yaml_workflow_is_scanned_like_a_dot_yml_one` only if the new site feeds the
-    coverage scan, so a future non-glob enumeration site is a REVIEW question, not a pinned
-    one. Stated rather than implied, because a structural pin invites exactly that
-    over-reading. The tuple itself is asserted here too (bottom), so a dropped `.yaml` reds
-    even when no site spells the glob.
+    WHY THE CALL FAMILY AND NOT THE BARE CALL: the first cut matched only
+    `glob("<star>.yml")` and a fresh review measured FOUR escapes — `glob("**/<star>.yml")`,
+    `glob("<star>.yml", case_sensitive=False)`, the same with `root_dir=`, and any of those
+    wrapped across lines. Each is still a one-extension workflow glob, each left the guard
+    GREEN, and nothing else reds on one that does not feed the coverage scan — i.e. the
+    silent skip this issue is about, restored. So the arm reads the ARGUMENT TEXT of every
+    `glob`/`rglob` call and reds when it names `.yml` without naming `.yaml`, which covers the
+    `**/`-prefixed, keyword-argument and multi-line spellings by construction rather than by
+    enumeration.
+
+    SCOPE, so a green run is not read as more than it is: this is a pin on the glob CALL
+    family. Two shapes stay out of reach, both declared rather than implied — a site that
+    writes no glob at all (`[p for p in WORKFLOWS.iterdir() if p.suffix == ".yml"]`, measured
+    clean) and a site that DERIVES the pattern (`glob(f"*{suffix}")`, which is this module's
+    own correct form). Neither is pinnable from source text without parsing Python, so both
+    are REVIEW questions. Stated because a structural pin invites exactly that over-reading —
+    the over-claim, not the escape, is what round 2 of review caught here. The tuple itself
+    is asserted here too (bottom), so a dropped `.yaml` reds even when no site spells a glob.
     """
     source = Path(__file__).read_text()
-    narrow = re.findall(r"glob\(\s*[\"']\*\.yml[\"']\s*\)", source)
+    #: The call's argument text: `glob(…)`/`rglob(…)` up to the first `)`. No glob argument in
+    #: this repo contains a `)`, and DOTALL is what makes a wrapped call read like a flat one.
+    glob_args = re.findall(r"(?:glob|rglob)\(([^)]*)", source, re.DOTALL)
+    narrow = [args.strip() for args in glob_args if "*.yml" in args and "*.yaml" not in args]
     assert not narrow, (
-        f"this module spells the workflow glob narrowly at {len(narrow)} site(s): `*.yml` "
-        "omits the `*.yaml` extension, which GitHub also RUNS — a workflow in it is then "
-        "invisible to every scan here (#12238). Use `_workflow_paths()`."
+        f"this module spells a workflow glob narrowly at {len(narrow)} site(s): {narrow}. "
+        "A `*.yml` glob omits the `*.yaml` extension, which GitHub also RUNS — a workflow in "
+        "it is then invisible to every scan here (#12238). Use `_workflow_paths()`."
     )
-    assert _WORKFLOW_SUFFIXES == (".yml", ".yaml"), (
+    # ORDER-INSENSITIVE: `_workflow_paths()` sorts, so the tuple's order carries no meaning and
+    # asserting the order would red a semantically identical swap with a message blaming the
+    # extensions. Set equality keeps the dropped-entry teeth without the false red.
+    assert set(_WORKFLOW_SUFFIXES) == {".yml", ".yaml"}, (
         "`_WORKFLOW_SUFFIXES` no longer matches the set of extensions GitHub Actions runs"
     )
