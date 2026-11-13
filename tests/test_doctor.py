@@ -46,24 +46,24 @@ def clear_db_env(monkeypatch):
 def _no_hosted_egress(monkeypatch):
     """#11912: `doctor` now probes the hosted endpoint when a credential resolves.
 
-    No test in this module may touch the real network. Pinning a URL is NOT
-    enough and the first version of this fixture was wrong that way (PR #12371
-    review, cycle 2, BLOCKING, measured): a **file-sourced** key ignores
-    `TORTOISE_API_URL` by design (#2369 D1.1 — one identity, one source chain),
-    so a developer's real `~/.tortoise/credentials.json` was still SENT to
-    api.premiselabs.co, 60 times across 30 doctor invocations. Block the
-    transport itself: every doctor run in this module is then offline and fast.
-    Tests that exercise the probe replace `urlopen` themselves and win (autouse
-    fixtures apply before the class-level monkeypatch).
+    The SUITE-wide block lives in `tests/conftest.py` (it has to —
+    `test_session_index_health.py` and `test_capture_backlog_4197.py` call doctor
+    too, and a per-module guard left a developer's real stored key transmitted to
+    the production API; PR #12371 review cycles 2 and 3). This module keeps its
+    own copy so the guard is visible next to the tests that exercise the probe,
+    and so `test_the_egress_guard_itself_works` pins the behaviour it relies on.
+    Tests that exercise the probe replace the seam themselves and win (an autouse
+    fixture applies before a class-level monkeypatch).
     """
     import urllib.error
-    import urllib.request
+
+    import tortoise.__main__ as _main
 
     def _blocked(req, *a, **k):
         url = getattr(req, "full_url", req)
         raise urllib.error.URLError(f"network disabled in tests ({url})")
 
-    monkeypatch.setattr(urllib.request, "urlopen", _blocked)
+    monkeypatch.setattr(_main, "_DOCTOR_URLOPEN", _blocked)
     return monkeypatch
 
 
@@ -1797,7 +1797,12 @@ class TestDoctorHostedCredentialRows:
                 ).encode())
             raise AssertionError(f"unexpected probe URL {url}")
 
-        monkeypatch.setattr(urllib.request, "urlopen", _fake)
+        # The SEAM, not `urllib.request.urlopen`: `_probe_hosted` resolves the
+        # transport through `_doctor_transport()` so the whole suite can block it
+        # in one place (tests/conftest.py). Patching `urlopen` here would leave
+        # the probe pointed at the real network.
+        import tortoise.__main__ as _main
+        monkeypatch.setattr(_main, "_DOCTOR_URLOPEN", _fake)
         return calls
 
     # ── tests ──────────────────────────────────────────────────────────────
@@ -1827,8 +1832,8 @@ class TestDoctorHostedCredentialRows:
         def _forbidden(*a, **k):
             raise AssertionError("doctor dialed the network with no credential")
 
-        import urllib.request
-        monkeypatch.setattr(urllib.request, "urlopen", _forbidden)
+        import tortoise.__main__ as _main
+        monkeypatch.setattr(_main, "_DOCTOR_URLOPEN", _forbidden)
 
         rc = _run_doctor([])
         out = capsys.readouterr().out
@@ -1865,8 +1870,8 @@ class TestDoctorHostedCredentialRows:
         def _forbidden(*a, **k):
             raise AssertionError("--offline made a request")
 
-        import urllib.request
-        monkeypatch.setattr(urllib.request, "urlopen", _forbidden)
+        import tortoise.__main__ as _main
+        monkeypatch.setattr(_main, "_DOCTOR_URLOPEN", _forbidden)
 
         _run_doctor(["--offline"])
         out = capsys.readouterr().out
@@ -1952,6 +1957,22 @@ class TestDoctorHostedCredentialRows:
         from tortoise.__main__ import _key_fingerprint
         assert _key_fingerprint(key) in out, out
 
+    def test_a_timeout_names_the_cold_start_possibility(
+            self, monkeypatch, tmp_path, capsys):
+        """PR #12371 review (BLOCKING, cycle 3): the bound's comment claimed the
+        row names a cold-starting app, and the code did not — so a sleeping
+        hosted app read as `endpoint unreachable … check your network` (exit 1)
+        while `team info` succeeded a minute later. A timeout now says so."""
+        self._store(tmp_path, "tt_" + "t" * 40)
+        self._install(monkeypatch, health_exc=TimeoutError("timed out"))
+
+        _run_doctor([])
+        out = capsys.readouterr().out
+
+        assert "❌ Hosted" in out, out
+        assert "may be starting up" in out, out
+        assert "check your network" not in out, out
+
     def test_an_unreachable_endpoint_is_named_not_swallowed(
             self, monkeypatch, tmp_path, capsys):
         import urllib.error
@@ -1975,8 +1996,8 @@ class TestDoctorHostedCredentialRows:
         def _forbidden(*a, **k):
             raise AssertionError("doctor dialed with a key that cannot be sent")
 
-        import urllib.request
-        monkeypatch.setattr(urllib.request, "urlopen", _forbidden)
+        import tortoise.__main__ as _main
+        monkeypatch.setattr(_main, "_DOCTOR_URLOPEN", _forbidden)
 
         _run_doctor([])
         out = capsys.readouterr().out

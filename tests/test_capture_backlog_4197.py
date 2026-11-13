@@ -571,7 +571,9 @@ def test_doctor_reports_the_backlog_and_the_recommended_action(places, capsys,
     backlog.record_not_processed(session_id="s_1", harness="pi", turns=10,
                                  estimate=30, reason="no LLM provider key",
                                  file=str(home / "a.jsonl"))
-    main.main(["doctor", "--path", str(tmp_path / "doctor.db")])
+    # `--offline` (#11912): this test is about the LOCAL backlog row; an
+    # un-offline run would probe the hosted half and could add a ❌ row.
+    main.main(["doctor", "--offline", "--path", str(tmp_path / "doctor.db")])
     out = capsys.readouterr().out
 
     line = next(ln for ln in out.splitlines() if "Saved backlog" in ln)
@@ -582,7 +584,7 @@ def test_doctor_reports_the_backlog_and_the_recommended_action(places, capsys,
 
 def test_doctor_is_silent_about_a_backlog_that_does_not_exist(places, capsys,
                                                               tmp_path):
-    main.main(["doctor", "--path", str(tmp_path / "doctor.db")])
+    main.main(["doctor", "--offline", "--path", str(tmp_path / "doctor.db")])
     out = capsys.readouterr().out
     assert "Saved backlog" not in out
 
@@ -1131,7 +1133,7 @@ def test_the_read_surface_reports_a_local_record_not_a_server_verdict(
     assert "Local record only" in out
     assert "not visible here" in out
 
-    main.main(["doctor", "--path", str(home / "doctor.db")])
+    main.main(["doctor", "--offline", "--path", str(home / "doctor.db")])
     doctor_out = capsys.readouterr().out
     line = next(ln for ln in doctor_out.splitlines() if "Saved backlog" in ln)
     assert "LOCALLY RECORDED" in line
@@ -1407,7 +1409,7 @@ def test_doctor_renders_an_unpriced_entry(places, capsys, tmp_path):
             estimate=backlog.estimate_units([{"role": "user", "content": "x"}]),
             file=str(home / "a.jsonl")) is True
 
-    main.main(["doctor", "--path", str(tmp_path / "doctor.db")])
+    main.main(["doctor", "--offline", "--path", str(tmp_path / "doctor.db")])
     line = next(ln for ln in capsys.readouterr().out.splitlines()
                 if "Saved backlog" in ln)
     assert "~0 estimated extraction unit(s)" in line

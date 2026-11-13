@@ -12869,15 +12869,38 @@ def _session_index_rows_without_graph(
              "(see the `Graph: health` row)")]
 
 
-#: `doctor`'s hosted-probe bounds. `team info` answers with 10 s and then
-#: retries once at 30 s for a cold app; `doctor` must not park twice as long as
-#: the command whose verdict it reports, so it makes ONE attempt at the same
-#: first bound and names the cold-start possibility in the row instead of
-#: retrying. `/health` gets a tighter bound: it answers in milliseconds when the
-#: app is up (measured 173–227 ms), so a 5 s silence there is a finding, not a
-#: warm-up.
+#: The ONE transport `doctor`'s hosted probe uses, resolved at CALL time.
+#:
+#: It is a module attribute (not a local `import urllib.request` per call) so the
+#: TEST SUITE can replace the transport for every test at once — `tests/conftest.py`
+#: blocks it autouse. That is not a test-only hatch bolted onto production code:
+#: it is the dependency-injection point for the one OUTBOUND call this module
+#: makes, and it exists because `doctor` gained a network probe (#11912) while a
+#: dozen pre-existing tests call it with no credential isolation. Measured on
+#: PR #12371 (review cycle 3): without a single seam, `pytest` transmitted a
+#: developer's real stored API key to api.premiselabs.co from
+#: `tests/test_session_index_health.py` — the #5109 disclosure class.
+_DOCTOR_URLOPEN = None  # None ⇒ resolve `urllib.request.urlopen` at call time
+
+
+#: `doctor`'s hosted-probe bound, and the reason it is ONE number for both
+#: probes: `team info` answers at 10 s and then retries once at 30 s for a cold
+#: app, and `doctor` must not park longer than the command whose verdict it
+#: reports — so it makes ONE attempt at the same first bound. Nothing here is
+#: tighter than 10 s on purpose: the sibling's own comment records >10 s cold
+#: starts, and a 5 s probe would report a sleeping app as unreachable while
+#: `team info` succeeds a minute later (PR #12371 review, cycle 3). The row names
+#: the cold-start possibility on a TIMEOUT instead of retrying.
 _DOCTOR_HOSTED_TIMEOUT_S = 10.0
-_DOCTOR_HEALTH_TIMEOUT_S = 5.0
+
+
+def _doctor_transport():
+    """The callable `_probe_hosted` uses for BOTH requests."""
+    if _DOCTOR_URLOPEN is not None:
+        return _DOCTOR_URLOPEN
+    import urllib.request
+
+    return urllib.request.urlopen
 
 
 def _probe_hosted(api_url: str, api_key: str,
@@ -12902,14 +12925,19 @@ def _probe_hosted(api_url: str, api_key: str,
     """
     import time
     import urllib.error
+
+    # Imported here as well as in `_doctor_transport()`: `urllib.request.Request`
+    # is built below, and a seam the TEST SUITE patched (conftest) does not import
+    # it for us — without this, that path raised AttributeError and reported "the
+    # key could not be verified" instead of the truth (PR #12371 review, cycle 3).
     import urllib.request
 
+    urlopen = _doctor_transport()
     base = (api_url or "").rstrip("/")
     shown = _printable(_mask_display_target(base or "(no api_url resolved)"))
     started = time.monotonic()
     try:
-        with urllib.request.urlopen(f"{base}/health",
-                                    timeout=min(timeout, _DOCTOR_HEALTH_TIMEOUT_S)) as resp:
+        with urlopen(f"{base}/health", timeout=timeout) as resp:
             resp.read(2048)
     except urllib.error.HTTPError as exc:
         # The body is never read on this path; close it so a `-W error::
@@ -12921,8 +12949,19 @@ def _probe_hosted(api_url: str, api_key: str,
                       "not healthy; check status.premiselabs.co, your "
                       "TORTOISE_API_URL, or retry")
     except Exception as exc:  # transport, bad URL, TLS, timeout
-        reason = _printable(_scrub(str(getattr(exc, "reason", None) or exc),
-                                   base, api_key))[:80]
+        reason_text = str(getattr(exc, "reason", None) or exc)
+        reason = _printable(_scrub(reason_text, base, api_key))[:80]
+        if _is_timeout_reason(getattr(exc, "reason", None) or exc):
+            # The ONE case where "your network" is the wrong advice: a hosted app
+            # that has been idle takes >10 s to wake, and `team info` answers it
+            # with a retry. `doctor` does not retry (it must stay bounded), so it
+            # must at least name the possibility — otherwise a correctly
+            # configured box reads as broken and disagrees with the command whose
+            # verdict it reports (PR #12371 review, cycle 3).
+            return ("❌", f"no answer from {shown}/health in {timeout:.0f} s — the "
+                          "hosted app may be starting up; re-run `tortoise "
+                          "doctor` in a minute, check TORTOISE_API_URL, or pass "
+                          "--offline to skip the probe")
         return ("❌", f"endpoint unreachable at {shown}/health ({reason}) — check "
                       "your network, TORTOISE_API_URL, or re-run with --offline "
                       "to skip the probe")
@@ -12931,7 +12970,7 @@ def _probe_hosted(api_url: str, api_key: str,
     try:
         req = urllib.request.Request(
             f"{base}/v1/team", headers={"Authorization": f"Bearer {api_key}"})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urlopen(req, timeout=timeout) as resp:
             # Bounded like every other read on this surface: a proxy page must
             # not be pulled into memory just because it answers 200.
             raw = resp.read(65536)
@@ -12956,11 +12995,16 @@ def _probe_hosted(api_url: str, api_key: str,
         return ("✅", f"health OK ({health_ms} ms) · key accepted "
                       f"({_printable(_scrub(org, base, api_key))})")
     except urllib.error.HTTPError as exc:
+        import contextlib as _contextlib
         import http.client
         try:
             body = exc.read(65536).decode("utf-8", "replace") if exc.fp else ""
         except (OSError, http.client.HTTPException):
             body = ""
+        # Closed for the same reason as the `/health` arm: a >64 KiB error body
+        # would otherwise wait for GC (PR #12371 review, cycle 3).
+        with _contextlib.suppress(Exception):
+            exc.close()
         verdict = _classify_hosted_refusal(exc.code, body, base, api_key)
         if verdict["state"] == "graph_scoped":
             return ("✅", f"health OK ({health_ms} ms) · key accepted — graph-scoped "
@@ -13309,15 +13353,13 @@ def _cmd_doctor(args):
     # reason: `org_id` lives in the FILE, and an env-supplied key has none (which
     # is an answer, not a gap — the row says so by omitting it).
     _offline = bool(getattr(args, "offline", False))
+    # ONLY the resolution is inside this guard. The probe runs in the `else` arm
+    # on purpose: `_probe_hosted` is raise-safe today, but an exception from the
+    # NETWORK reported as "the credential resolver could not run" would be a
+    # mis-attributed diagnosis, and an uncaught type would escape `doctor`
+    # entirely (PR #12371 review, cycle 3).
     try:
         _cfg_path, _cfg, _api_key, _api_url = _resolve_config_path()
-        results.extend(_doctor_hosted_rows(
-            _api_key, _api_url,
-            source=("env:TORTOISE_API_KEY" if (_cfg_path is None and _api_key)
-                    else (str(_cfg_path) if _cfg_path is not None else None)),
-            org_id=(_cfg or {}).get("org_id") if isinstance(_cfg, dict) else None,
-            org_name=(_cfg or {}).get("org_name") if isinstance(_cfg, dict) else None,
-            offline=_offline))
     except _ConfigError as exc:
         # The resolver REFUSED a store: that is the diagnosis, and probing with
         # no key would fail for a reason we already know.
@@ -13336,6 +13378,14 @@ def _cmd_doctor(args):
             degraded=(f"credential resolver could not run: "
                       f"{_printable(f'{type(exc).__name__}: {exc}')[:80]} — `tortoise "
                       "config show` reports the stores it could read")))
+    else:
+        results.extend(_doctor_hosted_rows(
+            _api_key, _api_url,
+            source=("env:TORTOISE_API_KEY" if (_cfg_path is None and _api_key)
+                    else (str(_cfg_path) if _cfg_path is not None else None)),
+            org_id=(_cfg or {}).get("org_id") if isinstance(_cfg, dict) else None,
+            org_name=(_cfg or {}).get("org_name") if isinstance(_cfg, dict) else None,
+            offline=_offline))
 
     # 4.6 Session capture consent (#3615) — capture is a DATA-SHARING act and
     # requires the explicit TORTOISE_CAPTURE opt-in; a lone credential no longer

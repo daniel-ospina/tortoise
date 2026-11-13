@@ -1999,6 +1999,38 @@ def _reset_hosted_registry_probe() -> None:
     module._reset_registry_probe_sdk()
 
 
+@pytest.fixture(autouse=True)
+def _no_doctor_hosted_egress(monkeypatch):
+    """#11912: `tortoise doctor` now probes the hosted endpoint when a credential
+    resolves — so EVERY test that calls doctor can reach the network.
+
+    A per-module guard is not enough, and that was measured, not assumed (PR
+    #12371 review cycle 3): `tests/test_session_index_health.py` and
+    `tests/test_capture_backlog_4197.py` call doctor with no `HOME` isolation, so
+    a developer's real file store resolved and its key was transmitted to
+    api.premiselabs.co. Pinning `TORTOISE_API_URL` cannot fix it — a file-sourced
+    key IGNORES that variable by design (#2369 D1.1, one identity one source
+    chain). So the TRANSPORT is blocked here, for every test: doctor's one
+    outbound call cannot leave the process unless a test explicitly replaces
+    `tortoise.__main__._DOCTOR_URLOPEN` with its own fake (the probe tests do).
+
+    Lazy in COST but not in EFFECT: `tortoise.__main__` is imported here if it
+    is not already loaded (72 ms, once per process) rather than skipped — a
+    `sys.modules.get(...) is None → return` would leave the probe unblocked for
+    every test that imports the CLI later in the run, which is the leak this
+    fixture exists to close.
+    """
+    import urllib.error
+
+    import tortoise.__main__ as module
+
+    def _blocked(req, *a, **k):
+        raise urllib.error.URLError(
+            f"network disabled in tests ({getattr(req, 'full_url', req)})")
+
+    monkeypatch.setattr(module, "_DOCTOR_URLOPEN", _blocked, raising=False)
+
+
 # ── #3695 / #5477: the provider gate is CODE, not a property of the box ───
 # A test whose premise is "no provider is configured" is asserting on the
 # ambient shell unless it scrubs EVERY key the routing resolvers honour — and
