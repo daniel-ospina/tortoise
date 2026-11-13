@@ -81,7 +81,8 @@ Four properties are load-bearing and each is pinned by a test:
 * **Cannot-answer is not an answer — and not an abort, and not `degraded`.**
   A read that fails after a projection resolved never returns the pre-hop rows
   (that is the binding the guard exists to prevent) and never escapes
-  `search_graph` either: its callers (`extract_session_v2`, `commit_session`) hold
+  `search_graph` either: its one caller (`extract_session_v2` — `search_graph`
+  has no other call site) holds
   no `try`, so a raise would abort a capture. It is graded **PARTIAL** (§4.4 G3 /
   `#5095`), not `degraded` — `degraded` means the search never got through its
   first query and `_render_search_results` acts on it by withholding every prior
@@ -336,8 +337,16 @@ done here, because we have no measurement that would justify the prompt bytes.
 **Checked explicitly and NOT reversed:** V1 (`SEARCH-ARCHITECTURE.md` 1–4),
 §12.2/§12.2c, §14.3 V3 + the `#11395` KEEP ruling (`6781921075`), §2.0, the
 no-eviction/projection-window rule, §7 + §17.4.6 (the read ledger is not an
-admission-control signal), and `#11901`'s conclusion (the window is untouched —
-this change alters no window, no index, no vector, and reads no ledger).
+admission-control signal), and `#11901`'s conclusion. ⚠️ **What the change DOES
+do to the index path, stated rather than certified away:** it adds ONE range index
+per identity label — `resolved_from` on `Object` and on `Subject` — inside the
+graph projection, and declares both REQUIRED
+(`projection/__init__.py::_RANGE_INDEX_LABEL_PROPS`, `::_REQUIRED_RANGE_INDEXES`),
+so a pre-`#12296` graph runs the one-time bootstrap sweep instead of reading
+current forever (the `#8400` trap). It MOVES no index and adds no new index
+LOCATION — this is an index on an existing label in the existing projection, so
+V1's ruling is not engaged — and it adds no vector, alters no window, and reads
+no ledger.
 
 ---
 

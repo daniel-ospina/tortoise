@@ -3349,8 +3349,9 @@ def search_graph(sdk, embed_list: dict, story: str, *,
     # ⛔ **Cannot-answer is not an answer, and it is not an ABORT either — and it
     # is not `degraded` either.** A read that fails after a projection resolved
     # must never be answered with the pre-hop rows (that is the binding this guard
-    # exists to prevent), and its raise must not escape this function: the callers
-    # (`extract_session_v2`, `commit_session`) hold no `try`, so it would abort a
+    # exists to prevent), and its raise must not escape this function: its ONE
+    # caller (`extract_session_v2` — `search_graph` has no other call site) holds
+    # no `try`, so it would abort a
     # capture. But `degraded` is the wrong grade for it — `degraded` means the
     # search never got through its FIRST query and therefore carries ZERO priors
     # (this function's `except …: degraded = …` arm, graded by

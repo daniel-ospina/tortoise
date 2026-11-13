@@ -47,9 +47,11 @@ def _create_object(sdk, node_id: str, name: str, kind: str = "core:plan",
 def _merged_pair(sdk, carrier_id: str = "obj-carrier",
                  survivor_id: str = "obj-survivor",
                  carrier_name: str = "the team",
-                 survivor_name: str = "Acme Holdings") -> None:
-    _create_object(sdk, carrier_id, carrier_name)
-    _create_object(sdk, survivor_id, survivor_name)
+                 survivor_name: str = "Acme Holdings",
+                 carrier_kind: str = "core:plan",
+                 survivor_kind: str = "core:plan") -> None:
+    _create_object(sdk, carrier_id, carrier_name, kind=carrier_kind)
+    _create_object(sdk, survivor_id, survivor_name, kind=survivor_kind)
     apply_entity_merge(sdk, carrier_id, survivor_id,
                        method="exact", similarity=1.0)
 
@@ -99,6 +101,36 @@ class TestThePriorSetNeverCarriesARetiredNode:
             {"obj-carrier": "Object"})
         assert [(r["id"], r["name"]) for r in out] == [
             ("obj-survivor", "Acme Holdings")], out
+
+    def test_the_folded_row_carries_the_survivor_s_kind_not_the_carrier_s(
+            self, sdk_factory):
+        """The fold replaces the row with the SURVIVOR's kind — and that is
+        load-bearing, not cosmetic.
+
+        Phase 1's name rungs are kind-gated, so a folded row carrying the
+        CARRIER's kind makes a mention spelled exactly like the SURVIVOR miss
+        `exact`/`bare`; the survivor's own name is not in its `aliases[]` (the
+        merge writes the CARRIER's spelling there), so the mention falls to phase
+        2, where `kind_conflict` fires against the carrier's kind → `HOLD_VETOED`
+        → dropped (an entity hold is not carried forward).
+
+        ⛔ Discriminating on purpose: every other test here creates BOTH nodes with
+        the same kind, so a fold that kept `row["kind"]` instead of the
+        survivor's would pass all of them — the defect this file exists to keep
+        closed would be invisible.
+        """
+        sdk = sdk_factory()
+        _merged_pair(sdk, carrier_kind="core:plan", survivor_kind="core:org")
+        out = v2._current_entity_priors(
+            sdk, [{"id": "obj-carrier", "name": "the team",
+                   "kind": "core:plan"}],
+            {"obj-carrier": "Object"})
+        assert [(r["id"], r["kind"]) for r in out] == [
+            ("obj-survivor", "core:org")], out
+        # …and the survivor's own spelling still resolves on the NAME rung at the
+        # survivor's kind — the path a carrier-kind fold closes.
+        hit, mode = v2._find_existing_entity(out, "Acme Holdings", "core:org")
+        assert (hit["id"], mode) == ("obj-survivor", "exact"), (hit, mode)
 
     def test_an_unmerged_graph_is_untouched(self, sdk_factory):
         sdk = sdk_factory()
