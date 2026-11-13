@@ -592,12 +592,22 @@ def derive_bound(target_jobs: list[dict], green_job_lists: list[list[dict]],
             # was judged against a clock that included its whole queue wait — the P0
             # this guard exists to stop. A job that has not begun now stays
             # CLOCKLESS, which routes it to `unstarted` and makes the bound
-            # UNDERIVABLE. The direction is fail-closed and it is NOT "never more
-            # cancels": a CLAIMED `in_progress` job carrying `steps` but no readable
-            # `started_at` stays CLOCKLESS too (rev12421 review, cycle 1 F1) — the
-            # clock is floored at the claim stamp, so with no claim stamp there is
-            # nothing to floor a retained step against, and handing one out here
-            # would re-open the residue path. Fail closed.
+            # UNDERIVABLE. The direction is fail-closed in BOTH arms: this change can
+            # only ever produce a LATER-or-equal clock than main's direct `started_at`
+            # read (never an earlier one), and a clock it cannot measure routes to
+            # `unstarted` instead of to a fabricated one — so it is monotonically
+            # NON-CANCELLING, i.e. "strictly fewer cancels, never more".
+            #
+            # ⛔ AN INTERMEDIATE HEAD OF THIS PR DID CARRY A PERMITTING BRANCH, and
+            # this paragraph used to cite it as one that still exists. A CLAIMED
+            # `in_progress` job carrying `steps` but no readable `started_at` was
+            # clocked from `min(steps)` — the floor's own input with the floor
+            # bypassed — so a retained step from a PREVIOUS attempt could cancel a
+            # shard claimed seconds ago. rev12421 review cycle 1 F1 removed it:
+            # `job_work_start` now returns `None` before it reads any step, and the
+            # shape is pinned by test case (d). If you are reading this looking for
+            # the permitting path, there is none left here — the clock is
+            # `max(claim, min(steps))` and `claim` is required before it is computed.
             ts = job_work_start(job)
             if ts is not None:
                 rec["started_at"] = ts
