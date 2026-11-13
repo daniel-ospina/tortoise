@@ -1685,3 +1685,81 @@ def test_the_frozen_norm_only_control_does_not_use_the_folded_rung(
         "it is the live matcher — the before/after this artifact publishes would "
         "be the change measured against itself")
 
+
+def test_the_frozen_norm_only_control_can_actually_match(tool_mod):
+    """The frozen control must BIND by `_norm`, not merely abstain.
+
+    ⛔ MEASURED (#12304, dead arm): `_norm_only_match` used to be NESTED inside
+    `run()`, and the only thing pinning it was
+    `test_the_frozen_norm_only_control_does_not_use_the_folded_rung`'s
+    `attached_norm_only == 0`. That value is **entailed by the harness
+    invariant** — every surface `variants()` generates is `_norm`-different from
+    its stored name, by construction — so the assertion is satisfied by a
+    function that can never match anything. Replacing the entire body with
+    `return None` left **74 passed**: an inert arm and the faithful frozen
+    control were observationally identical, and the "before" half of this PR's
+    before/after could have been a stub with every published number unchanged.
+
+    So this pins the function DIRECTLY (extracted to module scope), in BOTH
+    directions: a `_norm`-equal row BINDS (identity by `id`), and the two
+    surface families only the #12295 FOLD reaches — separator/case variant and
+    article drop — are REFUSED. The kind arms are pinned too: an exact-kind hit
+    outranks a bare-kind hit (the bare carrier is listed FIRST, so returning
+    `rows[0]` fails here), and two bare-kind carriers are ambiguous.
+
+    No graph, no `_drive`: this is the control's own contract, not the arm.
+    """
+    stored = {"id": "obj-1", "name": "the plan doc", "kind": "core:other"}
+
+    # 1. It BINDS. `_norm` equality (case + whitespace collapse) is the arm, so
+    #    a merely re-spaced/re-cased surface must still find the row.
+    hit = tool_mod._norm_only_match([stored], "the plan doc", "core:other")
+    assert hit is not None, (
+        "the frozen control did not bind a `_norm`-equal mention of the stored "
+        "name — a control that can never match makes the published "
+        "`attached_norm_only` an artifact of the function being inert")
+    assert hit["id"] == "obj-1", (
+        f"bound the wrong row ({hit!r}) — identity is `id`, not name")
+    spaced = tool_mod._norm_only_match([stored], "The   Plan Doc", "core:other")
+    assert spaced is not None and spaced["id"] == "obj-1", (
+        "a case/whitespace variant of the stored name is `_norm`-equal, so the "
+        "frozen arm must bind it — `None` here means the arm is comparing raw "
+        "strings and is not the pre-#12295 phase 1 it claims to be")
+
+    # 2. It REFUSES what only the FOLD folds. These are the #12295 classes: a
+    #    comparison-side fold binds both, `_norm` binds neither.
+    hyphen = tool_mod._norm_only_match([stored], "The  Plan-Doc", "core:other")
+    assert hyphen is None, (
+        f"the frozen pre-#12295 control bound the separator variant "
+        f"({hyphen!r}) — `_norm` does not fold `-`, so this arm includes "
+        "#12295's rung and the before/after is the change against itself")
+    article = tool_mod._norm_only_match([stored], "plan doc", "core:other")
+    assert article is None, (
+        f"the frozen pre-#12295 control bound the article-drop variant "
+        f"({article!r}) — dropping `the` is the folded rung, not phase 1")
+
+    # 3. It honours its kind arms. The bare-kind carrier is FIRST in the list so
+    #    a `rows[0]` stub is not mistaken for a kind-aware match.
+    bare = {"id": "obj-bare", "name": "the plan doc", "kind": "doc:other"}
+    exact = {"id": "obj-exact", "name": "the plan doc", "kind": "core:other"}
+    won = tool_mod._norm_only_match([bare, exact], "the plan doc", "core:other")
+    assert won is not None and won["id"] == "obj-exact", (
+        f"the exact-kind hit did not outrank the bare-kind carrier ({won!r}) — "
+        "phase 1 tries exact kind BEFORE bare kind, and a bare-first reply "
+        "would attach across kinds")
+    # …and the bare arm is `_norm`-keyed too: ONE bare-kind carrier is the
+    # positive side of the ambiguity rule, so it must bind a re-spaced surface.
+    # ⛔ Without this, making the bare arm compare RAW names leaves every
+    # assertion above green (measured on this fixture) — the same dead-arm class
+    # this test exists to close, one arm down.
+    lone = tool_mod._norm_only_match([bare], "The  Plan Doc", "core:other")
+    assert lone is not None and lone["id"] == "obj-bare", (
+        f"a single bare-kind carrier did not bind a `_norm`-equal surface "
+        f"({lone!r}) — the bare-kind arm is comparing raw strings, so the "
+        "frozen control's second arm is unpinned")
+    ambiguous = tool_mod._norm_only_match(
+        [bare, {"id": "obj-bare-2", "name": "the plan doc", "kind": "other"}],
+        "the plan doc", "core:other")
+    assert ambiguous is None, (
+        f"two bare-kind carriers returned {ambiguous!r} — phase 1 is ambiguous "
+        "on a bare-kind collision and must abstain rather than pick one")

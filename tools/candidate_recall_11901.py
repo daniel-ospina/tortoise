@@ -696,6 +696,42 @@ def _blocked_pair_set(index, rows) -> set[frozenset[str]]:
     return pairs
 
 
+def _norm_only_match(rows: list[dict], surface: str, kind: str):
+    """Pre-#12295 phase 1, frozen — the control the AFTER is measured against.
+
+    Verbatim the body `_find_existing_entity` had before the folded rung
+    (`extractor_v2.py`, pre-#12295): ``_norm`` equality, exact kind then
+    bare kind, ambiguous when the bare form collides. Frozen ON PURPOSE:
+    importing the live function would move the "before" every time the
+    "after" changes, and a before/after measured against a moving before
+    is not a measurement.
+
+    ⛔ Extracted from ``run()`` to module scope so a test can call the control
+    DIRECTLY. While it was nested, the only thing pinning it was the arm's own
+    ``attached_norm_only == 0`` — a value the harness invariant already entails
+    (every generated variant surface is ``_norm``-different from its stored
+    name), so replacing the whole body with ``return None`` left the suite green
+    and an inert arm was observationally identical to the frozen control. The
+    deferred ``extractor_v2`` import is kept INSIDE the function for the same
+    reason ``run()`` imports it there: this module must stay importable without
+    the graph stack (``tests/test_candidate_recall_11901.py`` loads it directly).
+    """
+    from tortoise.extractor_v2 import _norm, _norm_kind
+
+    n = _norm(surface)
+    kind_folded = str(kind).strip().lower()
+    exact = [r for r in rows
+             if _norm(r.get("name", "")) == n
+             and str(r.get("kind", "")).strip().lower() == kind_folded]
+    if exact:
+        return exact[0]
+    bare = _norm_kind(kind)
+    m = [r for r in rows
+         if _norm(r.get("name", "")) == n
+         and _norm_kind(r.get("kind", "")) == bare]
+    return m[0] if len(m) == 1 else None
+
+
 def _in_block(index, member_id, surface, label: str = "Object") -> bool:
     """Does the blocker propose ``member_id`` as a candidate for ``surface``?
 
@@ -737,7 +773,7 @@ def run(args: argparse.Namespace) -> int:
         return 3
 
     from tortoise.entity_blocking import BlockIndex, reduction_ratio
-    from tortoise.extractor_v2 import _find_existing_entity, _norm, _norm_kind, _sanitise_query_text
+    from tortoise.extractor_v2 import _find_existing_entity, _sanitise_query_text
     from tortoise.sdk import TortoiseSDK
 
     sessions = Path(os.path.expanduser(args.sessions_dir))
@@ -1088,9 +1124,12 @@ def run(args: argparse.Namespace) -> int:
         #   ``attached``          the SHIPPED matcher, whatever it is at this head
         #                         (it now includes the comparison-side fold)
         #   ``attached_norm_only`` a FROZEN COPY of pre-#12295 phase 1 (`_norm`
-        #                         equality + kind, nothing else). Recomputed here,
-        #                         never read back from the old artifact, so the
-        #                         before/after is one run on one corpus.
+        #                         equality + kind, nothing else) — module-scope
+        #                         `_norm_only_match`, so a test can pin what it
+        #                         BINDS as well as what it abstains from.
+        #                         Recomputed here, never read back from the old
+        #                         artifact, so the before/after is one run on one
+        #                         corpus.
         #   ``attached_folded``   the SHIPPED matcher on a SEPARATOR-NORMALISED input
         #                         (`_fold_punct` applied to the surface AND the rows
         #                         first). ⛔ NOT an article-preserving fold and NOT
@@ -1102,29 +1141,6 @@ def run(args: argparse.Namespace) -> int:
         #   ``in_multikey_block`` the pair completeness of the multi-key blocker:
         #                         is the canonical id in the union of the keys the
         #                         mention blocks on? (the metric `#12295` names)
-        def _norm_only_match(rows: list[dict], surface: str, kind: str):
-            """Pre-#12295 phase 1, frozen — the control the AFTER is measured against.
-
-            Verbatim the body `_find_existing_entity` had before the folded rung
-            (`extractor_v2.py`, pre-#12295): ``_norm`` equality, exact kind then
-            bare kind, ambiguous when the bare form collides. Frozen ON PURPOSE:
-            importing the live function would move the "before" every time the
-            "after" changes, and a before/after measured against a moving before
-            is not a measurement.
-            """
-            n = _norm(surface)
-            kind_folded = str(kind).strip().lower()
-            exact = [r for r in rows
-                     if _norm(r.get("name", "")) == n
-                     and str(r.get("kind", "")).strip().lower() == kind_folded]
-            if exact:
-                return exact[0]
-            bare = _norm_kind(kind)
-            m = [r for r in rows
-                 if _norm(r.get("name", "")) == n
-                 and _norm_kind(r.get("kind", "")) == bare]
-            return m[0] if len(m) == 1 else None
-
         var = {k: {"pairs": 0, "in_window": 0, "attached": 0,
                    "attached_folded": 0, "in_window_not_attached": 0,
                    "attached_norm_only": 0, "in_multikey_block": 0}
