@@ -1110,25 +1110,25 @@
    }
   }
  },
- "code_head": "6aeb9e5b0d2f8b3c9cf411659047a61d6b34d089",
+ "code_head": "e9a572d4b499d52050ee29bd2a8bf6cb0ab67134",
  "corpus": {
   "dir": "/home/cmux/.tortoise/session-events",
-  "elapsed_s": 402.4,
+  "elapsed_s": 390.6,
   "files": 18,
-  "graph": "recall11901_1794531950_484047",
+  "graph": "recall11901_1794532634_746264",
   "harvested_distinct": {
-   "definite": 106439,
-   "ident": 9962,
+   "definite": 106463,
+   "ident": 9964,
    "path": 4341
   },
   "input": {
    "files": 18,
-   "lines": 10273,
+   "lines": 10285,
    "parse_errors": 5,
    "records_without_text": 0
   },
   "population": 1000,
-  "population_digest": "d90dc3b702b74e3d",
+  "population_digest": "03785295abd20d9a",
   "sample": 300,
   "sample_by_class": {
    "definite": 180,
@@ -1143,7 +1143,7 @@
   10,
   15
  ],
- "measured_at": "2026-11-13T01:12:25Z",
+ "measured_at": "2026-11-13T01:23:37Z",
  "measured_for": 12295,
  "pooled_budget_note": "a pooled group is `max_queries` (15) names, which is the production BUDGET CAP, not the typical capture \u2014 a capture with 5 entities issues 5 object queries",
  "retrieval": {

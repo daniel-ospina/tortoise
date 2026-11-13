@@ -3,8 +3,8 @@
 **Lane:** `fix/12295-fold-blocking` · **Artifact:** `measurement.json` in this directory ·
 **Harness:** `tools/candidate_recall_11901.py` (**reused, not rebuilt** — the tool and its pinned
 test landed with `#12159`) · **Run:** `--population 1000 --sample 300 --captures 20`, elapsed
-402.4 s, graph `recall11901_1794531950_484047`, population digest `d90dc3b702b74e3d`,
-measured at code head `6aeb9e5b0d2f8b3c9cf411659047a61d6b34d089` — the commit this brief and the artifact ship with.
+390.6 s, graph `recall11901_1794532634_746264`, population digest `03785295abd20d9a`,
+measured at code head `e9a572d4b4` — the commit this brief and the artifact ship with.
 
 **Search rung, stated because it was taken twice and failed twice.**
 `mcp__seo-intelligence__perplexity_search` → `Unknown MCP server 'seo-intelligence'` (rung 1
