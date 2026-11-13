@@ -522,8 +522,15 @@ def test_a_points_provenance_event_id_does_not_guard_an_event_write(env):
     sdk._get_proj().g.query(
         "CREATE (e:Event {eventId:'ev-9649-prov', name:'session'})")
 
-    sdk.update_entity("ev-9649-prov", status="archived")
-    assert sdk.get_entity("ev-9649-prov")["status"] == "archived"
+    # ⛔ A NON-TERMINAL status is what makes this test still possible at all:
+    # since #11825 a TERMINAL status on an `:Event` is refused by that guard
+    # first (measured: `status='archived'` here raises "not writable on an
+    # :Event" before the address resolution is consulted), so `archived` would
+    # pin #11825's rule instead of this one. `live` rides the prop lane #2788
+    # leaves open, and the address read still has to NOT find the retracted
+    # provenance Point — which is the whole claim under test.
+    sdk.update_entity("ev-9649-prov", status="live")
+    assert sdk.get_entity("ev-9649-prov")["status"] == "live"
 
 
 def test_a_hybrid_point_status_write_is_validated_and_journals_the_POINT(env):
@@ -536,6 +543,14 @@ def test_a_hybrid_point_status_write_is_validated_and_journals_the_POINT(env):
     LANDED and the key rode into the `:Event` arm, which journalled `restatus`
     against `label='Event'` — a record no fold can apply (a live write that makes
     `rebuild_all` refuse). Measured at `a35a3973b7`.
+
+    ⛔ TWO NODES since #11825 (#9649 merge review): an `:Event` never carries a
+    TERMINAL status (that guard refuses one first, with its own message), and
+    every DECLARED transition out of a non-terminal Point status is terminal —
+    so the transition refusal reachable on a hybrid is an UNDECLARED
+    non-terminal one (`live -> draft`), while the journal half is the prop-lane
+    promotion `draft -> live`. Splitting them keeps both halves of this test's
+    claim pinned instead of pinning #11825's rule by accident.
     """
     sdk, events = env
     pid = _live(sdk)
@@ -544,24 +559,29 @@ def test_a_hybrid_point_status_write_is_validated_and_journals_the_POINT(env):
         params={"id": pid, "eid": "evt-hybrid-9649"})
 
     with pytest.raises(ValueError, match="transition"):
-        sdk.update_entity("evt-hybrid-9649", status="archived")
+        sdk.update_entity("evt-hybrid-9649", status="draft")
     with pytest.raises(ValueError, match="Invalid status"):
         sdk.update_entity("evt-hybrid-9649", status="garbage")
     assert _row(sdk, pid)["status"] == "live", (
         "a refused hybrid status write must not touch the row")
 
-    sdk.update_entity("evt-hybrid-9649", status="retracted")
-    assert _row(sdk, pid)["status"] == "retracted"
-    recs = _mutations(events, pid)
+    draft_pid = sdk.create_point(
+        "statement", "draft hybrid", dedup=False, status="draft")["id"]
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) SET n:Event, n.eventId=$eid",
+        params={"id": draft_pid, "eid": "evt-hybrid-draft-9649"})
+    sdk.update_entity("evt-hybrid-draft-9649", status="live")
+    assert _row(sdk, draft_pid)["status"] == "live"
+    recs = _mutations(events, draft_pid)
     assert recs, "the declared transition must be journaled against the POINT id"
     assert all(r.get("label") == "Point" for r in recs), (
         f"a restatus record must name the label the node replays as: {recs}")
-    assert _mutations(events, "evt-hybrid-9649") == [], (
+    assert _mutations(events, "evt-hybrid-draft-9649") == [], (
         "nothing may be journalled against the ADDRESS the caller typed")
     # …and the record must actually FOLD: a wrong label is only visible on replay
     # (a live write that makes `rebuild_all` raise `NonFoldedEventsError`).
     sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
-    assert _row(sdk, pid)["status"] == "retracted", (
+    assert _row(sdk, draft_pid)["status"] == "live", (
         "the journalled restatus must replay onto the Point")
 
 
@@ -827,12 +847,17 @@ def test_two_address_arms_resolving_one_id_journal_one_record(env):
     assertion catches it.
     """
     sdk, events = env
-    pid = _live(sdk, "one node, two arms")
+    pid = sdk.create_point(
+        "statement", "one node, two arms", dedup=False, status="draft")["id"]
     sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) SET n:Event, n.eventId=$id",
         params={"id": pid})
 
-    sdk.update_entity(pid, status="retracted")
+    # ⛔ `draft -> live`, not `-> retracted`: since #11825 a TERMINAL status on
+    # an `:Event` is refused before this arm (measured), and this test is about
+    # the dedupe, not that rule. The promotion is a declared, non-terminal
+    # transition that still journals exactly one `restatus`.
+    sdk.update_entity(pid, status="live")
     recs = [r for r in _mutations(events, pid) if r.get("op") == "restatus"]
     assert len(recs) == 1, f"one intent must journal one record: {recs}"
 
@@ -994,34 +1019,38 @@ def test_the_refusal_also_names_the_route_for_a_read_modify_write(env):
 def test_the_transition_refusal_names_the_RESOLVED_id_not_the_typed_address(env):
     """Review round 12 (P3, AX rule 2): the prescription must be PERFORMABLE.
 
-    A `:Point:Event` addressed by its `eventId` reaches the transition arm with
-    `id_val='EVT'` while the Point's own id is something else — and
+    A `:Point:Source` addressed by its `url` reaches the transition arm with
+    `id_val='<url>'` while the Point's own id is something else — and
     ``supersede_point`` resolves by ``id`` ONLY, so the message's
-    ``supersede_point('EVT', …)`` was a call that raises ``No point 'EVT'``. The
+    ``supersede_point('<url>', …)`` was a call that raises ``No point``. The
     refusal now names the RESOLVED id (kept, with the typed address as a separate
     "addressed as" clause) and interpolates that same id into the prescription,
     matching what the dead-claim refusal already did.
 
-    Fixture-reachable only — no production writer mints a `:Point:Event` — which
-    is why it is a message defect and not a hole in the guard.
+    ⛔ The vehicle is `:Point:Source` because since #11825 the transition arm is
+    UNREACHABLE on a `:Point:Event`: every declared transition out of a
+    non-terminal Point status is terminal, and a terminal status on an `:Event`
+    is refused by that guard first (measured at the merge head). The claim under
+    test — the prescription names the RESOLVED id, not the typed address — is
+    label-independent, and `url` is the other secondary arm that resolved one.
     """
     sdk, _ = env
-    pid = _live(sdk, "a claim addressed by its eventId")
+    pid = _live(sdk, "a claim addressed by its url")
     sdk._get_proj().g.query(
-        "MATCH (n:Point {id:$id}) SET n:Event, n.eventId=$eid, n.status='live'",
-        params={"id": pid, "eid": "evt-round12-9649"})
+        "MATCH (n:Point {id:$id}) SET n:Source, n.url=$url, n.status='live'",
+        params={"id": pid, "url": "src://round12-9649"})
 
     with pytest.raises(ValueError) as exc:
-        sdk.update_entity("evt-round12-9649", status="archived")
+        sdk.update_entity("src://round12-9649", status="draft")
     text = str(exc.value)
 
     assert f"supersede_point({pid!r}" in text, (
         f"the prescription must name the RESOLVED id {pid!r}, or it cannot be "
         f"run: {text!r}")
-    assert "supersede_point('evt-round12-9649'" not in text, (
+    assert "supersede_point('src://round12-9649'" not in text, (
         f"supersede_point resolves by `id` only — this call would raise "
         f"`No point`: {text!r}")
-    assert "addressed as 'evt-round12-9649'" in text, (
+    assert "addressed as 'src://round12-9649'" in text, (
         f"the typed address must still be shown, so the caller recognises its "
         f"own call: {text!r}")
 

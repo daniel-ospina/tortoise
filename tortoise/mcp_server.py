@@ -6193,9 +6193,22 @@ def tortoise_list_dedup_candidates(candidate_type: str = "content",
     {id, content, pointKind, method/similarity (content) or replacement
     (temporal), target_id, candidate_type, status}; an entity row names the pair
     as candidate_id/existing_id with the method and similarity that proposed it.
+
+    ⛔ The queue comes back INSIDE ``{"result": [...]}``, and the annotation
+    stays ``-> dict``, because `TortoiseSDK.list_dedup_candidates` returns a LIST
+    on every branch while FastMCP derives the `output_schema` from this
+    annotation (#12364 class; found by the AREA B sweep in #11081). An
+    annotation that disagreed with the value made FastMCP refuse its own
+    result — EVERY call failed with "structured_content must be a dict or
+    None", including on an empty queue, which is what proves it is type-level
+    and not data-dependent. Enveloping the rows keeps the served declaration
+    byte-identical (no owner approval owed) and gives the client one shape.
     """
-    return _safe(_get_org_sdk().list_dedup_candidates,
+    rows = _safe(_get_org_sdk().list_dedup_candidates,
                  candidate_type=candidate_type, limit=limit)
+    if isinstance(rows, _SafeError):
+        return rows  # the failure channel stays _safe's, never an envelope
+    return {"result": rows}
 
 
 def tortoise_approve_merge(candidate_id: str,
@@ -6234,8 +6247,22 @@ def tortoise_belief_timeline(topic: str, limit: int = 50) -> dict:
     Decision Points aboutObject-connected to the topic entity, validFrom-
     ordered (superseded priors kept visible via the CORRECTS chain), each
     with {content, pointKind, validFrom, status, linked_by, related}.
+
+    ⛔ The rows are returned INSIDE ``{"result": [...]}``, and the annotation
+    stays ``-> dict``, because `TortoiseSDK.belief_timeline` returns a LIST
+    while this wrapper must advertise a shape FastMCP will accept (#12364).
+    FastMCP derives the tool's `output_schema` from the wrapper's annotation,
+    so an annotation that disagreed with the value made FastMCP refuse its own
+    result: every call failed with "structured_content must be a dict or None",
+    and `_safe()` could not intercept it because the refusal happens after the
+    SDK call returns. Enveloping the rows keeps the served declaration
+    byte-identical (no owner approval owed) and gives the client one shape.
+    Pinned by `tests/test_12364_mcp_list_return_annotations.py`.
     """
-    return _safe(_get_org_sdk().belief_timeline, topic, limit=limit)
+    rows = _safe(_get_org_sdk().belief_timeline, topic, limit=limit)
+    if isinstance(rows, _SafeError):
+        return rows  # the failure channel stays _safe's, never an envelope
+    return {"result": rows}
 
 
 # ── Tool Registry Adapter (#454) ────────────────────────────────
