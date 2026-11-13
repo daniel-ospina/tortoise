@@ -372,8 +372,13 @@ def build_report(
 ) -> Report:
     """Assemble the verdict from index documents + the install/run result.
 
-    ``None`` plus an error string means the index could not be read; that is an
-    UNKNOWN (fail-closed), never an OK. ``init_arm`` is None when the install
+    ``None`` for an index document means no document came back, and the state
+    that accompanies it decides the verdict: ``INDEX_ABSENT`` (a real 404/410 —
+    the project is not on the index) is a FAIL, because the documented install
+    is then impossible; every OTHER state (a timeout, a 429, an unparseable
+    body, or a state a later refactor introduces) is UNKNOWN, fail-closed. A 404
+    is an answer and a timeout is not, so "I could not check" must never be
+    reported as "the artifact is broken". ``init_arm`` is None when the install
     could not run at all, which is also UNKNOWN.
 
     ``wheel_path`` switches to WHEEL mode (the pre-publish gate): the artifact
@@ -414,8 +419,15 @@ def build_report(
             Arm(
                 "engine-index",
                 FAIL if engine_state == INDEX_ABSENT else UNKNOWN,
-                f"could not read the {ENGINE_PACKAGE} index metadata: "
-                f"{engine_error or 'no result'}",
+                (
+                    f"{ENGINE_PACKAGE} is not on the index "
+                    f"({engine_error or 'no result'}) — a 404/410 is an answer, "
+                    f"so the documented install cannot succeed"
+                    if engine_state == INDEX_ABSENT
+                    else f"could not read the {ENGINE_PACKAGE} index metadata "
+                    f"({engine_error or 'no result'}) — the distribution's "
+                    f"presence is UNKNOWN, not absent"
+                ),
             )
         )
     else:
@@ -801,8 +813,12 @@ def install_and_run(
     # latest release yanked-and-broken and an older good one, the pinned form tested bytes
     # nobody receives.
     # The arm's whole job is the documented path, so it now runs the documented spec.
-    # `version` is still used by `_main` for the release-age row (informational, never
-    # gated) — do not thread it back in here.
+    # ⛔ `version` is NOT read by this function and must not be threaded back into
+    # `spec`: it is accepted only because every call site already passes it, and the
+    # release-age row that mentions a version is recomputed in `build_report` from
+    # the index document instead (informational, never gated). Re-pinning the spec to
+    # `f"{package}=={version}"` reinstates the yanked-release defect this comment and
+    # `test_index_mode_installs_the_DOCUMENTED_unpinned_spec` exist to forbid.
     spec = str(Path(wheel).resolve()) if wheel is not None else package
 
     transcript: list[str] = []
