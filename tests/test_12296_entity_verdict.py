@@ -383,6 +383,35 @@ class TestThePriorSetNeverCarriesARetiredNode:
             {"name": "Acme", "kind": "core:project"},
             {"name": "Acme", "kind": "core:org"}, derived)["band"] == "review"
 
+    def test_a_stored_self_fold_alias_does_not_let_phase_1_bind_another_kind(
+            self, sdk_factory):
+        """The stored self-fold entry matches; it must not BIND across kinds.
+
+        A merge of two same-fold rows legitimately leaves the survivor's own fold
+        in `aliases[]` (`apply_entity_merge` unions it), and the fold keeps a
+        STORED entry — so `_find_existing_entity` can answer `mode: "alias"` for a
+        mention spelled like the row itself. Phase 1's `mention_is_alias` fact is
+        therefore narrowed by the SPELLING, not by the mode: the mention is spelled
+        exactly like the target, so the three SPELLING vetoes still run and the
+        pair is HELD `kind_conflict` instead of retiring a node.
+        """
+        sdk = sdk_factory()
+        _create_object(sdk, "obj-a", "Acme", kind="core:org")
+        _create_object(sdk, "obj-b", "Acme", kind="core:plan")
+        apply_entity_merge(sdk, "obj-b", "obj-a", method="exact",
+                           similarity=1.0)
+        rows = v2._current_entity_priors(
+            sdk, [{"id": "obj-a", "name": "Acme", "kind": "core:org"}],
+            {"obj-a": "Object"})
+        res = v2.resolve_entities(
+            [{"name": "Acme", "kind": "core:project"}],
+            {"entities": rows, "degraded": False},
+            facts=v2._entity_verdict_facts(sdk, rows))
+        assert res["map"] == {}, res
+        assert res["new"] == [], res
+        assert res["held"][0]["reason"] == v2.HOLD_VETOED, res
+        assert verdict.VETO_KIND_CONFLICT in res["held"][0]["vetoes"], res
+
     def test_a_bare_string_stored_alias_is_normalised_not_dropped(
             self, sdk_factory):
         """`update_entity(aliases="the team")` is reachable; the fold must not
