@@ -265,6 +265,75 @@ def test_a_retired_indicator_retires_the_state_derived_from_its_readings(sdk):
     assert sdk.get_entity(made["point_id"])["status"] == "retracted"
 
 
+# ── 4a. the LEGACY retirement words retire an input too ───────────────────
+
+@pytest.mark.parametrize("retire,reason", [
+    ("target", "target-retired"),
+    ("indicator", "indicator-retired"),
+    ("goal", "goal-retired"),
+])
+def test_the_LEGACY_outdated_WORD_retires_an_input_like_every_read_surface(sdk, retire, reason):
+    """`outdated` is the legacy supersede/invalidate WORD, and every read surface
+    already refuses to serve a node carrying it (`live.TERMINAL_EXCLUDED_STATUSES`,
+    which this module IMPORTS and uses for the claim itself two hundred lines down).
+
+    ⛔ Measured RED before this case existed: `_retirement` tested the narrower
+    `commit_ops.OBJECT_TERMINAL_STATUSES`, which OMITS `outdated`, so an input
+    retired with the legacy word returned ``None`` — HEALTHY — and the derived
+    state kept counting. `sdk.update_entity(<object>, status='outdated')` is an
+    accepted public write, and #11825 measured that the SDK accepts terminal
+    statuses on Objects — so this is the issue's own headline ("a conclusion
+    whose justification is gone"), reachable through a public door, not a
+    theoretical spelling.
+
+    The invariant is AGREEMENT WITH THE READ SURFACES, not this module's own
+    vocabulary: if no reader will serve the input, no derived state may outlive it.
+    """
+    i, t, g = _world(sdk, tag=f"legacy-outdated-{retire}")
+    made = _judge(sdk, i, t, g)
+    node = {"target": t, "indicator": i, "goal": g}[retire]
+    sdk.update_entity(node["id"], status="outdated")
+    # the premise, asserted rather than assumed: the read surfaces already agree
+    assert sdk.get_entity(node["id"])["status"] == "outdated"
+    v = _only(verdicts(sdk, goal_id=g["id"]))
+    assert v.invalidation.reason == reason, v.invalidation
+    assert invalidate_stale(sdk, goal_id=g["id"])["counts"]["retired"] == 1
+    assert sdk.get_entity(made["point_id"])["status"] == "retracted"
+
+
+def test_the_LEGACY_outdated_FLAG_retires_an_input(sdk):
+    """The OTHER legacy spelling: `outdated=true` with a LIVE status.
+
+    ⚠️ THE FLAG IS NOT WRITABLE THROUGH `update_entity` — it refuses with "`outdated`
+    is a server-managed lifecycle flag" (measured while writing this case). That
+    refusal is the POINT: no Object writer sets the flag
+    (``live._terminal_excluded`` passes ``include_outdated_flag=False`` for Objects
+    for the same reason), so this shape only appears in LEGACY data — which is
+    exactly the population a retirement sweep must not serve as live. The raw
+    graph write below is how the repo simulates legacy data elsewhere
+    (`tests/test_lifecycle_guards.py` writes a legacy ``deprecated`` status the
+    same way).
+
+    The claim's own lane already honours the flag (`derived_invalidation.invalidate`
+    -> ``claim.get("outdated") is True``); the two lanes must not disagree about
+    what "dead" means.
+    """
+    i, t, g = _world(sdk, tag="legacy-outdated-flag")
+    made = _judge(sdk, i, t, g)
+    sdk._get_proj().g.query(
+        "MATCH (n:Object) WHERE n.id = $id SET n.outdated = true",
+        params={"id": t["id"]},
+    )
+    props = sdk.get_entity(t["id"])
+    assert props["outdated"] is True
+    assert props.get("status") != "outdated"  # the flag, NOT the word
+    v = _only(verdicts(sdk, goal_id=g["id"]))
+    assert v.invalidation.reason == "target-retired", v.invalidation
+    assert invalidate_stale(sdk, goal_id=g["id"])["counts"]["retired"] == 1
+    assert sdk.get_entity(made["point_id"])["status"] == "retracted"
+
+
+
 # ── 4b. an UNNAMED scope is undecidable, never a retirement ──────────────
 
 @pytest.mark.parametrize("missing, word", [

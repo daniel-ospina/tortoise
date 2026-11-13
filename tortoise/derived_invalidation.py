@@ -115,7 +115,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from .commit_ops import OBJECT_TERMINAL_STATUSES
 from .goal_judgement import (
     DEFINITION_BOUNDARY_PROP,
     GOAL_STATE_CACHE,
@@ -328,8 +327,27 @@ def _retirement(node: Any, *, goal: bool = False) -> str | None:
     if not isinstance(node, dict):
         return None
     status = node.get("status")
-    if isinstance(status, str) and status in OBJECT_TERMINAL_STATUSES:
+    # ⛔ THE SHARED READ-SURFACE VOCABULARY, NOT THIS MODULE'S NARROWER ONE (#11926
+    # review, P1). `commit_ops.OBJECT_TERMINAL_STATUSES` omits `outdated` — the
+    # legacy supersede/invalidate WORD — while ``live.TERMINAL_EXCLUDED_STATUSES``
+    # (what every retrieval leg, the EP factor extraction and this module's OWN
+    # ``invalidate`` filter on) includes it. Testing the narrower set meant an
+    # input retired with the legacy word read as HEALTHY and its derived state kept
+    # counting: measured, `update_entity(<goal>, status='outdated')` is an accepted
+    # public write, and the verdict came back ``None``. Agreement with the read
+    # surfaces is the invariant — if no reader will serve the input, no state
+    # derived from it may outlive it.
+    if isinstance(status, str) and status in TERMINAL_EXCLUDED_STATUSES:
         return f"its status is {status!r}"
+    # The OTHER legacy spelling: `outdated=true` with a live status. No Object
+    # WRITER sets it (``live._terminal_excluded`` passes
+    # ``include_outdated_flag=False`` for Objects for exactly that reason), so this
+    # shape only appears in legacy data — the population a retirement sweep must
+    # not serve as live. The claim's own lane already honours the flag
+    # (``invalidate`` -> ``claim.get("outdated") is True``), and the two lanes must
+    # not disagree about what "dead" means.
+    if node.get("outdated") is True:
+        return "its legacy outdated flag is set"
     successor = node.get("supersededBy") or node.get("superseded_by")
     if successor:
         return f"it was superseded by {successor!r}"
