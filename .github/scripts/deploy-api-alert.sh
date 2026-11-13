@@ -376,9 +376,10 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
         # ⛔ `-f`, BECAUSE THAT IS THE PROPERTY THAT MAKES THE READ TERMINATE (#12272 review round 8).
         # The read guard above admits anything that is `-e`-true and not a FIFO, and `tail -c 6000`
         # is BOUNDED — it stops after 6000 bytes — but `wc -c` is not: it skips the read only for a
-        # REGULAR file whose metadata reports a non-zero size (SIZE IS NOT THE DISCRIMINATOR — a
-        # directory is read anyway and fails EISDIR whatever it reports: `/proc` reports 0 and a
-        # disk-backed one a block count, and BOTH are read — measured), so a character device such as
+        # REGULAR file whose metadata reports a non-zero size. FOR A DIRECTORY, REGULAR-NESS IS THE
+        # DISCRIMINATOR AND SIZE IS NOT — a directory is read anyway and fails EISDIR whatever it
+        # reports: `/proc` reports 0 and a disk-backed one a block count, and BOTH are read
+        # (measured), so size is not what decides it. Likewise a character device such as
         # `/dev/zero` (which `[ -p ]` does not catch) never reaches EOF, so
         # `build_body` never returns and NOTHING is filed: no ledger entry, no exit status, the
         # #2240 silence this script exists to remove, one primitive past the FIFO guard. It is
