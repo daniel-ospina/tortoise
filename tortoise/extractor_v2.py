@@ -6167,10 +6167,18 @@ def _verdict_facts(facts, node_id, mention_name: str = "") -> dict:
         return {}
     out = dict(entry)
     aliases = entry.get("aliases")
+    spellings = {normalize_entity_name(a) for a in aliases
+                 if a is not None} if isinstance(aliases, (list, tuple, set)) else set()
+    # ⛔ The candidate's OWN name counts, not only its aliases. A mention spelled
+    # exactly like the target is not inferring membership of a group — nothing is
+    # being inferred — and phase 1 can miss it when the mention's kind is unstated
+    # (`""`/`other`/`unclassified`), which used to reach phase 2 and there be
+    # vetoed `group_join` with the reason "no alias of the candidate carries this
+    # spelling" about the candidate's own name.
+    if entry.get("name"):
+        spellings.add(normalize_entity_name(entry["name"]))
     out["mention_is_alias"] = bool(
-        mention_name and isinstance(aliases, (list, tuple, set))
-        and normalize_entity_name(mention_name) in {
-            normalize_entity_name(a) for a in aliases if a is not None})
+        mention_name and normalize_entity_name(mention_name) in spellings)
     return out
 
 
@@ -6629,7 +6637,8 @@ def _entity_verdict_facts(sdk, entities: list[dict]) -> dict:
         {id: {"retired": bool,      # carries `resolved_from`
               "dependents": int,    # nodes already folded into this one
               "suppressed": bool,   # `reject` that named no survivor
-              "aliases": [str]}}    # the folded spellings this id answers to
+              "name": str,          # the candidate's own surface spelling
+              "aliases": [str]}}    # the folded spellings it also answers to
 
     ⛔ ``aliases`` is read here because the ``group_join`` veto needs it: a
     mention whose folded spelling is already one of the candidate's aliases is a
@@ -6685,7 +6694,7 @@ def _entity_verdict_facts(sdk, entities: list[dict]) -> dict:
         rows = graph.query(
             f"MATCH (n:{label}) WHERE n.id IN $ids RETURN n.id, "
             "n.resolved_from, n.dedup_reviewed, n.dedup_target_id, "
-            "n.dedup_rejected_targets, n.aliases",
+            "n.dedup_rejected_targets, n.aliases, n.name",
             params={"ids": ids}).result_set
         if not rows:
             continue
@@ -6712,6 +6721,7 @@ def _entity_verdict_facts(sdk, entities: list[dict]) -> dict:
                 "retired": bool(row[1]),
                 "dependents": 0,
                 "suppressed": reviewed == "reject" and not targets,
+                "name": "" if row[6] is None else str(row[6]),
                 "aliases": alias_list,
             }
         dep_rows = graph.query(

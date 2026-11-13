@@ -448,6 +448,12 @@ class TestHardVetoes:
         out = verdict.judge({"name": "2026-11 report", "kind": "k"},
                             {"name": "2026-12 report", "kind": "k"})
         assert out["vetoes"] == [verdict.VETO_DATE_CONFLICT], out
+        # …and the SLASH spelling is the same date, not a path: splitting it would
+        # delete the `year_month` kind and the skeleton abstraction with it, and
+        # the pair would merge with no veto.
+        out = verdict.judge({"name": "the 2026/11 report", "kind": "k"},
+                            {"name": "the 2026/12 report", "kind": "k"})
+        assert out["vetoes"] == [verdict.VETO_DATE_CONFLICT], out
         # Like with like: a month against a bare year contradicts nothing.
         assert verdict.judge({"name": "2026-11 report", "kind": "k"},
                              {"name": "2026 report", "kind": "k"})[
@@ -474,9 +480,11 @@ class TestHardVetoes:
             assert out["vetoes"] == [code], (a, b, out)
 
     def test_a_full_date_is_a_DATE_not_an_identifier(self):
-        out = verdict.judge({"name": "2026-11-12 weekly report", "kind": "k"},
-                            {"name": "2026-12-12 weekly report", "kind": "k"})
-        assert out["vetoes"] == [verdict.VETO_DATE_CONFLICT], out
+        for a, b in (("2026-11-12 weekly report", "2026-12-12 weekly report"),
+                     ("2026/11/12 weekly report", "2026/12/12 weekly report")):
+            out = verdict.judge({"name": a, "kind": "k"},
+                                {"name": b, "kind": "k"})
+            assert out["vetoes"] == [verdict.VETO_DATE_CONFLICT], (a, b, out)
 
     def test_a_year_quarter_compound_is_a_DATE_not_an_identifier(self):
         """`2026-Q3` is one token and it is a date.
@@ -800,6 +808,35 @@ class TestTheResolverBands:
     def test_the_held_vocabulary_is_published(self):
         assert v2.HOLD_VETOED in v2.HOLD_REASONS
         assert len(set(v2.HOLD_REASONS)) == len(v2.HOLD_REASONS)
+
+    def test_a_mention_spelled_exactly_like_the_target_is_not_a_group_inference(
+            self, monkeypatch):
+        """`group_join` must not fire on the candidate's OWN name.
+
+        Phase 1's name rungs are kind-gated, so a mention whose kind is unstated
+        (`""`/`other`/`unclassified`) falls to phase 2 — where the escape used to
+        look only at `aliases[]`, so it refused a spelling that IS the survivor's
+        name and recorded "no alias of the candidate carries this spelling" about
+        the candidate's own name. Nothing is inferred there.
+        """
+        monkeypatch.setattr(
+            v2, "_complete",
+            lambda *a, **kw: '{"resolutions": [{"name": "Acme Holdings", '
+                             '"resolves_to": "obj-0"}], "new": []}')
+        facts = {"obj-0": {"retired": False, "dependents": 3,
+                           "suppressed": False, "name": "Acme Holdings",
+                           "aliases": ["team"]}}
+        derived = v2._verdict_facts(facts, "obj-0", "Acme Holdings")
+        assert derived["mention_is_alias"] is True, derived
+        for kind in ("", "other"):
+            res = v2.resolve_entities(
+                [{"name": "Acme Holdings", "kind": kind}],
+                {"entities": [{"id": "obj-0", "name": "Acme Holdings",
+                               "kind": "core:org"}], "degraded": False},
+                model=object(), facts=facts)
+            assert res["map"]["Acme Holdings"]["id"] == "obj-0", (kind, res)
+            assert res["held"] == [], (kind, res)
+            assert res["new"] == [], (kind, res)
 
     def test_a_repeat_mention_of_a_folded_alias_merges_instead_of_being_lost(
             self, sdk_factory, monkeypatch):

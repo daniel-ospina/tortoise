@@ -339,7 +339,7 @@ measure nothing.
 using the instrument's own generator (`tools/candidate_recall_11901.py::variants`)
 rather than a fixture written to pass. Pinned by
 `tests/test_12296_entity_verdict.py::TestVetoesAreSilentOnTheGenuineVariantCorpus`
-— ten names across `article-drop`, `space-to-hyphen`, `hyphen-to-space`,
+— eleven names across `article-drop`, `space-to-hyphen`, `hyphen-to-space`,
 `basename-only` and `hash-dropped`, **zero vetoes**. That measurement is why the
 identifier/date vetoes require the token to be the ONLY difference: the first cut
 fired on `basename-only` and was corrected against this corpus.

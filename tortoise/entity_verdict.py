@@ -214,20 +214,20 @@ _SEPARATORS = re.compile(r"[^0-9a-z]+")
 #: (`ERR-4032`), never of a fragment (`4032`) — a bare number is a quantity or a
 #: date, and folding it to an identifier would veto `the top 3 accounts` against
 #: `the top 5 accounts` for the wrong reason.
-_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._\-/]*")
 #: A `#`-prefixed reference (`#11901`) — the corpus's dominant issue/PR spelling.
-#: `_TOKEN` starts at an alphanumeric, so the `#` is skipped and the digits read as
-#: a BARE NUMBER (excluded on purpose: a bare number is a quantity or a date). The
+#: The scanner starts at an alphanumeric, so the `#` is skipped and the digits read
+#: as a BARE NUMBER (excluded on purpose: a bare number is a quantity or a date). The
 #: reference form is not a bare number: `#11901 plan` and `#11905 plan` name two
 #: different issues, and without this they merged with no veto.
 _HASH_ID = re.compile(r"#(\d{2,})")
-#: `_TOKEN` or a hash id, in name order — the one scanner both `identifier_tokens`
-#: and `skeleton` use, so the two cannot disagree about what a token is.
+#: A name token, a path, or a hash id — the one scanner `identifier_tokens`,
+#: `date_tokens` and `skeleton` all use, so they cannot disagree about what a
+#: token is.
 _TOKEN_OR_HASH = re.compile(r"#\d{2,}|[A-Za-z0-9][A-Za-z0-9._\-/]*")
 def _scan(text: str) -> list[str]:
     """Tokens in ``text``, with a PATH split into its components.
 
-    ⛔ A whole path is one token (`_TOKEN`'s charset includes `/`), and one token
+    ⛔ A whole path is one token (the charset includes `/`), and one token
     cannot be both a locator and an identity. Dropping it silenced BOTH vetoes for
     every path pair (`tortoise/extractor_v2.py` vs `.../extractor_v3.py` merged);
     keeping it whole folded two spellings of ONE file into disjoint "identifiers"
@@ -235,12 +235,15 @@ def _scan(text: str) -> list[str]:
     `basename-only` class was vetoed. Components answer both: `tortoise` is a
     literal, and the basename is tokenised like any other name.
 
-    `_TOKEN`'s charset is unchanged on purpose — `_YEAR_MONTH_RAW` and friends read
-    whole tokens (``2026/11`` is a date written with a slash, not a path).
+    A SLASH-WRITTEN DATE (``2026/11``, ``2026/11/12``) is NOT split: it is one
+    temporal compound, and splitting it into ``2026`` + ``11`` would delete the
+    `year_month`/`date` kinds and the skeleton abstraction with them, so both date
+    spellings would merge with no veto (measured before the guard).
     """
     out: list[str] = []
     for tok in _TOKEN_OR_HASH.findall(str(text or "")):
-        if "/" in tok and not tok.startswith("#"):
+        if ("/" in tok and not tok.startswith("#")
+                and not _temporal_compound(tok)):
             out.extend(part for part in tok.split("/") if part)
         else:
             out.append(tok)
@@ -325,7 +328,7 @@ def identifier_tokens(name: str) -> set[str]:
     out: set[str] = set()
     text = str(name or "")
     # `#11901` → `11901`: the hash form is identifier-shaped, the bare digits are
-    # not (see `_TOKEN`'s note). Folded onto the digits, so the same reference
+    # not (the scanner's note below). Folded onto the digits, so the same reference
     # written with an inner separator still agrees.
     out.update(_HASH_ID.findall(text))
     for tok in _scan(text):
@@ -469,9 +472,10 @@ def hard_vetoes(mention: dict, candidate: dict, facts: dict | None = None) -> li
         {"retired": bool,        # candidate carries `resolved_from`
          "dependents": int,      # nodes whose `resolved_from` is the candidate
          "suppressed": bool,     # `dedup_reviewed='reject'` naming no survivor
-         "mention_is_alias": bool}  # the mention's folded name is in the
-                                    # candidate's `aliases[]` — the record that
-                                    # this spelling was already folded into it.
+         "mention_is_alias": bool}  # the mention's folded name is the
+                                    # candidate's OWN name or one of its
+                                    # `aliases[]` — the record that this spelling
+                                    # is already that entity
                                     # ⛔ DERIVED by the caller's shim
                                     # (`extractor_v2._verdict_facts`), never by
                                     # the facts reader: only the shim sees the
