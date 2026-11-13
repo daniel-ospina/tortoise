@@ -1276,7 +1276,10 @@ reset_case
 run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-report-utf8.txt"
 export PATH="$PATH_BEFORE_ICONV_SHIM"
 assert_eq "$(count_creates)" "1" "case 17p: a 19-digit in-range count still files the alert"
-assert_not_contains "$OUT" "integer expression expected" "case 17p: and it emits no arithmetic diagnostic"
+# ⛔ No `assert_not_contains "$OUT" "integer expression expected"` row here: no revert of this guard
+# can make `[ 1000000000000000000 -lt … ]` error (it is a legal comparison), so such a row could
+# never go red — dead weight that reads as coverage (agent-infra#3442 rule 3). The 20-digit row above
+# is the discriminating half.
 WC_INRANGE_BODY="$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)"
 assert_contains "$WC_INRANGE_BODY" "could NOT be measured" "case 17p: and the guard's conservative answer is DECLARED, not silent"
 assert_contains "$WC_INRANGE_BODY" "longer than the 18 digits this guard will compare" "case 17p: and the window names the guard's LENGTH BOUND, not a comparability it did not test"
