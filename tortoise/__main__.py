@@ -12847,6 +12847,10 @@ def _session_index_rows_without_graph(
 _DOCTOR_HEALTH_TIMEOUT_S = 5
 _DOCTOR_TEAM_TIMEOUT_S = 10
 _DOCTOR_TEAM_RETRY_TIMEOUT_S = 30
+#: Most bytes of a reply this diagnostic will hold in memory. The bodies it reads
+#: are small JSON objects; the cap exists so a proxy/captive portal cannot make
+#: `doctor` buffer an unbounded stream on a memory-tight box.
+_DOCTOR_BODY_CAP = 65536
 
 
 def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> None:
@@ -12963,11 +12967,40 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
     results.append(("Credentials", "✅", detail))
 
     if offline:
-        # Not probed is NOT "healthy": the row says exactly what went untested.
-        results.append(("Hosted", "ℹ️",
+        # Not probed is NOT "healthy". ⚠️ rather than ℹ️ is deliberate: `_cmd_doctor`
+        # counts ℹ️ in NEITHER the pass nor the warn column, so on an otherwise
+        # configured box the summary would read `N pass, 0 warn, 0 fail` /
+        # `✅ All checks passing!` beside a row saying the credential was never
+        # tested — #11912's target reachable through the new flag, and a reader
+        # who believes the summary line (fresh review round 3). ⚠️ changes no exit
+        # code (only ❌ does) and keeps the report's two halves consistent.
+        results.append(("Hosted", "⚠️",
                         f"{_printable(_mask_display_target(api_url or ''))} — "
                         "not probed (`--offline`); hosted reachability and key "
                         "validity were NOT tested"))
+        return
+
+    # ⛔ THE PROBE MUST NOT OBEY A CHECKOUT. `<cwd>/.tortoise` is repo-controlled
+    # (this module's transmitting surfaces exclude it for exactly that reason —
+    # `_resolve_transmit_config` / `global_only=True`, D1b/D1.2), and `doctor` is
+    # a routine verb people run in freshly cloned trees. Dialling a host that a
+    # checkout names is a silent beacon, and a host that answers
+    # `200 {"org_id": …}` makes this report certify an environment the checkout
+    # chose. The credential is still REPORTED (that is what `config show` is for);
+    # it is simply not exercised.
+    _cwd_store: Path | None = None
+    try:
+        _cwd_store = Path.cwd() / ".tortoise"
+    except OSError:
+        _cwd_store = None
+    if winner_path is not None and _cwd_store is not None and _same_path(winner_path, _cwd_store):
+        results.append(("Hosted", "⚠️",
+                        f"{_printable(_mask_display_target(api_url or ''))} — not "
+                        f"probed: the credential came from "
+                        f"{_printable(str(_cwd_store))}, a file this checkout "
+                        "controls (a diagnostic must not send a request to a "
+                        "host a repo names). Run `doctor` from another "
+                        "directory, or `tortoise config show` to inspect it"))
         return
 
     # ── the reachability read (no credential in the request) ──
@@ -12989,11 +13022,13 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
             # The service's OWN verdict rides the body (`{"status": "degraded",
             # …}`) — a 200 whose body says degraded is a reachable-but-unhealthy
             # service, and that is the difference between "the key works" and
-            # "the product works". Bounded + fully guarded: this body is
-            # server/proxy-controlled.
+            # "the product works". ⛔ BOUNDED AT THE READ, not after it: a proxy
+            # or captive portal streaming a chunked body would otherwise be
+            # buffered whole into a memory-tight box's RSS (fresh review round 3
+            # — `read()` then `len()` bounds the terminal, not the process).
             try:
-                raw_health = resp.read()
-                if isinstance(raw_health, bytes) and len(raw_health) <= 65536:
+                raw_health = resp.read(_DOCTOR_BODY_CAP)
+                if isinstance(raw_health, bytes) and raw_health:
                     parsed_health = _json.loads(raw_health.decode("utf-8", "replace"))
                     if isinstance(parsed_health, dict):
                         candidate_status = parsed_health.get("status")
@@ -13059,11 +13094,14 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
         try:
             with urlopen(req, timeout=timeout) as resp:
                 team_code = getattr(resp, "status", None) or resp.getcode()
-                team_body = resp.read().decode("utf-8", "replace")
+                # Bounded at the read (see the `/health` note above): a proxy
+                # echoing a large body must not be buffered whole.
+                team_body = resp.read(_DOCTOR_BODY_CAP).decode("utf-8", "replace")
         except HTTPError as exc:
             team_code = exc.code
             try:
-                team_body = exc.read().decode("utf-8", "replace") if exc.fp else ""
+                team_body = (exc.read(_DOCTOR_BODY_CAP).decode("utf-8", "replace")
+                             if exc.fp else "")
             except (OSError, http.client.HTTPException):
                 team_body = ""
 

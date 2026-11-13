@@ -760,6 +760,92 @@ class TestDoctorHostedCredential:
             assert "no team identity" in hosted, hosted
             assert rc == 1
 
+    def test_offline_never_prints_all_checks_passing(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """`--offline` on a configured box must not end `✅ All checks passing!`.
+
+        The offline row is a WARNING for exactly this reason: `_cmd_doctor` counts
+        ℹ️ in neither column, so a green summary printed beside "hosted validity
+        was NOT tested" is #11912's target reachable through the new flag (fresh
+        review round 3).
+        """
+        _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY)
+        calls = _stub_hosted(monkeypatch, lambda url, req: pytest.fail(
+            f"--offline must make no request — dialled {url}"))
+        db_path = str(tmp_path / "offline-summary.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor offline summary seed")
+
+        _run_doctor(["--offline"])
+        out = capsys.readouterr().out
+
+        assert calls == []
+        hosted = _row(out, "Hosted")
+        assert hosted is not None and "⚠️" in hosted, out[-1200:]
+        assert "All checks passing" not in out, out[-1200:]
+
+    def test_a_checkout_supplied_credential_is_never_dialled(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """`doctor` must not obey `<cwd>/.tortoise` — a repo-controlled host.
+
+        The transmitting surfaces exclude that candidate on purpose (D1b/D1.2):
+        a freshly cloned tree can name any host, so dialling it is a silent
+        beacon and a `200 {"org_id": …}` from it would forge a Hosted verdict in
+        the report agents use to judge the environment (fresh review round 3).
+        """
+        import json as _json
+        from pathlib import Path as _Path
+
+        (_Path.cwd() / ".tortoise").write_text(_json.dumps(
+            {"api_key": _FAKE_HOSTED_KEY, "api_url": "https://repo.example.test"}))
+        calls = _stub_hosted(monkeypatch, lambda url, req: pytest.fail(
+            f"a checkout-named host must not be dialled — requested {url}"))
+        db_path = str(tmp_path / "cwd-store.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor cwd store seed")
+
+        _run_doctor([])
+        out = capsys.readouterr().out
+
+        assert calls == []
+        hosted = _row(out, "Hosted")
+        assert hosted is not None and "not probed" in hosted, out[-1200:]
+        assert ".tortoise" in hosted, hosted
+
+    def test_reply_bodies_are_read_with_a_bound(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """A proxy streaming a huge body must not be buffered whole.
+
+        `resp.read()` then `len(...)` bounds the TERMINAL, not the process — on a
+        memory-tight box that is how `doctor` (the verb `onboard` ends with) gets
+        OOM-killed. The cap has to be applied AT the read.
+        """
+        _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY)
+        caps_seen: list[int | None] = []
+
+        class _BoundedResponse(_FakeResponse):
+            def read(self, n=None):
+                caps_seen.append(n)
+                assert n is not None, "unbounded read() — the body cap is not applied"
+                assert n <= 65536, f"read cap too large: {n}"
+                return self._body[:n]
+
+        def handler(url, req):
+            if url.endswith("/health"):
+                return _BoundedResponse(200, b'{"status":"ok"}')
+            return _BoundedResponse(200, b'{"org_id":"org-7"}')
+
+        _stub_hosted(monkeypatch, handler)
+        db_path = str(tmp_path / "bounded.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor bounded read seed")
+
+        _run_doctor([])
+        out = capsys.readouterr().out
+
+        assert len(caps_seen) >= 2, caps_seen
+        assert _row(out, "Hosted") is not None
+
 
 class TestDoctorPath:
     def test_doctor_path_resolves_and_runs(self, clear_db_env, tmp_path, capsys):

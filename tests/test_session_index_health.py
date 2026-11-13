@@ -231,7 +231,7 @@ def test_doctor_includes_session_indexing(env, capsys, monkeypatch, tmp_path):
     assert db_path.is_file()
     monkeypatch.setenv("TORTOISE_DB_PATH", str(db_path))
 
-    rc = main(["doctor"])
+    rc = main(["doctor", "--offline"])
     out = capsys.readouterr().out
 
     assert "0 Points" in out, out            # the GRAPH-AWARE branch really ran
@@ -274,7 +274,7 @@ def test_doctor_surfaces_session_indexing_before_init(
 
     _isolate_uninitialized(monkeypatch, tmp_path)
 
-    rc = main(["doctor"])
+    rc = main(["doctor", "--offline"])
     out = capsys.readouterr().out
 
     assert "Session indexing" in out, out
@@ -308,7 +308,7 @@ def test_doctor_session_indexing_before_init_reports_unindexed_corpus(
     _isolate_uninitialized(monkeypatch, tmp_path)
     _write_session(env, "sess-a")  # one corpus file, no graph to index it
 
-    rc = main(["doctor"])
+    rc = main(["doctor", "--offline"])
     out = capsys.readouterr().out
     row = next(line for line in out.splitlines() if "Session indexing" in line)
 
@@ -334,7 +334,7 @@ def test_doctor_session_indexing_check_unavailable_is_a_warning(
 
     monkeypatch.setattr(_si, "corpus_files", _boom)
 
-    rc = main(["doctor"])
+    rc = main(["doctor", "--offline"])
     out = capsys.readouterr().out
 
     assert "Session indexing" in out, out
@@ -358,12 +358,12 @@ def test_doctor_session_indexing_configured_target_names_config_surface(
     _isolate_uninitialized(monkeypatch, tmp_path)
     missing = str(tmp_path / "nope" / "tortoise.db")
 
-    rc_empty = main(["doctor", "--db", missing])  # empty-corpus variant
+    rc_empty = main(["doctor", "--offline", "--db", missing])  # empty-corpus variant
     empty_row = next(line for line in capsys.readouterr().out.splitlines()
                      if "Session indexing" in line)
 
     _write_session(env, "sess-a")
-    rc_full = main(["doctor", "--db", missing])  # populated-corpus variant
+    rc_full = main(["doctor", "--offline", "--db", missing])  # populated-corpus variant
     full_out = capsys.readouterr().out
     full_row = next(line for line in full_out.splitlines()
                     if "Session indexing" in line)
@@ -392,7 +392,7 @@ def test_doctor_session_indexing_renders_when_target_unresolved(
 
     _isolate_uninitialized(monkeypatch, tmp_path)
 
-    rc = main(["doctor", "--db", "bolt://user:sup3rsekrit@host:7687/g"])
+    rc = main(["doctor", "--offline", "--db", "bolt://user:sup3rsekrit@host:7687/g"])
     out = capsys.readouterr().out
 
     assert "Session indexing" in out, out
@@ -414,7 +414,7 @@ def test_doctor_session_indexing_renders_when_graph_unreachable(
 
     _isolate_uninitialized(monkeypatch, tmp_path)
 
-    rc = main(["doctor", "--db", "docker://:@127.0.0.1:59999/test_doctor"])
+    rc = main(["doctor", "--offline", "--db", "docker://:@127.0.0.1:59999/test_doctor"])
     out = capsys.readouterr().out
 
     assert "Session indexing" in out, out
