@@ -810,6 +810,23 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
     assert entry["ran"] is False, f"the skip must be disclosed ({entry})"
     assert entry["reason"] == "order_owned_downstream", entry
 
+    # ⛔ AND THE OPT-OUT IS "NOT PASSED" AT THE SITES THAT NEED IT. A behaviour
+    # test cannot reach `battery/runner/setup.py` or `tools/why_layer_rate.py`,
+    # whose false diagnosis is the harm: pin the CALL SITES in the source so a
+    # new caller cannot quietly inherit a re-picked page. This is a presence
+    # check, so it is deliberately the weakest form — the behaviour above is the
+    # assertion; this stops the sweep from being silently shrunk.
+    import pathlib as _pl
+    root = _pl.Path(__file__).resolve().parent.parent
+    for rel in ("battery/runner/setup.py", "tools/why_layer_rate.py",
+                "tools/longmem_eval/retrieve.py", "tools/fusion_formula_ab.py",
+                "tools/ask_pool_admission_probe.py"):
+        src = (root / rel).read_text()
+        assert "_rerank_candidates=False" in src, (
+            f"{rel} reads the rerankable page without opting out — with the "
+            "gate armed its page composition moves and a membership probe "
+            "returns a false diagnosis")
+
 
 def test_a_non_relevance_order_by_is_never_re_picked_by_the_rerank(sdk, monkeypatch):
     """The second pre-cut reorder must not touch a page another ordering owns.

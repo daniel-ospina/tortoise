@@ -40337,12 +40337,24 @@ class TortoiseSDK:
         _valid_time_rerank: bool = True,
         # #12297: PRIVATE — the FUSED-CANDIDATE rerank. Default True = the
         # product behaviour (a relevance read reranks when the gate is armed).
-        # Passed False by a caller that RE-OWNS the order of these rows
-        # downstream — the SAME six lanes that pass ``_valid_time_rerank=False``,
-        # and for the same reason: their sort/aggregate is what the caller sees,
-        # so the only thing a pre-cut reorder can do is move which ids survive
-        # ``limit``, which is an unmeasured composition change on a product
-        # surface. ⛔ The two opt-outs are SEPARATE on purpose: the capture path
+        # Passed False by a caller whose PAGE COMPOSITION must not move. Two
+        # classes, and the second is why this is a SUPERSET of the
+        # ``_valid_time_rerank=False`` sites rather than the same set:
+        #   * the lanes that RE-OWN the order downstream (the six in
+        #     ``_valid_time_rerank``'s docstring) plus the eval / A-B harnesses
+        #     that pin that flag for arm comparability — a pre-cut reorder can
+        #     only move which ids survive ``limit``, an unmeasured composition
+        #     change;
+        #   * MEMBERSHIP PROBES that read a page smaller than the pool width and
+        #     ask "is this row in it" — ``battery/runner/setup.py``'s
+        #     seed-manifest guard (a false ``ConfigError`` reading "stale
+        #     PRE-FIX graph") and ``tools/why_layer_rate.py``'s support-entry
+        #     lookup (whose ``None`` is the documented FAIL shape). Neither
+        #     re-owns an order and neither passes ``_valid_time_rerank=False``,
+        #     but a re-picked page turns both into a false diagnosis.
+        # Composition can only move when ``limit < _scored_n``, so a large-pool
+        # caller (the evals' ``pool_size`` reads) is safe by construction — but
+        # "safe today because of an arithmetic accident" is not an opt-out. ⛔ The two opt-outs are SEPARATE on purpose: the capture path
         # (``extractor_v2._fts_rows``) deliberately KEEPS the rerank — it has a
         # measured recall@3 delta and its own ``OVERRIDES:`` record — while
         # opting out of the valid-time selection. One flag for both would force
@@ -41948,8 +41960,10 @@ class TortoiseSDK:
         # outrank correctness, so the rerank runs first and the demotion lands on
         # top of it. ``tests/test_rerank_pool.py`` pins the order.
         # ⛔ Default OFF (``TORTOISE_FUSED_RERANK``): the shipped order is
-        # byte-identical when the flag is unset, which is also why this costs
-        # one env lookup rather than a batch read on every search.
+        # byte-identical when the flag is unset, which is also why the OFF path
+        # costs no graph read — only the gate lookup below, resolved ONCE for
+        # all four arms (it used to be four ``os.environ.get`` calls, which the
+        # comment beside them described as "one env lookup").
         # ⛔ A CALLER-DECLARED RECENCY ORDER OUTRANKS A RELEVANCE REORDER. Step
         # 4b above already ordered the fused list by date for a caller that asked
         # for it (``recency_field`` + ``recency_boost``), and this block sorts on
@@ -41980,6 +41994,7 @@ class TortoiseSDK:
         # same method scopes itself the same way (``order_by == "relevance"``);
         # this is that rule applied to the second pre-cut reorder. Not a silent
         # choice either: a read that opted in and was left alone DISCLOSES it.
+        _rr_on = rerank_pool_enabled()
         _rr_order_by_ok = order_by == "relevance"
         # ⛔ THE SECOND HALF OF THE SAME GUARD. ``order_by``/recency catch a
         # caller that ASKS for another order; they do not catch a caller that
@@ -41991,7 +42006,7 @@ class TortoiseSDK:
         # arm the rerank re-picked their page INVISIBLY — the trace said
         # ``ok``, because nothing in the block knew the caller had opted out.
         _rr_recency_conflict = bool(_recency_applied)
-        if (result_ids and rerank_pool_enabled() and (query or "").strip()
+        if (result_ids and _rr_on and (query or "").strip()
                 and _rr_order_by_ok and not _rerank_candidates
                 and status_trace is not None):
             status_trace.append(dict(
@@ -42000,7 +42015,7 @@ class TortoiseSDK:
                 **{RERANK_POOL_KEY: fused_rerank_pool_width(),
                    RERANK_SCORED_KEY: 0,
                    RERANK_UNSCORED_KEY: len(result_ids)}))
-        if (result_ids and rerank_pool_enabled() and (query or "").strip()
+        if (result_ids and _rr_on and (query or "").strip()
                 and not _rr_order_by_ok and status_trace is not None):
             status_trace.append(dict(
                 _trace_entry("rerank", ran=False, degraded=False,
@@ -42008,7 +42023,7 @@ class TortoiseSDK:
                 **{RERANK_POOL_KEY: fused_rerank_pool_width(),
                    RERANK_SCORED_KEY: 0,
                    RERANK_UNSCORED_KEY: len(result_ids)}))
-        if (result_ids and rerank_pool_enabled() and (query or "").strip()
+        if (result_ids and _rr_on and (query or "").strip()
                 and _rr_order_by_ok
                 and _rr_recency_conflict and status_trace is not None):
             status_trace.append(dict(
@@ -42017,7 +42032,7 @@ class TortoiseSDK:
                 **{RERANK_POOL_KEY: fused_rerank_pool_width(),
                    RERANK_SCORED_KEY: 0,
                    RERANK_UNSCORED_KEY: len(result_ids)}))
-        if (result_ids and rerank_pool_enabled() and (query or "").strip()
+        if (result_ids and _rr_on and (query or "").strip()
                 and _rr_order_by_ok and _rerank_candidates
                 and not _rr_recency_conflict):
             # ONE width for the batch read AND the scorer (#12297 review): the
