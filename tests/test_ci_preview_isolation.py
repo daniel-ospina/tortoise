@@ -756,12 +756,16 @@ def test_stop_all_leaves_a_peer_jobs_decoy_workerd_alone(tmp_path: Path, state) 
         raise
 
     # Job A: a real tree (a supervisor + two children, like wrangler + workerd).
-    # ⛔ JOB A'S OWN SPAWN IS A LEAK PATH TOO (#12227 review cycle 6). It runs BEFORE the
-    # `try:` below, so a failure in ANY of the three asserts that shape the tree leaks the
-    # supervisor, its two children AND the peer decoy — three 120 s processes in their own
-    # sessions — which the comment above used to claim "the later `finally` still reaps on
-    # the rest". It did not. This guard covers exactly that window; the `finally` below
-    # covers everything after it, and a double reap is a suppressed no-op.
+    # ⛔ JOB A'S SPAWN IS ITSELF A LEAK PATH (#12227 review cycle 7). `_spawn` CREATES the
+    # supervisor, so the call has to be INSIDE the guard: a fork that fails on a
+    # resource-starved runner (`EAGAIN`/`ENOMEM`) or a host without `bash` raises before
+    # any pid exists to reap, and the peer decoy spawned above would then be orphaned —
+    # measured on a mutation that forced the spawn to raise: the red run left the decoy
+    # running with nothing left to reap it. `own` is therefore pre-bound, so a failure
+    # that creates no tree still reaps the decoy, and the four processes here (supervisor
+    # + two children + the peer decoy, each a 120 s process in its own session) are all
+    # covered — including the two the old `try:` reached only after the tree-shape asserts
+    # had already passed.
     #
     # ⛔ AND IT REAPS THE SESSION, NOT THE ENUMERATION (#12227 review cycle 8). Reaping
     # `own.pid` plus the `children` LIST could not cover this guard's own failure mode:
@@ -769,9 +773,10 @@ def test_stop_all_leaves_a_peer_jobs_decoy_workerd_alone(tmp_path: Path, state) 
     # poll timed out, and a child forked after the last sample is in the group but not in
     # the list — SIGKILL to the supervisor does not reach it. Measured: omitting one
     # enumerated child from the reap left `sleep 120` (ppid 1) behind.
-    own = _spawn(["bash", "-c", "sleep 120 & sleep 120"], tmp_path)
+    own: subprocess.Popen | None = None
     children: list[int] = []
     try:
+        own = _spawn(["bash", "-c", "sleep 120 & sleep 120"], tmp_path)
         _wait_alive(own.pid)
         deadline = time.time() + 5
         while time.time() < deadline and len(_child_pids(own.pid)) < 2:
@@ -782,7 +787,10 @@ def test_stop_all_leaves_a_peer_jobs_decoy_workerd_alone(tmp_path: Path, state) 
         recorded = _record_when_running("app", own.pid, env=state)
         assert recorded.returncode == 0, _recorded(recorded, own.pid, state)
     except BaseException:
-        _reap_group(own.pid)
+        # `own` may be None only when the spawn itself raised — then there is no group to
+        # reap, but the peer decoy above is still ours to kill.
+        if own is not None:
+            _reap_group(own.pid)
         _reap(peer.pid)
         raise
     result = _script("stop-all", env=state)
