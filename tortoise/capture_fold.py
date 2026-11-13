@@ -376,12 +376,15 @@ _STRUCTURAL_PROPS = ("id", "content", "content_hash", "createdAt",
                      # duplicate's vector would hand the canonical a vector for
                      # text the fold discards.
                      # ⚠️ `_REPORTED_FIELDS` is NOT the louder alternative it
-                     # looks like: `_observed` is a FIXED five-key dict and
-                     # residuals are emitted only from `evidence.support`, so
-                     # moving `embedding` there would suppress it from
-                     # `undeclared` and report NOTHING — a silent drop wearing
-                     # the shape of a disclosure, which is the worst of the
-                     # three buckets.
+                     # looks like. That bucket has exactly ONE residual channel,
+                     # `evidence.support` — this module's other seven residual
+                     # sites are occupancy, label, reference-emptiness and link
+                     # grading — and
+                     # `support` is built only from the fixed five-key
+                     # `_observed` dict. `embedding` is not one of those five, so
+                     # moving it there would suppress it from `undeclared` and
+                     # reach no residual at all: a silent drop wearing the shape
+                     # of a disclosure, which is the worst of the three buckets.
                      # ⚠️ MEASURED #12323: with an embedding model provisioned
                      # the write door mints `embedding`, `_DECLARED_PROPS` did
                      # not name it, and every capture receipt therefore claimed
