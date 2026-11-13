@@ -772,6 +772,101 @@ def test_a_dwell_window_STRADDLING_the_boundary_retires_the_claim(sdk):
     assert sdk.get_entity(g["id"]).get("goalState") is None
 
 
+def test_a_claim_that_records_NO_reading_instant_is_UNDECIDABLE_not_healthy(sdk):
+    """⛔ REVIEW cycle 6, P2, reproduced. Claims written before `readingAsOf` and
+    `readingWindowFrom` existed carry neither, so the boundary check fell back to
+    the MINT clock — and a back-dated boundary between the reading and the mint
+    then read as "the claim is newer, it stands". The retirement half said HEALTHY
+    while the derivation half refused to satisfy the window: the two halves of this
+    same change disagreeing on the same graph.
+
+    The mint clock is not evidence of when a number was taken, so it is no longer a
+    fallback: when a boundary is declared, the instant must come from a READING, and
+    a claim that cannot supply one is reported as `undecidable` — loudly, and
+    without retiring it."""
+    i, t, g = _world(sdk, tag="legacy-instant", dwell=2)
+    _reading(sdk, i, 9.0, at="2026-11-11T10:00:00Z")
+    _reading(sdk, i, 9.1, at="2026-11-11T11:00:00Z")
+    made = judge_and_record(sdk, goal_id=g["id"], indicator_id=i["id"],
+                            target=Target.from_node(t))
+    # the pre-#11926 claim shape: no reading instants at all
+    sdk._get_proj().g.query(
+        "MATCH (p:Point {id:$i}) REMOVE p.readingAsOf, p.readingWindowFrom",
+        params={"i": made["point_id"]})
+    mark_definition_change(sdk, i["id"], at="2026-11-11T10:30:00+00:00")
+    v = _only(verdicts(sdk, goal_id=g["id"]))
+    assert v.invalidation is None, v.invalidation
+    assert "cannot be compared" in v.undecidable
+    report = invalidate_stale(sdk, goal_id=g["id"])
+    assert report["counts"]["retired"] == 0
+    assert report["counts"]["undecidable"] == 1
+    assert sdk.get_entity(made["point_id"])["status"] == "live"
+    # ⛔ and the OTHER retirement reasons still work on that same legacy claim — an
+    # undecidable DEFINITION check must not shield a revised bar.
+    sdk.update_entity(t["id"], threshold=8.0)
+    v = _only(verdicts(sdk, goal_id=g["id"]))
+    assert v.invalidation is not None, (
+        "an unplaceable definition boundary suppressed the bar check — a stale "
+        "claim would survive a target revision")
+    assert v.invalidation.reason == "target-revised"
+
+
+def test_a_window_with_an_UNDATED_reading_is_UNDECIDABLE_not_narrower(sdk):
+    """The other half of the same finding: an undated reading inside the window is
+    still `available`, so `_dwell_satisfied` counts it as agreement — but its
+    instant is unknown. Reporting the oldest DATED reading as the window start
+    under-reports how far back the decision reached, so a boundary inside the real
+    window stays invisible. The window is therefore reported as UNPLACEABLE."""
+    i, t, g = _world(sdk, tag="undated-window", dwell=2)
+    _reading(sdk, i, 9.0, at="2026-11-11T10:00:00Z")
+    # an undated reading, still a real measurement
+    sdk.create_event("CI run undated", "measurement", value=9.1, unit="minutes",
+                     aboutObject=i["id"])
+    made = judge_and_record(sdk, goal_id=g["id"], indicator_id=i["id"],
+                            target=Target.from_node(t))
+    claim = sdk.get_entity(made["point_id"])
+    assert claim["dwell"] == 2
+    assert claim.get("readingWindowFrom") is None, (
+        "the window was narrowed to the oldest DATED reading, so its real start is "
+        "hidden")
+    mark_definition_change(sdk, i["id"], at="2026-11-11T10:30:00+00:00")
+    v = _only(verdicts(sdk, goal_id=g["id"]))
+    assert v.invalidation is None, v.invalidation
+    assert "dwell window cannot be placed" in v.undecidable
+    assert sdk.get_entity(made["point_id"])["status"] == "live"
+
+
+def test_every_minted_dwell_claim_places_its_window(sdk):
+    """Why the two rows above are the ONLY shapes that need the undecidable arm.
+
+    An UNCHANGED state mints nothing (#11822's unchanged arm re-asserts the live
+    claim), and a `dwell-holding` pass reports the PREVIOUS state — which equals the
+    live claim's state, so it mints nothing either. Every claim this writer mints is
+    therefore a FLIP, so a `dwell > 1` claim that has a placeable window ALWAYS
+    carries `readingWindowFrom`; a `met`/`unmet` dwell claim without one is exactly
+    the shape whose window cannot be placed, which is why reporting it is not noise.
+    """
+    i, t, g = _world(sdk, tag="minted-dwell", dwell=2)
+    _reading(sdk, i, 9.0, at="2026-11-11T10:00:00Z")
+    _reading(sdk, i, 9.1, at="2026-11-11T11:00:00Z")
+    target = Target.from_node(t)
+    first = judge_and_record(sdk, goal_id=g["id"], indicator_id=i["id"], target=target)
+    assert first["written"] is True
+    claim = sdk.get_entity(first["point_id"])
+    assert claim["judgementReason"] == "state-flipped"
+    assert claim["readingWindowFrom"] == "2026-11-11T10:00:00Z"
+    # a later pass whose state is UNCHANGED mints nothing, so no claim of that
+    # shape can exist to be mis-reported
+    _reading(sdk, i, 9.2, at="2026-11-11T12:00:00Z")
+    second = judge_and_record(sdk, goal_id=g["id"], indicator_id=i["id"], target=target)
+    assert second["written"] is False
+    assert second["point_id"] == first["point_id"]
+    # ... and that claim is placed by its WINDOW, not by the newest reading
+    mark_definition_change(sdk, i["id"], at="2026-11-11T11:30:00+00:00")
+    v = _only(verdicts(sdk, goal_id=g["id"]))
+    assert v.invalidation is not None and v.invalidation.reason == "definition-changed"
+
+
 def test_a_dwell_window_ENTIRELY_after_the_boundary_stands(sdk):
     """The negative control for the row above: every reading the window consumed
     was taken under the current definition, so the claim must survive — otherwise

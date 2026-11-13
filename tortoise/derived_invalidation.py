@@ -116,6 +116,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from .goal_judgement import (
+    _ROW_FLIP,
     DEFINITION_BOUNDARY_PROP,
     GOAL_STATE_CACHE,
     JUDGEMENT_STATES,
@@ -566,50 +567,81 @@ def invalidation_for(
     #    HEALTHY, and silence is the one direction this module must never fail in.
     #    `_Nodes` keeps MISSING and UNREADABLE apart, and `indicator is None` was
     #    already refused above, so a boundary that is absent here really is absent.
+    #: Set when the DEFINITION trigger cannot be decided. Reported only if the bar
+    #: check below finds nothing — a definite finding outranks an unclear one.
+    undecidable_definition: str | None = None
     boundary = (indicator.get(DEFINITION_BOUNDARY_PROP)
                 if isinstance(indicator, dict) else None)
     if boundary is not None:
-        derived_at = (judgement.get("readingWindowFrom")
-                      or judgement.get("readingAsOf")
-                      or judgement.get("evaluatedAt")
-                      or judgement.get("createdAt"))
+        #        A JUDGEMENT IS JUDGED ON THE READING(S) IT CONSUMED, not on the
+        #        clock its claim was written at.
+        #
+        #        ⛔ THE MINT CLOCK IS NOT A SUBSTITUTE. `evaluatedAt`/`createdAt` say
+        #        when the CLAIM was written, never when the number it judged was
+        #        taken, so falling back to them is the silence this module must
+        #        never produce: a boundary landing between the reading and the mint
+        #        reads as "the claim is newer, it stands". MEASURED (review
+        #        cycle 6): a claim written before `readingAsOf` existed carries no
+        #        reading instant, and the fallback made the retirement half call it
+        #        HEALTHY while the derivation half refused to satisfy its window —
+        #        the two halves of this same change disagreeing on one graph.
+        #
+        #        ⛔ AND A ``dwell`` WINDOW CONSUMES MORE THAN THE NEWEST READING. A
+        #        flip at ``dwell=2`` rests on BOTH readings it inspected, so the
+        #        claim carries the OLDEST of them (``readingWindowFrom``) and THAT
+        #        is the instant compared here: a boundary inside the window means
+        #        the window is a trend drawn across two definitions (§3 row 9).
+        #        MEASURED (cycle 5): comparing only ``readingAsOf`` let such a claim
+        #        survive while the goal kept reading ``met``.
+        dwell = _declared_dwell(judgement.get("dwell"))
+        window_expected = (judgement.get("judgementReason") == _ROW_FLIP
+                           and isinstance(dwell, int)
+                           and not isinstance(dwell, bool) and dwell > 1)
+        derived_at = (judgement.get("readingWindowFrom") if window_expected
+                      else judgement.get("readingAsOf"))
         if derived_at is None:
-            return Verdict(judgement_id=judgement_id, undecidable=(
-                f"the judgement records no derivation instant, so it cannot be "
-                f"placed either side of the definition boundary {boundary!r}"))
-        # ⛔ BOTH DIRECTIONS, because `instant_at_or_after` answers `False` for
-        # ANY pair it cannot order — including "the boundary names no instant",
-        # which is not the same fact as "the judgement predates it". Reading
-        # only the first direction would retire a claim on an unreadable stamp.
-        #
-        # ⛔ AND THE DECISION IS **STRICT**: a claim derived EXACTLY AT the
-        # boundary STANDS. `instant_at_or_after` is `>=`, so at equality BOTH
-        # directions are true — a `if boundary_is_later:` test therefore retired a
-        # claim that the derivation half of this same change ADMITS (the reading
-        # filter is `>= boundary`, ``goal_judgement.latest_readings``), with a
-        # detail string — "before the change" — that was false. MEASURED by
-        # review: the claim was retracted, the documented follow-up
-        # `judge_and_record` re-minted it (`written: True`), and the next sweep
-        # retired that one too — a retire/re-derive loop that grows a Point and an
-        # operator per cycle, with a terminal retirement at its centre.
-        #
-        # So the question asked here is the ONE the derivation asks: is the
-        # reading PREDATES the boundary (`derived_at < boundary`). Equality means
-        # "taken under the new definition", on both sides of the module.
-        derived_is_at_or_after = instant_at_or_after(derived_at, boundary)
-        boundary_is_at_or_after = instant_at_or_after(boundary, derived_at)
-        if not derived_is_at_or_after and not boundary_is_at_or_after:
-            return Verdict(judgement_id=judgement_id, undecidable=(
-                f"the definition boundary {boundary!r} and the judgement's "
-                f"derivation instant {str(derived_at)!r} cannot be ordered "
-                "(one of them names no instant)"))
-        if not derived_is_at_or_after:
-            return _verdict(
-                "definition-changed",
-                f"the indicator {indicator_id!r} definition changed at {boundary!r}; "
-                f"this judgement was derived at {derived_at!r}, before the change",
-                effective_at=boundary,
-            )
+            # ⛔ DEFERRED, NOT RETURNED. "I cannot place this claim against the
+            # boundary" is an absence of evidence; a DEFINITE reason further down (a
+            # revised bar) is evidence. Returning here would let an unplaceable
+            # boundary SHIELD a claim whose bar has visibly moved, so a stale claim
+            # would survive a target revision.
+            undecidable_definition = (
+                f"the definition boundary {boundary!r} cannot be compared with "
+                "this judgement: "
+                + ("its dwell window cannot be placed (a reading in it names no "
+                   "instant, or the claim predates `readingWindowFrom`)"
+                   if window_expected else
+                   "it records no reading instant (a claim written before "
+                   "`readingAsOf` existed)"))
+        else:
+            # ⛔ THE DECISION IS **STRICT**: a claim derived EXACTLY AT the boundary
+            # STANDS. `instant_at_or_after` is `>=`, so at equality BOTH directions
+            # are true — a `if boundary_is_later:` test therefore retired a claim
+            # the derivation half of this same change ADMITS (the reading filter is
+            # `>= boundary`), with a detail string ("before the change") that was
+            # false. MEASURED by review: the claim was retracted, the documented
+            # `judge_and_record` follow-up re-minted it, and the next sweep retired
+            # that one too — a retire/re-derive loop that grows a Point and an
+            # operator per cycle.
+            #
+            # Both directions are still needed, because `instant_at_or_after`
+            # answers `False` for ANY pair it cannot order — which is not the same
+            # fact as "the judgement predates it".
+            derived_is_at_or_after = instant_at_or_after(derived_at, boundary)
+            boundary_is_at_or_after = instant_at_or_after(boundary, derived_at)
+            if not derived_is_at_or_after and not boundary_is_at_or_after:
+                undecidable_definition = (
+                    f"the definition boundary {boundary!r} and the judgement's "
+                    f"derivation instant {str(derived_at)!r} cannot be ordered "
+                    "(one of them names no instant)")
+            elif not derived_is_at_or_after:   # strictly before the boundary
+                return _verdict(
+                    "definition-changed",
+                    f"the indicator {indicator_id!r} definition changed at "
+                    f"{boundary!r}; this judgement was derived at {derived_at!r}, "
+                    "before the change",
+                    effective_at=boundary,
+                )
 
     # 5. the BAR. The judgement copied the comparator/threshold/dwell it was
     #    derived under, so a revision is a plain comparison — no history needed.
@@ -620,6 +652,8 @@ def invalidation_for(
         return _verdict("target-revised",
                         f"the target {target_id!r} was revised — {moved}")
 
+    if undecidable_definition is not None:
+        return Verdict(judgement_id=judgement_id, undecidable=undecidable_definition)
     return Verdict(judgement_id=judgement_id)
 
 

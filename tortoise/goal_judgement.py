@@ -649,6 +649,16 @@ class Judgement:
     #: row 9, surviving the module whose job is to detect it). The retirement half
     #: compares THIS instant with the boundary, so any consumed reading that
     #: predates it retires the claim.
+    #:
+    #: ⛔ AND IT IS ``None`` WHEN ANY READING IN THE WINDOW NAMES NO INSTANT — the
+    #: whole window must be placeable for the oldest instant to mean anything.
+    #: `started_at` falls back to `createdAt` and both can be absent
+    #: (`create_event(..., startedAt=None)` stores neither), and such a reading is
+    #: still `available`, so `_dwell_satisfied` counts it as agreement: taking the
+    #: oldest DATED reading instead would silently UNDER-report how far back the
+    #: window reached, and a boundary inside the real window would stay invisible
+    #: (measured: review cycle 6). An unplaceable window is reported as exactly
+    #: that by the retirement half, never as a narrower one.
     window_from: str | None = None
 
     def __post_init__(self) -> None:
@@ -793,12 +803,14 @@ def compare(
     window_from: str | None = None
     if flipped and target.dwell > 1:
         # `readings` is newest-first, so the OLDEST consumed reading closes the
-        # slice. An undated one cannot widen the window backwards (there is no
-        # instant to compare), so it is skipped rather than treated as instant
-        # zero.
-        for r in readings[: target.dwell]:
-            if r.started_at:
-                window_from = str(r.started_at)
+        # slice. ⛔ The window is placed ONLY when EVERY reading in it names an
+        # instant: skipping an undated one (rather than refusing to place the
+        # window) reports a NARROWER window than the decision consumed, so a
+        # boundary inside the real one stays invisible — silence in the direction
+        # a retirement must never fail in.
+        consumed = readings[: target.dwell]
+        if all(r.started_at for r in consumed):
+            window_from = str(consumed[-1].started_at)
     return Judgement(
         state=state,
         reason=row.reason,
