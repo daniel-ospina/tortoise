@@ -21,9 +21,15 @@ program that refuses:
        must name every member of `CANCELLABLE_STATUSES`: a rule that omits one
        leaves a value the code allows that the stated rule does not (`requested`
        was omitted once — round-7 review F2);
-    2. NO job of it has started (a `queued` run whose job has started is a run
-       whose work would be DESTROYED — 32 of the 42 cancels in that window had
-       started jobs);
+    2. NO job of it has started — decided by WORK, never by a timestamp (a
+       `queued` run whose job has started is a run whose work would be
+       DESTROYED — 32 of the 42 cancels in that window had started jobs).
+       ⛔ A STAMPED `started_at` IS NOT EVIDENCE OF WORK: GitHub stamps it when
+       the job is QUEUED, so a job no runner has ever claimed carries it too.
+       The predicate is `job_has_started()` — a runner assigned, or the job
+       completed, or a status outside the unstarted set. Reading `started_at`
+       here made this guard refuse EVERY run it was given, i.e. an inert
+       enforcer with a dead permit path (#11045);
     3. the branch is not the default branch (a `main` push run is never
        superseded — main's history is what shipped);
     4. exactly one OPEN PR owns (head repository, branch) and its head repository
@@ -54,6 +60,14 @@ FLOOD trim limited to `finding-provenance` `issue_comment` runs),
 same head), and `tools/run_reaper.py` (a verified-in-progress wedge) — plus
 agent-infra's sweep, which is not in this index (four in total). Wiring them in is
 the follow-up.
+
+⛔ THE `started_at` MISREADING WAS CROSS-CHECKED AT ALL THREE (#11045 item 3,
+2026-11-13). Only `tools/run_reaper.py` carried it, and it is fixed in the same
+commit (`job_work_start`). The other two read no work-start signal at all:
+`ci_queue_health.py::cancel_run` is a bare POST over a workflow/event allow-list,
+and `ci_check_repair.py::_cancel` re-reads the run and refuses unless the status is
+queued AND the job count is a MEASURED zero — zero jobs means there is no job row to
+misread. So the defect was in exactly two of the four sites, not one and not all.
 
 Usage:
   uv run python tools/ci_cancel_guard.py <run-id> [--repo owner/name] [--apply] [--json]
@@ -127,6 +141,10 @@ _OID_RE = re.compile(r"^[0-9a-f]{40}$|^[0-9a-f]{64}$", re.IGNORECASE)
 #: started", never as "no work to destroy" — the same allow-list rule the rail's
 #: check-run reader uses (a status GitHub has not documented yet falls through a
 #: deny-list silently).
+#:
+#: ⛔ THIS SET IS NECESSARY AND NOT SUFFICIENT (#11045). A job whose status is in
+#: here can still have been claimed by a runner, so `job_has_started()` refuses on
+#: ANY of three signals; a status-only test would be a deny-list of one field.
 UNSTARTED_JOB_STATUSES = frozenset({"queued", "waiting", "requested", "pending"})
 PR_LIMIT = 500
 #: The test seam, as a COMMAND-LINE argument only. ⛔ There is deliberately no
@@ -194,6 +212,46 @@ def read_jobs(repo: str, run_id: int) -> list[dict[str, Any]]:
         # not read. Refuse rather than under-count.
         raise Unreadable(f"run {run_id} job list is partial ({len(jobs)} of {total})")
     return jobs
+
+
+def job_has_started(job: dict[str, Any]) -> bool:
+    """Has this job actually done any work? PURE, and deliberately NOT age-based.
+
+    ⛔ `started_at` IS NOT AN INPUT, AND THAT IS THE WHOLE POINT (#11045). GitHub
+    stamps `started_at` when the job is QUEUED, not when a runner picks it up, so
+    every job of a never-run workflow carries it. The guard's previous clause read
+    `j.get("started_at") or …`, which therefore refused EVERY run it was ever given
+    — including runs about to be cancelled correctly — and its PERMIT path was dead
+    code: an instrument that reads as protection and is in fact an inert enforcer.
+
+    MEASURED 2026-11-13 on daniel-ospina/tortoise, across the 63 non-completed runs
+    that had jobs at that moment: **19** carried `started_at` on EVERY job while
+    `runner_name` was empty on every job and every status was `queued`/`pending` —
+    no runner had claimed any of them, and the old clause refused all 19 with
+    "job(s) already started (N of N): cancelling would destroy the work".
+
+    The three signals, ORed, each of which alone means work may be lost:
+      1. `runner_name` non-empty — a runner HAS claimed the job (the direct
+         evidence `started_at` was standing in for);
+      2. `completed_at` non-null — it ran and finished;
+      3. `status` outside `UNSTARTED_JOB_STATUSES` — an allow-list, so an
+         unrecognised status reads as started.
+
+    The strictness is the point: a job can only be declared untouched when it is
+    queued-by-status AND unclaimed AND unfinished. Anything unreadable, unknown or
+    contradictory falls on the REFUSE side, which is the direction that cannot lose
+    a verdict — so an ABSENT or non-string `status` reads as started rather than
+    raising (membership on an unhashable status would `TypeError` out of a pure
+    predicate, and a second caller would inherit that as an aborted pass).
+    """
+    if job.get("runner_name"):
+        return True
+    if job.get("completed_at") is not None:
+        return True
+    status = job.get("status")
+    if not isinstance(status, str):
+        return True
+    return status not in UNSTARTED_JOB_STATUSES
 
 
 def read_pr_map(repo: str) -> dict[tuple[str, str], list[tuple[int, str]]]:
@@ -303,8 +361,7 @@ def decide(repo: str, run_id: int) -> tuple[str, dict[str, Any]]:
         # The status is a set member, so a dict/list raises TypeError → exit 1, which the
         # exit table reserves for "the POST failed" (review round 3).
         raise Unreadable(f"run {run_id} job status is not a string")
-    started = [j for j in jobs
-               if j.get("started_at") or j.get("status") not in UNSTARTED_JOB_STATUSES]
+    started = [j for j in jobs if job_has_started(j)]
     detail["jobs"] = len(jobs)
     detail["jobs_started"] = len(started)
     if started:
