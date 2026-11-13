@@ -4112,6 +4112,35 @@ def test_the_event_layer_reaches_the_census(monkeypatch, tmp_path, capsys):
     assert "3 events" in capsys.readouterr().out, "the summary line must name the layer"
 
 
+def test_the_event_layer_reaches_the_PLAN_census_too(monkeypatch, tmp_path):
+    """The `plan` verb's census population, which nothing pinned (review round 2).
+
+    `cmd_plan` builds its OWN census (`C.build_plan(points + sources + operators +
+    events)`), so the two call sites are independent: measured, dropping `+ events`
+    there left the whole file green, because every `event:*` assertion above drives
+    `inventory`. The payload would then carry `events_read: 3` /
+    `events_reconciled: True` beside a census of 1 row with NO `event:*` key — the run
+    claiming it read and reconciled a layer its own plan artifact does not contain.
+
+    Both halves are asserted for that reason: the counting half (`total_rows`) and the
+    KEY-SHAPE half (`event:<kind>`), because a key regressed to something else still
+    leaves `total_rows` right. The doc-text pins guard the PROSE that describes the
+    request; this guards the ARTIFACT the plan verb actually emits.
+    """
+    mod = _tool_module()
+    monkeypatch.setattr(mod, "_live_call_tool", _event_surface())
+    rc = mod.main(["plan", "--graph", "org_x_g_old", "--target", "org_x_g_new", "--off",
+                   "--no-verify-read", "--ledger", str(tmp_path / "l.jsonl"),
+                   "--out", str(tmp_path / "p.json")])
+    assert rc == 0
+    payload = json.loads((tmp_path / "p.json").read_text())
+    census = payload["census"]
+    assert census["total_rows"] == 4, census            # 1 point + 3 events
+    assert census["by_class"]["event:AgentSession"]["undecidable"] == 1, census["by_class"]
+    assert census["by_class"]["event:meeting"]["undecidable"] == 1, census["by_class"]
+    assert census["by_class"]["event:deployment"]["undecidable"] == 1, census["by_class"]
+
+
 def test_an_event_row_that_is_not_an_object_is_refused_not_a_traceback(
         monkeypatch, capsys, tmp_path):
     """Shape drift at the ROW level gets the designed refusal, not an AttributeError.
