@@ -238,11 +238,12 @@ def test_a_caller_vector_still_gets_a_truthfully_minted_marker(tmp_path):
     NOT asserted — only the record was, and the record is the wrong half for the
     exemption this route carries. `tortoise/embed_writer_register.py` declares
     `tortoise.sdk::create_source` EXEMPT-as-CARRIER on exactly the delegate's store
-    ("`_upsert_source`, whose passthrough stores `s.embedding`"). Measured: dropping
-    `embedding` from `Projection._SOURCE_EXTRA_PROPS` denies it on the node (`#3998`
-    deny-and-log, node value `None`) while this test, the register suite, the probe
-    suite and `#11641`'s all stayed green (390 passed) — a journalled vector nothing
-    can read. The node assertion below is what makes that mutation red.
+    ("`_upsert_source`, whose passthrough stores `s.embedding`"). Measured **at
+    `ca74f2375e`, before the node assertion below existed**: dropping `embedding` from
+    `Projection._SOURCE_EXTRA_PROPS` denies it on the node (`#3998` deny-and-log, node
+    value `None`) while this test, the register suite, the probe suite and `#11641`'s
+    all stayed green (390 passed) — a journalled vector nothing can read. The node
+    assertion below is what makes that mutation red.
     """
     sdk, journal = _journal(tmp_path)
     try:

@@ -3706,13 +3706,13 @@ def test_a_no_live_vector_declaration_executes_no_store_clause() -> None:
 #: **DELEGATED** is a claim about a DELEGATE: *"this writer's own body holds no store clause, and the
 #: store it feeds exists in the writer it names"*. The first half is re-derived by
 #: `test_a_no_live_vector_declaration_executes_no_store_clause` (absence in its own body). The second
-#: half had NO pin at all, and it is the half that can go quiet — measured on the tree that carries
-#: this table: delete `"embedding"` from `Projection._SOURCE_EXTRA_PROPS` and the caller's vector is
-#: **denied on the node** (`#3998` deny-and-log: measured node value `None` while the `SourceCreated`
-#: record still carries the 4-float vector), so a vector is journalled and unreadable, the
-#: declaration above still says the passthrough "stores `s.embedding` for the vector retrieval leg to
-#: read", and **390 tests across the four suites that own this seam stayed green**. That is a silent
-#: retrieval loss behind a declaration nobody re-derived — the class `#12170` is about, one level in
+#: half had NO pin at all, and it is the half that can go quiet — measured **at `ca74f2375e`, before
+#: this pin existed**: delete `"embedding"` from `Projection._SOURCE_EXTRA_PROPS` and the caller's
+#: vector is **denied on the node** (`#3998` deny-and-log: measured node value `None` while the
+#: `SourceCreated` record still carries the 4-float vector), so a vector is journalled and unreadable,
+#: the declaration above still says the passthrough "stores `s.embedding` for the vector retrieval leg
+#: to read", and **390 tests across the four suites that own this seam stayed green**. That is a
+#: silent retrieval loss behind a declaration nobody re-derived — the class `#12170` is about, one level in
 #: from the missing-entry symptom the issue names.
 #:
 #: Keyed by the register key, the routes are read off SOURCE at HEAD (no import, no graph — this
@@ -3721,8 +3721,8 @@ def test_a_no_live_vector_declaration_executes_no_store_clause() -> None:
 #:     by calling `handoff_call`;
 #:   * `delegate` — the `(path, symbol)` the register's `reason` NAMES, which must still exist;
 #:   * `passthrough` — the call inside the delegate that performs the extra-props store;
-#:   * `allowlist` — the module constant the passthrough is fed from, which must still name
-#:     `required`. ⛔ That is what makes the exemption TRUE: a key absent from the closed `:Source`
+#:   * `allowlist` — the constant the passthrough's `allow_keys=` is FED from (one hop), which must
+#:     still name `required`. ⛔ That is what makes the exemption TRUE: a key absent from the closed `:Source`
 #:     surface is dropped, not stored (`#3998`), so a declaration that names the delegate while the
 #:     delegate stops admitting the key is a claim about a write that no longer happens.
 DELEGATED_STORE_ROUTES: dict[str, dict[str, object]] = {
@@ -3784,10 +3784,17 @@ def _delegation_violation(
     content is right — the same reason `register.load` is public.
 
     ⛔ It does NOT try to prove the vector reaches the node by data flow (that is the live falsifier
-    in `tests/test_11858_source_door_markers.py`). It proves the three text-level facts the
-    declaration's wording rests on: the writer hands off to the delegate, the delegate still calls
-    the passthrough with an allowlist, and the allowlist still admits the key. Deleting any one of
-    them makes the prose false, so each must red.
+    in `tests/test_11858_source_door_markers.py`). It proves the text-level facts the declaration's
+    wording rests on: the writer hands off to the delegate, the delegate still calls the passthrough
+    with `allow_keys=` FEED FROM that constant, and the constant still admits the key. Deleting any
+    one of them makes the prose false, so each must red.
+
+    ⛔ Step (b) is a FEED check, not a co-occurrence check (round 1 of this lane's own review): an
+    earlier version asserted only that `self.<allowlist>` occurred SOMEWHERE in the delegate, which
+    a refactor that read the constant for an unrelated purpose while feeding the passthrough another
+    set would have satisfied — the "green over a delegation that no longer happens" shape one level
+    in. The `allow_keys=` argument must be the constant itself, or a local ASSIGNED from it (the real
+    shape: `_allow = self._SOURCE_EXTRA_PROPS`, then `allow_keys=_allow`).
     """
     if delegate[1] not in reason:
         return (
@@ -3822,26 +3829,49 @@ def _delegation_violation(
     ]
     if not delegates:
         return f"{delegate[0]}::{delegate[1]} — the DELEGATE the reason names — is not defined any more"
-    # (b) the delegate still stores through the passthrough, fed from the allowlist constant.
-    calls = [
-        n for fn in delegates for n in ast.walk(fn)
+    # (b) the delegate still stores through the passthrough, its `allow_keys=` FED from the constant.
+    keys = [
+        kw.value for fn in delegates for n in ast.walk(fn)
         if isinstance(n, ast.Call)
-        and any(kw.arg == "allow_keys" for kw in n.keywords)
         and (
             (isinstance(n.func, ast.Attribute) and n.func.attr == passthrough)
             or (isinstance(n.func, ast.Name) and n.func.id == passthrough)
         )
+        for kw in n.keywords if kw.arg == "allow_keys"
     ]
-    if not calls:
+    if not keys:
         return f"{delegate[1]} no longer calls {passthrough}(…, allow_keys=…) — the store is gone"
-    reads_allowlist = any(
-        isinstance(n, ast.Attribute) and n.attr == allowlist
-        for fn in delegates for n in ast.walk(fn)
-    )
-    if not reads_allowlist:
+
+    def _mentions(node: ast.AST) -> bool:
+        """Whether `node` names `self.<allowlist>` (directly, or inside a `|` union of it)."""
+        return any(
+            isinstance(n, ast.Attribute) and n.attr == allowlist for n in ast.walk(node)
+        )
+
+    def _fed_by(value: ast.AST) -> bool:
+        """Whether THIS `allow_keys=` expression reaches the constant (directly or one hop)."""
+        if _mentions(value):
+            return True
+        if not isinstance(value, ast.Name):
+            return False
+        for fn in delegates:
+            for node in ast.walk(fn):
+                if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                    continue
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                if (
+                    any(isinstance(t, ast.Name) and t.id == value.id for t in targets)
+                    and _mentions(node.value)
+                ):
+                    return True
+        return False
+
+    # EVERY `allow_keys=` on this passthrough, not "one of them": a second call fed a different set
+    # is a store the declaration does not cover, and `any()` would pass over it.
+    if not all(_fed_by(value) for value in keys):
         return (
-            f"{delegate[1]} no longer reads {allowlist} — the passthrough may be fed a different "
-            "set, so the declaration names a store that may not admit the vector"
+            f"{delegate[1]} no longer FEEDS the passthrough's allow_keys from {allowlist} — the "
+            "declaration names a store that may not admit the vector"
         )
     # (c) the closed surface still admits the key, or the vector is DENIED rather than stored.
     named = _constant_strings(delegate_tree, allowlist)
@@ -3956,10 +3986,21 @@ def test_the_delegation_pin_REDS_on_each_fact_it_rests_on() -> None:
     # (b') the passthrough is fed a different set — the row's wording stops being derivable.
     refed = delegate_source.replace(
         "_allow = self._SOURCE_EXTRA_PROPS", "_allow = frozenset()")
-    assert refed != delegate_source, "the allowlist-read anchor did not change — a stale needle"
+    assert refed != delegate_source, "the allowlist-feed anchor did not change — a stale needle"
     violation = _delegation_violation(delegate_source=refed, **kwargs)
     assert violation is not None and allowlist in violation, (
         f"re-feeding the passthrough from another set must red the pin — got {violation!r}"
+    )
+
+    # (b'') the constant is still READ by the delegate, but for something else — the co-occurrence
+    # hole round 1 found: a `reads` check passes, a FEED check must not.
+    decoy = delegate_source.replace(
+        "allow_keys=_allow,", "allow_keys=_capture_props,", 1)
+    assert decoy != delegate_source, "the allow_keys anchor did not change — a stale needle"
+    violation = _delegation_violation(delegate_source=decoy, **kwargs)
+    assert violation is not None and allowlist in violation, (
+        "a passthrough fed a DIFFERENT set while the constant is still mentioned in the body must "
+        f"red the pin (co-occurrence is not a feed) — got {violation!r}"
     )
 
     # (a) the DELEGATE the reason names stops existing — the row names a function that is gone.
