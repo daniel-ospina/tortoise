@@ -145,7 +145,9 @@ in ONE `tortoise_search(entity_type="operator")` call, ROUTED to `--graph` like 
 and reconciled against `structure.operators` — both because `tortoise_query` has no arm that returns
 operator rows (`kind="operator"` answers `total: 0`) and because there is no `offset` on the search
 path, so a short read cannot be continued and must be refused instead. Events are readable in one
-call too and are deliberately NOT read here (see the class table).
+call too (`tortoise_get_entity(None, type="events", limit=N)` → `get_events`) and are 
+**read since #12378**, reconciled against `counts.Event` the same way — see the class table for what
+each arm classifies to.
 
 ⚠️ **The reconciliation predates a known predicate difference, and equality is therefore a
 measurement, not a guarantee.** `structure.operators` counts
@@ -257,9 +259,11 @@ the guarantees, because a review comment is not an artifact the next lane reads:
   but "refused" is not "warned", so a namespaced spelling is not free. Which spellings the clean
   target must accept is the clean graph's vocabulary decision (`#10175` step 2).
   ⚠️ **Classification is NOT spelling-invariant, despite the bare-kind rule.** `classify_point`
-  compares `Row.bare_kind`, but `classify_source` and `classify_event` compare the EXACT
-  `row.kind`: a `core:agentSession` source falls through `classify_source`'s session arm to
-  `carry`, where a bare `agentSession` is `undecidable` (§9.1/D1). No live row moves today — the
+  compares `Row.bare_kind`, but `classify_source` and `classify_event` compare `row.kind` (for
+  `classify_event`, case-INSENSITIVELY since #12378 — the write path stores `AgentSession` while the
+  arm used to test only `agentSession`): a `core:agentSession` source falls through
+  `classify_source`'s session arm to `carry`, where a bare `agentSession` is `undecidable` (§9.1/D1).
+  No live row moves today — the
   census's source rows are all bare — but a lane that namespaced a kind on the strength of "the
   rules use the bare kind" would turn a decision into a carry.
 * **the `_g_` split is on the LAST occurrence, so a graph id that itself contains `_g_` is

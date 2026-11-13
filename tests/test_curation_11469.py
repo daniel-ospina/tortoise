@@ -4040,10 +4040,17 @@ def test_a_structure_refusal_is_the_designed_refusal_on_BOTH_verbs(monkeypatch, 
 #: The real `get_events` row shape: `properties(e)` of a `:Event`, whose text is `name`
 #: (persisted because it is absent from `_EVENT_HANDLED`, `projection/entities.py`).
 #: A meeting persists `title` instead — that is the declared fallback, and `ev3` pins it.
+#: Each row exercises a DIFFERENT text carrier, because the reader declares three and a
+#: test that only ever sees two of them pins two (round-2 review measured that deleting
+#: `subject` from `_event_text` left the named-for-three test green):
+#:   ev-1 `name` (the canonical carrier, persisted because it is absent from
+#:        `_EVENT_HANDLED`) · ev-2 `title` ONLY, with no `name` — the real meeting shape,
+#:        which is what makes `title` a FALLBACK rather than a coincidence · ev-3
+#:        `subject` ONLY, the last declared carrier.
 EVENT_ROWS = [
     {"id": "ev-1", "eventKind": "AgentSession", "name": "session 2026-11-13"},
-    {"id": "ev-2", "eventKind": "meeting", "name": "kickoff"},
-    {"id": "ev-3", "eventKind": "deployment", "title": "deploy 4f2a", "subject": "tortoise"},
+    {"id": "ev-2", "eventKind": "meeting", "title": "kickoff"},
+    {"id": "ev-3", "eventKind": "deployment", "subject": "deploy 4f2a"},
 ]
 
 
@@ -4123,6 +4130,7 @@ def test_an_events_text_is_its_name_with_title_and_subject_fallbacks():
     reader = mod.MCPReader(_event_surface(), None)
     rows, reported = reader.read_events({"counts": {"Event": 3}})
     assert reported == 3
+    # name · title-as-fallback (ev-2 has NO name) · subject-as-fallback (ev-3 has neither).
     assert [r.content for r in rows] == ["session 2026-11-13", "kickoff", "deploy 4f2a"]
     assert [r.kind for r in rows] == ["AgentSession", "meeting", "deployment"]
     assert len({r.stable_key for r in rows}) == 3, [r.stable_key for r in rows]
@@ -4363,6 +4371,47 @@ def test_the_architecture_doc_no_longer_claims_the_event_layer_is_unread():
         "the node-count table still says the omission is deliberate")
     assert "counted here, NOT enumerated" not in doc, (
         "the node-count table still describes the Event layer as unenumerated")
+    # ⛔ The THIRD sentence, one paragraph above the row this test was written for: the
+    # first version of this pin asserted three phrasings and stayed green over
+    # "Events are readable in one call too and are deliberately NOT read here", which is
+    # the same false claim in different words (round-2 review). Pin the CLAIM, not a
+    # phrase: no sentence in this doc may say the Event layer is not read.
+    assert "NOT read here" not in doc, (
+        "a paragraph still says the Event layer is not read")
+    assert "deliberately NOT read" not in doc, (
+        "a paragraph still says the omission is deliberate")
+    # ...and the spelling-invariance claim must match the classifier (case-folded since
+    # #12378): "compare the EXACT `row.kind`" is now true for `classify_source` only.
+    assert "compare the EXACT" not in doc, (
+        "the doc still says classify_event compares row.kind exactly; it case-folds now")
     # ...and the row records the change rather than dropping the subject.
     assert "enumerated** since #12378" in doc or "**enumerated** — agent-session" in doc, (
         "the Event row must say it IS enumerated now, and cite #12378")
+
+
+def test_an_event_with_no_text_is_counted_on_the_report(monkeypatch, tmp_path):
+    """An Event with no name/title/subject has an empty text, and the report SAYS so.
+
+    The pass keys Events by content, so those rows share one `stable_key`. What does NOT
+    happen is a duplicate CLAIM: `classify_event` takes no `duplicate_of`/`keeper_id` and
+    every Event arm is `undecidable`, so the row count and the per-row reasons are
+    unaffected — an earlier draft of the `read_note` asserted a fold outcome that never
+    reaches an Event decision (round-2 review), which is why the counter is pinned here
+    and the wording says only what is true.
+    """
+    mod = _tool_module()
+    surface = _event_surface([
+        {"id": "ev-1", "eventKind": "deployment", "subject": "has text"},
+        {"id": "ev-2", "eventKind": "deployment", "subject": ""},
+    ])
+    monkeypatch.setattr(mod, "_live_call_tool", surface)
+    assert mod.main(["inventory", "--out", str(tmp_path / "i.json"),
+                     "--no-verify-read"]) == 0
+    report = json.loads((tmp_path / "i.json").read_text())
+    note = report["read_note"] or ""
+    assert "1 of 2 Event rows carry no name/title/subject" in note, note
+    # The disclosure must not claim a duplicate fold, and the count must be intact.
+    assert "content duplicates" not in note, note
+    assert report["census"]["total_rows"] == 3, report["census"]      # 1 point + 2 events
+    assert report["census"]["by_class"]["event:deployment"]["undecidable"] == 2
+    assert report["events_read"] == 2, report

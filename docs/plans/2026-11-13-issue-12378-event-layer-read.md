@@ -1,5 +1,5 @@
 <!-- research-path: issue #12378 comment carrying `<!-- research: v1 -->` (posted 2026-11-13) -->
-<!-- plan-review: cycles=pending, status=pending, version=2.3.0 -->
+<!-- plan-review: cycles=3, status=pending, version=2.3.0 -->
 
 # #12378 — read the Event layer the way the operator layer is now read
 
@@ -69,7 +69,7 @@ and its `graph` argument already exist, so the surface-approval rule is not enga
 | `MCPReader.read_events` (new) | unit, via the fake `_live_call_tool` surfaces |
 | `cmd_inventory` payload | integration over `main([...])` with a fake surface |
 | `cmd_plan` payload + disarmed arms | integration over `main([...])` |
-| `_disarmed_artifact` field set | unit (both stop points) |
+| `_disarmed_artifact` field set | unit (**three** stop points, incl. the ledger arm) |
 | `C.Row` → `classify_event` → `census.by_class` | integration (already covered upstream) |
 | `NOT_ENUMERABLE` + `docs/architecture/CURATION-11469.md` | assertion + doc text |
 | pre-existing fake surfaces in `tests/test_curation_11469.py` | regression (blast radius) |
@@ -102,10 +102,10 @@ Pointer: the `<!-- research: v1 -->` comment on #12378. Decisions it supports:
 | `tools/curate_graph.py::cmd_plan` | same, plus a **fresh** status read immediately before the Event read (narrows the count-vs-rows window to two requests) |
 | `tools/curate_graph.py::_disarmed_artifact` | new `events` tri-state kwarg; `events_*` present on **every** disarmed arm (`None` = no completed read) |
 | `tools/curate_graph.py::NOT_ENUMERABLE` | `"event"` entry replaced by a rationale comment: the layer is now read |
-| `tortoise/curation.py::classify_event` | **unchanged** — receives rows it already classifies `undecidable` |
+| `tortoise/curation.py::classify_event` | **CHANGED** (round-1 correction): the session-kind test is case-insensitive — the write path stores `AgentSession` while the arm tested lower-case `agentSession`, so making the layer reachable gave all 4,670 session rows a false reason. The census key keeps the original capitalisation |
 | `tortoise/curation.py::Plan.census` | **unchanged** — `by_class` derives `event:<kind>` from `node_type`+`kind` |
 | `docs/architecture/CURATION-11469.md:49,75` | rows say "deliberately does not read it"; both updated or they become false |
-| `tests/test_curation_11469.py::_with_operator_count` | extended to answer the Event read and `counts.Event` for every **pre-existing** fake (blast radius: ~40 fixtures) |
+| `tests/test_curation_11469.py::_with_operator_count` **and** `::_operator_surface` | **both** extended to answer the Event read and `counts.Event` for every **pre-existing** fake (blast radius: the file's 35 inline fakes and 48 `main([...])` call sites; `_operator_surface` cannot be wrapped, so it answers the read itself) |
 
 ## Implementation steps
 

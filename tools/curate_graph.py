@@ -699,16 +699,20 @@ class MCPReader:
             self._note("the status section reported no `Event` count, so the Event layer "
                        "read is unreconciled (it is still the read's rows, not a count)")
         if empty_text:
-            # ⛔ Disclosed, not hidden: an Event with no `name`/`title`/`subject` has an
-            # EMPTY text, and this pass keys Events by CONTENT (`Row.stable_key`), so
-            # those rows share one key and the plan's duplicate fold reports them as
-            # content duplicates. Nothing is carried from this class, so no write
-            # depends on the key — but the count is the difference between a reader that
-            # understood the layer and one that silently collapsed it, so it travels on
-            # the artifact.
-            self._note(f"{empty_text} of {len(raw)} Event rows carry no name/title/subject, "
-                       "so they share one content-addressed key and appear as content "
-                       "duplicates in the plan's fold (nothing is carried from them)")
+            # ⛔ Disclosed, not hidden — and stated EXACTLY as far as it goes. An Event with
+            # no `name`/`title`/`subject` has an EMPTY text, and this pass keys Events by
+            # CONTENT (`Row.stable_key`), so those rows share one key: `--rows` shows the
+            # same `stable_key` string for each of them. What does NOT happen is a duplicate
+            # CLAIM — `classify_event` takes no `duplicate_of`/`keeper_id`, and every Event
+            # arm is `undecidable`, so the row count and the per-row reasons are unaffected.
+            # (An earlier draft of this note asserted a fold outcome that never reaches an
+            # Event decision; round-2 review measured it and it was wrong.) The count is
+            # still the difference between a reader that understood the layer and one that
+            # silently collapsed it, so it travels on the artifact.
+            self._note(f"{empty_text} of {len(raw)} Event rows carry no name/title/subject "
+                       "and therefore an empty text: they share one content-addressed "
+                       "`stable_key` in `--rows` (no duplicate claim is made for them — "
+                       "every Event decision is `undecidable`, and nothing is carried)")
         return out, reported
 
     def _get_entities(self, limit: int) -> Any:
