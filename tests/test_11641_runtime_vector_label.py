@@ -46,6 +46,7 @@ RED proof (each assertion fails on the pre-fix tree):
 """
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from uuid import uuid4
@@ -1896,6 +1897,98 @@ def test_the_drop_COUNT_and_the_drop_LABELS_describe_the_SAME_set(tmp_path) -> N
     assert linkable["dropped_vector_labels"] == ["<relationship:SUPPORTS>"], linkable
 
 
+def test_the_drop_warning_names_a_remedy_that_EXISTS_for_the_target(tmp_path, caplog) -> None:
+    """`#12015` reviews rounds 3, 8 and 9 — the line must name only repairs that WORK.
+
+    The `allow_unserved_vectors=True` warning is the ONLY operator-visible line on the
+    recovery route, and it ended by promising that "a relabel migration can repair them".
+    ⛔ It cannot repair the VECTOR: the restore DELETES the vector on every flagged target
+    (`props.pop("embedding", None)` before this line is emitted) and nothing writes it
+    back. What a relabel DOES do for a `:Document` label is make the NODE served (the
+    `:Document` → `:Source` walk `relabel_legacy_documents()` performs), so that a RE-EMBED
+    lands where `run_vector_query` serves it. For a `<relationship:TYPE>` entry even that
+    is unavailable — a relationship has no label at all, and no product read path queries a
+    relationship vector — so this line says the drop is FINAL rather than offering a clear
+    or an index that would remove nothing and serve nothing. A line that names a repair
+    which cannot exist sends the operator to a no-op, which is the same class as calling
+    the wrong object the survivor.
+    """
+    proj = _proj(tmp_path)
+    with caplog.at_level(logging.WARNING, logger="tortoise.hosted_backup"):
+        edge = restore_graph(
+            proj.g,
+            _dump_with_two_served_nodes([
+                {"src": 1, "dst": 2, "type": "SUPPORTS",
+                 "props": {"embedding": VEC}}]),
+            allow_unserved_vectors=True)
+    assert edge["dropped_vector_labels"] == ["<relationship:SUPPORTS>"], edge
+    edge_msg = "\n".join(r.getMessage() for r in caplog.records
+                         if "dropped" in r.getMessage())
+    assert edge_msg, "an authorised EDGE drop logged nothing"
+    assert "NO relabel" in edge_msg, edge_msg
+    assert "drop is FINAL" in edge_msg, (
+        "a relationship vector has no serving read path, so the line must say the drop "
+        "is final rather than offer a clear/index: " + edge_msg)
+    assert "nodes kept so a relabel migration makes them SERVED" not in edge_msg, (
+        "the EDGE is what survives here and no relabel repairs a relationship: "
+        + edge_msg)
+
+    # The NODE half of the same warning keeps the relabel remedy — the fix must not
+    # trade one wrong claim for another.
+    caplog.clear()
+    proj2 = _proj(tmp_path)
+    with caplog.at_level(logging.WARNING, logger="tortoise.hosted_backup"):
+        node = restore_graph(
+            proj2.g,
+            _dump([
+                {"dump_id": 1, "labels": ["Document"],
+                 "props": {"id": "d1", "documentKind": "article",
+                           "embedding": VEC}},
+            ]),
+            allow_unserved_vectors=True)
+    assert node["dropped_vector_labels"] == ["Document"], node
+    node_msg = "\n".join(r.getMessage() for r in caplog.records
+                         if "dropped" in r.getMessage())
+    assert node_msg, "an authorised NODE drop logged nothing"
+    assert "nodes kept so a relabel migration makes them SERVED" in node_msg, node_msg
+    assert "GONE" in node_msg and "re-embed" in node_msg, (
+        "the `:Document` arm must say the dropped vector is gone and that a re-embed "
+        "replaces it: " + node_msg)
+
+    # ⛔ THE MIXED ARM (review round 5): when ONE run drops a node's vector AND an edge's,
+    # the line must carry BOTH remedies — reverting this arm to the node-only sentence red
+    # nothing before this case existed, even though the mixed wording is the one an
+    # operator meets on a dump that has both defects.
+    caplog.clear()
+    proj3 = _proj(tmp_path)
+    with caplog.at_level(logging.WARNING, logger="tortoise.hosted_backup"):
+        mixed = restore_graph(
+            proj3.g,
+            {
+                "format": DUMP_FORMAT,
+                "nodes": [
+                    {"dump_id": 1, "labels": ["Document"],
+                     "props": {"id": "d1", "documentKind": "article",
+                               "embedding": VEC}},
+                    {"dump_id": 2, "labels": ["Point"],
+                     "props": {"id": "p2", "content": "b", "pointKind": "claim"}},
+                ],
+                "edges": [{"src": 1, "dst": 2, "type": "SUPPORTS",
+                           "props": {"embedding": VEC}}],
+            },
+            allow_unserved_vectors=True)
+    assert mixed["dropped_vectors"] == 2, mixed
+    assert mixed["dropped_vector_labels"] == ["<relationship:SUPPORTS>", "Document"], mixed
+    mixed_msg = "\n".join(r.getMessage() for r in caplog.records
+                          if "dropped" in r.getMessage())
+    assert mixed_msg, "an authorised MIXED drop logged nothing"
+    assert "nodes kept so a relabel migration makes them SERVED" in mixed_msg, (
+        "the node half of a mixed drop keeps its relabel remedy: " + mixed_msg)
+    assert "edges kept" in mixed_msg, (
+        "the mixed wording must say the EDGE half has no relabel: " + mixed_msg)
+    assert "NO relabel can reach" in mixed_msg, mixed_msg
+
+
 def test_restore_graph_still_restores_a_served_label(tmp_path) -> None:
     """The legitimate direction, for EVERY served label AND a multi-label node.
 
@@ -1950,3 +2043,132 @@ def test_an_unserved_vector_restores_when_it_carries_no_embedding(tmp_path) -> N
     assert proj.g.query(
         "MATCH (b:Batch {id:'b1'}) RETURN b.embedding"
     ).result_set[0][0] is None
+
+
+def test_the_EDGE_label_spelling_follows_its_ONE_owner(tmp_path, monkeypatch) -> None:
+    """`#12015` review — `dropped_vector_labels` reads `relationship_target`, not a literal.
+
+    A format spelled out here and composed by the projection is how the two drift: this
+    key is what an operator reads after a restore, so an edge entry that no longer
+    matches `is_relationship_target` is silently reported as a record LABEL. Rebinding
+    the owner is the discriminating arm — comparing the owner with itself is not.
+    """
+    from tortoise import cache_projection as cp
+
+    monkeypatch.setattr(cp, "relationship_target", lambda t: f"<rel:{t}>")
+    proj = _proj(tmp_path)
+    artifact = _dump_with_edge_props({"weight": 1.0, "embedding": VEC})
+    counts = restore_graph(proj.g, artifact, allow_unserved_vectors=True)
+    assert counts["dropped_vector_labels"] == ["<rel:SUPPORTS>"], (
+        "the DR report composes the edge key by hand instead of from "
+        f"`cache_projection.relationship_target`: {counts}")
+
+
+def test_the_remedy_does_not_promise_a_relabel_to_a_node_with_NO_label(tmp_path, caplog) -> None:
+    """`#12015` review round 4 — the node arm has a NO-LABEL shape too.
+
+    The remedy clause was made target-aware for EDGES (a relationship has no label, so no
+    relabel can repair its vector), but a node entry is not automatically relabel-repairable
+    either: `dropped_vector_labels` mints `<unlabelled>` for a dump node whose `labels` bag is
+    EMPTY (`hosted_backup`'s own mint), and `is_relationship_target` answers False for it — so
+    it fell to the node arm and was promised a relabel migration that cannot reach a node with
+    no label (`relabel_legacy_documents()` is `MATCH (n:Document)`-scoped).
+
+    Measured on the un-fixed clause: `dropped_vector_labels == ['<unlabelled>']` and the
+    warning read *"nodes kept so a relabel migration can repair them"* over exactly that node —
+    a named repair that is a no-op, the same defect one sentinel over from the edge case.
+    """
+    proj = _proj(tmp_path)
+    with caplog.at_level(logging.WARNING, logger="tortoise.hosted_backup"):
+        out = restore_graph(
+            proj.g,
+            _dump([{"dump_id": 1, "labels": [],
+                    "props": {"id": "x", "embedding": VEC}}]),
+            allow_unserved_vectors=True)
+    assert out["dropped_vector_labels"] == ["<unlabelled>"], out
+    msg = "\n".join(r.getMessage() for r in caplog.records
+                    if "dropped" in r.getMessage())
+    assert msg, "an authorised UNLABELLED-NODE drop logged nothing"
+    assert "NO relabel" in msg, (
+        "a node the dump gave NO label is not repairable by a relabel migration, so the "
+        "warning must not promise one: " + msg)
+    assert "nodes kept so a relabel migration makes them SERVED" not in msg, (
+        "the relabel promise is still made over a node that has no label at all: " + msg)
+    # ⛔ AND THE NON-DESTRUCTIVE ROUTE IS NAMED (`#12015` review round 7). "Only an
+    # explicit property clear removes it" sends an operator to the destructive move while
+    # the label ADD (`SET n:Source`) makes the NODE served, so a re-embed lands where the
+    # read path serves it — the walk itself only matches `:Document`, and the dropped
+    # VECTOR is not recoverable by any step (only a re-embed replaces it).
+    assert "SET n:Source" in msg, (
+        "the warning must name the label ADD that makes a re-embed land: " + msg)
+    assert "GONE" in msg and "re-embed" in msg, (
+        "the line must say the dropped vector is gone and that a re-embed replaces it — "
+        "otherwise it promises to bring that vector back: " + msg)
+
+
+def test_a_NON_Document_unserved_label_gets_no_relabel_promise(tmp_path, caplog) -> None:
+    """`#12015` review round 7 — only a `:Document` is inside the relabel walk's scope.
+
+    `relabel_legacy_documents()` is `MATCH (n:Document)`-scoped, so a dropped vector on any
+    OTHER unserved label (`:Session` here) cannot be repaired by it either. The clause used
+    to treat every non-sentinel node label as relabel-repairable, which named a repair that
+    does not reach these, so the warning names the label ADD (`SET n:Source`) that lets a
+    RE-EMBED land instead. Same class as the edge and no-label arms, one label class over.
+    """
+    proj = _proj(tmp_path)
+    with caplog.at_level(logging.WARNING, logger="tortoise.hosted_backup"):
+        out = restore_graph(
+            proj.g,
+            _dump([{"dump_id": 1, "labels": ["Session"],
+                    "props": {"id": "s1", "embedding": VEC}}]),
+            allow_unserved_vectors=True)
+    assert out["dropped_vector_labels"] == ["Session"], out
+    msg = "\n".join(r.getMessage() for r in caplog.records
+                    if "dropped" in r.getMessage())
+    assert msg, "an authorised drop on an unserved label logged nothing"
+    assert "no relabel walk matches" in msg, (
+        "`:Session` is outside `relabel_legacy_documents()`'s `MATCH (n:Document)` scope, "
+        "so the warning must not promise that relabel: " + msg)
+    assert "nodes kept so a relabel migration makes them SERVED" not in msg, (
+        "the relabel promise is still made over a label the walk cannot match: " + msg)
+    assert "GONE" in msg and "re-embed" in msg, (
+        "the arm must say the dropped vector is gone and that a re-embed replaces it: "
+        + msg)
+    assert "SET n:Source" in msg, (
+        "the non-destructive label ADD is the route that DOES reach it: " + msg)
+    assert "the `url` a Source resolves by" in msg, (
+        "a `:Source` resolves by `url`, so the label ADD must say which identity the "
+        "re-embedded vector needs: " + msg)
+
+
+def test_the_mixed_remedy_does_not_name_edges_that_are_not_there(tmp_path, caplog) -> None:
+    """`#12015` review round 5 — the mixed arm has an EDGE-FREE shape.
+
+    Making the remedy target-aware left one arm over-claiming: the mixed sentence said
+    "nodes kept so a relabel migration can repair them, and **the edges kept beside them**",
+    but the arm is also reached by a relabelable node PLUS an unlabelled one with **no edges
+    in the dump at all** — so it named surviving edges over an edge-free drop. Same rule as
+    the operator line: the claim must not outrun the labels.
+
+    Measured on the over-claiming arm: `dropped_vector_labels == ['<unlabelled>', 'Document']`
+    with `edges == []`, and the warning still said "the edges kept beside them".
+    """
+    proj = _proj(tmp_path)
+    with caplog.at_level(logging.WARNING, logger="tortoise.hosted_backup"):
+        out = restore_graph(
+            proj.g,
+            _dump([
+                {"dump_id": 1, "labels": ["Document"],
+                 "props": {"id": "d1", "documentKind": "article",
+                           "embedding": VEC}},
+                {"dump_id": 2, "labels": [], "props": {"id": "x", "embedding": VEC}},
+            ]),
+            allow_unserved_vectors=True)
+    assert out["dropped_vector_labels"] == ["<unlabelled>", "Document"], out
+    assert out["dropped_vectors"] == 2, out
+    msg = "\n".join(r.getMessage() for r in caplog.records
+                    if "dropped" in r.getMessage())
+    assert "nodes kept so a relabel migration makes them SERVED" in msg, msg
+    assert "the nodes the dump gave no label" in msg, msg
+    assert "edges kept" not in msg, (
+        "the dump carried NO edges, yet the warning named kept edges as survivors: " + msg)

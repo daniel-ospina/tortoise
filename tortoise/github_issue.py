@@ -89,12 +89,25 @@ def create_issue(
     return int(data["number"])
 
 
+def comment_issue(repo: str, token: str, number: int, body: str) -> None:
+    """Post ``body`` as a comment on issue ``number`` (#12243).
+
+    The ONE comment primitive both the resolve path (via
+    :func:`close_issue`'s optional comment) and the DEDUP recurrence record
+    use, so "did GitHub accept this record" has one answer. Raises
+    :class:`GithubApiError` on any non-2xx — the caller decides whether a
+    failed comment may be swallowed (the recurrence record: yes, the incident
+    is already LOUD) or must not be (the close comment: no).
+    """
+    _request(
+        "POST", f"{_API}/repos/{repo}/issues/{number}/comments", token,
+        {"body": body},
+    )
+
+
 def close_issue(repo: str, token: str, number: int, comment: str | None = None) -> None:
     if comment:
-        _request(
-            "POST", f"{_API}/repos/{repo}/issues/{number}/comments", token,
-            {"body": comment},
-        )
+        comment_issue(repo, token, number, comment)
     _request("PATCH", f"{_API}/repos/{repo}/issues/{number}", token, {"state": "closed"})
 
 

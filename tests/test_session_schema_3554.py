@@ -2871,12 +2871,10 @@ def test_the_newest_block_recording_4_3_cites_a_comment_id() -> None:
     The file's CRITICAL RULE names a PERSON, so the entry has to name where that
     person's answer lives. The sibling entries do it by comment id —
     ``#11827 (comment 6805834755)``, ``#11083 (comment 6667121779)`` — and the
-    v3.34 entry did not: it asserted *"the owner answered `ok` to a three-item
-    amendment proposal"* while three independent passes measured **zero**
-    standalone ``ok`` and zero ``three-item`` occurrences on the issue it named.
-    The answer existed in a decision lane's pane, not on any surface the next
-    lane could read (``DECISION RELAY``: recorded nowhere the next lane reads is
-    a default, not a decision). The relay comment that finally recorded it
+    v3.34 entry did not: it asserted an owner approval whose only home was a
+    decision lane's pane, so it named no surface the next lane could read
+    (``DECISION RELAY``: recorded nowhere the next lane reads is a default, not a
+    decision). The relay comment that finally recorded it
     (``6815950417``) is what this entry must cite.
 
     Pinned as a SHAPE, not as that id: a later entry cites its own relay, and a
