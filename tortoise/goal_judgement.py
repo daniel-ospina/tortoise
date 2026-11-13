@@ -899,8 +899,9 @@ def _newest_first_key(reading: Reading) -> tuple[int, Any, str]:
     for every reading written through :meth:`TortoiseSDK.create_event`, whose
     ``e.id`` is a non-empty opaque string, and distinct non-empty strings are
     distinct under ``str``. It does NOT for an event written outside that path
-    with a falsy or duplicate ``id`` — which is exactly what the section below
-    enumerates, and why the scope is stated as a condition rather than claimed.
+    with an ``id`` that is falsy, duplicated, or collides after ``str`` (``1``
+    beside ``"1"``) — the section below enumerates the shapes this rule
+    SUBSUMES, and the rule is what the scope is stated in rather than claimed.
 
     ⛔ THE STORED STRING IS NOT THE ORDER (#12322). A graph holds the same slot
     spelled ``Z``, ``+00:00``, date-only, and as the ingest producer's
@@ -1174,15 +1175,20 @@ def latest_readings(
         # incomplete set. Refuse rather than answer from the part that arrived.
         raise RuntimeError(
             f"latest_readings read {len(rows)} of {expected} rows for indicator "
-            f"{indicator_id!r} — a page came back short of {batch}. THREE causes, "
-            "with two remedies: a server-side RESULTSET_SIZE pinned below "
+            f"{indicator_id!r} — a page came back short of {batch}. FOUR causes, "
+            "with three remedies: a server-side RESULTSET_SIZE pinned below "
             "_READINGS_PAGE_SIZE (lower the constant below the cap), or the "
             "matched set SHRANK after the count was taken — a concurrent DELETE "
             "of a reading the count had already seen, OR a concurrent UPDATE that "
             "moves a row OUT of the predicate (an ``eventKind`` change on the "
-            "event, or deleting/rewiring its ``aboutObject`` edge) — and both of "
-            "those take the same remedy, re-run, because no setting can prevent "
-            "them. A CREATE that lands mid-read is NOT among the three: it either reuses "
+            "event, deleting/rewiring its ``aboutObject`` edge, or a re-key of "
+            "``o.id``) — and those take the same remedy, re-run, because no "
+            "setting can prevent them — or the INDICATOR ITSELF was deleted "
+            "between the count and the pages, which empties the predicate for "
+            "every row at once and is the one cause re-running can NEVER clear: "
+            "the caller is asking about a node that no longer exists, so the "
+            "answer is to observe that, not to retry. A CREATE that lands mid-read is NOT "
+            "among the four: it either reuses "
             "an id already paged past (count unchanged) or appends one (count "
             "short by nothing). Which rows a truncated tail costs is "
             "whatever currently holds the highest live ids (``id(e)`` is creation "

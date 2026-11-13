@@ -5291,7 +5291,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # 10022 at `42409813a7` (+1 at 2237, #12348); and 10076 at the `main`
         # tip `ca74f2375e`, whose +54 came from THREE landings in FIVE hunks
         # (12 at 1610, 7 at 2250, 8 at 6830, 5 at 9737, 22 at 7565). This
-        # branch adds +13 at 2239 (its own `core:` registration), so the tree
+        # branch adds +13 at 2258 (its own `core:` registration), so the tree
         # that adds BOTH parents reads 10089 = 10076 + 13.
         # `carve_out:` opens 9963 and `uri_requiring:` 10294 at THIS tree, so
         # 10089 is inside the section, and the identical text also sits at 6138
