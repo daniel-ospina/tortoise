@@ -132,6 +132,7 @@ from .live import TERMINAL_EXCLUDED_STATUSES
 __all__ = [
     "DEFINITION_BOUNDARY_PROP",
     "DERIVED_GOAL_STATES",
+    "GONE_UNPROVEN",
     "NOT_DURABLE_REASON",
     "RETIRED_GOAL_STATES",
     "STALE_REASONS",
@@ -1478,15 +1479,15 @@ def invalidate_stale(
     dropped), ``counts`` (including ``failed`` and ``gone``) and ``truncated``
     (true when the scan hit ``limit``, i.e. the sweep did not see the whole graph).
 
-    ``counts.gone`` counts the findings whose goal the GRAPH no longer holds —
-    i.e. the retirement landed but the goal's ``goalState`` cache could not be
-    reconciled because there is no node to reconcile it on. ⛔ It is the door's
-    UN-PROBED answer, so an id the entity surface merely cannot ADDRESS is counted
-    here too, and this docstring used to promise "the goal NO LONGER EXISTS", which
-    the door cannot establish (#12534 owns the code fix; the sweep's wording above
-    is the correct one). It is not a failure of the retirement (which did land) and
-    not a success of the reconcile (which did not happen) — it is its own bucket,
-    and it exists so a sweep over deleted goals cannot read clean.
+    ``counts.gone`` counts the findings whose cache reconcile did not happen
+    because the door could not resolve the goal — the retirement landed, but there
+    was no resolved node to reconcile the ``goalState`` cache on. ⛔ That is a
+    DELETED node AND an id the entity surface merely cannot ADDRESS: it is the
+    door's UN-PROBED answer, so the two are counted alike here (#12534 owns the
+    code fix; the sweep's wording above is the correct one). It is not a failure of
+    the retirement (which did land) and not a success of the reconcile (which did
+    not happen) — it is its own bucket, and it exists so a sweep over unresolved
+    goals cannot read clean.
     """
     found = verdicts(sdk, goal_id=goal_id, indicator_id=indicator_id,
                      target_id=target_id, limit=limit)

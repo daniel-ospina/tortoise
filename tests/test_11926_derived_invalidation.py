@@ -1869,22 +1869,40 @@ def test_a_goal_on_a_label_the_surface_CANNOT_RESOLVE_is_COUNTED_not_reported_GO
     # trade this bug for a silent coverage hole.
     sdk._get_proj().g.query(
         "CREATE (n:Event {id:'e-real-1', eventId:'e-real-1', goalState:'met'})")
-    report = reconcile_goal_states(sdk)
+    real_update = sdk.update_entity
+    writes: list[tuple] = []
+
+    def recording(node_id, **props):
+        writes.append((node_id, tuple(sorted(props))))
+        return real_update(node_id, **props)
+
+    sdk.update_entity = recording
+    try:
+        report = reconcile_goal_states(sdk)
+    finally:
+        sdk.update_entity = real_update
     assert report["counts"]["unaddressable"] == 3, (
         f"the sweep neither repaired nor counted an unaddressable shape: {report}")
     assert report["counts"]["gone"] == 0, (
         f"the sweep recorded a DELETION for nodes that still exist: {report}")
     assert report["counts"]["repaired"] == 1, (
         f"the fix over-excluded a RESOLVABLE `:Event` (silent coverage hole): {report}")
-    # ⛔ NO WORD-STANDING LOOP HERE, deliberately (#12457 review, cycle 6, measured).
-    # The obvious assertion — "each word still reads `met`" — CANNOT FAIL under any
-    # mutation of this diff: the whole premise is that the entity surface cannot
-    # WRITE these nodes, so neither a reverted probe nor a hand-added
-    # `update_entity(…, goalState=None)` changes a byte of the graph (both measured:
-    # the mutant stays GREEN). An assertion that cannot vary is dead weight that
-    # makes the next reader believe the no-repair half is covered. It IS covered,
-    # by `repaired == 1` above: only the resolvable control may be repaired, so any
-    # real repair of an unaddressable node reds that counter.
+    # ⛔ THE NO-REPAIR HALF, as a WRITE ATTEMPT (#12457 review, cycle 6, measured).
+    # This intercepts the ATTEMPT, not the write's effect: these nodes cannot
+    # actually be written (`_update_entity` iterates the canonical labels only), so
+    # "the word still reads `met`" cannot vary — but a blind `update_entity` on the
+    # `present` arm CAN, and it is the thing that must not happen from an arm which
+    # has just declared the node unaddressable.
+    # ⚠️ AND THE COUNTERS DO NOT COVER IT, which an earlier version of this comment
+    # claimed on false grounds. `counts["repaired"] += 1` lives ONLY in the final
+    # `else` (`derived_invalidation.py:1445`), which the `if present:` arm falls
+    # past — so a blind write there leaves `repaired == 1`, `unaddressable == 3` and
+    # `gone == 0` all green. `repaired == 1` catches a RE-CLASSIFICATION, the
+    # interceptor catches a WRITE ATTEMPT: different mutants, and both are needed.
+    assert [w for w in writes if w[0] == "e-real-1"], (
+        f"the write interceptor captured nothing — the rows below would be vacuous: {writes}")
+    assert [w for w in writes if w[0] in {node_id for _, node_id in labels_and_ids}] == [], (
+        f"the sweep attempted a write to a goal it just declared unaddressable: {writes}")
     # The RECORD contract the payload docstring declares: `unaddressable` is a real
     # `action` value with the SWEEP's own reason and NO `to` (nothing was written).
     # Pinned here because the docstring's enum is CLOSED — a consumer branching on
