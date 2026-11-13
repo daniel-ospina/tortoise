@@ -176,6 +176,7 @@ from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
     run_control_plane_call,
     run_on_daemon_worker,
     set_dataplane_verdict_source,  # #12477: the 9090 check's data-plane term
+    set_served_progress_source,  # #12477: …and its served-request counter
     start_health_listener,
     start_loop_block_sampler,
     start_stall_watchdog,
@@ -2043,7 +2044,13 @@ def _liveness_dataplane_verdict() -> dict:
       going.
     """
     try:
-        snap = _HEALTH_PROBE.snapshot()
+        # ⛔ ``peek()``, NOT ``snapshot()`` (#12477): snapshot() self-heals by
+        # starting a probe when the last result is stale, and this reader is
+        # called BY the platform check every 15 s. Using it here would let the
+        # check refresh its own evidence — a wedged loop would read ``healthy``
+        # precisely because the check kept asking, which is the circularity
+        # #10892 recorded as an OVERRIDES decision against this shape.
+        snap = _HEALTH_PROBE.peek()
         meta = _HEALTH_PROBE.info()
     except Exception as exc:  # noqa: BLE001 - a verdict must never raise
         return {"state": "failed",
@@ -2073,6 +2080,37 @@ def _liveness_dataplane_verdict() -> dict:
             "detail": {"result_age_s": age,
                        "latency_ms": snap.get("latency_ms")},
             "error": None}
+
+
+def _liveness_served_progress() -> dict:
+    """The `/liveness` served-request counter, for the 9090 check (#12477).
+
+    #10892 recorded that a liveness answer must be evidence that the loop RAN,
+    not a gauge the loop writes — and its instrument for that is the
+    served-request counter below. The Fly check reads the same counter here so
+    the two arms cannot disagree, and so the wedge term can require a missing
+    SERVE rather than trusting a missing tick on its own.
+
+    Zero I/O, and the lock is acquired with a short timeout: this runs on the
+    liveness listener's thread while the app may be wedged, and a listener that
+    blocks on the app's lock has become a second victim of the outage it exists
+    to report. A lock we cannot take inside 50 ms is reported as UNMEASURED
+    (``last_served_age_s: None``), which the verdict treats as no evidence of
+    progress — never as health.
+    """
+    got = _LIVENESS_SERVED_LOCK.acquire(timeout=0.05)
+    try:
+        if not got:
+            return {"last_served_age_s": None, "served": None,
+                    "error": "served counter lock busy"}
+        last = _LIVENESS_LAST_SERVED_AT
+        served = _LIVENESS_SERVED_COUNT
+    finally:
+        if got:
+            _LIVENESS_SERVED_LOCK.release()
+    return {"last_served_age_s": (None if last is None
+                                  else round(max(0.0, time.monotonic() - last), 3)),
+            "served": served, "error": None}
 
 
 async def _health_probe_loop() -> None:
@@ -2646,6 +2684,10 @@ def _start_liveness(app) -> None:
     # `GET /health` reads (`_HEALTH_PROBE`), so the two surfaces cannot disagree
     # about whether the data plane is answering.
     set_dataplane_verdict_source(_liveness_dataplane_verdict)
+    # #12477: …and the SERVED-REQUEST counter, so the wedge term requires a
+    # missing SERVE and not merely a missing tick (#10892's instrument, read by
+    # both arms).
+    set_served_progress_source(_liveness_served_progress)
 
 
 async def _stop_liveness(app) -> None:

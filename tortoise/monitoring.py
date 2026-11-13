@@ -4506,6 +4506,24 @@ class HealthProbe:
                 return
             self._start_locked()
 
+    def peek(self) -> dict:
+        """The last known view WITHOUT starting work (#12477).
+
+        ``snapshot()`` deliberately self-heals — it calls ``begin(if_stale=True)``
+        so a dead refresher cannot pin the report to a frozen verdict. That is
+        right for ``GET /health``, whose caller is a human or a dashboard, and
+        WRONG for the ``/healthz`` listener, whose caller is the platform polling
+        every 15 s: a probe started BY the check would make the check's own
+        evidence fresh, so a wedged loop would read ``healthy`` because the
+        listener kept asking. This method therefore reads the state and starts
+        nothing — the same reason #10892 refused to answer liveness from state
+        written by the loop.
+
+        Pure memory: no lock held across a submit, no thread, no await.
+        """
+        with self._cv:
+            return self._view_locked(time.monotonic())
+
     async def run(self) -> dict:
         """Coalesced, hard-bounded read: start/join the probe, return ≤ timeout.
 
@@ -5101,6 +5119,52 @@ def start_loop_block_sampler(*, loop_thread_ident: int | None = None,
 # self-hosted lane with no such reader is not a broken deployment, and a check
 # that is red for a wiring choice teaches operators to ignore it.
 _DATAPLANE_VERDICT: Callable[[], dict] | None = None
+#: #12477: the app's SERVED-REQUEST counter, also registered at startup. This is
+#: #10892's instrument, not a loop gauge, and it is what keeps this check on the
+#: right side of that issue's recorded OVERRIDES: "a gauge the loop itself writes
+#: is not evidence the loop ran". A request the loop SERVED is that evidence, so
+#: the wedge term below combines the missing tick with the missing SERVE rather
+#: than trusting the tick alone.
+_SERVED_PROGRESS: Callable[[], dict] | None = None
+
+
+def set_served_progress_source(reader: Callable[[], dict] | None) -> None:
+    """Register the app's served-request counter for the liveness verdict.
+
+    ``reader()`` must be zero-I/O and must read ONLY a counter the app stamps
+    when it actually SERVES a request (#10892's ``/liveness`` handler) — never a
+    gauge a background task writes. It must return
+    ``{"last_served_age_s": float|None, "served": int|None}``, and it must not
+    block: the listener calls it while the app may be wedged.
+    """
+    global _SERVED_PROGRESS
+    _SERVED_PROGRESS = reader
+
+
+def served_progress() -> dict:
+    """Read the registered served-request counter. Never raises, never blocks.
+
+    ``{"registered": bool, "last_served_age_s": x|None, "served": n|None,
+    "error": e|None}``. A raising reader reports ``registered: True`` with an
+    ``error`` and ``last_served_age_s: None``: the caller treats "no measured
+    progress" as UNEVIDENCED, never as health (the #4034 family).
+    """
+    reader = _SERVED_PROGRESS
+    if reader is None:
+        return {"registered": False, "last_served_age_s": None,
+                "served": None, "error": None}
+    try:
+        result = reader()
+    except Exception as exc:  # noqa: BLE001 - liveness must still answer
+        return {"registered": True, "last_served_age_s": None, "served": None,
+                "error": f"served reader raised: {type(exc).__name__}: {exc}"[:200]}
+    if not isinstance(result, dict):
+        return {"registered": True, "last_served_age_s": None, "served": None,
+                "error": "served reader returned a non-dict"}
+    return {"registered": True,
+            "last_served_age_s": result.get("last_served_age_s"),
+            "served": result.get("served"),
+            "error": result.get("error")}
 
 
 def set_dataplane_verdict_source(reader: Callable[[], dict] | None) -> None:
@@ -5425,6 +5489,7 @@ class _HealthzHandler(BaseHTTPRequestHandler):
         idle = workload_is_idle()
         plane = dataplane_verdict()
         recent = wait_bound_breach_window()
+        served = served_progress()
         recent_total = recent.get("total")
         # A recent breach is a request the product REFUSED moments ago; the
         # verdict's own contract is "the door is refusing", so it fails here.
@@ -5435,21 +5500,53 @@ class _HealthzHandler(BaseHTTPRequestHandler):
         # that.
         refusing = bool(recent_total)
         plane_failed = plane.get("state") == "failed"
-        failing = bool(stale or plane_failed or refusing)
+        # ── THE WEDGE TERM (and the #10892 decision it must respect) ────────
+        # #10892 recorded, as an OVERRIDES decision, that a liveness answer must
+        # not be built on a gauge the loop itself writes ("a gauge the loop
+        # itself writes is not evidence the loop ran"), and that the `stale AND
+        # idle` predicate on THIS listener "cannot fail on the outage it exists
+        # for". Both halves are honoured here:
+        #   * the tick alone is NOT enough — it must be joined by the absence of
+        #     a SERVE (#10892's own instrument, `served_progress()`) whenever the
+        #     app registers one; and
+        #   * the idle VETO is gone (the conjunct #10892 names as broken).
+        # `workload_idle` is read for a different purpose now: as the DEMAND
+        # term. "Something is waiting to be served, nothing has been served for
+        # longer than any on-loop operation takes, and the loop has not ticked"
+        # is a wedge; any one of those alone is not.
+        #
+        # When no served-progress reader is registered (a self-hosted lane, a
+        # test), the tick + demand pair is all the evidence available and the
+        # pre-existing #2850 contract applies unchanged — so this is never a
+        # WEAKER check than the one it replaced.
+        served_age = served.get("last_served_age_s")
+        demand = not idle
+        no_serve = (served_age is None
+                    or float(served_age) > LOOP_STALE_AFTER)
+        if served.get("registered") is not True:
+            # No served-progress reader (self-host, tests): the tick is the only
+            # progress evidence available, so the pre-existing #2850 contract
+            # applies unchanged. This branch is why the change can only ever
+            # make the check STRICTER, never weaker, on a lane that has one.
+            wedged = bool(stale)
+        else:
+            wedged = bool(stale and demand and no_serve)
+        failing = bool(wedged or plane_failed or refusing)
         reasons = []
-        if stale:
-            reasons.append("loop-not-scheduling")
+        if wedged:
+            reasons.append("loop-not-serving")
         if plane_failed:
             reasons.append("data-plane-failed")
         if refusing:
             reasons.append("requests-refused")
         self._send(503 if failing else 200,
                    {"status": ("ok" if not failing
-                              else "stale" if stale else "unhealthy"),
+                              else "stale" if wedged else "unhealthy"),
                     "reasons": reasons,
                     "workload_idle": idle,
                     "loop_block_episodes": loop_block_report()["episodes"],
                     "dataplane": plane,
+                    "served": served,
                     "recent_breaches": recent,
                     **info})
 

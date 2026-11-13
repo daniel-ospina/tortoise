@@ -3136,7 +3136,81 @@ class TestHealthzListener:
         assert payload["status"] == "stale"
         assert payload["loop_stale"] is True
         assert payload["workload_idle"] is False
-        assert "loop-not-scheduling" in payload["reasons"]
+        assert "loop-not-serving" in payload["reasons"]
+
+    def test_a_registered_served_counter_joins_the_tick_in_the_wedge_verdict(self):
+        """#10892's decision, applied to THIS check: a tick is not a SERVE.
+
+        #10892 recorded (OVERRIDES, on that issue) that a liveness answer must
+        not be built on a gauge the loop itself writes. The tick therefore no
+        longer decides alone once the app registers its served-request counter:
+        a stale tick is a wedge only when something is WAITING to be served and
+        nothing HAS been served for longer than any on-loop operation takes.
+
+        Inverting the previous case (stale tick, work in flight, but a request
+        served a moment ago) must read HEALTHY: that is a busy loop, not a
+        wedged one, and it is exactly the false red the removed `AND idle`
+        conjunct was trying to prevent — now prevented by evidence instead of by
+        a veto that is false by construction during the real wedge.
+        """
+        import time
+
+        server = monitoring.start_health_listener(port=0, bind="127.0.0.1")
+        monitoring.heartbeat_record(
+            at=time.monotonic() - (monitoring.LOOP_STALE_AFTER + 2.0))
+        monitoring.workload_enter()
+        monitoring.set_served_progress_source(
+            lambda: {"last_served_age_s": 0.4, "served": 41})
+        try:
+            status, body = _http_get(server.server_address[1])
+        finally:
+            monitoring.set_served_progress_source(None)
+            monitoring.workload_exit()
+        assert status == 200, body
+        payload = json.loads(body)
+        assert payload["reasons"] == []
+        assert payload["loop_stale"] is True  # still REPORTED, as a diagnostic
+        assert payload["served"]["last_served_age_s"] == 0.4
+
+    def test_the_wedge_term_fires_when_nothing_has_been_served_either(self):
+        """Same stale tick, same demand, but no serve inside the window -> 503."""
+        import time
+
+        server = monitoring.start_health_listener(port=0, bind="127.0.0.1")
+        monitoring.heartbeat_record(
+            at=time.monotonic() - (monitoring.LOOP_STALE_AFTER + 2.0))
+        monitoring.workload_enter()
+        monitoring.set_served_progress_source(
+            lambda: {"last_served_age_s": monitoring.LOOP_STALE_AFTER + 30.0,
+                     "served": 7})
+        try:
+            status, body = _http_get(server.server_address[1])
+        finally:
+            monitoring.set_served_progress_source(None)
+            monitoring.workload_exit()
+        assert status == 503, body
+        payload = json.loads(body)
+        assert payload["reasons"] == ["loop-not-serving"]
+
+    def test_a_raising_served_reader_is_unevidenced_not_healthy(self):
+        """No measured progress is not progress (#4034)."""
+        import time
+
+        server = monitoring.start_health_listener(port=0, bind="127.0.0.1")
+        monitoring.heartbeat_record(
+            at=time.monotonic() - (monitoring.LOOP_STALE_AFTER + 2.0))
+        monitoring.workload_enter()
+        monitoring.set_served_progress_source(
+            lambda: (_ for _ in ()).throw(RuntimeError("counter gone")))
+        try:
+            status, body = _http_get(server.server_address[1])
+        finally:
+            monitoring.set_served_progress_source(None)
+            monitoring.workload_exit()
+        assert status == 503, body
+        payload = json.loads(body)
+        assert payload["reasons"] == ["loop-not-serving"]
+        assert "counter gone" in (payload["served"]["error"] or "")
 
     def test_a_failed_data_plane_reports_503_while_the_loop_is_fine(self):
         """#12477 acceptance (2): the check fails when the DATA PLANE fails.

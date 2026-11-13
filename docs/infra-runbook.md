@@ -1761,6 +1761,48 @@ outage run unattended.
 > exists for, and a gauge the loop itself writes is not evidence the loop ran.
 > The marker is repeated on #10892, where a lane adopts or replaces this design.
 
+### §6.4.3 What the Fly check now reports, and what it deliberately does not
+
+**#12477: `[checks.loop_liveness]` was the second arm that could not fail.** Its
+predicate was `503 if (stale AND idle) else 200`, and `workload_idle` is `False`
+for any box serving traffic — the same defect the OVERRIDES above records for
+this section's runner-side arm, on the arm that gates deploys. Measured twice
+with it live: 2026-11-02 (`#10585`: 97 min wedged, `2/2 checks passing`) and
+2026-11-13 (`#12477`: every data request 30–45 s or refused, `2/2 checks
+passing`, `wait_bound_breaches.rest` climbing from 0 to 18 while `/health`
+answered `status: "ok"`).
+
+The check now fails on any of three terms, each an in-memory read:
+
+| reason | when | why it is honest |
+|---|---|---|
+| `loop-not-serving` | heartbeat stale **and** work waiting **and** nothing SERVED for `LOOP_STALE_AFTER` (90 s) | the tick alone is not the verdict — #10892's served-request counter (`GET /liveness`) joins it, so a busy loop that is still serving stays green |
+| `data-plane-failed` | the DB probe's last result is fresh and not ok, **or** too old to vouch for anything (30 s window) | the refresher task runs on the loop, so a wedge stops it refreshing — and the check reads it with `peek()`, never `snapshot()`, so the check cannot refresh its own evidence |
+| `requests-refused` | a wait-bound breach inside the last 120 s (`TORTOISE_WAIT_BOUND_HEALTH_WINDOW_S`) | a refusal is the door failing RIGHT NOW; the cumulative total still never folds into a verdict (#10185/#10620) |
+
+What it deliberately does **not** do: it is still a **top-level** check, so Fly's
+proxy ignores it for routing and a red cannot de-register the machine — it fails
+a deploy's health wait and appears in `flyctl checks list`. It still cannot
+restart anything (that is `TORTOISE_LOOP_STALL_HARD_EXIT_S` + the
+`[[restart]]` policy). And it does not replace this section's runner-side
+prober: the two arms answer different questions ("is this instance healthy"
+vs "is the product serving"), and the OVERRIDES above is about the latter.
+
+**The wedge now leaves an artifact.** The same stall that used to end in an
+`os._exit` with no evidence — measured 2026-11-13, nothing was readable after
+the restart — is now captured: a sampler thread takes the LOOP THREAD's Python
+stack as soon as the heartbeat is 2 s stale (`TORTOISE_LOOP_BLOCK_SAMPLE_AFTER_S`),
+reports the last one on `GET /health` under `loop_blocks`, and appends it to
+`/data/loop-blocks.jsonl` (beside the journal, bounded to 200 lines / 512 KB)
+where it SURVIVES the restart. Read it after any wedge before restarting again:
+
+```bash
+curl -s https://api.premiselabs.co/health | jq '.loop_blocks'
+# {"episodes": 1, "max_age_s": 612.4, "last": {"at": "…",
+#   "loop_age_s": 612.4, "frames": ["hosted_api.py:… in …", …]},
+#  "persist_path": "/data/loop-blocks.jsonl", "enabled": true}
+```
+
 ⚠️ **And, like the Pages auth arm, it never consults the egress control probe.**
 `control_ok()` runs only on the restartable path — the restart decision's own
 `if ! control_ok` guard, inside `if [ "$restart_mode" = "DOWN" ]` — because the

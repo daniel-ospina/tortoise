@@ -145,10 +145,23 @@ kill_timeout = 30
 # can be surfaced to an operator even though a stall can no longer take the app
 # offline (#3062). It points at the app's dedicated 9090 /healthz listener.
 #
-# ⚠️ The listener's predicate is `503 if (stale AND idle) else 200`
-# (tortoise/monitoring.py) — a stale loop WITH a request in flight still
-# reports 200, so this check does NOT reliably surface a true wedge; it errs
-# toward 200, which is the safe direction for the deploy gate it feeds.
+# ⚠️ THE LISTENER'S PREDICATE CHANGED (#12477) — read this before tuning it.
+# It used to be `503 if (stale AND idle) else 200` and that conjunct could never
+# fire on the outage it exists for: a wedged app keeps an MCP SSE stream counted
+# as in flight, so `workload_idle` is FALSE BY CONSTRUCTION during a wedge.
+# Measured twice with it live — 2026-11-02 (97 min wedged, #10585) and
+# 2026-11-13 (#12477: 30-45 s timeouts on every data request, `2/2 checks
+# passing`). It now fails on ANY of three terms (tortoise/monitoring.py):
+#   (a) `loop-not-serving`  — the heartbeat is stale AND work is waiting AND the
+#       app has not SERVED a request inside the staleness window (the served
+#       counter is #10892's instrument, read from `GET /liveness`);
+#   (b) `data-plane-failed` — the DB probe's last result is FRESH and not ok, or
+#       is too OLD to vouch for anything (the refresher runs on the loop, so a
+#       wedge produces this within the probe's 30 s stale window);
+#   (c) `requests-refused` — the transport wait bound refused a request inside
+#       the last 120 s (`TORTOISE_WAIT_BOUND_HEALTH_WINDOW_S`).
+# `workload_idle` and `loop_stale` stay in the payload as DIAGNOSTICS. A red here
+# is what a wedged or refusing deployment is supposed to look like.
 #
 # ⚠️ DEPLOY-BLOCKING BY DESIGN: flyctl's deploy health wait counts top-level
 # checks (WaitForHealthchecksToPass requires every reported check to pass — no
@@ -214,10 +227,13 @@ kill_timeout = 30
   # `on-failure` restart policy replaces the process. This is the ONLY self-heal
   # available: Fly's own docs are explicit that a failing health check "does NOT
   # automatically restart or stop a Machine" and that restart policies act only
-  # on process EXIT — and `[checks.loop_liveness]` cannot even go red here,
-  # because its predicate requires `stale AND idle` while a wedged app keeps an
-  # MCP stream counted as in flight (`workload_idle: false`). Measured: 97 min
-  # wedged, `loop_lag_max_ms` 696164, machine reporting 2/2 checks passing.
+  # on process EXIT — and `[checks.loop_liveness]` could not even go red here at
+  # the time, because its predicate required `stale AND idle` while a wedged app
+  # keeps an MCP stream counted as in flight (`workload_idle: false`). Measured:
+  # 97 min wedged, `loop_lag_max_ms` 696164, machine reporting 2/2 checks
+  # passing. ⚠️ That predicate is FIXED as of #12477 (see the check's own comment
+  # above) — but the ceiling below is still the ONLY thing that REPLACES the
+  # process, which is what turns a wedge back into a working machine.
   # DEPENDENCY, versioned rather than re-read by hand: the exit only becomes a
   # RESTART because of the `[[restart]]` block ABOVE (`policy = "on-failure"`,
   # `retries = 10`, covering the `app` process group). Delete that block and
