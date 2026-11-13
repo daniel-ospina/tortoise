@@ -3400,7 +3400,7 @@ name, and the sentence says that instead). A carried report **larger than the ca
 and not its size — the excerpt is there to read, so the size adds nothing, and the squeeze loss, when
 there is one, is declared beside it as above — and one under the cap states nothing about its extent,
 because nothing was cut. A carried report whose **own size could not be measured** — the size probe is
-skipped for a path that is not a regular file, because `-f` is what keeps the read bounded (`wc -c` takes a
+skipped for a path that is not a regular file, because `-f` is what makes the read terminate (`wc -c` takes a
 regular file's size from its metadata only when that metadata reports a **non-zero** size; a procfs file
 reports 0 and is then read through to a real EOF — `/proc/cpuinfo` measures 21016 bytes that way — whereas a
 non-regular path may never end — `/dev/zero` — and a directory fails on the first read), and the size is

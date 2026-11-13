@@ -354,21 +354,24 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
         # broken, and a `| tr -d ' '` here FAILED under `pipefail` in case 17h's state (broken
         # `tr`), silently setting the size to 0 and reverting to the cut-undeclared sentence —
         # measured. Parameter expansion strips a right-padded `wc` count without a subprocess;
-        # the guard maps "no size to be had" to 0. The two causes the guard itself CREATES are
-        # measured: the property check refuses (`-f` false — a directory, a device), or the READ
-        # fails before `wc` starts (an unreadable regular file: bash's `<` fails and `wc` is never
-        # invoked — measured, a logging `wc` on `PATH` logs 0 calls for a `chmod 000` file). ⛔ AND
-        # TWO STATES THIS ARM ALSO ABSORBS, which earlier versions of this comment claimed did not
-        # exist: a `wc` ABSENT from `PATH` (rc 127, capture empty) and a `wc` PRESENT that returns no
-        # numeric count (a shim exiting 1 → capture empty; one printing text → capture
-        # "not-a-number") — measured, and BOTH are mapped to 0 below (the `case` matches '' or any
-        # value containing a non-digit), so both reach the same unknown-size sentence.
-        # ⛔ THE HISTORY IS WHY THIS LISTS FOUR STATES. This block has said, in turn: "a directory:
-        # `wc` fails" (false — `-f` refuses a directory before `wc` exists in the pipeline); "or a
-        # `wc` that fails", as its correction (reachable only through a broken `wc` binary, not
-        # through the report's path, which is what that sentence implied); and then "the ONE state … a
-        # `wc` MISSING from `PATH`" (false — a present `wc` that exits non-zero reaches the same arm).
-        # Each was falsified by measuring one more state, so this comment states the set.
+        # the guard maps "no size to be had" to 0. What is MEASURED to reach that arm:
+        #   · the property check refuses (`-f` false — a directory, a device);
+        #   · the READ fails before `wc` starts (an unreadable regular file: bash's `<` fails and `wc`
+        #     is never invoked — a logging `wc` on PATH logs 0 calls for a `chmod 000` file);
+        #   · `wc` RUNS and ITS read fails (`-f` true and `<` fine, but `read(2)` errors —
+        #     `/proc/<pid>/mem` gives EIO, a healthy `wc` exits 1, and the `||` below discards the
+        #     partial count so the `case` sees '');
+        #   · a `wc` ABSENT from `PATH` (rc 127, capture empty);
+        #   · a `wc` PRESENT that yields no numeric count (a shim exiting 1 → capture empty; one
+        #     printing text → capture "not-a-number").
+        # The last two are absorbed as well: the `case` matches '' or any value containing a non-digit.
+        # ⛔ THE HISTORY IS WHY THIS ENUMERATES AND DOES NOT CLOSE THE SET. This block has said, in
+        # turn: "a directory: `wc` fails" (false — `-f` refuses a directory before `wc` exists in the
+        # pipeline); "or a `wc` that fails", as its correction (right about reachability, wrong to
+        # imply a broken BINARY was the only route — an `-f`-true path whose read errors reaches it
+        # with a healthy `wc`); then "the ONE state … a `wc` MISSING from `PATH`" (false — a present
+        # `wc` that exits non-zero reaches the same arm). Each was falsified by measuring one more
+        # state, so this lists every state measured so far and claims no more than that.
         #
         # ⛔ `-f`, BECAUSE THAT IS THE PROPERTY THAT MAKES THE READ TERMINATE (#12272 review round 8).
         # The read guard above admits anything that is `-e`-true and not a FIFO, and `tail -c 6000`
