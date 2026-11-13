@@ -863,3 +863,75 @@ def test_a_write_that_matches_no_row_journals_nothing(env, monkeypatch):
     restatus = [r for r in _mutations(events, pid) if r.get("op") == "restatus"]
     assert restatus == [], (
         f"a write that matched no row must not journal a restatus: {restatus}")
+
+
+# ══════════════════════════════════════════════════════════════════════
+# The residual this change DECLARES (#12403) — pinned, not just prose
+# ══════════════════════════════════════════════════════════════════════
+
+def test_a_declared_terminalizing_transition_carries_none_of_the_verbs_effects(env):
+    """#9649 review F1 / #12403: the door PERMITS a declared terminal target,
+    and performs none of the effects the verb that owns it performs.
+
+    ``_ALLOWED_TRANSITIONS['live']`` is ``{retracted, superseded}``, so the
+    transition arm accepts both — but this arm writes ``status`` and journals
+    ``EntityMutated/restatus`` and NOTHING else. Measured here, at this head:
+
+    * no ``PointSuperseded`` / ``PointRetracted`` record — those are the
+      ``:GraphEvent`` store's claim-transition set (``#432`` Task 3), while
+      ``EntityMutated`` is JSONL-only (``#548``), so a change-feed subscriber
+      never learns the claim died;
+    * no ``CORRECTS`` edge for ``superseded`` — ONTOLOGY §5 defines that state
+      AS *"structural replacement via CORRECTS edge"*, so the claim leaves
+      belief (``_terminal_excluded``) and nothing replaces it;
+    * no window close and no ``updatedAt`` stamp, unlike ``retract_point`` /
+      ``supersede_point``.
+
+    ⛔ THIS PINS A DISCLOSED RESIDUAL, NOT A CONTRACT WE WANT. If #12403 lands
+    (refuse the terminalizing targets and name the verb, or emit the record),
+    the assertions below INVERT — ``pytest.raises(ValueError)`` for the first
+    shape, or a ``PointSuperseded`` record for the second. Update the pin with
+    the fix; do not delete it, and do not read its presence as approval of the
+    behaviour.
+    """
+    sdk, events = env
+    pid = _live(sdk, "claim that will be retired through the generic door")
+    before = _row(sdk, pid)
+    assert before["validTo"] is None, before
+
+    sdk.update_entity(pid, status="superseded")
+
+    after = _row(sdk, pid)
+    assert after["status"] == "superseded", after
+    # 1. no claim-transition record of any kind.
+    journal = [
+        json.loads(line) for line in
+        (events / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()]
+    kinds = {r.get("type") for r in journal if r.get("id") == pid}
+    assert "PointSuperseded" not in kinds, (
+        f"if this record appears, the door now emits the claim transition and "
+        f"this residual is CLOSED (#12403) — invert this pin: {sorted(kinds)}")
+    assert "EntityMutated" in kinds, (
+        f"the restatus journal is what the door does write: {sorted(kinds)}")
+    # 2. no successor edge, and the claim really does leave belief.
+    assert sdk._get_proj().g.query(
+        "MATCH (:Point {id:$id})-[r:CORRECTS]->() RETURN count(r)",
+        params={"id": pid}).result_set[0][0] == 0, (
+        "#12403: a successor-less `superseded` is the shape ONTOLOGY §5 forbids")
+    assert sdk.query("claim that will be retired") in ([], None), (
+        "the dead claim must leave belief — that is WHY a missing successor "
+        "matters (#2498)")
+    # 3. the window the verbs close stays exactly as it was.
+    assert after["validTo"] == before["validTo"], after
+
+    # ...and the VERB, on the same shape, does all three (the contrast the
+    # residual rests on — non-vacuity: this half must PASS).
+    other = _live(sdk, "claim retired through the verb")
+    sdk.retract_point(other, valid_to="2030-01-01T00:00:00Z")
+    assert _row(sdk, other)["validTo"] == "2030-01-01T00:00:00Z"
+    kinds = {json.loads(line).get("type") for line in
+             (events / "events.jsonl").read_text(encoding="utf-8").splitlines()
+             if line.strip() and json.loads(line).get("id") == other}
+    assert "PointRetracted" in kinds, (
+        f"the verb must journal the claim transition: {sorted(kinds)}")

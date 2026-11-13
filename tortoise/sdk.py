@@ -47354,6 +47354,26 @@ class TortoiseSDK:
                 # exists to refuse. A status with NO entry in the map (`deprecated`,
                 # a legacy spelling) still DEFERS rather than being guessed at;
                 # terminal rows never reach here — the guard above has refused them.
+                #
+                # ⚠️ RESIDUAL, REPORTED NOT FIXED HERE (#12403). A DECLARED target
+                # is a transition this door PERMITS, and the two targets `live`
+                # declares are `retracted` and `superseded` — the two a VERB owns.
+                # Writing them here sets `status` and journals `restatus` and
+                # nothing else: no `PointRetracted`/`PointSuperseded` in the
+                # `:GraphEvent` store (so a change-feed subscriber never sees the
+                # claim die — `EntityMutated` is JSONL-only, #548), no `CORRECTS`
+                # successor for `superseded` (ONTOLOGY §5 defines that state AS
+                # the replacement), and no window close or `updatedAt` stamp.
+                # Measured at this head: `update_entity(live, status='superseded')`
+                # leaves `['superseded', validTo=None]`, zero edges, and the claim
+                # out of `query()`. That is a PRE-EXISTING shape — this door always
+                # accepted the word — but this change is what makes the map its
+                # PERMISSION table, so it is recorded here rather than left for the
+                # next reader to discover. #12403 carries the three candidate fixes
+                # (refuse the terminalizing targets and name the verb; emit the
+                # claim-transition record; or keep and disclose). Do NOT read the
+                # refusal below as "the verbs are optional": it fires only for
+                # UNdeclared targets.
                 for _stored in _pt_statuses or ():
                     if not isinstance(_stored, str) or _stored == _status:
                         continue
@@ -47369,7 +47389,11 @@ class TortoiseSDK:
                     # was wrong. `archived` gets its own sentence because it is
                     # *"reserved — no v1 write path"* on a Point (ONTOLOGY §5),
                     # so naming it in a transition list would advertise a write
-                    # the model does not offer.
+                    # the model does not offer. For a declared target the verbs
+                    # are named too (`retract_point` / `supersede_point`) even
+                    # though this door would accept the status: they are the
+                    # routes that also journal the transition and, for
+                    # `superseded`, mint the successor (#12403).
                     _reserved = (
                         " `archived` is reserved on Points (ONTOLOGY §5: no v1 "
                         "write path) — `retract_point(...)` is the SDK route to "
