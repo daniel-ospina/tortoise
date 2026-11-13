@@ -848,6 +848,27 @@ def test_a_declared_RECENCY_order_is_never_inverted_by_the_rerank(
         f"the skip must be disclosed in the leg trace, not silent ({entries})")
     assert entries[0]["reason"] == "recency_order_requested", entries[0]
 
+    # ⛔ AND THE OTHER HALF — the one that makes the guard a GUARD. Step 4b fails
+    # OPEN (its ``except`` arm leaves plain RRF order), so a recency request whose
+    # read broke did not reorder anything; keying the skip on the REQUEST would
+    # then suppress the rerank and report a cause that never applied. An invalid
+    # property name makes 4b's own Cypher raise, which is that path, driven
+    # through the public API rather than by patching an internal flag:
+    # ``recency_field="bad prop"`` → ``Invalid input 'p'`` → plain RRF → the
+    # rerank RUNS. Without the ``_recency_applied`` fix this asserts
+    # ``recency_order_requested`` and fails.
+    monkeypatch.setenv("TORTOISE_FUSED_RERANK", "1")
+    _inject(_Positional(), monkeypatch)
+    trace2: list[dict] = []
+    sdk.tortoise_fts_query(q, entity_type="point", limit=5,
+                           recency_field="bad prop", recency_boost=10.0,
+                           leg_trace=trace2)
+    entry2 = _rerank_entries(trace2)[0]
+    assert entry2["ran"] is True, (
+        "a recency request whose reorder FAILED must not suppress the rerank — "
+        f"that is a lever skipped for a cause that never applied ({entry2})")
+    assert entry2["reason"] == "ok", entry2
+
 
 def test_an_ALL_empty_pool_says_nothing_scorable(sdk, monkeypatch):
     """#12297 — "the read broke" and "nothing to score" are different facts.

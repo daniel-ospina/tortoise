@@ -285,12 +285,12 @@ Measured over **39,930 pairs** in the arm-5 run (torch intra-op threads pinned t
 | pairs per mention at pool 40 | 40 |
 | **added latency per mention at pool 40** | **≈ 207 ms** |
 | added latency per mention at pool 15 | ≈ 78 ms |
-| model load (from local HF cache) | 6.4 s, once, cached by name across both gates — **an observation, not a reproducible figure: it is NOT in the artifact**, whose `latency.note` says load is excluded |
-
 **Cost at the production shape:** a capture issues up to `max_queries=15` derived
 object queries, so pool 40 costs **≈ 3.1 s added per capture** (pool 15 ≈ 1.2 s).
 That is the price of the gate, and it is the reason the gate ships **OFF** and
 opt-in rather than default-on.
+
+**Model load is NOT a table cell, because it is not in the artifact.** A one-off observation on this box: ~6.4 s from the local HF cache, once, then cached by name across both gates. Every artifact's `latency.note` says load is EXCLUDED from `ms_per_pair`, so a load figure sits here as prose under the same label this document gives any unartifacted observation — it bounds the mechanism (a cold first call is expensive and one-off), not a number to quote.
 
 This is a **CPU** figure. It is not comparable to the model card's
 "1800 docs/sec" (computed on a **V100**). The comparable number is the measured
