@@ -1661,6 +1661,161 @@ def test_the_tokenizer_control_refusal_is_wired(tool_mod) -> None:
         "the control's return value must BE the recorded `terms_census`")
 
 
+def test_the_index_wait_REFUSES_on_timeout_and_on_overshoot(tool_mod) -> None:
+    """`_wait_indexed` must REFUSE — pinning the operator is not pinning that.
+
+    ⛔ The operator pin (`last == expected`, no `<=`/`>=`) says how the loop
+    EXITS, never that exiting without a match raises. Measured at this head
+    (#12349 review cycle 12): making the timeout `raise` unreachable, with the
+    text left intact, kept all 68 tests green — so a partially built index, or
+    one that is not the graph this run wrote, could be MEASURED and its count
+    published as `index_numDocuments`, which the function's own docstring calls
+    "indistinguishable from a real one in the artifact".
+    """
+
+    class _G:
+        def __init__(self, counts):
+            self.counts = list(counts)
+            self.i = 0
+
+        def query(self, _cypher, params=None):
+            n = self.counts[min(self.i, len(self.counts) - 1)]
+            self.i += 1
+            row = ["Object", {"numDocuments": n}]
+
+            class _R:
+                result_set = [row]
+
+            return _R()
+
+    class _Proj:
+        def __init__(self, counts):
+            self.g = _G(counts)
+
+    with pytest.raises(SystemExit) as err:
+        tool_mod._wait_indexed(_Proj([1, 1, 1, 1]), 3, timeout_s=0.3)
+    assert "REFUSED" in str(err.value), "a PARTIAL index must be refused"
+
+    with pytest.raises(SystemExit) as err:
+        tool_mod._wait_indexed(_Proj([5]), 3, timeout_s=0.3)
+    assert "REFUSED" in str(err.value), (
+        "an OVER-count must be refused — it means the graph is not the one "
+        "this run wrote")
+
+    assert tool_mod._wait_indexed(_Proj([3]), 3, timeout_s=1.0)[0] == 3, (
+        "an exactly-complete index must be ACCEPTED, or no honest run completes")
+
+
+def test_verify_cypher_parity_refuses_drift_and_vacuity(tool_mod, monkeypatch) -> None:
+    """The replica check must refuse a DRIFTED replica and an EMPTY comparison.
+
+    ⛔ The recovery arm's "+25.00 pts recoverable in place" rests on `_fts_cypher`
+    reproducing `run_fts_query`, and the harness docstring promises it "refuses
+    if it ever stops reproducing". Nothing pinned that promise: neutering the
+    id comparison, or the anti-vacuity `if not matched:`, each kept all 68 tests
+    green (#12349 review cycle 12) — the sequence pin only sees that the CALL
+    exists.
+    """
+    import tortoise.search_engine as se
+    import tortoise.sparse as sp
+
+    monkeypatch.setattr(sp, "build_or_query", lambda q: q)
+
+    # (i) the replica drifted: same shape, different ids -> REFUSE
+    monkeypatch.setattr(se, "run_fts_query", lambda *a, **k: [("A", 1.0)])
+    monkeypatch.setattr(tool_mod, "_fts_cypher", lambda *a, **k: [("B", 1.0)])
+    with pytest.raises(SystemExit) as err:
+        tool_mod.verify_cypher_parity(object(), ["q"])
+    assert "REFUSED" in str(err.value)
+
+    # (ii) both sides empty: equal, but proves nothing -> REFUSE
+    monkeypatch.setattr(se, "run_fts_query", lambda *a, **k: [])
+    monkeypatch.setattr(tool_mod, "_fts_cypher", lambda *a, **k: [])
+    with pytest.raises(SystemExit) as err:
+        tool_mod.verify_cypher_parity(object(), ["q"])
+    assert "REFUSED" in str(err.value)
+
+    # (iii) a genuine match on a non-empty result -> PASS
+    monkeypatch.setattr(se, "run_fts_query", lambda *a, **k: [("A", 1.0)])
+    monkeypatch.setattr(tool_mod, "_fts_cypher", lambda *a, **k: [("A", 1.0)])
+    tool_mod.verify_cypher_parity(object(), ["q"])
+
+
+def test_the_stale_name_refusal_reads_the_graphs_actual_names(tool_mod) -> None:
+    """The stale-name guard must DERIVE `stale` from the graph, not be a constant.
+
+    ⛔ The count guard's input is pinned; this one's was not. Measured at this
+    head (#12349 review cycle 12): `stale = []` — a FABRICATION, which keeps the
+    `if stale:` shape so the sequence marker stays green — left all 68 tests
+    passing, and a reused graph carrying a DIFFERENT population of the same size
+    is then swept instead of refused. That is the `o.name`-is-ON-CREATE hazard
+    (§2) and the one case the count guard cannot see.
+    """
+    import ast
+
+    tree = ast.parse(TOOL.read_text())
+    fn = next((n for n in ast.walk(tree)
+               if isinstance(n, ast.FunctionDef) and n.name == "arm_falkordb"), None)
+    assert fn is not None
+    assigns = [s for s in ast.walk(fn)
+               if isinstance(s, ast.Assign)
+               and any(getattr(tg, "id", None) == "stale" for tg in s.targets)]
+    assert assigns, "the `stale` computation is gone"
+    src = ast.unparse(assigns[0].value)
+    assert isinstance(assigns[0].value, ast.ListComp) or "for r in rows" in src, (
+        "`stale` must be a comprehension over `rows`")
+    assert "stored.get" in src and "!=" in src and "name" in src, (
+        f"`stale` does not compare the graph's stored names against the "
+        f"population (got {src!r}) — a constant here silently accepts a reused "
+        "graph")
+
+
+def test_the_recovery_arm_is_measured_through_its_own_cypher(tool_mod) -> None:
+    """The `recovery` branch must issue `_fts_cypher`, never `run_fts_query`.
+
+    ⛔ `_fts_cypher` exists precisely because `run_fts_query` RE-TOKENISES its
+    input: the harness's own first cut passed `search|web|web_search` and
+    measured +0.33 pts because the function split it straight back, destroying
+    the thing under test. The `sweep` marker only checks that ONE of the two
+    calls appears somewhere in the loop, so `if recovery:` → `if False:` kept
+    every test green while the arm silently measured the SHIPPED leg — making
+    the published "recoverable in place" delta 0 (#12349 review cycle 12).
+    """
+    import ast
+
+    tree = ast.parse(TOOL.read_text())
+    fn = next((n for n in ast.walk(tree)
+               if isinstance(n, ast.FunctionDef) and n.name == "arm_falkordb"), None)
+    assert fn is not None
+    sweep = [s for s in fn.body
+             if isinstance(s, ast.For) and isinstance(s.iter, ast.Name)
+             and s.iter.id == "rows"
+             and ("run_fts_query" in ast.unparse(s)
+                  or "_fts_cypher" in ast.unparse(s))]
+    assert len(sweep) == 1, "the recall sweep could not be identified"
+    branches = [n for n in ast.walk(sweep[0])
+                if isinstance(n, ast.If) and isinstance(n.test, ast.Name)
+                and n.test.id == "recovery"]
+    assert branches, (
+        "the `if recovery:` branch is gone from the sweep — without it the "
+        "recovery arm measures the shipped leg and reports a 0-point delta")
+    # ⛔ BOTH branches: one binds the OR string (`or_string = recovery_query(q)`),
+    # the other issues the query inside `for k in ks`. They are separate `if
+    # recovery:` statements, so a pin reading only the first sees half the
+    # contract — which is how the first version of this pin failed.
+    body = " ".join(ast.unparse(s) for b in branches for s in b.body)
+    assert any("recovery_query(" in ast.unparse(s)
+               for b in branches for s in b.body), (
+        "the recovery branch must build its OR string from `recovery_query(q)` ")
+    assert "_fts_cypher" in body, (
+        "no recovery branch issues `_fts_cypher` — `run_fts_query` re-tokenises "
+        "the query and would silently undo the added terms (the +0.33 pts "
+        "self-inflicted regression this harness already hit once)")
+    assert "run_fts_query" not in body, (
+        "a recovery branch calls `run_fts_query`, which re-tokenises its input "
+        "and destroys the thing under test")
+
+
 def test_brief_states_what_the_reuse_guards_actually_do(brief_text) -> None:
     """§2's reuse claim must match EXACTLY what the guards do — and that is narrow.
 
