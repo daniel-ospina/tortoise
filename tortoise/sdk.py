@@ -28632,14 +28632,25 @@ class TortoiseSDK:
                                f"`live`), or drop `status`.",
                 })
                 continue
-            if not any(isinstance(v, str)
-                       and is_terminal_status(str.__str__(v))
-                       for v in _status_values):
+            # ⛔ NAME THE DECLARATION THAT FAILED, not the LAST one. The test above
+            # is an `any`, and the writer applies EVERY key of the map, so an item
+            # can declare both names — one terminal, one not. Rendering
+            # `_status_values[-1]` then indicted the LEGAL value and advised the
+            # caller to pass it, with the offending terminal declaration absent
+            # from the message (measured, review: conflict-sweep lane F — an item
+            # declaring `superseded` and `live` produced "declares status 'live' …
+            # use a non-terminal value", naming only the value that was fine).
+            _terminal_hits = [
+                v for v in _status_values
+                if isinstance(v, str) and is_terminal_status(str.__str__(v))
+            ]
+            if not _terminal_hits:
                 continue
             violations.append({
                 "section": "entities", "index": i,
                 "message": f"ingest: entities[{i}] declares status "
-                           f"{_status_values[-1]!r} for an :Event — an :Event "
+                           f"{', '.join(repr(v) for v in _terminal_hits)} for an "
+                           f":Event — an :Event "
                            f"carries no lifecycle, so its door refuses the "
                            f"terminal half mid-write and the bundle is rejected "
                            f"at validation. WHAT TO DO: drop `status` from the "

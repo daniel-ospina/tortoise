@@ -1698,8 +1698,21 @@ class EventAPI:
         # that puts `label`+`op` positionally and `state` in the kwargs presents
         # every field the refusal needs while neither map does (measured,
         # review cycle 7 P1: both split shapes stored a terminal `:Event`).
-        for _map in (payload, *record,
-                     {**payload, **(record[0] if record else {})}):
+        # ⛔ THE SPLICE IS BUILT ONLY FOR A MAPPING RECORD. Building it inline in
+        # the tuple below evaluations it BEFORE the loop's `isinstance` test and
+        # before the `record[0] is not dict` refusal further down, so a non-mapping
+        # record raised a bare ``TypeError: 'str' object is not a mapping`` out of
+        # the splat — the un-named 500-class this box exists to replace with a
+        # diagnosis, and a REGRESSION against ``main``, which validates the record
+        # before it reads it and answers the same inputs with its named
+        # ``ValueError`` (``_emit's record payload must be an exact dict``).
+        # Measured at the head that added the splice (review: conflict-sweep lane F):
+        # ``'a string'``/``42``/``None`` each raised ``TypeError``, and the guard
+        # whose comment explains why such a container is refused was unreachable.
+        _guards = [payload, *record]
+        if record and isinstance(record[0], dict):
+            _guards.append({**payload, **record[0]})
+        for _map in _guards:
             if not isinstance(_map, dict):
                 continue
             # ``op`` must be a STRING before the set membership: an unhashable

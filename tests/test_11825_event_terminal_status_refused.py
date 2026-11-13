@@ -452,6 +452,29 @@ class TestTheEventApiDoor:
         assert _journal_lines(sdk._test_log) == []
 
 
+    @pytest.mark.parametrize("bad", ["a string", 42, None, ["a"]],
+                             ids=["str", "int", "none", "list"])
+    def test_a_non_mapping_record_gets_the_named_refusal_not_a_bare_typeerror(
+            self, sdk, bad):
+        """Conflict-sweep lane F, P3 — the SPLIT-shape splice was built eagerly.
+
+        The state-op box sweeps `(payload, *record, {**payload, **record[0]})`, and
+        that third element was built INLINE in the tuple — so it was evaluated
+        before the loop's `isinstance(_map, dict)` test and before the
+        `record[0] is not dict` refusal further down. A non-mapping record
+        therefore raised a bare ``TypeError: 'str' object is not a mapping`` out
+        of the splat, and the guard whose own comment explains why such a
+        container is refused became UNREACHABLE. That is a regression against
+        `main`, which validates the record before reading it and answers these
+        same inputs with its named ``ValueError`` — the un-named 500-class this
+        box exists to replace with a diagnosis.
+        """
+        api = self._api(sdk)
+        # NO label/op/state: those trip the OTHER early refusal, and this pin is
+        # about the SPLICE being evaluated before the loop can skip a non-mapping.
+        with pytest.raises(ValueError, match="must be an exact `dict`"):
+            api._emit("EntityMutated", bad)
+
     def test_add_event_refuses_the_outdated_flag(self, sdk):
         """Measured reachable at #11825's head: this door had NO refusal for it
         (the SDK doors get one from `_sanitize_props`; this one writes the
@@ -1476,6 +1499,44 @@ class TestTheBundleValidationDoor:
         assert any("declares status 'superseded'" in m
                    for m in (v["message"] for v in sdk._validate_bundle(alone))), (
             "an unreferenced terminal Event item passed Phase 1")
+
+    def test_the_violation_names_the_TERMINAL_declaration_when_a_legal_one_masks_it(
+            self, sdk):
+        """Conflict-sweep lane F, P3 — the message rendered `_status_values[-1]`.
+
+        The arm tests EVERY declaration for terminality (an `any`), because the
+        writer applies every key of the map and two keys can both render to
+        `status` — but it rendered the LAST value. When the last declaration is a
+        LEGAL one, the message indicted that legal value and then advised the
+        caller to pass it, while the offending terminal declaration never appeared
+        — the one datum the repair needs. Measured before the fix, with an item
+        declaring `superseded` and, via the liar key below, `live`: "declares
+        status 'live' for an :Event … use a non-terminal value".
+        """
+        class SaysStatus(str):
+            """Content is distinct; only `str()` renders to `status`.
+
+            Two DISTINCT dict keys, both filed under `status` by one renderer or
+            the other — the shape the eager `_event_state_key_names` union exists
+            to catch.
+            """
+
+            def __str__(self):
+                return "status"
+
+        item = {"ref": "evt", "type": "event", "name": "Launch",
+                "eventKind": "sessionCaptured", "status": "superseded"}
+        item[SaysStatus("harmless")] = "live"    # the MASKING, legal value
+        bundle = {"points": [{"ref": "pX", "kind": "statement",
+                               "content": "must-not-commit"}],
+                  "entities": [item]}
+        msgs = [v["message"] for v in sdk._validate_bundle(bundle)]
+        assert msgs, "the masked-terminal item passed Phase 1 entirely"
+        event_msg = [m for m in msgs if "for an :Event" in m]
+        assert event_msg, msgs
+        assert any("'superseded'" in m for m in event_msg), (
+            "the message must NAME the terminal declaration that failed",
+            event_msg)
 
 
 # ── T5: no over-block on the other labels ───────────────────────────────────
