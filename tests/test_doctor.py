@@ -2158,10 +2158,158 @@ class TestDoctorHostedCredential:
 
         hosted = _row(out, "Hosted")
         assert hosted is not None, out[-1200:]
-        # The cut must be REPORTED (that is the fix) and must never be a pass.
-        assert "CUT" in hosted or "could not be read" in hosted, hosted
+        # ⛔ `"CUT"` SPECIFICALLY: the `or "could not be read"` alternative this
+        # assertion carried was satisfied by the PRE-EXISTING JSON-decode arm (a
+        # drip-cut body fails `_json.loads` and produces that phrase whether or
+        # not the cut block exists), so deleting the whole round-16 block left the
+        # suite green — and the zero-byte cut then read ✅ with a `degraded` body
+        # nobody read (fresh review of the delta).
+        assert "CUT" in hosted, hosted
         assert "✅" not in hosted, hosted
         assert "All checks passing" not in out, out[-1200:]
+
+    def test_a_short_body_is_not_read_as_a_captive_portal(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """A body that CLOSES EARLY is truncated, not "no team identity".
+
+        EOF is not proof of completeness: a declared `Content-Length` that never
+        arrives (a proxy cutting the stream, a reset after the headers) made the
+        reader report a COMPLETE body, so a healthy key fell into the
+        "answered 200 but with no team identity … a captive portal also returns
+        200" arm — `❌` + exit 1 for a flaky TRANSPORT, with a remedy blaming the
+        user's own endpoint (fresh review of the delta).
+        """
+
+        class _ShortBody(_FakeResponse):
+            """Declares 60 bytes, delivers 11, then closes."""
+
+            def __init__(self):
+                super().__init__(200, b'{"org_id":')
+
+            @property
+            def length(self):
+                # The shape `http.client` exposes: bytes still to come.
+                return max(0, 60 - self._buf.tell())
+
+            def read1(self, n: int = -1):
+                chunk = self._buf.read(n)
+                return chunk
+
+            def read(self, n: int = -1):
+                return self._buf.read(n)
+
+        _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY)
+        _stub_hosted(monkeypatch, lambda url, req: (
+            _FakeResponse(200, b'{"status":"ok"}') if url.endswith("/health")
+            else _ShortBody()))
+        db_path = str(tmp_path / "short-body.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor short body seed")
+
+        rc = _run_doctor([])
+        out = capsys.readouterr().out
+
+        hosted = _row(out, "Hosted")
+        assert hosted is not None, out[-1500:]
+        assert "no team identity" not in hosted, hosted
+        assert "captive portal" not in hosted, hosted
+        assert "CUT" in hosted or "UNPROVEN" in hosted or "UNREAD" in hosted, hosted
+        assert "❌ Hosted" not in out, out[-1200:]
+        assert rc == 0, "a truncated transport is not a broken credential"
+
+    def test_a_complete_body_at_the_deadline_boundary_is_not_reported_as_cut(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """A COMPLETED body is not "CUT" — the round-17 check, pinned.
+
+        The deadline is consulted before the EOF probe, so a body whose last chunk
+        arrives at the boundary (or a fixed-length body fully read) would be
+        reported CUT and downgrade a healthy `✅` to a "we stopped early" `⚠️`.
+        `HTTPResponse.length == 0` is what distinguishes it; deleting that check
+        left the whole module green because no test double carried `length`.
+        """
+
+        import time as _time
+
+        from tortoise import __main__ as _m
+
+        class _CompleteAtTheBoundary(_FakeResponse):
+            """The WHOLE body arrives late, in one read, with `length == 0`.
+
+            That is the shape the round-17 check exists for: the loop's next
+            deadline test fires AFTER every declared byte has arrived, so the
+            deadline has passed while the body is COMPLETE. `length == 0` is what
+            says so; without it the row would be downgraded to "stopped early".
+            """
+
+            @property
+            def length(self):
+                return 0
+
+            def read1(self, n: int = -1):
+                _time.sleep(0.30)  # past the 0.25 s floor
+                return self._buf.read(n)
+
+            def read(self, n: int = -1):
+                return self.read1(n)
+
+        monkeypatch.setattr(_m, "_DOCTOR_HEALTH_TIMEOUT_S", 0.001)  # → 0.25 floor
+        _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY)
+        _stub_hosted(monkeypatch, lambda url, req: (
+            _CompleteAtTheBoundary(200, b'{"status":"degraded"}')
+            if url.endswith("/health")
+            else _FakeResponse(200, b'{"org_id":"org-c"}')))
+        db_path = str(tmp_path / "exact-body.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor exact body seed")
+
+        _run_doctor([])
+        out = capsys.readouterr().out
+
+        hosted = _row(out, "Hosted")
+        assert hosted is not None, out[-1500:]
+        assert "CUT" not in hosted, hosted
+        assert "UNREAD" not in hosted, hosted
+        # The body's OWN verdict survives — proof it was read, not assumed.
+        assert "degraded" in hosted, hosted
+        assert "/v1/team accepted" in hosted, hosted
+
+    def test_an_oat_token_in_the_env_with_an_explicit_url_is_not_a_broken_key(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """The `oat_` 401 must not read as a revoked key — on EVERY route to it.
+
+        The env-only gate refuses to probe an `oat_` identity, but an explicit
+        `TORTOISE_API_URL` (or a store file) skips that gate and probes, and REST
+        `/v1/*` answers 401 to an OAuth token BY DESIGN (ADR-010: `oat_` tokens
+        are MCP-only). That read `❌ … Re-mint it: tortoise signup (new team)` +
+        exit 1 for a working setup — the exact false FAIL the gate exists to
+        prevent, one environment variable away (fresh review of the delta).
+        """
+        from urllib.error import HTTPError
+
+        monkeypatch.setenv("TORTOISE_API_KEY", "oat_" + "b2c3d4e5f6a7" * 3)
+        monkeypatch.setenv("TORTOISE_API_URL", "https://api.example.test")
+
+        def handler(url, req):
+            if url.endswith("/health"):
+                return _FakeResponse(200, b'{"status":"ok"}')
+            raise HTTPError(url, 401, "Invalid API key", {}, None)
+
+        _stub_hosted(monkeypatch, handler)
+        db_path = str(tmp_path / "oat-401.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor oat 401 seed")
+
+        rc = _run_doctor([])
+        out = capsys.readouterr().out
+
+        hosted = _row(out, "Hosted")
+        assert hosted is not None, out[-1500:]
+        assert "401" in hosted, hosted
+        assert "OAuth" in hosted and "MCP" in hosted, hosted
+        # The remedies that would be WRONG for this family.
+        assert "tortoise signup (new team)" not in hosted, hosted
+        assert "❌ Hosted" not in out, out[-1200:]
+        assert rc == 0, "an MCP-only token is not a failed REST credential"
 
     def test_a_v1_team_reply_cut_by_the_deadline_is_unproven_not_a_broken_key(
             self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):

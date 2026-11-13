@@ -13344,11 +13344,17 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
             # — `read()` then `len()` bounds the terminal, not the process).
             try:
                 raw_health, _cut = _read_capped(resp, _DOCTOR_BODY_CAP, deadline)
+                # ⛔ `elif`, NOT a fall-through (fresh review of the delta): a CUT
+                # body was recorded and then STILL handed to `_json.loads`, whose
+                # `JSONDecodeError` overwrote the CUT note with a decode message —
+                # so the row said "could not be read (Unterminated string …)"
+                # while the code and the test both claimed the cut was REPORTED.
+                # A truncated body carries no verdict, so it is not parsed at all.
                 if _cut:
                     health_read_error = (
                         f"the body was CUT at the {_fmt_bound(deadline - started)}s"
                         " deadline before it completed")
-                if isinstance(raw_health, bytes) and raw_health:
+                elif isinstance(raw_health, bytes) and raw_health:
                     parsed_health = _json.loads(raw_health.decode("utf-8", "replace"))
                     if isinstance(parsed_health, dict):
                         candidate_status = parsed_health.get("status")
@@ -13593,6 +13599,27 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
         return
 
     if team_code == 401:
+        # ⛔ AN `oat_` TOKEN IS NOT A BROKEN KEY (fresh review at `0604e2f015`).
+        # The env-only gate refuses to PROBE one, but two other routes reach this
+        # arm with an OAuth token — an explicit `TORTOISE_API_URL`, and a STORE
+        # file holding one — and both graded `❌ … Re-mint it: tortoise signup
+        # (new team)` + exit 1 for a WORKING setup. REST `/v1/*` accepts keys and
+        # JWTs only: `oat_` access tokens are MCP-only
+        # (`docs/adr/ADR-010-auth-planes-session-agent-key.md:62-64`), and the
+        # server enforces it (`tortoise/hosted_api.py` rejects any Bearer that is
+        # not `API_KEY_PREFIXES`, so `/v1/team` never resolves one). The 401 is
+        # therefore the EXPECTED answer, not a verdict on the credential — and
+        # "refused the STORED key" is false for an env-supplied one either way.
+        if api_key.startswith(_OAUTH_ONLY_KEY_PREFIX):
+            results.append(_combine("⚠️",
+                            f"{health_part}; /v1/team 401 — this is an `oat_` "
+                            "OAuth access token, which REST `/v1/*` does not "
+                            "accept by design (ADR-010: `oat_` tokens are "
+                            "MCP-only), so the 401 is expected and the token is "
+                            "NOT proven broken. Use it against the MCP endpoint, "
+                            "or store a `tt_` key with `tortoise signup` if you "
+                            "want the REST verdict"))
+            return
         results.append(_combine("❌",
                         f"{health_part}; /v1/team 401 Invalid API key — "
                         f"{base} refused the stored key. Re-mint it: `tortoise "
