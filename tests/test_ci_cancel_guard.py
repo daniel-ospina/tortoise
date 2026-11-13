@@ -454,6 +454,45 @@ def test_a_COMPLETED_job_with_no_runner_name_is_refused(fixture):
     assert fixture.cancelled() == []
 
 
+def test_a_CONTRADICTORY_job_row_is_refused_not_cancelled(fixture):
+    """rev12421 review cycle 4, F2 and F3: the REFUSE side must cover the shapes the
+    docstring names, and each arm must be PINNED in the direction it claims.
+
+    Both rows are contradictory payloads a degraded API surface can produce on a
+    `queued` job whose `runner_name` is empty:
+
+    * (a) `conclusion: "success"` — GitHub sets a conclusion only on a job that RAN.
+      The docstring said "anything unreadable, unknown or contradictory falls on the
+      REFUSE side" while the predicate never read `conclusion`, so this row was
+      CANCELLED. The arm is now `is not None`, so the row refuses.
+    * (b) `completed_at: ""` — an empty-string stamp is not a timestamp, so the row
+      is contradictory too, and `is not None` reads it as FINISHED (refuse). A
+      TRUTHINESS mutation of that arm (the natural "cleanup") reads `""` as
+      not-completed, lets the row through to the status arm, and CANCELS it — with
+      the suite green before this test existed, because no fixture carried an
+      empty-string `completed_at`.
+
+    Both are pinned at the CLI, because that is the guarantee a lane acts on: exit 3
+    and NOTHING cancelled.
+    """
+    for overrides in ({"conclusion": "success"}, {"completed_at": ""}):
+        row = {"name": "test (b)", "status": "queued",
+               "started_at": "2026-11-04T13:44:52Z",
+               "runner_name": "", "completed_at": None}
+        row.update(overrides)
+        fixture.apply("run.json", _run_meta(sha=HEAD_OLD))
+        fixture.apply("prs.json", pr(PR_HEAD_MOVED))
+        fixture.apply("jobs.json", {"total_count": 2, "jobs": [
+            {"name": "test (a)", "status": "queued",
+             "started_at": "2026-11-04T13:44:52Z",
+             "runner_name": "", "completed_at": None},
+            row]})
+        r = guard(fixture, "41840910128", "--apply")
+        assert r.returncode == 3, f"{overrides}: " + r.stdout + r.stderr
+        assert fixture.cancelled() == [], (
+            f"{overrides}: a contradictory job row was read as untouched work")
+
+
 def test_no_open_pr_is_refused(fixture):
     fixture.apply("run.json", _run_meta(sha=HEAD_OLD, branch="release/2.0"))
     fixture.apply("prs.json", pr(PR_HEAD_MOVED, branch="surface-containers"))
@@ -1016,6 +1055,40 @@ def test_the_STARTED_predicate_is_TOTAL_for_an_unreadable_status(bad):
     spec.loader.exec_module(mod)
     assert mod.job_has_started(
         {"name": "x", "status": bad, "runner_name": "", "completed_at": None}) is True
+
+
+def test_the_RUNNER_arm_refuses_every_unreadable_shape_and_permits_only_no_runner():
+    """rev12421 review cycle 5, I3: the `runner_name` arm was a TRUTHINESS test.
+
+    GitHub types `runner_name` as a string and sends `""` for "no runner", so `""`,
+    `None` and an ABSENT field are the only shapes that mean "unclaimed". The arm was
+    `if job.get("runner_name"): return True`, so every DEGRADED falsy value — `[]`,
+    `{}`, `0`, `False` — read as "no runner", the row fell through to the status arm,
+    and the run was CANCELLABLE — while the paragraph above promises "anything
+    unreadable, unknown or contradictory falls on the REFUSE side". An unreadable
+    field is not an absent one: a claim we cannot parse must refuse, because the
+    alternative is cancelling work we could not see.
+
+    Pinned on the predicate, like the status totality test above, because `decide()`
+    raises `Unreadable` on a non-string STATUS before any row reaches this arm — the
+    CLI path is a different guarantee (refuse the run), and this one is about the
+    predicate's own totality.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("ccg_under_test_runner", TOOL)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    base = {"name": "x", "status": "queued", "completed_at": None, "conclusion": None}
+    for bad in ([], {}, 0, False, " ", "\t", ["runner"], {"name": "r"}, 7, True):
+        assert mod.job_has_started(dict(base, runner_name=bad)) is True, (
+            f"runner_name={bad!r} is unreadable or a claim, not 'no runner' — "
+            "the run must not be cancellable on it")
+    for unclaimed in ("", None):
+        assert mod.job_has_started(dict(base, runner_name=unclaimed)) is False, (
+            f"runner_name={unclaimed!r} IS 'no runner' and must stay permissible")
+    assert mod.job_has_started(dict(base)) is False, (
+        "an ABSENT runner_name is 'no runner' and must stay permissible")
 
 
 def test_a_unicode_digit_run_id_is_a_usage_error(fixture):

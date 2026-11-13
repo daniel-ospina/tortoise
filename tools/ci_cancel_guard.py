@@ -27,7 +27,10 @@ program that refuses:
        ⛔ A STAMPED `started_at` IS NOT EVIDENCE OF WORK: GitHub stamps it when
        the job is QUEUED, so a job no runner has ever claimed carries it too.
        The predicate is `job_has_started()` — a runner assigned, or the job
-       completed, or a status outside the unstarted set. Reading `started_at`
+       completed, or a conclusion present, or a status outside the unstarted set
+       (four arms, ORED; the `conclusion` arm arrived with rev12421 review cycle 4
+       F2 — `job_has_started`'s own strictness paragraph is what promised that arm
+       while the code never read the field). Reading `started_at`
        here made this guard refuse EVERY run it was given, i.e. an inert
        enforcer with a dead permit path (#11045);
     3. the branch is not the default branch (a `main` push run is never
@@ -156,7 +159,8 @@ _OID_RE = re.compile(r"^[0-9a-f]{40}$|^[0-9a-f]{64}$", re.IGNORECASE)
 #:
 #: ⛔ THIS SET IS NECESSARY AND NOT SUFFICIENT (#11045). A job whose status is in
 #: here can still have been claimed by a runner, so `job_has_started()` refuses on
-#: ANY of three signals; a status-only test would be a deny-list of one field.
+#: ANY of four signals (runner assigned, completed, conclusion present, begun
+#: status); a status-only test would be a deny-list of one field.
 UNSTARTED_JOB_STATUSES = frozenset({"queued", "waiting", "requested", "pending"})
 PR_LIMIT = 500
 #: The test seam, as a COMMAND-LINE argument only. ⛔ There is deliberately no
@@ -242,11 +246,18 @@ def job_has_started(job: dict[str, Any]) -> bool:
     no runner had claimed any of them, and the old clause refused all 19 with
     "job(s) already started (N of N): cancelling would destroy the work".
 
-    The three signals, ORed, each of which alone means work may be lost:
+    The four signals, ORED, each of which alone means work may be lost:
       1. `runner_name` non-empty — a runner HAS claimed the job (the direct
          evidence `started_at` was standing in for);
-      2. `completed_at` non-null — it ran and finished;
-      3. `status` outside `UNSTARTED_JOB_STATUSES` — an allow-list, so an
+      2. `completed_at` non-null — it ran and finished. ⛔ `is not None`, NOT a
+         truthiness test (rev12421 review cycle 4 F3): an empty-string stamp is a
+         contradictory payload and reads as FINISHED, which is the REFUSE side;
+      3. `conclusion` non-null — GitHub sets a conclusion only on a job that RAN,
+         so a queued-by-status row carrying one is contradictory and refuses
+         (rev12421 review cycle 4 F2: this docstring promised that arm and the code
+         never read the field, so `status: queued` + `conclusion: "success"` was
+         CANCELLED — benign direction, but a guarantee stated and not given);
+      4. `status` outside `UNSTARTED_JOB_STATUSES` — an allow-list, so an
          unrecognised status reads as started.
 
     The strictness is the point: a job can only be declared untouched when it is
@@ -265,10 +276,30 @@ def job_has_started(job: dict[str, Any]) -> bool:
     claimed it. Both tools gate `steps` the same way (it can never establish that a
     job began); only the clock uses them. Pinned by
     `test_a_requeued_unclaimed_job_with_steps_is_PERMITTED`.
+
+    ⛔ AND THE `runner_name` ARM STAYS HERE EVEN THOUGH `run_reaper.job_work_start`
+    NO LONGER READS THE FIELD (rev12421 review cycle 4 F1, closed in cycle 5). The
+    two tools point in opposite directions on purpose: a claim is not a work CLOCK
+    (so the reaper must not cancel on it), but it IS evidence that work may be at
+    risk (so the guard must not cancel over it). A claim therefore refuses here and
+    is clockless there; both answers fail safe.
+
+    ⛔ AND THE `runner_name` ARM IS A THREE-WAY, NOT A TRUTHINESS TEST (rev12421
+    review cycle 5, I3). GitHub types the field as a string and sends `""` for "no
+    runner", so `""`, `None` and an ABSENT field are the only permit shapes. Every
+    OTHER value refuses: it is either a claim (`"pi-runner-x64-1"`) or UNREADABLE
+    (`" "`, or a degraded dict/list/int/bool), and `truthiness` let the unreadable
+    half through — contradicting the strictness paragraph above. Measured on the
+    truthiness form: `runner_name: []`, `{}`,
+    `0` and `False` all returned False ("untouched") for a `queued` job, i.e. the
+    guard would CANCEL on a payload it could not read.
     """
-    if job.get("runner_name"):
+    runner = job.get("runner_name")
+    if runner is not None and runner != "":
         return True
     if job.get("completed_at") is not None:
+        return True
+    if job.get("conclusion") is not None:
         return True
     status = job.get("status")
     if not isinstance(status, str):

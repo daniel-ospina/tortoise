@@ -59,15 +59,25 @@ cancel tool toward cancelling a healthy run that only just started.
 
 The SAME argument applies to a shard's own clock (`job_work_start`): an
 UNFINISHED shard with no work clock — a job whose status is
-`queued`/`waiting`/`requested`/`pending` AND which no runner has claimed — makes
-the bound **UNDERIVABLE**
-(#11045). ⛔ THE CLASS IS NARROWER THAN THE STATUS LIST, and the difference is a
-claim: a job still reported `queued` but carrying an assigned `runner_name` DID
-get a runner, so its `started_at` is its claim time and `job_work_start` hands
-that out as the clock (see the gate in that function). No instance was observed
-live — 0 of 250 job rows across 50 non-completed runs (outside review, cycle 3)
-— but the docstring must not state a guarantee the gate does not give.
-That is the dominant skip on a starved fleet: a run whose only
+`queued`/`waiting`/`requested`/`pending` — makes the bound **UNDERIVABLE**
+(#11045). ⛔ THE CLASS IS EXACTLY THE STATUS LIST, WITH NO CARVE-OUT FOR A CLAIM
+(rev12421 review cycle 4 F1, closed in cycle 5). An earlier head treated a
+`queued` job carrying an assigned `runner_name` as a claimed job whose
+`started_at` must therefore be its CLAIM time, and handed that stamp out as the
+clock. That is an UNMEASURED inference and it is PERMITTING on a destructive
+path: the shape occurred 0 times in 250 job rows across 50 non-completed runs (measured
+2026-11-13, outside review, cycle 3), so nothing could falsify it — and if
+`started_at` were still the queue stamp the shard would be charged its whole
+queue wait and the run cancelled. Measured on that head: a `queued` job with
+`runner_name="pi-runner-x64-1"` and `started_at` 7200 s old against a 1200 s bound
+→ `cancel reason=verified-overrun shard_elapsed_s=7200`, where the same row with an
+empty `runner_name` is `skip / bound-underivable`. So `runner_name` is not read here
+at ALL: a queued job has no work clock however its runner field reads, which costs
+nothing on the observed population (0 of those 250 rows) and is the only answer a
+tool that CANCELS may give. `ci_cancel_guard.job_has_started` keeps its own
+`runner_name` arm in the OPPOSITE direction (a claim REFUSES a cancel) — both tools
+fail safe, which is why the asymmetry is deliberate rather than an oversight.
+That clockless-shard rule is the dominant skip on a starved fleet: a run whose only
 unfinished shards are queueing is a CAPACITY WAIT. ⛔ AND IT IS THE DEFAULT OUTCOME
 FOR A MIXED MATRIX — one claimed shard plus any queued sibling — which is a
 CAPABILITY LOSS, stated plainly rather than argued away (review E, cycle 2):
@@ -479,8 +489,10 @@ def job_work_start(job: dict) -> float | None:
     this predicate disagree with `ci_cancel_guard.job_has_started` (which ignores
     `steps` entirely) on the same job, in the destructive direction. The evidence
     order is therefore:
-      1. GATE: a `BEGUN_JOB_STATUSES` status or an assigned `runner_name`, else None
-         — the job is a CAPACITY WAIT, not a wedge;
+      1. GATE: a `BEGUN_JOB_STATUSES` status, else None — the job is a CAPACITY
+         WAIT, not a wedge, and a `queued` job's `runner_name` does NOT open this
+         gate (see the module docstring: the claim-derived clock was an unmeasured,
+         permitting inference and it is gone);
       2. REFINE: the earliest step `started_at`, when the payload carries steps —
          ⛔ FLOORED AT THE CLAIM STAMP (rev12421 review, F1);
       3. otherwise the job's own claim-time `started_at`.
@@ -515,31 +527,26 @@ def job_work_start(job: dict) -> float | None:
     live decision and removes the path rather than re-tuning anything.
     """
     status = job.get("status")
-    runner = job.get("runner_name")
-    # TWO isinstance arms, and both are load-bearing. Set membership on an
-    # unhashable status (a list/dict in a degraded payload) raises TypeError out of
-    # this PURE function, and `decide` is called per candidate with no per-run
-    # `except` — so one bad row aborted the whole sweep (exit 5, no report, decided
-    # candidates never acted on). And a non-string TRUTHY `runner_name` (a dict, a
-    # list, a number) is not evidence that a runner claimed the job; treating it as
-    # such flips this predicate in the PERMITTING direction, because an unclaimed
-    # `queued` job would then hand its queue stamp out as a work clock (review cycle
-    # 2, T5). Both arms fail to None, the non-cancelling answer.
+    # ONE isinstance arm, and it is load-bearing: set membership on an unhashable
+    # status (a list/dict in a degraded payload) raises TypeError out of this PURE
+    # function, and `decide` is called per candidate with no per-run `except` — so one
+    # bad row aborted the whole sweep (exit 5, no report, decided candidates never
+    # acted on). A non-string status fails to None, the non-cancelling answer.
     #
-    # ⛔ AND A WHITESPACE `runner_name` IS NOT A CLAIM (rev12421 review cycle 4, F1).
-    # `isinstance(runner, str) and runner` is a TRUTHINESS test, so `" "`, `"\t"` and
-    # `"\n "` passed this gate and an UNCLAIMED `queued` job handed its queue stamp
-    # out as a work clock — measured on this head: `runner_name=" "` with
-    # `started_at` 7200 s old returned that stamp, the shard escaped `unstarted`, the
-    # bound became derivable, and the run was cancelled on a queue wait. That is the
-    # exact P0 this change exists to remove, re-entered through the other field, and
-    # the cycle-2 pin did not cover it (its rows were dict/list/int/bool only, so the
-    # suite stayed green over a live permitting path). `.strip()` closes it; the
-    # residual is stated rather than hidden — any NON-BLANK string is still taken as
-    # a claim, because a runner name is opaque text this module has no allow-list for.
-    if not isinstance(status, str) or (
-            status not in BEGUN_JOB_STATUSES
-            and not (isinstance(runner, str) and runner.strip())):
+    # ⛔ AND `runner_name` IS NOT READ AT ALL (rev12421 review cycle 4 F1, closed in
+    # cycle 5). The gate used to accept a `queued` job whose `runner_name` was a
+    # non-blank string, on the premise that a claimed job's `started_at` is its CLAIM
+    # time rather than its queue-entry stamp. That premise is UNMEASURED — 0 of 250
+    # job rows across 50 non-completed runs carried a runner while the status was
+    # still unstarted — and it is PERMITTING, measured on the prior head: a
+    # `queued` job with `runner_name="pi-runner-x64-1"` and `started_at` 7200 s old
+    # returned that stamp, the shard escaped `unstarted`, the bound became derivable
+    # (1200 s) and the run was CANCELLED on a queue wait, while the same row with an
+    # empty `runner_name` was `skip / bound-underivable`. Cycle 4 narrowed the test to
+    # `.strip()` and left the inference itself in place; this removes it. A claim is
+    # not a clock this module may cancel on, so the clock is status-only and a queued
+    # job is CLOCKLESS however its runner field reads.
+    if not isinstance(status, str) or status not in BEGUN_JOB_STATUSES:
         return None
     claim = _parse_ts(job.get("started_at"))
     if claim is None:

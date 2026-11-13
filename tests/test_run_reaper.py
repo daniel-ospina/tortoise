@@ -938,6 +938,52 @@ class RunReaperTestCase(unittest.TestCase):
                          "a shard with no measured start was cancelled on a step stamp")
         self.assertIsNone(row["shard_elapsed_s"])
 
+    def test_a_CLAIMED_queued_shard_has_NO_work_clock(self):
+        """rev12421 review cycle 4, F1 [P2]: a `runner_name` on a QUEUED job is a
+        CLAIM, not a work clock — and the gate no longer reads it at all.
+
+        The prior gate accepted any begun status OR a `queued` job whose
+        `runner_name` was a non-blank string, on the premise that such a job's
+        `started_at` is its CLAIM time. That premise is UNMEASURED (0 of 250 job rows
+        across 50 non-completed runs carried a runner while the status was still
+        unstarted) and it is PERMITTING: if the stamp is still the queue-entry
+        stamp, the shard is charged its whole queue wait and a healthy queueing run
+        is CANCELLED. Measured on that head, with the green population below giving
+        a 1200 s bound: `runner_name="pi-runner-x64-1"`, `started_at` 7200 s old →
+        `cancel reason=verified-overrun shard_elapsed_s=7200`, while the same row
+        with an empty `runner_name` was `skip / bound-underivable`.
+
+        ⛔ RED-FIRST: this test reds on that head (action=cancel) and on any head
+        that reintroduces a claim-derived clock, including the `.strip()` form that
+        closed only the whitespace half of the hole. A well-formed, non-blank runner
+        name is the STRONGEST version of the shape, so it is the row that matters —
+        a whitespace-only pin would leave the inference itself uncertified.
+        """
+        mod = _load_tool_module()
+        run = {"id": 111, "status": "in_progress", "run_started_at": iso(NOW - 7200)}
+        green = [
+            [{"name": "test (a)", "status": "completed", "conclusion": "success",
+              "started_at": iso(NOW - 200), "completed_at": iso(NOW - 100)}],
+            [{"name": "test (g)", "status": "completed", "conclusion": "success",
+              "started_at": iso(NOW - 1600), "completed_at": iso(NOW - 1000)}],
+        ]
+        for runner in ("pi-runner-x64-1", "pi-runner-vm-6"):
+            claimed_but_queued = job("test (g)", None, status="queued", started_s=7200)
+            claimed_but_queued.update({"runner_name": runner, "steps": []})
+            self.assertIsNone(
+                mod.job_work_start(claimed_but_queued),
+                f"runner_name={runner!r} on a QUEUED job was read as a work clock")
+            row = mod.decide(run, [job("test (a)", 600), claimed_but_queued], green,
+                             now=NOW, floor=300)
+            self.assertEqual(
+                row["action"], "skip",
+                f"a queued shard's CLAIM caused a cancel on queue wait: "
+                f"{row['action']} via {row.get('reason')} "
+                f"(shard_elapsed_s={row.get('shard_elapsed_s')})")
+            self.assertEqual(row["reason"], mod.REASON_UNDERIVABLE)
+            self.assertIsNone(row["shard_elapsed_s"],
+                              "a claimed-but-queued shard supplied a work clock")
+
     def test_a_DEGRADED_runner_name_does_not_claim_a_job(self):
         """T5, review cycles 2 and 4: the permitting-direction flip is closed.
 
@@ -954,6 +1000,15 @@ class RunReaperTestCase(unittest.TestCase):
         `"\t"` and `"\n "` — strings, and truthy — STILL read as a claim and handed
         out the queue stamp measured below. Every row in the tuple is a shape that
         reds without its arm, and the whitespace rows red without `.strip()`.
+
+        ⛔ AND CYCLE 5 REMOVED THE ARM ENTIRELY (cycle 4, F1 again — the `.strip()`
+        narrowing certified the inference instead of removing it). This test is kept
+        because it is still the right ASSERTION (none of these shapes may yield a
+        clock), and it now holds for a stronger reason: the gate reads `status`
+        alone, so every row here is clockless by construction. The row that would
+        catch a reintroduced claim arm is
+        `test_a_CLAIMED_queued_shard_has_NO_work_clock` — it uses a well-formed,
+        non-blank `runner_name`, which is the shape `.strip()` let through.
         """
         mod = _load_tool_module()
         for bad in ({"name": "runner"}, ["runner"], 7, True, " ", "\t", "\n ", "   "):
