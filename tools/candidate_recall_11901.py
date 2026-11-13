@@ -930,6 +930,26 @@ def _interleave(by_cls: dict[str, list[dict]], shares: dict[str, int]) -> list[d
 
 
 def run(args: argparse.Namespace) -> int:
+    from tortoise.rerank import rerank_pool_enabled
+
+    #: ⛔ BEFORE THE STORE CHECK, deliberately. The gate shapes what "before" IS;
+    #: with TORTOISE_FUSED_RERANK armed the read reranks the pool first, so every
+    #: arm's "before" is a rerank and the cells report ``gained 0 / lost 0`` — a
+    #: false zero that looks exactly like a real one, on the instrument that
+    #: produced the artifacts this PR's §3, §5 and §7 cite. Its sibling
+    #: (``tools/rerank_calibration_12297.py``) has refused this since the gate
+    #: landed; this instrument did not, and that asymmetry is a hole in the
+    #: evidence chain the PR rests on. The committed artifacts are provably
+    #: unarmed (``gained 56 / lost 0``), so this closes a hazard for the NEXT run.
+    _ambient_gate = rerank_pool_enabled()
+    if _ambient_gate and not args.allow_reranked_baseline:
+        print("REFUSED: TORTOISE_FUSED_RERANK is armed, so the read's own order "
+              "is ALREADY reranked and \"before\" is not the fused baseline — "
+              "this run would report a rerank-vs-rerank zero. Unset it "
+              "(TORTOISE_FUSED_RERANK=) or pass --allow-reranked-baseline to "
+              "measure an armed read on purpose.", file=sys.stderr)
+        return 3
+
     uri = os.environ.get("TORTOISE_DB_URI") or ""
     if not uri.startswith(("docker://", "redis://")):
         print("REFUSED: no live FalkorDB in TORTOISE_DB_URI — S3 itself refuses "
@@ -1546,6 +1566,11 @@ def run(args: argparse.Namespace) -> int:
         report = {
             "issue": 11901,
             "measured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            #: Whether the read's own rerank gate was armed during this run. False
+            #: is the only shape whose "before" is the fused baseline; True is
+            #: only reachable with --allow-reranked-baseline, and a reader
+            #: comparing cells needs to know which they are looking at.
+            "config": {"fused_rerank_gate_armed": bool(_ambient_gate)},
             "corpus": {"dir": str(sessions),
                        "files": _harvest_files,
                        "input": dict(_input_stats),
@@ -1642,6 +1667,14 @@ def main(argv: list[str] | None = None) -> int:
                         "cross-encoder is paid 207 ms/mention for. A control "
                         "only: not shipped, not a matcher, reaches no product "
                         "path.")
+    p.add_argument("--allow-reranked-baseline", action="store_true",
+                   help="#12297 — proceed even when TORTOISE_FUSED_RERANK is "
+                        "armed. Without this the run REFUSES (exit 3), because "
+                        "the read's own order is already reranked and every "
+                        "arm's \"before\" would be a rerank, i.e. a "
+                        "rerank-vs-rerank zero that looks exactly like a real "
+                        "one. The artifact records `fused_rerank_gate_armed` "
+                        "either way.")
     return run(p.parse_args(argv))
 
 

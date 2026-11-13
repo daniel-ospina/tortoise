@@ -296,13 +296,16 @@ class _FakeGraph:
     ("event", "Event", "eventId", ["MATCH (n:Event)", "n.eventId IN $ids"]),
     ("object", "Object", "id", ["MATCH (n:Object)", "n.id IN $ids"]),
     # the two restated predicates, pinned so they cannot drift from step 7
-    # BOTH spellings of the :Source read restate the same predicate: `source` is an
-    # accepted `entity_type` for the same nodes (id_field="url"), so pinning only
-    # `document` would let a `source` read score rows the `document` path excludes.
     ("document", "Source", "url", ["MATCH (n:Source)", "n.url IN $ids",
                                    "n.documentKind IS NOT NULL"]),
+    # ⛔ ``source`` is the OPPOSITE partition of the same label — document ⟺
+    # ``documentKind IS NOT NULL``, source ⟺ ``documentKind IS NULL`` (#5026 /
+    # D10) — so it must NOT carry the document predicate. Pinning it as "the same
+    # predicate" (an earlier draft did) matches no row and makes the rerank
+    # structurally inert on the ``source`` surface, which is a caller-facing MCP
+    # entity_type; the exclusion is asserted in test_the_source_read_carries_no…
     ("source", "Source", "url", ["MATCH (n:Source)", "n.url IN $ids",
-                                 "n.documentKind IS NOT NULL"]),
+                                 "NOT documentKind IS NOT NULL"]),
     ("operator", "Point", "id", ["MATCH (n:Point {is_operator: true})"]),
 ])
 def test_pool_text_read_predicates(entity_type, label, id_field, fragments):
@@ -312,10 +315,32 @@ def test_pool_text_read_predicates(entity_type, label, id_field, fragments):
     assert out == {"a": "some text"}
     cypher, params = g.calls[0]
     for frag in fragments:
-        assert frag in cypher, cypher
+        if frag.startswith("NOT "):
+            # a NEGATIVE pin: the excluded predicate must really be absent
+            assert frag[4:] not in cypher, cypher
+        else:
+            assert frag in cypher, cypher
     assert params == {"ids": ["a", "b"]}
     # ONE batch read, never N+1
     assert len(g.calls) == 1
+
+
+def test_the_SOURCE_branch_of_step_7_carries_no_documentKind_predicate():
+    """``source`` and ``document`` are opposite partitions; step 7's source branch
+    reads ``:Source`` with no ``documentKind`` clause at all.
+
+    The "restated predicates" test asserts a string is present in step 7's SOURCE
+    TEXT, which the DOCUMENT branch satisfies — so it could not tell the two apart.
+    This one reads the source branch itself.
+    """
+    step7 = inspect.getsource(sdk_mod.TortoiseSDK.tortoise_fts_query)
+    branch = step7.split('elif entity_type == "source":', 1)[1]
+    branch = branch.split("elif entity_type ==", 1)[0]
+    assert "MATCH (n:Source) WHERE n.url IN $ids RETURN n.url" in branch, branch
+    assert "documentKind" not in branch, (
+        "step 7's source branch gained a documentKind predicate — document and "
+        "source are opposite partitions (#5026), so a shared predicate makes one "
+        "of them match nothing")
 
 
 def test_the_two_restated_predicates_are_pinned_against_step_7():

@@ -4740,10 +4740,17 @@ def _fetch_rerank_pool_texts(graph, entity_type: str, graph_label: str,
         return {}
     if entity_type == "operator":
         match = "MATCH (n:Point {is_operator: true}) WHERE n.id IN $ids "
-    elif entity_type in ("document", "source"):
-        # BOTH SPELLINGS are the same ``:Source`` read (``id_field="url"`` for each),
-        # so the predicate step 7 restates must apply to both — otherwise a
-        # ``source`` read scores exactly the rows the ``document`` path excludes.
+    elif entity_type == "document":
+        # ⛔ NOT ``source``. Both spellings are a ``:Source`` read and both use
+        # ``url`` for the id, which makes them look interchangeable here — they are
+        # OPPOSITE partitions of the same label: step 7 (and ``search_engine``)
+        # define document ⟺ ``documentKind IS NOT NULL`` and source ⟺
+        # ``documentKind IS NULL`` (#5026 / D10). Restating the document predicate
+        # for ``source`` therefore matched NO row and made the rerank structurally
+        # inert there (measured: ``source`` went from ``scored=1`` to
+        # ``ran=False, pool_text_read_failed``) — the pool read had succeeded and
+        # the disclosure blamed the wrong cause. ``source`` takes the generic
+        # branch, which adds no predicate.
         match = ("MATCH (n:Source) WHERE n.url IN $ids "
                  "AND n.documentKind IS NOT NULL ")
     else:
@@ -41998,6 +42005,12 @@ class TortoiseSDK:
                     "degrade_reason": (
                         "no_text_field"
                         if _rerank_text_field(entity_type, graph_label) is None
+                        # ⛔ TWO DIFFERENT FAILURES, TWO NAMES. ``read_failed`` is
+                        # the batch read returning nothing (a graph error, an
+                        # excluded id set); ``empty`` is the read SUCCEEDING and
+                        # no row carrying usable text. Collapsing them blamed the
+                        # read for a pool that was simply empty of text — the
+                        # mislabel the ``source`` regression surfaced.
                         else ("pool_text_empty"
                               if _pool_texts else "pool_text_read_failed")),
                 }

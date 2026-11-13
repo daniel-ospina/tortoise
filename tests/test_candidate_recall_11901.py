@@ -1464,6 +1464,49 @@ def test_the_control_artifact_covers_both_pools_and_all_three_scorers(lexical):
             f"{arm} no longer explains WHY miss_past_k is not the ceiling")
 
 
+def _run_ns(**over):
+    """The minimum Namespace `run` touches before its first refusal."""
+    ns = dict(sessions_dir="~/.tortoise/session-events", records=1, span=8,
+              limit=120, pool_size=None, model=None, threads=1, namespace="x",
+              graph=None, per_query=False, allow_reranked_baseline=False,
+              out=None, rerank=False, rerank_pool=None, rerank_model=None,
+              rerank_threads=1, lexical_baseline=None, population="auto")
+    ns.update(over)
+    return type("NS", (), ns)()
+
+
+def test_an_armed_read_gate_refuses_the_run(tool_mod, monkeypatch, capsys):
+    """This instrument's "before" must really be the fused order.
+
+    With ``TORTOISE_FUSED_RERANK`` armed the read reranks the pool first, so every
+    arm's "before" is a rerank and the cells report ``gained 0 / lost 0`` — a false
+    zero indistinguishable from a real one, on the instrument that produced the
+    artifacts this PR cites. Its sibling (``rerank_calibration_12297``) has refused
+    this since the round that added the gate; this one did not, which is the
+    asymmetry this pins.
+
+    ⛔ THE STDERR ASSERTION IS THE DISCRIMINATING HALF: the store refusal also exits
+    3, and this test unsets the URI, so an exit-code-only assertion passes with the
+    gate refusal deleted.
+    """
+    monkeypatch.setenv("TORTOISE_FUSED_RERANK", "1")
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    assert tool_mod.run(_run_ns()) == 3
+    err = capsys.readouterr().err
+    assert "TORTOISE_FUSED_RERANK" in err
+    assert "TORTOISE_DB_URI" not in err      # the gate fired, not the store
+
+
+def test_an_armed_gate_is_measurable_only_when_asked_for(
+        tool_mod, monkeypatch, capsys):
+    """``--allow-reranked-baseline`` opts in deliberately; the refusal that fires
+    then is the STORE one, which is how this test tells the two apart without a DB."""
+    monkeypatch.setenv("TORTOISE_FUSED_RERANK", "1")
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    assert tool_mod.run(_run_ns(allow_reranked_baseline=True)) == 3
+    assert "TORTOISE_DB_URI" in capsys.readouterr().err
+
+
 def test_the_artifacts_ceiling_note_is_the_one_the_tool_emits(lexical, tool_mod):
     """The artifact's ceiling_note must be REPRODUCIBLE by the tool that writes it.
 
@@ -1509,6 +1552,23 @@ def test_the_control_arms_are_not_labelled_with_the_models_cost_story(lexical):
             f"{note!r}")
     assert "torch sigmoid" in lexical["arms"]["rerank"]["latency"]["note"], (
         "the cross-encoder arm's note lost the cost it actually pays")
+
+
+def test_the_brief_does_not_still_call_the_control_unrun():
+    """§8 is the control's RUN; §4 must not tell a reader it was never run.
+
+    §4 is the section the brief labels "read before quoting §3", and it said a
+    token-overlap baseline "would likely reproduce much of this gain — and that
+    control was **not run here** (see §7)" three correction passes after §8 was
+    written as its result. A reader obeying the document's own instruction
+    concluded the decisive experiment did not exist, which is the inverse of the
+    PR's headline. Unpinned is why it survived; this is the pin.
+    """
+    text = _squash(RERANK_BRIEF.read_text())
+    assert "not run here" not in text, (
+        "the brief still says the lexical control was not run — §8 is its run")
+    assert "that control was run" in text, (
+        "the brief's §4 no longer points at the control that WAS run (see §8)")
 
 
 def test_the_briefs_lexical_section_recomputes_from_the_artifact(lexical):

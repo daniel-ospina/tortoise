@@ -179,8 +179,10 @@ So the correct reading is:
 - ⚠️ **IT IS NOT EVIDENCE THAT ms-marco TRANSFERS SEMANTICALLY TO ENTITY
   NAMES.** The task it is actually winning is *name matching*, which needs no
   domain knowledge and therefore transfers trivially. A pure token-overlap
-  baseline would likely reproduce much of this gain — and that control was
-  **not run here** (see §7).
+  baseline would likely reproduce much of this gain — **and it does: that
+  control was run, and §8 is its result** (identical recall, equal-or-better
+  nDCG, ~1,000× cheaper). So the semantic claim is bounded to nothing here, and
+  this section's warning is now a measured finding rather than a suspicion.
 - ⚠️ **IT SAYS NOTHING ABOUT USER SEARCH**, where the query is a passage span and
   the documents are captured turns — a genuinely different and harder task.
   That is §5, and it is where the model's actual training distribution lives.
@@ -370,9 +372,13 @@ noun-path note above should be read as "this lever is worth turning on" **not** 
 
 §Residuals-1 named this the decisive missing experiment and said a follow-up should
 run it first. It has now been run, over **the same pools in the same process**:
-one `--rerank --lexical-baseline both` invocation emits the cross-encoder arm and
-both lexical arms from a single fused read, so the comparison is counterfactual
-rather than merely adjacent — same mentions, same pool, same cut, same tie-break.
+one `--rerank --lexical-baseline both` invocation runs the cross-encoder arm and
+both lexical arms over the same deterministic fused read, so the comparison is
+counterfactual rather than merely adjacent — same mentions, same pool, same cut,
+same tie-break. ⛔ Each arm RE-DERIVES that read (the tool shares no capture), and
+the evidence that the baselines really are the same pools is in the artifact:
+`recall_3_before` is **244** in all three arms at pool 15 and **244** in all three
+at pool 40, against `recall_3_after` of 277 / 277 / 277 and 300 / 300 / 300.
 
 `LexicalScorer` implements the cross-encoder's own `score(query, contents)`
 interface, so **only the scorer changes**. Two declared, untuned modes:
