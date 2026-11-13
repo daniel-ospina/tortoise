@@ -493,6 +493,12 @@ _DIRECTIONAL = frozenset({
     "larger", "smaller", "largest", "smallest", "higher", "lower", "holds",
     "breaks", "constant", "variable", "find", "miss", "above", "below", "still",
     "never", "shipped",
+    # ⛔ The INFLECTED forms the documents actually use, and the arithmetic verb
+    # (round-24 reviewer, cycle 9): `find`/`miss` never match the prose's `found`/
+    # `missed`, so an entry that cannot fire is the same false-pass shape as a
+    # missing entry — the file already recorded this defect once for `m3-000014`.
+    "found", "missed", "sum",
+    "+", "\u2212",
     "==", "!=", ">=", "<=", "<", ">", "\u2192", "\u00d7", "\u00f7", "\u00b1",
     "\u2248",
 })
@@ -501,8 +507,13 @@ _DIRECTIONAL = frozenset({
 # would never fire otherwise. `/` is deliberately NOT in the alternation: it is the
 # "of" separator in these documents' `180 / 90 / 30` lists, so a site that pins one
 # names it in `free` explicitly rather than every list-triple being refused.
+# ⛔ The arithmetic operators are matched only when they are NOT the sign of a
+# number: `62.3 + 2.2` is an operator, `+1.33 pts` is a signed value (and its sign
+# belongs to `_SIGNED_NUMBER`). A `[+−]` alternative without those lookarounds
+# would flag every signed value in the file (round-24 reviewer, cycle 9).
 _WORD_OR_OPERATOR = re.compile(
-    r"[A-Za-z][A-Za-z'\-]*|[<>=!]=?|\u2192|\u00d7|\u00f7|\u00b1|\u2248")
+    r"[A-Za-z][A-Za-z'\-]*|[<>=!]=?|\u2192|\u00d7|\u00f7|\u00b1|\u2248"
+    r"|(?<!\d)[+\u2212](?!\d)")
 
 
 def _strip_free(text: str, free: tuple[str, ...]) -> str:
@@ -720,6 +731,17 @@ def _only_claim(scope: str, true: str, where: str,
     # This is the check that would have caught the case-sensitivity split above
     # (#12349 round-24 reviewer, cycle 8).
     for entry in free:
+        # ⛔ For an ALTERNATION, at least ONE arm must occur: `free=("find|miss",)`
+        # is inert on prose that says `found`, and an inert declaration is the
+        # same false pass as a missing one (round-24 reviewer, cycle 9).
+        if "|" in entry and not any(
+                re.search(r"(?<![A-Za-z0-9_])" + re.escape(arm)
+                          + r"(?![A-Za-z0-9_])", true, re.I)
+                for arm in entry.split("|")):
+            raise AssertionError(
+                f"{where} declares `free={entry!r}` but NO arm of it occurs in "
+                f"the claim {true!r} — an inert declaration leaves the word "
+                "LITERAL in the shape, so the pin silently stops seeing it")
         if "|" in entry:
             continue
         if not re.search(r"(?<![A-Za-z0-9_])" + re.escape(entry)
@@ -2247,7 +2269,8 @@ def test_brief_census_and_identifier_decomposition_are_the_artifact(
     _only_claim(section33,
                 f"found by the **shipped** leg **{sh} of {len(hashed)}**",
                 "§3.3's `#n` recall cell",
-                values=(str(sh), str(len(hashed))), free=("shipped",))
+                values=(str(sh), str(len(hashed))),
+                free=("shipped", "found"))
     want = (f"the {len(snake)} `snake_case` names: {sn_sh} of {len(snake)} "
             f"({sn_sh / len(snake):.3f}) shipped → {sn_fx} of {len(snake)} "
             f"({sn_fx / len(snake):.3f}) with the in-place fix, "
@@ -2357,7 +2380,7 @@ def test_changelog_does_not_restate_superseded_numbers(artifact, population,
         # ⛔ `values` is what makes the falsified copy MATCH the shape: without it
         # the shape is the literal sentence and a plant beside it went green
         # (measured: P3 GREEN on the first cut of this round).
-        values=(str(a), str(b)), free=("shipped",))
+        values=(str(a), str(b)), free=("shipped", "found"))
 
 
 # ── 6. the two things a re-run would otherwise decide wrongly ───────────────
@@ -2586,7 +2609,10 @@ def test_brief_production_estimate_rederives_from_the_per_class_cells(
                 f"({definite} + {hashed} + {token_share:.1f})",
                 "§4.3's published share total",
                 values=(f"{total:.1f}", f"{definite}", f"{hashed}",
-                        f"{token_share:.1f}"), free=("above|below",))
+                        f"{token_share:.1f}"),
+                # ⛔ The ARITHMETIC is the claim's content (round-24 reviewer,
+                # cycle 9): `+` → `−` and `sum` → `average` both planted green.
+                free=("above|below", "+", "sum"))
     _only_claim(_s43, f"i.e. **{100 - total:.1f} %**",
                 "§4.3's published remainder",
                 values=(f"{100 - total:.1f}",))
@@ -2759,8 +2785,10 @@ def test_brief_reading_two_bullets_are_the_artifact(artifact, brief: str) -> Non
         # ⛔ `inside` is the claim's direction (`inside` → `outside`) and
         # `differently` is its point (`rank differently` → `identically`) —
         # both planted green when left literal (round-24 reviewer, cycles 4-5).
+        # ⛔ `find|miss` was INERT on this sentence's `found` (round-24 reviewer,
+        # cycle 9 — the same defect the file recorded once for `m3-000014`).
         free=("inside", "differently", "both", "largest|smallest",
-              "find|miss", "\u2192"))
+              "find|found|miss|missed", "\u2192"))
 
     _only_claim(
         plain,
