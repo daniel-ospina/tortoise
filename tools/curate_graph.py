@@ -493,6 +493,14 @@ class MCPReader:
                        "layer read is unreconciled (it is still the read's rows, not a count)")
         out: list[C.Row] = []
         for r in raw:
+            if not isinstance(r, dict):
+                # `_is_row_listing` accepts any list, so shape drift here would otherwise
+                # surface as an AttributeError on `.get` (rc 1 traceback) instead of this
+                # module's designed refusal — the same guard `graphs()` and
+                # `read_sources` already apply to their rows.
+                raise C.CurationRefused(
+                    f"an operator row arrived as {type(r).__name__}, not an object — "
+                    "refusing the layer rather than guessing which field carries its id")
             node_id = str(r.get("id") or "")
             if not node_id:
                 raise C.CurationRefused(
@@ -659,16 +667,22 @@ OPERATOR_READ_CEILING = 10_000
 
 def cmd_inventory(args: argparse.Namespace) -> int:
     reader = MCPReader(_live_call_tool, args.graph)
-    counts = reader.counts()
-    structure = reader.structure()
-    graphs = reader.graphs()
-    points, total = reader.read_points(page=args.page, verify=args.verify_read)
-    sources, source_total = reader.read_sources()
-    # ⛔ The reasoning layer: readable, and omitted from every census before this
-    # change. `structure` is handed over so the read reconciles against its count, and
-    # a refusal here is the DESIGNED kind (rc 3), not a crash: it says two surfaces
-    # disagree about one population, or that the layer cannot be read whole.
+    # ⛔ ONE handler for EVERY census read, and the SAME one `plan` has. The refusal type
+    # also covers a tool payload that answered with an error (`normalise_tool_result`
+    # raises `CurationRefused` for an `is_error` result), and a driver must not see
+    # `inventory` exit 1 for the very failure `plan` reports as a designed rc 3 — two
+    # codes for one failure was the round-3 finding, and the fix is agreement, not a
+    # second vocabulary.
     try:
+        counts = reader.counts()
+        structure = reader.structure()
+        graphs = reader.graphs()
+        points, total = reader.read_points(page=args.page, verify=args.verify_read)
+        sources, source_total = reader.read_sources()
+        # ⛔ The reasoning layer: readable, and omitted from every census before this
+        # change. `structure` is handed over so the read reconciles against its count, and
+        # a refusal here is the DESIGNED kind (rc 3), not a crash: it says two surfaces
+        # disagree about one population, or that the layer cannot be read whole.
         operators, operators_reported = reader.read_operators(structure)
     except C.CurationRefused as exc:
         print(f"REFUSED: {exc}", file=sys.stderr)
@@ -843,11 +857,12 @@ def cmd_plan(args: argparse.Namespace) -> int:
         # scope, so a failure there is the same census class.
         graphs = reader.graphs()
     except C.CurationRefused as exc:
-        # A DESIGNED refusal of the operator layer (two surfaces disagreeing about one
-        # population, or a layer that cannot be read whole) — rc 3, like every other
-        # refusal this tool reports, not the unhandled-failure rc 1. Disarmed keeps the
-        # round-22 contract: nothing was going to be written, so it is still exit 0 and
-        # the refusal travels on the artifact.
+        # A DESIGNED refusal of ANY census read — the operator layer (two surfaces
+        # disagreeing about one population, or a layer that cannot be read whole), or a
+        # read whose payload came back as a tool error. rc 3, like every other refusal
+        # this tool reports (`cmd_inventory` shares this answer), not the
+        # unhandled-failure rc 1. Disarmed keeps the round-22 contract: nothing was going
+        # to be written, so it is still exit 0 and the refusal travels on the artifact.
         if not disarmed:
             print(f"REFUSED: {exc}", file=sys.stderr)
             return 3

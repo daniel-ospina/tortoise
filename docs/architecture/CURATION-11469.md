@@ -160,6 +160,15 @@ silent short census — and its message names all three candidate causes so the 
 attributed instead of re-derived. Equality held on `live-v4` on 2026-11-13 (3,727 = 3,727), which
 is what the numbers here rest on.
 
+⚠️ **The refusal has no override, on purpose, and its cost should be stated:** one terminal
+(`outdated`) operator, or one legacy `op_type`-only operator, blocks the WHOLE census — including
+the 127-row carry set that has nothing to do with the reasoning layer. The legacy cause at least
+names its remedy (`graph-scripts/backfill_is_operator.py`); the terminal cause names none, because
+the honest remedy is a decision about whether a superseded operator belongs in the curated graph —
+not a flag. That is acceptable only because this pass writes nothing yet: an operator who hits it
+can read the message, fix the layer, or take the decision, and no data is written while the census
+is refused.
+
 | property | mechanism | test |
 |---|---|---|
 | the old graph is only read | the module has no destructive call at all; the reader exposes no write verb. The property is the WRITER's verb list — a bundle-text grep for "delete" cannot observe a destructive call | `test_writer_protocol_declares_no_destructive_verb` (property), `test_bundle_carries_no_deletion` (supplement) |
@@ -207,7 +216,7 @@ Environment: `TORTOISE_MCP_URL` + `TORTOISE_MCP_API_KEY`; `TORTOISE_CURATE_OFF=1
 | **0** | the run did what was asked: `inventory`, a dry `plan`, an operator-DISARMED run (the off-switch, asked for on purpose), an apply that completed, or an apply that owed the target nothing (idempotent re-run) |
 | **2** | a USAGE error, decided before any read: `--page-size 0`, `--apply` without `--graph`, `inventory` given a `plan`-only flag |
 | **3** | a real failure: the identity guard refused (never an in-place write), the target refused the write, the off-switch flipped mid-run, or any stop/refusal/no-op — reached before OR after the first batch |
-| **1** | ⚠️ **not part of the designed contract** — an UNHANDLED failure. A read the surface refuses raises out of `MCPReader`'s section gate (`_checked`, `read_points`) before any handler, so `inventory` and `plan` exit 1 with a traceback. A driver should treat 1 as "the run crashed" and 3 as the designed failure rc |
+| **1** | ⚠️ **not part of the designed contract** — an UNHANDLED failure: anything that is not a `CurationRefused` escapes as a traceback in BOTH verbs. `CurationRefused` itself is the designed refusal — it covers this harness's own guards AND an MCP error result (`normalise_tool_result` raises it for an `is_error` payload), and both verbs answer it with **3** and a `REFUSED:` line (`plan` with `--off` answers 0 and carries the refusal on the artifact). A driver should treat 1 as "the run crashed" and 3 as the designed failure rc |
 
 In the JSON report, `run.applied` follows what the target ACCEPTED: `true` means the apply leg
 landed (or there was nothing left to write), `false` with `run.refused` **or** `run.stopped` set
@@ -261,9 +270,12 @@ fresh HTTP session per call (by design — the credential is resolved per reques
 verification pass** (the second full walk plus the two page re-reads), which is the number to
 schedule against: the hosted endpoint can answer `429 Too Many Requests` part-way. The run then fails loudly rather than reporting a partial census (the reader raises), and
 nothing is written — but a production run should be scheduled rather than fired in parallel with a
-busy fleet. **+1 call since 2026-11-13:** the operator layer is read in a single
+busy fleet. A 429 arriving as an MCP error result is a `CurationRefused` ⇒ **rc 3** with the reason on stderr (see the exit-code table); a DB fault or a timeout that is not shaped as a refusal raises ⇒ rc 1.
+**+1 call since 2026-11-13 for `inventory`, +2 for `plan`:** the operator layer is read in a single
 `tortoise_search(entity_type="operator")` call that returns all 3,727 rows at once (measured 1m57s for
-a full `inventory --no-verify-read` over 15,842 points + 3,727 operators + 1,578 sources).
+a full `inventory --no-verify-read` over 15,842 points + 3,727 operators + 1,578 sources), and `plan`
+additionally reads `graph_overview(section="structure")` — the count it reconciles against — which
+`inventory` was already reading (~70 calls for a default `plan`, ~34 for `inventory --no-verify-read`).
 
 ## Why this pass has not written anything yet (three blockers, all measured)
 

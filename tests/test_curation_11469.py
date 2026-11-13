@@ -3381,6 +3381,10 @@ def test_a_disarmed_plan_over_a_refused_operator_layer_still_exits_zero(
     assert payload["census"] is None, payload
     assert payload["census_measured"] is False
     assert "structure.operators" in (payload["disarmed_reason"] or "")
+    # ⛔ A `CurationRefused` IS a read that failed, and the sibling arm sets this field for
+    # exactly that — a driver switching on `read_failure` to answer "did the read fail?"
+    # must not get null on one read-failure arm and a message on the other (round-3).
+    assert "structure.operators" in (payload["read_failure"] or ""), payload
 
 
 def test_a_quota_envelope_on_the_operator_read_does_not_re_read_another_graph():
@@ -3491,3 +3495,77 @@ def test_a_graph_refusal_raised_as_an_exception_retries_without_the_argument():
     assert len(calls) == 2, calls
     assert "graph" in calls[0] and "graph" not in calls[1], calls
     assert reader.note is not None and "refused" in reader.note, reader.note
+
+
+def test_an_unreported_count_over_a_non_empty_operator_read_is_accepted_and_noted(
+        monkeypatch, tmp_path):
+    """The DOWNGRADE arm: rows without a count are still the read's rows, and it says so.
+
+    Round-3 review measured this arm unpinned in both halves — deleting the note left
+    every test green, and flipping the zero-row guard to `if reported is None:` (always
+    refuse) failed only a message-grep in the at-limit case. The claim is in
+    `read_operators`' docstring and in the doc, so it needs a positive pin: a non-empty
+    read with no `structure.operators` succeeds, reports `None` for the count, and names
+    the lost cross-check in `read_note`.
+    """
+    mod = _tool_module()
+    monkeypatch.setattr(mod, "_live_call_tool",
+                        _operator_surface(operators=OPERATOR_ROWS, reported=None))
+    rc = mod.main(["inventory", "--graph", "org_x_g_old", "--no-verify-read",
+                   "--out", str(tmp_path / "i.json")])
+    assert rc == 0, rc
+    payload = json.loads((tmp_path / "i.json").read_text())
+    assert payload["operators_read"] == len(OPERATOR_ROWS), payload["operators_read"]
+    assert payload["operators_total_reported"] is None, payload
+    assert payload["census"]["total_rows"] > len(OPERATOR_ROWS)
+    assert "no `operators` count" in (payload["read_note"] or ""), payload["read_note"]
+    assert "unreconciled" in (payload["read_note"] or "")
+
+
+def test_an_operator_row_that_is_not_an_object_is_refused_not_a_traceback(
+        monkeypatch, capsys, tmp_path):
+    """Shape drift at the ROW level gets the designed refusal, not an AttributeError.
+
+    `_is_row_listing` accepts any list, so a junk element would reach `.get` and raise
+    (`rc 1` traceback) instead of `rc 3` — the guard `graphs()` and `read_sources` already
+    apply to their own rows (round-3 review).
+    """
+    mod = _tool_module()
+    rows = [*OPERATOR_ROWS, "junk"]
+    monkeypatch.setattr(mod, "_live_call_tool",
+                        _operator_surface(operators=rows, reported=len(rows)))
+    rc = mod.main(["inventory", "--graph", "org_x_g_old", "--no-verify-read",
+                   "--out", str(tmp_path / "i.json")])
+    assert rc == 3, (rc, capsys.readouterr())
+    assert "not an object" in capsys.readouterr().err
+
+
+def test_inventory_and_plan_answer_the_same_exit_code_for_a_surface_fault(
+        monkeypatch, capsys, tmp_path):
+    """One failure, one code — for BOTH verbs.
+
+    Round-3 measured `plan` returning 3 for a 429 on the first read while `inventory`
+    raised (rc 1) for the identical failure, because only `plan` wrapped every read.
+    `CurationRefused` also covers a tool payload that answered with an error, so both
+    verbs must report it as the designed refusal (rc 3).
+    """
+    mod = _tool_module()
+
+    def call(name, args):
+        # An MCP ERROR RESULT (the surface's own "this call failed" shape) — the case
+        # `normalise_tool_result` turns into `CurationRefused`. A plain `{"error": ...}`
+        # dict is a different path (the reader raises `RuntimeError`), and it is not the
+        # divergence under test.
+        if (args or {}).get("section") == "status":
+            return RealCallToolResult({"error": "429 Too Many Requests"}, is_error=True)
+        return {"result": []}
+
+    monkeypatch.setattr(mod, "_live_call_tool", call)
+    inv = mod.main(["inventory", "--graph", "org_x_g_old", "--no-verify-read",
+                    "--out", str(tmp_path / "i.json")])
+    assert inv == 3, (inv, capsys.readouterr())
+    assert "REFUSED" in capsys.readouterr().err
+    plan = mod.main(["plan", "--graph", "org_x_g_old", "--target", "org_x_g_new",
+                     "--no-verify-read", "--ledger", str(tmp_path / "l.jsonl"),
+                     "--out", str(tmp_path / "p.json")])
+    assert plan == inv, (plan, inv)
