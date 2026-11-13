@@ -2236,6 +2236,14 @@ surfaces:
   core:
   - test_12296_entity_verdict.py
   - test_12364_mcp_list_return_annotations.py
+  # #12322 (PR #12338): the read a judgement is computed FROM. `latest_readings`
+  # lives in `tortoise/goal_judgement.py`, which matches NO `SOURCE_PATTERNS`
+  # entry, so a goal_judgement-only diff falls through to this `core` fallback
+  # (measured: `select(['tortoise/goal_judgement.py'])` → ['core'], and the file
+  # is in that selection's `test_files`). `select()` REPLACES the fallback on a
+  # named match — measured: a `tortoise/sdk.py`-only diff selects `core` too but
+  # does not reach this file — so a narrower `ep`/`sdk` registration would run on
+  # none of the diffs that can break it. Keep it here.
   - test_12322_latest_readings_order.py
   - test_candidate_recall_11901.py
   # #12294: the ported predicate and the falsification that declined it. `core`
