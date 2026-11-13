@@ -8312,8 +8312,10 @@ def test_a_duplicate_literal_key_in_the_census_dicts_cannot_land_silently():
 #: cannot: a red that no marker can defuse, one that runs in the pytest shard without
 #: depending on the lint step's selection, and one whose RED arm is provable by a test
 #: — so it is a COMPLEMENT to lint, never a replacement. ⛔ That step must stay
-#: rule-SCOPED: a repo-wide `--ignore-noqa` would un-baseline the 242 per-line `noqa`
-#: markers `#1685` recorded, i.e. it would reverse that decision — do not propose it.
+#: rule-SCOPED: a repo-wide `--ignore-noqa` would un-baseline the WHOLE suppression
+#: baseline — measured on the tree this note was written on, **4,452** suppressed
+#: findings (the 242 markers `#1685` added on 2026-08-25 are where it started, not the
+#: size it reached) — i.e. it would reverse that decision. Do not propose it.
 #:
 #: (⛔ Neither sentence above spells the suppressive marker prefix itself: a comment
 #: whose text contains that prefix followed by the word `noqa` is PARSED by ruff as a
@@ -8537,7 +8539,13 @@ def _scan_declaration_roots(root: Path) -> tuple[list[str], dict[str, int]]:
                     violations.append(
                         f"{rel}:{duplicate} re-declares key {key} (first at :{first})")
             except SyntaxError as exc:  # name the file, never `<unknown>`
-                violations.append(f"{rel}: UNPARSEABLE ({exc.msg} at line {exc.lineno}), not scanned")
+                # `lineno` is None for a NUL byte and for a decode-level failure, so an
+                # unconditional render prints "at line None" — a located-LOOKING defect
+                # with no location, which is the misattribution this message exists to
+                # prevent, one field down. `?` says "unknown" instead of "here".
+                where = exc.lineno if exc.lineno is not None else "?"
+                violations.append(
+                    f"{rel}: UNPARSEABLE ({exc.msg} at line {where}), not scanned")
         per_root[name] = scanned_here
     return violations, per_root
 
@@ -8614,12 +8622,16 @@ def test_the_scan_REPORTS_a_duplicate_it_finds(tmp_path):
     # is a FALSE GREEN (the file is counted as scanned, contributes no violation, and
     # satisfies the per-root floor).
     (tmp_path / "tools" / "binary.py").write_bytes(b"\xff\xfe\n")
+    # …nor may a PARSE failure that carries no line number read as a LOCATED defect: a NUL
+    # byte raises a `SyntaxError` whose `lineno` is None, so an unconditional render
+    # prints "at line None" — a defect that points at a location it does not have.
+    (tmp_path / "tools" / "nul.py").write_bytes(b"D = {}\x00\n")
 
     violations, per_root = _scan_declaration_roots(tmp_path)
 
     # `binary.py` still counts as SCANNED (the counter runs before the read), which is
     # exactly why the report — not the count — is what has to name it.
-    assert per_root == {"tortoise": 1, "tools": 2, "tests": 1}, per_root
+    assert per_root == {"tortoise": 1, "tools": 3, "tests": 1}, per_root
     # The key is rendered with `repr`, so `1` and `'1'` stay distinguishable in the
     # report — the whole reason that spelling was chosen over `str(value)`.
     assert any(
@@ -8629,6 +8641,13 @@ def test_the_scan_REPORTS_a_duplicate_it_finds(tmp_path):
     assert any(
         v.startswith("tools/binary.py: UNREADABLE (UnicodeDecodeError)") for v in violations
     ), violations
+    # ⛔ A parse failure with no line number must say UNKNOWN, never `None`: a NUL byte's
+    # `SyntaxError.lineno` is None, and "at line None" reads as a location that is not
+    # there — the same misattribution, one field down (#12265 round 4).
+    assert any(
+        v.startswith("tools/nul.py: UNPARSEABLE") and "at line ?" in v for v in violations
+    ), violations
+    assert not any("at line None" in v for v in violations), violations
     # …and the clean module contributes nothing: the report is specific, not a roll-up.
     assert not any("clean.py" in v for v in violations), violations
     # ⛔ And the guard's OWN message — the one `test_no_module_declares_the_same_dict_key_twice`
