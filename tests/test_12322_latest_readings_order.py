@@ -487,7 +487,9 @@ def test_a_truncated_page_set_raises_instead_of_answering_from_survivors(
     """A server-side cap below the page size truncates EVERY page, and the rows it
     costs are ARBITRARY BY INSTANT — pages ascend by ``id(e)``, which is creation
     order only while nothing has been deleted (the engine REUSES a freed node id;
-    measured on a lane: ids 2,3,4 for A,B,C, delete B, create D ⇒ D holds id 3),
+    measured on a FRESH lane graph: A, B, C take ids 0, 1, 2, and after deleting
+    B a newly created D takes id 1 — the ids are relative to what the graph
+    already held, only the REUSE is the point),
     and a backfilled row can be instant-OLD while landing last. So continuing
     would compute the state from an incomplete set — the defect #12322 removes
     arriving through the read's own transport (#4515).
