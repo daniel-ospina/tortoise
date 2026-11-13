@@ -3536,7 +3536,11 @@ def test_no_site_spells_the_workflow_glob_one_sidedly():
         would have to guess which directories hold workflows, and every guess it got wrong in
         review (`glob.glob(str(WORKFLOWS) + "/*.yml")`, whose receiver is the stdlib module and
         whose argument merely MENTIONS the directory) was a fail-open. The module has no such
-        glob today; if one is ever needed, declare it here rather than widening the filter.
+        glob today. ⛔ If one is ever needed, a note HERE does NOT clear the red — nothing reads
+        this docstring. The red is cleared only in code: teach the grading loop below the
+        exemption for that shape (record why at the site), or restructure the loader so it does
+        not spell an extension-class glob. Measured (review round 15): adding the declaration to
+        this list and re-running left the identical red.
         ⛔ EXCEPT a pattern with NO wildcard: `cfg.glob("main.yml")` is a SINGLE-FILE reference,
         not an extension-class enumeration, so it stays CLEAN (`_glob_matches` and
         `_spells_one_extension` both require a wildcard, measured), while `cfg.glob(
@@ -3589,11 +3593,14 @@ def test_no_site_spells_the_workflow_glob_one_sidedly():
         for label in _one_sided_workflow_pattern_constants(yml_names, yaml_names)
     ]
     assert not one_sided, (
-        f"this module enumerates workflows one-sidedly at {len(one_sided)} site(s): {one_sided}. "
-        "A glob for only one extension silently skips workflows in the other, which GitHub also "
-        "RUNS (#12238). Use `_workflow_paths()`. If this glob is not a WORKFLOW enumeration "
-        "(a config or fixture loader), do not widen the filter: add it to this test's SCOPE "
-        "list, which is where the module declares its reach."
+        f"this module spells an EXTENSION-CLASS glob one-sidedly at {len(one_sided)} site(s): "
+        f"{one_sided}. For a WORKFLOW enumeration that is the #12238 defect: one extension "
+        "opens, the other is silently skipped although GitHub RUNS both — use "
+        "`_workflow_paths()`. For any OTHER loader (a config or fixture path) this is a "
+        "declared over-block by choice, and a note in this test's SCOPE docstring will NOT "
+        "clear it: nothing reads that prose. Clear it in code — teach the loop above the "
+        "exemption for that shape with its reason at the site, or stop spelling an "
+        "extension-class glob there."
     )
     # ORDER-INSENSITIVE: `_workflow_paths()` sorts, so the tuple's order carries no meaning and
     # asserting the order would red a semantically identical swap with a message blaming the
