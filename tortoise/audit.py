@@ -2055,9 +2055,18 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                    "re-point would keep the same inert connection, because a neutral "
                    "edge transfers no confidence in either direction"
                    if neutral else
-                   f"re-point the "
-                   f"{'edge' if not s['is_operator'] else 'input'} onto it and "
-                   f"delete the edge into {q}")
+                   # ⛔ On a NEITHER-arm row a bare re-point moves nothing: the
+                   # endpoint is in neither EP arm, so the shape has to be cleared in
+                   # the SAME instruction. Measured: follow the bare re-point and the
+                   # row goes QUIET over ``confidences {}``; adding the shape call
+                   # restores it (``effective_n 2.5255``). The resolvable neither-arm
+                   # arm already states this order — this one did not, then denied
+                   # the re-point three clauses later (#12210 review, P2).
+                   (f"{_shape_repair} AND re-point the edge onto it, then delete the "
+                    f"edge into {q}" if (s["shape"] and not s["is_operator"]) else
+                    f"re-point the "
+                    f"{'edge' if not s['is_operator'] else 'input'} onto it and "
+                    f"delete the edge into {q}"))
                 + ". If a Subject or Point carries that name, "
                 + ("delete the edge and wire the support through a node EP reads, "
                    "not by re-attaching it" if neutral else
@@ -2080,10 +2089,11 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 # EP arm, so "write the equivalent edge" (the direct-edge sentence)
                 # changes nothing and a re-audit reads CLEAN over a claim whose
                 # support was never there.
-                fix += ("; and no edge rewrite ALONE repairs this — EP builds NO factor "
-                        "in EITHER arm (the operator arm needs the :Point LABEL and "
-                        "(``is_operator = true`` or an ``op_type``), the "
-                        "direct-edge arm refuses an operator-shaped endpoint). "
+                fix += ("; and no edge rewrite ALONE repairs this — EP builds NO "
+                        "factor in EITHER arm (the operator arm needs the :Point "
+                        "LABEL and (``is_operator = true`` or an ``op_type``), the "
+                        "direct-edge arm refuses an operator-shaped endpoint), which "
+                        "is why the shape call above is part of the instruction. "
                         "Clearing the shape is NOT sufficient on its own — this edge "
                         "still ends at the superseded Object, so what restores the "
                         f"support is the wiring, not the flag: {_shape_repair} AND "
