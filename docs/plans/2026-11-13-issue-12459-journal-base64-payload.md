@@ -14,7 +14,7 @@ related:
   - issue: 11821
     note: "The three-phase spec this note takes P2 from; P0 landed in #11835."
   - issue: 12458
-    note: "P1 — the blocking predecessor. Implementation is blocked on it landing and being measured."
+    note: "P1 — closed NOT_PLANNED 2026-11-13T19:16Z (its 32,032 B/session premise is dead and the change was classified a REVERSAL). The #11821 sequencing gate that named it is now unsatisfiable as written and must be re-stated by #11821's owner; until then implementation stays blocked."
   - issue: 5004
     note: "Round-7: a caller-owned vector keeps its RAW form. The constraint that stops a single uniform encoding."
   - issue: 11886
@@ -27,7 +27,7 @@ related:
 landed by this document.**
 **Complexity:** Standard (a format change on the durability artifact; the risk is on the rebuild path, not
 the append path)
-**Issue:** #12459 · **spec:** #11821 · **P0 (landed):** #11835 · **blocking predecessor:** #12458 (P1)
+**Issue:** #12459 · **spec:** #11821 · **P0 (landed):** #11835 · **blocking predecessor:** #12458 (P1) — **closed `NOT_PLANNED`**; see §5
 **Evidence + probe:** `docs/evidence/12459-base64-payload/`
 
 ---
@@ -75,16 +75,19 @@ how a repairable gap becomes a permanent one.
   **corruption detection all six are the same**: none carries an intrinsic checksum, so a *validly
   altered* payload decodes silently under every one of them — which is why §2.2's refusals are structural
   (count, version, alphabet) and why this note does **not** claim integrity from the encoding. Recorded
-  in-repo too: `STORAGE-ARCHITECTURE.md` §5.2 — base64 is **~4× smaller than the float64 decimal text**
-  (8,414 → 2,048) and **~5× smaller than the raw 4 B/float** (8,414 → 1,536); those are two different
-  comparisons and the note keeps them apart (§1.4).
+  in-repo too: `STORAGE-ARCHITECTURE.md` §5.2 reads *"~4× more than base64 of the same information as the
+  float32 the graph itself stores (2,048 B for a 384-d vector, against 8,414 B of decimal text)"* — so
+  base64 is **4.11× smaller than the float64 decimal text** (8,414 → 2,048) and **5.48× smaller than the
+  raw 4 B/float** (8,414 → 1,536). Those are two different comparisons and §1.4 keeps them apart.
 - **(b) shortest-round-trip printing.** The formal bound is `⌈1 + p·log₁₀2⌉` with `p = 24` significand
   bits ⇒ `⌈8.22⌉ = **9**`: for every finite binary32 value there is a ≤9-digit decimal that correctly
   rounds back to **exactly** it, and "round-trips" means `R₃₂(P(x)) = x` — equality of sign, exponent and
   significand, not closeness. It is a **sufficient worst case, not a per-value cost**, which is exactly
   why P0's text measures **12.2 chars/float** and not 9. Ryu/Grisu exist to find the *shortest* such
-  numeral rather than a fixed 9. Checked here as well as cited — §2.3's 2,000,000-value sweep
-  (`%.9g` exact 2,000,000/2,000,000; `%.8g` misses 10,758; `%.7g` misses 1,336,573).
+  numeral rather than a fixed 9. The bound is the cited argument; §2.3's sweep is a falsification attempt
+  on a **narrow population** — 2,000,000 standard-normal draws cast to float32, which contains no
+  subnormals and no wide exponent band — and it did not falsify it there (`%.9g` exact
+  2,000,000/2,000,000; `%.8g` misses 10,758; `%.7g` misses 1,336,573).
 - **(c) versioned formats on a replay path.** The convergent pattern is **both layers**: a stable
   container header for framing, and a **per-record/per-batch version discriminator read *before* the
   payload is interpreted**, plus length-delimited records so an old reader can skip what it cannot decode,
@@ -212,8 +215,8 @@ P2 journal   1,000,000 × 2,798 B = 2.798 GB  ≈ $0.35/mo      (saves 2.625 GB 
 pre-P0       1,000,000 × 9,176 B = 9.176 GB  ≈ $1.15/mo
 ```
 
-#11821's *"Effect on the unbounded line"* cost line said **"~4.7 GB ≈ $0.59 (P0) → ~2.1 GB ≈ $0.26
-(P2)"**. Measured, it is
+#11821's *"Effect on the unbounded line"* paragraph reads **"8.5 GB ≈ $1.06/mo → ~4.7 GB ≈ $0.59 (P0) →
+~2.1 GB ≈ $0.26 (P2)"**, and the figure under test is the **P0 → P2** leg of it. Measured, it is
 **5.42 GB ≈ $0.68 → 2.80 GB ≈ $0.35**, and the difference is **arithmetic that can be reproduced**, not a
 different basis:
 
@@ -298,8 +301,9 @@ in `measurement.txt`):
 `b64decode` **refuses** a cut that is not a multiple of 4 characters (`Incorrect padding`, or *"cannot be 1
 more than a multiple of 4"*) — so the danger is not a partial quantum. It is the **aligned** cut: 4 base64
 characters are 3 whole bytes, so a body shortened by a multiple of 4 characters is still **valid** base64
-and decodes silently to fewer bytes. Since `3k ≡ 0 (mod 4)` iff `k ≡ 0 (mod 4)`, only every fourth such cut
-leaves a length that is a multiple of the 4-byte element — and at **−16 characters** that is exactly the
+and decodes silently to fewer bytes. Let `m` be the number of **quanta** (4-character units) removed, so
+`k = 4m` characters: the decoded length is `4(N−3m)` bytes, and `3m ≡ 0 (mod 4)` iff `m ≡ 0 (mod 4)` —
+i.e. only every **16th** character may go. At **−16 characters** (`m = 4`) that is exactly the
 case (1,524 B = **381 whole floats**), so a reader checking only `len(decoded) % 4` **accepts a silently
 truncated vector**. Only the declared count refuses it. (This is the fail-open direction on the durability
 artifact: a short vector replayed into the graph is a wrong graph with no error anywhere.) `validate=True`
@@ -543,8 +547,14 @@ below**. Measured on a 384-d vector of degenerate shapes (the probe prints these
    shape                            f32: text    frame    ratio    f64: text    frame    ratio
    all zeros                            1,537    2,064    0.74x       1,537    4,112    0.37x
    small ints 0..383                    2,195    2,064    1.06x       2,195    4,112    0.53x
-   the probe's real vector (f32)        8,031    2,064    3.89x       8,031    4,112    1.95x
+   the probe's real vector (f32)        4,689    2,064    2.27x       8,031    4,112    1.95x
 ```
+
+**Each column is on its own width's ruler**, which is the #11886 discipline applied inside the table: the
+`f32` text is **P0's shortest float32 text** (what the journal writes today — 4,689 B, the same figure as
+§1.4), and the `f64` text is the value's full float64 repr (what a caller-owned vector's text is). Printing
+both through one `json.dumps` would put the `f32` row on a ruler the journal has never written (8,031 B),
+and 3.89× is the ratio of *that* synthetic form — the real `f32` ratio is §1.4's **2.27×**.
 
 A ratio **below 1 means the frame is LARGER than the text**. So on zeros, base64 loses for **both** widths
 (the `f64` frame is 2.68× the text; even `f32` is 1.34×), and on small integers it loses for `f64` (1.87×)
@@ -553,9 +563,9 @@ is not a corner case to wave away: base64 is a **size trade whose sign depends o
 here for the *bit exactness*, the single reader and the removal of the shortest-decimal invariant — not
 because it always shrinks. A degenerate vector that loses bytes is still a correct vector.
 
-(These f64 numbers are **full-precision** text — `0.10000000149011612`, what a widened float32 prints —
-so they exceed §1's `f32` figures, which are P0's *shortest* text. The two are not comparable and §1's are
-the ones the journal actually writes.) And it is narrowed **not at all**: the frame's width
+(The `f64` text here is full precision — `0.10000000149011612`, what a widened float32 prints — so it
+exceeds §1's `f32` figures, which are P0's *shortest* text. The two are not comparable, and for the
+embedder population §1's are the ones the journal actually writes.) And it is narrowed **not at all**: the frame's width
 field is what carries the promise — `f64` in, `f64` out.
 
 ### 4.3 What happens to a caller-owned vector under the new format
@@ -579,20 +589,40 @@ ruling is unchanged: the frame carries two widths precisely so it does not have 
 
 ## 5. Blocked-on
 
-**Implementation is blocked on P1 (#12458) merged and measured.** This is #11821's own sequencing rule,
-stated on the PR that landed P0:
+**Implementation is blocked, and the blocker now has to be re-stated.** This is #11821's own sequencing
+rule, stated on the PR that landed P0:
 
 > **P2** — base64 float32 payload: **design note on #11821 first**, and no implementation until P0 and P1
 > are merged and measured. It is a format migration on the rebuild path and shares a PR with nothing.
 
-Consequences, stated so the note cannot be read as an authorisation:
+⛔ **UPDATE, 2026-11-13T19:16Z (a concurrent lane, after this note's first draft): #12458 was closed
+`NOT_PLANNED`. It will never merge, so the "P1 merged and measured" leg of that rule cannot be satisfied by
+a merge.**
 
-- **P1 is a separate lane and is not this lane's to wait on.** Its measurement is an **input to §7's
-  recommendation**, not a precondition for the note to exist. If P1 lands and moves the corpus figures, §1's
-  arithmetic must be **re-measured**, not adjusted — the probe is committed for exactly that.
+Its closing verification record states why, and the substance matters more than the status:
+
+- **P1's premise is dead on its own terms.** The 32,032 B/session `:GraphEvent` figure was measured at
+  `fffcc7c0c2` before the turn carrier landed (`aed841e8b9`, four days later); the carrier is not an
+  ancestor of the commit the figure was measured at, and the falsifier (`test_10017_turn_carrier_replay` →
+  21 passed at `ca74f2375e`) shows the per-turn `:GraphEvent` write is already absent on the armed lane. As
+  the record puts it: *"P1 as scoped would reclaim a cost that no longer exists."*
+- **And it was classified a `REVERSAL`, not a narrowing.** `_GRAPH_EVENT_TYPES` (`tortoise/sdk.py:4655`) is
+  an 11-type claim-transition contract, not a copy of the journal; dropping the mirror removes the
+  contract's mechanism rather than trimming it.
+- The audit's four blockers are real and **BK1 is fatal to the idea** — the journal-less lane is a supported
+  shape, and the `:GraphEvent` store is the only feed implementation for it.
+
+So the gate is **not** met, and it is also **not** satisfiable as written. What follows from that, stated so
+the note cannot be read as either an authorisation or a release:
+
+- **Whoever owns #11821 must re-state the gate.** It now hangs on a decision that was deliberately declined,
+  and re-basing a recorded sequencing rule is that owner's call — not this note's.
+- **Absent that re-statement, implementation stays blocked**, and this note is not evidence that any of it
+  has been approved.
 - **P2 shares a PR with nothing.** Not P1's, not #11886's, not a docs sweep.
-- **Nothing in this note may be implemented before P1 is measured**, and the note is not evidence that any
-  of it has been approved for implementation.
+- **§1's figures do not depend on P1's fate.** They are measured on an unarmed lane's corpus
+  (`docs/evidence/`), so if P2 is later authorised, re-run the probe rather than adjust the numbers — it is
+  committed for exactly that.
 
 ---
 
@@ -620,20 +650,34 @@ journal — every frame-bearing journal is thereafter a second code path that mu
 **The format in §2–§4 is the correct one if P2 is taken.** It is the only framing that satisfies all four
 recorded constraints at once: per-record versioning (append-only), a count that fails closed on the
 measured silent-truncation path, two widths so #5004 is preserved rather than overridden, and JSONL
-compatibility so the tear contract and the reader are not replaced. The decision it *does not* make is
-whether P2 is worth taking now, and the honest numbers for that are:
+compatibility so the tear contract and the reader are not replaced. What it *does not* decide is whether P2
+is worth taking, and the honest numbers for that are:
 
 - **the remaining win is 1.94× on a creating record and 2.27× on its vector — not 4.1×** (§1.4);
-- **≈ $0.33/mo per million creates** at $0.125/GB, on a line #11758 has not established is metered at all;
+- **≈ $0.33/mo per million creates** at $0.125/GB, on a line whose metering is unsettled (§1.5);
+- **the sign of the trade depends on the vector** — a degenerate caller vector can come out *larger* (§4.2);
 - against **a format migration on the rebuild path** — the one surface whose failure is a silently wrong
   graph — plus a **permanent second reader** and the loss of hand-inspectable vectors.
 
-**Recommendation:** if P1's measurement shows the vector still dominating the journal, take P2 **with this
-format**, and sequence it as its own PR with §3.2's seven pins as the review scope. If P1 shows the record
-line is no longer vector-dominated in practice, the 1.94× is being bought against the wrong risk, and the
-correct answer is to **not take P2** — and this note then stands as the recorded design that was declined,
-which is cheaper than rediscovering it. That judgement belongs to whoever holds P1's measurement, not to
-this note.
+**Recommendation, given what happened to P1 — and it is now a weaker recommendation than the note first
+drew.** The decision input the note asked for (`P1's measurement`) has arrived, and its content is *not*
+one of the two branches this section originally contemplated: P1 was **declined as a reversal whose premise
+had already disappeared** (§5), which says nothing about the vector and leaves the journal's vector payload
+as the dominating record term it always was. So:
+
+- **The byte case for P2 is real and stands on its own**: 1.94× on a creating record, measured, with the
+  format decided rather than guessed.
+- **It is also the smaller half of what #11821 hoped for, and it is not urgent.** The line it shrinks is
+  ~$0.33/mo per million creates and its metering is unsettled; meanwhile the durability artifact is the one
+  place where a silent failure is a wrong graph, and P1's fate is a live demonstration of how a
+  cost-driven change to this area ends (a premise measured on a tree that no longer existed, and a
+  "narrowing" that was really a reversal).
+- **So: do not take P2 on the strength of the byte saving alone.** Take it if and when the journal's vector
+  payload shows up as a real cost or a real operator problem, and then take it **exactly as specified here**
+  — its own PR, §3.2's seven pins as the review scope, and the `#11821` gate re-stated first (§5). If it is
+  never taken, this note is the recorded design that was declined, which is cheaper than rediscovering it.
+
+That judgement belongs to the owner of #11821 and of the journal's cost line — not to this note.
 
 ---
 
@@ -673,6 +717,7 @@ for seed, skip in ((5612, 0), (12459, 2_000_000)):
 PY
 ```
 
+```bash
 # 4. the §3.1 claim that no bypassing reader touches a vector: `embedding` as a CODE
 #    token (comments excluded) on every journal line-parser that skips `read_all`
 uv run python - <<'PY2'
@@ -691,6 +736,7 @@ for fn in ("_apply_journal_presence", "_journal_presence_state", "_journal_vecto
 PY2
 ```
 
+```bash
 # 5. the §2.6 key-order claim: `type` first in all 39 corpus records; the SDK
 #    envelope puts it third
 uv run python - <<'PY3'

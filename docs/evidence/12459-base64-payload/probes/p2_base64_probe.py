@@ -63,6 +63,7 @@ import numpy as np  # noqa: E402
 from tools.journal_growth import measure  # noqa: E402
 from tortoise.embeddings import (  # noqa: E402
     EMBEDDING_DIM,
+    shortest_float32_vector,
     JOURNAL_VECTOR_WIDTH_F32,
     JOURNAL_VECTOR_WIDTH_F64,
     JOURNAL_VECTOR_WIDTH_KEY,
@@ -376,8 +377,17 @@ def main() -> int:  # noqa: C901 — a report, read top to bottom
     print("   shape                 f32: text     frame    ratio    "
           "f64: text     frame    ratio")
     def _len(values, width):
-        n = len(values)
-        text = json.dumps(values, separators=(",", ":"))
+        """Text on EACH width's own ruler: `f32` = P0's shortest float32 text
+        (what the journal writes today); `f64` = the value's full float64 repr
+        (what a caller-owned vector's text is). Serialising both with the same
+        `json.dumps` would report the `f32` row on a ruler the journal has never
+        written — 8,031 B instead of 4,689 B for the real vector."""
+        if width == "f32":
+            short = shortest_float32_vector(values)
+            text_values = short if short is not None else values
+        else:
+            text_values = values
+        text = json.dumps(text_values, separators=(",", ":"))
         fr = json.dumps(frame(width, 4 if width == "f32" else 8, values))
         return len(text), len(fr)
     shapes = {
