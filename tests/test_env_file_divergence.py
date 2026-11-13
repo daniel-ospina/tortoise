@@ -1550,3 +1550,80 @@ def test_a_differing_shell_value_is_not_credited_to_the_file():
                       "daemon_target": "/tmp/from-shell.db"})
     assert "is the one it selects" not in row, row
     assert "the environment already sets TORTOISE_DB_URI" in row, row
+
+
+def test_a_blank_exported_key_is_named_as_the_blocker(capsys, _isolated, monkeypatch):
+    """The file sets a graph key and a BLANK export blocks it — say which.
+
+    Measured: `.env` = `TORTOISE_DB_URI=docker://…` with `TORTOISE_DB_URI=""`
+    exported printed "neither TORTOISE_DB_URI nor TORTOISE_DB_PATH is set" — the
+    file sets one, and the blocker (the daemon's ladder skips a blank value) was
+    named nowhere (#12428 review).
+    """
+    monkeypatch.setenv("TORTOISE_DB_URI", "")
+    _write_env(_isolated, "TORTOISE_DB_URI=/tmp/from-file.db\n")
+
+    out = _show_text(capsys)
+
+    assert "is exported EMPTY" in out, out
+    assert "neither TORTOISE_DB_URI nor" not in out, out
+
+
+def test_the_applied_note_does_not_claim_values_that_did_not_survive():
+    """A loader that ran over a shadowing shell wrote nothing that is in effect.
+
+    `keys_in_effect` is empty when the shell's value differs, and the row then
+    said "its values ARE in this process now" — about values that are not
+    (#12428 review).
+    """
+    row = _rows_text({"read_by_this_command": True,
+                      "keys_in_effect": [],
+                      "shadowed_graph_keys": ["TORTOISE_DB_URI"],
+                      "file_graph_keys": ["TORTOISE_DB_URI"],
+                      "graph_keys": [],
+                      "differs": False,
+                      "cli_target": "/tmp/from-shell.db",
+                      "daemon_target": "/tmp/from-shell.db"})
+
+    assert "its values ARE in this process now" not in row, row
+    assert "no key it wrote survived in this process" in row, row
+
+
+def test_both_graph_health_arms_scrub_their_exception_text():
+    """No `Graph: health` arm may render an exception raw.
+
+    The SECOND arm (the one the SDK/client reaches) printed a client exception
+    verbatim — measured with `TORTOISE_DB_URI=docker://:PwABCD#x@h:6379/g`:
+    `❌ Graph: health: Port could not be cast to integer value as 'PwABCD'`. The
+    sibling probe arms were already scrubbed; this one was missed (#12428
+    review). Pinned structurally because forcing that block to raise would need
+    the SDK's projection teardown mocked; the behavioural half — that the
+    composition removes the fragment and keeps a plain path — is pinned by the
+    two tests above.
+    """
+    import inspect
+
+    from tortoise import __main__ as m
+
+    flat = " ".join(inspect.getsource(m._cmd_doctor).split())
+
+    assert 'results.append(("Graph: health", "❌", str(e)[:60]))' not in flat, flat
+    assert flat.count('results.append(("Graph: health", "❌", _mask_uri_userinfo(') == 2, flat
+
+
+def test_a_plain_path_survives_the_graph_health_arm():
+    """The arm must cut the credential WITHOUT wiping a path (or `:memory:`).
+
+    Composing `_scrub_uri_error` there turned `Relative DB path 'relative.db'
+    rejected` into `Relative DB path '<redacted>' rejected` — `_scrub` treats the
+    whole target as secret, the hazard the resolver arm above documents and two
+    `test_doctor` tests enforce (#12428 review).
+    """
+    from tortoise.__main__ import _mask_uri_userinfo, _redact_credential_fragments
+
+    # `relative.db` is the shape two `test_doctor` tests assert on; `:memory:` is
+    # NOT included: `_mask_uri_userinfo` mangles it to `:<redacted>` (a
+    # pre-existing behaviour of that masker, unrelated to this arm).
+    target, message = "relative.db", "Relative DB path 'relative.db' rejected"
+    out = _mask_uri_userinfo(_redact_credential_fragments(message, target))
+    assert message in out, out

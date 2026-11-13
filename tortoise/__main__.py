@@ -4368,9 +4368,23 @@ def _cmd_config(args) -> int:
                     print("     not show that error")
             else:
                 if env_file.get("daemon_rung") == "refuses":
+                    # ⛔ "neither … is set" is false when the file sets one and an
+                    # EXPLICITLY BLANK export blocks it (the daemon's ladder skips
+                    # a blank value). Name the blocker instead (#12428 review).
+                    from os import environ as _environ_daemon
+
+                    _blank_keys = sorted(
+                        key for key in (env_file.get("file_graph_keys") or ())
+                        if key in _environ_daemon
+                        and not str(_environ_daemon.get(key) or "").strip())
                     print("  daemon        (none — `tortoise serve` REFUSES to")
-                    print("                start: neither TORTOISE_DB_URI nor")
-                    print("                TORTOISE_DB_PATH is set)")
+                    if _blank_keys:
+                        print("                start: "
+                              f"{_printable(', '.join(_blank_keys))} is exported EMPTY")
+                        print("                and the daemon's ladder skips a blank value)")
+                    else:
+                        print("                start: neither TORTOISE_DB_URI nor")
+                        print("                TORTOISE_DB_PATH is set)")
                 else:
                     print(f"  daemon        {_printable(env_file['daemon_target'] or '(unresolved)')}"
                           "   (what `tortoise serve` resolves)")
@@ -11682,6 +11696,13 @@ def _dotenv_rows(env_file: dict) -> list[tuple[str, str, str]]:
     # self-contradiction this PR fixed for `config show`'s header (#12428 review
     # — the row read "this command does NOT read it" … "its values ARE in this
     # process now").
+    # ⛔ A shadowed file whose value the shell overrode: the LOADER ran, but
+    # nothing it wrote is in this process — so neither clause may say the values
+    # ARE here (#12428 review).
+    _in_effect = bool(env_file.get("keys_in_effect"))
+    # ⛔ `_read_clause` may state the APPLIED fact (the loader really did run), and
+    # `_applied_note` states what SURVIVED — so the pair reads as one story rather
+    # than "it applied" followed by "nothing it wrote is here" (#12428 review).
     _read_clause = ("this command applied it at import as well — the daemon does too"
                     if _applied else
                     "this command does NOT read it, the daemon does")
@@ -11691,6 +11712,9 @@ def _dotenv_rows(env_file: dict) -> list[tuple[str, str, str]]:
     # happened (measured, #12428 review).
     _applied_note = (" — ⚠️ this run imported the daemon module, which applies the "
                      "file at import, so its values ARE in this process now"
+                     if _applied and _in_effect else
+                     " — ⚠️ this run imported the daemon module, which applied the "
+                     "file at import, but no key it wrote survived in this process"
                      if _applied else "")
     if env_file.get("graded_unresolved") or env_file.get("cli_error"):
         # This run has NO target — either the caller's `--db`/`--path` failed or
@@ -11727,9 +11751,23 @@ def _dotenv_rows(env_file: dict) -> list[tuple[str, str, str]]:
         # whose `.env` carries provider keys but no local daemon has done
         # nothing wrong, and `doctor` must not fail that setup (#3615). It IS a
         # warning, because the rows below grade a store the daemon does not serve.
+        # ⛔ The file's own keys may be present yet blocked by an EXPLICITLY BLANK
+        # export (the daemon's ladder skips a blank value), so "neither … is set"
+        # was false and named nothing the user could act on (#12428 review).
+        from os import environ as _environ_blank
+
+        _blank = sorted(
+            key for key in (env_file.get("file_graph_keys") or ())
+            if key in _environ_blank
+            and not str(_environ_blank.get(key) or "").strip())
+        if _blank:
+            _why = (f"the file sets {_printable(', '.join(env_file['file_graph_keys']))}, "
+                    f"but {_printable(', '.join(_blank))} is exported EMPTY and the "
+                    "daemon's ladder skips a blank value")
+        else:
+            _why = ("neither TORTOISE_DB_URI nor TORTOISE_DB_PATH is set")
         rows.append(("Config: .env", "⚠️",
-                     f"{path} selects no store for the daemon — neither "
-                     "TORTOISE_DB_URI nor TORTOISE_DB_PATH is set, and "
+                     f"{path} selects no store for the daemon — {_why}, and "
                      "`tortoise serve` REFUSES to start in that state (it will "
                      "not open an empty embedded DB). The rows below grade this "
                      "CLI's own target, which the daemon does not serve"
@@ -15201,18 +15239,23 @@ def _cmd_doctor(args):
                     if sdk._proj:
                         sdk._proj.close()
             except Exception as e:
-                # ⛔ The SAME redaction chain as Step 3's arm above (#12428 review):
-                # this is the OTHER place a client's own echo reaches a row, and it
-                # printed `Port could not be cast to integer value as 'Sup3rSecret'`
-                # raw — the password's head, from a `.env` value the user was told
-                # to export (`set -a; . ./.env; set +a`). One row above, the same
-                # error was already redacted, so the two rows disagreed about a
-                # credential in one screen.
+                # ⛔ The SAME redaction chain as Step 3's arm above (#12428
+                # review): this is the OTHER place a client's own echo reaches a
+                # row, and it printed `Port could not be cast to integer value as
+                # 'Sup3rSecret'` raw — the password's head, from a `.env` value the
+                # user was told to export (`set -a; . ./.env; set +a`). One row
+                # above, the same error was already redacted, so the two rows
+                # disagreed about a credential in one screen.
+                # ⛔ `_redact_credential_fragments`, NOT `_scrub_uri_error`:
+                # `_scrub` treats the whole target as a secret, so a plain path
+                # became `Relative DB path '<redacted>' rejected` — the hazard the
+                # resolver arm above documents and two `test_doctor` tests enforce.
                 results.append(("Graph: health", "❌",
                                 _mask_uri_userinfo(
                                     _redact_credential_fragments(
                                         str(e),
-                                        db or path or _env_db_target_value()))[:60]))
+                                        db or path or target
+                                        or _env_db_target_value()))[:60]))
 
     # #280 check 4 / #5815 — ONE seam, exactly once. The session-index row used
     # to be appended inside the graph-health block, so its EXISTENCE was
