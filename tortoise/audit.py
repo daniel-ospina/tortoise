@@ -2070,12 +2070,14 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 # clauses was emitted and none of them can transfer anything
                 # (#12210 review, P3). An earlier comment here claimed the tail was
                 # "" by construction — it is not, and that claim cost a round.
-                # ⛔ SEPARATED on both sides: no ``_chain_tail`` arm ends in
+                # ⛔ A TERMINATOR, not just a space: no ``_chain_tail`` arm ends in
                 # punctuation and ``_archive_clause`` opens with "Archiving it
-                # instead", so a bare concatenation emitted
-                # "…only onto a live claimArchiving it instead …" (#12210 review, P3).
+                # instead", so a bare concatenation emitted "…only onto a live
+                # claimArchiving it instead…"; padding with a space alone still ran the
+                # two sentences together ("…live claim Archiving it instead…") and
+                # doubled the space after "endpoint." (#12210 review, P3).
                 + ("" if s["neutral_row"] or not tail.strip()
-                   else " " + tail.strip() + " ")
+                   else tail.strip() + ". ")
                 + _archive_clause(s))
         if not s["carrier_count"]:
             # ⛔ "Nothing to re-point onto" would be FALSE whenever a :Subject or

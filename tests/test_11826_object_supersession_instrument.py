@@ -3386,8 +3386,12 @@ def test_the_id_less_arm_separates_the_tail_and_puts_the_prefix_first(sdk):
     fix = next(i for i in _issues(sdk, "superseded_object_active_edges")
                if i.node_id == "PolicyV1").fix
     at = fix.index("Archiving it instead")
-    assert fix[at - 1] == " ", (
-        "the archive clause is glued to the chain tail: " + fix[at - 40:at + 25])
+    # ⛔ A SPACE is not enough: the tail has no terminator, so a space-only pad still
+    # ran the sentences together ("…live claim Archiving it instead…"). Assert the
+    # BOUNDARY this test is named for (#12210 review, P3).
+    assert fix[:at].endswith(". "), (
+        "the archive clause must open a new sentence: " + fix[at - 40:at + 25])
+    assert ".  " not in fix, "no doubled space after a terminator: " + fix[at - 40:at + 30]
 
     # …and the ambiguity prefix comes FIRST, as its own `FIRST` demands.
     q = sdk.create_point("statement", "the second policy")
