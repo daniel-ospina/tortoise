@@ -13500,6 +13500,21 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
     except (ValueError, TypeError, RecursionError):
         parsed = None
 
+    if team_cut and team_code != 401:
+        # ⛔ A CUT body cannot carry a verdict — and that applies to a 4xx too
+        # (fresh review round 18). A 403 whose body was cut loses its
+        # `error_code`, so the arms below fall through to the generic `❌ … API
+        # error 403: <fragment>`: a documented graph-scoped key (or a suspended
+        # org's appeal path) reads RED with a fragment of its own body as
+        # evidence. 401 is exempt because that arm reads no body at all.
+        results.append(_combine("⚠️",
+                        f"{health_part}; /v1/team answered {team_code} but its "
+                        f"body was CUT before it completed "
+                        f"({_printable(body[:160]) if body else 'no bytes'}) — the "
+                        "credential is UNPROVEN rather than wrong, and the "
+                        "refusal's reason is unread. Re-run, or use `--offline`"))
+        return
+
     if team_code == 401:
         results.append(_combine("❌",
                         f"{health_part}; /v1/team 401 Invalid API key — "

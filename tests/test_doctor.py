@@ -172,6 +172,17 @@ class _FakeResponse:
     def getcode(self):
         return self.status
 
+    @property
+    def length(self):
+        """Remaining DECLARED length, like `http.client.HTTPResponse.length`.
+
+        Without it `_read_capped`'s "a completed body is not a cut body" branch
+        (`getattr(resp, "length", None) == 0`) is unreachable from the suite, and
+        reverting that fix stayed green (fresh review round 18).
+        """
+        remaining = self._buf.getbuffer().nbytes - self._buf.tell()
+        return remaining
+
     def close(self):
         self._buf.close()
 
@@ -1997,7 +2008,12 @@ class TestDoctorHostedCredential:
             def read(self, n=None):
                 # The password sits PAST the 200-char display bound, so
                 # truncate-then-scrub would print its tail.
-                raise ValueError("x" * 260 + f" https://svc:{password}@api.example.test")
+                # ⛔ The password STRADDLES the 200-char display bound: with
+                # truncate-before-scrub the cut leaves `hunter2p`, a fragment
+                # `_scrub` can no longer match (fresh review round 18 — the first
+                # version put the password entirely PAST the bound and pinned
+                # nothing).
+                raise ValueError("x" * 190 + f" https://svc:{password}@api.example.test")
 
             def read1(self, n=None):
                 return self.read(n)
@@ -2013,6 +2029,87 @@ class TestDoctorHostedCredential:
         out = capsys.readouterr().out
 
         assert password not in out, "the api_url password reached the transcript"
+
+    def test_a_completed_body_is_not_reported_as_cut(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """A body fully read is NOT "cut", even when the deadline has passed.
+
+        The deadline is tested before the EOF probe, so the reader used to claim a
+        cut on a complete body and downgrade a healthy ✅ to a ⚠️ that was false
+        about the body (fresh review round 17). The distinction is
+        `HTTPResponse.length == 0` (remaining declared length), and it is only
+        reachable in tests because the fake models `length`.
+        """
+        from tortoise import __main__ as _m
+
+        _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY)
+
+        class _CompleteThenLate(_FakeResponse):
+            """Hands over the WHOLE body, then reports the deadline spent."""
+
+            def read(self, n=None):
+                # Consume the budget so the next loop-head deadline check fires,
+                # after the body is already complete.
+                if self._buf.tell() == 0:
+                    return self._buf.read(1048576) or b""
+                return b""
+
+            def read1(self, n=None):
+                return self.read(n)
+
+        monkeypatch.setattr(_m, "_DOCTOR_TOTAL_BUDGET_S", 0.0)
+        _stub_hosted(monkeypatch, lambda url, req: (
+            _CompleteThenLate(200, b'{"status":"ok"}') if url.endswith("/health")
+            else _FakeResponse(200, b'{"org_id":"org-9"}')))
+        db_path = str(tmp_path / "complete.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor complete seed")
+
+        _run_doctor([])
+        out = capsys.readouterr().out
+
+        hosted = _row(out, "Hosted")
+        assert hosted is not None, out[-1200:]
+        assert "CUT" not in hosted, hosted
+
+    def test_a_cut_403_body_is_unproven_not_a_red_refusal(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """A cut 403 must not be graded from a fragment.
+
+        Losing the body loses `error_code`, so a cut graph-scoped 403 fell through
+        to `❌ /v1/team → API error 403: <fragment>` — a documented, correctly
+        scoped key reading RED (fresh review round 18).
+        """
+        import time as _time
+
+        from tortoise import __main__ as _m
+
+        _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY)
+
+        class _Slow403(_FakeResponse):
+            def read(self, n=None):
+                _time.sleep(0.05)
+                return self._buf.read(1)
+
+            def read1(self, n=None):
+                return self.read(n)
+
+        monkeypatch.setattr(_m, "_DOCTOR_TEAM_TIMEOUT_S", 0.001)  # → 0.25 floor
+        body = b'{"detail":{"error_code":"GRAPH_SCOPED_TEAM_SURFACE"}}'
+        _stub_hosted(monkeypatch, lambda url, req: (
+            _FakeResponse(200, b'{"status":"ok"}') if url.endswith("/health")
+            else _Slow403(403, body)))
+        db_path = str(tmp_path / "cut-403.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor cut 403 seed")
+
+        _run_doctor([])
+        out = capsys.readouterr().out
+
+        hosted = _row(out, "Hosted")
+        assert hosted is not None, out[-1200:]
+        assert "CUT" in hosted, hosted
+        assert "❌" not in hosted, hosted
 
 
 class TestDoctorPath:
