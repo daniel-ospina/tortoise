@@ -71,8 +71,9 @@ becomes admissible because nothing is dropped:
    merge through `stats["merges"]` and the `(Session)-[:CONTAINS]->(Point)`
    edge, but NOT the losing quote. Do not read this item as a promise about the
    capture receipt — and note a `NOOP` fold IS surfaced there (as a classified
-   `dedup` entry, `sdk.py:12290-12302`), so the two are **not** alike on that
-   path. Tracked on #9871.
+   `dedup` entry — `sdk.py::TortoiseSDK._extract_session_v2`'s capture receipt,
+   the `extracted.append({... "dedup": dedup})` rows), so the two are **not**
+   alike on that path. Tracked on #9871.
    *A merge a reader cannot find is indistinguishable from a silent drop*, which
    is why that gap is filed rather than absorbed here.
 
@@ -153,7 +154,8 @@ def _entity_names(value: object) -> dict[str, str] | None:
     spell, because `Object.name` is stored **case-preserved** everywhere —
     `projection/entities.py` MERGEs on the verbatim name, capture's own
     attachment pass resolves the SAME `about_entities` list with
-    `name.strip()` (no lowering, `sdk.py:12123`), and the S3 enrichment that
+    `name.strip()` (no lowering — `sdk.py::TortoiseSDK._extract_session_v2`'s
+    `_n = name.strip()` in the `about_entities` loop), and the S3 enrichment that
     fills a prior row reads `collect(o.name)` verbatim. Emitting the
     normalised form here is what made the fusion's central promise fail on
     ordinary data: `MATCH (o:Object {name:'acme'})` matches nothing when the
