@@ -51,7 +51,8 @@ name: ci-queue-health
 # reading reaches no trim. A trim-safe offender CAN be present when the queue is
 # merely PR-dominated, so its absence is NOT the bound.
 # `PR-BACKLOGGED` (PR CI is COUNTED as executing — `pr_running > 0`, and that count
-# may include runs whose jobs were never read, so it is not a proof — and a queued
+# may include runs whose jobs were never read, or whose read did not PROVE them idle,
+# so it is not a proof — and a queued
 # PR run has
 # waited past the wait budget — the shape that used to print `CI: OK`, measured
 # 2026-10-28 on #10237) is an `::warning` at exit 0 for the same reason, and the
@@ -64,12 +65,18 @@ name: ci-queue-health
 # below reads `cancelled` from the payload and says which case it is.
 # `PR-UNWITNESSED` is also an `::warning` at exit 0: it names what was NOT measured
 # instead of inferring health. Its THREE causes are different dimensions, and the
-# annotation must not prescribe one cause's lever for another's: (a) the feed was
-# cut at its page cap, so the oldest queued runs — the end the age clause needs —
-# were never read (lever: --max-pages); (b) the queued PR runs carry no readable
-# `created_at`, so the wait cannot be measured at all; (c) the RUNNING CENSUS is
-# unwitnessed — every run counted in `pr_running` was unmeasured, which is #12037's
-# own defect returned by the probe budget. That sub-cause has TWO forms with
+# annotation must not prescribe one cause's lever for another's: (a) a feed (the
+# queued or the in-progress one — they share one flag) was cut at its page cap, so
+# the end the age clause needs (queued) or the census's frozen tail (in-progress) was
+# never read (lever: --max-pages); (b) a WAITING PR-event run has no measurable
+# current-attempt age, so the wait cannot be measured at all — it is NOT only an
+# unreadable `created_at`: `QueuedRun.wait_age_seconds` abstains on THREE routes, and a
+# readable stamp does not rule this cause out; (c) the RUNNING CENSUS is
+# unwitnessed — every run counted in `pr_running` was unmeasured, whose routes span three
+# layers (the callee's read, the CALLER's settle gate, and the probe BUDGET), so ⛔ NOT
+# "returned by the probe budget": the budget is ONE of the layers, and for the population
+# this proof creates the settle gate — not the budget — withholds the proof. That
+# sub-cause has TWO forms with
 # opposite levers (round 13), and the payload reports which applies:
 # `pr_running_unmeasured_unprobed` is cleared by RAISING the budget, and
 # `pr_running_unmeasured_unread` by RETRYING the reading (a bigger budget only
@@ -78,9 +85,21 @@ name: ci-queue-health
 # dimension and can be set in the SAME reading, in which case the cut feed still
 # needs --max-pages and the annotation must not forbid it. The arm therefore reads
 # `truncated` from the payload rather than hardcoding the refutation.
-# ⛔ And NOT "repair the frozen runs": a run whose every job is `completed` is the
-# PROOF that excludes it from `pr_running`, so it can never make the census
-# unmeasured, and neither /cancel nor /force-cancel accepts such a repair (409).
+# ⛔ And NOT "repair the frozen runs": exclusion from `pr_running` requires TWO halves —
+# every job `completed` AND the run's own `updated_at` still for JOB_SETTLE_SECONDS — AND
+# only once the probe reached it and its jobs READ BACK all-`completed` (a failed read or an
+# unprovable list abstains into `_unread` before the settle gate is consulted) — so
+# an all-`completed` run whose last update just moved is COUNTED (unmeasured), not
+# excluded. `repair` is not a lever either way, but ⛔ FOR TWO DIFFERENT REASONS and they
+# must not be merged: the 409 evidence ("not in progress" / "has not been queued yet") is
+# scoped to the FROZEN population, while a run whose stillness is merely UNPROVEN may still
+# be working — the DYNAMIC matrix's pre-expansion window, a run that has just finished
+# every job, or one whose stamp cannot be read or is future-dated (`_settled_still` answers
+# False for ALL OF THEM — three routes, not four: the pre-expansion window and the
+# just-finished run are the same "merely recent stamp" route) — and /cancel on THAT may be
+# ACCEPTED (it may also still answer 409:
+# the 409 evidence covers only a run whose stillness is PROVEN), so it is the one thing here
+# an operator must not be told is a closed avenue.
 # Neither can block a merge, because a
 # `schedule`-event run is a NON-CODE event: the merge rail's own `NON_CODE_EVENTS`
 # set excludes `schedule|issues|issue_comment` from the merge decision, so a red
@@ -332,7 +351,8 @@ jobs:
             # `PR-UNWITNESSED` has three causes on different dimensions and they take
             # different levers. Round 4 keyed this on `pr_running == pr_running_unmeasured >
             # 0`, which is wrong on the OVERLAP: a reading whose WAIT was not witnessed (a
-            # queued PR run with no readable `created_at`) can ALSO have a fully unmeasured
+            # run with no measurable CURRENT-ATTEMPT age — not only one whose `created_at`
+            # is unreadable) can ALSO have a fully unmeasured
             # census, and the numbers cannot tell which cause produced the verdict — so the
             # annotation prescribed the census lever (frozen runs / --max-job-probes) for a
             # wait defect, dropping the lever that fixes it (#12037 review round 5). The
@@ -351,13 +371,26 @@ jobs:
               # (`pr_running_unmeasured_unprobed` / `_unread`) and this arm names only the
               # remedy that applies.
               #
-              # ⛔ AND THERE IS NO THIRD CAUSE NAMED HERE ANY MORE: "a run GitHub has stopped
-              # driving (frozen, every job completed)" is the OPPOSITE of unmeasured — all-jobs
-              # -completed is the PROOF that EXCLUDES a run from `pr_running` (see the
-              # `excluded` sentence), so it can never contribute to an unmeasured census. Such
-              # a run is identified BY being probed, which is the budget lever, and neither
-              # /cancel nor /force-cancel accepts a repair — so pointing an operator at an
-              # "API-side repair" sent them to an avenue the tool's own record calls closed.
+              # ⛔ AND "a run GitHub has stopped driving (frozen, every job completed)" is NOT
+              # a third cause: exclusion needs every job `completed` AND `updated_at` still
+              # for JOB_SETTLE_SECONDS, so an all-completed run is unmeasured whenever its
+              # stillness is unproven. ⛔ WHICH BUCKET IT LANDS IN DECIDES THE LEVER, so
+              # this block must not answer for both (round 7 — an earlier revision said a
+              # bigger budget "is NOT that lever" and "does not fix one", which is FALSE
+              # for the slice the budget never read):
+              #   * PROBED and not yet still → `_unread`, lever RETRY once it has settled
+              #     (retrying immediately reproduces the downgrade);
+              #   * NEVER REACHED by the budget → `_unprobed`, lever raise
+              #     --max-job-probes. For the #12037 shape this IS the lever: a run still
+              #     for 7 days resolves on the first probe, so raising the budget is what
+              #     stops it being unmeasured at all.
+              # Do NOT offer /cancel or /force-cancel as the lever: for a FROZEN run they
+              # answer 409, while for a settle-downgraded one they may be ACCEPTED — and that
+              # population is NOT proven to be "about to execute" either (`_settled_still`
+              # also answers False for a run that has just finished every job, and for an
+              # UNREADABLE or future-dated stamp), so cancelling one is unsafe for a reason
+              # the 409 evidence does not cover. An "API-side repair" is therefore either
+              # closed or unreliable, never right.
               unprobed_n="$(python3 -c "import json; print(json.load(open('/tmp/ci-queue-health.json')).get('pr_running_unmeasured_unprobed') or 0)" 2>/dev/null || echo 0)"
               unread_n="$(python3 -c "import json; print(json.load(open('/tmp/ci-queue-health.json')).get('pr_running_unmeasured_unread') or 0)" 2>/dev/null || echo 0)"
               if [ "${unread_n:-0}" -gt 0 ] && [ "${unprobed_n:-0}" -eq 0 ]; then
@@ -376,9 +409,9 @@ jobs:
               # the census needs its own. Emitting the flat "NOT --max-pages" there sent the
               # operator away from the only lever the cut leg has — the mirror of round 5.
               pages_tail="$(python3 -c "import json; d=json.load(open('/tmp/ci-queue-health.json')); print('the FEED IS ALSO CUT in this same reading (feed=truncated), so it has a second unwitnessed dimension whose lever is --max-pages — pull both' if d.get('truncated') else 'NOT --max-pages for THIS dimension; see the step summary for the dimension that was not measured')" 2>/dev/null || echo 'NOT --max-pages for THIS dimension; see the step summary for the dimension that was not measured')"
-              echo "::warning::${state} — the RUNNING CENSUS was not witnessed: every run counted as executing was unmeasured, so the count is the pre-#12037 status-string census and PR starvation is neither witnessed nor disproved. Nothing is inferred healthy here. ${census_lever}. ${pages_tail}."
+              echo "::warning::${state} — the RUNNING CENSUS was not witnessed: every run counted as executing was unmeasured, so the count is an UPPER BOUND on executing work among the runs it READ rather than a census of it (for the surplus it is exactly the pre-#12037 status-string reading; for a run the probe DID read it is not), and PR starvation is neither witnessed nor disproved. Nothing is inferred healthy here. ${census_lever}. ${pages_tail}."
             else
-              echo "::warning::${state} — the PR wait was not witnessed (the queued feed was cut at the page cap, or the pending/requested leg was cut at its page cap, or a WAITING PR-event run — queued, pending or requested — has no measurable current-attempt age), so PR starvation is neither witnessed nor disproved. Nothing is inferred healthy here; for a truncated feed raise --max-pages to read further back, and see the step summary for the dimension that was not measured."
+              echo "::warning::${state} — the PR wait was not witnessed (a feed was cut at the page cap — the queued or the in-progress one, which share one flag — or the pending/requested leg was cut at its page cap, or a WAITING PR-event run — queued, pending or requested — has no measurable current-attempt age), so PR starvation is neither witnessed nor disproved. Nothing is inferred healthy here; for a truncated feed raise --max-pages to read further back, and see the step summary for the dimension that was not measured."
             fi
           fi
           echo "ci-queue-health exit=$rc (0 = OK, cleared, PR-STARVED, PR-BACKLOGGED or PR-UNWITNESSED (five exit-0 shapes, all but OK and cleared warned); 1 = FLOOD stands; 2 = could not measure)"

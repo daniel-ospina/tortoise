@@ -439,13 +439,21 @@ same step with the same tail is the investigation.
   with the oldest queued PR run at 527 minutes). The budget's default is derived from this
   document's own §1 measurement (max first-job wait 81.9 min → 90 min), so it fires past the
   measured-normal population rather than on it. `PR-UNWITNESSED` is reported rather than `OK`
-  whenever the PR work is neither witnessed nor disproved, and it has THREE causes on different
-  dimensions — and FIVE triggers, because a cut `pending`/`requested` leg is unwitnessed by the
-  same argument as a cut queued feed and takes the same lever (it just is not a *fourth* cause),
-  and because the unreadable-stamp cause applies to the WHOLE waiting population
-  (`queued + pending + requested`), not to the queued leg alone:
-  - the queued feed was cut at its page cap **and no PR-event run is executing** — raise
-    `--max-pages` to read further back;
+  whenever the PR work is neither witnessed nor disproved. It has THREE causes on different
+  dimensions and FOUR triggers — and the triggers are NOT one per cause: the cut-feed cause
+  below is TWO of them (a cut `queued`/`running` feed, which needs `pr_running == 0`, and a
+  cut `pending`/`requested` leg, which needs no such qualifier — the two `pending`/
+  `requested` legs themselves collapse into ONE trigger). The wait-age cause — NOT "the unreadable-
+  `created_at` cause", which is only ONE of its three routes (unreadable stamps account for
+  TWO: that one and `run_started_at`; the third is an `attempt >= 2` run with NO start stamp)
+  — applies to the WHOLE waiting population (`queued + pending + requested`), not to the
+  queued leg alone:
+  - a feed was cut at its page cap. The QUEUED and RUNNING legs share one flag and one
+    qualifier — `pr_running == 0`, because an executing PR run is observed in the
+    in-progress read whatever the queued window held — so a cut feed with PR runs
+    executing does not degrade here. The cut `pending`/`requested` legs carry NO
+    qualifier and degrade with PR runs executing. Raise `--max-pages` to read further
+    back;
   - a WAITING PR-event run (`queued`/`pending`/`requested`) has no measurable age for its
     CURRENT ATTEMPT, so the wait cannot be measured at all. ⛔ ONE OWNER for that rule:
     `QueuedRun.wait_age_seconds`, which abstains on THREE routes — an unreadable `created_at`
@@ -480,16 +488,39 @@ same step with the same tail is the investigation.
     There is deliberately **no** "repair the frozen run" remedy here, and that is not an
     omission: a frozen run — `in_progress` with every job `completed` **and its own
     `updated_at` motionless for `JOB_SETTLE_SECONDS` (300 s)** — is the *proof* that EXCLUDES
-    it from `pr_running` (see the `excluded` sentence), so it can never make the census
-    unmeasured. ⛔ The stillness half is load-bearing: this repo's test matrix is DYNAMIC
+    it from `pr_running` (see the `excluded` sentence) once it has been PROBED **and its jobs
+    read back all-`completed`**, so a frozen run that was read cleanly can never make the
+    census unmeasured. ⛔ BOTH qualifiers are load-bearing. "Once probed" alone was still too
+    wide: probing is necessary but NOT sufficient — a frozen run whose jobs read FAILS (a
+    transient 5xx), or whose list does not prove complete, abstains into `_unread` before the
+    settle gate is ever consulted (`_settled_still` runs only `if live is False`), and so it
+    DOES make the census unmeasured. ⛔ AND PROBING IS BUDGETED: the budget is spent
+    oldest-first over `DEFAULT_MAX_JOB_PROBES` runs, so once more runs are frozen than the
+    budget allows, the surplus is never probed, keeps
+    `has_live_job = None`, and DOES land in `pr_running_unmeasured` (as `_unprobed`) — the
+    population the bullet above resolves by raising `--max-job-probes`.
+    ⛔ The stillness half is load-bearing: this repo's test matrix is DYNAMIC
     (`python-ci.yml` instantiates `test`/`test-slow`/`test-carve-out` from
     `fromJSON(needs.changes.outputs.*_matrix)`), so between the parent job finishing and the
     shards being created the jobs endpoint answers with ONE `completed` row while the run is
     about to execute — an all-`completed` list alone would subtract a run that is working.
     A run whose stillness cannot be proven abstains instead (counted, and reported in
-    `pr_running_unmeasured`). Such a run is identified *by being probed*, i.e. by the budget
-    lever above, and neither `/cancel` nor `/force-cancel` accepts a repair. It is **NOT
-    `--max-pages`**.
+    `pr_running_unmeasured`). ⛔ WHICH REMEDY APPLIES DEPENDS ON WHETHER THE PROBE REACHED
+    IT, and the two are opposites: a run the reading *did* reach that was not yet still
+    gets the RETRY described in the bullet above (retrying immediately reproduces the same
+    downgrade), while a run the probe budget never reached needs a larger
+    `--max-job-probes` — and for the frozen shape that **is** the lever, since a run still
+    for 7 days resolves on its first probe. So a blanket "the budget is not the lever for
+    an all-completed run" is false for the slice it never read.
+    ⛔ THE TWO POPULATIONS — the frozen one and the settling one — must not be merged,
+    because the repair endpoints differ between them: for a **frozen** run `/cancel` and
+    `/force-cancel` both answer 409 ("not in progress" / "has not been queued yet"), while
+    a run whose stillness is merely UNPROVEN may have `/cancel` accepted — and that
+    population is not only the pre-expansion window: `_settled_still` also answers "not
+    proven" for a run that has just finished every job, and for an unreadable or
+    future-dated stamp. So neither endpoint is the lever here, for two different reasons:
+    closed for the frozen run, neither closed nor reliably harmless for the unproven one.
+    It is **NOT `--max-pages`**.
 
   In every case an unmeasured dimension is not a measured-healthy one.
 - **It does not reduce jobs per run.** A `python-ci` run is 22 jobs (max 30) by construction; with

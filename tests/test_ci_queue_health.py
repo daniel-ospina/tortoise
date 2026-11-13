@@ -280,7 +280,8 @@ def test_an_unreadable_timestamp_does_not_satisfy_the_age_clause():
     assert health.verdict == Q.PR_UNWITNESSED
     assert health.verdict != Q.OK
     assert health.oldest_pr_queued_age_seconds is None
-    assert any("no readable timestamp" in reason for reason in health.reasons)
+    assert any("no measurable age for their CURRENT ATTEMPT" in reason
+               for reason in health.reasons)
     assert "1 of the 1" in " ".join(health.reasons), (
         "the reason names how many of the queued PR runs were unreadable, so a mixed "
         "reading is not described as an all-unreadable one")
@@ -1195,7 +1196,7 @@ def test_congests_pr_is_three_valued_so_a_cancel_cannot_consume_silence():
 def test_an_ok_with_nothing_queued_cannot_certify_the_queue_clear():
     """⭐⭐ P1 (review): `OK(pr_queued=0)` is the clause that says it is NOT health.
 
-    `classify_queue`'s `no PR-event run is QUEUED` clause appends a reason line that
+    `classify_queue`'s `not wait_runs` clause appends a reason line that
     states the fact itself — *"starvation of PR CI was not witnessed (an idle fleet
     looks the same)"* — and still emits `OK`. A destructive gate may not read that as
     "the queue is clear": this module's feed is filtered at the API to `status=queued`
@@ -1210,12 +1211,12 @@ def test_an_ok_with_nothing_queued_cannot_certify_the_queue_clear():
     Discriminating power: this test reddens the moment `congests_pr` drops its
     `pr_wait_measured` clause — `OK and not truncated` alone answers `False`.
     """
-    # The explicit `no PR-event run is QUEUED` clause (offender at/over the dominance
+    # The explicit `not wait_runs` clause (offender at/over the dominance
     # floor, no PR run queued) ...
     quiet = classify(flood_queued(12))
     assert quiet.verdict == Q.OK
     assert quiet.pr_queued == 0
-    assert any("no PR-event run is QUEUED" in r for r in quiet.reasons), (
+    assert any("no PR-event run was READ as queued or pending" in r for r in quiet.reasons), (
         "the fixture must be the clause under test")
     assert quiet.pr_wait_measured is False, (
         "there was no queued PR-event run, so no wait was read")
@@ -1290,7 +1291,7 @@ def test_a_PENDING_ONLY_wait_past_the_budget_cannot_clear_the_gate():
     """⭐⭐ P1 (review): the `pending` leg fed the AGES but never reached the CLAUSES.
 
     `oldest_pr_age` is a max over `wait_runs` (queued + pending), but `starved_wait`,
-    `backlogged_wait` and the `no PR-event run is QUEUED` clause all still required
+    `backlogged_wait` and the `not wait_runs` clause all still required
     `pr_queued_runs`. In the ONE shape where those populations differ — a NON-EMPTY
     `pending` leg with an EMPTY queued PR leg — the wait was measured, reported in
     `oldest_pr_queued_age_seconds` past `pr_wait_budget_seconds`, and then dropped
@@ -1339,7 +1340,7 @@ def test_a_PENDING_ONLY_wait_past_the_budget_cannot_clear_the_gate():
         "a measured, in-budget pending wait IS a clearance — otherwise this is "
         "fail-closed noise, not a measurement")
 
-    # C — the `no PR-event run is ...` clause must not swallow a pending-only wait.
+    # C — the `not wait_runs` clause must not swallow a pending-only wait.
     # This is the shape where that clause is REACHABLE (the offender clears the
     # dominance floor), so keying it on the queued leg alone hid the wait entirely.
     over_floor = classify(flood_queued(12),
@@ -1472,7 +1473,7 @@ def test_a_PENDING_ONLY_wait_with_an_unreadable_stamp_is_UNWITNESSED():
         "a wait nobody could measure is not a healthy queue")
     assert health.pr_wait_measured is False
     assert health.congests_pr is None, "the gate must REFUSE, not authorise"
-    assert any("no readable timestamp" in r for r in health.reasons)
+    assert any("no measurable age for their CURRENT ATTEMPT" in r for r in health.reasons)
     assert "1 of the 1" in " ".join(health.reasons), (
         "the reading says the population it counted — the WAIT population, not the "
         "queued leg")
@@ -1484,8 +1485,15 @@ def test_a_CUT_pending_leg_cannot_certify_the_queue_clear():
     A capped `pending` read drops its OLDEST runs — the feed is newest-first — i.e.
     exactly the run the wait budget applies to, so it cannot certify anything. `OK`
     degrades to `PR-UNWITNESSED` (same class as an unparseable timestamp) and the gate
-    answers `None`. Discriminating: dropping `pending_truncated` from
-    `pr_wait_measured` restores `OK / False`.
+    answers `None`.
+
+    ⛔ THE DISCRIMINATING MUTATION CHANGED WHEN THE REFUSAL MOVED (round 18). It used to
+    be "drop `pending_truncated` from `pr_wait_measured`", which restored `OK / False`
+    while that was the ONLY owner. `health()` is now a second, independent owner, so that
+    mutation leaves the verdict at `PR-UNWITNESSED` and only reds the `pr_wait_measured`
+    assertion (measured). What this test discriminates now is the `health()` arm: delete
+    it and the verdict returns to `OK`; the `pr_wait_measured` arm is still needed and is
+    pinned by its own assertion, so the two are independent witnesses rather than one.
     """
     health = classify(flood_queued(4) + starving_pr_runs(1, age_seconds=60),
                       in_progress=[run(1, "Python CI", event="pull_request",
@@ -1654,6 +1662,81 @@ def test_an_UNCUT_reading_is_required_before_any_witness_can_be_excluded():
         "a POSITIVE congestion is a claim about what was read — the cut does not erase it")
     assert witnessed.congests_pr_apart_from(4249) is True, (
         "but the exemption is unavailable: the cut may have hidden a second witness")
+
+
+def test_a_cut_PENDING_leg_refuses_OK_even_with_no_PR_run_in_ANY_leg():
+    """⬛ ROUND-16 P1: the refusal was in `healthy()`, and one path never calls it.
+
+    A capped `pending`/`requested` read drops its OLDEST runs, so the wait this reading
+    is about to call healthy — or CLEAR — may be one it never saw. It was refused
+    inside `healthy()`, which the `not wait_runs` clause does not call, so a
+    flood-shaped queue (no PR run in any leg, a cut pending page) printed
+    `OK(queued=6, pr_running=0, …)` over a leg this reading KNOWS was cut, while
+    `truncated=True` in the same shape returned `PR-UNWITNESSED`.
+
+    Discriminating: moving the check back into `healthy()` alone reds this; so does
+    dropping it from `health()`, since the queued-leg arm would still pass.
+    """
+    flood = [run(5000 + i, "Some Other Workflow", event="push", age_seconds=1800)
+             for i in range(6)]
+    cut_pending = classify(flood, in_progress=[], pending_truncated=True)
+    assert cut_pending.verdict == Q.PR_UNWITNESSED, (
+        "a leg the reading knows was cut cannot be reported as OK")
+    assert "pending`/`requested` leg was cut" in " ".join(cut_pending.reasons)
+    # …and the destructive gate stays shut, which it already did (pr_wait_measured)
+    assert cut_pending.congests_pr is None
+    # the queued-leg arm is unchanged, so the two legs are now actually symmetric
+    assert classify(flood, in_progress=[],
+                    truncated=True).verdict == Q.PR_UNWITNESSED
+
+
+def test_a_counters_met_queue_with_an_executing_PR_run_reaches_OK_with_no_PRWITNESS():
+    """⬛ ROUND-23 P2: this reading is provably NOT `FLOOD`, and it returns `OK`.
+
+    `healthy()`'s docstring names it as one of the ways to reach `OK` with
+    `pr_wait_measured=False`, and that "one of the ways" claim is FALSE-shaped if the
+    queue could be FLOOD: `pr_running != 0` is decided ABOVE the flood block, so a queue
+    with an executing PR run can never carry that verdict however many runs it has. Both
+    halves are asserted here, so neither the sentence nor its negation can drift.
+
+    THIS test pins the route's OUTPUT, not the clauses' reachability: the route
+    (`pr_running != 0` → `healthy()` → the constructor's derivation) leaves `OK` /
+    `pr_wait_measured=False` / `congests_pr is None`. It is the behavioural anchor for
+    `healthy()`'s sentence — it reds when any of THOSE THREE values changes, and a change
+    elsewhere in that route's return can leave it green — but it is NOT a witness that its
+    clauses are REACHED, which is why the two mutations below and the two retractions that
+    follow are kept apart.
+
+    ⛔ WHAT THIS TEST DOES **NOT** PIN (round 24, measured — an earlier draft of this
+    docstring claimed both and both were GREEN): conjoining `and not truncated` into the
+    constructor's `pr_wait_measured` derivation does not red it, because `bool(wait_runs)`
+    is already `False` when the PR wait is empty and no added conjunct can change that
+    (the test that reds on THAT mutation is
+    `test_congests_pr_is_three_valued_so_a_cancel_cannot_consume_silence`, uniquely); and
+    neutering the `pr_running != 0` clause does not red it either, because with no PR wait
+    the `not wait_runs` clause answers `OK` first (five other tests witness that clause).
+
+    Discriminating (both measured at this head): returning this shape as `FLOOD` from
+    `classify_queue`'s `pr_running != 0` clause — the clause that CALLS `healthy()`, not
+    anything inside it — reds the first assertion, and does so in this test alone; that is
+    exactly the retracted wording the sentence replaced. And making the constructor's
+    derivation `bool(wait_runs) or not pending_truncated` reds the second.
+    """
+    executing = run(1, "Python CI", event="pull_request", age_seconds=60,
+                    has_live_job=True)
+    measured = classify(flood_queued(6), in_progress=[executing])
+    assert measured.verdict == Q.OK, (
+        "a counters-met queue with an executing PR run and no PR wait is not FLOOD")
+    assert measured.pr_wait_measured is False, (
+        "there is no wait to measure, so the destructive gate must not read it as clear")
+    assert measured.congests_pr is None
+
+    # …and the truncated variant of the same shape takes the same route, which is why
+    # truncation is neither necessary nor sufficient for this `False`.
+    truncated = classify(flood_queued(6), in_progress=[executing], truncated=True)
+    assert truncated.verdict == Q.OK
+    assert truncated.pr_wait_measured is False
+    assert truncated.congests_pr is None
 
 
 def test_the_witness_ids_are_emitted_so_the_caller_does_not_re_derive_them():
@@ -2120,11 +2203,14 @@ def test_an_unmeasured_pr_wait_while_pr_ci_executes_is_not_ok():
 
 
 def test_the_only_ok_outside_the_seam_has_no_wait_to_measure():
-    """The narrowed guarantee: no queued PR run means no PR wait at all.
+    """The narrowed guarantee: no PR-event run waiting in ANY read leg means no wait.
 
     `healthy()` is the single seam every `OK` returns through EXCEPT this clause,
-    and this clause is harmless by construction — with no queued PR-event run there
-    is no wait that could be past a budget. Pinned so a future clause cannot slip a
+    and this clause is harmless by construction — with no PR-event run waiting in ANY
+    of the read legs (`queued`, `pending`, `requested`) there is no wait that could be
+    past a budget. ⛔ NOT "no QUEUED run": the clause keys on `wait_runs`, which is the
+    union of both wait legs, and a pending-only wait at 5700 s IS past the budget
+    (measured: `PR-STARVED`, `oldest=5700.0`). Pinned so a future clause cannot slip a
     durable `OK` in beside it without this test changing.
     """
     health = classify(flood_queued(12))
@@ -2149,11 +2235,14 @@ def test_the_only_ok_outside_the_seam_has_no_wait_to_measure():
 #     `max_pr_wait_seconds` (5400 s), so a queue starved for 30× longer than the floor
 #     certified itself `OK`.
 #
-# THE FIX. `pr_running` counts only runs whose jobs were READ and not all found
-# terminal. The discrimination matters as much as the exclusion: `False` is a PROOF
-# (every job of the run is `completed`, so it is executing nothing), while an
-# unmeasured run abstains toward EXECUTING — under-counting manufactures `PR-STARVED`,
-# a `STARVING_VERDICT` that authorises a destructive cancel-then-rerun.
+# THE FIX. `pr_running` SUBTRACTS only the runs whose jobs were READ, EVERY one of them
+# found terminal (`completed`), and whose own `updated_at` had been still for
+# `JOB_SETTLE_SECONDS` — an all-completed list alone is also what a DYNAMIC matrix's
+# pre-expansion window looks like, so stillness is the second half of the proof. Every
+# other run is still COUNTED, an unmeasured one included: this fixture's `False` MEANS
+# settled (its `updated_at` is 7 days old, so both halves hold), while an unmeasured run
+# abstains toward EXECUTING — under-counting manufactures `PR-STARVED`, a
+# `STARVING_VERDICT` that authorises a destructive cancel-then-rerun.
 
 GHOSTS = (42066648922, 42063693940, 42062549845)
 
@@ -2186,8 +2275,9 @@ def test_the_issue_reproduction_frozen_runs_no_longer_make_a_starved_queue_read_
     assert pre_fix.verdict == Q.OK, "the pre-fix reading this issue measured"
     assert pre_fix.pr_running == 3, "three dead runs counted as executing PR CI"
 
-    # B — the same queue, the same three runs, now READ: every job is `completed`, so
-    # none of them is executing anything, and the queue is starved.
+    # B — the same queue, the same three runs, now READ and SETTLED (their `updated_at`
+    # is 7 days old, so both halves of the exclusion proof hold), so none of them is
+    # executing anything and the queue is starved.
     measured = classify(queued, in_progress=ghost_runs())
     assert measured.pr_running == 0
     assert measured.pr_running_excluded == GHOSTS
@@ -2274,6 +2364,745 @@ def test_the_default_projection_is_the_pre_fix_census():
                        created_at="2026-10-19T03:00:00Z").is_executing is True
 
 
+def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
+    r"""The prose that documents the exclusion proof must never state it with one half.
+
+    WHY A TEXT GUARD EXISTS IN A SUITE OTHERWISE BUILT ON EXECUTED ASSERTIONS. The
+    settle gate made exclusion require every job `completed` AND `updated_at` still for
+    `JOB_SETTLE_SECONDS`. That rule is stated in prose at MANY sites — module comments and
+    `#:` field docs in `tools/ci_queue_health.py`, two comment blocks in the workflow, the
+    ops doc, and headers in this file — and prose cannot be executed, so a revert to the
+    one-half wording is invisible to every behavioural test. ⛔ NO COUNT IS GIVEN HERE ON
+    PURPOSE: an earlier revision said "TEN places — three module comments, TWO `#:` field
+    docs", while this change corrects FOUR field docs, and the miscount is how two of them
+    came to be claimed without a needle (review P3). An inventory in a docstring is itself
+    an unpinned claim; what is pinned is the NEEDLES, and every site a needle was written
+    for is listed in the list below rather than counted here. It has ALREADY happened four
+    times: round 17 corrected one twin and left the other contradicting it in the same file;
+    the workflow
+    block claiming an all-completed run "can never make the census unmeasured" is FALSE for
+    the population the gate creates; the first version of this guard missed
+    `classify_queue`'s comment; and the second missed the two test headers that shipped the
+    same inference in this very file.
+
+    SO THE MATCH IS CLAIM-LEVEL AND FORMATTING-INSENSITIVE. Line-literal matching let a
+    re-wrap at a comment boundary through (routine at ~80–85 columns here), so leading
+    comment markers are stripped and all whitespace flattened on both sides — and CASE
+    and BACKTICKS are normalised away too (review P2-2), because a revert is re-TYPED,
+    not pasted: "the PROOF that EXCLUDES" returns as "the proof that excludes" the moment
+    it is re-wrapped into a sentence, and re-typing routinely drops inline-code
+    backticks. Both were MEASURED to walk through a case- and backtick-sensitive scan.
+    The lower-casing precedent is this repo's own: `tests/test_10000_source_prose.py`
+    scans case-INSENSITIVELY for exactly this reason. The needles are the retracted
+    CLAIM, never a fragment: "can never make the census" alone is TRUE when stated over
+    both halves — the ops doc states exactly that — so a fragment needle both
+    over-triggers on correct prose and cannot be pointed at the doc at all. Half needles
+    are likewise avoided where the fragment is legitimate: "therefore NOT counted in" is
+    correct prose in the corrected field doc, so the retracted PAIR is one needle.
+
+    ⛔ AND NO WORDING RULE MAKES A NEEDLE SAFE (review P2). Round 4 claimed every needle
+    runs to its sentence's terminal clause and that "so a correct sentence cannot contain
+    one" — and MEASURED it false: five needles still redded CORRECT two-half prose, because
+    ANY contiguous span can be embedded by a correct rewrite and qualified afterwards ("… is
+    the PROOF that excludes it from `pr_running` ONLY WHEN the run's `updated_at` has also
+    been still"). Extending a needle to its terminal clause SHRINKS that surface; it cannot
+    close it. What closes it is CONTEXT, not wording, and that is what `hits()` does: a hit
+    counts only when the sentence carrying it does not itself state the stillness half — which
+    is exactly the clause every CORRECT rewrite adds. ⛔ NOT "and no retracted sentence had":
+    a shipped count sentence DOES name stillness and is therefore disarmed by design — which
+    is why the count claims below are checked WITHOUT this discriminator.
+    Two lists below keep that honest, and BOTH are asserted: `correct` (the same-sentence
+    restatements must pass, so no needle may red the right answer) and `pre_fix` (every
+    sentence that actually shipped must still be caught, so no needle may be narrowed past
+    its own target). A needle that breaks either one fails here, in CI.
+
+    ⛔ ONE NEEDLE BELOW IS NOT A RETRACTED PHRASING BUT A DISCLOSURE DELETION (review P3).
+    A blocklist catches a claim that came BACK; it cannot see a site that went SILENT — the
+    sentence deleted, leaving the wrong statement unstated rather than contradicted. That
+    is `has_live_job`'s `None` bullet: dropping the stillness clause from it left the suite
+    green (measured), and its needle matches the pre-fix JOIN the deletion recreates, so the
+    silence and the revert are the same failure. The CANONICAL-list needles beside it are a
+    DIFFERENT shape — a retracted claim, not a deletion — and they exist twice because the
+    claim shipped twice, in the module and in this file, with different wording.
+
+    RESIDUAL, stated plainly: this catches the phrasings that have actually shipped, not a
+    novel paraphrase — a NEW wrong wording, or a revert that keeps the wrong claim but
+    rephrases it, is not caught. ⛔ AND IT IS PER-SITE: every needle here was written BY HAND
+    for a site someone noticed, so a site NO needle was written for can revert to `origin/main`
+    and stay green — measured on this very diff, which corrects the same claim at several
+    surfaces (the wait witness, cause (b)'s `created_at`, `False`'s CANDIDATE status, the
+    `_executing_claim` docstring twin) and pins only some of them. That is the ceiling of a
+    hand-enumerated blocklist, not a defect to keep chasing: the enumeration is unbounded by
+    construction (sites × claims), and a round that adds needles for the four sites a reviewer
+    happened to try leaves the next four free. What this guard DOES establish is narrower and
+    still worth having: the phrasings that actually shipped at the sites it names cannot come
+    back, and the load-bearing claims have presence pins (`must_state`) so a DELETION reds.
+    Widening the match is not free either: once case and
+    backticks are ignored every needle must stay long enough to be unambiguous ("by being
+    probed" alone would collide with the pre-fix sentence's own "identified *by being
+    probed*" clause),
+    which is why the doc needles below carry their clause and not a fragment. It is a
+    regression guard, not a proof of the prose.
+    """
+    root = Path(__file__).resolve().parents[1]
+    scanned = {
+        "module": (root / "tools/ci_queue_health.py").read_text(),
+        "workflow": (root / ".github/workflows/ci-queue-health.yml").read_text(),
+        "doc": (root / "docs/ops/ci-wall-clock.md").read_text(),
+        "tests": (root / "tests/test_ci_queue_health.py").read_text(),
+    }
+
+    def flat(text: str) -> str:
+        r"""Comment markers and line wrapping are NOT content, so neither may hide a revert.
+
+        Dropping only whitespace was not enough: a reverted paragraph re-wrapped at a
+        comment boundary flattens to a token split across the marker and slips past the
+        needle. The leading comment marker of every line is stripped first, so the
+        comparison is on the prose an operator reads, however it is wrapped or indented.
+
+        ⛔ NOR ARE CASE, BACKTICKS AND ASTERISK EMPHASIS CONTENT (review P2-2, P3-1). All three
+        were MEASURED to hide a revert: the same retracted claim, re-typed lower-case, passed
+        the whole suite, and these docs emphasise tokens INSIDE the very sentences guarded
+        here ("is the *proof* that EXCLUDES", and the pre-fix doc's "*by being probed*"), so a
+        revert that bolds a word inside a needle span would otherwise be invisible.
+        ⛔ UNDERSCORE EMPHASIS IS NOT NORMALISED, and that is a stated limit, not an oversight:
+        `_` is a token character in this module (`job_settle_seconds`, `pr_running`), so
+        stripping it would mangle the very needles it was meant to protect. A revert that
+        italicises with `_` or `__` therefore walks through — measured.
+        """
+        lines = [re.sub(r"^\s*(?:#:|#)\s?", "", ln) for ln in text.splitlines()]
+        return re.sub(r"\s+", " ", " ".join(lines)).replace("`", "").replace("*", "").lower()
+
+    #: What a CORRECT restatement adds that a retracted one never has: the stillness half.
+    #: ⛔ THE DISCRIMINATOR (review P2). Every retracted claim asserts that ONE half suffices;
+    #: every correct rewrite supplies the missing one — in the same sentence, or in the next
+    #: one. A needle is a contiguous SPAN, so no wording rule makes it unreachable by such a
+    #: rewrite (measured, repeatedly); what separates the two is CONTEXT. So a hit only counts
+    #: when the passage it lands in does not itself state the second half.
+    #: ⛔ AND THIS TUPLE IS ITSELF A WORDING RULE, so it is stated as one. A correct qualifier
+    #: reds unless it names stillness with one of these tokens IN THE SAME SENTENCE: measured, a
+    #: correct edit phrased "unless its stamp has stopped moving" or "while the run has been
+    #: QUIET for 300 s" redded. So the tuple carries the stillness PHRASING A CORRECTED EDIT MAY
+    #: USE — not "the vocabulary these docs use", which was measured false and is the wrong
+    #: test: bare `quiet` and `stops moving` occur in these files with OTHER referents (a quiet
+    #: repo, a quiet queue, a count that stops moving), so `quiet` is `quiet for` and
+    #: `stops moving` is `stopped moving` here, on the same reasoning that rejects bare `still`
+    #: below.
+    #: `still for` rather than bare `still`: "still counted" is ordinary prose in THIS module
+    #: (an abstained run is "still counted as executing"), so the loose token would disarm real
+    #: hits — measured.
+    #: ⛔ NO `settle window` TOKEN (review P1, round 11). It was added to admit the prose "now
+    #: that we are inside the settle window", and admitting it is a FALSE PASS: this tuple is
+    #: consumed only to SUPPRESS a hit, and in this module's own vocabulary the settle window is
+    #: the 300 s during which stillness is NOT yet established (`_settled_still`) — so "inside
+    #: the settle window" is the NEGATION of the proof, and a gate noun rather than a stillness
+    #: predicate. Measured: a one-half claim qualified with it passed the guard.
+    SECOND_HALF = ("still for", "motionless",
+                   "quiet for", "stopped moving", "has been still")
+
+    #: ⛔ AND NO TOKEN MAY NAME A GATE, A FIELD OR A CONSTANT (review P1, round 12). This is
+    #: the general form of the `settle window` defect, stated as code so it cannot come back
+    #: as prose: a token here can only ever SUPPRESS a hit, so any noun the module itself
+    #: uses to name a GATE ("settle window" is the 300 s in which stillness is not yet
+    #: established) or a raw FIELD/CONSTANT (`updated_at`, `JOB_SETTLE_SECONDS`,
+    #: `created_at`) is a false PASS waiting for the first sentence that names it. Measured
+    #: on the pre-fix tuple: a one-half claim qualified ", for the `JOB_SETTLE_SECONDS`
+    #: window" and again ", once its `updated_at` was last read" each PASSED the guard —
+    #: both are the NEGATION of stillness, or a bare field name, and neither states it.
+    #: Stillness must be a PREDICATE ("has been still", "stopped moving"), never the clock
+    #: it is measured against.
+    for _gate in ("settle", "window", "updated_at", "job_settle_seconds", "created_at",
+                  "budget", "probe", "completed", "status", "conclusion", "attempt"):
+        assert not any(_gate in token for token in SECOND_HALF), (
+            f"{_gate!r} names a gate, field or constant, not stillness — as a "
+            f"SECOND_HALF token it can only suppress a hit, which turns this guard into a "
+            f"false PASS: {SECOND_HALF!r}"
+        )
+
+    #: ⛔ AND THE SET IS PINNED EXACTLY, NOT MERELY BOUNDED (review P1, round 13). A
+    #: blocklist cannot see an ADDITION, and measured: `at rest`, `not moving`,
+    #: `unchanged for`, `quiescent` and `has not moved` were each added in silence — a
+    #: five-token-wide false-PASS surface, and the one direction that matters, since every
+    #: token here can only SUPPRESS a hit. So adding stillness vocabulary requires editing
+    #: this line, which is a place a reviewer is forced to look. Add a token ONLY if the
+    #: module computes it as a stillness PREDICATE of ``run.updated_at``.
+    assert set(SECOND_HALF) == {
+        "still for", "motionless", "quiet for", "stopped moving", "has been still",
+    }, (
+        "SECOND_HALF gained or lost a token — every token in it can only SUPPRESS a hit, "
+        "so this set is pinned exactly and any change must be argued from `_settled_still`, "
+        f"never from the prose it admits: {SECOND_HALF!r}"
+    )
+
+    def hits(hay: str, needle: str) -> bool:
+        """Does ``needle`` occur where the second half is NOT also stated nearby?
+
+        The passage STARTS at the needle's own sentence — unless no terminator appears in the
+        300 characters before it, in which case it starts 300 characters back, which is
+        (measured) a different clause: in an unpunctuated bullet list, a previous item that
+        mentions `updated_at` will disarm a hit in the item below it. That cap is a bound on
+        how far back the search may cost, NOT a promise that the passage is one sentence.
+
+        ⛔ NO LOOKAHEAD INTO THE NEXT SENTENCE, and that is measured, not stylistic (review P2).
+        A one-sentence lookahead disarms the REAL revert: a revert re-adds the retracted
+        sentence next to corrected text that still names stillness, so four site reverts went
+        GREEN under it (measured: workflow block, its lower-case and no-wrap variants, and the
+        tests-file twin). Missing a revert is the failure this guard exists to prevent; reding
+        a correct edit is visible and fixable. So detection wins, and the cost is named.
+
+        RESIDUAL, stated plainly: a correct rewrite that qualifies in a SEPARATE SENTENCE
+        ("… executing anything. (Their `updated_at` is 7 days old …)") still reds. Put the
+        qualifier in the same sentence — the form every site here actually uses — or narrow the
+        needle. This is a regression guard, not a proof.
+        """
+
+        #: ⛔ A REAL BOUNDARY, NOT EVERY DOT (review P2). Treating each ``.`` as a sentence end
+        #: splits a CORRECT sentence at ``i.e.`` — this repo's own idiom — or at a decimal like
+        #: ``300.0``, which CUTS the stillness half away and reds correct prose (measured). A
+        #: terminator must be followed by whitespace, end-of-string, or a closing delimiter, so
+        #: "… (see the `excluded` sentence)." and "…)." both still count while ``i.e.`` and
+        #: ``0.5`` do not. This is stricter than ``". "`` was (that rule ran past a ``.)``),
+        #: which is why it is the predicate used for BOTH ends of the passage.
+        _TERM = re.compile(r'[.!?](?=$|\s|[)\]`"])')
+        #: ⛔ AND AN ABBREVIATION'S FULL STOP IS NOT A SENTENCE END EITHER (review P2). ``i.e.``
+        #: and ``e.g.`` end in a dot followed by a space, so the delimiter rule alone still split
+        #: a CORRECT sentence there and cut its stillness half away — measured. Decided BEFORE a
+        #: candidate is accepted, for both ends of the passage.
+        _ABBREV = ("i.e.", "e.g.", "vs.", "cf.", "al.")
+
+        def _is_abbrev(j: int) -> bool:
+            return any(hay[max(0, j - 3):j + 1].endswith(a) for a in _ABBREV)
+
+        def _terminator(after: int) -> int:
+            """Index of the next REAL sentence terminator at/after ``after``, or -1."""
+            start = after
+            while True:
+                m = _TERM.search(hay, start)
+                if m is None:
+                    return -1
+                if not _is_abbrev(m.start()):
+                    return m.start()
+                start = m.start() + 1
+
+        start = 0
+        while True:
+            i = hay.find(needle, start)
+            if i == -1:
+                return False
+            found = [m.start() for m in _TERM.finditer(hay, max(0, i - 300), i)
+                     if not _is_abbrev(m.start())]
+            left = found[-1] if found else i - 300
+            # ⛔ START AT THE NEEDLE'S LAST CHARACTER, not one past it. `_terminator` is
+            # inclusive, so searching from `i + len(needle)` skipped a terminator that IS the
+            # needle's final character — and then found the NEXT sentence's, so the passage
+            # spanned two sentences: a one-sentence lookahead, the exact thing the docstring
+            # above says was measured to disarm the real revert (review P1).
+            right = _terminator(i + len(needle) - 1)
+            if right == -1:
+                right = len(hay) - 1
+            passage = hay[left + 1:right + 1] if left >= 0 else hay[:right + 1]
+            if not any(tok in passage for tok in SECOND_HALF):
+                return True
+            start = i + 1
+
+    retracted = [
+        # the module sites that shipped uncorrected
+        "whose EVERY job had completed, and which are therefore NOT counted in "
+        "`pr_running` (#12037).",
+        # ⛔ EACH CARRIES ENOUGH CONTEXT THAT A CORRECT REWRITE CANNOT EMBED IT (review P2).
+        # A prefix-only needle is a substring of the CORRECT sentence that appends the second
+        # half; a clause-level one is not. Both directions are re-measured for every needle.
+        "EVERY job of them was `completed` (a proof of non-execution), and how many",
+        "PR-event runs read as `in_progress` whose jobs could NOT be read, and which are "
+        "still counted as executing. Abstaining toward executing",
+        "only when its jobs were read and every one had completed. An unmeasured run keeps",
+        # the settled-ness INFERENCE the two test headers shipped: all-completed,
+        # therefore executing nothing. True only of a fixture that is also still, so it
+        # must be stated as the premise, never as the inference. The second needle anchors on
+        # the OMISSION ("now READ:" — without SETTLED), because the inference itself becomes
+        # TRUE once the run is settled and a correct header may then state it.
+        "`False` is a PROOF (every job of the run is `completed`, so it is executing nothing)",
+        # the SHORT form of the same claim, which survived in this very file until a review
+        # found it (review P2): `False` alone is a CANDIDATE proof, not a final one.
+        "`False` is a PROOF of non-execution",
+        "now READ: every job is `completed`, so none of them is executing anything",
+        # the sufficiency CLAIM, carried through its own terminal clause: the short form alone
+        # ("… is the PROOF that excludes it from `pr_running`") is a prefix of a CORRECT
+        # sentence that qualifies it, so the needle is the whole shipped sentence. ⛔ The
+        # never-shipped variant that used to sit here ("every job `completed` is the PROOF
+        # that EXCLUDES a run from `pr_running`") is DELETED: `git log -S` shows only the
+        # commit that added the needle ever contained it, so it was pure false-positive
+        # surface — it reds any correct sentence that appends the stillness half.
+        # ⛔ THE SUBJECT IS PART OF THE NEEDLE (review P3-1). Without it, dropping `*`
+        # (above) turns this needle into a false positive on the ops doc's CORRECT
+        # paragraph the moment its "(see the `excluded` sentence)" cross-reference is
+        # tightened — measured: 4 passed pristine, RED on correct prose after the tidy.
+        "every job is `completed` is the PROOF that excludes it from `pr_running`, so it "
+        "can never make the census unmeasured, and neither `/cancel` nor `/force-cancel` "
+        "accepts such a repair",
+        # the wrap artifact is NOT the claim (review P3-2): `flat()` turns the shipped
+        # "all-jobs" / newline / "-completed" into "all-jobs -completed", so a needle that
+        # hard-codes that space only catches a PASTE. The re-typed revert (no space) needs
+        # the hyphen-joined form, which the wrap-free needle carries. BOTH run to the shipped
+        # sentence's terminal clause (review P2-1), so neither is a prefix of a correct
+        # sentence that adds the stillness half.
+        "all-jobs -completed is the PROOF that EXCLUDES a run from `pr_running` (see the "
+        "`excluded` sentence), so it can never contribute to an unmeasured census",
+        "all-jobs-completed is the PROOF that EXCLUDES a run from `pr_running` (see the "
+        "`excluded` sentence), so it can never contribute to an unmeasured census",
+        # the `classify_queue` RETURNED-DICT twin of the comment above (review P2). It was
+        # corrected by this change and NO needle matched it: silencing its stillness clause
+        # left the suite green. ⛔ Anchored on the TERMINAL clause, not on "read as
+        # `completed` — a run GitHub has stopped driving": that prefix is a substring of a
+        # CORRECT sentence with the stillness clause interposed (review P2, measured RED on
+        # correct prose), and both shapes end on "and they are subtracted".
+        "read as `completed` — a run GitHub has stopped driving — and they are subtracted "
+        "from `pr_running`.",
+        # the has_live_job `None` bullet's stillness clause (review P3) — a DISCLOSURE
+        # deletion: dropping the clause re-joins "not provably complete" to the budget arm.
+        "that is not provably complete, or a run the probe BUDGET",
+        # the CANONICAL-list claim this change RETRACTED (review P3): a single list cannot
+        # own a set that spans the callee, the caller's settle gate, and the budget split.
+        # Both carry the shipped sentence's `; it is NOT re-enumerated` clause (review P2-1),
+        # so a correct edit that widens the claim ("…Returns block FOR the callee's routes")
+        # does not red.
+        "The CANONICAL list lives in `read_run_live_job`'s Returns block; it is NOT "
+        "re-enumerated here on purpose",
+        # ... and its TWIN IN THIS FILE (review P3), which shipped with different wording
+        # and so was NOT caught by the needle above: the same claim, corrected twice and
+        # half-guarded — the "corrected one twin, left the other" shape this docstring names.
+        'The canonical list of what "did not prove it idle" covers lives in '
+        "`read_run_live_job`'s Returns block; it is NOT re-enumerated here",
+        # the merged claim that either state is a CLOSED avenue: for a settle-downgraded
+        # run /cancel is ACCEPTED and destructive
+        "accepts a run in either state",
+        "accepts a repair in either state",
+        # the OPS DOC's own shipped paragraph (review P2-1). NO other needle matched what
+        # it actually shipped, so reverting it put both errors back — the wrong lever AND
+        # the merged cancelled-avenue claim — with the suite green. Clause-level, not a
+        # fragment: "by being probed" alone now collides with the corrected workflow block.
+        "i.e. by the budget lever above, and neither `/cancel` nor `/force-cancel` "
+        "accepts a repair",
+        # ⛔ AND THE STANDALONE "neither `/cancel` nor `/force-cancel` accepts a repair" IS
+        # NOT HERE (review P3): it is TRUE of the frozen population the corrected doc
+        # describes (both endpoints answer 409 there), so with case and `*` normalised it
+        # reds CORRECT prose — measured. The shipped doc wording is caught by the
+        # clause-anchored needle above and the workflow's by "accepts a repair in either
+        # state", so nothing that shipped loses coverage.
+    ]
+    flats = {name: flat(text) for name, text in scanned.items()}
+    # The guard's own docstring quotes several of these to describe them, so the test file
+    # is scanned with THIS FUNCTION's span CUT OUT — otherwise the guard self-triggers.
+    # ⛔ THE END BOUNDARY IS THE NEXT TOP-LEVEL `def`, NOT A NAME (review P3): partitioning
+    # on the following test's name found a mention of it INSIDE this body, so the "cut"
+    # stopped six lines early and left the tail of the guarded body in the hay (harmless
+    # only until a retracted phrasing is added there, and then it self-triggers).
+    own = scanned["tests"]
+    start = own.index("def test_NO_site_states_the_retracted")
+    end = own.index("\ndef ", start + 1)
+    flats["tests"] = flat(own[:start] + own[end:])
+    for phrase in retracted:
+        needle = flat(phrase)
+        for name, hay in flats.items():
+            assert not hits(hay, needle), (
+                f"retracted one-half claim is back in the {name} (claim-level, "
+                f"wrapping-insensitive): {phrase!r}"
+            )
+
+    # ⛔ THE NO-FALSE-POSITIVE LEG, EXECUTED (review P2). A needle is a contiguous span, so a
+    # CORRECT rewrite can EMBED it and qualify it afterwards — measured on five needles that
+    # had already been extended to their terminal clause. No wording rule closes that;
+    # `hits()` does, by context. These are the CORRECT shapes the guard must let through, all
+    # of them forms an editor actually writes at the sites this rule lives on (a same-sentence
+    # "only when … has also been still" qualifier, a widened subject, a comma where the
+    # retracted sentence had a full stop). ⛔ On its own this leg is satisfiable VACUOUSLY,
+    # which is why `pre_fix` below carries the teeth. ⛔ AND NOT EVERY ENTRY HERE EMBEDS A
+    # NEEDLE SPAN (review NIT): measured, only a minority do, because most correct rewrites
+    # QUALIFY the span away rather than quote it. The entries that do not embed one are still
+    # worth keeping — they are the shapes a NARROWED needle would newly match — but they
+    # exercise nothing today. ⛔ NOR IS THE DISARM PATH COVERED BY `pre_fix` BELOW (round 10):
+    # those entries must FIRE, and a firing hit is by definition one the context check did
+    # not disarm — so `pre_fix` covers detection, never disarming. The disarm path is
+    # exercised ONLY by the `correct` entries that embed a span. That was ONE when this was
+    # written and is FIVE now (the four vocabulary pins below joined it), which is why the
+    # assertion pins a measured FLOOR instead of an exact count — `len({entry for entry, _ in
+    # disarming}) >= 5` — so it catches a deletion without going stale when one is added.
+    #: ⛔ THE FOUR VOCABULARY PINS ARE SELECTED BY IDENTITY, NOT BY POSITION (review P2,
+    #: round 13). They were `correct[-4:]`, which silently stopped covering pin 1 the moment a
+    #: fifth two-half restatement was appended AND falsely redded that new entry as "disarmed
+    #: by 2 tokens … it pins nothing" — measured.
+    vocabulary_pins = [
+        "False is a PROOF (every job of the run is completed, so it is executing nothing) "
+        "because its stamp is motionless",
+        "now READ: every job is completed, so none of them is executing anything, and the run "
+        "has been quiet for 300 s",
+        "the runs read out because EVERY job of them was completed (a proof of "
+        "non-execution), and how many, now that its stamp has been still long enough",
+        "all-jobs-completed is the PROOF that EXCLUDES a run from pr_running (see the "
+        "excluded sentence), so it can never contribute to an unmeasured census once its "
+        "stamp has stopped moving",
+    ]
+
+    correct = [
+        "PR-event runs whose EVERY job had completed, and which are therefore NOT counted "
+        "in `pr_running` (#12037) only once its `updated_at` has been still for "
+        "`JOB_SETTLE_SECONDS`.",
+        "a run whose every job is `completed` is the PROOF that excludes it from "
+        "`pr_running` only when the run's `updated_at` has also been still for "
+        "JOB_SETTLE_SECONDS",
+        "every job is `completed` is the PROOF that excludes it from `pr_running` only when "
+        "the run's `updated_at` has also been still for JOB_SETTLE_SECONDS",
+        "all-jobs-completed is the PROOF that EXCLUDES a run from `pr_running` only when "
+        "the run's `updated_at` has also been still for JOB_SETTLE_SECONDS.",
+        "read as `completed` — a run GitHub has stopped driving — and they are subtracted "
+        "from `pr_running` only once its own `updated_at` has been still for "
+        "`JOB_SETTLE_SECONDS`.",
+        "this fixture's `False` is a PROOF (every job of the run is `completed`, so it is "
+        "executing nothing) precisely because its stamp has been still for far longer than "
+        "`JOB_SETTLE_SECONDS`",
+        "PR-event runs read as `in_progress` whose jobs could NOT be read, and which are "
+        "still counted as executing — along with the settle-downgraded and "
+        "budget-unreached runs.",
+        "The CANONICAL list lives in `read_run_live_job`'s Returns block for the callee's "
+        "routes; the settle gate is the caller's.",
+        'The canonical list of what "did not prove it idle" covers lives in '
+        "`read_run_live_job`'s Returns block for the callee's routes; the settle gate is "
+        "the caller's.",
+        "their every job was `completed` (a proof of non-execution) AND the run had been "
+        "still for `JOB_SETTLE_SECONDS`, and how many were not read",
+        "a run counts out only when its jobs were read and every one had completed AND its "
+        "own `updated_at` has been still for `JOB_SETTLE_SECONDS`",
+        "now READ and SETTLED (their `updated_at` is 7 days old, so both halves of the "
+        "exclusion proof hold), so none of them is executing anything",
+        # ⛔ THESE FOUR PIN THE WIDENED VOCABULARY ITSELF. Each embeds a needle that exists
+        # in `retracted` AND is disarmed by EXACTLY ONE of the tokens — asserted
+        # immediately below, because a pin whose qualifier two tokens match pins neither
+        # (review P2, round 12: the third one, written to replace the removed `settle
+        # window` prose, said "has been still for 300 s" and so was disarmed by BOTH
+        # `has been still` and `still for`, i.e. by nothing in particular). ⛔ THE RISK
+        # DIRECTION IS THE OTHER WAY FROM WHAT IT LOOKS, and this comment got it wrong twice
+        # (review P2/P1, rounds 12-16; all measured). A DELETION always reds, because the
+        # exact-set pin above fires first on any removal. This leg ALSO reds on four of the
+        # five deletions — every token a registered pin names alone. What it cannot see is a
+        # deletion of `still for`: NO REGISTERED PIN NAMES IT AT ALL, and
+        # the one `correct` entry that embeds a needle and leans on it is also carried by
+        # `has been still`. The other four tokens each carry a registered pin alone, so their
+        # deletion reds HERE.
+        # Two legs, two failure modes, neither redundant. And an ADDITION is not
+        # visible from any leg below: `at rest`, `not moving`, `unchanged for`, `quiescent`
+        # and `has not moved` were each accepted in silence, and a one-half claim qualified
+        # with any of them then passes the guard — the same fail-open as `settle window`,
+        # reached from the other side. That is why the set is pinned EXACTLY above rather
+        # than bounded: an addition reds, and must be argued from `_settled_still` (a
+        # PREDICATE the code computes) and never from the prose it is meant to admit.
+        # This leg keeps a pin from being dropped silently; it is not what keeps the
+        # vocabulary narrow — the exact-set pin is.
+    ]
+    correct += vocabulary_pins
+    # ⛔ EACH REGISTERED VOCABULARY PIN MUST NAME EXACTLY ONE TOKEN (review P2, rounds 12
+    # and 14). A token's PRESENCE in the passage is what disarms it, so "exactly one token
+    # occurs" IS the exclusivity claim the comment above makes — a pin carrying two is
+    # carried by neither. ⛔ AND THIS LEG READS ONLY `vocabulary_pins`: registration is what
+    # enforces the invariant, so a NEW vocabulary pin that is written into `correct` and not
+    # added to that list is NOT checked (measured: an unregistered two-token pin is green).
+    # Register it here, or the pin is a comment rather than a test.
+    for _pin in vocabulary_pins:
+        _tokens = [token for token in SECOND_HALF if token in flat(_pin)]
+        assert len(_tokens) == 1, (
+            f"this vocabulary pin is disarmed by {len(_tokens)} tokens {_tokens!r}, so "
+            f"deleting any single one leaves the path green — it pins nothing: {_pin!r}"
+        )
+
+    disarming = []
+    for phrase in correct:
+        want = flat(phrase)
+        for needle_phrase in retracted:
+            assert not hits(want, flat(needle_phrase)), (
+                f"a needle reds CORRECT prose: {needle_phrase!r} fires on {phrase!r} — "
+                f"add the stilling context or narrow the needle (review P2)"
+            )
+            if flat(needle_phrase) in want:
+                disarming.append((phrase, needle_phrase))
+    # ⛔ THE DISARM PATH MUST BE EXERCISED, not merely described (round 10). Every assertion
+    # above passes trivially for an entry that contains no needle span, so without this a
+    # future edit could delete the entries that make `hits()`'s context check load-bearing and
+    # the whole suite would stay green (measured when there was only one to delete).
+    assert len({entry for entry, _ in disarming}) >= 5, (
+        f"hits()'s disarm path is exercised by only "
+        f"{len({entry for entry, _ in disarming})} distinct `correct` entries — it "
+        f"was five when this was pinned, and a deletion that takes it lower means the path is "
+        f"silently less tested: {disarming!r}"
+    )
+
+    # ⛔ AND THE OTHER HALF OF THE CONTRACT: EVERY SHIPPED RETRACTED SENTENCE MUST STILL FIRE
+    # (review P2-2). The loop above pins NO FALSE POSITIVES; on its own it is satisfiable
+    # vacuously (every correct sentence carries the stillness half, so any hit on one is
+    # disarmed). This is the leg with teeth: it catches the real risk of narrowing — a needle
+    # taken so far down that the sentence it exists to catch walks past it. These are the
+    # phrasings that actually SHIPPED: most pre-fix on `origin/main` (one of those a
+    # truncation of a shipped sentence to its shortest true instance), two that shipped only
+    # mid-branch at `6c05aeb903` (the merged closed-avenue claim, later retracted), and one
+    # declared RE-TYPED variant. ⛔ NO NUMERAL IS GIVEN (review P2, round 12): this sentence
+    # carried one ("SEVENTEEN entries") whose own parts summed to 16, and the split it named
+    # did not match the list — every count in this file has been a route short. What
+    # matters is that each entry shipped; the composition is not a fact about the guard.
+    # ⛔ THE COUNT CLAIMS ARE NOT HERE: they live in `unconditional` below, checked WITHOUT
+    # the discriminator, because a count sentence
+    # is wrong whatever stillness it also names (the FIRST TWO shipped forms name
+    # `JOB_SETTLE_SECONDS`, which would otherwise read as a correction; the third names no
+    # settle constant at all — see the `unconditional` leg below, which reaches all
+    # three). Several guarded sites carry more than one entry, so this is not one-per-site.
+    pre_fix = [
+        # ⛔ THE TWO SHIPPED CAUSE-NAMING COMMENTS (review rounds 18-20) are NOT here: they belong
+        # in `unconditional` below, because they are CAUSE-NAMING claims rather than stillness
+        # claims — `hits()` disarms a `retracted` hit whose sentence names stillness, and these
+        # sentences are native to a paragraph that names `JOB_SETTLE_SECONDS` (measured: both
+        # re-typed with a stillness qualifier passed `retracted` GREEN).
+        # to_dict + the two field docs + classify_queue's comment + its returned-dict twin
+        "the runs read out because EVERY job of them was `completed` (a proof of "
+        "non-execution), and how many could not be read and are still counted as executing",
+        "PR-event runs read as `in_progress` whose jobs could NOT be read, and which are "
+        "still counted as executing. Abstaining toward executing is what keeps an unread",
+        "Ids of the PR-event runs read as `in_progress` whose EVERY job had completed, and "
+        "which are therefore NOT counted in `pr_running` (#12037).",
+        "The exclusion is a PROOF, never a heuristic (`is_executing`): a run counts out only "
+        "when its jobs were read and every one had completed. An unmeasured run keeps",
+        "`pr_running_excluded` names the runs whose every job was READ as `completed` — a run "
+        "GitHub has stopped driving — and they are subtracted from `pr_running`.",
+        # both workflow comment blocks
+        "a run whose every job is `completed` is the PROOF that excludes it from "
+        "`pr_running`, so it can never make the census unmeasured, and neither /cancel nor "
+        "/force-cancel accepts such a repair (409)",
+        "all-jobs -completed is the PROOF that EXCLUDES a run from `pr_running` (see the "
+        "`excluded` sentence), so it can never contribute to an unmeasured census",
+        # the ops doc's lever sentence
+        "Such a run is identified *by being probed*, i.e. by the budget lever above, and "
+        "neither `/cancel` nor `/force-cancel` accepts a repair.",
+        # the CANONICAL-list claim, module and its twin in this file
+        "The CANONICAL list lives in `read_run_live_job`'s Returns block; it is NOT "
+        "re-enumerated here on purpose.",
+        'The canonical list of what "did not prove it idle" covers lives in '
+        "`read_run_live_job`'s Returns block; it is NOT re-enumerated here.",
+        # the has_live_job bullet with its stillness clause DELETED (the silence shape)
+        "a payload whose jobs belong to a DIFFERENT attempt, a list that is not provably "
+        "complete, or a run the probe BUDGET (`DEFAULT_MAX_JOB_PROBES`) never reached.",
+        # the two test headers
+        "`False` is a PROOF (every job of the run is `completed`, so it is executing nothing)",
+        "now READ: every job is `completed`, so none of them is executing anything",
+        "`False` is a PROOF of non-execution — the frozen-run shape, measured.",
+        # ⛔ THE MERGED-CLOSED-AVENUE CLAIM, as it SHIPPED in BOTH workflow blocks at
+        # `6c05aeb903` (review NIT: without these two entries the "either state" needles
+        # were relied on by nothing, so deleting them was silent).
+        "`repair` is not a lever either way: neither /cancel nor /force-cancel accepts "
+        "a run in either state (409), so naming it would send an operator to a closed avenue.",
+        "neither /cancel nor /force-cancel accepts a repair in either state, so naming one "
+        "would point an operator at a closed avenue.",
+        # ⛔ A RE-TYPED REVERT, not a shipped quote: `flat()` turns the shipped
+        # "all-jobs" / newline / "-completed" into "all-jobs -completed", so a revert that
+        # re-types it without the break would otherwise be caught by no needle at all
+        # (review NIT: this needle had no exercise). Marked here so the leg stays honest
+        # about what it covers.
+        "all-jobs-completed is the PROOF that EXCLUDES a run from `pr_running` (see the "
+        "`excluded` sentence), so it can never contribute to an unmeasured census",
+    ]
+    # ⛔ EVERY NEEDLE MUST BE EXERCISED IN THE DETECTION DIRECTION (review NIT). Without
+    # this, a needle relied on by no `pre_fix` entry can be deleted or typo'd with the suite
+    # green — which is how the never-shipped needle above survived four rounds.
+    exercised = {p for p in retracted if any(hits(flat(s), flat(p)) for s in pre_fix)}
+    unexercised = [p for p in retracted if p not in exercised]
+    assert not unexercised, (
+        "these needles catch NO shipped sentence, so nothing would notice their removal — "
+        f"add the shipped phrasing to `pre_fix` or delete the needle: {unexercised!r}"
+    )
+    # ⛔ THE COUNT CLAIMS ARE CHECKED WITHOUT THE DISCRIMINATOR (review P2). The retraction
+    # here is that NO count is given at all, so unlike the one-half claims a count sentence is
+    # wrong whatever stillness it also names: the FIRST TWO shipped forms go on to name
+    # `JOB_SETTLE_SECONDS`, so `hits()` reads them as a correction (measured — with only the
+    # discriminator, reverts to c0c53f8c's and 6c05aeb9's sentences were GREEN), and the third
+    # shipped form is listed because it shipped, not because it is disarmed.
+    # ⛔ ONE ENTRY, TWO LEGS (review P2, round 21). The needle list and its
+    # detection-direction proof are the SAME list, because when they were two lists a typo in
+    # an entry was SILENT: the loop kept its own literal copy and kept passing (measured —
+    # renaming an entry so it could never match left 157 passed). Each entry pairs the clause
+    # with the sentence that actually shipped; a needle that stops matching its own target reds,
+    # and a deleted entry loses its content check with it.
+    unconditional = [
+        ("disproved — three causes, one bucket",
+         "disproved — three causes, one bucket: the jobs could NOT be read"),
+        ("disproved — FOUR causes, one bucket",
+         "disproved — FOUR causes, one bucket: the probe BUDGET never reached the run"),
+        ("disproved. FOUR causes, ONE bucket",
+         "disproved. FOUR causes, ONE bucket — and the causes span three layers"),
+        # ⛔ AND THE TWO SHIPPED CAUSE-NAMING COMMENTS (review rounds 18-21). Content-checked
+        # without the discriminator for the same reason as the count claims: the retraction is
+        # that the CAUSE is mis-named, which no stillness qualifier repairs. ⛔ NARROWED TO THE
+        # SHIPPED LEAD-IN, and this leg's RESIDUAL is stated rather than chased (review round
+        # 22, the same lesson round 4 learned for `retracted`): ANY contiguous span can be
+        # embedded by a correct rewrite, so (i) the bare clause reds a correct re-typing of the
+        # BUDGET-surplus scoping at `tools/ci_queue_health.py:1628` (measured; the coordinate
+        # moves with this file's own line count — it reds nothing if it drifts, so it is
+        # cheapest to re-check when the module above it changes), and (ii) a
+        # comment that quotes the retracted sentence IN ORDER TO REJECT IT also reds, because
+        # this leg has no discriminator to tell assertion from quotation. The lead-in form
+        # closes both measured false positives; a re-typing that drops the lead-in is NOT
+        # caught, and that residual is accepted — a needle that cannot be embedded at all is
+        # not achievable here, and pretending otherwise is what produced the false positives.
+        ("unmeasured, the count is the old status-string census and cannot certify health",
+         "unmeasured, the count is the old status-string census and cannot certify health"),
+        ("`pr_running_census_unwitnessed` is set by `read_health` inside its",
+         "`pr_running_census_unwitnessed` is set by `read_health` inside its "
+         "`verdict == OK`-gated clause"),
+        # ⛔ AND THE SHIPPED `state_line` CLAIM ITSELF (review P2, round 21). The presence pin
+        # beside it sits on the META-sentence describing the correction, so restoring the claim
+        # verbatim left both sentences in the block and the suite green. Pinned as the WHOLE
+        # shipped sentence, not its clause: the corrected comment quotes the clause in order to
+        # reject it, so the clause alone reds correct prose (measured, review round 22).
+        ("the second cause of this state is a queue whose PR runs ARE executing but carry "
+         "no readable timestamp",
+         "the second cause of this state is a queue whose PR runs ARE executing but carry "
+         "no readable timestamp"),
+        # ⛔ AND THE `_executing_claim` CAUSE THE SAME COMMIT RETRACTED (review P3, round 23).
+        # It had NO leg: reverting the emitted sentence measured GREEN, and the only reason a
+        # VERBATIM revert reds at all is incidental — two tests assert the case-sensitive
+        # literal "NONE of them was MEASURED", so a one-token case change defeated them. This
+        # entry catches the CLAIM (through `flat()`, i.e. case-insensitively), which is what
+        # the two literals should never have been the cover for. ⛔ THE NEEDLE SITS INSIDE ONE
+        # SOURCE LITERAL: `flat()` collapses whitespace but NOT quotation marks, so a span that
+        # crosses a line-wrapped string boundary carries `" "` in the hay and never matches
+        # (measured — the first version of this entry was GREEN on its own revert).
+        ("MEASURED: every job probe abstained",
+         "MEASURED: every job probe abstained, so this is the pre-#12037 status-string census, "
+         "not a job-level proof"),
+    ]
+    # ⛔ A DELETION OF AN ENTRY IS STILL SILENT WITHOUT A FLOOR (review P2, round 21): deleting
+    # an entry removes its content check AND its proof at once, which is indistinguishable from
+    # never having written it — measured, 157 passed. A MEASURED FLOOR, not an exact count, so
+    # adding an entry needs no edit here while dropping one reds. Same shape as `disarming`'s
+    # floor above; the numeral is a guard rail, not an inventory claim.
+    assert len(unconditional) >= 7, (
+        "an `unconditional` entry was deleted: this list is the ONLY check for claims that are "
+        "wrong whatever stillness they name, so a removal must be deliberate"
+    )
+    for phrase, shipped in unconditional:
+        needle = flat(phrase)
+        assert needle in flat(shipped), (
+            f"this needle no longer matches the sentence it exists to catch: {phrase!r}"
+        )
+        for name, hay in flats.items():
+            assert needle not in hay, (
+                f"a RETRACTED claim is back in the {name}: {phrase!r} — this check does not "
+                f"use the stillness discriminator, because the claim is mis-named whatever "
+                f"stillness the sentence also names"
+            )
+
+    # ⛔ AND THE DELETION CLASS NEEDS A POSITIVE LEG (review P2). A blocklist cannot see a site
+    # that went SILENT, and `pre_fix` only covers sentences that shipped: the ops doc's
+    # DEFINITION of a frozen run and the module's two `False` statements can each lose their
+    # stillness clause while every needle stays green (measured — three sites). These assert
+    # the clause is PRESENT.
+    must_state = [
+        # the ops doc's definition of a frozen run
+        ("doc", "in_progress` with every job `completed` and its own `updated_at` motionless for"),
+        # QueuedRun.has_live_job's `False` bullet
+        ("module", "the list is PROVABLY COMPLETE, AND the run's own `updated_at` has"),
+        # read_run_live_job's summary sentence
+        ("module", "COMPLETE**, and whose own `updated_at` has been STILL"),
+        # ⛔ THE PROBE QUALIFIER, which is this PR's own correction to the ops doc: a frozen run
+        # is excluded only once it has been PROBED. Reverting just that hunk restores the
+        # "can never make the census unmeasured" claim this guard calls FALSE, and NO needle can
+        # catch it — the claim's own sentence carries `motionless`, so `hits()` self-disarms
+        # it (measured: doc/h01 reverted -> GREEN before this entry existed). `updated_at`
+        # self-disarmed it too until round 12 removed that token as a gate noun; the
+        # mechanism is unchanged, only the token that carries it.
+        ("doc", "once it has been PROBED and its jobs read back all-completed"),
+        # ⛔ AND THE ALERT'S OWN CAUSE, which is EMITTED to operators (#12166 review round 15).
+        # The census-unwitnessed branch told the operator the count "is the pre-#12037
+        # status-string census" — false for the population this PR creates, where the probe DID
+        # read the run and the settle gate withheld the proof; the same branch's
+        # `${census_lever}` three lines above names the retry route, so one payload carried two
+        # incompatible causes. Nothing pinned this text (the alert is a shell `echo`, not a
+        # Python reason line), so the reword was silent — a revert measured GREEN.
+        ("workflow", "so the count is an UPPER BOUND on executing work among the runs it READ"),
+        # ⛔ AND THE HEADER'S OWN CAUSE (c), same class one paragraph up (#12166 review round 17).
+        # It attributed the unwitnessed census to "#12037's own defect returned by the probe
+        # budget" while naming a NON-budget lever two sentences later. Reverting the whole
+        # passage to that text measured GREEN at this head, i.e. the correction had no leg.
+        ("workflow", "layers (the callee's read, the CALLER's settle gate, and the probe BUDGET)"),
+        # ⛔ THREE MORE CORRECTED CLAIMS THAT MEASURED GREEN ON REVERT (review round 20) — an
+        # EMITTED reason line, a caller-side comment, and the ops doc's trigger count. Each is
+        # pinned at the wording this PR ships, so the shipped (false) form removes the phrase.
+        ("module", "a feed was cut at the page cap"),
+        ("module", "it moved a waiting-run defect onto running runs"),
+        ("doc", "dimensions and FOUR triggers"),
+        # ⛔ AND THE MODULE DOCSTRING'S cause (c), the same defect one surface over (#12166
+        # review round 15). It named the three routes and then concluded "so that count is the
+        # pre-#12037 status-string census" — which contradicts the route list in the SAME
+        # sentence, since a settle-downgraded run WAS read. No needle reached it: the suite was
+        # GREEN with the two-route gloss and again with the three-route gloss plus the wrong
+        # conclusion, so the presence pin is what keeps the conclusion honest.
+        # ⛔ AND THE QUALIFIER IS LOAD-BEARING, not decoration (#12166 review round 25): with the
+        # IN-PROGRESS feed cut, runs that ARE executing were never read, so the same reading is a
+        # LOWER bound — and the reason list's first line says exactly that for that shape. The
+        # pin carries the qualifier so dropping it reds.
+        ("module", "pr_running count in this state can only OVER-COUNT executing work among"),
+        # ⛔ THE TWO-ARM HEADLINE, pinned for the same reason (round 23): reverting it to
+        # the old universal "`OK` — but only when the PR wait was MEASURED …" measured
+        # GREEN, so the claim could come back silently.
+        ("module", "the PR wait was MEASURED and inside the budget, OR nothing was waiting"),
+        # ⛔ AND THE CLAUSE ITSELF, not just the headline above it (round 24): reverting the
+        # corrected wording to the retracted "a flood with an executing PR run …" measured
+        # fully GREEN, because a behavioural test pins behaviour and never a sentence.
+        ("module", "whose offender clears the flood counters but has an executing PR run"),
+        # ⛔ AND THE GLOSSES THAT ONLY A MAINTAINER READS — pinned because the delta's own rule
+        # is that a corrected claim needs a leg, and these had none (#12166 review round 16).
+        # The `--help` one is EMITTED (argparse's description), i.e. operator-visible; the rest
+        # are property and inline comments. ⛔ NO COUNT IS GIVEN HERE: a numeral in this comment
+        # goes stale before the list it describes does. (That is a rule for THIS list, not a
+        # claim about the file — other comments quote counts where the count is the point.)
+        # Every read-only gloss the one-half correction touched has an entry below, and
+        # reverting any ONE of them REDs.
+        ("module", "read, or whose read did not PROVE them idle — a count, not a proof"),
+        ("module", "whose jobs were never read, or whose read did not PROVE them idle) but the oldest"),
+        ("module", "that count may be runs whose jobs could not be read, or"),
+        ("module", "count may be made entirely of runs whose jobs could not be read, or of runs whose"),
+    ]
+    # ⛔ PER-FILE, NOT "SOMEWHERE" (review NIT, round 11). The comments above name a SITE, so
+    # a presence check over all four surfaces passes when the named site loses the clause and
+    # any OTHER file happens to carry the same phrase — the exact silent-deletion shape this
+    # leg exists to catch. Each entry declares the surface it belongs to. ⛔ AND THE REMAINING
+    # RESIDUAL IS SAME-FILE DUPLICATION (measured, review round 27): the check is FILE-scoped,
+    # so an editor that inserts the clause elsewhere in the SAME file keeps the leg green while
+    # the named site loses it. All 16 phrases measured unique in their declared file at this
+    # head, so the hole is unrealized; closing it needs per-site anchoring (a line or a
+    # neighbour), which is the same unbounded per-site enumeration the `RESIDUAL` above says
+    # this guard does not attempt.
+    # ⛔ AND `must_state` NEEDS THE SAME FLOOR (review P2, round 26). Its siblings got one after
+    # the same measurement (`disarming` >= 5, `unconditional` >= 7); this list did not, so
+    # deleting an entry removed its presence check AND its proof at once and the suite stayed
+    # green — measured: dropping the round-25 `workflow` qualifier pin and reverting the emitted
+    # annotation to the unqualified "UPPER BOUND" form left all three suites at 350 passed.
+    # A MEASURED FLOOR, not an exact count: adding a site needs no edit here, dropping one reds.
+    assert len(must_state) >= 16, (
+        "a `must_state` presence pin was deleted: a DELETION of the clause it protects then "
+        "stops being caught, which is the half of this guard that a blocklist cannot cover"
+    )
+    for where, phrase in must_state:
+        needle = flat(phrase)
+        assert needle in flats[where], (
+            f"a MANDATORY clause is not PRESENT VERBATIM in the {where} — EITHER it was "
+            f"DELETED (the failure this leg exists to catch) OR it was REWORDED (re-pin it if "
+            f"the new wording still states the clause): {phrase!r}"
+        )
+
+    for phrase in pre_fix:
+        want = flat(phrase)
+        caught = [p for p in retracted if hits(want, flat(p))]
+        assert caught, (
+            f"NO needle catches this shipped retracted sentence — a needle was narrowed "
+            f"past its own target (review P2-2): {phrase!r}"
+        )
+
+
 def test_the_reason_line_names_the_runs_it_read_out_of_pr_running():
     """The exclusion is declared, not silent — with the ids.
 
@@ -2284,7 +3113,15 @@ def test_the_reason_line_names_the_runs_it_read_out_of_pr_running():
     health = classify([run(999001, "python-ci", event="pull_request", age_seconds=300)],
                       in_progress=ghost_runs())
     joined = " ".join(health.reasons)
-    assert "pr_running excluded 3 run(s) whose every job is completed" in joined
+    # ⛔ BOTH HALVES OF THE PROOF ARE NAMED (review P2). Exclusion requires every job
+    # `completed` AND the run's own `updated_at` still for `JOB_SETTLE_SECONDS`; a
+    # one-half sentence taught that the settle-downgraded population cannot exist, while
+    # the PRODUCTION reading (`read_health`) can produce it: an all-completed run whose list
+    # the settle gate did not corroborate stays counted, in `pr_running_unmeasured`. This
+    # fixture passes `has_live_job` directly, so `classify` applies no settle logic and must
+    # not be read as demonstrating the downgrade.
+    assert "pr_running excluded 3 run(s) whose every job is completed AND" in joined
+    assert f"still for {Q.JOB_SETTLE_SECONDS:.0f}s" in joined, joined
     for rid in GHOSTS:
         assert str(rid) in joined
 
@@ -2314,7 +3151,11 @@ def _jobs(*statuses, total_count=None):
 
 
 def test_live_job_false_only_when_every_job_is_completed(monkeypatch):
-    """`False` is a PROOF of non-execution — the frozen-run shape, measured."""
+    """`False` is a CANDIDATE proof of non-execution — every VISIBLE job `completed` AND the
+    list provably complete; the CALLER's settle gate (`_settled_still`) is what makes it
+    final. ⛔ NOT "a PROOF of non-execution" on its own: that unqualified short form is the
+    inference this PR removes, and it survived at five sites (here and four others, all
+    reworded to CANDIDATE in the same commit) — review P2."""
     monkeypatch.setattr(Q, "gh_json", lambda args, timeout=None: _jobs("completed", "completed"))
     assert Q.read_run_live_job("o/r", 42066648922) is False
 
@@ -2439,7 +3280,7 @@ def test_live_job_reads_only_the_latest_attempt(monkeypatch):
 def test_live_job_abstains_when_a_full_page_carries_no_usable_total_count(monkeypatch):
     """Review finding 1: completeness must not depend on `total_count` being an int.
 
-    Pre-fix this returned `False` — the value the function's own docstring calls a PROOF
+    Pre-fix this returned `False` — the value the function's own docstring calls a CANDIDATE
     of non-execution — from a page that could have been one of several, because the cap
     guard tested only `isinstance(total, int)`. A run with >100 jobs whose live job sits
     on page 2 would have been subtracted from `pr_running`.
@@ -2465,7 +3306,7 @@ def test_live_job_abstains_on_a_SHORT_page_whose_total_count_is_present_but_not_
     """`total_count` PRESENT and non-int must abstain even on a SHORT page.
 
     Pre-fix the non-int path fell THROUGH to the page-fullness heuristic, so a one-row page
-    carrying `"total_count": "250"` returned `False` — a proof of non-execution taken from
+    carrying `"total_count": "250"` returned `False` — a candidate proof of non-execution taken from
     a list whose own payload said 250 rows exist. `False` SUBTRACTS from `pr_running`.
     """
     payload = {"total_count": total, "jobs": [{"status": "completed"}]}
@@ -2603,7 +3444,9 @@ def test_live_job_false_when_an_int_total_count_equals_a_full_page(monkeypatch):
     """Completeness accepted from `total_count` EQUAL to the page, not only below it.
 
     The counter-arm to the abstentions: a full page whose `total_count` says exactly that
-    many jobs exist IS a complete read, so it may still prove non-execution. Without this
+    many jobs exist IS a complete read, so it can still be PROVED non-executing — once the
+    CALLER's settle gate corroborates it, which is the other half and not this function's.
+    Without this
     the guard could be "fixed" by abstaining on every full page and the frozen-run
     exclusion would silently stop working on any run with >= 100 jobs.
     """
@@ -2926,6 +3769,20 @@ def test_read_health_where_EVERY_probe_times_out_is_not_OK(monkeypatch):
         "a census made entirely of abstained probes is not a measurement"
     )
     assert health.congests_pr is None, "no destructive authorisation may rest on it"
+    # ⛔ THE EMITTED CAUSE IS PINNED HERE, NOT JUST THE VERDICT (#12166 review round 15).
+    # This clause is SHARED by all the routes into `census_unwitnessed`, and it used to name
+    # ONE of them — "the pre-#12037 status-string census" — which is true of the unprobed
+    # surplus and FALSE of a run the probe did read (a read that did not prove the run idle,
+    # and the settle gate withholding the proof). An operator reading it would rule out the
+    # shape that produced it. This fixture is the abstain route; the PIN is on the wording,
+    # which is emitted identically for the other two, and nothing asserted it before — a
+    # revert to the retracted clause measured GREEN.
+    census_reason = next(r for r in health.reasons if r.startswith("PR-UNWITNESSED"))
+    assert "the count is an UPPER BOUND" in census_reason, census_reason
+    assert "status-string census" not in census_reason, (
+        "the census clause is naming the old status-string reading as THE cause again; it is "
+        f"one of the shapes that land here, not the only one: {census_reason}"
+    )
 
 
 def test_a_legacy_caller_and_an_abstained_probe_are_DIFFERENT():
@@ -2997,7 +3854,8 @@ def test_the_census_cause_is_a_NAMED_flag_so_the_overlap_cannot_misattribute_it(
 
     `PR-UNWITNESSED` has three causes on different dimensions. Round 4 keyed the annotation on
     `pr_running == pr_running_unmeasured > 0`, which is ALSO true when the real cause is (b) —
-    a queued PR run with no readable `created_at` — while the census happens to be entirely
+    a waiting PR run with no measurable CURRENT-ATTEMPT age, of which the unreadable
+    `created_at` is one route of three — while the census happens to be entirely
     unmeasured (the likeliest probe outcome under load). The annotation then prescribed the
     census lever (frozen runs / --max-job-probes) and dropped the lever that fixes the reading.
 
@@ -3062,7 +3920,7 @@ def test_backlogged_does_not_assert_execution_it_never_measured():
     assert unmeasured.verdict == Q.PR_BACKLOGGED
     assert unmeasured.congests_pr is True, "still fail-closed: this is a reporting defect only"
     claim = next(r for r in unmeasured.reasons if r.startswith("PR-BACKLOGGED"))
-    assert "is REPORTED executing" in claim and "NONE of them was measured" in claim
+    assert "is REPORTED executing" in claim and "NONE of them was MEASURED" in claim
     assert "PR CI IS executing" not in claim
 
     measured = classify(
@@ -3236,8 +4094,13 @@ def test_the_unwitnessed_annotation_selects_the_CAUSE_and_its_own_lever():
     enough either: "unmeasured" is either "the budget never reached the run" (raise
     --max-job-probes) or "the run's read did not PROVE it idle" (retry once it has settled —
     a bigger budget probes more runs the same way), and the arm must name the one that
-    applies, not both. The canonical list of what "did not prove it idle" covers lives in
-    `read_run_live_job`'s Returns block; it is NOT re-enumerated here.
+    applies, not both. ⛔ NO SINGLE LIST owns the UNMEASURED SET: the callee's
+    routes are in `read_run_live_job`'s Returns block, the settle gate is the caller's
+    (`read_health` downgrades an unproven `False` via `_settled_still` — the callee never sees
+    `updated_at`), and the budget cause is neither. Only the ANNOTATION's copy of the first two
+    is pinned below; the prose that owns the ATTRIBUTION (which layer each cause comes from,
+    the budget cause included — it is NOT a "did not prove it idle" member, it is "never
+    reached") is `pr_running_unmeasured_unprobed` — it does not, and must not, own the set.
     """
     arm = _pr_unwitnessed_arm_and_branches()
 
@@ -3333,6 +4196,22 @@ def test_the_unwitnessed_annotation_selects_the_CAUSE_and_its_own_lever():
                             "pr_running_unmeasured_unread": 3})
         assert "RETRY the reading" in read_only, read_only
         assert "--max-job-probes" not in read_only, read_only
+        # ⛔ AND IT NAMES THE THREE CAUSES IT DOES NAME (review P2-2; narrowed round 7).
+        # ⛔ THIS IS NOT AN EXHAUSTIVENESS CLAIM, and must not become one: the bucket also
+        # holds a run whose list could not be PROVEN complete — a `total_count` that is
+        # PRESENT and not an int, on a SHORT page, which `read_run_live_job` abstains on
+        # (see its completeness rule) and which is none of empty/partial/malformed/
+        # other-attempt. The emitted sentence does not name it (tracked as issue #12219),
+        # so a claim that these three are all of them would be false.
+        # `5f6f08902c`'s subject was this emitted list, and the REASON LINE's copy is
+        # pinned — but this ANNOTATION's copy was not, so the exact two-cause regression
+        # that commit removed could return with the whole suite green (measured: the
+        # retracted form passes every other assertion in this file). The three causes are
+        # (i) the read FAILED, (ii) it returned nothing USABLE (empty/partial/malformed/
+        # other-attempt), (iii) the run was not still long enough for the list to count.
+        assert "read FAILED" in read_only, read_only
+        assert "other-attempt" in read_only, read_only
+        assert "still long enough" in read_only, read_only
 
         # both present: name both, and say which to try first
         both = census({"pr_running_unmeasured_unprobed": 2,
@@ -3419,7 +4298,7 @@ def test_every_reason_line_that_says_executing_is_as_strong_as_its_evidence():
     )
     assert unreadable_wait.verdict == Q.PR_UNWITNESSED
     claim = next(r for r in unreadable_wait.reasons if r.startswith("PR-UNWITNESSED"))
-    assert "is REPORTED executing" in claim and "NONE of them was measured" in claim, claim
+    assert "is REPORTED executing" in claim and "NONE of them was MEASURED" in claim, claim
     assert "PR CI is executing (" not in claim
 
     # not-a-flood: a reporting workflow leads the queue, the PR census is fully unmeasured
@@ -3450,7 +4329,7 @@ def test_every_reason_line_that_says_executing_is_as_strong_as_its_evidence():
     )
     partial_claim = next(r for r in partial.reasons if r.startswith("not a flood"))
     assert "PR CI IS executing (2 run(s))" in partial_claim, partial_claim
-    assert "NONE of them was measured" not in partial_claim
+    assert "NONE of them was MEASURED" not in partial_claim
 
     # ... and a MEASURED census keeps the strong claim on both arms
     executing = [Q.QueuedRun(id=13, name="Python CI", event="pull_request",
@@ -3549,7 +4428,8 @@ def test_the_unmeasured_count_is_SPLIT_into_never_reached_and_read_failed(monkey
     assert legacy.pr_running_unmeasured_unread is None
     assert legacy.pr_running_unmeasured_unprobed is None
     assert Q._unmeasured_because(None, None) == (
-        " (the probe budget did not reach them, or their jobs could not be read)"
+        " (unprobed, of unread jobs, or of a read that did not prove them idle — the caller "
+        "did not split them, so this cannot say which)"
     )
     # ... and the split is never emitted as a pair of zeroes when there is nothing to split
     assert Q._unmeasured_because(0, 0) == ""
@@ -3740,12 +4620,35 @@ def test_the_UNMEASURED_token_is_rendered_by_EVERY_arm_that_can_carry_it():
             run(7003, "python-ci", event="pull_request", has_live_job=None)]
     base = classify(queued, in_progress=runs, probe_attempted=True)
     assert base.pr_running == 3 and base.pr_running_unmeasured == 2
-    for verdict in (Q.FLOOD, Q.PR_BACKLOGGED, Q.OK):
+    # ⛔ ONLY THE ARMS A PARTIAL CENSUS CAN ACTUALLY REACH (review NIT). `FLOOD` and
+    # `PR-STARVED` are unreachable while any counted run is unmeasured — both require
+    # `pr_running == 0`, and `pr_running_unmeasured ⊆ pr_running` — so rendering them here
+    # via `dataclasses.replace` would be a state `classify_queue` cannot produce, i.e. a
+    # mutation "covered" by an impossible input. Their splices stay in the arms as
+    # defence against a future condition change, and are counted as DEAD TEXT, not as
+    # coverage. The two reachable arms are the ones this asserts.
+    for verdict in (Q.PR_BACKLOGGED, Q.OK):
         line = dataclasses.replace(base, verdict=verdict,
                                    dominant_workflow="welcome-e2e").state_line
         assert "unmeasured=2" in line, (verdict, line)
         # EXACTLY ONCE: two occurrences would mean two arms rendered into one line.
         assert line.count("unmeasured=2") == 1, (verdict, line)
+    # ⛔ THE PREMISE IS PINNED BY REACHABILITY, NOT BY A ZEROED FIELD (review NIT). The
+    # arms DO splice the token — hand them `pr_running=3, pr_running_unmeasured=2` and both
+    # render it — so asserting on a zeroed object passes by construction and proves nothing.
+    # What is actually true is that `classify_queue` can never hand them such a census:
+    # `FLOOD` is only returned once `pr_running == 0` (its flood clause returns early), and
+    # `starved_wait` is only built when `pr_running == 0` — and
+    # `pr_running_unmeasured ⊆ pr_running`. So the assertion is on the PRODUCER: a partial
+    # census of this shape must never classify as either dead arm.
+    assert base.pr_running_unmeasured > 0
+    assert base.verdict not in (Q.FLOOD, Q.PR_STARVED), base.verdict
+    # ... and the splice is real, so "the arm is dead" is a statement about reachability
+    # rather than about a missing token: force the unreachable census and see it render.
+    assert ", unmeasured=2" in dataclasses.replace(
+        base, verdict=Q.FLOOD, dominant_workflow="w").state_line
+    assert ", unmeasured=2" in dataclasses.replace(
+        base, verdict=Q.PR_STARVED).state_line
 
     # The ALL-UNMEASURED shape takes `census=unmeasured` instead of the count token, and
     # must never print both. With the degradation flag set, the `PR-UNWITNESSED` arm is
@@ -3758,10 +4661,16 @@ def test_the_UNMEASURED_token_is_rendered_by_EVERY_arm_that_can_carry_it():
     assert ", unmeasured=" not in exclusive, exclusive
 
 
-def test_the_unread_bracket_names_ALL_THREE_causes():
-    """The `unread` bucket's text must cover every cause it stands for (review P2).
+def test_the_unread_bracket_names_the_THREE_causes_it_names():
+    """The bracket must name the causes it NAMES — not claim to cover every one (review P2).
 
-    The settle gate gave this bucket a third cause — a read that SUCCEEDED while its list
+    ⛔ THIS IS NOT AN EXHAUSTIVENESS PIN (round 8). The bucket also holds a run whose list
+    could not be PROVEN complete — a `total_count` that is PRESENT and not an int, on a
+    SHORT page — which is none of empty/partial/malformed/other-attempt and which the
+    emitted sentence does not name (issue #12219). The docstring used to say "every cause it
+    stands for", which the code contradicts.
+
+    The settle gate gave this bucket a third NAMED cause — a read that SUCCEEDED while its list
     proved nothing (truncated, or jobs stamped for another attempt, where the stamp can be
     hours old so stillness is no obstacle). A two-cause bracket then asserted a cause that
     did not happen for that reading, which is the precise class this PR removes. Nothing
