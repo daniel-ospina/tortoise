@@ -2426,7 +2426,13 @@ def test_an_ambiguous_successor_name_is_not_called_refused(sdk):
         "fixture drifted: the name must be ambiguous: " + issue.fix)
     assert "NOT the one it names" not in issue.fix, (
         "the row cannot say WHICH of the two EP refuses: " + issue.fix)
-    assert "the disposition for the edge AS NAMED is DROP" not in issue.fix, (
+    # ⛔ The AS NAMED sentence requires carrier_count == 1 on BOTH of its emitters
+    # (`_succ_refused` arm: `carrier_count == 1 and …`; `neither_drops`: `unread`,
+    # which is `carrier_count == 1 and …`), so asserting its ABSENCE on a 2-carrier
+    # row could never fail. Assert the property instead — an ambiguous name keeps the
+    # carry triage, because the check declines to attribute a refusal (#12210 review,
+    # P3).
+    assert "may CARRY to the successor" in issue.fix, (
         "an ambiguous name keeps the carry/drop triage: " + issue.fix)
 
 
@@ -3088,9 +3094,6 @@ def test_a_neither_arm_row_with_a_TERMINAL_successor_keeps_DROP(sdk):
     # review, P3).
     assert "the disposition for the edge AS NAMED is DROP" in fix, fix
     assert "NOT the one it names ('PolicyV2')" in fix, fix
-    # ⛔ NOT "ONCE PROMOTED": that phrase lives on the DRAFT arm only, which cannot be
-    # reached by an archived successor, so asserting its absence pinned nothing.
-    assert "for the edge AS NAMED is DROP" in fix, fix
 
 
 def test_a_draft_successor_carrying_the_legacy_outdated_flag_is_not_promoted(sdk):
@@ -3314,11 +3317,13 @@ def test_a_neutral_neither_arm_row_does_not_offer_a_dead_write(sdk):
     fix = next(i for i in _issues(sdk, "superseded_object_active_edges")
                if i.node_id == v1["id"]).fix
     assert "DELETE it instead — §3.1's disposition here is DROP" in fix, fix
-    if "FLOWING" in fix:
-        assert "live and readable FIRST" in fix, (
-            "the flowing alternative writes onto the successor, so it must state "
-            "that the successor has to be readable: " + fix)
-        assert "builds no factor" in fix, fix
+    # ⛔ UNGUARDED: behind `if "FLOWING" in fix` the whole test passed by DELETING the
+    # sentence it exists to check (#12210 review, P3).
+    assert "FLOWING" in fix, fix
+    assert "live and readable FIRST" in fix, (
+        "the flowing alternative writes onto the successor, so it must state that the "
+        "successor has to be readable: " + fix)
+    assert "builds no factor" in fix, fix
 
 
 def test_a_dangling_successor_on_a_direct_row_is_not_called_an_input(sdk):
@@ -3617,8 +3622,8 @@ def test_the_next_hop_consequence_is_about_the_next_hop(sdk):
     operator-shaped, the hop-2 clause read "…which is OPERATOR-SHAPED … so EP's
     direct-edge arm refuses the superseded endpoint itself…": the consequence of the
     NEXT link's shape was stated about the wrong node (and repeated the detail's earlier
-    clause). `hop=2` keeps `_dropped_input` on the destination it is describing
-    (#12210 review, P3).
+    clause). `_dropped_input`'s `sup_refused` sentence now names its own cause and
+    subject, so it stays true at the hop-2 call site (#12210 review, P3).
     """
     p = sdk.create_point("statement", "the gateway enforces the policy")
     v1 = _obj(sdk, "PolicyV1")
@@ -3696,3 +3701,53 @@ def test_a_neither_arm_successorless_repair_restores_the_belief(sdk):
     assert run["confidences"], (
         "the emitted repair must restore the belief: " + fix + " → " + repr(run))
     assert _issues(sdk, "superseded_object_active_edges") == []
+
+
+def test_a_neither_arm_terminal_detail_names_the_shape_precondition(sdk):
+    """The DETAIL must not order the bare re-point its own FIX calls insufficient.
+
+    Measured on a neither-arm row whose archived successor chains to a LIVE head:
+    `compute_confidence(factors=[src])` is `n=0 iters=0` before, after, and only becomes
+    `n=2 iters=12` once the shape is cleared and the edge carried onto the head — so a
+    detail that says only "target THAT" orders the edge rewrite its own `fix` refuses
+    (#12210 review, P2).
+    """
+    actor = sdk.create_entity("subject", "AcmeCorp")["node"]
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    _obj(sdk, "PolicyV3")
+    sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
+    sdk.update_entity(actor["id"], is_operator=True)
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    _supersede_object(sdk, "PolicyV2", "PolicyV3")
+    sdk.update_entity(v2["id"], status="archived")
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    assert "target THAT" in issue.detail, issue.detail
+    assert "PRECONDITION of that move" in issue.detail, (
+        "the shape has to be cleared before that move, and the detail must say so: "
+        + issue.detail)
+
+
+def test_an_ambiguous_name_is_not_asserted_as_a_single_destination(sdk):
+    """With N≥2 carriers the check cannot pick one, so `dest` must not name it.
+
+    The ambiguity prefix demands the reader "name the successor meant ... by ID"; the
+    destination clause then said "the successor ('name')" — a single destination this
+    check explicitly declines to resolve (#12210 review, P3).
+    """
+    actor = sdk.create_entity("subject", "AcmeCorp")["node"]
+    v1 = _obj(sdk, "PolicyV1")
+    _obj(sdk, "PolicyV2")
+    sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
+    sdk.update_entity(actor["id"], is_operator=True)
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    _q(sdk, "CREATE (:Object {id:'twin-PolicyV2', name:'PolicyV2', "
+            "objectKind:'other', status:'live'})", {})
+
+    fix = next(i for i in _issues(sdk, "superseded_object_active_edges")
+               if i.node_id == v1["id"]).fix
+    assert "carried by 2 Objects" in fix, fix
+    assert "the successor you named by ID" in fix, (
+        "the destination must defer to the reader's choice: " + fix)
