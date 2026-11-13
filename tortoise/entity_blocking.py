@@ -349,10 +349,15 @@ class BlockIndex:
         name's fold (legal: a caller-supplied key, ``api.py:2671``, or a pre-
         `#12047` row) would then be invisible to every rung. One value, one key.
 
-        A member whose fold is empty is NOT indexed: an empty ``E`` key would put
-        every punctuation-only name in ONE block and pair them as ``exact`` — the
-        pre-existing guard in ``entity_candidates`` (``if not ent["folded"]:
-        continue``) expressed where the key is made.
+        A member whose fold is empty is NOT indexed. ⚠️ "Empty" is NARROWER than it
+        sounds: a punctuation-only name is NOT empty, because `key_of` falls back to
+        the stripped fold, so `...` keys as `...` and `!!!` as `!!!` (pinned at
+        `tests/test_12295_entity_blocking.py`). The class this guard excludes is the
+        fold that is WHITESPACE only — `"   "`, reachable because a reader admits
+        any truthy name — which is the one that would put otherwise-unrelated names
+        in one ``E`` block and pair them as ``exact``. The pre-existing guard in
+        ``entity_candidates`` (``if not ent["folded"]: continue``) expressed where
+        the key is made.
         """
         if not member_id:
             return
