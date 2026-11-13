@@ -13052,7 +13052,7 @@ def _doctor_read_capped(resp, cap: int, deadline: float) -> tuple[bytes, bool]:
                 # on a premature close instead of raising `IncompleteRead` (declared
                 # 200, closed after 10, `length == 190`, no exception), so a
                 # truncated reply would report "not cut" and reach the captive-portal
-                # arm — the false red the flag removes, on a different trigger.
+                # arm — the false red the CUT signal removes, on a different trigger.
                 # `length` is the bytes still OWED; `None` (chunked OR
                 # close-delimited) carries NO information.
                 outstanding = getattr(resp, "length", None)
