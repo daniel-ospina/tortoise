@@ -23,10 +23,14 @@ right existing entity is not in it, no adjudicator downstream can pick it
 (``docs/research/2026-09-24-2730-entity-attachment/research-brief.md`` §6.2, X1).
 
 The window is only half of the pipeline. ``resolve_entities`` phase 1 attaches a
-mention with ``_find_existing_entity``, which is **exact normalised-name
+mention with ``_find_existing_entity``, whose exact arms are **normalised-name
 equality** (``_norm`` = whitespace collapse + lowercase, nothing else) plus a
-kind-compatibility check. So a candidate can be *inside* the window and still be
-unusable, and the two failures have different fixes:
+kind-compatibility check. Since `#12295` it also tries the comparison-side FOLD
+(`entity_blocking.attach_matches`) after those arms miss, which is why the arm
+reports `attached_norm_only` — a frozen copy of the pre-`#12295` matcher — beside
+`attached`, so the before/after is one run and not two artifacts. So a candidate
+can be *inside* the window and still be unusable, and the two failures have
+different fixes:
 
   * RETRIEVAL failure — the right node never entered the window.
     Widening ``limit`` is the response, and it costs adjudication quality
@@ -44,9 +48,13 @@ by an argument. Three arms, because the failures have different fixes:
                        in the window at each k? (widening can help)
   ARM 2  MATCHING      a mention that is a real surface VARIANT of the stored
                        name — how often does phase 1 bind it? This arm ALSO
-                       measures `attached_folded`, what a candidate punctuation
-                       fold would recover, and that fix is NOT shipped here: the
-                       point of #11901 is to decide on evidence, not to patch.
+                       measures `attached_folded`, what a `[-_./]`-only fold
+                       would recover. ⚠️ That is a DIFFERENT fold from the one
+                       shipped in `#12295`: it does not drop a leading article,
+                       so it binds the article+separator class the shipped
+                       `normalize_entity_name` cannot (#12047 round-4 F5). Both
+                       are recorded because the gap between them IS the measured
+                       cost of that decision.
   ARM 3  THE UNION     how large is the candidate set a capture actually hands
                        `resolve_entities`? (not `limit` — see below)
 
@@ -111,6 +119,7 @@ EXIT CODES: 0 ok · 2 usage · 3 no reachable graph (never a silent skip)
 """
 from __future__ import annotations
 
+import subprocess
 import sys
 
 # #5128 (the repo's entry-point contract): refuse a <3.12 interpreter HERE, before the rest of the
@@ -348,6 +357,17 @@ def _fold_punct(text: str) -> str:
     return re.sub(r"\s+", " ", t).strip()
 
 
+def _git_head() -> str | None:
+    """The commit the measurement ran on — an artifact with no head cannot be
+    reproduced against a tree."""
+    try:
+        out = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True,
+                             text=True, timeout=10)
+        return (out.stdout.strip() or None) if out.returncode == 0 else None
+    except Exception:
+        return None
+
+
 def _allocate_shares(sample: int, pop: list[dict]) -> dict[str, int]:
     """Largest-remainder allocation of ``sample`` across the harvested classes.
 
@@ -397,9 +417,7 @@ def run(args: argparse.Namespace) -> int:
               file=sys.stderr)
         return 3
 
-    from tortoise.entity_blocking import (
-        BlockIndex,
-    )
+    from tortoise.entity_blocking import BlockIndex, reduction_ratio
     from tortoise.extractor_v2 import _find_existing_entity, _norm, _norm_kind, _sanitise_query_text
     from tortoise.sdk import TortoiseSDK
 
@@ -689,9 +707,13 @@ def run(args: argparse.Namespace) -> int:
         #: COST side of pair completeness (a blocker can reach 1.0 by proposing
         #: everything, which is the number a lone recall figure hides).
         blocked_sizes: dict[int, list[int]] = {k: [] for k in KS}
+        #: (row, surface) pairs the blocker's cost figure is computed over —
+        #: materialised so `reduction_ratio` is computed by its one helper.
+        _mk_mentions: list[tuple[dict, str]] = []
         for row in sample:
             name = row["name"]
             for vclass, surface in variants(name, row["cls"]):
+                _mk_mentions.append((row, surface))
                 folded_surface = _fold_punct(surface)
                 # The multi-key blockers are graph-free, so they are computed ONCE
                 # per (row, surface) and reported at every k — the window does not
@@ -748,19 +770,31 @@ def run(args: argparse.Namespace) -> int:
         _pairs = var[KS[0]]["pairs"]
         _mk = var[KS[0]]["in_multikey_block"]
         _sizes = blocked_sizes[KS[0]] or [0]
-        _all_pairs_per_mention = max(1, len(pop) - 1)
+        _mk_mean = sum(_sizes) / len(_sizes)
+        #: The blocker's proposals MATERIALISED as pairs, so `reduction_ratio` is
+        #: computed by the one helper that defines it (mean-candidates / all-pairs
+        #: is the same quantity only while every mention proposes a fixed count —
+        #: two definitions under one name is how a published ratio stops meaning
+        #: anything).
+        _mk_pairs = {
+            frozenset((row["id"], cid))
+            for row, surface in _mk_mentions
+            for cid in index.candidates(surface, label="Object")
+        }
         arms["blocking"] = {
             "pairs": _pairs,
             "population": len(pop),
             "multikey": {
                 "in_block": _mk,
                 "pair_completeness": (round(_mk / _pairs, 4) if _pairs else None),
-                "candidates_mean": round(sum(_sizes) / len(_sizes), 2),
+                # COST, and the ONLY comparable cost figure: candidates proposed
+                # PER MENTION. The pooled FTS number is per CAPTURE (a union over
+                # ~15 mentions), so comparing the two directly is an apples-to-
+                # oranges claim — the per-mention column is what a reader must use.
+                "candidates_mean_per_mention": round(_mk_mean, 2),
                 "candidates_max": max(_sizes),
-                # The cost side, always beside the completeness: proposing every
-                # node scores PC = 1.0 and is not a blocker.
                 "reduction_ratio": round(
-                    (sum(_sizes) / len(_sizes)) / _all_pairs_per_mention, 4),
+                    reduction_ratio(_mk_pairs, len(pop)) or 0.0, 4),
                 "k_independent": True,
             },
             "fts_only": {
@@ -768,6 +802,8 @@ def run(args: argparse.Namespace) -> int:
                 "pair_completeness": {
                     str(k): (round(var[k]["in_window"] / _pairs, 4) if _pairs else None)
                     for k in KS},
+                # A window's cost IS its width, per mention.
+                "candidates_mean_per_mention": {str(k): k for k in KS},
             },
             "index_stats": index.stats(),
         }
@@ -778,20 +814,23 @@ def run(args: argparse.Namespace) -> int:
         # a rate quoted at another width is not a rate the product pays.
         _k = KS[0]
         _v = var[_k]
+
+        def _rate(attached: int) -> dict:
+            minted = _pairs - attached
+            return {"attached": attached, "minted": minted,
+                    "rate": (round(minted / _pairs, 4) if _pairs else None)}
+
         arms["duplicate_rate"] = {
             "window_k": _k,
             "pairs": _pairs,
-            "prior_off": {"attached": 0, "minted": _pairs, "rate": 1.0},
-            "prior_on_norm_only": {
-                "attached": _v["attached_norm_only"],
-                "minted": _pairs - _v["attached_norm_only"],
-                "rate": round((_pairs - _v["attached_norm_only"]) / _pairs, 4),
-            },
-            "prior_on_shipped_folded": {
-                "attached": _v["attached"],
-                "minted": _pairs - _v["attached"],
-                "rate": round((_pairs - _v["attached"]) / _pairs, 4),
-            },
+            # DEFINITION, not a measurement: with no prior there is no candidate
+            # set at all, so every mention mints. Kept because it is the baseline
+            # the other two rows are read against.
+            "prior_off": {"attached": 0, "minted": _pairs,
+                          "rate": (1.0 if _pairs else None),
+                          "definition": "no prior: every mention mints (not measured)"},
+            "prior_on_norm_only": _rate(_v["attached_norm_only"]),
+            "prior_on_shipped_folded": _rate(_v["attached"]),
         }
 
         # ── ARM 3: what a capture actually hands ``resolve_entities``.
@@ -827,12 +866,19 @@ def run(args: argparse.Namespace) -> int:
         _pool3 = arms["pooled"][KS[0]]
         _pool_mean = (_pool3["set_sum"] / _pool3["captures"]
                       if _pool3["captures"] else 0.0)
-        arms["blocking"]["fts_only"]["candidates_mean"] = round(_pool_mean, 2)
-        arms["blocking"]["fts_only"]["reduction_ratio"] = (
-            round(_pool_mean / (len(pop) - 1), 4) if len(pop) > 1 else None)
+        #: PER CAPTURE — a union over ~15 mentions, NOT a per-mention cost. Kept
+        #: beside its per-mention derivation because the two were once compared
+        #: to each other as if they were one quantity.
+        arms["blocking"]["fts_only"]["pooled_candidates_per_capture"] = round(
+            _pool_mean, 2)
+        #: `budget` is the production `max_queries` (15) the pooled groups are
+        #: built at, so dividing by it is the per-mention derivation of the
+        #: per-capture union.
+        arms["blocking"]["fts_only"]["pooled_candidates_per_mention"] = round(
+            _pool_mean / 15, 2)
         arms["blocking"]["fts_only"]["candidate_set"] = (
             "pooled union over a capture's derived queries (max_queries=15); "
-            "the per-query window is `k`")
+            "the per-query window is `k` candidates per mention")
 
         # ⛔ A MIXED run is refused: `legs_seen` OR-s the looser #3005 predicate
         # over thousands of windows, so a run where the dense leg held for some
@@ -858,7 +904,12 @@ def run(args: argparse.Namespace) -> int:
             # Only a fake/stub harvest that reported no count reaches this.
             _harvest_files = len(list(sessions.glob("*.jsonl")))
         report = {
+            # The harness is #11901's and its schema stays #11901's; THIS run is
+            # #12295's evidence, and says so (a measurement labelled with
+            # another issue's number cannot be tied to the change it measured).
             "issue": 11901,
+            "measured_for": 12295,
+            "code_head": _git_head(),
             "measured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "corpus": {"dir": str(sessions),
                        "files": _harvest_files,

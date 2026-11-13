@@ -101,6 +101,11 @@ _ARTICLES = frozenset({"the", "a", "an"})
 #: cutting the 872-Subject scan by ~3 orders of magnitude.
 MIN_BLOCK_CHARS = 3
 
+#: The block-size at which the SCAN reports its largest block. Not a cap: the
+#: scan compares every block (a cap would drop pairs a smaller graph showed), and
+#: an emerging giant block is the over-merge signal the report exists for.
+LARGE_BLOCK_WARN = 200
+
 #: The two labels an entity identity lives on (``entity_identity._IDENTITY_LABELS``).
 ENTITY_LABELS = ("Object", "Subject")
 
@@ -393,32 +398,35 @@ def entity_candidates(graph, *, limit: int | None = 50,
         # transposition, and one of the classes `#11901` measured at a 0.0 %
         # attach rate — landed in different blocks and the pair was never
         # compared, at ANY similarity. The block set is now the union of the
-        # folded key, the folded prefix (kept, so the exact rung can still never
-        # be missed by the wider set), per-token prefixes and LSH shingle bands
-        # (``entity_blocking``, Zep's shape, ``dedup_helpers.py``). Candidate
-        # generation only: every rung below still decides, and nothing here can
-        # auto-merge on a similarity.
-        from .entity_blocking import MAX_BLOCK_SIZE, BlockIndex
+        # folded key, the folded prefix (KEPT: it is the key main blocked on, so
+        # keeping it preserves main's pairing set), per-token prefixes and LSH
+        # shingle bands (``entity_blocking``, Zep's shape,
+        # ``dedup_helpers.py``). Candidate generation only: every rung below
+        # still decides, and nothing here can auto-merge on a similarity.
+        # ⛔ NO SIZE CAP on this path. A cap would drop pairs main compared, which
+        # is a behaviour change disguised as a bound; the block-size distribution
+        # is reported instead, because an emerging giant block is the over-merge
+        # signal a cap would merely hide.
+        from .entity_blocking import BlockIndex
 
         index = BlockIndex.from_rows(entities)
-        oversized = 0
-        blocks = []
-        for members_ids in index.blocks():
-            if len(members_ids) > MAX_BLOCK_SIZE:
-                oversized += 1
-                continue
-            blocks.append(members_ids)
-        if oversized:
+        blocks = index.blocks()
+        _stats = index.stats()
+        if _stats["max_block_size"] >= LARGE_BLOCK_WARN:
             _logger.warning(
-                "entity blocking: %d block(s) exceeded %d members and were not "
-                "compared — narrow the key set or review that cluster by hand "
-                "(#12295: a silently dropped block reads as 'nothing shares "
-                "this key', a false negative attributed to the data)",
-                oversized, MAX_BLOCK_SIZE)
+                "entity blocking: largest block holds %d of %d %s entities "
+                "(%d blocks) — an emerging giant block is the over-merge signal "
+                "(#12295); the scan compared it in full rather than dropping it",
+                _stats["max_block_size"], _stats["members"],
+                "/".join(sorted({e["label"] for e in entities})),
+                _stats["blocks"])
         by_id = {str(ent["id"]): ent for ent in entities}
-        #: Pairs already emitted. A union of keys puts one pair in SEVERAL
-        #: blocks, and the review surface must not show it twice (nor let the
-        #: second sighting re-elect a survivor the first already settled).
+        #: Pairs already emitted. A union of keys puts one PAIR in several blocks
+        #: (up to ~12: ``E``, ``B``, ``P``, one ``T`` per token, 8 ``S`` bands),
+        #: and a pair's row is identical in every one of them — `fuzzy_sim`,
+        #: `sem_sim`, `kind_mismatch` and the survivor/candidate assignment are pure
+        #: functions of the pair — so the dedupe costs nothing a caller can see and
+        #: saves recomputing the comparison per block.
         emitted: set[tuple[str, str]] = set()
 
         sem: dict = {}
@@ -499,11 +507,9 @@ def entity_candidates(graph, *, limit: int | None = 50,
                         survivor["kind"] and candidate["kind"]
                         and survivor["kind"] != candidate["kind"])
                     # ⛔ #12295: a union of blocking keys puts the SAME pair in
-                    # several blocks. Emit it once here; which METHOD represents
-                    # it is decided below, where the per-duplicate reduction keeps
-                    # the best-scoring row — so a pair that is `exact` in one
-                    # block and merely `fuzzy` in another is still reviewed as the
-                    # exact twin it is.
+                    # several blocks. Emit it once — the row is identical in each
+                    # (see `emitted` above), so this saves work and changes no
+                    # output.
                     _pair_key = (survivor["id"], candidate["id"])
                     if _pair_key in emitted:
                         continue

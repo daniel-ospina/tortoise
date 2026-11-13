@@ -43,6 +43,9 @@ def test_the_artifact_declares_one_uniform_retrieval_mode(report):
     """A mixture published as one mode is the false-label class #2952 refuses."""
     r = report["retrieval"]
     assert r["uniform_windows"] is True
+    assert report.get("measured_for") == 12295, (
+        "the artifact does not name the issue it is evidence for")
+    assert report.get("code_head"), "the artifact does not name the commit it measured"
     assert r["legs_seen"].get("vector") is True, (
         "the artifact is not the fused read — re-run with the embeddings extra "
         "(a keyword-only figure is never a figure about the production read)")
@@ -89,30 +92,39 @@ def test_pair_completeness_is_computed_from_the_counts_it_reports(report):
         assert pc == pytest.approx(b["fts_only"]["in_window"][k] / b["pairs"], abs=1e-3)
 
 
-def test_multikey_blocking_is_never_worse_than_the_window_and_says_its_cost(report):
-    """The comparison the brief makes, as an assertion.
+def test_the_blocker_is_NOT_earned_on_this_corpus_and_the_artifact_says_so(report):
+    """N-3's falsifier F1, pinned as the result it is.
 
-    A blocker can reach completeness 1.0 by proposing everything, so the
-    completeness AND the reduction ratio must both be present — and the claim
-    "better completeness at lower cost" is only allowed if the cost is lower.
+    The shipped window reaches pair completeness 1.0 at k=15 with 15 candidates
+    per mention; the multi-key blocker reaches 1.0 at ~35. If that ever flips —
+    the window losing completeness the blocker keeps at a comparable cost — the
+    brief's "not earned for the capture prior" verdict is wrong and must be
+    re-derived. Pinned in BOTH directions so neither sentence can rot:
+    completeness is never worse than the window, AND it is not cheaper.
     """
     b = report["arms"]["blocking"]
     mk, fts = b["multikey"], b["fts_only"]
     for k, pc in fts["pair_completeness"].items():
         assert mk["pair_completeness"] >= pc, (
             f"multi-key blocking was worse than the k={k} window")
-    assert mk["reduction_ratio"] is not None and fts["reduction_ratio"] is not None
-    assert mk["candidates_mean"] <= fts["candidates_mean"], (
-        "the blocker proposes MORE than the capture's pooled candidate set — the "
-        "brief's 'at lower cost' sentence would be false")
-    # A blocker is a function of the names, so a window width cannot move it.
+    assert fts["pair_completeness"]["15"] == 1.0, (
+        "the window no longer reaches completeness 1.0 at k=15 — the 'not "
+        "earned' verdict rested on that")
+    # The COST comparison must be per mention, in one unit; the pooled capture
+    # figure is recorded separately precisely so it cannot be used as one.
+    assert mk["candidates_mean_per_mention"] > fts["candidates_mean_per_mention"]["15"], (
+        "the blocker is now cheaper per mention than the k=15 window — re-derive "
+        "the verdict, it may now be earned")
+    assert fts["pooled_candidates_per_capture"] > fts["pooled_candidates_per_mention"], (
+        "a capture's union is smaller than one mention's — the two quantities were "
+        "swapped somewhere")
     assert mk["k_independent"] is True
 
 
 def test_the_residual_is_the_two_named_classes_and_nothing_unexplained(report):
     """Every unattached pair is attributed — the brief's §4 table is this test.
 
-    The unattached remainder must be exactly the two DECLARED classes:
+    The unattached remainder must be exactly the DECLARED classes:
     ``space-to-hyphen`` (the article anchor, #12047 round-4 finding 5) and
     ``basename-only`` (the precision rule: a basename attaches only on a complete
     population). An unexplained gap means the explanation is incomplete.
@@ -125,6 +137,8 @@ def test_the_residual_is_the_two_named_classes_and_nothing_unexplained(report):
     }
     assert total == report["arms"]["blocking"]["pairs"]
     assert attached == report["arms"]["variant"]["3"]["attached"]
+    # Three declared classes: the two residuals carry the explanation, the third
+    # is the pre-existing retrieval miss #11901 owns (out of window at k=3).
     declared = {"space-to-hyphen", "basename-only", "article-drop"}
     unexplained = {c: n for c, n in unattached.items() if n and c not in declared}
     assert not unexplained, (
@@ -145,6 +159,7 @@ def test_the_brief_exists_and_quotes_the_artifact(report):
     b = report["arms"]["blocking"]
     attached = report["arms"]["variant"][str(report["arms"]["duplicate_rate"]["window_k"])]["attached"]
     for needle in (str(b["pairs"]), str(attached),
-                   f"{b['multikey']['candidates_mean']}",
-                   f"{b['fts_only']['candidates_mean']}"):
+                   f"{b['multikey']['candidates_mean_per_mention']}",
+                   f"{b['fts_only']['pooled_candidates_per_capture']}",
+                   str(report["arms"]["variant"]["3"]["attached_folded"])):
         assert needle in text, f"the brief does not quote {needle!r} from the artifact"

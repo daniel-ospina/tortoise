@@ -17,7 +17,7 @@ What was missing is the **comparison** and the **blocker**:
   ``the plan-doc`` cannot bind the node stored as ``the plan doc``. `#11901`
   measured the consequence: **0 of 419 real surface variants attach at every
   ``k``, in both retrieval modes**, while 62 % of them are *inside* the window.
-* ``entity_resolver.entity_candidates`` (``entity_resolver.py:394``) blocks on
+* ``entity_resolver.entity_candidates`` (``entity_resolver.py:364``) blocks on
   ONE key — ``block_key`` = the first :data:`entity_resolver.MIN_BLOCK_CHARS`
   folded characters — so a transposition or a word-order change
   (``the project alpha`` vs ``alpha project``) lands in two blocks and the pair
@@ -89,13 +89,12 @@ from tortoise.entity_resolver import (
     normalize_entity_name,
 )
 
-#: A block larger than this stops generating pairs and says so. The field's
-#: control for the failure mode this module's own precedent names — a merge
-#: cluster whose badness *"scales with the size of what it joined"* — and the
-#: bound that keeps a pathological block from turning a blocked scan back into
-#: all-pairs. Sized well above the measured population: `#12047` scanned 872
-#: Subjects, and a block holding this many members is a key the caller should
-#: narrow, not a population to compare.
+#: A single QUERY's candidate list from one block stops growing at this many
+#: members (**the query path only** — see :meth:`BlockIndex.candidates`). It is a
+#: latency bound on one read, not a limit on a SCAN: `entity_candidates` compares
+#: every block, because a scan's pair set is what the reviewer sees and narrowing
+#: it here would be a silent behaviour change. A block this large is a degenerate
+#: key (one token shared by hundreds of entities) and the caller should narrow it.
 MAX_BLOCK_SIZE = 200
 
 #: 3-gram shingles over the folded name with whitespace removed (Zep `_shingles`).
@@ -213,7 +212,7 @@ def lsh_bands(signature: tuple[int, ...]) -> tuple[tuple[int, int, ...], ...]:
 # ── the key set ──────────────────────────────────────────────────────────
 
 
-def attach_keys(name: object) -> tuple[str, ...]:
+def attach_keys(name: object, *, key: str | None = None) -> tuple[str, ...]:
     """Keys that may resolve a mention onto an existing entity, by EQUALITY.
 
     ``E`` is always present (and is what folds case, articles, separators,
@@ -221,10 +220,16 @@ def attach_keys(name: object) -> tuple[str, ...]:
     carried by every file of that name it is listed in :data:`AMBIGUOUS_KEYS`,
     and :func:`attach_matches` only lets it decide between two PATH-shaped
     names, only when exactly one candidate holds it.
+
+    ``key`` overrides the fold for a row whose STORED key is not ``key_of(name)``
+    — `#12047` writes ``canonical_name`` and `entity_resolver.scan_entities`
+    scores ``normalize_entity_name(canonical or name)``, so a caller holding that
+    stored key must be able to say so. Re-folding ``name`` instead would block
+    and score on two different values for the same row.
     """
     raw = "" if name is None else str(name)
     base = raw.rstrip("/").rsplit("/", 1)[-1]
-    keys = [f"{EXACT}:{key_of(raw)}"]
+    keys = [f"{EXACT}:{key if key is not None else key_of(raw)}"]
     if base:
         # Symmetric: BOTH sides derive the basename, so a path and its bare
         # basename meet on this key. It is emitted for every non-empty name — for
@@ -245,18 +250,19 @@ def is_path_shaped(name: object) -> bool:
     return "/" in ("" if name is None else str(name))
 
 
-def block_keys(name: object) -> tuple[str, ...]:
+def block_keys(name: object, *, key: str | None = None) -> tuple[str, ...]:
     """Every key this name blocks on — the candidate generators.
 
-    ``P`` a folded prefix (the `#12047` key, kept so the exact rung can never be
-    missed by the wider set), ``T`` a per-token prefix (word order and
-    transposition), ``S`` an LSH shingle band (typo/separator classes FTS cannot
-    reach), and the ``E``/``B``/``H`` attach keys. A low-entropy name blocks on
-    ``E``/``P``/``T`` only: its shingle set is noise, which is the cost Zep's gate
-    exists to avoid.
+    ``P`` a folded prefix (this is the `#12047` key — kept because the scan used
+    to block on it, so keeping it preserves **main's pairing set**; ``E`` pairs are
+    a subset of ``P`` pairs, so ``P`` adds no exactness of its own), ``T`` a
+    per-token prefix (word order and transposition), ``S`` an LSH shingle band
+    (typo/separator classes FTS cannot reach), and the ``E``/``B`` attach keys. A
+    low-entropy name blocks on ``E``/``P``/``T`` only: its shingle set is noise,
+    which is the cost Zep's gate exists to avoid.
     """
-    keys = list(attach_keys(name))
-    key = key_of(name)
+    keys = list(attach_keys(name, key=key))
+    key = key if key is not None else key_of(name)
     if not key:
         return tuple(keys)
     if len(key) >= MIN_BLOCK_CHARS:
@@ -290,37 +296,48 @@ class BlockIndex:
         self._oversized: dict[str, int] = {}
         self._keys = 0
 
-    def add(self, member_id: str, name: object, *, label: str = "") -> None:
+    def add(self, member_id: str, name: object, *, label: str = "",
+            key: str | None = None) -> None:
         """Index one member under every key :func:`block_keys` yields.
 
-        A member whose name folds to nothing is NOT indexed: an empty ``E`` key
-        would put every punctuation-only name in ONE block and pair them as
-        ``exact`` — the pre-existing guard in ``entity_candidates``
-        (``if not ent["folded"]: continue``) expressed where the key is made.
+        ``key`` is the member's STORED fold. Pass it whenever the caller already
+        holds one, which `entity_resolver.scan_entities` does: it scores
+        ``normalize_entity_name(canonical or name)`` (``entity_resolver.py:266``),
+        so indexing this row by ``key_of(name)`` would BLOCK on one value and
+        SCORE on another — and a row whose ``canonical_name`` differs from its
+        name's fold (legal: a caller-supplied key, ``api.py:2671``, or a pre-
+        `#12047` row) would then be invisible to every rung. One value, one key.
+
+        A member whose fold is empty is NOT indexed: an empty ``E`` key would put
+        every punctuation-only name in ONE block and pair them as ``exact`` — the
+        pre-existing guard in ``entity_candidates`` (``if not ent["folded"]:
+        continue``) expressed where the key is made.
         """
         if not member_id:
             return
         if member_id in self._members:
             return
-        folded = key_of(name)
+        folded = key if key is not None else key_of(name)
         if not folded:
             return
         self._members[member_id] = (label, folded)
-        for key in block_keys(name):
-            self._blocks.setdefault((label, key), []).append(member_id)
+        for block in block_keys(name, key=folded):
+            self._blocks.setdefault((label, block), []).append(member_id)
             self._keys += 1
 
     @classmethod
     def from_rows(cls, rows, *, label_of=None) -> BlockIndex:
-        """Build from ``{id, name}`` rows (an optional ``label`` field is used)."""
+        """Build from ``{id, name}`` rows; a ``folded`` field is used when present."""
         index = cls()
         for row in rows or ():
             if not isinstance(row, dict):
                 continue
             label = (row.get("label") or row.get("_label")
                      or (label_of(row) if label_of else "") or "")
+            stored = row.get("folded")
             index.add(str(row.get("id") or ""), row.get("name"),
-                      label=str(label))
+                      label=str(label),
+                      key=str(stored) if stored is not None else None)
         return index
 
     def candidates(self, name: object, *, label: str | None = None,
@@ -351,7 +368,15 @@ class BlockIndex:
         return out
 
     def blocks(self, *, label: str | None = None) -> list[list[str]]:
-        """Every block's members (oversized ones included) — for a scan."""
+        """Every block's members — the SCAN path, which applies no size cap.
+
+        :data:`MAX_BLOCK_SIZE` bounds one query's candidate list
+        (:meth:`candidates`), never a scan's pair set: a scan that silently
+        dropped a large block would lose pairs the reviewer could previously see,
+        which is a behaviour change disguised as a bound. The block-size
+        distribution is reported instead (:meth:`stats`), because an emerging
+        giant block is the over-merge signal a cap would merely hide.
+        """
         out = []
         for (lbl, _key), members in sorted(self._blocks.items()):
             if label is not None and lbl != label:
@@ -389,10 +414,11 @@ def attach_matches(mention: object, candidates, *,
       ``lib/config.py`` to ``server/config.py`` on the strength of what happened
       to be retrieved — a false merge, invisible and hard to undo (`#2730` §6.7).
     """
-    if not attach_keys(mention):
+    if not key_of(mention):
         return []
     want = set(attach_keys(mention))
     mention_path = is_path_shaped(mention)
+    weak_ns = {f"{ns}:" for ns in AMBIGUOUS_KEYS}
     out: list[dict] = []
     for cand in candidates or ():
         if not isinstance(cand, dict) or not cand.get("id"):
@@ -400,14 +426,19 @@ def attach_matches(mention: object, candidates, *,
         if label is not None and str(cand.get("label") or label) != label:
             continue
         cand_name = cand.get("name")
-        have = set(attach_keys(cand_name))
-        strong = want & {k for k in have if not k.startswith(f"{BASENAME}:")}
+        # A row may carry its STORED fold (`canonical_name`, or `folded` from the
+        # scan); prefer it over re-folding the name — one value, one key.
+        stored = cand.get("folded") or cand.get("canonical_name")
+        have = set(attach_keys(cand_name,
+                               key=str(stored) if stored else None))
+        strong = {k for k in want & have
+                  if not any(k.startswith(ns) for ns in weak_ns)}
         if strong:
             out.append({"id": str(cand["id"]), "key": sorted(strong)[0],
                         "name": cand_name or "", "basename_only": False})
             continue
         if mention_path or is_path_shaped(cand_name):
-            weak = want & {k for k in have if k.startswith(f"{BASENAME}:")}
+            weak = {k for k in want & have if any(k.startswith(ns) for ns in weak_ns)}
             if weak:
                 out.append({"id": str(cand["id"]), "key": sorted(weak)[0],
                             "name": cand_name or "", "basename_only": True})
@@ -440,6 +471,13 @@ def pair_completeness(true_pairs, blocked_pairs) -> float | None:
 
 def reduction_ratio(blocked_pairs, population: int) -> float | None:
     """Blocked pairs as a fraction of all pairs — the cost the completeness buys.
+
+    ``population`` is the number of entities, so ``all pairs`` is
+    ``n*(n-1)/2``. A caller whose blocker proposes a candidate LIST per mention
+    (rather than materialising pairs) expresses the same quantity by passing
+    ``(mention, candidate)`` for each proposal — that is what the measurement
+    harness does, so the published ``reduction_ratio`` has ONE definition and the
+    helper is the only place it is computed.
 
     Reported BESIDE :func:`pair_completeness`, always: a blocker can reach perfect
     completeness by comparing everything, and a number that rises while this one

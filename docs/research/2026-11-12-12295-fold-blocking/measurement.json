@@ -2,8 +2,13 @@
  "arms": {
   "blocking": {
    "fts_only": {
-    "candidate_set": "pooled union over a capture's derived queries (max_queries=15); the per-query window is `k`",
-    "candidates_mean": 42.75,
+    "candidate_set": "pooled union over a capture's derived queries (max_queries=15); the per-query window is `k` candidates per mention",
+    "candidates_mean_per_mention": {
+     "10": 10,
+     "15": 15,
+     "3": 3,
+     "5": 5
+    },
     "in_window": {
      "10": 421,
      "15": 422,
@@ -16,11 +21,12 @@
      "3": 0.9692,
      "5": 0.9953
     },
-    "reduction_ratio": 0.0428
+    "pooled_candidates_per_capture": 42.85,
+    "pooled_candidates_per_mention": 2.86
    },
    "index_stats": {
-    "blocks": 8450,
-    "keys": 10969,
+    "blocks": 8449,
+    "keys": 10968,
     "max_block_size": 93,
     "max_block_size_allowed": 200,
     "members": 1000,
@@ -28,11 +34,11 @@
    },
    "multikey": {
     "candidates_max": 152,
-    "candidates_mean": 34.75,
+    "candidates_mean_per_mention": 34.73,
     "in_block": 422,
     "k_independent": true,
     "pair_completeness": 1.0,
-    "reduction_ratio": 0.0348
+    "reduction_ratio": 0.0195
    },
    "pairs": 422,
    "population": 1000
@@ -41,6 +47,7 @@
    "pairs": 422,
    "prior_off": {
     "attached": 0,
+    "definition": "no prior: every mention mints (not measured)",
     "minted": 422,
     "rate": 1.0
    },
@@ -427,8 +434,8 @@
      "tests/test_problem_map_2820.py",
      "tests/test_substrate_map.py",
      "tests/test_11826_object_supersession_instrument.py",
-     "tests/test_12051_ci_pg_client_matches_server.py",
-     "the map"
+     "the map",
+     "tests/test_12051_ci_pg_client_matches_server.py"
     ]
    },
    {
@@ -445,6 +452,22 @@
      "evidence/7949-capstone/probes/capstone_measure.py",
      "probes/capstone_measure.py",
      "dod_5090_probe"
+    ]
+   },
+   {
+    "cls": "ident",
+    "name": "worktree_report",
+    "returned": 3,
+    "siblings_2tok": 0,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "the worktree state",
+     "the git worktree at",
+     "the worktree",
+     "the git worktree",
+     "the worktree being reaped"
     ]
    },
    {
@@ -509,22 +532,6 @@
      "the verification checks",
      "the verification checks now",
      "the findings"
-    ]
-   },
-   {
-    "cls": "ident",
-    "name": "worktree_report",
-    "returned": 3,
-    "siblings_2tok": 0,
-    "tokens": 1,
-    "tokens_kept_numeric": false,
-    "wide_returned": 15,
-    "wide_top": [
-     "the worktree state",
-     "the git worktree at",
-     "the worktree",
-     "the git worktree",
-     "the worktree being reaped"
     ]
    },
    {
@@ -618,8 +625,8 @@
     "wide_top": [
      "docs/architecture/MEMORY-SUBSTRATE-FINDINGS-LEDGER.md",
      "tests/test_9664_capstone_verdict_ledger.py",
-     "the ledger",
      "tests/test_findings_ledger_2852.py",
+     "the ledger",
      "tests/test_7949_capstone_verdict_check.py"
     ]
    },
@@ -731,8 +738,8 @@
      "tests/test_hosted_api.py",
      "the hosted",
      "scripts/cloud-cell-supervisor.test.sh",
-     "tests/test_12051_ci_pg_client_matches_server.py",
-     "tests/test_substrate_map.py"
+     "tests/test_substrate_map.py",
+     "tests/test_12051_ci_pg_client_matches_server.py"
     ]
    },
    {
@@ -871,25 +878,25 @@
     "captures": 20,
     "set_max": 45,
     "set_min": 37,
-    "set_sum": 855
+    "set_sum": 857
    },
    "5": {
     "captures": 20,
     "set_max": 74,
     "set_min": 59,
-    "set_sum": 1385
+    "set_sum": 1386
    },
    "10": {
     "captures": 20,
     "set_max": 145,
     "set_min": 106,
-    "set_sum": 2617
+    "set_sum": 2619
    },
    "15": {
     "captures": 20,
-    "set_max": 206,
+    "set_max": 207,
     "set_min": 153,
-    "set_sum": 3742
+    "set_sum": 3744
    }
   },
   "variant": {
@@ -1103,24 +1110,25 @@
    }
   }
  },
+ "code_head": "b42312b265672973df7a73f306f4dc6833243b22",
  "corpus": {
   "dir": "/home/cmux/.tortoise/session-events",
-  "elapsed_s": 392.6,
+  "elapsed_s": 382.9,
   "files": 18,
-  "graph": "recall11901_1794529308_2855367",
+  "graph": "recall11901_1794530603_3877740",
   "harvested_distinct": {
-   "definite": 106117,
-   "ident": 9934,
-   "path": 4337
+   "definite": 106303,
+   "ident": 9946,
+   "path": 4341
   },
   "input": {
    "files": 18,
-   "lines": 10225,
+   "lines": 10252,
    "parse_errors": 5,
    "records_without_text": 0
   },
   "population": 1000,
-  "population_digest": "c13acf1f3522208f",
+  "population_digest": "92ca585ab5fc1867",
   "sample": 300,
   "sample_by_class": {
    "definite": 180,
@@ -1135,7 +1143,8 @@
   10,
   15
  ],
- "measured_at": "2026-11-13T00:28:13Z",
+ "measured_at": "2026-11-13T00:49:38Z",
+ "measured_for": 12295,
  "pooled_budget_note": "a pooled group is `max_queries` (15) names, which is the production BUDGET CAP, not the typical capture \u2014 a capture with 5 entities issues 5 object queries",
  "retrieval": {
   "has_embedder": true,
