@@ -2698,18 +2698,26 @@ def removal_report(
                 # a guard) and the operator saw one problem where the invocation has two.
                 if _waived_by_bare(symbol) and not _waived_by_qualified(symbol, cls):
                     waived.setdefault(symbol, []).append(cls)
+                # ⛔ ONE MAP CLEARS THIS SHAPE, AND IT IS THE RENAME MAP. Naming both maps here
+                # ("`RETIRED_SDK_METHODS` / `REMOVED_SDK_METHODS`") was the same conflation rounds
+                # 18/21 removed elsewhere, in the one text an operator reads AFTER typing the
+                # override: `--allow-removal` is consulted by the no-freeze arm only when the
+                # symbol is in `sdk_renamed` (= `RETIRED_SDK_METHODS`), so following the sentence
+                # literally and adding the DEPARTURE map produced a byte-identical refusal. The
+                # two routes are now named as what they are — a rename (map + override) and a
+                # departure (map + freeze, no replacement to name) — because this shape can be
+                # either (review of PR #12313, round 22).
                 problems.append(RemovalProblem(
                     "no-record",
                     f"{symbol} (sdk) has no departure record: `--allow-removal` states the "
                     "rename but a caller of the old name needs the fail-closed `AttributeError` "
-                    "the map raises. For a RENAME add the old name to `RETIRED_SDK_METHODS` in "
-                    "`tortoise/sdk_retired.py` FIRST — that is the map the owner's "
-                    "approved-rename gates read — then pass the same override: the map entry "
-                    "plus the override IS the record and a rename needs no freeze. For a "
-                    "DEPARTURE with NO replacement a `REMOVED_SDK_METHODS` entry records it "
-                    "but does NOT clear this: the rename map is read alone, so the override "
-                    "changes nothing there and the code still has to be frozen (the map keeps "
-                    "no code)"
+                    "the map raises. If this is a RENAME, add the old name to "
+                    "`RETIRED_SDK_METHODS` in `tortoise/sdk_retired.py` FIRST (that also runs "
+                    "the owner's approved-rename gates), then pass the same override — the "
+                    "rename entry plus the override IS the record. A `REMOVED_SDK_METHODS` "
+                    "entry is a DEPARTURE with no replacement to name: it records the "
+                    "departure and keeps no code, so it does not clear this shape — a "
+                    "departure still needs the freeze"
                 ))
                 continue
             if _waived_by_bare(symbol) and not _waived_by_qualified(symbol, cls):

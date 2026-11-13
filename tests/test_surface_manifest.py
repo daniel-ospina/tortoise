@@ -5347,6 +5347,39 @@ def test_the_rename_remedy_does_not_claim_to_be_the_whole_record_for_an_SDK_meth
     assert len(problems) == 1 and problems[0].kind == "no-record", problems
     assert accounting == {}, accounting
     assert "has no departure record" in str(problems[0]), problems[0]
+    # ⛔ AND THE PER-ROW LINE NAMES ONE MAP FOR THIS SHAPE. It offered
+    # "`RETIRED_SDK_METHODS` / `REMOVED_SDK_METHODS`" as interchangeable, so following it
+    # literally (add the DEPARTURE map, re-pass "the same override") produced a byte-identical
+    # refusal — the closing line's round-21 defect in the row an operator reads first (review
+    # of PR #12313, round 22). The line must say the departure map does not clear this shape.
+    row = str(problems[0])
+    assert "`RETIRED_SDK_METHODS` in `tortoise/sdk_retired.py`" in row, row
+    assert "A `REMOVED_SDK_METHODS` entry is a DEPARTURE with no replacement" in row, row
+    assert "does not clear this shape" in row, row
+
+    # Non-vacuity, and the reason the wording is not cosmetic: the RENAME route it names does
+    # clear this exact shape, and the DEPARTURE route it now excludes does not.
+    rename_records = dict(
+        archived=set(),
+        forward_raw=set(),
+        sdk_retired={"ghost_method"},
+        sdk_renamed={"ghost_method"},
+    )
+    cleared, accounting = sm.removal_report(
+        {("ghost_method", "sdk")}, set(), rename_records, allowed={"sdk:ghost_method"}
+    )
+    assert cleared == [] and accounting, (cleared, accounting)
+    departure_records = dict(
+        archived=set(),
+        forward_raw=set(),
+        sdk_retired={"ghost_method"},
+        sdk_renamed=set(),
+    )
+    refused, accounting = sm.removal_report(
+        {("ghost_method", "sdk")}, set(), departure_records, allowed={"sdk:ghost_method"}
+    )
+    assert len(refused) == 1 and refused[0].kind == "no-record", refused
+    assert accounting == {}, accounting
     # The remedy the parser ADVERTISES names the map entry as still required — and names the
     # RENAME map only: offering `RETIRED_SDK_METHODS` / `REMOVED_SDK_METHODS` as interchangeable
     # halves re-collapsed the two maps round 18 separated, and for a `REMOVED_SDK_METHODS` name
@@ -6826,70 +6859,3 @@ def test_the_dangling_forward_REMEDY_runs_the_order_it_prints(tmp_path):
     assert (repo / entry["file"]).exists(), entry
     assert "probe_fwd" in (repo / entry["file"]).read_text(encoding="utf-8")
 
-
-def test_the_SDK_map_entry_REMEDY_names_the_map_that_actually_clears_it():
-    """The ROW remedy must not offer the two OPPOSITE maps as interchangeable halves.
-
-    ⛔ F2 of the review at `2899c30e1e`, and the half round 21 did not reach: round 21 fixed the
-    CLOSING line (asserted elsewhere) but the row the same refusal prints still said "add the
-    old name to `RETIRED_SDK_METHODS` / `REMOVED_SDK_METHODS` … then pass the same override —
-    the map entry plus the override IS the record". `removal_records` populates `sdk_retired`
-    from BOTH maps and `sdk_renamed` from `RETIRED_SDK_METHODS` alone, and the no-freeze arm
-    reads `sdk_renamed` — so for a `REMOVED_SDK_METHODS` name (a departure with NO replacement)
-    the printed remedy changed NOTHING and printed the same refusal again, now demanding a
-    freeze. Both halves are RUN here, not quoted.
-    """
-    sm = _load_manifest_tool()
-
-    problems, _accounting = sm.removal_report(
-        {("probe_m", "sdk")},
-        set(),
-        {"archived": set(), "forward_raw": set(), "sdk_retired": set(), "sdk_renamed": set()},
-        allowed={"sdk:probe_m"},
-    )
-    assert len(problems) == 1 and problems[0].kind == "no-record", problems
-    row = str(problems[0])
-    assert "`RETIRED_SDK_METHODS` / `REMOVED_SDK_METHODS`" not in row, (
-        "the row still offers the two opposite maps as interchangeable halves:\n" + row
-    )
-    # …and it does name the rename map, plus the departure map's own (different) requirement.
-    assert "`RETIRED_SDK_METHODS`" in row and "NO replacement" in row, row
-    # ⛔ NOT a bare `"freeze" in row.lower()`: the RENAME half of the same row says "a rename
-    # needs no freeze", so that assertion is satisfied by the OPPOSITE clause and deleting the
-    # departure requirement left the test GREEN (measured by mutation in the review of this
-    # very fix — the class of vacuous assertion this file exists to stop).
-    assert "does NOT clear this" in row, row
-    assert "still has to be frozen" in row, row
-
-    # HALF 1 — a `RETIRED_SDK_METHODS` name (a RENAME, replacement named) + the override IS the
-    # record: it clears, and needs no freeze.
-    problems, accounting = sm.removal_report(
-        {("probe_m", "sdk")},
-        set(),
-        {
-            "archived": set(),
-            "forward_raw": set(),
-            "sdk_retired": {"probe_m"},
-            "sdk_renamed": {"probe_m"},
-        },
-        allowed={"sdk:probe_m"},
-    )
-    assert problems == [], problems
-    assert accounting, "the rename was accepted without an accounting entry"
-
-    # HALF 2 — a `REMOVED_SDK_METHODS` name (a DEPARTURE) + the same override does NOT clear it:
-    # the row must not have implied it would.
-    problems, accounting = sm.removal_report(
-        {("probe_m", "sdk")},
-        set(),
-        {
-            "archived": set(),
-            "forward_raw": set(),
-            "sdk_retired": {"probe_m"},
-            "sdk_renamed": set(),
-        },
-        allowed={"sdk:probe_m"},
-    )
-    assert len(problems) == 1 and problems[0].kind == "no-record", problems
-    assert "FREEZE IT" in str(problems[0]), problems[0]
-    assert accounting == {}, accounting
