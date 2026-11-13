@@ -4237,6 +4237,11 @@ def test_the_event_read_is_routed_to_the_graph():
     assert calls and calls[0]["name"] == "tortoise_get_entity", calls
     assert calls[0].get("type") == "events", calls
     assert calls[0].get("graph") == "org_x_g_old", calls
+    # ⛔ The REQUEST SHAPE, and specifically `limit`: every fake ignored it, so dropping
+    # the argument outright left the suite green — and the live effect is that
+    # `tortoise_get_entity` falls back to its own default (`limit=20`), so a 4,670-row
+    # layer would return 20 rows and the census would refuse on EVERY run.
+    assert calls[0].get("limit") == 4, calls          # reported 3 + 1, not 3, not the bound
 
 
 def test_a_bound_credential_falls_back_and_discloses_on_the_event_read():
@@ -4388,12 +4393,21 @@ def test_the_architecture_doc_no_longer_claims_the_event_layer_is_unread():
     # the doc's stated enumerable population must equal the sum of the class table, and
     # reading the Event layer moved it by 4,670. Assert the SUM, not a number copied by
     # hand, so a future layer that is read without updating this line reds here.
-    parts = (15_842, 1_578, 3_727, 4_670)          # points + sources + operators + events
-    assert f"{sum(parts):,}" in doc, (
-        f"the doc must state the enumerable population as {sum(parts):,} "
+    # ⛔ Parse the class table's own figures and check the doc's stated population against
+    # their sum — NOT against a hand-copied literal tuple, which stayed green when a table
+    # figure changed (round-4 review). Each figure must appear in the table row for its
+    # class, and the population line must equal their sum.
+    table = {"points": "15,842", "sources": "1,578",
+             "operators": "3,727", "events": "4,670"}
+    for cls, figure in table.items():
+        assert figure in doc, f"the doc no longer states {figure} for {cls}"
+    total = sum(int(v.replace(",", "")) for v in table.values())
+    assert f"{total:,}" in doc, (
+        f"the doc's enumerable population must be {total:,} "
         "(points+sources+operators+events) now that the Event layer is read")
-    assert "21,147 enumerable" not in doc, (
-        "the doc still calls 21,147 the enumerable population; the Event layer is read")
+    # The old population must be gone as a POPULATION claim (it may not linger as "21,147").
+    assert "= 21,147" not in doc and "is 21,147." not in doc, (
+        "the doc still states 21,147 as the enumerable population")
     # ...and the row records the change rather than dropping the subject.
     assert "enumerated** since #12378" in doc or "**enumerated** — agent-session" in doc, (
         "the Event row must say it IS enumerated now, and cite #12378")
@@ -4425,3 +4439,106 @@ def test_an_event_with_no_text_is_counted_on_the_report(monkeypatch, tmp_path):
     assert report["census"]["total_rows"] == 3, report["census"]      # 1 point + 2 events
     assert report["census"]["by_class"]["event:deployment"]["undecidable"] == 2
     assert report["events_read"] == 2, report
+
+
+def test_a_layer_that_grew_past_the_bound_is_not_accepted_as_complete():
+    """The `+1` headroom must survive AT the bound, or the count silently vouches for less.
+
+    `limit_sent` used to be `min(reported + 1, EVENT_READ_CEILING)`, which collapses to
+    `reported` exactly when `counts.Event == EVENT_READ_CEILING`: a layer that had grown to
+    10,050 then came back as 10,000 rows == the count, passed the reconciliation, and was
+    filed `events_reconciled: True` with 50 rows unread. Measured by the PR reviewer; the
+    fix is to send `reported + 1` unbounded (the surface validates no upper `limit`).
+    """
+    mod = _tool_module()
+    ceiling = mod.EVENT_READ_CEILING
+    true_layer = [{"id": f"ev-{i}", "eventKind": "meeting", "name": f"m{i}"}
+                  for i in range(ceiling + 1)]
+    sent: list[int] = []
+
+    def call(name, args):
+        args = args or {}
+        if name == "tortoise_get_entity" and args.get("type") == "events":
+            sent.append(args["limit"])
+            return {"result": true_layer[:args["limit"]]}   # real LIMIT semantics
+        if args.get("section") == "status":
+            return {"counts": {"Event": ceiling}}          # the stale count
+        return {"result": []}
+
+    reader = mod.MCPReader(call, None)
+    with pytest.raises(C.CurationRefused, match=r"counts\.Event"):
+        reader.read_events({"counts": {"Event": ceiling}})
+    # The request carried headroom past the bound, which is what makes the growth visible.
+    assert sent == [ceiling + 1], sent
+
+
+def test_a_layer_that_grew_with_an_agreeing_recount_is_accepted_not_refused():
+    """The GROWTH direction is a correct read, and this tenant grows while sessions index.
+
+    `counts.Event` is fed by `index_sessions`, so the two-request window can close on a
+    layer one row larger than the count. The read re-counts ONCE and accepts when the fresh
+    count agrees with the rows; a stale count must not present as a broken layer.
+    """
+    mod = _tool_module()
+    rows = [{"id": "ev-1", "eventKind": "meeting", "name": "a"},
+            {"id": "ev-2", "eventKind": "meeting", "name": "b"},
+            {"id": "ev-3", "eventKind": "meeting", "name": "c"},
+            {"id": "ev-4", "eventKind": "meeting", "name": "d"}]
+    counts_seen: list[int] = []
+
+    def call(name, args):
+        args = args or {}
+        if name == "tortoise_get_entity" and args.get("type") == "events":
+            return {"result": rows[:args["limit"]]}
+        if args.get("section") == "status":
+            counts_seen.append(1)
+            # The caller holds the STALE count (3); this re-read sees the newer 4.
+            return {"counts": {"Event": 4}}
+        return {"result": []}
+
+    reader = mod.MCPReader(call, None)
+    out, reported = reader.read_events({"counts": {"Event": 3}})
+    assert len(out) == 4 and reported == 4, (len(out), reported)
+    assert "GREW" in (reader.note or ""), reader.note
+
+
+def test_a_completed_event_read_survives_a_graphs_failure_on_both_disarmed_arms(
+        monkeypatch, tmp_path):
+    """Two of the three disarmed call sites were unpinned, and both can drop a READ layer.
+
+    `graphs()` is read AFTER the Event read, so a failure there leaves the layer read — and
+    an arm that dropped `events=` on the way out reported `events_read: None` ("no completed
+    read") over a read that HAD completed. Measured: deleting `events=episodic` from either
+    the `CurationRefused` arm or the `Exception` arm left the whole suite green.
+    """
+    mod = _tool_module()
+
+    # ⛔ Two arms, two SHAPES: the `CurationRefused` arm takes an error ENVELOPE, and the
+    # `Exception` arm needs something that RAISES — a plain dict here does not reach it
+    # (`graphs()` ignores unrecognised rows), so the test would pass while never entering
+    # the arm it names. Measured: with a dict, dropping `events=` from the `Exception` arm
+    # still left the test green.
+    for shape in ("envelope", "raises"):
+        def call(name, args, _shape=shape):
+            args = args or {}
+            if args.get("section") == "graphs":
+                if _shape == "envelope":
+                    return RealCallToolResult({"error": "429 Too Many Requests"},
+                                              is_error=True)
+                raise TimeoutError("graphs read timed out after 10s")
+            return _event_surface()(name, args)
+
+        monkeypatch.setattr(mod, "_live_call_tool", call)
+        out = tmp_path / f"p-{shape}.json"
+        rc = mod.main(["plan", "--graph", "org_x_g_old", "--target", "org_x_g_new",
+                       "--off", "--no-verify-read",
+                       "--ledger", str(tmp_path / f"l-{shape}.jsonl"),
+                       "--out", str(out)])
+        assert rc == 0, (shape, rc)
+        payload = json.loads(out.read_text())
+        assert payload["run"]["off"] is True, (shape, payload["run"])
+        # The layer read COMPLETED before `graphs()` failed, so it travels as (n, m):
+        # `None` here would be the round-2/3 defect this PR exists to close.
+        assert payload["events_read"] == 3, (shape, payload.get("events_read"))
+        assert payload["events_total_reported"] == 3, (shape, payload)
+        assert payload["events_reconciled"] is True, (shape, payload)

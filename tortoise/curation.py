@@ -705,9 +705,10 @@ class Plan:
                     # WARNED about and stored, a kind naming a pack the target has not
                     # installed is REFUSED (`_refuse_unapproved_kind`), so a namespaced
                     # spelling is not free. ⚠️ Classification is NOT spelling-invariant:
-                    # `classify_point` uses `bare_kind`, but `classify_source` and
-                    # `classify_event` compare the EXACT `row.kind` — a `core:agentSession`
-                    # source is `carry` where a bare `agentSession` is `undecidable`. What
+                    # `classify_point` uses `bare_kind` and `classify_source` compares the
+                    # EXACT `row.kind` (a `core:agentSession` source is `carry` where a bare
+                    # `agentSession` is `undecidable`), while `classify_event` case-FOLDS it
+                    # (#12378) — so for Events the two spellings are the SAME decision. What
                     # the clean target's kind vocabulary should accept is the clean graph's
                     # decision (#10175 step 2), not this pass's.
                     "kind": d.kind or "statement",

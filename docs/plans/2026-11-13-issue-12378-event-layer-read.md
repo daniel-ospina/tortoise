@@ -120,6 +120,15 @@ Pointer: the `<!-- research: v1 -->` comment on #12378. Decisions it supports:
    non-truncation, and the bound is only consumed by a layer that genuinely has no whole
    read. The refusal says exactly that: a size bound on ONE response, raise it
    deliberately if the layer legitimately outgrew it.
+
+   ⛔ `reported + 1` is **NOT capped at the bound** (PR-review finding 1):
+   `min(reported + 1, EVENT_READ_CEILING)` ate the headroom exactly AT it, so a layer
+   reporting 10,000 that had grown to 10,050 returned 10,000 rows == the count and was
+   filed `events_reconciled: True` with 50 rows unread.
+   ⛔ And the **growth direction is re-counted once** before refusing (finding 6):
+   `counts.Event` is fed by `index_sessions`, so a layer one row larger than the count is
+   a CORRECT read and refusing it is a false block. A fresh count equal to the rows
+   accepts (and says so on `read_note`); anything else still refuses.
 2. Content lane: `content := name`, fallbacks `title` then `subject`; rows carrying
    none are COUNTED on `read_note`. ⚠️ Round-2 correction: the note says only what is
    TRUE — those rows are keyed `node_type:kind:sha`, so **same-kind** ones share a

@@ -596,8 +596,9 @@ class MCPReader:
         * a read that FILLS the requested limit exactly is REFUSED when no reported
           count says that is the whole layer, because there is no offset walk, so "a full
           page" and "a truncated layer" are the same bytes. The request is sized to
-          `counts.Event + 1` whenever a count is available, so this arm can only fire on
-          the UNREPORTED arm, where nothing vouches for the layer's size;
+          `counts.Event + 1` whenever a count is available (uncapped — see below), so this
+          arm can only fire on the UNREPORTED arm, where nothing vouches for the layer's
+          size;
         * a read whose row count disagrees with `counts.Event` is REFUSED. Both describe
           `:Event` with the same predicate (unlike the operator pair), so equality is
           expected — but the count is read moments earlier, so a concurrent create can
@@ -631,8 +632,13 @@ class MCPReader:
         # since the count, so the reconciliation below refuses instead of filing a short
         # layer, and `reported` rows cannot have been cut short because the request was
         # for more than `reported`.
-        limit_sent = (EVENT_READ_CEILING if reported is None
-                      else min(reported + 1, EVENT_READ_CEILING))
+        # ⛔ NOT capped by `reported + 1`'s `min(..., EVENT_READ_CEILING)`: that clamp ate
+        # the headroom EXACTLY at the bound (a layer reporting 10,000 sent `limit=10,000`,
+        # so a layer that had grown to 10,050 came back as 10,000 rows == the count and was
+        # filed `events_reconciled: True` with 50 rows unread — measured by the PR
+        # reviewer). `reported` is already bounded by the refusal above, and `get_events`
+        # validates no upper `limit`, so `reported + 1` is always a legal request.
+        limit_sent = EVENT_READ_CEILING if reported is None else reported + 1
         res = self._get_entities(limit_sent)
         err = _error_of(res)
         if err:
@@ -656,15 +662,30 @@ class MCPReader:
                 "truncated, and this read has no offset walk to continue from; refusing "
                 "a partial episodic layer")
         if reported is not None and len(raw) != reported:
-            raise C.CurationRefused(
-                f"the Event layer read {len(raw)} rows but counts.Event reports {reported} "
-                "— refusing a layer two surfaces disagree about. Both count `:Event` with "
-                "the same predicate, so the difference is one of: a genuinely partial / "
-                "clamped read; another writer's Event created between the status read and "
-                "this read (the count is re-read immediately before this call to keep that "
-                "window to two requests, but it is still two requests — so `read > "
-                "reported` is possible); or an Event deleted in that window, which makes "
-                "`read < reported`")
+            # ⛔ A layer that GREW between the count and this read is a CORRECT read being
+            # refused, and on this tenant it grows whenever sessions are indexed
+            # (`counts.Event` is fed by `index_sessions`). Re-read the count ONCE: two
+            # surfaces agreeing on the NEWER number accepts the read; still disagreeing is
+            # a refusal. This closes the false block without loosening the guard — the
+            # growth direction can only ever be resolved upward, against a fresh count.
+            fresh = _node_count(self.counts(), "Event") if len(raw) > reported else None
+            if fresh is not None and fresh == len(raw):
+                self._note(
+                    "the Event layer GREW between the status count and this read "
+                    f"({reported} -> {len(raw)} rows); the count was re-read and now "
+                    "agrees with the rows, so this is a complete read of the newer layer")
+                reported = fresh
+            else:
+                raise C.CurationRefused(
+                    f"the Event layer read {len(raw)} rows but counts.Event reports {reported} "
+                    "— refusing a layer two surfaces disagree about. Both count `:Event` with "
+                    "the same predicate, so the difference is one of: a genuinely partial / "
+                    "clamped read; another writer's Event created between the status read and "
+                    "this read (the count is re-read immediately before this call to keep "
+                    "that window to two requests, and a GROWTH direction is re-counted a "
+                    f"second time before refusing — the re-read reported {fresh!r}, not "
+                    f"{len(raw)}); or an Event deleted in that window, which makes "
+                    "`read < reported`")
         empty_text = 0
         out: list[C.Row] = []
         for r in raw:
@@ -735,9 +756,10 @@ class MCPReader:
 
         `type="events"` with no `id` is the whole-layer listing (`tortoise_get` treats
         `id` as an optional eventKind FILTER on this arm), and `limit` is the response the
-        truncation check in `read_events` is sized against — one more than the reported
-        count where a count is available, so a full response PROVES the layer grew rather
-        than being silently cut.
+        truncation check in `read_events` is sized against — exactly one more than the
+        reported count where a count is available (`reported + 1`, NOT capped at
+        `EVENT_READ_CEILING`: capping it ate the headroom at the bound), so a full response
+        PROVES the layer grew rather than being silently cut.
         """
         args: dict[str, Any] = {"type": "events", "limit": limit}
         if not self.graph:
