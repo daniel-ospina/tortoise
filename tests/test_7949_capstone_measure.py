@@ -5235,7 +5235,15 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("16347", '"extraction_mode": "llm:<route>"'),
         ), "sdk"),
         ("04-plan.md", "operator / label path", (
-            ("25284", "declared = declared_relation_predicates()"),
+            # Re-derived on the REBASED tree, never carried from either side of
+            # the conflict: both parents of this rebase were stale. The statement
+            # the cite names now sits at 25393
+            # (`grep -n 'declared = declared_relation_predicates()' tortoise/sdk.py`).
+            # Trail: 25195 at #12362's merge of `ca74f2375ef4` (+ #12268), 25284 at
+            # the `main` tip `ca74f2375e`'s successor read by the other parent, then
+            # 25393 after #12416 (`6408da01ce90`) and the landings between them —
+            # so `25284` and `25195` were BOTH stale and NEITHER side was taken.
+            ("25393", "declared = declared_relation_predicates()"),
         ), "sdk"),
         # The manifest's own `carve_out:` entry, cited from the artifact table.
         # ⛔ The 5th element is the SECTION the cite must fall inside: this exact
@@ -5355,16 +5363,32 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # re-derived from THIS merged tree (`awk
             # '/^- test_pack_logic_writeprobe_11083.py$/{print NR}'
             # config/ci-surfaces.yml`), never carried forward from either side of
-            # The value this row pins is MEASURED on the tree that merges, never
-            # predicted: `10076` at the merge of `main` `ca74f2375e` into this branch
-            # (`awk '/^- test_pack_logic_writeprobe_11083.py$/{print NR}'
-            # config/ci-surfaces.yml`), which is also what `main`'s tip reads — so the
-            # row and the base agree instead of the row carrying a branch-only offset.
-            # ⛔ The earlier trail (9943 -> 9973 -> 9987 -> 10005 -> "10019 merged")
-            # was PREDICTED arithmetic, not measurement: a predicted merge-tree value
-            # is what #11837's review removed from this file, and the prediction went
-            # stale the moment `main` moved again. Do not restore it; re-measure.
-            ("10076", "- test_pack_logic_writeprobe_11083.py"),
+            # the merge: 9714 -> 9951 -> 9973 -> 10019 is the number's own trail,
+            # and only the last of those describes a tree that adds BOTH parents.
+            # Measured values, not a delta: 9943 at `9828250732`, 9949 at
+            # `ba84fbfabf`, 9965 at `e200623286`, 9973 at `cd22562c24e4`, 9987 at
+            # the `main` tip `abf186f1109a`, 10005 at this branch alone
+            # (`d036b9859960`), and 10019 merged. ⛔ `9951` is in that list only
+            # because this row printed it — it was a predicted merge-tree value
+            # (9943 + 8), never a line any commit on `main` carried. The deltas
+            # are just where the registrations landed: `main` adds +78 above the
+            # entry by its tip 87c07462a8 (9943 -> 10021: +44 across four landing
+            # PRs at `ba84fbfabf`/`e200623286`/`cd22562c24`/`f1f74135a1`, then +34
+            # across `ea2c41a696`/`a53ba8cf53`/`73c479ce40`) and this branch adds
+            # +13 (a `core:` registration block plus a `slow_files:` row; its
+            # 1-line `durations:` addition falls below the entry), so a row sitting
+            # BELOW every insertion moves by the whole +91: 9943 + 91 = the 10034
+            # this row printed at that head. ⛔ Re-derive on the merged tree — a
+            # parent's PREDICTION is not a value: `main` wrote 10019 into this row
+            # from its own tip and three landings had moved it before the merge.
+            # ⛔ #12362's merge of `ca74f2375ef4` re-derived it to 10091 (main 10076
+            # + this branch's +15 for the `api:`/`core:` registrations of
+            # `test_12362_capture_outcome_unknown.py`, at `+9` and `+6` above the
+            # entry). ⛔ BOTH parents of the #12416 rebase were stale: `main` at
+            # `ca74f2375e` read 10076, and by its tip `6408da01ce90` — after #12416
+            # and the landings between — it reads 10132, so this branch's +15 makes
+            # the merged tree read 10147 (9943 + 204). Measured, not carried.
+            ("10147", "- test_pack_logic_writeprobe_11083.py"),
         ), "ci_surfaces", "carve_out:"),
     )
     assert len(rows) >= 9, (
