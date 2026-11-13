@@ -5412,8 +5412,9 @@ def _assert_carve_out_entry_is_pinned_by_symbol():
     def _block_bounds(key: str) -> tuple[int, int]:
         head = next((i for i, ln in enumerate(lines) if ln.startswith(key + ":")), None)
         assert head is not None, (
-            f"config/ci-surfaces.yml carries no `{key}:` key — the surface the bundle "
-            f"pins has been renamed, so re-read the section before trusting this pin")
+            f"config/ci-surfaces.yml carries no `{key}:` key — the block this pin "
+            f"grades `{key}:` of has been renamed, deleted, or moved, so the claim "
+            f"cannot be graded; re-read the section before trusting it")
         tail = len(lines)
         for j in range(head + 1, len(lines)):
             ln = lines[j]
@@ -5474,10 +5475,11 @@ def _assert_carve_out_entry_is_pinned_by_symbol():
         "this four times by hand). Cite the symbol and the section instead.")
 
     # ⛔ The row's OTHER half — "`uri_requiring:` and `slow_files:` hold none" — is
-    # graded here too (#12266 review, P2). It is true today (the symbol occurs at
-    # `6103`, `8502`, `9987` and `11573`, of which only `9987` is in `carve_out:`; the
-    # rest are `surfaces:` registrations), and nothing else in the tree reads it, so an
-    # entry slipped into either block would make the row false with no check to red.
+    # graded here too (#12266 review, P2). It is true today: the symbol occurs only in
+    # the two `surfaces:` registrations, the `carve_out:` entry itself, and its
+    # `durations:` weight, so neither graded block holds it. Nothing else in the tree
+    # reads that half, so an entry slipped into either block would make the row false
+    # with no check to red.
     for key in ("uri_requiring", "slow_files"):
         block_start, block_end = _block_bounds(key)
         stray = [n + 1 for n in range(block_start, block_end)
