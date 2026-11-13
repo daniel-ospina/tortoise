@@ -624,8 +624,10 @@ def test_an_install_failure_is_only_RED_when_the_INDEX_confirms_the_absence(tmp_
     (from versions: none)" it prints for a genuinely missing release. So the FAIL needs
     an INDEPENDENT re-read of the index, and only its answer routes the arm:
     ABSENT and OK are both FAIL (the project is gone / the project is served but the
-    version will not install), and UNREADABLE alone is UNKNOWN — a non-zero exit that
-    never sends a human to cut an irreversible release (#12363 rounds 3 → 4 → 11)."""
+    version will not install), and every other value is UNKNOWN — UNREADABLE, and every
+    UNNAMED state (``None``, ``""``, a future one): a non-zero exit that never sends a
+    human to cut an irreversible release (#12363 rounds 3 → 4 → 11; the allow-list is
+    #12422 round 19)."""
     marks = (
         "ERROR: Could not find a version that satisfies the requirement "
         "tortoise-graph==0.2.0 (from versions: none)\n"

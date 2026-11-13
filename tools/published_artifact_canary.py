@@ -169,13 +169,16 @@ def index_absence_probe(package: str, timeout: float = 30.0) -> str:
     finding about the ARTIFACT (no files uploaded for ``info.version``, every file
     yanked, a wheel pip rejects), not about the detector. Routing OK to UNKNOWN is what
     made the caller's FAIL arm unreachable and reported "do NOT cut a release" for an
-    uninstallable release. UNKNOWN is reserved for the one state that genuinely has no
-    answer: INDEX_UNREADABLE.
+    uninstallable release. The caller therefore ALLOW-LISTS these two NAMED states: ABSENT
+    and OK are the only values that justify a verdict, and every other value —
+    INDEX_UNREADABLE, ``None``, ``""``, or a state a later refactor introduces — is
+    UNKNOWN, because the probe produced no usable reading.
 
     ⛔ Do NOT "restore" a `state != INDEX_ABSENT -> UNKNOWN` test here or at the caller:
     that is the defect, not the protection. The round-3 protection it was meant to give —
-    pip prints its absence vocabulary for an UNREACHABLE index too — is preserved by
-    keeping UNREADABLE (and only UNREADABLE) on the UNKNOWN path.
+    pip prints its absence vocabulary for an UNREACHABLE index too — is preserved by that
+    ALLOW-LIST: only the two named states above reach a verdict, so an unnamed state stays
+    on the UNKNOWN path whatever a future refactor decides to call it.
     """
     _doc, _reason, state = fetch_index(package, timeout)
     return state
