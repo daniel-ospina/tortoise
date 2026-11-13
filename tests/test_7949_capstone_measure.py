@@ -5277,14 +5277,14 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # transcription slip: the number is owned by another tool, so every
         # landing PR above it is a re-derivation this pin cannot do for itself.
         #
-        # So it is re-derived from THIS MERGED tree — `9e0bb06062`, the merge of
-        # `origin/main` (`6408da01ce`) INTO this branch, measured with
-        # `git cat-file -p 9e0bb06062 | grep '^parent'` — so the entry sits where
-        # the tree that adds both puts it. (Naming the act matters: this branch
-        # was MERGED with its base, not rebased onto it, and a comment that calls
-        # a merge a rebase sends the next reader to `git log` looking for a
-        # rewrite that never happened.) Every value below is stated with the tree
-        # it was read from, never carried across a rebase or a merge:
+        # So it is re-derived from THIS merged tree, and re-derived AGAIN after
+        # every base merge — a value true of one merge is stale the moment `main`
+        # lands another registration above the entry, which is the one thing that
+        # keeps happening here. The integration is a MERGE, not a rebase (this
+        # branch carries `9e0bb06062` and the merge below it), because naming the
+        # wrong act sends the next reader to `git log` hunting a rewrite that
+        # never happened. Every value below is stated with the tree it was read
+        # from, never carried across a rebase or a merge:
         #   awk '/^- test_pack_logic_writeprobe_11083.py$/{print NR}' config/ci-surfaces.yml
         #   grep -nE '^(carve_out|uri_requiring):' config/ci-surfaces.yml
         # 9943 at `9828250732`; 9949 at `ba84fbfabf`, 9965 at `e200623286` and
@@ -5307,17 +5307,18 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # whose +56 came from THREE landings in SIX hunks ABOVE the entry (8 at
         # 1954, 16 at 2267, 21 at 2316, 8 at 5119, 2 at 9286, 1 at 9289 — again
         # positions read off `6408da01ce` itself, not off the commits that added
-        # them). Each of those ranges has hunks BELOW the entry too
-        # (`durations:`/`durations_floors:` rows) and those do not move the pin,
-        # which is why they are not in either sum. This branch adds +13 at 2278
-        # (its own `core:` registration), so the tree that adds BOTH parents
-        # reads 10145 = 10132 + 13.
-        # `carve_out:` opens 10019 and `uri_requiring:` 10350 at THIS tree, so
-        # 10145 is inside the section, and the identical text also sits at 6191
-        # and 8652 (over `9828250732`'s 6082 / 8459 — the two move at DIFFERENT
+        # them); and 10147 at `main`'s CURRENT tip `2dbfb046d7` (+15 in ONE hunk
+        # at 2266, #12372's `tortoise_query` `entity_type` rows). Each of those
+        # ranges has hunks BELOW the entry too (`durations:`/`durations_floors:`
+        # rows) and those do not move the pin, which is why they are not in any
+        # sum. This branch adds +13 at 2278 (its own `core:` registration), so
+        # the tree that adds BOTH parents reads 10147 + 13 = 10160.
+        # `carve_out:` opens 10034 and `uri_requiring:` 10365 at THIS tree, so
+        # 10160 is inside the section, and the identical text also sits at 6206
+        # and 8667 (over `9828250732`'s 6082 / 8459 — the two move at DIFFERENT
         # rates, because only the hunks above each one count), which is what the
         # 5th element exists to refuse. ⚠️ Both of those are INDENTED sub-keys
-        # (`core:` 2256, `sdk:` 8418 at THIS tree) of `surfaces:`, so the
+        # (`core:` 2256, `sdk:` 8433 at THIS tree) of `surfaces:`, so the
         # resolver's nearest-column-zero-key rule reports the PARENT: a cite onto
         # either refuses with `sits in section 'surfaces:', not 'carve_out:'` —
         # measured, so a re-derivation onto it does not get told `sdk:` and
@@ -5364,19 +5365,23 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # (+6 @6721, #11609), 9965 at `e200623286` (+16 @7514, #11926), 9973
             # at `cd22562c24` (+8 @2725, #12060), 9987 at `f1f74135a15b`
             # (+13 @2237 and +1 @9150, #12294), 10022 at `42409813a7` (+1 @2237,
-            # #12348), 10076 at `ca74f2375e`, and 10132 at the `origin/main` tip
-            # `6408da01ce`, whose +56 came from THREE landings in SIX hunks ABOVE
-            # the entry (8 at 1954, 16 at 2267, 21 at 2316, 8 at 5119, 2 at 9286,
-            # 1 at 9289 — positions read off `6408da01ce` itself; its other two
-            # hunks are `durations:`/`durations_floors:` rows BELOW the entry and
-            # move the pin not at all). This branch's own `core:` registration
-            # adds +13 at 2278, so the tree that adds BOTH parents reads
-            # 10145 = 10132 + 13. ⛔ BOTH sides of this merge carried a stale
-            # number — 10089 OURS (`c5e117335d`) and 10132 `main`'s
-            # (`6408da01ce`), each read off the side it names — and NEITHER
-            # describes a tree that adds both. ⛔ Naming only the FIRST hunk above the entry is how
-            # `9951` stood here — re-derive the SUM of every hunk above it.
-            ("10145", "- test_pack_logic_writeprobe_11083.py"),
+            # #12348), 10076 at `ca74f2375e`, 10132 at `6408da01ce`, and 10147 at
+            # the CURRENT `main` tip `2dbfb046d7` (+15 at 2266, #12372's
+            # `tortoise_query` `entity_type` rows). Their +56 and +15 are each
+            # stated from the tree that carries them, never summed off a diff:
+            # `6408da01ce`'s +56 is THREE landings in SIX hunks ABOVE the entry
+            # (8 at 1954, 16 at 2267, 21 at 2316, 8 at 5119, 2 at 9286, 1 at
+            # 9289), and `2dbfb046d7`'s +15 is ONE hunk at 2266. Both ranges also
+            # carry `durations:`/`durations_floors:` rows BELOW the entry, and
+            # those move the pin not at all. This branch's own `core:`
+            # registration adds +13 at 2278, so the tree that adds BOTH parents
+            # reads 10147 + 13 = 10160. ⛔ Naming only the FIRST hunk above the
+            # entry is how `9951` stood here — re-derive the SUM of every hunk
+            # above it AND at the CURRENT base, never at the base this sentence
+            # was first written against: the `10145` this row carried one `main`
+            # tip ago was correct at `9e0bb06062` and described no tree `main`
+            # would ever produce, which is the same defect one base later.
+            ("10160", "- test_pack_logic_writeprobe_11083.py"),
         ), "ci_surfaces", "carve_out:"),
     )
     assert len(rows) >= 9, (
