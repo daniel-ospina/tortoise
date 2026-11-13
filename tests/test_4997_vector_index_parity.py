@@ -466,19 +466,33 @@ def test_empty_result_set_means_measured_and_empty():
 
 def test_none_result_set_means_not_measured():
     """`rows is None` is NOT `rows == []` — None means the catalog could not be
-    read, which a gap consumer must treat as unknown."""
+    read, which a gap consumer must treat as unknown.
 
-    class _NoneGraph(_RecordingGraph):
-        def query(self, cypher, params=None, timeout=None):
-            self.calls.append(cypher)
-            if "db.indexes()" in cypher.lower():
-                return _MockResult(None)
-            return super().query(cypher, params=params, timeout=timeout)
+    ⛔ ONE fake, not two (#11295 item 2). This test used to define its own local
+    `_NoneGraph` beside the module-scope `_NoneCatalogueGraph`, so two copies of
+    one fake could drift apart — and the local copy DID: it appended to
+    `self.calls` on every query and then delegated, double-counting any
+    non-catalogue query. The single behaviour this test relies on is the one
+    `_NoneCatalogueGraph` exists to carry: the engine ANSWERS, and the answer's
+    `result_set` is `None`. The empty-catalogue arm stays a DIFFERENT answer,
+    reached through `_RecordingGraph(index_rows=[])` in
+    `test_empty_result_set_means_measured_and_empty`.
 
+    ⛔ The "lane must have RUN" assertion is what makes this able to fail: on a
+    VIRGIN projection `_bare()` already leaves `_vector_indexed_labels` as
+    `None`, so `is None` afterwards is ALSO satisfied by a read that never
+    entered — the false-PASS shape `test_unmeasured_pair_is_none_in_both_halves`
+    guards its own arm against.
+    """
     proj = _bare()
-    proj.g = _NoneGraph()
+    proj.g = _NoneCatalogueGraph()
     proj._record_vector_index_inventory()
+    assert any("db.indexes()" in c for c in proj.g.calls), (
+        "the catalogue read must have been ATTEMPTED, or `is None` proves nothing"
+    )
     assert proj._vector_indexed_labels is None
+    # The pair stays coherent: `None` means NOT MEASURED, so neither half is a set.
+    assert proj._vector_index_served_labels is None
 
 
 # (d) fail-open: a raising read never breaks store setup
