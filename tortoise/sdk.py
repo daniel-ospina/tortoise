@@ -18000,8 +18000,16 @@ class TortoiseSDK:
             _ekind = _payload_entity_kind(e)
             _is_subject = is_subject_kind(_ekind or "")
             if _is_subject:
+                # ⛔ The FOLDED set is NOT maintained here (review round 23): it is
+                # derived once, AFTER the `#12060` landed-layer correction below,
+                # because a guard redirect moves a name between the entity labels
+                # and the derived set must follow the write that LANDED. Maintaining
+                # it here as well was a dead store — written once per payload
+                # entity, then discarded before its only reader — and a trap: a
+                # later reader would take the seed as load-bearing and try to
+                # delta-maintain it, which cannot express "another name still holds
+                # this folded key".
                 subject_entity_names.add(name)
-                subject_entity_names_folded.add(_fold(name))
             try:
                 if _is_subject:
                     _written = self.create_entity(

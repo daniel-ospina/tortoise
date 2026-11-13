@@ -1592,7 +1592,7 @@ def _capture_extractor(payload: dict):
 
 
 def _capture_payload(entity_name: str, entity_kind: str,
-                     content: str) -> dict:
+                     content: str, about: list | None = None) -> dict:
     import tortoise.extractor_v2 as ev2
 
     return {
@@ -1605,7 +1605,8 @@ def _capture_payload(entity_name: str, entity_kind: str,
         "points": [{"id": ev2._content_id("pt", content), "content": content,
                     "pointKind": "statement", "reason": "NEW",
                     "confidence": 0.5, "c_cal": 0.5,
-                    "about_entities": [entity_name], "source_ref": "session.md",
+                    "about_entities": ([entity_name] if about is None else about),
+                    "source_ref": "session.md",
                     "quote": "", "status": "draft", "search_keys": []}],
         "events": [], "operators": [], "supersessions": [],
         "telemetry": {"counts": {"kept": 1}},
@@ -2765,3 +2766,52 @@ depends_on: []
              "reason": "x"},
             guard_extra={"layer": "object", "onConfusions": []})
         assert errs and "onConfusions" in " ".join(errs), errs
+
+
+def test_the_folded_subject_set_is_re_derived_after_the_correction(
+        sdk, monkeypatch):
+    """#12341: the folded subject set must track the LANDED layer, not the payload kind.
+
+    ⛔ The direction matters, and this is the shape a first attempt missed. A
+    `core:naturalPerson` name IS a declared Subject kind, so it is seeded into
+    `subject_entity_names_folded`; a CORE guard then redirects the write to
+    `:Object`/`core:Project`, and the `#12060` correction loop DISCARDS the name
+    from `subject_entity_names` while the pre-write folded key survives. The claim
+    then names the same entity in a fold-equal spelling, so a stale folded set makes
+    `_subject_fold_only` TRUE and narrows the `aboutObject` probe to
+    `o.name = $exact` — a spelling no node carries — and the edge is LOST silently
+    (no warning, no `skipped` entry).
+
+    Measured: with the re-derive, the edge is written; deleting the twelve lines that
+    rebuild `subject_entity_names_folded` reds exactly this test (`[]`), and
+    disabling the narrowing on top of the mutant makes it green again — i.e. the
+    stale key's narrowing is the cause, not another route. A control with the
+    EXACT spelling writes the edge under both code shapes, which is why this is an
+    exactness question and not a blanket skip.
+    """
+    import tortoise.extractor_v2 as ev2
+
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    monkeypatch.delenv("TORTOISE_SESSION_EXTRACTOR", raising=False)
+    name = "daniel-ospina/agent-infra"
+    monkeypatch.setattr(ev2, "extract_session_v2", _capture_extractor(
+        _capture_payload(name, "core:naturalPerson",
+                         "the repo ships a kind guard",
+                         about=["DANIEL-OSPINA/AGENT-INFRA"])))
+    r = sdk._capture_session(_CAPTURE_CONV, session_id="s12060_f1")
+    assert r.get("ok") is True, r
+    g = sdk._get_proj().g
+    # Not vacuous: the guard MOVED the write, which is what discards the name from
+    # the exact set while the folded set would keep it.
+    assert [list(row) for row in g.query(
+        "MATCH (o:Object {name:$n}) RETURN o.objectKind",
+        params={"n": name}).result_set] == [["core:Project"]]
+    assert not g.query("MATCH (s:Subject {name:$n}) RETURN s",
+                       params={"n": name}).result_set
+    # THE PIN: the claim's edge survives the fold-equal spelling.
+    assert [list(row) for row in g.query(
+        "MATCH (p:Point)-[rel:aboutObject]->(x {name:$n}) RETURN type(rel)",
+        params={"n": name}).result_set] == [["aboutObject"]], (
+        "the aboutObject edge was lost for a fold-equal reference to a "
+        "guard-REDIRECTED subject-kind name — `subject_entity_names_folded` was "
+        "left stale by the landed-layer correction (#12341)")
