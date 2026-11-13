@@ -399,17 +399,22 @@ response_fields:
 #     returned item: the chain IS the Source link, so it existed whether or not the raw did.
 #     #4282 deleted the method and the row went with it.
 #   • `sdk:traverse` / `idx` (#6101) — now recorded on `tortoise_traverse` below, its surviving carrier.
-# The SEAM SURVIVES: it is `_capture_stats_with_step_witness` at the `_extract_session_v2` meta fold
-# (`tortoise/sdk.py`), a privatised method, and the whole extractor-v2 pipeline still reaches it. What
-# went with the surface is the public CARRIER, so `stats.step_witness` is now observable in-process
-# (and by the capstone probes) rather than through a declared SDK response. `graph_ops` had exactly
-# one carrier — the `counts_capture_ops` decorator on the deleted method — and is gone with it.
+# The SEAM SURVIVES: it is `_capture_stats_with_step_witness`, a module-level function at the
+# `_extract_session_v2` meta fold (`tortoise/sdk.py`), and the whole extractor-v2 pipeline
+# still reaches it. What went with the surface is the public CARRIER, so `stats.step_witness`
+# is now observable in-process (and by the capstone probes) rather than through a declared
+# SDK response. `graph_ops` is in the SAME position, not gone: its decorator `counts_capture_ops`
+# still runs on the surviving private `TortoiseSDK._capture_session` and attaches `graph_ops`
+# to the returned dict — what the deletion removed was the public method that EXPOSED it.
 # Restoring either as a declared surface is a SURFACE CHANGE and needs owner approval (#4282).
 #
 # ⛔ AND THIS COMMENT SURVIVED A `cut` ONLY BY BEING RESTORED BY HAND (#11609 batch 1): `cut`
-# re-emits `rows:`/`response_fields:` from the declaration and drops every comment inside those
-# sections, so a re-cut silently deletes a memorial like this one. Whoever cuts next must diff
-# this file for lost comments and put them back — `check` cannot see a comment.
+# re-emits the file as `MANIFEST_HEADER + yaml.safe_dump(doc)`, so EVERY comment below the
+# emitted header dies — not only the ones inside `rows:`/`response_fields:` (this block sits
+# INSIDE `response_fields:` and died anyway; the `counts` block above `counts:`, which sits in
+# neither, died in the same cut).
+# Whoever cuts next must diff this file for lost comments and put them back — `check` cannot
+# see a comment, so nothing else will tell you.
 - response: tortoise_traverse
   field: idx
   emitted_when: 'always, on every hop in nodes[] — the traversed edge''s idx (the same value the #4282-deleted `sdk:traverse`
@@ -901,14 +906,19 @@ approval_status: approved
 approval_principal: daniel-ospina
 approval_pr: '4120'
 approval_date: '2026-09-18'
-# ⚠️ `counts` is DERIVED by `render`, and it describes the SAME snapshot as
-# `cut_at_commit` above — both come out of one `cut --commit <default-branch sha>`.
-# The two disagreed for a while (#4282 deleted 26 dead public SDK methods at
-# `45eefb26c`, so `sdk_public_methods` stayed 124 while `tools` still read 72);
-# #11609 batch 1 removed four no-destination MCP tools and re-cut, so they agree
-# again: 68 tools / 124 SDK methods / 23 retired, derived from the declaration.
-# ⛔ A hand-edited `counts` reds `check` — re-cut instead (`cut --commit $(git
-# rev-parse origin/main)`), and never paste a number in.
+# ⚠️ `counts` is DERIVED by `cut` (and re-derived by `check`) from the TREE the cut ran in;
+# `cut_at_commit` only records the commit passed to `cut --commit`, which must be a
+# DEFAULT-BRANCH sha so the citation survives a squash-merge (#11057 review F1). So the two
+# can legitimately DISAGREE, and they are graded by different properties — `counts` is
+# compared by the DERIVATION property, while `cut_at_commit` is excluded from that drift
+# check and graded only by the provenance property (that it RESOLVES and SURVIVES). Do not
+# read the pair as one snapshot. They disagreed for a while (#4282 deleted 26 dead public SDK
+# methods at `45eefb26c`, so `sdk_public_methods` stayed 124 while `tools` still read
+# 72: the counts came from a lane tree, the sha from the branch). #11609 batch 1 cut a
+# lane tree with four no-destination MCP tools removed and recorded `origin/main`, so
+# the counts below read 68 while `6408da01ce` itself still holds 72 — same legitimate
+# divergence, opposite direction. ⛔ A hand-edited `counts` reds `check` — re-cut
+# instead (`cut --commit $(git rev-parse origin/main)`), and never paste a number in.
 counts:
   tools: 68
   sdk_public_methods: 124
