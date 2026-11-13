@@ -131,11 +131,44 @@ exists to report. Recorded here rather than quietly fixed (a "stored but unfinda
 that starts firing on every `snake_case` name is a product-visible behaviour change that needs
 its own measurement).
 
+## 4b. The emitted shapes are all parseable (measured, not assumed)
+
+A term that breaks the RediSearch parser would not just miss — it raises inside
+`queryNodes`, which `run_fts_query` records as an FTS **FAILURE**
+(`_breaker_record("fts", False)`) and which degrades later searches. So every adversarial
+shape the new tail can emit was issued against a live index, and a wider set was compared by
+the index itself:
+
+| emitted shape | parsed | matched |
+|---|---|---|
+| `web_search` (the composite) | yes | yes |
+| `a_` (trailing underscore) | yes | yes — the index holds `a_` |
+| `__a` (leading underscores) | yes | yes — the index holds `__a` |
+| `_menu` (run after a unicode break) | yes | no (harmless: an OR alternative that cannot match) |
+| `a__b` (double underscore) | yes | no — `x__y` takes the degenerate branch and sends the RAW `x__y`, which does match |
+| 48×`a` (a bounded single-char run is dropped; the length bound holds) | yes | no |
+| `search|web|web_search` (the full union) | yes | yes |
+
+Nothing in the emitted alphabet can be a metacharacter: `underscore_run_terms` only ever emits
+`[a-z0-9_]` (lowercased), and a test asserts that against the module's own
+`_REDI_SEARCH_SPECIAL` set. The tail is also bounded (8 runs × 48 chars), so the OR budget
+stays a bound.
+
 ## 5. Declared gaps
 
 * **`:Object` only.** The mechanism is label-independent (the index tokenises stored text on
   every label) and should be *worse* on `:Point`, where a composite inside `content` is the
   only term the index holds — a prediction, not a measurement.
+* **The run alphabet is ASCII, so a NON-ASCII `snake_case` name is still unretrievable.**
+  Measured on a live lane: the index holds `café_menu` as ONE term
+  (`queryNodes('Object', 'café_menu')` → the record; `'café'`, `'menu'`, `'caf_'`, `'_menu'` →
+  nothing), while the ASCII-only run splitter breaks at `é` and emits `menu|caf|_menu` — so that
+  record is **not** recovered. The measured 300-name population carries **0** non-ASCII names, so
+  the numbers above are unaffected; the widening is deliberately NOT shipped, because `#8933`'s
+  ruling is explicit — *"start conservative … widen only on measurement; do not ship a broadened
+  pattern speculatively"* — and a unicode run alphabet is a widening with no measured population
+  behind it. Recorded on `#12350` (the tokenizer contract) with the probe, so the next lane gets
+  the evidence instead of rediscovering it.
 * **The dense leg is absent here**, so the two fused surfaces are measured keyword-only, and
   the interaction between +25 pts of lexical recall and a live dense leg is unmeasured
   (`#11901` showed the dense leg *hurts* the definite class, so the interaction is not
