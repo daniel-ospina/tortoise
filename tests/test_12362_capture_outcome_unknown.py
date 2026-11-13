@@ -128,14 +128,17 @@ def test_an_unrecorded_outcome_is_not_reported_as_extraction_failure(
         "a PENDING confirmation is terminal for TURN durability (#4675) — the "
         "turns ARE stored, so spooling it for retry is the deferral this verdict "
         "exists to stop re-asserting")
-    assert "no memory points were extracted" not in err, (
-        "the server said the outcome is NOT RECORDED; asserting an absence from "
-        "it is the measured false negative (#12362)")
+    # Folded into ONE assertion: both strings come from the same f-string in
+    # `__main__.py`, so every `err` carrying `no-provider` also carries
+    # "no memory points were extracted" — kept separate, the cause clause could
+    # only ever fire behind the absence clause and the row would report the
+    # absence (agent-infra#3442 rule 2: the catch must be ATTRIBUTABLE).
+    assert ("no memory points were extracted" not in err
+            and "no-provider" not in err), (
+        "the server said the outcome is NOT RECORDED: asserting an absence, or "
+        "naming the keyless cause, from it is the measured false negative (#12362)")
     assert "outcome not recorded yet" in err, \
         "the honest state must still be surfaced, not silently dropped"
-    assert "no-provider" not in err, (
-        "the capture extracted on the server; `no-provider` names a cause that "
-        "was never measured")
     assert backlog.sessions() == [], (
         "a deferral is a PRICED offer to re-extract; offering it for a capture "
         "whose extraction is still running is the actionable half of the bug")
