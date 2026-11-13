@@ -111,6 +111,22 @@ EXIT CODES: 0 ok · 2 usage · 3 no reachable graph (never a silent skip)
 """
 from __future__ import annotations
 
+import sys
+
+# #5128 (the repo's entry-point contract): refuse a <3.12 interpreter HERE, before the rest of the
+# imports, so a stale local `python3` fails LOUDLY with a remedy instead of with whichever 3.12-only
+# construct happens to trip first. `tests/test_entry_point_python_guard.py` asserts structurally that
+# this guard precedes every other import and behaviourally that it names the floor, the interpreter it
+# got, and the invocation that works.
+if sys.version_info < (3, 12):  # noqa: UP036 -- intentional RUNTIME guard
+    print(
+        f"tools/candidate_recall_11901.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/candidate_recall_11901.py`",
+        file=sys.stderr,
+    )
+    raise SystemExit(70)
+
 import argparse
 import collections
 import contextlib
@@ -118,7 +134,6 @@ import hashlib
 import json
 import os
 import re
-import sys
 import time
 from pathlib import Path
 
