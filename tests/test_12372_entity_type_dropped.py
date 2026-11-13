@@ -770,10 +770,11 @@ def test_the_operator_remedy_discloses_the_view_it_bounds() -> None:
     (`tortoise/sdk.py:26563`) while the leg appends only `n.is_operator = true`
     (`search_engine.py:4261`). So "one call at the SDK's maximum … no
     single-call read above 10,000" hands the caller a short answer shaped like
-    the layer, and a reconciler two causes conflated into none — the same false
-    PASS this guard removes, one level down (round 2 fixed the `limit` half of
-    it). Fails on the `CURRENT VIEW` clause and on the second cause; deleting
-    either reds it.
+    the layer, with none of its causes named — the same false PASS this guard
+    removes, one level down (round 2 fixed the `limit` half of it). The NAMED
+    causes are pinned here; the SILENT ones (a timed-out or breaker-open leg)
+    are pinned by `test_the_operator_remedy_names_the_silent_cause_too`. Fails
+    on the `CURRENT VIEW` clause and on either named cause.
     """
     message = _message_for("operator")
 
@@ -781,8 +782,8 @@ def test_the_operator_remedy_discloses_the_view_it_bounds() -> None:
         f"the remedy implies the operator LAYER while naming a view: {message!r}"
     )
     assert "op_type" in message and "status" in message, (
-        "a reconciled gap has two causes (terminal status, and operators "
-        f"carrying only `op_type`) and the message names neither: {message!r}"
+        "a reconciled gap's NAMED causes (terminal status, and operators "
+        f"carrying only `op_type`) are missing: {message!r}"
     )
 
 
