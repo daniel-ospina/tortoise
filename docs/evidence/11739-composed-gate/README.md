@@ -36,7 +36,8 @@ this graph**, not passing.
 ## The numbers
 
 `gate.json` (three gate verdicts) and `quote_identity.json` (root-cause counts) each carry the probe
-they came from in `provenance`; every figure below is a field in one of those two artifacts.
+they came from **and a digest of the numbers they publish** in `provenance` (so a hand-edit of a
+verdict or a count reds in the pin); every figure below is a field in one of those two artifacts.
 
 ```text
 GATE: raw-vs-composed similarity   worst case = 1.000 (global and worst session) vs 0.89  → FAIL
@@ -103,6 +104,16 @@ subject a 100-word `content` carried, so distinct facts in the same session crow
   `find_cross_source_matches` wrapper the issue names — both are thin callers of the same encode +
   cosine-similarity pipeline (the wrapper keys on `speaker`, this one on `lens`). The live rows
   carry neither `lens` nor `speaker`, so the capture session is the lens.
+* **`rows_walked` is a cache-sourced count, and the walk's completeness proof is absent from the
+  artifact.** `gate.json` was written from the row cache (`source: cache:/tmp/11739-rows.jsonl`), and
+  cache mode synthesises `rows_walked = live_rows = len(rows)`, so the field reads **15,842** — the
+  LIVE row count — while the #11838 census walked **15,868** (26 terminal rows). With the walk
+  skipped, `pages`, `distinct_ids`, `total_reported` and `final_page_size` — the #5346
+  partition proof — are not in the artifact at all, so `gate.json` alone cannot show that the cache
+  was a complete partition of the population rather than a truncated walk. What corroborates it is
+  external: the population is byte-identical to the census (15,842 live, 15,295 embedded, 15,008
+  quoted+embedded). Recorded, not repaired, for the same reason as the drop counters — the
+  artifacts are dated and their digests bind.
 * **The two drop counters do NOT partition the population, and one of them is a structural zero.**
   `measure()` skips a row with no `embedding` BEFORE the quote test (`if not isinstance(emb, list) or
   not emb: continue`) and then increments `quoted` and appends to `kept` unconditionally — so
@@ -124,15 +135,19 @@ subject a 100-word `content` carried, so distinct facts in the same session crow
 
 ## Reproduce
 
+⚠️ **Needs ~2 GB RSS peak.** `_pair_bands` is chunked (~30 MB), but `_worst_pair` materialises the
+full `n x n` similarity matrix for the whole population — `15,008² x 4 B ≈ 900 MB` — and it runs
+twice (raw, then composed). A 15 GB cell already at load 15 has OOM-killed multi-suite runs; check
+`free -g` / `uptime` before starting, because a run killed at 80 % produces no verdict.
+
 Numbers in `gate.json` (the three gates, ~15 min: it encodes 15,008 composed texts) and in
 `quote_identity.json` (root cause, ~30 s, no encoding — it reads the same row cache):
 
 ⚠️ **The probes' own `Usage` docstrings still show the HISTORICAL in-place invocation**
 (`--out docs/evidence/11739-composed-gate/gate.json`, and the same for `quote_identity.py`). The
-recipe below supersedes them. That is deliberate: the probes are byte-frozen because
-`provenance.probe_sha256` is the bundle's entire binding, and `quote_identity.py` has no `--attest`,
-so correcting its docstring would permanently red the digest with no repair short of a re-run that
-re-stamps `measured_at` — i.e. it would replace the baseline this note exists to protect.
+recipe below supersedes them; they are left alone because rewriting a frozen baseline's prose is
+churn, **not** because it is unrepairable — since this round both probes carry `--attest`, so a
+docstring correction is a provenance rebind rather than a re-run that re-stamps `measured_at`.
 
 ```bash
 cd <checkout>
@@ -148,10 +163,13 @@ uv run python docs/evidence/11739-composed-gate/probes/composed_gate.py \
 # 2. the root cause (no encoding, ~30 s)
 uv run python docs/evidence/11739-composed-gate/probes/quote_identity.py \
     --rows /tmp/11739-rows.jsonl --out /tmp/quote_identity.json
-# 3. only after a probe EDIT — rebinds provenance to the edited probe WITHOUT re-running the
-#    measurement (every fresh run already writes its own provenance)
+# 3. only after a probe EDIT — rebinds provenance (code digest + payload digest) to the edited
+#    probe WITHOUT re-running the measurement; every fresh run already writes its own provenance
 uv run python docs/evidence/11739-composed-gate/probes/composed_gate.py \
     --attest docs/evidence/11739-composed-gate/gate.json
+# …and the same for the root-cause artifact (no row cache needed for a rebind)
+uv run python docs/evidence/11739-composed-gate/probes/quote_identity.py \
+    --attest docs/evidence/11739-composed-gate/quote_identity.json
 ```
 
 Then compare: `diff <(uv run python -m json.tool /tmp/gate.json) <(uv run python -m json.tool
@@ -164,16 +182,49 @@ The probe walks the whole live population through the #11838 census probe's own 
 embedder, and applies the pre-declared pass criteria in its docstring. Measured duration of the
 committed run: **949.2 s** (mostly CPU encoding of 15,008 texts on a loaded 16-core cell).
 
-Each artifact binds itself to its code by the probe's own sha256 (gate.json:
-`provenance.probe_sha256` = `294535695b7dd2fdefc696203f9e0766cb5a37df5ab0a37ca338bf23d609bb6b`;
-quote_identity.json: `0b784446e43d0faa9448d232fd51978a9f19485741428be5fe5108120fa682c0`), not by a
-head sha — the repo squash-merges, so a head sha is unverifiable when someone re-runs the probe to
-check it (the same binding the #11838 census uses). `_provenance()` in `composed_gate.py` is the one
-producer of that field: a fresh run calls it, and `--attest` calls it on an existing artifact (it
-refuses an artifact with no gate verdicts). `--attest` exists because a fresh run is ~16 minutes of
-encoding while the binding is a pure function of the probe's bytes; it rewrites ONLY `provenance`, so
-it cannot move a number. Note what that means for a re-run: the committed numbers are reproducible
-from the row cache named in `provenance.rows_source` (`/tmp/11739-rows.jsonl`, which is **not**
-committed — see the limitation above), and a fresh run (no cache on the box) is a **live** walk over a
-graph that has captured more Points since 2026-11-13 — so it reproduces the **protocol and the gate
-logic**, which is what #12436's acceptance test means by "the same gate re-run", not these literals.
+Each artifact binds itself twice, and the two bindings answer different questions — the same split
+**SLSA v1.0 provenance** makes between the attested artifact's **`subject` digest** and its
+**`resolvedDependencies`** (the inputs; a probe digest is a dependency digest, not a build
+definition — in-toto's Statement itself has no build-definition field):
+
+* `provenance.probe_sha256` binds it to the **code** that produced it (gate.json:
+  `129564cd5f931c22ccb91bbc7730af042a0c371bc05f362b56b403518fe2d1b1`; quote_identity.json:
+  `0ef9fe88f04b86b90005a0042afedec6cdc4697098389c6058477b40f5afaf6f`), and
+* `provenance.payload_sha256` binds it to the **numbers** it produced **and to the row cache they
+  are attributed to** — sha256 over `{"artifact": <every field except provenance>,
+  "rows_source": …}`, canonicalised `indent=2, sort_keys=True` (gate.json:
+  `cfbe7ad4eaee3868ddc52e5432b79fc7baf92a541e581dbcbff6398cf00693be`; quote_identity.json:
+  `31ba4cf0deb6d0bee1f95e0ccf8e66211fe2f0fbb0ba290971f1d735d40dd296`). Without the first half of
+  that, a hand-edit that flipped `verdict.all_pass` to `true` left `probe_sha256` untouched and
+  nothing noticed; without `rows_source` inside it, re-pointing the attribution at another cache
+  left the pin green (measured).
+
+Neither is a head sha — the repo squash-merges, so a head sha is unverifiable when someone re-runs
+the probe to check it (the same binding the #11838 census uses). `_provenance()` in each probe is
+the ONE producer of its block: a fresh run calls it, and `--attest` calls it on an existing artifact.
+`--attest` fails closed on four shapes: no gate verdicts (or no `verdict.gates` block, so a deleted
+flag cannot be blessed), `all_pass` disagreeing with the three gate flags (`ATTEST-INCONSISTENT`), an
+artifact naming no row source, and an unwritable target (`PROBE-WRITE`) — each exit `2`. It exists
+because a fresh run is ~16 minutes of
+encoding while the binding is a pure function of the probe's bytes and the artifact's own payload;
+it changes ONLY `provenance`, so it cannot move a number.
+
+⚠️ **What none of it proves — and what is bound.** `--attest` blesses the bytes it is handed,
+exactly as `probe_sha256` blesses whatever the probe is — so the guarantee is *"nothing edited this
+artifact after the attest"*, not *"these numbers came from a run"*. The attest is a lane action, and
+the commit diff is where it is reviewable.
+
+Within the artifact, `payload_sha256` covers **every field except `provenance`, plus the
+`rows_source` those fields are attributed to**, and the pin separately checks the remaining fields
+`provenance` carries that the artifact itself can corroborate: the probe's bytes, the probe's
+basename, a non-empty row source (which must equal the artifact's own `source` where it records
+one) and a non-empty encoder. So a hand-edit of a NUMBER, a count, the VERDICT, the attested probe,
+or the cache the numbers are attributed to each reds (`tests/test_11739_composed_gate_probe.py`);
+what it cannot see is an edit made *and re-attested* in the same commit — that is what the commit
+diff is for.
+
+What that means for a re-run: the committed numbers are reproducible from the row cache named in
+`provenance.rows_source` (`/tmp/11739-rows.jsonl`, which is **not** committed — see the limitation
+above), and a fresh run with no cache on the box is a **live** walk over a graph that has captured
+more Points since 2026-11-13 — so it reproduces the **protocol and the gate logic**, which is
+what #12436's acceptance test means by "the same gate re-run", not these literals.

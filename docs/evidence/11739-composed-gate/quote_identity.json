@@ -95,7 +95,8 @@
   ],
   "provenance": {
     "probe_path": "quote_identity.py",
-    "probe_sha256": "0b784446e43d0faa9448d232fd51978a9f19485741428be5fe5108120fa682c0",
+    "probe_sha256": "0ef9fe88f04b86b90005a0042afedec6cdc4697098389c6058477b40f5afaf6f",
+    "payload_sha256": "31ba4cf0deb6d0bee1f95e0ccf8e66211fe2f0fbb0ba290971f1d735d40dd296",
     "rows_source": "/tmp/11739-rows.jsonl",
     "composed_encoder": "BAAI/bge-small-en-v1.5 (only via the composer's word budget; this section encodes nothing)"
   }

@@ -21,8 +21,12 @@ Usage
         --rows /tmp/11739-rows.jsonl \
         --out docs/evidence/11739-composed-gate/quote_identity.json
 
-Exit codes: 0 measured · 2 usage / unwritable --out · 3 no rows / no composed text (never a
-silent zero).
+    # rebind ONLY the provenance of an existing artifact (no row cache needed):
+    uv run python docs/evidence/11739-composed-gate/probes/quote_identity.py \
+        --attest docs/evidence/11739-composed-gate/quote_identity.json
+
+Exit codes: 0 measured · 2 usage / unwritable --out / an artifact `--attest` refused ·
+3 no rows / no composed text (never a silent zero).
 
 ⚠️ ``--rows`` is the row cache written by ``composed_gate.py`` (the live, quoted+embedded subset;
 re-fetch it with that probe, which is the one owner of the paging contract).
@@ -41,6 +45,70 @@ import sys
 import numpy as np
 
 HERE = pathlib.Path(__file__).resolve().parent
+
+
+def _payload_digest(report: dict, rows_source: str) -> str:
+    """sha256 over the artifact's EVIDENCE — every field except ``provenance``, PLUS the row
+    cache those fields are attributed to.
+
+    Same canonical form as ``composed_gate.py``'s and the same reason: ``probe_sha256`` binds this
+    file to the code that produced it, ``payload_sha256`` binds it to the root-cause numbers the
+    fix (#12436) is scoped against — 2,059 Points sharing a quote, 28,994 byte-identical composed
+    pairs. ``rows_source`` travels INSIDE the digest because it is the attribution those numbers
+    rest on: re-pointing it at a different cache is an edit to the evidence, not a note about it.
+    """
+    body = {k: v for k, v in report.items() if k != "provenance"}
+    canon = json.dumps({"artifact": body, "rows_source": rows_source},
+                       indent=2, sort_keys=True)
+    return hashlib.sha256(canon.encode("utf-8")).hexdigest()
+
+
+def _provenance(report: dict, rows_source: str) -> dict:
+    """The ONE producer of the provenance block: a fresh run and ``--attest`` both call it.
+
+    ⚠️ ``--attest`` blesses the bytes it is handed, so the guarantee is *"nothing edited this
+    artifact after the attest"* — not *"these numbers came from a run"*.
+    """
+    return {
+        "probe_path": str(pathlib.Path(__file__).relative_to(HERE)),
+        "probe_sha256": hashlib.sha256(pathlib.Path(__file__).read_bytes()).hexdigest(),
+        "payload_sha256": _payload_digest(report, rows_source),
+        "rows_source": rows_source,
+        "composed_encoder": "BAAI/bge-small-en-v1.5 (only via the composer's word budget; "
+                            "this section encodes nothing)",
+    }
+
+
+def _attest(path: str) -> int:
+    """(Re)bind an existing artifact's provenance to this probe's bytes and its own evidence.
+
+    Mirrors ``composed_gate.py --attest``: a re-run needs the row cache (which is not
+    committed), and the binding is a pure function of the probe's bytes and the artifact's
+    own payload. It refuses an artifact that carries no measurement, and one whose provenance
+    does not name a row source, so neither a truncated report nor a stripped artifact can be
+    attested into evidence.
+    """
+    try:
+        report = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        _say(f"ATTEST-UNREADABLE({path}): {e}\n")
+        return 2
+    if "measured_points" not in report or "shared_composed_text_groups" not in report:
+        _say(f"ATTEST-REFUSED({path}): no root-cause measurement in this artifact\n")
+        return 2
+    rows_source = str((report.get("provenance") or {}).get("rows_source") or "")
+    if not rows_source:
+        _say(f"ATTEST-REFUSED({path}): no `provenance.rows_source`, so the row cache the "
+             "numbers came from cannot be recorded\n")
+        return 2
+    report["provenance"] = _provenance(report, rows_source)
+    try:
+        pathlib.Path(path).write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    except OSError as e:
+        _say(f"PROBE-WRITE({path}): {e}\n")
+        return 2
+    _say(f"attested {path} -> {report['provenance']['probe_sha256']}\n")
+    return 0
 
 
 def _say(msg: str) -> None:
@@ -124,20 +192,18 @@ def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--rows", default="/tmp/11739-rows.jsonl")
     ap.add_argument("--out", default="-")
+    ap.add_argument("--attest", default="", metavar="PATH",
+                    help="(re)write provenance into an existing artifact; no measurement runs")
     args = ap.parse_args(argv[1:])
+    if args.attest:
+        return _attest(args.attest)
     try:
         rows = [json.loads(line) for line in open(args.rows, encoding="utf-8")]
     except OSError as e:
         _say(f"IDENTITY-NO-ROWS({args.rows}): {e}\n")
         return 3
     report = measure(rows)
-    report["provenance"] = {
-        "probe_path": str(pathlib.Path(__file__).relative_to(HERE)),
-        "probe_sha256": hashlib.sha256(pathlib.Path(__file__).read_bytes()).hexdigest(),
-        "rows_source": args.rows,
-        "composed_encoder": "BAAI/bge-small-en-v1.5 (only via the composer's word budget; "
-                            "this section encodes nothing)",
-    }
+    report["provenance"] = _provenance(report, args.rows)
     text = json.dumps(report, indent=2) + "\n"
     if args.out == "-":
         sys.stdout.write(text)

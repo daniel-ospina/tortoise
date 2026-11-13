@@ -54,7 +54,9 @@ Usage
     uv run python docs/evidence/11739-composed-gate/probes/composed_gate.py \
         --out docs/evidence/11739-composed-gate/gate.json
 
-Exit codes: 0 measured · 2 usage / unwritable --out · 3 graph unreachable, not
+Exit codes: 0 measured · 2 usage / unwritable --out / an artifact `--attest` refused
+(`ATTEST-UNREADABLE`, `ATTEST-REFUSED`, `ATTEST-INCONSISTENT`, or an unwritable attest target) ·
+3 graph unreachable, not
 configured, or an empty population (never a silent zero) · 4 the page walk could not be
 proven complete, or the embedder is unavailable (a gate that cannot encode cannot
 measure, and TF-IDF is NOT the calibrated space).
@@ -84,7 +86,10 @@ TOP_K = 10
 SEED = 11739
 QUERY_SAMPLE = 500
 CROSS_LENS_SAMPLE = 1500
-#: Chunk rows for the all-pairs pass — keeps peak memory ~30 MB instead of ~2 GB.
+#: Chunk rows for the all-pairs pass — peaking at ~30 MB for the band counts instead of the
+#: ~900 MB a materialised ``n x n`` would need. ⛔ ``_worst_pair`` is NOT chunked and DOES
+#: materialise ``n x n`` (15,008^2 x 4 B = ~900 MB), twice per run (raw and composed); the
+#: README's Reproduce section states the resulting peak RSS requirement.
 CHUNK = 256
 
 
@@ -178,7 +183,7 @@ def _worst_pair(vec: np.ndarray, idx: list[int]) -> tuple[float, tuple[int, int]
     return float(sims[i, j]), (idx[i], idx[j])
 
 
-def _pair_bands(raw: np.ndarray, comp: np.ndarray, bands) -> dict:
+def _pair_bands(raw: np.ndarray, comp: np.ndarray) -> dict:
     """Count pairs in each band for RAW and COMPOSED, and the transitions.
 
     Single chunked pass over i<j so the 15k x 15k matrix is never materialised.
@@ -345,7 +350,7 @@ def measure(rows: list[dict], meta: dict) -> dict:
         })
     worst_session = max(per_session, key=lambda g: g["worst_composed"], default=None)
 
-    bands = _pair_bands(raw, comp, None)
+    bands = _pair_bands(raw, comp)
 
     rng = np.random.default_rng(SEED)
     qidx = rng.choice(len(kept), size=min(QUERY_SAMPLE, len(kept)), replace=False).tolist()
@@ -392,17 +397,55 @@ def measure(rows: list[dict], meta: dict) -> dict:
     }
 
 
-def _provenance(rows_source: str) -> dict:
-    """The artifact's self-binding (the #11838 census's rule).
+def _payload_digest(report: dict, rows_source: str) -> str:
+    """sha256 over the artifact's EVIDENCE — every field except ``provenance``, PLUS the row
+    cache those fields are attributed to.
+
+    ``probe_sha256`` binds the artifact to the CODE that produced it; this binds it to the
+    NUMBERS that code produced **and to the input they are attributed to**. Both are needed —
+    SLSA v1.0 provenance separates the attested artifact's `subject` digest from
+    `resolvedDependencies` (the inputs, which is what a probe digest is) — because the probe's
+    digest does not change when somebody edits a verdict or a count inside the committed
+    artifact, and the verdict in this file is the gate that decides whether
+    ``TORTOISE_COMPOSED_EMBED_TEXT`` may ship ON.
+
+    ⛔ ``rows_source`` is INSIDE the digest, not merely recorded beside it: the README's
+    reproducibility claim is "the committed numbers are reproducible from the row cache named in
+    ``provenance.rows_source``", so re-pointing that field at a different cache is an edit to the
+    evidence — measured before it was bound here, setting it to ``/tmp/some-other-cache.jsonl``
+    left the pin green.
+
+    Canonical form: ``json.dumps({"artifact": <the fields>, "rows_source": …}, indent=2,
+    sort_keys=True)`` — a pure function of the values, not of the file's formatting, with the
+    attribution under its own key so no field of the artifact can shadow it. The pin recomputes
+    it from the committed bytes with the same expression.
+    """
+    body = {k: v for k, v in report.items() if k != "provenance"}
+    canon = json.dumps({"artifact": body, "rows_source": rows_source},
+                       indent=2, sort_keys=True)
+    return hashlib.sha256(canon.encode("utf-8")).hexdigest()
+
+
+def _provenance(report: dict, rows_source: str) -> dict:
+    """The artifact's self-binding (the #11838 census's rule, plus the evidence half).
 
     The repo squash-merges, so a head sha cannot be verified exactly when someone re-runs the
-    probe to check the numbers; the PROBE's own digest can. This is the ONE producer of the
-    field — ``main()`` calls it on a fresh run and ``--attest`` calls it on an existing
-    artifact, so the value is always computed by this file from this file's own bytes.
+    probe to check the numbers; the PROBE's own digest can — and the PAYLOAD digest extends
+    that binding from the code to the evidence AND to the row cache the evidence is attributed
+    to, so a hand-edit of a verdict, a count, or `rows_source` reds instead of silently
+    re-pointing the gate. This is the ONE producer of the block:
+    ``main()`` calls it on a fresh run and ``--attest`` calls it on an existing artifact, so
+    the value is always computed by this file from this file's own bytes.
+
+    ⚠️ What that buys is *"nothing edited this artifact after the attest"*, not *"these
+    numbers came from a run"*: ``--attest`` blesses the bytes it is handed, exactly as
+    ``probe_sha256`` blesses whatever the probe is. The attest is a lane action recorded in
+    the commit diff; the README says so rather than implying more.
     """
     return {
         "probe_path": "probes/composed_gate.py",
         "probe_sha256": hashlib.sha256(pathlib.Path(__file__).read_bytes()).hexdigest(),
+        "payload_sha256": _payload_digest(report, rows_source),
         "rows_source": rows_source,
         "encoder": "BAAI/bge-small-en-v1.5 (tortoise.embeddings.EMBEDDING_MODEL)",
     }
@@ -425,8 +468,29 @@ def _attest(path: str) -> int:
     if "verdict" not in report or "gate1_similarity" not in report:
         _say(f"ATTEST-REFUSED({path}): no gate verdicts in this artifact\n")
         return 2
-    report["provenance"] = _provenance(str(report.get("source", "")))
-    pathlib.Path(path).write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    # A self-contradictory artifact is refused rather than bound: `all_pass` disagreeing with
+    # the three gate flags is the exact shape a hand-edit to “green” leaves behind, and
+    # blessing it would turn `--attest` into the tamper path it exists to close. ⛔ FAIL CLOSED
+    # on an absent block too: `if gates and …` skipped the check when a hand-edit DELETED the
+    # flags, which blessed the tamper shape it was written for (measured in review: `verdict`
+    # present, no `gates` → attested, exit 0).
+    gates = (report.get("verdict") or {}).get("gates") or {}
+    if not gates:
+        _say(f"ATTEST-REFUSED({path}): no gate flags to check in `verdict.gates`\n")
+        return 2
+    if bool(report["verdict"].get("all_pass")) != all(bool(v) for v in gates.values()):
+        _say(f"ATTEST-INCONSISTENT({path}): all_pass disagrees with the gate flags {gates}\n")
+        return 2
+    source = str(report.get("source", ""))
+    if not source:
+        _say(f"ATTEST-REFUSED({path}): no `source` field, so `rows_source` cannot be recorded\n")
+        return 2
+    report["provenance"] = _provenance(report, source)
+    try:
+        pathlib.Path(path).write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    except OSError as e:
+        _say(f"PROBE-WRITE({path}): {e}\n")
+        return 2
     _say(f"attested {path} -> {report['provenance']['probe_sha256']}\n")
     return 0
 
@@ -477,7 +541,7 @@ def main(argv: list[str]) -> int:
     started = time.monotonic()
     report = measure(rows, meta)
     report["duration_s"] = round(time.monotonic() - started, 1)
-    report["provenance"] = _provenance(meta.get("source", ""))
+    report["provenance"] = _provenance(report, meta.get("source", ""))
     text = json.dumps(report, indent=2) + "\n"
     if args.out == "-":
         sys.stdout.write(text)
