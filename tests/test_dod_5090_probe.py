@@ -8613,10 +8613,17 @@ def _duplicate_constant_key_sites(
     COMPUTED key (`SOME_NAME`), an f-string key compared against a DIFFERENT expression
     or against a plain literal (`{f"a": 1, "a": 2}` is one key at runtime, but proving
     it needs evaluation, and `ruff` does not flag it either — measured), any tuple
-    containing one, and a key built by an operator outside `USub`/`UAdd`. `filename` is
-    threaded into
-    `ast.parse` so an unparseable module names ITSELF instead of `<unknown>` — the
-    same "a hole is a hole, not a zero" rule this file's predicate-count test states.
+    containing one, and a key built by an operator outside `USub`/`UAdd`.
+
+    ⚠️ `filename` is threaded into `ast.parse` so a `SyntaxError` carries the module's
+    REAL path rather than `<string>` — it does NOT affect any message. The
+    UNPARSEABLE text is built by `_scan_declaration_roots` from `rel` and `exc.msg`,
+    so dropping this argument leaves every message byte-identical (measured by
+    mutation: removing `filename=filename` keeps all three tests green, and the
+    `{rel}` PREFIX is what makes an unparseable module name ITSELF instead of
+    `<unknown>` — the "a hole is a hole, not a zero" rule this file's
+    predicate-count test states). Stated so the next reader does not mistake an
+    inert argument for the mechanism.
 
     ⛔ `source` may be BYTES on purpose: the scan hands it the file's raw bytes, so
     CPython's own source decoding applies (a PEP 263 coding cookie and a UTF-8 BOM are
@@ -8847,9 +8854,14 @@ def test_no_module_declares_the_same_dict_key_twice():
     # (`Path(probe.__file__).resolve().parent.parent`); `probe.REPO_ROOT` is that
     # same value, but several reads here already spell it out for the same reason.
     violations, per_root = _scan_declaration_roots(_guard_root())
-    # ⛔ THE VIOLATION IS ASSERTED FIRST. A floor failure means the guard is
-    # narrower than it claims, but a live duplicate in the same run is the finding
-    # the reader actually needs, and asserting floors first would hide it.
+    # ⛔ THE VIOLATION IS ASSERTED FIRST, deliberately: a floor failure means the
+    # guard is narrower than it claims, but a live duplicate in the same run is the
+    # finding the reader actually needs, and asserting floors first would hide it.
+    # ⚠️ The ORDER itself is not separately asserted — both asserts fire on their own
+    # (each is proven RED by its own mutation), but no test builds a tree holding a
+    # duplicate AND a broken walk, so swapping these two lines leaves the suite green
+    # (measured by mutation). The sentence above is the RATIONALE for the order, not a
+    # claim that the order is pinned.
     assert not violations, _duplicate_key_report(violations)
     # A scan that read nothing would satisfy the assertion above vacuously — and it
     # must be checked PER ROOT: rglob returns zero silently on a root that was
