@@ -1339,6 +1339,12 @@ def test_a_reconcile_that_RAISES_is_reported_not_raised(sdk, monkeypatch):
     assert counts["stale"] == 1, counts
     assert counts["alreadyRetired"] == 1, counts
     assert counts["failed"] == 1, counts      # reported, never raised
+    # ⛔ AND `counts.undecidable` IS PINNED ON THIS SHAPE TOO (#12315 review).
+    # A drift that folds either count into `undecidable`
+    # (`len(undecidable) + len(stale)`, or `+ len(invalidated)`) reds this line —
+    # the second one had NO pin anywhere while this line was absent, because the
+    # dry-run site's `invalidated` is empty by construction and cannot see it.
+    assert counts["undecidable"] == 0, counts
     # the finding keeps its idempotent outcome AND its cache report; the generic
     # refusal shape (the mutant's) has neither
     per_finding = report["invalidated"][0]
@@ -1575,13 +1581,13 @@ def test_dry_run_writes_nothing_and_names_what_it_would_retire(sdk):
     report = invalidate_stale(sdk, goal_id=g["id"], dry_run=True)
     assert report["dryRun"] is True
     assert report["counts"]["stale"] == 1
-    # ⛔ `counts.undecidable` IS PINNED WHERE IT CAN FAIL (#12315 review). A sweep
-    # over one stale finding decides that finding, so nothing is undecidable and
-    # the counter must read 0 — and here `stale == 1` is asserted just above, so a
-    # drift in the counts EXPRESSION (anything that folds `stale` into
-    # `undecidable`) reds this line. The same assertion placed on a shape whose
-    # `stale` count is already pinned by sibling literals could not fail, which is
-    # why it lives on the dry-run sweep and not on the retirement arms.
+    # ⛔ `counts.undecidable` IS PINNED ON A SHAPE WHERE A DRIFT REDS IT (#12315
+    # review). A sweep over one stale finding decides that finding, so nothing is
+    # undecidable and the counter must read 0; `counts["stale"] == 1` is asserted
+    # just above, so anything that folds `stale` into `undecidable` reds this
+    # line. It also fails under the same mutant on the retirement-arm site, which
+    # pins the `invalidated` half of the expression — so the line lives on BOTH
+    # shapes: neither site alone sees every drift.
     assert report["counts"]["undecidable"] == 0, report["counts"]
     assert report["invalidated"] == []
     assert sdk.get_entity(made["point_id"])["status"] == "live"

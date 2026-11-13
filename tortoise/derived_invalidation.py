@@ -1017,10 +1017,13 @@ def invalidate_stale(
     False``), where no retirement was needed at all; and either ALREADY-TERMINAL
     arm (``found: True``) whose goal has also gone, where the retirement happened
     out of band. ⛔ So ``gone`` is NOT attributable from ``retired``/``found``
-    alone (measured on the third: a claim flipped to ``retracted`` with its goal
-    deleted gives ``{'stale': 1, 'retired': 0, 'alreadyRetired': 1, 'gone': 1,
-    'failed': 0}``). It is neither a failure of a retirement nor a success of the
-    reconcile, and it exists so a sweep over deleted goals cannot read clean.
+    alone (measured on the third: a claim that BECOMES ``retracted`` between the
+    scan and the retirement, with its goal deleted in that same window, gives
+    ``{'stale': 1, 'retired': 0, 'alreadyRetired': 1, 'gone': 1, 'failed': 0}`` —
+    both edits made BEFORE the sweep instead give ``stale: 0`` and no finding at
+    all, because the scan reads live judgements only). It is neither a failure of
+    a retirement nor a success of the reconcile, and it exists so a sweep over
+    deleted goals cannot read clean.
 
     ⛔ THE BUCKETS ARE PER-FINDING PREDICATES, NOT A PARTITION — do not read a
     bucket total as a finding count. A retirement that landed and whose cache
