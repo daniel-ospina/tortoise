@@ -1105,6 +1105,18 @@ surfaces:
   - test_email_signup.py
   - test_enforcement.py
   - test_env_truthy.py  # #4097: env-truthiness contract + guard (registered in api/core/sdk/eval/ep/onboarding; the ledger pins hosted_api.py / mcp_auth.py / __main__.py reads)
+  # #11978 / #12428: the `.env` divergence guard. ⛔ DUAL-REGISTERED with `core`,
+  # and both arms are load-bearing — measured with `select()`, not assumed:
+  # `['tortoise/__main__.py']` → `['api']` (a named-surface match REPLACES the
+  # `core` fallback), so a `core`-only row ran this 93-case guard ZERO times on a
+  # `__main__.py`-only diff — and `__main__.py` is exactly where the two things
+  # this file pins live (`_cmd_config`'s `.env` disclosure and
+  # `_dotenv_unread_candidates`). `tortoise/dotenv_file.py` reaches it through
+  # `core`; `tortoise/mcp_server.py` is a SHARED_MODULES path (`full: True`) and
+  # hid the gap. Same silent-drop class, and the same remedy, as the
+  # `test_11892_health_quota.py` row above. Measured after the fix:
+  # `select(['tortoise/__main__.py'])` → this file selected.
+  - test_env_file_divergence.py
   - test_epic903_hosted.py
   - test_epic903_mcp.py
   - test_export_delete.py
