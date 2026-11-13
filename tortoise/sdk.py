@@ -47286,7 +47286,11 @@ class TortoiseSDK:
                         f"for the corrected claim and supersede this one with "
                         f"`supersede_point(dead_id, new_id)`; do not re-status a "
                         f"dead one. Content and metadata revisions are still "
-                        f"accepted on it."
+                        f"accepted on it: a read-modify-write that echoed the "
+                        f"window back with the fields it changed should re-send "
+                        f"the call WITHOUT the temporal fields (`validFrom`, "
+                        f"`validTo`, their precision markers, `expiredAt`, "
+                        f"`when`), and the revision lands."
                     ) from None
         if "status" in props:
             # ⛔ Review F3-1: this arm is keyed on the ADDRESS the guard resolved,

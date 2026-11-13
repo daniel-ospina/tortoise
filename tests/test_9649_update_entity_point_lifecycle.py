@@ -952,3 +952,40 @@ def test_a_declared_terminalizing_transition_carries_none_of_the_verbs_effects(e
         params={"id": other}).result_set[0][0] == 1, (
         "the verb mints the successor edge the generic door omits — this is the "
         "half that makes the residual matter")
+
+
+def test_the_refusal_also_names_the_route_for_a_read_modify_write(env):
+    """Review round 11 (P2, AX rule 2): the repair must fit the caller's INTENT.
+
+    A generic tenant PUT is a read-modify-write — it fetches the row and sends it
+    back with the fields it changed (this change's own ``_status_entailed``
+    comment names that shape) — so a caller revising the CONTENT of a dead claim
+    echoes the stored window as well, and is refused for it. The rejection is
+    right (#7819 refuses the same shape on ``update_point``); the PRESCRIPTION
+    was not: "mint a new Point and supersede" is the wrong repair for a caller
+    who only wanted a content revision, and the final sentence promised the
+    capability without saying how to reach it.
+
+    The route is therefore named in the message. ⛔ Do NOT "fix" the shape by
+    comparing the echoed window against the stored one and exempting an unchanged
+    value: ``update_point`` refuses it by design (#7819), so an exemption here
+    would make the two doors disagree rather than patch this one.
+    """
+    sdk, _ = env
+    old, _new = _superseded(sdk)
+    stored = sdk.get_point(old)
+
+    with pytest.raises(ValueError) as exc:
+        sdk.update_entity(old, validTo=stored["validTo"],
+                          content="a re-sent, corrected reading")
+    text = str(exc.value)
+    assert "WITHOUT the temporal fields" in text, (
+        f"the repair must name the route a read-modify-write can take: {text!r}")
+    assert "content" in text.lower(), (
+        f"the message must say what IS still accepted: {text!r}")
+
+    # ...and the route it names really works (non-vacuity: this half must pass).
+    sdk.update_entity(old, content="a re-sent, corrected reading")
+    assert sdk.get_point(old)["content"] == "a re-sent, corrected reading"
+    assert _row(sdk, old)["validTo"] == stored["validTo"], (
+        "the revision must not disturb the window the supersession closed")
