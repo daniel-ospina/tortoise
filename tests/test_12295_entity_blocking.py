@@ -286,7 +286,7 @@ def test_shingles_and_bands_are_deterministic_across_processes():
     assert shingles("ab") == frozenset({"ab"})       # shorter than SHINGLE_SIZE
 
 
-def test_every_key_namespace_in_the_union_is_pinned_by_a_pair_that_shares_only_it():
+def test_every_key_namespace_in_the_union_is_pinned_by_a_pair_that_REQUIRES_it():
     """One witness per generator — `P`, `T`, `S` — each pair REQUIRING that key.
 
     ⛔ MEASURED before this test: deleting the `P:` append from `block_keys` left

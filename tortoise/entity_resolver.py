@@ -79,7 +79,7 @@ Equal folded names always share ``E``, so the exact rung can never be missed by
 blocking. ⛔ The bound the prefix alone imposed is GONE (#12295): a pair
 whose folded names share no 3-character prefix is no longer excluded — that is
 exactly what the ``T`` (word order / transposition) and ``S`` (typo and separator
-classes) keys reach, and `test_every_key_namespace_in_the_union_is_pinned_by_a_pair_that_shares_only_it`
+classes) keys reach, and `test_every_key_namespace_in_the_union_is_pinned_by_a_pair_that_REQUIRES_it`
 pins each of ``P``/``T``/``S`` with a pair whose own namespace its arm REQUIRES (not
 "shares alone" — measured, only the ``P`` witness shares ``P`` by itself; the ``T``
 witness shares ``T`` and ``S``, the ``S`` witness all three). ⚠️ And the arms do NOT all

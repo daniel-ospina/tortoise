@@ -471,7 +471,7 @@ def attach_matches(mention: object, candidates, *,
                    complete: bool = False) -> list[dict]:
     """The candidates a mention may resolve onto **by key equality**.
 
-    Returns ``[{id, key, name}]`` in candidate order, containing only matches this
+    Returns ``[{id, key, name, basename_only}]`` in candidate order, containing only matches this
     function is willing to let decide:
 
     * an ``E`` (fold) match always decides — equal folds, one folded name;
