@@ -656,14 +656,17 @@ def test_the_entailed_status_exemption_is_narrow(env):
     assert _row(sdk, t)["validTo"] != "2030-01-01T00:00:00Z", (
         "the temporal half must be refused even when the status is entailed")
 
-    # (b) a NULL-status sibling is NOT "equal" — it is the legacy shape.
-    n = _live(sdk, "null sibling")
+    # (b) a NULL-status row is NOT "equal" — and it must not ride in on the
+    #     exemption just because its SIBLINGS hold the status. (A lone
+    #     NULL-status row is already refused by the `()` != (status,) clause, so
+    #     only the fan-out shape exercises `not _bound_null_statuses`.)
+    f2 = _live(sdk, "fan with legacy null")
+    sdk.retract_point(f2)
     sdk._get_proj().g.query(
-        "MATCH (n:Point {id:$id}) SET n.status=NULL, n.outdated=true",
-        params={"id": n})
+        "CREATE (n:Point {id:$id, content:'legacy null row'})",
+        params={"id": f2})
     with pytest.raises(ValueError, match="terminal"):
-        sdk.update_entity(n, status="live")
-    assert _row(sdk, n)["status"] is None
+        sdk.update_entity(f2, status="retracted")
 
     # (c) EVERY bound row must hold it — "any" resurrects a terminal sibling.
     f = _live(sdk, "fan terminal")
@@ -701,3 +704,56 @@ def test_the_entailed_status_exemption_reads_the_write_row_set(env):
         sdk.update_entity("evt-twin-9649", status="live")
     assert sorted(r[0] for r in _fan(sdk, pid)) == before, (
         "the unaddressed terminal twin must not be resurrected")
+
+
+def test_a_falsy_non_null_id_is_still_guarded(env):
+    """Review round 6, P2: `if i` filtered falsy NON-null ids, failing open.
+
+    `_lifecycle_ids` is the single gate for the guard, the vocabulary check, the
+    declared transition, the `status`-drop and the journal, so a dropped row
+    skips all five. `collect` already drops NULLs, so `if i` could only ever
+    filter a falsy id (`0`) — measured: a superseded `id: 0` Point was
+    resurrected by `status='live'` and had its window rewritten, and a live one
+    accepted `status='garbage'` unjournalled. Unreachable through
+    `create_point`, but the door fails CLOSED on the id-less shape for the same
+    reason, so it must here too.
+    """
+    sdk, _ = env
+    sdk._get_proj().g.query(
+        "CREATE (n:Point {id:0, status:'superseded', outdated:true, "
+        "validTo:'2020-01-01T00:00:00Z'})")
+
+    with pytest.raises(ValueError, match="terminal"):
+        sdk.update_entity(0, status="live")
+    with pytest.raises(ValueError, match="terminal"):
+        sdk.update_entity(0, validTo="2031-01-01T00:00:00Z")
+    assert sdk._get_proj().g.query(
+        "MATCH (n:Point {id:0}) RETURN n.status, n.validTo").result_set == [
+            ["superseded", "2020-01-01T00:00:00Z"]], (
+        "the falsy-id row must be untouched")
+
+
+def test_operator_points_keep_their_documented_lifecycle(env):
+    """Review round 6, P2: `allow_operator=True` had no coverage.
+
+    This door writes operator points too. A LIVE operator's declared transition
+    lands (it must — `allow_operator` exists for it), while a TERMINAL operator
+    refuses both `status` and the window (terminality is one-way on every
+    Point, operator or not). Turning `allow_operator` off reds this.
+    """
+    sdk, _ = env
+    a = _live(sdk, "op src")
+    b = _live(sdk, "op tgt")
+    live_op = sdk.create_operator("IMPL", a, [b])["id"]
+    sdk.update_entity(live_op, status="retracted")
+    assert _row(sdk, live_op)["status"] == "retracted"
+
+    dead_op = sdk.create_operator("NAND", a, [b])["id"]
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) SET n.status='superseded'",
+        params={"id": dead_op})
+    with pytest.raises(ValueError, match="terminal"):
+        sdk.update_entity(dead_op, status="live")
+    with pytest.raises(ValueError, match="terminal"):
+        sdk.update_entity(dead_op, validTo="2031-01-01T00:00:00Z")
+    assert _row(sdk, dead_op)["status"] == "superseded"

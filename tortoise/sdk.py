@@ -47095,12 +47095,16 @@ class TortoiseSDK:
         # gate). It runs after the CARRIER refusal above, and AHEAD of the `status`
         # arm's VOCABULARY check — so a bad WORD on a dead claim names the dead state.
         #
-        # `missing_ok=True` is load-bearing: this method is the documented tenant
-        # route onto EVERY label, so an absent or non-Point id must stay a no-op
-        # rather than become `No point <id>` (#10119's absent contract; the
-        # `:Subject`/`:Object` arms below serve those ids). `allow_operator=True`
-        # matches `update_point` (#7819): this door writes operator points too, and
-        # the guard still refuses a TERMINAL operator.
+        # ── Review F6-5: what actually protects the ABSENT contract here ──
+        # The loop below iterates the ids the ADDRESS READ returned, so an absent or
+        # non-Point id never reaches `_assert_lifecycle_guard` at all — the loop's
+        # EMPTINESS is what keeps `update_entity('no-such-id', status=…)` a `{}`
+        # (#10119), not the parameter. `missing_ok=True` is kept because the guard's
+        # contract for a resolved id must still never turn into `No point <id>` if a
+        # row is deleted between the two reads; it is not what the absent contract
+        # rests on. `allow_operator=True` IS load-bearing (#7819): this door writes
+        # operator points too, and the guard still refuses a TERMINAL operator
+        # (pinned by `test_operator_points_keep_their_documented_lifecycle`).
         #
         # The refusal is re-raised HERE rather than taken from the guard verbatim
         # (#10183, AX rule 2): the guard's message names the dead state but not the
@@ -47180,7 +47184,13 @@ class TortoiseSDK:
                     (_hits, _idless, _addressed_ids,
                      _null_statuses, _addressed_statuses) = (
                         _by_url[0] if _by_url else (0, 0, [], 0, []))
-            _lifecycle_ids = [i for i in (_addressed_ids or ()) if i]
+            # `is not None`, not truthiness: `collect` already drops NULLs, so the
+            # only thing `if i` could filter is a FALSY non-null id (`id: 0`) — and
+            # `_lifecycle_ids` is the single gate for the guard, the vocabulary
+            # check, the transition check, the `status`-drop and the journal, so
+            # dropping such a row there fails OPEN (measured: a superseded
+            # `id: 0` Point was resurrected by `status='live'`).
+            _lifecycle_ids = [i for i in (_addressed_ids or ()) if i is not None]
             if _hits and _idless:
                 # An id-less Point (url/eventId only) cannot be handed to the
                 # id-keyed instrument, so terminality cannot be checked. Fail
