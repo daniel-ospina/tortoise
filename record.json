@@ -1,0 +1,1 @@
+{"pr":3621,"head_sha":"59864bff6b7b5aeb32d2becb2e23d6970b75b4c8","diff_sha256":"59c4e9833d5a3efb6360f8aee63a49a08f683fcbe7f18baa1fbccfe9df2aefe8","mint":"fresh","evidence":"comment:6699236841","findings":1,"findings_note":"1 open P2 (non-discriminating test arm H53)","verdict":"not-clean","repo":"daniel-ospina/agent-infra","reviewed_at":"2026-11-07T00:06:00Z"}
