@@ -5368,8 +5368,9 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # move the pin not at all). This branch's own `core:` registration
             # adds +13 at 2278, so the tree that adds BOTH parents reads
             # 10145 = 10132 + 13. ⛔ BOTH sides of this merge carried a stale
-            # number (10035 ours, 10034 `main`'s) and NEITHER describes a tree
-            # that adds both. ⛔ Naming only the FIRST hunk above the entry is how
+            # number — 10089 OURS (`c5e117335d`) and 10132 `main`'s
+            # (`6408da01ce`), each read off the side it names — and NEITHER
+            # describes a tree that adds both. ⛔ Naming only the FIRST hunk above the entry is how
             # `9951` stood here — re-derive the SUM of every hunk above it.
             ("10145", "- test_pack_logic_writeprobe_11083.py"),
         ), "ci_surfaces", "carve_out:"),

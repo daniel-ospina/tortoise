@@ -863,12 +863,20 @@ def definition_boundary(sdk: Any, indicator_id: str) -> Any:
     return node.get(DEFINITION_BOUNDARY_PROP)
 
 
-#: Rows per keyset page of the readings read. It must stay under the server's
-#: ``RESULTSET_SIZE`` (FalkorDB's server-global default is 10000 — restated at
-#: ``tools/backfill_graph_turns.py:32`` and ``tools/turn_parity_census.py:142``;
-#: this repo's LOCAL dev ``apps/graph-viz/docker-compose.yml`` pins the same
-#: value, and a lane container reports ``-1`` = no cap — the hosted deployment
-#: sets no pin at all, so the default is what governs it), because ONE unbounded
+#: Rows per keyset page of the readings read. It must stay under whatever
+#: ``RESULTSET_SIZE`` the server it is pointed at applies — and that is a
+#: DEPLOYMENT choice, not an engine constant. The docker image this repo pins
+#: declares ``FALKORDB_ARGS=… RESULTSET_SIZE 10000`` as an image ENV default
+#: (``docker image inspect falkordb/falkordb-server:v4.20.6``), which is what a
+#: container left on that default reports; a server whose args OMIT it — every
+#: ``tools/test_lane.py`` container — reports ``-1`` = NO CAP (measured:
+#: ``GRAPH.CONFIG GET RESULTSET_SIZE`` → ``-1``, and a 20 000-row ``UNWIND``
+#: returns all 20 000 rows, while the same query on an image-default container
+#: stops at 10 000). The local dev ``apps/graph-viz/docker-compose.yml:20`` pins
+#: 10000 explicitly; the HOSTED deployment passes no pin of its own (``fly.toml``
+#: builds ``TORTOISE_DB_URI`` from ``FALKORDB_CLOUD_URI``) and its effective
+#: value is NOT measured here. This constant sits ten times under the smallest
+#: of those, so it is safe under all of them. ⛔ ONE unbounded
 #: query is truncated BY THE SERVER in store order
 #: and says nothing about it — #4515's silent-truncation class (an UNPAGED read
 #: over ``RESULTSET_SIZE`` backs up silently partial and verifies GREEN), whose
