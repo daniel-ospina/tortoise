@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -59,47 +60,67 @@ def test_the_artifact_declares_one_uniform_retrieval_mode(report):
             f"the brief does not name the artifact's corpus.{field} "
             f"({corpus[field]!r}) — the header describes a different run")
     assert report.get("code_head"), "the artifact does not name the commit it measured"
-    #: ⛔ A TRUTHY HASH IS NOT A REACHABLE ONE. The #12304 rebase rewrote the
-    #: measured commit out of every ref, and this assertion was the only thing
-    #: guarding the field — so the artifact named an object no fresh clone has and
-    #: nothing redded. Assert it names a real commit in THIS history, where git and
-    #: the history are available (a shallow CI checkout may legitimately not have
-    #: it, and an over-block there is the failure this guard must not add).
-    assert re.fullmatch(r"[0-9a-f]{40}", str(report["code_head"])), (
-        f"code_head is not a full commit sha: {report['code_head']!r}")
+    head = str(report["code_head"])
+    assert re.fullmatch(r"[0-9a-f]{40}", head), (
+        f"code_head is not a full commit sha: {head!r}")
+    #: ⛔ THE NOTE IS REQUIRED ON EVERY READ, ABOVE any git gate. The #12304 rebase
+    #: rewrote the measured commit out of every ref, so the field names a rebased
+    #: stand-in; without the note the artifact cannot say which commit the numbers
+    #: actually describe. It is checked here — not inside the git branch — because a
+    #: shallow CI clone has no history objects at all, which is exactly the
+    #: environment where the original defect (a dead 40-hex sha passing as evidence)
+    #: was invisible.
+    note = report.get("code_head_note")
+    assert note, (
+        "code_head is a rebased stand-in but the artifact does not say so; the note "
+        "must name the commit actually measured and the equivalence it claims")
+    measured = re.search(r"[0-9a-f]{40}", str(note))
+    assert measured, (
+        "code_head_note names no full 40-hex commit — it must name the commit the "
+        "numbers were measured at")
+    for _f in ("entity_resolver.py", "entity_blocking.py", "extractor_v2.py"):
+        assert _f in str(note), (
+            f"code_head_note does not name {_f} — the equivalence claim must be "
+            "scoped to the files the measurement exercises")
+    #: Git is OPTIONAL here: a shallow clone, or an image with no git binary, must
+    #: not red a CORRECT artifact — an over-block is the failure this guard must not
+    #: add. Where git and BOTH objects are present, require the two commits to be
+    #: code-equivalent on the three measurement files. ⛔ NOT ancestry: the rail
+    #: SQUASH-merges (`admin-merge.sh` defaults to `--squash`), so after merge the
+    #: branch commit is not an ancestor of main while its object survives in every
+    #: object DB that fetched the PR — an ancestry assert would red healthy main.
     repo = Path(__file__).resolve().parent.parent
-    if (repo / ".git").exists():
+    if (repo / ".git").exists() and shutil.which("git"):
         #: ⛔ EVERY git subprocess here needs a timeout: on a promisor/partial
         #: clone an ABSENT object makes `git cat-file -e` spawn a lazy fetch whose
         #: negotiation can burn minutes before failing (MEMORY.md
         #: `[git-exit-code-is-not-proof]`: 5m46s of CPU, suite aborted at pytest's
         #: 280 s faulthandler). A timeout is "could not answer", which this guard
         #: must treat exactly like a shallow checkout — never as a red.
-        try:
-            present = subprocess.run(
-                ["git", "-C", str(repo), "cat-file", "-e",
-                 f"{report['code_head']}^{{commit}}"],
-                capture_output=True, timeout=10)
-        except subprocess.TimeoutExpired:
-            present = None
-        if present is not None and present.returncode == 0:
+        def _git(*args: str):
             try:
-                ancestor = subprocess.run(
-                    ["git", "-C", str(repo), "merge-base", "--is-ancestor",
-                     report["code_head"], "HEAD"], capture_output=True, timeout=10)
+                return subprocess.run(["git", "-C", str(repo), *args],
+                                      capture_output=True, timeout=10)
             except subprocess.TimeoutExpired:
-                ancestor = None
-            #: 0 = ancestor, 1 = not an ancestor, anything else = could not answer.
-            if ancestor is not None and ancestor.returncode in (0, 1):
-                assert ancestor.returncode == 0, (
-                    f"code_head {report['code_head']} exists but is not in this "
-                    "branch's history — a rebase rewrote it out of every ref, so "
-                    "the artifact cannot be tied to a tree a fresh clone has "
-                    "(name the rebased commit and record the docstring-only diff)")
-            assert report.get("code_head_note"), (
-                "code_head is a rebased stand-in but the artifact does not say so; "
-                "the note names the commit actually measured and the diff it is "
-                "equivalent to")
+                return None
+
+        def _has(sha: str) -> bool:
+            r = _git("cat-file", "-e", f"{sha}^{{commit}}")
+            return r is not None and r.returncode == 0
+
+        other = measured.group(0)
+        if other != head and _has(head) and _has(other):
+            scoped = _git("diff", "--quiet", other, head, "--",
+                          "tortoise/entity_resolver.py",
+                          "tortoise/entity_blocking.py",
+                          "tortoise/extractor_v2.py")
+            #: 0 = identical, 1 = differ, None/other = could not answer.
+            if scoped is not None and scoped.returncode in (0, 1):
+                assert scoped.returncode == 0, (
+                    f"code_head {head} and the head the note names ({other}) differ "
+                    "on the files this measurement exercises — the substitution is "
+                    "not code-equivalent, so the numbers no longer describe this "
+                    "tree")
     assert r["legs_seen"].get("vector") is True, (
         "the artifact is not the fused read — re-run with the embeddings extra "
         "(a keyword-only figure is never a figure about the production read)")
