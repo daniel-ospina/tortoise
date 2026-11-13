@@ -373,20 +373,21 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
         # `wc` that exits non-zero reaches the same arm). Each was falsified by measuring one more
         # state, so this lists every state measured so far and claims no more than that.
         #
-        # ⛔ `-f`, BECAUSE THAT IS THE PROPERTY THAT MAKES THE READ TERMINATE (#12272 review round 8).
-        # The read guard above admits anything that is `-e`-true and not a FIFO, and `tail -c 6000`
-        # is BOUNDED — it stops after 6000 bytes — but `wc -c` is not: it skips the read only for a
-        # REGULAR file whose metadata reports a non-zero size. FOR A DIRECTORY, REGULAR-NESS IS THE
-        # DISCRIMINATOR AND SIZE IS NOT — a directory is read anyway and fails EISDIR whatever it
-        # reports: `/proc` reports 0 and a disk-backed one a block count, and BOTH are read
-        # (measured), so size is not what decides it. Likewise a character device such as
-        # `/dev/zero` (which `[ -p ]` does not catch) never reaches EOF, so
+        # ⛔ `-f`, BECAUSE A PATH THAT NEVER REACHES EOF HANGS THE ALERT (#12272 review round 8).
+        # The read guard above admits anything that is `-e`-true and not a FIFO. `tail -c 6000` is
+        # BOUNDED on a seekable path — it stops after 6000 bytes — but `wc -c` has no such bound: it
+        # either takes a size without reading, or reads until it fails or reaches EOF. So a character
+        # device such as `/dev/zero` (which `[ -p ]` does not catch) never reaches EOF, and
         # `build_body` never returns and NOTHING is filed: no ledger entry, no exit status, the
         # #2240 silence this script exists to remove, one primitive past the FIFO guard. It is
         # the same class as that guard, so it takes the same shape: name the property that makes
         # the read safe instead of trusting the caller. Measured on the unguarded form:
         # `--drift-report /dev/zero` rc=124 at 8 s (hung), where `origin/main` reaches its
         # ledger leg — i.e. this line, not the report, was the regression.
+        # ⛔ AND NO CLAIM ABOUT WHEN `wc -c` TAKES THE FAST PATH, because the rule is not one rule:
+        # a directory is read whatever `st_size` reports, and a sysfs regular file reports 4096 while
+        # `wc -c` reads 23 (`/sys/kernel/mm/transparent_hugepage/enabled`, measured) — metadata is a
+        # hint, not the criterion.
         # A path that is not a regular file therefore stays unmeasured (`report_bytes` empty,
         # mapped to 0 below), which is the branch a DIRECTORY already takes (case 17d) — a size
         # nobody can measure is not asserted as a size.
