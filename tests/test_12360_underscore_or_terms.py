@@ -495,6 +495,24 @@ class TestPin:
                          "_" * 129):
             refusal = probe_phrase_rejection(too_long)
             assert refusal is not None and "128" in refusal, (len(too_long), refusal)
+        # ⛔ AND THE BARE TOKEN, WHICH THE BOUND USED TO MISS ENTIRELY (#12368
+        # independent review, P2). The bound was gated on `deferred`, which needs
+        # a `_`, so every SEPARATOR-FREE token past the bound was ACCEPTED —
+        # `probe_phrase_rejection('a' * 129)` returned None, i.e. the guard
+        # certified "the pre-fix prose is gone" for a probe that can match
+        # nothing, because the index holds nothing above 128 chars. The
+        # truncation is a property of the INDEX, not of `_`, so this pins the
+        # AT-BOUND case too: 128 is accepted (the index returns it), 129/200 are
+        # refused (it returns nothing). The shapes above are ALL `_`-carrying, so
+        # none of them covered this one.
+        bare_at_bound = "a" * MAX_COMPOSITE_RUN_LEN
+        assert probe_phrase_rejection(bare_at_bound) is None, (
+            "the index DOES hold a 128-char term — refusing it would be a false "
+            "block")
+        for past in (MAX_COMPOSITE_RUN_LEN + 1, 200):
+            bare = "a" * past
+            refusal = probe_phrase_rejection(bare)
+            assert refusal is not None and "128" in refusal, (past, refusal)
         # ⛔ CORRECTED (#12368 review): `_café` is NOT an expansion case. The
         # composite `_caf` is a TRUNCATION of the index term `_café` — the
         # ASCII-only splitter splits at `é` — so nothing holds it and the read

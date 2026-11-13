@@ -1493,7 +1493,21 @@ def probe_phrase_rejection(phrase: str) -> str | None:
     # `'a'*129 + '_b'` and `'ñ'*130 + '_b'` the read sends ONE alternative (the
     # escaped literal, == the token), while for `('ab_'*43)[:129]` it sends
     # twelve; the earlier wording narrated the first as if it were the second.
-    if deferred and len(token) > MAX_COMPOSITE_RUN_LEN:
+    #
+    # ⛔ NOT GATED ON ``deferred`` (#12368 independent review, P2 — a FALSE PASS
+    # this branch was leaving open). ``deferred`` requires a ``_``, so gating the
+    # bound on it let every SEPARATOR-FREE token longer than the bound through:
+    # MEASURED ``probe_phrase_rejection('a' * 129) is None`` (accepted) while the
+    # index returns nothing for that name and returns rows for the 128-char one —
+    # so the guard certified "the pre-fix prose is gone" over a still-present
+    # sentence, which is the exact failure the paragraph above says it prevents.
+    # The truncation is a property of the INDEX's term length, not of ``_``, so
+    # the bound has to apply to the TOKEN (which ``len(token)`` already is).
+    # Refusing a long phrase-costs nothing: a probe of this length cannot address
+    # one indexed term either way, and the multi-term shapes are refused below
+    # regardless. PRE-EXISTING on ``origin/main`` (same ``None`` there), repaired
+    # here because this branch is where the bound was introduced.
+    if len(token) > MAX_COMPOSITE_RUN_LEN:
         # ⛔ THE CONSEQUENCE CLAUSE IS NOT ONE THING (#12360 review round 11, P3).
         # It used to assert "so the query is ONE literal term the index cannot
         # hold and the probe would match NOTHING", which is FALSE for any

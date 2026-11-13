@@ -249,24 +249,28 @@ MAX_ALIASES_PER_POINT = 8
 #: so a typo can never silently turn it on OR off.
 UNDERSCORE_ENV = "TORTOISE_UNDERSCORE_TERMS"
 
-#: The splitter for the composite runs: on anything that is NOT a word
-#: character (``[A-Za-z0-9_]``). The NEGATION is the whole point — it is
-#: :data:`_SPLIT_RE` with ``_`` admitted, so a ``snake_case`` name stays ONE
-#: run here where the tokenizer above breaks it into segments.
-_COMPOSITE_SPLIT_RE = re.compile(r"[^A-Za-z0-9_]+")
-
-#: The POSITIVE form of the same class, used where the run's OFFSETS matter and
-#: :data:`_COMPOSITE_SPLIT_RE`'s separator spans do not — see
-#: :func:`underscore_run_terms`' truncation refusal (#12368 review).
+#: The run alphabet: ``[A-Za-z0-9_]``. The ``_`` is the whole point — with it
+#: admitted a ``snake_case`` name stays ONE run where :data:`_SPLIT_RE` above
+#: breaks it into segments.
+#:
+#: ⛔ DELIBERATELY THE *POSITIVE* FORM, NOT A SPLITTER (#12368 review). A
+#: ``[^A-Za-z0-9_]+`` splitter yields the SAME runs as this regex for pure ASCII,
+#: but its runs are ASCII-ONLY while the index's word characters are Unicode: for
+#: ``año_actual`` it hands back ``o_actual``, a FRAGMENT of the index term that
+#: nothing holds, and emitting that is what made the capture guard refuse five
+#: valid probes. It also cannot report a run's OFFSETS, which is exactly what the
+#: abutment refusal in :func:`underscore_run_terms` needs. There was a
+#: ``_COMPOSITE_SPLIT_RE`` constant here doing the splitting; it was removed with
+#: the bug it caused — do not reintroduce it, and do not "simplify" this back
+#: into a splitter: the offsets are load-bearing.
 _COMPOSITE_RUN_RE = re.compile(r"[A-Za-z0-9_]+")
 
 
 def _continues_a_word(ch: str) -> bool:
     """Is *ch* part of the same INDEX word as an abutting ASCII run?
 
-    Used by :func:`underscore_run_terms` to refuse a run that
-    :data:`_COMPOSITE_SPLIT_RE` produced by TRUNCATING a longer Unicode word
-    (#12368 review).
+    Used by :func:`underscore_run_terms` to refuse a run that the ASCII run
+    class would report by TRUNCATING a longer Unicode word (#12368 review).
 
     ⛔ MEASURED ANSWER: on FalkorDB 4.20.6 **every non-ASCII character stays
     INSIDE the word** — none of them separates it. Probe (a lane graph, one
@@ -586,10 +590,11 @@ def underscore_run_terms(text: str) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
     # ⛔ THE RUN'S OFFSETS MATTER, so this walks :data:`_COMPOSITE_RUN_RE` rather
-    # than splitting on :data:`_COMPOSITE_SPLIT_RE` (#12368 review). Both yield the
-    # same runs for pure ASCII, but the splitter is ASCII-ONLY while the index's
-    # word characters are UNICODE: for `año_actual` it splits at the `ñ` and hands
-    # back `o_actual`, a FRAGMENT of the index term `año_actual` that NOTHING
+    # than splitting on a negated run class (#12368 review). A `[^A-Za-z0-9_]+`
+    # splitter yields the same runs for pure ASCII, but it is ASCII-ONLY while the
+    # index's word characters are UNICODE: for `año_actual` it splits at the `ñ`
+    # and hands back
+    # `o_actual`, a FRAGMENT of the index term `año_actual` that NOTHING
     # holds (the module comment below says so itself). Emitting it was not
     # additive-but-harmless — it is what made
     # `session_source_prose_migration.probe_phrase_rejection` REFUSE
