@@ -6352,7 +6352,8 @@ def resolve_entities(entity_refs: list[dict], search: dict,
                      facts: dict | None = None) -> dict:
     """D3: two-phase entity resolution — returns
     {"map": {name: {"id", "name"}}, "records": [{"name", "resolves_to",
-    "mode"}], "new": [name], "held": [{"name", "kind", "reason"}],
+    "mode", "band"}], "new": [name], "held": [{"name", "kind", "reason",
+    "vetoes"}],
     "warnings": [...]}.
 
     Phase 1 (deterministic): the existing ``_find_existing_entity`` (exact
@@ -9406,6 +9407,21 @@ def _minted_kind_report(embed_list: dict, master: dict | None = None) -> list[st
     return minted
 
 
+def _alias_hit_for(folded_mention: str, aliases) -> bool:
+    """Is ``folded_mention`` one of ``aliases``? Folds the stored side too.
+
+    `aliases` is undeclared-but-writable, so a caller may have stored an unfolded
+    spelling; comparing a folded value against raw strings is how one spelling the
+    merge recorded stops resolving.
+    """
+    if isinstance(aliases, str):
+        aliases = [aliases]
+    if not isinstance(aliases, (list, tuple, set)):
+        return False
+    return bool(folded_mention) and folded_mention in {
+        normalize_entity_name(a) for a in aliases if a is not None}
+
+
 def _resolve_superseded(ref: str, search: dict, *, kind: str = "") -> dict | None:
     """Resolve an entity ``supersedes`` ref to the S3-returned existing
     ENTITY dict: by id (content-addressed, unique), or by name filtered to
@@ -9421,9 +9437,22 @@ def _resolve_superseded(ref: str, search: dict, *, kind: str = "") -> dict | Non
     for e in entities:
         if e.get("id") == ref:
             return e
-    matches = [e for e in entities
-               if _norm(e.get("name", "")) == _norm(ref)
-               and (not kind or _norm_kind(e.get("kind", "")) == _norm_kind(kind))]
+    # ⛔ FOLDED, name OR alias (#12296). The D-1 fold replaces a merge-retired
+    # carrier's row with the SURVIVOR's row, so the carrier's spelling survives
+    # only in `aliases[]` — and a name-only arm here then failed to resolve a
+    # `supersedes` ref spelled the way the merged variant was spelled, which DROPS
+    # the supersession (the entity that should be retired stays live) and warns
+    # that it was "recorded without a graph id" for a record that is not recorded
+    # at all. Same rule as `_find_existing_entity`: fold both sides, and never
+    # guess when more than one row answers.
+    want = normalize_entity_name(ref)
+    named = [e for e in entities
+             if _norm(e.get("name", "")) == _norm(ref)
+             or normalize_entity_name(e.get("name", "")) == want
+             or _alias_hit_for(want, e.get("aliases"))]
+    matches = [e for e in named
+               if (not kind
+                   or _norm_kind(e.get("kind", "")) == _norm_kind(kind))]
     if len(matches) == 1:
         return matches[0]
     return None  # 0 or >1 → caller warns, never guesses
@@ -9791,8 +9820,8 @@ def _supersession_records(entity_refs: list[dict], search: dict,
         if not existing:
             if warnings is not None:
                 warnings.append(f"entity '{name[:60]}' supersedes={ref!r} does not "
-                                "resolve to an S3 search result — recorded without "
-                                "a graph id")
+                                "resolve to an S3 search result — the supersession "
+                                "is DROPPED (no graph id to record it against)")
             continue
         if (_norm(existing.get("name", "")) == _norm(name)
                 and _norm_kind(existing.get("kind", "")) == _norm_kind(kind)):

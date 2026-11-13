@@ -132,7 +132,7 @@ acceptance does not reach them.
 |---|---|---|
 | `merge` | the mention IS this existing entity | binds (phase 1 exact, or a phase-2 proposal that survives every veto) |
 | `review` | undecidable at this layer | **HELD** (`HOLD_VETOED`), never asserted new (§4.4 I1) |
-| `new` | the run measured ABSENCE | the one state that licenses a create (`#11653`) |
+| `new` | the run measured ABSENCE | the one state that licenses a create (`#11653`). ⛔ `judge` never returns it — it takes a (mention, candidate) PAIR and cannot answer absence; the create side is `resolve_entities`'s `new` population |
 
 ⛔ **`link` is not a band.** Round 3 (`#12186` comment `6839898289`, Half-A.1)
 found exactly one non-retiring pointer — `aliases[]` on the SURVIVOR

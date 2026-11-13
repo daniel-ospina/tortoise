@@ -17,6 +17,15 @@ Three bands, and only three::
     new     — the run measured ABSENCE (no candidate of that name), which is the
               one state that licenses a create (#11653).
 
+⛔ **`judge` returns only `merge` or `review`, and that is not a gap.** It takes a
+(candidate, mention) PAIR, so it can answer *"is this the same entity"* and can
+never answer *"does this entity exist elsewhere"* — absence is the resolver's to
+measure (`resolve_entities`'s `new` population, licensed by the model positively
+declaring distinct referents). `BAND_NEW` is therefore published VOCABULARY: the
+name a create-side record carries, so one vocabulary covers the whole step. A
+falsifier that scores `judge` "per band" will have an empty `new` row by
+construction; score the create side on `resolve_entities`'s `new` list instead.
+
 ⛔ **`link` is NOT a band, and this is a deliberate record-shape decision
 (issue #12296 scope 1).** Round 3 (`12186` comment `6839898289`, Half-A.1) found
 exactly one non-retiring pointer in the tree — `aliases[]` on the SURVIVOR

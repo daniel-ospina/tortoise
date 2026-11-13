@@ -909,6 +909,23 @@ class TestTheResolverBands:
         assert res["held"] == [], res
         assert res["records"][0]["band"] == verdict.BAND_MERGE
 
+    def test_a_supersedes_ref_spelled_as_the_merged_variant_still_resolves(
+            self, sdk_factory):
+        """The fold replaces the carrier's row, so its SPELLING lives in `aliases[]`
+        — and `_resolve_superseded` was name-only, so the supersession was DROPPED
+        (the entity that should be retired stayed live) while warning that it had
+        been "recorded without a graph id".
+        """
+        sdk = sdk_factory()
+        _merged_pair(sdk)
+        monkeypatch_free = v2._current_entity_priors(
+            sdk, [{"id": "obj-carrier", "name": "the team", "kind": "core:plan"}],
+            {"obj-carrier": "Object"})
+        assert [r["id"] for r in monkeypatch_free] == ["obj-survivor"]
+        hit = v2._resolve_superseded("the team",
+                                     {"entities": monkeypatch_free})
+        assert hit is not None and hit["id"] == "obj-survivor", hit
+
     def test_the_facts_reader_and_the_resolver_are_wired_together(
             self, sdk_factory):
         """The two FUNCTIONS compose: a foreign `search` table + the real reader.
