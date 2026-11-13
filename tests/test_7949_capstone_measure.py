@@ -4621,9 +4621,12 @@ def _pin_row_failures(rows, docs, sources, default_source: str = "extractor_v2")
         # ...and it may name the SECTION its cited line must fall INSIDE. Without
         # this, a number re-derived onto a byte-identical entry in a DIFFERENT
         # section stays GREEN while the document's claim goes false: measured on
-        # the `03-test-design.md` `carve_out:` row, whose anchor line also exists
-        # under `core:` and its mirror, so "the anchor is on this line" alone
-        # cannot tell the three apart (#11837 review, P3).
+        # the `03-test-design.md` `carve_out:` row — since RETIRED by #12266, which
+        # holds that entry by symbol + section instead — whose anchor line also
+        # exists under `core:` and its mirror, so "the anchor is on this line"
+        # alone could not tell the three apart (#11837 review, P3). No row in the
+        # current tables passes a 5th element, so this branch is a capability the
+        # next section-scoped cite can use, not a check any row runs today.
         section = row[4] if len(row) > 4 else None
         # ⛔ The label is the SOURCE's real path, not `<key>.py` (#11837 review P3):
         # `ci_surfaces` maps to `config/ci-surfaces.yml`, so the fabricated
@@ -5241,17 +5244,22 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         ("04-plan.md", "operator / label path", (
             ("25041", "declared = declared_relation_predicates()"),
         ), "sdk"),
-        # The manifest's own `carve_out:` entry. ⛔ PRE-#12266 HISTORY, the whole
-        # comment block to the entry that follows the history paragraph: the row that
-        # lived here pinned a NUMBER, and the paragraphs below describe how to
-        # re-derive one. There is no number any more and there is no row —
-        # `_assert_carve_out_entry_is_pinned_by_symbol` (called from the tail of this
-        # test) holds the entry by symbol + section. Read this as the record of why a
-        # number could not be kept, never as an instruction.
+        # The manifest's own `carve_out:` entry. ⛔ PRE-#12266 HISTORY — and it is the
+        # history of a row THIS TABLE NO LONGER CONTAINS: the tuple that lived here
+        # pinned a NUMBER, and the paragraphs below record how such a number had to be
+        # re-derived and why that could not be kept. There is no number any more and
+        # there is no row; `_assert_carve_out_entry_is_pinned_by_symbol` (called from
+        # the tail of this test) holds the entry by symbol + section. Read this as the
+        # record of why a number could not be kept, never as an instruction — and do
+        # not read the rows below as its continuation: the next rows are the
+        # `RECONCILE-A1-A2-A5.md` `plan_hierarchy_edges` ones.
         # ⛔ The 5th element is the SECTION the cite must fall inside: this exact
         # anchor text also sits under `core:` and its mirror, so without it a
         # re-derivation onto either stays green while the document's `carve_out:`
-        # claim goes false (measured: 5854 and 8173 both drove this row GREEN).
+        # claim goes false (measured on the RETIRED row: 5854 and 8173 both drove it
+        # GREEN). That row was its only consumer, so `section` is read by no row in
+        # this table any more — the branch stays for the next cite whose anchor line
+        # is shared across sections, not because a row uses it today.
         # ⛔ THE NUMBER WAS NEVER A CONSTANT OF THE EPIC — it was wherever the last
         # merge above the entry left it, re-derived at the head each fix landed on,
         # never copied forward from a run that was green earlier. That is exactly why
@@ -5380,8 +5388,10 @@ def _assert_carve_out_entry_is_pinned_by_symbol():
     QUALIFIED `config/ci-surfaces.yml:<line>` form only. Bare digits in that row stay
     allowed (it legitimately carries the history `9943 … 9949 … 9965 … 9973 … 9987`),
     and history rows in OTHER documents legitimately keep the number they were read
-    at — `05-verify.md`'s D5 row records `:9906` → `:9933` at headed shas for exactly
-    that reason. A bare number is not a cite; the file name is what makes a number
+    at — `05-verify.md`'s D5 row records `:9906` → `:9933` and `:9934` at
+    `0e281a900b` for exactly that reason (one of the three is headed; the other two are
+    history no reader can check, which is the weaker shape this pin does not police).
+    A bare number is not a cite; the file name is what makes a number
     checkable, and a headed history row is not a claim about today.
 
     This is `05-verify.md` D5's own rule ("the symbol is authoritative and the line
@@ -5408,7 +5418,15 @@ def _assert_carve_out_entry_is_pinned_by_symbol():
             end = j
             break
 
-    hits = [n + 1 for n in range(start, end) if lines[n].strip() == entry]
+    # ⛔ Match the WRITER's parse, not the raw line. `carve_out:` carries six
+    # hand-authored entries with an inline `#` comment today, and
+    # `tools/ci_selection.py::register_tests` reads a name as
+    # `lines[i].strip()[2:].split("#", 1)[0].rstrip()` (`tools/ci_selection.py:4908`).
+    # An inline comment added to THIS entry must therefore not read as "the entry is
+    # absent", which is the false reason an exact `== entry` reports (#12266 review,
+    # P2).
+    hits = [n + 1 for n in range(start, end)
+            if lines[n].strip().split("#", 1)[0].rstrip() == entry]
     assert len(hits) == 1, (
         f"`{entry}` appears on {len(hits)} line(s) of the `carve_out:` block "
         f"({hits}) — the bundle's capstone row states `carve_out:` holds exactly ONE "
@@ -5423,9 +5441,16 @@ def _assert_carve_out_entry_is_pinned_by_symbol():
     assert "config/ci-surfaces.yml" in rows[0], (
         "the `carve_out:` row must still name the FILE the entry lives in — the "
         "symbol alone names no tree to look in")
-    assert "carve_out:" in rows[0].split("config/ci-surfaces.yml")[1], (
-        "the `carve_out:` row must name the SECTION after the file, or a reader "
-        "cannot find an entry whose line is deliberately unstated")
+    # ⛔ `split(...)[1]` is NOT "the text after the file". The row mentions
+    # `config/ci-surfaces.yml` TWICE, so that slice is the text BETWEEN the two
+    # mentions — a row that named a different section first still passed it (#12266
+    # review, P2). Require the adjacency the row actually states, so the section this
+    # pin reads is the one claimed OF this file.
+    assert "config/ci-surfaces.yml`'s `carve_out:`" in rows[0], (
+        "the `carve_out:` row must name the SECTION as "
+        "`config/ci-surfaces.yml`'s `carve_out:` — the file name alone does not say "
+        "which block the entry is in, and a section named elsewhere in the same row is "
+        "not the claim this pin reads")
     stale = re.findall(r"ci-surfaces\.yml:\d+", rows[0])
     assert not stale, (
         f"the `carve_out:` row prints {stale} — that number is owned by "
