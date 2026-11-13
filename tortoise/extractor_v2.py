@@ -184,11 +184,11 @@ from collections.abc import Mapping, Sequence
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from . import entity_verdict as _entity_verdict  # #12296: the verdict step's bands
 from . import failure_policy as _failure_policy  # #5095: S3's failure policy (§4.4 G3)
 from . import identity_hold as _identity_hold  # #10997: S3's HOLD
 from . import referentiality as _referentiality  # #11021: the referentiality test
 from . import value_gate as _value_gate  # #4899: the S2.2b identifier-only predicate
-from . import entity_verdict as _entity_verdict  # #12296: the verdict step's bands
 from . import vet_gate as _vet_gate  # #5005: S2.2 VET (stdlib-only module)
 from ._gate_memo import GateMemo
 from .env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract

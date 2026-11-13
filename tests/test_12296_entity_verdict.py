@@ -30,7 +30,6 @@ from tortoise import entity_verdict as verdict
 from tortoise import extractor_v2 as v2
 from tortoise.entity_resolver import apply_entity_merge
 
-
 # ── helpers ───────────────────────────────────────────────────────────────
 
 
