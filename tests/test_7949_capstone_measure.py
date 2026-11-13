@@ -5286,8 +5286,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # registered test files above it; 9987 at the `main` tip `abf186f1109a`
         # (+14: a 13-line `surfaces:` block inserted at 2237 and a 1-line
         # `tier1:` one at 9150); 10002 at this branch alone (`9081bb367e` /
-        # `4de7bbf511`: 9987 + the 15 lines it registers, 9 at 1942 and 6 at
-        # 5063). ⚠️ The 10005 this paragraph once attributed to "this branch
+        # `4de7bbf511`: 9987 + the 15 lines it registers, 9 at 1941 and 6 at
+        # 5061). ⚠️ The 10005 this paragraph once attributed to "this branch
         # alone" is `d036b9859960`'s OWN reading — a different PR's commit that
         # registers NONE of this lane's entries and changes `ci-surfaces.yml`
         # by 0 lines — so it is not this branch's value; do not restore that
@@ -5301,7 +5301,9 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `ea2c41a696` (`+32 @7535`, #12108 — 9987 + 32), reached with nothing
         # of this branch in the tree. It looked like a checked prediction only
         # because main's +32 and this branch's block had both been written down
-        # as 32; the branch's is 15, and 9987 + 14 + 15 is 10016, never 10019.
+        # as 32; the branch's is 15, and 9987 + 15 is 10002 — the merge tree's
+        # own reading, stated seven lines above. Do not "correct" that to a
+        # 16xxx by adding main's +14 a second time: the 9987 already contains it.
         # `main` then added `+1 @1039` (`a53ba8cf53`, 10020) and `+1 @2237`
         # (`73c479ce40`) to read 10021 at `87c07462a8` before this lane was
         # rebased. The row below re-derives 10036 from the rebased tree it
@@ -5318,7 +5320,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         #  +16  @7514  `e200623286` (#11926)   → above the sdk twin only
         #  +13  @2237  `f1f74135a15b` (#12302, #12294's name-entropy gate) → above BOTH
         #   +1  @9150  `f1f74135a15b`           → BELOW both twins; it moves neither
-        #  +32  @7522  this branch's own block → above the entry and the sdk twin
+        #  +15  @1941 / @5061  this branch's own block → above the entry and the sdk twin
         # ⚠️ Both `f1f74135a15b` rows are read at the main tip `abf186f1109a`, which
         # carries them but made NEITHER: `git show --stat abf186f1109a --
         # config/ci-surfaces.yml` is empty, and `f1f74135a15b` is the only commit in
@@ -5328,7 +5330,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # ⛔ So the FIRST twin read 6103 = 6082 + 8 + 13 at `abf186f1109a` (only
         # two of the five insertions are above it, which is why the two twins do
         # not move together), and the sdk twin read 8502 = 8459 + 8 + 6 + 16 + 13
-        # — NOT 8534, which would be the +32 this branch's block adds and no
+        # — NOT 8517, which would be the +15 this branch's block adds and no
         # commit on `main` had yet.
         # ⚠️ Both of those are INDENTED sub-keys
         # (`core:` 2245, `sdk:` 8317 on the rebased tree — 2235 / 8268 at
