@@ -4714,12 +4714,31 @@ def _pin_row_failures(rows, docs, sources, default_source: str = "extractor_v2")
 #: `` … `config/ci-surfaces.yml` and `tools/ci_selection.py:4140` `` is a cite of a
 #: DIFFERENT file, not of this one. Every shape above is pinned by the two matcher
 #: tests below.
-_UNIT = r"(?!\s*(?:s|sec|secs|seconds|ms|files|lines|rows|cases|bytes|entries|points|%)\b)"
+_UNIT = (r"(?!\s*(?:s|sec|secs|seconds|ms|min|mins|tests?|files|lines|rows|cases|"
+         r"bytes|shards|entries|points|(?i:kb|mb)|%)\b)")
 _NUM = rf"(?:\d{{1,3}}(?:,\d{{3}})+|\d{{3,}}){_UNIT}(?![\d])(?!\.\d)(?!-\d)(?!:\d)"
-_LEADING_NUM = rf"(?<![\w#]){_NUM}"
+#: ⛔ THE `.` IN THIS LOOKBEHIND IS LOAD-BEARING: without it a DECIMAL FRAGMENT is
+#: read as an integer (`1.093 %` matched `093`), contradicting the rule stated three
+#: paragraphs up. Reproduced, then closed.
+_LEADING_NUM = rf"(?<![\w#.]){_NUM}"
 _WRAP = r"[`*]*"
-_SEP = r"(?::|#L|—|\bL\.?|\b(?:at|on|line|row|entry)\b)"
+_SEP = r"(?::|#L|—|–|\bL\.?|\b(?:at|on|line|lines|row|rows|entry|entries)\b)"
 _GAP = r"(?:(?!\.\w)[^|]){0,160}?"
+#: A RANGE is the cite a maintainer writes when re-adding one, and `_NUM`'s `(?!-\d)`
+#: guard — which exists to stop a FRAGMENT of a longer run being read as the number —
+#: also stopped the two-endpoint form entirely, so `(:9987-9995)` and
+#: "the manifest, lines 9987-9995" were invisible to this matcher. Both orders are
+#: covered below.
+#:
+#: ⛔ THE ENDPOINT WIDTH AND THE TRAILING GUARDS ARE WHAT KEEP A DATE OUT. The first
+#: cut was `\d[\d,]*\s*[-–—]\s*\d[\d,]*`, which read `2026-11-09` as the range
+#: `2026-11` and REDed the pinned-clean fixture "…`slow_files:` row, re-taken on
+#: 2026-11-09". Endpoints are bounded to line-number width and may not be followed by
+#: a digit, a decimal or another `-<digit>`, which is exactly what a date fragment
+#: is. Caught by the false-red fixture that already existed, which is what those
+#: fixtures are for.
+_RANGE_NUMS = (r"(?<![\d,])\d{1,5}(?:,\d{3})*\s*[-–—]\s*\d{1,5}(?:,\d{3})*"
+               r"(?![\d.])(?!-\d)")
 
 #: A bare line cite with NO filename binding — the form this module documents as
 #: invisible to every sweep. Applied to the ONE sentence the claim lives on, where
@@ -4745,14 +4764,23 @@ _MANIFEST_CITE = re.compile(
     rf"{_MANIFEST}{_GAP}{_SEP}\s*{_WRAP}{_NUM}{_WRAP}"
     rf"|{_SEP}\s*{_WRAP}{_NUM}{_WRAP}{_GAP}{_MANIFEST}"
     rf"|{_WRAP}{_LEADING_NUM}{_WRAP}\s*{_SEP}{_GAP}{_MANIFEST}"
+    rf"|{_MANIFEST}{_GAP}{_SEP}\s*{_WRAP}{_RANGE_NUMS}{_WRAP}"
+    rf"|{_WRAP}{_RANGE_NUMS}{_WRAP}\s*{_SEP}{_GAP}{_MANIFEST}"
 )
 
-#: A bare integer in CITIZEN position on the claim's own sentence — no separator, no
-#: filename binding. `_LINE_CITE` above needs a separator beside the number, so the
+#: A bare NUMBER in cite position with no separator and no filename binding — the
 #: form a maintainer produces when trimming the recorded history down to its number
-#: ("the entry read 9943 before the last re-derivation") passed it AND the doc-wide
-#: arm. It reuses `_NUM`'s vocabulary rather than a blanket 3-digit rule, so a
-#: unit-suffixed COUNT ("166 s") stays green on the same sentence.
+#: ("the entry read 9943 before the last re-derivation"). `_LINE_CITE` above needs a
+#: separator beside the number, so this passed it AND the doc-wide arm.
+#:
+#: ⛔ IT REFUSES A COMMIT HEAD TOO, AND THAT IS THE INTENDED CONTRACT, not a
+#: false red: the bundle's own D5 keeps the head-qualified history AT THE PIN
+#: ("the head-qualified history of the entry's line is kept at the pin"), so the
+#: document carries neither a line number nor a head. An earlier cut of the failure
+#: message told a maintainer to "describe the history by head", i.e. it prescribed
+#: the form this arm refuses — the MESSAGE was wrong, and it now says what the
+#: policy says. The `.` in the lookbehind is load-bearing in its own right: without
+#: it a DECIMAL FRAGMENT is read as an integer (`1.093 %` matched `093`).
 _BARE_NUM = re.compile(_LEADING_NUM)
 
 
@@ -5663,8 +5691,13 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # The DOCUMENT side of the same claim: one line says it, that line NAMES the
     # entry, and it does not hand a reader a line number that a tool will move.
     doc_text = _EPIC_CITE_DOCS["03-test-design.md"].read_text(encoding="utf-8")
-    doc_hits = [ln for ln in doc_text.splitlines()
-                if "`carve_out:` holds **one**" in ln]
+    # ⛔ ONE list, reused. `doc_text.splitlines()` called a second time builds NEW
+    # string objects, so an `is` comparison against `doc_hits[0]` never held and the
+    # claim line was scanned by the neighbour loop as well as by the claim arms
+    # (measured: a head-as-history produced TWO findings, one of them from the wrong
+    # arm). The same list is now sliced, and the skip is by EQUALITY.
+    doc_lines = doc_text.splitlines()
+    doc_hits = [ln for ln in doc_lines if "`carve_out:` holds **one**" in ln]
     if len(doc_hits) != 1:
         block_failures.append(
             f"03-test-design.md: the scoping phrase '`carve_out:` holds **one**' "
@@ -5693,10 +5726,15 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
                     f"that drops one of them is a claim the pin can no longer "
                     f"check. Restore the clause; do not narrow the sentence.")
         # Only the ONE named entry may appear: a second `test_*.py` token is the
-        # addition case above in another spelling. Path-prefixed references stay
-        # legal — this pin's own module is cited that way beside the clause.
-        extra_files = sorted(set(re.findall(r"(?<![\w/])test_\w+\.py",
-                                            doc_hits[0].replace(ENTRY, ""))))
+        # addition case above in another spelling. ⛔ THE PATH PREFIX IS NOT AN
+        # EXEMPTION. The first cut used `(?<![\w/])`, which let a SECOND capstone
+        # filament through merely by writing it with a path —
+        # "unlike `tests/test_graph_census_7949.py`, which lives elsewhere" was GREEN
+        # while the same name BARE was RED. The fix matches the name anywhere and
+        # exempts exactly one thing: THIS module, whose basename the sentence cites
+        # beside the clause.
+        extra_files = sorted({f for f in re.findall(r"test_\w+\.py", doc_hits[0])
+                              if f not in (ENTRY, Path(__file__).name)})
         if extra_files:
             block_failures.append(
                 f"03-test-design.md's `carve_out:` sentence names {extra_files!r} "
@@ -5710,14 +5748,41 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
                             _BARE_NUM.finditer(doc_hits[0].replace(ENTRY, ""))]
         if sentence_numbers:
             block_failures.append(
-                f"03-test-design.md hands a reader a NUMBER on the `carve_out:` "
+                f"03-test-design.md hands a reader a LINE NUMBER on the `carve_out:` "
                 f"sentence: {sentence_numbers[0]!r} — that sentence used to carry a "
                 f"line number for this entry, and even as HISTORY the digit reads as "
                 f"a current cite to anyone grepping for one. This arm is the one the "
                 f"separator-based matcher cannot cover: the number here is in a "
                 f"position no cite shape describes (`read 9943`, `was 9943`), which "
-                f"is why the check is on the NUMBER and not on its neighbours. "
-                f"Describe the history by head, or by \"moved again\"; print no digit.")
+                f"is why the check is on the NUMBER and not on its neighbours. The "
+                f"head-qualified history belongs AT THE PIN (this bundle's own D5), "
+                f"so this sentence carries neither a line number nor a head — say "
+                f"that it moved again and point at the pin.")
+        # ⛔ AND THE CLASS IS NOT ONE LINE. Scoping the bare arms to `doc_hits[0]`
+        # left the very form this module documents as "invisible to every sweep"
+        # green ONE LINE BELOW the claim — "the entry itself sat at `:9987` at head
+        # `1a0ace24`" — because the doc-wide arm needs the manifest token and this
+        # document WRAPS prose. Every other line that talks about the block is
+        # scanned with both bare arms. Measured at this head: three lines mention it,
+        # and none of them carries a number the arms fire on, so this is
+        # behaviour-preserving on the current document.
+        for other_line in doc_lines:
+            if other_line == doc_hits[0] or "carve_out:" not in other_line:
+                continue
+            stray = [m.group(0) for m in _LINE_CITE.finditer(other_line)]
+            stray += [m.group(0) for m in _BARE_NUM.finditer(other_line)
+                      if m.group(0) not in stray and ENTRY not in m.group(0)]
+            if stray:
+                block_failures.append(
+                    f"03-test-design.md attaches a number to a `carve_out:` line "
+                    f"besides the claim: {stray[0]!r} in {other_line.strip()[:90]!r} — "
+                    f"the claim sentence is the document's single statement about "
+                    f"this block, and a number on a NEIGHBOURING line re-creates the "
+                    f"rot just as surely (the entry's position in "
+                    f"`config/ci-surfaces.yml` is moved by every registration "
+                    f"`tools/ci_selection.py::register_tests` splices above it). "
+                    f"Keep the claim in one place and print no number.")
+                break
         if _LINE_CITE.search(doc_hits[0].replace(ENTRY, "")):
             block_failures.append(
                 "03-test-design.md attaches a LINE NUMBER to "
@@ -5800,6 +5865,15 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     "`config/ci-surfaces.yml` lists 60 entries in `carve_out:`",
     "`config/ci-surfaces.yml` is 1319360 bytes",
     "x11083, see `config/ci-surfaces.yml`",
+    # ⛔ the three shapes the first cuts of `_MANIFEST`'s WIDENED binding and of the
+    # RANGE alternative had to be taught to leave alone. Each was a measured
+    # false-RED, not a hypothetical: `2026-11-09` was read as the range `2026-11`,
+    # and a unit the `_UNIT` list did not name (`961 tests`, `166 min`) was read as
+    # a line number.
+    "`the manifest`'s `durations:` row: 166 s",
+    "`config/ci-surfaces.yml` — 961 tests",
+    "`config/ci-surfaces.yml` — 166 min",
+    "`config/ci-surfaces.yml`'s `slow_files:` row, re-taken on 2026-11-09",
 ])
 def test_the_manifest_line_cite_matcher_does_not_fire_on_correct_prose(prose):
     """A legit reference near the filename is not a line cite — do not red it."""
@@ -5833,12 +5907,57 @@ def test_the_manifest_line_cite_matcher_does_not_fire_on_correct_prose(prose):
     "see `config/ci-surfaces.yml` in its carve-out block; the entry is on line 9973",
     # a line WRAP between the filename and the number: this document wraps prose
     "see `config/ci-surfaces.yml` in its carve-out block;\nthe entry is on line 9973",
+    # ⛔ THE TWO SPELLINGS THE FIRST CUTS LEFT GREEN, added here so the docstring's
+    # "every shape above is pinned" is true rather than aspirational: the document's
+    # OWN word for the manifest, and the two-endpoint RANGE form (`_NUM`'s `(?!-\d)`
+    # guard excluded it). Reverting `_MANIFEST` to the literal filename, or dropping
+    # the range alternatives, now reds this test instead of shipping a green pin.
+    "line 9987 of the manifest",
+    "the `carve_out:` entry sits on line 9987 of the manifest at this head",
+    "(`config/ci-surfaces.yml:9987-9995`)",
+    "the manifest, lines 9987-9995",
+    "`config/ci-surfaces.yml` lines 9987–9995",
 ])
 def test_the_manifest_line_cite_matcher_catches_every_spelling(prose):
     """Every spelling that attaches a NUMBER to the manifest must be refused."""
     assert _MANIFEST_CITE.search(prose), (
         f"the matcher missed a line cite: {prose!r} — this is the rot the pin "
         f"exists to keep out of the document")
+
+
+@pytest.mark.parametrize(("prose", "should_match"), [
+    # The separator-free forms: the history-trimmed style that both the loose and the
+    # bound arm are blind to, which is why `_BARE_NUM` exists.
+    ("shifting this entry down the file (the entry read 9943 before the re-derivation)", True),
+    ("the entry was 9987 at the previous head", True),
+    ("the entry sat at `9987` and moved again", True),
+    # ⛔ a HEAD is refused too, deliberately: the bundle's D5 keeps the head-qualified
+    # history AT THE PIN, so the sentence carries neither a line number nor a head.
+    # (An earlier message told the maintainer to "describe the history by head", i.e.
+    # it prescribed the form this arm refuses — the message was the defect.)
+    ("last re-derived at `9828250732`, keep the history at the pin", True),
+    # …and the forms it must NEVER refuse, each a measured false-RED from an earlier
+    # cut: the decimal fragment `093` out of `1.093 %` (a missing `.` in the
+    # lookbehind) and unit-suffixed COUNTS read as line numbers (an incomplete
+    # `_UNIT` list).
+    ("1.093 % of the suite", False),
+    ("row: 166 s", False),
+    ("config/ci-surfaces.yml` — 961 tests", False),
+    ("the entry's `test_x_11083.py` sibling", False),
+])
+def test_the_bare_number_arm_catches_a_line_number_and_a_head_but_not_a_count(prose, should_match):
+    """`_BARE_NUM` catches a bare line number OR head, and no count or decimal.
+
+    The pair of properties is the contract: a 4-digit line number in a position no
+    cite shape describes is a cite a reader will follow, a 10-digit head is the same
+    cite one layer up (and D5 keeps it at the pin), and a decimal or a unit-suffixed
+    count is neither and must stay green.
+    """
+    hit = bool(_BARE_NUM.search(prose))
+    assert hit is should_match, (
+        f"_BARE_NUM {'missed' if should_match else 'refused'} {prose!r} — the arm "
+        f"shares `_NUM`'s vocabulary, so a head, a decimal and a count all behave the "
+        f"way the docstring says they do")
 
 
 def test_the_two_cite_arms_are_complementary_not_duplicate():
