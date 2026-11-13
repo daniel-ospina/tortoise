@@ -137,7 +137,9 @@ cut**.
 > `miss_absent_at_max_k` rows unreachable "at every pool width". Both are wrong, and
 > in the same direction: `miss_past_k` at k=P is **0 by construction** (a response
 > has at most P rows, so "its rank is past P" cannot occur) — a property of the
-> counter, not a measurement of the legs; and the pool-40 arm of **this same run**
+> counter, not a measurement of the legs — and ⛔ only at arm 1's **widest** measured
+> window: at every narrower k it is non-zero by design (33 / 27 / 13 at k = 3 / 5 / 10, 0
+> at 15), so it is never a width-independent bound; and the pool-40 arm of **this same run**
 > reaches **300/300**, so those 23 rows are reachable at a modestly wider pool.
 > `miss_absent_at_max_k` therefore means "absent within arm 1's **maximum** window
 > (15)", **not** "absent at every width" — it is width-dependent too. The ceiling is

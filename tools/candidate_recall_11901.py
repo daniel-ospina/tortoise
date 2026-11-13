@@ -597,10 +597,10 @@ def _rerank_arm(
         # numbers ("277/300 at a 15-window, 300/300 at 40") as a literal, so a
         # re-run on a grown corpus (this file already records `population_digest`
         # moving between runs) would have shipped a note contradicting its OWN
-        # `arms.rerank.<P>.exact`, and a hand-edit of either artifact's copy was
+        # `arms.<label>.<P>.exact`, and a hand-edit of either artifact's copy was
         # invisible (measured: rewriting 277 -> 299 in the noun-path artifact left
         # every test green). The figures now live only where they are COMPUTED —
-        # `arms.rerank.<P>.exact.recall_3_after` / `mentions` — and the note says
+        # `arms.<label>.<P>.exact.recall_3_after` / `mentions` — and the note says
         # which cell to read AND that it is the ACHIEVED count, not the ceiling
         # (`lost` is what separates them; the note called them identical, which
         # held only because this run lost nothing).
@@ -620,7 +620,7 @@ def _rerank_arm(
             "itself. WIDTH DEPENDENT throughout, and not quoted here. "
             "⛔ `arms.exact` is a DIFFERENT, width-by-width table: it holds arm 1's "
             "own in-window count for each of arm 1's widths and nothing else, so a "
-            "pool width outside that set (the shipped 40 is one) has no cell there "
+            "pool width outside that set has no cell there "
             "at all. Read it only where its key matches the width you are asking "
             "about; everywhere else the achieved cell above is the only figure this "
             "artifact carries for this arm. miss_past_k is 0 BY CONSTRUCTION only "
@@ -1615,12 +1615,15 @@ def run(args: argparse.Namespace) -> int:
         # emitted note. ⛔ `recall_3_after` is what the arm ACHIEVED, not the
         # ceiling: they coincide only where `lost` is 0, so the note names both the
         # ceiling (in_window) and the achieved cell. ⛔ Not `arms.exact.<P>`: that
-        # table is arm 1's, keyed by its own k, with no pool-40 entry.
+        # table is arm 1's own width-by-width one, and a pool width outside its
+        # keys has no cell there.
         #
         # ⛔ `miss_past_k` is NOT that ceiling, and this comment used to say it
-        # was: at k=P it is 0 BY CONSTRUCTION (a response has at most P rows, so
-        # "its rank is past P" cannot occur), so it measures the counter, not the
-        # legs. `miss_absent_at_max_k` is not a width-independent bound either —
+        # was: it is 0 BY CONSTRUCTION only at arm 1's WIDEST window (a response
+        # has at most that many rows, so "the rank is past it" cannot occur) and
+        # NON-ZERO at every narrower k, where a gold the legs returned further down
+        # is genuinely past the cut — so it measures the counter, not the legs, at
+        # any width. `miss_absent_at_max_k` is not a width-independent bound either —
         # it is "absent within arm 1's maximum window (15)", and the pool-40 arm
         # returns every one of those golds. The count is the artifact's own
         # field, deliberately not restated as a literal here (an earlier draft

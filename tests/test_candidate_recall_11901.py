@@ -1610,6 +1610,13 @@ def test_the_artifacts_ceiling_note_is_the_one_the_tool_emits(
                 "the ceiling note lost its {label} placeholder — a constant arm "
                 "pointer reads the WRONG arm on the lexical carriers")
             want = emitted.replace("{label}", arm)
+            # ⛔ THE POINTER MUST NAME ITS OWN CARRIER. `"{label}" in emitted` alone
+            # is satisfied by a note that hard-codes `arms.rerank` in the pointer
+            # and puts the placeholder somewhere decorative — measured: that mutant
+            # passed while the lexical carriers read `arms.rerank.<P>`.
+            assert f"arms.{arm}.<P>.exact.recall_3_after" in got, (
+                f"{name}:{arm}: the note names another arm's achieved cell — it "
+                f"must point at `arms.{arm}.<P>.exact.recall_3_after`")
             assert got == want, (
                 f"{name}:{arm}: the artifact's ceiling_note is not what the tool "
                 f"emits for this arm — regenerate the artifact (it is generated, "
