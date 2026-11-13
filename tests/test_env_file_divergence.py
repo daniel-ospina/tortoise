@@ -1791,3 +1791,23 @@ def test_config_show_cuts_a_credential_in_the_rejected_path(capsys, _isolated,
     error = payload["graph_store"]["error"]
     assert "Pw1" not in error, error
     assert "<redacted: userinfo-shaped>" in error, error
+
+
+def test_a_short_password_is_redacted_too():
+    """A `≤3`-character credential leaked through the delimiter arm.
+
+    Measured on `.env` = `TORTOISE_DB_PATH=docker://:Abc#r@h:6379/g`: all three
+    surfaces printed `Relative DB path 'docker://:Abc…' rejected` — the whole
+    password. The short-fragment guard only rewrote the QUOTED form, and this arm
+    emits the fragment unquoted before the `…` (#12428 review).
+    """
+    from tortoise.__main__ import _redact_credential_fragments, _redact_db_value
+
+    for value, secret in (
+        ("docker://:Abc#r@h:6379/g", "Abc"),
+        ("bolt://u:Ab#x@h/db", "Ab"),
+    ):
+        described = f"Relative DB path '{value}' rejected"
+        assert secret not in _redact_db_value(described, value), value
+        assert secret not in _redact_credential_fragments(
+            f"Port could not be cast to integer value as '{secret}'", value), value

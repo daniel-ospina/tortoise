@@ -3196,18 +3196,20 @@ def _redact_credential_fragments(text: str, uri: str | None) -> str:
             fragment = form.split(":", 1)[1]
             fragments.add(fragment)
             fragments.add(_unquote(fragment))
-    # ⛔ A minimum length: a one-character password would otherwise rewrite every
-    # occurrence of that character in the message. Below the threshold the
-    # fragment is still removed where the CLIENT echoes it — quoted, as its own
-    # token (`Port could not be cast to integer value as 'Abc'`) — so a short
-    # credential is redacted without the replacement mangling prose (#12428).
+    # ⛔ A minimum length for the BLANKET replace: a one-character password would
+    # otherwise rewrite every occurrence of that character in the message. A SHORT
+    # fragment is still redacted — but only where it stands alone as a token
+    # (quoted, or between non-word characters), which is exactly how these
+    # messages quote it. Quoted-only was not enough: the delimiter arm emits the
+    # fragment UNQUOTED before the `…` (`docker://:Abc…`), so `abc`-length
+    # credentials leaked there (#12428 review).
     for fragment in sorted((f for f in fragments if len(f) >= 4),
                            key=len, reverse=True):
         text = text.replace(fragment, "<redacted>")
-    for fragment in sorted((f for f in fragments if 0 < len(f) < 4),
+    for fragment in sorted({f for f in fragments if 0 < len(f) < 4},
                            key=len, reverse=True):
-        for quoted in (f"'{fragment}'", f'"{fragment}"'):
-            text = text.replace(quoted, "'<redacted>'")
+        text = re.sub(rf"(?<![A-Za-z0-9]){re.escape(fragment)}(?![A-Za-z0-9])",
+                      "<redacted>", text)
     return text
 
 
