@@ -438,8 +438,9 @@ def test_the_scorer_control_is_a_tie_and_the_rule_says_fail(artifact, brief_text
     """M3's verdict, pinned with BOTH of its parts.
 
     ⛔ A later lane must not read the deployable arm's 25-point swing as M3
-    passing: the primary arm is the scorer-controlled one, and the rule was
-    fixed before the numbers existed.
+    passing: the primary arm is the scorer-controlled one, and the rule is the
+    harness's `DECISION_RULE` constant, asserted byte-identical in
+    `test_artifact_carries_the_rule_as_the_harness_constant`.
     """
     primary = artifact["comparisons"][
         "falkordb_tfidf__vs__postgres_bm25/tokens"]["k3"]
@@ -831,7 +832,11 @@ def test_brief_census_and_identifier_decomposition_are_the_artifact(
 
     def found(arm_name: str, ids: list[str]) -> int:
         ranks = artifact["arms"][arm_name]["ranks"]
-        return sum(1 for i in ids if ranks.get(i) is not None and ranks[i] < 3)
+        # ⛔ `<= 3`, not `< 3` — rank 3 IS found at k=3, and `< 3` silently
+        # recomputes recall@2 while the brief publishes the result as recall@3
+        # (review r3: inert in the committed artifact only because no `ident`
+        # name sits at exactly rank 3, which is a property of a FROZEN file).
+        return sum(1 for i in ids if ranks.get(i) is not None and ranks[i] <= 3)
 
     sh = found("falkordb_tfidf", hashed)
     sn_sh = found("falkordb_tfidf", snake)

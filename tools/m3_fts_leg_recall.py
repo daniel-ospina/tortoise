@@ -53,10 +53,12 @@ Two Postgres queries are measured, and the difference between them is a
              supporting evidence, because a difference here may be the analyser
              rather than BM25.
 
-**PRIMARY (pre-registered before the run): ``tokens``.** C2 is *"BM25 instead
-of TF-IDF"* — a scorer change. The decision rule is stated in the artifact and
-in ``docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md`` before the
-numbers exist, and it is not re-cut afterwards.
+**PRIMARY is ``tokens``.** C2 is *"BM25 instead of TF-IDF"* — a scorer change.
+The decision rule is a CONSTANT below, copied verbatim into the artifact so a
+reader can check the numbers against it. ⚠️ It cannot be re-chosen per run
+without editing two places; that it existed BEFORE this run is a claim about the
+lane's process, not something this repository can show (harness, artifact and
+brief landed in one commit — see §4.1 of the brief).
 
 ⚠️ The token-set control is SELF-CHECKED: the tool rebuilds the RediSearch OR
 string from the term list it will hand Postgres and **refuses** if that string
@@ -168,8 +170,11 @@ def _repo_relative(path: Path) -> str:
 #: calls ``tortoise_fts_query`` with ``limit=3``).
 PRIMARY_K = 3
 
-#: Pre-registered decision rule. Copied VERBATIM into the artifact so a reader
-#: can check the numbers against the rule that was fixed before them.
+#: The decision rule, as a CONSTANT. Copied VERBATIM into the artifact so a
+#: reader can check the numbers against the same rule the code applies — and a
+#: different rule has to be edited in two places. ⚠️ The ORDERING (that this
+#: constant predates the 300-name run) is not provable from one commit; the
+#: brief's §4.1 says so rather than implying it.
 DECISION_RULE = (
     "PASS iff on the primary arm (postgres_bm25/tokens) recall@3 is strictly "
     "greater than falkordb_tfidf recall@3, AND the exact two-sided McNemar "
@@ -508,9 +513,15 @@ def _fts_cypher(graph, or_string: str, limit: int) -> list[tuple[str, float]]:
 
 
 def verify_cypher_parity(graph, queries: list[str]) -> None:
-    """Refuse unless :func:`_fts_cypher` reproduces ``run_fts_query`` exactly."""
+    """Refuse unless :func:`_fts_cypher` reproduces ``run_fts_query`` exactly.
+
+    ⛔ Anti-vacuity: two EMPTY result sets compare equal, so a parity check over
+    queries the shipped leg finds nothing for would pass while proving nothing
+    about the replica. At least one query must return rows (review r3).
+    """
     from tortoise.search_engine import run_fts_query
     from tortoise.sparse import build_or_query
+    matched = 0
     for q in queries:
         want = run_fts_query(graph, q, entity_type="object", limit=10)
         got = _fts_cypher(graph, build_or_query(q), 10)
@@ -519,6 +530,13 @@ def verify_cypher_parity(graph, queries: list[str]) -> None:
                 "REFUSED: the recovery arm's Cypher no longer reproduces "
                 f"run_fts_query for {q!r} — want {want[:3]}, got {got[:3]}. A "
                 "replica that has drifted measures a different leg.")
+        if want:
+            matched += 1
+    if not matched:
+        raise SystemExit(
+            "REFUSED: not one parity query returned a row, so the comparison "
+            "was empty-vs-empty and proves nothing about the replica — pass "
+            f"queries the shipped leg resolves ({len(queries)} were tried).")
 
 
 def arm_falkordb(rows: list[dict], graph_name: str, namespace: str,

@@ -181,8 +181,10 @@ fairer one — so the break is disclosed instead.
 **Two harness hazards were measured out, not assumed.**
 (a) **The index builds on a background cycle.** `db.indexes()` reports `numDocuments`; a query issued
 straight after the writes can see a **partially built** index and book a present name as a miss — an
-artefact in the direction that flatters the wrong arm. The harness **waits** for
-`numDocuments == n` and **refuses** on timeout.
+artefact in the direction that flatters the wrong arm. The harness **waits** until `numDocuments`
+reaches the population size and **refuses** on timeout; it also **refuses a reused graph** outright,
+because `o.name` is an ON CREATE write (`#8919`) — a second run against the same graph would measure
+the previous population, and the count guard alone cannot see that.
 (b) **Re-upserting into a live graph is not free** — before the wait and run-scoped graphs existed, two
 runs differed by 2 names (0.7133 vs 0.7067, an uncommitted pre-run observation). With both, two
 independent runs return **identical** numbers, and the second one is committed as
@@ -302,9 +304,9 @@ exactly the shapes it was built for, and neither a new scorer nor a new store is
 
 ---
 
-## 4. The verdict, against the rule fixed before the numbers
+## 4. The verdict, against the rule the harness fixes
 
-### 4.1 The pre-registered rule
+### 4.1 The rule, and what "pre-registered" can and cannot prove
 
 > **PASS iff** on the primary arm (`postgres_bm25/tokens`) recall@3 is strictly greater than
 > `falkordb_tfidf` recall@3, **AND** the exact two-sided McNemar test over the discordant pairs has
