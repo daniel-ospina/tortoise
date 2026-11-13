@@ -1411,10 +1411,10 @@ def _apply_subject_supersession(proj, sdk, ref, supersedes_by,
         params={"ref": ref},
     ).result_set
     # Every row the ref RESOLVED to, from either arm — the keep-first arm reads
-    # their stored `supersededBy` to keep an idempotent re-ingest silent when the
-    # entity's representative (the SURVIVOR) stores something else (round 19).
+    # the TARGET ENTITY'S rows (never the whole arm) to keep an idempotent
+    # re-ingest silent when the entity's representative (the SURVIVOR) stores
+    # something else (rounds 19-20).
     _subj_raw: list = []
-    _subj_matched_rows = list(by_id)
     if len(by_id) > 1:
         # #1423 review P2: the Object twin records this refusal durably
         # (``record_non_folded``) as well as warning — the entry IS the
@@ -1446,8 +1446,24 @@ def _apply_subject_supersession(proj, sdk, ref, supersedes_by,
             ).result_set if _ref_space else [],
             with_groups=True)
         by_name, _ref_widened = _ref_candidates(_subj_raw, "Subject")
-        _subj_matched_rows += [r for _rep, _key, _members in _subj_raw
-                              for r in _members if len(r) > 4]
+        # ⛔ The terminal-target rescue below reads the TARGET'S OWN GROUP, never the
+        # whole name arm (review round 20): `_subj_raw` is every holder the WIDENED
+        # key space matched — multi-entity by construction — so asking all of it
+        # whether "the fold happened" answers for other nodes. Measured: one
+        # unrelated terminal Subject with a dangling survivor (its rows are dropped
+        # by `_ref_candidates`, leaving the target the only candidate) made a
+        # GENUINE divergence vanish — `applied=0, skips=[], warns=[]` where `main`
+        # warned and where the same graph minus that node reported
+        # `terminal subject target`. That is the Object twin's round-19 finding, in
+        # the arm the Object twin's fix did not reach.
+        _subj_target_rows = list(by_id)
+        if by_name:
+            _the_target_node = str(by_name[0][0])
+            for _rep, _k2, _members in _subj_raw:
+                _group_rows = ([_rep] if _rep is not None else []) + list(_members)
+                if any(str(_r[0]) == _the_target_node for _r in _group_rows):
+                    _subj_target_rows = _group_rows
+                    break
         if len(by_name) > 1:
             # ⛔ A DUPLICATE-ID pair is CORRUPTION, not two incarnations, and the
             # live narrowing below cannot tell them apart: with one claimant
@@ -1553,8 +1569,12 @@ def _apply_subject_supersession(proj, sdk, ref, supersedes_by,
                                      for _rep, _key, members in sb_entities
                                      for _mid, mname, _mst in members])
                 or (not _same_successor(target_sb or "", supersedes_by)
-                    and any(_same_successor(str(r[4] or ""), supersedes_by)
-                            for r in _subj_matched_rows if len(r) > 4))):
+                    and any(_same_successor(
+                        str(r[4] or ""), supersedes_by,
+                        candidate_names=[mname
+                                         for _rep, _key, members in sb_entities
+                                         for _mid, mname, _mst in members])
+                        for r in _subj_target_rows if len(r) > 4))):
             warn(f"subject supersession {ref!r} already terminal "
                  f"(status={target_status!r}, supersededBy={target_sb!r}) — "
                  f"conflict with {supersedes_by!r} skipped "
@@ -2380,8 +2400,16 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
             _stored_here = (o_sb or "")
             _carrier_rows = [m for _rep, _key, _members in _name_entities
                              if _key == _target_key for m in _members]
+            # ⛔ `candidate_names` here too (review round 20): the fold stores
+            # `_one_successor_spelling`, i.e. a CARRIER spelling that may fold
+            # differently from the record's, so a rescue without it reports the
+            # very divergence this arm exists to prevent - measured on a
+            # merge-then-supersede shape: second apply `skips=[{'reason':
+            # 'terminal object target'}]` + a divergence warn, silent once the
+            # candidate set is passed.
             if (not _same_successor(_stored_here, supersedes_by)
-                    and any(_same_successor(str(r[4] or ""), supersedes_by)
+                    and any(_same_successor(str(r[4] or ""), supersedes_by,
+                                            candidate_names=_sb_carrier_spellings)
                             for r in _carrier_rows if len(r) > 4)):
                 continue
             # #5370/#12120: the fold stores the successor NODE's spelling; rows

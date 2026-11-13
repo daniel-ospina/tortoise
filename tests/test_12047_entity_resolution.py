@@ -4776,6 +4776,21 @@ class TestThe12120ReviewRound18:
                 "MATCH (s:Subject {id:'r18-scarrier'}) "
                 "RETURN s.status, s.supersededBy").result_set
             assert row and tuple(row[0]) == ("superseded", "New Team"), row
+            # A re-ingest through the merged carrier stays silent (the round-19
+            # rescue's purpose). ⛔ This assertion does NOT pin the rescue's
+            # `candidate_names` argument: measured both ways on the shape below
+            # AND on a fold-only successor ('Acme Corporation' reached by
+            # `canonical_name='acme'`), the outcome is `(0, [], [])` either way,
+            # because the arm's FIRST disjunct already carries the successor's
+            # candidate set. The kwarg is passed for consistency with
+            # `_same_successor`'s contract, not because a reachable shape was
+            # shown to need it.
+            applied2, skips2, msgs2 = self._apply(sdk, [
+                {"superseded": "The Team", "supersedes_by": "New Team",
+                 "evidence": "test"}])
+            assert (applied2, skips2, msgs2) == (0, [], []), (
+                "the Subject re-ingest through a merged carrier was reported as a "
+                f"divergence: {skips2!r} {msgs2!r}")
         finally:
             sdk.close()
 
@@ -5064,5 +5079,42 @@ class TestThe12120ReviewRound19:
                 "another entity's row silenced the target's divergence: "
                 f"{skips!r} {msgs!r}")
             assert msgs, "the divergence emitted no warning"
+        finally:
+            sdk.close()
+
+    def test_the_subject_lane_is_not_silenced_by_another_entitys_row(
+            self, sdk_factory):
+        """Round 20: the SUBJECT terminal-target rescue reads the target's group.
+
+        The Object twin was scoped to its target's group (`839f883a5a`); the Subject
+        twin kept flattening EVERY group of the name arm, so one unrelated terminal
+        Subject with a dangling survivor — its rows dropped by `_ref_candidates`,
+        leaving the target the only candidate — answered the idempotency question
+        for the target and silenced a genuine divergence. Measured: the graph below
+        reported `applied=0, skips=[], warns=[]`, where the same graph minus the
+        second Subject reported `terminal subject target` and warned, and where
+        `main` warned in both.
+        """
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            sdk.create_subject("New Team", "organization")
+            g.query(
+                "CREATE (t:Subject {id:'sc-target', name:'Shared Co', "
+                "subjectKind:'organization', status:'superseded', "
+                "supersededBy:'Other Co'}) "
+                "CREATE (o:Subject {id:'sc-other', name:'Shared Co Holdings', "
+                "subjectKind:'organization', status:'superseded', "
+                "canonical_name:'shared co', supersededBy:'New Team', "
+                "resolved_from:'sc-gone-survivor'})")
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "Shared Co", "supersedes_by": "New Team",
+                 "evidence": "test"}])
+            assert applied == 0, (applied, skips, msgs)
+            assert any("terminal subject target" in str(s.get("reason") or "")
+                       for s in skips), (
+                "another entity's row silenced the Subject target's divergence: "
+                f"{skips!r} {msgs!r}")
+            assert msgs, "the Subject divergence emitted no warning"
         finally:
             sdk.close()
