@@ -351,6 +351,18 @@ class TestDoctorHostedCredential:
         assert cred is not None, out[-1200:]
         assert "api_url https://api.premiselabs.co" in cred, cred
         assert "org agent-1" in cred, cred
+        # ⛔ The row's PAYLOAD was entirely unpinned (fresh review round 15,
+        # mutation-tested): the mask, the fingerprint, and the store path could
+        # each be deleted — or the short-key withholding dropped in favour of
+        # `_key_fingerprint` — with every test in the module green. The mask and
+        # the fingerprint are the row's whole answer to "who am I", and the
+        # withholding is a deliberate #5109 property (a 48-bit digest over a
+        # short secret is brute-forceable offline), so all three are pinned.
+        import re as _re2
+        assert _re2.search(r"\(fingerprint [0-9a-f]{12}\)", cred), cred
+        assert f"tt_…{_FAKE_HOSTED_KEY[-4:]}" in cred, cred
+        # Which STORE won — the question `config show` exists to answer.
+        assert str(_hermetic_hosted_identity / ".tortoise" / "credentials.json") in cred, cred
         # The row must be in the PASS column: downgrading it to ⚠️ would make
         # every healthy hosted box print "Some warnings" and nothing reds
         # (fresh review round 12 — no test asserted this icon).
@@ -358,6 +370,46 @@ class TestDoctorHostedCredential:
         assert "pass," in out and "0 fail" in out, out[-800:]
         assert "❌ Hosted" not in out, out[-1200:]
         assert _FAKE_HOSTED_KEY not in out
+        # The provenance note is CONDITIONAL on the winner being the checkout-local
+        # store: made unconditional (`_cwd_provenance = True`) it would tell every
+        # global-store and env user that their credential is a repo-local file
+        # they do not have — a false statement about which store won, with the
+        # suite still green (fresh review round 15). The positive direction is
+        # pinned by the `./.tortoise` test.
+        assert "checkout-local" not in hosted, hosted
+        assert "#3660" not in hosted, hosted
+
+    def test_a_short_key_withholds_its_fingerprint(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """A short secret gets NO fingerprint — the deliberate #5109 withholding.
+
+        `_publishable_fingerprint` withholds the digest below
+        `_MIN_PUBLISHABLE_KEY_LEN`, because a 48-bit digest over a short secret is
+        brute-forceable offline — a property this PR's own body calls out. Swapping
+        it for `_key_fingerprint` published one for every key and nothing reded
+        (fresh review round 15). The row must also not print half a secret: below
+        the mask floor the only output is `(present)`.
+        """
+        short_secret = "short-secret"
+        from tortoise.__main__ import _key_fingerprint
+        _write_credential(_hermetic_hosted_identity, short_secret)
+        _stub_hosted(monkeypatch, lambda url, req: (
+            _FakeResponse(200, b'{"status":"ok"}')
+            if url.endswith("/health") else
+            _FakeResponse(200, b'{"org_id":"org-s"}')))
+        db_path = str(tmp_path / "short-key.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor short key seed")
+
+        _run_doctor([])
+        out = capsys.readouterr().out
+
+        cred = _row(out, "Credentials")
+        assert cred is not None, out[-1500:]
+        assert "fingerprint" not in cred, cred
+        assert "(present)" in cred, cred
+        assert short_secret not in out, "a short secret was printed"
+        assert _key_fingerprint(short_secret) not in out, "the withheld digest was published"
 
     def test_offline_makes_no_request_and_says_not_probed(
             self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
@@ -663,6 +715,117 @@ class TestDoctorHostedCredential:
         cred = _row(out, "Credentials")
         assert cred is not None and "env:TORTOISE_API_KEY" in cred, out[-1500:]
         assert _FAKE_ENV_KEY not in out
+
+    def test_an_env_only_selfhost_static_key_is_never_transmitted(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """`TORTOISE_API_KEY` alone is NOT a hosted identity — never dial with it.
+
+        The SAME variable is the documented shared secret for a self-hosted
+        `serve --http --auth static` (`.env.example:152-153`,
+        `docs/quickstart-selfhosted.md:65`), and the resolver aims any env key at
+        `TORTOISE_API_URL` or the production default. So an env-only static
+        secret was sent to api.premiselabs.co, 401'd there, and read a HEALTHY
+        self-host box as `❌ Hosted … the stored API key at this host is not
+        valid` + exit 1 — #11912's false PASS mirrored into a false FAIL, with a
+        `signup`/`recover` remedy that is wrong for a user with no hosted
+        account. Found independently by two fresh reviewers (round 15); #1708
+        §D1b is the recorded decision for exactly this shape.
+        """
+        static_secret = "local-static-key-for-my-own-serve"
+        monkeypatch.setenv("TORTOISE_API_KEY", static_secret)
+        calls = _stub_hosted(monkeypatch, lambda url, req: pytest.fail(
+            f"a self-host static key must never be transmitted — dialled {url}"))
+        db_path = str(tmp_path / "static-auth.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor static auth seed")
+
+        rc = _run_doctor([])
+        out = capsys.readouterr().out
+
+        assert calls == [], "a local auth secret left the box"
+        hosted = _row(out, "Hosted")
+        assert hosted is not None, out[-1500:]
+        assert "not probed" in hosted, hosted
+        assert "no request was made" in hosted, hosted
+        # The remedy must name the way out, not `signup` for a self-hoster.
+        assert "TORTOISE_API_URL" in hosted, hosted
+        assert "signup" in hosted, hosted  # …IF it is a hosted key
+        # ⚠️, never ❌: a correct self-host install is not a broken credential.
+        assert "⚠️" in hosted and "❌ Hosted" not in out, out[-1200:]
+        assert rc == 0, "a self-host static key must not fail the report"
+        # The other half of #11912 still holds: the row names what WOULD be sent.
+        cred = _row(out, "Credentials")
+        assert cred is not None and "env:TORTOISE_API_KEY" in cred, out[-1500:]
+        assert static_secret not in out, "the secret reached the transcript"
+
+    def test_an_env_only_hosted_shaped_key_is_still_probed(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """A `tt_`/`tk_` env key IS a hosted identity — the gate must not go quiet.
+
+        The gate above is only safe if it is pinned in BOTH directions: without
+        this, a fix for the self-host case could silence the
+        `TORTOISE_API_KEY=<hosted key>` path, which `.env.example` calls the
+        CANONICAL name for the hosted credential — and a revoked one would then
+        read green, which is #11912 itself.
+        """
+        monkeypatch.setenv("TORTOISE_API_KEY", _FAKE_ENV_KEY)
+        calls = _stub_hosted(monkeypatch, lambda url, req: (
+            _FakeResponse(200, b'{"status":"ok"}')
+            if url.endswith("/health") else
+            _FakeResponse(200, b'{"org_id":"org-7"}')))
+        db_path = str(tmp_path / "env-hosted.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor env hosted seed")
+
+        _run_doctor([])
+        out = capsys.readouterr().out
+
+        assert [u for u, _t in calls if u.endswith("/health")], calls
+        hosted = _row(out, "Hosted")
+        assert hosted is not None and "✅" in hosted, out[-1500:]
+        assert "/v1/team accepted" in hosted, hosted
+        assert "not probed" not in hosted, hosted
+
+    def test_an_env_key_with_an_explicit_api_url_is_probed(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """Naming the endpoint IS the hosted signal, even for a non-`tt_` key.
+
+        A self-hoster pointing the CLI at their own `serve --http` box sets both
+        variables; that is an explicit hosted identity (the resolver's own
+        co-source rule keeps the env key with the env URL), so the probe must
+        run against the endpoint the user named.
+        """
+        monkeypatch.setenv("TORTOISE_API_KEY", "local-static-key-for-my-own-serve")
+        monkeypatch.setenv("TORTOISE_API_URL", "https://self.example.test")
+        calls = _stub_hosted(monkeypatch, lambda url, req: (
+            _FakeResponse(200, b'{"status":"ok"}')
+            if url.endswith("/health") else
+            _FakeResponse(200, b'{"org_id":"org-8"}')))
+        db_path = str(tmp_path / "env-explicit.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor env explicit seed")
+
+        _run_doctor([])
+        out = capsys.readouterr().out
+
+        assert calls and calls[0][0] == "https://self.example.test/health", calls
+        hosted = _row(out, "Hosted")
+        assert hosted is not None and "✅" in hosted, out[-1500:]
+
+    def test_the_hosted_prefixes_match_the_auth_contract(self):
+        """`_HOSTED_KEY_PREFIXES` must stay the ONE prefix contract.
+
+        `tortoise/auth.py` owns the definition (`API_KEY_PREFIXES`) and
+        `__main__` cannot import it — that module RAISES at import time when
+        `TORTOISE_API_KEY` is set without `TORTOISE_SECRET_PEPPER`, which is the
+        self-host box the gate protects. So the duplicate is pinned here instead:
+        a new prefix added to the mint (`key create`) must not silently leave
+        `doctor` refusing to probe those keys.
+        """
+        from tortoise import auth as _auth
+        from tortoise.__main__ import _HOSTED_KEY_PREFIXES
+
+        assert _HOSTED_KEY_PREFIXES == _auth.API_KEY_PREFIXES
 
     def test_trailing_slash_in_api_url_does_not_fake_a_broken_key(
             self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):

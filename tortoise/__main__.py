@@ -12887,6 +12887,17 @@ _DOCTOR_BODY_CAP = 65536
 #: network `--offline` exists for.
 _DOCTOR_TOTAL_BUDGET_S = 75
 
+#: The key prefixes a HOSTED mint produces (`signup`, `key create`). #11912 uses
+#: this ONLY to decide whether an env-only `TORTOISE_API_KEY` may be aimed at a
+#: hosted endpoint — see the gate in `_doctor_hosted_rows`.
+#: ⛔ Deliberate duplicate of `tortoise/auth.py::API_KEY_PREFIXES`, not an import:
+#: `tortoise/auth.py` RAISES at import time when `TORTOISE_API_KEY` is set and
+#: `TORTOISE_SECRET_PEPPER` is not — which is exactly the self-host box this gate
+#: exists for, so importing it here would crash `doctor` on the case it protects.
+#: `tests/test_doctor.py::test_the_hosted_prefixes_match_the_auth_contract` pins
+#: the two definitions together.
+_HOSTED_KEY_PREFIXES = ("tt_", "tk_")
+
 
 def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> None:
     """#11912: report the hosted identity AND whether it works.
@@ -13068,6 +13079,54 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
                         f"{_printable(_mask_display_target(api_url or ''))} — "
                         "not probed (`--offline`); hosted reachability and key "
                         f"validity were NOT tested{_provenance_note}"))
+        return
+
+    # ⛔ An env-only `TORTOISE_API_KEY` is NOT proof of a HOSTED identity, and
+    # probing one sends a LOCAL SECRET off the box (#11912 review round 15).
+    # `TORTOISE_API_KEY` is also the documented shared key for a self-hosted
+    # `serve --http --auth static` (`.env.example:152-153`, `tortoise/auth.py`
+    # `require_auth`, `docs/quickstart-selfhosted.md:65`), and the resolver aims
+    # ANY env key at `TORTOISE_API_URL` or the production default:
+    # `_resolve_config_path` computes
+    # `env_url = _os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co")`.
+    # So a healthy self-host box that exports the variable — exactly what the
+    # self-host quickstart tells it to do — had its static secret sent to
+    # api.premiselabs.co, 401'd there, and read `❌ Hosted … the stored API key at
+    # this host is not valid` + exit 1: #11912's false PASS mirrored into a false
+    # FAIL, with a `signup`/`recover` remedy wrong for a user who has no hosted
+    # account. `onboard` inherits it through its final `doctor` step.
+    #
+    # THIS IS #1708 §D1b APPLIED TO THE PROBE. §D1b records the hazard for this
+    # shape (`TORTOISE_API_KEY` is commonly exported in dev shells for
+    # `serve --http --auth static`, "so an env-first resolver would silently
+    # flip … a silent backend switch") and mitigates it there with
+    # `include_env=False`. It literally governs `_cmd_context`'s resolver
+    # argument rather than `doctor` — but `doctor` has just become a
+    # TRANSMITTING surface whose flip is triggered by env alone, which is the
+    # shape that decision exists to prevent, so the same gate applies here.
+    #
+    # Deliberately NARROW: it fires only when the identity is env-ONLY, the
+    # endpoint was NOT named, and the key is not hosted-shaped. A FILE store
+    # always probes (the whole point of #11912 — a revoked stored key must never
+    # read green), and so does an explicit `TORTOISE_API_URL` or a `tt_`/`tk_`
+    # key (the prefixes `signup` and `key create` mint).
+    _env_url_explicit = bool((_os.environ.get("TORTOISE_API_URL") or "").strip())
+    if (env_key and winner_path is None and not _env_url_explicit
+            and not api_key.startswith(_HOSTED_KEY_PREFIXES)):
+        # ⚠️, not ℹ️: the `--offline` arm above is ⚠️ for the reason recorded
+        # there, and it applies identically — ℹ️ counts in neither column, so the
+        # summary could read `All checks passing!` beside an untested credential.
+        results.append(("Hosted", "⚠️",
+                        f"{_printable(_mask_display_target(api_url or ''))} — not "
+                        "probed: `TORTOISE_API_KEY` is set with no "
+                        "`TORTOISE_API_URL`, and it is not a hosted-shaped key "
+                        "(`tt_`/`tk_`), so no request was made. That is also the "
+                        "documented self-host `serve --http --auth static` "
+                        "secret, and sending a local auth secret to a hosted "
+                        "endpoint is not this verb's call. If it IS a hosted "
+                        "key, set `TORTOISE_API_URL` (or store it with `tortoise "
+                        f"signup`); `tortoise config show` names which store won"
+                        f"{_provenance_note}"))
         return
 
     # ── the reachability read (no credential in the request) ──
