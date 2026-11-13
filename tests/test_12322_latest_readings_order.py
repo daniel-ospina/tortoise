@@ -340,13 +340,14 @@ def test_a_doubled_about_object_edge_yields_one_reading_not_two(sdk, monkeypatch
 
     MEASURED (this is the fact the cursor's comment rests on): with two
     `aboutObject` edges from one event to one indicator, `RETURN id(e), e.id` is
-    **1 row**, while on the BOUND spelling `-[r:aboutObject]->` both
-    `RETURN count(*)` and `RETURN count(r)` are **2**. So the engine does NOT
-    scope the pattern by node pair — the two path rows collapse because the
-    PROJECTED tuple is identical (the same event twice), and projecting an
-    edge-derived column brings both back (`RETURN id(e), e.id, id(r)` → 2 rows).
-    The cursor is sufficient for the narrower, checkable reason: distinct events
-    have distinct `id(e)`, and this projection carries no edge-derived column. No
+    **1 row**, while on the BOUND spelling `-[r:aboutObject]->`
+    `RETURN count(r)` is **2**. So the engine does NOT scope the pattern by node
+    pair — the two path rows collapse because the PROJECTED tuple is identical
+    (the same event twice), and projecting an edge-derived column brings both
+    back (`RETURN id(e), e.id, id(r)` → 2 rows). (`count(*)` is NOT the
+    discriminator: two runs on the same core measured it 2 and 1.) The cursor is
+    sufficient for the narrower, checkable reason: distinct events have distinct
+    `id(e)`, and this projection carries no edge-derived column. No
     Python de-duplication is layered on top because one keyed on `reading_id`
     could DROP a distinct reading that legitimately shares an `e.id`.
 

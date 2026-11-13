@@ -1057,12 +1057,14 @@ def latest_readings(
     # ONE ROW PER EVENT **FOR THIS PROJECTION**, so `id(e)` alone is a sufficient
     # cursor. MEASURED on a lane running core `graph ver 42006` (v4), with TWO
     # `aboutObject` edges from one event to the same indicator: `RETURN id(e),
-    # e.id` = **1 row**, while `RETURN count(*)` on the BOUND spelling
-    # `-[r:aboutObject]->` = 2 and `count(r)` = 2. So the engine is NOT scoping
-    # the pattern by node pair — the two path rows collapse because the projected
-    # tuple is IDENTICAL (they are the same event twice), and a projection that
-    # added an edge-derived column would return both (measured: `RETURN id(e),
-    # e.id, id(r)` → 2 rows). What makes the cursor safe is therefore narrower and
+    # e.id` = **1 row**, while `RETURN count(r)` on the BOUND spelling
+    # `-[r:aboutObject]->` = 2. So the engine is NOT scoping the pattern by node
+    # pair — the two path rows collapse because the projected tuple is IDENTICAL
+    # (they are the same event twice), and a projection that added an
+    # edge-derived column returns both (measured: `RETURN id(e), e.id, id(r)` →
+    # 2 rows). ⚠️ Do not reason from `count(*)` here: two independent runs on the
+    # same core measured it as 2 and as 1, so it is not a stable discriminator —
+    # `count(r)` and an edge-derived projection are. What makes the cursor safe is therefore narrower and
     # checkable: distinct events have distinct `id(e)`, and this projection
     # carries no edge-derived column, so a doubled edge cannot split a reading
     # across a page boundary nor duplicate one. The doubled-edge test pins the
