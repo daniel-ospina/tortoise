@@ -5287,7 +5287,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # at 9150, the #12294 name-entropy gate); 10021 at `87c07462a807`, whose
         # own +34 was made by three commits (32 at 7535, 1 at 1039, 1 at 2237);
         # and 10022 at the `main` tip `42409813a7` (+1 at 2237, #12348). This
-        # branch adds +13 at 2237 (its own `core:` registration), so the tree
+        # branch adds +13 at 2239 (its own `core:` registration), so the tree
         # that adds BOTH parents reads 10035 = 10022 + 13 = 9943 + 92.
         # `carve_out:` opens 9909 and `uri_requiring:` 10240 at THIS tree, so
         # 10035 is inside the section, and the identical text also sits at 6119
@@ -5342,7 +5342,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # 9987 at `f1f74135a15b` (+13 @2237 and +1 @9150, #12294), 10021 at
             # `87c07462a807` (+32 @7535, +1 @1039, +1 @2237), and 10022 at the
             # `main` tip `42409813a7` (+1 @2237, #12348). This branch's own
-            # `core:` registration adds +13 @2237, so the tree that adds BOTH
+            # `core:` registration adds +13 @2239, so the tree that adds BOTH
             # reads 10035. ⛔ Naming only the FIRST hunk above the entry is how
             # `9951` stood here — re-derive the SUM of every hunk above it.
             ("10035", "- test_pack_logic_writeprobe_11083.py"),
