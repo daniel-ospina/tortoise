@@ -877,8 +877,9 @@ def definition_boundary(sdk: Any, indicator_id: str) -> Any:
 #: there is FalkorDB Cloud, reached through the ``FALKORDB_CLOUD_URI`` secret that
 #: ``entrypoint.sh`` resolves into ``TORTOISE_DB_URI`` (``fly.toml`` leaves that
 #: key empty on purpose) — and its effective value is NOT measured here. This
-#: constant sits ten times under the 10000 that both MEASURED servers apply
-#: (1000 vs 10000). ⛔ ONE unbounded
+#: constant sits ten times under the 10000 the image-default container applies
+#: (1000 vs 10000), and under no cap at all on a lane container (``-1``); the
+#: local dev compose service pins the same 10000. ⛔ ONE unbounded
 #: query is truncated BY THE SERVER in store order
 #: and says nothing about it — #4515's silent-truncation class (an UNPAGED read
 #: over ``RESULTSET_SIZE`` backs up silently partial and verifies GREEN), whose
