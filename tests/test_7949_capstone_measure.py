@@ -5145,20 +5145,21 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # whole sentence's three numbers, so a re-derivation of one cannot leave
         # its neighbours behind the way it did at `a08f7bce3d`.
         ("RECONCILE-A1-A2-A5.md", "`TortoiseSDK._extract_session_v2` at", (
-            # 17974 -> 18728: #12060 adds its own lines to sdk.py above this call,
+            # 17974 -> 18728 -> 18743: #12060 and then #9649's reviewed guard add
+            # their own lines to sdk.py above this call,
             # and every forward merge of `origin/main` (`1f28d107cf`, `c7499ac7a7`
             # carrying #12112/#12111, then `9828250732`) moved the region again, so
             # every number in this table moved with them. Re-derived off THIS merged
             # tree (`grep -nF 'relation_write = apply_relation_edges(' tortoise/sdk.py`),
             # never carried forward from either side. The anchors are unchanged —
             # that is the point of keying a row on the symbol.
-            ("18728", "relation_write = apply_relation_edges("),
+            ("18743", "relation_write = apply_relation_edges("),
         ), "sdk"),
         ("RECONCILE-A1-A2-A5.md", "is the line above it, `:", (
-            ("18727", "from tortoise.relation_write import apply_relation_edges"),
+            ("18742", "from tortoise.relation_write import apply_relation_edges"),
         ), "sdk"),
         ("RECONCILE-A1-A2-A5.md", "`relation_write.py:7`, `sdk.py:", (
-            ("18715", "# `#10999` made the channel TRANSPORT ONLY"),
+            ("18730", "# `#10999` made the channel TRANSPORT ONLY"),
         ), "sdk"),
         # `subject_binding_available`'s DEFINITION and its CONSUME pair, in both
         # documents that state them — a row per document, because a row scopes to
@@ -5168,8 +5169,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("6607", "def subject_binding_available(graph) -> bool:"),
         ), "search_engine"),
         ("00-plan.md", "consumed at `sdk.py:", (
-            ("9867", "subject_binding_available,"),
-            ("9920", "and not subject_binding_available(graph):"),
+            ("9882", "subject_binding_available,"),
+            ("9935", "and not subject_binding_available(graph):"),
         ), "sdk"),
         ("03-test-design.md", "is a **fail-OPEN** probe (`search_engine.py:", (
             ("6607", "def subject_binding_available(graph) -> bool:"),
@@ -5178,8 +5179,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # row: a row carries ONE source key, and a mis-keyed cite must red with a
         # message rather than an IndexError (the guard below now says so).
         ("03-test-design.md", "is a **fail-OPEN** probe (`search_engine.py:", (
-            ("9867", "subject_binding_available,"),
-            ("9920", "and not subject_binding_available(graph):"),
+            ("9882", "subject_binding_available,"),
+            ("9935", "and not subject_binding_available(graph):"),
         ), "sdk"),
         # The A5 binder's CALL SITE (its `def` is in `subject_binding.py`; the plan
         # names the call), keyed by the quoted form the sentence prints.

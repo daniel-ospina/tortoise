@@ -47209,7 +47209,14 @@ class TortoiseSDK:
             # check, the transition check, the `status`-drop and the journal, so
             # dropping such a row there fails OPEN (measured: a superseded
             # `id: 0` Point was resurrected by `status='live'`).
-            _lifecycle_ids = [i for i in (_addressed_ids or ()) if i is not None]
+            # Two address arms can resolve the SAME id (a `:Point:Event` whose
+            # `id` and `eventId` are both the value the caller passed), and this
+            # list drives the guard loop, the write and the `restatus` journal —
+            # so it is de-duplicated ONCE, in the order the arms produced it, or
+            # one intent would append two records (`delete_point`'s own comment
+            # names that class: a second destruction record for one intent).
+            _lifecycle_ids = list(dict.fromkeys(
+                i for i in (_addressed_ids or ()) if i is not None))
             if _hits and _idless:
                 # An id-less Point (url/eventId only) cannot be handed to the
                 # id-keyed instrument, so terminality cannot be checked. Fail

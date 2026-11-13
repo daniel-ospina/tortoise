@@ -815,3 +815,51 @@ def test_a_map_less_stored_status_still_defers(env):
     assert _row(sdk, pid)["status"] == "live"
     sdk.update_entity(pid, status="retracted")
     assert _row(sdk, pid)["status"] == "retracted"
+
+
+def test_two_address_arms_resolving_one_id_journal_one_record(env):
+    """Review round 9, P2: the resolved-id list must be DE-DUPLICATED.
+
+    A `:Point:Event` whose `id` and `eventId` are the same string is resolved by
+    two arms, so an un-deduplicated list journalled the SAME `restatus` twice for
+    one intent — the class `delete_point`'s own comment names ("a second
+    destruction record for one intent"). Replay is idempotent, so only a count
+    assertion catches it.
+    """
+    sdk, events = env
+    pid = _live(sdk, "one node, two arms")
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) SET n:Event, n.eventId=$id",
+        params={"id": pid})
+
+    sdk.update_entity(pid, status="retracted")
+    recs = [r for r in _mutations(events, pid) if r.get("op") == "restatus"]
+    assert len(recs) == 1, f"one intent must journal one record: {recs}"
+
+
+def test_a_write_that_matches_no_row_journals_nothing(env, monkeypatch):
+    """Review round 9, P2: the journal is gated on the write having MATCHED.
+
+    ``_journal_entity_mutation`` runs only when ``SET n += $s`` reported a row, or
+    a row deleted between the read and the write would leave a `restatus` record
+    for a write that never happened (the class the loop's own comment names).
+    The deletion is injected through the guard, which is the last step before the
+    write, so the race is deterministic here.
+    """
+    sdk, events = env
+    pid = _live(sdk, "vanishes before the write")
+    real = sdk._assert_lifecycle_guard
+
+    def spy(point_id, **kw):
+        out = real(point_id, **kw)
+        sdk._get_proj().g.query(
+            "MATCH (n:Point {id:$id}) DETACH DELETE n", params={"id": point_id})
+        return out
+
+    monkeypatch.setattr(sdk, "_assert_lifecycle_guard", spy)
+    # ⚠️ a DECLARED transition, not an entailed one: an entailed status skips the
+    # guard loop entirely (that is its purpose), so it would not run the spy.
+    sdk.update_entity(pid, status="retracted")
+    restatus = [r for r in _mutations(events, pid) if r.get("op") == "restatus"]
+    assert restatus == [], (
+        f"a write that matched no row must not journal a restatus: {restatus}")
