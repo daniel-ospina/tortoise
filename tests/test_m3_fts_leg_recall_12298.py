@@ -1456,7 +1456,11 @@ def test_section_1_locators_still_point_at_the_code_they_name(brief: str) -> Non
     assert marker in scope.replace("*", ""), (
         "§1 lost the 'pinned read of the code' table — the locators it carries "
         "are the only record of which lines the mechanism claims rest on")
-    table = scope[scope.replace("*", "").index(marker):]
+    # ⛔ The index must be measured on the SAME string it is applied to
+    # (round-25 review, cycle 5): an index from the stripped copy applied to the
+    # raw slice starts k characters early, and k grows with every emphasis edit.
+    stripped = scope.replace("*", "")
+    table = stripped[stripped.index(marker):]
 
     for rel, line, symbol, cited in _S1_LOCATORS:
         assert cited in table, (
@@ -2648,7 +2652,9 @@ def test_brief_production_estimate_rederives_from_the_per_class_cells(
         f"§4.3's code-token share cell says {table[2][1]!r}; the bound below it "
         f"is derived from {token_share:.1f} % — a SUBSTRING check passes on "
         "`19.0 %`, so the cell is compared as a number")
-    assert "NOT RECORDED" in table[2][1]
+    # ⛔ A structural match like the rest (round-25 review, cycle 5): the raw
+    # cell made `NOT **RECORDED**` a false red.
+    assert "NOT RECORDED" in _plain(table[2][1])
     total = definite + hashed + token_share
     assert round(total, 1) == 73.5
     assert round(100 - total, 1) == 26.5
