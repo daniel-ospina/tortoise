@@ -45,11 +45,14 @@ reinvented).
 """
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import inspect
 import json
 import re
+from collections import Counter
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -420,6 +423,21 @@ def test_artifact_carries_the_rule_as_the_harness_constant(
 
 def test_artifact_population_is_the_committed_pin(artifact, population) -> None:
     assert artifact["population_digest"] == population["digest"]
+    # ⛔ The digest is a CONTENT digest, so it has to be RE-DERIVED from the names
+    # it summarises — comparing the same string on both sides proves only that
+    # the two files agree, not that either was built from those names (#12349
+    # review, P2-1). Measured on the earlier cut: rewriting one class's name text
+    # in `population.json` and leaving `digest` untouched kept all 72 tests
+    # green, while the recomputed hash moved off the recorded `668229a6adeb9d0a`
+    # — the exact tamper class a content digest exists to catch. The derivation
+    # is the producer's own (`tools/m3_fts_leg_recall.py`: sha256("\n".join(
+    # names))[:16]).
+    assert population["digest"] == hashlib.sha256(
+        "\n".join(r["name"] for r in population["names"]).encode()
+    ).hexdigest()[:16], (
+        "`population.json`'s digest does not re-derive from its own names — the "
+        "pin file can then be hand-edited with every other gate in this file "
+        "still green")
     assert artifact["sample"] == population["sample"] == len(population["names"])
     ids = [r["id"] for r in population["names"]]
     assert len(ids) == len(set(ids)), "the pinned ids must be unique"
@@ -984,6 +1002,28 @@ def test_brief_census_and_identifier_decomposition_are_the_artifact(
         "§2's degenerate-query census no longer matches `terms_census` — the "
         "control break is stated as 126 of 300 and recorded as "
         f"{census['degenerate']} of {census['queries']}")
+    # ⛔ §2's DEGENERATE CLASS SPLIT is published ("108 `definite` … and 18
+    # ident — none of them a path") and was unpinned while §2's census is
+    # described as compared CELL BY CELL (#12349 review, P2-2): rewriting those
+    # cells to 118/28 kept all 72 tests green. It is arithmetic over
+    # `degenerate_ids` + `names[i].cls`, exactly like §3.4's decomposition, so
+    # it gets the same cell treatment.
+    by_id = {n["id"]: n for n in population["names"]}
+    deg = Counter(by_id[i]["cls"] for i in
+                  artifact["arms"]["postgres_bm25/tokens"]["degenerate_ids"])
+    assert sum(deg.values()) == census["degenerate"], (
+        f"the degenerate ids cover {sum(deg.values())} of the census's "
+        f"{census['degenerate']} — the split below would then describe a "
+        "different population")
+    assert f"{deg['definite']} `definite`" in text, (
+        f"§2 must state {deg['definite']} `definite` degenerate queries — "
+        "recomputed from `degenerate_ids` and the pinned classes")
+    assert f"{deg['ident']} ident" in text, (
+        f"§2 must state {deg['ident']} ident degenerate queries — recomputed "
+        "from `degenerate_ids` and the pinned classes")
+    assert (deg["path"] == 0) == ("none of them a path" in text), (
+        "§2's `none of them a path` clause must agree with the classes: "
+        f"{deg['path']} degenerate queries are `path`")
     subset = artifact["verdict"]["primary_arm_tokens_controlled_subset"]
     assert f"**{subset['n']} tokens-controlled queries**" in text or \
         f"the **{subset['n']} tokens-controlled queries**" in text, (
@@ -1684,7 +1724,10 @@ def test_the_index_wait_REFUSES_on_timeout_and_on_overshoot(tool_mod) -> None:
             row = ["Object", {"numDocuments": n}]
 
             class _R:
-                result_set = [row]
+                # ClassVar, not a plain mutable class attribute (RUF012): the
+                # stub only has to expose `result_set`, and ruff's `check .`
+                # gate reds on a mutable default here (agent-infra-ci / lint).
+                result_set: ClassVar[list] = [row]
 
             return _R()
 
