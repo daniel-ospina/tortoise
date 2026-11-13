@@ -225,10 +225,14 @@ async def test_a_plain_dict_payload_is_still_recorded_ok_at_the_seam(
     dict LITERAL carrying a CONSTANT ``"error"`` key. It is therefore not a
     proof that a refusal the gate cannot see cannot be written. The named
     limits live in ``tests/test_mcp_refusal_telemetry_9084.py`` under
-    "WHAT THE GATE STILL DOES NOT SEE"; one of them is live today —
-    ``tortoise_overview()`` with no ``section`` nests each section's payload one
-    level down (``combined[sec] = result``), which the seam's two-level read
-    does not reach, so a failing section is recorded ``ok``. A KEYLESS refusal
+    "WHAT THE GATE STILL DOES NOT SEE"; one of them is live today — a **PARTIAL**
+    summary of ``tortoise_overview()`` with no ``section`` still nests each
+    section's payload one level down (``combined[sec] = result``), which the seam's
+    two-level read does not reach, so such a section is recorded ``ok``. A
+    **TOTAL** outage is NOT that shape: since #11153 it returns the refusal at the
+    TOP level, so the wire says `isError: true` and the row stops reading ``ok``.
+    Stating the qualifier is what keeps this paragraph from teaching a lane to
+    "restore" the nesting for the total case. A KEYLESS refusal
     is the other boundary: the seam classifies one only when the body returns
     an `_SafeError` (the exact-payload arm), and the gate cannot match a
     keyless dict at all — the last served body that answered one with a plain

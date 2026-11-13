@@ -438,6 +438,25 @@ def test_every_designed_prose_refusal_is_classified_not_a_crash(monkeypatch):
             mod._live_call_tool("tortoise_query", {})
         assert str(caught.value) == wire, str(caught.value)
 
+    # ⛔ SOURCE PINS, or "a copy cannot be reintroduced" is not actually enforced.
+    # The wire strings above are BUILT FROM the constants, so this test would stay
+    # green if a producer reverted to an inline copy of the sentence: the wire would
+    # keep the OLD text, the constant would be reworded, and this test would rebuild
+    # the wire from the NEW constant and never touch the producer. Read the
+    # producers' own source instead (the idiom is
+    # `tests/test_7357_memory_ceiling_legibility.py`).
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    server_src = (root / "tortoise" / "mcp_server.py").read_text(encoding="utf-8")
+    hosted_src = (root / "tortoise" / "hosted_api.py").read_text(encoding="utf-8")
+    assert "_REFUSAL_GRAPH_LOOKUP_MARGIN_MESSAGE" in server_src, (
+        "the graph-lookup margin PRODUCER must write the constant, not a copy of "
+        "the sentence — otherwise rewording the constant leaves the wire on the old "
+        "text and this pin silently stops covering it")
+    assert "_REFUSAL_RATE_LIMIT_LEAD" in hosted_src, (
+        "the sensitive-op 429 PRODUCER must write the constant, not a copy")
+
     for crash in ("Error calling tool: TypeError: 'NoneType' object is not subscriptable",
                   "connection reset by peer"):
         assert mcp_client.refusal_message(crash) is None, crash

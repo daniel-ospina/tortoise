@@ -11746,15 +11746,16 @@ def _sensitive_op_budget(op: str, bucket_key: Hashable) -> dict | None:
     # classifies a designed prose refusal by the LEAD in this constant, so a copy
     # of the sentence here would silently turn the MCP arm's 429 into a "crash" at
     # every caller (rc 1 instead of rc 3, `call failed:` instead of the refusal
-    # payload) — #11153 review round 9, measured. Imported lazily: `mcp_auth`
-    # imports fastmcp at module level and this module is imported by script paths.
-    from tortoise.mcp_auth import _REFUSAL_RATE_LIMIT_LEAD
-
+    # payload) — #11153 review round 9, measured. ⛔ Read through the module alias
+    # this file already imports at module level (`from tortoise import mcp_auth as
+    # _mcp_auth`): an earlier version imported it lazily "because mcp_auth imports
+    # fastmcp at module level", which was FALSE here — this module had already
+    # imported mcp_auth, fastmcp and all, before this line ran.
     return {
         "buckets": _SENSITIVE_BUCKETS, "lock": _SENSITIVE_LOCK,
         "limit": max_per_hour, "window_s": 3600,
         "key": bucket_key,
-        "detail": f"{_REFUSAL_RATE_LIMIT_LEAD}{op}. Please try again later.",
+        "detail": f"{_mcp_auth._REFUSAL_RATE_LIMIT_LEAD}{op}. Please try again later.",
         "retry_after_s": 3600,
     }
 

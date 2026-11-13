@@ -381,8 +381,14 @@ def test_the_gate_coverage_claim_is_scoped_to_what_it_actually_sees():
           gate run as coverage of shapes the gate never matches, and re-open
           #9084 in one of them;
     (iii) the OTHER limit that is live today is still there, so a green run
-          cannot be read as "nothing at all is left": `tortoise_overview()`
-          with no `section` nests each section's payload one level down.
+          cannot be read as "nothing at all is left": a **PARTIAL** summary of
+          `tortoise_overview()` with no `section` still nests each section's
+          payload one level down. A **TOTAL** outage does not — since #11153 it
+          returns the refusal at the TOP level, so the wire says `isError: true`
+          and the row stops reading `ok` (`mcp_server.py`, the `answered == 0 and
+          first_refusal is not None` arm). Qualifying this matters: the unqualified
+          form taught the pre-#11153 behaviour and would have a lane "restore" the
+          nesting for the total case, re-opening the false PASS.
     """
     funcs = {n.name: n for n in ast.parse(MCP_SERVER.read_text()).body
              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}

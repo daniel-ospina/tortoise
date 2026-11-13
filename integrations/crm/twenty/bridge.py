@@ -318,9 +318,6 @@ def push_to_tortoise(frontmatter: dict) -> dict:
         point_ids = []
         failures = []
 
-        point_ids = []
-        failures = []
-
         meeting_point = _write("tortoise_create_point", {
             "kind": "event",
             "content": f"Meeting: {frontmatter['title']} ({frontmatter['date']})",

@@ -200,7 +200,6 @@ def test_call_failure_keeps_exit_one(monkeypatch, capsys):
         raise RuntimeError("Error calling tool: TypeError: 'NoneType' is not subscriptable")
 
     monkeypatch.setattr(cli, "call_tool", boom)
-    captured = capsys.readouterr()
     assert cli.main(["call", "some_tool"]) == 1
     captured = capsys.readouterr()
     assert "call failed" in captured.err

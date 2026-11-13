@@ -1040,14 +1040,16 @@ def _is_refusal_envelope(text: str) -> bool:
     """True when a client error's message IS one of the surface's refusals.
 
     Delegates to `tortoise.mcp_client.refusal_message`, which OWNS the
-    classification (it owns `call_tool`, the boundary that raises). FOUR shapes
-    are rc-3 material in this file: a `_safe`/`_quota_gated` refusal (fastmcp
-    raises `content[0].text` — for a `_safe` payload the JSON error dict), and the
-    transport wait-bound refusal's THREE prose arms (`-32009`: dispatched,
-    never-dispatched, and a refused WRITE — the routine refusal for an expensive
-    census read). A server-side CRASH's text (`Error calling tool: TypeError: …`)
-    matches none and stays a `ToolError`, so a driver paging on "the run crashed"
-    is not silenced.
+    classification (it owns `call_tool`, the boundary that raises). It matches a
+    JSON ERROR ENVELOPE (`_safe`/`_quota_gated`, where fastmcp raises
+    `content[0].text` = the JSON error dict) PLUS every prose entry in
+    `tortoise.mcp_auth.REFUSAL_PROSE_MESSAGES` — the three `-32009` wait-bound arms
+    (dispatched, never-dispatched, a refused WRITE), the graph-lookup margin
+    refusal, and the sensitive-op rate-limit 429 — matched by prefix. That list is
+    the ONE registry; do NOT restate a count here, because this docstring said
+    "FOUR shapes" while the delegate matched six (review round 5). A server-side
+    CRASH's text (`Error calling tool: TypeError: …`) matches none and stays a
+    `ToolError`, so a driver paging on "the run crashed" is not silenced.
 
     The rationale for the split, measured: review round 4 (the prose arm, which
     turned the routine refusal into an uncaught traceback with rc 1) and round 8

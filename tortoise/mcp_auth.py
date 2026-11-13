@@ -889,14 +889,25 @@ _TRANSPORT_WAIT_BOUND_WRITE_MESSAGE = (
     "Wait for the advertised delay before retrying."
 )
 
-#: Every DESIGNED tool-level refusal whose MESSAGE is PROSE rather than a JSON
-#: envelope. ONE collection, read by `mcp_client.refusal_message` — the classifier
-#: that keeps a designed refusal apart from a server CRASH (`Error calling tool:
-#: TypeError: …`). A refusal added without an entry here does not merely go
-#: unclassified: it reads as a crash at every consumer (rc 1 instead of rc 3 in
-#: `tools/curate_graph.py`, `call failed:` instead of the refusal payload in the
-#: CLI, round 9's measured finding). The JSON-envelope arm is matched separately,
-#: by parsing.
+#: The prose refusals `mcp_client.refusal_message` recognises. ONE collection, read
+#: by the classifier that keeps a designed refusal apart from a server CRASH
+#: (`Error calling tool: TypeError: …`). A refusal added without an entry here does
+#: not merely go unclassified: it reads as a crash at every consumer (rc 1 instead
+#: of rc 3 in `tools/curate_graph.py`, `call failed:` instead of the refusal payload
+#: in the CLI, round 9's measured finding). The JSON-envelope arm is matched
+#: separately, by parsing.
+#:
+#: ⛔ SCOPE, stated precisely because an earlier version of this comment said "Every
+#: DESIGNED tool-level refusal whose MESSAGE is PROSE" and that was FALSE: the
+#: `graph`-ARGUMENT family (`mcp_auth.GraphTargetError` — "cannot be re-targeted by
+#: a `graph` argument", "No graph '…' is reachable from this workspace", and
+#: `_take_graph_argument`'s "does not take a `graph` argument") is NOT registered
+#: here. Those are raised as `ToolError(str(exc))` from `mcp_server`, and they are
+#: still reported as crashes by the CLI — PRE-EXISTING, and deliberately not fixed
+#: at this gate: their messages embed a variable graph NAME, so matching them needs
+#: prefix design rather than a startswith on a static sentence. They are recognised
+#: where it matters for routing — `curate_graph` classifies them through
+#: `_looks_like_graph_refusal` to pick the credential-bound fallback.
 #:
 #: ⛔ ALL THREE `-32009` wait-bound arms are named, including the WRITE one, rather
 #: than leaning on the base message's leading 60 characters: they agree today only
