@@ -2621,7 +2621,7 @@ to answer.
   per §8's rule for *any* edit to this file.
 - **§10.29 succeeds this entry**, and it re-measures the same values: `34bb716315`'s `+9`
   insert was removed again by `391313ca9a`, so nothing below moved. The entry that carries
-  a `LIVE for the merged tree` bullet is §10.30, not this one.
+  a `LIVE for the merged tree` bullet is §10.31, not this one.
 
 ### 10.29 — the §11/§9 cite block re-derived for THIS branch's delta, round 15's code included (2026-11-13, `#12067`)
 
@@ -2689,11 +2689,17 @@ to answer.
   the `edges.py` ones from §3.4/§3.7/§7 above, and the `record_projection.py` one from this
   entry, because no live carrier holds it.
 - **§10.30 succeeds this entry**, and it re-measures the §11/§9 cite block above against `main` at
-  `5bacb44e0b`. The entry that carries a `LIVE for the merged tree` bullet is §10.30, not this one.
+  `5bacb44e0b`. The entry that carries a `LIVE for the merged tree` bullet is §10.31, not this one.
   ⛔ For the `edges.py` windows the live carriers are §3.4/§3.7/§7 (this entry names them); for
   `record_projection.py:4996-4999` this entry is still the ONLY carrier, and it stays correct.
 
 ### 10.30 — the §11/§9 cite block re-derived on `main` after the post-§10.29 merge wave (2026-11-13, `#12266`)
+
+> ⛔ **Superseded for the merged tree by §10.31.** §10.30 measured `main` at `5bacb44e0b`; `#12492`
+> then inserted a net `+3` inside `tortoise/sdk.py` above every carrier below, so the lines this entry
+> opens are no longer the lines this tree carries. Nothing below is corrected in place — those numbers
+> are a faithful record of the head this entry names. §10.31 owns the live values (the `sdk.py`
+> carriers AND the `#548` window).
 
 > **A successor entry, not an edit to §10.29.** §10.29 recorded the branch's own delta against the
 > base it names, and that record stays true to that head. `main` has since advanced: `#12348`
@@ -2749,10 +2755,11 @@ to answer.
 > **`+3`** above `_extract_session_v2` in `tortoise/sdk.py` (5 insertions, 2 deletions), which moved
 > **every** `sdk.py` carrier below it by exactly `+3`. Measured per commit: `18022` at `89c41ad8ba`,
 > `c2e579e629`, `017a9af331` and `adb6800c1e`; `18025` at `cca42fa599` and after.
-> `tortoise/extractor_v2.py`, `tortoise/projection/`, `tortoise/search_engine.py` and
-> `tortoise/pi-hooks/tortoise-capture.ts` did **not** move — re-measured, not assumed: `12730`,
-> `15149`, `15277`, `15302`, `15611`, `15621`, `17804`, `6637` and `955`/`947` all still open on the
-> content they claim.
+> `tortoise/extractor_v2.py`, `tortoise/projection/` and `tortoise/pi-hooks/tortoise-capture.ts`
+> did **not** move; `tortoise/search_engine.py` gained `+30` (`31` / `1` at `:2507`–`:2584`, from
+> `#12536`), which is why its cite moves `6607`→`6637` in this same PR — re-measured, not assumed:
+> `12730`, `15149`, `15277`, `15302`, `15611`, `15621`, `17804`, `6637` and `955`/`947` all still open
+> on the content they claim.
 
 - **The move is uniform for THIS wave, which is why a mapping is legitimate here and was not at
   §10.30.** `+3` describes every one of the thirteen carriers; the §10.30 wave was the one where an

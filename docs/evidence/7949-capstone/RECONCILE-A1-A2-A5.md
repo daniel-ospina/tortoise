@@ -760,25 +760,42 @@ git grep -n 'result\["relations"\]' -- tortoise/        # at this record's merge
                                                           # (§0 above). (⚠️ the `-- tortoise/` scope is
                                                           # the claim: unscoped it also matches the
                                                           # reader below)
-git grep -c 'result\["relations"\]' -- tests/          # tree-wide READERS — TWO files on this merge:
+git grep -c 'result\["relations"\]' -- tests/          # tree-wide READERS — THREE files on this merge:
                                                           # tests/test_10999_batch_story_relations.py — 56
-                                                          # LINES — and tests/eval/write_path/
-                                                          # test_write_path_relation_lane.py — 3 — so 59
+                                                          # LINES — tests/eval/write_path/
+                                                          # test_write_path_relation_lane.py — 3 — and the
+                                                          # capstone pin itself, tests/
+                                                          # test_7949_capstone_measure.py — 1 — so 60
                                                           # LINES in total (`-c` counts lines per file);
                                                           # contract pins, not producers
-git grep -o 'result\["relations"\]' -- tests/ | wc -l    # 62 OCCURRENCES on this merge (59 lines + the 3
+# ⚠️ the THIRD file is a contract pin that READS the channel like the other two — it was
+# added after this record was written, so the earlier "TWO files … 59" was true of the
+# head this block was first measured on and is re-measured here rather than left stale.
+git grep -o 'result\["relations"\]' -- tests/ | wc -l    # 63 OCCURRENCES on this merge (60 lines + the 3
                                                           # doubly-named ones below). The 59 occurrences
                                                           # the earlier text printed were `origin/main`'s
                                                           # at `62248db88`, BEFORE the second reader file
                                                           # existed — so that half is stale here too
 git grep -n -o 'result\["relations"\]' -- tests/ \
   | cut -d: -f2 | sort | uniq -d                          # the 3 extra: the doubly-named :1551, :1579, :161
-grep -c '^  - id:' config/v4-mechanisms.yml                 # 13 — and none for the hierarchy mechanism
+grep -c '^  - id:' config/v4-mechanisms.yml                 # 15 — and ONE for the hierarchy mechanism
+                                                          # (DM5, `:1695`, landed by `#11001` AFTER this
+                                                          # record was written; `13`/"none" was true of
+                                                          # the head it measured). Read it before adding
+                                                          # a second row: `declared_hierarchy` is already
+                                                          # registered there
 tools/who-is-on.sh 10984 --repo .                           # exit 0 = complete answer; exit 2 = a
                                                           # surface could not be queried — never read
                                                           # either as "nobody"
 uv run python tools/collision_preflight.py 10984 --repo .    # the dispatch-time gate (exit 0 = clear)
-grep -n -i -E 'hierarch|hasPart|part-whole|11001|10984' config/v4-mechanisms.yml      # no output
+grep -n -i -E 'hierarch|hasPart|part-whole|11001|10984' config/v4-mechanisms.yml      # 13 lines on this
+                                                          # merge — DM5 at `:1695` names
+                                                          # `pack_hierarchy.py`, `declared_hierarchy` and
+                                                          # `tests/test_pack_hierarchy_11001.py`; it was
+                                                          # empty when this record was written
+# ⛔ So the registry DOES declare the hierarchies surface — what it does NOT register is a
+# PRODUCER of `hasPart` edges on the capture path, which is the claim A1 actually makes. The
+# producer claim is the call-shaped grep above, still empty.
 # …and the structural edges that DO exist on the capture path, which is why the claim above is scoped:
 sed -n '275,283p' docs/evidence/7949-capstone/probes/capstone_measure.py   # `references`, via link_source_to_event
 sed -n '19452p' tortoise/sdk.py                             # the call (`references`'s writer)

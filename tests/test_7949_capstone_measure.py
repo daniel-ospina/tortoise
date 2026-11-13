@@ -5984,9 +5984,13 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # ...and THAT sentence names a second file, so its `.ts` pair takes its
         # own row: a row carries ONE source key. Both anchors are the FUNCTIONS
         # the row's prose names (`postCapture` and its `install-probe` sibling),
-        # never a bare offset — the pair had rotted by nine lines while every sdk
-        # cite beside it was re-derived (#12545 review, P2), because nothing read
-        # a `.ts` file at all.
+        # never a bare offset. The row named `:948`/`:938`; the tree carries those
+        # two `def`s at `:955`/`:947`, which are **always 8 apart** across all 27
+        # revisions of the file — so nothing "rotted" and there is no offset to
+        # reuse: `:938` was `clearTimeout(timer);` and `:948` was
+        # `cfg: CaptureConfig,`, i.e. the pair was WRONG, not shifted (the file did
+        # not move in this wave at all). A reader who takes an offset from it
+        # re-derives `948` → `957` and lands outside both functions.
         ("00-align.md", "`llm:deepseek-direct` is what", (
             ("955", "export function postCapture("),
             ("947", "export function postInstallProbe("),
