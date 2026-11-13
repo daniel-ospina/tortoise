@@ -1381,6 +1381,44 @@ def test_a_NONEXISTENT_wheel_path_is_refused(tmp_path):
     assert canary.main(["--wheel", str(tmp_path / "nope.whl")]) == 2
 
 
+def test_a_VALID_wheel_reaches_install_and_run_and_consults_no_index(tmp_path, monkeypatch, capsys):
+    """The pre-publish gate's PASSING path — the only path `publish-pypi.yml` takes.
+
+    Both existing `--wheel` cases are REFUSALS: they return before any install, so
+    `main()`'s forwarding of the flag to `install_and_run` was unpinned (#12363 round 16).
+    Dropping `wheel=wheel` there sends the gate into INDEX mode while `build_report`
+    still renders wheel mode: it installs the PREVIOUSLY PUBLISHED release, and if that
+    one is good the gate exits 0 and an uninstallable wheel is uploaded irreversibly —
+    the exact regression the module's own comment at the `wheel` kwarg exists for. A
+    healthy index here is therefore not decoration: reaching it at all is the failure.
+    """
+    wheel = tmp_path / "dist" / "tortoise_graph-0.3.0-py3-none-any.whl"
+    wheel.parent.mkdir(parents=True)
+    wheel.write_bytes(b"PK\x03\x04 not a real wheel, never installed")
+
+    def _no_index(*_a, **_k):
+        raise AssertionError("a wheel-mode run must not consult the index")
+
+    monkeypatch.setattr(canary, "fetch_index", _no_index)
+
+    seen: dict = {}
+
+    def fake_install(**kwargs):
+        seen.update(kwargs)
+        return canary.Arm("engine-init", canary.OK, "`tortoise init` succeeds"), "$ fake\n"
+
+    monkeypatch.setattr(canary, "install_and_run", fake_install)
+
+    rc = canary.main(["--wheel", str(wheel), "--json"])
+    assert rc == 0, capsys.readouterr().err
+    assert seen["wheel"] == wheel, (
+        "--wheel did not reach install_and_run: the gate graded the index"
+    )
+    # The budget the workflow's arithmetic counts must ride along with the flag.
+    assert seen["package"] == canary.ENGINE_PACKAGE
+    assert seen["transcript_path"] is None
+
+
 def test_summary_says_unknown_is_red_on_purpose():
     summary = canary.render_summary(canary.Report())
     assert "CANNOT RUN" in summary
@@ -1508,15 +1546,21 @@ def test_a_transport_failure_or_a_bad_body_is_UNREADABLE(monkeypatch):
 
 
 def _stub_main(monkeypatch, arm):
-    monkeypatch.setattr(
-        canary,
-        "fetch_index",
-        lambda package, timeout: (
-            {"releases": {"0.2.0": []}, "info": {"version": "0.2.0"}},
-            "",
-            canary.INDEX_OK,
-        ),
-    )
+    # ⛔ The CLIENT document must be HEALTHY here, and that is load-bearing (#12363 round
+    # 16). Returning ONE file-less document for both packages made `client-published`
+    # FAIL on every stubbed run, so `rc == 1` and `"FAIL" in out` were satisfied by the
+    # CLIENT arm: the CLI suite could not see the arm it exists to test. Measured by
+    # mutation — deleting `main()`'s `init_arm=` hand-off (so `init_arm=None`) left every
+    # assertion in both CLI cases still green, i.e. the canary could have stopped reading
+    # the published artifact's documented first command with 2146 lines of pins none the
+    # wiser. With a healthy client arm the only thing that can make this red is the arm
+    # under test.
+    def fake_fetch_index(package, timeout):
+        if package == canary.CLIENT_PACKAGE:
+            return _client_doc(), "", canary.INDEX_OK
+        return ({"releases": {"0.2.0": []}, "info": {"version": "0.2.0"}}, "", canary.INDEX_OK)
+
+    monkeypatch.setattr(canary, "fetch_index", fake_fetch_index)
 
     def fake_install(**kwargs):
         # Write at the path MAIN passes in: the wiring under test is
@@ -1559,6 +1603,10 @@ def test_the_cli_writes_the_summary_file_and_the_json_shape(tmp_path, monkeypatc
     assert payload["verdict"] == canary.FAIL
     assert payload["exit_code"] == 1
     assert {"name", "status", "gated", "detail"} <= set(payload["arms"][0])
+    # ⛔ The arm UNDER TEST, not merely the verdict (#12363 round 16): the client arm is
+    # healthy in this fixture, so a red may only come from `engine-init`.
+    engine = next(a for a in payload["arms"] if a["name"] == "engine-init")
+    assert engine["status"] == canary.FAIL, payload
 
 
 def test_a_wheel_that_installs_without_the_console_script_is_a_FAIL_not_UNKNOWN(tmp_path):
