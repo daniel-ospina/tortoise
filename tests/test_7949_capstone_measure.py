@@ -5307,18 +5307,21 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # whose +56 came from THREE landings in SIX hunks ABOVE the entry (8 at
         # 1954, 16 at 2267, 21 at 2316, 8 at 5119, 2 at 9286, 1 at 9289 — again
         # positions read off `6408da01ce` itself, not off the commits that added
-        # them); and 10147 at `main`'s CURRENT tip `2dbfb046d7` (+15 in ONE hunk
-        # at 2266, #12372's `tortoise_query` `entity_type` rows). Each of those
-        # ranges has hunks BELOW the entry too (`durations:`/`durations_floors:`
-        # rows) and those do not move the pin, which is why they are not in any
-        # sum. This branch adds +13 at 2278 (its own `core:` registration), so
-        # the tree that adds BOTH parents reads 10147 + 13 = 10160.
-        # `carve_out:` opens 10034 and `uri_requiring:` 10365 at THIS tree, so
-        # 10160 is inside the section, and the identical text also sits at 6206
-        # and 8667 (over `9828250732`'s 6082 / 8459 — the two move at DIFFERENT
+        # them); 10147 at `2dbfb046d7` (+15 in ONE hunk at 2266, #12372's
+        # `tortoise_query` `entity_type` rows); and 10172 at `main`'s CURRENT tip
+        # `1f4b0bc277` (+25: 13 at 2158 from #12452, 11 at 2295 from #12349's M3
+        # and 1 at 9325 in `tier1:`). Each of those ranges has hunks BELOW the
+        # entry too (`durations:`/`durations_floors:` rows) and those do not move
+        # the pin, which is why they are not in any sum. This branch adds +13 at
+        # 2279 (its own `core:` registration, measured as
+        # `@@ -2278,0 +2279,13 @@` against `origin/main`), so the tree that adds
+        # BOTH parents reads 10172 + 13 = 10185.
+        # `carve_out:` opens 10059 and `uri_requiring:` 10390 at THIS tree, so
+        # 10185 is inside the section, and the identical text also sits at 6230
+        # and 8691 (over `9828250732`'s 6082 / 8459 — the two move at DIFFERENT
         # rates, because only the hunks above each one count), which is what the
         # 5th element exists to refuse. ⚠️ Both of those are INDENTED sub-keys
-        # (`core:` 2256, `sdk:` 8433 at THIS tree) of `surfaces:`, so the
+        # (`core:` 2269, `sdk:` 8457 at THIS tree) of `surfaces:`, so the
         # resolver's nearest-column-zero-key rule reports the PARENT: a cite onto
         # either refuses with `sits in section 'surfaces:', not 'carve_out:'` —
         # measured, so a re-derivation onto it does not get told `sdk:` and
@@ -5367,23 +5370,24 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # (+13 @2237 and +1 @9150, #12294), 10021 at `87c07462a807` (+34: 32 at
             # 7537, 1 at 1039, 1 at 2237), 10022 at `42409813a7` (+1 @2237,
             # #12348), 10076 at `ca74f2375e` (+54 in FIVE hunks: 12 at 1610, 7 at
-            # 2250, 8 at 6830, 22 at 7565, 5 at 9759), 10132 at `6408da01ce`, and 10147 at
-            # the CURRENT `main` tip `2dbfb046d7` (+15 at 2266, #12372's
-            # `tortoise_query` `entity_type` rows). Their +56 and +15 are each
-            # stated from the tree that carries them, never summed off a diff:
-            # `6408da01ce`'s +56 is THREE landings in SIX hunks ABOVE the entry
-            # (8 at 1954, 16 at 2267, 21 at 2316, 8 at 5119, 2 at 9286, 1 at
-            # 9289), and `2dbfb046d7`'s +15 is ONE hunk at 2266. Both ranges also
-            # carry `durations:`/`durations_floors:` rows BELOW the entry, and
-            # those move the pin not at all. This branch's own `core:`
-            # registration adds +13 at 2278, so the tree that adds BOTH parents
-            # reads 10147 + 13 = 10160. ⛔ Naming only the FIRST hunk above the
-            # entry is how `9951` stood here — re-derive the SUM of every hunk
-            # above it AND at the CURRENT base, never at the base this sentence
-            # was first written against: the `10145` this row carried one `main`
-            # tip ago was correct at `9e0bb06062` and described no tree `main`
-            # would ever produce, which is the same defect one base later.
-            ("10160", "- test_pack_logic_writeprobe_11083.py"),
+            # 2250, 8 at 6830, 22 at 7565, 5 at 9759), 10132 at `6408da01ce`,
+            # 10147 at `2dbfb046d7` (+15 at 2266, #12372's `tortoise_query`
+            # `entity_type` rows), and 10172 at the CURRENT `main` tip
+            # `1f4b0bc277` (+25: 13 at 2158 from #12452, 11 at 2295 from #12349,
+            # 1 at 9325). Every one of those deltas is stated from the tree that
+            # carries it, never summed off a diff: `6408da01ce`'s +56 is THREE
+            # landings in SIX hunks ABOVE the entry (8 at 1954, 16 at 2267, 21 at
+            # 2316, 8 at 5119, 2 at 9286, 1 at 9289). Each range also carries
+            # `durations:`/`durations_floors:` rows BELOW the entry, and those
+            # move the pin not at all. This branch's own `core:` registration adds
+            # +13 at 2279, so the tree that adds BOTH parents reads
+            # 10172 + 13 = 10185. ⛔ Naming only the FIRST hunk above the entry is how
+            # `9951` stood here — re-derive the SUM of every hunk above it AND at
+            # the CURRENT base, never at the base this sentence was first written
+            # against: this row has now carried 10145, then 10160, each correct
+            # at its own base and each describing no tree `main` would ever
+            # produce, which is the same defect one base later.
+            ("10185", "- test_pack_logic_writeprobe_11083.py"),
         ), "ci_surfaces", "carve_out:"),
     )
     assert len(rows) >= 9, (
