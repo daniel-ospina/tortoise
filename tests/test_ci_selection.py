@@ -21382,6 +21382,32 @@ def test_curate_graph_tool_change_selects_core_not_tier1():
     assert "test_curation_11469.py" in m["test_files"], m
 
 
+def test_the_archive_and_its_gate_run_on_the_diffs_that_can_weaken_them():
+    # #11609: `tests/test_archive.py` holds the surface archive's guarantee — an archived
+    # symbol is GONE from the live surface (it must not be a slow leak back), `archive/`
+    # stays outside the shipped package, and the manifest/files/index agree. The only
+    # things that can weaken it are `tools/archive_surface.py` (the writer and the gate)
+    # and the archived files themselves.
+    #
+    # `tools/` is a flat NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches the
+    # tool, so before the CORE_ALSO entry a tool-only diff filtered to `changed == []`
+    # and took the tier-1 smoke path, where `test_archive.py` is NOT registered — the
+    # diff most able to weaken the guarantee was the one diff its proof never ran on
+    # (the #1349/#3332/#3616 silent-drop class). Same shape for `archive/`: an unknown
+    # path took the fail-closed FULL matrix, which is safe but is not a claim that the
+    # gate itself runs.
+    #
+    # Mutation check: removing either CORE_ALSO entry fails the arm that names it.
+    tool = _sel(["tools/archive_surface.py"])
+    assert tool["full"] is False, tool
+    assert tool["surfaces"] == ["core"], tool
+    assert "test_archive.py" in tool["test_files"], tool
+
+    archived = _sel(["archive/mcp-tools/example/tortoise_example.py"])
+    assert archived["surfaces"] == ["core"], archived
+    assert "test_archive.py" in archived["test_files"], archived
+
+
 def test_cache_eviction_census_runs_on_the_diffs_that_can_weaken_it():
     # #10976: `tests/test_cache_eviction_census.py` pins the egress census —
     # `tortoise/cache_eviction.py` (an unproven population may not be swept) and its

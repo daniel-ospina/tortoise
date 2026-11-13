@@ -7792,7 +7792,7 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
     # existed, but the note that enrols it did not until `#12000`'s F1b note),
     # and a provenance asserted here would be the false record this note exists
     # to prevent. ⛔ The count is SCOPED
-    # to that head rather than re-cut, because this file collects 179 now and no
+    # to that head rather than re-cut, because this file collects 180 now and no
     # run of it can report
     # 152; an unscoped figure here would be the stale-measurement defect §6 of the
     # census doc exists to forbid. What closed the gap is the AST guard below —
@@ -7880,13 +7880,13 @@ def test_the_census_doc_collects_what_the_file_collects():
     `--collect-only`, so adding a test reds this row until the figure is re-cut.
     The passed/skipped **split** is deliberately NOT pinned — it moves with the
     interpreter and the LANE, so pinning it would red on a box rather than on a
-    defect. Measured at this tree: the docker lane reads `178 passed, 1 skipped`
+    defect. Measured at this tree: the docker lane reads `179 passed, 1 skipped`
     (the skip is the `<3.12` re-derive; the three `main` reds this docstring used
     to record — `#12045`'s undeclared `tortoise.api::_emit` /
     `_verify_record_vector_width` writers — are cleared by `#12042`, landed as
-    `b367c54214a2`) and the carve-out lane reads `177 passed, 2 skipped` (that
+    `b367c54214a2`) and the carve-out lane reads `178 passed, 2 skipped` (that
     skip plus `tests/_live_utils.py`'s live-graph fixture, which only a lane with
-    a `TORTOISE_DB_URI` satisfies). Both splits add to the `179` re-derived
+    a `TORTOISE_DB_URI` satisfies). Both splits add to the `180` re-derived
     below, which is why the doc states its split as
     lane-bound: a carve-out run must not "correct" the docker lane's figure.
     """
@@ -8184,3 +8184,59 @@ def test_the_LIVE_census_names_the_unindexed_labels_and_writes_NOTHING():
         # would replace the real one). `contextlib.suppress`, not try/pass.
         with contextlib.suppress(Exception):
             graph.delete()
+
+
+def test_a_duplicate_literal_key_in_the_census_dicts_cannot_land_silently():
+    """#9314 — a duplicated literal key collapses BEFORE any code can see it.
+
+    `WRITER_CENSUS` and `CENSUS_EVIDENCE` are dict literals, so Python keeps the
+    LAST binding and the earlier row is dead: the RUNTIME object cannot report the
+    duplicate, because it never saw one (`census_evidence_violations()` compares
+    key SETS, which are already collapsed). `#11996` landed exactly that pair in
+    both dicts, and these DICT duplicates were caught only by `ruff`'s `F601` —
+    post-merge, on the merge ref every open PR inherits.
+
+    So this pin is re-derived from the SOURCE AST and runs in the pytest lane,
+    which is the half the lint job cannot cover. `load()` in
+    `tortoise/embed_writer_register.py` already fails loud on the register's
+    tuple-of-pairs for the same reason; the dicts here had no equivalent.
+
+    ⛔ `main` was red from TWO causes at `9828250732`, and this pin closes the
+    second: the register's duplicate raised at import (so this whole file could not
+    even collect), while the dict duplicates here were caught only by `ruff`'s
+    `F601` after the merge — never in the pytest lane.
+    """
+    src = (probe.REPO_ROOT / "tools/dod_5090_probe.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+
+    wanted = {"WRITER_CENSUS", "CENSUS_EVIDENCE"}
+    keys_by_dict: dict[str, list[str]] = {}
+    for stmt in tree.body:
+        name: str | None = None
+        value = None
+        if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+            name, value = stmt.target.id, stmt.value
+        elif (
+            isinstance(stmt, ast.Assign)
+            and len(stmt.targets) == 1
+            and isinstance(stmt.targets[0], ast.Name)
+        ):
+            name, value = stmt.targets[0].id, stmt.value
+        if name in wanted and isinstance(value, ast.Dict):
+            keys_by_dict[name] = [
+                ast.literal_eval(k) for k in value.keys if k is not None
+            ]
+
+    assert set(keys_by_dict) == wanted, (
+        "the declarations this pin reads were renamed or stopped being a dict "
+        f"literal — found {sorted(keys_by_dict)}, wanted {sorted(wanted)}. "
+        "Re-derive the pin rather than deleting it")
+    for name, keys in keys_by_dict.items():
+        assert len(keys) >= 10, (
+            f"{name} parsed to {len(keys)} literal keys — too few to be the real "
+            "table, so this pin would pass vacuously")
+        dupes = sorted({k for k in keys if keys.count(k) > 1})
+        assert not dupes, (
+            f"{name} declares {dupes} more than once. Python keeps the LAST "
+            "binding, so the earlier row is DEAD — an active override, not a "
+            "harmless no-op (#9314, measured on #11996)")

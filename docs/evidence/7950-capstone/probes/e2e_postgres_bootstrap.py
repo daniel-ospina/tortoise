@@ -7,7 +7,12 @@ Creates only what the record migrations depend on:
     service_role);
   * `public.organizations(id, name, graph_name)` and
     `public.graphs(id, org_id, name, namespace)` — the tenancy substrate;
-  * then applies the record migrations in filename order.
+  * then applies the record migrations in the order this file's `MIGRATIONS`
+    list names them. That is the registry order
+    (`record_projection.RECORD_MIGRATIONS`), which is deliberately NOT filename
+    order — the list is pinned to that tuple in EQUALITY (#9550), so a forward
+    retirement such as `#11827`'s sits where the registry puts it, not where
+    its filename date would sort.
 
 Run:  uv run --with psycopg2-binary python .../e2e_postgres_bootstrap.py
 """
@@ -37,11 +42,18 @@ MIGRATIONS = [
     # to it (`UndefinedColumn` on the point INSERT). `tests/
     # test_7950_capstone_probe.py` pins this list to `RECORD_MIGRATIONS`.
     "20261018000001_record_point_money_value_2782.sql",
-    # #11827's FORWARD `ALTER TABLE public.point DROP COLUMN as_of`. It contributes
-    # no column and no refusal, so nothing the probe drives needs it for a PARSE —
-    # applied because the list is pinned to `RECORD_MIGRATIONS` in EQUALITY (#9550)
-    # and a DROP is a schema change like any other: omitting it stands up a Postgres
-    # that is not the one the shipped read runs against.
+    # #11827's retirement: `ALTER TABLE public.point DROP COLUMN IF EXISTS
+    # as_of`. It contributes no column and no refusal, so nothing here READS it
+    # — it is listed for the registry reason `RECORD_MIGRATIONS` states, and
+    # because this list is pinned to that tuple in EQUALITY (#9550): an entry's
+    # POSITION is part of the pin, so this one sits where the registry puts it
+    # (index 7, before the `capture_redactions` entry — registry order, not
+    # chronology).
+    #
+    # ⛔ This entry has been missing since #11827, which reddened the pin on
+    # `main` (#12155) — the list stood one migration short of the registry, so
+    # the probe would have stood up a schema in which the retirement had not
+    # been applied. `IF EXISTS` keeps the statement idempotent on re-apply.
     "20261110000001_record_point_retire_as_of_11827.sql",
     # FORWARD `ALTER TABLE public.session ALTER COLUMN capture_redactions TYPE
     # integer` (#9264). Same reason as the entry above: the probe drives the
