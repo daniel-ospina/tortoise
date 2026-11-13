@@ -1442,5 +1442,5 @@
    "keyword_only": 0
   }
  },
- "artifact_note": "ceiling_note text synced to the generator's corrected wording after the retraction (tools/candidate_recall_11901.py); NO MEASURED VALUE in this artifact changed, because the note carries no measurement \u2014 re-running the tool reproduces every number and emits this text"
+ "artifact_note": "ceiling_note text synced to the generator's corrected wording after the retraction (tools/candidate_recall_11901.py); NO MEASURED VALUE in this artifact changed, because the note carries no measurement. The ceiling_note is emitted natively by the generator, so a re-run reproduces it; THIS artifact_note is maintained by hand and is NOT emitted \u2014 a --out re-run overwrites the file and drops this sentence, and re-times every pool cell (a re-run also carries the rerank_degraded field, which these cells predate)."
 }
