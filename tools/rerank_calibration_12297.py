@@ -200,6 +200,27 @@ def _arm_block() -> dict:
 
 
 def run(args: argparse.Namespace) -> int:
+    # ⛔ THE AMBIENT GATE WOULD SILENTLY FALSIFY THE BASELINE, and this check runs
+    # FIRST because it needs no store — a mis-shaped run should fail before paying
+    # for one. "Before" is the read's own fused order; the arm then reranks it
+    # explicitly (``enabled=True``). If ``TORTOISE_FUSED_RERANK`` is armed in the
+    # shell, the read has ALREADY reranked the pool, so "before" and "after" are
+    # two rerank passes and the artifact reports gained/lost 0 with identical
+    # nDCG — a false zero that looks exactly like a real one, on an instrument
+    # whose whole job is to decide whether the lever earns its gate. Refuse, in
+    # the tool's own declared style (never a silent skip), and record the gate in
+    # the artifact so an intended armed run stays auditable.
+    from tortoise.rerank import rerank_pool_enabled
+
+    _ambient_gate = rerank_pool_enabled()
+    if _ambient_gate and not args.allow_reranked_baseline:
+        print("REFUSED: TORTOISE_FUSED_RERANK is armed, so the read's own order "
+              "is ALREADY reranked and \"before\" is not the fused baseline — "
+              "the run would report a rerank-vs-rerank zero. Unset it "
+              "(TORTOISE_FUSED_RERANK=) or pass --allow-reranked-baseline to "
+              "measure an armed read on purpose.", file=sys.stderr)
+        return 3
+
     uri = os.environ.get("TORTOISE_DB_URI") or ""
     if not uri.startswith(("docker://", "redis://")):
         print("REFUSED: no live FalkorDB in TORTOISE_DB_URI — S3 itself refuses "
@@ -209,7 +230,11 @@ def run(args: argparse.Namespace) -> int:
               "eval \"$uri\"", file=sys.stderr)
         return 3
 
-    from tortoise.rerank import DEFAULT_FUSED_RERANK_POOL, get_scorer, rerank_pool
+    from tortoise.rerank import (
+        DEFAULT_FUSED_RERANK_POOL,
+        get_scorer,
+        rerank_pool,
+    )
     from tortoise.sdk import TortoiseSDK
 
     # ⛔ #12297, MEASURED ON THIS BOX: torch defaults to one thread per core (16
@@ -362,6 +387,12 @@ def run(args: argparse.Namespace) -> int:
                 "pool_size": args.pool_size,
                 "model": args.model,
                 "torch_threads": args.threads,
+                # ⛔ The read path's OWN gate decides what the baseline IS. It is
+                # False on every legitimate run (a True here means the caller
+                # opted into a rerank-vs-rerank comparison via
+                # ``--allow-reranked-baseline``), and recording it is what makes
+                # that decidable from the artifact instead of from memory.
+                "fused_rerank_gate_armed": _ambient_gate,
                 "loadavg_1m": round(os.getloadavg()[0], 2),
             },
             "arms": arms,
@@ -416,6 +447,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--no-assert-permutation", action="store_true",
                    help="skip the in-run check that the rerank never changes "
                         "the row SET (kept ON by default: it is the contract)")
+    p.add_argument("--allow-reranked-baseline", action="store_true",
+                   help="PERMIT the run while TORTOISE_FUSED_RERANK is armed. "
+                        "Off by default because an armed read is already "
+                        "reranked, so \"before\" is not the fused order and the "
+                        "comparison is rerank-vs-rerank (a false zero). The "
+                        "artifact records `fused_rerank_gate_armed` either way.")
     p.add_argument("--out", default=None)
     args = p.parse_args(argv)
     if args.limit < CUT:

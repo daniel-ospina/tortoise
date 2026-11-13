@@ -4,9 +4,10 @@
 `CrossEncoderScorer`, landed under #317/#1545) and **not wired**. The wiring
 landed on this branch (`31cf88be51`) behind a gate that ships **OFF**
 (`TORTOISE_FUSED_RERANK`); this document is the calibration that decides whether
-it earns that gate. Machine-readable artifact beside it:
-`measurement-noun-path.json`. The **user-search** artifact is **not attached** —
-that arm was not run for this PR; §5 states it rather than citing a file.
+it earns that gate. Machine-readable artifacts sit beside it:
+`measurement-noun-path.json` and `measurement-user-search.json` (the second was
+NOT in this branch when §5 first cited it — §5 records that correction and then
+carries the run that has since been performed).
 
 Every number below was produced on **this box, on CPU** — it has no GPU — from
 the **shipped** code path, not a re-implementation.

@@ -137,3 +137,48 @@ def test_the_default_pool_is_the_wired_default():
     """The measured configuration must be the SHIPPED one, not a second one."""
     from tortoise import rerank
     assert cal.POOL == rerank.DEFAULT_FUSED_RERANK_POOL
+
+
+# ── 6. the run refuses a baseline that is not the fused order ──────────────
+
+def _run_ns(**over):
+    """The minimum Namespace `run` touches before its first refusal."""
+    ns = dict(sessions_dir="~/.tortoise/session-events", records=1, span=8,
+              limit=cal.POOL, pool_size=None, model=None, threads=1,
+              namespace="x", graph=None, per_query=False,
+              no_assert_permutation=False, allow_reranked_baseline=False,
+              out=None)
+    ns.update(over)
+    return type("NS", (), ns)()
+
+
+def test_an_armed_read_gate_refuses_the_run(monkeypatch, capsys):
+    """The read's OWN gate decides what "before" IS.
+
+    The arm reranks explicitly; if `TORTOISE_FUSED_RERANK` is already armed then
+    the read reranked the pool first, so `before` and `after` are two rerank
+    passes and the result is a gained/lost 0 that is indistinguishable from a
+    real zero. That is the one wrong answer this instrument must never produce,
+    and it needs no store to detect — so it is refused before the DB check.
+
+    ⛔ The STDERR assertion is the discriminating half: the store refusal ALSO
+    exits 3, and this test unsets the URI, so an exit-code-only assertion passes
+    with the gate refusal deleted (measured by mutation). Asserting the message
+    names the GATE is what makes this test able to fail.
+    """
+    monkeypatch.setenv("TORTOISE_FUSED_RERANK", "1")
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    assert cal.run(_run_ns()) == 3
+    err = capsys.readouterr().err
+    assert "TORTOISE_FUSED_RERANK" in err
+    assert "TORTOISE_DB_URI" not in err      # the gate fired, not the store
+
+
+def test_an_armed_gate_is_measurable_only_when_asked_for(monkeypatch, capsys):
+    """`--allow-reranked-baseline` opts in deliberately; then the refusal that
+    fires is the STORE one, which is how this test tells the two apart without a
+    DB."""
+    monkeypatch.setenv("TORTOISE_FUSED_RERANK", "1")
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    assert cal.run(_run_ns(allow_reranked_baseline=True)) == 3
+    assert "TORTOISE_DB_URI" in capsys.readouterr().err

@@ -101,10 +101,17 @@ DEFAULT_FUSED_RERANK_POOL = 40
 #: the cap is reported ALONGSIDE the leg verdict, never through ``degraded``
 #: (which in a leg trace means "a retrieval leg did not run", #8487 review P1).
 #: ``rerank_pool`` is the WIDTH BOUND APPLIED — the most candidates that COULD
-#: have been scored — not the number that were. ``rerank_scored`` is that count
-#: and ``rerank_unscored`` is the pool minus it, so on a degraded arm the triple
-#: reads ``pool=40, scored=0, unscored=len(pool)``: the bound is still the bound,
-#: nothing was scored under it. Read the key as the cap, never as an achievement.
+#: have been scored — not the number that were. ⛔ THE OTHER TWO ARE COUNTED
+#: AGAINST DIFFERENT DENOMINATORS, so do not cross-check them against the bound:
+#: ``rerank_scored`` is how many were actually scored, and ``rerank_unscored`` is
+#: the CANDIDATE LIST minus ``rerank_scored`` — every row past the width, which is
+#: why it exceeds ``rerank_pool - rerank_scored`` as soon as the pool is wider
+#: than the bound (a 60-candidate read at width 40 reports
+#: ``pool=40, scored=40, unscored=20``; ``tests/test_rerank_pool.py`` pins that
+#: shape at width 2). The two readings coincide only where nothing was scored:
+#: a degraded arm reads ``pool=<bound>, scored=0, unscored=<candidates>``. Read
+#: the bound as the cap, never as an achievement, and read ``unscored`` as the
+#: rows the reranker could not promote.
 #: Rows past the width keep their retrieval order and can never be promoted, so a
 #: caller that opted in must be able to tell "the reranker decided" from "it
 #: never saw that row".
