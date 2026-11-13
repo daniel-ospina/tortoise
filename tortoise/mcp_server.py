@@ -3802,9 +3802,12 @@ _ENTITY_TYPE_REMEDY: dict[str, str] = {
     "document": (
         "No bulk listing: tortoise_search(entity_type='document', "
         "kind=<documentKind>, limit=10000) answers ONE kind at a time and "
-        "slices at `limit` (default 10, no total). Its size is counts.Source "
-        "in tortoise_graph_overview(section='status') — D10 retires :Document, "
-        "so a document IS a :Source there, alongside provenance sources."),
+        "slices at `limit` (default 10, no total). D10 retires :Document — a "
+        "document IS a :Source — so the layer is counts.Source in "
+        "tortoise_graph_overview(section='status') MINUS the provenance "
+        "Sources that section 'sources' lists: those are the "
+        "`documentKind IS NULL` complement (`sdk.list_sources`), and "
+        "counts.Source is the union of both."),
     "object": (
         "No bulk listing — and none is planned (#12378 keeps these as counts): "
         "tortoise_search(entity_type='object', kind=<objectKind>, "

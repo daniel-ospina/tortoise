@@ -901,3 +901,30 @@ def test_the_operator_remedy_names_the_silent_cause_too() -> None:
     assert "breaker" in message, (
         f"the remedy omits the leg's silent breaker-open answer: {message!r}"
     )
+
+
+def test_the_document_remedy_states_the_partition_not_the_union() -> None:
+    """`counts.Source` is documents PLUS provenance Sources, not the layer's size.
+
+    Verified: `taxonomy()` counts `MATCH (n:Source) RETURN count(n)` over every
+    Source (`tortoise/taxonomy.py:17-21`), while the remedy names a read scoped
+    to `documentKind` (`run_structural_query`'s document arm — `label_str =
+    "Source"`, `kind_field = "documentKind"`), i.e. the `documentKind NOT NULL`
+    partition. `sdk.list_sources()` is the complement (`WHERE s.documentKind IS
+    NULL`) and says so in its own docstring. So naming `counts.Source` as "its
+    size" hands the caller a number shaped like a DIFFERENT population — the
+    defect this PR removes from rows, one level down in prose. Fails on the
+    partition statement: dropping back to a bare "Its size is counts.Source"
+    reds it.
+    """
+    message = _message_for("document")
+
+    assert "counts.Source" in message, (
+        f"the document remedy must keep its count key: {message!r}"
+    )
+    assert "MINUS" in message and "provenance" in message, (
+        f"the union must be stated as a partition, not as the layer: {message!r}"
+    )
+    assert "documentKind IS NULL" in message, (
+        f"the complementary partition must be named: {message!r}"
+    )
