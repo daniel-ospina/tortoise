@@ -4921,7 +4921,7 @@ _BARE_NUM = re.compile(_LEADING_NUM_NO_POSITION)
 
 #: ⛔ A LONE FOUR-DIGIT 19xx/20xx RUN IS A YEAR AS OFTEN AS A LINE NUMBER, and the bare
 #: arm cannot tell them apart — so it refuses the year rather than punishing prose that
-#: dates itself ("the block was reviewed in 2026"). Execrcise is not lost: the SEPARATOR
+#: dates itself ("the block was reviewed in 2026"). Discriminating power is not lost: the SEPARATOR
 #: arms still catch `:2026`, `at 2026` and `line 2026`, because a cite is written with a
 #: separator and a year is not. Residual, stated: a line number of exactly 2026 written
 #: with no separator is indistinguishable from a year and is not caught here.
@@ -5048,31 +5048,13 @@ def _neighbour_number_strays(line: str) -> list[str]:
 def _bare_number_hits_neighbour(text: str) -> list[str]:
     """The NEIGHBOUR hits — the SAME strict matcher the claim sentence uses.
 
-    ⛔ NO POSITIONAL-TAIL ALLOW-LIST, DELIBERATELY, AND THIS IS THE THIRD DESIGN
-    (#12369 review, P2 — measured four ways before settling). The earlier cut exempted
-    `lines`/`rows` from being units when a TAIL followed (`into`, `down`, `deep`, ...).
-    That is a CLOSED ALLOW-LIST WITH INVERTED POLARITY: a tail the list omits does not
-    REFUSE correct prose, it ACCEPTS A FALSE POSITION — the dangerous direction, and
-    measured open four ways:
-
-        ... sits 9987 lines up from the bottom.           GREEN  (tail not listed)
-        ... sits 9987 lines, measured down from the top.   GREEN  (tail not adjacent)
-        ... reads 9987 rows in .                           GREEN  (space before the period)
-        Deep into the block, the entry reads 9987 lines.   GREEN  (tail before the number)
-
-    Each would have needed another list entry, another gap rule, another anchor — and a
-    guard whose completeness is asserted by an enumeration cannot be made complete by
-    extending the enumeration. So the tail is GONE and this arm is STRICT: on a
-    neighbouring line, `N lines` / `N rows` is a POSITION.
-
-    The cost is a FALSE RED — `-- 155 lines of rows` beside the manifest's name is
-    refused — and that is the direction this module already prescribes for its closed
-    unit list ("a missed unit does not weaken the pin, it REFUSES CORRECT PROSE").
-    Measured BEFORE choosing, not assumed: on this document the neighbour population is
-    3 lines and a strict arm yields ZERO findings on all of them, so the cost is
-    theoretical here while the false-PASS surface was real and reachable. Stated
-    residual: a genuine line/row COUNT on a neighbouring line is refused.
+    One implementation, two callers, no second pattern: an earlier cut kept a
+    unit-aware variant and a comment claiming the neighbour arm was "deliberately
+    UNIT-AWARE", while this file asserted `9987 lines` RED twenty lines later. The
+    tail allow-list was deleted for that reason; the helper is now an alias so the
+    two arms cannot drift apart again.
     """
+    return _bare_number_hits(text)
     return _bare_number_hits(text)
 
 
@@ -6106,12 +6088,35 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             f"03-test-design.md: the scoping phrase '`carve_out:` holds **one**' "
             f"occurs {len(doc_hits)} time(s) — this claim needs exactly one line")
     else:
-        if ENTRY not in doc_hits[0]:
+        # ⛔ THE ENTRY MUST BE BOUND TO THE PHRASE, NOT MERELY PRESENT ON THE LINE.
+        # `ENTRY not in doc_hits[0]` is a substring test on the whole row, so these
+        # four rewrites all kept it GREEN while asserting the block holds MORE than
+        # one — which the manifest arm alone cannot contradict (measured before this
+        # arm existed):
+        #
+        #     `carve_out:` holds **one** file besides `test_pack_logic_writeprobe_11083.py`
+        #     `carve_out:` holds **one**: `test_pack_logic_writeprobe_11083.py` and one more
+        #     `carve_out:` holds **one**: e.g. `test_pack_logic_writeprobe_11083.py`, among several
+        #     `carve_out:` holds **one** of the two: `test_pack_logic_writeprobe_11083.py`
+        #
+        # The pattern mirrors the row's own grammar: the phrase, an optional noun, a
+        # colon, its ONE filename — and nothing quantifier-shaped in between.
+        _ONE_ENTRY = (
+            r"`carve_out:`\s*holds\s*\*\*one\*\*\s*(?:entry|file)?\s*:\s*`"
+            + ENTRY + r"`"
+            # …and NOTHING may follow it that adds another: by the
+            # comma/'and one more'/plus/besides/among/except the same row can
+            # contradict itself in a handful of characters.
+            r"(?![^|]{0,12}\b(?:and|plus|besides|among|other than|except)\b)")
+        if not re.search(_ONE_ENTRY, doc_hits[0]):
             block_failures.append(
-                f"03-test-design.md's `carve_out:` sentence does not name {ENTRY!r} "
-                f"— the sentence is the only place the document says WHICH entry it "
-                f"means, so a sentence that names another file, or none, is the "
-                f"defect this pin exists to catch")
+                f"03-test-design.md's `carve_out:` sentence does not say, in the row's "
+                f"own grammar, that the block holds **one**: {ENTRY!r} — the sentence "
+                f"is the only place the document says WHICH entry it means, and a "
+                f"quantifier between the phrase and the name (`besides`, `and one "
+                f"more`, `among several`, `of the two`) asserts MORE than one while "
+                f"keeping the filename on the line. Restore 'holds **one**: "
+                f"`{ENTRY}`' with no qualifier between.")
         # ⛔ THE DOCUMENT'S "hold none" HALF IS PART OF THE CLAIM, and it was
         # unchecked: the tree was verified to hold none in `uri_requiring:` and
         # `slow_files:`, but the SENTENCE could be rewritten to claim the opposite
@@ -6125,16 +6130,25 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # the pin GREEN — measured, then closed with a positive pattern. The pattern
         # requires the two block names adjacent to `hold none` with no negation
         # between them, which is the shape the sentence actually uses.
-        # The two names, joined by `and`/`,`/`/` and nothing else, then `hold none`:
-        # any intervening word is where a negation lives.
-        _HOLD_NONE = r"`uri_requiring:`\s*(?:and|,|/)\s*`slow_files:`\s*hold none"
+        # ⛔ BOTH ORDERS, AN OPTIONAL `both` / `, which`, AND NO NEGATION. The first
+        # cut pinned one order and one spelling, so three TRUE phrasings were refused
+        # with a message that named a cause that was not there. The pattern now
+        # accepts either order and the two fillers the sentence may carry; anything
+        # else between the names is where a negation would live.
+        _HOLD_NONE = (
+            r"(?:`uri_requiring:`\s*(?:and|,|/)\s*`slow_files:`"
+            r"|`slow_files:`\s*(?:and|,|/)\s*`uri_requiring:`)"
+            r"\s*(?:both\s+)?(?:,?\s*which\s+)?hold none")
         if not re.search(_HOLD_NONE, doc_hits[0]):
             block_failures.append(
                 "03-test-design.md's `carve_out:` sentence does not state, POSITIVELY, "
-                "that `uri_requiring:` and `slow_files:` hold NONE — either the clause "
-                "is gone, or it is negated (\"do NOT hold none\"), which asserts the "
-                "opposite of the tree. The pin checks the tree half of that claim; a "
-                "sentence that denies it is a claim the pin can no longer check.")
+                "that `uri_requiring:` and `slow_files:` hold NONE. Three causes, and "
+                "the sentence shows you which: the clause is GONE; it is NEGATED "
+                "(\"do NOT hold none\"), which asserts the opposite of the tree; or "
+                "the two block names were REORDERED or split by words the pattern "
+                "does not carry. The pin checks the tree half of this claim, so a "
+                "sentence that stops stating it is a claim the pin can no longer "
+                "check.")
         for needed in ("`uri_requiring:`", "`slow_files:`"):
             if needed not in doc_hits[0]:
                 block_failures.append(
