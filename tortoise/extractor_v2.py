@@ -3353,7 +3353,8 @@ def search_graph(sdk, embed_list: dict, story: str, *,
     # (`extract_session_v2`, `commit_session`) hold no `try`, so it would abort a
     # capture. But `degraded` is the wrong grade for it — `degraded` means the
     # search never got through its FIRST query and therefore carries ZERO priors
-    # (the first-query handler below, graded by `failure_policy.lookup_state`),
+    # (this function's `except …: degraded = …` arm, graded by
+    # `failure_policy.lookup_state`),
     # and `_render_search_results` acts on
     # that by withholding every prior and telling the gap reviewer the lookup did
     # not run. Here the queries RAN and their point/event priors are real, so the
@@ -6122,6 +6123,21 @@ def _find_existing_entity(entities: list[dict], name: str, kind: str) -> tuple[d
     if len(aliased_bare) == 1:
         return aliased_bare[0], "alias"
     if len(aliased_bare) > 1:
+        return None, "ambiguous"
+    # ⛔ The LAST rung is kind-AGNOSTIC, and it is load-bearing. An alias is the
+    # MERGE's own record that this spelling names that entity; the kind spelled on
+    # the retired variant need not match the survivor's (`approve_merge` merges a
+    # `kind_mismatch` pair on a human verdict, and `other` is the write-time
+    # coalesce default). Kind-gating every alias rung therefore returned
+    # `(None, "none")` for a survivor whose kind is `other`/empty/different — the
+    # mention fell through to `new` (a CREATE, the D-1 duplicate) or to a phase-2
+    # guess that cannot see aliases at all. A genuinely conflicting declared kind
+    # is recorded where the design already expects it: phase 1's `hard_vetoes`
+    # fires `kind_conflict` and the name is HELD with its code.
+    aliased_any = [e for e in entities if _alias_hit(e)]
+    if len(aliased_any) == 1:
+        return aliased_any[0], "alias"
+    if len(aliased_any) > 1:
         return None, "ambiguous"
     return None, "none"
 

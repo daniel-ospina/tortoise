@@ -515,7 +515,7 @@ class TestHardVetoes:
         AS a resolution (`entity_resolver.py:611`) — so this spelling's membership
         is RECORDED, not inferred, and no group-level comparison is being skipped.
         Refusing it is not merely conservative: an ENTITY hold is not carried
-        forward (`extractor_v2.execute_embed`, the `"ENTITY hold(s) are NOT carried forward"` branch of `execute_embed`)), so the mention is dropped on
+        forward (`extractor_v2.execute_embed`, the `"ENTITY hold(s) are NOT carried forward"` branch of `execute_embed`), so the mention is dropped on
         every run for the lifetime of the merge.
         """
         mention = {"name": "the team", "kind": "k"}
@@ -862,6 +862,27 @@ class TestTheResolverBands:
         ]
         hit, mode = v2._find_existing_entity(cross, "Acme Team", "core:org")
         assert (hit["id"], mode) == ("obj-B", "bare"), (hit, mode)
+        # …and the LAST rung is kind-AGNOSTIC: an alias is the merge's own record
+        # that the spelling names that entity, and the kind on the retired variant
+        # need not match the survivor's (`other` is the coalesce default, and
+        # `approve_merge` merges a kind_mismatch pair on a human verdict). Gating
+        # every alias rung on kind made the mention fall through to `new` — the
+        # duplicate the fold exists to prevent.
+        for kind in ("core:plan", "", "other"):
+            rows_any = [{"id": "S", "name": "Acme Holdings", "kind": "core:org",
+                         "aliases": ["team"]}]
+            hit, mode = v2._find_existing_entity(rows_any, "the team", kind)
+            assert (hit["id"], mode) == ("S", "alias"), (kind, hit, mode)
+        # …and a genuinely CONFLICTING declared kind is then recorded where the
+        # design expects it: phase 1's veto holds the name with its code.
+        res = v2.resolve_entities(
+            [{"name": "the team", "kind": "core:plan"}],
+            {"entities": [{"id": "S", "name": "Acme Holdings", "kind": "core:org",
+                           "aliases": ["team"]}], "degraded": False})
+        assert res["map"] == {}, res
+        assert res["new"] == [], res
+        assert res["held"][0]["reason"] == v2.HOLD_VETOED, res
+        assert verdict.VETO_KIND_CONFLICT in res["held"][0]["vetoes"], res
 
     def test_an_unfolded_stored_alias_still_resolves(self):
         """`aliases` is undeclared-but-writable, so the stored side must be folded

@@ -176,7 +176,7 @@ spelling into the survivor's `aliases[]`, and the by-name resolver reads
 spelling's membership is *recorded*, not inferred, and no group-level comparison
 is being skipped. Without the escape, every later re-mention of an already-folded
 variant is refused **on every run for the lifetime of the merge**, and an entity
-hold is **not carried forward** (`extractor_v2.execute_embed`, the `"ENTITY hold(s) are NOT carried forward"` branch of `execute_embed`)), so the mention is
+hold is **not carried forward** (`extractor_v2.execute_embed`, the `"ENTITY hold(s) are NOT carried forward"` branch of `execute_embed`), so the mention is
 dropped rather than queued. Pinned by
 `test_a_repeat_mention_of_a_folded_alias_merges_instead_of_being_lost`.
 
