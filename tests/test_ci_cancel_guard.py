@@ -17,6 +17,7 @@ branch key, a foreign fork head, a started job, and a measurement older than the
 from __future__ import annotations
 
 import json
+import importlib.util
 import os
 import pathlib
 import re
@@ -766,6 +767,26 @@ def test_an_undocumented_job_status_reads_as_started(fixture):
     r = guard(fixture, "41840910128", "--apply")
     assert r.returncode == 3, r.stdout + r.stderr
     assert fixture.cancelled() == []
+
+
+@pytest.mark.parametrize("bad", [None, ["queued"], {"s": "queued"}, 7, True])
+def test_the_started_predicate_is_TOTAL_for_an_unreadable_status(bad):
+    """Review cycle 3, F4: the non-string arm is LOAD-BEARING and was unpinned.
+
+    Mutation check: deleting `if not isinstance(status, str): return True` from
+    `job_has_started` left the whole suite green, because `decide()` raises
+    `Unreadable` on a non-string status BEFORE the predicate sees one — the row is
+    pre-guarded at `decide`, not at the predicate. The arm therefore protects the
+    predicate's CONTRACT ("total, and an unreadable status reads as STARTED"), which
+    its own docstring calls load-bearing, and any second caller would inherit a
+    `TypeError` out of a pure predicate as an aborted sweep rather than a refusal.
+    Pinned directly on the predicate so the arm cannot be deleted silently.
+    """
+    spec = importlib.util.spec_from_file_location("ccg_under_test", TOOL)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod.job_has_started(
+        {"name": "x", "status": bad, "runner_name": "", "completed_at": None}) is True
 
 
 def test_json_does_not_attest_an_unmeasured_age_or_a_false_applied(fixture):

@@ -171,6 +171,14 @@ class Incomplete(Exception):
 #: Job statuses that POSITIVELY mean the job's work has begun. An allow-list: a
 #: status GitHub has not documented yet must never be read as "begun", because the
 #: only consumer records a work CLOCK and a wrong clock biases toward cancelling.
+#:
+#: `completed` is CALLER-DEFENSIVE, not load-bearing today: `job_work_start`'s only
+#: production caller is `derive_bound`, which skips `status == "completed"` rows
+#: before asking, so that member can never fire from there. It stays because the
+#: predicate answers "when did this job's work begin?", and a finished job HAS
+#: begun — a second caller asking about completed shards would otherwise get None,
+#: and a None clock reads as "never begun" in this module's vocabulary. Stated
+#: plainly rather than dressed up as coverage (review cycle 3, F3).
 BEGUN_JOB_STATUSES = frozenset({"in_progress", "completed"})
 
 
@@ -476,6 +484,31 @@ def job_work_start(job: dict) -> float | None:
          — the job is a CAPACITY WAIT, not a wedge;
       2. REFINE: the earliest step `started_at`, when the payload carries steps;
       3. otherwise the job's own claim-time `started_at`.
+
+    ⛔ THE REFINEMENT IS CLAMPED TO THE CLAIM, AND THAT CLAMP IS A GATE TOO
+    (review cycle 3, F2). A step cannot start BEFORE the runner claimed the job —
+    the measurement above is `first_step - started_at ∈ {+1,+1,+2,+2,+12}` s, always
+    POSITIVE — so a step stamp EARLIER than `started_at` is by definition from a
+    DIFFERENT attempt, and the premise that makes it reachable is this function's
+    own (a requeued job can retain its step list). Unclamped, `min(stamps)`
+    REGRESSES the clock: on a claimed `in_progress` shard whose claim stamp is 1200 s
+    old and whose retained step is 36000 s old, it returned `now-36000` — elapsed
+    36000 s against a 1200 s bound ⇒ CANCEL of a healthy shard, where the pre-#11045
+    code was in budget. So the returned clock is `max(earliest_step, claim_stamp)`:
+    lossless on every healthy payload (steps are always later than the claim, so the
+    step still wins the refinement) and monotone — it can only make elapsed SMALLER,
+    i.e. it can only remove cancels. A clock here is a LOWER BOUND on how long the
+    shard has worked; when two clocks disagree, the LATER one is the honest one for
+    a tool that cancels.
+
+    ⛔ A WHITESPACE `runner_name` IS NOT A CLAIM (review cycle 3, F1). `runner` was
+    tested for truthiness, so `" "`, `"\t"` and `"0"` read as "a runner claimed this
+    job" and an unclaimed `queued` job handed out its queue stamp as a work clock —
+    the P0 above, re-entered through the other field. Blank/whitespace is stripped
+    and reads as UNCLAIMED. The residual, stated rather than hidden: any non-blank
+    string is still taken as a claim, because a runner name is opaque text and this
+    module has no allow-list of them — a payload carrying a non-blank non-name there
+    is not a shape the API produces.
     """
     status = job.get("status")
     runner = job.get("runner_name")
@@ -488,18 +521,25 @@ def job_work_start(job: dict) -> float | None:
     # such flips this predicate in the PERMITTING direction, because an unclaimed
     # `queued` job would then hand its queue stamp out as a work clock (review cycle
     # 2, T5). Both arms fail to None, the non-cancelling answer.
+    # `runner.strip()` rather than `runner`: a whitespace-only name is a DEGRADED
+    # payload, not a claim (review cycle 3, F1 — measured `" "`, `"\t"`, `"0"` all
+    # handing out a queue stamp as a work clock).
     if not isinstance(status, str) or (
             status not in BEGUN_JOB_STATUSES
-            and not (isinstance(runner, str) and runner)):
+            and not (isinstance(runner, str) and runner.strip())):
         return None
+    ts = _parse_ts(job.get("started_at"))
+    claim = ts.timestamp() if ts is not None else None
     steps = job.get("steps")
     if isinstance(steps, list) and steps:
         stamps = [_parse_ts(s.get("started_at")) for s in steps if isinstance(s, dict)]
         stamps = [t for t in stamps if t is not None]
         if stamps:
-            return min(stamps).timestamp()
-    ts = _parse_ts(job.get("started_at"))
-    return ts.timestamp() if ts is not None else None
+            first = min(stamps).timestamp()
+            # CLAMP to the claim — see the docstring: an earlier step stamp belongs
+            # to a DIFFERENT attempt, and honouring it cancels a healthy shard.
+            return first if claim is None else max(first, claim)
+    return claim
 
 
 def derive_bound(target_jobs: list[dict], green_job_lists: list[list[dict]],

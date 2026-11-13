@@ -882,7 +882,7 @@ class RunReaperTestCase(unittest.TestCase):
         self.assertIsNone(row["shard_elapsed_s"])
 
         # (b) a CLAIMED job's clock is its FIRST STEP, not its claim stamp
-        claimed = job("test (g)", None, status="in_progress", started_s=1200)
+        claimed = job("test (g)", None, status="in_progress", started_s=3600)
         claimed.update({"runner_name": "pi-runner-x64-1",
                         "steps": [{"started_at": iso(NOW - 2400)}]})
         row = mod.decide({"id": 111, "status": "in_progress",
@@ -892,8 +892,37 @@ class RunReaperTestCase(unittest.TestCase):
                          "the first step's start IS the shard's work clock")
         self.assertEqual(row["action"], "cancel")
 
-    def test_a_NON_STRING_runner_name_does_not_claim_a_job(self):
-        """T5, review cycle 2: the permitting-direction flip is closed.
+    def test_a_RETAINED_step_stamp_cannot_REGRESS_the_clock_past_the_claim(self):
+        """A step stamped BEFORE the claim is a DIFFERENT attempt's, and is refused.
+
+        ⛔ A REAL DESTRUCTIVE PATH, INTRODUCED BY THE `steps` REFINEMENT (#11045,
+        review cycle 3, F2). `min(stamps)` had no lower bound, so a requeued job that
+        RETAINS its step list — the premise this module's own docstring states —
+        handed out a clock from BEFORE its current claim. Elapsed is `now - clock`,
+        so an older stamp cancels HARDER: measured on this fixture, claim 1200 s old
+        + retained step 36000 s old ⇒ `shard_elapsed_s=36000` and `cancel` against a
+        1200 s bound, where the pre-#11045 code was `in budget` at 1200 s. The clamp
+        is `max(first_step, claim)` — lossless for a healthy payload (a real step is
+        always AFTER the claim, so it still wins the refinement: the test above) and
+        monotone, so it can only ever REMOVE cancels.
+        """
+        mod = _load_tool_module()
+        green = [[{"name": "test (g)", "status": "completed", "conclusion": "success",
+                   "started_at": iso(NOW - 600), "completed_at": iso(NOW)}]]
+        claimed = job("test (g)", None, status="in_progress", started_s=1200)
+        claimed.update({"runner_name": "pi-runner-x64-1",
+                        "steps": [{"started_at": iso(NOW - 36000)}]})
+        row = mod.decide({"id": 111, "status": "in_progress",
+                          "run_started_at": iso(NOW - 7200)},
+                         [job("test (a)", 600), claimed], green, now=NOW, floor=300)
+        self.assertEqual(row["shard_elapsed_s"], 1200,
+                         "a step stamped before the claim regressed the shard clock")
+        self.assertNotEqual(row["action"], "cancel",
+                            f"a retained step stamp cancelled a healthy shard: "
+                            f"{row.get('reason')} (shard_elapsed_s={row.get('shard_elapsed_s')})")
+
+    def test_a_DEGRADED_runner_name_does_not_claim_a_job(self):
+        """T5, review cycles 2 and 3: the permitting-direction flip is closed.
 
         `not job.get("runner_name")` is only a truthiness test, so a DEGRADED payload
         (`runner_name` as a dict / list / number) read as "a runner claimed this job"
@@ -902,9 +931,15 @@ class RunReaperTestCase(unittest.TestCase):
         run on a queue wait. That is the exact P0 this change exists to prevent,
         re-entered through the other field. `read_jobs` keeps dict rows without
         validating inner fields, so it is reachable from a real payload.
+
+        ⛔ CYCLE 2 CLOSED THREE OF THE FOUR DECLARED SHAPES AND MISSED WHITESPACE
+        (cycle 3, F1): `isinstance(runner, str) and runner` still accepted `" "`,
+        `"\t"` and `"\n "`, each of which handed out the queue stamp measured in the
+        test above. The arm is `runner.strip()` now, and the whitespace rows below
+        are the ones that red without it.
         """
         mod = _load_tool_module()
-        for bad in ({"name": "runner"}, ["runner"], 7, True):
+        for bad in ({"name": "runner"}, ["runner"], 7, True, " ", "\t", "\n "):
             probe = {"name": "test (g)", "status": "queued", "runner_name": bad,
                      "started_at": iso(NOW - 7200), "completed_at": None, "steps": []}
             self.assertIsNone(
