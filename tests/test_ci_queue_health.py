@@ -2939,7 +2939,9 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
         # SHIPPED LEAD-IN, and this leg's RESIDUAL is stated rather than chased (review round
         # 22, the same lesson round 4 learned for `retracted`): ANY contiguous span can be
         # embedded by a correct rewrite, so (i) the bare clause reds a correct re-typing of the
-        # BUDGET-surplus scoping at `tools/ci_queue_health.py:1626` (measured), and (ii) a
+        # BUDGET-surplus scoping at `tools/ci_queue_health.py:1628` (measured; the coordinate
+        # moves with this file's own line count — it reds nothing if it drifts, so it is
+        # cheapest to re-check when the module above it changes), and (ii) a
         # comment that quotes the retracted sentence IN ORDER TO REJECT IT also reds, because
         # this leg has no discriminator to tell assertion from quotation. The lead-in form
         # closes both measured false positives; a re-typing that drops the lead-in is NOT
@@ -3068,6 +3070,16 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
     # a presence check over all four surfaces passes when the named site loses the clause and
     # any OTHER file happens to carry the same phrase — the exact silent-deletion shape this
     # leg exists to catch. Each entry declares the surface it belongs to.
+    # ⛔ AND `must_state` NEEDS THE SAME FLOOR (review P2, round 26). Its siblings got one after
+    # the same measurement (`disarming` >= 5, `unconditional` >= 7); this list did not, so
+    # deleting an entry removed its presence check AND its proof at once and the suite stayed
+    # green — measured: dropping the round-25 `workflow` qualifier pin and reverting the emitted
+    # annotation to the unqualified "UPPER BOUND" form left all three suites at 350 passed.
+    # A MEASURED FLOOR, not an exact count: adding a site needs no edit here, dropping one reds.
+    assert len(must_state) >= 16, (
+        "a `must_state` presence pin was deleted: a DELETION of the clause it protects then "
+        "stops being caught, which is the half of this guard that a blocklist cannot cover"
+    )
     for where, phrase in must_state:
         needle = flat(phrase)
         assert needle in flats[where], (
