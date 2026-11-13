@@ -2696,6 +2696,11 @@ def test_a_disarmed_run_over_an_unmeasurable_points_read_exits_zero(monkeypatch,
     assert payload["census"] is None and payload["census_measured"] is False, payload
     assert "read returned 0 points" in payload["read_failure"], payload["read_failure"]
     assert payload["run"]["off"] is True and payload["run"]["applied"] is False
+    # ⛔ `run.refused` names the CAUSE here too, not the helper's `"off-switch active"`
+    # default: the switch is not what refused this run, and this arm must say the same
+    # thing the sibling `CurationRefused` arm and the damaged-ledger arm say (the latter
+    # is pinned on its own: `"damaged" in run["refused"]`). One state, one spelling.
+    assert "read returned 0 points" in payload["run"]["refused"], payload["run"]
 
 
 def test_an_armed_run_over_an_unmeasurable_points_read_still_fails(monkeypatch, tmp_path):
@@ -3260,14 +3265,31 @@ def test_an_operator_layer_beyond_one_call_is_refused_not_truncated(monkeypatch,
     There is no offset walk on `tortoise_search`, so a layer larger than the declared
     ceiling cannot be read completely — and a truncated read is worse than a refusal,
     because it enters the census looking complete.
+
+    ⛔ The discriminating assertion is that NO READ WAS ISSUED, not a message substring.
+    Round-7 review measured that deleting this guard still exits 3 (the reconciliation
+    guard fires one line later, on the same input) and the only thing separating the two
+    was the word "offset" in stderr — so rewording either message flipped the verdict
+    with no behaviour change. The ceiling's real job is to refuse BEFORE spending the
+    call: that is what a layer above the surface's maximum needs, because the read it
+    would spend returns a partial one.
     """
     mod = _tool_module()
     ceiling = mod.OPERATOR_READ_CEILING
-    monkeypatch.setattr(mod, "_live_call_tool",
-                        _operator_surface(operators=OPERATOR_ROWS, reported=ceiling + 1))
+    calls: list[str] = []
+    surface = _operator_surface(operators=OPERATOR_ROWS, reported=ceiling + 1)
+
+    def call(name, args):
+        calls.append(name)
+        return surface(name, args)
+
+    monkeypatch.setattr(mod, "_live_call_tool", call)
     rc = mod.main(["inventory", "--out", str(tmp_path / "inv.json"), "--no-verify-read"])
     assert rc == 3, (rc, capsys.readouterr())
     assert "offset" in capsys.readouterr().err.lower()
+    assert "tortoise_search" not in calls, (
+        "a layer above the single-call ceiling must be refused BEFORE the read is spent"
+    )
 
 
 def test_an_operator_read_that_fills_its_limit_is_refused_unless_the_count_vouches(
@@ -3277,6 +3299,13 @@ def test_an_operator_read_that_fills_its_limit_is_refused_unless_the_count_vouch
     `tortoise_search` has a `limit` and no `offset`, so there is no page to walk to:
     "a full page" and "a truncated layer" are the same bytes unless a reported count
     says that is the whole population. Round-1 review found this arm unpinned.
+
+    ⛔ BOTH arms are pinned here. Refusing is the safe failure, but always refusing is
+    the OVER-BROAD one: a layer of exactly `OPERATOR_READ_CEILING` rows that
+    `structure.operators` vouches for as complete is a legitimate full read, and round-7
+    review measured that flipping the guard to `if len(raw) == OPERATOR_READ_CEILING:`
+    (refuse the vouched-for case too) left every test green while blocking the whole
+    census — the carry set included, since the refusal has no override.
     """
     mod = _tool_module()
     at_limit = [{"id": f"o{i}", "content": "", "point_kind": "IMPL"}
@@ -3286,6 +3315,19 @@ def test_an_operator_read_that_fills_its_limit_is_refused_unless_the_count_vouch
     rc = mod.main(["inventory", "--out", str(tmp_path / "inv.json"), "--no-verify-read"])
     assert rc == 3, (rc, capsys.readouterr())
     assert "truncat" in capsys.readouterr().err.lower()
+
+    # …and the ACCEPT arm: the same 10,000 rows WITH a count that vouches for them is a
+    # complete layer, not a truncation.
+    monkeypatch.setattr(mod, "_live_call_tool",
+                        _operator_surface(operators=at_limit,
+                                          reported=mod.OPERATOR_READ_CEILING))
+    out = tmp_path / "inv_accepted.json"
+    rc = mod.main(["inventory", "--out", str(out), "--no-verify-read"])
+    assert rc == 0, (rc, capsys.readouterr())
+    payload = json.loads(out.read_text())
+    assert payload["operators_read"] == mod.OPERATOR_READ_CEILING, payload["operators_read"]
+    assert payload["operators_total_reported"] == mod.OPERATOR_READ_CEILING
+    assert payload["operators_reconciled"] is True
 
 
 def test_an_operator_row_without_an_id_is_refused(monkeypatch, capsys, tmp_path):
@@ -3356,6 +3398,14 @@ def test_the_operator_read_is_routed_to_the_graph_and_falls_back_on_a_binding_re
                    "--out", str(tmp_path / "inv.json"), "--no-verify-read"])
     assert rc == 0
     assert seen and seen[0].get("graph") == "org_x_g_old", seen
+    # ⛔ The REQUEST SHAPE, not only the routing: `limit` is what makes the at-limit
+    # truncation guard reachable at all (it compares `len(raw)` to the CEILING), and
+    # `entity_type` is what selects the operator layer instead of a points search.
+    # Round-7 review measured that dropping `limit` from the request left every test
+    # green — the fake ignores unknown args, so nothing observed them.
+    for sent in seen:
+        assert sent.get("entity_type") == "operator", sent
+        assert sent.get("limit") == mod.OPERATOR_READ_CEILING, sent
     assert any("graph" not in a for a in seen), "the fallback read must omit the argument"
     report = json.loads((tmp_path / "inv.json").read_text())
     assert report["operators_read"] == len(OPERATOR_ROWS)
@@ -3385,6 +3435,15 @@ def test_a_disarmed_plan_over_a_refused_operator_layer_still_exits_zero(
     # exactly that — a driver switching on `read_failure` to answer "did the read fail?"
     # must not get null on one read-failure arm and a message on the other (round-3).
     assert "structure.operators" in (payload["read_failure"] or ""), payload
+    # ⛔ And the field that says WHO refused names the cause here, like every other
+    # disarmed failure arm (the ledger arm's own test asserts `"damaged" in
+    # run["refused"]`) — this is the arm's UNIQUE behaviour, and round-7 review measured
+    # it asserted nowhere: dropping `refused=str(exc)` left 193 tests green, as did
+    # deleting the whole arm (the generic `except Exception` below produces the same
+    # rc/census/read_failure). The generic arm prefixes the exception TYPE, so the
+    # `disarmed_reason` shape below is what tells the two arms apart.
+    assert "structure.operators" in (payload["run"]["refused"] or ""), payload["run"]
+    assert not payload["disarmed_reason"].startswith("CurationRefused:"), payload
 
 
 def test_a_quota_envelope_on_the_operator_read_does_not_re_read_another_graph():
@@ -3517,6 +3576,11 @@ def test_an_unreported_count_over_a_non_empty_operator_read_is_accepted_and_note
     payload = json.loads((tmp_path / "i.json").read_text())
     assert payload["operators_read"] == len(OPERATOR_ROWS), payload["operators_read"]
     assert payload["operators_total_reported"] is None, payload
+    # ⛔ The MACHINE-READABLE half of the downgrade: `census_measured` speaks for the
+    # point/source census and cannot answer "was this layer read whole?" — so with no
+    # count to reconcile it, the artifact must say so in a field rather than only in
+    # `read_note` prose (round-7 review).
+    assert payload["operators_reconciled"] is False, payload
     assert payload["census"]["total_rows"] > len(OPERATOR_ROWS)
     assert "no `operators` count" in (payload["read_note"] or ""), payload["read_note"]
     assert "unreconciled" in (payload["read_note"] or "")
@@ -3571,24 +3635,37 @@ def test_inventory_and_plan_answer_the_same_exit_code_for_a_surface_fault(
     assert plan == inv, (plan, inv)
 
 
-def test_an_error_payload_on_the_audit_section_is_a_designed_refusal_too(
-        monkeypatch, capsys, tmp_path):
-    """EVERY census read, not just the four this was first written for.
+@pytest.mark.parametrize("failing", ["status", "structure", "sources", "graphs", "audit",
+                                      "points"])
+def test_every_census_read_answers_the_designed_refusal(
+        monkeypatch, capsys, tmp_path, failing):
+    """EVERY census read, one section at a time — not just the ones a review noticed.
 
     Round-4 review measured the `audit` read sitting outside `cmd_inventory`'s designed
     refusal handler: an `is_error` payload there raised as rc 1 while `status`,
-    `structure`, `sources` and `graphs` answered rc 3 — one failure, two codes, one
-    section over from where round 3 removed exactly that. The audit section is in the
-    `used` set the census tests assert, so it is a census read and belongs inside.
+    `structure`, `sources` and `graphs` answered rc 3. The fix put it inside — but
+    round-7 review measured that only `status`, `audit` and the operator read are
+    actually PINNED, so moving `structure`, `graphs`, `points` or `sources` back out of
+    the `try` left every test green. The handler's whole claim is "one code for one
+    failure across every census read", so each read gets its own arm here.
+
+    The failure shape is an MCP ERROR RESULT (`RealCallToolResult(..., is_error=True)`),
+    which `normalise_tool_result` turns into `CurationRefused` — the surface's own "this
+    call failed" delivery, and the case the two-vocabularies defect was about. A plain
+    `{"error": …}` dict is a different path (the reader raises `RuntimeError`, then
+    runtime error), and it is not what this test is about.
     """
     mod = _tool_module()
-    sections = {"status", "structure", "sources", "graphs", "audit"}
+    boom = RealCallToolResult({"error": "429 Too Many Requests"}, is_error=True)
 
     def call(name, args):
         args = args or {}
         section = args.get("section")
-        if section in sections and section == "audit":
-            return RealCallToolResult({"error": "429 Too Many Requests"}, is_error=True)
+        if failing == "points":
+            if name == "tortoise_query":
+                return boom
+        elif section == failing:
+            return boom
         if section == "structure":
             return {"total": 1, "operators": 0}
         if section == "status":
@@ -3598,14 +3675,14 @@ def test_an_error_payload_on_the_audit_section_is_a_designed_refusal_too(
         if section == "graphs":
             return {"result": [{"namespace": "org_x_g_old"}]}
         if name == "tortoise_query":
-            return {"result": [{"id": "p1", "kind": "decision", "content": "a durable claim"}],
-                    "total": 1}
+            return {"result": [{"id": "p1", "kind": "decision",
+                                "content": "a durable claim"}], "total": 1}
         return {"result": []}
 
     monkeypatch.setattr(mod, "_live_call_tool", call)
     rc = mod.main(["inventory", "--graph", "org_x_g_old", "--no-verify-read",
                    "--out", str(tmp_path / "i.json")])
-    assert rc == 3, (rc, capsys.readouterr())
+    assert rc == 3, (failing, rc, capsys.readouterr())
     assert "REFUSED" in capsys.readouterr().err
 
 

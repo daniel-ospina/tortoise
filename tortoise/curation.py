@@ -380,6 +380,20 @@ def classify_point(
                         "text has no row of record and needs a per-row decision",
                         pack, key, row.content)
 
+    # ⛔ Reachability of the four `!= "operator"` clauses below, so none of them reads as
+    # protection it does not provide (round-7 review). `build_plan` is the only caller
+    # that passes `duplicate_of`, and it passes a KEEPER's disposition. For an operator
+    # the keeper can only be another operator with the SAME id-scoped key, and the
+    # operator branch at the bottom decides every operator row `UNDECIDABLE` — so an
+    # operator's `duplicate_of` is always `UNDECIDABLE`:
+    #   · the `content_mismatch` arm ABOVE is live (two same-id operators with different
+    #     labels) and the `UNDECIDABLE` arm below is live (the ordinary same-id case);
+    #   · the `CARRY` arm and the generic `is not None` arm are UNREACHABLE for operators
+    #     today and are kept as DEFENCE IN DEPTH — deleting them would not change a
+    #     single disposition, and they are pinned only through the synthetic
+    #     `duplicate_of=` arm in `test_two_operator_rows_sharing_an_id_do_not_get_a_
+    #     content_duplicate_reason`. They exist so that a future keeper rule (or a moved
+    #     operator branch) cannot make an operator inherit a content fold.
     if duplicate_of == CARRY and row.node_type != "operator":
         return Decision(row.node_id, row.node_type, row.kind, NOT_CARRIED,
                         "exact content duplicate of a carried row (same content hash); "

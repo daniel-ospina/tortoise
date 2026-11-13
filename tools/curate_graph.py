@@ -451,11 +451,12 @@ class MCPReader:
                 reported = value
         if reported is not None and reported > OPERATOR_READ_CEILING:
             raise C.CurationRefused(
-                f"the operator layer holds {reported} rows, above this reader's "
-                f"{OPERATOR_READ_CEILING}-row single-call ceiling — `tortoise_search` has a "
-                "`limit` and NO `offset`, so there is no page walk, and a truncated layer "
-                "entering the census is indistinguishable from a complete one; refusing "
-                "rather than reporting a partial reasoning layer")
+                f"the operator layer holds {reported} rows, above the "
+                f"{OPERATOR_READ_CEILING}-row single-call ceiling — that ceiling IS the "
+                "surface's maximum `limit` (the SDK refuses a larger one), so there is no "
+                "wider read to raise it to, only a `limit` and NO `offset`: no page walk, "
+                "and a truncated layer entering the census is indistinguishable from a "
+                "complete one; refusing rather than reporting a partial reasoning layer")
         res = self._search_operators()
         err = _error_of(res)
         if err:
@@ -660,8 +661,15 @@ NOT_ENUMERABLE = {
 #: The operator layer is read in ONE call: `tortoise_search` takes a `limit` and has no
 #: `offset`, so there is no page walk to fall back on. A population above this ceiling
 #: is therefore REFUSED rather than truncated — a partial layer entering the census
-#: looks exactly like a complete one. 10,000 is far above this tenant's 3,727 and below
-#: the point at which one response is worth attempting unmeasured.
+#: looks exactly like a complete one.
+#:
+#: ⛔ 10,000 is NOT a chosen trade-off, it is the SURFACE'S hard maximum: the SDK refuses
+#: `limit > 10000` outright (`tortoise_fts_query`, `sdk.py:40575`), so this constant is
+#: also the `limit` every operator read sends. There is no headroom to spend — raising
+#: it does not read a wider layer, it makes every operator read raise `ValueError` out
+#: of the SDK, which is NOT a `CurationRefused` and so escapes both `except` arms as an
+#: unhandled rc 1. A population above 10,000 has no single-call read on this surface at
+#: all, which is what the refusal says.
 OPERATOR_READ_CEILING = 10_000
 
 
@@ -722,6 +730,14 @@ def cmd_inventory(args: argparse.Namespace) -> int:
         # when they disagree, so a reader of this artifact can see both.
         "operators_read": len(operators),
         "operators_total_reported": operators_reported,
+        # ⛔ `operators_total_reported is None` means NO cross-check was available, and
+        # this layer's completeness then rests on `tortoise_search` having no `offset`
+        # (a short response is indistinguishable from a whole layer). A driver must be
+        # able to answer that from a FIELD rather than from prose — `census_measured`
+        # describes the point/source census and knows nothing about this layer, so
+        # leaving it at `True` was the machine-readable form of "this layer was read
+        # whole", which the read cannot claim when nothing vouched for the count.
+        "operators_reconciled": operators_reported is not None,
         "source_count_gap": gap,
         "structure": structure,
         "graphs": graphs,
@@ -871,14 +887,26 @@ def cmd_plan(args: argparse.Namespace) -> int:
         if not disarmed:
             print(f"REFUSED: {exc}", file=sys.stderr)
             return 3
-        return _disarmed_artifact(args, str(exc), refused=str(exc), read_failure=str(exc))
+        # `read_note` travels too: a section that fell back to the credential's own graph
+        # is disclosed THERE, and this arm is one of the two places a disarmed run can
+        # end — dropping it would lose the only record that part of this census came from
+        # a different graph than `--graph` names.
+        return _disarmed_artifact(args, str(exc), refused=str(exc), read_failure=str(exc),
+                                  read_note=reader.note)
     except Exception as exc:
         # ⛔ THE SWITCH IS RESOLVED BEFORE THE CENSUS, for EVERY read — not only the
         # source section. An armed run still raises (a failed read must be loud); a
         # disarmed run reports the failure on the artifact and exits 0 (round-37 P3).
         if not disarmed:
             raise
+        # ⛔ `refused` names the CAUSE on every disarmed failure arm, which is the
+        # convention the ledger arm below already follows and the one the sibling
+        # `CurationRefused` arm above follows too — leaving this arm on the helper's
+        # `"off-switch active"` default made ONE state (a census read failed on a
+        # disarmed run) read two ways in one field, and the off switch is not what
+        # refused it here.
         return _disarmed_artifact(args, f"{type(exc).__name__}: {exc}",
+                                  refused=f"{type(exc).__name__}: {exc}",
                                   read_failure=f"{type(exc).__name__}: {exc}")
     gap = _source_gap(counts, len(sources))
     unreconciled = _unreconciled_sources(len(sources), gap)
@@ -966,6 +994,8 @@ def cmd_plan(args: argparse.Namespace) -> int:
                "sources_read": len(sources), "sources_total_reported": source_total,
                "operators_read": len(operators),
                "operators_total_reported": operators_reported,
+               # See `cmd_inventory`: the layer's completeness is a field, not a note.
+               "operators_reconciled": operators_reported is not None,
                "source_count_gap": gap,
                # The plan is the artifact a driver writes; a census without the
                # classes this read path cannot enumerate reads as complete.
