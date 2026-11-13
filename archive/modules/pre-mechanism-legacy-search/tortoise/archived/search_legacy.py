@@ -1,3 +1,25 @@
+# Archived module `tortoise.archived.search_legacy` — REMOVED from the product surface (#11609).
+#
+# batch:   pre-mechanism-legacy-search
+# reason:  pre-mechanism archive: shipped importable inside the package; moved out of the product (#11609 batch 0)
+# source:  tortoise/archived/search_legacy.py @ 4abff72cbb65966ab6b8ec9d51ac7b9315d8648b
+#
+# This file IS the source of record. To restore: copy each block below back into the
+# file named in ITS OWN `verbatim from <path>` banner (one symbol can span more than
+# one file), then run `uv run python tools/archive_surface.py check` (which fails
+# while `archive/` and the live surface disagree).
+#
+# ⛔ NOT part of the product: not importable from `tortoise`, not served over MCP, and
+#    not pointed at by any retired-forward name. Do not import this file.
+
+ARCHIVED_KIND = 'module'
+ARCHIVED_SYMBOL = 'tortoise.archived.search_legacy'
+ARCHIVED_BATCH = 'pre-mechanism-legacy-search'
+ARCHIVED_FROM = 'tortoise/archived/search_legacy.py'
+ARCHIVED_AT = '4abff72cbb65966ab6b8ec9d51ac7b9315d8648b'
+
+# ── verbatim from tortoise/archived/search_legacy.py ──
+
 """ARCHIVED: Legacy search() implementation from before Phase 0 hybrid search (#7748).
 
 Removed 2026-08-03. Replaced by tortoise_fts_query().
