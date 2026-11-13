@@ -1541,9 +1541,9 @@ def _apply_subject_supersession(proj, sdk, ref, supersedes_by,
             # ⛔ ONE ENTITY only (review round 21, P3 — the Object twin below):
             # this set is the whole widened probe, so an unrelated dangling
             # incarnation storing this successor must not answer for the record.
+            # The group key alone (review round 22, as the Object twin above).
             _matched_is_one_entity = (
-                len({_k for _rep, _k, _m in _subj_raw}) <= 1
-                and len({r[1] for r in _matched_subj if r[1]}) <= 1)
+                len({_k for _rep, _k, _m in _subj_raw}) <= 1)
             if (_matched_is_one_entity and any(_same_successor(
                     str(r[4] or ""), supersedes_by,
                     candidate_names=[mname
@@ -2054,9 +2054,13 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
         _name_arm_rows, _name_widened = _ref_candidates(_name_entities, "Object")
         # Does every matched row belong to ONE entity? The gone-survivor dedup
         # below may only answer for a single entity (review round 21, P3).
-        _name_is_one_entity = (
-            len({_k for _rep, _k, _m in _name_entities}) <= 1
-            and len({r[1] for r in _name_rows if r[1]}) <= 1)
+        # ⛔ The GROUP KEY is the entity test and nothing else may be conjoined
+        # with it (review round 22): one entity legitimately holds TWO carriers
+        # (a non-destructive merge of two candidates onto one survivor), so adding
+        # a distinct-id count made a merged entity's idempotent re-ingest refuse as
+        # "ref carrier's survivor is gone" — the regression class this branch
+        # forbids. Two DIFFERENT entities can never share a key.
+        _name_is_one_entity = len({_k for _rep, _k, _m in _name_entities}) <= 1
         if (not rows and _name_rows and not _name_arm_rows
                 and not _subject_family_holds_ref(proj, ref)):
             # #12120 review: the name arm DID match carriers and every one of

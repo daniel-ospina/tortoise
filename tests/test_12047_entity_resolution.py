@@ -5315,3 +5315,51 @@ class TestThe12120ReviewRound21:
                 f"divergence silently: {skips!r} {msgs!r}")
         finally:
             sdk.close()
+
+
+class TestThe12120ReviewRound22:
+    """The entity scope is the GROUP KEY, and nothing else (review round 22).
+
+    `_entity_rows` keys a row by its `resolved_from` SURVIVOR, or by the row
+    itself when it has none — so two DIFFERENT entities can never share a key,
+    while ONE entity legitimately holds two carriers (a non-destructive merge of
+    two candidates onto one survivor). The round-21 scope conjoined a distinct-id
+    count on top, which read "two carriers" as "two entities": a merged entity
+    whose retired survivor is gone then refused an idempotent re-ingest with
+    "ref carrier's survivor is gone" plus a durable `unaddressable-name` entry,
+    where `main` was silent.
+    """
+
+    @staticmethod
+    def _apply(sdk, records):
+        from tortoise.commit_ops import apply_supersessions
+
+        msgs: list[str] = []
+        skips: list[dict] = []
+        applied = apply_supersessions(
+            sdk._get_proj(), sdk, records, session_id="s-12120-r22",
+            skipped=skips,
+            warn=lambda m, *a, **k: msgs.append(m % a if a else m))
+        return applied, skips, msgs
+
+    def test_two_carriers_of_one_entity_still_dedup_silently(self, sdk_factory):
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            sdk.create_object("New Co", "document")
+            g.query(
+                "CREATE (a:Object {id:'r22-a', name:'Old Co', "
+                "objectKind:'document', status:'superseded', "
+                "supersededBy:'New Co', resolved_from:'r22-gone'}) "
+                "CREATE (b:Object {id:'r22-b', name:'old co', "
+                "objectKind:'document', canonical_name:'old co', "
+                "status:'superseded', supersededBy:'Other Co', "
+                "resolved_from:'r22-gone'})")
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "Old Co", "supersedes_by": "New Co",
+                 "evidence": "r22"}])
+            assert (applied, skips, msgs) == (0, [], []), (
+                "two CARRIERS of ONE entity were read as two entities, turning "
+                f"an idempotent re-ingest into a refusal: {skips!r} {msgs!r}")
+        finally:
+            sdk.close()
