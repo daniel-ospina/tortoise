@@ -378,7 +378,8 @@ _STRUCTURAL_PROPS = ("id", "content", "content_hash", "createdAt",
                      # ⚠️ `_REPORTED_FIELDS` is NOT the louder alternative it
                      # looks like. That bucket has exactly ONE residual channel,
                      # `evidence.support` — this module's other seven residual
-                     # sites are occupancy, label and link grading — and
+                     # sites are occupancy, label, reference-emptiness and link
+                     # grading — and
                      # `support` is built only from the fixed five-key
                      # `_observed` dict. `embedding` is not one of those five, so
                      # moving it there would suppress it from `undeclared` and
