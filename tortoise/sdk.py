@@ -47624,18 +47624,32 @@ class TortoiseSDK:
                     # the claim it tells the caller to supersede is by construction
                     # dead — and `supersede_point` runs the same guard on its
                     # SOURCE and refuses it (#2498: terminalization is one-way).
-                    # Measured: `supersede_point(<superseded>, <fresh>)` raises
-                    # `already terminal`, and so does every other door
-                    # (`update_point`, `retract_point`, `invalidate_point`). The
-                    # route that EXISTS is minting the corrected claim: a new
-                    # Point stands as current on its own, with no supersession
+                    # Measured: `supersede_point(<superseded>, <fresh>)`,
+                    # `retract_point` and `invalidate_point` all raise
+                    # `already terminal`; `update_point` raises the same when the
+                    # call carries a TEMPORAL prop (`update_point(dead,
+                    # validTo=…)`) and `Illegal status transition` on its status
+                    # arm. The route that EXISTS is minting the corrected claim: a
+                    # new Point stands as current on its own, with no supersession
                     # needed (and none possible) on the dead one.
+                    #
+                    # ⛔ Review round 12d: the denial is scoped to a RECORDED
+                    # terminal STATUS, not said absolutely. "No SDK door re-livens
+                    # a dead claim" was measured FALSE on the flag-dead shape the
+                    # same arm fires for (`status` NULL + legacy `outdated=true`):
+                    # `update_point(p, status='live')` stores `status='live'` on it,
+                    # because the promote arm's `WHERE n.status IS NULL OR … 'draft'`
+                    # does not read the flag — the residual recorded at this file's
+                    # own comment above `_promote_incident_operators`. The belief
+                    # layer still treats the node as dead (the flag), so nothing is
+                    # resurrected; the absolute sentence was just untrue.
                     raise ValueError(
                         f"update_entity refused {_lifecycle_fields} on a dead "
                         f"claim: {_terminal_refusal}. A terminal Point's status "
                         f"and validity window are one-way (#2498): no SDK door "
-                        f"re-livens a dead claim or re-stamps its window — not "
-                        f"this one, and not `supersede_point`, which refuses a "
+                        f"re-livens a claim whose recorded status is terminal, "
+                        f"or re-stamps its window — not this one, and not "
+                        f"`supersede_point`, which refuses a "
                         f"terminal SOURCE for the same reason. Mint the corrected "
                         f"claim with `create_point(...)`; it stands as current on "
                         f"its own, and the dead one keeps its recorded window. Do "

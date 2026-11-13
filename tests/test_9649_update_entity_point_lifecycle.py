@@ -282,6 +282,17 @@ def test_the_refusal_carries_the_three_parts(env):
         f"the refusal must not tell the caller to supersede a claim it has "
         f"just called terminal — `supersede_point` refuses a terminal SOURCE, "
         f"so that prescription cannot be run: {text!r}")
+    # ⛔ Review round 12d, and this is a pin, not a preference: the denial must
+    # be scoped to a claim whose RECORDED STATUS is terminal. The absolute form
+    # ("no SDK door re-livens a dead claim") is measurably FALSE on the flag-dead
+    # shape this same arm fires for — `update_point(<status NULL, outdated=true>,
+    # status='live')` stores `status='live'`, the residual recorded beside
+    # `_promote_incident_operators` — and a refusal whose subject is repair
+    # accuracy cannot itself overstate what is possible.
+    assert "re-livens a dead claim" not in text, (
+        f"the one-way denial must name its scope (a RECORDED terminal status), "
+        f"not deny an absolute that a measured door contradicts: {text!r}",
+    )
 
     # ...and the assertion above is not vacuous: superseding the dead id really
     # does raise, which is WHY the old prescription was wrong.
