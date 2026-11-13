@@ -1944,6 +1944,39 @@ def test_the_drop_warning_names_a_remedy_that_EXISTS_for_the_target(tmp_path, ca
     assert node_msg, "an authorised NODE drop logged nothing"
     assert "nodes kept so a relabel migration can repair them" in node_msg, node_msg
 
+    # ⛔ THE MIXED ARM (review round 5): when ONE run drops a node's vector AND an edge's,
+    # the line must carry BOTH remedies — reverting this arm to the node-only sentence red
+    # nothing before this case existed, even though the mixed wording is the one an
+    # operator meets on a dump that has both defects.
+    caplog.clear()
+    proj3 = _proj(tmp_path)
+    with caplog.at_level(logging.WARNING, logger="tortoise.hosted_backup"):
+        mixed = restore_graph(
+            proj3.g,
+            {
+                "format": DUMP_FORMAT,
+                "nodes": [
+                    {"dump_id": 1, "labels": ["Document"],
+                     "props": {"id": "d1", "documentKind": "article",
+                               "embedding": VEC}},
+                    {"dump_id": 2, "labels": ["Point"],
+                     "props": {"id": "p2", "content": "b", "pointKind": "claim"}},
+                ],
+                "edges": [{"src": 1, "dst": 2, "type": "SUPPORTS",
+                           "props": {"embedding": VEC}}],
+            },
+            allow_unserved_vectors=True)
+    assert mixed["dropped_vectors"] == 2, mixed
+    assert mixed["dropped_vector_labels"] == ["<relationship:SUPPORTS>", "Document"], mixed
+    mixed_msg = "\n".join(r.getMessage() for r in caplog.records
+                          if "dropped" in r.getMessage())
+    assert mixed_msg, "an authorised MIXED drop logged nothing"
+    assert "nodes kept so a relabel migration can repair them" in mixed_msg, (
+        "the node half of a mixed drop keeps its relabel remedy: " + mixed_msg)
+    assert "edges kept beside them" in mixed_msg, (
+        "the mixed wording must say the EDGE half has no relabel: " + mixed_msg)
+    assert "no relabel can repair" in mixed_msg, mixed_msg
+
 
 def test_restore_graph_still_restores_a_served_label(tmp_path) -> None:
     """The legitimate direction, for EVERY served label AND a multi-label node.

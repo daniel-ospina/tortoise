@@ -670,8 +670,10 @@ def test_an_edge_arm_that_stops_PLANTING_cannot_report_full_coverage(monkeypatch
     list (`edge_probed.add(rel_type)` at the top of the per-type loop — the exact variant the
     probe's own comment calls MEASURED wrong) left the file as it stood then green at
     `171 passed, 2 skipped` (=173, SCOPED to that head — this file collects 183 today, so the
-    figure is not re-cut: the mutation it describes reds the pin above on the current tree and
-    therefore cannot be re-measured here). Only
+    figure is not re-cut). What CANNOT be reproduced here is that GREEN observation: the
+    variant is CAUGHT now — measured, it leaves the population pin above SATISFIED
+    (input-derived equals `KNOWN_REL_TYPES`, so `:607` is not the assert that reds) while
+    THIS test's own `relationships_probed == frozenset()` assertion below does red. Only
     the empty-the-integer direction was pinned by the test above.
 
     So this disables the PLANT: with no stored-vector property to plant, no door can record a
