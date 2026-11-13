@@ -13234,7 +13234,15 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
         """
         chunks: list[bytes] = []
         total = 0
-        reader = getattr(resp, "read1", None) or resp.read
+        # ⛔ A body without `read1` is read ONE byte per call (fresh review round
+        # 18). `read(n)` blocks until `n` bytes or EOF, so the chunk-sized
+        # fallback put this leg's deadline back where the chunking exists to
+        # remove it: the deadline could not fire until a whole 4096-byte chunk had
+        # arrived — the unbounded wait this reader closes on the `read1` path.
+        # Real urllib responses (including `HTTPError` via `addbase.__getattr__ →
+        # fp`) expose `read1`, so this is latent rather than live; it is a
+        # one-byte fallback and not a redesign of the transport.
+        reader = getattr(resp, "read1", None) or (lambda n: resp.read(min(n, 1)))
         while total < cap:
             if time.monotonic() >= deadline:
                 # ⛔ CUT is REPORTED, never silent: a body truncated by the
@@ -13259,7 +13267,19 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
             # the exact arm round 13 added. The callers already handle it.
             chunk = reader(min(4096, cap - total))
             if not chunk:
-                return b"".join(chunks), False
+                # ⛔ EOF is NOT automatically a COMPLETE body: `read1` returns
+                # `b""` on a premature close instead of raising `IncompleteRead`
+                # (measured: `Content-Length: 200`, closed after 10 bytes,
+                # `resp.length == 190`, no exception), so a truncated reply used
+                # to report "not cut" and reach the ❌ captive-portal arm — the
+                # same false red the cut flag removed, on a different trigger
+                # (fresh review round 18). `resp.length` is the bytes still OWED;
+                # `None` (chunked / no Content-Length) means the body ended. The
+                # deadline arm above treats `None` the other way on purpose:
+                # there we stopped early with no evidence, here the stream itself
+                # declared its end.
+                outstanding = getattr(resp, "length", None)
+                return b"".join(chunks), outstanding not in (None, 0)
             # A reader that IGNORES `n` (a test double, a custom transport, a
             # proxy shim) would otherwise append the same bytes on every pass
             # until the cap — duplicating the body instead of bounding it.
