@@ -15566,7 +15566,45 @@ def main(argv: list[str] | None = None) -> int:
     elif args.cmd == "init":
         return _cmd_init(args)
     elif args.cmd == "setup":
-        return _cmd_setup(args)
+        # #12404: `setup` must not surface a traceback when its input ENDS.
+        # Every prompt raises EOFError from `input()` once the input runs out —
+        # which is EVERY non-TTY caller with nothing to read (an agent's bash
+        # tool, CI, `docker run` without -t) and also a TTY user pressing Ctrl-D.
+        # The boundary is closed HERE, once, rather than at the prompts —
+        # deliberately:
+        #
+        # ⛔ Not a `sys.stdin.isatty()` refusal inside _cmd_setup: that was the
+        # first shape of this fix and review rejected it, because a PIPE that
+        # supplies every answer is a legitimate non-TTY caller —
+        # `printf '6\ndeveloper\neng\n…' | tortoise setup` used to complete and
+        # write the config, and `--role` cannot replace it (it emits the canned
+        # `_default_memory_filter` defaults, not scripted custom answers).
+        # Firing only on EOF keeps both shapes working: a pipe with answers is
+        # untouched, a pipe without them (or Ctrl-D) gets this clean refusal.
+        # Do not "restore" an isatty gate here.
+        #
+        # ⚠️ Scope: input that ENDS, not every unusable stdin. A CLOSED fd 0
+        # raises `RuntimeError: input(): lost sys.stdin`, and a WRITE-ONLY fd 0
+        # raises `OSError: [Errno 9] Bad file descriptor`; both still traceback
+        # and exit 1 — `origin/main` behaves identically, so this handler is
+        # not a regression there, and neither is caught here on purpose: a
+        # broader `except` would swallow real errors. Both are their own issue.
+        #
+        # Exit 2, not 1: a missing effectively-required input is a usage error
+        # by this CLI's own convention (argparse exits 2 for every
+        # `invalid choice`; `_cmd_validate` documents `2 usage error`). Nothing
+        # is written — setup writes only at its final "Save to …" prompt, which
+        # neither path reaches.
+        try:
+            return _cmd_setup(args)
+        except EOFError:
+            print(
+                "\nInput ended (EOF) — setup aborted; nothing was written.\n"
+                "  Non-interactive: tortoise setup --role <role> --team <team> "
+                "[--output <file>]   (prints YAML)",
+                file=sys.stderr,
+            )
+            return 2
     elif args.cmd == "doctor":
         return _cmd_doctor(args)
     elif args.cmd == "config":
