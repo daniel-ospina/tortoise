@@ -45,6 +45,7 @@ import types
 from pathlib import Path
 
 import pytest
+import yaml
 
 _REPO = Path(__file__).resolve().parents[1]
 if str(_REPO) not in sys.path:
@@ -4683,6 +4684,61 @@ def _pin_row_failures(rows, docs, sources, default_source: str = "extractor_v2")
     return failures
 
 
+def _section_entries(lines: list[str], section: str) -> list[str] | None:
+    """The entries of a top-level `config/ci-surfaces.yml` block, or None if ABSENT.
+
+    ⛔ WHY THIS EXISTS INSTEAD OF A LINE-NUMBER PIN (eleven RECORDED moves).
+    The `carve_out:` cite in `03-test-design.md` used to be pinned as a hand-typed
+    line number. `tools/ci_selection.py::register_tests` OWNS that block — it
+    splices a new entry in and writes every other line back verbatim — so every
+    landing PR that registers a test file ABOVE the entry moved the number and
+    reddened `main`. The recorded ENTRY values, heads where the record carries one:
+
+        :9635 (pre-#12035) -> :9714 (#12035) -> :9721 (#12061) -> :9775 (#12056)
+        -> :9810 (#11977) -> :9933 -> :9934 (`0e281a900b`) -> :9943
+        (`9828250732`) -> :9949 (`ba84fbfabf`) -> :9965 (`e200623286`)
+        -> :9973 (`cd22562c24`, `c17e3c5f78`) -> :9987 (`1a0ace24`)
+
+    Twelve values, eleven moves. ⛔ `:9823` and `:9917` are deliberately NOT in
+    this series: both are values the DOCUMENT carried (at `edcac493a5` line 9823
+    read `- test_flip_gate.py`, 83 lines above the entry), not the entry's line —
+    counting them would mix the document's numbers with the tree's, which is the
+    exact error this pin exists to stop. And the tree moved more often than the
+    record: an UNRECORDED `:9821` sits between `:9810` and `:9851` in the
+    commit-by-commit scan, so eleven is a floor, not a total.
+
+    ⛔ `:9987` arrived TWENTY-SIX SECONDS after #12347 (`e59e6076`, 06:08:37Z)
+    landed the `:9973` re-derivation — `f1f74135a15b` (#12302, 06:09:03Z) is the
+    only commit in `c17e3c5f78..1a0ace24` touching the file. That latency is the
+    argument: the pin was checking a value its OWNER rewrites, not a fact about
+    the document.
+
+    So the claim is read off the BLOCK — which is what the document asserts
+    ("`carve_out:` holds **one**: …") and which no insertion can move. It is
+    parsed with `yaml` rather than scanned by hand, because the hand-rolled
+    version needed its own column-zero boundary rule and could not see an
+    indented entry: this very test file is registered that way under `core:`
+    (`config/ci-surfaces.yml:6103`) and `sdk:` (`:8502`), and a scan that misses
+    those cannot honestly claim a section "holds none".
+
+    This is the bundle's own D5 policy applied to the one cite a tool owns: the
+    symbol/block is authoritative, the line number is a convenience.
+
+    ⚠️ Returns `None` for an ABSENT section, never `[]`, because `[]` makes a
+    "holds none" assertion pass vacuously — a renamed or deleted block would then
+    disarm exactly the half of the claim that says "none".
+    """
+    manifest = yaml.safe_load("\n".join(lines))
+    entries = manifest.get(section) if isinstance(manifest, dict) else None
+    if entries is None:
+        return None
+    assert isinstance(entries, list), (
+        f"config/ci-surfaces.yml `{section}:` is a {type(entries).__name__}, not a "
+        f"list — this pin compares entries and cannot read a mapping")
+    # a YAML `# comment` is already gone; keep the value verbatim otherwise.
+    return [str(e).strip() for e in entries]
+
+
 def test_the_bare_continuation_cites_name_what_they_say():
     """A BARE `:NNNN` continuation is invisible to the sweep above — pin it here.
 
@@ -5079,11 +5135,14 @@ _EPIC_CITE_DOCS = {
 _EPIC_CITE_SOURCES = {
     "sdk": _REPO / "tortoise/sdk.py",
     "search_engine": _REPO / "tortoise/search_engine.py",
-    # `03-test-design.md` cites the manifest's OWN `carve_out:` entry by number.
-    # ⛔ Registered because #11837 moved it TWICE without a reader: restoring the
-    # `core:` line a merge dropped (+6 above it) shifted the entry 9548 -> 9554
-    # while the document went on naming 9548, which is the row above — a cite a
-    # change moves is exactly the cite no hand-recheck keeps.
+    # `03-test-design.md` cites the manifest's OWN `carve_out:` block — by BLOCK and
+    # filename now, not by line number, because `tools/ci_selection.py::register_tests`
+    # owns that block and every landing PR that registers a test file above the entry
+    # moves the number (measured: 9943 -> 9949 -> 9965 -> 9973 -> 9987, the last move
+    # inside two hours). The entry is read off the block by `_section_entries`;
+    # `#11837`'s point stands — nothing read it at all before that — but a reader that
+    # has to be re-derived by hand on every landing PR is a reader that reds `main`
+    # between landings.
     "ci_surfaces": _REPO / "config/ci-surfaces.yml",
     # `00-align.md` pins the `hierarchies` VALIDATOR by range and nothing read it,
     # which is how a guessed +15 survived where the tree's real offset is +42.
@@ -5237,60 +5296,15 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         ("04-plan.md", "operator / label path", (
             ("25041", "declared = declared_relation_predicates()"),
         ), "sdk"),
-        # The manifest's own `carve_out:` entry, cited from the artifact table.
-        # ⛔ The 5th element is the SECTION the cite must fall inside: this exact
-        # anchor text also sits under `core:` and its mirror, so without it a
-        # re-derivation onto either stays green while the document's `carve_out:`
-        # claim goes false (measured: 5854 and 8173 both drove this row GREEN).
-        # ⛔ THIS NUMBER IS NOT A CONSTANT OF THE EPIC — it is wherever the last
-        # merge above the entry left it, and it is re-derived at the head this PR
-        # lands on, never copied forward from a run that was green earlier.
-        #
-        # The history, because it is why this row carries this much prose:
-        # `#12035` re-derived the document here (9635 -> 9714) and its own +3 kept
-        # the entry and the document in step at 9714. Later merges then moved the
-        # entry out from under the document without touching it: `#12061` +7
-        # (9714 -> 9721), `#12056` +54 (-> 9775), `#11977` +35 (-> 9810). A parallel
-        # batch then re-derived the DOCUMENT to 9823 while the entry kept moving — so
-        # at main `edcac493a5` line 9823 reads `- test_flip_gate.py`, a different file
-        # 83 lines above the entry, and the pin was RED on main and on every diff that
-        # selects this file (a `config/*` diff takes `core`).
-        #
-        # Re-derive, never copy: read the number the DOCUMENT claims, then measure
-        #   awk '/^- test_pack_logic_writeprobe_11083.py$/{print NR}' config/ci-surfaces.yml
-        # and the section bounds
-        #   grep -nE '^(carve_out|uri_requiring):' config/ci-surfaces.yml
-        # The file is tool-MAINTAINED, not generated from a source of truth:
-        # `tools/ci_selection.py::register_tests` reads the text, splices the new
-        # entry into the surface's block and writes every other line back verbatim,
-        # which is why it also carries hand-authored prose. Either way the property
-        # this row trips on holds: an insertion anywhere above the entry moves it —
-        # measured on `main` as `#12159` (`33781512b6`) registering
-        # `test_candidate_recall_11901.py` at `config/ci-surfaces.yml:2236`, ONE
-        # insertion that moved every number below it. That is the class here — a
-        # line-number pin over a number another tool owns, not a citation anyone
-        # mis-copied. The entry read 9943 at `9828250732` and reads 9987 at
-        # `abf186f1109` — +44 across FOUR landing PRs that each registered lines
-        # above it (`ba84fbfabf` 9949, +6 @6721; `e200623286` 9965, +16 @7514;
-        # `cd22562c24` 9973, +8 @2725; `f1f74135a1` 9987, +13 @2237 and +1 @9150).
-        # ⛔ The `9951` this comment used to defend was never a value on `main`: it
-        # was 9943 + the 8 lines #12060 was predicted to add, and two other
-        # registrations landed first, so the prediction described no checkable
-        # commit — which is why this one number has now been "re-derived" three
-        # times. That is the row's real defect and not a transcription slip: the
-        # number is owned by another tool, so every landing PR above it is a
-        # re-derivation this pin cannot do for itself. Naming only the FIRST hunk
-        # is how 9951 stood here — re-derive the SUM of every hunk above the entry.
-        # `carve_out:` opens 9861 and `uri_requiring:` 10192 at `abf186f1109`, so
-        # 9987 is inside the section, and the identical text also sits at 6103 and
-        # 8502 (over `9828250732`'s 6082 / 8459: +21 / +43 — the two move at
-        # DIFFERENT rates, because only the hunks above each one count), which is
-        # what the 5th element exists to refuse. ⚠️ Both of those are INDENTED
-        # sub-keys (`core:` 2235, `sdk:` 8268 at `abf186f1109`) of `surfaces:`, so
-        # the resolver's nearest-column-zero-key rule reports the PARENT: a cite
-        # onto either refuses with `sits in section 'surfaces:', not 'carve_out:'`
-        # — measured, so a re-derivation onto it does not get told `sdk:` and
-        # conclude the guard is broken.
+        # ⛔ NOT A ROW ANY MORE — the `carve_out:` claim below the rows is checked
+        # against the BLOCK (`_section_entries`) and not against a line number: the
+        # entry lives in a block `tools/ci_selection.py::register_tests` rewrites, so
+        # every landing PR above it moved the number. The recorded entry-line
+        # series (twelve values, eleven moves) is in `_section_entries`' docstring;
+        # the last move arrived 26 seconds after #12347 landed its predecessor.
+        # The class the deleted row's 5th element guarded is unchanged — an
+        # indented `core:`/`sdk:` mirror satisfies the anchor text alone — but a
+        # block read has no boundary to get wrong.
         # The `plan_hierarchy_edges` CALL, in the two documents that name it, keyed
         # by the sentence rather than by the number: `:631` is where `main` had it,
         # then #12112 moved it three times (`687`, `695`, `700`) and each move left a
@@ -5324,29 +5338,16 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("700", "planned = plan_hierarchy_edges("),
             ("705", "`plan_hierarchy_edges` returns one"),
         ), "relation_write"),
-        ("03-test-design.md", "`carve_out:` holds **one**", (
-            # 9714 -> 9951 -> 9973 -> 9987: re-derived from THIS tree (`awk
-            # '/^- test_pack_logic_writeprobe_11083.py$/{print NR}'
-            # config/ci-surfaces.yml`), never carried forward from either side of
-            # a merge. Measured values, not a delta: 9943 at `9828250732`, 9949
-            # at `ba84fbfabf`, 9965 at `e200623286`, 9973 at `cd22562c24`, 9987 at
-            # `f1f74135a1` and at `abf186f1109`. ⛔ `9951` is in that list only
-            # because this row printed it — it was a predicted merge-tree value
-            # (9943 + 8), never a line any commit on `main` carried.
-            # The +44 over `9828250732` is FOUR insertions above the entry plus one
-            # `tier1:` line, and naming only the first is how 9951 stood here:
-            # `+8 @2725` (#12060's registration block → that is the 9951 step),
-            # `+6 @6721` (`test_archive.py`, #11609), `+16 @7514`
-            # (`test_11926_derived_invalidation.py`, #11926), `+13 @2237` plus
-            # `+1 @9150` (`tier1:`, the #12294 name-entropy gate). Each `@` offset
-            # is that commit's OWN new-side offset, measured per commit with
-            # `git diff -U0 <c>^..<c> -- config/ci-surfaces.yml`; the whole range
-            # `git diff -U0 9828250732..abf186f1109 -- config/ci-surfaces.yml`
-            # carries EIGHT hunks (zero deletions) — these five above the entry and
-            # three `durations:` rows below it, which do not move the pin. Re-derive
-            # the SUM of the hunks above the entry, never one.
-            ("9987", "- test_pack_logic_writeprobe_11083.py"),
-        ), "ci_surfaces", "carve_out:"),
+        # ⛔ THE `carve_out:` ENTRY IS NOT A ROW HERE, DELIBERATELY (measured four times).
+        # It used to be `("03-test-design.md", "`carve_out:` holds **one**", (("NNNN",
+        # anchor),), "ci_surfaces", "carve_out:")` — a hand-typed line number for an
+        # entry `tools/ci_selection.py::register_tests` OWNS, so every landing PR that
+        # registered a test file above it moved the number and reddened `main`, and
+        # every repair was another hand re-derivation: 9943 → 9949 → 9965 → 9973 →
+        # 9987. The fourth re-stale happened TWO HOURS after the PR that landed it.
+        # Three repairs to the same digit is the tell that the digit is the wrong
+        # binding, so this claim is now checked against the BLOCK (below), which is
+        # what the document actually asserts, and which no insertion can move.
     )
     assert len(rows) >= 9, (
         f"only {len(rows)} rows — an emptied table would pass vacuously, and these "
@@ -5359,6 +5360,97 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         "an epic-bundle cite names code it does not name, in a document no sweep "
         "reads — re-derive the number from the tree before changing this pin:\n  "
         + "\n  ".join(failures))
+
+    # ⛔ THE BLOCK ARM — the claim `03-test-design.md` actually makes, checked
+    # against the structure instead of a number that a tool rewrites under it.
+    # The sentence reads "capstone files in `carve_out:` / `uri_requiring:` /
+    # `slow_files:`: `carve_out:` holds **one** … `uri_requiring:` and
+    # `slow_files:` hold none", so the predicate is CAPSTONE membership — the
+    # whole `carve_out:` block holds 60 entries by design and asserting `== 1`
+    # over it would be my error, not the document's.
+    #
+    # ⚠️ THE CLASSIFIER IS A HEURISTIC, and that residual is stated rather than
+    # hidden: a capstone file whose NAME carries none of these markers and which
+    # lands in `uri_requiring:`/`slow_files:` would not be seen. The block
+    # membership itself is exact (YAML, not a hand scan); it is what counts as a
+    # "capstone file" that is a substring rule. Widening it would start refusing
+    # unrelated files, so the marker set is named here for a reader to extend.
+    block_failures: list[str] = []
+    ci_lines = sources["ci_surfaces"]
+    capstone = ("7949", "capstone", "pack_logic", "writeprobe")
+    ENTRY = "test_pack_logic_writeprobe_11083.py"
+    carve_all = _section_entries(ci_lines, "carve_out")
+    if carve_all is None:
+        block_failures.append(
+            "config/ci-surfaces.yml has no top-level `carve_out:` block at all — "
+            "03-test-design.md makes a positive claim about it, so an absent block "
+            "is a failure and not an empty match")
+    else:
+        carve = [e for e in carve_all if any(k in e for k in capstone)]
+        if carve != [ENTRY]:
+            block_failures.append(
+                f"config/ci-surfaces.yml's `carve_out:` block holds {len(carve)} "
+                f"CAPSTONE entr(y/ies) {carve!r}, not exactly {[ENTRY]!r} — "
+                f"03-test-design.md claims this block holds ONE, and a second entry "
+                f"falsifies the document's carve-out claim (and the E6 lane's "
+                f"embedded-only isolation)")
+    for other in ("uri_requiring", "slow_files"):
+        entries = _section_entries(ci_lines, other)
+        if entries is None:
+            block_failures.append(
+                f"config/ci-surfaces.yml has no top-level `{other}:` block — "
+                f"03-test-design.md states it holds NONE of the capstone files, "
+                f"which is a claim about a block that must EXIST to be checked")
+            continue
+        leaked = [e for e in entries if any(k in e for k in capstone)]
+        if leaked:
+            block_failures.append(
+                f"config/ci-surfaces.yml's `{other}:` block carries {leaked!r} — "
+                f"03-test-design.md states it holds NONE of the capstone files")
+
+    # The DOCUMENT side of the same claim: one line says it, that line NAMES the
+    # entry, and it does not hand a reader a line number that a tool will move.
+    doc_text = _EPIC_CITE_DOCS["03-test-design.md"].read_text(encoding="utf-8")
+    doc_hits = [ln for ln in doc_text.splitlines()
+                if "`carve_out:` holds **one**" in ln]
+    if len(doc_hits) != 1:
+        block_failures.append(
+            f"03-test-design.md: the scoping phrase '`carve_out:` holds **one**' "
+            f"occurs {len(doc_hits)} time(s) — this claim needs exactly one line")
+    else:
+        if ENTRY not in doc_hits[0]:
+            block_failures.append(
+                f"03-test-design.md's `carve_out:` sentence does not name {ENTRY!r} "
+                f"— the sentence is the only place the document says WHICH entry it "
+                f"means, so a sentence that names another file, or none, is the "
+                f"defect this pin exists to catch")
+        if re.search(r"ci-surfaces\.yml:\d", doc_hits[0]):
+            block_failures.append(
+                "03-test-design.md cites `config/ci-surfaces.yml:<line>` for the "
+                "`carve_out:` entry — that number is owned by "
+                "`tools/ci_selection.py::register_tests`, which rewrote it eleven "
+                "recorded times (the last 26 seconds after the PR that re-derived "
+                "it), so printing one re-creates the rot. Cite the BLOCK and the "
+                "filename (the bundle's own D5 policy, `05-verify.md`): the block "
+                "is authoritative, a number is a convenience.")
+    # …and a line-number cite for that TOOL-MAINTAINED file must not reappear
+    # ANYWHERE in the document: scoping the check to the phrase's line would let a
+    # second sentence reintroduce the rot this arm removes.
+    numbered = re.findall(r"ci-surfaces\.yml:(\d+)", doc_text)
+    if numbered:
+        block_failures.append(
+            f"03-test-design.md cites `config/ci-surfaces.yml:{numbered[0]}` (and "
+            f"{len(numbered) - 1} more) by LINE NUMBER — `tools/ci_selection.py::"
+            f"register_tests` rewrites that file, so any number in it is a value a "
+            f"tool moves under the sentence. Cite the BLOCK and the entry name "
+            f"(the bundle's own D5 policy, `05-verify.md`): the block is "
+            f"authoritative, a number is a convenience.")
+    assert not block_failures, (
+        "the `carve_out:` / `uri_requiring:` / `slow_files:` claim in "
+        "03-test-design.md does not hold against `config/ci-surfaces.yml` — this "
+        "arm reads the BLOCK with YAML, so there is no number to re-derive; fix the "
+        "manifest block or the document sentence:\n  "
+        + "\n  ".join(block_failures))
 
 
 def test_a_cite_that_names_a_directory_names_a_file_that_exists():
