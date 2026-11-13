@@ -237,8 +237,11 @@ def test_a_caller_vector_still_gets_a_truthfully_minted_marker(tmp_path):
     ⛔ `#12170`: the "lands on the node" half of that sentence was written down but
     NOT asserted — only the record was, and the record is the wrong half for the
     exemption this route carries. `tortoise/embed_writer_register.py` declares
-    `tortoise.sdk::create_source` EXEMPT-as-CARRIER on exactly the delegate's store
-    ("`_upsert_source`, whose passthrough stores `s.embedding`"). Measured **at
+    `tortoise.sdk::create_source` EXEMPT-as-CARRIER on exactly the delegate's store — the row names
+    `_upsert_source` as the delegate and states that its `_persist_extra_props(...,
+    allow_keys=_allow)` passthrough's closed surface DECLARES `embedding`; the "stores `s.embedding`
+    for the vector retrieval leg to read" phrasing is the probe's census row
+    (`tools/dod_5090_probe.py`, the `#5004` disposition), not the register's. Measured **at
     `ca74f2375e`, before the node assertion below existed**: dropping `embedding` from
     `Projection._SOURCE_EXTRA_PROPS` denies it on the node (`#3998` deny-and-log, node
     value `None`) while this test, the register suite, the probe suite and `#11641`'s

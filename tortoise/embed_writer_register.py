@@ -1037,8 +1037,13 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             "`embedding` — with its own mutation arm, and "
             "`tests/test_11858_source_door_markers.py::"
             "test_a_caller_vector_still_gets_a_truthfully_minted_marker` proves the vector lands on "
-            "the NODE. Without the first, dropping `embedding` from the allowlist leaves this "
-            "reason FALSE and every owner suite green",
+            "the NODE. ⛔ That figure is HEADED: measured at `ca74f2375e`, BEFORE this pin existed, "
+            "dropping `embedding` from the allowlist left this reason FALSE and every owner suite "
+            "green (390 passed). At THIS head the same mutation reds "
+            "`test_the_delegated_store_this_row_names_still_resolves`, "
+            "`test_the_delegation_pin_REDS_on_each_fact_it_rests_on` and the node assertion it "
+            "names — so read the 390 as the reason the pin was written, never as a property of "
+            "today's tree",
             "#5004",
             stores=NO_LIVE_VECTOR,
         ),

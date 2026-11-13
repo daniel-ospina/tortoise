@@ -4016,8 +4016,8 @@ def test_a_no_live_vector_declaration_executes_no_store_clause() -> None:
 #: this pin existed**: delete `"embedding"` from `Projection._SOURCE_EXTRA_PROPS` and the caller's
 #: vector is **denied on the node** (`#3998` deny-and-log: measured node value `None` while the
 #: `SourceCreated` record still carries the 4-float vector), so a vector is journalled and unreadable,
-#: the declaration above still says the passthrough "stores `s.embedding` for the vector retrieval leg
-#: to read", and **390 tests across the four suites that own this seam stayed green**. That is a
+#: the declaration above still says the store is delegated to that passthrough, whose closed surface
+#: `DECLARES` `embedding`, and **390 tests across the four suites that own this seam stayed green**. That is a
 #: silent retrieval loss behind a declaration nobody re-derived — the class `#12170` is about, one level in
 #: from the missing-entry symptom the issue names.
 #:
@@ -4046,10 +4046,19 @@ DELEGATED_STORE_ROUTES: dict[str, dict[str, object]] = {
 def _constant_strings(tree: ast.Module, name: str) -> set[str] | None:
     """Every string literal a binding of `name` carries, or None when the name is not bound.
 
-    ⛔ Not `tree.body` only: both allowlists this pin reads are CLASS attributes
+    ⛔ Not `tree.body` only: the allowlist this pin reads is a CLASS attribute
     (`_SOURCE_EXTRA_PROPS` sits in the `Projection` body), so a module-level-only walk would report
-    the constant as gone and red the control arm — a false hold naming the wrong cause. The name is
-    unique in its module, so walking every scope is precise enough for this claim.
+    the constant as gone and red the control arm — a false hold naming the wrong cause.
+
+    ⚠️ STATED RESIDUAL — what this walk does NOT see, measured on this head rather than assumed:
+    (a) a CALL-SITE narrowing (`_allow = self._SOURCE_EXTRA_PROPS - {"embedding"}`, which the
+    `allow_keys=` feed check accepts because the expression still MENTIONS the constant), and (b) a
+    SECOND binding of the name in the same scope that shadows the real one — this returns the UNION
+    of every binding, so the shadow is invisible here even though Python uses the last. Both leave
+    this static half GREEN; the authority for the EFFECTIVE set is the live node assertion in
+    `tests/test_11858_source_door_markers.py::test_a_caller_vector_still_gets_a_truthfully_minted_marker`,
+    which was measured to red on both. A walk that cannot see a shadow must say so, not imply it
+    saw it.
     """
     values: set[str] = set()
     found = False
@@ -4203,11 +4212,14 @@ def test_the_delegated_store_this_row_names_still_resolves() -> None:
     which drives the real write. Two halves, two homes, because a source reader cannot execute a
     store and this suite must stay URI-less.
 
-    ⛔ Why it exists at all when the row's class is already pinned: `EXEMPT` + `NO_LIVE_VECTOR` is
-    the ONE combination whose truth lives entirely in ANOTHER function. Every other declaration
-    either names a label (re-derived by `LABEL_EVIDENCE`) or proves absence in its own body
-    (re-derived above). This one says "the store is over there", and until this pin nothing checked
-    that "over there" still stored it.
+    ⛔ Why it exists when the row's class is already pinned: `EXEMPT` + `NO_LIVE_VECTOR` is
+    ONE OF TWO rows whose truth lives in ANOTHER function — `tortoise.sdk::_index_process_unit`
+    (`tortoise/embed_writer_register.py`, the `#10541` block) declares the same pair and hands its
+    store to `_session_event_write` in the same prose shape. Every other declaration either names a
+    label (re-derived by `LABEL_EVIDENCE`) or proves absence in its own body (re-derived above).
+    These two say "the store is over there". This pin covers `create_source`'s; ⛔ `_index_process_unit`
+    is the RESIDUAL — nothing re-derives its delegation either, and it is left unpinned here on
+    purpose so the next reader does not read this pin as coverage of both.
     """
     assert DELEGATED_STORE_ROUTES, (
         "no routed row is declared — this pin would assert nothing"
