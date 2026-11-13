@@ -215,7 +215,7 @@ def _unscoped_heading_forms(doc: str,
     reported: set[int] = set()
 
     def flag(i: int, why: str) -> None:
-        if i in reported or i <= skip:
+        if i in reported or (skip and i <= skip):
             return
         reported.add(i)
         bad.append(f"line {i + 1}: {lines[i][:60]!r} {why}")
@@ -233,8 +233,20 @@ def _unscoped_heading_forms(doc: str,
                     "read (it anchors on two forms at column 0), so the "
                     "PRECEDING section's scope runs past its own boundary "
                     "through it")
+    rendered = set(_rendered_heading_lines(doc, skip))
     for i, line in enumerate(lines):
-        if (not readable.match(line)
+        if readable.match(line) and i > skip and i not in rendered:
+            # ⛔ THE INVERSE (round 21): a line that LOOKS like a readable opener
+            # but which the parser does not render as a heading — `## ` inside a
+            # fenced block — TERMINATES a scope the document continues, so a
+            # presence pin can be satisfied from text BEFORE the truncation while
+            # the section's real text after it is never read. Measured (M-7): a
+            # fenced `## 3. Results` at the end of §2 with a false triple inside §2
+            # was green at 74 tests; it reds here.
+            flag(i, "looks like a readable section opener but is not a heading "
+                    "CommonMark renders (a `## ` inside a fenced block, say) — it "
+                    "TRUNCATES the preceding section's scope")
+        elif (not readable.match(line)
                 and re.match(rf"^{_BLOCK_PREFIX}#{{1,6}}\s?\d+(?:\.\d+)*\.\s",
                              line)):
             # ⛔ A SECTION-NUMBER LOOKALIKE only: `##3. Results` renders as prose
@@ -253,18 +265,11 @@ def _unscoped_heading_forms(doc: str,
                     "`_scope_slice` cannot see it")
         elif (i and lines[i - 1].strip()
               and re.fullmatch(r" {0,3}(?:=+|-+)[ \t]*", line)
-              and not lines[i - 1].lstrip().startswith(("#", ">", "```", "|"))
-              and i not in _thematic_break_lines(doc)):
+              and not lines[i - 1].lstrip().startswith(("#", ">", "```", "|"))):
             flag(i, "is a SETEXT underline under prose (the spec sets no minimum "
                     "run length and allows 1-3 spaces of indent) — it turns that "
                     "prose into a heading `_scope_slice` cannot see")
     return bad
-
-
-def _thematic_break_lines(doc: str) -> set[int]:
-    """Lines the parser renders as `hr` — a `---` here is NOT a setext heading."""
-    return {tok.map[0] for tok in MarkdownIt("commonmark").parse(doc)
-            if tok.type == "hr" and tok.map}
 
 
 def _assert_only_readable_headings(doc: str, readable: re.Pattern,
@@ -300,7 +305,7 @@ def _scope_slice(brief: str, heading: str) -> str:
     # the heading line alone, and §4's Result line lives in 4.1). An `h1` DOES end
     # it — `# Appendix` mid-document was otherwise absorbed into the preceding
     # section (#12349 round 20, P1).
-    end = r"^#{1,2} " if level == "##" else r"^#{2,3} "
+    end = r"^#{1,2} " if level == "##" else r"^#{1,3} "
     hit = re.search(rf"(?ms){own}.*?(?={end}|\Z)", brief)
     assert hit is not None, f"the brief no longer carries a `{level} {heading}` section"
     starts = re.findall(rf"(?m){own}", brief)
