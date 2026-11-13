@@ -902,16 +902,21 @@ def build_or_query(
     # emitted. See :func:`underscore_run_terms` for the measured defect and why
     # this is a query-side repair rather than a tokenizer change.
     #
-    # They count in the degenerate predicate for the same reason the aliases do:
-    # a `_`-shaped input whose plain tokens all die (`a_`, `x__y`, `__a`) has,
-    # before this change, only the ESCAPED-RAW branch to fall into, and that
-    # branch sends the whole string as one literal — where the index's own term
-    # is the composite. `x__y` emission is the same BYTES either way, `10:00_u`
-    # is not (`00_u` vs `10\:00_u`), so the predicate counts them.
+    # They do NOT enter the degenerate predicate below — `degenerate` stays
+    # `len(tokens) <= 1 and not aliases and not phrases`, and the two branches
+    # under it are what carry the composites (P2, #12368 review: an earlier
+    # wording here said they "count in the degenerate predicate", which is the
+    # opposite of the code — a maintainer aligning the predicate to that prose
+    # would delete the escaped-literal branch and reintroduce the round-3 P1
+    # below). Why they are handled there rather than folded in: a `_`-shaped
+    # input whose plain tokens all die (`a_`, `x__y`, `__a`) would otherwise
+    # fall only into the ESCAPED-RAW branch, and that branch sends the whole
+    # string as one literal — where the index's own term is the composite.
+    # `x__y` emission is the same BYTES either way, `10:00_u` is not (`00_u` vs
+    # `10\:00_u`), so the branches must see both.
     composites = underscore_run_terms(query) if underscore_terms_enabled() else []
-    # #12360 review round 3 (P1): the predicate above counts the composites, but
-    # the OR path must NOT then drop the escaped-raw literal that branch used to
-    # send. The composite is the INDEX's term only while the run is pure ASCII
+    # #12360 review round 3 (P1): the branches below must NOT drop the escaped-raw
+    # literal that the degenerate arm used to send. The composite is the INDEX's term only while the run is pure ASCII
     # (`[A-Za-z0-9_]`); the index treats every Unicode LETTER as a word character
     # too, so for `año_actual` the index holds `año_actual` as ONE term and the
     # composite this module can build from it (`o_actual`) is a term NOTHING

@@ -3154,6 +3154,15 @@ def test_a_PUNCTUATED_underscore_token_is_a_probe_because_the_read_addresses_ONE
         terms, only one of which is the token), `abc_def` emits `abc|def|abc_def`,
         `cafécafé` emits `caf|caf` where the index holds `cafécafé`, and
         `überüber`/`testétest` are the same shape.
+
+    ⛔ AND THE DOUBLED-SEGMENT CLASS IS PART OF THAT PIN, not an afterthought
+    (`#12368` review, P1 — the first cut of this widening REOPENED it). The
+    comparison must be made in the INDEX's sense, which keeps `_` inside a word:
+    `_indexed_term_runs` splits on `_`, so it mapped both `test_test` and its own
+    alternative `test` to `{'test'}` and ACCEPTED `test_test` — whose read is
+    `test|test|test_test`, i.e. two distinct index terms, so the probe comes back
+    on the common word alone. `origin/main` refused it (two runs), so accepting it
+    was a reopening, not a widening.
     """
     from tortoise.session_source_prose_migration import probe_phrase_rejection
 
@@ -3162,7 +3171,8 @@ def test_a_PUNCTUATED_underscore_token_is_a_probe_because_the_read_addresses_ONE
             f"{accepted!r} was refused — every alternative the read emits "
             f"addresses the ONE index term this token denotes, so it is a probe "
             f"(MEASURED live: it returns its own record)")
-    for refused in ("web_search", "abc_def", "cafécafé", "überüber", "testétest"):
+    for refused in ("web_search", "abc_def", "cafécafé", "überüber", "testétest",
+                    "test_test", "ab_ab", "abc_abc", "foo_foo"):
         assert probe_phrase_rejection(refused), (
             f"{refused!r} was accepted — the read OR-joins terms this token is "
             f"not, so the probe would match on any one of them")

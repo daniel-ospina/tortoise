@@ -1746,20 +1746,22 @@ def probe_phrase_rejection(phrase: str) -> str | None:
         # reason ("the read expands it into several terms") is false about INDEX
         # terms: there is ONE.
         #
-        # So the question is the one the guard means: does the emitted set address
-        # the ONE index term the token itself denotes? Both directions stay pinned —
-        # ``cafécafé`` (``caf|caf``; the token's term is ``cafécafé``), ``überüber``,
-        # ``testétest``, and ``web_search`` (whose alternative terms are ``search``,
-        # ``web`` AND the composite) still refuse, because their alternative terms
-        # are not the token's.
-        # ⚠️ This also makes the ``friday.`` shape the paragraph above always claimed
-        # was accepted ACTUALLY accepted: ``runs`` for it is ``['friday']`` and the
-        # read sends ``friday``, so the alternative terms equal the token's. It was
-        # refused before this change, which is why that claim was false.
-        token_terms = {r.lower() for r in runs}
+        # ⛔ COMPARE IN THE **INDEX'S** SENSE (``_INDEX_WORD_RUN_SPLIT_RE`` keeps
+        # ``_`` inside the run), NOT ``_indexed_term_runs``' (which splits on it),
+        # found by the #12368 review, P1. ``_indexed_term_runs('test_test')`` is
+        # ``['test','test']`` — so it maps BOTH the token and its alternative
+        # ``test`` to ``{'test'}`` and the guard ACCEPTED ``test_test``, whose read
+        # is ``test|test|test_test``: ``test`` and ``test_test`` are two distinct
+        # INDEX terms, so a probe on it returns rows for the common word alone.
+        # That is the over-match this block exists to refuse, and ``origin/main``
+        # refused it (``runs`` was ``['test','test']``, two runs) — so the read's
+        # splitter was a REOPENING of a closed class, not a widening of it.
+        # ``a_.`` is unaffected: both its alternatives are one index run, ``a_``.
+        token_terms = {r.lower() for r in _INDEX_WORD_RUN_SPLIT_RE.split(token) if r}
         alternative_terms: set[str] = set()
         for alternative in alternatives:
-            alternative_terms |= {r.lower() for r in _indexed_term_runs(alternative)}
+            alternative_terms |= {r.lower() for r in
+                                  _INDEX_WORD_RUN_SPLIT_RE.split(alternative) if r}
         if not (len(token_terms) == 1 and alternative_terms == token_terms):
             return (f"the read expands it into several terms ({built!r}) — either "
                     f"the identifier mechanism (a digit/dash run), the #12360 "
