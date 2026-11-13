@@ -6054,7 +6054,13 @@ def test_an_archive_entry_without_its_FIELDS_is_not_a_RECORD(tmp_path):
         path.write_text(_json.dumps({"schema": 1, "entries": [entry]}), encoding="utf-8")
         with pytest.raises(sm.SurfaceEvidenceUnreadable) as excinfo:
             sm.removal_records(path)
-        assert missing in str(excinfo.value), str(excinfo.value)
+        # ⛔ THE FIELD-NAME GUARD'S OWN WORDING, not merely the field name. The bare
+        # `assert missing in ...` passed with the loop deleted: the DELEGATED sibling grading
+        # (`archive_surface.manifest_violations` / `file_violations`) refuses the same row and
+        # its message happens to name whichever field is missing, so the loop could be removed
+        # with the suite green — a test that cannot fail for the guard it is named after
+        # (review round 15 of PR #12313: the mutant survived 38/38).
+        assert f"carries no usable `{missing}`" in str(excinfo.value), str(excinfo.value)
 
     # non-vacuity: the REAL row, unmodified, is a record — so the refusals above are about the
     # missing field, not about the fixture. (The committed entry is a `module`, which the
@@ -6065,6 +6071,42 @@ def test_an_archive_entry_without_its_FIELDS_is_not_a_RECORD(tmp_path):
     assert records["archived"] == {(real["kind"], real["symbol"])}, records
     problems, _ = sm.removal_report({(real["symbol"], "tool")}, set(), records)
     assert len(problems) == 1 and "DROPPED with no record" in problems[0], problems
+
+
+def test_an_archive_row_that_names_no_SYMBOL_is_UNREADABLE_not_absent(tmp_path):
+    """A row with `kind` but no `symbol` must REFUSE, not be skipped as "not archived".
+
+    Skipping it grades "unreadable" as "not there", so `cut` tells the operator to archive a
+    symbol that IS archived while a corrupt manifest stays quiet — and the cut never gives the
+    tree a committed baseline, so `check` cannot see the shape either.
+    (review round 15 of PR #12313: disarming the guard left 247/247 green.)
+    """
+    import json as _json
+
+    sm = _load_manifest_tool()
+    path = tmp_path / "MANIFEST.json"
+    real = _real_archive_entry()
+    entry = copy.deepcopy(real)
+    del entry["symbol"]
+    path.write_text(_json.dumps({"schema": 1, "entries": [entry]}), encoding="utf-8")
+    with pytest.raises(sm.SurfaceEvidenceUnreadable) as excinfo:
+        sm.removal_records(path)
+    assert "an `archive/MANIFEST.json` entry names no symbol" in str(excinfo.value), excinfo.value
+
+
+def test_a_baseline_ROW_with_no_name_is_UNREADABLE_not_absent():
+    """A `rows:`/`retired:` row that names no symbol must REFUSE, not vanish from the prior.
+
+    Grading it as absent loses the symbol: `cut` exits 0 and the row the operator hand-edited
+    (or `yq`'d, dropping `name:`) leaves the surface with nothing recorded — the exact deletion
+    this gate exists to refuse. `_read_manifest` accepts the shape (it only requires `rows` to
+    be a list) and `check`'s malformed-row finding needs a committed tree a cut never gives it.
+    (review round 15 of PR #12313: disarming the guard left 247/247 green.)
+    """
+    sm = _load_manifest_tool()
+    with pytest.raises(sm.SurfaceEvidenceUnreadable) as excinfo:
+        sm.surface_symbols({"rows": [{"method": "tortoise_x"}], "retired": []})
+    assert "a manifest `rows:` row carries no name" in str(excinfo.value), excinfo.value
 
 
 def test_a_FORGED_archive_row_is_not_a_RECORD(tmp_path):
@@ -6347,6 +6389,20 @@ def test_a_baseline_with_NO_retired_half_is_SAID_not_silent(monkeypatch, tmp_pat
     emptied = copy.deepcopy(derived_baseline)
     emptied["retired"] = []
     path.write_text(yaml.safe_dump(emptied, sort_keys=False, allow_unicode=True, width=110))
+    rc = sm.cmd_cut(argparse.Namespace(commit=CUT_SHA, allow_approval_reset=True))
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "WARNING the committed baseline carries no `retired:` list" in out, out
+
+    # ⛔ AND THE WARNING IS NOT CONDITIONAL ON THE DERIVED HALF HAVING ROWS. The disclosure
+    # used to require `doc.get("retired")` too, so a tree whose committed half was gone AND
+    # whose derivation produced no retired names said NOTHING while every forward entry left
+    # the surface — the state where silence is worst, and the one the docs already describe as
+    # unconditional (`CONTRIBUTING.md`, `archive/README.md`). (review round 15 of PR #12313.)
+    no_forward = copy.deepcopy(derived_baseline)
+    no_forward["retired"] = []
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(no_forward))
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
     rc = sm.cmd_cut(argparse.Namespace(commit=CUT_SHA, allow_approval_reset=True))
     out = capsys.readouterr().out
     assert rc == 0, out

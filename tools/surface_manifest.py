@@ -2890,7 +2890,12 @@ def cmd_cut(args: argparse.Namespace) -> int:
     # (a splice or merge artefact) was compared silently while `tortoise_get` leaving the
     # declaration in that same cut went ungraded (review of PR #12313). The disclosure is what
     # that arm exists for, so it fires on emptiness, not on a missing key.
-    if prior_doc is not None and not prior_doc.get("retired") and doc.get("retired"):
+    # ⛔ NOT CONDITIONAL ON THE DERIVED HALF HAVING ROWS (review round 15 of PR #12313). The
+    # guard used to be `and doc.get("retired")`, so a tree whose committed half was gone AND
+    # whose derivation produced no retired names said NOTHING — the state where the loss is
+    # total (every forward entry gone) and where a reader most needs to be told the half was
+    # not compared. The docs state the disclosure unconditionally; the code now does too.
+    if prior_doc is not None and not prior_doc.get("retired"):
         print("  WARNING the committed baseline carries no `retired:` list, so the retired "
               "half could not be compared — a retired name that also left the declaration is "
               "NOT graded by this cut (and `check` reds the shape; reconcile, then re-cut)")
