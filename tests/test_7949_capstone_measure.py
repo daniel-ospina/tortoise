@@ -5309,12 +5309,16 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # '/^- test_pack_logic_writeprobe_11083.py$/{print NR}'
             # config/ci-surfaces.yml`), never carried forward from either side of
             # the merge. Measured: `main` `9828250732` read 9943, the main TIP
-            # (`cd22562c24e4`, after #12060's own registrations) 9973, this branch
-            # alone 9981 — and no parent's number describes a tree that adds BOTH.
-            # The +32 from the main tip is this branch's own single registration
-            # block at 7519; the +30 before that is #12060's three registrations
-            # (measured, not a guessed +8 per row: only the 6090/`core:` rows sit
-            # above the FIRST of them and so move by 8).
+            # (`cd22562c24e4`) 9973, this branch alone 9981 — and no parent's
+            # number describes a tree that adds BOTH. The two deltas are just
+            # where the registrations landed: three commits between `9828250732`
+            # and the main tip add blocks above the entry (`cd22562c24e4` #12060
+            # +8, `ba84fbfabfba` #11609 +6, `e2006232866f` #11926 +16 = +30), and
+            # this branch adds one 32-line block (7522-7553) = +32. A row that
+            # sits BELOW every insertion moves by the whole sum; the duplicates
+            # at 6090 / 8521 show the two cases (+8 / +62) because only the
+            # #12060 block is above the first, and 8521 is below all four. The
+            # `core:` sub-key reads 2235 on all four trees (no insertion above it).
             ("10005", "- test_pack_logic_writeprobe_11083.py"),
         ), "ci_surfaces", "carve_out:"),
     )
