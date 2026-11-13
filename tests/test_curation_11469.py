@@ -4738,13 +4738,45 @@ def test_the_architecture_doc_no_longer_claims_the_event_layer_is_unread():
     _HISTORY = _re.compile(
         r"\b(was|were|had been)\b|withdrawn|original|superseded|first draft|earlier|"
         r"\bcycle \d|used to|no longer", _re.I)
-    prescribing = [
-        s.strip() for s in _re.split(r"(?<=[.;:])\s+", plan_norm)
-        if "sized to `counts.Event + 1`" in s and not _HISTORY.search(s)
-    ]
+
+    def _prescribes(text: str) -> list[str]:
+        """Clauses that state the withdrawn sizing as if it were current.
+
+        ⚠️ THE UNIT IS A CLAUSE, NOT A SENTENCE (PR-review cycle 9, measured). Excluding
+        the whole SENTENCE when any history word appears anywhere in it let a live
+        prescription ride along in the same sentence: "Earlier revisions aside, the read is
+        no longer sized to the bound, it is **sized to `counts.Event + 1`** today" stayed
+        GREEN — a single "no longer" excused a sentence that prescribes the defect. Commas
+        split too, so history and a live claim cannot share a unit.
+        """
+        return [
+            c.strip() for c in _re.split(r"(?<=[.;:,])\s+", text)
+            if "sized to `counts.Event + 1`" in c and not _HISTORY.search(c)
+        ]
+
+    # ⛔ THE DETECTOR IS SELF-TESTED, because a pin that cannot fail on its own defect is
+    # the class this block has produced twice already. Each case below is a MEASURED
+    # mutation of the plan doc: the first is the verbatim withdrawn sentence (emphasis-
+    # wrapped, mid-sentence — the form the previous `is sized to` pin could not see), the
+    # second is the clause-splitting bypass, the last two must stay writable as history.
+    assert _prescribes(
+        "The read is therefore sized to `counts.Event + 1`, which is the smallest "
+        "request that PROVES non-truncation."), (
+        "the plan-doc detector cannot see the withdrawn sentence it exists for")
+    assert _prescribes(
+        "Earlier revisions aside, the read is no longer sized to the bound, it is sized "
+        "to `counts.Event + 1` today."), (
+        "a history word in the same sentence still exempts a live prescription")
+    assert not _prescribes(
+        "A first draft said the request was sized to `counts.Event + 1`."), (
+        "recorded history must stay writable")
+    assert not _prescribes(
+        "The superseded row sized the request to `counts.Event + 1`."), (
+        "recorded history must stay writable")
+    prescribing = _prescribes(plan_norm)
     assert not prescribing, (
         "the plan prescribes sizing the request to the count (one row of headroom), which "
-        f"the code does not send; offending sentence(s): {prescribing[:2]}")
+        f"the code does not send; offending clause(s): {prescribing[:2]}")
     # ⛔ ...and the CODE's own text, which nothing pinned (PR-review cycle 5). The plan pin
     # above guards the plan, but `tools/curate_graph.py` carried the SAME superseded
     # prescription in TWO places — the `read_events` docstring bullet and the
