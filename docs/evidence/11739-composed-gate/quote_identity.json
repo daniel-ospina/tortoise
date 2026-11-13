@@ -1,0 +1,102 @@
+{
+  "measured_at": "2026-11-13T16:34:10Z",
+  "rows_in_cache": 15842,
+  "measured_points": 15008,
+  "distinct_composed_texts": 13341,
+  "points_without_a_distinct_composed_text": 1667,
+  "points_without_distinct_text_pct": 11.11,
+  "shared_composed_text_groups": 392,
+  "points_in_shared_groups": 2059,
+  "points_in_shared_groups_pct": 13.72,
+  "pairs_composing_to_identical_text": 28994,
+  "of_those_with_DIFFERENT_content": 28994,
+  "of_those_with_same_content": 0,
+  "of_those_raw_below_0_89": 16114,
+  "of_those_raw_at_or_above_0_89": 12880,
+  "largest_groups": [
+    {
+      "points": 117
+    },
+    {
+      "points": 89
+    },
+    {
+      "points": 72
+    },
+    {
+      "points": 68
+    },
+    {
+      "points": 66
+    },
+    {
+      "points": 53
+    }
+  ],
+  "largest_group_points": 117,
+  "raw_exact_duplicate_pairs_ge_0_99999": 12,
+  "examples": [
+    {
+      "raw_similarity": 0.7442,
+      "composed_similarity": 1.0,
+      "composed_text": "ISSUES 2",
+      "content_a": "The review of the extractor prompt-injection fix PR returned a verdict of two issues; the issues themselves are unnamed and their nature is not stated.",
+      "content_b": "The review outcome was reported as ISSUES 2"
+    },
+    {
+      "raw_similarity": 0.7298,
+      "composed_similarity": 1.0,
+      "composed_text": "ISSUES 2",
+      "content_a": "The review of the extractor prompt-injection fix PR returned a verdict of two issues; the issues themselves are unnamed and their nature is not stated.",
+      "content_b": "The review outcome was ISSUES 2, posted as a PR comment on the shard refresh PR."
+    },
+    {
+      "raw_similarity": 0.7944,
+      "composed_similarity": 1.0,
+      "composed_text": "ISSUES 2",
+      "content_a": "The review of the extractor prompt-injection fix PR returned a verdict of two issues; the issues themselves are unnamed and their nature is not stated.",
+      "content_b": "The review of the cell-recovery PR concluded with two reported issues; the specific issues and their reasoning are not recorded in the transcript."
+    },
+    {
+      "raw_similarity": 0.7448,
+      "composed_similarity": 1.0,
+      "composed_text": "ISSUES 2",
+      "content_a": "The review of the extractor prompt-injection fix PR returned a verdict of two issues; the issues themselves are unnamed and their nature is not stated.",
+      "content_b": "The harness rest and watchdog fix PR was reviewed and found to have 2 high-confidence real issues; verdict ISSUES 2, so the PR is not mergeable as-is."
+    },
+    {
+      "raw_similarity": 0.6852,
+      "composed_similarity": 1.0,
+      "composed_text": "ISSUES 2",
+      "content_a": "The review of the extractor prompt-injection fix PR returned a verdict of two issues; the issues themselves are unnamed and their nature is not stated.",
+      "content_b": "The review of PR #10675 on branch p0-10000b in tortoise concluded with two real issues found; no code was modified, committed, or merged."
+    },
+    {
+      "raw_similarity": 0.7328,
+      "composed_similarity": 1.0,
+      "composed_text": "ISSUES 2",
+      "content_a": "The review of the extractor prompt-injection fix PR returned a verdict of two issues; the issues themselves are unnamed and their nature is not stated.",
+      "content_b": "The harness rest and watchdog change was reviewed and found to have 2 real issues (verdict ISSUES 2); the specific findings are not recorded in this transcript."
+    },
+    {
+      "raw_similarity": 0.7694,
+      "composed_similarity": 1.0,
+      "composed_text": "ISSUES 2",
+      "content_a": "The review of the extractor prompt-injection fix PR returned a verdict of two issues; the issues themselves are unnamed and their nature is not stated.",
+      "content_b": "The fresh-context review of PR #3231 reported two issues."
+    },
+    {
+      "raw_similarity": 0.7534,
+      "composed_similarity": 1.0,
+      "composed_text": "ISSUES 2",
+      "content_a": "The review of the extractor prompt-injection fix PR returned a verdict of two issues; the issues themselves are unnamed and their nature is not stated.",
+      "content_b": "The review of PR #10632 concluded with ISSUES 2 \u2014 two real issues found"
+    }
+  ],
+  "provenance": {
+    "probe_path": "quote_identity.py",
+    "probe_sha256": "0b784446e43d0faa9448d232fd51978a9f19485741428be5fe5108120fa682c0",
+    "rows_source": "/tmp/11739-rows.jsonl",
+    "composed_encoder": "BAAI/bge-small-en-v1.5 (only via the composer's word budget; this section encodes nothing)"
+  }
+}
