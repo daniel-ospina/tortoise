@@ -157,7 +157,7 @@ names over `C(1000, 2)` (`entity_blocking.reduction_ratio`, computed by that one
 the pairs proposed by the 300-row variant sample — mixing the two published a ratio ~3× cheaper
 than the quantity its own definition names (`#12295` round-2 B3, fixed before this run).
 
-⚠️ **Two recall bounds sit under every blocking figure in this section, and neither one is a
+⚠️ **Three recall bounds sit under every blocking figure in this section, and none is a
 property of the blocker alone.** The first is `MAX_BLOCK_SIZE = 200` in `BlockIndex.candidates()`
 (`tortoise/entity_blocking.py`): a block larger than that is **skipped, not scored**, and the skip
 is recorded under `oversized_skipped` — and this table's pair-completeness column is computed
@@ -175,7 +175,13 @@ exactly those names. **Neither bound shrinks these figures:** the measured run's
 `oversized_skipped` **empty** — so **these counts are complete for THIS corpus**. On a larger
 corpus the cap would deflate pair completeness **silently**: nothing refuses, warns, or fails on a
 non-empty `oversized_skipped`, so a reader must check that field to know whether the number still
-means what this column says it means.
+means what this column says it means. The third is the `T:` key's own floor — `block_keys` emits a
+word-order/transposition key only for tokens matched by `_WORD = re.compile(r"[a-z0-9']+")` **and** at
+least `MIN_BLOCK_CHARS` (3) characters long, so a transposition of shorter tokens (`'ab cd'` /
+`'cd ab'`) or of non-ASCII tokens (`'привет мир'` / `'мир привет'`) shares **no** key and is never
+compared. It does not move these figures — every token in this population's reachable classes
+clears the floor — but it is a real reach limit on the shipped comparison path, and it is stated
+here rather than left for a reader to infer from “transpositions are reached”.
 
 ### 3.2 The falsifier, answered — and it fires against the BLOCKER
 

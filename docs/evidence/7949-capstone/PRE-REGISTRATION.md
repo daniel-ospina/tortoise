@@ -2688,7 +2688,7 @@ to answer.
 - **Why this entry exists.** §10.29 closed by declaring itself "LIVE for the merged tree … it has no
   successor". It has one now. `#12295` adds a net **`+83`** to `tortoise/extractor_v2.py`
   (`+87`/`-4` against `origin/main`) across four hunks, which shift lines cumulatively by `+40`,
-  `+81`, `+82` and `+83`; the §11 row and this pin both sit above the last of them, so they take
+  `+81`, `+82` and `+83`; the §11 row and this pin both sit below the last of them, so they take
   the full `+83`.
 - **The one cite this entry re-derives is the one the capstone pin READS.**
   `preregistration.json`'s `door.acceptance_arm.read_back` names the `#10360` switch,

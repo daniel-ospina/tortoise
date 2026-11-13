@@ -76,10 +76,16 @@ union :func:`tortoise.entity_blocking.block_keys` yields, partitioned per
 ``(label, key)``: ``E`` the folded name, ``B`` a path basename, ``P`` the
 ``MIN_BLOCK_CHARS`` prefix, one ``T`` per word-prefix, and 8 ``S`` minhash bands.
 Equal folded names always share ``E``, so the exact rung can never be missed by
-blocking. ⛔ The bound the prefix alone imposed is GONE (#12295): a pair
-whose folded names share no 3-character prefix is no longer excluded — that is
-exactly what the ``T`` (word order / transposition) and ``S`` (typo and separator
-classes) keys reach, and `test_every_key_namespace_in_the_union_is_pinned_by_a_pair_that_REQUIRES_it`
+blocking. ⛔ The bound the prefix ALONE imposed is gone for names whose tokens clear the `T`
+key's own floor (#12295): a pair whose folded names share no 3-character prefix is no longer
+excluded by that fact — the ``T`` (word order / transposition) and ``S`` (typo and separator
+classes) keys reach it. ⚠️ That is a relief, NOT a universal: ``T`` is emitted per token matched
+by ``_WORD = re.compile(r"[a-z0-9']+")`` that is also at least ``MIN_BLOCK_CHARS`` (3)
+characters long, so (i) a transposition whose tokens are shorter than 3 characters and (ii) every
+non-ASCII transposition still share no key at all — measured at this head:
+``'alpha beta'`` / ``'beta alpha'`` share ``T:alp`` and ``T:bet``, while ``'ab cd'`` / ``'cd ab'``,
+``'go py'`` / ``'py go'`` and ``'привет мир'`` / ``'мир привет'`` share NOTHING.
+``test_every_key_namespace_in_the_union_is_pinned_by_a_pair_that_REQUIRES_it``
 pins each of ``P``/``T``/``S`` with a pair whose own namespace its arm REQUIRES (not
 "shares alone" — measured, only the ``P`` witness shares ``P`` by itself; the ``T``
 witness shares ``T`` and ``S``, the ``S`` witness all three). ⚠️ And the arms do NOT all
