@@ -4713,7 +4713,9 @@ def _pin_row_failures(rows, docs, sources, default_source: str = "extractor_v2")
 #: prose — but never a table pipe, and never another `something.ext` token, so
 #: `` … `config/ci-surfaces.yml` and `tools/ci_selection.py:4140` `` is a cite of a
 #: DIFFERENT file, not of this one. Every shape above is pinned by the two matcher
-#: tests below.
+#: tests below — INCLUDING the long form: the GAP is bounded at 400 characters
+#: (`_GAP`), and the bound is stated here rather than left to be discovered, because
+#: a bound nobody states is a scope the reader trusts past the guard's reach.
 #: Rule 3 — a number followed by a UNIT is a COUNT, not a cite — is only as good as
 #: the unit list, and two shapes walked straight through earlier cuts:
 #:   * `%` was inside the `\b` group, and `%` is a NON-WORD character, so `%\b` can
@@ -4735,7 +4737,21 @@ _NUM = rf"(?:\d{{1,3}}(?:,\d{{3}})+|\d{{3,}}){_UNIT}(?![\d])(?!,\d)(?!\.\d)(?!-\
 _LEADING_NUM = rf"(?<![\w#.]){_NUM}"
 _WRAP = r"[`*]*"
 _SEP = r"(?::|#L|—|–|\bL\.?|\b(?:at|on|line|lines|row|rows|entry|entries|of)\b)"
-_GAP = r"(?:(?!\.\w)[^|]){0,160}?"
+#: ⛔ THE GAP IS BOUNDED, AND THE BOUND USED TO TRUNCATE SILENTLY — the module's own
+#: contract is that a guard may be incomplete but may not be quiet about it. At
+#: `{0,160}` a cite written with more prose than that between the manifest's name and
+#: the number was INVISIBLE. The reproduction is the witness in
+#: `…_catches_every_spelling`, and it is the same string: 240 characters of padding
+#: (`"prose " * 40`) put 242 between the filename and the `line` separator and 247
+#: between the filename and the digits — a cite a reader follows, and the matcher did
+#: not see it. 400 covers a heavily qualified or wrapped sentence, and the bound is
+#: kept at all (rather than removed) because an unbounded gap reads a number out of a
+#: LATER paragraph or table row and reports it as this sentence's cite — measured 0
+#: hits on the current document at both bounds, so the widening changes no verdict
+#: today. Whatever this comment says, the witness's own arithmetic is the figure to
+#: trust: it is one string, written once, and the pad length is a number nobody should
+#: have to re-derive from prose.
+_GAP = r"(?:(?!\.\w)[^|]){0,400}?"
 #: A RANGE is the cite a maintainer writes when re-adding one, and `_NUM`'s `(?!-\d)`
 #: guard — which exists to stop a FRAGMENT of a longer run being read as the number —
 #: also stopped the two-endpoint form entirely, so `(:9987-9995)` and
@@ -4831,9 +4847,9 @@ def _parse_manifest(lines: list[str], failures: list[str]) -> dict | None:
     "holds none". `parse_manifest_text` refuses it (its `DuplicateManifestKeyError`
     docstring records 24 duplicate keys measured on one merge).
 
-    ⛔ Parsed ONCE and passed on: the manifest is ~1.3 MB and one strict parse is
-    ~0.8 s on a shared cell, so asking `_section_entries` per section re-parsed it
-    three times — ~1.6 s of a ~18 s junit sum for the file. The refusal is
+    ⛔ Parsed ONCE and passed on: one strict parse is ~0.8 s on a shared cell, so
+    asking `_section_entries` per section re-parsed it three times — ~1.6 s of a
+    ~18 s junit sum for the file. The refusal is
     unchanged; only the repetition goes. (Readings, not constants: three
     consecutive runs at the reviewed head measured 0.755 / 0.776 / 0.832 s per
     parse. No byte figure is quoted here — a size is a tree state, and this PR is
@@ -5632,9 +5648,11 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         """
         return name == ENTRY or any(g in name for g in capstone_globs)
 
-    # ⛔ PARSED ONCE. The manifest is ~1.3 MB and one strict parse is ~0.8 s on a
-    # shared cell; asking `_section_entries` per section re-parsed it three times, for
-    # ~1.6 s of this test. The refusal is unchanged — only the repetition goes.
+    # ⛔ PARSED ONCE. One strict parse is ~0.8 s on a shared cell; asking
+    # `_section_entries` per section re-parsed it three times, for ~1.6 s of this test.
+    # The refusal is unchanged — only the repetition goes. (No size is quoted: a byte
+    # count is a tree state, and this PR is about not typing one into prose — including
+    # its own.)
     manifest = _parse_manifest(ci_lines, block_failures)
 
     def _has_top_level(section: str) -> bool:
@@ -5978,6 +5996,16 @@ def test_the_manifest_line_cite_matcher_does_not_fire_on_correct_prose(prose):
     "(`config/ci-surfaces.yml:9987-9995`)",
     "the manifest, lines 9987-9995",
     "`config/ci-surfaces.yml` lines 9987–9995",
+    # ⛔ THE LONG FORM, and it was GREEN until this arm's `_GAP` was widened from 160
+    # to 400: a heavily qualified sentence put MORE prose than the old bound between
+    # the manifest's name and the number, which is a cite a reader follows and the
+    # matcher did not see. The wording is deliberately ordinary — this is not a
+    # contrived spelling, it is what a careful author writes when they explain the
+    # mechanism before naming the line. The pad is 40 × `"prose "` = 240 characters,
+    # which puts 242 before the `line` separator: comfortably past 160, comfortably
+    # inside 400, so this case neither sits on the old bound's edge nor on the new
+    # one's. Re-narrowing `_GAP` to 160 reds here.
+    ("see `config/ci-surfaces.yml` " + "prose " * 40 + "line 9987"),
 ])
 def test_the_manifest_line_cite_matcher_catches_every_spelling(prose):
     """Every spelling that attaches a NUMBER to the manifest must be refused."""
