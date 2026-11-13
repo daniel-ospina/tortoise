@@ -795,11 +795,14 @@ def _zone_child_env_base() -> dict[str, str]:
 def test_the_zone_child_gets_the_parents_sys_path_not_just_the_repo_root() -> None:
     """⛔ THE `sys.path` HAND-OFF IS PINNED STRUCTURALLY, NOT BY IMPORTING (#12330).
 
-    Reverting `_zone_child_env_base` to `"PYTHONPATH": repo_root` leaves this whole file
-    green (measured: 60 passed) — the parent's `pydantic` resolves through the venv prefix,
-    so a LOCAL child imports fine in BOTH shapes and the fix is unpinned on the box its
-    author runs on. An import-based assertion does not rescue that: it only moves the
+    Reverting `_zone_child_env_base` to `"PYTHONPATH": repo_root` LEFT THIS WHOLE FILE GREEN
+    BEFORE THIS PIN EXISTED — the parent's `pydantic` resolves through the venv prefix, so a
+    LOCAL child imports fine in BOTH shapes and the fix was unpinned on the box its author
+    runs on. An import-based assertion does not rescue that: it only moves the
     defect to the runner's install shape, which the helper's own docstring argues against.
+    ⚠️ Present tense would be FALSE: with the pin below in place that revert REDS it, which
+    is the whole point of the pin. Do not quote a pass count for the revert without saying
+    which head it was counted at.
 
     So the contract is asserted directly on the value the helper returns: the repo root is
     FIRST (a stray installed `tortoise` must not shadow the tree under test), EVERY
@@ -838,9 +841,12 @@ def test_the_zone_child_gets_the_parents_sys_path_not_just_the_repo_root() -> No
     # ⛔ KEEP THE DEDUPE. Dropping it from the mutant is not a simplification: pytest's
     # `sys.path` on this repo already carries `<repo>/tests` TWICE, so a bare
     # `[repo_root, *reversed(...)]` reds `assert len(entries) == len(set(entries))` at the
-    # uniqueness arm above and the ORDER assert is never reached — measured (`1 failed`,
-    # on `assert 8 == 7`). That is the same trap this paragraph exists to name, and it was
-    # wrong in an earlier cut of this very comment.
+    # uniqueness arm above and the ORDER assert is never reached — measured: `1 failed`, on
+    # the uniqueness assert. ⚠️ The digits of that comparison are BOX-DEPENDENT (they count
+    # how many entries `sys.path` happens to carry), so no `assert N == M` literal is quoted
+    # here: one more duplicate is all the claim needs, and a reader who measures a different
+    # N will conclude the note is wrong rather than that their box differs. That is the same
+    # trap this paragraph exists to name, and it was wrong in an earlier cut of this comment.
     # ⛔ VERIFY THE MUTANT CHANGED `entries` BEFORE TRUSTING A GREEN RUN. `sorted(...)` over
     # a tail that is ALREADY non-decreasing is the IDENTITY — the mutant asserts nothing,
     # passes, and a reader concludes the order arm is unpinned; `reversed(...)` below is a

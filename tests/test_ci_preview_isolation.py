@@ -975,8 +975,8 @@ def test_a_raising_ps_poll_still_reaps_the_peer_decoy(
     was inside a `try:`, so a raise from `ps` left a 120 s `workerd` alive, reparented to
     pid 1.
 
-    Moving the poll back outside the guard leaves the REST of this file green — nothing
-    else injects a failure from the `ps` call, because the raising
+    Moving the poll back outside the guard LEFT THE REST OF THIS FILE GREEN BEFORE THIS PIN
+    EXISTED — nothing else injects a failure from the `ps` call, because the raising
     `_script` arm in `test_a_raising_stop_all_...` never reaches it. So the guard was
     unpinned while its own comment claimed nothing between the spawn and its reaper is
     unguarded; this pins it by raising from the poll ONLY and asserting the decoy is gone.
@@ -1034,8 +1034,9 @@ def test_a_raising_job_a_spawn_still_reaps_the_peer_decoy(
     raises, `own` is still `None`, and an UNGUARDED `_reap_group(own.pid)` raises
     `AttributeError: 'NoneType' object has no attribute 'pid'`, which (a) leaks the 120 s
     `workerd` decoy because the `_reap(peer.pid)` on the next line never runs, and (b)
-    MASKS the real `OSError` that CI needs to see. Removing the guard leaves the whole
-    file green (measured: 44 passed), so it is pinned here: make `_spawn`'s SECOND call
+    MASKS the real `OSError` that CI needs to see. REMOVING THE GUARD LEFT THE REST OF THIS
+    FILE GREEN BEFORE THIS PIN EXISTED — nothing else drove `_spawn`'s second call to raise
+    — so it is pinned here: make `_spawn`'s SECOND call
     (job A's tree root) raise the EAGAIN/ENOMEM `OSError` the comment names, then assert
     that `OSError` — not `AttributeError` — surfaces, and that the decoy is gone.
     """
