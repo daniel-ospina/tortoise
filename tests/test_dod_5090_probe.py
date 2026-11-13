@@ -8443,8 +8443,23 @@ def test_the_census_has_no_DUPLICATE_dict_key_in_its_source() -> None:
         names = [t.id for t in targets if isinstance(t, ast.Name) and t.id in wanted]
         if not names or not isinstance(node.value, ast.Dict):
             continue
-        keys = [k.value for k in node.value.keys
-                if isinstance(k, ast.Constant) and isinstance(k.value, str)]
+        # ⛔ A key that is NOT a string literal (an alias like `_ALIAS_KEY = "…"` used as a key, a
+        # splat, any computed expression) must FAIL here rather than be filtered out. Filtering made
+        # the same name declared twice under one literal and once behind the alias collapse to "no
+        # duplicate" in BOTH checks below — the alias is skipped, and the literal-vs-runtime count
+        # still agrees, because the runtime dict collapses identically. Measured on a copy of this
+        # tree (`#12182` cycle 10): `_ALIAS_KEY = "tortoise.api::_emit"` plus `_ALIAS_KEY: (…)` in
+        # `WRITER_CENSUS` stayed GREEN here while `main`'s dropped `#9314` pin, which called
+        # `ast.literal_eval`, raised on the same file. That is the one shape where this detector was
+        # NARROWER than the pin it replaced: fail on it, never re-filter it.
+        keys: list[str] = []
+        for k in node.value.keys:
+            assert isinstance(k, ast.Constant) and isinstance(k.value, str), (
+                f"{names[0]} carries a key that is not a string LITERAL ({type(k).__name__}). This "
+                "pin reads literal keys, so an aliased or computed key is invisible to it — and a "
+                "duplicate hidden behind one is exactly the fail-open this detector exists to stop "
+                "(#9314). Spell the key as a literal, or re-derive the detector")
+            keys.append(k.value)
         dupes = sorted({k for k in keys if keys.count(k) > 1})
         assert not dupes, (
             f"{names[0]} declares the same key more than once: {dupes}. A dict literal keeps the "
