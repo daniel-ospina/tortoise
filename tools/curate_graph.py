@@ -687,7 +687,6 @@ def cmd_inventory(args: argparse.Namespace) -> int:
     # second vocabulary.
     try:
         counts = reader.counts()
-        structure = reader.structure()
         graphs = reader.graphs()
         points, total = reader.read_points(page=args.page, verify=args.verify_read)
         sources, source_total = reader.read_sources()
@@ -695,6 +694,12 @@ def cmd_inventory(args: argparse.Namespace) -> int:
         # change. `structure` is handed over so the read reconciles against its count, and
         # a refusal here is the DESIGNED kind (rc 3), not a crash: it says two surfaces
         # disagree about one population, or that the layer cannot be read whole.
+        # ⛔ `structure` is read IMMEDIATELY before the layer HERE TOO, not at the top: the
+        # refusal's fourth cause is a concurrent create between the count and the read, and
+        # its message states the window is "two requests". Reading the count before the
+        # point walk (`read_points` is 34+ calls on a real graph) makes that message false
+        # for the verb a driver runs FIRST — the window would be the whole walk.
+        structure = reader.structure()
         operators, operators_reported = reader.read_operators(structure)
         # ⛔ The audit section is a census read too (it is in the `used` set the tests
         # assert, and it feeds the report), so it belongs INSIDE this handler: outside

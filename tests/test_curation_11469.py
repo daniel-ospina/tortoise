@@ -3901,6 +3901,39 @@ def test_a_disarmed_census_failure_carries_the_sections_fallback_note(
         assert payload["operators_reconciled"] is None, payload
 
 
+def test_both_verbs_take_the_count_and_the_layer_in_one_window(monkeypatch, tmp_path):
+    """`structure` is read IMMEDIATELY before the layer, in BOTH verbs.
+
+    The refusal's fourth cause is a concurrent create between the count and the read, and its
+    message states the window is "two requests". `read_points` alone is 34+ calls on a real
+    graph, so reading the count at the top of the verb makes that message false: the window
+    would be the whole point walk. `plan` was narrowed and `inventory` was left reading the
+    count at the top — one arm fixed, the shared message claiming both (review of
+    `0918c1366a`). Pinned on the ORDER of the requests, because that is the property; a pin on
+    the code's shape would not survive a refactor that moved the read again.
+    """
+    mod = _tool_module()
+    seen: list[tuple[str, str | None]] = []
+    surface = _operator_surface(operators=OPERATOR_ROWS, reported=len(OPERATOR_ROWS))
+
+    def recording(name, args=None):
+        seen.append((name, (args or {}).get("section")))
+        return surface(name, args)
+
+    for verb in ("inventory", "plan"):
+        seen.clear()
+        monkeypatch.setattr(mod, "_live_call_tool", recording)
+        argv = [verb, "--graph", "org_x_g_old", "--no-verify-read",
+                "--out", str(tmp_path / f"{verb}.json")]
+        if verb == "plan":
+            argv += ["--target", "org_x_g_new", "--ledger", str(tmp_path / "plan.jsonl")]
+        assert mod.main(argv) == 0, verb
+        count_at = seen.index(("tortoise_graph_overview", "structure"))
+        # the layer read is the ONLY `tortoise_search` this run makes
+        layer_at = next(i for i, (name, _) in enumerate(seen) if name == "tortoise_search")
+        assert layer_at == count_at + 1, (verb, seen)
+
+
 def test_the_plan_payload_carries_the_layers_three_fields(monkeypatch, tmp_path):
     """The `plan` payload is the artifact a driver reads — its three fields are pinned.
 
