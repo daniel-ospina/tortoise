@@ -5293,12 +5293,18 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # 10019 (+46 = `main`'s +14 and this branch's +32), `carve_out:` opened
         # 9893 and `uri_requiring:` 10224, so 10019 was inside the section.
         # ⛔ That 10019 shared the `9951` defect it condemns: it is a MERGE-TREE
-        # value, and no commit carried it — `abf186f1109a` itself read 9987, and
-        # `main` then added +34 of its own (`+32 @7535` `ea2c41a696`, `+1 @1039`
-        # `a53ba8cf53`, `+1 @2237` `73c479ce40`) to read 10021 at `87c07462a8`
-        # before this lane was rebased. The row below re-derives 10036 from the
-        # rebased tree it names; every number in THIS paragraph is the earlier
-        # tree's, kept as the trail and not as the current reading. The
+        # value (`9987 + 32`), not a reading of `main` — `abf186f1109a` itself
+        # read 9987, and `main` then added +34 of its own (`+32 @7535`
+        # `ea2c41a696`, `+1 @1039` `a53ba8cf53`, `+1 @2237` `73c479ce40`) to read
+        # 10021 at `87c07462a8` before this lane was rebased. ⚠️ `main`'s OWN +32
+        # does land the anchor on 10019 at `ea2c41a696` — a coincidence of the
+        # same two addends, which is exactly why the prediction looked checked;
+        # the +2 that landed after it is what made it stale. The row below
+        # re-derives 10036 from the rebased tree it names; every number in THIS
+        # paragraph is the earlier tree's, kept as the trail and not as the
+        # current reading. ⚠️ `d036b9859960` (the 10005 above) is NOT in this
+        # clone — `git cat-file -e` exits 128 — so that one value is carried text
+        # rather than a re-measurable one. The
         # identical text also sat at 6103 and 8502 at `abf186f1109a` (6120 and
         # 8551 rebased), which is what the 5th element exists to refuse; the
         # pair shows the two cases over `9828250732`'s 6082 / 8459. Each
@@ -5323,8 +5329,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # — NOT 8534, which would be the +32 this branch's block adds and no
         # commit on `main` had yet.
         # ⚠️ Both of those are INDENTED sub-keys
-        # (`core:` 2245, `sdk:` 8317 on the rebased tree — 2235 / 8300 at
-        # `abf186f1109a`) of `surfaces:`, so the resolver's
+        # (`core:` 2245, `sdk:` 8317 on the rebased tree — 2235 / 8268 at
+        # `abf186f1109a`, 8300 at `ea2c41a696`) of `surfaces:`, so the resolver's
         # nearest-column-zero-key rule reports the PARENT: a cite onto 8551 refuses
         # with `sits in section 'surfaces:', not 'carve_out:'` — measured, so a
         # re-derivation onto it does not get told `sdk:` and conclude the guard is
@@ -5387,7 +5393,9 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # below both twins but above this entry), then on `main` itself
             # `+32 @7535` (`ea2c41a696`, #12108), `+1 @1039` (`a53ba8cf53`,
             # #12406) and `+1 @2237` (`73c479ce40`, #12408) = 10021, and this
-            # lane `+9 @1941` plus `+6 @5061` = 10036 (its own registration of
+            # lane `+9 @1942` plus `+6 @5063` (the rebased commit's own offsets;
+            # `4de7bbf511` against `d571adef87` read `@1941` / `@5061`) = 10036
+            # (its own registration of
             # `test_12362_capture_outcome_unknown.py` in the `api` and `core`
             # halves). A row sitting BELOW every insertion moves by the whole sum,
             # so 9987 + 34 + 15 = 10036. The `core:` sub-key reads 2245 here and
