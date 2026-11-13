@@ -128,7 +128,7 @@ from .live import is_terminal_status  # #2498 shared terminal predicate (Python 
 from .live import classify_lifecycle_fanout  # #7822 fan-out-wide lifecycle verdict
 from .live import LIFECYCLE_FANOUT_QUERY  # #7822 the shared fan-out statement
 from .live import EPISTEMIC_LABELS  # #7902 epistemic-label write widening (shared with #7853 read widening)
-from .live import status_as_reported  # #9974 R1 absent-status rendering (shared with live.py)
+from .live import status_as_reported, refuse_terminal_event_state  # #9974 R1 + #11825
 from .raw_state import (  # #3998: the absent-raw state
     WRITABLE_RAW_STATES,
     raw_entry,
@@ -8117,12 +8117,41 @@ def _item_prop_at_depth(item: dict, key: str, depth: int) -> tuple[bool, object]
     for _ in range(depth):
         if not isinstance(cur, dict):
             return False, None
-        if key in cur:
-            return True, cur.get(key)
+        declares, value = _item_rendered_prop(cur, key)
+        if declares:
+            return True, value
         cur = cur.get("props")
     if not isinstance(cur, dict):
         return False, None
-    return key in cur, cur.get(key)
+    return _item_rendered_prop(cur, key)
+
+
+def _item_rendered_prop(scope: dict, key: str) -> tuple[bool, object]:
+    """PRESENCE + value for ``key`` in one scope, reading keys the way the WRITER
+    renders them (#11825 review cycle 6, P1).
+
+    ``if key in scope`` hashes the literal name, so a ``str`` SUBCLASS whose
+    ``__str__`` returns ``key`` (or a ``bytes`` key the driver decodes to it) is
+    invisible to a Phase-1 reader while the writer files it under that name —
+    measured: a rendered-alias ``outdated`` key passed Phase 1 and the entity
+    write then refused mid-write, after the earlier items committed.
+
+    ⛔ LAST match wins, not first, within a scope: `_coerce_props` merges with
+    ``props.update``-style ordering, so a later key that renders to the same name
+    is the one the writer keeps — which is also the arm's rule, and the two must
+    agree or Phase 1 reports clean for a bundle the door refuses.
+    """
+    from .live import _event_state_key_names
+
+    found, value = False, None
+    for raw, candidate in scope.items():
+        # ⛔ BOTH renderings, the same union the write door asks
+        # (`_event_state_key_names`): Phase 1 reading one renderer while the door
+        # reads two is how a rendered-alias `outdated` key was refused mid-write
+        # after the earlier items committed (measured, review cycle 8, P1).
+        if key in _event_state_key_names(raw):
+            found, value = True, candidate
+    return found, value
 
 
 def _item_effective_status(item: dict, depth: int = 1) -> object:
@@ -8277,8 +8306,13 @@ def _item_flatten_depth(item: dict, section: str) -> int:
     """How many times the item's write door applies ``_coerce_props``."""
     if section == "points":
         return _POINT_ITEM_FLATTEN_DEPTH
-    return _ENTITY_ITEM_FLATTEN_DEPTH.get(
-        str(item.get("type") or "").strip().lower(), 1)
+    # ⛔ The DEPTH is a function of the label the WRITER resolves, so it reads the
+    # type by the same rule every other arm does (#11825 review cycle 11, P1).
+    # While this line rendered, the arms above could read the status at depth 1
+    # while the writer folded 2: `{"type": Lie("subject"), "props": {"props":
+    # {"status": "dead"}}}` measured TEN violations' worth of difference — Phase 1
+    # returned [] and `ingest` raised in step 3 with the point already committed.
+    return _ENTITY_ITEM_FLATTEN_DEPTH.get(_item_type_text(item), 1)
 
 
 def _status_is_evaluable(value: object) -> bool:
@@ -8410,6 +8444,44 @@ def _endpoint_is_terminal(info: dict) -> bool:
     )
 
 
+def _type_text(value: object) -> str:
+    """An item's `type` or a door's `type=` argument: content, lowercased.
+
+    ⛔ ONE primitive for BOTH sides of the seam, because the two were reading the
+    same value by different rules and `#11825` review cycle 12 measured the
+    consequence: `class LieStrip(str)` whose `strip()` returns `"event"` with
+    content `"object"` was an `:Object` to every Phase-1 arm (which ask
+    ``_item_type_text``) and an `:Event` to `ingest` (whose read called the
+    SUBCLASS's `strip`) — so the bundle passed validation and step 3 raised
+    with the point already committed.
+
+    ⛔ Why the explicit `str.*` calls: ``str.__str__(value)`` returns a PLAIN
+    ``str`` carrying the CONTENT (verified: no ``__str__`` override is consulted),
+    and the base ``strip``/``lower`` are then called explicitly rather than as
+    bound methods, so an override of EITHER cannot change the answer. Calling
+    ``value.strip()`` was the defect — it is a virtual dispatch, not the writer's
+    rule.
+    """
+    if not isinstance(value, str):
+        return ""
+    return str.lower(str.strip(str.__str__(value)))
+
+
+def _item_type_text(item: dict) -> str:
+    """The item's `type` as its WRITER reads it: content, lowercased.
+
+    ⛔ One rule, applied by EVERY Phase-1 arm that asks what an item IS: content,
+    then lowercase, implemented once in `_type_text` (`:8447`) — which this
+    delegates to, and whose explicit `str.strip`/`str.lower` BASE calls mean no
+    overridden `strip`/`lower` or `__str__` can change the answer. An arm that
+    compared `str(item.get("type") or "")` was asking a DIFFERENT question (the
+    `__str__` rendering), so a subclass whose content is a real label and whose
+    `__str__` differs passed Phase 1 and step 3 then raised with the point items
+    already committed — the #2422/#7925 partial-mutation class, review 10.
+    """
+    return _type_text(item.get("type"))
+
+
 _ENTITY_ITEM_LABELS = {"subject": "Subject", "object": "Object",
                        "event": "Event", "document": "Source"}
 
@@ -8469,8 +8541,7 @@ def _bundle_entity_name_outcomes(
     for item in bundle.get("entities") or []:
         if not isinstance(item, dict):
             continue
-        elabel = _ENTITY_ITEM_LABELS.get(
-            str(item.get("type") or "").strip().lower())
+        elabel = _ENTITY_ITEM_LABELS.get(_item_type_text(item))
         name = item.get("name")
         if elabel not in ("Subject", "Object") \
                 or not isinstance(name, str) or not name:
@@ -21638,6 +21709,41 @@ class TortoiseSDK:
             if missing_ok:
                 return None
             raise ValueError(f"No point {point_id!r}")
+        # ── #11825 → the LIFECYCLE doors: an `:Event` has no lifecycle ──
+        # The three terminalizing doors (`retract_point` / `supersede_point` /
+        # `invalidate_point`) reach this guard BEFORE any write, and each of them
+        # writes a TERMINAL status — so a node carrying BOTH `:Point` and
+        # `:Event` (`#3311`'s `retype`, migrated graphs) was terminalized here
+        # while the `update_entity` door refused the same value (measured, review
+        # cycle 11: `retract_point(<:Point:Event>)` -> `['retracted',
+        # ['Point','Event']]`). The probe below then answers "does the node THIS
+        # door writes carry `:Event` too", which is a NARROWER question than the
+        # update door's — see the block below for why the two differ on purpose.
+        #
+        # Scoped by `refuse_terminal`: that is exactly the "this door
+        # terminalizes" predicate (the docstring above defines it that way), and
+        # the one caller that passes `False` (`update_point`) writes a window or
+        # a non-terminal prop through its own policy, so an `:Event` carrying one
+        # is not this refusal's business.
+        # ⛔ The probe is `:Point:Event`, NOT the update door's OR-form, and the
+        # difference is deliberate (#11825 review cycle 12 P2): THIS guard's write
+        # surface is `MATCH (n:Point {id:$id})` (`LIFECYCLE_FANOUT_QUERY` is
+        # :Point-scoped too), so only a node carrying BOTH labels is one this door
+        # would terminalize. Measured over-block with the OR-form: `add_event(<a
+        # point's id>)` mints a SEPARATE `:Event` keyed by that id, and
+        # `retract_point(<the point>)` was then refused — "carries the :Event label"
+        # — while the `:Point` node it would write stayed `live`, with journal
+        # delta 0. `_update_entity` keeps the OR-form because ITS write reaches
+        # both nodes.
+        if refuse_terminal and self._get_proj().g.query(
+                "MATCH (n:Point:Event {id:$id}) RETURN count(n)",
+                params={"id": point_id},
+        ).result_set[0][0]:
+            raise ValueError(
+                f"Point {point_id!r} carries the :Event label — {method} "
+                f"cannot terminalize it: an :Event has no lifecycle, so a "
+                f"terminal status would store a value no reader names and no "
+                f"retrieval leg filters (#11825)")
         if kind == "operator" and not allow_operator:
             raise ValueError(
                 f"Point {point_id!r} is an operator — {method} is for "
@@ -26923,8 +27029,7 @@ class TortoiseSDK:
                     "message": f"ingest: sources[{index}] requires 'sourceKind'",
                 })
         elif section == "entities":
-            _etype_v = item.get("type")
-            etype = (_etype_v if isinstance(_etype_v, str) else "").strip().lower()
+            etype = _type_text(item.get("type"))
             if not etype:
                 violations.append({
                     "section": section, "index": index,
@@ -28383,15 +28488,16 @@ class TortoiseSDK:
         # above gives the flag, and the one the sibling `:Subject` arm inside
         # the endpoint loop could never provide.
         #
-        # `:Object` and `:Event` are deliberately NOT refused: their writers do
-        # not validate, they STORE the value (measured), so a refusal here
-        # would reject bundles the writer accepts — the over-rejection class
-        # this PR already fixed once.
+        # `:Object` is deliberately NOT refused: its writer does not validate,
+        # it STORES the value (measured), so a refusal here would reject bundles
+        # the writer accepts — the over-rejection class this PR already fixed
+        # once. `:Event` is no longer in that sentence: since #11825 its door
+        # refuses the TERMINAL half, and the arm BELOW mirrors that refusal at
+        # Phase 1 for the same partial-mutation reason.
         for i, item in enumerate(bundle.get("entities") or []):
             if not isinstance(item, dict):
                 continue
-            if _ENTITY_ITEM_LABELS.get(
-                    str(item.get("type") or "").strip().lower()) != "Subject":
+            if _ENTITY_ITEM_LABELS.get(_item_type_text(item)) != "Subject":
                 continue
             _declares_status, own_status = _item_declared_status(
                 item, _item_flatten_depth(item, "entities"))
@@ -28407,6 +28513,149 @@ class TortoiseSDK:
                            f"refuses it mid-write, so the bundle is "
                            f"rejected at validation. Must be one of: "
                            f"{', '.join(sorted(_SUBJECT_STATUS_VALUES))}",
+            })
+        # ── #11825: the `:Event` TERMINAL half, refused at Phase 1 ──
+        # The same class as the `:Subject` vocabulary arm directly above, and
+        # for the same measured reason: `create_event` now runs
+        # `live.refuse_terminal_event_state`, so an item carrying a terminal
+        # status raises in step 3 AFTER the point items have committed. The
+        # predicate is `live.is_terminal_status` — the ONE mirror of the Cypher
+        # terminal rule — so a status added to the vocabulary moves the door and
+        # this arm together (`#2901`/`#3301`). NON-terminal statuses are NOT
+        # refused: the door accepts them and `_promote_incident_operators` reads
+        # `draft`/`live` as its gate (#7853, #10828), so refusing here would be
+        # this file's own over-rejection class. `outdated` needs no arm: the loop
+        # above already refuses it bundle-wide on ANY point or entity item.
+        # ⛔ EMITTED UNCONDITIONALLY, and the duplicate for a DIRECT-route
+        # operator connection is the accepted cost — the same bargain the
+        # `:Subject` vocabulary arm above makes. Deferring to the connection arm
+        # by OWNERSHIP was measured WRONG (review cycle 5 P1): that arm runs only
+        # for a DIRECT-route connection carrying an `operator`, so an item named
+        # by a `reify: true` or `relation: …` connection was deferred to an arm
+        # that never fired — ZERO violations, and `ingest` committed the point
+        # and then raised mid-write, which is precisely the class this arm
+        # exists to prevent. A message that repeats itself is cheaper than a
+        # bundle that half-commits.
+        for i, item in enumerate(bundle.get("entities") or []):
+            if not isinstance(item, dict):
+                continue
+            # ⛔ THE TYPE IS RESOLVED THE WAY ITS OWN WRITER RESOLVES IT — by
+            # CONTENT, not by `__str__`. `ingest` and `create_entity` route by the
+            # writer's rule — content, then lowercase — through `_type_text` /
+            # `_item_type_text` (`:8447`, `:8470`), whose explicit `str.strip` /
+            # `str.lower` calls make that answer unspoofable: `str.strip` builds a
+            # PLAIN `str` from the subclass's content, so no `__str__` is consulted
+            # anywhere on that path, and no overridden `strip`/`lower` can change it
+            # either. This arm therefore reads `str.__str__` too: asking the
+            # UNION here (as the API label arms rightly do, because the fold
+            # interpolates the label by `str()` while the journal keeps its
+            # content) made Phase 1 refuse a `content="object", __str__="event"`
+            # item that the writer files as an `:Object` — an over-block with a
+            # wrong diagnosis (measured, review cycle 9 P2). One rule per side:
+            # the LABEL is a two-renderer name, the TYPE is a content string.
+            if _ENTITY_ITEM_LABELS.get(_item_type_text(item)) != "Event":
+                continue
+            # ⛔ THE KEY AXIS, and the `None` value, are part of this arm too
+            # (review cycle 5: one P1, one P2, both measured). `_item_declared_status`
+            # reads the LITERAL name, so a `str`-subclass or `bytes` key naming
+            # `status` was invisible here while the door refused it — Phase 1 said
+            # clean, `ingest` committed the point, and step 3 then raised (the
+            # half-commit this arm exists to prevent). And `status: None` is the
+            # DOCUMENTED clear route the door accepts, so treating it as a
+            # violation was this file's own over-rejection class (#7925).
+            # `_event_state_declarations` is the same renderer-side reader the
+            # door uses, over the item and its nested `props` with the door's
+            # presence precedence.
+            # ⛔ The scope precedence is the WRITER's, not "last scope wins"
+            # (review cycle 7, P1/P2 — the first revision of this arm got it
+            # backwards, then the second removed the `break` and got it backwards
+            # the other way). `_coerce_props` fills ABSENT keys from the nested
+            # `props`, so the TOP-LEVEL key wins; an aliased top-level key does
+            # not shadow a literal nested one, because the fill is by EXACT key.
+            # Building the merged map is the only way to get all three measured
+            # shapes right — top terminal + nested live, top live + nested
+            # terminal, and aliased top + literal nested terminal.
+            # ⛔ The scope precedence is the WRITER's, and the same-name collision
+            # rule is the ENGINE's (review cycle 7). Three shapes had to be
+            # measured to get this right, and the two earlier revisions each got
+            # one wrong:
+            #   * `_coerce_props` fills ABSENT keys from the nested `props`, so the
+            #     TOP-LEVEL value of the SAME exact key wins;
+            #   * two DIFFERENT keys that both render to `status` are both written,
+            #     and the door refuses when EITHER is terminal (measured).
+            # So the map is built the way the writer builds it, and then EVERY
+            # declaration of the guarded name is evaluated — which cannot call a
+            # bundle clean that the door refuses, and does not over-reject the
+            # same-key shadowing the writer resolves.
+            from .live import _event_state_key_names
+            _scopes = []
+            _cur: object = item
+            for _ in range(_item_flatten_depth(item, "entities") or 1):
+                if not isinstance(_cur, dict):
+                    break
+                _scopes.append(_cur)
+                _cur = _cur.get("props")
+            _merged: dict = {}
+            for _scope in _scopes:                # shallow first: it WINS
+                _merged.update({k: v for k, v in _scope.items()
+                                if k not in _merged})
+            _status_values = [v for k, v in _merged.items()
+                              if "status" in _event_state_key_names(k)]
+            own_status = None
+            if not _status_values:
+                _declares_status, own_status = _item_declared_status(
+                    item, _item_flatten_depth(item, "entities"))
+                _status_values = [own_status] if _declares_status else []
+            else:
+                own_status = _status_values[-1]
+            # `status: None` is the DOCUMENTED clear route the door ACCEPTS, so it
+            # is not a violation (review cycle 5, P2).
+            _status_values = [v for v in _status_values if v is not None]
+            if not _status_values:
+                continue
+            # The TYPE dimension (review cycle 6, P1): a PERSISTABLE non-string is
+            # refused by the door, a discarded one is accepted-and-dropped.
+            from .live import _status_is_discarded_by_every_writer as _is_discarded
+            _stored_bad = [v for v in _status_values
+                           if not isinstance(v, str)
+                           and not _is_discarded(v)]
+            if _stored_bad:
+                violations.append({
+                    "section": "entities", "index": i,
+                    "message": f"ingest: entities[{i}] declares status "
+                               f"{_stored_bad[0]!r} for an :Event — `status` on "
+                               f"the node is a STRING drawn from the "
+                               f"vocabulary, or `None` to clear it, so the "
+                               f"bundle is rejected at validation rather "
+                               f"than mid-write. WHAT TO DO: pass a string "
+                               f"(the door accepts `scheduled`/`draft`/"
+                               f"`live`), or drop `status`.",
+                })
+                continue
+            # ⛔ NAME THE DECLARATION THAT FAILED, not the LAST one. The test above
+            # is an `any`, and the writer applies EVERY key of the map, so an item
+            # can declare both names — one terminal, one not. Rendering
+            # `_status_values[-1]` then indicted the LEGAL value and advised the
+            # caller to pass it, with the offending terminal declaration absent
+            # from the message (measured, review: conflict-sweep lane F — an item
+            # declaring `superseded` and `live` produced "declares status 'live' …
+            # use a non-terminal value", naming only the value that was fine).
+            _terminal_hits = [
+                v for v in _status_values
+                if isinstance(v, str) and is_terminal_status(str.__str__(v))
+            ]
+            if not _terminal_hits:
+                continue
+            violations.append({
+                "section": "entities", "index": i,
+                "message": f"ingest: entities[{i}] declares status "
+                           f"{', '.join(repr(v) for v in _terminal_hits)} for an "
+                           f":Event — an :Event "
+                           f"carries no lifecycle, so its door refuses the "
+                           f"terminal half mid-write and the bundle is rejected "
+                           f"at validation. WHAT TO DO: drop `status` from the "
+                           f"item, or use a non-terminal value (the door "
+                           f"accepts `scheduled`/`draft`/`live`).",
             })
         local: dict[str, tuple[str, dict]] = {}
         for section in ("sources", "points", "entities"):
@@ -28486,7 +28735,7 @@ class TortoiseSDK:
         for i, item in enumerate(bundle.get("entities") or []):
             if not isinstance(item, dict):
                 continue
-            _etype = str(item.get("type") or "").strip().lower()
+            _etype = _item_type_text(item)
             _name = item.get("name")
             if _etype not in _ENTITY_LAYER_LABEL \
                     or not isinstance(_name, str) or not _name:
@@ -28552,8 +28801,7 @@ class TortoiseSDK:
         for i, item in enumerate(bundle.get("entities") or []):
             if not isinstance(item, dict):
                 continue
-            _elabel = _ENTITY_ITEM_LABELS.get(
-                str(item.get("type") or "").strip().lower())
+            _elabel = _ENTITY_ITEM_LABELS.get(_item_type_text(item))
             if _elabel not in ("Object", "Event"):
                 continue
             if _elabel == "Event":
@@ -28609,7 +28857,7 @@ class TortoiseSDK:
                     # Subject/Object/Event entity item — the same label set the
                     # write primitives accept. An entity item typed `document`
                     # is a `:Source`, so it stays out.
-                    etype = str(item.get("type") or "").strip().lower()
+                    etype = _item_type_text(item)
                     elabel = entity_labels.get(etype)
                     # #7925 review P1: an operator-SHAPED item is not an
                     # endpoint on either route — `is_operator` rides the
@@ -28833,8 +29081,7 @@ class TortoiseSDK:
                     esection, eitem = local[v]
                     if esection != "entities":
                         continue
-                    ep_label = entity_labels.get(
-                        str(eitem.get("type") or "").strip().lower())
+                    ep_label = entity_labels.get(_item_type_text(eitem))
                     ep_name = eitem.get("name")
                 else:
                     info = node_info.get(v) or {}
@@ -28956,8 +29203,7 @@ class TortoiseSDK:
                     # route) — the graph
                     # write refuses it on presence, so a name simulation would
                     # add nothing there.
-                    elabel = entity_labels.get(
-                        str(item.get("type") or "").strip().lower())
+                    elabel = entity_labels.get(_item_type_text(item))
                     name = item.get("name")
                     if elabel not in ("Subject", "Object", "Event"):
                         continue
@@ -30352,7 +30598,17 @@ class TortoiseSDK:
           ``SUBJECT_STATUS_VALUES`` before the name merge, so an invalid value
           (outside that set, non-string, or an explicit ``null``) on ANY entity
           item is a Phase-1 violation, while ``:Object``/``:Event`` statuses
-          are stored verbatim and stay accepted. Props are read at the depth
+          are stored verbatim and stay accepted. ⛔ The ``:Event`` half of that
+          is now split, and the split is the whole point of #11825: a
+          NON-TERMINAL ``status`` (``scheduled``/``draft``/``live``) is still
+          stored verbatim, but the TERMINAL half is refused bundle-wide here
+          for exactly the reason the ``:Subject`` vocabulary is — the door
+          (``create_event`` → ``create_entity(type='event')``) runs
+          ``live.refuse_terminal_event_state``, so leaving it to step 3 means the
+          point items commit and THEN the write raises (measured: a bundle with
+          one point and one ``status='superseded'`` event returned ``[]`` here
+          and raised a bare ``ValueError`` after ``Point 1`` was written — the
+          #2422/#7925 partial-mutation class, review cycle 3 P1). Props are read at the depth
           the ITEM'S write door flattens (``_item_prop_at_depth``): TWICE for a
           ``subject``/``object``/``event`` item (step 3 relays
           ``create_subject``/``create_object``/``create_event`` →
@@ -30755,7 +31011,7 @@ class TortoiseSDK:
                 raise Phase2Error(viols[0]["message"], batch_id=batch_id)
             item = dict(item)
             ref = item.pop("ref", None)
-            etype = (item.pop("type", None) or "").strip().lower()
+            etype = _type_text(item.pop("type", None))
             name = item.pop("name", None)
             # Entity props that wire edges may address earlier bundle items
             # by local ref (points + entities are registered by now).
@@ -47087,6 +47343,73 @@ class TortoiseSDK:
                     props, label=_carrier_label, surface="update_entity",
                     stored_status=_carrier_rows[0][0])
                 break
+        # ── #11825: an `:Event` target, BEFORE the first write ──
+        # ⛔ THIS BLOCK MUST PRECEDE the Point status arm below, which WRITES
+        # (`SET n += $s`) and only THEN drops the key from `props`. It used to sit
+        # after that arm, so on a node carrying BOTH `:Point` and `:Event` the
+        # Point arm consumed and cleared `status` before this guard ran — the
+        # guard then saw no declaration at all and the terminal status stood.
+        # Measured (review cycle 9, P1): `update_entity(<:Point:Event>,
+        # status="superseded")` was ACCEPTED, the node ended with
+        # `status='superseded'` on an `:Event`, and the record (label="Point")
+        # replays onto that node, so live and replay agree on the half-state.
+        # This is the atomicity rule the guards beside it already state: refuse
+        # BEFORE any write, never after one.
+        #
+        # The `outdated` half of the predicate is NOT re-tested here: the
+        # ``_sanitize_props`` call at the top of this method already refuses the
+        # flag on EVERY label, so it cannot be in ``props`` by now.
+        #
+        # ⛔ The presence TEST is the helper's, not `"status" in props`: a dict
+        # lookup hashes the literal name, so a ``str`` SUBCLASS key that overrides
+        # ``__hash__`` missed it and this guard was SKIPPED for the whole write
+        # (measured at review cycle 4, after the value axis was already closed).
+        # Imported here rather than at module scope because a new import line
+        # shifts every ``sdk.py`` line the capstone documentation cites.
+        from .live import declares_event_state_key
+
+        # ⛔ The reachability probe matches the label by BOTH identity keys, not
+        # by the Event primary alone. `_label_reachable_by("Event", ...)` asks
+        # `{eventId:$id}` (Event's primary) and has no secondary, so a node that
+        # carries the `:Event` LABEL while its identity sits on `id` — the
+        # `:Point:Event` shape `#3311`'s `retype` and migrated graphs produce —
+        # was invisible: the guard skipped, the Point arm wrote, and the terminal
+        # status landed on an `:Event` (measured, review cycle 10 P1: labels
+        # `['Point','Event']` with `eventId` ABSENT accepted `status='superseded'`
+        # and journaled it; the same node WITH `eventId` was refused). The probe
+        # is the sibling `#2104` guard's own text (`e.eventId = $id OR e.id = $id`
+        # a few blocks above) — one form for one question, so the two cannot
+        # disagree about which nodes are Events.
+        if declares_event_state_key(props) and proj.g.query(
+                "MATCH (e:Event) WHERE e.eventId = $id OR e.id = $id "
+                "RETURN count(e)",
+                params={"id": id_val},
+        ).result_set[0][0]:
+            refuse_terminal_event_state(props, door="update_entity")
+            # ⛔ No `props` surgery here on purpose: a NON-terminal status is a
+            # legal write on an `:Event` target (#2788's prop lane), and on a
+            # multi-label node the property is shared, so there is no "Point side"
+            # to keep it away from. The guard's whole job is the TERMINAL half,
+            # and it has it — measured: dropping the key here red 9 pins that
+            # legitimately land `draft`/`live` through this door.
+
+        # ⛔ A REFUSAL MUST NOT COST A WRITE (#12222, review cycle 10 P1). The
+        # rename-ambiguity guard lives BELOW, inside its lock and ahead of the
+        # label write loop — but the Point STATUS arm below writes
+        # `SET n += $s` and journals before that guard can run. Measured on a
+        # `:Point:Object` in `draft` with a live `:Object` already holding the
+        # target name: `update_entity(<id>, status="live", name="taken-name")`
+        # raised `NameAlreadyHeld` and STILL left `status='live'` with a
+        # journaled `restatus` — a refusal that cost a write, the atomicity
+        # rule #9287/#10192 state. So the predicate is asked HERE first, before
+        # anything is written. It is a pure read; the locked call below keeps
+        # being the authoritative one under `entity_create_lock` (the #9876
+        # check-then-act), so this pre-check can only refuse EARLIER, never
+        # differently — both calls ask the same read-only question of the same
+        # graph, and the second is the one inside the critical section.
+        if isinstance(props.get("name"), str) and props["name"].strip():
+            self._refuse_ambiguous_rename(id_val, props["name"])
+
         if "status" in props:
             _pt_hits = proj.g.query(
                 "MATCH (n:Point {id:$id}) RETURN count(n)",
@@ -47623,7 +47946,7 @@ class TortoiseSDK:
             raise ValueError(
                 "'_server_id' is a server-managed field and cannot be set "
                 "via props.")
-        t = (type or "").strip().lower()
+        t = _type_text(type)
         # ── #12060: the KIND GUARD — redirect a mis-filed write, never refuse ──
         # Runs BEFORE the kind<->layer routing below, because a guard decides
         # WHICH KIND (and therefore which layer) the write belongs at, while
@@ -47840,6 +48163,16 @@ class TortoiseSDK:
             if not eventKind:
                 raise ValueError(
                     "create_entity(type='event') requires eventKind")
+            # #11825: the CREATE door is the other half of the same hole. A
+            # terminal status supplied HERE lands on the new node directly (the
+            # fold's extras lane is an open prop passer-by design, #2788), and
+            # `create_event` relays through this branch, so guarding only the
+            # update door would leave the half-state one call away — measured at
+            # #11825's head: `create_entity('event', …, status='superseded')`
+            # stored it. Refused BEFORE any write or journal emission, so a
+            # refused create leaves nothing behind (the Point/Subject doors'
+            # shape, #9287/#1423).
+            refuse_terminal_event_state(props, door="create_entity(type='event')")
             # Legacy create_event about* wiring — preserved verbatim (#888 W2).
             # W5 Phase F (#2104, TOCTOU): an explicit deterministic id
             # (server-ONLY channel via the ``_server_id`` keyword — the
