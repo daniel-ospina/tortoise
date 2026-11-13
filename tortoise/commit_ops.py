@@ -1297,11 +1297,17 @@ def _exact_subject_ref_ids(proj, ref: str) -> list:
 
     #12120 review: a Subject that holds the ref only by FOLD is a TIE, and a tie
     must not silently pick a family; a Subject that holds it EXACTLY is the one
-    case where the Object lane was demonstrably the wrong family. The same
-    question also decides whether the Subject lane can still take a record whose
-    Object carriers all collapsed away, so it lives here ONCE rather than
-    re-spelled at two call sites (the census counts name-keyed reads, and a second
-    copy is a second key space waiting to drift).
+    case where the Object lane was demonstrably the wrong family.
+    # ⛔ ONE CALLER, and this is NOT the collapsed-carrier guard (review round 29).
+    # The only caller is the family DEFER (`apply_supersessions`, `and
+    # _exact_subject_ref_ids(proj, ref)`). The collapse-report guard asks
+    # `_subject_family_holds_ref` instead — a DIFFERENT question, and deliberately:
+    # that helper's docstring records the measured regression from asking THIS one
+    # there (an id-matched or fold-only Subject is invisible to an exactness test,
+    # so the guard dropped a fold the Subject lane applies — `applied=0`, and
+    # `applied=1` once the family's own space is asked). Do not "reconcile the two
+    # call sites" by restoring this helper at that guard: it is the bug the commit
+    # that introduced `_subject_family_holds_ref` removed.
     """
     space, params = name_key_space_same_entity("s", ref)
     if not space:
@@ -2162,8 +2168,14 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
             # downgrade `_ref_is_one_gone_entity` was written to prevent (round 17:
             # "two distinct entities with dangling pointers must keep `main`'s
             # `ambiguous-name` record rather than be reported as one repairable
-            # entity"). `main` refuses this shape with `ambiguous object name`
-            # (`by_name = [r for r in rows if r[1] == ref]; len(by_name) > 1`), and
+            # entity"). ⛔ `main` refuses this SHAPE with an `ambiguous-name` record
+            # and then `continue`s with NO `skipped` entry
+            # (`by_name = [r for r in rows if r[1] == ref]; len(by_name) > 1`) — the
+            # `_skip` below is THIS branch's #5365 fix, not parity, and `main` never
+            # emits the string "ambiguous object name" at all (its only `ambiguous …`
+            # reasons are `ambiguous object id`, `ambiguous subject id` and
+            # `ambiguous subject name`; the Object twin's missing `_skip` is exactly
+            # the gap #5365 names — review round 29).
             # `test_an_id_less_holder_is_not_a_gone_entity` already pins that rule
             # on the sibling arm — so the `_name_is_one_entity` test decides the
             # shape HERE too, rather than gating only the silent-dedup `continue`.

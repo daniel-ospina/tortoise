@@ -5317,11 +5317,15 @@ class TestThe12120ReviewRound21:
             assert applied == 0, (applied, skips, msgs)
             # The CLASSIFICATION, not just truthiness (review round 25): two
             # DISTINCT entities (`r21-gone-1` / `r21-gone-2`, i.e. two group keys)
-            # are `main`'s never-guess shape (`len(by_name) > 1` →
-            # `ambiguous object name`), NOT the one-gone-entity shape
-            # `_ref_is_one_gone_entity` answers with `unaddressable-name`. The
-            # truthiness assertion this test shipped with accepted both, which is
-            # how the downgrade survived a round.
+            # are the shape `main` answers with an `ambiguous-name` record
+            # (`len(by_name) > 1`), NOT the one-gone-entity shape
+            # `_ref_is_one_gone_entity` answers with `unaddressable-name`.
+            # ⛔ The SKIP REASON below is this branch's own, NOT parity (review
+            # round 29): `main` records `ambiguous-name`, warns and `continue`s with
+            # NO `skipped` entry, and never emits "ambiguous object name" at all —
+            # the Object twin's missing `_skip` is the #5365 gap this PR closes. The
+            # truthiness assertion this test shipped with accepted both shapes,
+            # which is how the downgrade survived a round.
             assert [s_["reason"] for s_ in skips] == [
                 "ambiguous object name"], skips
             shapes = [e.shape for e in non_folded_entries()

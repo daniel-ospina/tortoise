@@ -907,9 +907,12 @@ _ALLOWED_OPERATOR = {
         # not outvote a fold-only Object on a tie). An exactness TEST, not a
         # lookup that selects an identity: the fold itself still goes through the
         # writer's key space, and the row it returns is only used as a boolean.
-        # Round 8 folded the two spellings (family defer + the collapse report)
-        # into `_exact_subject_ref_ids` — ONE read, one census entry, so the key
-        # space cannot drift between the two questions that ask it.
+        # Round 8 folded the two spellings into ONE read. ⛔ Round 29: the
+        # collapse-report guard does NOT call this helper — it asks
+        # `_subject_family_holds_ref`, deliberately, because an exactness test
+        # cannot see a by-id or by-fold Subject holder (that helper's docstring
+        # records the measured regression from asking it there). So this is ONE
+        # caller, ONE read, ONE census entry — not "two questions that ask it".
         # Round 24 FLATTENS the read to ids (it returned the `[id]` ROWS its own
         # docstring, name and `-> list` annotation deny), so the census entry
         # follows the statement — the coordinate is unchanged, only the row
