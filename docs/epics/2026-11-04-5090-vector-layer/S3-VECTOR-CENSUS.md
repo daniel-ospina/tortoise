@@ -398,7 +398,7 @@ declaration that clears it.
 `TORTOISE_TEST_CARVE_OUT=1` with no `TORTOISE_DB_URI` — the second skip is
 `tests/_live_utils.py`'s live-graph fixture, which only the docker lane satisfies. Both splits add
 to the same `186` the pin re-derives, so **neither is a stale figure**: a carve-out run that
-"corrects" 182/1 to 181/2 rewrites a true record into a false one, and the pin deliberately does
+"corrects" 185/1 to 184/2 rewrites a true record into a false one, and the pin deliberately does
 not cover the split for exactly that reason. ⚠️ The COUNT is bound to THIS TREE, never to a branch
 head: a figure
 stated as *"at #11337's head"* is stale against the same tree it sits in as soon as one more test is

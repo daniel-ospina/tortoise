@@ -8407,23 +8407,23 @@ def test_a_duplicate_literal_key_in_the_census_dicts_cannot_land_silently():
 #
 # So this is the DICT half: one scan, run wherever a diff SELECTS this module. ⛔ Not
 # on every tree that holds a duplicate — selection is the real bound, and it is
-# NARROWER than "every file under the scanned roots". Measured per file at this head,
-# with `select([p], "pull_request")` over every module the scan walks:
+# NARROWER than "every file under the scanned roots". Measured per file on the tree that
+# measured them, with `select([p], "pull_request")` over every module the scan walks:
 #
 #   * `tools/` — 140 of 195 DO reach it; 55 do not (measured:
-#     `select(["tools/min_signal.py"], "pull_request")` → 90 test files, this one
+#     `select(["tools/min_signal.py"], "pull_request")` → 91 test files, this one
 #     absent — a `tools/`-only diff matching NO pattern is swallowed by
 #     NON_PYTHON_PREFIXES before the `core` fallback runs, and
-#     `tools/merge_throughput.py` measures the same 90; `tools/ask_spotcheck.py`
+#     `tools/merge_throughput.py` measures the same 91; `tools/ask_spotcheck.py`
 #     misses by the OTHER mechanism (`tools/ci_selection.py:1147` makes it an `sdk`
-#     named surface, which REPLACES the fallback → 197 test files, this one absent)).
+#     named surface, which REPLACES the fallback → 198 test files, this one absent)).
 #     ⛔ Do NOT name `tools/who_is_on.py` here — this bullet did, and it is the
 #     OPPOSITE of a miss: an UNCLASSIFIED path selects in FULL, so this test DOES run
 #     on that diff (measured: `full=True`, `test_files == "ALL"`). `tools/claim_lanes.py`
 #     is not a file in this repo (agent-infra's is `tools/fleet/claim_lanes.py`), so it
 #     could not have been the one measured. `tools/dod_5090_probe.py`
 #     itself does — it is a `CORE_ALSO` entry in `tools/ci_selection.py` (the
-#     instrument has to be selected by its own subject; 832 test files, this one
+#     instrument has to be selected by its own subject; 833 test files, this one
 #     PRESENT) — which is the file `#11996`'s duplicate lived in, and why a
 #     duplicate born there at a merge IS caught. It is pinned by
 #     `test_the_instrument_is_selected_by_its_own_subjects` in this module.
@@ -8431,7 +8431,7 @@ def test_a_duplicate_literal_key_in_the_census_dicts_cannot_land_silently():
 #     `tortoise/hosted_api.py` → `api`+`onboarding`, `tortoise/reader.py` → `sdk`, …).
 #     The mechanism is the one this module already documents: a named-surface match
 #     REPLACES the `core` fallback that would otherwise sweep this file in.
-#   * `tests/` — 1,492 of 1,493 reach it; the exception is `tests/_html_links.py`
+#   * `tests/` — 1,493 of 1,494 reach it; the exception is `tests/_html_links.py`
 #     (`onboarding`).
 #
 # So the honest bound is per root and NOT a rule you can generalise: any full-lane run
@@ -8483,15 +8483,15 @@ def test_a_duplicate_literal_key_in_the_census_dicts_cannot_land_silently():
 #: probe, and naming files here would re-open the hole the moment a declaration moves
 #: into one not named.
 #:
-#: ⛔ IT IS NOT FREE, measured on this tree: 1,975 modules (`tortoise/` 287,
-#: `tools/` 195, `tests/` 1,493), **19.1 s** of `ast.parse`+walk, inside a file whose
+#: ⛔ IT IS NOT FREE, measured on the tree that measured it: 1,976 modules (`tortoise/` 287,
+#: `tools/` 195, `tests/` 1,494), **19.1 s** of `ast.parse`+walk, inside a file whose
 #: own run is ~2 min. Recorded so the next reader does not assume it is cheap — and so
 #: a future budget discussion has a figure. There is no sound cheap pre-filter:
 #: narrowing the roots narrows the guard, which is the hole the scan exists to close.
 _DUP_KEY_ROOTS = ("tortoise", "tools", "tests")
 
 #: Per-root FLOOR for the scan's own non-vacuity check, deliberately per root and not
-#: as an aggregate: measured 287 / 195 / 1,493 on the tree above, so an aggregate floor
+#: as an aggregate: measured 287 / 195 / 1,494 on the tree above, so an aggregate floor
 #: (>1,000) still passes if the `tortoise/` AND `tools/` walks silently yield nothing —
 #: and `tools/` is exactly where this class's original instance lived. Set well under
 #: what each root holds so ordinary churn does not red it, but non-zero, so a renamed or
