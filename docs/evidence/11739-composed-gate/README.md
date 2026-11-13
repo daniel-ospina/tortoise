@@ -138,7 +138,7 @@ subject a 100-word `content` carried, so distinct facts in the same session crow
 ⚠️ **Needs ~2 GB RSS peak**, composed of ~0.98 GB in `_worst_pair` and ~0.5 GB of
 resident torch/embedder plus overhead. `_pair_bands` is chunked (~30 MB), but `_worst_pair`
 materialises the full `n x n` similarity matrix for the whole population — `15,008² x 4 B ≈ 900 MB`
-(measured `ru_maxrss` 104 MB → 976 MB across the call). It is called twice (raw, then composed),
+(measured `ru_maxrss` 104 MB → 976 MB across the call). It is called twice (composed, then raw),
 **one matrix at a time** — the calls are strictly sequential and the matrix is a local freed at
 return, so the term is never doubled. A 15 GB cell already at load 15 has OOM-killed multi-suite
 runs; check `free -g` / `uptime` before starting, because a run killed at 80 % produces no verdict.
@@ -159,8 +159,11 @@ uv sync --extra embeddings
 # 1. the three gates (a fresh run WRITES provenance itself; ~16 min of encoding)
 #    ⛔ WRITE TO A SCRATCH PATH, then diff — do NOT overwrite the committed artifact:
 #    this bundle is the 2026-11-13 baseline #12436 is scoped against, and a fresh run with no
-#    cache on the box is a LIVE walk, so its numbers are EXPECTED to differ. The pin does not
-#    stop a drifted overwrite: probe bytes, verdict and bands would all still hold.
+#    cache on the box is a LIVE walk, so its numbers are EXPECTED to differ. The provenance
+#    bindings cannot stop that (an overwrite re-attests itself: probe bytes, verdict and bands
+#    all stay valid), though the pinned headline figures do red on a moved population — measured:
+#    rows_walked 15842 -> 15868 re-attested with --attest gave `1 failed, 19 passed`. Write to
+#    scratch anyway: a red you did not intend is still a red.
 uv run python docs/evidence/11739-composed-gate/probes/composed_gate.py \
     --out /tmp/gate.json --cache /tmp/11739-rows.jsonl
 # 2. the root cause (no encoding, ~30 s)
@@ -191,7 +194,7 @@ Each artifact binds itself twice, and the two bindings answer different question
 definition — in-toto's Statement itself has no build-definition field):
 
 * `provenance.probe_sha256` binds it to the **code** that produced it (gate.json:
-  `9d3fdb6da097b76f91f9847f37a1bb3d10238f01cfe6f69e7db043125910cf7a`; quote_identity.json:
+  `6dbb87f488fafde74e401bbbaac46ce839bf8d0015229b358d7197cde3026c0f`; quote_identity.json:
   `0ef9fe88f04b86b90005a0042afedec6cdc4697098389c6058477b40f5afaf6f`), and
 * `provenance.payload_sha256` binds it to the **numbers** it produced **and to the row cache they
   are attributed to** — sha256 over `{"artifact": <every field except provenance>,

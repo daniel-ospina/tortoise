@@ -326,6 +326,12 @@ def _attest_a_tmp_copy(probe_name: str, artifact_name: str, mutate) -> tuple[int
     ("no-verdict", lambda a: a.pop("verdict")),
     ("no-gate1", lambda a: a.pop("gate1_similarity")),
     ("no-gates-block", lambda a: a["verdict"].pop("gates")),
+    # The DISCRIMINATING shape for the `if not gates:` guard: with `all_pass` still false the
+    # case above is refused by ATTEST-INCONSISTENT before that guard decides, so deleting the
+    # guard would leave it green (measured). Green + no flags is the true fail-open: the guard
+    # is the ONLY thing that refuses it, so this case reds if it is removed.
+    ("no-gates-but-green", lambda a: (a["verdict"].pop("gates"),
+                                      a["verdict"].__setitem__("all_pass", True))),
     ("all-pass-disagrees", lambda a: a["verdict"].__setitem__("all_pass", True)),
     ("no-source", lambda a: a.pop("source")),
 ])
@@ -383,23 +389,31 @@ def test_attest_rewrites_on_a_legitimate_rebind_and_still_carries_the_residual()
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the mode bits the PROBE-WRITE arm needs")
-def test_attest_reports_probe_write_on_an_unwritable_target():
-    """FAILS IF an unwritable target reverts to a bare `PermissionError` traceback (exit 1).
+@pytest.mark.parametrize("probe_name,artifact_name", [
+    ("composed_gate.py", "gate.json"),
+    ("quote_identity.py", "quote_identity.json"),
+])
+def test_attest_reports_probe_write_on_an_unwritable_target(probe_name, artifact_name):
+    """FAILS IF either probe's unwritable-target arm reverts to a bare `PermissionError` (exit 1).
 
-    The arm is `PROBE-WRITE(…): …` with exit 2 — a refusal a caller can act on, not a crash.
+    The arm is `PROBE-WRITE(…): …` with exit 2 — a refusal a caller can act on, not a crash. BOTH
+    probes are driven: the README and `config/ci-surfaces.yml` describe the refusal set as the
+    probes' property, and until this was parametrized only `composed_gate.py`'s arm had a case, so
+    deleting `quote_identity.py`'s `try/except OSError` reddened nothing but the probe digest
+    (measured).
     """
     with tempfile.TemporaryDirectory() as td:
         ro = Path(td) / "ro"
         ro.mkdir()
         target = ro / "gate.json"
-        target.write_text(json.dumps(_artifact("gate.json"), indent=2) + "\n", encoding="utf-8")
+        target.write_text(json.dumps(_artifact(artifact_name), indent=2) + "\n", encoding="utf-8")
         before = target.read_bytes()
         # The FILE's mode, not the directory's: `Path.write_text` truncates the existing file, so a
         # read-only DIRECTORY still lets the write through (measured -- that was this test's first
         # version, and it failed for that reason, not because the arm was broken).
         os.chmod(target, 0o400)
         try:
-            rc = _load_probe("composed_gate.py")._attest(str(target))
+            rc = _load_probe(probe_name)._attest(str(target))
         finally:
             os.chmod(target, 0o600)
         assert rc == 2, f"an unwritable target exited {rc}, not 2 (PROBE-WRITE)"

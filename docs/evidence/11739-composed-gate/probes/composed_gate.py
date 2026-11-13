@@ -89,7 +89,7 @@ CROSS_LENS_SAMPLE = 1500
 #: Chunk rows for the all-pairs pass — peaking at ~30 MB for the band counts instead of the
 #: ~900 MB a materialised ``n x n`` would need. ⛔ ``_worst_pair`` is NOT chunked and DOES
 #: materialise ``n x n`` (15,008^2 x 4 B = ~900 MB, measured 104 MB -> 976 MB ru_maxrss across
-#: the call). It is called twice (raw, then composed) but strictly SEQUENTIALLY, so the matrix is
+#: the call). It is called twice (composed, then raw) but strictly SEQUENTIALLY, so the matrix is
 #: never doubled — ~0.98 GB peak from this term, not ~2 GB; the README's Reproduce section states
 #: the whole-run RSS requirement and what makes up the rest of it.
 CHUNK = 256

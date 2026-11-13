@@ -295,7 +295,7 @@
   "duration_s": 949.2,
   "provenance": {
     "probe_path": "probes/composed_gate.py",
-    "probe_sha256": "9d3fdb6da097b76f91f9847f37a1bb3d10238f01cfe6f69e7db043125910cf7a",
+    "probe_sha256": "6dbb87f488fafde74e401bbbaac46ce839bf8d0015229b358d7197cde3026c0f",
     "payload_sha256": "cfbe7ad4eaee3868ddc52e5432b79fc7baf92a541e581dbcbff6398cf00693be",
     "rows_source": "cache:/tmp/11739-rows.jsonl",
     "encoder": "BAAI/bge-small-en-v1.5 (tortoise.embeddings.EMBEDDING_MODEL)"
