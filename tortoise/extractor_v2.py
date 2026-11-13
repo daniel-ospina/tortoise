@@ -3045,20 +3045,30 @@ def _absorb_spellings(folded_row: dict, row: dict, fact: tuple | None) -> None:
         stored = [a for a in raw if a is not None]
     else:
         stored = []
-    # ⛔ A row must never alias ITSELF. `aliases[]` is the MERGE's record ("these
-    # two are one entity"), and the row's own spelling is not a record of anything
-    # — while `_find_existing_entity`'s last rung is deliberately kind-agnostic, so
-    # an own-name entry made EVERY prior row match itself by `alias`, phase 1
-    # derived a "recorded alias" from it, and all three SPELLING vetoes stood
-    # down: `plan "Acme"` bound onto `org "Acme"` with `band: merge`, `held: []`
-    # and no warning. The CARRIER's spelling (why this function exists) always
-    # differs from the survivor's name, so the alias rung keeps exactly the
-    # purpose it was added for.
+    # ⛔ The folded row's OWN name is NOT an alias. `aliases[]` is the MERGE's
+    # record ("these two are one entity"); the row's own spelling is not a record
+    # of anything, and `_find_existing_entity`'s last rung is deliberately
+    # kind-agnostic — so an own-name entry made EVERY prior row match itself by
+    # `alias`, phase 1 passed `mention_is_alias` for it, and all three SPELLING
+    # vetoes stood down: `plan "Acme"` bound onto `org "Acme"` with no hold and no
+    # warning. The CARRIER's spelling (why this function exists) always differs
+    # from the survivor's name, so it is unaffected.
+    # ⛔ But only the INJECTION is skipped: a STORED `aliases[]` entry is a
+    # reviewer's record (`apply_entity_merge` unions the candidate's fold
+    # unconditionally, so a merge of two same-fold rows legitimately leaves the
+    # survivor's own fold in there), and dropping it would delete a decision the
+    # tree made (round-6 review). It still participates in MATCHING, so such a
+    # mention is never re-published as measured absence; whether it BINDS is then
+    # decided by the kind rungs, which is where "same spelling, different kind"
+    # belongs.
     own_fold = normalize_entity_name(str(folded_row.get("name") or ""))
     row_name = str(row.get("name") or "")
+    injected = True
     for source in (row_name, *stored):
         folded = normalize_entity_name(source) if source else ""
-        if folded and folded != own_fold and folded not in folded_row["aliases"]:
+        skip = injected and folded == own_fold
+        injected = False
+        if folded and not skip and folded not in folded_row["aliases"]:
             folded_row["aliases"].append(folded)
 
 
@@ -3222,9 +3232,14 @@ def _current_entity_priors(sdk, rows: list[dict],
         # (`_find_existing_entity`) then answers "no such entity" for a mention
         # spelled exactly the way the merged variant was spelled — which is a
         # measured ABSENCE (`found: False · no match — created`), the one state
-        # §4.4 I1 makes license a CREATE. The aliases are the survivor's own plus
-        # the spelling that matched the carrier, so the mention resolves to the
-        # survivor deterministically instead of depending on a phase-2 model.
+        # §4.4 I1 makes license a CREATE. The aliases are the carrier's recorded
+        # spellings plus the survivor's stored `aliases[]` — never the survivor's
+        # own injected name (it would alias the row with itself and stand
+        # `kind_conflict` down for a same-spelling, different-kind mention, round-5
+        # review). The carrier's spelling therefore still resolves here
+        # deterministically. The survivor's OWN name is matched by the name rungs,
+        # which are `_norm`-equal by #11901's decision (a surface variant is
+        # deliberately invisible to phase 1 — see `_find_existing_entity`).
         folded_row = {"id": current, "name": str(fact[1]),
                       "kind": "" if fact[2] is None else str(fact[2]),
                       "aliases": []}
@@ -6093,6 +6108,16 @@ def _find_existing_entity(entities: list[dict], name: str, kind: str) -> tuple[d
     kind_folded = str(kind).strip().lower()
 
     def _name_hit(e: dict) -> bool:
+        # ⛔ `_norm` ONLY — deliberately NOT `normalize_entity_name`. A surface
+        # variant (article, separator, punctuation) is INVISIBLE to phase 1 by
+        # #11901's decision: the candidate-recall harness measures the fallback's
+        # contribution FROM that gap, and its 0% arm is pinned by
+        # `tests/test_candidate_recall_11901.py::test_the_matcher_is_exact_norm_equality_plus_kind`.
+        # Round 6 proposed folding this comparison to make a variant bind
+        # deterministically here; that CONTRADICTS the recorded #11901 conclusion,
+        # so it is refused and recorded rather than adopted. The variant's home is
+        # the write door's fold (`entity_identity.resolve_or_mint`), which folds on
+        # `canonical_name`, so no duplicate node is created.
         return _norm(e.get("name", "")) == norm_name
 
     def _alias_hit(e: dict) -> bool:
