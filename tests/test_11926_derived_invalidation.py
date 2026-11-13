@@ -1964,6 +1964,18 @@ def test_one_refused_retirement_does_not_discard_the_rest_of_the_sweep(sdk):
     # is in scope here, so writing it in would report a reconcile that never
     # happened — the same class of untruth as inventing a `cache`.
     assert "goalId" not in failed[0], failed[0]
+    # ⛔ AND A REFUSAL IS NOT AN ALREADY-RETIRED OUTCOME — the one word in this
+    # synthetic record that could silently invert the summary (fresh-context
+    # review, 2026-11-13). Flip `"alreadyRetired": False` to `True` where the
+    # record is built and the suite stayed GREEN before these two lines: every
+    # other `counts["alreadyRetired"]` assertion in this file is `== 1`, so
+    # nothing pinned the zero side anywhere, and this is the only sweep that
+    # contains a refusal record. The counter would then book a REFUSAL as
+    # "already retired, nothing to do" — the #12315 defect class (a summary that
+    # misreports a finding) one arm over, and the same shape as the `found` /
+    # `cache` / `goalId` traps pinned just above.
+    assert report["counts"]["alreadyRetired"] == 0, report["counts"]
+    assert failed[0]["alreadyRetired"] is False, failed[0]
 
 
 # ── 8. the sweep: scope, limit, dry run, and no re-derivation ────────────
