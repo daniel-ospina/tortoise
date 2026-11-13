@@ -244,8 +244,9 @@ question.
 | `"embedding_b64": "…"` with `embedding` dropped | ⛔ **refused** — R1 is *presence is ownership*: an absent `embedding` key means "pre-#5004 record, recompute is the only behaviour available". Dropping it would make the replay **re-embed**, silently changing the graph. |
 | `"embedding": {"b64": "…"}` (a nested object) | ⛔ **refused** — `stamp_journal_embedding` treats a `dict` as *"not a numeric sequence"* and **drops the vector to an owned `None`** (`_drop_journalled_embedding`). It is the right refusal for a hand-edited journal and the wrong shape for a format. |
 
-A string is the one shape the seam already refuses to treat as a vector, so a mis-ordered pipeline is
-**loud** (§2.5) rather than silently transposed.
+A string is the one shape the seam already refuses to treat as a vector — `_drop_journalled_embedding`
+replaces it with an owned `None` and logs a warning (the row two lines above), so a mis-ordered pipeline
+is **loud**, not silently transposed.
 
 ### 2.2 How the length is encoded — and why the count is load-bearing, measured
 
@@ -328,8 +329,8 @@ unrecoverable direction wins.
 ### 2.5 The log line stays newline-delimited and parseable — and why not raw bytes
 
 Raw packed float32 is **1,536 B**, i.e. 512 B per record cheaper than base64. It is refused, and this is
-measured rather than asserted: on the probe's corpus vector (`p2_base64_probe.py`'s `unit_vector()`), the
-raw packet contains
+measured rather than asserted: on the probe's deterministic unit vector (`unit_vector()`, seed 5612,
+normalised — the vector the probe injects; no corpus record carries it), the raw packet contains
 
 ```
   contains 0x0A (newline): 4    contains 0x22 ('"'): 4    contains 0x00: 7
@@ -338,7 +339,8 @@ raw packet contains
 Raw float32 bytes include `0x0A` and `0x22`, so they cannot live in a JSON string unescaped and cannot be
 a JSONL line. Carrying them would need a **binary framing layer** — length-prefixed, non-newline-delimited —
 which is a *different log*, and it would retire the whole existing torn-tail classifier (§2.6) in exchange
-for 512 B/record. Base64's alphabet excludes both bytes (measured: `0x0A=0`, `0x22=0`), so:
+for 512 B/record. Base64's alphabet excludes both bytes (RFC 4648's 64 symbols contain neither; measured
+in the appendix: `0x0A=0`, `0x22=0`), so:
 
 - the line stays one JSON object, one `\n` terminator, written by **one `write(2)`** on an `O_APPEND` fd —
   the property that makes a record un-interleavable (`_write_record`);
@@ -367,7 +369,7 @@ Under the new frame every one of those steps is identical, because the frame is 
 - `record_types_from_partial`/`_torn_type_key_at_end_of_line` read the fragment's **prefix** for a `"type"`
   key. The frame changes only the `embedding` **value**, which sits deep in the payload — after `type` in
   every shape (measured: `type` is the first key in **39/39** of the committed corpus's records; the SDK
-  writer inserts it third, at ~90 B). So a tear late enough to keep the type keeps it exactly as today, and
+  writer inserts it third, at ~80 B). So a tear late enough to keep the type keeps it exactly as today, and
   a tear before it is already #3316's ambiguous case, which **refuses** rather than guesses. The frame
   moves neither boundary.
 - seals and torn markers are **line-level** artifacts, not payload-level, so nothing about them moves.
@@ -395,10 +397,14 @@ the frame, one place to get it wrong — the same reason P0 put the width decisi
 **The bypasses, named rather than left to be found.** Three journal line-parsers do *not* go through
 `read_all`: `log.py`'s seal/tail detection, `subject_binding`'s key scan, and `MentionScan`
 (`log.py:1243`, used by `EventLog.mention_lines` and `sdk._journal_presence_state`). All three read
-`type`/id-shaped keys and **never** `embedding`, so an undecoded frame cannot reach them — which is a
-property to keep, not an accident to assume: the implementation's tests must red if any of them starts
-reading a vector. (`sdk._journal_vector` is the opposite direction — a `Vectorf32` → JSON-able list
-converter on the **write** path — and reads no journal.)
+`type`/id-shaped keys and **never** `embedding` — measured at this head: `embedding` appears as a **code**
+token on **no line** of `log.py` or `subject_binding.py` (tokenised, comments excluded; `log.py`'s eight
+mentions are all comment prose), and `_apply_journal_presence` — the parser behind `MentionScan` — and
+`_journal_presence_state` contain none. So an undecoded frame cannot reach them. That is a property to
+keep, not an accident to assume: the implementation's tests must red if any of them starts reading a
+vector, and they must spy on **`_apply_journal_presence`**, not only on `MentionScan`, or the symbol that
+could actually start reading one is unwatched. (`sdk._journal_vector` is the opposite direction — a
+`Vectorf32` → JSON-able list converter on the **write** path — and reads no journal.)
 
 Dispatch is on the **value**, per record:
 
@@ -527,7 +533,8 @@ The frame was chosen so that this question has a cheap answer, which is the stro
 
 | scenario | recovery | permanently lost |
 |---|---|---|
-| the encoding is wrong (a bug in pack/unpack, endianness, the count) | **rebuild from records**: the journal is intact and the frame is self-describing, so a fixed reader replays the same bytes correctly. The graph is rebuilt, not restored. | **nothing** — the bytes were never destructive |
+| the **decode** is wrong (unpack, endianness, the count) | **rebuild from records**: the journal bytes are intact and the frame is self-describing, so a fixed reader replays them correctly. The graph is rebuilt, not restored. | **nothing** — the bytes were never destructive |
+| the **encode** is wrong (pack) | a wrong pack puts wrong bytes **in the journal**, so a rebuild replays them faithfully and wrongly. A pack that violates the frame's own length (packed `<d` under a declared `f32`, or 383 elements under a count of 384) is **refused** by the count — measured: 3,072 B and 1,532 B decoded against a declared 1,536 B. A pack that is self-consistent but wrong (element order, a transposition) decodes **silently**, and the replay writes the wrong vector with no error — §3.3's failure exactly. | **the vector as written**, in the silent case: the journal is the record of record, so the correct value cannot be recovered from it. The rest of the record still rebuilds. |
 | the format is wrong (base64 turns out to be the wrong choice) | **dual reader**: both shapes stay readable indefinitely, because dispatch is per record and needs no state. The writer reverts to JSON text; journals that already carry frames keep replaying. | **nothing** — no record is rewritten, so no migration is needed in either direction |
 | the frame is withdrawn entirely | a reader that stops decoding still has to keep understanding frames for as long as any frame-bearing journal exists. That reader is a **permanent** obligation of the format. | a second reader path, forever |
 | base64 makes the log un-inspectable in an incident | a decode helper (`tools/journal_decode.py`-shaped) restores human readability on demand; it is a **tool**, not a format change | **human greppability of the vector** — you can no longer read, diff or hand-edit a vector in the log by eye. This is a real, permanent loss and the main non-byte cost of P2. |
@@ -591,8 +598,28 @@ for seed, skip in ((5612, 0), (12459, 2_000_000)):
     v = r.standard_normal(384).astype(np.float32)
     v = (v / np.linalg.norm(v)).astype(np.float32)
     raw = struct.pack("<384f", *[float(x) for x in v])
-    print(seed, len(raw), raw.count(b"\n"), raw.count(b'"'), raw.count(b"\x00"), len(base64.b64encode(raw)))
+    body = base64.b64encode(raw)
+    print(seed, len(raw), raw.count(b"\n"), raw.count(b'"'), raw.count(b"\x00"), len(body),
+          "b64 0x0A=", body.count(b"\n"), "0x22=", body.count(b'"'))
 PY
+```
+
+# 4. the §3.1 claim that no bypassing reader touches a vector: `embedding` as a CODE
+#    token (comments excluded) on every journal line-parser that skips `read_all`
+uv run python - <<'PY2'
+import io, inspect, tokenize
+import tortoise.sdk as s
+for path in ("tortoise/log.py", "tortoise/subject_binding.py"):
+    code, comments = [], 0
+    for t in tokenize.generate_tokens(io.StringIO(open(path).read()).readline):
+        if t.type == tokenize.COMMENT and "embedding" in t.string:
+            comments += 1
+        elif t.type == tokenize.NAME and t.string == "embedding":
+            code.append(t.start[0])
+    print(f"{path}: code lines {code or 'none'}; comment mentions {comments}")
+for fn in ("_apply_journal_presence", "_journal_presence_state", "_journal_vector"):
+    print(fn, "mentions embedding:", "embedding" in inspect.getsource(getattr(s, fn)).lower())
+PY2
 ```
 
 Suites touched by the *design* (none by this document — it changes no code): `test_11821_journal_vector_width`,
