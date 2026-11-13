@@ -1001,10 +1001,10 @@ def invalidate_stale(
     test falsiness — ``None`` and ``False`` are different facts. ⚠️ ``None`` here
     means the sweep could not tell, NOT that the answer is in principle unknown: a
     raise out of :func:`invalidate` is either an unreadable claim (``claim is
-    None`` — genuinely unknown) or a ``retract_point`` refusal on a claim that WAS
-    read and was live (whose answer is ``True``). The exception does not carry
-    which, so the record reports the conservative value and ``error`` names the
-    raise),
+    None`` — genuinely unknown) or a ``retract_point`` refusal, where the claim HAD
+    been read as live (answer ``True``) unless the re-read that follows found it
+    gone or unreadable — the exception does not carry which, so the conservative
+    value is ``None`` and ``error`` names the raise),
     ``undecidable`` (verdicts the module could not decide — surfaced, never
     dropped), ``counts`` (including ``failed`` and ``gone``) and ``truncated``
     (true when the scan hit ``limit``, i.e. the sweep did not see the whole graph).
@@ -1077,19 +1077,22 @@ def invalidate_stale(
                 # `None` — the conflation of "absent" with "unnamed" that #12315
                 # is about, one level out.
                 # ⚠️ `None` says the SWEEP could not tell, not that the answer is
-                # unknowable: `invalidate` raises from two places — `claim is
-                # None` (the read failed: genuinely unknown) and the trailing
-                # `raise exc` when `retract_point` refused a claim this call had
-                # ALREADY read as live (whose answer is `True`). The exception does
-                # not say which, so the conservative `None` is reported and
-                # `error` carries the raise. `cache` stays absent: no reconcile
-                # ran.
+                # unknowable for every raise: `invalidate` raises from two places
+                # — `claim is None` (the read failed: genuinely unknown) and the
+                # trailing `raise exc` when `retract_point` refused a claim this
+                # call had ALREADY read as live (answer `True`) UNLESS the re-read
+                # that follows found it gone or unreadable (answer unknown, and
+                # that is the vanish-mid-sweep race this PR is about). The
+                # exception does not carry which, so the conservative `None` is
+                # reported and `error` carries the raise. `cache` stays absent: no
+                # reconcile ran.
                 # ⛔ PRECEDENT STATED AS A DIFFERENCE, NOT AN IDENTITY: #7818 fixed
                 # the same CLASS one surface over — an omitted `found` key read
                 # through `.get()` as honest absence when a candidate WAS found.
                 # That surface closed it with a boolean plus a `status` field; this
-                # one has a genuinely-unknown third shape, so it is `None`, and a
-                # `.get()`/falsiness test here reads "refused" as "absent".
+                # one has a third shape whose value the sweep does not have, so it
+                # is `None`, and a `.get()`/falsiness test here reads "refused" as
+                # "absent".
                 invalidated.append({
                     "invalidated": False,
                     "alreadyRetired": False,

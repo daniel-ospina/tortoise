@@ -1553,8 +1553,10 @@ def test_one_refused_retirement_does_not_discard_the_rest_of_the_sweep(sdk):
     # while the key was omitted here, `record["found"]` was a KeyError and
     # `.get("found")` read `None` — indistinguishable from an unnamed bucket,
     # which is the #12315 defect class one level out. `None` is the conservative
-    # answer: this synthetic raise happens before any read, and `invalidate`'s own
-    # refusals do not say whether they got as far as reading the claim.
+    # answer: this synthetic raise happens before any read, and the trailing
+    # `raise exc` in `invalidate` re-raises `retract_point`'s own exception, which
+    # carries nothing about the read (the `claim is None` refusal does name itself
+    # — "could not read judgement" — but the sweep does not parse prose).
     assert failed[0]["found"] is None, failed[0]
     # ⛔ AND `cache` IS THE ONE KEY A REFUSAL STILL OMITS, which is correct rather
     # than untidy: no reconcile ran, so there is no report to carry — but an
