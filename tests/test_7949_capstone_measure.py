@@ -4351,7 +4351,15 @@ _BUNDLE_RULES = (
      ("identifier_tokens_enabled()",), "line", None),
     ("the Object writer's objectKind default", "projection_entities",
      ("the writer stamps",),
-     ("o.objectKind=coalesce($ok",), "line", None),
+     # ⛔ The anchor is the FULL ON CREATE default, not the `coalesce($ok` prefix
+     # (#12342 review). `entities.py` carries the prefix TWICE — `:5086` is the
+     # `ON CREATE SET` that writes `'other'`, `:5102` is the `ON MATCH SET` that
+     # keeps `o.objectKind` — so `coalesce($ok` alone passes on EITHER, and a
+     # re-derivation of this cite onto `:5102` would stay GREEN while the
+     # sentence's claim (the writer stamps the `'other'` DEFAULT) goes false.
+     # That is a false PASS in the one guard whose job is to catch a cite that
+     # moved, so the anchor names what the sentence actually claims.
+     ("o.objectKind=coalesce($ok, 'other')",), "line", None),
     # A THIRD `entities.py` cite the pattern surfaced, and its rule must be its
     # own: `:2740` is the `is_episodic` write, not the `pointKind` one `:2602`
     # carries, so a shared "the live write" phrase would bind it to the wrong
@@ -5261,27 +5269,32 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `test_candidate_recall_11901.py` at `config/ci-surfaces.yml:2236`, ONE
         # insertion that moved every number below it. That is the class here — a
         # line-number pin over a number another tool owns, not a citation anyone
-        # mis-copied. The entry read 9943 at `9828250732` and reads 9973 at
-        # `c17e3c5f78` (`ba84fbfabf` 9949, `e200623286` 9965, `cd22562c24`
-        # 9973). ⛔ The `9951` this comment used to defend was never a value of the
-        # ENTRY on `main`: it was 9943 + the 8 lines #12060 was predicted to add, and
+        # mis-copied. The entry read 9943 at `9828250732` and reads 9987 at
+        # `abf186f1109` — +44 across FOUR landing PRs that each registered lines
+        # above it (`ba84fbfabf` 9949, +6 @6721; `e200623286` 9965, +16 @7514;
+        # `cd22562c24` 9973, +8 @2725; `f1f74135a1` 9987, +13 @2237 and +1 @9150).
+        # ⛔ The `9951` this comment used to defend was never a value of the ENTRY
+        # on `main`: it was 9943 + the 8 lines #12060 was predicted to add, and
         # two other registrations landed first, so the prediction described no
-        # checkable commit (the ROW printed it; no commit's `carve_out:` entry sat
-        # there). That is the row's real defect and not a
+        # checkable commit (the ROW printed it at `cd22562c24`, where the entry
+        # itself sat at 9973; no commit's `carve_out:` entry ever sat there).
+        # Naming only the FIRST hunk is how 9951 stood here — re-derive the SUM of
+        # every hunk above the entry. That is the row's real defect and not a
         # transcription slip: the number is owned by another tool, so every
         # landing PR above it is a re-derivation this pin cannot do for itself.
         # ⛔ No repair COUNT is stated in prose here — the row's own comment below
         # ENUMERATES the values and the repairs instead, because every prose count
         # this file has carried had already gone stale when it was read.
-        # `carve_out:` opens 9847 and `uri_requiring:` 10178 at `c17e3c5f78`, so
-        # 9973 is inside the section, and the identical text also sits at 6090 and
-        # 8489 (+8 / +30 over `9828250732`'s 6082 / 8459 for the same cause), which
-        # is what the 5th element exists to refuse. ⚠️ Both of those are INDENTED
-        # sub-keys (`core:` 2235, `sdk:` 8255 — the latter also +30, same cause) of
-        # `surfaces:`, so the resolver's nearest-column-zero-key rule reports the PARENT: a cite onto 8489 refuses
-        # with `sits in section 'surfaces:', not 'carve_out:'` — measured, so a
-        # re-derivation onto it does not get told `sdk:` and conclude the guard is
-        # broken.
+        # `carve_out:` opens 9861 and `uri_requiring:` 10192 at `abf186f1109`, so
+        # 9987 is inside the section, and the identical text also sits at 6103 and
+        # 8502 (over `9828250732`'s 6082 / 8459: +21 / +43 — the two move at
+        # DIFFERENT rates, because only the hunks above each one count), which is
+        # what the 5th element exists to refuse. ⚠️ Both of those are INDENTED
+        # sub-keys (`core:` 2235, `sdk:` 8268 at `abf186f1109`) of `surfaces:`, so
+        # the resolver's nearest-column-zero-key rule reports the PARENT: a cite
+        # onto either refuses with `sits in section 'surfaces:', not 'carve_out:'`
+        # — measured, so a re-derivation onto it does not get told `sdk:` and
+        # conclude the guard is broken.
         #
         # ⛔ The durable SHAPE is not unavailable, it is UNOWNED, and the
         # distinction matters because a reader will otherwise mistake this repair for
@@ -5349,20 +5362,36 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # '/^- test_pack_logic_writeprobe_11083.py$/{print NR}'
             # config/ci-surfaces.yml`), never carried forward from either side of
             # a merge. Measured values, not a delta: 9943 at `9828250732`, 9949
-            # at `ba84fbfabf`, 9965 at `e200623286`, 9973 at `cd22562c24` and at
-            # `c17e3c5f78`, 9987 at `f1f74135a15b` and at `abf186f110`. ⛔ `9951`
-            # is in that list only because this row printed it — it was a predicted
-            # merge-tree value (9943 + 8), never a line any commit on `main`
-            # carried. As a ROW value, `main` has carried `9633, 9635, 9714,
-            # 9823, 9906, 9917, 9933, 9934, 9951, 9973`; `9987` is the one this PR
-            # adds. ⛔ Do not conflate that with the ENTRY line — `9987` has been
-            # the entry's line on `main` since `f1f74135a15b` (see the paragraph
-            # above), so the ROW value is the only sense in which `9987` is absent
-            # from `main`. The COUNT is deliberately not the claim, and neither is
-            # "ten" nor "eleven": the recipe below walks
-            # whatever branch you RUN IT ON, so it prints the values THAT branch
-            # carries and can make no main/branch distinction for you. Reproduce
-            # it, one value per commit, with
+            # at `ba84fbfabf`, 9965 at `e200623286`, 9973 at `cd22562c24`, 9987 at
+            # `f1f74135a1` and at `abf186f1109`. ⛔ `9951` is in that list only
+            # because this row printed it — it was a predicted merge-tree value
+            # (9943 + 8), never a line any commit on `main` carried.
+            # The +44 over `9828250732` is FOUR insertions above the entry plus one
+            # `tier1:` line, and naming only the first is how 9951 stood here:
+            # `+8 @2725` (#12060's registration block → that is the 9951 step),
+            # `+6 @6721` (`test_archive.py`, #11609), `+16 @7514`
+            # (`test_11926_derived_invalidation.py`, #11926), `+13 @2237` plus
+            # `+1 @9150` (`tier1:`, the #12294 name-entropy gate). Each `@` offset
+            # is that commit's OWN new-side offset, measured per commit with
+            # `git diff -U0 <c>^..<c> -- config/ci-surfaces.yml`; the whole range
+            # `git diff -U0 9828250732..abf186f1109 -- config/ci-surfaces.yml`
+            # carries EIGHT hunks (zero deletions) — these five above the entry and
+            # three `durations:` rows below it, which do not move the pin. Re-derive
+            # the SUM of the hunks above the entry, never one.
+            # ⛔ ROW VALUE AND ENTRY LINE ARE TWO DIFFERENT NUMBERS, and conflating
+            # them is how `9951` survived. As a ROW value `main` has carried
+            # `9633, 9635, 9714, 9823, 9906, 9917, 9933, 9934, 9951, 9973, 9987`
+            # (`for c in $(git log --reverse --format=%h origin/main --
+            # tests/test_7949_capstone_measure.py); do git show
+            # $c:tests/test_7949_capstone_measure.py | rg -o '"[0-9]{4}", "-
+            # test_pack_logic_writeprobe_11083.py"'; done | sort -u`, measured at
+            # `abf186f1109`); the ENTRY line has been `9987` since
+            # `f1f74135a15b`, and `#12342` landed `9987` as the ROW value too, so
+            # no number this row prints is absent from `main`. The COUNT is
+            # deliberately not the claim: the recipe below walks whatever branch
+            # you RUN IT ON, so it prints the values THAT branch carries and can
+            # make no main/branch distinction for you. Reproduce it, one value per
+            # commit, with
             #   for c in $(git log --reverse --format=%h -- tests/test_7949_capstone_measure.py); do
             #     git show $c:tests/test_7949_capstone_measure.py \
             #       | rg -o '"[0-9]{4}", "- test_pack_logic_writeprobe_11083.py"'; done | sort -u
