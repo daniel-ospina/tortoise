@@ -964,8 +964,35 @@ def reconcile_goal_state_cache(sdk: Any, goal_id: str | None) -> dict:
 #: two scans is counted, reported and repaired twice.
 _GOAL_STATE_CANDIDATES = (
     "MATCH (n) WHERE NOT n:Point AND toStringOrNull(n.goalState) IN $words "
-    "RETURN n.id AS id, n.goalState AS word ORDER BY n.id LIMIT $lim"
+    "RETURN n.id AS id, n.goalState AS word, labels(n) AS labels "
+    "ORDER BY n.id LIMIT $lim"
 )
+
+#: The labels the ENTITY surface can resolve (``sdk.get_entity`` → ``_get_entity``),
+#: resolved LAZILY and once. A node outside this set cannot be named to the repair
+#: door at all, so handing it over is not a repair attempt: the door's only way to
+#: say "I could not resolve this id" is ``gone: True`` — documented as *"the goal
+#: node is gone"* (:func:`reconcile_goal_state_cache`) — so the sweep reported a
+#: DELETION that never happened while the stale word still displayed. MEASURED
+#: (#12412 review, cycle 5) on ``:Widget {id:'w-1', goalState:'met'}`` and on an
+#: unlabelled ``{id:'nolabel-1', goalState:'met'}``: the sweep reported
+#: ``{'action': 'gone', 'reason': "the goal 'w-1' no longer exists"}`` for both,
+#: and ``MATCH (n:Widget {id:'w-1'}) RETURN n.goalState`` still answered ``met``.
+#:
+#: ⛔ A FAILED IMPORT RAISES, it does not fall back to an empty set: a sweep whose
+#: classifier cannot name its population must not read clean over it, which is the
+#: same rule that makes a failed SCAN raise rather than return a zero-goal summary.
+_CANONICAL_ENTITY_LABELS_CACHE: frozenset[str] | None = None
+
+
+def _canonical_entity_labels() -> frozenset[str]:
+    """The entity surface's canonical labels, resolved once (lazy on purpose)."""
+    global _CANONICAL_ENTITY_LABELS_CACHE
+    if _CANONICAL_ENTITY_LABELS_CACHE is None:
+        from .projection import _CANONICAL_ENTITY_LABELS
+        _CANONICAL_ENTITY_LABELS_CACHE = frozenset(_CANONICAL_ENTITY_LABELS)
+    return _CANONICAL_ENTITY_LABELS_CACHE
+
 
 #: The population the sweep DECLINES, counted (never repaired) so its summary
 #: cannot read clean over words it could not durably repair: a node carrying the
@@ -1081,6 +1108,17 @@ def reconcile_goal_states(
       ``counts.unaddressable`` rather than filtered away silently: a candidate
       read that matched and then vanished would be the same false PASS as the
       declined label above.
+    * **a node whose ``id`` sits on a label the entity surface cannot resolve** —
+      the same unaddressable population, in its second shape: the scan is
+      label-agnostic by design (``WHERE NOT n:Point``) while ``sdk.get_entity``
+      resolves only :data:`_CANONICAL_ENTITY_LABELS`, so an ``:Widget`` node — or
+      an unlabelled one — matches the scan and cannot be named to the door. ⛔ It
+      is classified ``counts.unaddressable`` BEFORE the door is called, because
+      the door's only answer for an id it cannot resolve is ``gone: True`` ("the
+      goal node is gone"), which would record a DELETION for a node still holding
+      its word — a measured false statement in the payload, not merely a missing
+      repair (#12412 review, cycle 5). Reachability is raw/legacy-write only, like
+      the no-``id`` shape above, because no SDK create path mints these labels.
     * **a word written inside the DOOR's read→write window** — see the note on
       ``preserved`` below.
 
@@ -1153,8 +1191,12 @@ def reconcile_goal_states(
       ``guideline``) was left alone and reported, so a sweep cannot read clean over
       a goal it refused to touch. ⚠️ Scoped by VALUE for the same reason the gate
       above is: a human ``met``/``unmet`` in that window IS overwritten;
-    * ``gone`` — the goal no longer exists, so there is no cache to reconcile
-      (reported the same way :func:`invalidate_stale` reports ``counts.gone``);
+    * ``gone`` — the goal node is GONE, so there is no cache to reconcile
+      (reported the same way :func:`invalidate_stale` reports ``counts.gone``).
+      ⛔ A goal that still EXISTS but whose label the entity surface cannot resolve
+      is NOT this bucket — it would be a recorded deletion for a node that is
+      still there — so such a candidate is classified ``unaddressable`` before the
+      door is called; see that counter and :data:`_GOAL_STATE_CANDIDATES`;
     * ``failed`` — the reconcile could not run or its write was refused. A sweep
       may not read clean while a goal still displays a word it could not repair;
     * ``notDurable`` — goals the sweep DECLINED because their repair cannot be
@@ -1162,12 +1204,16 @@ def reconcile_goal_states(
       derived word. It is not a failure and not a repair: it is the population
       this call does not cover, counted so `scanned: 0` cannot be read as "this
       graph is clean" (:data:`NOT_DURABLE_REASON` says the same in the payload);
-    * ``unaddressable`` — candidates in the fetched WINDOW that carry no ``id``, so
-      the entity surface cannot name them and the sweep cannot repair them. The
-      counter is window-scoped; ``truncated`` is what says the window itself was
-      capped, so a caller reading both sees the whole shape (a capped scan whose
-      tail was unaddressable now reports ``truncated: True`` rather than looking
-      exhaustive);
+    * ``unaddressable`` — candidates in the fetched WINDOW that the entity surface
+      cannot ADDRESS, in either of its two shapes: a node carrying no ``id``, and a
+      node whose ``id`` sits on a label ``sdk.get_entity`` cannot resolve (an
+      exclusion scan is label-agnostic, the surface is not). The second shape used
+      to reach the door and come back ``gone`` — a deletion recorded for a node
+      that still exists with its word intact (#12412 review, cycle 5, measured).
+      The counter is window-scoped; ``truncated`` is what says the window itself
+      was capped, so a caller reading both sees the whole shape (a capped scan
+      whose tail was unaddressable now reports ``truncated: True`` rather than
+      looking exhaustive);
     * ``wouldRepair`` — what a ``dry_run`` WOULD change; always ``0`` when
       ``dry_run`` is false, because nothing was previewed.
     """
@@ -1176,12 +1222,23 @@ def reconcile_goal_states(
         _GOAL_STATE_CANDIDATES,
         params={"words": words, "lim": limit + 1},
     ).result_set or []
-    rows: list[tuple[str, str]] = [(row[0], row[1]) for row in result
-                                  if row and row[0]]
-    # A matched node with no `id` cannot be named to the entity surface, so it is
-    # not repairable here — and it is COUNTED rather than filtered away: a
-    # candidate that matched the scan and then vanished from the payload is the
-    # same false PASS as the declined label below.
+    canonical = _canonical_entity_labels()
+    rows: list[tuple[str, str]] = []
+    for row in result:
+        if not row or not row[0]:
+            continue
+        # TWO shapes the entity surface cannot ADDRESS, counted alike: no `id` to
+        # name the node by, and an `id` on a label `sdk.get_entity` cannot resolve.
+        # The second must NOT reach the door: the door's only answer for an id it
+        # cannot resolve is `gone: True` ("the goal node is gone"), so the sweep
+        # reported a DELETION that never happened while the word still stood
+        # (#12412 review, cycle 5 — measured on a `:Widget` and an unlabelled node).
+        if not (set(row[2] if len(row) > 2 else () or ()) & canonical):
+            continue
+        rows.append((row[0], row[1]))
+    # A candidate that matched the scan and then vanished from the payload is the
+    # same false PASS as the declined label below, so it is COUNTED rather than
+    # filtered away silently.
     unaddressable = len(result) - len(rows)
     # ⛔ THE DECLINED POPULATION IS MEASURED, NOT ASSUMED EMPTY. Without this a
     # sweep over a graph whose only stale words sit on nodes the sweep cannot

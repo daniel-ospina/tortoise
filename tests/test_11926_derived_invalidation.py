@@ -1824,6 +1824,43 @@ def test_a_goal_with_no_ID_cannot_be_repaired_and_is_COUNTED_not_dropped(sdk):
     assert standing and standing[0][0] == "met", standing
 
 
+def test_a_goal_on_a_label_the_surface_CANNOT_RESOLVE_is_COUNTED_not_reported_GONE(sdk):
+    """The unaddressable population's SECOND shape (#12412 review, cycle 5).
+
+    The scan is an EXCLUSION by the one label that matters (``WHERE NOT n:Point``),
+    so it matches a derived word on ANY label; ``sdk.get_entity`` resolves only
+    :data:`_CANONICAL_ENTITY_LABELS`. A node with an id on any other label — or on
+    no label at all — therefore cannot be named to the repair door.
+
+    ⛔ WHAT THE DEFECT WAS, measured: such a candidate was handed to the door
+    anyway, and the door's only answer for an id it cannot resolve is
+    ``gone: True``, documented as *"the goal node is gone"*. The sweep recorded
+    ``{'action': 'gone', 'reason': "the goal 'w-1' no longer exists"}`` for a node
+    that was still there with ``goalState='met'`` — a DELETION asserted in the
+    payload that never happened, which is a worse falsehood than the silent drop
+    the sibling no-``id`` counter exists to prevent. Both shapes are now COUNTED.
+
+    Both nodes carry a DERIVED word, so both are genuine candidates: this is a
+    counting failure, not a matching one, and ``gone`` must stay reserved for the
+    door's own sense of it (``test_a_goal_DELETED_mid_sweep_...``).
+    """
+    labels_and_ids = ((":Widget", "w-unresolvable-1"), ("", "nolabel-unresolvable-1"))
+    for label, node_id in labels_and_ids:
+        sdk._get_proj().g.query(
+            f"CREATE (n{label} {{id:'{node_id}', goalState:'met'}})")
+    report = reconcile_goal_states(sdk)
+    assert report["counts"]["unaddressable"] == 2, (
+        f"the sweep neither repaired nor counted the unresolvable-label shape: {report}")
+    assert report["counts"]["gone"] == 0, (
+        f"the sweep recorded a DELETION for nodes that still exist: {report}")
+    assert report["counts"]["scanned"] == 0, report
+    for _label, node_id in labels_and_ids:
+        standing = sdk._get_proj().g.query(
+            f"MATCH (n {{id:'{node_id}'}}) RETURN n.goalState").result_set
+        assert standing and standing[0][0] == "met", (
+            f"{node_id} lost its word, so the counter hid a real repair: {standing}")
+
+
 def test_a_CAPPED_window_with_a_dropped_row_still_reports_TRUNCATED(sdk):
     """The two disclosures must compose (#12412 review, cycle 4, measured).
 
