@@ -40337,23 +40337,30 @@ class TortoiseSDK:
         _valid_time_rerank: bool = True,
         # #12297: PRIVATE — the FUSED-CANDIDATE rerank. Default True = the
         # product behaviour (a relevance read reranks when the gate is armed).
-        # Passed False by a caller whose PAGE COMPOSITION must not move. Two
-        # classes, and the second is why this is a SUPERSET of the
-        # ``_valid_time_rerank=False`` sites rather than the same set:
-        #   * the lanes that RE-OWN the order downstream (the six in
-        #     ``_valid_time_rerank``'s docstring, plus ``search_sessions``, which
-        #     re-sorts its pool by the PRE-rerank ``rrf`` score before slicing —
-        #     so a rerank there is a permutation the sort discards) plus the eval
-        #     / A-B harnesses that pin that flag for arm comparability — a
-        #     pre-cut reorder can only move which ids survive ``limit``, an
-        #     unmeasured composition change;
-        #   * MEMBERSHIP PROBES that read a page smaller than the pool width and
-        #     ask "is this row in it" — ``battery/runner/setup.py``'s
-        #     seed-manifest guard (a false ``ConfigError`` reading "stale
-        #     PRE-FIX graph") and ``tools/why_layer_rate.py``'s support-entry
-        #     lookup (whose ``None`` is the documented FAIL shape). Neither
-        #     re-owns an order and neither passes ``_valid_time_rerank=False``,
-        #     but a re-picked page turns both into a false diagnosis.
+        # Passed False by a caller whose PAGE COMPOSITION must not move. THREE
+        # classes, not one — they are different harms and the brief's §5 states
+        # the same three (keep the two lists in step):
+        #   * ORDER RE-OWNERS — ``suggest_entry_points``, ``issue_insight``,
+        #     ``recall_state``, ``recall_gaps``, ``volunteer_context`` (bound as a
+        #     ``_search_fn`` seam) and ``search_sessions`` (which re-sorts its pool
+        #     by the PRE-rerank ``rrf`` score, so a rerank there is a permutation
+        #     its own sort discards). A pre-cut reorder moves which ids survive
+        #     ``limit`` and their sort then hides it. The eval / A-B and benchmark
+        #     harnesses belong here too: they pin it for comparability.
+        #   * CONSUMED AS A SET, never as a page — ``_review_pool`` (a
+        #     ``{pid: …}`` membership map; ``review_add`` orders its own picks) and
+        #     ``_resolve_subgraph_seed`` (an expansion START set). ⛔ Neither keeps
+        #     an order, which is what ``_valid_time_rerank``'s docstring says about
+        #     them: do not file them as order re-owners.
+        #   * MEMBERSHIP PROBES that read a page SMALLER than the pool width and ask
+        #     "is this row in it" — ``battery/runner/setup.py``'s seed-manifest
+        #     guard (a false ``ConfigError`` reading "stale PRE-FIX graph"),
+        #     ``tools/why_layer_rate.py``'s support-entry lookup (whose ``None`` is
+        #     the documented FAIL shape) and ``mcp_server``'s
+        #     ``tortoise_suggest_entry_points`` (the returned page IS the resolution
+        #     result set, at ``limit=5``). None of the three passes
+        #     ``_valid_time_rerank=False``, and a re-picked page turns each into a
+        #     false diagnosis.
         # Composition can only move when ``limit < _scored_n``, so a large-pool
         # caller (the evals' ``pool_size`` reads) is safe by construction — but
         # "safe today because of an arithmetic accident" is not an opt-out. ⛔ The two opt-outs are SEPARATE on purpose: the capture path
@@ -42000,11 +42007,14 @@ class TortoiseSDK:
         _rr_order_by_ok = order_by == "relevance"
         # ⛔ THE SECOND HALF OF THE SAME GUARD. ``order_by``/recency catch a
         # caller that ASKS for another order; they do not catch a caller that
-        # re-owns the order DOWNSTREAM and passes neither. Two shapes:
+        # re-owns the order DOWNSTREAM — or consumes it as a SET — and passes
+        # neither.
         #   * ``_review_pool``, ``suggest_entry_points``, ``issue_insight``,
         #     ``recall_state``, ``recall_gaps``, ``_resolve_subgraph_seed`` —
         #     these six ALREADY pass ``_valid_time_rerank=False`` for the
-        #     identical reason;
+        #     identical reason. Note that the last of them and ``_review_pool``
+        #     are SET consumers rather than sorters (see the parameter's
+        #     docstring): same flag, different harm;
         #   * ``search_sessions``, which re-sorts its pool by the PRE-rerank
         #     ``rrf`` score before slicing, and ``volunteer_context``, which
         #     binds this read as a ``_search_fn`` seam — ⛔ NEITHER opts out of

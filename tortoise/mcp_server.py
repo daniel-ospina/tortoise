@@ -4147,7 +4147,8 @@ def tortoise_suggest_entry_points(query: str, limit: int = 5,
 
     Uses hybrid search (tortoise_fts_query) for semantic entity resolution.
     Falls back to string match (CONTAINS) if hybrid search unavailable.
-    Returns [{id, name, kind, confidence}] sorted by confidence DESC.
+    Returns [{id, name, kind, confidence}] in the read's own (relevance) order;
+    the ``suggest_entry_points`` FALLBACK sorts the match by confidence DESC.
     """
     try:
         # #12297: THE RETURNED PAGE **IS** THE RESOLUTION RESULT SET, at

@@ -315,11 +315,12 @@ do NOT, because the re-pick IS the lever: the two API-server search routes
   `tools/ask_pool_admission_probe.py`) and the benchmarks
   (`benchmarks/run_report.py`, `benchmarks/load_test.py`) pin it for comparability
   against RECORDED numbers, exactly as the first three pin `_valid_time_rerank`.
-- **Membership probes** — `battery/runner/setup.py`'s
-seed-manifest guard (`limit=20`) and `tools/why_layer_rate.py`'s support-entry
-lookup (`limit=25`) ask "is this row in the returned page", read a page smaller than
-the pool width, and would turn a re-picked page into a false `ConfigError` / a false
-FAIL. Each skip is disclosed as `order_owned_downstream` **when the caller passes a
+- **Membership probes** — `battery/runner/setup.py`'s seed-manifest guard
+  (`limit=20`), `tools/why_layer_rate.py`'s support-entry lookup (`limit=25`) and
+  `mcp_server`'s `tortoise_suggest_entry_points` (`limit=5`, where the returned page
+  IS the resolution result set) ask "is this row in the returned page", read a page
+  smaller than the pool width, and would turn a re-picked page into a false
+  `ConfigError` / a false FAIL / a wrong entity set. Each skip is disclosed as `order_owned_downstream` **when the caller passes a
 leg trace** — most of these call sites pass none, because there is no sink to pass, so
 their skip is silent by construction rather than unrecorded. The capture prior is the
 deliberate exception on the write path: it keeps the rerank, under its own
