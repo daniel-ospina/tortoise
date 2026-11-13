@@ -2387,8 +2387,9 @@ def cmd_cut(args: argparse.Namespace) -> int:
     # refusal must not leave a baseline that has already forgotten the symbol, because the
     # committed baseline is the only list of what USED to be there. A first cut has no prior
     # to lose, so the ROW comparison is skipped — but the override flags are validated on
-    # EVERY cut, because "no prior document" is the one tree where a stray override cannot
-    # even be checked against a removal, which is exactly when it should be refused.
+    # EVERY cut, INCLUDING the symbol-vs-removal check below (which therefore refuses any
+    # override on a first cut): "no prior document" is the one tree where a waiver cannot be
+    # checked against a removal, which is exactly when it should be refused.
     accounting: dict[str, str] = {}
     allowed = [str(s) for s in (getattr(args, "allow_removal", None) or [])]
     reason = str(getattr(args, "allow_removal_reason", "") or "").strip()
@@ -2402,6 +2403,7 @@ def cmd_cut(args: argparse.Namespace) -> int:
         print("REFUSED a reason with no symbol names an override that did not happen — an "
               "operator who wrote a justification believes something was waived.")
         return 1
+    problems: list[str] = []
     if prior_doc is not None:
         try:
             records = removal_records()
@@ -2410,17 +2412,19 @@ def cmd_cut(args: argparse.Namespace) -> int:
             )
         except SurfaceEvidenceUnreadable as exc:
             return _refuse(exc)
-        # The override is validated before the removal problems: a bogus `--allow-removal` is
-        # a defect in the invocation, and reporting it as "a removal had no record" would
-        # send the operator to archive a symbol instead of fixing the flag.
-        unexplained = sorted(set(allowed) - set(accounting))
-        if unexplained:
-            print(f"::error::--allow-removal named symbol(s) this cut does not remove: "
-                  f"{', '.join(unexplained)}")
-            print("REFUSED an override must name a symbol that is actually going away — an "
-                  "unused override is a permission granted for something else later.")
-            return 1
-        if problems:
+    # The override is validated before the removal problems, and on EVERY cut: a bogus
+    # `--allow-removal` is a defect in the invocation, and reporting it as "a removal had no
+    # record" would send the operator to archive a symbol instead of fixing the flag. On a
+    # first cut `accounting` is empty, so every override is unexplained and refused — which
+    # is the point: nothing was removed, so a waiver for it is a false record.
+    unexplained = sorted(set(allowed) - set(accounting))
+    if unexplained:
+        print(f"::error::--allow-removal named symbol(s) this cut does not remove: "
+              f"{', '.join(unexplained)}")
+        print("REFUSED an override must name a symbol that is actually going away — an "
+              "unused override is a permission granted for something else later.")
+        return 1
+    if problems:
             print(f"::error::cut would drop {len(problems)} surface row(s) with no usable record")
             print("REFUSED a removal must leave a record — the #11609 owner ruling archives "
                   "removed code so a mistake can be inspected later, and a re-cut cannot "

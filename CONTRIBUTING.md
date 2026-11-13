@@ -259,8 +259,9 @@ move the census, and it lands in a reviewed diff like any other edit.
 **To REMOVE a symbol** (a tool from `TOOL_REGISTRY` or from `RETIRED_USE_INSTEAD`, a public
 method from `TortoiseSDK`), the cut **refuses** a symbol that disappears with no record —
 whenever a committed baseline exists to compare against (a first cut is not gated; deleting
-`config/surface-manifest.yml` first defeats this comparison, so do not) — and both halves of the
-baseline are compared (`rows:` and `retired:`, because a retired MCP name is still served)
+`config/surface-manifest.yml` first, or splicing one row out of the baseline by hand, defeats the
+comparison — no gate can see a removal both documents already agree on, so take the archive
+route and do not hand-splice a removal — #12327 tracks the pin that would see it) — and both halves of the baseline are compared (`rows:` and `retired:`, because a retired MCP name is still served)
 ([#12237](https://github.com/daniel-ospina/tortoise/issues/12237)): account for it by **exactly
 one** of an `archive/MANIFEST.json` entry of the matching kind (`tools/archive_surface.py
 archive mcp-tool|sdk-method <symbol> --batch <slug> --reason <text>`, run **before** the

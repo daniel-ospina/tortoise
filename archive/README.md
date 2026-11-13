@@ -101,9 +101,19 @@ enforced at two different seams, deliberately:
   in `check`: it iterates the manifest's own entries, so a symbol gone from **both** is
   invisible to it. `cut` is the seam where a row is actually forgotten, so the refusal is
   there — **whenever a committed baseline exists to compare against** (a first cut has no
-  prior to lose, so it is not gated; deleting the baseline file first is therefore NOT
-  gated — [`#12291`](https://github.com/daniel-ospina/tortoise/issues/12291) covers the
-  same absence class for the archive) — and **both halves of the baseline are compared** (`rows:` and `retired:`), because a
+  prior to lose, so it is not gated). ⚠️ **Two hand-edits defeat the comparison, and neither is
+  a defect of the gate — no comparison of two documents can see a removal both already agree
+  on:** deleting `config/surface-manifest.yml` before the cut (a first cut has no prior), or
+  **splicing** the baseline by hand — deleting the row, the derived row, and the four
+  mechanical cells a splicer already edits (`counts.tools`,
+  `counts.keyword_distribution`, the `response_fields` entry,
+  `config/surface-order.yml`'s `baseline_counts`), which is what the `[surface-cut]` note in
+  `MEMORY.md` prescribes for slice PRs because a raw cut rewrites the whole file. A batch that
+  takes the splice path leaves **no** archive entry and **no** retirement record with every
+  required gate green; a shrink pin on the committed counts is the only instrument that would
+  see it ([`#12327`](https://github.com/daniel-ospina/tortoise/issues/12327)), and
+  [`#12291`](https://github.com/daniel-ospina/tortoise/issues/12291) covers the same absence class
+  for the archive. **Both halves of the baseline are compared** (`rows:` and `retired:`), because a
   retired name is still SERVED: `RETIRED_TOOL_REGISTRY` is derived from
   `RETIRED_USE_INSTEAD`, so one edit to that map detaches both, and a gate reading only
   `rows:` would watch a live name leave the product and report nothing. A dropped symbol must
@@ -115,8 +125,8 @@ enforced at two different seams, deliberately:
   frozen `sdk-method` to appear in the map — **one-directionally**, so a map entry needs no
   archive row, while a frozen entry with no map entry leaves a caller with a bare
   `AttributeError` — and counting the pair apart refused this file's own procedure (freeze,
-  then record) while leaving the map-only shape, which loses the frozen code, as the only
-  passing one. A genuine rename passes `cut --allow-removal <symbol>
+  then record) while leaving no STABLE shape that carries the frozen code: archive-only passed
+  `cut` but red `check`, and map-only passed both while freezing nothing. A genuine rename passes `cut --allow-removal <symbol>
   --allow-removal-reason <why>`, which is logged in the cut output and belongs in the PR body;
   a reason with no symbol is refused, because it records an override that did not happen.
   **The refusal happens BEFORE the write**, so a refused cut never leaves a baseline that has

@@ -5116,8 +5116,11 @@ def test_cut_ACCEPTS_a_dropped_tool_that_is_RETIRED_FORWARD(monkeypatch, tmp_pat
     so a committed baseline carrying it is exactly the shape of "a name that left the count".
     """
     sm = _load_manifest_tool()
-    # The committed baseline carries `tortoise_get` as a RETIRED row; the derived one no
-    # longer does (an ordinary edit to `RETIRED_USE_INSTEAD` detaches both halves at once).
+    # The committed baseline carries `tortoise_get` as a RETIRED row and the derived one does
+    # not. This is the shape AFTER a `RETIRED_USE_INSTEAD` edit is reverted-but-not-re-cut, and
+    # what makes it PASS is that the REAL map still holds the name: `removal_records` reads the
+    # imported map, so `RETIRED_USE_INSTEAD` accounts for it. (An edit that ALSO drops the map
+    # key is the round-1 case — refused, because then nothing accounts for the name.)
     prior = copy.deepcopy(derived_baseline)  # already carries `tortoise_get` as retired
     derived = copy.deepcopy(derived_baseline)
     derived["retired"] = [
@@ -5472,3 +5475,36 @@ def test_an_override_does_not_MASK_a_two_record_inconsistency():
     )
     assert problems and not accounting, (problems, accounting)
     assert "2 records" in problems[0], problems
+
+
+def test_an_override_on_a_FIRST_cut_is_refused(monkeypatch, tmp_path, derived_baseline, capsys):
+    """No prior baseline means nothing was removed, so any waiver for it is a false record.
+
+    Round 7 of PR #12313: the symbol-vs-removal check lived inside the prior-doc arm, so a
+    first cut accepted `--allow-removal x --allow-removal-reason r` and printed
+    `REMOVAL OVERRIDE …` although no symbol can have gone — the same false-record class the
+    mirror case (a reason with no symbol) already refused.
+    """
+    sm = _load_manifest_tool()
+    path = tmp_path / "no-such-baseline.yml"  # a FIRST cut: nothing committed to compare against
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+
+    rc = sm.cmd_cut(
+        argparse.Namespace(
+            commit=CUT_SHA,
+            allow_approval_reset=True,
+            allow_removal=["whatever"],
+            allow_removal_reason="a rename that is not happening",
+        )
+    )
+
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "does not remove" in out, out
+    assert not path.exists(), "the refused first cut still wrote a baseline"
+
+    # …and a first cut with NO override still works (non-vacuity).
+    rc = sm.cmd_cut(argparse.Namespace(commit=CUT_SHA, allow_approval_reset=True))
+    assert rc == 0, capsys.readouterr().out
+    assert path.exists()
