@@ -1283,8 +1283,13 @@ def _main(argv: list[str] | None = None) -> int:
     )
 
     if log_path is not None and not transcript:
-        # The install never ran (unreadable index): say so in the log rather than leaving
-        # an empty file the reader has to interpret.
+        # The install never ran: no engine index document came back, or the document came
+        # back carrying no published version. NOT "an unreadable index" — a 404/410 is a
+        # readable ANSWER that the project is not on the index, and a document that parses
+        # but names no version was read perfectly well. The line below writes the actual
+        # state, so it distinguishes a finding from the absence of an answer; this comment
+        # must not re-assert the 404-versus-timeout equivalence that the verdict arms and
+        # `build_report`'s docstring exist to keep apart.
         try:
             log_path.parent.mkdir(parents=True, exist_ok=True)
             log_path.write_text(
