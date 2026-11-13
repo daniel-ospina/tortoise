@@ -285,7 +285,9 @@ def apply_merge_union(proj: Any, record: dict, *, session_id: str,
     ``{point_id (the SURVIVOR), about_entities (the union), ...}``.
 
     ``subject_names`` is the SUBJECT-KIND names the caller's payload declared
-    (capture's ``subject_entity_names``, ``sdk.py:17620``, skipped at ``sdk.py:17939``). They are SKIPPED —
+    (capture's ``subject_entity_names``; ``sdk.py::TortoiseSDK._extract_session_v2``
+    seeds it at ``subject_entity_names.add(name)`` and skips on it where the
+    ``aboutObject`` edge is written). They are SKIPPED —
     see "the subject channel" below — and reported in ``skipped_subject``.
     Omitting it is safe rather than silently wider: with no set there is
     nothing to skip, which is exactly what a capture whose payload declares no
@@ -347,7 +349,8 @@ def apply_merge_union(proj: Any, record: dict, *, session_id: str,
 
     * a name whose EXACT spelling is in that set is reported in `skipped_subject`
       and **never written** (F6's rule: capture's own pass skips on the exact name,
-      `sdk.py:17939`, and a write there would attach an Object under a subject's
+      `sdk.py::TortoiseSDK._extract_session_v2`'s `if _n in subject_entity_names`
+      skip, and a write there would attach an Object under a subject's
       name — the un-gated `#4934` edge);
     * a name that only FOLD-equals one is NOT dropped: the lookup is narrowed to
       `AND o.name = $exact`, so an Object whose OWN name is the reference keeps its
@@ -372,7 +375,8 @@ def apply_merge_union(proj: Any, record: dict, *, session_id: str,
     than assumed — ⚠️ **but only for subject-kind names that appear in the
     union's `about_entities`.** A participant that reaches the claim through the
     point's SLOTS is dropped UNREPORTED: the ordinary path binds it via
-    `bind_point_subjects` (`sdk.py:18025`), a merge emits no payload point so
+    `bind_point_subjects` (`sdk.py::TortoiseSDK._extract_session_v2`, the call site
+    after the entity loop), a merge emits no payload point so
     that call never runs for the candidate, and the slots are not carried onto
     the merge record. So "nothing it argued for is silently dropped" is true of
     OBJECT attachments, and for subject binding it holds only for the
@@ -436,7 +440,8 @@ def apply_merge_union(proj: Any, record: dict, *, session_id: str,
     # folds. Local import: this module must stay importable without
     # `entity_resolver` being pulled in eagerly (see the block above).
     from .entity_resolver import normalize_entity_name as _ndm_fold
-    # Capture's own skip (`sdk.py:17939`), applied here so a merge cannot write
+    # Capture's own skip (`sdk.py::TortoiseSDK._extract_session_v2`'s
+    # `if _n in subject_entity_names`), applied here so a merge cannot write
     # an edge the SAME capture refuses to write on the normal route. The
     # comparison is made in the WRITER's key space (raw OR folded), because the
     # resolution below matches the folded union — an exact-only skip here would

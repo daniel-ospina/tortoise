@@ -5423,12 +5423,20 @@ class TestThe12120ReviewRound22SubjectTwin:
                 "CREATE (b:Subject {id:'r22s-d', name:'Shared Team', "
                 "subjectKind:'organization', status:'superseded', "
                 "supersededBy:'Other Team', resolved_from:'r22s-gone-2'})")
+            from tortoise.entity_identity import clear_non_folded_entries, non_folded_entries
+            clear_non_folded_entries()
             applied, skips, msgs = self._apply(sdk, [
                 {"superseded": "Shared Team", "supersedes_by": "New Team",
                  "evidence": "r22s"}])
             assert applied == 0, (applied, skips, msgs)
-            assert skips, (
-                "one unrelated dangling Subject incarnation absorbed a genuine "
-                f"divergence silently: {skips!r} {msgs!r}")
+            # The CLASSIFICATION, not just truthiness (review round 23): this arm
+            # must report the dangling survivor, never `ambiguous subject name` —
+            # which writes a durable `shape='ambiguous-name'` entry telling a
+            # repair consumer to merge a pair the merge already made (round 17).
+            assert [s_["reason"] for s_ in skips] == [
+                "ref carrier's survivor is gone"], skips
+            shapes = [e.shape for e in non_folded_entries()
+                      if getattr(e, "name", None) == "Shared Team"]
+            assert shapes == ["unaddressable-name"], shapes
         finally:
             sdk.close()

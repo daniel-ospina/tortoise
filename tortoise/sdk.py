@@ -18061,6 +18061,18 @@ class TortoiseSDK:
                 subject_entity_names.add(_ln)
             else:
                 subject_entity_names.discard(_ln)
+        # ⛔ RE-DERIVED, not delta-maintained (review round 23): the correction
+        # above moves names in and out of `subject_entity_names`, and the folded
+        # set feeds `_subject_fold_only` — the discriminator that decides whether
+        # the `aboutObject` probe may be widened. A stale folded key made a
+        # pack-guard-redirected name (`"the operator"` → `core:role`, a `:Subject`)
+        # miss the exact-name narrowing and take the widened probe, attaching to an
+        # `:Object` whose folded name matches — the #4934-class un-gated edge `main`
+        # never wrote. Rebuilding is also the only correct form: an incremental
+        # `discard` would drop a folded key another subject-spelled name still
+        # holds.
+        subject_entity_names_folded = {
+            _fold(_n) for _n in subject_entity_names}
         if entity_failures:
             warnings.extend(entity_failures)
             warnings.append(
