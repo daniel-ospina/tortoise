@@ -46800,8 +46800,8 @@ class TortoiseSDK:
         # method's FIRST write and its `restatus` journal: a refusal after it would
         # tell the caller the call failed while the status had already landed and
         # been journaled (the atomicity rule #9287/#10192 state for the sibling
-        # gate). It runs after the refusals above, so a call refused for its
-        # vocabulary or its carrier is still reported as itself.
+        # gate). It runs after the CARRIER refusal above, and AHEAD of the `status`
+        # arm's VOCABULARY check — so a bad WORD on a dead claim names the dead state.
         #
         # `missing_ok=True` is load-bearing: this method is the documented tenant
         # route onto EVERY label, so an absent or non-Point id must stay a no-op
@@ -46819,27 +46819,62 @@ class TortoiseSDK:
         _lifecycle_fields = sorted(
             ({"status"} if "status" in props else set())
             | (_TEMPORAL_RESTAMP_PROPS & set(props)))
-        _verdict = None
         if _lifecycle_fields:
-            try:
-                _verdict = self._assert_lifecycle_guard(
-                    id_val, method="update_entity", missing_ok=True,
-                    allow_operator=True)
-            except ValueError as _terminal_refusal:
+            # ── #9649 review F1: resolve the ADDRESS before the verdict ─────────
+            # This door binds a Point by `id`, by `eventId` AND by `url` — the
+            # three keys the padded-kind probe above documents and the per-label
+            # loop below writes through. Asking the guard about `id_val` alone
+            # measured a hole at the review head: a `:Point:Event` addressed by its
+            # `eventId` ACCEPTED `validTo`, `validFrom`, `when` and
+            # `status='live'` on a SUPERSEDED claim (window rewritten, claim
+            # resurrected), and a `:Point:Source` addressed by `url` accepted
+            # `status='live'` — the exact miss the padded-kind probe's own comment
+            # names. No production writer mints those hybrid labels (every Point
+            # writer emits `:Point`), so the shape is fixture-reachable rather
+            # than customer-reachable — but the guard's claim is "the Point the
+            # write touches", so it resolves the address instead of trusting one
+            # key of it. Terminality still comes from ONE instrument: this read
+            # only turns the address into the id that instrument takes.
+            _addressed = proj.g.query(
+                "MATCH (n:Point) WHERE n.id = $id OR n.eventId = $id "
+                "OR n.url = $id RETURN collect(DISTINCT n.id)",
+                params={"id": id_val}).result_set
+            _addressed_ids = _addressed[0][0] if _addressed else []
+            _lifecycle_ids = [i for i in (_addressed_ids or ()) if i]
+            if _addressed_ids and not _lifecycle_ids:
+                # An id-less Point (url/eventId only) cannot be handed to the
+                # id-keyed instrument, so terminality cannot be checked. Fail
+                # CLOSED: a resurrection is the harm #9649 exists to stop, and no
+                # production writer mints such a node — `create_point` always
+                # stamps an `id`.
                 raise ValueError(
-                    f"update_entity refused {_lifecycle_fields} on a dead "
-                    f"claim: {_terminal_refusal}. A terminal Point's status and "
-                    f"validity window are one-way (#2498) — mint a new Point "
-                    f"for the corrected claim and supersede this one with "
-                    f"`supersede_point(dead_id, new_id)`; do not re-status a "
-                    f"dead one. Content and metadata revisions are still "
-                    f"accepted on it."
-                ) from None
+                    f"update_entity refused {_lifecycle_fields}: the Point bound "
+                    f"by {id_val!r} carries no `id`, so its lifecycle state "
+                    f"cannot be checked. Give the Point an `id` (the canonical "
+                    f"key every other door uses) or write the window through "
+                    f"`update_point(id, ...)`."
+                )
+            for _lifecycle_id in _lifecycle_ids:
+                try:
+                    self._assert_lifecycle_guard(
+                        _lifecycle_id, method="update_entity", missing_ok=True,
+                        allow_operator=True)
+                except ValueError as _terminal_refusal:
+                    raise ValueError(
+                        f"update_entity refused {_lifecycle_fields} on a dead "
+                        f"claim: {_terminal_refusal}. A terminal Point's status and "
+                        f"validity window are one-way (#2498) — mint a new Point "
+                        f"for the corrected claim and supersede this one with "
+                        f"`supersede_point(dead_id, new_id)`; do not re-status a "
+                        f"dead one. Content and metadata revisions are still "
+                        f"accepted on it."
+                    ) from None
         if "status" in props:
-            _pt_hits = proj.g.query(
-                "MATCH (n:Point {id:$id}) RETURN count(n)",
+            _pt_hits, _pt_statuses = proj.g.query(
+                "MATCH (n:Point {id:$id}) RETURN count(n), "
+                "collect(DISTINCT n.status)",
                 params={"id": id_val},
-            ).result_set[0][0]
+            ).result_set[0]
             if _pt_hits:
                 _status = props["status"]
                 if (not isinstance(_status, str)
@@ -46873,11 +46908,25 @@ class TortoiseSDK:
                 # which also covers what the map cannot (`deprecated`, the legacy
                 # `outdated=true` flag, an operator fan-out) — that is why this
                 # check never re-derives terminality from an empty target set.
-                _stored = (_verdict or {}).get("status")
-                _declared = (_ALLOWED_TRANSITIONS.get(_stored)
-                             if isinstance(_stored, str) else None)
-                if (_declared is not None and _status != _stored
-                        and _status not in _declared):
+                #
+                # ⛔ #9649 review F2: ONE row is not the fan-out. The instrument
+                # answers TERMINALITY over every node carrying the id (#7822), and
+                # the write below binds every one of them (`SET n += $s`), so the
+                # transition question is asked per stored status. Reading a single
+                # representative let a `{draft, live}` fan-out — mintable through
+                # the public `create_point(..., id=X)` door, the shape `live.py`
+                # calls "tested, graph-reachable" — accept `-> 'draft'` and DEMOTE
+                # the live row (the representative is the sorted-first, i.e.
+                # `draft`), which is an undeclared `live -> draft` this check
+                # exists to refuse. A status with NO entry in the map (`deprecated`,
+                # a legacy spelling) still DEFERS rather than being guessed at;
+                # terminal rows never reach here — the guard above has refused them.
+                for _stored in _pt_statuses or ():
+                    if not isinstance(_stored, str) or _stored == _status:
+                        continue
+                    _declared = _ALLOWED_TRANSITIONS.get(_stored)
+                    if _declared is None or _status in _declared:
+                        continue
                     _declared_text = ", ".join(
                         sorted(_declared)) or "nothing — it is terminal"
                     # AX rule 2's third part (#10183): a route the caller can

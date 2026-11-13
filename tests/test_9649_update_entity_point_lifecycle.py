@@ -43,12 +43,10 @@ Runnable (docker lane):
 from __future__ import annotations
 
 import json
-import os
 
 import pytest
 
-from tortoise.sdk import (_ALLOWED_TRANSITIONS, _TEMPORAL_RESTAMP_PROPS,
-                          TortoiseSDK)
+from tortoise.sdk import _ALLOWED_TRANSITIONS, _TEMPORAL_RESTAMP_PROPS, TortoiseSDK
 
 TERMINAL = ["retracted", "superseded", "outdated", "archived"]
 
@@ -167,6 +165,27 @@ def test_the_legacy_outdated_flag_alone_makes_the_point_dead(env):
     with pytest.raises(ValueError, match="terminal"):
         sdk.update_entity(pid, status="live")
     assert _row(sdk, pid)["status"] is None
+
+
+def test_deprecated_is_terminal_even_though_the_map_has_no_key(env):
+    """Terminality is the SHARED predicate, not an entry in the transition map.
+
+    ``deprecated`` is terminal in ``live.is_terminal_status`` and has NO key in
+    ``_ALLOWED_TRANSITIONS``, so a guard that re-derived terminality from the map
+    (or from an empty declared-target set) would let this write through. The
+    shared instrument refuses it — which is what makes "is this claim dead?" and
+    "which status may it become?" answer from ONE place rather than two.
+    """
+    sdk, _ = env
+    pid = _live(sdk)
+    _force_status(sdk, pid, "deprecated")
+    before = _row(sdk, pid)
+    assert "deprecated" not in _ALLOWED_TRANSITIONS, (
+        "this arm is only non-vacuous while the map carries no `deprecated` key")
+
+    with pytest.raises(ValueError, match="terminal"):
+        sdk.update_entity(pid, validTo="2030-01-01T00:00:00Z")
+    assert _row(sdk, pid) == before
 
 
 def test_a_null_status_legacy_point_can_still_be_given_one(env):
@@ -384,3 +403,80 @@ def test_an_absent_id_is_still_the_documented_empty_reply(env):
     """A typo must not become a lifecycle refusal (the #10119 absent contract)."""
     sdk, _ = env
     assert sdk.update_entity("no-such-point-9649", status="live") == {}
+
+
+# ══════════════════════════════════════════════════════════════════
+# The SHAPE the write binds, not just the key it was given (review F1/F2)
+# ══════════════════════════════════════════════════════════════════
+
+def test_a_point_addressed_by_its_event_id_is_guarded_too(env):
+    """Review F1: this door binds a Point by `id`, `eventId` AND `url`.
+
+    A `MATCH (n:Point {id:$id})` guard missed a `:Point:Event` reached through
+    the Event arm by `eventId` — measured at the review head: `validTo`,
+    `validFrom`, `when` and `status='live'` all landed on a SUPERSEDED claim,
+    resurrecting it with a rewritten window. No production writer mints the
+    hybrid label, but the guard's claim is "the Point the write touches".
+    """
+    sdk, _ = env
+    old, _new = _superseded(sdk)
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) SET n:Event, n.eventId=$eid",
+        params={"id": old, "eid": "evt-review-9649"})
+    before = _row(sdk, old)
+
+    for props in ({"validTo": "2031-01-01T00:00:00Z"},
+                  {"validFrom": "2019-01-01T00:00:00Z"},
+                  {"when": "2031-01-01T00:00:00Z"},
+                  {"status": "live"}):
+        with pytest.raises(ValueError, match="terminal"):
+            sdk.update_entity("evt-review-9649", **props)
+    assert _row(sdk, old) == before, (
+        "the eventId-addressed write must leave the dead claim alone")
+
+
+def test_a_point_addressed_by_its_url_is_guarded_too(env):
+    """Review F1, the Source arm: `status='live'` on a dead `:Point:Source`."""
+    sdk, _ = env
+    old, _new = _superseded(sdk)
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) SET n:Source, n.url=$url",
+        params={"id": old, "url": "src://review-9649"})
+    before = _row(sdk, old)
+
+    with pytest.raises(ValueError, match="terminal"):
+        sdk.update_entity("src://review-9649", status="live")
+    assert _row(sdk, old) == before
+
+
+def test_one_row_is_not_the_fan_out_for_the_transition_check(env):
+    """Review F2: the write binds every node, so the check must ask every row.
+
+    A duplicate-id fan-out is mintable through the public `create_point(id=…)`
+    door (the shape `live.py` calls "tested, graph-reachable"). Reading ONE
+    representative status let `{draft, live} -> draft` through — the
+    representative is the sorted-first, i.e. the draft — which DEMOTED the live
+    row: an undeclared `live -> draft`, the transition this check exists to
+    refuse (a draft is inert for EP).
+    """
+    sdk, _ = env
+    pid = sdk.create_point("statement", "fan one", dedup=False,
+                           status="draft")["id"]
+    sdk.create_point("statement", "fan two", dedup=False,
+                     status="live", id=pid)
+    assert sorted(r[0] for r in _fan(sdk, pid)) == ["draft", "live"]
+
+    with pytest.raises(ValueError) as exc:
+        sdk.update_entity(pid, status="draft")
+    text = str(exc.value)
+    assert "transition" in text.lower() and "live" in text, (
+        f"the refusal must name the row it would demote: {text!r}")
+    assert sorted(r[0] for r in _fan(sdk, pid)) == ["draft", "live"], (
+        "a refused transition must not demote the live row")
+
+
+def _fan(sdk, pid: str) -> list[tuple]:
+    """Every `(status, validTo)` row the fan-out holds under one id."""
+    return sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.status, n.validTo",
+        params={"id": pid}).result_set
