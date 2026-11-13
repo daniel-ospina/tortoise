@@ -19,7 +19,8 @@ aboutObjects: research-brief.md (rounds 1–2), SEARCH-ARCHITECTURE.md §6.2, ST
 > ⛔ **Every locator below was re-measured at `f33f5e2c3215`, not inherited — with one declared exception.**
 > Round 2's own §7.0 makes this a discipline — *"Locators drift, and a pin is not a citation"* (round-2 branch
 > `research-brief.md`, `:393`) — and it is worth doing: **round 2's locators all hold at this
-> head** (checked individually — `entity_resolver.py` `:207`/`:536`/`:547`/`:624`/`:694`/`:739`/`:801`/`:809`,
+> head, and so do the four this round added** (`entity_resolver.py:739`/`:801`, `entity_identity.py:355`/`:417`)
+> (checked individually — `entity_resolver.py` `:207`/`:536`/`:547`/`:624`/`:694`/`:739`/`:801`/`:809`,
 > `entity_identity.py` `:355`/`:378`/`:384`/`:417`/`:499`/`:589`/`:594`, `search_engine.py`
 > `:2986`/`:3103`/`:4492`, `sparse.py` `:13-14`, `projection/edges.py` `:717-730`) — while
 > **`SEARCH-ARCHITECTURE.md` §6.2's do not**: its `search_engine.py` pins have drifted ~1,390 lines (`:3021` →
@@ -75,7 +76,7 @@ Round 2 said *"retires the node in **every** reader"*. That is true of the ident
 **false of every retrieval reader**, and the difference matters because it is the difference between "a redirect
 is a worse merge" and "a redirect is a merge **plus** a visible duplicate".
 
-**The identity readers — five reads, four of which retire the carrier:**
+**The identity readers — six reads, five of which retire the carrier:**
 
 | reader | line at `f33f5e2c3215` | what it does |
 |---|---|---|
@@ -84,6 +85,7 @@ is a worse merge" and "a redirect is a merge **plus** a visible duplicate".
 | the write-side union | `entity_identity.py:466` `_live_holders_same_entity` → `_collapse_resolved_holders` (`:350`, hop `:384`) | collapses each carrier onto its survivor and counts DISTINCT ids |
 | the create verb | `entity_identity.py:593-594` (`resolve_or_mint`) | a write of the variant lands on the **survivor** |
 | the ANY-status / un-collapsed read | `entity_identity.py:410` `_name_holder_ids_same_entity` | deliberately does **not** collapse (a held name must not read as unheld) |
+| the onboarding seed's anchor collapse | `onboarding/seed.py:271` `_collapse_merged_anchor_rows`, hop at `:307` (`target = cur.get("resolved_from")`) | collapses merged-away carriers onto their survivor, docstring *"**any status**"* — a sixth identity-side read, added in cycle 5's sweep |
 
 **The retrieval readers — none of them knows the property exists.** Measured counts at this head:
 
@@ -147,12 +149,12 @@ the same selector as `:382`), and comments/docstrings (`sdk.py:24087`, `:24321`,
 | site | line | value tested |
 |---|---|---|
 | `entity_resolver.py` — the scan read | `:211` | `coalesce(n.dedup_reviewed, '')` |
-| `entity_resolver.py` — `_pair_reviewed` | `:216`, `:226` | `'merge'` (`:227-228`), `'reject'` (`:230`) — and the reject arm is **set-valued**, matched against `dedup_rejected_targets` (`:230-250`), not a scalar |
+| `entity_resolver.py` — `_pair_reviewed` | `:216`, `:226` | `'merge'` (`:227-228`), `'reject'` (`:229`) — and the reject arm is **set-valued**, matched against `dedup_rejected_targets` (`:230-250`), not a scalar |
 | `entity_resolver.py` — the ladder's skip | `:694` | `== 'merge'` |
 | `sdk.py` — the content arm | `:23664`, `:23674` | `== 'merge'` |
 | ⛔ **`sdk.py` — the CONTENT review queue** | **`:24256-24257`** | **`WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL`** — **value-agnostic** |
 | `sdk.py` — the queue's own echo | `:24274` | echoes the value, tests nothing |
-| `sdk.py` — the verdict echo | `:24471` | echoes |
+| `sdk.py` — the verdict echo | `:24471` | reads the value, then **does** test it: `:24482` (early return on the same verdict) and `:24487` (refuses to overwrite a `'merge'`) — a value-aware read the earlier phrasing understated |
 | `review_verdicts.py` | `:382` | *selects which key to write* (`temporal_reviewed` vs `dedup_reviewed`) — a write-side selector, not a read of the value |
 
 **Every write:**
@@ -193,7 +195,7 @@ round-2 branch `research-brief.md` §7 ~`:830`, **not** in this tree's `docs/`.
 ⇒ **Corrected conclusion, and it is a *narrower* one:** a `'link'` band needs **a reader that means "linked"** —
 not a write (one `update_entity` call) and not a new field. And it inherits a hazard the envelope does not show:
 until that reader exists, writing the value **removes the candidate from review**. Round 2's *"a merge under a
-different label"* stands; its *"dead state"* framing does not — this is state that bites.
+different label"* stands; its *"read by nothing"* framing does not — this is state that bites.
 
 ### 8.1.3 FalkorDB exposes no `scorer`; our FTS is TF-IDF by the vendor's own definition; `rrf_fusion` discards the score so the scorer acts only through `LIMIT`
 
@@ -224,7 +226,7 @@ is literally accurate.
 
 **(d) ⛔ OVERTURNED: round 2's rule — *"the TF-IDF score never reaches the answer as a score: it decides which
 rows survive the LIMIT"* — is not what our code or our doc says.** It acts in
-**three** places, and `SEARCH-ARCHITECTURE.md` §6.2 (`:246-258`) already names the third:
+**three** places, and `SEARCH-ARCHITECTURE.md` §6.2 (`:246-260`) already names the third:
 
 1. **`LIMIT` selection** — the FTS leg is `ORDER BY score DESC, <recency tie> LIMIT $limit`
    (`search_engine.py:2992-2994`). Confirmed.
@@ -247,7 +249,7 @@ rows survive the LIMIT"* — is not what our code or our doc says.** It acts in
    **raw** score either way. `threshold`'s shipped default is `0.0` (`sdk.py:39852`), so the floor is inert by
    default; it is a live path all the same, and a rescale changes which rows clear it.
 
-   §6.2 says exactly this (`:254-258`, *"when a single leg answers or the read is a full scan, a caller's
+   §6.2 says exactly this (`:257-260`, *"when a single leg answers or the read is a full scan, a caller's
    `threshold` IS compared against that **leg's raw score**"*). Round 2's *"it decides which rows survive the
    `LIMIT`"* dropped it.
 
@@ -563,7 +565,7 @@ position, which M-11 did not have.
 **Verdict: not applicable to candidate generation, and it should not be** — it is a **context-construction**
 strategy, not a retrieval one. Its relevance to this epic is as the bound, not the answer, which is why our own
 `STORAGE-ARCHITECTURE.md` §12.2b already carries the same direction (*"write less, and write things worth
-keeping"*). **Adopting it would reverse none of the records named at the end of this section** — which is exactly why it is worth carrying as a
+keeping"*). **Adopting it would reverse none of the records listed at the end of §8.5** — which is exactly why it is worth carrying as a
 *scope* note and not as a lever.
 
 ⛔ **Two overclaims this lane made on first draft, withdrawn** (raised by review, verified here):
@@ -624,7 +626,7 @@ should take, and it is the shape §8.1.5 already settled.
 | §8.3.1 Zep's adjudicator carries no topology | **no recorded decision reaches this work** | corrects round 2's *"context in the adjudicator is free"* — it is free to *add*, and it is an extension, not a copy |
 | §8.3.2 interleave fusion (M-12) | ⛔ **YES, on the product search path**: the owner decision 2026-08-25 making `{"vector": 1.5}` weighted RRF the production default (`sdk.py:41233-41237`). **M-12 is therefore scoped to the dedup candidate pool; applying it to `tortoise_fts_query` would be a reopen, argued at that decision's home** | **scoped down** |
 | §8.3.3 Mem0's pool vs its signal | **no recorded decision reaches this work** | M-11 already carries it |
-| §8.3.4 Mastra: no **similarity-based** retrieval step (the narrower claim — see §8.3.4's two withdrawals) | **it touches none of the records named at the end of this section**; the D block's suspension (§7/§17.4.6) is untouched | scope note only |
+| §8.3.4 Mastra: no **similarity-based** retrieval step (the narrower claim — see §8.3.4's two withdrawals) | **it touches none of the records listed at the end of this section**; the D block's suspension (§7/§17.4.6) is untouched | scope note only |
 | §8.3.5 topology never decides identity in the field | **no recorded decision reaches this work** | supports B1 staying a *verdict*, not a similarity threshold |
 
 **Not reversed, and checked explicitly:** the **KEEP ruling** (`#11395`), **V1**, **§12.2/§12.2c**, **§14.3 V3**,
@@ -638,7 +640,7 @@ fix on the merge, not a change to what is stored.
 
 1. **Round 2's `resolved_from` conclusion survives; its wording does not.** "Retires the node in every reader" →
    **"retires it in every identity read that decides *which entity a name lands on*, and in none of the retrieval
-   readers."** ⛔ That is four of the five (see §8.1.1's table): the fifth, `_name_holder_ids_same_entity`
+   readers."** ⛔ That is **five of the six** (see §8.1.1's table): the sixth, `_name_holder_ids_same_entity`
    (`entity_identity.py:410`), deliberately does **not** collapse, because a held name must not read as unheld —
    so "every identity reader" would overstate by one. N-4's dispatch readiness is
    unchanged (still blocked on `SAME_AS`), and the redirect is now a *worse* substitute than round 2 said, because
