@@ -100,7 +100,10 @@ enforced at two different seams, deliberately:
   ([#12237](https://github.com/daniel-ospina/tortoise/issues/12237)). This gate cannot live
   in `check`: it iterates the manifest's own entries, so a symbol gone from **both** is
   invisible to it. `cut` is the seam where a row is actually forgotten, so the refusal is
-  there — **both halves of the baseline are compared** (`rows:` and `retired:`), because a
+  there — **whenever a committed baseline exists to compare against** (a first cut has no
+  prior to lose, so it is not gated; deleting the baseline file first is therefore NOT
+  gated — [`#12291`](https://github.com/daniel-ospina/tortoise/issues/12291) covers the
+  same absence class for the archive) — and **both halves of the baseline are compared** (`rows:` and `retired:`), because a
   retired name is still SERVED: `RETIRED_TOOL_REGISTRY` is derived from
   `RETIRED_USE_INSTEAD`, so one edit to that map detaches both, and a gate reading only
   `rows:` would watch a live name leave the product and report nothing. A dropped symbol must

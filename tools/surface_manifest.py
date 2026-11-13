@@ -2174,7 +2174,19 @@ def surface_symbols(doc: dict) -> set[tuple[str, str]]:
             )
         for row in half:
             if not isinstance(row, dict):
-                continue
+                # A row the gate cannot read is UNREADABLE EVIDENCE, not an absent row. The
+                # `continue` this replaces graded it as "no such row existed", so a prior
+                # baseline carrying e.g. `- tortoise_x` (a hand-edit or a `yq` append that
+                # dropped the `name:` key) lost the symbol with `cut` exiting 0 — the exact
+                # deletion this gate exists to refuse. `_read_manifest` accepts such a row
+                # (it only requires `rows` to be a LIST), and `check`'s malformed-row finding
+                # needs a committed tree, which a cut never gives it: the cut is what erases
+                # the shape. Measured by review round 4 of PR #12313.
+                raise SurfaceEvidenceUnreadable(
+                    f"a manifest `{key}:` row is not a mapping ({type(row).__name__}: "
+                    f"{row!r:.60}) — the removal gate cannot read it, and grading an "
+                    "unreadable row as absent is how a symbol leaves the surface unrecorded"
+                )
             name = str(row.get("name") or row.get("tool") or row.get("key") or "")
             if not name:
                 raise SurfaceEvidenceUnreadable(

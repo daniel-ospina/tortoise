@@ -5393,3 +5393,30 @@ def test_a_reason_without_an_allow_removal_is_refused(monkeypatch, tmp_path, der
     out = capsys.readouterr().out
     assert rc == 1, out
     assert "no --allow-removal" in out, out
+
+
+def test_a_NON_MAPPING_baseline_row_is_UNREADABLE_not_absent(monkeypatch, tmp_path, derived_baseline, capsys):
+    """A row the gate cannot read must REFUSE — grading it as absent is the fail-open.
+
+    Found by review round 4 of PR #12313. `_read_manifest` accepts a `rows:` list whose
+    entries are not mappings (it only requires the half to be a LIST), and `check`'s
+    malformed-row finding needs a COMMITTED tree — which a cut never gives it, because the
+    cut is the operation that erases the shape. So `- tortoise_x` (a hand-edit, or a `yq`
+    append that dropped the `name:` key) used to land here as "no such row existed": the
+    symbol left the surface, the baseline was rewritten, and `cut` exited 0.
+    """
+    sm = _load_manifest_tool()
+    prior = copy.deepcopy(derived_baseline)
+    prior["rows"] = [*prior["rows"], "tortoise_vanished_probe"]  # a bare string, not a mapping
+    path = tmp_path / "surface-manifest.yml"
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    before = path.read_text(encoding="utf-8")
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+
+    rc = sm.cmd_cut(argparse.Namespace(commit=CUT_SHA, allow_approval_reset=True))
+
+    out = capsys.readouterr().out
+    assert rc == 1, f"an unreadable row was graded as absent and the cut passed:\n{out}"
+    assert "not a mapping" in out, out
+    assert path.read_text(encoding="utf-8") == before
