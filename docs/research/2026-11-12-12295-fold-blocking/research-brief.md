@@ -80,7 +80,7 @@ as of `#12047`. What did not exist, and is what this lane adds:
 
 | gap | site | measured consequence |
 |---|---|---|
-| the capture prior compared `_norm` only — whitespace + lowercase, byte-identical to Zep's `_normalize_string_exact` | `extractor_v2._norm` at `:4232`, the historical arm in `_find_existing_entity`; `extractor_v2._find_by_folded_key` cited BY SYMBOL (a `file.py:<line>` cite rots on any insertion above it, and this one did — it read `:5823` for two review rounds after the def moved to `:5831`) (`:5769`), which now delegates to `_find_by_folded_key` (`:5823`, the folded rung this lane added) | **0 of 422** variant pairs attach at any `k`, both modes — the before-half of every rate in §3 |
+| the capture prior compared `_norm` only — whitespace + lowercase, byte-identical to Zep's `_normalize_string_exact` | `extractor_v2._norm` at `:4232`, the historical arm in `_find_existing_entity`; `extractor_v2._find_by_folded_key` cited BY SYMBOL (a `file.py:<line>` cite rots on any insertion above it, and this one did — it read `:5823` for two review rounds after the def moved to `:5831`) (`_find_existing_entity`, `:5769` at the head this table was written), which now delegates to `extractor_v2._find_by_folded_key` (cited by SYMBOL above — its `def` line moves and is deliberately NOT restated here) | **0 of 422** variant pairs attach at any `k`, both modes — the before-half of every rate in §3 |
 | the dedupe scan blocks on ONE key — `folded[:3]` | `entity_resolver.py:394` **on `origin/main`** (this change moves it) | a transposition (`the project alpha` / `alpha project`) is never compared, at any similarity |
 
 External confirmation at source (rung 3): Zep's `_normalize_string_exact` is *"Lowercase text and
