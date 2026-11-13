@@ -1326,11 +1326,15 @@ def _textual_jobs(text: str) -> list[tuple[str, list[str], list[str]]]:
 #: YAML syntax, and must have either a .yml or .yaml file extension"*
 #: (workflow-syntax reference) — and a workflow in either extension triggers on every event
 #: like any other. Until #12238 this module globbed
-#: `*.yml` alone at every enumeration site, so a `.yaml` workflow was never OPENED by any
-#: scan here — `_jobs` was never called on it, its jobs could not appear in
+#: `*.yml` alone at every ENUMERATION site, so no enumeration scan opened a `.yaml`
+#: workflow — `_jobs` was never called on it, its jobs could not appear in
 #: `test_every_pool_eligible_gh_job_is_declared`'s output, and nothing in the suite said
 #: a file had been skipped. That is the same silent skip in the same fail-open direction
-#: the rest of this file exists to close. Latent rather than live (measured: no `.yaml`
+#: the rest of this file exists to close. ⛔ The hole was the ENUMERATION, not opening as
+#: such: a `.yaml` workflow NAMED BY HAND in `GH_JOBS` or `ADVISORY_MOUNTS` was still read
+#: (`_job_block` and the advisory pin call `path.read_text()` on a literal filename and
+#: check no extension), which is why this is a silent skip in the COVERAGE scan and not in
+#: the declared-job pins. Latent rather than live (measured: no `.yaml`
 #: workflow is in the tree), and a tuple rather than two globs so a reader adds in ONE
 #: place.
 _WORKFLOW_SUFFIXES = (".yml", ".yaml")
@@ -3188,7 +3192,9 @@ def test_a_dot_yaml_workflow_is_scanned_like_a_dot_yml_one(tmp_path):
     """#12238: GitHub RUNS `*.yaml`, so a scan that globs `*.yml` is silently blind to it.
 
     ⛔ THE DEFECT IS THE SILENCE, NOT THE COUNT. Every enumeration site in this module
-    globbed `*.yml`, so a `.yaml` workflow was never opened: `_jobs` never saw it, the
+    globbed `*.yml`, so no enumeration scan opened a `.yaml` workflow: `_jobs` never saw
+    it (a `.yaml` named BY HAND in `GH_JOBS`/`ADVISORY_MOUNTS` was still read by
+    `_job_block`/`read_text` — the hole is the enumeration, not opening), the
     coverage scan could not name its jobs, and nothing in the output said a file had been
     skipped — this suite stayed GREEN while a `gh`-using pool job in that file would die
     `line 2: gh: command not found` / exit 127, the exact red-that-reads-as-a-harness-defect
@@ -3252,7 +3258,9 @@ def test_the_enumerator_returns_every_workflow_file_github_would_run():
     )
     assert {p.name for p in _workflow_paths()} == on_disk, (
         "`_workflow_paths()` does not return every workflow file in `.github/workflows` — "
-        "a workflow it omits is never opened by any scan in this module (#12238)"
+        "a workflow it omits is never covered by the enumeration scans in this module "
+        "(hand-declaring it in `GH_JOBS` still reads it, but the coverage scan cannot see "
+        "it) (#12238)"
     )
 
 
@@ -3275,9 +3283,12 @@ def _glob_calls(source: str) -> list[tuple[int, str, str, list[str]]]:
     collected as FRAGMENTS (never joined into a pattern, which only executing the code could
     produce), and the test's SCOPE states exactly what that does and does not reach.
 
-    `receiver` is the NAME before the dot (`WORKFLOWS` in `WORKFLOWS.glob(…)`), and it matters:
-    pairing a `.yml` call with an unrelated `.yaml` call is how the previous cut's exemption was
-    fail-open in one direction and false-red in the other.
+    `receiver` is the NAME before the dot (`WORKFLOWS` in `WORKFLOWS.glob(…)`), carried for the
+    failure MESSAGE only — no grading decision reads it. An earlier cut excused a one-sided call
+    when a complementary call existed on the same receiver; that exemption was removed (cut 5 of
+    `test_no_site_spells_the_workflow_glob_one_sidedly`) because it licensed reverting one of this
+    PR's own sites to a narrow glob with all 53 tests green. Do not reintroduce one, and do not
+    read this field as evidence that a receiver-based pairing is sound.
     """
     out: list[tuple[int, str, str, list[str]]] = []
     tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
