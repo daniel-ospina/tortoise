@@ -515,6 +515,46 @@ def test_the_whole_block_pins_its_OWN_settled_future_window(monkeypatch):
         lambda: measured, timeout=0.01) == measured
 
 
+def test_an_unexpected_fault_in_the_allowance_gate_is_closed_not_unknown(
+        tmp_path, monkeypatch):
+    """⛔ An UNEXPECTED raise at the allowance seam refuses the write, so `closed`.
+
+    This arm had ZERO coverage in round 5: the three sibling allowance tests
+    exercise `QuotaCheckError` (:264), `QuotaExceededError` (:289) and a
+    `sys.modules`-disabled `ImportError` (:306) — none reaches the generic
+    `except Exception`. Reclassifying it to `open` therefore left this file AND
+    the 3-file regression set green (47 / 284 passed), in a state where no write
+    completes.
+
+    ⛔ It is `closed`, NOT `unknown`, and the difference is measured rather than
+    stylistic: `enforce_allowances` is the write gate's FIRST check, so the same
+    exception escapes `_enforce_quota`, and `_safe`'s generic `except Exception`
+    returns `ERR_QUOTA_SERVER` (`mcp_server.py:3359`) — the write does not
+    complete. The count arm below reports its own unexpected raise as `closed`
+    for the same reason. `unknown` is reserved for a budget expiry HERE, where
+    the gate has no such timeout and its answer may still land.
+    """
+    sdk = _sdk(tmp_path / "unexp.db", "unexp", points=1)
+    _pin_count(monkeypatch, 100)
+    import tortoise.allowance_gate as ag
+
+    def _bug(*a, **k):
+        # Deliberately NOT a QuotaCheckError/QuotaExceededError: a plain bug in
+        # the gate, which is what this arm exists for.
+        raise RuntimeError("unexpected fault inside the allowance gate")
+
+    monkeypatch.setattr(ag, "enforce_allowances", _bug)
+    state = org_quota_state({"org_id": "t", "max_points": 25_000},
+                            "points", sdk=sdk)
+    assert state["state"] == "closed", (
+        "an unexpected fault at the allowance seam still refuses the write; "
+        f"got {state['state']!r}")
+    assert state["state"] != "open"
+    assert state["error"] and "unexpected" in state["error"]
+    assert state["points_used"] is None and state["points_limit"] is None
+    sdk.close()
+
+
 def test_the_selfhost_arm_is_not_applicable_not_closed(tmp_path, monkeypatch):
     """⛔ The gate returns EARLY for `SELFHOST_ORG_ID` (no billing, no registry), so
     a report calling that `closed` would assert a refusal the gate does not make
@@ -540,6 +580,47 @@ def test_the_selfhost_arm_is_not_applicable_not_closed(tmp_path, monkeypatch):
     assert report["quota"]["points_used"] is None
     assert report["status"] == "ok"
     sdk.close()
+
+
+def test_no_org_context_is_not_applicable_not_closed(tmp_path, monkeypatch):
+    """⛔ The OTHER half of the pre-gate guard: `not org_id`.
+
+    `_enforce_quota` returns EARLY at `if not org_id: return` — a stdio/operator
+    session has no tenant, so no write can be refused for quota. Round 3 pinned
+    the `== SELFHOST_ORG_ID` half (the test above) and left this one unpinned;
+    round 5 measured it: deleting `not org_id or` at `mcp_server.py:5016` left
+    this file AND the 3-file regression set green (47 / 284 passed) while flipping
+    a session-less `health` from `not_applicable` to `closed` — because
+    `resolve_org_limits(None)` raises `QuotaCheckError` and the block reports that
+    as a refusal.
+
+    That is the same defect the selfhost half was found to have, in the shape the
+    #11892 issue is about: a lane told to PARK a finding the graph would have
+    accepted.
+    """
+    import tortoise.quota as quota_mod
+    from tortoise import mcp_auth
+    from tortoise.mcp_server import tortoise_health
+
+    def _must_not_run(*a, **k):
+        raise AssertionError(
+            "with no org context the block must not resolve tenant limits")
+
+    for label, falsy in (("none", None), ("emptystr", "")):
+        sdk = _sdk(tmp_path / f"noorg_{label}.db", f"noorg_{label}", points=1)
+        _wire_health(monkeypatch, sdk, {"org_id": "team11892", "max_points": 10})
+        monkeypatch.setattr(mcp_auth, "_current_org_id", _ctx(falsy))
+        monkeypatch.setattr(quota_mod, "resolve_org_limits", _must_not_run)
+
+        report = tortoise_health()
+        assert report["quota"]["state"] == "not_applicable", (
+            f"org_id={falsy!r} must be `not_applicable`, got "
+            f"{report['quota']['state']!r} — `closed` would assert a refusal the "
+            f"gate does not make (`_enforce_quota` returns early at `if not "
+            f"org_id: return`)")
+        assert report["quota"]["points_used"] is None
+        assert report["status"] == "ok"
+        sdk.close()
 
 
 def test_a_wedged_worker_has_a_reset_hatch(monkeypatch):

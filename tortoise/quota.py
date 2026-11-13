@@ -1706,9 +1706,25 @@ def org_quota_state(limits: dict | None, resource: str = "points", sdk=None,
             f"the ruled-dimension allowance gate raises for this write "
             f"({type(exc).__name__}: {str(exc)[:160]})")
     except Exception as exc:  # noqa: BLE001, RUF100 — never escape the contract
-        return _unavailable(
+        # ⛔ `closed`, not `unknown` (fresh review of #12426, round 5). An
+        # UNEXPECTED raise here is not this report's own machinery failing in
+        # isolation: `enforce_allowances` IS the write gate's FIRST check, so the
+        # same exception escapes `_enforce_quota` and `_safe`'s generic
+        # `except Exception` turns it into `ERR_QUOTA_SERVER` — i.e. NO write
+        # completes. The count arm a few lines below already reports its own
+        # unexpected raise as `closed` for exactly this reason. `unknown` stays
+        # reserved for OUR budget expiry (`run_bounded_quota_state`), where the
+        # gate has no such timeout and its answer may still land. Leaving this
+        # `unknown` understated a refusal as a shrug — and round 5 measured the
+        # classification UNPINNED: reclassifying this arm to `open` left both
+        # this file and the 3-file regression set green (47 / 284 passed).
+        _logger.error(
+            "quota state: the allowance gate failed unexpectedly (reporting "
+            "closed): team=%s resource=%s error=%r", org_id, resource, exc)
+        return _refused(
             f"the allowance gate failed in an unexpected way "
-            f"({type(exc).__name__}: {str(exc)[:160]})")
+            f"({type(exc).__name__}: {str(exc)[:160]}), which the write path "
+            f"surfaces as an error rather than a completed write")
     # ── 2. limit next, count last — the gate's own ORDER (it raises on a
     # missing/unreadable limit BEFORE it counts), so a data fault never costs a
     # graph round-trip here either.
