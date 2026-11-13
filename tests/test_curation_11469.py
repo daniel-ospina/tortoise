@@ -3980,6 +3980,18 @@ def test_both_verbs_take_the_count_and_the_layer_in_one_window(monkeypatch, tmp_
             status_calls[0] += 1
             if status_calls[0] == 1:
                 payload = {"counts": {"Point": 1, "Source": 0}}
+            elif status_calls[0] == 2:
+                # ⛔ THE COUNT IMMEDIATELY BEFORE THE LAYER MUST NOT ALREADY BE THE ANSWER
+                # (review cycle 16, measured). Reporting `len(EVENTS)` here let a change
+                # write the ARTIFACT field from a fresh count while reconciling the read
+                # against the STALE one -- `events_reported = _node_count(reader.counts(),
+                # "Event")` then `read_events(counts)` -- and the whole file stayed GREEN
+                # (240 passed), with the artifact showing `events_reconciled: True` next to
+                # a note saying nothing reconciled it. A count that DISAGREES forces the
+                # re-count path, so only a read that CONSUMED this count can end with
+                # `events_total_reported == len(EVENTS)`.
+                payload = {"counts": {"Point": 1, "Source": 0,
+                                       "Event": len(EVENTS) + 1}}
         return payload
 
     for verb in ("inventory", "plan"):
@@ -4022,6 +4034,13 @@ def test_both_verbs_take_the_count_and_the_layer_in_one_window(monkeypatch, tmp_
         # fresh count it carries the layer's own length. That difference is the property.
         out = json.loads((tmp_path / f"{verb}.json").read_text())
         assert out.get("events_total_reported") == len(EVENTS), (verb, out)
+        # ⛔ AND IT GOT THERE BY RECONCILING AGAINST THE FRESH COUNT, not by writing the field
+        # from a separate read (review cycle 16). The count immediately before the layer now
+        # DISAGREES (`len(EVENTS) + 1`), so a correct read must take the re-count path — which
+        # is what puts this note on the artifact. Without this assertion the artifact field
+        # alone could be satisfied by a fresh count that the layer read never consumed.
+        assert "CHANGED between the status count and this read" in (out.get("read_note") or ""), (
+            verb, out)
 
 
 def test_the_plan_payload_carries_the_layers_three_fields(monkeypatch, tmp_path):

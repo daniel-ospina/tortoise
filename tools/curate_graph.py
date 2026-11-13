@@ -620,9 +620,12 @@ class MCPReader:
         ⛔ RESIDUAL, stated rather than hidden: on the UNREPORTED arm completeness rests
         only on the response having stayed below the bound. A server tuned with
         `RESULTSET_SIZE` BELOW `EVENT_READ_CEILING` would cap such a read invisibly, and
-        nothing in this tool can see that tuning. Where a `counts.Event` exists the
-        disagreement arm catches it (a capped response never equals a larger count), which
-        is why the count is preferred and why `events_total_reported` is on the artifact.
+        nothing in this tool can see that tuning. A `counts.Event` catches it only where
+        that count EXCEEDS the cap — the disagreement arm then refuses. A capped response
+        EQUALS an equal-or-smaller count, and the equality path carries no fill check by
+        design, so immunity on the REPORTED arm rests on
+        `RESULTSET_SIZE >= EVENT_READ_CEILING`, NOT on the count. That coupling is why the
+        count is still preferred and why `events_total_reported` is on the artifact.
         A deployment that tunes the cap below the bound must lower `EVENT_READ_CEILING`
         with it.
 
