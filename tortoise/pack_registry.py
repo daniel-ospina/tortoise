@@ -3293,7 +3293,13 @@ class PackRegistry:
                         f"{cw}.when: must be one of "
                         f"{', '.join(WHEN_PREDICATES)} (got {when!r})")
                 pattern = c.get("pattern")
-                if not isinstance(pattern, str) or not pattern:
+                # ⛔ ONE PREDICATE, BOTH GATES (review P2, measured): the
+                # runtime skips a blank pattern (`re.compile("")` matches every
+                # name, one guard then redirecting every write that declares no
+                # kind), so accepting `"   "` here blessed a guard that could
+                # never fire — `pack validate` said `✓ Clean` over a rule the
+                # runtime dropped with only a log line.
+                if not isinstance(pattern, str) or not pattern.strip():
                     errors.append(f"{cw}.pattern: required non-empty string")
                 elif _pattern_needs_compile(str(when)):
                     # Only a REGEX predicate is compiled. `nameStartsWith` reads
@@ -3571,7 +3577,11 @@ class PackRegistry:
             confusions: list = []
             for ns in sorted(self.packs):
                 declared = getattr(self.packs[ns], "guards", None)
-                if declared:
+                # `is not None`: one gate for all three callers of `pack_guards`
+                # (a manifest cannot carry a falsy non-sequence — `_validate`
+                # refuses it — but three spellings of the same gate is how the
+                # reader's warning became unreachable once already).
+                if declared is not None:
                     confusions.extend(pack_guards(ns, declared))
             if not confusions:
                 # ⛔ NO DECLARED GUARDS IS THE COMMON CASE, and the table compile
