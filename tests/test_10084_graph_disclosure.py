@@ -767,11 +767,21 @@ def test_the_named_arm_reports_the_ref_as_given_not_a_canonical_id():
 
 @pytest.mark.asyncio
 async def test_a_safe_answered_failure_is_not_disclosed(monkeypatch):
-    """The seam's `status == "ok"` gate is what stops a `_safe`-answered failure
-    (a plain `ToolResult` with `is_error=False`) from being disclosed — NOT the
-    helper, which cannot tell one apart. Without this case the gate can be
-    replaced by `if True:` and the suite stays green (measured), which is exactly
-    a check that cannot fail."""
+    """A `_safe`-answered failure is NOT stamped with the graph it "targeted".
+
+    ⚠️ WHAT THIS PINS, restated after #11153 changed the shape it guards (review
+    finding, this change): the reachable guard is now
+    ``_disclose_graph_resolution``'s OWN ``is_error`` check, because a `_safe`
+    failure is an error result since #11153 and the helper returns it untouched.
+    Before that change the result carried ``is_error=False`` and the only guard was
+    the seam's ``if status == "ok":`` — so this test used to kill the mutant that
+    deletes that gate line, and it NO LONGER DOES (measured: with the gate replaced
+    by ``if True:`` the helper's ``is_error`` check still returns early and this
+    test stays green). The seam gate is kept as belt-and-braces, and no reachable
+    shape has ``status != "ok"`` with ``is_error=False`` any more, so the mutant is
+    no longer observable from the wire. Do not delete either guard on the strength
+    of this test.
+    """
     monkeypatch.setattr(ms, "WRITE_TOOL_NAMES", frozenset({PROBE}))
 
     def _failing() -> dict:
@@ -791,7 +801,11 @@ async def test_a_safe_answered_failure_is_not_disclosed(monkeypatch):
         with contextlib.suppress(Exception):
             ms.mcp.local_provider.remove_tool(PROBE)
 
-    assert result.is_error is False, "a `_safe` failure is NOT an error result"
+    assert result.is_error is True, (
+        "#11153: a `_safe` failure IS an error result, so the HELPER's own "
+        "`is_error` check — not the seam's `status == \"ok\"` gate, which is "
+        "belt-and-braces — is what keeps the graph disclosure off it; this line "
+        "used to assert the opposite verdict")
     assert "boom" in _text(result), _text(result)
     assert (result.meta or {}).get("tortoise") is None, (
         "a failed write was stamped with the graph it 'targeted'")

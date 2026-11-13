@@ -287,8 +287,10 @@ async def test_a_union_envelope_tool_is_classified_through_the_envelope(
 
     assert result.structured_content == {
         "result": {"error": "points quota exceeded", "code": ms.ERR_QUOTA}}
-    assert result.is_error is False, (
-        "a union envelope admits a dict result, so #8482 leaves the wire alone")
+    assert result.is_error is True, (
+        "#8482 leaves the union envelope's PAYLOAD alone (a dict result is admitted), "
+        "but #11153 makes the VERDICT truthful: the dispatch failed, so the client "
+        "is told so. Before #11153 this asserted `is False`.")
     row = events[-1]
     assert row["status"] == "exec_error", row
     assert row["error_kind"] == "safe_error", row
@@ -450,11 +452,13 @@ async def test_the_type_is_gone_at_the_seam(events, stdio):
 
 @pytest.mark.asyncio
 async def test_the_wire_is_unchanged_by_the_classification(events, stdio):
-    """#8135 is a TELEMETRY fix: the client sees exactly what it saw before.
+    """#8135 is a TELEMETRY fix: the PAYLOAD the client receives is unchanged.
 
-    Same ``structured_content``, same ``is_error`` (False — an object-annotated
-    tool's error dict is a legal payload, and #8482 deliberately left it alone),
-    same text. Only the analytics row changes.
+    Same ``structured_content``, same text. Two things changed AFTER this issue and
+    are asserted separately, one line each, so the two concerns stay legible:
+    ``is_error`` is now ``True`` (#11153 — a refused call must not report itself as
+    a success; before that change this asserted ``False``), and the analytics row
+    says ``exec_error``. Neither is part of the #8135 contract this test pins.
     """
     def quota_tool() -> dict:
         return ms._safe(_QuotaSDK().query, "statement")
@@ -463,7 +467,7 @@ async def test_the_wire_is_unchanged_by_the_classification(events, stdio):
 
     assert result.structured_content == {"error": "points quota exceeded",
                                         "code": ms.ERR_QUOTA}
-    assert result.is_error is False
+    assert result.is_error is True, "#11153: the refusal's verdict must be an error"
     assert "points quota exceeded" in "".join(
         getattr(b, "text", "") for b in (result.content or ()))
     assert events[-1]["status"] == "exec_error"

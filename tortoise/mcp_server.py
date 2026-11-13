@@ -2014,6 +2014,43 @@ def _schema_error_result(result, name: str, schema: dict) -> ToolResult:
     )
 
 
+def _payload_refusal_result(result) -> ToolResult:
+    """Flip a payload-carried refusal's VERDICT: same payload, ``is_error=True`` (#11153).
+
+    Why this exists at all. ``_safe`` answers a failure with an ``_SafeError`` dict, and
+    for a DICT-annotated tool that dict is schema-valid — so FastMCP ships it as a
+    *successful* payload and nothing in the envelope says the call failed::
+
+        {"structuredContent": {"error": "Team points limit reached (25000)…",
+                              "code": -32006},
+         "isError": false}
+
+    ``isError`` is the only failure signal uniform across MCP clients, so a client that
+    keys on it records a REFUSED WRITE as a success — measured on the production
+    workspace (#11153) and on the fleet's own graph CLI, which printed the refusal and
+    exited 0.
+
+    Why the payload is NOT dropped, unlike :func:`_schema_error_result`. #8482 has to
+    drop its envelope because the payload VIOLATES the advertised schema. A dict tool's
+    error dict does not: it is exactly the shape it advertised, so dropping it would
+    cost the client the machine-readable half (``code``) for no gain, and break every
+    reader that already parses ``payload["error"]``. The verdict was never the
+    payload's business — only the envelope's.
+
+    What this is NOT allowed to do. It is applied only to a payload the seam has already
+    PROVEN to be this dispatch's `_safe` failure (:func:`_returned_safe_failure`), never
+    to key presence: a successful write whose user props carry a key literally named
+    ``error`` is not a failure (#3926), and a tool that RECOVERED from a secondary
+    `_safe` failure answered successfully (#8135).
+    """
+    return ToolResult(
+        content=getattr(result, "content", None),
+        structured_content=getattr(result, "structured_content", None),
+        meta=getattr(result, "meta", None),
+        is_error=True,
+    )
+
+
 def _take_graph_argument(name: str,
                          arguments: dict[str, Any] | None) -> str | None:
     """Strip a tool call's optional `graph` argument, or refuse it (#9340).
@@ -2447,13 +2484,16 @@ def _disclose_graph_resolution(result: Any, name: str,
     for it would mean re-deriving a target this seam does not own.
 
     It leaves an `is_error` result and a non-`ToolResult` UNTOUCHED (the same
-    object, by identity). ⚠️ It does NOT catch a `_safe`-answered failure: that is
-    a plain `ToolResult` with `is_error=False`, so the thing that keeps a failure
-    from being disclosed is the CALLER's gate — `if status == "ok":` in
-    `_wrapped_call_tool`, which is where `exec_error`/`safe_error` is already
-    classified. Pinned by
-    `test_a_safe_answered_failure_is_not_disclosed`, because a reader (or a
-    mutant) that believes this function is the guard would be wrong.
+    object, by identity). ⚠️ The `is_error` half of that guard is what keeps a
+    `_safe`-answered failure from being disclosed — since #11153 such a failure IS
+    an error result (`_payload_refusal_result`), so it is caught HERE. It was NOT,
+    before that change: a `_safe` failure used to be a plain `ToolResult` with
+    `is_error=False`, and the only thing that stopped the disclosure was the
+    caller's `if status == "ok":` gate in `_wrapped_call_tool`. That gate is kept
+    (belt-and-braces: it also covers a non-error result with a non-ok status), but
+    it is no longer the reachable guard — do not treat either one as removable on
+    the strength of the other. Pinned by
+    `test_a_safe_answered_failure_is_not_disclosed`.
     """
     if name not in WRITE_TOOL_NAMES:
         return result
@@ -2811,6 +2851,20 @@ async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None,
                     # SAME pair this line produces, so the two producers of one
                     # failure class agree on what it is called.
                     status, error_kind = "exec_error", "safe_error"
+        # #11153: ...and the VERDICT must agree with the payload even when the payload
+        # is schema-VALID. #8482 repaired only the tools whose declared schema forbids
+        # the `_safe` error dict, which left every DICT-annotated tool shipping a
+        # refusal as `isError: false` — a false PASS for the caller, and the reason a
+        # refused write reads as a recorded one. The payload is kept byte-identical
+        # here (see `_payload_refusal_result`); only `is_error` changes.
+        #
+        # Keyed on the seam's own proof (`_returned_safe_failure`, the discriminator
+        # #8135 established) rather than on `status`/`error_kind`, so an auth refusal
+        # (`auth_error`) is covered too and a payload the tool merely CONTAINS an
+        # `error` key in stays a success. Applied AFTER #8482's repair, whose result is
+        # already an error and must not be rebuilt.
+        if not getattr(result, "is_error", False) and _returned_safe_failure(payload) is not None:
+            result = _payload_refusal_result(result)
         # #10084 (owner ruling: default-graph-with-disclosure): a WRITE that
         # named no `graph` has just landed somewhere, and until now nothing in
         # the result said where. Applied LAST — after every classification and

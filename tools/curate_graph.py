@@ -116,7 +116,15 @@ class MCPReader:
         out: list[str] = []
         offset = 0
         while True:
-            res = C.normalise_tool_result(self._q(offset=offset, limit=page))
+            try:
+                raw = self._q(offset=offset, limit=page)
+            except C.CurationRefused as exc:
+                # #11153: the client-raise shape (see `read_points`) must keep
+                # saying WHERE the verification walk was refused.
+                raise RuntimeError(
+                    f"verification pass was refused at offset {offset} after "
+                    f"{len(out)} rows: {str(exc)[:300]}") from exc
+            res = C.normalise_tool_result(raw)
             err = _error_of(res)
             if err:
                 raise RuntimeError(f"verification pass was refused: {err[:300]}")
@@ -142,15 +150,35 @@ class MCPReader:
         seen: dict[str, tuple[int, str]] = {}
         totals: set[int] = set()
         while True:
-            res = C.normalise_tool_result(self._q(offset=offset, limit=page))
-            # A refusal on this surface is a `_safe`-answered payload with
-            # `is_error=False`, so `normalise_tool_result` does NOT raise for it and it
-            # would read as "0 rows". It is TERMINAL wherever it lands: on a LATER page
-            # it used to reach `if not batch: break` with rows already collected, and
-            # when the surface reports no `total` the short walk was then returned as a
-            # complete census — the shortfall guard has no total to compare against and
-            # the page re-check re-reads the last SUCCESSFUL page, so neither can see it.
-            # That is the silent partial census R7 forbids (round-34 finding 1).
+            try:
+                raw = self._q(offset=offset, limit=page)
+            except C.CurationRefused as exc:
+                # #11153: `_live_call_tool` raises the client-level refusal BELOW
+                # this loop, so without this arm the offset/row diagnostic the
+                # data arm produces would be lost on the shape that now actually
+                # occurs (fastmcp `raise_on_error=True`).
+                raise RuntimeError(
+                    f"read refused at offset {offset} after {len(rows)} rows: "
+                    f"{str(exc)[:300]} — refusing a partial census") from exc
+            res = C.normalise_tool_result(raw)
+            # A refusal on this surface is a `_safe`-answered payload, and since
+            # #11153 it arrives on the CLIENT-RAISE shape, not as data:
+            # `fastmcp`'s client runs `call_tool(raise_on_error=True)`, so a refused
+            # call raises BEFORE any payload exists, and `_live_call_tool`
+            # translates it into `CurationRefused` (#11153). The old
+            # `is_error=False` false PASS — which read as "0 rows" — is gone, and
+            # with it the reachable-ness of the `_error_of` arm below (kept: it
+            # still covers a refusal that reaches this file as DATA, e.g. a dict
+            # carrying `error` that the surface did not flag).
+            #
+            # The refusal is TERMINAL wherever it lands, and it must still say
+            # WHERE: on a LATER page it used to reach `if not batch: break` with
+            # rows already collected, and when the surface reports no `total` the
+            # short walk was then returned as a complete census — the shortfall
+            # guard has no total to compare against and the page re-check re-reads
+            # the last SUCCESSFUL page, so neither can see it. That is the silent
+            # partial census R7 forbids (round-34 finding 1), which is why the
+            # offset/row diagnostic is re-raised on the client-raise shape too.
             page_refusal = _error_of(res)
             if page_refusal:
                 raise RuntimeError(
@@ -876,9 +904,23 @@ class MCPReader:
 
 
 def _live_call_tool(name: str, args: dict[str, Any] | None = None) -> Any:
+    """Call the hosted surface, reporting a refusal on THIS file's own seam.
+
+    #11153: the surface now flags a refused call with `isError: true`, and fastmcp's
+    client is built with `raise_on_error=True` (`tortoise/mcp_client.py::call_tool`),
+    so it raises `ToolError` BEFORE the payload can reach `normalise_tool_result`.
+    Without this translation a refusal left `read_points` as an uncaught client
+    traceback — losing the offset/row diagnostics and the documented rc-3 refusal
+    path — instead of the `CurationRefused` this file already handles.
+    """
+    from fastmcp.exceptions import ToolError
+
     from tortoise import mcp_client
 
-    return mcp_client.call_tool(name, args or {})
+    try:
+        return mcp_client.call_tool(name, args or {})
+    except ToolError as exc:
+        raise C.CurationRefused(str(exc)) from exc
 
 
 #: A fallback to the credential's own graph is only legitimate when the refusal is

@@ -1517,6 +1517,15 @@ surfaces:
   # SHARED_MODULE, so its own changes already select the full matrix); this
   # entry is what makes the guard RUN when the seam it pins moves.
   - test_mcp_wrap_envelope_error_8482.py
+  # #11153: the envelope VERDICT must agree with the payload. #8482 repaired only
+  # the tools whose declared schema FORBIDS the `_safe` error dict, so every
+  # dict-annotated tool shipped a refusal as `isError: false` and a client that
+  # keys on that flag (the whole fleet's write-back path does) recorded a refused
+  # write as a success. Registered on `api` like the rest of the mcp_server
+  # family (`tortoise/mcp_server.py` is a SHARED_MODULE, so its own changes
+  # already select the full matrix); this entry is what makes the guard RUN when
+  # the seam it pins moves.
+  - test_11153_payload_refusal_envelope.py
   # #8135: a `_safe`-swallowed SDK failure must not be recorded `status="ok"`.
   # Registered on `api` like the rest of the mcp_server family
   # (`tortoise/mcp_server.py` is a SHARED_MODULE, so its own changes already
