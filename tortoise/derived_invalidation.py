@@ -1000,15 +1000,14 @@ def invalidate_stale(
     dropped), ``counts`` (including ``failed`` and ``gone``) and ``truncated``
     (true when the scan hit ``limit``, i.e. the sweep did not see the whole graph).
 
-    ``counts.gone`` counts the findings whose goal NO LONGER EXISTS, i.e. the
-    retirement landed but the goal's ``goalState`` cache could not be reconciled
-    because there is no node to reconcile it on. It is not a failure of the
-    retirement (which did land) and not a success of the reconcile (which did not
-    happen) — it is its own bucket, and it exists so a sweep over deleted goals
-    cannot read clean. ⛔ A finding in #12315's ABSENT arm can also set ``gone``
-    (it carries ``found: False``); there the retirement did NOT need to happen, so
-    ``gone`` means "the cache could not be reconciled", never "a retirement
-    landed".
+    ``counts.gone`` counts the findings whose goal NO LONGER EXISTS, so its
+    ``goalState`` cache could not be reconciled: there is no node to reconcile it
+    on. TWO shapes set it, and it means the same thing in both — "the cache could
+    not be reconciled", never "a retirement landed": a retirement that DID land
+    whose cache follow-up could not, and #12315's ABSENT arm (``found: False``),
+    where no retirement was needed at all. It is neither a failure of a retirement
+    nor a success of the reconcile, and it exists so a sweep over deleted goals
+    cannot read clean.
 
     ⛔ THE BUCKETS ARE PER-FINDING PREDICATES, NOT A PARTITION — do not read a
     bucket total as a finding count. A retirement that landed and whose cache
@@ -1034,7 +1033,7 @@ def invalidate_stale(
     ``alreadyRetired``, ``failed``, ``gone`` — are 0 by construction, while
     ``scanned``, ``stale`` and ``undecidable`` keep reporting what the scan saw
     (``stale`` names what it WOULD have retired and ``undecidable`` > 0 is a real
-    finding, not a counter that should be zero — its own test asserts the
+    finding, not a counter that should be zero — the dry-run test asserts the
     ``stale`` 1 / ``invalidated`` empty pair). So reconcile the four retirement
     buckets against ``stale`` ONLY when ``dryRun`` is false, and read
     ``scanned``/``undecidable`` on their own terms either way.

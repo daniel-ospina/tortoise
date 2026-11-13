@@ -1275,8 +1275,10 @@ def test_the_POST_EXCEPTION_terminal_arm_reconciles_too(sdk, monkeypatch):
     ``invalidate`` re-reads the claim after ``retract_point`` raises, so this arm is
     only reachable when the claim becomes terminal BETWEEN those two reads — which
     is exactly the concurrent sweep it was written for. Reaching it needs the raise
-    and the status flip together (measured: without this test, deleting the arm's
-    ``cache`` key left the whole suite green — a dead arm that read as coverage).
+    and the status flip together. ⚠️ Measured when this test was written: deleting
+    the arm's ``cache`` key left the whole suite green — a dead arm that read as
+    coverage. ``test_a_reconcile_that_RAISES_is_reported_not_raised`` now reaches
+    that arm's cache report as well, so the arm is no longer singly-pinned.
     """
     i, t, g = _world(sdk, tag="post-exception")
     made = _judge(sdk, i, t, g)
