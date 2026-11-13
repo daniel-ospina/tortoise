@@ -21869,8 +21869,9 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # carried were EXACT when written (`_fold_object_status` `:5783`,
     # `context="status fold about"` `:5892`, `context="EventRecorded.object"` `:6295`
     # at `57982a098c`) and went ~17 lines stale on a LATER forward merge from `main`
-    # — uniformly `+17`, at `:5800` / `:5909` / `:6312` today. That is precisely why
-    # they were dropped rather than corrected.
+    # — uniformly `+17` (measured at `53e0be5f1b`: `:5800` / `:5909` / `:6312`).
+    # That is precisely why they were dropped rather than corrected: the numbers
+    # are a dated reading of a moving file, not a coordinate to navigate by.
     for _eid, _name, _exact_only in _deferred_about_objects:
         # #12120 review: strip ONCE, here. Both sibling sites strip before they
         # compare (`sdk.py` `_n = name.strip()`, `near_dup_merge.py` the same),

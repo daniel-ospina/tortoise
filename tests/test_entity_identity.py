@@ -910,8 +910,8 @@ _ALLOWED_OPERATOR = {
         # Round 8 folded the two spellings into ONE read. ⛔ Round 29: the
         # collapse-report guard does NOT call this helper — it asks
         # `_subject_family_holds_ref`, deliberately, because an exactness test
-        # cannot see a by-id or by-fold Subject holder (that helper's docstring
-        # records the measured regression from asking it there). So this is ONE
+        # cannot see a by-id or by-fold Subject holder — that helper's docstring
+        # records WHY, and the guard's own note records the measurement. So this is ONE
         # caller, ONE read, ONE census entry — not "two questions that ask it".
         # Round 24 FLATTENS the read to ids (it returned the `[id]` ROWS its own
         # docstring, name and `-> list` annotation deny), so the census entry

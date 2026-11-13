@@ -1302,10 +1302,11 @@ def _exact_subject_ref_ids(proj, ref: str) -> list:
     # The only caller is the family DEFER (`apply_supersessions`, `and
     # _exact_subject_ref_ids(proj, ref)`). The collapse-report guard asks
     # `_subject_family_holds_ref` instead — a DIFFERENT question, and deliberately:
-    # that helper's docstring records the measured regression from asking THIS one
-    # there (an id-matched or fold-only Subject is invisible to an exactness test,
-    # so the guard dropped a fold the Subject lane applies — `applied=0`, and
-    # `applied=1` once the family's own space is asked). Do not "reconcile the two
+    # that helper's docstring records WHY exactness is the wrong question there (a
+    # Subject holding the ref by FOLD or by ID is invisible to it), and the GUARD's
+    # own note records the measurement — asking this helper there dropped a fold the
+    # Subject lane applies (`applied=0`, `applied=1` once the family's own space is
+    # asked). Do not "reconcile the two
     # call sites" by restoring this helper at that guard: it is the bug the commit
     # that introduced `_subject_family_holds_ref` removed.
     """
