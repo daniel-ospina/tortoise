@@ -5511,6 +5511,18 @@ def test_the_REMOVAL_docs_do_not_name_a_route_the_writer_REFUSES():
     bullet = bullet[: bullet.index("\n  `#12327`") if "\n  `#12327`" in bullet else 1800]
     assert "whole-`module` removal is NOT graded" in bullet, bullet[:600]
 
+    # ⛔ AND THE SUMMARY TABLE CELL, WHICH CLAIMED THE FREEZE FOR EVERY DROP. It said a `cut`
+    # that drops an SDK method "requires the frozen entry too" — unconditionally — while a
+    # STATED RENAME keeps no code by design and archives nothing (the paragraph further down
+    # says exactly that, and `cut` exits 0 over a rename with no archive entry, measured). The
+    # table is the section a reader consults to learn what the mechanism KEEPS, so an
+    # unconditional "yes" there re-asserts the conflation rounds 18-22 removed from the prose
+    # (review of PR #12313, round 23).
+    table = readme[readme.index("| mechanism |") :]
+    table = table[: table.index("\n\n")]
+    assert "yes for a REMOVAL" in table, table
+    assert "stated rename" in table, table
+
 
 def test_a_class_the_archive_knows_but_the_baseline_cannot_carry_is_REFUSED_by_name():
     """An unmapped surface class must refuse BY NAME, not raise a bare `KeyError`.

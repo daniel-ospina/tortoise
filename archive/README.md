@@ -68,8 +68,8 @@ It **composes** — it replaces neither, because they answer different questions
 | mechanism | what the name does | is it in the product? | archived? |
 |---|---|---|---|
 | `tool_registry.RETIRED_USE_INSTEAD` | **served**, with a warning naming the replacement (#3883) | **yes** — it still answers | **no** |
-| `sdk_retired.RETIRED_SDK_METHODS` | raises `AttributeError` **naming** the replacement (#3836 (c)) | no (the map is the failure, not the code) | **yes** — a `cut` that drops the method requires the frozen entry too (one half of one record) |
-| `sdk_retired.REMOVED_SDK_METHODS` | raises `AttributeError` with **no** hint (went internal or was deleted) | no | **yes** — same requirement |
+| `sdk_retired.RETIRED_SDK_METHODS` | raises `AttributeError` **naming** the replacement (#3836 (c)) | no (the map is the failure, not the code) | **yes for a REMOVAL** — a `cut` that drops the method requires the frozen entry too (one half of one record); a **stated rename** keeps no code by design and archives nothing |
+| `sdk_retired.REMOVED_SDK_METHODS` | raises `AttributeError` with **no** hint (went internal or was deleted) | no | **yes for a removal** — same requirement; this map records no replacement, so it never takes the rename route |
 | **this archive** | **nothing** — the name does not resolve | **no** | **yes — this is where the code goes** |
 
 The 23 existing `RETIRED_USE_INSTEAD` entries are therefore **not** in this archive: they are
