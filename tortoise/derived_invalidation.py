@@ -5,8 +5,9 @@ as a claim (``tortoise/goal_judgement.py``). This module is the arrow's OTHER
 half: what happens to that claim when one of its three inputs is replaced. Before
 this module the answer was **nothing** — measured on #11926 — and the graph kept
 a conclusion whose justification was gone, which the design of record calls *"the
-worst failure mode the EP layer has"* (``docs/plans/2026-11-11-goal-measurement-and-reasoning.md``
-§3 rows 8, 9 and 12):
+worst failure mode the EP layer has"* — quoted from issue #11926, whose body states
+it; the plan of record applies it to the three inputs in
+``docs/plans/2026-11-11-goal-measurement-and-reasoning.md`` §3 rows 8, 9 and 12:
 
     ===========================  ==========================================
     what changes                 what used to happen
