@@ -213,7 +213,7 @@ Operator/admin surfaces. **Not** part of the agent-facing read/write guarantee.
 
 | # | Namespace | Members |
 |---|---|---|
-| N1 | `org` | `org_create`, `org_get` |
+| N1 | `org` | `org_create`, `org_get`, `get_organisation_account` |
 | N2 | `graph` | `list_memory_graphs`, `graph_delete`, `restore_memory_graph`, `trash_graphs`, `update_memory_graph`, `graph_key_ids`, `graph_active_key_count` |
 | N3 | `membership` | `membership_create`, `membership_get` |
 | N4 | `apikey` | `apikey_create`, `apikey_revoke`, `apikey_verify` |
