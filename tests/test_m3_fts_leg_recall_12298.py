@@ -897,3 +897,78 @@ def test_changelog_does_not_restate_superseded_numbers(artifact, changelog: str)
     assert sentence in text, (
         "the changelog's `#8933` fixture counts must be the artifact's; expected "
         f"{sentence!r}")
+
+
+# ── 6. the two things a re-run would otherwise decide wrongly ───────────────
+
+def test_a_degraded_shipped_leg_is_a_REFUSAL_not_a_miss(tool_mod) -> None:
+    """`run_fts_query` returns `[]` for a failed read as well as for a miss.
+
+    ⛔ The direction that matters: a wedged FalkorDB (breaker open, index
+    missing, query failed) collapsing the shipped baseline to ~0 publishes a
+    spectacular PASS — the very trigger `#12298` step 3 pre-authorises. The
+    sweep therefore reads the leg's own trace and refuses; a genuine empty
+    result must still be accepted, or the measurement could never run.
+    """
+    for reason in ("breaker_open", "index_missing", "query_failed"):
+        bad = [{"leg": "fts", "ran": False, "degraded": True,
+                "reason": reason, "count": 0}]
+        with pytest.raises(SystemExit) as err:
+            tool_mod._refuse_degraded_legs(bad, "web_search")
+        assert "REFUSED" in str(err.value) and reason in str(err.value)
+
+    # ran, degraded=False, count 0 — the shipped leg RAN and found nothing.
+    tool_mod._refuse_degraded_legs(
+        [{"leg": "fts", "ran": True, "degraded": False,
+          "reason": "empty_results", "count": 0}], "web_search")
+    # a vector leg's entry is not this guard's business
+    tool_mod._refuse_degraded_legs(
+        [{"leg": "vector", "ran": True, "degraded": True,
+          "reason": "no_query_vector", "count": 0}], "web_search")
+
+
+def test_brief_production_estimate_rederives_from_the_per_class_cells(
+        artifact, population, brief_text) -> None:
+    """§4.3's derived figures are the only published numbers §3.3 does not pin.
+
+    The class cells they come from ARE pinned, so a re-run reds §3.3 — but §4.3
+    could still go stale on its own, which is the rot class the pins exist to
+    close. `+26.7` is the path class's delta; `+91.8` is the `snake_case`
+    SUB-class's (1 of 73 → 68 of 73), not the whole identifier class's 74.4.
+    """
+    pc = {a: artifact["arms"][a]["per_class"] for a in (
+        "falkordb_tfidf", "falkordb_tfidf__tokens_fixed")}
+    path_delta = (pc["falkordb_tfidf__tokens_fixed"]["path"]["3"]
+                  - pc["falkordb_tfidf"]["path"]["3"]) * 100
+    assert round(path_delta, 1) == 26.7
+    assert "26.7" in brief_text
+
+    snake = [n["id"] for n in population["names"]
+             if n["cls"] == "ident" and "#" not in n["name"]]
+    shipped, fixed = (artifact["arms"][a]["ranks"] for a in (
+        "falkordb_tfidf", "falkordb_tfidf__tokens_fixed"))
+
+    def hit(ranks: dict, ids: list[str]) -> int:
+        return sum(1 for i in ids if ranks.get(i) is not None and ranks[i] <= 3)
+
+    snake_delta = (hit(fixed, snake) - hit(shipped, snake)) / len(snake) * 100
+    assert len(snake) == 73
+    assert round(snake_delta, 1) == 91.8, snake_delta
+    assert "91.8" in brief_text
+
+    # The sentence the table's remainder rests on, arithmetic included. The
+    # shares are read from the rows the brief prints them in: the definite cell,
+    # the `#n` cell, and the code-token share the `snake_case` row NAMES (that
+    # cell says NOT RECORDED, which is the point of the row).
+    table = _table(brief_text, "class / sub-class", "weighted")
+    assert len(table) == 5, [r[0] for r in table]
+    definite = _num(table[0][1])
+    hashed = _num(table[1][1])
+    assert (round(definite, 1), round(hashed, 1)) == (62.3, 2.2)
+    token_share = 9.0
+    assert f"{token_share:.1f} %" in table[2][1], table[2][1]
+    assert "NOT RECORDED" in table[2][1]
+    total = definite + hashed + token_share
+    assert round(total, 1) == 73.5
+    assert round(100 - total, 1) == 26.5
+    assert "73.5 %" in brief_text and "26.5 %" in brief_text

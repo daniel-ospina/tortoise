@@ -512,6 +512,27 @@ def _fts_cypher(graph, or_string: str, limit: int) -> list[tuple[str, float]]:
     return [(r[0], float(r[1])) for r in rows]
 
 
+def _refuse_degraded_legs(trace: list[dict], query: str) -> None:
+    """Refuse the run if the shipped leg did not actually RUN for a query.
+
+    ``run_fts_query`` returns ``[]`` from every degraded exit as well as from a
+    genuine empty result, so the sweep cannot tell them apart by looking at the
+    rows. The trace is the leg's own account of what happened, and this is the
+    measurement's alarm for the direction that would otherwise flatter a
+    *conclusion*: a wedged FalkorDB collapsing the shipped baseline to ~0 turns
+    a non-result into a spectacular PASS.
+    """
+    bad = [e for e in trace
+           if isinstance(e, dict) and e.get("leg") == "fts"
+           and (e.get("degraded") or not e.get("ran"))]
+    if bad:
+        raise SystemExit(
+            f"REFUSED: the shipped FTS leg did not run cleanly for {query!r} "
+            f"— {bad}. A degraded read (breaker open / index missing / query "
+            "failed) returns [] exactly like a genuine miss, so continuing "
+            "would publish an understated baseline.")
+
+
 def verify_cypher_parity(graph, queries: list[str]) -> None:
     """Refuse unless :func:`_fts_cypher` reproduces ``run_fts_query`` exactly.
 
@@ -600,7 +621,17 @@ def arm_falkordb(rows: list[dict], graph_name: str, namespace: str,
             if recovery:
                 out = _fts_cypher(proj.g, or_string, k)
             else:
-                out = run_fts_query(proj.g, q, entity_type="object", limit=k)
+                # ⛔ `leg_trace` is not decoration: `run_fts_query` returns `[]`
+                # on EVERY degraded path too (breaker open, index missing,
+                # query failed — `tortoise/search_engine.py`), so a bare call
+                # cannot tell "the leg ran and found nothing" from "the leg did
+                # not run". Without it a box where the breaker trips mid-sweep
+                # publishes a shipped recall near 0, which flips the verdict to
+                # a huge PASS — the exact adoption trigger of #12298 step 3.
+                trace: list[dict] = []
+                out = run_fts_query(proj.g, q, entity_type="object", limit=k,
+                                    leg_trace=trace)
+                _refuse_degraded_legs(trace, q)
             n_q += 1
             if not out:
                 per_k[k]["rows_zero"] += 1
@@ -672,10 +703,12 @@ def _wait_indexed(proj, expected: int, timeout_s: float = 60.0) -> tuple[int, fl
         rows = proj.g.query("CALL db.indexes()").result_set
         for row in rows:
             # row shape (measured, v4.20.6): [label, fields, types, options,
-            # language, stopwords, entity_type, status, stats…] where the LAST
-            # dict carrying ``numDocuments`` is the indexer's own stats. Find it
-            # by key rather than by position — a positional read is how a
-            # version bump turns this guard into a silent no-op.
+            # language, stopwords, entity_type, status, stats…] where the dict
+            # carrying ``numDocuments`` is the indexer's own stats. Find it by
+            # KEY rather than by position — a positional read is how a
+            # version bump turns this guard into a silent no-op. ``next()``
+            # yields the FIRST such dict, which is what this row shape gives
+            # (measured); an earlier comment said LAST and contradicted the code.
             if not row or row[0] != "Object":
                 continue
             stats = next((c for c in row

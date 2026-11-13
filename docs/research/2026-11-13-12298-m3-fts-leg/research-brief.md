@@ -274,9 +274,11 @@ Both FalkorDB arms shared one graph and the shipped arm inserts its fixtures at 
 so the recovery arm's sweep ran over a **305**-document index against the shipped arm's **300** — the
 artifact's own `index_numDocuments` records both, unedited. The harness now gives each arm its own graph
 (a re-run measures 300 on both), and the direction is not rescued by the defect: five extra documents
-compete for the same three slots, so the recovery arm was measured on the **harder** population of the
-two and still recorded zero regressions. The re-run is still the confirmation, and it is what `#12350`
-should be measured with. See `artifact.json`'s `measurement_notes`.
+compete for the same three slots, so the recovery arm faced five more competitors — plausibly the
+harder population, not provably so (five extra documents also move document frequencies, and TF-IDF
+re-weighting can move a name up as well as down); the zero-regression result itself does not depend on
+that argument, but nothing here should be read as having PROVEN the direction. The re-run is the
+confirmation, and it is what `#12350` should be measured with. See `artifact.json`'s `measurement_notes`.
 
 | stored name | query | shipped | in-place fix | `pg/tokens` | `pg/native` |
 |---|---|---|---|---|---|
@@ -313,7 +315,8 @@ exactly the shapes it was built for, and neither a new scorer nor a new store is
 > p < 0.05. **FAIL otherwise** — including a tie, and including a gain carried by pairs where the two
 > arms agree.
 
-The rule is the harness's `DECISION_RULE` constant (`tools/m3_fts_leg_recall.py:158`) and the artifact
+The rule is the harness's `DECISION_RULE` constant (the symbol, not a line number — locators in this
+document rot on every merge, which §1 says out loud) and the artifact
 carries it verbatim, so it cannot be re-chosen per run without editing two places — the test asserts that
 byte-equality rather than the label. ⚠️ **What that does not prove:** the harness, the artifact and this
 brief landed in **one commit**, so the *ordering* — that the constant existed before the 300-name run —
@@ -388,6 +391,14 @@ remainder without a derivation; it is removed rather than re-guessed.
 * **The `snake_case` and path class shares.** Neither is recorded anywhere; §4.3 says so rather than
   assuming one, and the residual class share is assumed Δ = 0.
 * **Index-time tokenization** is each engine's own and was not controlled (only query-side terms were).
+* **The production call shape's terminal-status posture.** The harness asks `run_fts_query(...)` with its
+  default `excluded_statuses=None`, so terminal-status Objects are EXCLUDED — but the capture prior's own
+  caller (`extractor_v2._fts_rows`) passes `include_terminal=True` for `:Object` (`#3301`: a
+  resolution prior, not a surfaced result), which sends `excluded_statuses=()`. On a production graph
+  holding terminal Objects the harness therefore measures a **stricter** leg than the prior uses, and
+  the measured baseline can understate that caller's recall. Inert here — every population and fixture
+  row is freshly written and carries no terminal status — but it is a difference in the shape measured,
+  so it is declared rather than left to be discovered.
 * **The recency half of the tie rule.** The *id* key is matched (DESC/DESC) and pinned at the harness's
   own SQL. The recency key is **not** controlled: the shipped leg reads a live `createdAt DESC` (the
   projection stamps it on create), the Postgres arm has no timestamp, and the two orders agree **only
