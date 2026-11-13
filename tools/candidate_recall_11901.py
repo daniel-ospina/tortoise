@@ -605,9 +605,11 @@ def _rerank_arm(
         # which cell to read AND that it is the ACHIEVED count, not the ceiling
         # (`recall_3_before` minus `lost` plus `gained` is what separates them; the
         # note called the two identical, then called `lost` the discriminator, which
-        # is wrong in ONE direction — `lost` 0 is NECESSARY but not sufficient: the
-        # witness is a rerank with `lost` 0 and `gained` 0 that still leaves an
-        # in-pool gold outside the top 3).
+        # is wrong in ONE direction at a pool wider than the top-3 cut — there `lost`
+        # 0 is NECESSARY but not sufficient: the witness is a rerank with `lost` 0 and
+        # `gained` 0 that still leaves an in-pool gold outside the top 3 (at a pool no
+        # wider than the cut, `lost` 0 IS sufficient — every in-window gold is already
+        # in the top 3).
         # ⛔ LABEL-DERIVED, and it has to be: this same note is emitted onto the
         # lexical carriers too (`_rerank_arm(..., label=...)`), where "this arm" is
         # `lexical_difflib` / `lexical_overlap`. A hard-coded `arms.rerank` pointer
@@ -633,8 +635,9 @@ def _rerank_arm(
             "key set has no cell there at all, so read it only where the key matches "
             "the width you are asking about; this arm's own at-pool figures live in "
             "its `arms.{label}.<P>.exact` cell instead, which stores no in_window "
-            "of its own — arm 1 is the only arm whose MENTION-level in-pool count is "
-            "recorded, and only at arm 1's own four widths — so at a pool width "
+            "of its own — no other arm records a FULL-POPULATION mention-level in-pool "
+            "count (arm 4 keeps one for its gated subset), and arm 1's is at arm 1's "
+            "own four widths only — so at a pool width "
             "outside that set the ceiling is NOT recorded here: it is a measurement "
             "of what the legs returned at that width, not a function of the width, so "
             "it has to be re-measured rather than read off. The VARIANT pairs carry "
@@ -642,9 +645,11 @@ def _rerank_arm(
             "counts of their own (`variant.in_window_3_before` / `in_window_3_after`); "
             "the variant pairs' in-pool count is arm 2's, in "
             "`arms.variant.<k>.in_window` and `arms.variant_by_class.<cls>.<k>.in_window` "
-            "at arm 2's widths. At a pool wider than the top-3 cut, neither TOP-3 count "
-            "is in_window(P) — but at a pool no wider than that cut the window IS the "
-            "top 3, so `in_window_3_before` is the same number. miss_past_k is "
+            "at arm 2's widths. Those two measure TOP-3 containment, not window "
+            "containment: they equal in_window(P) only where every in-window gold "
+            "happens to land in the top 3, which is always the case at a pool no wider "
+            "than the cut — so treat them as a different quantity rather than as the "
+            "ceiling. miss_past_k is "
             "0 BY CONSTRUCTION only "
             "at arm 1's WIDEST window (a response has at most that many rows, so "
             "'the rank is past it' cannot occur) and can be non-zero at a narrower "
@@ -1636,11 +1641,12 @@ def run(args: argparse.Namespace) -> int:
         # (`recall_3_after` / `mentions`, computed) and NOT as a literal here: a
         # re-run moves them, and an earlier draft hardcoded one run's pair in the
         # emitted note. ⛔ `recall_3_after` is what the arm ACHIEVED, not the
-        # ceiling: they coincide only where `lost` is 0, so the note names both the
-        # ceiling (in_window) and the achieved cell — they coincide when
-        # `recall_3_before - lost + gained` reaches `in_window`; `lost` 0 is
-        # NECESSARY but not sufficient (a no-gain rerank has it 0 with the achieved
-        # figure still below the ceiling). ⛔ Not `arms.exact.<P>`: that
+        # ceiling, so the note names both the ceiling (in_window) and the achieved
+        # cell: they coincide when `recall_3_before - lost + gained` reaches
+        # `in_window`, and at a pool wider than the top-3 cut `lost` 0 is NECESSARY
+        # but not sufficient (a no-gain rerank has it 0 with the achieved figure
+        # still below the ceiling; at a pool no wider than the cut it IS sufficient).
+        # ⛔ Not `arms.exact.<P>`: that
         # table is arm 1's own width-by-width one, and a pool width outside its
         # keys has no cell there.
         #
