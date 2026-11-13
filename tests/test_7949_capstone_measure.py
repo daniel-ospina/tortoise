@@ -5276,9 +5276,12 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # tree read 10026. The last +14 belongs to the `abf186f1109a` merge below,
         # not to that one.
         # ⛔ THE ANCHOR IS THIS TREE, not either side of the merge, and the
-        # decomposition is measured rather than asserted. The ROUND-1 rebase base
-        # `f33f5e2c32` (five rebases back; the current one is `ca74f2375e`, named
-        # below) read 9949 / 9823 / twins 6082 + 8465. THIS PR alone puts the
+        # decomposition is measured rather than asserted. An EARLIER rebase base,
+        # `f33f5e2c32` (not this head's — that is `ca74f2375e`, named below; how far
+        # back it sits is deliberately not asserted, because the branch's own
+        # history is rewritten by every rebase and an ordinal there re-stales
+        # exactly like the line numbers this row exists to stop trusting) read
+        # 9949 / 9823 / twins 6082 + 8465. THIS PR alone puts the
         # entry at 9988 (+39, its own `core` registration block, and the same +39 on
         # the second twin: 8465 -> 8504), while `main`'s eleven-commit advance to
         # `cd22562c24` adds +24 to the entry (9949 -> 9973) and +24 to the second
