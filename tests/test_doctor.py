@@ -931,6 +931,45 @@ class TestDoctorHostedCredential:
         # A service-side refusal must not contribute a FAIL either.
         assert "❌ Hosted" not in out, out[-1200:]
 
+    @pytest.mark.parametrize("status", [429, 408])
+    def test_a_rate_limit_is_the_same_service_refusal_as_a_5xx(
+            self, status, clear_db_env, tmp_path, capsys, monkeypatch,
+            _hermetic_hosted_identity):
+        """`429`/`408` are SERVICE refusals, not a bad key (#11912 review).
+
+        The arm reads `team_code in (408, 429) or 500 <= team_code < 600`, and
+        only the 5xx half was pinned: the rate-limit half — the one the arm's
+        own comment names first, and the one `/v1/team`'s usage count actually
+        produces — could be deleted with the suite green. A `429` rendered as a
+        `❌` would red `doctor`, and anything gating on its exit code, for a
+        healthy key that was merely throttled.
+        """
+        from urllib.error import HTTPError
+
+        _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY)
+
+        def handler(url, req):
+            if url.endswith("/health"):
+                return _FakeResponse(200, b'{"status":"ok"}')
+            raise HTTPError(url, status, "refused", {},
+                            __import__("io").BytesIO(
+                                b'{"detail":{"error_code":"rate_limited"}}'))
+
+        _stub_hosted(monkeypatch, handler)
+        db_path = str(tmp_path / f"transient-{status}.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor transient seed")
+
+        rc = _run_doctor([])
+        out = capsys.readouterr().out
+
+        hosted = _row(out, "Hosted")
+        assert hosted is not None, out[-1200:]
+        assert "⚠️" in hosted and "❌" not in hosted, hosted
+        assert str(status) in hosted and "UNPROVEN" in hosted, hosted
+        assert "❌ Hosted" not in out, out[-1200:]
+        assert rc == 0, "a throttled key must not fail the report"
+
     def test_reply_bodies_are_read_with_a_bound(
             self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
         """A proxy streaming a huge body must not be buffered whole.
@@ -2143,8 +2182,11 @@ class TestDoctorSessionExtraction:
 
 class TestOnboardDoctorCall:
     def test_bare_namespace_no_attribute_error(self, monkeypatch, clear_db_env, tmp_path, capsys):
-        """#703 follow-up: _cmd_onboard calls _cmd_doctor(Namespace(cmd='doctor'))
-        — both args.db AND args.path must be read via getattr."""
+        """#703 follow-up: `_cmd_doctor` must tolerate a caller that passes ONLY
+        `Namespace(cmd='doctor')` — `_cmd_onboard` did exactly that before it
+        forwarded the graph target (#720) and `--offline` (#11912), and the
+        tolerance is the contract, not an accident of who calls it today. Both
+        args.db AND args.path AND args.offline are read via getattr."""
         monkeypatch.setenv("TORTOISE_DB_PATH", os.path.join(str(tmp_path), "onboard.db"))
         # Seed an initialized DB (doctor must not create one as a side effect
         # of a diagnostic — #2204); the health row must then report THIS graph.
