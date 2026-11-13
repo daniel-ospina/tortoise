@@ -5292,9 +5292,15 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         #   +8  @2725  `cd22562c24` (#12060)   → above BOTH twins
         #   +6  @6721  `ba84fbfabf` (#11609)   → above the sdk twin only
         #  +16  @7514  `e200623286` (#11926)   → above the sdk twin only
-        #  +13  @2237  `abf186f1109a` (the tip this merge brought in)   → above BOTH
-        #   +1  @9150  `abf186f1109a`           → BELOW both twins; it moves neither
+        #  +13  @2237  `f1f74135a15b` (#12302, #12294's name-entropy gate) → above BOTH
+        #   +1  @9150  `f1f74135a15b`           → BELOW both twins; it moves neither
         #  +32  @7522  this branch's own block → above the entry and the sdk twin
+        # ⚠️ Both `f1f74135a15b` rows are read at the main tip `abf186f1109a`, which
+        # carries them but made NEITHER: `git show --stat abf186f1109a --
+        # config/ci-surfaces.yml` is empty, and `f1f74135a15b` is the only commit in
+        # `cd22562c24e4..abf186f1109a` that touches this file. A row naming the span
+        # END rather than the commit would be the same defect one level down: the
+        # number is true and the reader who checks `git show` learns nothing.
         # ⛔ So the FIRST twin reads 6103 = 6082 + 8 + 13 (only two of the six
         # insertions are above it, which is why the two twins do not move
         # together), and the sdk twin reads 8534 = 8459 + 8 + 6 + 16 + 13 + 32.
