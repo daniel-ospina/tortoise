@@ -40337,21 +40337,26 @@ class TortoiseSDK:
         _valid_time_rerank: bool = True,
         # #12297: PRIVATE — the FUSED-CANDIDATE rerank. Default True = the
         # product behaviour (a relevance read reranks when the gate is armed).
-        # Passed False by a caller whose PAGE COMPOSITION must not move. THREE
-        # classes, not one — they are different harms and the brief's §5 states
-        # the same three (keep the two lists in step):
+        # Passed False by a caller whose PAGE COMPOSITION must not move. FOUR
+        # classes, not one — they are different harms, and the brief's §5 states
+        # the same four, in the same order (keep the two lists in step):
         #   * ORDER RE-OWNERS — ``suggest_entry_points``, ``issue_insight``,
         #     ``recall_state``, ``recall_gaps``, ``volunteer_context`` (bound as a
         #     ``_search_fn`` seam) and ``search_sessions`` (which re-sorts its pool
         #     by the PRE-rerank ``rrf`` score, so a rerank there is a permutation
         #     its own sort discards). A pre-cut reorder moves which ids survive
-        #     ``limit`` and their sort then hides it. The eval / A-B and benchmark
-        #     harnesses belong here too: they pin it for comparability.
+        #     ``limit`` and their own sort then hides it.
         #   * CONSUMED AS A SET, never as a page — ``_review_pool`` (a
         #     ``{pid: …}`` membership map; ``review_add`` orders its own picks) and
         #     ``_resolve_subgraph_seed`` (an expansion START set). ⛔ Neither keeps
         #     an order, which is what ``_valid_time_rerank``'s docstring says about
         #     them: do not file them as order re-owners.
+        #   * RECORDED-BASELINE HARNESSES — ``tools/longmem_eval/retrieve.py``,
+        #     ``tools/fusion_formula_ab.py``, ``tools/ask_pool_admission_probe.py``,
+        #     ``benchmarks/run_report.py`` and ``benchmarks/load_test.py``. They pin
+        #     it for comparability against RECORDED numbers, exactly as they pin
+        #     ``_valid_time_rerank``: the harm is a baseline that silently stops
+        #     being the baseline, not a moved page.
         #   * MEMBERSHIP PROBES that read a page SMALLER than the pool width and ask
         #     "is this row in it" — ``battery/runner/setup.py``'s seed-manifest
         #     guard (a false ``ConfigError`` reading "stale PRE-FIX graph"),
