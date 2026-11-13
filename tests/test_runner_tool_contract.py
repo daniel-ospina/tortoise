@@ -2790,7 +2790,7 @@ def test_a_folded_block_scalar_is_one_command_not_two(tmp_path):
     # spelling beat it: `>2`/`>-2` (indicator), `"run":`/`run :` (key), `&a`/`!!str` (one
     # decoration), `&a !!str` (two), `!<tag:…>` (verbatim form), `>` on the next line (the
     # plainest spelling of all), `>` after a COMMENT line, a bare `!` tag, and the explicit-key
-    # `? run` / `: >` form. So `_yaml_run_scalars` asks PyYAML: the composer folds, and this row
+    # `? run` / `: >` form. So `_yaml_jobs` asks PyYAML: the composer folds, and this row
     # asserts the ANSWER rather than the pattern. Every spelling below is one the runner
     # really folds into a single executing command — verified against `yaml.safe_load`.
     for header in (
@@ -3268,7 +3268,7 @@ def _glob_calls(source: str) -> list[tuple[int, str, str, list[str]]]:
     """`(line, receiver, method, string literals)` for every `glob(`/`rglob(` call in `source`.
 
     ⛔ TOKENIZED, NOT TEXT-SCANNED — the third answer to this question rather than the first,
-    and the same lesson `_yaml_run_scalars` records one screen up. Cut 1 matched
+    and the same lesson `_yaml_jobs` records above. Cut 1 matched
     `glob("<star>.yml")` literally. Cut 2 read the argument up to the first `)` and was beaten
     by the repo's own idiom `glob.glob(str(WORKFLOWS) + "/*.yml")`, whose argument CONTAINS a
     `)` — and it also reddened on its own docstring, because a hand-rolled quote tracker cannot
@@ -3591,7 +3591,9 @@ def test_no_site_spells_the_workflow_glob_one_sidedly():
     assert not one_sided, (
         f"this module enumerates workflows one-sidedly at {len(one_sided)} site(s): {one_sided}. "
         "A glob for only one extension silently skips workflows in the other, which GitHub also "
-        "RUNS (#12238). Use `_workflow_paths()`."
+        "RUNS (#12238). Use `_workflow_paths()`. If this glob is not a WORKFLOW enumeration "
+        "(a config or fixture loader), do not widen the filter: add it to this test's SCOPE "
+        "list, which is where the module declares its reach."
     )
     # ORDER-INSENSITIVE: `_workflow_paths()` sorts, so the tuple's order carries no meaning and
     # asserting the order would red a semantically identical swap with a message blaming the
