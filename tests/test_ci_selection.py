@@ -3120,7 +3120,8 @@ _NON_CODE_DOC_ROOTS = ("tests", "tools", "scripts", ".github", "tortoise")
 #:     this assertion green but reds TWO tests in this file:
 #:     `test_the_mention_census_announces_an_unmaterialised_root` (its fixture
 #:     hard-codes four roots, so materialising `scripts/` leaves `config` absent
-#:     and the control leg sees a silence it does not expect) and
+#:     and the control leg's expected silence does not hold — it sees an
+#:     announcement it does not expect) and
 #:     `test_no_allowlisted_root_file_has_a_reader`, which immediately surfaces
 #:     `config/docs-lint-baseline.json` as a reader of the allowlisted
 #:     `.scope-1894.md` (measured: 2 failed, 508 passed).
