@@ -5063,7 +5063,13 @@ def _neighbour_number_strays(line: str) -> list[str]:
 
     The caller passes the line with the claim ENTRY's own filename already removed.
     """
-    if _OTHER_FILE.search(_MANIFEST_FILE.sub("", line)):
+    # ⛔ THE EXEMPTION MUST NOT SWALLOW A LINE THAT NAMES THE MANIFEST. It is
+    # applied only when the line does not, because `_GAP` bounds the doc-wide arm
+    # (400 chars) — so a manifest-bound cite with more than that much prose
+    # between the filename and the number is caught by NEITHER arm if this
+    # returns early. Reproduced GREEN on exactly that shape before this guard.
+    if not _MANIFEST_FILE.search(line) and _OTHER_FILE.search(
+            _MANIFEST_FILE.sub("", line)):
         return []
     stray = [m.group(0) for m in _LINE_CITE.finditer(line)]
     stray += [n for n in _bare_number_hits_neighbour(line) if n not in stray]
@@ -6170,6 +6176,11 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # filename the sentence exists to state left the pin GREEN
             # (a fresh-context review's #1 finding, reproduced before it was fixed).
             + re.escape(ENTRY) + r"`"
+            # ⛔ RESIDUAL, stated next to the rule: the anchor pinned here is the row's
+            # own `— cited by`, so prose AFTER it is unguarded by construction —
+            # "… — cited by the BLOCK and though the block in fact holds two capstone
+            # entries …" is GREEN (measured). Extending the anchor to the row's `|`
+            # only moves the false-red surface, so the limit is named instead.
             # ⛔ THE DEFAULT IS "NOTHING MAY FOLLOW", so this is a POSITIVE lookahead
             # for a clause break, not a deny-list of connectives. The deny-list
             # shipped one round and four same-meaning tails walked straight past it —
@@ -6255,13 +6266,18 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         if not re.search(_HOLD_NONE, doc_hits[0]):
             block_failures.append(
                 "03-test-design.md's `carve_out:` sentence does not state, POSITIVELY, "
-                "that `uri_requiring:` and `slow_files:` hold NONE. Three causes, and "
+                "that `uri_requiring:` and `slow_files:` hold NONE. Four causes, and "
                 "the sentence shows you which: the clause is GONE; it is NEGATED "
                 "(\"do NOT hold none\"), which asserts the opposite of the tree; or "
                 "the two block names were REORDERED or split by words the pattern "
-                "does not carry. The pin checks the tree half of this claim, so a "
-                "sentence that stops stating it is a claim the pin can no longer "
-                "check.")
+                "does not carry; or a QUALIFIER follows `hold none` (an `except`/"
+                "`but`/`apart from` tail, or even a true one like `of the capstone "
+                "files`). ⚠️ THAT LAST CASE IS AN ACCEPTED FALSE RED, stated rather than "
+                "hidden: the arm requires the clause to END, because a deny-list of "
+                "connectives let four same-meaning tails through (measured). Write "
+                "the clause as `hold none |` and the qualifier in its own sentence. "
+                "The pin checks the tree half of this claim, so a sentence that stops "
+                "stating it is a claim the pin can no longer check.")
         for needed in ("`uri_requiring:`", "`slow_files:`"):
             if needed not in doc_hits[0]:
                 block_failures.append(
@@ -6746,7 +6762,7 @@ def test_the_neighbour_population_includes_the_line_that_names_the_manifest_file
     POPULATION is not the same as yielding a finding, and only the second is the arm
     working.
     """
-    # ⛔ THESE THREE, and the neighbour arm is STRICT here — it refuses a count beside
+    # ⛔ THESE FOUR, and the neighbour arm is STRICT here — it refuses a count beside
     # the manifest's name as readily as a position, which is why `9987 lines` and
     # `9987 rows` are asserted RED below rather than exempted. (An earlier cut of this
     # comment claimed the arm was "deliberately UNIT-AWARE" and named a helper,
