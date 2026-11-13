@@ -107,6 +107,21 @@ class MCPReader:
             args["graph"] = self.graph
         return self._call("tortoise_query", args)
 
+    def _labelled(self, label: str, call, *args: Any, **kwargs: Any) -> Any:
+        """Call, re-raising a client-level refusal UNDER this site's label.
+
+        #11153 moved a refusal from DATA to a CLIENT RAISE (fastmcp
+        `raise_on_error=True`), which happens BELOW these call sites — so the
+        `_error_of` arms that named the site ("read of section 'status' was
+        refused: …", "verification read of the first page was refused: …") stopped
+        firing and every refusal read as an anonymous error. Wrapping the CALL keeps
+        the label on the shape that now actually occurs.
+        """
+        try:
+            return call(*args, **kwargs)
+        except C.CurationRefused as exc:
+            raise C.CurationRefused(f"{label}: {str(exc)[:300]}") from exc
+
     def _fingerprint_walk(self, *, page: int = PAGE) -> list[str]:
         """The id+content sequence of one full walk — used to VERIFY a census.
 
@@ -120,8 +135,10 @@ class MCPReader:
                 raw = self._q(offset=offset, limit=page)
             except C.CurationRefused as exc:
                 # #11153: the client-raise shape (see `read_points`) must keep
-                # saying WHERE the verification walk was refused.
-                raise RuntimeError(
+                # saying WHERE the verification walk was refused, and must stay on
+                # the refusal class `main()` answers rc 3 for — `CurationRefused`
+                # (a `RuntimeError` subclass) is what `cmd_inventory` catches.
+                raise C.CurationRefused(
                     f"verification pass was refused at offset {offset} after "
                     f"{len(out)} rows: {str(exc)[:300]}") from exc
             res = C.normalise_tool_result(raw)
@@ -156,8 +173,11 @@ class MCPReader:
                 # #11153: `_live_call_tool` raises the client-level refusal BELOW
                 # this loop, so without this arm the offset/row diagnostic the
                 # data arm produces would be lost on the shape that now actually
-                # occurs (fastmcp `raise_on_error=True`).
-                raise RuntimeError(
+                # occurs (fastmcp `raise_on_error=True`). `CurationRefused`, not a
+                # bare `RuntimeError`: `cmd_inventory`/`cmd_plan` catch THAT class
+                # and answer rc 3, and raising its parent would turn a designed
+                # refusal into an uncaught traceback (review round 3, measured).
+                raise C.CurationRefused(
                     f"read refused at offset {offset} after {len(rows)} rows: "
                     f"{str(exc)[:300]} — refusing a partial census") from exc
             res = C.normalise_tool_result(raw)
@@ -264,7 +284,9 @@ class MCPReader:
                 ("first", first_page_fp, {"offset": 0, "limit": page}),
                 ("last", last_page_fp, {"offset": last_offsets[0], "limit": last_offsets[1]}),
             ):
-                res2 = C.normalise_tool_result(self._q(**args))
+                res2 = C.normalise_tool_result(
+                    self._labelled(f"verification read of the {label} page was refused",
+                                   self._q, **args))
                 err2 = _error_of(res2)
                 if err2:
                     raise RuntimeError(f"verification read of the {label} page was refused: "
@@ -301,9 +323,15 @@ class MCPReader:
         """
         args = {"section": section}
         if not self.graph:
-            return self._checked(self._call("tortoise_graph_overview", args), section)
+            return self._checked(
+                self._labelled(f"read of section {section!r} was refused",
+                               self._call, "tortoise_graph_overview", args),
+                section)
         try:
-            res = C.normalise_tool_result(self._call("tortoise_graph_overview", {**args, "graph": self.graph}))
+            res = C.normalise_tool_result(
+                self._labelled(f"read of section {section!r} was refused",
+                               self._call, "tortoise_graph_overview",
+                               {**args, "graph": self.graph}))
         except Exception as exc:
             # ONLY a recognised graph-refusal may fall back. A timeout/429 says
             # nothing about the binding, and re-reading a DIFFERENT graph under the
@@ -912,6 +940,13 @@ def _live_call_tool(name: str, args: dict[str, Any] | None = None) -> Any:
     Without this translation a refusal left `read_points` as an uncaught client
     traceback — losing the offset/row diagnostics and the documented rc-3 refusal
     path — instead of the `CurationRefused` this file already handles.
+
+    ⚠️ NARROW ON PURPOSE: fastmcp raises `ToolError` for ANY error result, including
+    a server-side crash (`Error calling tool: TypeError: …`). Translating that into
+    a refusal would report a crash as a DESIGNED rc-3 refusal, so a driver paging
+    on rc 1 ("the run crashed") would stay silent. Only a message that parses as
+    the surface's refusal envelope (`{"error": …}` — the text of a `_safe` payload)
+    is translated; everything else is re-raised untouched.
     """
     from fastmcp.exceptions import ToolError
 
@@ -920,7 +955,25 @@ def _live_call_tool(name: str, args: dict[str, Any] | None = None) -> Any:
     try:
         return mcp_client.call_tool(name, args or {})
     except ToolError as exc:
+        if not _is_refusal_envelope(str(exc)):
+            raise
         raise C.CurationRefused(str(exc)) from exc
+
+
+def _is_refusal_envelope(text: str) -> bool:
+    """True when a client error's message IS the surface's refusal payload.
+
+    The message fastmcp raises is `content[0].text`, and for a `_safe` refusal that
+    text is the JSON error dict (`{"error": "Team points limit reached (25000)…",
+    "code": -32006}`). A crash's text is prose (`Error calling tool: TypeError: …`),
+    which does not parse. Deliberately strict: a payload with no `error` key is not
+    this file's refusal class either.
+    """
+    try:
+        payload = json.loads(text)
+    except (TypeError, ValueError):
+        return False
+    return isinstance(payload, dict) and isinstance(payload.get("error"), (str, dict))
 
 
 #: A fallback to the credential's own graph is only legitimate when the refusal is

@@ -3914,6 +3914,14 @@ surfaces:
   # LIMITATIONS text, which claimed a failed call cannot be told apart in the
   # series because `_safe` swallows the exception.
   - test_mcp_safe_error_telemetry_8135.py
+  # #11153: the refusal VERDICT half (with the `api` half — see there). `core` owns
+  # the consumer half this change moves: `tools/curate_graph.py` runs
+  # `except ToolError` -> `CurationRefused` translations and offset/section
+  # diagnostics that three of this file's tests pin, and a diff touching ONLY
+  # `tools/curate_graph.py` selects `core` (measured: surfaces ['core'], 838 test
+  # files) — an `api`-only entry would leave the guard asleep on exactly the half
+  # that regresses, the same reasoning the #8135 entry above records.
+  - test_11153_payload_refusal_envelope.py
   # #8218: the consent identity invariant's ENUMERATION half (with the `api` half
   # — see there). `_functions_touching` walks the whole `tortoise/` package and
   # fails on any NEW function that mentions `oauth_clients` or `client_name`,

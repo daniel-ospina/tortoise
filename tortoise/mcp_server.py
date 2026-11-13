@@ -2484,16 +2484,22 @@ def _disclose_graph_resolution(result: Any, name: str,
     for it would mean re-deriving a target this seam does not own.
 
     It leaves an `is_error` result and a non-`ToolResult` UNTOUCHED (the same
-    object, by identity). ⚠️ The `is_error` half of that guard is what keeps a
-    `_safe`-answered failure from being disclosed — since #11153 such a failure IS
-    an error result (`_payload_refusal_result`), so it is caught HERE. It was NOT,
-    before that change: a `_safe` failure used to be a plain `ToolResult` with
-    `is_error=False`, and the only thing that stopped the disclosure was the
-    caller's `if status == "ok":` gate in `_wrapped_call_tool`. That gate is kept
-    (belt-and-braces: it also covers a non-error result with a non-ok status), but
-    it is no longer the reachable guard — do not treat either one as removable on
-    the strength of the other. Pinned by
-    `test_a_safe_answered_failure_is_not_disclosed`.
+    object, by identity). For a `_safe`-answered failure TWO guards now cover it,
+    and the ORDER matters when you are deciding what may be deleted:
+
+    * since #11153 such a failure IS an `is_error` result, so this function's own
+      check below would return it untouched — belt-and-braces;
+    * but this function is never ENTERED for one: the caller gate
+      `if status == "ok":` in `_wrapped_call_tool` is false first, because the
+      payload was already classified `exec_error`/`safe_error` a few lines above
+      (measured: wrapping this call in a recorder and driving a refused write
+      through the seam records ZERO invocations).
+
+    So the seam gate is the guard that RUNS and this check is the second layer —
+    and that in turn is why `test_a_safe_answered_failure_is_not_disclosed` no
+    longer kills the mutant that deletes the seam gate: with the gate replaced by
+    `if True:`, this check still returns early. State that plainly rather than
+    letting the test read as a non-vacuity proof it is not.
     """
     if name not in WRITE_TOOL_NAMES:
         return result

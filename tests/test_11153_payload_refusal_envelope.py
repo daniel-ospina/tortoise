@@ -221,7 +221,9 @@ def test_the_curation_reader_turns_a_client_refusal_into_a_curation_refusal(
     mod = _curate_graph_module("11153")
 
     def _refuse(*_a, **_k):
-        raise ToolError("Team points limit reached (25000)")
+        # fastmcp raises the message that was in `content[0].text`, and for a
+        # `_safe` refusal that text IS the JSON error payload.
+        raise ToolError('{"error": "Team points limit reached (25000)", "code": -32006}')
 
     monkeypatch.setattr(mcp_client, "call_tool", _refuse)
     with pytest.raises(C.CurationRefused) as caught:
@@ -229,8 +231,6 @@ def test_the_curation_reader_turns_a_client_refusal_into_a_curation_refusal(
     assert "points limit" in str(caught.value), (
         "the refusal's own message must survive the translation — an operator "
         "needs to know WHICH refusal ended the census")
-
-
 def test_an_unrelated_transport_error_is_not_relabelled_as_a_refusal(monkeypatch):
     """The translation must be narrow: a transport death is not a curation
     refusal, and mislabelling it would send an operator to re-read a graph that
@@ -247,6 +247,25 @@ def test_an_unrelated_transport_error_is_not_relabelled_as_a_refusal(monkeypatch
         mod._live_call_tool("tortoise_query", {})
 
 
+def test_a_server_crash_is_not_relabelled_as_a_designed_refusal(monkeypatch):
+    """fastmcp raises `ToolError` for ANY error result, including a crash in the
+    tool body. Translating that into a refusal would report a crash as the rc-3
+    "designed refusal" and a driver paging on rc 1 would stay silent."""
+    from fastmcp.exceptions import ToolError
+
+    from tortoise import mcp_client
+
+    mod = _curate_graph_module("11153_crash")
+
+    def _crash(*_a, **_k):
+        raise ToolError("Error calling tool: TypeError: 'NoneType' object is not "
+                        "subscriptable")
+
+    monkeypatch.setattr(mcp_client, "call_tool", _crash)
+    with pytest.raises(ToolError):
+        mod._live_call_tool("tortoise_query", {})
+
+
 def test_a_refused_census_still_says_which_offset_it_died_at():
     """The diagnostic the false PASS used to hide must survive the new shape.
 
@@ -255,6 +274,11 @@ def test_a_refused_census_still_says_which_offset_it_died_at():
     offset/row diagnostic `_error_of`'s arm produces has to be re-raised on the
     raise path too, or an operator is told only "points limit reached" and cannot
     tell a first-page refusal from a mid-walk one (review round 2, measured).
+
+    It must stay on `CurationRefused` specifically (review round 3, measured):
+    `main()` catches THAT class to answer rc 3, and its parent `RuntimeError` is
+    NOT caught — an uncaught traceback with rc 1 is exactly the "the run crashed"
+    signal a designed refusal must not emit.
     """
     from tortoise import curation as C
 
@@ -270,10 +294,28 @@ def test_a_refused_census_still_says_which_offset_it_died_at():
                 "total": 6}
 
     reader = mod.MCPReader(_refuse_on_page_two)
-    with pytest.raises(RuntimeError) as caught:
+    with pytest.raises(C.CurationRefused) as caught:
         reader.read_points(page=2, verify=False)
     message = str(caught.value)
     assert "offset 2" in message, message
     assert "after 2 rows" in message, message
     assert "points limit" in message, message
     assert "partial census" in message, message
+
+
+def test_a_refused_section_still_names_the_section():
+    """Same class, one site over: the `_error_of` arm used to say
+    "read of section 'status' was refused: …", and the client-raise shape
+    bypassed it (review round 3)."""
+    from tortoise import curation as C
+
+    mod = _curate_graph_module("11153_section")
+
+    def _refuse(*_a, **_k):
+        raise C.CurationRefused("Team points limit reached (25000)")
+
+    reader = mod.MCPReader(_refuse)
+    with pytest.raises(C.CurationRefused) as caught:
+        reader._section("status")
+    assert "status" in str(caught.value), str(caught.value)
+    assert "points limit" in str(caught.value), str(caught.value)

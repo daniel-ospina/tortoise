@@ -769,17 +769,19 @@ def test_the_named_arm_reports_the_ref_as_given_not_a_canonical_id():
 async def test_a_safe_answered_failure_is_not_disclosed(monkeypatch):
     """A `_safe`-answered failure is NOT stamped with the graph it "targeted".
 
-    ⚠️ WHAT THIS PINS, restated after #11153 changed the shape it guards (review
-    finding, this change): the reachable guard is now
-    ``_disclose_graph_resolution``'s OWN ``is_error`` check, because a `_safe`
-    failure is an error result since #11153 and the helper returns it untouched.
-    Before that change the result carried ``is_error=False`` and the only guard was
-    the seam's ``if status == "ok":`` — so this test used to kill the mutant that
-    deletes that gate line, and it NO LONGER DOES (measured: with the gate replaced
-    by ``if True:`` the helper's ``is_error`` check still returns early and this
-    test stays green). The seam gate is kept as belt-and-braces, and no reachable
-    shape has ``status != "ok"`` with ``is_error=False`` any more, so the mutant is
-    no longer observable from the wire. Do not delete either guard on the strength
+    ⚠️ WHICH GUARD FIRES, stated after a review round measured it (this change
+    moves the attribution, not the behaviour): the seam's ``if status == "ok":``
+    gate is the guard that RUNS — a refused write is classified
+    ``exec_error``/``safe_error`` before that line, so
+    ``_disclose_graph_resolution`` is never entered for it. Since #11153 the
+    helper's own ``is_error`` check would ALSO return the result untouched, so it
+    is a second layer, not the first.
+
+    Consequence, said plainly rather than implied: this test no longer kills the
+    mutant that deletes the seam gate (with it replaced by ``if True:`` the
+    helper's ``is_error`` check still returns early and this test stays green). It
+    pins the OUTCOME (no disclosure on a refusal) and the seam gate is pinned by
+    reading the code, not by this test. Do not delete either guard on the strength
     of this test.
     """
     monkeypatch.setattr(ms, "WRITE_TOOL_NAMES", frozenset({PROBE}))
@@ -802,10 +804,9 @@ async def test_a_safe_answered_failure_is_not_disclosed(monkeypatch):
             ms.mcp.local_provider.remove_tool(PROBE)
 
     assert result.is_error is True, (
-        "#11153: a `_safe` failure IS an error result, so the HELPER's own "
-        "`is_error` check — not the seam's `status == \"ok\"` gate, which is "
-        "belt-and-braces — is what keeps the graph disclosure off it; this line "
-        "used to assert the opposite verdict")
+        "#11153: a `_safe` failure IS an error result; the seam's `status == \"ok\"` "
+        "gate is what keeps the graph disclosure off it (the helper's own `is_error` "
+        "check is the second layer), and this line used to assert the opposite verdict")
     assert "boom" in _text(result), _text(result)
     assert (result.meta or {}).get("tortoise") is None, (
         "a failed write was stamped with the graph it 'targeted'")
