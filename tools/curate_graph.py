@@ -634,6 +634,21 @@ class MCPReader:
         on.
         """
         reported = _node_count(counts, "Event")
+        # ⚠️ KNOWN RESIDUAL, stated so the comment below is not read as claiming more than
+        # the code delivers: this gate refuses WITHOUT reading, so a count that is
+        # stale-HIGH across the bound refuses un-read even when the layer has since shrunk
+        # BELOW the bound — where a read would have returned `len(raw) < limit_sent`, which
+        # the arms below ACCEPT. Narrow (a graph sitting exactly AT the bound with a delete
+        # inside the count->read window) and it clears on a re-run, so it is fail-CLOSED
+        # and filed rather than fixed here.
+        #
+        # ⛔ Why it is not a one-line fix: moving the refusal after the read is only safe if
+        # the fill check ALSO moves onto the EQUALITY path. The fill arm below lives INSIDE
+        # the `len(raw) != reported` block, so `len(raw) == reported == EVENT_READ_CEILING`
+        # reaches no fill check at all — measured, disabling THIS gate reds
+        # `test_a_layer_at_the_bound_refuses_because_the_server_caps_there` and
+        # `test_an_event_layer_above_the_ceiling_is_refused`, i.e. removing it alone is a
+        # FAIL-OPEN. It is a two-part change with its own mutation proofs.
         if reported is not None and reported >= EVENT_READ_CEILING:
             raise C.CurationRefused(
                 f"the Event layer holds {reported} rows, at or above this read's declared "
