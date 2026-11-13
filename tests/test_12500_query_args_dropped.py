@@ -127,24 +127,33 @@ _STRUCTURAL_SHAPES = [
 def test_the_structural_arms_refuse_a_floor_or_an_order(stub, base, argument) -> None:
     """RED before the fix: the accessor never saw the argument, rows came back.
 
-    Fails on ``_is_refusal(result) is False``. The second assertion is the one
-    that shows WHY that matters, and it has to be written against the shape this
-    arm really returns: un-paginated the arm answers a bare ``list``, so a
-    ``"results" not in result`` check would be inert (round-1 finding 4 made this
-    real). With the guard removed the call returns 3 rows at confidence 0.01 —
-    exactly the rows the floor of 0.9 excludes — so this reds on the rows, not
-    just on the refusal.
+    Two falsifiers, and BOTH are reachable (round-2 finding 1: the previous
+    version claimed a rows assertion it did not have):
+
+    * ``_is_refusal(result) is False`` — the shipped defect;
+    * the rows report below, which runs only in the mutant case and names what
+      the caller actually received — 3 rows at confidence 0.01, exactly what a
+      floor of 0.9 excludes. It is written as an `if` rather than a second
+      `assert` because an `assert` after the first one is unreachable: pytest
+      stops at the first failure, so a "second assertion" there would be dead by
+      construction — which is how the claim outlived the assertion it described.
     """
     from tortoise.mcp_server import tortoise_query
 
     value = _CONFIDENCE_FLOOR if argument == "min_confidence" else "confidence"
     result = tortoise_query(**base, **{argument: value})
 
-    assert _is_refusal(result), (
-        f"{argument}={value!r} on {sorted(base)} was accepted and DROPPED — the "
-        f"accessor takes no such parameter, so the caller got rows they excluded: "
-        f"{result if not isinstance(result, list) else len(result)}"
-    )
+    if not _is_refusal(result):
+        rows = result if isinstance(result, list) else result.get("results", [])
+        below = [r for r in rows
+                 if isinstance(r, dict)
+                 and float(r.get("confidence", 1.0)) < _CONFIDENCE_FLOOR]
+        pytest.fail(
+            f"{argument}={value!r} on {sorted(base)} was accepted and DROPPED — "
+            f"the accessor takes no such parameter, so the caller received "
+            f"{len(rows)} row(s), {len(below)} of them BELOW the requested "
+            f"{argument}: {below[:3]}"
+        )
 
 
 @pytest.mark.parametrize("argument,value", [
@@ -233,9 +242,12 @@ def test_the_text_arm_still_APPLIES_them(stub, argument, value) -> None:
 def test_legitimate_calls_are_untouched(stub, kwargs) -> None:
     """The hot paths of all three arms must not be perturbed.
 
-    Fails if the guard's condition is broader than the set of arguments the arm
-    cannot apply (e.g. keying on ``order_by is not None`` alone would refuse the
-    default everywhere).
+    Falsified by a guard whose condition reaches these calls at all — e.g. one
+    keyed on the presence of ``filters``, or one that refuses every structural
+    read. It does NOT falsify `is not None` (these cases pass no such argument,
+    so the value is `None`); that mutant is caught by
+    ``test_falsy_values_are_no_ops_and_never_refused``, which is stated here
+    rather than claimed away (round-2 finding 2).
     """
     from tortoise.mcp_server import tortoise_query
 
@@ -248,8 +260,11 @@ def test_legitimate_calls_are_untouched(stub, kwargs) -> None:
 def test_defaults_are_not_refusals(stub) -> None:
     """`min_confidence=None` / `order_by=None` are the DEFAULTS — never refused.
 
-    Fails if the guard keys on the parameter's presence rather than on a value
-    the caller actually set, which would refuse every structural call.
+    Fails if the guard refuses on the parameter being PRESENT at all (e.g. an
+    `if "min_confidence" in kwargs` shape, or a guard placed where the default
+    trips it). An `is not None` mutant is NOT caught here — `None is not None` is
+    false, so it passes — and that limitation is recorded rather than papered
+    over (round-2 finding 2).
     """
     from tortoise.mcp_server import tortoise_query
 
@@ -261,13 +276,24 @@ def test_defaults_are_not_refusals(stub) -> None:
 @pytest.mark.parametrize("kwargs", [
     {"kind": "statement", "min_confidence": 0.0},
     {"kind": "statement", "offset": 0, "min_confidence": 0.0},
+    {"kind": "statement", "min_confidence": 0},      # int zero, not float
+    {"kind": "statement", "min_confidence": False},  # bool zero
     {"kind": "statement", "order_by": ""},
+    {"kind": "statement", "order_by": False},
     {"tag": "pricing", "kind": ""},
     {"tag": "pricing", "min_confidence": 0.0},
+    {"tag": "pricing", "min_confidence": 0},
     {"tag": "pricing", "order_by": ""},
 ])
 def test_falsy_values_are_no_ops_and_never_refused(stub, kwargs) -> None:
     """A client that serialises its own DEFAULTS must not be refused (#12500 r1).
+
+    This is the ONLY test that reds when the guard is narrowed to `is not None`
+    (measured: reintroducing it leaves the five `legitimate_calls` cases and
+    `test_defaults_are_not_refusals` green, because an OMITTED argument is
+    `None` and `is not None` never refuses `None` — round-2 finding 2). So it
+    carries the shapes the round-1 review named: float zero, INT zero, `False`,
+    and the empty strings.
 
     The arm itself defines these values as absent — the `text=` call normalises
     with `min_confidence or 0.0` and `order_by or "relevance"`, and the sibling
