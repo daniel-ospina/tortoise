@@ -2590,6 +2590,11 @@ def test_a_shaped_neutral_row_is_not_told_to_move_the_edge(sdk):
     assert "move this IMPL edge off" not in fix, (
         "a neutral edge transfers nothing even after the move: " + fix)
     assert "DELETE it instead — §3.1's disposition here is DROP" in fix, fix
+    # ⛔ The JUNCTION: the "flag is only HALF the repair" frame is suppressed on a
+    # neutral row, so the continuation must open its own sentence — it used to emit
+    # "…refuses an operator-shaped endpoint). this edge is '-' (neutral)…" (#12210
+    # review, P3).
+    assert "endpoint). This edge is" in fix, fix
     # ⛔ Neither the ambiguity prefix nor the chain tail: both are written for a
     # RE-POINT, and this string says DELETE (#12210 review, P3).
     assert "re-point onto the intended one by ID" not in fix, fix
@@ -3737,9 +3742,13 @@ def test_a_neither_arm_terminal_detail_names_the_shape_precondition(sdk):
     issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
                  if i.node_id == v1["id"])
     assert "target THAT" in issue.detail, issue.detail
-    assert "PRECONDITION of that move" in issue.detail, (
-        "the shape has to be cleared before that move, and the detail must say so: "
-        + issue.detail)
+    assert "PRECONDITION of the re-point this finding\'s repair orders" in \
+        issue.detail, (
+        "the shape has to be cleared before that re-point, and the detail must say "
+        "so: " + issue.detail)
+    # ⛔ The subject the sibling arm supplies ("and it") must survive the splice:
+    # "— then names NO successor" dropped it (#12210 review, P3).
+    assert "then it names" in issue.detail, issue.detail
 
 
 def test_an_ambiguous_name_is_not_asserted_as_a_single_destination(sdk):
@@ -3763,3 +3772,41 @@ def test_an_ambiguous_name_is_not_asserted_as_a_single_destination(sdk):
     assert "carried by 2 Objects" in fix, fix
     assert "the successor you named by ID" in fix, (
         "the destination must defer to the reader's choice: " + fix)
+
+
+def test_the_successorless_neither_arm_orders_the_shape_as_an_imperative(sdk):
+    """`_shape_repair` is a noun phrase; after "then " the arm needs an imperative.
+
+    Splicing the noun form emitted "name the successor — … — then clearing the shape —
+    … — AND re-point the edge onto it" (#12210 review, P3).
+    """
+    actor = sdk.create_entity("subject", "AcmeCorp")["node"]
+    v1 = _obj(sdk, "PolicyV1")
+    sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
+    sdk.update_entity(actor["id"], is_operator=True)
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.status='superseded'", {"i": v1["id"]})
+
+    fix = next(i for i in _issues(sdk, "superseded_object_active_edges")
+               if i.node_id == v1["id"]).fix
+    assert "then clear the shape" in fix, fix
+    assert "then clearing the shape" not in fix, fix
+
+
+def test_an_id_less_repair_does_not_emit_a_triple_space(sdk):
+    """The tail padding degenerated to two extra spaces when `_chain_tail` was empty.
+
+    Emitted "…Delete the edge into the old endpoint.   Archiving it instead …" on an
+    id-less row whose successor resolves live (#12210 review, P3).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    _obj(sdk, "PolicyV2")
+    sdk.create_operator("IMPL", p["id"], [v1["id"]])
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.status='superseded', "
+            "o.supersededBy='PolicyV2' REMOVE o.id", {"i": v1["id"]})
+
+    fix = next(i for i in _issues(sdk, "superseded_object_active_edges")
+               if i.node_id == "PolicyV1").fix
+    assert ".   Archiving" not in fix, (
+        "no clause is padded with extra spaces when the tail is empty: " + fix)
+    assert "endpoint. Archiving" in fix, fix

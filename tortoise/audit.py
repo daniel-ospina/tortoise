@@ -1281,7 +1281,8 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             # step is stated here as a precondition, as the draft arm above does
             # (#12210 review, P2).
             _pre = (" ⛔ and this endpoint is in NEITHER EP arm, so clearing its shape "
-                    "is a PRECONDITION of that move — then "
+                    "is a PRECONDITION of the re-point this finding's repair orders — "
+                    "then it "
                     if s["shape"] and not s["is_operator"] else " and it ")
             return ("; the successor it names is ITSELF "
                     f"{_quoted(_status_or_flag(s['carrier_status'], s['carrier_outdated']))}"
@@ -1962,6 +1963,11 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             _shape_repair = ("clearing the shape on the endpoint that carries it "
                              "(which carries no identity, so no repair can name "
                              "it)")
+        # ⛔ …and the IMPERATIVE form, for the arms that follow "then ": splicing the
+        # noun phrase there emitted "then clearing the shape — … — AND re-point …"
+        # (#12210 review, P3).
+        _shape_repair_imp = _shape_repair.replace("clearing the shape",
+                                                  "clear the shape", 1)
         # ⛔ ONE place that decides the DESTINATION, above EVERY arm that names one —
         # including the id-less arm, which used to return before it. A successor EP
         # cannot READ must never be the destination: a SHAPE refusal (operator-shaped,
@@ -2053,7 +2059,8 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 # punctuation and ``_archive_clause`` opens with "Archiving it
                 # instead", so a bare concatenation emitted
                 # "…only onto a live claimArchiving it instead …" (#12210 review, P3).
-                + ("" if s["neutral_row"] else " " + tail.strip() + " ")
+                + ("" if s["neutral_row"] or not tail.strip()
+                   else " " + tail.strip() + " ")
                 + _archive_clause(s))
         if not s["carrier_count"]:
             # ⛔ "Nothing to re-point onto" would be FALSE whenever a :Subject or
@@ -2097,8 +2104,9 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                    # restores it (``effective_n 2.5255``). The resolvable neither-arm
                    # arm already states this order — this one did not, then denied
                    # the re-point three clauses later (#12210 review, P2).
-                   (f"{_shape_repair} AND re-point the edge onto it, then delete the "
-                    f"edge into {q}" if (s["shape"] and not s["is_operator"]) else
+                   (f"{_shape_repair_imp} AND re-point the edge onto it, then "
+                    f"delete the edge into {q}"
+                    if (s["shape"] and not s["is_operator"]) else
                     f"re-point the "
                     f"{'edge' if not s['is_operator'] else 'input'} onto it and "
                     f"delete the edge into {q}"))
@@ -2185,7 +2193,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 # (#12210 review, P3).
                 + ("" if neutral else f"The flag is only HALF the repair — "
                     f"{_shape_repair} AND ")
-                + ("this edge is "
+                + ("This edge is "
                    f"{_quoted(s['direction'])} (neutral), so a moved edge would "
                    "transfer nothing either: DELETE it instead — §3.1's disposition "
                    "here is DROP. ⛔ Clearing the shape is NOT required to DELETE "
