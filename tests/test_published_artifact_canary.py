@@ -634,14 +634,15 @@ def test_the_transcript_DIRECTORY_is_paired_at_every_site_that_names_it():
     level out. This is the same class the authors already recognised for the artifact
     NAME and left unpinned for the PATH.
 
-    ⛔ SIBLING PIN, kept deliberately: `test_the_transcript_RELAY_is_one_agreement_across_four_sites`
-    pins the SAME agreement as "four strings" (the round-10 pass, scoped to
-    `release-artifact-canary.yml`). The counts differ because they count different things —
-    four STRINGS vs five SITES — not because the contract differs. This one is kept because
-    it also covers `publish-pypi.yml`'s build job, which the sibling does not, and because it
-    compares the WHOLE normalised path at every site (round 12: the last-component form was
-    blind to `$RUNNER_TEMP/logs/canary`). Neither is redundant; do not delete one as a
-    duplicate without checking the other's scope.
+    ⛔ SOLE OWNER OF THIS CONTRACT, on purpose (#12363 round 13). A peer lane's round-10 pin
+    (`test_the_transcript_RELAY_is_one_agreement_across_four_sites`) asserted the same
+    agreement, and the two DISAGREED on the location axis: it captured ONE component from
+    `--transcript-dir` and compared it to the upload path's last segment, so a fully
+    consistent rename to `$RUNNER_TEMP/logs/canary` at all five sites passed HERE and failed
+    THERE (measured). Two artifacts asserting one fact, disagreeing, is the failure mode
+    where neither is authoritative — so that pin was consolidated into this one rather than
+    left beside it. Do not reintroduce a second copy: if a site is added, add it to the
+    tuples below, which is what makes the count five rather than four.
     """
     import re
 
@@ -804,6 +805,102 @@ def test_the_transcript_STEPS_are_ordered_so_the_evidence_can_be_collected():
         f"{min(alert_steps)} — the alert would TAIL a file that is not there yet and every "
         f'filed issue body would say "(no transcript reached this job …)", silently '
         f"(`continue-on-error: true`)"
+    )
+
+
+def test_the_gate_steps_cannot_be_DEFUSED_into_a_green_job():
+    """A gate step that cannot fail its job is a no-op, and here it also RESOLVES the ledger (#12363 round 13).
+
+    This repo already names the class: `tests/test_runner_tool_contract.py`'s
+    `_STEP_DEFUSERS = ("if", "continue-on-error")` — the two step keys that turn a failing
+    gate into a passing job. It was applied to `ensure gh` only, so the two steps whose
+    verdict is the whole point were never checked against it.
+
+    Measured at `d3d5782152`, each mutation independently and with all 55 pins GREEN:
+
+      * `continue-on-error: true` on publish-pypi's `Documented first command on the built
+        wheel (#12363)`: the step fails, `build` reports SUCCESS, and `publish`
+        (`needs: build`) runs `pypa/gh-action-pypi-publish` on the uninstallable wheel —
+        irreversibly. That is the #2204 regression this gate exists to stop, shipped by a
+        one-line tightening that reads like caution.
+      * `continue-on-error: true` (or `if: false`) on the canary job's `id: canary` step:
+        the job reads SUCCESS with `steps.canary.outputs.exit_code` `1`, so the alarm and
+        `File or refresh the alert issue` (both `needs.canary.result != 'success'`) are
+        SKIPPED while the close gate (`result == 'success'` disjunct) RUNS — `af_resolve`
+        called with "Green: the published artifact now passes its documented first
+        command." A daily green run that files nothing and falsifies its own release-owed
+        issue, indefinitely.
+
+    ⛔ Asserting the mechanism (`exit "$rc"` present) is NOT this pin: that assertion stays
+    true under `continue-on-error`, which is why the property is asserted separately. This is
+    the pin that makes the two mechanisms agree instead of each looking correct alone.
+    """
+    import yaml
+
+    workflows = REPO_ROOT / ".github" / "workflows"
+
+    def undefused(step: dict, label: str) -> None:
+        for key in ("if", "continue-on-error"):
+            assert key not in step, (
+                f"{label} carries `{key}: {step[key]!r}` — a step that cannot fail its job is "
+                f"not a gate: the run reads green and the verdict (or the ledger close) goes "
+                f"with it"
+            )
+
+    build_steps = yaml.safe_load((workflows / "publish-pypi.yml").read_text())["jobs"]["build"][
+        "steps"
+    ]
+    preupload = [
+        step
+        for step in build_steps
+        if "published_artifact_canary.py" in str(step.get("run") or "")
+    ]
+    assert len(preupload) == 1, "the pre-upload gate step is missing"
+    undefused(preupload[0], "publish-pypi build / the pre-upload gate")
+
+    canary_steps = yaml.safe_load((workflows / "release-artifact-canary.yml").read_text())[
+        "jobs"
+    ]["canary"]["steps"]
+    canary_step = [step for step in canary_steps if step.get("id") == "canary"]
+    assert len(canary_step) == 1, "the `id: canary` step is missing"
+    undefused(canary_step[0], "release-artifact-canary / the `id: canary` step")
+
+
+def test_the_alert_job_keeps_the_write_scope_the_alert_RUNS_under():
+    """JOB-level `permissions` REPLACES the workflow's for that job, so the job block is the one that counts (#12363 round 13).
+
+    The existing pin reads `workflow["permissions"]["issues"]`, i.e. the WORKFLOW-level
+    block. GitHub's syntax reference: `jobs.<job_id>.permissions` "modif[ies] the default
+    permissions granted to the GITHUB_TOKEN" for that job — and the alert legs run inside
+    `report`, which declares its own block. Measured: setting
+    `report.permissions.issues: read` (a plausible minimum-privilege tightening, and exactly
+    the drift the neighbouring pin's message claims to prevent) leaves every pin green while
+    `gh issue create`/`close` 403 in `auto-file-issue.sh`: the durable issue is never filed
+    and both ledgers are never resolved, on a job that reads green.
+
+    So BOTH blocks are asserted: the job block because it is the one in force, the workflow
+    block because removing it silently re-opens the same hole the moment the job block is
+    dropped.
+    """
+    import yaml
+
+    workflow = yaml.safe_load(
+        (REPO_ROOT / ".github" / "workflows" / "release-artifact-canary.yml").read_text()
+    )
+    assert workflow["permissions"].get("issues") == "write", (
+        "the workflow-level grant must keep issues: write (the job block is additive to it in "
+        "intent; dropping this re-opens the hole if the job block is ever removed)"
+    )
+    report = workflow["jobs"]["report"]
+    assert report.get("permissions", {}).get("issues") == "write", (
+        "the `report` job declares its own permissions block, and a JOB-level block REPLACES "
+        "the workflow's for that job — the alert legs run under THIS one, so `issues: read` "
+        "here makes `gh issue create` 403 while the run reads green"
+    )
+    canary_perms = workflow["jobs"]["canary"].get("permissions") or {}
+    assert canary_perms.get("issues", "write") == "write", (
+        "the canary job must not lose issues: write if it declares its own block — a job-level "
+        "block replaces the workflow's, and the DEFUSED-close path depends on it"
     )
 
 
@@ -1710,72 +1807,3 @@ def test_a_FOREIGN_database_under_HOME_does_not_count_as_initialised(tmp_path):
     )
     assert arm.status == canary.FAIL, arm.detail
     assert "created no database" in arm.detail
-
-
-def test_the_transcript_RELAY_is_one_agreement_across_four_sites():
-    """The tail reaches the issue only if FOUR separately-edited strings agree: the canary
-    step's `--transcript-dir`, the upload `path`, the upload `name` == the download `name`,
-    and the download `path` == the directory the alert script reads. Nothing else in this
-    suite touches the workflow-side half — the shell harness writes the log ITSELF, so it can
-    only test the script's side — and round 10 measured three mutations of these strings
-    leaving the suite green while every filed issue silently degraded to
-    "(no transcript reached this job)" (#12363 round 10, P2). One test, so the four sites
-    cannot drift apart without a red.
-    """
-    import re
-
-    import yaml
-
-    workflow = yaml.safe_load(
-        (REPO_ROOT / ".github" / "workflows" / "release-artifact-canary.yml").read_text()
-    )
-    canary_steps = workflow["jobs"]["canary"]["steps"]
-    report_steps = workflow["jobs"]["report"]["steps"]
-
-    def step_named(steps, name):
-        for step in steps:
-            if step.get("name") == name:
-                return step
-        raise AssertionError(f"no step named {name!r}")
-
-    upload = next(s for s in canary_steps if "upload-artifact" in str(s.get("uses")))
-    download = next(s for s in report_steps if "download-artifact" in str(s.get("uses")))
-
-    upload_path = str(upload["with"]["path"]).rstrip("/")
-    download_path = str(download["with"]["path"]).rstrip("/")
-    assert upload["with"]["name"] == download["with"]["name"], (
-        f"the upload names the artifact {upload['with']['name']!r} and the download asks for "
-        f"{download['with']['name']!r} — the transcript never reaches the alert"
-    )
-    assert upload_path == download_path, (
-        f"the upload stores {upload_path!r} and the download extracts to {download_path!r}; "
-        f"the alert reads one fixed directory, so these must be the same path"
-    )
-
-    # The canary must WRITE into that same directory, and the tool owns the FILENAME.
-    transcript_dir = re.search(
-        r"--transcript-dir\s+\"?\$\{?RUNNER_TEMP\}?/([\w.-]+)",
-        str(
-            step_named(
-                canary_steps, "Smoke the published artifact (documented first command, clean HOME)"
-            )["run"]
-        ),
-    )
-    assert transcript_dir, 'the canary step does not pass --transcript-dir "$RUNNER_TEMP/<dir>"'
-    assert transcript_dir.group(1) == upload_path.rsplit("/", 1)[-1], (
-        f"the canary writes to $RUNNER_TEMP/{transcript_dir.group(1)} but the artifact captures "
-        f"{upload_path!r} — the upload would store an empty directory"
-    )
-
-    # The alert script's hardcoded read path must match the directory AND the tool's filename.
-    tool_src = (REPO_ROOT / "tools" / "published_artifact_canary.py").read_text()
-    filename = re.search(r'"([\w.-]+\.log)"', tool_src)
-    assert filename, "the tool no longer names its transcript file"
-    alert_src = (REPO_ROOT / ".github" / "scripts" / "published-artifact-alert.sh").read_text()
-    alert_log = re.search(r'local log="\$\{RUNNER_TEMP:-/tmp\}/([^"]+)"', alert_src)
-    assert alert_log, "the alert script no longer reads a RUNNER_TEMP transcript"
-    assert alert_log.group(1) == f"{transcript_dir.group(1)}/{filename.group(1)}", (
-        f"the alert reads {alert_log.group(1)!r} but the canary writes "
-        f"{transcript_dir.group(1)}/{filename.group(1)} — every filed issue would say "
-        f'"no transcript", which is the state round 6\'s incremental log exists to prevent'
-    )
