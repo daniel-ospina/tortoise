@@ -5309,8 +5309,8 @@ def _section_entries(manifest: dict, section: str) -> list[str] | None:
     the `<surface>:` blocks `tools/ci_selection.py::register_tests` splices into —
     which is why a scan that reads COLUMN-0 rows alone cannot see it, and why the row
     that carries it in a column-0 block is the one this pin reads instead.
-    ⛔ NEITHER A COUNT NOR AN INDEX IS PRINTED HERE, and an INDEX is NOT the stable
-    alternative the first cut of this paragraph claimed it was: this PR's own merge
+    ⛔ NO COUNT OR INDEX IS STATED AS THE CURRENT VALUE HERE, and an INDEX is NOT the
+    stable alternative the first cut of this paragraph claimed it was: this PR's merge
     of `origin/main` moved the entry's `core` index 653 -> 655 (898 -> 902 entries)
     while the claim it sits in was untouched, because an index moves on any
     registration ABOVE the entry exactly as a line number does. A number nobody
@@ -6369,7 +6369,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
                 f"position in `config/ci-surfaces.yml` is moved by every "
                 f"registration `tools/ci_selection.py::register_tests` splices above "
                 f"it). Keep the claim in one place and print no number. ⚠️ THREE RESIDUALS, "
-                f"both stated rather than left to be discovered: a number on a line "
+                f"all three stated rather than left to be discovered: a number on a line "
                 f"that names none of the block, an entry nor the manifest (by the WORD "
                 f"or by its FILENAME — the population is `_in_neighbour_population`, "
                 f"i.e. `_BLOCK_WORDS_WITH_MANIFEST` PLUS `_ENTRY_STEMS`, so all three "
@@ -6919,6 +6919,89 @@ def _drop_block_entries(text: str, section: str) -> str:
     return "".join(out)
 
 
+#: a LINE FINDING is `<source>:<digits> (cited by <doc>)`; a BLOCK/DOCUMENT finding
+#: names the sentence or the block and carries no such cite. The arm table below
+#: needs that split, because `pytest.raises(AssertionError)` cannot tell them apart.
+_ROW_FINDING = re.compile(r"- [\w./]+:\d+ \(cited by ")
+
+
+def _block_findings(message: str) -> list[str]:
+    """The BLOCK / DOCUMENT findings in the pin's message — the ones with no number.
+
+    ⛔ WHY THE ARM TABLE NEEDS THIS, MEASURED. `pytest.raises(AssertionError)` only
+    asks that the pin failed, and at a head where a TABLE ROW is stale — `#12381`
+    moved `tortoise/sdk.py` under the bundle's `sdk.py:25189` row, which this branch
+    does not own — EVERY case in the table passed with its arm deleted, because the
+    unrelated row's red satisfied `pytest.raises` (measured: the identity mutation,
+    which changes nothing at all, is RED). A case is therefore evidence for its arm
+    only when the ARM'S OWN finding — a block/document one — appeared, which is what
+    the table now asserts. The baseline test below holds the other half: on the
+    UNMUTATED tree these findings must be absent, or every case is satisfied by
+    something that was already wrong.
+
+    ⛔ THE `strip()` IS NOT DEFENSIVE TIDINESS — it is what makes this read the message
+    at all. pytest renders an assert's EXPLANATION with every continuation line
+    indented by two spaces, so `str(excinfo.value)` carries `  - <finding>` and a
+    `startswith("- ")` test matches NOTHING (measured: the extractor returned `[]` for
+    all 19 cases in the table, i.e. the very assertion this function exists to make
+    would have passed vacuously on every case it was written to tighten).
+    """
+    return [ln.strip()[2:] for ln in message.splitlines()
+            if ln.strip().startswith("- ")
+            and not _ROW_FINDING.match(ln.strip())]
+
+
+def test_the_arm_table_is_not_satisfied_by_an_unrelated_red():
+    """Baseline for `test_each_block_arm_reds_on_the_mutation_it_guards`.
+
+    The table mutates a copy and requires the pin to raise. At a head where a stale
+    TABLE ROW already raises, every case passes unconditionally — so the table's
+    evidence is only valid while the UNMUTATED pin produces no block/document
+    finding. Measured at this head: the only failure is
+    `tortoise/sdk.py:25189 (cited by 04-plan.md)`, a row finding (root #12381), so
+    this baseline holds and the table is a live instrument. If this test ever reds,
+    the table has become inert and every case in it is worthless until it is fixed.
+    """
+    try:
+        test_the_epic_bundle_cites_the_branch_rederived_resolve()
+    except AssertionError as exc:
+        stray = _block_findings(str(exc))
+        assert not stray, (
+            "the pin's block/document arms are ALREADY red on the unmutated tree, so "
+            "no case in `test_each_block_arm_reds_on_the_mutation_it_guards` can pin "
+            f"its arm — any raise satisfies the table: {stray}")
+
+
+def test_the_section_entries_membership_paragraph_is_rederived():
+    """The `_section_entries` docstring's remaining claim, checked against the tree.
+
+    Round 1's P3 removed the counts that drifted (898 -> 902), and the replacement
+    sentence claims MEMBERSHIP instead: this module is registered INDENTED in `core`
+    and is NOT in `sdk`; the ENTRY is registered INDENTED in BOTH. ⛔ MEMBERSHIP IS
+    STILL A CLAIM ABOUT TREE STATE, and a review measured two routine manifest edits
+    that falsify it with the whole suite green — adding this module to `sdk:` (a
+    plausible registration: it cites `tortoise/sdk.py` rows), and deleting the
+    entry's indented `sdk:` row. Both now red here. The `carve_out:` half is already
+    read by the block arm; this reads the two `surfaces:` mirrors a column-0 scan
+    cannot see, which is the point the paragraph makes.
+    """
+    manifest = parse_manifest_text(
+        _EPIC_CITE_SOURCES["ci_surfaces"].read_text(encoding="utf-8"))
+    core = manifest["surfaces"]["core"]
+    sdk = manifest["surfaces"]["sdk"]
+    module = "test_7949_capstone_measure.py"
+    entry = "test_pack_logic_writeprobe_11083.py"
+    assert module in core and module not in sdk, (
+        "the paragraph says this module is registered INDENTED in `core` and NOT in "
+        f"`sdk`; measured core={module in core}, sdk={module in sdk}")
+    assert entry in core and entry in sdk, (
+        "the paragraph says the ENTRY is registered INDENTED in BOTH `core` and "
+        f"`sdk`; measured core={entry in core}, sdk={entry in sdk}")
+    assert entry in manifest["carve_out"], (
+        "the paragraph says the column-0 `carve_out:` block is the row this pin reads "
+        f"INSTEAD; measured: {entry in manifest['carve_out']}")
+
+
 @pytest.mark.parametrize("mutation, arm", [
     # ⛔ NON-VACUITY FOR THE BLOCK ARM'S OWN ARMS. A review deleted twelve of them one
     # at a time and found the pin GREEN every time — over the real document AND over
@@ -7005,19 +7088,37 @@ def _drop_block_entries(text: str, section: str) -> str:
     # like `elif len(carve) > 1:` below — and it is listed here as such rather than
     # given a case that would pass either way.
     #
-    # ⚠️ TWO MORE REFINEMENTS, DECLARED FOR THE SAME REASON (both measured): the
-    # claim sentence's `sentence_numbers` arm is subsumed by `_LINE_CITE` +
-    # `_BARE_NUM` over the same sentence, and the non-list shape guard in
-    # `_section_entries` raises into the same collected `block_failures` list that
-    # `elif carve != [ENTRY]:` already refuses the state through. Deleting either
-    # leaves this table green. They are kept because they name the CAUSE better than
-    # the arm that subsumes them (a bare number, a mapping rather than a list), not
-    # because they are the only guard.
-    # `sentence_numbers` — a bare number with no cite separator on the claim line.
+    # ⚠️ ONE MORE REFINEMENT, DECLARED FOR THE SAME REASON (measured): the non-list
+    # shape guard in `_section_entries` raises into the same collected
+    # `block_failures` list that the `slow_files:` leak arm already refuses a
+    # MAPPING-KEYED-BY-THE-ENTRY through (`"`slow_files:` block carries [...]"`), so
+    # deleting `if not isinstance(entries, list):` leaves that case RED. It is kept
+    # because it names the CAUSE better than the arm that subsumes it (a mapping
+    # rather than a list) — and it is a SOLE catcher for a second shape, pinned by the
+    # row below: a VALID mapping holding NO capstone is GREEN with the guard deleted
+    # (measured).
+    # ⛔ `sentence_numbers` WAS DECLARED HERE AS THE OTHER REFINEMENT AND THAT WAS WRONG
+    # IN THE DANGEROUS DIRECTION (measured by a review): the row that was supposed to
+    # pin it (`— was 9943 once, cited by`) also breaks `_ONE_ENTRY`'s
+    # `(?=\s*—\s*cited by\b)` lookahead, so it stayed RED with `sentence_numbers`
+    # deleted — while a bare number with NO cite separator (`— cited by (9943)`,
+    # `cited by 9943 rows`) went GREEN, because `_LINE_CITE` needs a separator and the
+    # doc-wide `_MANIFEST_CITE` needs one too. It is a SOLE catcher, and it now has a
+    # row whose mutation keeps the lookahead intact.
+    # ⛔ TWO ROWS FOR THE CLAIM SENTENCE'S BARE-NUMBER ARM, because the second one does
+    # NOT pin it: `— was 9943 once, cited by` breaks `_ONE_ENTRY`'s lookahead, so it
+    # stayed red with `sentence_numbers` deleted (measured). The first keeps the
+    # lookahead intact and puts the number where no SEPARATOR-based matcher can see
+    # it — `(9943)` and `9943 rows` are both GREEN with the arm deleted, RED with it
+    # present, via its own message.
+    (lambda doc, man: (doc.replace(
+        "`test_pack_logic_writeprobe_11083.py` — cited by",
+        "`test_pack_logic_writeprobe_11083.py` — cited by (9943)", 1), man),
+     "the `sentence_numbers` arm (a number with NO cite separator)"),
     (lambda doc, man: (doc.replace(
         "`test_pack_logic_writeprobe_11083.py` — cited by",
         "`test_pack_logic_writeprobe_11083.py` — was 9943 once, cited by", 1), man),
-     "the claim sentence's bare-number arm (`was 9943`)"),
+     "`_ONE_ENTRY`'s tail lookahead (a qualifier between the name and the clause)"),
     # `elif carve != [ENTRY]:` — a DIFFERENT capstone where the entry should be.
     (lambda doc, man: (doc, man.replace(
         "\n- test_pack_logic_writeprobe_11083.py\n",
@@ -7028,12 +7129,19 @@ def _drop_block_entries(text: str, section: str) -> str:
     # only the `- ` rows between `slow_files:` and the next column-0 key.
     (lambda doc, man: (doc, _drop_block_entries(man, "slow_files")),
      "the absent-or-empty `slow_files:` arm"),
-    # the non-list shape guard — a MAPPING-shaped `slow_files:` holding the entry.
-    (lambda doc, man: (doc, man.replace(
-        "\nslow_files:\n", "\nslow_files:\n  x: test_pack_logic_writeprobe_11083.py\n", 1)
-        if False else man.replace(
-        "\nslow_files:\n", "\nslow_files:\n  x: y\n", 1)),
-     "the non-list shape guard (a mapping-shaped `slow_files:`)"),
+    # the non-list shape guard — a VALID mapping-shaped `slow_files:` holding NO
+    # capstone. ⛔ AN EARLIER FIXTURE HERE PINNED NOTHING: it carried a dead
+    # `if False else` branch (so its "holding the entry" label described a variant that
+    # never ran) and the branch that DID run produced `slow_files:` followed by
+    # `  x: y` AND the original `- ` rows, which is invalid YAML — refused by the
+    # loader before `_section_entries`, so the case stayed RED with the guard DELETED
+    # (measured). Two corrections from that measurement: the block's entry rows are
+    # dropped first so the mapping is valid, and the mapping holds no capstone, which
+    # is the shape ONLY this guard refuses (a mapping keyed by the entry is also
+    # refused by the leak arm).
+    (lambda doc, man: (doc, _drop_block_entries(man, "slow_files").replace(
+        "\nslow_files:\n", "\nslow_files:\n  checked: 1\n", 1)),
+     "the non-list shape guard (a VALID mapping-shaped `slow_files:`)"),
     # ⛔ THE TWO THE SAME REVIEW FOUND AS FAIL-OPENS, so they get a case like the
     # rest: each is RED here and GREEN if the arm it names is deleted.
     (lambda doc, man: (doc.replace(
@@ -7058,6 +7166,13 @@ def test_each_block_arm_reds_on_the_mutation_it_guards(mutation, arm, monkeypatc
       * `elif len(carve) > 1:` is a MESSAGE refinement: `elif carve != [ENTRY]`
         refuses the same state, so its case stays RED with the arm deleted. It is
         listed for the message it produces, not for coverage.
+
+    ⛔ AND EVERY CASE MUST PRODUCE A BLOCK/DOCUMENT FINDING (`_block_findings`).
+    Without that assertion the table is INERT at any head where a stale table row
+    already raises: the identity mutation — which changes nothing — is RED there, so
+    `pytest.raises` is met by the row and an arm can be deleted with all cases green
+    (measured by a review). `test_the_arm_table_is_not_satisfied_by_an_unrelated_red`
+    holds the baseline half of that contract.
     """
     doc_text = _EPIC_CITE_DOCS["03-test-design.md"].read_text(encoding="utf-8")
     man_text = _EPIC_CITE_SOURCES["ci_surfaces"].read_text(encoding="utf-8")
@@ -7070,8 +7185,14 @@ def test_each_block_arm_reds_on_the_mutation_it_guards(mutation, arm, monkeypatc
     mcopy.write_text(man_new, encoding="utf-8")
     monkeypatch.setitem(_EPIC_CITE_DOCS, "03-test-design.md", dcopy)
     monkeypatch.setitem(_EPIC_CITE_SOURCES, "ci_surfaces", mcopy)
-    with pytest.raises(AssertionError):
+    with pytest.raises(AssertionError) as excinfo:
         test_the_epic_bundle_cites_the_branch_rederived_resolve()
+    findings = _block_findings(str(excinfo.value))
+    assert findings, (
+        f"the {arm!r} case went RED without a BLOCK/DOCUMENT finding — the only "
+        "failure was a stale TABLE ROW, so this case pins nothing. Either the "
+        "mutation is no longer the shape its arm refuses, or a subsuming arm now "
+        "catches it first; re-derive the case.")
 
 
 def test_the_two_cite_arms_are_complementary_not_duplicate():
