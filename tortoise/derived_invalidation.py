@@ -737,12 +737,20 @@ def _reconcile_or_report(sdk: Any, goal_id: str | None) -> dict:
     ``counts.gone``), not a reason to discard the sweep's other results. A falsy
     ``goal_id`` is not a failure — ``reconcile_goal_state_cache`` says so itself.
 
-    ⛔ THE CALLER MUST NAME THE GOAL, and the two read arms name it from the
-    claim when the ``Invalidation`` does not (``invalidation.goal_id or
-    claim["goalId"]``). A skipped check is invisible in the counters — it is
-    neither ``failed`` nor ``gone`` — so passing a goal id that is falsy for a
-    reason the claim could have supplied is a reconcile that silently does not
-    happen over the exact shape this helper exists for (#12336).
+    ⛔ THE CALLER MUST NAME THE GOAL, and every arm that holds a read claim
+    names it from the claim when the ``Invalidation`` does not
+    (``invalidation.goal_id or claim.get("goalId")``): the ALREADY-TERMINAL
+    arm, the POST-EXCEPTION arm from its re-read ``after``, and the SUCCESS arm.
+    ⛔ THREE arms, not two — and the SUCCESS arm is the one it matters most for:
+    it is the only arm that actually retires, so a skip there is permanent
+    (the claim is terminal by the time a caller could notice, and
+    ``invalidate_stale`` never scans it again). A skipped check is invisible in
+    the counters — it is neither ``failed`` nor ``gone`` — so passing a goal id
+    that is falsy for a reason the claim could have supplied is a reconcile that
+    silently does not happen over the exact shape this helper exists for
+    (#12336). ``.get`` rather than ``[]``: an arm written with the subscript
+    would RAISE on a claim that lacks the prop, turning a reconcilable skip into
+    a ``failed`` the sweep books with ``found: None``.
 
     ⚠️ It is deliberately the SAME reconcile the retirement path uses (step 4),
     wrapped once, so there is one set of predicates behind
@@ -985,10 +993,10 @@ def reconcile_goal_state_cache(sdk: Any, goal_id: str | None) -> dict:
     """
     if not goal_id:
         # ⛔ NOT "the claim names no goal" — this function cannot know that: it
-        # was handed nothing. The two ALREADY-TERMINAL arms source the id from the
-        # claim (`invalidation.goal_id or claim["goalId"]`), so a call that lands
-        # here means no caller supplied one, and the message says exactly that
-        # rather than asserting a fact about the claim it never read.
+        # was handed nothing. The three arms that hold a read claim source the id
+        # from it (`invalidation.goal_id or claim.get("goalId")`), so a call that
+        # lands here means no caller supplied one, and the message says exactly
+        # that rather than asserting a fact about the claim it never read.
         return {"checked": False,
                 "reason": "no goalId was supplied to the reconcile"}
     try:
