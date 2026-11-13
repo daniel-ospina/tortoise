@@ -4150,13 +4150,15 @@ def tortoise_suggest_entry_points(query: str, limit: int = 5,
     Returns [{id, name, kind, confidence}] sorted by confidence DESC.
     """
     try:
-        # #12297: ENTITY RESOLUTION RE-OWNS THIS ORDER — it sorts the rows by
-        # ``confidence`` DESC and returns the top ``limit`` (default 5, far
-        # inside the shipped pool width of 40), and the SDK lane it mirrors
-        # (``sdk.suggest_entry_points``) already opts out. Without this the
-        # armed gate re-picked WHICH entities resolve, with no ``leg_trace``
-        # here to disclose it — the "membership probe reading a page smaller
-        # than the pool width" class this PR's own docstring defines.
+        # #12297: THE RETURNED PAGE **IS** THE RESOLUTION RESULT SET, at
+        # ``limit`` default 5 — far inside the shipped pool width of 40 — so an
+        # armed rerank changes WHICH entities resolve rather than merely their
+        # order, and there is no ``leg_trace`` here to disclose it: the
+        # "membership probe reading a page smaller than the pool width" class
+        # this PR's own docstring defines. ⛔ This function does NOT sort (it
+        # returns ``_safe(...)``'s list as-is, see the return below); the
+        # confidence-DESC sort lives in the SDK lane it mirrors,
+        # ``sdk.suggest_entry_points``, which opts out for its own reason.
         results = _safe(_get_org_sdk().tortoise_fts_query, query,
                         kind=kind_filter, limit=limit,
                         _rerank_candidates=False)

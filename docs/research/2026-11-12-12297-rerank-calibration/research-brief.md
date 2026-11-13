@@ -290,9 +290,11 @@ point, and EVERY caller of this read is on it:
 | the **ask lane** (`tortoise/ask_lane.py` reaches the same read with the default `order_by="relevance"`, no recency, a non-empty question) | **no** — and its candidate text is captured TURNS, i.e. the passage-length class priced at 85.227 ms/pair, so arming the gate there costs the same ≈3.4 s/query it costs user search |
 
 Every caller that must not have its page re-picked **opts out** via
-`_rerank_candidates=False`, in three classes — and two product reads deliberately do
-NOT, because the re-pick is the lever: `hosted_api`'s search route and
-`selfhost_api`'s search. Three distinct mechanisms, and they are NOT the same fact:
+`_rerank_candidates=False`, in FOUR classes (below) — and SIX call sites deliberately
+do NOT, because the re-pick IS the lever: the two API-server search routes
+(`hosted_api` / `selfhost_api`), the MCP search tools (`tortoise_search`,
+`tortoise_query`), the ask lane, and the capture-time noun prior (which has its own
+`OVERRIDES:` record further down). The four mechanisms are NOT the same fact:
 
 - **Order re-owners** — `suggest_entry_points`, `issue_insight`, `recall_state`,
   `recall_gaps` and `volunteer_context` (which binds the read as a `_search_fn=` seam
@@ -312,11 +314,8 @@ NOT, because the re-pick is the lever: `hosted_api`'s search route and
   (`tools/longmem_eval/retrieve.py`, `tools/fusion_formula_ab.py`,
   `tools/ask_pool_admission_probe.py`) and the benchmarks
   (`benchmarks/run_report.py`, `benchmarks/load_test.py`) pin it for comparability
-  against RECORDED numbers, exactly as the first three pin `_valid_time_rerank`. The eval / A-B harnesses
-(`tools/longmem_eval/retrieve.py`, `tools/fusion_formula_ab.py`,
-`tools/ask_pool_admission_probe.py`) and the benchmark harnesses
-(`benchmarks/run_report.py`, `benchmarks/load_test.py`) pin it for comparability
-**Membership probes**: `battery/runner/setup.py`'s
+  against RECORDED numbers, exactly as the first three pin `_valid_time_rerank`.
+- **Membership probes** — `battery/runner/setup.py`'s
 seed-manifest guard (`limit=20`) and `tools/why_layer_rate.py`'s support-entry
 lookup (`limit=25`) ask "is this row in the returned page", read a page smaller than
 the pool width, and would turn a re-picked page into a false `ConfigError` / a false

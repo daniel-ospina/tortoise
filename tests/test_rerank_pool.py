@@ -897,7 +897,9 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
     # cannot quietly inherit a re-picked page. The behaviour above is the
     # assertion; this stops the sweep from being silently shrunk.
     #
-    # ⛔ EVERY SITE IN `tortoise/` *AND* THE EXTERNAL FILES, BY AST — because
+    # ⛔ EVERY SITE IN `tortoise/` BY AST, plus a DERIVED population in `tools/`,
+    # `battery/` and `benchmarks/` (test files are excluded: ~90 of them read
+    # this method and none is a product surface) — because
     # both weaker forms were measured green over a real defect:
     #   * a FILE-SCOPED SUBSTRING missed the call sites inside `tortoise/sdk.py`
     #     (deleting `_rerank_candidates=False` from any of the eight left the
@@ -1006,6 +1008,10 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
     # non-vacuous: the enumeration must have found the surface it claims to
     assert len(scanned) >= 16, scanned
 
+    # The NAMED set below is the "must opt out" half; the DERIVED half (further
+    # down) is what stops a NEW caller in these trees from staying green — a
+    # literal tuple does not grow by itself, which is the failure this comment's
+    # own body describes.
     for rel in ("battery/runner/setup.py", "tools/why_layer_rate.py",
                 "tools/longmem_eval/retrieve.py", "tools/fusion_formula_ab.py",
                 "tools/ask_pool_admission_probe.py",
@@ -1024,6 +1030,35 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
                 f"{rel}:{owner} reads the rerankable page without opting out — "
                 "with the gate armed its page composition moves and a "
                 "membership probe returns a false diagnosis")
+
+    # ⛔ THE DERIVED HALF. Every AST-visible call site in these three trees must
+    # either opt out or be on the INTENTIONAL-KEEP list below — a lever that must
+    # RUN to be calibrated (the two ask mirrors, the two calibration tools). A new
+    # caller that does neither reds here, which is what a literal tuple could
+    # never do.
+    intentional_keep = {
+        "tools/ask_recall_bench.py",        # an ask MIRROR: must measure the
+        "tools/gen_ask_transcripts.py",     # shipped reader, i.e. the lever ON
+        "tools/candidate_recall_11901.py",  # measures the rerank itself
+        "tools/rerank_calibration_12297.py",  # ditto
+    }
+    seen_external: set[str] = set()
+    for tree in ("tools", "battery", "benchmarks"):
+        for path in sorted((root / tree).rglob("*.py")):
+            rel = str(path.relative_to(root))
+            found = _sites(path)
+            if not found:
+                continue
+            seen_external.add(rel)
+            if rel in intentional_keep:
+                continue
+            for owner, opted_out in found:
+                assert opted_out, (
+                    f"{rel}:{owner} reads the rerankable page and neither opts "
+                    "out nor is on the intentional-keep list — with the gate "
+                    "armed it re-picks which rows survive limit, undisclosed")
+    assert len(seen_external) >= 9, (
+        f"the derived census saw only {sorted(seen_external)} — the trees moved")
 
     # ⛔ AND THE CENSUS MUST SEE THE SEAM. A read bound as ``_search_fn=`` (the
     # volunteer pipeline does exactly that) is not an ``ast.Call`` on
