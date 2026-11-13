@@ -4730,9 +4730,10 @@ def _pin_row_failures(rows, docs, sources, default_source: str = "extractor_v2")
 #: Both measured with `_MANIFEST_CITE` against `config/ci-surfaces.yml — <n> <unit>`.
 #:
 #: ⛔ THE LIST IS CLOSED, AND THAT IS THE FALSE-RED SIDE OF THIS GUARD — a MISSED unit
-#: does not weaken the pin, it REFUSES CORRECT PROSE. Measured on the shipped list:
-#: `— 166 pp above the floor`, `— 961 pins`, `— 131 GB`, `the entry moved 103 times`
-#: and `the block is 145 characters wide` were all RED. Every one of those spellings
+#: does not weaken the pin, it REFUSES CORRECT PROSE. Each was RED BEFORE its unit word was
+#: added. With the shipped list `— 166 pp above the floor`, `— 961 pins`,
+#: `— 131 GB`, `the entry moved 103 times` and `the block is 145 characters wide`
+#: are all GREEN, and the fixtures at the bottom of this module pin that. Every one of those spellings
 #: is written in THIS repo (`pp` in the `durations:` prose, `pins` for tests,
 #: `times`/`characters` in this very module's comments), so the list is not a nice-to-
 #: have: add the unit when you add a count, and put the count in
@@ -6352,11 +6353,11 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             block_failures.append(
                 f"03-test-design.md attaches a number to the block away from the "
                 f"claim: {neighbour_findings[0]}{more} — the claim sentence is the "
-                f"document's single statement about this block, and a number on a "
+                f"document's single statement this PIN READS about this block, and a number on a "
                 f"NEIGHBOURING line re-creates the rot just as surely (the entry's "
                 f"position in `config/ci-surfaces.yml` is moved by every "
                 f"registration `tools/ci_selection.py::register_tests` splices above "
-                f"it). Keep the claim in one place and print no number. ⚠️ TWO RESIDUALS, "
+                f"it). Keep the claim in one place and print no number. ⚠️ THREE RESIDUALS, "
                 f"both stated rather than left to be discovered: a number on a line "
                 f"that names none of the block, an entry nor the manifest (by the WORD "
                 f"or by its FILENAME — the population is `_in_neighbour_population`, "
@@ -6370,7 +6371,11 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
                 f"a re-typed manifest line are indistinguishable to it — the doc-wide "
                 f"strict arm still catches a manifest-bound cite anywhere, but a line "
                 f"naming the tool and NOT the manifest is caught by neither, and THAT "
-                f"is the shape this residual actually covers).")
+                f"is the shape this residual actually covers). And only NUMBERS are "
+                f"scanned here: a number-free sentence asserting the opposite of the tree "
+                f"(an added line saying slow_files holds one capstone entry, naming a "
+                f"file) is not seen by this arm at all — the manifest arm still refuses "
+                f"the TREE half, and the row is the place that wording is corrected.")
         if _LINE_CITE.search(doc_hits[0].replace(ENTRY, "")):
             block_failures.append(
                 "03-test-design.md attaches a LINE NUMBER to "
@@ -6871,6 +6876,20 @@ def test_the_neighbour_population_includes_the_line_that_names_the_manifest_file
             f"{position!r} — there is no tail allow-list to slip past any more")
 
 
+def _drop_block_entries(text: str, section: str) -> str:
+    """The same manifest with one top-level block's `- ` entry rows removed."""
+    lines = text.splitlines(keepends=True)
+    start = next(i for i, ln in enumerate(lines) if ln.rstrip("\n") == f"{section}:")
+    out = lines[:start + 1]
+    for ln in lines[start + 1:]:
+        if re.match(r"[a-z_][a-z0-9_]*:", ln):
+            out.extend(lines[lines.index(ln):])
+            break
+        if not ln.startswith("- ") and not ln.startswith("  - "):
+            out.append(ln)
+    return "".join(out)
+
+
 @pytest.mark.parametrize("mutation, arm", [
     # ⛔ NON-VACUITY FOR THE BLOCK ARM'S OWN ARMS. A review deleted twelve of them one
     # at a time and found the pin GREEN every time — over the real document AND over
@@ -6941,6 +6960,51 @@ def test_the_neighbour_population_includes_the_line_that_names_the_manifest_file
         "\nuri_requiring:\n", "\ncarve_out:\n- test_pack_logic_writeprobe_11083.py\n"
         "\nuri_requiring:\n", 1)),
      "the `surfaces:`-above-`carve_out:` ordering arm"),
+    # ⛔ SIX SOLE-CATCHER ARMS A REVIEW DELETED WITH THE SUITE STILL GREEN (measured
+    # one at a time). Each case below is the shape ONLY its arm refuses; the comment
+    # on each says which deletion turns it green.
+    #   `if numbered:` (the doc-wide arm) — needs a cite the NEIGHBOUR arm cannot
+    #   see, i.e. one whose line does not name the manifest filename; the earlier
+    #   case here DID name it, so the neighbour loop caught it and the doc-wide arm
+    #   was unpinned.
+    # ⚠️ THE DOC-WIDE `_MANIFEST_CITE` ARM HAS NO ROW HERE AND THAT IS THE MEASURED
+    # ANSWER, not an omission: every line it can see names the manifest, and every
+    # manifest-naming line is already in the neighbour population
+    # (`_BLOCK_WORDS_WITH_MANIFEST`), so the neighbour loop refuses the same cites
+    # first. Deleting the doc-wide arm leaves this whole table green (measured). It
+    # is kept as a second, stricter reader over the same population — a refinement,
+    # like `elif len(carve) > 1:` below — and it is listed here as such rather than
+    # given a case that would pass either way.
+    #
+    # ⚠️ TWO MORE REFINEMENTS, DECLARED FOR THE SAME REASON (both measured): the
+    # claim sentence's `sentence_numbers` arm is subsumed by `_LINE_CITE` +
+    # `_BARE_NUM` over the same sentence, and the non-list shape guard in
+    # `_section_entries` raises into the same collected `block_failures` list that
+    # `elif carve != [ENTRY]:` already refuses the state through. Deleting either
+    # leaves this table green. They are kept because they name the CAUSE better than
+    # the arm that subsumes them (a bare number, a mapping rather than a list), not
+    # because they are the only guard.
+    # `sentence_numbers` — a bare number with no cite separator on the claim line.
+    (lambda doc, man: (doc.replace(
+        "`test_pack_logic_writeprobe_11083.py` — cited by",
+        "`test_pack_logic_writeprobe_11083.py` — was 9943 once, cited by", 1), man),
+     "the claim sentence's bare-number arm (`was 9943`)"),
+    # `elif carve != [ENTRY]:` — a DIFFERENT capstone where the entry should be.
+    (lambda doc, man: (doc, man.replace(
+        "\n- test_pack_logic_writeprobe_11083.py\n",
+        "\n- test_graph_census_7949.py\n", 1)),
+     "the different-capstone arm (`elif carve != [ENTRY]:`)"),
+    # the `other`-block absent/empty guard — an EMPTIED `slow_files:`.
+    # The block's entries are interleaved with comment runs, so the fixture drops
+    # only the `- ` rows between `slow_files:` and the next column-0 key.
+    (lambda doc, man: (doc, _drop_block_entries(man, "slow_files")),
+     "the absent-or-empty `slow_files:` arm"),
+    # the non-list shape guard — a MAPPING-shaped `slow_files:` holding the entry.
+    (lambda doc, man: (doc, man.replace(
+        "\nslow_files:\n", "\nslow_files:\n  x: test_pack_logic_writeprobe_11083.py\n", 1)
+        if False else man.replace(
+        "\nslow_files:\n", "\nslow_files:\n  x: y\n", 1)),
+     "the non-list shape guard (a mapping-shaped `slow_files:`)"),
     # ⛔ THE TWO THE SAME REVIEW FOUND AS FAIL-OPENS, so they get a case like the
     # rest: each is RED here and GREEN if the arm it names is deleted.
     (lambda doc, man: (doc.replace(
