@@ -5357,16 +5357,19 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         "consume pair that sat beside them")
     # #12266: the one cite this table no longer holds — a line number that other
     # tools and hand-authored rows move. Asserted here rather than as its own test on
-    # purpose: this
-    # file's case count is itself pinned by `config/ci-surfaces.yml`'s durations row
-    # (`test_the_durations_row_quotes_the_case_count_it_weights`), so a new test
-    # function here would red a count that has nothing to do with the change — the
-    # pin lives in the private helper, and the doc cites THIS test as its caller,
-    # because a `path::symbol` cite has to resolve (a cite naming a renamed-away test
-    # is the same defect class this PR fixes; caught in this PR's own review).
+    # purpose: this file's case count is itself pinned by `config/ci-surfaces.yml`'s
+    # durations row (`test_the_durations_row_quotes_the_case_count_it_weights`), so a
+    # new test function here would red a count that has nothing to do with the change
+    # — the pin lives in the private helper, and the doc cites THIS test as its
+    # caller, because a `path::symbol` cite has to resolve (a cite naming a
+    # renamed-away test is the same defect class this PR fixes; caught in this PR's
+    # own review).
     # ⛔ AND IT IS CALLED **BEFORE** `assert not failures` ON PURPOSE — THE ORDER IS
     # LOAD-BEARING, so do not tidy it down beside that assert. This test is RED on
-    # `main` for an unrelated row (`04-plan.md`'s `tortoise/sdk.py:25189`, #11556), and
+    # `main` for an unrelated row — `04-plan.md` cites `tortoise/sdk.py:25189` for
+    # `declared = declared_relation_predicates()`, which the tree carries at `25195`
+    # (measured at `ca74f2375e`: `git show ca74f2375e:tortoise/sdk.py | sed -n
+    # '25189p'` is a bare `)`); the same cite rot is tracked in #12456 / #12381. And
     # an `assert` that raises ends the test: placed after it, this pin was **never
     # executed at the head that merged** and every arm below was unexercised — measured
     # by appending a `config/ci-surfaces.yml:10076` cite to the document's row,
@@ -5431,9 +5434,10 @@ def _assert_carve_out_entry_is_pinned_by_symbol():
     EARLIER head and is not the value at `c7499ac7a7`.)
     ⛔ The rule is NOT "a bare number is not a cite". A headed history value is legal
     whether it is dressed or not; the LIVE value is refused in EVERY form, bare
-    included, because it is a claim about a tree that has not happened yet. The
-    headings above are what make a history value checkable — not the absence of them
-    on a live one.
+    included — it is the one claim in the row that today's tree re-stales on somebody
+    else's merge, so printing it makes the document false without anyone editing the
+    document. Headings are what make a HISTORY value checkable; they do not make the
+    live one safe.
 
     This is `05-verify.md` D5's own rule ("the symbol is authoritative and the line
     number is a convenience") applied to the one cite whose number a third party
@@ -5558,9 +5562,14 @@ def _assert_carve_out_entry_is_pinned_by_symbol():
     # The `[0-9A-Za-z_]` boundaries are what keep it off an IDENTIFIER that merely
     # ends in those digits — `test_pack_logic_writeprobe_11083` must stay legal,
     # because this pin REQUIRES the row to print it, and `11083` is a reachable live
-    # line for a file that moved 44 lines in a day (#12266 review, P2).
+    # line for a file that moved 44 lines in a day (#12266 review, P2). ⛔ `#` is
+    # excluded from the preceding-character set for the same reason one step further
+    # out: `#<N>` in this bundle is an ISSUE reference, and an issue number equal to
+    # the live line was a MEASURED false block (`(see #10076)` red the pin at
+    # `ca74f2375e`, where the entry sat on 10076 and #10076 is a real issue). GitHub's
+    # line anchor is `#L<N>`, which the second arm still catches.
     live = str(hits[0])
-    live_cites = re.findall(rf"(?<![0-9A-Za-z_]){live}(?![0-9A-Za-z_])", rows[0]) + \
+    live_cites = re.findall(rf"(?<![0-9A-Za-z_#]){live}(?![0-9A-Za-z_])", rows[0]) + \
         re.findall(rf"(?:(?<=#)|\b)L{live}\b", rows[0])
     assert not live_cites, (
         f"the `carve_out:` row prints the entry's CURRENT line ({live}) "
@@ -5568,8 +5577,9 @@ def _assert_carve_out_entry_is_pinned_by_symbol():
         "the number that re-stales on somebody else's merge (#12266 settled it four "
         f"times by hand), and it is a cite in whatever form it is dressed: `:{live}`, "
         f"`→ :{live}`, `@{live}`, `**{live}**`, `#L{live}`. History values stay legal; "
-        "the LIVE one does not, because it is a claim about a tree that has not "
-        "happened yet. Cite the symbol and the section instead.")
+        "the LIVE one does not, because it is the one claim in the row that today's "
+        "tree re-stales on somebody else's merge. Cite the symbol and the section "
+        "instead.")
 
     # ⛔ The row's OTHER half — "`uri_requiring:` and `slow_files:` hold none" — is
     # graded here too (#12266 review, P2). It is true today: the symbol occurs only in
