@@ -7792,7 +7792,7 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
     # existed, but the note that enrols it did not until `#12000`'s F1b note),
     # and a provenance asserted here would be the false record this note exists
     # to prevent. ⛔ The count is SCOPED
-    # to that head rather than re-cut, because this file collects 180 now and no
+    # to that head rather than re-cut, because this file collects 183 now and no
     # run of it can report
     # 152; an unscoped figure here would be the stale-measurement defect §6 of the
     # census doc exists to forbid. What closed the gap is the AST guard below —
@@ -8264,7 +8264,7 @@ def test_a_duplicate_literal_key_in_the_census_dicts_cannot_land_silently():
 #
 #   * `tools/` — 140 of 195 DO reach it; 55 do not (measured:
 #     `select(["tools/min_signal.py"], "pull_request")` → 90 test files, this one
-#     absent; `tools/who_is_on.py`, `tools/claim_lanes.py` likewise). `tools/dod_5090_probe.py`
+#     absent; `tools/claim_lanes.py`, `tools/ask_spotcheck.py` likewise). `tools/dod_5090_probe.py`
 #     itself does — it is a `CORE_ALSO` entry in `tools/ci_selection.py` (the
 #     instrument has to be selected by its own subject; 830 test files, this one
 #     PRESENT) — which is the file `#11996`'s duplicate lived in, and why a
@@ -8280,7 +8280,7 @@ def test_a_duplicate_literal_key_in_the_census_dicts_cannot_land_silently():
 # So the honest bound is per root and NOT a rule you can generalise: any full-lane run
 # (push and schedule select in FULL, which is what makes the born-at-merge case
 # catchable), plus a per-file `pull_request` selection that covers every `tests/`
-# module but one, `tools/dod_5090_probe.py`, and 254 of 285 `tortoise/` modules.
+# module but one, 140 of 195 `tools/` modules, and 254 of 285 `tortoise/` modules.
 # Anything outside that is lint's alone.
 
 #: Roots the declaration dicts live under today. ⛔ NOT the whole repo: `battery/`,
@@ -8472,7 +8472,12 @@ def _duplicate_key_report(violations: list[str]) -> str:
 
 
 def _scan_declaration_roots(root: Path) -> tuple[list[str], dict[str, int]]:
-    """`(violation messages, modules read per root)` over `_DUP_KEY_ROOTS` under `root`.
+    """`(violation messages, modules FOUND per root)` over `_DUP_KEY_ROOTS` under `root`.
+
+    ⚠️ "found", not "read": the per-root counter is incremented BEFORE the read, so a
+    module that fails to decode is counted here while its own message says
+    `UNREADABLE (…), not scanned`. Stated because these counts are what satisfy the
+    per-root floors — i.e. the guard's non-vacuity claim.
 
     Hoisted out of the test so the REPORTING path can be driven: on a real tree
     `violations` is empty, so the message formatting, the `relative_to` naming and the
@@ -8540,7 +8545,7 @@ def test_no_module_declares_the_same_dict_key_twice():
     # that walk while still counting `tests/` is the regression that matters most.
     for name, floor in _MIN_MODULES.items():
         assert per_root[name] >= floor, (
-            f"the duplicate-key scan read {per_root[name]} module(s) under {name}/, below "
+            f"the duplicate-key scan found {per_root[name]} module(s) under {name}/, below "
             f"its floor of {floor} — the root was renamed, removed, or its walk broke, "
             "so the guard is now narrower than it claims. Re-derive the floor (or fix "
             f"the root) rather than lowering it. Full counts: {per_root}")
