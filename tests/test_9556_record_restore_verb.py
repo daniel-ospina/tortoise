@@ -1418,6 +1418,27 @@ def test_the_human_line_distinguishes_a_DROPPED_EDGE_vector_from_a_node_one():
     )
     assert "The nodes and edges are restored" in mixed.render(), mixed.render()
 
+    # ⛔ `#12015` review round 2 — the SURVIVOR claim must not outrun the LABELS. With no
+    # labels the targets read `unrecorded`, so naming a survivor would contradict the
+    # same sentence — and an EDGE drop is exactly what can be unnamed here. The pin
+    # fails on the pre-fix default ("The nodes are restored"), which asserted an object
+    # the line had just said it did not know.
+    unlabelled = rrestore.RestoreOutcome(
+        org_id="o", graph_id="g", cache_graph="test_c",
+        record_nodes=1, record_relations=0, nodes_written=1,
+        relations_written=0, target_nodes_before=0,
+        nodes_selected=1, relations_selected=0, coverage="complete",
+        declared_keys=0, dropped_vectors=1,
+    )
+    unlabelled_line = unlabelled.render()
+    assert "on target(s) with no query path (unrecorded)" in unlabelled_line, (
+        unlabelled_line)
+    assert "The nodes are restored" not in unlabelled_line, (
+        f"no label was recorded, so no survivor can be named: {unlabelled_line}")
+    assert "The edges are restored" not in unlabelled_line, (
+        f"no label was recorded, so no survivor can be named: {unlabelled_line}")
+    assert "cannot name which survived" in unlabelled_line, unlabelled_line
+
 
 
 def test_the_report_carries_the_drop_from_the_projection_to_the_outcome():

@@ -387,7 +387,14 @@ class RestoreOutcome:
                            for t in self.dropped_vector_labels)
             kept = ("The nodes and edges are restored" if has_node and has_edge
                     else "The edges are restored" if has_edge
-                    else "The nodes are restored")
+                    else "The nodes are restored" if has_node
+                    # ⛔ `#12015` review round 2 — the claim must not outrun the
+                    # labels. With no labels the targets above read `unrecorded`,
+                    # so defaulting to "the nodes" asserted a survivor in the same
+                    # breath as admitting it is unknown — and an EDGE drop is
+                    # exactly what can be unnamed here.
+                    else "The restored object(s) are unrecorded, so this line "
+                         "cannot name which survived")
             line += (
                 f" — {self.dropped_vectors} vector(s) were DROPPED by the "
                 f"projection on target(s) with no query path ({targets}): a vector "
