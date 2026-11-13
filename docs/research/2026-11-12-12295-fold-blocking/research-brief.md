@@ -4,10 +4,14 @@
 **Harness:** `tools/candidate_recall_11901.py` (**reused, not rebuilt** — the tool and its pinned
 test landed with `#12159`) · **Run:** `--population 1000 --sample 300 --captures 20`, elapsed
 390.6 s, graph `recall11901_1794532634_746264`, population digest `03785295abd20d9a`,
-measured at code head `e9a572d4b4` — the commit whose code these numbers describe. ⚠️ Commits after
-it do touch `tortoise/entity_resolver.py`: `ec1b4d71a2` moves the `emitted:` docstring only (no
-statement, no call), so the semantics these numbers describe are the shipped semantics — but the
-claim is stated as the diff, not as a summary of it.
+measured at code head `437d5d17a5f5` — the commit whose code these numbers describe. ⚠️ The run
+itself happened at `e9a572d4b4`, which the `#12304` rebase rewrote out of every ref (a dangling
+local object, absent from a fresh clone); `437d5d17a5f5` is that same commit rebased, and
+`git diff e9a572d4b4 437d5d17a5f5 -- tortoise/entity_resolver.py tortoise/entity_blocking.py
+tortoise/extractor_v2.py` is EMPTY. Commits after it do touch `tortoise/entity_resolver.py`:
+`07033dd926cc` moves the `emitted:` docstring only (no statement, no call), so the semantics these
+numbers describe are the shipped semantics — but the claim is stated as the diff, not as a summary
+of it.
 
 **Search rung, stated because it was taken twice and failed twice.**
 `mcp__seo-intelligence__perplexity_search` → `Unknown MCP server 'seo-intelligence'` (rung 1
@@ -161,8 +165,12 @@ boundary **before** it folds punctuation (`#12047` round-4 finding 5 — the fix
 folding to `b`), so `the-plan-doc` folds to `the plan doc` while the stored `the plan doc` folds to
 `plan doc`. The two never meet. **That decision is NOT reversed here** — this lane pins it from the
 outside (`test_the_article_anchor_decision_is_not_reversed`) and reports its measured cost instead.
-The artifact's own ceiling for this class is **179 pairs** — `variant_by_class["space-to-hyphen"]`
-has 179 of 180 in the window, so the 180th cannot attach at any `k`. Recovering them would take the
+The artifact's own per-`k` rows say something sharper than "a ceiling". At the **k=3 production
+window** 179 of 180 are IN the window, so exactly one is out of reach at that setting; at
+**k=5, k=10 and k=15 all 180 are in the window** (`variant_by_class["space-to-hyphen"]["in_window"]`
+= 180) and **still 0 attach**. Width therefore cannot recover them — which makes the diagnosis
+*stronger*, not weaker: the article anchor alone is the cause, and no `k` budget fixes it. Recovering
+them would take the
 lane from **207/422 = 49.1 %** to **386/422 = 91.5 %**, which is exactly the artifact's
 `attached_folded` = 386 (91.5 %). That is a **reopen of a recorded finding**, not a candidate for
 quiet adoption, so it is filed as evidence (see §7).

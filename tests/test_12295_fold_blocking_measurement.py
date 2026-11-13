@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -57,6 +59,34 @@ def test_the_artifact_declares_one_uniform_retrieval_mode(report):
             f"the brief does not name the artifact's corpus.{field} "
             f"({corpus[field]!r}) — the header describes a different run")
     assert report.get("code_head"), "the artifact does not name the commit it measured"
+    #: ⛔ A TRUTHY HASH IS NOT A REACHABLE ONE. The #12304 rebase rewrote the
+    #: measured commit out of every ref, and this assertion was the only thing
+    #: guarding the field — so the artifact named an object no fresh clone has and
+    #: nothing redded. Assert it names a real commit in THIS history, where git and
+    #: the history are available (a shallow CI checkout may legitimately not have
+    #: it, and an over-block there is the failure this guard must not add).
+    assert re.fullmatch(r"[0-9a-f]{40}", str(report["code_head"])), (
+        f"code_head is not a full commit sha: {report['code_head']!r}")
+    repo = Path(__file__).resolve().parent.parent
+    if (repo / ".git").exists():
+        present = subprocess.run(
+            ["git", "-C", str(repo), "cat-file", "-e", f"{report['code_head']}^{{commit}}"],
+            capture_output=True)
+        if present.returncode == 0:
+            ancestor = subprocess.run(
+                ["git", "-C", str(repo), "merge-base", "--is-ancestor",
+                 report["code_head"], "HEAD"], capture_output=True)
+            #: 0 = ancestor, 1 = not an ancestor, anything else = could not answer.
+            if ancestor.returncode in (0, 1):
+                assert ancestor.returncode == 0, (
+                    f"code_head {report['code_head']} exists but is not in this "
+                    "branch's history — a rebase rewrote it out of every ref, so "
+                    "the artifact cannot be tied to a tree a fresh clone has "
+                    "(name the rebased commit and record the docstring-only diff)")
+            assert report.get("code_head_note"), (
+                "code_head is a rebased stand-in but the artifact does not say so; "
+                "the note names the commit actually measured and the diff it is "
+                "equivalent to")
     assert r["legs_seen"].get("vector") is True, (
         "the artifact is not the fused read — re-run with the embeddings extra "
         "(a keyword-only figure is never a figure about the production read)")

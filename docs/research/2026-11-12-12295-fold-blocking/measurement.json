@@ -26,7 +26,7 @@
    },
    "index_stats": {
     "blocks": 8449,
-    "keys": 10968,
+    "key_memberships": 10968,
     "max_block_size": 93,
     "members": 1000,
     "oversized_skipped": {},
@@ -1110,7 +1110,8 @@
    }
   }
  },
- "code_head": "e9a572d4b499d52050ee29bd2a8bf6cb0ab67134",
+ "code_head": "437d5d17a5f5e2bae8d0427c0e2bf578943d4847",
+ "code_head_note": "Measured at `e9a572d4b499d52050ee29bd2a8bf6cb0ab67134`, which the #12304 rebase rewrote OUT of every ref (it is a dangling local object, absent from a fresh clone), so the field names the rebased commit carrying the IDENTICAL code instead: `git diff e9a572d4b4 437d5d17a5f5 -- tortoise/entity_resolver.py tortoise/entity_blocking.py tortoise/extractor_v2.py` is EMPTY, and the only later change to those files is docstrings/comments (the `emitted:` note and the `complete=True` note), with no statement and no call. Renamed from `keys` in `index_stats` in the same commit: the counter increments once per (member, block) pair, so 10968 is key MEMBERSHIPS across 1000 members, not 10968 distinct keys (the index has 8449 blocks).",
  "corpus": {
   "dir": "/home/cmux/.tortoise/session-events",
   "elapsed_s": 390.6,
