@@ -67,3 +67,56 @@ required shard, so the violation made every PR on the repository unmergeable.
   above — and lost the `✅ FIXED (#11702)` header and the "used to answer… replaced it" framing.
 - Nothing about the rule's content, its surface list, or `tests/test_11702_absent_belief_state.py`'s
   coverage was dropped or loosened; the guard was not widened and `DESIGN_DOCS` was not narrowed.
+
+---
+
+## `#12298` — M3 measured: the text index does not move, and the recall gap was never the scorer
+
+`SEARCH-ARCHITECTURE.md` §6.2 defers the text index behind measure **M3** — *"a BM25-capable Postgres
+option with score distributions, not only ranks, plus the identifier fixture"* — and §9's M3 row
+states the same. `#12298` ran that measurement on the `#11901` corpus with its instrument
+(`tools/m3_fts_leg_recall.py`, artifacts in `docs/research/2026-11-13-12298-m3-fts-leg/`), and its
+result answers M3's question: **the text index does not move**.
+
+**The numbers** (300 names, paired — one pinned population, one run, both backends, repeated with an
+identical second run):
+
+| arm | recall@3 | Δ vs shipped | paired p |
+|---|---|---|---|
+| shipped `db.idx.fulltext` (RediSearch TF-IDF) | 0.7133 | — | — |
+| ParadeDB `pg_search` BM25, **our production terms** | 0.7267 | +1.33 pts | 0.34 |
+| ⤷ the same, tokens-controlled subset (174 of 300 queries) | 0.5287 vs 0.5172 | +1.15 pts | 0.73 |
+| ParadeDB `pg_search` BM25, its own analyser | 0.9633 | +25.00 pts | <0.001 |
+| **the shipped index**, query with the `_`-preserving runs added | 0.9633 | +25.00 pts | <0.001 |
+
+**What that says, in the decision's own terms.** The scorer is not the constraint: with the query terms
+held constant, swapping TF-IDF for BM25 moves recall@3 by 1.33 points (1.15 on the subset where the
+control holds), is **−0.67 at k=5** (the shipped leg ahead 2–0) and **zero** at k=15, with zero
+discordant pairs at k=15. Both directions are stated because reporting only k=3 and k=15 reads as a
+floor where the evidence has a sign change. The 25-point difference is real, is
+**not BM25**, and is reproducible **inside the current index** — so an index migration earns no recall
+return, which is what §6.2's deferral exists to establish.
+
+⛔ **This entry does NOT close `C3` (SPLADE), and an earlier revision of it wrongly said so.** `#12298`'s
+step 3 is a recorded owner instruction to proceed into SPLADE without re-litigation, and the literal
+falsifier it states is *not* met — a deployable BM25-in-Postgres does beat the current scorer. The
+measurement is evidence that C3's **premise** (a ranking limit in the text index) is falsified, and the
+brief records that as a recommendation; the ruling on C3 stays in the OPEN homes — epic `#12186` and the pre-registration issue `#12192` — where the owner can take it. ⛔ NOT on `#12298`: that issue is **CLOSED** (`COMPLETED`, 2026-11-13T05:21:53Z) on the reading *"M3 FAILS"*, which this measurement contradicts: the closing condition in its own falsifier sentence is NOT triggered — a deployable BM25-in-Postgres beats the current scorer.
+A lane may no more decline pre-authorised scope on its own reading than it may adopt something over a
+decision.
+
+**The `#8933` identifier fixture is part of the DoD, and the shipped leg fails it.** Five fixture records
+queried at the production window: shipped **3 of 5 reachable**, the in-place query **5 of 5**, BM25 fed
+our terms **3 of 5**, BM25 with its own analyser **5 of 5**. The `abc_def` row is **absent from its own name's window at the production
+limit and at k=15** on the shipped leg. The identifier capability the product believes it has is defeated on exactly
+the shapes `#8933` was built for.
+
+**The defect it found, stated as a design fact rather than as tracker state.** RediSearch treats `_` as a
+word character; `sparse.tokenize_sparse_query` (`tortoise/sparse.py:381`, splitting on `[^a-z0-9]` at
+`:58`) does not. So for a stored name `web_search` the leg issues `search|web` — two terms the index does
+not contain — and `snake_case` names are unretrievable by their own name: of the 73 in the sample,
+**1 was found at k=3 by the shipped leg and 68 by the in-place query**. The repair is additive (the
+`#8933` alias pattern — an OR alternative, never a removed term) and it has **zero** regressions across
+the sample. It is **measured in this harness and not shipped**: a query-bytes change touches every label
+and reverts part of `#2070`'s byte-identity control, so it needs its own review with the number in front
+of it.
