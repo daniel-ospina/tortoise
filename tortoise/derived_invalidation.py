@@ -578,18 +578,11 @@ def invalidation_for(
     #        instant alone would let a BACK-DATED definition change leave a state
     #        derived from an older reading standing — a real sequence ("the
     #        definition changed on Monday, noticed on Tuesday"), not a corner
-    #        case. ``evaluatedAt`` is the fallback for a claim that names no
-    #        reading instant, and ``createdAt`` the last one.
+    #        case. ⛔ The mint clock is NOT a fallback for a claim that names no
+    #        reading instant: it says when the CLAIM was written, never when the
+    #        number it judged was taken, and a claim that cannot supply a reading
+    #        instant is `undecidable` (see the block inside the boundary branch).
     #
-    #        ⛔ AND A ``dwell`` WINDOW CONSUMES MORE THAN THE NEWEST READING. A
-    #        flip at ``dwell=2`` rests on BOTH readings it inspected, so the claim
-    #        carries the OLDEST of them (``readingWindowFrom``) and THAT is the
-    #        instant compared here: a boundary landing inside the window means the
-    #        window itself is a trend drawn across two definitions, which is
-    #        design-of-record §3 row 9 verbatim. MEASURED (#11926 review
-    #        cycle 5): comparing only ``readingAsOf`` let such a claim survive the
-    #        sweep while the goal kept reading ``met`` on the old definition's
-    #        agreement.
     #    ⛔ THE BOUNDARY IS READ FROM THE INDICATOR DICT `_Nodes` ALREADY FETCHED,
     #    not through `definition_boundary()`. That helper folds "the read failed"
     #    into the same `None` as "no boundary was declared" — which `judge` can
