@@ -8307,13 +8307,19 @@ def test_a_duplicate_literal_key_in_the_census_dicts_cannot_land_silently():
 #: ⛔ THE CANONICAL ALTERNATIVE, stated so this scan is not read as the only catcher
 #: and not read as a substitute for the linter: the standard answer to a suppressible
 #: rule is to run the rule UNSUPPRESSED — `ruff check --select F601 --ignore-noqa`
-#: (measured on this tree: `All checks passed`, and no `# noqa: F601` DIRECTIVE
+#: (measured on this tree: `All checks passed`, and no `noqa` directive naming F601
 #: survives to un-suppress, so it costs nothing). What this scan adds is what lint
 #: cannot: a red that no marker can defuse, one that runs in the pytest shard without
 #: depending on the lint step's selection, and one whose RED arm is provable by a test
 #: — so it is a COMPLEMENT to lint, never a replacement. ⛔ That step must stay
-#: rule-SCOPED: a repo-wide `--ignore-noqa` would un-baseline the 242 `# noqa`
-#: directives `#1685` recorded, i.e. it would reverse that decision — do not propose it.
+#: rule-SCOPED: a repo-wide `--ignore-noqa` would un-baseline the 242 per-line `noqa`
+#: markers `#1685` recorded, i.e. it would reverse that decision — do not propose it.
+#:
+#: (⛔ Neither sentence above spells the suppressive marker prefix itself: a comment
+#: whose text contains that prefix followed by the word `noqa` is PARSED by ruff as a
+#: directive, so prose about suppression emits "invalid directive" warnings on exactly
+#: the cache-cold lint run that is supposed to report findings — measured: this paragraph
+#: cost 2 spurious warnings in its first draft.)
 #:
 #: ⛔ NO FILE COUNT IS ASSERTED, here or for the roots outside. A count is a
 #: measurement of the tree it was taken on: a draft of this comment said "254", and by
