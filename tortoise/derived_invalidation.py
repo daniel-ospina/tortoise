@@ -963,12 +963,16 @@ def invalidate_stale(
 
     In a sweep that actually retires (``dry_run=False``) every finding lands in
     **at least one** bucket — the failure #12315 records was an arm landing in
-    none. ⚠️ That does NOT hold for ``dry_run=True``, and the asymmetry is by
-    design rather than an unhandled arm: a dry run retires nothing, so
-    ``invalidated`` stays empty and EVERY bucket is 0 by construction while
-    ``stale`` names what it would have retired — its own test asserts exactly
-    that pair (``stale`` 1, ``invalidated`` empty). Read the buckets against
-    ``dryRun`` before reconciling them.
+    none. ⚠️ That rule does NOT hold for ``dry_run=True``, and the asymmetry is
+    by design rather than an unhandled arm: a dry run retires nothing, so
+    ``invalidated`` stays empty and the four RETIREMENT buckets — ``retired``,
+    ``alreadyRetired``, ``failed``, ``gone`` — are 0 by construction, while
+    ``scanned``, ``stale`` and ``undecidable`` keep reporting what the scan saw
+    (``stale`` names what it WOULD have retired and ``undecidable`` > 0 is a real
+    finding, not a counter that should be zero — its own test asserts the
+    ``stale`` 1 / ``invalidated`` empty pair). So reconcile the four retirement
+    buckets against ``stale`` ONLY when ``dryRun`` is false, and read
+    ``scanned``/``undecidable`` on their own terms either way.
     """
     found = verdicts(sdk, goal_id=goal_id, indicator_id=indicator_id,
                      target_id=target_id, limit=limit)
