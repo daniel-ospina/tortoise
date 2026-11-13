@@ -5282,12 +5282,14 @@ def _section_entries(manifest: dict, section: str) -> list[str] | None:
     eight indented surface blocks, and it is in the `core` block (`898` entries)
     AND in the `sdk` block (`128` entries) — measured at this head with
     `parse_manifest_text` (`m["surfaces"]["sdk"]`, index 30). ⛔ NO LINE NUMBER IS
-    PRINTED HERE ON PURPOSE, and a previous revision of this paragraph printed two
-    (`:8536`, the entry's raw line, "inside the `sdk:` block opened at `:8412`") —
-    the second was not even the opener (`:8412` is a comment line; the block opens
-    at `:8302`), which is a measured claim the tree refutes in the paragraph whose
-    thesis is that typed-in line numbers rot. The block and the entry are the
-    address; the next registration moves the digits.
+    PRINTED HERE, and an earlier revision of this paragraph did print one as the
+    block's opening position. That number was wrong when it was written, AND it is
+    the wrong KIND of number even when right: a two-space-indented surface block is
+    exactly what `register_tests` splices into, so its opening position moves on the
+    next registration above it — MEASURED: across the forty most recent commits
+    that touch `config/ci-surfaces.yml`, this block's opening line moved twelve
+    times (nine distinct positions). The block and the entry are the address; the
+    digits are not.
     ⚠️ An earlier revision of this paragraph said "`core` holds it, `sdk` does
     not — that mirror holds 128 entries and none of them is this file", which
     the tree refutes: `sdk` IS the 128-entry mirror and it DOES hold the file.
