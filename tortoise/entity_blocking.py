@@ -79,7 +79,7 @@ Zep/Graphiti (`graphiti_core/utils/maintenance/dedup_helpers.py`, read at
    applies to kinds. ⛔ **The ``E`` fold is non-injective too, and it DOES attach
    alone.** The NON-INJECTIVITY is ``#12047``'s and is inherited (``key_of`` IS
    the stored ``canonical_name`` key); the ATTACH is CREATED here, by the folded
-   rung this PR adds to ``extractor_v2._find_by_folded_key``. On ``origin/main`` the ladder is six rungs —
+   rung this PR adds to ``extractor_v2._find_by_folded_key``. On ``origin/main`` the ladder is five rungs —
    ``named_exact``, ``named_bare``, ``aliased_exact``, ``aliased_bare`` and the
    kind-agnostic ``aliased_any`` (#12296 D-1) — and the distinction that matters is
    WHAT each compares: the NAME rungs are ``_norm``-keyed (whitespace collapse +
