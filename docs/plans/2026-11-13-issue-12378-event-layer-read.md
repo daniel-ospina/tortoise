@@ -97,7 +97,7 @@ Pointer: the `<!-- research: v1 -->` comment on #12378. Decisions it supports:
 | Call site / consumer | What it does there |
 |---|---|
 | `tools/curate_graph.py::MCPReader.read_events` | **new**: reconciles, refuses, maps rows to `C.Row(node_type="event")` |
-| `tools/curate_graph.py::MCPReader._get_entities` | **new**: the routed call (`type="events"`, `limit` = `counts.Event + 1` **uncapped** (see step 1) or `EVENT_READ_CEILING` on the unreported arm; `graph`), with the graph-refusal fallback every other read has |
+| `tools/curate_graph.py::MCPReader._get_entities` | **new**: the routed call (`type="events"`, `limit` = `EVENT_READ_CEILING + 1` — one request, **never sized to the count** (see step 1); `graph`), with the graph-refusal fallback every other read has |
 | `tools/curate_graph.py::cmd_inventory` | reads the layer, feeds `C.build_plan`, emits `events_read` / `events_total_reported` / `events_reconciled` |
 | `tools/curate_graph.py::cmd_plan` | same, plus a **fresh** status read immediately before the Event read (narrows the count-vs-rows window to two requests) |
 | `tools/curate_graph.py::_disarmed_artifact` | new `events` tri-state kwarg; `events_*` present on **every** disarmed arm (`None` = no completed read) |
@@ -116,24 +116,32 @@ Pointer: the `<!-- research: v1 -->` comment on #12378. Decisions it supports:
    ⛔ The bound is **OURS, not the surface's**: `get_events` validates no upper `limit`
    (it goes straight into the Cypher `LIMIT`), so declaring it as "the surface's maximum"
    would be false — and the refusal's stated cause would not bind. The read is therefore
-   **sized to `counts.Event + 1`**, which is the smallest request that PROVES
-   non-truncation, and the bound is only consumed by a layer that genuinely has no whole
-   read. The refusal says exactly that: a size bound on ONE response, raise it
-   deliberately if the layer legitimately outgrew it.
+   **sized to `EVENT_READ_CEILING + 1`**, and the bound is only consumed by a layer that
+   genuinely has no whole read. The refusal says exactly that: a size bound on ONE
+   response, raise it deliberately if the layer legitimately outgrew it.
 
-   ⛔ `reported + 1` is **NOT capped at the bound** (PR-review finding 1):
-   `min(reported + 1, EVENT_READ_CEILING)` ate the headroom exactly AT it, so a layer
-   reporting 10,000 that had grown to 10,050 returned 10,000 rows == the count and was
-   filed `events_reconciled: True` with 50 rows unread.
-   ⛔ And a disagreement in **EITHER direction is re-counted once** before refusing
+   ⛔ The request size is what makes an accept SOUND, and it took three revisions to get
+   right. `limit` goes straight into the Cypher `LIMIT`, so a response **shorter** than
+   the request IS the exact layer, and a response that **fills** the request is "at least
+   this many" and indistinguishable from a truncation.
+   - `min(reported + 1, EVENT_READ_CEILING)` (original) ate the headroom exactly AT the
+     bound: a layer reporting 10,000 that had grown to 10,050 returned 10,000 rows == the
+     count and was filed `events_reconciled: True` with 50 rows unread.
+   - `reported + 1` (PR-review cycle 1) left ONE row of headroom, so a layer that grew by
+     a single Event FILLED the request — every growth became truncation-shaped, and a
+     grow-then-shrink-back race was accepted as whole over unread rows (cycle 4,
+     reproduced: 4 live rows unread, 4 deleted rows reported).
+   - `EVENT_READ_CEILING + 1` pays the cost ONCE, at the bound: every response below the
+     bound is provably whole at ANY size, and a response that reaches the bound is above
+     what one response may accept and refuses.
+   ⛔ A disagreement in **EITHER direction is re-counted once** before refusing
    (finding 6, made symmetric in PR-review cycle 2): `counts.Event` is fed by
    `index_sessions` (growth) and `:Event` is deleted by the hosted entity-delete path
    (shrink), so a layer that changed between the two requests is a CORRECT read and
    refusing it is a false block. A fresh count equal to the rows accepts in either
-   direction (and says so on `read_note`); anything else still refuses.
-   ⚠️ Growth is tolerated only up to **+1** — the request is sized `reported + 1`, so a
-   sweep that added two or more Events in that window still refuses (fail-closed,
-   diagnosable by re-running). Shrink has no such bound.
+   direction (and says so on `read_note`); anything else still refuses — and a filled
+   request refuses even when the fresh count agrees, because equality cannot prove
+   wholeness there.
 2. Content lane: `content := name`, fallbacks `title` then `subject`; rows carrying
    none are COUNTED on `read_note`. ⚠️ Round-2 correction: the note says only what is
    TRUE — those rows are keyed `node_type:kind:sha`, so **same-kind** ones share a

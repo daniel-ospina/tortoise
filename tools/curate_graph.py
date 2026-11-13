@@ -626,19 +626,29 @@ class MCPReader:
                 "census is indistinguishable from a complete one. Raise "
                 "`EVENT_READ_CEILING` deliberately if this layer legitimately outgrew it; "
                 "do not let a partial episodic layer be reported as complete")
-        # ⛔ Ask for ONE MORE than the reported count, not for the full ceiling: with an
-        # authoritative count in hand, `reported + 1` is the smallest request that PROVES
-        # non-truncation — a response of exactly `reported + 1` rows means the layer grew
-        # since the count, so the reconciliation below refuses instead of filing a short
-        # layer, and `reported` rows cannot have been cut short because the request was
-        # for more than `reported`.
-        # ⛔ NOT capped by `reported + 1`'s `min(..., EVENT_READ_CEILING)`: that clamp ate
-        # the headroom EXACTLY at the bound (a layer reporting 10,000 sent `limit=10,000`,
-        # so a layer that had grown to 10,050 came back as 10,000 rows == the count and was
-        # filed `events_reconciled: True` with 50 rows unread — measured by the PR
-        # reviewer). `reported` is already bounded by the refusal above, and `get_events`
-        # validates no upper `limit`, so `reported + 1` is always a legal request.
-        limit_sent = EVENT_READ_CEILING if reported is None else reported + 1
+        # ⛔ Ask for ONE MORE than our DECLARED BOUND — never for `reported + 1`. The
+        # response size is what decides whether a read is provably whole: `limit` goes
+        # straight into the Cypher `LIMIT`, so a response SHORTER than the request is the
+        # exact layer, and a response that FILLS the request is "at least this many" and
+        # cannot be distinguished from a truncated one.
+        #
+        # Sizing the request to `reported + 1` (what this code did until the fourth review
+        # cycle) gives exactly ONE row of headroom, so a layer that grew by even one row
+        # FILLED the request — the very case the re-count below was meant to accept became
+        # the truncation-capable case instead, and a grow-then-shrink race was accepted as
+        # `events_reconciled: True` over unread rows (reproduced by the reviewer: 4 live
+        # rows unread, 4 deleted rows reported).
+        #
+        # `EVENT_READ_CEILING + 1` pays that cost ONCE, at the bound: every response below
+        # the bound is provably whole at ANY size (so growth and shrink are both
+        # acceptable), and a response that reaches the bound is above what this read may
+        # accept and refuses. ⛔ NOT `min(reported + 1, EVENT_READ_CEILING)`: that clamp ate
+        # the headroom exactly at the bound (a layer reporting 10,000 sent `limit=10,000`,
+        # so one that had grown to 10,050 came back as 10,000 rows == the count and was
+        # filed `events_reconciled: True` with 50 rows unread — the first reviewer round).
+        # `reported` is already bounded by the refusal above, and `get_events` validates no
+        # upper `limit`, so this is always a legal request.
+        limit_sent = EVENT_READ_CEILING + 1
         res = self._get_entities(limit_sent)
         err = _error_of(res)
         if err:
@@ -655,12 +665,12 @@ class MCPReader:
                 "the Event read returned no rows AND the status section reported no "
                 "`Event` count, so an empty layer cannot be told from an unread one — "
                 "refusing a census that would report the episodic layer as empty")
-        if reported is None and len(raw) == EVENT_READ_CEILING:
+        if reported is None and len(raw) >= limit_sent:
             raise C.CurationRefused(
-                f"the Event read returned exactly its {EVENT_READ_CEILING}-row limit and "
-                "no reported count says that is the whole layer — the response may be "
-                "truncated, and this read has no offset walk to continue from; refusing "
-                "a partial episodic layer")
+                f"the Event read returned {len(raw)} rows, filling its "
+                f"{EVENT_READ_CEILING}-row RESPONSE BOUND, and no reported count says that "
+                "is the whole layer — the response may be truncated, and this read has no "
+                "offset walk to continue from; refusing a partial episodic layer")
         if reported is not None and len(raw) != reported:
             # ⛔ BOTH directions are re-counted, not only growth. A layer that GREW or
             # SHRANK between the count and this read is a CORRECT read being refused, and
@@ -668,23 +678,29 @@ class MCPReader:
             # `index_sessions`, and `:Event` nodes are deleted by the hosted entity-delete
             # path. Equality with a fresh count accepts, in either direction.
             #
-            # ⚠️ WHAT THAT PROVES, exactly — the assumption is worth stating because a
-            # comment claiming more than the code proves is this file's own recurring
-            # defect. Acceptance means: the request (`reported + 1`) was at least the true
-            # size (so a short response cannot have been cut), AND the layer did not change
-            # AGAIN between this read and the re-read. A change confined to the first
-            # window is RESOLVED here, not refused.
+            # ⚠️ WHY ACCEPTING HERE IS SOUND. Completeness rests on ONE fact, and the
+            # request is sized to establish it: `len(raw) < limit_sent`, i.e. the response
+            # did not fill the request, so it is the exact layer — at ANY size. The
+            # re-count then only answers a different question: is the number this read
+            # disagrees with simply stale? (A `:Event` created by `index_sessions` or
+            # deleted by the hosted entity-delete path between the two requests.)
             #
-            # ⚠️ The GROWTH direction is therefore bounded at exactly +1: the request only
-            # had one row of headroom, so a layer that gained two or more Events (an
-            # `index_sessions` sweep) returns `reported + 1` rows and the re-count reports
-            # a higher number — refused, not accepted. That is fail-CLOSED and diagnosable
-            # (re-run the census), and it is stated rather than left to be discovered; a
-            # re-issued read sized to the fresh count would remove the block at the cost of
-            # a third request window whose own staleness would need the same treatment.
-            # The SHRINK direction has no such bound: `reported + 1 > len(raw)` proves the
-            # response was whole for any magnitude.
+            # ⛔ Do NOT weaken that to "the re-count proves the read is whole": it does not,
+            # and an earlier revision said so. Equality plus a FILLED request is
+            # satisfiable by a layer that grew past the request and then shrank back to
+            # exactly its size before the re-read — the read truncated, the census filed
+            # `events_reconciled: True` over unread rows (reproduced by the reviewer). The
+            # arm below therefore refuses whenever the response filled the request, in
+            # either direction.
             fresh = _node_count(self.counts(), "Event")
+            if fresh is not None and fresh == len(raw) and len(raw) >= limit_sent:
+                raise C.CurationRefused(
+                    f"the Event layer read {len(raw)} rows, filling the "
+                    f"{EVENT_READ_CEILING}-row RESPONSE BOUND, and a re-read of "
+                    f"counts.Event now also reports {fresh} — but this layer is above what "
+                    "ONE response may accept, and a filled response may also have been CUT, "
+                    "so the rows cannot be shown to be the whole layer. Refusing rather "
+                    "than filing a possibly-short layer")
             if fresh is not None and fresh == len(raw):
                 self._note(
                     "the Event layer CHANGED between the status count and this read "
@@ -696,10 +712,9 @@ class MCPReader:
                     f"the Event layer read {len(raw)} rows but counts.Event reports {reported} "
                     "— refusing a layer two surfaces disagree about. Both count `:Event` with "
                     "the same predicate, so the difference is one of: a genuinely partial / "
-                    "clamped read; a change between the status read and this read that "
-                    "was TOO LARGE for the request's one row of headroom, or that happened "
-                    "AGAIN between this read and the re-read (a DISAGREEMENT is re-counted "
-                    f"once before refusing — the re-read reported {fresh!r}, not "
+                    "clamped read; a change between the status read and this read, "
+                    "repeated before the re-read (a DISAGREEMENT is re-counted once "
+                    f"before refusing — the re-read reported {fresh!r}, not "
                     f"{len(raw)}); or a `counts` section that is itself stale, or scoped "
                     "to a different graph")
         empty_text = 0

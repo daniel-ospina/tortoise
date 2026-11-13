@@ -4210,8 +4210,12 @@ def test_a_truncation_shaped_event_read_is_refused(monkeypatch, tmp_path, capsys
     and "a truncated layer" are the same bytes. Deleting this arm reds this test.
     """
     mod = _tool_module()
+    # ⛔ The fill must reach the REQUEST, and the request is now `EVENT_READ_CEILING + 1`
+    # (a response below the bound is provably whole at any size — see read_events). A
+    # fixture that fills only the old ceiling no longer fills the request, which is why
+    # this list is sized off the request rather than off `EVENT_READ_CEILING`.
     at_limit = [{"id": f"ev-{i}", "eventKind": "meeting", "name": f"m{i}"}
-                for i in range(mod.EVENT_READ_CEILING)]
+                for i in range(mod.EVENT_READ_CEILING + 1)]
     monkeypatch.setattr(mod, "_live_call_tool",
                         _event_surface(at_limit, reported=None))
     rc = mod.main(["inventory", "--out", str(tmp_path / "i.json"), "--no-verify-read"])
@@ -4271,7 +4275,11 @@ def test_the_event_read_is_routed_to_the_graph():
     # the argument outright left the suite green — and the live effect is that
     # `tortoise_get_entity` falls back to its own default (`limit=20`), so a 4,670-row
     # layer would return 20 rows and the census would refuse on EVERY run.
-    assert calls[0].get("limit") == 4, calls          # reported 3 + 1, not 3, not the bound
+    # ⛔ The request is `EVENT_READ_CEILING + 1` — deliberately NOT `reported + 1` and not
+    # the bare bound. Sizing it to the count gave one row of headroom, so a single grown
+    # Event FILLED it and the read became truncation-shaped (PR-review cycle 4); sizing it
+    # to the bare bound could not tell "exactly at the bound" from "above it".
+    assert calls[0].get("limit") == mod.EVENT_READ_CEILING + 1, calls
 
 
 def test_a_bound_credential_falls_back_and_discloses_on_the_event_read():
@@ -4470,15 +4478,27 @@ def test_the_architecture_doc_no_longer_claims_the_event_layer_is_unread():
             / "2026-11-13-issue-12378-event-layer-read.md").read_text(encoding="utf-8")
     assert "limit=EVENT_READ_CEILING" not in plan, (
         "the plan's wiring row still prescribes the clamped limit the code removed")
-    assert "min(reported + 1" not in plan.split("NOT capped")[0], (
-        "the plan still describes the clamped request as the implementation")
+    # ⛔ Pin the WIRING ROW, not the whole document: the plan legitimately RECORDS the two
+    # superseded sizings as history (a reader needs to know why the request is no longer
+    # sized to the count), so a whole-document "absent" assertion reds on the very
+    # paragraph that documents the fix. What must never come back is the row a lane would
+    # re-implement from.
+    wiring = [ln for ln in plan.splitlines() if ln.startswith("| `tools/curate_graph.py::"
+                                                             "MCPReader._get_entities`")]
+    assert wiring, "the plan has no MCPReader._get_entities wiring row"
+    assert "EVENT_READ_CEILING + 1" in wiring[0], wiring[0]
+    assert "reported + 1" not in wiring[0] and "min(" not in wiring[0], wiring[0]
     # The plan must not describe the re-count as growth-only either: since the symmetric
     # fix, a SHRINK with an agreeing fresh count is accepted, and the growth-only wording
     # states the opposite of the code for the mirror direction (PR-review cycle 3).
     assert "growth direction is re-counted" not in plan, (
         "the plan still describes the re-count as growth-only")
-    assert "Growth is tolerated only up to **+1**" in plan, (
-        "the plan does not state the growth direction's +1 bound")
+    # The plan must describe the request the code actually sends, and must not resurrect
+    # the ONE-ROW-HEADROOM sizing (cycle 4: it made every growth truncation-shaped).
+    assert "EVENT_READ_CEILING + 1" in plan, (
+        "the plan does not describe the request the code sends")
+    assert "sized to `counts.Event + 1`" not in plan, (
+        "the plan still prescribes sizing the request to the count (one row of headroom)")
 
     # ...and the row records the change rather than dropping the subject.
     assert "enumerated** since #12378" in doc or "**enumerated** — agent-session" in doc, (
@@ -4654,3 +4674,39 @@ def test_a_layer_that_shrank_with_an_agreeing_recount_is_accepted_not_refused():
     out, reported = reader.read_events({"counts": {"Event": 5}})   # stale, higher count
     assert len(out) == 2 and reported == 2, (len(out), reported)
     assert "CHANGED" in (reader.note or ""), reader.note
+
+
+def test_a_response_that_FILLED_its_request_refuses_even_when_a_recount_agrees():
+    """An agreeing re-count does not prove the rows are whole when the response was FULL.
+
+    The dangerous shape is a COMPOUND race: the layer grew past the request (so the
+    response was TRUNCATED), then shrank back to exactly the requested size before the
+    re-read — the equality holds, and accepting files `events_reconciled: True` over rows
+    that are partly dead and partly missing. Measured by the PR reviewer (4 live rows
+    unread, 4 deleted rows reported, accepted). A response that fills its request is the
+    only truncation-capable accept, so it must refuse instead of trusting the re-count.
+    """
+    mod = _tool_module()
+    def call(name, args):
+        args = args or {}
+        if name == "tortoise_get_entity" and args.get("type") == "events":
+            # Fill the REQUEST exactly: this is the truncation-capable shape.
+            return {"result": [{"id": f"ev-{i}", "eventKind": "meeting", "name": f"e{i}"}
+                               for i in range(args["limit"])]}
+        if args.get("section") == "status":
+            # The re-count AGREES with the rows (the grow-then-shrink-back race).
+            return {"counts": {"Event": mod.EVENT_READ_CEILING + 1}}
+        return {"result": []}
+
+    reader = mod.MCPReader(call, None)
+    try:
+        reader.read_events({"counts": {"Event": 3}})     # stale count: the re-count decides
+    except mod.C.CurationRefused as exc:
+        msg = str(exc)
+        assert "RESPONSE BOUND" in msg, msg
+        assert "may also have been CUT" in msg, msg
+    else:
+        raise AssertionError(
+            "a full request + an agreeing re-count was ACCEPTED: the compound race "
+            "(grow past the request, shrink back before the re-read) files "
+            "events_reconciled=True over unread rows")
