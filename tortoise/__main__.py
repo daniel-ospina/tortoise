@@ -11469,13 +11469,23 @@ def _cmd_onboard(args) -> int:
     # the block's whole 75 s worst case with no supported way to skip it.
     doctor_offline = bool(getattr(args, "offline", False))
     if is_db_uri(db_target):
-        _cmd_doctor(argparse.Namespace(cmd="doctor", db=db_target, path=None,
-                                      offline=doctor_offline))
+        doctor_rc = _cmd_doctor(argparse.Namespace(
+            cmd="doctor", db=db_target, path=None, offline=doctor_offline))
     else:
-        _cmd_doctor(argparse.Namespace(cmd="doctor", db=None, path=db_target,
-                                      offline=doctor_offline))
+        doctor_rc = _cmd_doctor(argparse.Namespace(
+            cmd="doctor", db=None, path=db_target, offline=doctor_offline))
 
     print(f"\n{'='*50}")
+    # ⛔ The wizard's last step is its VERDICT (#11912). It used to discard the
+    # health check's exit code and print "Onboarding complete." / return 0 under
+    # its own `❌ Hosted: … 401 Invalid API key` row — so a script or agent
+    # gating on the wizard certified a dead hosted credential, and the completion
+    # banner contradicted the report directly above it (fresh review round 12).
+    if doctor_rc != 0:
+        print("Onboarding finished — but the health check FAILED (see above).")
+        print("Fix the ❌ rows and re-run `tortoise doctor` before relying on "
+              "this setup.")
+        return doctor_rc
     print("Onboarding complete.")
     # #2200: a no-Docker wizard run that defaulted onto the canonical
     # embedded path must never read as a durable setup — gate the completion
@@ -13088,15 +13098,25 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
     except (OSError, http.client.HTTPException, ValueError) as exc:
         reason = getattr(exc, "reason", None) or exc
         if not _is_timeout_reason(reason):
+            # A REFUSAL/RESET is definitive (no retry) but it is NOT a credential
+            # verdict: nothing was asked of the key. ⚠️ for the same reason the
+            # authenticated leg's reset is ⚠️ (round 7) — a Fly machine
+            # replacement answers ECONNREFUSED in under a second, and grading that
+            # `❌` + exit 1 redded `doctor` on a sub-second blip with a remedy
+            # blaming the user's config (fresh review round 12). It can never read
+            # "all checks passing" either: a warning is enough to suppress that
+            # line.
+            #
             # The reason is `_scrub`ed as well as the target: `http.client`
             # embeds the URL in its own message, and a URL with userinfo embeds a
             # PASSWORD (`InvalidURL: nonnumeric port: '<password>@host'`).
             # `_scrub` expands each supplied value into its user/password
             # fragments, the one rule #5109 established for this file.
-            results.append(("Hosted", "❌",
+            results.append(("Hosted", "⚠️",
                             f"cannot reach {base} — "
                             f"{_printable(_scrub(str(reason), api_url, api_key))}"
-                            f". Check https://api.premiselabs.co/health or your "
+                            ". The credential is UNGRADED (nothing was asked of "
+                            "it) — check https://api.premiselabs.co/health or your "
                             "TORTOISE_API_URL, then `tortoise config show`"))
             return
         # ⛔ A HEALTHY endpoint is allowed to time out here. The hosted app
@@ -13113,12 +13133,13 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
             health_code = retry_exc.code
         except (OSError, http.client.HTTPException, ValueError) as retry_exc:
             retry_reason = getattr(retry_exc, "reason", None) or retry_exc
-            results.append(("Hosted", "❌",
+            results.append(("Hosted", "⚠️",
                             f"cannot reach {base} — no answer in "
                             f"{_DOCTOR_HEALTH_TIMEOUT_S}s, and none in "
                             f"{_DOCTOR_TEAM_RETRY_TIMEOUT_S}s on retry "
                             f"({_printable(_scrub(str(retry_reason), api_url, api_key))})"
-                            f". Check https://api.premiselabs.co/health or your "
+                            ". The credential is UNGRADED (nothing was asked of "
+                            "it) — check https://api.premiselabs.co/health or your "
                             "TORTOISE_API_URL, then `tortoise config show`"))
             return
 

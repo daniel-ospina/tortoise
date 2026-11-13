@@ -331,6 +331,11 @@ class TestDoctorHostedCredential:
         assert cred is not None, out[-1200:]
         assert "api_url https://api.premiselabs.co" in cred, cred
         assert "org agent-1" in cred, cred
+        # The row must be in the PASS column: downgrading it to ⚠️ would make
+        # every healthy hosted box print "Some warnings" and nothing reds
+        # (fresh review round 12 — no test asserted this icon).
+        assert "✅" in cred, cred
+        assert "pass," in out and "0 fail" in out, out[-800:]
         assert "❌ Hosted" not in out, out[-1200:]
         assert _FAKE_HOSTED_KEY not in out
 
@@ -542,9 +547,13 @@ class TestDoctorHostedCredential:
         out = capsys.readouterr().out
 
         hosted = _row(out, "Hosted")
-        assert hosted is not None and "❌" in hosted, out[-1500:]
+        assert hosted is not None and "⚠️" in hosted, out[-1500:]
         assert password not in out, "the api_url password reached the transcript"
-        assert rc == 1
+        # Unreachable is UNGRADED, not a broken key (round 12): a refused socket
+        # asked nothing of the credential, and the same event on the authenticated
+        # leg is ⚠️ too.
+        assert "UNGRADED" in hosted, hosted
+        assert rc == 0
 
     def test_health_5xx_with_a_working_key_is_a_warning(
             self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
@@ -1319,6 +1328,29 @@ class TestDoctorHostedCredential:
                 if _re.match(r"^\s+\S+\s+Graph: health:", ln)]
         assert len(rows) == 1, out[-1500:]
         assert "\\n" in out, "the newline should be escaped, not executed"
+
+    def test_onboard_does_not_announce_completion_over_a_failing_health_check(
+            self, clear_db_env, tmp_path, capsys, monkeypatch):
+        """The wizard's last step is its VERDICT, not a banner.
+
+        `_cmd_onboard` discarded `_cmd_doctor`'s return value and printed
+        "Onboarding complete." / return 0 under its own `❌ Hosted: … 401 Invalid
+        API key` row, so a script gating on the wizard certified a dead hosted
+        credential (fresh review round 12 — the previous behaviour, and the claim
+        that it failed, were both wrong; the verdict now propagates).
+        """
+        from tortoise import __main__ as _m
+
+        monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "onboard-verdict.db"))
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(_m, "_cmd_doctor", lambda _args: 1)
+
+        rc = _m._cmd_onboard(argparse.Namespace(cmd="onboard", path=None))
+        out = capsys.readouterr().out
+
+        assert rc == 1, "a failing health check must not exit 0"
+        assert "health check FAILED" in out, out[-800:]
+        assert "Onboarding complete." not in out, out[-800:]
 
 
 class TestDoctorPath:
