@@ -477,7 +477,7 @@ just E1b.
 **E2a, the value-bearing class (14 units).** The gold has no `state_value` kind, so the class is
 **derived by rule, not by hand**: a planted unit is value-bearing iff its `verbatim_anchor` contains a
 digit (**16** units), **minus two exclusions**, each argued against `STATE_VALUE_CARVE_OUT`'s own text
-(`tortoise/extractor_v2.py:325-341`, the constant's own extent, which keeps *"measurements,
+(`tortoise/extractor_v2.py:327-343`, the constant's own extent, which keeps *"measurements,
 deadlines/freezes, thresholds/TTLs, versions, and counts"* and drops only *"ids, hashes, and
 ephemeral counters"*):
 
@@ -1071,7 +1071,7 @@ steps:
     - step: S2.3
       condition: >-
         the S2 map left at least one candidate's kind missing or `unclassified`, so
-        `_collect_classify_items` (tortoise/extractor_v2.py:11857, `def _collect_classify_items`) had an item to hand the classifier;
+        `_collect_classify_items` (tortoise/extractor_v2.py:12682, `def _collect_classify_items`) had an item to hand the classifier;
         when the map types every candidate the pass has no work and neither classify pass runs
       idle_evidence: >-
         the run's own classify surface reads enabled=true with empty s2/union, the receipt's
@@ -1200,7 +1200,7 @@ except where noted; the alternative was to omit the provenance and let a reader 
 | 90 of 90 m2 baseline | `tests/eval/write_path/baselines/m2.json` at this `fixtures_hash` |
 | 53/37, 7/8, 5/9, 21/8 split counts | the per-session sums above, partitioned by §2.1 |
 | 9 of 15 shape coverage (60%) | §1.3, `is_positively_bare_definite_description` |
-| 7 unconditional / 1 conditional step (§11) | `tortoise/extractor_v2.py:11857-11879` (`_collect_classify_items`, the collector's item set), `:14276` and `:14429` (the two `if items:` gates, one per classify pass) |
+| 7 unconditional / 1 conditional step (§11) | `tortoise/extractor_v2.py:12682-12704` (`_collect_classify_items`, the collector's item set), `:15101` and `:15254` (the two `if items:` gates, one per classify pass) |
 | 148 / 433 (0.34180), 148 / 383 (0.38642) | `capstone-measured-e0fc940b.log`'s `E3 census` block: `e3 label=Point nodes=338 anchored=141`, `Object 50/0`, `Event 45/7`, no `Document` written (§10.1) |
 | 141/150 (0.940000), 159 turn rows, 29 operator Points | the same census block's `point composition` line — reported, NOT adopted as E3's denominator (§10.1) |
 | 5/25 (20%) vs 13/25 (52%) recovered; 0.4800 raw absolute on n=25 | §10 @ `ecc7bc8ca` (run 1 losses 80.0%/48.0%) and `capstone-measured-e0fc940b.log`'s E5 row (§10.2) |
@@ -1981,15 +1981,15 @@ re-cut from the resolved document (§8), and no committed verdict is re-scored.
   `test_the_newest_change_control_entry_describes_the_shipped_tree`).
 - **What moved: nothing else.** No metric, denominator, threshold, class set or corpus pin is
   touched. `document_sha256` is re-cut in this same commit, per §8's rule for *any* edit to this file.
-- ⛔ **Superseded for the merged tree by §10.24.** The numbers above are the head this entry
+- ⛔ **Superseded for the merged tree by §10.29.** The numbers above are the head this entry
   names, and they are byte-identical to `main`'s copy of that entry — a history entry is not
   re-pointed in place (this entry's own warning, and the handling §10.17→§10.18 used). The inserts
   above every one of them total **+401** lines by this head — `_collect_classify_items` measures
   `:11402` at the merge base, `:11510` on `main` (`#11654`'s +108) and `:11803` here — so the live
-  values are §10.24's (`§10.23`'s own block is a record of the `#11654` forward-merge head, and
-  `§10.24` is the entry that claims THIS tree).
+  values are §10.29's (`§10.23`'s and `§10.24`'s own blocks are records of the `#11654`
+  forward-merge heads they name, and `§10.29` is the entry that claims THIS tree).
 
-⛔ **10.20 is superseded for the shipped tree by §10.23** (the live values for what §10.20 pins — the `:10508` read-back — which §10.23 re-derived; §10.22 records the `#11654` head it measured).
+⛔ **10.20 is superseded for the shipped tree by §10.29** (the live values for what §10.20 pins — the read-back, `:11361` at this tree — which §10.29 re-derived; §10.22 records the `#11654` head it measured, and §10.23/§10.24/§10.28 record the heads they name).
 
 ### 10.20 — the merge of `#11523`, and the door-read pin re-pointed for THIS tree (2026-11-09, `#11534`)
 
@@ -2014,10 +2014,11 @@ re-cut from the resolved document (§8), and no committed verdict is re-scored.
   touched; `document_sha256` is re-cut in this same merge, per §8's rule for *any* edit to this
   file.
 
-- ⛔ **Superseded for the merged tree by §10.23.** The numbers above are the `#11523` merge's
+- ⛔ **Superseded for the merged tree by §10.29.** The numbers above are the `#11523` merge's
   head. At this head, the switch's read-back this entry pins —
-  `_state_value_verbatim_enforced` assigned to `_value_fidelity_judged` — sits at `:10508`,
-  which `preregistration.json`'s `read_back` already carries.
+  `_state_value_verbatim_enforced` assigned to `_value_fidelity_judged` — sits at `:11361`,
+  which `preregistration.json`'s `read_back` now carries (this commit re-points the field from
+  `:10536`; at the head this entry names, the assignment — and the field — read `:10157`).
 
 ### 10.21 — the sixth row: `E6` is registered as a REQUIRED capstone criterion (`#11673`, 2026-11-10)
 
@@ -2163,9 +2164,9 @@ the condition; the gate reads the declaration below instead of asserting eight.
 
 ### 11.1 The finding, and what it is not
 
-`_collect_classify_items` (`tortoise/extractor_v2.py:11857-11879`) collects only candidates whose kind
+`_collect_classify_items` (`tortoise/extractor_v2.py:12682-12704`) collects only candidates whose kind
 is **missing or the `unclassified` sentinel**. Both classify passes are gated on that list being
-non-empty — `if items:` at `:14276` (the S2 pass) and `:14429` (the post-S4 pass). So S2.3 has work **iff the S2 map left
+non-empty — `if items:` at `:15101` (the S2 pass) and `:15254` (the post-S4 pass). So S2.3 has work **iff the S2 map left
 something untyped** — and that is a property of the candidate set, not of the pipeline's health. A
 corpus whose map assigns a concrete kind to every candidate legitimately idles the pass.
 
@@ -2209,7 +2210,7 @@ evidence or its evidence issue.
    run log, so making a step conditional is a reviewed edit to a hash-pinned artefact rather than a
    lane's local choice. A log whose declaration the frozen record does not confirm is **refused**.
 
-**Why (2) is a witness and not a loophole.** The extractor's fail-open `except` (`:14289`, `classify(S2) failed` / `:14440`, `classify(union) failed`) leaves
+**Why (2) is a witness and not a loophole.** The extractor's fail-open `except` (`:15114`, `classify(S2) failed` / `:15265`, `classify(union) failed`) leaves
 the *same* empty `s2`/`union` block as an idle pass — `#9823` measured that. Accepting a bare empty
 block would therefore hand a **crashed** classify pass the same verdict as a pass with nothing to do,
 which is the fail-open shape a gate may not have. The failure is visible: the extractor appends
@@ -2254,27 +2255,30 @@ to answer.
   `embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass(`, and `:14000` is
   `complete_list, vet_union_stats, _w, _ = _run_vet_pass(`.
 - **What moved: nothing else.** No metric, denominator, threshold, class set or corpus pin is
-  touched. The `#10360` switch's read-back is re-derived from `:10157` to `:10265` (the +108) in
-  `preregistration.json`'s live prose. `document_sha256` is re-cut in this same commit, per §8.
+  touched. The `#10360` switch's read-back is re-derived from `:10157` to `:10265` (the +108), and
+  `preregistration.json`'s `read_back` prose carried `:10265` when this entry was written — at this
+  tree the field carries `:11361` (see §10.29). `document_sha256` is re-cut in this same commit, per §8.
 
 ### 10.23 — the §11 cite block re-derived at the `#11654` forward merge, and the in-place re-pointings reverted (2026-11-10, `#11653`)
 
-> ⛔ **Superseded for the merged tree by §10.28.** `#12067` inserts a net `+54` into
+> ⛔ **Superseded for the merged tree by §10.29.** `#12067` inserts a net `+54` into
 > `tortoise/extractor_v2.py` (28 of it above the `#10360` read-back below), so §10.23's block
 > and §10.24's block are both records of the heads they name. That includes the note below
 > that calls `:10508` "still live": at this head `:10508` is a comment line and the
-> read-back assignment is `:10536`, which §10.28 re-points.
+> read-back assignment is `:11361`, which §10.29 re-points.
 >
-> ⛔ **Superseded for the merged tree by §10.24** — the §11 cite-block numbers below are a faithful
-> record of the head this entry names, and §10.24 carries the live values for those cites in this
+> ⛔ **Superseded for the merged tree by §10.29** — the §11 cite-block numbers below are a faithful
+> record of the head this entry names, and §10.29 carries the live values for those cites in this
 > tree. That includes the last sentence of the note below ("it is the newest entry and its numbers
 > are this tree's"): true when this entry was written, not true of this tree.
 >
-> **One number below is still live, and it is not §10.24's.** This entry's `#10360` read-back bullet
-> re-derives that switch's read-back to `extractor_v2.py:10508`; `#11239`'s `+17` inserts sit at
-> `extractor_v2.py:12112-12157`, **below** that assignment, so it did not move. That is why §10.20's
-> pointer still names THIS entry for the `:10508` value, and why `preregistration.json`'s `read_back`
-> prose carries it: §10.24 re-derived the block's lower cites and never restates `:10508`.
+> **One number below was still live when this entry was written, and it was not §10.24's.** This
+> entry's `#10360` read-back bullet re-derives that switch's read-back to
+> `extractor_v2.py:10508`; `#11239`'s `+17` inserts sit at `extractor_v2.py:12112-12157`,
+> **below** that assignment, so it did not move then. That is why §10.20's pointer named THIS entry
+> for the `:10508` value at the time, and why `preregistration.json`'s `read_back` prose carried it:
+> §10.24 re-derived the block's lower cites and never restated `:10508`. ⛔ At THIS tree the read-back
+> is `:11361`, §10.29 owns it, and `read_back` carries `:11361` — the field this commit re-pointed.
 >
 > ⛔ **Renumbered from §10.21 to §10.23 in the `#11654` forward merge**, by the rule §10.22 states for
 > `#11673`'s collision: this section and `#11673`'s both claimed §10.21 on 2026-11-10, the later one
@@ -2295,7 +2299,7 @@ to answer.
   §10.17→§10.18 used: a new dated entry"* — and it did not even hold arithmetically, because
   §10.19's prose still asserted that *all ten numbers move by the same +57* while the numbers
   written into it had moved by +391, +409 and +422. Those three entries are **byte-identical to
-  `main`**, each a faithful record of the head it names, and the live values are here.
+  `main`**, each a faithful record of the head it names, and the live values are §10.29's.
 - **New value — measured at this head:** `_collect_classify_items` at `:11803`, its
   extent `:11803-11825` (23 lines, `def` to `return items` — unchanged in size, so the extent is
   still the 23 lines §10.19 measured), the two `if items:` gates at `:14205`/`:14358`
@@ -2313,16 +2317,18 @@ to answer.
   `#11660`'s `sdk.py` move), which is exactly why a constant could not be trusted here.
 - **The `#10360` switch's read-back is re-derived by content too**, to `:10508` (the
   `_value_fidelity_judged = _state_value_verbatim_enforced()` assignment), and
-  `preregistration.json`'s live `read_back` prose carries that number.
+  `preregistration.json`'s `read_back` prose carried that number when this entry was written — at
+  this tree the field carries `:11361` (see §10.29).
 - **What moved: nothing else.** No metric, denominator, threshold, class set or corpus pin is
   touched — every §1–§9 value and the E4 denominator are the ones this record froze.
   `document_sha256` is re-cut in this same merge, per §8's rule for *any* edit to this file.
 
 ### 10.24 — the §11 cite block re-derived for `#11239`'s +17 (2026-11-11, `#11795`)
 
-> ⛔ **Superseded for THIS tree by §10.28.** `#12067`'s `+54` into `tortoise/extractor_v2.py`
-> sits above every cite in the block below (28 of the 54 above the read-back), so the live
-> values for this tree are §10.28's, not this entry's.
+> ⛔ **Superseded for THIS tree by §10.29.** `#12067`'s `+54` into `tortoise/extractor_v2.py`
+> sits above every cite in the block below (28 of the 54 above the read-back); §10.28 recorded that
+> head, and a later rebase onto `ca74f2375e` moved the file again, so the live values for this tree
+> are §10.29's, not this entry's.
 >
 > **A successor entry, not an edit to §10.23.** §10.23's numbers are a faithful record of the
 > `#11654` forward-merge head it names, and §10.19's rule is that re-numbering a history entry in
@@ -2459,7 +2465,8 @@ to answer.
 - ⛔ **Superseded for the merged tree by §10.26.** The numbers above are the `9ba2da35` head this
   entry measured — `:14225-14227` really was the window there. A later commit on this same branch
   (`93dafca241`) inserted 20 lines above the anchor and did not re-derive the cite, so the live
-  numbers are §10.26's.
+  window at this tree is `:14272-14274`, which §10.27 records (§10.26 recorded the head after it and
+  §10.27 superseded that in turn; §10.29 owns the `extractor_v2.py` values, not this cite).
 - ⛔ **The `hosted_api.py` pivot is superseded too, and was missed by the first pass of this
   marker.** `:23466` WAS `life = proj.g.query(LIFETIME_MEMORY_QUERY).result_set` at the `9ba2da35`
   head this entry measured — the claim above is true of the head it names. On the merged tree it is
@@ -2519,16 +2526,19 @@ to answer.
   TOGETHER so they cannot disagree about this anchor, which is the failure §10.25 was written to
   stop and this entry closes.
 - ⛔ **Superseded for the merged tree by §10.27.** The numbers above are the head this entry
-  measured; `29ec0f3471` inserted a net `+3` above the anchor and did not re-derive the cite,
-  so the live window is `:14248-14250`.
+  measured; `29ec0f3471` inserted a net `+3` above the anchor and did not re-derive the cite, so at
+  that head the live window was `:14248-14250`. At THIS tree it is `:14272-14274`: `#12067`'s own
+  squash `c7499ac7a` moved it to `:14265`, and later merges moved it again (§10.27).
 
 ### 10.27 — the same §548 cite re-pointed once more, for this branch's own `+3` (2026-11-12, `#9752`)
 
-> ⛔ **Superseded for the merged tree by §10.28** — but only for the cites that entry names.
-> This entry's `tortoise/projection/__init__.py:14248-14250` window is untouched by `#12067`
-> (that diff has no hunk in `projection/__init__.py`), so it stayed the live value through
-> §10.28; §10.29 then measured it at `:14265-14267` for the merged tree this record ships
-> with, and §10.29 owns that window.
+> ⛔ **Superseded for the merged tree by §10.29** — but only for the cites that entry names.
+> This entry's `tortoise/projection/__init__.py:14248-14250` window did NOT stay live: `#12067`'s own
+> squash `c7499ac7a` has a hunk in `projection/__init__.py` that inserts **+10** above the anchor
+> (its inserted comment carries the literal `#12067`), moving the anchor `:14255` → `:14265`; later
+> merges moved it again. At THIS tree the window is `:14272-14274`, re-derived together with the
+> probe's copy of it in the same commit — this entry's own rule, so the two cannot disagree about
+> the anchor. No entry records `:14265-14267`; §10.29 owns the `extractor_v2.py` values.
 >
 - **What redded.** `probes/capstone_measure.py:2989` carried
   `tortoise/projection/__init__.py:14245-14247` from §10.26, and `29ec0f3471` ("name :PackSelection at
@@ -2550,18 +2560,20 @@ to answer.
   *any* edit to this file, and the probe's cite and this document's cite are re-pointed TOGETHER so
   they cannot disagree about this anchor.
 - ⛔ **Superseded for THIS tree by §10.29.** This entry's window was the live one when it was
-  written, and `#12067` has no hunk in `tortoise/projection/__init__.py` — but a later merge on
-  the branch inserted above the anchor, so the window this tree carries is
-  `projection/__init__.py:14265-14267`, not `:14248-14250`. §10.29 owns the values this tree
-  carries. (§10.26 records the `:14245` window; `29ec0f3471` then inserted a net `+3` above the
+  written, but `#12067`'s own squash `c7499ac7a` DOES have a hunk in
+  `tortoise/projection/__init__.py` — it inserts 10 lines above the anchor and its inserted comment
+  carries the literal `#12067` — and later merges moved it again, so the window this tree carries is
+  `projection/__init__.py:14272-14274`, not `:14248-14250`, and the probe's copy of it is re-pointed
+  with this one in the same commit. §10.29 owns the `extractor_v2.py` values this tree carries. (§10.26 records the `:14245` window; `29ec0f3471` then inserted a net `+3` above the
   anchor, making `:14248-14250` what this entry measured.)
 
 ### 10.28 — the §11/§9 cite block re-derived for `#12067`'s `+54`, and the `#10360` read-back re-pointed (2026-11-13, `#12067`)
 
-> ⛔ **Superseded for THIS tree by §10.29.** No cite below moved: `34bb716315` inserted `+9`
-> inside the same relation-builder hunk and `391313ca9a` then removed it again (the mechanism
-> guard became the DECLARED table in `tortoise/ep.py`), so §10.29 re-measured the same numbers
-> this entry recorded while the branch's total delta grew elsewhere. §10.29 owns them.
+> ⛔ **Superseded for THIS tree by §10.29.** Those two merges moved no cite below: `34bb716315`
+> inserted `+9` inside the same relation-builder hunk and `391313ca9a` then removed it again (the
+> mechanism guard became the DECLARED table in `tortoise/ep.py`). A later rebase onto `ca74f2375e`
+> then moved the file again, so §10.29 re-measured the same ANCHORS on the tree this record ships
+> with and its numbers differ from this entry's — §10.29 owns them.
 >
 > **A successor entry, not an edit to §10.23 or §10.24.** Both of those number the head
 > they name and must stay byte-identical to `main` — §10.19's rule, restated by §10.22
@@ -2592,8 +2604,9 @@ to answer.
   `:14289`/`:14440`, the two result blocks at `:14640` (closing `:14646`) and `:14650`
   (closing `:14654`), and `_run_vet_pass`'s S2.2 call at `:16834` and its post-S4 union call at
   `:14405`. The `#10360` switch's read-back — the
-  `_value_fidelity_judged = _state_value_verbatim_enforced()` assignment — is at `:10536`
-  (was `:10508`), and `preregistration.json`'s live `read_back` prose carries that number.
+  `_value_fidelity_judged = _state_value_verbatim_enforced()` assignment — at this entry's head is
+  `:10536` (was `:10508`), and `preregistration.json`'s `read_back` prose carried that number then.
+  At the tree this record ships with it is `:11361`, which the field now carries (§10.29).
 - **Verified by content, not by arithmetic.** Each line was opened at this head:
   `:11857` is `def _collect_classify_items(embed_list: dict) -> list[dict]:` and `:11879` is
   `return items`; `:14276`/`:14429` are the two `if items:` gates; `:14289`/`:14440` are the
@@ -2613,45 +2626,52 @@ to answer.
   threshold, class set or corpus pin is changed — every §1–§9 criterion VALUE and the E4
   denominator are the ones this record froze. `document_sha256` is re-cut in this same commit,
   per §8's rule for *any* edit to this file.
-- **§10.29 succeeds this entry**, and it re-measures the same values: `34bb716315`'s `+9`
-  insert was removed again by `391313ca9a`, so nothing below moved. The entry that carries
-  a `LIVE for the merged tree` bullet is §10.29, not this one.
+- **§10.29 succeeds this entry**, and it re-measures the same ANCHORS on the tree this record
+  ships with: `34bb716315`'s `+9` insert was removed again by `391313ca9a`, so those two moves left
+  the block where it was — but a later rebase onto `ca74f2375e` renumbered every one of them, so
+  §10.29's numbers are not this entry's. The entry that carries a `LIVE for the merged tree` bullet
+  is §10.29, not this one.
 
 ### 10.29 — the §11/§9 cite block re-derived for THIS branch's delta, round 15's code included (2026-11-13, `#12067`)
 
 > **A successor entry, not an edit to §10.28.** §10.28's numbers are a faithful record of the head
 > it names. Two merges have landed since: `34bb716315` added 9 lines to the relation builder, and
 > `391313ca9a` then REMOVED them again — the mechanism guard became the DECLARED table in
-> `tortoise/ep.py`, so the band this block lives in is back to `+54` while the total grew elsewhere.
-> An entry that recorded the intermediate `+63` reading would name a head that no longer exists, so
-> this one is measured against the merged tree this record ships with.
+> `tortoise/ep.py`, so no offset carries this block: the `+54` band belongs to the earlier citation
+> pairs §10.28 names, not to the tree measured below. An entry that recorded the intermediate `+63`
+> reading would name a head that no longer exists, so this one is measured against the merged tree
+> this record ships with — every anchor OPENED at that tree.
 >
 > ⚠️ **The handling is still §10.26→§10.27's**: a new dated entry, never a re-point in place.
 
-- **What moved, and why an offset cannot describe it.** The branch's delta against `origin/main` is
-  now **`+99 / -12` in fifteen hunks**, not one band: `+0` above `:1761`, `+28` at the `#10360`
-  read-back (`:10508` on `main`, `:10536` here), and `+54` from `_collect_classify_items`
-  (`:11803` → `:11857`) all the way through the S2.2 VET gate (`:16779` → `:16833`). A single
-  offset applied to the block would be wrong at two of those three regions, which is exactly why
-  every line below was opened instead.
+- **What moved, and why an offset cannot describe it.** At this head the branch's
+  `tortoise/extractor_v2.py` is **byte-identical to the base this record is measured against,
+  `ca74f2375e`** (`git diff ca74f2375e -- tortoise/extractor_v2.py` is empty), so the `#10360`
+  read-back (`:11361`), `_collect_classify_items` (`:12682`) and the S2.2 VET gate (`:17756`) are
+  this file's own lines at that tree. ⛔ They are bound to **that head**: `main` has advanced past
+  `ca74f2375e` since (`b85194d6b`/`#12343` inserts a 48-line block at `:2930-2977`, above the anchor), which renumbers
+  all three — so this block must be re-derived on any later tree, never offset, and never graded
+  against a moving `origin/main`. The **`+99 / -12` in fifteen hunks** this bullet recorded measured
+  an earlier tree, not this one: it is kept only as the reason every line below was OPENED rather
+  than offset, since an offset taken from it is wrong at two of its three regions.
 - **New value — measured at this head, by opening each line:** `_collect_classify_items` at
-  `:11857`, extent `:11857-11879` (`def` to `return items`, unchanged in size); the two `if items:`
-  gates at `:14276`/`:14429`; the two fail-open `except` arms at `:14289`/`:14440`; the two result
-  blocks at `:14640` (closing `:14646`) and `:14650` (closing `:14654`); `_run_vet_pass`'s S2.2
-  call at `:16834` and its post-S4 union call at `:14405`; and the `#10360` read-back
-  (`_value_fidelity_judged = _state_value_verbatim_enforced()`) at `:10536`.
-- **Verified by content, not by arithmetic.** `:11857` is
-  `def _collect_classify_items(embed_list: dict) -> list[dict]:` and `:11879` is `return items`;
-  `:14276`/`:14429` are the two `if items:` gates; `:14289`/`:14440` are the two fail-open
-  `except` arms whose warnings name `classify(S2) failed` / `classify(union) failed`; `:14640`
-  opens `result["classify_later"]` and `:14646` closes it (`}`), `:14650` opens `result["vet"]`
-  and `:14654` closes it; `:16834` is
-  `embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass(` and `:14405` is
-  `complete_list, vet_union_stats, _w, _ = _run_vet_pass(`; `:10536` is the read-back assignment.
-  The selection flags this block sits under are at `:13820` (`vet_enabled`), `:13789`
-  (`classify_later`) and `:13814` (its construction-failure arm), and the early return that emits
-  both OFF surfaces is `if not edus:` at `:13824`, with `edus = _edus_from_conversation(...)` at
-  `:13823` above it.
+  `:12682`, extent `:12682-12704` (`def` to `return items`, unchanged in size); the two `if items:`
+  gates at `:15101`/`:15254`; the two fail-open `except` arms at `:15114`/`:15265`; the two result
+  blocks at `:15563` (closing `:15569`) and `:15573` (closing `:15577`); `_run_vet_pass`'s S2.2
+  call at `:17757` and its post-S4 union call at `:15230`; and the `#10360` read-back
+  (`_value_fidelity_judged = _state_value_verbatim_enforced()`) at `:11361`.
+- **Verified by content, not by arithmetic.** `:12682` is
+  `def _collect_classify_items(embed_list: dict) -> list[dict]:` and `:12704` is `return items`;
+  `:15101`/`:15254` are the two `if items:` gates; `:15114`/`:15265` are the two fail-open
+  `except` arms whose warnings name `classify(S2) failed` / `classify(union) failed`; `:15563`
+  opens `result["classify_later"]` and `:15569` closes it (`}`), `:15573` opens `result["vet"]`
+  and `:15577` closes it; `:17757` is
+  `embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass(` and `:15230` is
+  `complete_list, vet_union_stats, _w, _ = _run_vet_pass(`; `:11361` is the read-back assignment.
+  The selection flags this block sits under are at `:14645` (`vet_enabled`), `:14614`
+  (`classify_later`) and `:14639` (its construction-failure arm), and the early return that emits
+  both OFF surfaces is `if not edus:` at `:14649`, with `edus = _edus_from_conversation(...)` at
+  `:14648` above it.
 - **What moved: the citations, and nothing that is a protocol value.** No metric, denominator,
   threshold, class set or corpus pin is changed — every §1–§9 criterion VALUE and the E4
   denominator are the ones this record froze. `document_sha256` is re-cut in this same commit,
