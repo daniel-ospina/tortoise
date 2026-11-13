@@ -487,9 +487,9 @@ def test_none_result_set_means_not_measured():
     deliberately NOT asserted here: on a virgin projection `_bare()` leaves the
     served half `None` too, so the assertion cannot catch the mutation that
     matters in this method — a dropped `self._vector_index_served_labels = None`
-    reset. It WOULD red a lane that clears the indexed half while leaving the
-    served half populated, and that is a real shape; it just belongs to a pin
-    that populates the pair first. The guards are
+    reset. A COHERENCE ASSERTION placed here would red a lane that clears the
+    indexed half while leaving the served half populated, and that is a real
+    shape; it just belongs to a pin that populates the pair first. The guards are
     `test_unmeasured_pair_is_none_in_both_halves`, which proves each `None` lane
     RAN from its own log line (`"inventory read failed"` /
     `"inventory unavailable (empty response)"`), and
@@ -708,8 +708,8 @@ def test_a_store_with_no_gap_does_not_warn(caplog):
 # UNARMED report keeps its WARNING, which is the split `_gap_level()` above
 # reads from `vector_index_retired()`. The header said "captures at WARNING"
 # over a pin that no longer takes one, which is the same defect class this
-# file's fixtures were fixed for: it sends the next reader to check the wrong
-# half.
+# file's sibling pins were fixed for (#11660 review F1 raised their capture
+# level): it sends the next reader to check the wrong half.
 #
 # What #11087 ends is the SILENCE — the same store must now report the
 # serves/indexes pair at INFO, and so must a store that HAS a gap (which also
