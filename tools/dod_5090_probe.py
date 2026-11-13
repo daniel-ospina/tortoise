@@ -1278,6 +1278,13 @@ WRITER_CENSUS: dict[str, tuple[str, str]] = {
         "chain — the same direction, and for the same reason, as "
         "`_journal_event_raw_write`: its record IS what the rebuild reads the "
         "vector back from (`#8488`), not a store reached around the gate"),
+    # ⛔ ONE entry per name: a second literal key for the same name SILENTLY OVERRIDES the
+    # first (Python's last-wins dict semantics — the LATER row wins and the earlier one is
+    # dead; an active override, not a harmless no-op). `ruff`'s F601 is the only LINTER that
+    # catches it, and it caught this one only post-merge on `main` — the pytest lane could
+    # not, until `#9314`'s pin
+    # (`tests/test_dod_5090_probe.py::test_a_duplicate_literal_key_in_the_census_dicts_cannot_land_silently`).
+    # Provenance and the carrier rationale are merged into this row so neither reading is lost.
     "tortoise.sdk::create_source": (
         CENSUS_EXEMPT,
         "`tortoise/sdk.py::create_source` — the instrument's match is an operator-facing "
@@ -1326,7 +1333,6 @@ CENSUS_EVIDENCE: dict[str, tuple[tuple[str, str, str], ...]] = {
         # only shadowed) and `ruff check .` F601 caught it on main; its one distinct
         # sentence: deleting the guard (the `raise`) takes the needle AND the
         # population entry away together, so a stale exemption cannot outlive it.
-        # The quoted refusal sentence itself — the whole reason this name enrols.
         # Needle 1 is the REFUSAL's own prose — the whole reason this name enrols, and the
         # only `_EMBED_WRITE` match in the body: delete the `raise` and it goes, taking the
         # population entry with it. Needle 2 is the guard's CONDITION
