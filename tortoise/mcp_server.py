@@ -3889,7 +3889,16 @@ def tortoise_query(kind: str | None = None,
       alone does NOT switch the return shape — it BOUNDS the plain list. Not
       combinable with text= (fts has no offset/skip) — error dict returned.
     - text=<query>: routes through tortoise_fts_query() for hybrid search
-      (unchanged behavior; limit defaults to 100).
+      (unchanged behavior; limit defaults to 100). `filters=` is REFUSED on
+      this arm rather than dropped (#12455): the fts leg takes named knobs
+      (exclude_status, claim_class, relationship_filter, …) and has no
+      property-filter parameter, so an accepted dict used to be silently
+      discarded and the UNFILTERED population served as if it applied. Use the
+      structural path for property filters. `include_retracted` is the one
+      exception: it is promoted to the parameter (never a property filter), and
+      the fts leg is not given it, so terminal rows are excluded there.
+    - tag mode, like the text= arm, does not apply `filters` (its own
+      documented ignore) — it is a Point reader keyed on the tag only.
     - include_retracted=True surfaces tombstones on every path (structural,
       paginated, and tag modes); default False excludes them.
 
@@ -4016,6 +4025,42 @@ def tortoise_query(kind: str | None = None,
         return {"results": page_rows,
                 "total": total,
                 "hasMore": eff_offset + eff_limit < total}
+    # ── #12455: `filters=` was ACCEPTED on the `text=` arm and DROPPED ───────
+    # `filters` is a STRUCTURAL-path argument. This arm forwards only
+    # kind/entity_type/limit/min_confidence/order_by into
+    # `sdk.tortoise_fts_query`, whose knobs are named (`exclude_status`,
+    # `claim_class`, `exclude_turn_echo_session`, `relationship_filter`, …) and
+    # which has NO property-filter parameter (sdk.py:40637-40710) — so a dict
+    # the caller passed was never looked at, and the answer was the UNFILTERED
+    # population with `total`/ordering computed over it. That is the #6146
+    # wrong-answer-indistinguishable-from-right class, and the same one #12372
+    # removed for `entity_type`.
+    #
+    # Honouring it is not the smaller change: it means teaching the fts leg to
+    # apply property filters at its pre-truncation seam (`exclude_status`/
+    # `claim_class` do exactly that), i.e. an SDK SURFACE change, which this
+    # repo's own rule reserves to the owner. So the fail-open is closed by
+    # REFUSING — the same shape `offset=`/`page=` already have on this arm.
+    #
+    # Placed ABOVE the branch and BELOW the `tag=` branch, for two reasons: a
+    # guard after the read would still pay for it and could still serve rows on
+    # an error path; and `tag=` takes precedence over `text=` by its own
+    # documented contract, so a caller who passes both keeps the tag read.
+    # `include_retracted` is popped out of `filters` above, so an
+    # `{"include_retracted": …}` dict has already become a parameter by now and
+    # is correctly NOT refused here (refusing it would be a false block on a
+    # name that is not a property filter at all).
+    if text and filters:
+        return _SafeError({"error": (
+            "filters= is not applied on the text= arm, and it used to be "
+            "dropped silently (#12455): the read goes through the fts leg, "
+            "which has no property-filter parameter, so your filters would be "
+            "ignored and the UNFILTERED population returned as if they had "
+            "applied. Drop text= to use the structural path "
+            "(tortoise_query(kind=..., filters={...})), or drop filters= for "
+            "the semantic read. (`include_retracted` is NOT affected: it is "
+            "promoted to its own parameter and is never a property filter.)"
+        )})
     if text:
         if paginated:
             return _SafeError({"error": "offset/page not supported with text — "
