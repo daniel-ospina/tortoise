@@ -1047,8 +1047,10 @@ rows:
   # this cell), because `cut` is owner-gated ("ask Daniel FIRST, before the re-cut",
   # tools/surface_manifest.py) and this change adds/removes/renames NO tool or method.
   # A full `cut` was measured on this box and DELIBERATELY NOT committed: with `skills/`
-  # dangling it drops `skill-docs` from 38 SDK `used_by` cells, and it rewrites 26 header
-  # comment lines — both `NON_DERIVABLE` evidence that a digest refresh must not move.
+  # dangling it drops `skill-docs` from 38 SDK `used_by` cells, and it DROPS the body
+  # rationale comments (27 absent from a re-cut at main, 35 at this head) — the header
+  # block is `MANIFEST_HEADER`, re-emitted verbatim, so it survives a cut. Both kinds are
+  # `NON_DERIVABLE` evidence that a digest refresh must not move.
   served_attributes: 7a717e4e60ce3bfa
   family: memory
   family_rank: 1
