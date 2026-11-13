@@ -8258,23 +8258,30 @@ def test_a_duplicate_literal_key_in_the_census_dicts_cannot_land_silently():
 # `tests/test_embed_writer_register.py::test_a_duplicate_key_raises`).
 #
 # So this is the DICT half: one scan, run wherever a diff SELECTS this module. ⛔ Not
-# on every tree that holds a duplicate — selection is the real bound, and it has TWO
-# shapes:
+# on every tree that holds a duplicate — selection is the real bound, and it is
+# NARROWER than "every file under the scanned roots". Measured per file at this head,
+# with `select([p], "pull_request")` over every module the scan walks:
 #
-#   * most `tools/` files are NOT subjects that reach this module (measured:
+#   * `tools/` — 140 of 195 DO reach it; 55 do not (measured:
 #     `select(["tools/min_signal.py"], "pull_request")` → 90 test files, this one
-#     absent; `tools/who_is_on.py` and `tools/claim_lanes.py` likewise), so a
-#     duplicate born at the merge of two PRs each touching one of those reds nothing
-#     here;
-#   * `tools/dod_5090_probe.py` itself DOES reach it — it is a `CORE_ALSO` entry in
-#     `tools/ci_selection.py` (the instrument has to be selected by its own subject),
-#     measured `select(["tools/dod_5090_probe.py"], "pull_request")` → 830 test files,
-#     this one PRESENT. That is the file `#11996`'s duplicate lived in, and it is
-#     pinned by `test_the_instrument_is_selected_by_its_own_subjects` in this module.
+#     absent; `tools/who_is_on.py`, `tools/claim_lanes.py` likewise). `tools/dod_5090_probe.py`
+#     itself does — it is a `CORE_ALSO` entry in `tools/ci_selection.py` (the
+#     instrument has to be selected by its own subject; 830 test files, this one
+#     PRESENT) — which is the file `#11996`'s duplicate lived in, and why a
+#     duplicate born there at a merge IS caught. It is pinned by
+#     `test_the_instrument_is_selected_by_its_own_subjects` in this module.
+#   * `tortoise/` — 31 of 285 do NOT reach it (`tortoise/ranking.py` → `ep`,
+#     `tortoise/hosted_api.py` → `api`+`onboarding`, `tortoise/reader.py` → `sdk`, …).
+#     The mechanism is the one this module already documents: a named-surface match
+#     REPLACES the `core` fallback that would otherwise sweep this file in.
+#   * `tests/` — 1,490 of 1,491 reach it; the exception is `tests/_html_links.py`
+#     (`onboarding`).
 #
-# So: a `tests/`, `tortoise/` or `tools/dod_5090_probe.py` diff reaches this guard, as
-# does any full-lane run (push/schedule select in FULL) — which is what makes the
-# born-at-merge case catchable. Everything else is lint's alone.
+# So the honest bound is per root and NOT a rule you can generalise: any full-lane run
+# (push and schedule select in FULL, which is what makes the born-at-merge case
+# catchable), plus a per-file `pull_request` selection that covers every `tests/`
+# module but one, `tools/dod_5090_probe.py`, and 254 of 285 `tortoise/` modules.
+# Anything outside that is lint's alone.
 
 #: Roots the declaration dicts live under today. ⛔ NOT the whole repo: `battery/`,
 #: `graph-scripts/`, `docs/`, `eval/` and several smaller roots sit outside these three,
@@ -8448,6 +8455,22 @@ def test_the_duplicate_key_detector_catches_a_duplicate():
     assert _duplicate_constant_key_sites("D = {-1: 'a', 1: 'b'}\n") == []
 
 
+def _duplicate_key_report(violations: list[str]) -> str:
+    """The guard's failure message — separated so a test can DRIVE it.
+
+    It used to be composed inline in the guard's `assert`, where it is evaluated only
+    when that assert FAILS — so no run ever built it, and changing the prefix or the
+    newline-and-indent separator would have left every test green. A message nobody renders is
+    not a guard's evidence.
+    """
+    return (
+        "a dict literal declares the same key twice, so the entry that loses the "
+        "last-wins race is DEAD while every test stays green (#12265, root #9314). "
+        "Delete the stale row (or correct the reason) — do not add `# noqa: F601`:\n  "
+        + "\n  ".join(violations)
+    )
+
+
 def _scan_declaration_roots(root: Path) -> tuple[list[str], dict[str, int]]:
     """`(violation messages, modules read per root)` over `_DUP_KEY_ROOTS` under `root`.
 
@@ -8509,12 +8532,7 @@ def test_no_module_declares_the_same_dict_key_twice():
     # ⛔ THE VIOLATION IS ASSERTED FIRST. A floor failure means the guard is
     # narrower than it claims, but a live duplicate in the same run is the finding
     # the reader actually needs, and asserting floors first would hide it.
-    assert not violations, (
-        "a dict literal declares the same key twice, so the entry that loses the "
-        "last-wins race is DEAD while every test stays green (#12265, root #9314). "
-        "Delete the stale row (or correct the reason) — do not add `# noqa: F601`:\n  "
-        + "\n  ".join(violations)
-    )
+    assert not violations, _duplicate_key_report(violations)
     # A scan that read nothing would satisfy the assertion above vacuously — and it
     # must be checked PER ROOT: rglob returns zero silently on a root that was
     # renamed or removed, and an aggregate floor lets two empty roots hide behind
@@ -8572,10 +8590,12 @@ def test_the_scan_REPORTS_a_duplicate_it_finds(tmp_path):
     ), violations
     # …and the clean module contributes nothing: the report is specific, not a roll-up.
     assert not any("clean.py" in v for v in violations), violations
-    # ⛔ And the JOINED render — the string `test_no_module_declares_the_same_dict_key_twice`
-    # asserts on, which lives in the TEST and not in the helper — must carry both
-    # sites. Without this the multi-violation `"\n  ".join(...)` stays an undriven arm,
-    # and a guard whose red arm is only CLAIMED is not evidence.
-    joined = "\n  ".join(violations)
-    assert "tortoise/dup.py:3 re-declares key 'x::y' (first at :2)" in joined, joined
-    assert "tests/broken.py: UNPARSEABLE" in joined, joined
+    # ⛔ And the guard's OWN message — the one `test_no_module_declares_the_same_dict_key_twice`
+    # asserts with — must carry both sites. It used to be composed inline in that
+    # `assert`, so it was evaluated only on FAILURE and no run ever built it; a
+    # change to the prefix or the `"\n  "` separator left every test green. This
+    # drives the real builder, not a local copy of it.
+    report = _duplicate_key_report(violations)
+    assert "tortoise/dup.py:3 re-declares key 'x::y' (first at :2)" in report, report
+    assert "tests/broken.py: UNPARSEABLE" in report, report
+    assert report.count("\n  ") >= 2, report

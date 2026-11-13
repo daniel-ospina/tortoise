@@ -797,12 +797,14 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # before `main()` writes the var. Function-scoped `monkeypatch` — auto-undone
     # at teardown, so no lane leaks into a later module.
     #
-    # ⛔ ONE ROW ONLY — this module had a SECOND, broad row
+    # ⛔ ONE ROW ONLY — this module had a FIRST, broad row
     # (`[r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"']`) further up the dict.
-    # Python's last-wins dict semantics made the broad row DEAD (it never applied;
-    # ruff `F601` flagged it), so removing it changes no exemption, while MERGING
-    # the two would silently re-widen the shape the entry below deliberately
-    # narrows. Same behaviour, one row, no reading that says otherwise.
+    # Python's last-wins dict semantics made that broad row DEAD (it never applied),
+    # so removing it changes no exemption, while MERGING the two would silently
+    # re-widen the shape the entry below deliberately narrows. ⛔ `ruff`'s `F601`
+    # flagged the SURVIVING (narrow) row, not this dead one — see the note 130 lines
+    # up: following "which one did ruff flag" finds the row that WON, never the loser.
+    # Same behaviour, one row, no reading that says otherwise.
     "test_9079_event_writers_journal.py": [
         r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*$'],
     # The arm's `--db` scoping tests (#1349 isolation): an explicit `--db` must
