@@ -477,9 +477,13 @@ def test_the_scorer_control_is_a_tie_and_the_rule_says_fail(artifact, brief_text
     assert primary["mcnemar_p_two_sided"] > 0.05, (
         "the scorer control is now significant — re-run and re-decide")
     assert artifact["verdict"]["M3"] == "FAIL"
-    # ⛔ The issue's OWN falsifier sentence is satisfied by the deployable arm.
-    # The brief must present BOTH readings; this pin makes the second one
-    # impossible to drop when the first is quoted.
+    # ⛔ The closing condition in the issue's OWN falsifier sentence is NOT
+    # triggered — a deployable BM25-in-Postgres beats the current scorer —
+    # which is why M3's own rule can still say FAIL here. The brief must
+    # present BOTH readings; this pin makes the second one impossible to
+    # drop when the first is quoted. ⛔ Do NOT write "the falsifier is
+    # satisfied": quote-mined, that says the leg is CLOSED, the opposite of
+    # what this assertion exists for.
     subset = artifact["verdict"]["primary_arm_tokens_controlled_subset"]
     assert subset["n"] < artifact["sample"], (
         "the tokens control is only real on the non-degenerate queries; the "
@@ -1013,6 +1017,32 @@ def test_the_degraded_leg_refusal_is_WIRED_at_every_shipped_leg_call(tool_mod) -
                 and (getattr(n.func, "id", None) == name
                      or getattr(n.func, "attr", None) == name)]
 
+    def _innermost_loop(call, fn):
+        """The innermost ``for``/``while`` body the call sits in, or ``None``.
+
+        ⛔ SCOPE, not line order (#12349 review cycle 8). The previous attempt
+        asserted the refusal came before the NEXT measured call by line number —
+        which is **unsatisfiable**: any call after the paired one is also after the
+        refusal's own line, so the assertion could never fire, and a refusal
+        hoisted out of the inner loop stayed GREEN. Measured by the reviewer:
+        hoisting it to the end of the row loop left 900 of 1200 measured reads
+        unguarded with the pin reporting OK. Two call sites 40 lines apart cannot
+        see a 14-line hoist; their ENCLOSING BLOCKS can.
+        """
+        found = []
+
+        def walk(node, cur):
+            for child in ast.iter_child_nodes(node):
+                nxt = (child if isinstance(child, (ast.For, ast.While,
+                                                   ast.AsyncFor))
+                       else cur)
+                if child is call:
+                    found.append(cur)
+                walk(child, nxt)
+
+        walk(fn, None)
+        return found[0] if found else None
+
     def _is_warmup(call) -> bool:
         """The pre-wait warm query, whose RESULT is discarded.
 
@@ -1054,7 +1084,23 @@ def test_the_degraded_leg_refusal_is_WIRED_at_every_shipped_leg_call(tool_mod) -
         assert prior, (
             f"`_refuse_degraded_legs` at line {refusal.lineno} has no measured "
             "`run_fts_query` call before it")
-        want = traces[max(prior)]
+        owner = max(prior)
+        want = traces[owner]
+        # ⛔ The refusal must sit in the SAME innermost loop as the measured call
+        # it guards. That is what makes it run once per measured read; a refusal
+        # hoisted one scope out runs once per ROW and silently leaves every k but
+        # the last unguarded.
+        # NEAREST preceding call with that trace name — both loops use a local
+        # called `trace`, so the name alone does not disambiguate them.
+        leg_call = max((c for c in legs
+                        if any(k.arg == "leg_trace" and k.value.id == want
+                               for k in c.keywords) and c.lineno < refusal.lineno),
+                       key=lambda c: c.lineno)
+        assert _innermost_loop(refusal, sweep) is _innermost_loop(leg_call, sweep), (
+            f"`_refuse_degraded_legs` at line {refusal.lineno} is in a different "
+            f"loop body from the `run_fts_query` call at line {leg_call.lineno} "
+            "it guards — it has been hoisted out, so the reads in between are "
+            "unguarded while this pin reports OK")
         assert first.id == want, (
             f"`_refuse_degraded_legs` at line {refusal.lineno} refuses on "
             f"{first.id!r} but the leg wrote its trace to {want!r} — the refusal "
