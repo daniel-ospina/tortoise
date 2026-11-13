@@ -575,7 +575,7 @@ def test_since_excludes_by_instant_on_the_correctly_ordered_list(sdk):
 
     The two boundary EDGES are pinned in ``tests/test_11926_derived_invalidation.py``
     (not in this file): equality still admits
-    (``tests/test_11926_derived_invalidation.py:821``, the assertion) and an
+    (``tests/test_11926_derived_invalidation.py:822``, the assertion) and an
     incomparable boundary excludes everything (``since="not-an-instant"`` → ``[]``).
     """
     indicator = _indicator(sdk, "since")
