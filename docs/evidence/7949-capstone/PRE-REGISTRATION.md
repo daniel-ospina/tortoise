@@ -2639,7 +2639,8 @@ to answer.
   gates at `:15149`/`:15302`; the two fail-open `except` arms at `:15162`/`:15313`; the two result
   blocks at `:15611` (closing `:15617`) and `:15621` (closing `:15625`); `_run_vet_pass`'s S2.2
   call at `:17805` and its post-S4 union call at `:15278`; and the `#10360` read-back
-  (`_value_fidelity_judged = _state_value_verbatim_enforced()`) at `:11409`.
+  (`_value_fidelity_judged = _state_value_verbatim_enforced()`) at `:11409` — the record's live
+  `read_back` now carries this value, superseding §10.28's `:10536` sentence.
 - **Verified by content, not by arithmetic.** `:12730` is
   `def _collect_classify_items(embed_list: dict) -> list[dict]:` and `:12752` is `return items`;
   `:15149`/`:15302` are the two `if items:` gates; `:15162`/`:15313` are the two fail-open
