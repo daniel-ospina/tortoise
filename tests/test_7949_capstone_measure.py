@@ -5375,9 +5375,11 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # bare `)`; the same cite rot is tracked in #12456 / #12381. And
     # an `assert` that raises ends the test: placed after it, this pin was **never
     # executed at the head that merged** and every arm below was unexercised — measured
-    # by appending a `config/ci-surfaces.yml:10076` cite to the document's row,
-    # which is exactly the cite the pin exists to refuse, and getting the same single
-    # `sdk.py:25189` message with no mention of the `carve_out:` row. A guard that a
+    # at `ca74f2375e` by appending a `config/ci-surfaces.yml:10076` cite to the
+    # document's row (10076 was the entry's LIVE line THERE, which is what made it
+    # exactly the cite the pin exists to refuse — substitute the live one to repeat
+    # it, do not copy this number), and getting the same single `sdk.py:25189`
+    # message with no mention of the `carve_out:` row. A guard that a
     # neighbouring red row switches off is not a guard (#12266 review).
     _assert_carve_out_entry_is_pinned_by_symbol()
     sources = {name: path.read_text(encoding="utf-8").splitlines()
@@ -5408,7 +5410,9 @@ def _assert_carve_out_entry_is_pinned_by_symbol():
     unrelated to it — a number no single tool moves (`register_tests`' registration
     splices, plus hand-authored rows). ⛔ And TWO MORE while this PR waited, which is
     the cleanest measurement of the defect there is: 10021 at `87c07462a8` (+34),
-    then 10076 at `ca74f2375e` (+55) — the `main` tip this branch was rebased onto.
+    then 10076 at `ca74f2375e` (+55) — the `main` tip an EARLIER rebase of this branch
+    landed on. It has moved again on every rebase since, which is the whole reason no
+    live value appears below; the numbers here are headed history, not today's tree.
     At that tip `main`'s own row still printed `:10034`, which on that same tree is a
     COMMENT line (`git show ca74f2375e:config/ci-surfaces.yml | sed -n '10034p'`),
     so the row that existed to hold this number was **42 lines adrift on its own
