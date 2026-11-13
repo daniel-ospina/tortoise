@@ -14,7 +14,11 @@ OR-union + RediSearch's TFIDF scorer ranks docs by term-overlap, which is
 the BM25-style rank behavior the epic's scope prescribes (issue #1541 D1/D2).
 Single-token queries and stopword-only queries fall back to the raw string —
 byte-identical to the pre-R2 code path for inputs WITHOUT RediSearch-special
-characters (escaped via :func:`escape_redisearch_literal`, see below).
+characters (escaped via :func:`escape_redisearch_literal`, see below) — with one
+#12360 exception stated so this header is not the next stale claim: a DEGENERATE
+input carrying a ``_`` run also emits that run's composite beside the literal
+(``a_b c_d`` -> ``a_b c_d|a_b|c_d``), which changes the fallback's bytes for a
+string that carries no RediSearch-special character at all.
 
 Escaping is structural: tokens are alnum-only, so RediSearch reserved
 characters (``|`` included) cannot be injected into the OR-union path. The
@@ -730,10 +734,18 @@ def build_or_query(
     the index never holds and the record was unretrievable by its own name.
     Appending the composite as a further OR alternative recovers it with zero
     regressions (candidate recall@3 0.7133 -> 0.9633 on a pinned 300-name
-    population, 75 gains / 0 losses, p < 0.001). Byte-identical for every query
-    carrying NO ``_`` at all — the narrower true claim: a run with a LEADING or
-    TRAILING ``_`` also fires (``'foo_ bar'`` -> ``'foo|bar|foo_'``), so such a
-    query is not a control case.
+    population, 75 gains / 0 losses, p < 0.001).
+
+    ⚠️ **Byte-identity holds for every query carrying NO ``_`` at all** — and that
+    is the only direction safe to state it in. A query WITH a `_` run MAY gain that
+    run's composite, and where it fires it is ADDITIVE (nothing that matched before
+    stops matching); the edge case does fire (``'foo_ bar'`` ->
+    ``'foo|bar|foo_'``). ⛔ But do NOT restate it as "any `_` query changes" — review
+    round 10 found four copies of that over-claim (here, ``run_fts_query``,
+    ``.env.example`` and the brief), which an auditor of the #2070 control reads as
+    "these queries are not control cases". They are: where the composite IS the
+    literal (``a_b``, ``x__y``, ``a_``) the bytes are unchanged, and an alnum-free
+    (``___``) or over-bound run gains nothing (both declared lossy above).
     """
     # #8933: the identifier terms are computed SEPARATELY from the capped
     # original set, so they can never consume one of its slots — the A4
@@ -796,7 +808,16 @@ def build_or_query(
         return escape_redisearch_literal(query)
     if degenerate:
         literal = escape_redisearch_literal(query)
-        tail = [c for c in composites if c != literal]
+        # ⛔ THE DEDUPE IS CASE-INSENSITIVE, because the INDEX is (review round 10,
+        # P2). ``underscore_run_terms`` lowercases its term while ``literal`` keeps
+        # the query's case, so a bare ``c != literal`` emitted the SAME RediSearch
+        # term twice for a capitalised `_` token: ``build_or_query('A_bc')`` was
+        # ``A_bc|a_bc`` where ``'a_bc'`` is ``a_bc``, MEASURED on a lane to return
+        # the record for either spelling (RediSearch folds case). ``literal.lower()``
+        # equals the composite exactly when the literal is unescaped and IS that run
+        # modulo case — precisely the duplicate case — so escaped literals
+        # (``10\:00_u``), multi-run literals and non-ASCII literals are untouched.
+        tail = [c for c in composites if c != literal and c != literal.lower()]
         return "|".join([literal, *tail])
     tokens.sort(key=len, reverse=True)  # stable — ties keep source order
     original = tokens[:max_terms]

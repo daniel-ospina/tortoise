@@ -1537,8 +1537,8 @@ def probe_phrase_rejection(phrase: str) -> str | None:
                 f"FTS index splits on every non-alphanumeric character EXCEPT "
                 f"`_` (which it treats as a word character, #12360), so a token "
                 f"carrying any other separator cannot address ONE indexed term "
-                f"at all — pass a SINGLE RARE token (no digits, dashes, "
-                f"underscores or punctuation inside it)")
+                f"at all — pass a SINGLE RARE token (no separators other than "
+                f"`_` inside it)")
     # ⛔ AND A TOKEN THE READ WILL **ESCAPE** IS NOT A PROBE (#11536 review
     # round 7, P0). `build_or_query`'s degenerate single-token branch sends the
     # token through :func:`tortoise.sparse.escape_redisearch_literal`, which
@@ -1564,10 +1564,13 @@ def probe_phrase_rejection(phrase: str) -> str | None:
                 f"absent — pass the bare word, without punctuation")
     built = build_or_query(token)
     # ⚠️ CASED COMPARISON, because RediSearch LOWERCASES (#12360 review round 8,
-    # P3): ``build_or_query('A_B') == 'A_B|a_b'`` is TWO alternatives for ONE
-    # index term — MEASURED, ``queryNodes('Object','A_B')`` and ``…'a_b'`` both
-    # return the record named ``a_b`` — so a case-variant of the same term cannot
-    # over-match and refusing it was a false block with a false reason.
+    # P3): a case-variant of one term is not an OR over-match — MEASURED,
+    # ``queryNodes('Object','A_B')`` and ``…'a_b'`` both return the record named
+    # ``a_b`` — so refusing it was a false block with a false reason. It is kept
+    # as BELT-AND-BRACES: since the same review's builder fix (below, round 10)
+    # a capitalised `_` token no longer emits the duplicate at all
+    # (``build_or_query('A_B') == 'A_B'``), but this comparison is what makes the
+    # guard independent of the builder's dedupe staying case-aware.
     alternatives = {t.lower() for t in built.split("|")}
     if len(alternatives) != 1:
         return (f"the read expands it into several terms ({built!r}) — either "

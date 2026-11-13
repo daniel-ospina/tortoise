@@ -315,8 +315,12 @@ class TestPin:
         A `_`-only token whose plain segments mostly die is sent by the read as
         ONE term that the index holds (`a_bc` -> `a_bc`, `x_axis` -> `x_axis`),
         so refusing it by run count was a false block with a false reason — the
-        round-6 finding. A token carrying any OTHER separator is still refused,
-        because there the index really does split.
+        round-6 finding, and round 7 extended it to the ZERO-token shapes below.
+        ⛔ Scoped, not generalised (round 9): a token carrying a separator the
+        read ESCAPES or the index SPLITS is still refused (the three shapes
+        below). `friday.`/`friday?`/`friday+`/`friday/` are ACCEPTED — `.`, `?`,
+        `+` and `/` are in neither set, so the read sends them as one term — which
+        is why this says "escapes or splits" and not "any other separator".
         """
         from tortoise.session_source_prose_migration import probe_phrase_rejection
 

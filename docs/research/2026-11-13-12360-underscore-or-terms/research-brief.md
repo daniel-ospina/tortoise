@@ -95,10 +95,14 @@ Three properties the port keeps:
 * **No write-path change** — RediSearch already stores the composite (that is the defect), so
   records written before this change are reachable.
 * **Byte-identical for every query carrying NO `_` at all** — pinned, including `#8933`'s own
-  `ERR-4032` → `err|err4032|"err 4032"`. ⚠️ The claim is that narrow, and it was corrected in
-  round 3: a run with a **leading or trailing** `_` also fires (`'foo_ bar'` →
-  `'foo|bar|foo_'`), so such a query is not a control case — the pin only ever covered queries
-  with no `_` in them.
+  `ERR-4032` → `err|err4032|"err 4032"`. That is the only direction safe to state, and the
+  mirror claim is **not** "any `_` query changes" (review round 10, which found four copies of
+  it — here, `build_or_query`, `run_fts_query` and `.env.example`): a query WITH a run **may**
+  gain that run's composite and where it fires it is additive, but `a_b` / `x__y` / `a_` are
+  **byte-identical** (the composite *is* the literal), an alnum-free run (`___`) and an
+  over-bound run gain nothing (both declared lossy), and only then do the edge cases fire —
+  round 3's correction stands: a **leading or trailing** `_` does (`'foo_ bar'` →
+  `'foo|bar|foo_'`), so such a query is not a control case either.
 
 Four deviations from the measurement arm, and **NONE of them is lossless** (round 8 measured the last one too):
 
@@ -174,6 +178,43 @@ whoever takes it; **this PR does not change the advisory**, so it still cannot s
 exists to report. Recorded here rather than quietly fixed (a "stored but unfindable" verdict
 that starts firing on every `snake_case` name is a product-visible behaviour change that needs
 its own measurement).
+
+## 4a. The recorded decision this DOES reach — and why it authorizes this shape
+
+`#12360`'s body answers the contradiction test with *"No recorded decision reaches this work"*.
+That sentence is too strong, and a lane relying on it could conclude the `#2070` byte-identity
+control never applied to a query like `web_search`. It **did** apply, this PR narrows its scope
+in four places (`sparse.py` twice, `search_engine.py`, `.env.example`), and the narrowing is
+already authorized:
+
+* The control is `#2070`'s `keep_numeric=False` / "the search lane stays byte-identical"
+  (`docs/planning/2026-08-31-2070-scoping-package.md`). The owner **reopened** it on 2026-10-26
+  (`#8933`): *"The search lane may no longer stay byte-identical for identifier-shaped
+  queries."* The `OVERRIDES:` line recording that ruling is
+  `docs/plans/2026-10-27-issue-8933-identifier-tokenizer.md` §2, and the same plan states the
+  surviving scope in its own words: **"Byte-identity holds only for queries with no identifier
+  SHAPE."**
+* `web_search` **has** identifier shape — it matches `sparse._IDENTIFIER_SPAN_RE`, the span
+  predicate the identifier mechanism itself uses. What `identifier_alias` additionally requires (a
+  ≥2-digit segment) decides whether an ALIAS is worth minting for discrimination; it is not what
+  makes a span identifier-shaped.
+* So this PR's scope — *byte-identical for every query carrying no `_` at all* — covers the
+  identifier-shape half of that class, applied to the part the alias tail declines (no digit to
+  normalise into a discriminating token). **No new owner ruling is needed; what this PR owes is
+  the record**, and this section is it.
+
+⚠️ **One sub-class inside the new scope is NOT covered by that predicate, and it is named rather
+  than folded in** (review round 9). A LEADING or TRAILING `_` run does not match
+  `_IDENTIFIER_SPAN_RE` — it requires `[-_][A-Za-z0-9]+`, so `'foo_ bar'` and `'_foo bar'` have no
+  identifier span at all — yet their bytes move too (`'foo_ bar'` -> `'foo|bar|foo_'`). Those
+  stand on the same reopening's ADDITIVE argument plus the measured `_`-is-a-word-character fact,
+  not on the span predicate, and §1 already lists them as "not a control case". Stated here
+  because an auditor checking the #2070 control against the identifier-shape predicate would
+  otherwise find this class outside the coverage this section claims.
+
+⚠️ It narrows nothing else. Bare numeric tokens are still dropped (`keep_numeric=False`
+unchanged), nothing is removed from an OR union (#8933 and #12360 are both additive-only), and
+`TORTOISE_UNDERSCORE_TERMS=0` restores the pre-change bytes exactly.
 
 ## 4b. The emitted shapes are all parseable (measured, not assumed)
 

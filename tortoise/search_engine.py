@@ -2951,11 +2951,15 @@ def run_fts_query(
     #
     # #12360: and there is a SECOND no-argument, ON-by-default input, so the
     # surviving byte-identity claim is narrower than "every other query": a
-    # query carrying NO ``_`` AT ALL is byte-identical, while any query with a
-    # `_` run — including one at the run's EDGE (``'foo_ bar'`` ->
-    # ``'foo|bar|foo_'``) — also gains its composite
-    # (``web_search`` -> ``search|web|web_search``, recall@3 0.7133 -> 0.9633
-    # measured on both product doors). Its switch is
+    # query carrying NO ``_`` AT ALL is byte-identical. A query WITH a `_` run
+    # MAY gain that run's composite — ``web_search`` ->
+    # ``search|web|web_search``, recall@3 0.7133 -> 0.9633 measured on both
+    # product doors — and where it fires it is ADDITIVE only (nothing that
+    # matched before stops matching). ⛔ Not "any `_` query changes": where the
+    # composite IS the literal (``a_b``, ``x__y``, ``a_``) the bytes are
+    # unchanged, and an alnum-free (``___``) or over-bound run gains nothing
+    # (both declared lossy in ``sparse.underscore_run_terms``). An edge run does
+    # fire (``'foo_ bar'`` -> ``'foo|bar|foo_'``). Its switch is
     # ``TORTOISE_UNDERSCORE_TERMS``, pinned by
     # ``tests/test_12360_underscore_or_terms.py`` and evidenced in
     # ``docs/research/2026-11-13-12360-underscore-or-terms/``.
