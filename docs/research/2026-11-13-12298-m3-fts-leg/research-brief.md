@@ -55,11 +55,12 @@ sentence alone M3 **passes**, and the instruction that follows is *"proceed stra
 * the cause is measured and is ours: **RediSearch treats `_` as a word character; `sparse.py` splits on
   it** (§3.4). A stored `web_search` is queried as `search|web` — two terms the index never holds.
 
-**This lane acts on Reading 2 and records that openly.** The judgement is: the owner's pre-authorisation
-was conditional on a measurement whose *premise* was that the text index's **ranking** limits recall.
-That premise is now measured and false, so building a learned-sparse representation — which re-indexes a
-vocabulary of its own and would therefore **mask** the defect (§6) at a neural pass per query — would be
-adopting a lever for a cause that no longer exists.
+**This lane recommends Reading 2, and says so openly — it does not act on it.** The recommendation's
+ground is that the owner's pre-authorisation was conditional on a measurement whose *premise* was that
+the text index's **ranking** limits recall. That premise is now measured and false, so building a
+learned-sparse representation — which re-indexes a vocabulary of its own and would therefore **mask** the
+defect (§6) at a neural pass per query — would be buying a lever for a cause that no longer exists. A
+recommendation is not a ruling, and §0 goes on to say why this lane cannot make one.
 
 ⛔ **But closing C3 is not this lane's call, and this brief does not make it.** `#12298`'s step 3 is a
 recorded owner instruction — *"If M3 passes — proceed straight into SPLADE / learned sparse. Do **not**
@@ -395,7 +396,7 @@ remainder without a derivation; it is removed rather than re-guessed.
   nothing in this lane's numbers to show it.
 * **The single-leg floor arm** (requirement 4) — not exercised; recorded in `threshold_arm` (§2).
 * **A SPLADE encoder's cost on CPU.** ⛔ **Not measured, deliberately.** The issue's overhead item sits
-  after "if M3 passes"; this lane does not proceed to SPLADE (§0). The literature range (≈100–300 ms per
+  after "if M3 passes"; this lane measured M3 and stopped there (§0 — the C3 ruling is the owner's). The literature range (≈100–300 ms per
   query for a full BERT-base SPLADE encoder on CPU, ≈1–50 ms for distilled variants) is **cited, never
   adopted as ours**.
 * **The embedded sklearn TF-IDF fallback** (`tortoise/sparse.py`'s other backend) — outside
