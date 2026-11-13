@@ -1198,7 +1198,6 @@ def test_doctor_blames_the_pre_application_target_not_the_ladders():
         "differs": True,
         "read_by_this_command": True,
         "applied_when_graded": False,
-        "rerun_agrees": True,
         "graded_explicit": False,
         "graded_unresolved": False,
         "cli_error": None,
@@ -1218,7 +1217,8 @@ def test_doctor_blames_the_pre_application_target_not_the_ladders():
 
     assert "two LADDERS ranking its keys differently" not in row, row
     assert "resolved the store above BEFORE that import applied the file" in row, row
-    assert "a re-run grades the daemon's" in row, row
+    assert "re-running grades the same store" in row, row
+    assert "set -a; . ./.env; set +a" in row, row
 
 
 def test_a_provider_only_file_is_not_credited_with_the_difference(capsys, _isolated,
@@ -1298,30 +1298,30 @@ def _rows_text(payload):
         "shadowed_graph_keys": [],
         "keys_already_set_in_the_environment": [],
         "unread_env_files": [],
-        "rerun_agrees": True,
     }
     base.update(payload)
     rows = _dotenv_rows(base)
     return " ".join(str(detail) for _check, _status, detail in rows)
 
 
-def test_a_rerun_promise_needs_the_ladders_to_actually_agree():
-    """`rerun_agrees` decides whether "a re-run grades the daemon's" is said.
+def test_the_pre_application_arm_promises_no_rerun_that_cannot_happen():
+    """Every run resolves at the same Step 1, BEFORE the import fills the file.
 
-    Measured before the fix: with `TORTOISE_DB_PATH` exported and a scheme-less
-    `TORTOISE_DB_URI` in the file, the row promised "a re-run grades the
-    daemon's — the two ladders agree on this box". The CLI ladder ranks
-    `TORTOISE_DB_PATH` ABOVE a scheme-less `TORTOISE_DB_URI` and the daemon's
-    does not, so a re-run still grades a different store — a false promise about
-    the very store the verdict is about (#12428 review).
+    Measured on two consecutive real `doctor` runs: both graded the pre-fill
+    embedded default, and both said "a re-run grades the daemon's — the two
+    ladders agree on this box". A re-run reproduces the store above, because
+    resolution precedes the import in every run — so the promise sent the user
+    back to a command that cannot answer, which is the one thing a diagnostic
+    must not do (#12428 review).
     """
-    agreed = _rows_text({"rerun_agrees": True})
-    assert "a re-run grades the daemon's — the two ladders agree on this box" in agreed, agreed
+    row = _rows_text({})
 
-    disagreed = _rows_text({"rerun_agrees": False})
-    assert "the two ladders agree on this box" not in disagreed, disagreed
-    assert "still rank its keys differently" in disagreed, disagreed
-    assert "the daemon's store is above" in disagreed, disagreed
+    assert "a re-run grades the daemon's" not in row, row
+    assert "two ladders agree on this box" not in row, row
+    assert "re-running grades the same store" in row, row
+    # …and the remedy is one that actually changes the resolution.
+    assert "set -a; . ./.env; set +a" in row, row
+    assert "point `--db`/`--path` at its target above" in row, row
 
 
 def test_the_unresolved_arm_does_not_credit_a_provider_only_file(capsys, _isolated):

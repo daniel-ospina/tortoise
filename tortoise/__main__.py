@@ -11301,13 +11301,6 @@ def _dotenv_divergence(graded_target: str | None = None, *,
         "cli_target": None,
         "daemon_target": None,
         "differs": False,
-        # Whether a RE-RUN would grade the daemon's store. Only meaningful in the
-        # pre-application state, and MEASURED, never assumed: the CLI ladder and
-        # the daemon's rank a scheme-less `TORTOISE_DB_URI` differently (the CLI
-        # puts `TORTOISE_DB_PATH` above it, the daemon does not), so "the two
-        # ladders agree" is false on that box and the promise would let a user
-        # accept a green verdict about the wrong store (#12428 review).
-        "rerun_agrees": None,
         # Distinct from `read_by_this_command`: that one only says the file is in
         # this process NOW, which a mid-run import makes true of a target
         # resolved BEFORE it (#12428 review).
@@ -11465,17 +11458,6 @@ def _dotenv_divergence(graded_target: str | None = None, *,
         payload["daemon_target"] = _mask_display_target(daemon_target)
     payload["differs"] = bool(cli_target and daemon_target
                               and cli_target != daemon_target)
-    if (payload["read_by_this_command"] and not payload["applied_when_graded"]
-            and not graded_explicit):
-        # The frame is POST-fill now (that is what `read_by_this_command` being
-        # true means), so resolving from the environment answers "what would a
-        # re-run grade?" without a second process.
-        try:
-            _rerun = _resolve_db_target(None)
-        except Exception:  # a broken environment is already reported elsewhere
-            _rerun = None
-        payload["rerun_agrees"] = bool(_rerun and daemon_target
-                                       and str(_rerun) == str(daemon_target))
     if payload["differs"] and payload["cli_target"] == payload["daemon_target"]:
         # Reachable: the mask collapses userinfo, so two stores differing ONLY in
         # credentials display identically. ⛔ The claim is
@@ -11604,8 +11586,8 @@ def _dotenv_rows(env_file: dict) -> list[tuple[str, str, str]]:
             _sets = f"sets no graph key — {_read_clause}"
         rows.append(("Config: .env", "⚠️",
                      f"{path} {_sets}; this run's own target did not resolve, so "
-                     f"the rows below grade NO store — {what}. The two cannot be "
-                     "compared" + _applied_note))
+                     f"the rows below grade NO store — {what}. Nothing here "
+                     "grades a store to compare against it" + _applied_note))
         return rows
     if env_file.get("daemon_rung") == "refuses":
         # The daemon would not start at all: `mcp_server.main()` exits 1 rather
@@ -11669,19 +11651,17 @@ def _dotenv_rows(env_file: dict) -> list[tuple[str, str, str]]:
             elif not env_file.get("applied_when_graded", True):
                 # ⛔ The DOCUMENTED setup: no store key in the shell, so Step 1
                 # resolved the canonical embedded default, and §5.5's later import
-                # then applied the file. The ladders explanation is false here
-                # (#12428 review) — but "a re-run grades the daemon's" is only
-                # true when the two ladders agree POST-fill, which `rerun_agrees`
-                # measures.
+                # then applied the file. The ladders explanation is false here.
+                # ⛔ And so is "a re-run grades the daemon's": EVERY run resolves
+                # at that same Step 1, before the import, so a re-run reproduces
+                # the store above — measured, two consecutive runs (#12428
+                # review). The remedy has to be one that actually changes the
+                # resolution.
                 detail += (" (this run resolved the store above BEFORE that import "
-                           "applied the file")
-                if env_file.get("rerun_agrees"):
-                    detail += (", so a re-run grades the daemon's — the two ladders "
-                               "agree on this box)")
-                else:
-                    detail += ("; a re-run resolves from the filled environment too, "
-                               "and the two ladders still rank its keys differently — "
-                               "the daemon's store is above)")
+                           "applied the file, and every run resolves there first — "
+                           "so re-running grades the same store. To grade the "
+                           "daemon's, export the file's keys (`set -a; . ./.env; "
+                           "set +a`) or point `--db`/`--path` at its target above)")
             else:
                 detail += (" (both read the SAME environment now, so the difference "
                            "comes from the two LADDERS ranking its keys differently)")
