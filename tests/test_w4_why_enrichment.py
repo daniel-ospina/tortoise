@@ -63,7 +63,8 @@ from tortoise.why import (
     w4_enrichment_enabled,
 )
 
-W4_KEYS = ("warnings", "why", "conflicts", "supersession", "tradeoffs", "dig_deeper")
+W4_KEYS = ("warnings", "why", "conflicts", "supersession", "tradeoffs",
+           "dig_deeper", "assessment")
 
 # Canonical ask-lane response keys (the flag-OFF byte-identical shape; the
 # flag-ON shape adds ONLY the "why" key — additive-only, #1353 D8).
@@ -1030,16 +1031,25 @@ def test_assembly_bounded_batch_reads(monkeypatch):
             assert len(blocks) == len(batch)
             return len(calls)
 
-        # Exactly 6 assembly queries (ep read, supports×2, conflicts,
-        # supersession, tradeoffs) — fixed regardless of batch size. The
-        # exact count is the structural pin: a per-point loop over a
-        # 10-claim fixture would need ≥15 calls AND a merged/dropped read
-        # (e.g. folding the dedicated ep read back into the conflict query)
-        # would drop below 6 — both directions of drift trip the == 6 pin.
+        # Exactly 7 assembly queries for a POINT-ONLY batch (ep read,
+        # supports×2, conflicts, supersession, tradeoffs, assessments) — fixed
+        # regardless of batch size. The exact count is the structural pin: a
+        # per-point loop over a 10-claim fixture would need ≥15 calls AND a
+        # merged/dropped read (e.g. folding the dedicated ep read back into the
+        # conflict query) would drop below 7 — both directions of drift trip the
+        # == 7 pin.
+        #
+        # #11928: 6 → 7, and the ONE added read is named: the `assessment`
+        # dimension (the derived judgement + the reading/target/comparison
+        # that produced it) is its own batch read, because a support entry's
+        # key set is a pinned contract and the ≤3 support budget may evict the
+        # judgement from the chain. The batch is still ONE anchored ep read:
+        # the per-label sweep only widens when ids resolve on another label,
+        # and this fixture is Point-only.
         n10 = _count_for(ids)
         n15 = _count_for(ids2)
-        assert n10 == 6, f"10-claim batch issued {n10} queries — expected exactly 6"
-        assert n15 == 6, f"15-claim batch issued {n15} queries — count must be size-independent"
+        assert n10 == 7, f"10-claim batch issued {n10} queries — expected exactly 7"
+        assert n15 == 7, f"15-claim batch issued {n15} queries — count must be size-independent"
     finally:
         sdk.close()
 
@@ -1078,7 +1088,12 @@ def test_assembly_partial_dimension_fail_open(w4_flag, monkeypatch):
             # carries a `mitigated_by` optional match, so a substring selector
             # would fail both dimensions and the test would no longer be able
             # to tell "tradeoffs degraded alone" from "two legs broke".
-            if cypher == _TRADEOFFS_CYPHER:
+            if cypher == _TRADEOFFS_CYPHER.replace("{label}", "Point"):
+                # #11928: the tradeoffs read is now an ID-ANCHORED TEMPLATE
+                # (``{label}``), instantiated once per present label — this
+                # fixture is Point-only, so its one leg is the Point
+                # instantiation. Matched by IDENTITY still: the identity is
+                # now the substituted query, not the template.
                 fired.append(cypher)
                 raise RuntimeError("forced tradeoffs failure")
             return real_query(cypher, params=params, timeout=timeout)
@@ -1425,13 +1440,39 @@ def test_ontology_vocabulary_registered():
     # conflicts / supersession / tradeoffs / dig_deeper / warnings) must be
     # registered as response-contract vocabulary — drift between the code's
     # enriched-item keys and the ontology row would otherwise pass silently.
-    # Pinned as ONE row literal (three of the six keys also appear elsewhere
-    # in ONTOLOGY.md, so per-key presence-anywhere scans would pass a row
-    # that silently dropped them).
-    assert "why-block sections" in text
-    sections_row = "why · conflicts · supersession · tradeoffs · dig_deeper · warnings"
-    assert sections_row in text, \
-        "ontology §5 why-block sections row drifted from the W4_KEYS vocabulary"
+    #
+    # ⛔ THE ROW IS PARSED OUT OF THE DOC, not compared to a literal this test
+    # holds (#11928 review, mutation pass F3). The earlier form asserted the
+    # literal `"why · conflicts · …"` was a SUBSTRING of the doc and then
+    # compared `W4_KEYS` against that literal — so the only thing it could catch
+    # was a doc row that stopped containing the old substring, and it could never
+    # see the doc CATCH UP. Now `row_keys` comes from the document's own line, so
+    # both directions are live: a key the code stopped emitting, and a row that
+    # registered one early.
+    row_line = next(
+        (line for line in text.splitlines() if line.startswith("why-block sections")),
+        None)
+    assert row_line is not None, "ontology §5 has no why-block sections row"
+    row_keys = {k.strip() for k in row_line.split(maxsplit=2)[2].split("#")[0]
+                .split("·") if k.strip()}
+    # ⛔ #11928 — `assessment` is a NEW emitted key and is NOT yet in the §5 row.
+    # The reason is OWNER GATING, not scope: `docs/ONTOLOGY.md` is owner-gated
+    # (no edit without Daniel's approval of the exact change), and registering the
+    # key is tracked by **#12282** (open, one line). An earlier version of this
+    # comment claimed "#11928's brief puts it out of scope" — that does not
+    # reproduce (the issue's out-of-scope list names the comparator #11822 and the
+    # propagation depth #11823 only), and a false reason here is the load-bearing
+    # part: it is what the next editor reads before deciding the exemption can be
+    # dropped. Leaving the row alone while W4_KEYS grew is EXACTLY the drift this
+    # test exists to catch, so the delta is named explicitly instead of being
+    # allowed to pass silently — and it FAILS WHEN THE ROW CATCHES UP, which is
+    # when this exemption must be deleted.
+    assert row_keys == set(W4_KEYS) - {"assessment"}, (
+        "the ONTOLOGY §5 why-block sections row is not exactly the enriched-item "
+        "key set minus #11928's unregistered `assessment` "
+        f"(keys={sorted(set(W4_KEYS))} row={sorted(row_keys)}). If the row now "
+        "lists `assessment` (see #12282), drop the exemption here and let the "
+        "equality be exact; if a key was RENAMED, fix the row.")
 
 
 def test_bare_point_empty_conventions(w4_flag):

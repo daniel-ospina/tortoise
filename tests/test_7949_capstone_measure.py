@@ -5840,20 +5840,21 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # whole sentence's three numbers, so a re-derivation of one cannot leave
         # its neighbours behind the way it did at `a08f7bce3d`.
         ("RECONCILE-A1-A2-A5.md", "`TortoiseSDK._extract_session_v2` at", (
-            # 17974 -> 18728: #12060 adds its own lines to sdk.py above this call,
+            # 17974 -> 18728 -> 18743: #12060 and then #9649's reviewed guard add
+            # their own lines to sdk.py above this call,
             # and every forward merge of `origin/main` (`1f28d107cf`, `c7499ac7a7`
             # carrying #12112/#12111, then `9828250732`) moved the region again, so
             # every number in this table moved with them. Re-derived off THIS merged
             # tree (`grep -nF 'relation_write = apply_relation_edges(' tortoise/sdk.py`),
             # never carried forward from either side. The anchors are unchanged —
             # that is the point of keying a row on the symbol.
-            ("18799", "relation_write = apply_relation_edges("),
+            ("18822", "relation_write = apply_relation_edges("),
         ), "sdk"),
         ("RECONCILE-A1-A2-A5.md", "is the line above it, `:", (
-            ("18798", "from tortoise.relation_write import apply_relation_edges"),
+            ("18821", "from tortoise.relation_write import apply_relation_edges"),
         ), "sdk"),
         ("RECONCILE-A1-A2-A5.md", "`relation_write.py:7`, `sdk.py:", (
-            ("18786", "# `#10999` made the channel TRANSPORT ONLY"),
+            ("18809", "# `#10999` made the channel TRANSPORT ONLY"),
         ), "sdk"),
         # `subject_binding_available`'s DEFINITION and its CONSUME pair, in both
         # documents that state them — a row per document, because a row scopes to
@@ -5863,8 +5864,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("6607", "def subject_binding_available(graph) -> bool:"),
         ), "search_engine"),
         ("00-plan.md", "consumed at `sdk.py:", (
-            ("9938", "subject_binding_available,"),
-            ("9991", "and not subject_binding_available(graph):"),
+            ("9954", "subject_binding_available,"),
+            ("10007", "and not subject_binding_available(graph):"),
         ), "sdk"),
         ("03-test-design.md", "is a **fail-OPEN** probe (`search_engine.py:", (
             ("6607", "def subject_binding_available(graph) -> bool:"),
@@ -5873,13 +5874,13 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # row: a row carries ONE source key, and a mis-keyed cite must red with a
         # message rather than an IndexError (the guard below now says so).
         ("03-test-design.md", "is a **fail-OPEN** probe (`search_engine.py:", (
-            ("9938", "subject_binding_available,"),
-            ("9991", "and not subject_binding_available(graph):"),
+            ("9954", "subject_binding_available,"),
+            ("10007", "and not subject_binding_available(graph):"),
         ), "sdk"),
         # The A5 binder's CALL SITE (its `def` is in `subject_binding.py`; the plan
         # names the call), keyed by the quoted form the sentence prints.
         ("00-plan.md", "point-creation path at", (
-            ("18446", "bind_point_subjects(proj, self, point_id=pid,"),
+            ("18469", "bind_point_subjects(proj, self, point_id=pid,"),
         ), "sdk"),
         # The two cites this forward merge re-pointed in the documents no row read —
         # each is a RANGE, pinned at BOTH endpoints, because a range that moves by a
@@ -5918,11 +5919,11 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("2503", 'errors.append("hierarchies: entry missing \'type\' field")'),
         ), "pack_registry"),
         ("00-align.md", "`llm:deepseek-direct` is what", (
-            ("16322", "The v2 path reports"),
-            ("16323", '"extraction_mode": "llm:<route>"'),
+            ("16345", "The v2 path reports"),
+            ("16346", '"extraction_mode": "llm:<route>"'),
         ), "sdk"),
         ("04-plan.md", "operator / label path", (
-            ("25147", "declared = declared_relation_predicates()"),
+            ("25189", "declared = declared_relation_predicates()"),
         ), "sdk"),
         # ⛔ NOT A ROW ANY MORE — the `carve_out:` claim below the rows is checked
         # against the BLOCK (`_section_entries`) and not against a line number: the

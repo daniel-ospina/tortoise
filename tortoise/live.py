@@ -656,6 +656,52 @@ def _event_state_key_names(key) -> tuple[str, ...]:
     return tuple(dict.fromkeys(names))
 
 
+def lifecycle_props_by_rendering(props, guarded) -> dict:
+    """`{guarded name: value}` for every key whose RENDERER UNION names one.
+
+    ⛔ A door's PRESENCE TEST must be as shape-independent as the refusal it
+    guards, or the guard is decoration. `"status" in props` hashes the literal
+    name, so a `str` SUBCLASS key that overrides `__hash__` is missed by the
+    test (and by `set(props)`) while the WRITE still files it under `status` —
+    the live transport inlines `str(key)` and the journal writes the content.
+    That is not hypothetical: it was measured against this module's sibling door
+    (review cycles 4-8 of #11825) and then re-measured against the `#9649`
+    lifecycle guard added 70 lines below it in `update_entity` —
+    `update_entity(<superseded>, **{KHash("status"): "live"})` was ACCEPTED
+    (resurrected, window left closed, zero journal delta) while the #11825 guard
+    on the same node refused the identical call. Same door, two presence tests,
+    one hole.
+
+    FIRST-WINS, in iteration order, so a plain `str` key makes this equal to
+    `props[name]` and no ordinary call changes behaviour. Read this mapping to
+    ANSWER a question ("was a guarded field asked for?", "what value?") and use
+    `keys_rendering_as` to DROP the keys afterwards — reading `props[name]`
+    after this is exactly the hole it exists to close.
+    """
+    guarded = frozenset(guarded)
+    out: dict = {}
+    for key, value in props.items():
+        for name in _event_state_key_names(key):
+            if name in guarded:
+                out.setdefault(name, value)
+    return out
+
+
+def keys_rendering_as(props, names) -> list:
+    """The KEY OBJECTS in `props` that any renderer files under one of `names`.
+
+    The companion to `lifecycle_props_by_rendering`: after the guarded write has
+    been applied one way, a door must drop EVERY key that would re-write it
+    through the generic `SET n += $props` bag — and `k != "status"` drops only
+    the literal name, leaving the subclass key to write the field a second time
+    (measured: the status arm wrote `superseded`, the drop missed the key, and
+    the label loop's own write was the resurrecting one).
+    """
+    wanted = frozenset(names)
+    return [key for key in props
+            if wanted.intersection(_event_state_key_names(key))]
+
+
 def event_label_names(value) -> tuple[str, ...]:
     """EVERY name this LABEL can be filed under — the union of the two renderers.
 
@@ -948,6 +994,44 @@ def epistemic_identity(alias: str) -> str:
         f"{alias}.{key}" for key in EPISTEMIC_ID_KEYS) + ")"
 
 
+
+
+#: The property each epistemic label stores its KIND under (#11928 review
+#: round 1). One declaration for a question several reads ask, because the
+#: per-label answer is NOT the same property and a read that assumes one is
+#: silently blind on the others: ``create_object``/``create_event`` write
+#: ``objectKind``/``eventKind`` and leave ``pointKind`` NULL, so a kind gate
+#: written as ``n.pointKind`` is DEAD on exactly the labels #11928 widened to
+#: (``why._assemble_tradeoffs`` had two of them; see its ``_TRADEOFFS_CYPHER``).
+#:
+#: ⛔ SCOPED TO THE EPISTEMIC FOUR, deliberately. ``ranking._enrich`` spells a
+#: WIDER chain for its display kind (it appends ``documentKind`` and
+#: ``sourceKind``, ``ranking.py``:2560) — this helper does NOT, because the
+#: fields that consume it are restricted to ``EPISTEMIC_LABELS`` by
+#: ``epistemic_disjunction``. A ``:Document``/``:Source`` kind read through
+#: ``kind_expression`` is therefore ``''``: widen it HERE when a consumer needs
+#: those labels, and never assume the two chains are the same rule.
+KIND_PROPERTIES = ("pointKind", "objectKind", "subjectKind", "eventKind")
+
+
+def kind_expression(alias: str) -> str:
+    """Cypher expression: ``alias``'s KIND, whatever property its layer uses.
+
+    ⚠️ "Its layer" means one of the four EPISTEMIC labels — see
+    :data:`KIND_PROPERTIES` for the scope and for what a ``:Document``/
+    ``:Source`` kind would answer (``''``).
+
+    Use for any read that COMPARES or PARSES a node's kind across labels; the
+    absent case coalesces to ``''`` (never NULL) so a caller's ``== "option"``
+    arm is false rather than unanswerable, which is what every existing reader
+    of this value does.
+
+    ⛔ Do NOT use it as an identity, and do not confuse it with a label: an
+    ``:Object {objectKind: 'option'}`` and a ``:Point {pointKind: 'option'}``
+    answer the same KIND and are different layers.
+    """
+    return "coalesce(" + ", ".join(
+        f"{alias}.{prop}" for prop in KIND_PROPERTIES) + ", '')"
 
 
 def epistemic_disjunction(alias: str) -> str:

@@ -146,6 +146,17 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 > which is why the clause above is buildable without an expansion **and** why `sdk.py`'s over-block note still stands for that
 > shape (`:71-75`, and the owner's relay, `#11824` comment `6815950417`: *"`archived` does not close policy B"*).
 >
+> **⚠️ CORRECTION APPENDED 2026-11-12 — the Point half of the paragraph above is no longer true.** `#9649` was
+> fixed (PR #12325): `update_entity`'s Point arm now applies the lifecycle guard and refuses a lifecycle write
+> on a terminal Point — measured: `update_entity(<superseded>, status='live')` and
+> `update_entity(<terminal>, validTo=…)` are both REFUSED, with content/metadata revisions still accepted
+> (the #3305 carve-out). So *"a `retracted` Point can be flipped to `live`"* is history, not current state,
+> and the v3.34 argument must not be read as resting on it any more. **What survives, and is the load-bearing
+> half:** the `:Object` write path still carries no status-vocabulary guard at all (**#10371**, open), and
+> policy B still needs a word *then*, with a producer and a revival path. `archived` still does not close
+> policy B. The v3.34 history above is left as written — this note dates the correction rather than
+> rewriting it.
+>
 > **Still unbuilt, deliberately:** the guard that enforces this vocabulary, including the AX three-part
 > refusals (`status='outdated'` naming both `archived` and `superseded`; one refusal shape across
 > Point/Subject/Object — measured: `:Subject` **already** raises the correct shape,

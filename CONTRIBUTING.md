@@ -256,6 +256,46 @@ move the census, and it lands in a reviewed diff like any other edit.
    carve-out — it records a method deliberately outside
    the reachable set, and the guard reds if such a method later becomes reachable.
 
+**To REMOVE a symbol** (a tool from `TOOL_REGISTRY`, a public method from `TortoiseSDK` — a
+`RETIRED_USE_INSTEAD` forward is **graded** by this gate but is not a removal source, see the
+end of this paragraph), the cut **refuses** a symbol that disappears with no record —
+whenever a committed baseline exists to compare against (a first cut is not gated; deleting
+`config/surface-manifest.yml` first, or splicing one row out of the baseline by hand, defeats the
+comparison — no gate can see a removal both documents already agree on, so take the archive
+route and do not hand-splice a removal — #12327 tracks the pin that would see it) — and both
+halves of the baseline are compared (`rows:` and `retired:`, because a retired MCP name is
+still served), unless the committed baseline carries no `retired:` half, which `check`
+already reds — the cut then says that half was not compared
+([#12237](https://github.com/daniel-ospina/tortoise/issues/12237)): account for it by an
+`archive/MANIFEST.json` entry of the matching kind (`tools/archive_surface.py
+archive mcp-tool|sdk-method <symbol> --batch <slug> --reason <text>`, run **before** the
+deletion — see [`archive/README.md`](archive/README.md)). For an **SDK method** that entry is
+ONE HALF of the record: it must be paired with `RETIRED_SDK_METHODS` / `REMOVED_SDK_METHODS`
+(the SDK's fail-closed `AttributeError` record). **The two halves are ONE record and BOTH are
+required** — the freeze keeps the code, the map records the departure, and neither alone is the
+record: a map entry with no frozen code deletes a method that no other gate compares against
+the archive (`archive_surface.py check` iterates the archive manifest, so an unfrozen method is
+invisible to it), and a frozen method with no map entry leaves a caller with a bare
+`AttributeError` (which `check` reds from its own side). The ONE exception is a **stated
+rename**, which keeps no code by design: its record is the map entry plus
+`--allow-removal <symbol> --allow-removal-reason <why>`. A
+`RETIRED_USE_INSTEAD` entry is **not** a route for a removal, and the refusal no longer pretends
+it is: with the declaration still live the symbol is RETIRED rather than removed (it is still
+served, and the baseline's `retired:` half is compared), and with the declaration gone the map
+key dangles, which the cut refuses as a contradiction. So do not archive a forward entry: while
+its KEY is in the map, `archive_surface.py archive` refuses it ("a `RETIRED_USE_INSTEAD`
+forward entry — still SERVED"); with the key and the declaration BOTH gone it refuses too
+("has no `ToolDefinition` … nothing to archive"); and `archive/README.md` says the same of the
+23 committed entries. To really remove such a tool, delete the map KEY first (it is then an
+ordinary `TOOL_REGISTRY` tool, and neither half of the baseline loses a name), archive it, then
+delete the declaration. A genuine **rename**
+passes `--allow-removal <symbol> --allow-removal-reason <why>`, which is logged in the cut output and belongs in the PR
+body — and for an SDK method that is also the route out of the map-only shape: the recorded rename
+procedure (old name into `RETIRED_SDK_METHODS`, method gone from `sdk.py`) is exactly a departure
+with no freeze, so a stated rename accounts it, while an unstated one is refused with "FREEZE IT
+FIRST". The refusal runs **before** the write, so a refused cut leaves the baseline intact —
+the committed baseline is the only list of what USED to be there.
+
 **A red `surface-guard` is the gate working, not a bug.** Do not resolve it by editing the baseline to
 match the registry — that is precisely the unapproved expansion the check exists to catch. The curated
 list, including what each tool does, what uses it, and the recommendation for it, lives in

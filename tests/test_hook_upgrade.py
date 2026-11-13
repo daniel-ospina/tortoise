@@ -1487,7 +1487,7 @@ class TestDoctorIntegration:
         import argparse
 
         from tortoise.__main__ import _cmd_doctor
-        _cmd_doctor(argparse.Namespace(cmd="doctor", db=None, path=None))
+        _cmd_doctor(argparse.Namespace(cmd="doctor", db=None, path=None, offline=True))
         out = capsys.readouterr().out
         return [ln for ln in out.splitlines() if "Capture hooks" in ln]
 

@@ -446,12 +446,17 @@ def resolve_contested_relevance(
     canonical why-layer would surface (a boost never fires on a conflict
     the why-layer wouldn't show, and never misses one it would).
 
-    #7927 KNOWN DIVERGENCE, deliberate: this read admits all four epistemic
-    labels (§7813) while ``why._CONFLICTS_CYPHER`` is still ``:Point``-only, so
-    a non-Point conflict CAN fire the boost without the why-layer rendering it.
-    The subset agreement above therefore holds for ``:Point`` conflicts only;
-    widening the why-layer is the residual recorded on #7927 (it is a separate
-    read surface, not one of this issue's six).
+    #7927 KNOWN DIVERGENCE, now CLOSED (#11928): this read admits all four
+    epistemic labels (§7813) and ``why._CONFLICTS_CYPHER`` does too, so the
+    subset agreement above holds for every label, not only ``:Point``. It was
+    recorded here as a live divergence while the why layer was still
+    ``:Point``-only — a non-Point conflict could fire the boost without the
+    why-layer rendering it. #11928 widened the why layer's anchor and its
+    traversal positions together, with the same identity (``coalesce(id,
+    eventId)``, compared on the internal id) and the same text chain this read
+    uses, so the two surfaces cannot drift on how a counter-claim is named.
+    ⚠️ The WHY layer's SUPERSESSION read is still ``:Point``-only (#11824's
+    read gate) — that residual lives in ``why.py``'s block note, not here.
 
     The whole read + row-processing is fail-open — ranking must never break
     from enrichment (non-str raw-graph content is coerced, never raised)."""

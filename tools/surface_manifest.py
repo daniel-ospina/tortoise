@@ -2114,6 +2114,674 @@ def _recorded_approvals(doc: dict) -> list[tuple[str, str]]:
     return found
 
 
+# ── the REMOVAL direction (#12237) ──────────────────────────────────────────────
+#
+# `tools/archive_surface.py check` answers ONE direction: an ARCHIVED symbol that is still
+# live is RED. It iterates the archive MANIFEST's entries, never the surface, so code that
+# is simply gone from BOTH — deleted, never archived — is invisible to it (measured: the
+# expected violation list is empty for a surface the manifest does not mention).
+#
+# `cut` is the tool that performs a removal: a re-cut re-derives the row set from the code,
+# so a row that disappeared from the declaration disappears from the baseline here. The
+# other direction is therefore enforced at THAT seam, where the row actually goes away —
+# not in a lint over two artifacts that both lost it. Without this, a batch that deletes 10
+# tools and archives 0 re-cuts cleanly, `surface-guard.py` reds only until a human re-cuts,
+# and then everything is green with the removed code gone from the repo — which is exactly
+# what the #11609 owner ruling forbids ("we archive it in case we made a mistake").
+
+# ⛔ CLOSED OVER THE CLASSES `surface_symbols` CAN EMIT (tool rows and SDK methods) — and that
+# closure is a LIMIT, not a coverage claim. `module` is a real archive kind
+# (`archive_surface.KINDS`) and the one committed archive entry is a module, but the surface
+# baseline carries no module rows, so a whole-module deletion moves nothing this gate compares
+# and `archive_surface.check` (which iterates the manifest's own entries) cannot see it either:
+# the #12237 hole is closed here for the surface classes only, and #12402 tracks the module
+# half. Do not read this map as "every archived kind is graded". A NEW class is wired here
+# plus in `REMOVAL_WAYS`, and `removal_report` refuses an unmapped class by name rather than
+# raising a bare `KeyError` (measured: `removal_report({('x', 'module')}, set(), {})` used to
+# raise `KeyError: 'module'`).
+ARCHIVE_KIND_BY_CLASS = {"tool": "mcp-tool", "sdk": "sdk-method"}
+
+REMOVAL_WAYS = (
+    "an `archive/MANIFEST.json` entry of the matching kind — RESTORE THE DECLARATION FIRST "
+    "if it is already deleted (restore `tortoise/tool_registry.py` AND "
+    "`tortoise/mcp_server.py` for a tool — the archive freezes the declaration AND every "
+    "handler, and a handler that is already gone is skipped SILENTLY, so restoring only the "
+    "registry archives a tool whose behaviour is lost; restore `tortoise/sdk.py` for an SDK "
+    "method, from the commit you are removing it at), because "
+    "`archive_symbol` reads it from the working tree and refuses without it, then freeze: "
+    "`uv run python tools/archive_surface.py archive <mcp-tool|sdk-method> <symbol> "
+    "--batch <slug> --reason <text>` (and re-delete the declaration afterwards) — for an `sdk-method` this is ONE HALF: it must be "
+    "paired with `RETIRED_SDK_METHODS` / `REMOVED_SDK_METHODS`, because a frozen method "
+    "without the map entry strips the caller with a bare `AttributeError` instead of a "
+    "recorded departure (the freeze and the map entry are ONE record, and `CONTRIBUTING.md` "
+    "says so)",
+    "for an `sdk-method` whose code is ALREADY frozen, the missing half is the MAP: add the "
+    "name to `RETIRED_SDK_METHODS` / `REMOVED_SDK_METHODS` in `tortoise/sdk_retired.py` — do "
+    "NOT re-run `archive`, which refuses a symbol it has already archived (\"is already "
+    "archived\"), so the freeze bullet above cannot clear that shape",
+)
+
+# ⛔ THE MAP IS **NOT** A ROUTE ON ITS OWN, and advertising it as one was a hole, not a
+# courtesy: `RETIRED_SDK_METHODS` / `REMOVED_SDK_METHODS` records the DEPARTURE (a fail-closed
+# `AttributeError`), it keeps no code — and `archive_surface.check` iterates the archive
+# manifest, so a method that was never frozen is invisible to every gate. The refusal that
+# listed it as a standalone route therefore told the operator to delete the method and move on
+# (review round 14 of PR #12313: reproduced with the real `cmd_cut` — map-only, no archive
+# entry, exit 0, baseline rewritten).
+SDK_PAIR_RULE = (
+    "`RETIRED_SDK_METHODS` / `REMOVED_SDK_METHODS` is NOT a route on its own: it records the "
+    "departure but keeps no code, and removed code is what the #11609 ruling archives. A "
+    "REMOVAL of an SDK method therefore needs BOTH halves — freeze it AND record it; they are "
+    "ONE record. A STATED RENAME is the one shape that needs no freeze, because a rename "
+    "keeps no code by design: its record is the map entry plus the override."
+)
+
+# ⛔ `RETIRED_USE_INSTEAD` IS NOT A ROUTE HERE, and listing it as one sent lanes to a dead end.
+# A name that is in that map WITH its declaration is a RETIREMENT: `TOOL_REGISTRY` excludes it
+# and `RETIRED_TOOL_REGISTRY` includes it, so the name is still SERVED, it appears in the
+# baseline's `retired:` half, and the surface never lost it — not a removal at all. A name
+# whose declaration is GONE is the only state that can be a removal, and there the map key
+# dangles: `removal_report` refuses it with "delete the stale forward key, or restore the tool",
+# the exact opposite of the "account for it here" instruction this line used to give
+# (review of PR #12313, round 9 — reproduced, and the docstring one screen up already said the
+# accepting arm "could not fire in production").
+NOT_A_REMOVAL_ROUTE = (
+    "A `RETIRED_USE_INSTEAD` entry is NOT a route here: with the declaration still live the "
+    "symbol is RETIRED, not removed (it is still served, and the `retired:` half of the "
+    "baseline is compared); with the declaration gone the map key dangles and the cut refuses "
+    "it as a contradiction. In that dangling state NEITHER route above works as written — "
+    "`archive_symbol` reads the declaration and refuses without one, and `check` refuses to "
+    "archive a name that is in that map — so restore the declaration from git FIRST, then "
+    "either keep it (a retirement), or — to REMOVE it — delete the map KEY before you archive "
+    "(the symbol is then an ordinary `TOOL_REGISTRY` row, so `archive_symbol` accepts it) and "
+    "only then delete the declaration again. Restoring the declaration and archiving WITHOUT "
+    "deleting the key is refused: the key that is still there makes the symbol a RETIREMENT "
+    "that is still SERVED. That key-first order is the one `CONTRIBUTING.md` states."
+)
+
+
+def surface_symbols(doc: dict) -> set[tuple[str, str]]:
+    """`{(symbol, surface-class)}` for every row of a manifest document — BOTH halves.
+
+    The symbol is what a removal RECORD names: a tool's registry name, an SDK method's
+    name. `sdk:` is the manifest's ROW-NAME prefix, not part of the method name.
+
+    ⛔ THE `retired:` HALF IS READ TOO, and that is not symmetry for its own sake. Retired
+    names are STILL SERVED — `RETIRED_TOOL_REGISTRY` is derived from `RETIRED_USE_INSTEAD`
+    and every one of those handlers still answers (#3883) — so deleting a name from that
+    map removes BOTH the `retired:` row and the forward record in one ordinary edit. A gate
+    that read only `rows:` would watch that happen and report nothing, which is the same
+    silent wipe through a different door the approvals reset guards against (#4598).
+    Reading the half changes nothing on an ordinary re-cut (those rows are in the derived
+    document too) and nothing on a legitimate retirement (`RETIRED_USE_INSTEAD` still
+    accounts for it).
+
+    The key is `(symbol, class)`, not the symbol alone: a tool whose registry name collides
+    with a live SDK method name would otherwise be overwritten in the mapping and its
+    removal would be invisible.
+    """
+    symbols: set[tuple[str, str]] = set()
+    for key in ("rows", "retired"):
+        half = doc.get(key)
+        if half is None and key == "retired":
+            # NOT "an older manifest may predate the half" — no such manifest can be committed
+            # green: `check` reds a baseline with no `retired:` list from both directions. The
+            # only tree that reaches this is one `cut` is REPAIRING, so refusing would block
+            # the repair; but an absence must be SAID, because a retired name dropped in the
+            # same PR is otherwise invisible. `cmd_cut` prints the warning.
+            continue
+        if not isinstance(half, list):
+            raise SurfaceEvidenceUnreadable(
+                f"a manifest document carries no `{key}:` list, so its removed symbols "
+                "cannot be enumerated — a refusal, never an empty removal set"
+            )
+        for row in half:
+            if not isinstance(row, dict):
+                # A row the gate cannot read is UNREADABLE EVIDENCE, not an absent row. The
+                # `continue` this replaces graded it as "no such row existed", so a prior
+                # baseline carrying e.g. `- tortoise_x` (a hand-edit or a `yq` append that
+                # dropped the `name:` key) lost the symbol with `cut` exiting 0 — the exact
+                # deletion this gate exists to refuse. `_read_manifest` accepts such a row
+                # (it only requires `rows` to be a LIST), and `check`'s malformed-row finding
+                # needs a committed tree, which a cut never gives it: the cut is what erases
+                # the shape. Measured by review round 4 of PR #12313.
+                raise SurfaceEvidenceUnreadable(
+                    f"a manifest `{key}:` row is not a mapping ({type(row).__name__}: "
+                    f"{row!r:.60}) — the removal gate cannot read it, and grading an "
+                    "unreadable row as absent is how a symbol leaves the surface unrecorded"
+                )
+            name = str(row.get("name") or row.get("tool") or row.get("key") or "")
+            if not name:
+                raise SurfaceEvidenceUnreadable(
+                    f"a manifest `{key}:` row carries no name: the removal gate cannot tell "
+                    "which symbol disappeared, and guessing one would grade the wrong record"
+                )
+            if name.startswith("sdk:"):
+                # The row's NAME is its identity; `method` is a DERIVED cell beside it, and a
+                # hand-edit can move it while the name still says which method departed. The
+                # suffix is preferred (falling back to `method`) so the gate reads what the row
+                # says rather than what a splicer left in a derived column (review of PR #12313).
+                symbols.add((name[len("sdk:"):] or str(row.get("method") or ""), "sdk"))
+            else:
+                symbols.add((name, "tool"))
+    return symbols
+
+
+def removal_records(archive_manifest: Path | None = None) -> dict:
+    """The three records a removal may be accounted by, or a REFUSAL.
+
+    Never a partial answer: an unreadable archive and an unimportable retirement map are
+    both refusals. "I could not see the record" and "there is no record" must not be the
+    same verdict for a gate whose failure mode is losing code permanently.
+
+    `archive_manifest` is a parameter so a test can read the manifest it means to read
+    rather than a path bound at import. There is deliberately NO `root`: the retirement maps
+    come from the imported package, so a caller asking about a different checkout would get
+    this one's answer — a parameter that cannot change the verdict is a trap, not an option.
+    """
+    try:
+        from tools import archive_surface
+    except Exception as exc:  # pragma: no cover - an import failure is an environment fault
+        raise SurfaceEvidenceUnreadable(
+            f"could not import tools/archive_surface.py to read the archive record: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+    path = Path(archive_manifest) if archive_manifest else Path(archive_surface.MANIFEST_PATH)
+    try:
+        doc = archive_surface.load_manifest(path)
+    except Exception as exc:
+        raise SurfaceEvidenceUnreadable(
+            f"could not read the archive manifest {_display(path)}: {exc}"
+        ) from exc
+    archived: set[tuple[str, str]] = set()
+    for entry in doc.get("entries") or []:
+        if not isinstance(entry, dict):
+            # A frozen entry the gate cannot read is UNREADABLE EVIDENCE, not an entry that
+            # is not there — the same asymmetry `surface_symbols` refuses one function over,
+            # fixed in the row reader by review round 4 of PR #12313 and left here. Skipping
+            # it can only LOSE records, so nothing passes wrongly; it sends the operator to
+            # archive a symbol that is already archived, and it hides a corrupt manifest.
+            raise SurfaceEvidenceUnreadable(
+                f"an `archive/MANIFEST.json` entry is not a mapping ({type(entry).__name__}: "
+                f"{entry!r:.60}) — the removal gate cannot read it, and grading an "
+                "unreadable entry as 'not archived' is how a frozen symbol is reported as "
+                "unrecorded"
+            )
+        kind = str(entry.get("kind") or "")
+        symbol = str(entry.get("symbol") or "")
+        # ⛔ KIND + SYMBOL ALONE IS NOT A RECORD. `archive_symbol` always writes `batch`,
+        # `reason` and `file`, and `archive_surface.file_violations` reds a row without them
+        # ("manifest row carries no `file`") - so a hand-typed row of just kind+symbol was a
+        # record `cut` accepted and `check` refused, and the cheapest way to clear that red
+        # BEFORE the deleted code can be frozen is to delete the row: then prior == derived and
+        # no gate can see the removal again, which is the #12237 loss reached THROUGH this gate
+        # (review of PR #12313).
+        for field in ("batch", "reason", "file"):
+            # ⛔ MATCH THE WRITER, DO NOT INVENT A STRICTER RULE. `archive_symbol` refuses an
+            # empty `batch`/`reason` (`if not batch or not reason`) but accepts a whitespace
+            # one, and `check` grades only `reason` — so a `.strip()` here refused a row the
+            # other two accept, with a message claiming `check` reds it (review of PR #12313,
+            # round 15).
+            value = entry.get(field)
+            if not isinstance(value, str) or not (value.strip() if field == "file" else value):
+                raise SurfaceEvidenceUnreadable(
+                    f"an `archive/MANIFEST.json` entry ({kind}:{symbol}) carries no usable "
+                    f"`{field}` — an entry the writer would never have produced is not a "
+                    "record this gate may accept: a hand-typed row would let `cut` forget the "
+                    "symbol, and the cheapest way to clear it afterwards is deleting the row"
+                )
+        if not kind or not symbol:
+            # A mapping that names no symbol is the same defect one branch over: skipping it
+            # grades "unreadable" as "not archived", so `cut` tells the operator to archive
+            # a symbol that IS archived and a corrupt manifest stays quiet. `check` reds this
+            # shape through the file metadata, but the cut never gives it a committed tree.
+            raise SurfaceEvidenceUnreadable(
+                f"an `archive/MANIFEST.json` entry names no {'symbol' if kind else 'kind'} "
+                f"({sorted(entry)[:6]}) — the removal gate cannot tell which symbol it "
+                "freezes, and an entry it cannot read is not an entry that is not there"
+            )
+        archived.add((kind, symbol))
+    # ⛔ DELEGATE THE DEFINITION OF "A RECORD", DO NOT RE-DERIVE IT. A field list here is a
+    # SECOND opinion about what makes an archive row a record, and the two opinions drifted:
+    # the round-8 check ("`file` must name a file that exists") accepted a row naming
+    # `MEMORY.md`, a row pointing at a REAL frozen file under a DIFFERENT symbol, a row with
+    # no `archived_at`, a mutated block sha, and the same `(kind, symbol)` twice — every one of
+    # them RED by `archive_surface.py check`, so `cut` wrote a baseline whose archive has
+    # already lost the code and the cheapest way out of the red is deleting the row, after
+    # which no gate sees the removal at all (review of PR #12313, round 9). The sibling owns
+    # this question; the record reader now asks it instead of answering it again.
+    try:
+        # ⛔ ONLY WHERE THERE IS A MANIFEST TO GRADE. `manifest_violations`'s first arm reds a
+        # MISSING `archive/MANIFEST.json` (correctly, for `check`, which is asked whether the
+        # archive is intact) — but `load_manifest`'s contract is the opposite one this reader
+        # needs: "missing file is EMPTY, not an error (first run)". Delegating unconditionally
+        # refused EVERY cut on a tree with no archive at all, removal or not — a false refusal
+        # of the ordinary path, which is worse than the forged-record hole it closed
+        # (review of PR #12313, round 10). An absent manifest holds no records either way, so
+        # there is nothing here to grade.
+        violations: list[str] = []
+        if path.exists():
+            violations += archive_surface.manifest_violations(doc, path.parent)
+            violations += archive_surface.file_violations(
+                [e for e in (doc.get("entries") or []) if isinstance(e, dict)], path.parent, ROOT
+            )
+    except Exception as exc:  # pragma: no cover - an environment fault is a refusal
+        raise SurfaceEvidenceUnreadable(
+            f"could not grade the archive manifest against its own checker: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+    if violations:
+        raise SurfaceEvidenceUnreadable(
+            "the archive manifest does not hold up under `archive_surface.py check`, so its "
+            "rows are not records this gate may accept (a cut that trusted them would forget "
+            "a symbol whose code was never frozen): " + "; ".join(violations[:3])
+            + (f" (+{len(violations) - 3} more)" if len(violations) > 3 else "")
+        )
+    try:
+        from tortoise.sdk_retired import REMOVED_SDK_METHODS, RETIRED_SDK_METHODS
+        from tortoise.tool_registry import RETIRED_USE_INSTEAD
+    except Exception as exc:
+        raise SurfaceEvidenceUnreadable(
+            f"could not import the retirement records (RETIRED_USE_INSTEAD / "
+            f"RETIRED_SDK_METHODS / REMOVED_SDK_METHODS): {type(exc).__name__}: {exc}"
+        ) from exc
+    return {
+        "archived": archived,
+        # ⛔ THE RAW MAP, AND THAT IS THE ONLY FORWARD SET. There used to be a second field,
+        # `forward`, holding the SERVED subset (`_RETIRED_SHIMS`, built from
+        # `RETIRED_TOOL_REGISTRY`) — but `removal_report` reads `forward_raw`, so the served
+        # set was inert, kept alive only by a `dict.get` fallback that could never run
+        # (`removal_records` always sets `forward_raw`) and by a test asserting the dead field.
+        # A defence nothing consults is worse than no defence: it reads as protection while a
+        # later change could consume `forward` and reopen the dangling-key hole below with the
+        # suite green (review of PR #12313, round 11).
+        #
+        # `archive_surface.check` reads the raw map: a KEY whose `ToolDefinition` was deleted is invisible to `check`'s
+        # `forward`-is-still-served arm and reds its ARCHIVE arm instead ("is a
+        # RETIRED_USE_INSTEAD forward entry — a forward entry is STILL SERVED … must not be
+        # archived"). With only the served subset here, `cut` told the operator to archive a
+        # dangling name and `check` refused that same archive: two gates, two verdicts, one
+        # tree, and the only way out of the red was deleting the frozen entry. The raw set is
+        # what lets `removal_report` refuse in `check`'s words (review of PR #12313).
+        "forward_raw": set(RETIRED_USE_INSTEAD),
+        # The UNION answers "does this method have a map entry" (either map is enough for THAT
+        # question), but the two maps mean OPPOSITE things and the no-freeze rename arm must
+        # not treat them alike: `RETIRED_SDK_METHODS` is a RENAME whose replacement the map
+        # names (and whose owner gates pin that the replacement exists), while
+        # `REMOVED_SDK_METHODS` is a departure with NO replacement to point at. Collapsed into
+        # one set, a DELETED method was accepted as "a deliberate rename" with no freeze, so
+        # the caller got a bare `AttributeError`, `cut` persisted nothing, and no gate could
+        # see the loss (review of PR #12313, round 18).
+        "sdk_retired": set(RETIRED_SDK_METHODS) | set(REMOVED_SDK_METHODS),
+        "sdk_renamed": set(RETIRED_SDK_METHODS),
+    }
+
+
+def parse_waiver(entry: str) -> tuple[str | None, str]:
+    """`tool:<symbol>` / `sdk:<symbol>` → `("tool", "<symbol>")`; a bare name → `(None, name)`.
+
+    ONE parser for ONE grammar. Two implementations of it disagreed: `removal_report` treated
+    `foo:bar` as a BARE symbol while `cmd_cut` keyed on any `:` and read it as the qualified
+    `bar`, so a bare symbol containing a colon was accepted by one and mangled by the other
+    (review of PR #12313). `None` means "whichever surface this cut removes".
+    """
+    text = str(entry)
+    head, sep, tail = text.partition(":")
+    if sep and head in ARCHIVE_KIND_BY_CLASS and tail:
+        return head, tail
+    return None, text
+
+
+def waiver_matches(entry: str, symbol: str, cls: str) -> bool:
+    """Does this waiver entry account for the removal of `symbol` on surface `cls`?"""
+    want_cls, want_symbol = parse_waiver(entry)
+    return want_symbol == symbol and (want_cls is None or want_cls == cls)
+
+
+class RemovalProblem(str):
+    """A refusal line that also carries WHICH class of problem it is.
+
+    `cmd_cut` printed ONE header for every problem - "cut would drop N surface row(s) with no
+    usable record", the three archive routes, and the `--allow-removal` remedy - but
+    `removal_report` also produces problems that are NOT "no record": a redundant override on
+    a symbol that IS recorded, an ambiguous bare waiver, and a contradiction. So a refusal told
+    the operator to add a record to a row that had one, and for the ambiguity it prescribed the
+    very flag that had just been refused ("logged below", on a cut that returns 1 and logs
+    nothing below). A `str` subclass keeps every existing message match - `in`, `problems[0]`,
+    equality - working while the caller branches on `.kind` (review of PR #12313).
+    """
+
+    kind: str
+
+    def __new__(cls, kind: str, message: str) -> RemovalProblem:
+        obj = super().__new__(cls, message)
+        obj.kind = kind
+        return obj
+
+
+def removal_report(
+    prior: set[tuple[str, str]],
+    derived: set[tuple[str, str]],
+    records: dict,
+    *,
+    allowed: set[str] | None = None,
+) -> tuple[list[RemovalProblem], dict[tuple[str, str], str]]:
+    """`(problems, accounting)` for the symbols that disappeared from the surface.
+
+    A symbol present in `prior` and absent from `derived` is a REMOVAL. It is accounted for
+    by EXACTLY ONE record: an `archive/MANIFEST.json` entry of the symbol's own kind — and
+    for an SDK method that entry is ONE HALF, paired with the retirement map entry (BOTH are
+    required, and together they are one record, not two). Two edges follow from what those
+    artifacts actually are:
+
+    * a TOOL in `RETIRED_USE_INSTEAD` is REFUSED, and that refusal is REACHABLE: the map is
+      read RAW here (`forward_raw`), not as the served subset, because a key whose tool
+      declaration was deleted serves nothing (so the surface lost it and it IS a removal)
+      while `archive_surface.check` still reds archiving it — "a forward entry is STILL
+      SERVED … must not be archived". A served forward name can never be a removal at all
+      (`build_doc` writes those names into `retired:`, which `surface_symbols` reads), so the
+      old arm that ACCEPTED `RETIRED_USE_INSTEAD` as an accounting record could not fire in
+      production, and its "two records" sibling fired only on a document the derivation
+      cannot emit. Both are replaced by this one arm, which fires on the state that really
+      happens: retired-name cleanup that forgot the map key;
+    * an SDK method archived AND in `RETIRED_SDK_METHODS` / `REMOVED_SDK_METHODS` is ONE
+      record, not two: the archive freezes the code, the map records the departure, and
+      counting the pair apart refused the DOCUMENTED procedure (freeze the code, record the
+      departure) — found by review round 5 of PR #12313.
+      **BOTH halves are required, and NEITHER alone is the record.** The map without the
+      freeze loses the code permanently — the #11609 ruling keeps removed code "in case we
+      made a mistake" — and nothing else can see that loss, because `archive_surface.check`
+      iterates the ARCHIVE MANIFEST: a method that was never frozen is invisible to it, so a
+      map-only cut exited 0 over a deletion no gate would ever report (review round 14 of
+      PR #12313). The freeze without the map strips a caller with a bare `AttributeError`
+      instead of a recorded departure, which `archive_surface.check` reds from its own side.
+
+    `allowed` is the deliberate-rename escape hatch (`cut --allow-removal`), applied to a
+    NAMED symbol only — there is no blanket flag, because a blanket flag is how a gate
+    becomes decoration.
+
+    A waiver entry is either a BARE symbol or a SURFACE-QUALIFIED one (`tool:<symbol>` /
+    `sdk:<symbol>`). The qualification exists because `accounting` is keyed `(symbol,
+    surface-class)` — the same key the gate itself uses — so a bare symbol that would waive
+    a dropped TOOL and a dropped SDK METHOD of the same name at once is ambiguous and is
+    refused rather than counted as one record for two removals (review of PR #12313).
+    """
+    entries = [parse_waiver(e) for e in (allowed or ())]
+
+    def _waived(symbol: str, cls: str) -> bool:
+        """Is this removal waived — by a bare waiver, or by one naming THIS surface?"""
+        return any(c is None or c == cls for c, s in entries if s == symbol)
+
+    def _waived_by_bare(symbol: str) -> bool:
+        return any(c is None and s == symbol for c, s in entries)
+
+    def _waived_by_qualified(symbol: str, cls: str) -> bool:
+        """Does a waiver that NAMES this surface cover it?"""
+        return any(c == cls and s == symbol for c, s in entries)
+    problems: list[RemovalProblem] = []
+    accounting: dict[tuple[str, str], str] = {}
+    # Bare waivers that met a RECORDED removal, held until every removal is graded: a bare
+    # entry is a false record only if it waives nothing anywhere.
+    recorded_bare: dict[str, list[tuple[str, str]]] = {}
+    # `{(symbol, class): …}` — ONE entry per REMOVAL, not per symbol. Keyed by symbol (as it
+    # was) two removals of the same name collapsed into one entry and the `accounted N
+    # removal(s)` line understated what the cut did; the printed record is the audit the
+    # #11609 ruling keeps, so it may not undercount.
+    waived: dict[str, list[str]] = {}
+    for symbol, cls in sorted(prior):
+        if (symbol, cls) in derived:
+            continue
+        found: list[str] = []
+        try:
+            kind = ARCHIVE_KIND_BY_CLASS[cls]
+        except KeyError:
+            # Not a bare `KeyError` from a lookup nobody thought about: a class the archive
+            # knows but this map does not is exactly how a removal goes ungraded, and the
+            # traceback named neither the class nor the fix. A new surface class needs an
+            # archive kind HERE and a runnable route in `REMOVAL_WAYS`, or the operator gets
+            # a refusal they can act on instead of a crash they cannot.
+            raise ValueError(
+                f"surface class {cls!r} has no archive kind — `ARCHIVE_KIND_BY_CLASS` covers "
+                f"{sorted(ARCHIVE_KIND_BY_CLASS)}, the classes the surface baseline can carry. "
+                "A new class needs an entry there AND a printed route in `REMOVAL_WAYS`; a "
+                "class the baseline never carries (e.g. `module`, #12402) cannot be graded by "
+                "comparing baselines at all, and must not be silently skipped."
+            ) from None
+        archived = (kind, symbol) in records.get("archived", ())
+        if cls == "sdk" and symbol in records.get("sdk_retired", ()):
+            # ONE record (round 5: counting the pair apart refused this tree's own procedure),
+            # whose BOTH halves are REQUIRED (round 14: the map alone accepted a deletion of
+            # code that nothing else can see — `archive_surface.check` iterates the archive
+            # manifest, so a method that was never frozen is invisible to every other gate).
+            # The map records the DEPARTURE; it does not keep the code.
+            if (
+                not archived
+                and _waived(symbol, cls)
+                and symbol in records.get("sdk_renamed", ())
+            ):
+                # ⛔ A STATED RENAME IS A ROUTE HERE, and it has to be: the repo's recorded
+                # SDK rename procedure is EXACTLY this shape (`tortoise/sdk_retired.py`: the
+                # old name goes into `RETIRED_SDK_METHODS` and leaves `sdk.py`), so refusing
+                # it unconditionally refused the documented flow and then printed "a genuine
+                # RENAME ... passes `--allow-removal`" four lines under its own "FREEZE IT
+                # FIRST" - a flag that provably changed nothing (the branch `continue`d before
+                # any waiver was read; the refusal was byte-identical with and without it).
+                # A rename keeps no code to inspect BY DESIGN; the map entry IS its record,
+                # and the freeze stays required for a removal (review of PR #12313, round 15).
+                if _waived_by_bare(symbol) and not _waived_by_qualified(symbol, cls):
+                    waived.setdefault(symbol, []).append(cls)
+                accounting[(symbol, cls)] = (
+                    "`--allow-removal` (deliberate rename, stated in the PR) + the "
+                    "`RETIRED_SDK_METHODS` rename record"
+                )
+                continue
+            if not archived:
+                renamed_entry = symbol in records.get("sdk_renamed", ())
+                problems.append(RemovalProblem(
+                    "no-record",
+                    f"{symbol} (sdk) is in "
+                    + ("RETIRED_SDK_METHODS / REMOVED_SDK_METHODS" if renamed_entry
+                       else "REMOVED_SDK_METHODS — a departure with NO replacement")
+                    + " but its code is NOT archived — the map records the DEPARTURE, it "
+                    "does not keep the code, and the #11609 ruling keeps removed code so a "
+                    "mistake can be inspected later. "
+                    + ("FREEZE IT: restore the method into `tortoise/sdk.py` "
+                       "from the commit you are removing it at FIRST (it is already gone from the "
+                       "working tree, and `archive` reads it from there), then `uv run python "
+                       f"tools/archive_surface.py archive sdk-method {symbol} --batch <slug> "
+                       "--reason <text>`, then re-delete it (the freeze and the map entry are ONE "
+                       "record, and this cut requires BOTH halves). If this is really a RENAME, "
+                       "name the replacement in `RETIRED_SDK_METHODS` instead — a rename is the "
+                       "one shape that needs no freeze"
+                       if not renamed_entry else
+                       "FREEZE IT: restore the method into `tortoise/sdk.py` from the commit you "
+                       "are removing it at FIRST, then `uv run python "
+                       f"tools/archive_surface.py archive sdk-method {symbol} --batch <slug> "
+                       "--reason <text>`, then re-delete it (the freeze and the map entry are ONE "
+                       "record, and this cut requires BOTH halves)")
+                ))
+                continue
+            found.append("RETIRED_SDK_METHODS/REMOVED_SDK_METHODS + archived code")
+        elif cls == "sdk" and archived:
+            # The OTHER half of the pair, and NOT a pass.
+            # `surface_violations` reds this exact shape — "archived but absent from
+            # RETIRED_SDK_METHODS / REMOVED_SDK_METHODS — a caller would then hit a bare
+            # AttributeError instead of the recorded departure" — so accepting it here told
+            # the operator the removal was accounted for and then reddened CI, and the
+            # cheapest way to clear that red without knowing the map requirement is to
+            # DELETE the frozen entry: the loss this archive exists to prevent. Measured on
+            # both sides (review of PR #12313).
+            problems.append(RemovalProblem(
+                # NOT "no-record": the row HAS a record — it is missing its OTHER half — and
+                # counting it as a plain drop printed "cut would drop 1 surface row(s) with no
+                # usable record" over a row the very next line says is archived
+                # (review of PR #12313, round 12).
+                "incomplete-record",
+                f"{symbol} (sdk) is archived but absent from RETIRED_SDK_METHODS / "
+                "REMOVED_SDK_METHODS — `archive_surface.py check` reds that shape, so the "
+                "freeze alone is not the record: record the departure too (for an SDK method "
+                "the freeze and the map entry are ONE record)"
+            ))
+            continue
+        elif archived:
+            found.append(f"archive entry ({kind})")
+        if cls == "tool" and symbol in records.get("forward_raw", ()):
+            # REACHABLE, and refused in `check`'s own words. "Archived AND forward" is TWO
+            # records only when an archive entry is also present; on its own the forward key
+            # is the whole problem: the tool declaration is gone (so the name serves nothing
+            # and the surface lost it) while the map still names it, and `archive_surface.check`
+            # reads the RAW map and reds archiving a forward entry. Accepting the archive here
+            # — or claiming the symbol has "no record" — sends the operator to a red whose
+            # cheapest clearing is deleting the frozen code. (review of PR #12313)
+            if archived:
+                problems.append(RemovalProblem(
+                    "contradiction",
+                    f"{symbol} (tool) is accounted by 2 records (archive entry ({kind}), "
+                    "RETIRED_USE_INSTEAD) — and the archive one is a CONTRADICTION: "
+                    "`archive_surface.py check` reads the raw forward map and reds archiving "
+                    "a forward entry (\"a forward entry is STILL SERVED … must not be "
+                    "archived\"). Delete the stale forward key, or restore the tool; do not "
+                    "archive it"
+                ))
+            else:
+                problems.append(RemovalProblem(
+                    "contradiction",
+                    f"{symbol} (tool) is still a `RETIRED_USE_INSTEAD` entry whose tool "
+                    "declaration is gone: it serves nothing (which is why the surface lost "
+                    "it), and `archive_surface.py check` refuses to archive a name that is "
+                    "in that map at all. Delete the stale forward key, or restore the tool — "
+                    "the archive route is not available for it"
+                ))
+            continue
+        if found:
+            # ONLY a waiver that NAMES this surface can replace its record. `_waived` was used
+            # here, so a BARE `--allow-removal x` was refused as a redundant override when the
+            # removal it matched was the recorded one on the OTHER surface — while the same
+            # bare entry was exactly what the unrecorded class needed, and waives. The
+            # "sole authority" rule the ambiguity counter already applies applies here too
+            # (review of PR #12313, round 11). A bare entry's verdict is DEFERRED, because
+            # whether it waives anything depends on removals still to come: if it covers no
+            # unrecorded removal it is the false record round 8 refused.
+            if _waived_by_qualified(symbol, cls):
+                # A record ALREADY accounts for this removal, so the waiver waives nothing —
+                # and honouring it would REPLACE that record in the printed log, telling the
+                # next reader to look for a rename that did not happen. Same false-record
+                # class as a reason with no symbol (refused in `cmd_cut`), and the same
+                # unused-permission argument as an override for a symbol this cut does not
+                # remove (review of PR #12313).
+                problems.append(RemovalProblem(
+                    "redundant-override",
+                    f"{symbol} ({cls}) is already accounted for by {found[0]}, so "
+                    "`--allow-removal` waives nothing — an override that replaces a real "
+                    "record with a rename claim is a false record"
+                ))
+                continue
+            if _waived_by_bare(symbol):
+                recorded_bare.setdefault(symbol, []).append((cls, found[0]))
+            accounting[(symbol, cls)] = found[0]
+            continue
+        if _waived(symbol, cls):
+            if cls == "sdk" and symbol not in records.get("sdk_retired", ()):
+                # ⛔ A WAIVER IS NOT A DEPARTURE RECORD FOR AN SDK METHOD. This arm accepted
+                # `--allow-removal` as the WHOLE record for a method that was neither frozen
+                # nor in the map, so the old name vanished with nothing that fails closed: a
+                # caller got a bare `AttributeError` instead of the recorded departure, and the
+                # only trace was a stdout line (`cmd_cut` persists nothing about removals) —
+                # while `SDK_PAIR_RULE`, `CONTRIBUTING.md` and `archive/README.md` all state
+                # that a rename's record IS the map entry plus the override, and the owner's
+                # rename gates (`tests/test_sdk_retirement.py`) read only the map, so they never
+                # saw it. The map entry costs one line and is what the recorded rename
+                # procedure writes anyway (review of PR #12313, round 17).
+                # Count the bare entry against the ambiguity counter BEFORE refusing: without
+                # this, an unrecorded SDK removal `continue`s before `waived` is updated, so the
+                # two-surface ambiguity below could never fire (a guard that cannot fire is not
+                # a guard) and the operator saw one problem where the invocation has two.
+                if _waived_by_bare(symbol) and not _waived_by_qualified(symbol, cls):
+                    waived.setdefault(symbol, []).append(cls)
+                # ⛔ ONE MAP CLEARS THIS SHAPE, AND IT IS THE RENAME MAP. Naming both maps here
+                # ("`RETIRED_SDK_METHODS` / `REMOVED_SDK_METHODS`") was the same conflation rounds
+                # 18/21 removed elsewhere, in the one text an operator reads AFTER typing the
+                # override: `--allow-removal` is consulted by the no-freeze arm only when the
+                # symbol is in `sdk_renamed` (= `RETIRED_SDK_METHODS`), so following the sentence
+                # literally and adding the DEPARTURE map produced a byte-identical refusal. The
+                # two routes are now named as what they are — a rename (map + override) and a
+                # departure (map + freeze, no replacement to name) — because this shape can be
+                # either (review of PR #12313, round 22).
+                problems.append(RemovalProblem(
+                    "no-record",
+                    f"{symbol} (sdk) has no departure record: `--allow-removal` states the "
+                    "rename but a caller of the old name needs the fail-closed `AttributeError` "
+                    "the map raises. If this is a RENAME, add the old name to "
+                    "`RETIRED_SDK_METHODS` in `tortoise/sdk_retired.py` FIRST (that also runs "
+                    "the owner's approved-rename gates), then pass the same override — the "
+                    "rename entry plus the override IS the record. A `REMOVED_SDK_METHODS` "
+                    "entry is a DEPARTURE with no replacement to name: it records the "
+                    "departure and keeps no code, so it does not clear this shape — a "
+                    "departure still needs the freeze"
+                ))
+                continue
+            if _waived_by_bare(symbol) and not _waived_by_qualified(symbol, cls):
+                # ONLY a bare waiver can be ambiguous — and only for the classes it is the
+                # sole authority over. `--allow-removal x --allow-removal sdk:x` names the
+                # sdk surface explicitly, so the bare entry covers ONLY the tool removal:
+                # counting both against it refused a legitimate invocation and printed
+                # "one `--allow-removal x` would waive 2 removals", which is false for that
+                # command and whose prescribed remedy the operator had already applied
+                # (review of PR #12313).
+                waived.setdefault(symbol, []).append(cls)
+            # ⛔ NOT "a deliberate RENAME" — this arm cannot tell one from a deletion. It is
+            # reached by ANY unrecorded removal the override names, and on the TOOL surface a
+            # rename can never reach it at all (a name in `RETIRED_USE_INSTEAD` stays served,
+            # so it stays in the baseline's `retired:` half and is not a removal; with the key
+            # present and the declaration gone the cut refuses it as a contradiction before
+            # any waiver is read). Since `#11609`'s audit line is the ONLY lasting record of a
+            # removal — `cut` persists nothing about removals — calling a deletion a
+            # rename in the log contradicted the operator's own `--allow-removal-reason` one
+            # line below it (review of PR #12313, round 24). The verified rename is the SDK
+            # arm above, which reads `sdk_renamed` and says so.
+            accounting[(symbol, cls)] = (
+                "`--allow-removal` (deliberate removal, stated in the PR)"
+            )
+            continue
+        problems.append(RemovalProblem(
+            "no-record",
+            f"{symbol} ({cls}) was DROPPED with no record — it is gone from the "
+            "declaration and from the archive both, so there is nothing left to read"
+        ))
+    for symbol, pairs in sorted(recorded_bare.items()):
+        if symbol in waived:
+            # The bare entry really does waive an unrecorded removal, so it is not a false
+            # record — the recorded classes keep their records and it accounts the rest.
+            continue
+        for cls, label in pairs:
+            problems.append(RemovalProblem(
+                "redundant-override",
+                f"{symbol} ({cls}) is already accounted for by {label}, so "
+                f"`--allow-removal {symbol}` waives nothing — an override that replaces a "
+                "real record with a rename claim is a false record",
+            ))
+            # The refusal is the verdict, so the record it names is not part of an `accounted`
+            # block that will never print — and a caller reading `accounting` must not see a
+            # record the cut refused.
+            accounting.pop((symbol, cls), None)
+    for symbol, classes in sorted(waived.items()):
+        if len(classes) > 1:
+            # The same invariant the redundant-override arm enforces: a caller reading
+            # `accounting` must not see a record the cut REFUSED. The ambiguity counts every
+            # class the bare entry waives, so all of them come out (review of PR #12313,
+            # round 12).
+            for cls in classes:
+                accounting.pop((symbol, cls), None)
+            problems.append(RemovalProblem(
+                "ambiguous-waiver",
+                f"one `--allow-removal {symbol}` would waive {len(classes)} removals "
+                f"({', '.join(classes)}) — a named waiver is ONE symbol on ONE surface, and "
+                "collapsing them into one record understates what this cut removed. Name "
+                f"the surface: `--allow-removal tool:{symbol}` / `sdk:{symbol}`"
+            ))
+    return problems, accounting
+
+
 def cmd_cut(args: argparse.Namespace) -> int:
     # ⛔ #11057 review P1: `--commit` was written into the record with NO validation, so
     # `cut --commit main` landed a record that `check` could not distinguish from a verified
@@ -2154,11 +2822,13 @@ def cmd_cut(args: argparse.Namespace) -> int:
     # be enumerated, so overwriting it destroys them without ever naming them, which is the
     # #4598 wipe again. Refuse. Never a silent overwrite of a document we could not read.
     doomed: list[tuple[str, str]] = []
+    prior_doc: dict | None = None
     if MANIFEST_FILE.exists():
         try:
-            doomed = _recorded_approvals(_read_manifest(check_provenance=False))
+            prior_doc = _read_manifest(check_provenance=False)
         except SurfaceEvidenceUnreadable as exc:
             return _refuse(exc)
+        doomed = _recorded_approvals(prior_doc)
     if doomed and not getattr(args, "allow_approval_reset", False):
         print(f"::error::cut would reset {len(doomed)} recorded approval(s) to null")
         print(f"REFUSED {_display(MANIFEST_FILE)} carries {len(doomed)} recorded approval(s) "
@@ -2169,6 +2839,161 @@ def cmd_cut(args: argparse.Namespace) -> int:
               "READ from docs/product/canonical-mcp-tools.md (#4185), so no per-row "
               "re-recording is required. Pass --allow-approval-reset to drop them deliberately.")
         return 1
+
+    # FAIL CLOSED ON A REMOVAL THAT LEAVES NO RECORD (#12237). Runs BEFORE the write: a
+    # refusal must not leave a baseline that has already forgotten the symbol, because the
+    # committed baseline is the only list of what USED to be there. A first cut has no prior
+    # to lose, so the ROW comparison is skipped — but the override flags are validated on
+    # EVERY cut, INCLUDING the symbol-vs-removal check below (which therefore refuses any
+    # override on a first cut): "no prior document" is the one tree where a waiver cannot be
+    # checked against a removal, which is exactly when it should be refused.
+    accounting: dict[tuple[str, str], str] = {}
+    allowed = [str(s) for s in (getattr(args, "allow_removal", None) or [])]
+    reason = str(getattr(args, "allow_removal_reason", "") or "").strip()
+    if allowed and not reason:
+        print("::error::--allow-removal requires --allow-removal-reason")
+        print("REFUSED a removal override without a stated reason is an unexplained deletion; "
+              "the reason is recorded in the cut output and the PR.")
+        return 1
+    if reason and not allowed:
+        print("::error::--allow-removal-reason given with no --allow-removal")
+        print("REFUSED a reason with no symbol names an override that did not happen — an "
+              "operator who wrote a justification believes something was waived.")
+        return 1
+    problems: list[str] = []
+    removals: set[tuple[str, str]] = set()
+    if prior_doc is not None:
+        try:
+            prior_symbols = surface_symbols(prior_doc)
+            derived_symbols = surface_symbols(doc)
+            # What THIS cut actually removes. The override validator below must compare the
+            # waiver against this set, never against `accounting`: `accounting` is also empty
+            # for a symbol a REAL record already accounts for, and for a symbol whose
+            # removal was refused — so a symbol-keyed comparison against it reported
+            # "this cut does not remove <symbol>" for a symbol the cut DID remove, and hid
+            # the specific refusal `removal_report` had produced (review of PR #12313).
+            removals = prior_symbols - derived_symbols
+            # ⛔ NO REMOVALS, NO RECORD TO GRADE. `removal_records()` grades the WHOLE archive
+            # (`manifest_violations` + `file_violations`), so calling it unconditionally made
+            # an archive defect the cut neither reads nor aggravates refuse a cut that drops
+            # nothing — with a message about forgetting a symbol — e.g. the unindexed `.py`
+            # left behind by an interrupted `archive_symbol` (the file is written before the
+            # row is appended). Round 10 fixed the same false refusal for a MISSING manifest
+            # only; gating on the removals fixes the class (review of PR #12313, round 11).
+            records = (
+                removal_records()
+                if removals
+                else {"archived": set(), "forward_raw": set(), "sdk_retired": set()}
+            )
+            problems, accounting = removal_report(
+                prior_symbols, derived_symbols, records, allowed=set(allowed)
+            )
+        except SurfaceEvidenceUnreadable as exc:
+            return _refuse(exc)
+    # The override is validated before the removal problems, and on EVERY cut: a bogus
+    # `--allow-removal` is a defect in the invocation, and reporting it as "a removal had no
+    # record" would send the operator to archive a symbol instead of fixing the flag. On a
+    # first cut `accounting` is empty, so every override is unexplained and refused — which
+    # is the point: nothing was removed, so a waiver for it is a false record.
+    # A waiver entry may be SURFACE-QUALIFIED (`tool:<symbol>` / `sdk:<symbol>`), so it is
+    # matched against the removal SET (symbol AND class) through the ONE parser both callers
+    # share — comparing bare symbols let a `sdk:x` waiver be "explained" by a TOOL removal of
+    # the same name, and printed an override that never applied (review of PR #12313).
+    unexplained = sorted(
+        e for e in allowed if not any(waiver_matches(e, s, c) for (s, c) in removals)
+    )
+    if unexplained:
+        print(f"::error::--allow-removal named symbol(s)/surface(s) this cut does not "
+              f"remove: {', '.join(unexplained)}")
+        print("REFUSED an override must name a symbol that is actually going away, on the "
+              "surface named — an unused override is a permission granted for something "
+              "else later.")
+        return 1
+    if problems:
+        # ⛔ ONE HEADER FOR EVERY PROBLEM CLASS MADE THE REFUSAL CONTRADICT ITS OWN LINES.
+        # `removal_report` also produces problems that are NOT "no record" — a redundant
+        # override on a symbol that IS recorded, an ambiguous bare waiver, a contradiction —
+        # and this block told the operator the row had no record and to add one, or (for the
+        # ambiguity) prescribed the exact flag that had just been refused. "logged below" was
+        # false too: a refused cut writes nothing below. So the record-remedy block is printed
+        # only when a `no-record` problem is present; otherwise each line's own instruction is
+        # the whole refusal (review of PR #12313).
+        # ROWS THAT NEED A RECORD, whatever half they are missing: a plain drop, and a
+        # half-record (an SDK method whose freeze or map entry is absent). Both are "no USABLE
+        # record", which is what the header says, so both belong under it — typing the
+        # half-record apart was only half the round-12 fix: the heading below also named one
+        # of the two shapes, so a mixed refusal still described a row as something it was not
+        # (review of PR #12313).
+        recordable = [
+            p for p in problems if getattr(p, "kind", "no-record") in ("no-record", "incomplete-record")
+        ]
+        if recordable:
+            print(
+                f"::error::cut would drop {len(recordable)} surface row(s) with no usable record"
+            )
+            print("REFUSED a removal must leave a record — the #11609 owner ruling archives "
+                  "removed code so a mistake can be inspected later, and a re-cut cannot "
+                  "tell an archived removal from a silent deletion:")
+            for problem in problems:
+                print(f"  {problem}")
+            # ⛔ NOT "each row above": a CONTRADICTION row (two records) is above this line
+            # and no route clears it — the block's own problem line says so ("the archive
+            # route is not available for it"), which made the heading contradict the text two
+            # lines up. So the heading is scoped to the rows that actually need a record
+            # (review of PR #12313, round 15).
+            print("  Account for the rows above reported as missing a record by exactly "
+                  "one of:")
+            for way in REMOVAL_WAYS:
+                print(f"    - {way}")
+            print(f"  {SDK_PAIR_RULE}")
+            print(f"  {NOT_A_REMOVAL_ROUTE}")
+            # ⛔ ONLY WHERE IT CAN CLEAR. `--allow-removal` is consulted on the no-record
+            # path; a contradiction row is `continue`d before the waiver is read, so printing
+            # the rename remedy under a mixed refusal prescribed a flag that changes nothing
+            # for the row it appears to address (review of PR #12313, round 12).
+            if all(p.kind == "no-record" for p in problems):
+                # ⛔ "PASS IT" IS NOT THE WHOLE RECORD FOR AN SDK METHOD, and saying so here
+                # was the same over-claim this line was introduced to fix, one surface over:
+                # for an SDK rename the override only ACCOUNTS the departure — the map entry is
+                # what keeps a caller from meeting a bare `AttributeError` — so a refusal whose
+                # cause is the missing map entry must not close by prescribing the flag alone
+                # the operator has already typed (review of PR #12313, round 20).
+                # ⛔ AND THE MAP IT NAMES IS THE RENAME MAP, NOT BOTH. The qualifier that
+                # fixed round 20's over-claim re-collapsed the two opposite maps that round 18
+                # separated: it offered `RETIRED_SDK_METHODS` / `REMOVED_SDK_METHODS` as
+                # interchangeable halves, but the no-freeze arm reads `sdk_renamed`
+                # (`RETIRED_SDK_METHODS`) alone — so for a `REMOVED_SDK_METHODS` name (a
+                # departure with NO replacement) the flag changed NOTHING and the refusal was
+                # byte-identical with and without it: round 15's defect, one map over (review
+                # of PR #12313, round 21).
+                print("  A genuine RENAME (the old name is gone by design) passes "
+                      "`--allow-removal <symbol> --allow-removal-reason <why>`; for an SDK "
+                      "method that is the record TOGETHER WITH its `RETIRED_SDK_METHODS` "
+                      "entry. A `REMOVED_SDK_METHODS` name is a DEPARTURE, not a rename — "
+                      "this override does not clear it and the freeze is still required. It "
+                      "is logged in the cut output and belongs in the PR body.")
+            return 1
+        print(f"::error::cut refused this removal: {len(problems)} problem(s)")
+        print("REFUSED — each line names what is wrong, and the record it names is the "
+              "problem. Nothing was written:")
+        for problem in problems:
+            print(f"  {problem}")
+        return 1
+
+    # An ABSENT retired half and an EMPTY one are the same absence in two spellings — the
+    # `is None` test saw only the first, so a baseline whose `retired:` list had been emptied
+    # (a splice or merge artefact) was compared silently while `tortoise_get` leaving the
+    # declaration in that same cut went ungraded (review of PR #12313). The disclosure is what
+    # that arm exists for, so it fires on emptiness, not on a missing key.
+    # ⛔ NOT CONDITIONAL ON THE DERIVED HALF HAVING ROWS (review round 15 of PR #12313). The
+    # guard used to be `and doc.get("retired")`, so a tree whose committed half was gone AND
+    # whose derivation produced no retired names said NOTHING — the state where the loss is
+    # total (every forward entry gone) and where a reader most needs to be told the half was
+    # not compared. The docs state the disclosure unconditionally; the code now does too.
+    if prior_doc is not None and not prior_doc.get("retired"):
+        print("  WARNING the committed baseline carries no `retired:` list, so the retired "
+              "half could not be compared — a retired name that also left the declaration is "
+              "NOT graded by this cut (and `check` reds the shape; reconcile, then re-cut)")
 
     MANIFEST_FILE.write_text(
         MANIFEST_HEADER
@@ -2205,6 +3030,26 @@ def cmd_cut(args: argparse.Namespace) -> int:
             "  per-row `approval` audit references reset to null; the approval itself is READ "
             "from docs/product/canonical-mcp-tools.md (#4185)"
         )
+    if accounting:
+        # Named, not summarised: this is the record that a removal was accounted for, and a
+        # count alone cannot be checked against the archive afterwards. The surface class is
+        # printed ONLY where one symbol was removed from more than one surface, so the
+        # ordinary single-surface line keeps its `symbol: record` shape.
+        print(f"  accounted {len(accounting)} removal(s):")
+        by_symbol: dict[str, list[tuple[str, str]]] = {}
+        for (symbol, cls), label in accounting.items():
+            by_symbol.setdefault(symbol, []).append((cls, label))
+        for symbol in sorted(by_symbol):
+            entries = by_symbol[symbol]
+            if len(entries) == 1:
+                print(f"    {symbol}: {entries[0][1]}")
+            else:
+                for cls, label in sorted(entries):
+                    print(f"    {symbol} ({cls}): {label}")
+    if allowed:
+        print("  REMOVAL OVERRIDE (--allow-removal): "
+              f"{', '.join(sorted(set(allowed)))}")
+        print(f"    reason: {getattr(args, 'allow_removal_reason', '')}")
     return 0
 
 
@@ -3192,6 +4037,27 @@ def main() -> int:
         "--allow-approval-reset",
         action="store_true",
         help="permit dropping recorded per-row approvals (default: refuse and name every row)",
+    )
+    p_cut.add_argument(
+        "--allow-removal",
+        action="append",
+        default=[],
+        metavar="[tool:|sdk:]SYMBOL",
+        help=(
+            "permit ONE named symbol to disappear from the baseline with no archive "
+            "record (a genuine rename); an SDK method still needs its "
+            "`RETIRED_SDK_METHODS` entry, which is what records the rename for a caller — a "
+            "`REMOVED_SDK_METHODS` name is a DEPARTURE, not a rename, and still needs the "
+            "freeze. Repeatable, requires "
+            "--allow-removal-reason, and logged in the cut output (#12237). A bare SYMBOL "
+            "waives whichever surface this cut removes it from, and is refused if that is "
+            "BOTH — name the surface as `tool:SYMBOL` / `sdk:SYMBOL` when the same name is "
+            "removed from two of them."
+        ),
+    )
+    p_cut.add_argument(
+        "--allow-removal-reason",
+        help="why each --allow-removal symbol is going away (required with it; goes in the PR)",
     )
     p_cut.add_argument(
         "--refresh-observations",

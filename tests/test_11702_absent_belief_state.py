@@ -2591,7 +2591,11 @@ def test_why_support_chain_does_not_weigh_an_absent_supporter(sdk):
         "MATCH (n:Point {id:$id}) WITH n "
         "MATCH (sup:Point)-[r:IMPL]->(n) "
         "RETURN n.id, sup.id, sup.content, sup.confidence, "
-        "       sup.posterior_alpha, sup.posterior_beta, sup.ep_alpha, sup.ep_beta",
+        "       sup.posterior_alpha, sup.posterior_beta, sup.ep_alpha, sup.ep_beta, "
+        # #11928: the last column is the fusion's DEDUPE KEY (the internal node
+        # id — the emitted display id is `coalesce(id, eventId)` and is not
+        # unique). The fixture mirrors the real query width.
+        "       id(sup)",
         params={"id": target}).result_set
     _assemble_supports(rows, blocks)
     chain = blocks[target]["support_chain"]
@@ -2771,7 +2775,8 @@ def test_why_conflict_severity_and_tradeoff_weight_use_the_shared_reader(sdk):
         "RETURN n.id, c.id, c.content, "
         "  c.confidence, c.posterior_alpha, c.posterior_beta, "
         "  c.ep_alpha, c.ep_beta, "
-        "  null AS c1, null AS c2, null AS c3, null AS c4, null AS c5",
+        "  null AS c1, null AS c2, null AS c3, null AS c4, null AS c5, "
+        "  id(c)",  # #11928: the DEDUPE key (internal node id), last
         params={"id": target}).result_set
     _assemble_conflicts(rows, blocks)
     nands = blocks[target]["nands"]
@@ -2800,7 +2805,8 @@ def test_why_conflict_severity_and_tradeoff_weight_use_the_shared_reader(sdk):
         "RETURN n.id, coalesce(n.pointKind,''), alt.id, alt.content, "
         "  coalesce(alt.pointKind,''), null AS o1, null AS o2, "
         "  alt.confidence, alt.posterior_alpha, alt.posterior_beta, "
-        "  alt.ep_alpha, alt.ep_beta",
+        "  alt.ep_alpha, alt.ep_beta, "
+        "  id(alt)",  # #11928: the DEDUPE key (internal node id), last
         params={"id": decision}).result_set
     _assemble_tradeoffs(trows, tblocks)
     alts = {t["point_id"]: t for t in tblocks[decision].get("tradeoffs", [])}
