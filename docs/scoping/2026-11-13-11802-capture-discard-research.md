@@ -190,17 +190,18 @@ artifact the installer distributes.
 
 ## 4 · External research
 
-**PREFLIGHT — search tool.** `Search tool: Perplexity API (model 'sonar'), called directly with curl
-because the `web_search` tool could not see the credential — rung 1 unavailable: `mcp_load
-seo-intelligence` → "Unknown MCP server 'seo-intelligence'"; rung 2's harness route → `PERPLEXITY_API_KEY
-not set` in the process env, while the key IS present in `~/keys.env` (mode 600, as the skill
-documents) — queries: 4 attempted / 4 returned` (query 2 answered HTTP 429 and was retried serially
-after backoff, per the skill's rule; it then returned). `exa` was not used and is not on the ladder.
+**PREFLIGHT — search tool.** Search tool: Perplexity API (model `sonar`), called directly with curl
+because the `web_search` tool could not see the credential — rung 1 unavailable (`mcp_load`
+`seo-intelligence` → "Unknown MCP server 'seo-intelligence'"); rung 2's harness route →
+`PERPLEXITY_API_KEY` not set in the process env, while the key IS present in `~/keys.env` (mode 600,
+as the skill documents) — queries: 4 attempted / 4 returned (query 2 answered HTTP 429 and was
+retried serially after backoff, per the skill's rule; it then returned). `exa` was not used and is
+not on the ladder.
 
-**PREFLIGHT — graph.** `Graph: 0 hit(s) over 2 queries ("capture spool unreadable permission discard
+**PREFLIGHT — graph.** Graph: 0 hit(s) over 2 queries ("capture spool unreadable permission discard
 quarantine", "unreadable meta quarantine data loss") — unread — no query ran — failed: q1 504×1, q2
-504×1 (server wait-budget exceeded on both; retried once each per the skill) | wrote: not written —
-no query ran, so no evidence to file |`. The BRIEF's script route was tried first and reported
+504×1 (server wait-budget exceeded on both; retried once each per the skill); wrote: not written —
+no query ran, so no evidence to file. The BRIEF's script route was tried first and reported
 `GRAPH-UNREACHABLE(NO-KEY)` (no key in this process's env); sourcing `~/keys.env` reached the server,
 which then answered `504` with a 237-byte wait-budget body on both queries. Recorded, not silently
 skipped.
