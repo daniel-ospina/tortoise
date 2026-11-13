@@ -13963,8 +13963,17 @@ def _cmd_doctor(args):
     except MemoryError:
         raise
     except Exception as e:
-        results.append(("Hosted", "⚠️",
-                        f"check unavailable: {str(e)[:60]}"))
+        # ⛔ NOT a warning (#11912 review round 6). `_cmd_doctor` counts only ❌
+        # toward the exit code, so a crash in this block would leave `N pass,
+        # 0 fail` + exit 0 on a box whose credential is broken — the exact state
+        # the issue exists to remove, reachable through any bug in it. A hosted
+        # verdict that could not be produced is not a passing hosted verdict.
+        # Every EXPECTED failure inside the block is already handled with its own
+        # row; reaching here means the block itself failed.
+        results.append(("Hosted", "❌",
+                        f"the hosted check could not run "
+                        f"({type(e).__name__}: {str(e)[:80]}) — the hosted half of "
+                        "this setup is UNGRADED; `tortoise config show` for detail"))
 
     # Print results
     for check, icon, detail in results:

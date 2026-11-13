@@ -254,7 +254,7 @@ class TestDoctorHostedCredential:
         monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
         _seed_db(db_path, "doctor keyless seed")
 
-        rc = _run_doctor([])
+        _run_doctor([])
         out = capsys.readouterr().out
 
         assert calls == []
@@ -262,7 +262,7 @@ class TestDoctorHostedCredential:
         cred = _row(out, "Credentials")
         assert cred is not None and "none configured" in cred, out[-1500:]
         assert "ℹ️" in cred
-        assert rc in (0, 1)  # decided by the LOCAL rows, not by any request
+        assert "❌ Hosted" not in out  # no hosted failure row was invented
 
     def test_invalid_key_is_a_fail_not_a_pass(
             self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
@@ -315,7 +315,7 @@ class TestDoctorHostedCredential:
         monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
         _seed_db(db_path, "doctor valid seed")
 
-        rc = _run_doctor([])
+        _run_doctor([])
         out = capsys.readouterr().out
 
         hosted = _row(out, "Hosted")
@@ -324,7 +324,7 @@ class TestDoctorHostedCredential:
         assert "/v1/team accepted" in hosted, hosted
         assert "in " in hosted and "s" in hosted  # measured latency, not a bare OK
         assert "org-9" in hosted and "tier anon" in hosted, hosted
-        assert rc in (0, 1)
+        assert "❌ Hosted" not in out, out[-1200:]
         assert _FAKE_HOSTED_KEY not in out
 
     def test_offline_makes_no_request_and_says_not_probed(
@@ -375,7 +375,7 @@ class TestDoctorHostedCredential:
         monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
         _seed_db(db_path, "doctor scoped seed")
 
-        rc = _run_doctor([])
+        _run_doctor([])
         out = capsys.readouterr().out
 
         hosted = _row(out, "Hosted")
@@ -383,7 +383,8 @@ class TestDoctorHostedCredential:
         assert "❌" not in hosted, hosted
         assert "GRAPH_SCOPED_TEAM_SURFACE" in hosted, hosted
         assert "by design" in hosted or "deliberate" in hosted, hosted
-        assert rc in (0, 1)
+        # A deliberate scope refusal must not contribute a FAIL to the report.
+        assert "❌ Hosted" not in out, out[-1200:]
 
     def test_degraded_health_is_a_warning_not_a_pass(
             self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
@@ -581,7 +582,7 @@ class TestDoctorHostedCredential:
         monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
         _seed_db(db_path, "doctor cold start seed")
 
-        rc = _run_doctor([])
+        _run_doctor([])
         out = capsys.readouterr().out
 
         # The BOUNDS, not just the count: a retry at the same 5 s would still
@@ -594,7 +595,7 @@ class TestDoctorHostedCredential:
         hosted = _row(out, "Hosted")
         assert hosted is not None and "✅" in hosted, out[-1500:]
         assert "first attempt timed out" in hosted, hosted
-        assert rc in (0, 1)
+        assert "❌ Hosted" not in out, out[-1200:]
 
     def test_control_bytes_in_api_url_cannot_forge_a_row(
             self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
@@ -846,6 +847,7 @@ class TestDoctorHostedCredential:
         assert hosted is not None and "✅" in hosted, out[-1200:]
         assert "checkout-local" in hosted, hosted
         assert "accepted" in hosted, hosted
+        assert "❌ Hosted" not in out, out[-1200:]
 
     def test_a_checkout_local_credential_still_fails_when_the_key_is_revoked(
             self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
@@ -901,14 +903,15 @@ class TestDoctorHostedCredential:
         monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
         _seed_db(db_path, "doctor transient seed")
 
-        rc = _run_doctor([])
+        _run_doctor([])
         out = capsys.readouterr().out
 
         hosted = _row(out, "Hosted")
         assert hosted is not None, out[-1200:]
         assert "⚠️" in hosted and "❌" not in hosted, hosted
         assert "503" in hosted and "UNPROVEN" in hosted, hosted
-        assert rc in (0, 1)
+        # A service-side refusal must not contribute a FAIL either.
+        assert "❌ Hosted" not in out, out[-1200:]
 
     def test_reply_bodies_are_read_with_a_bound(
             self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
@@ -923,10 +926,14 @@ class TestDoctorHostedCredential:
 
         class _BoundedResponse(_FakeResponse):
             def read(self, n=None):
+                # RECORD, never raise: a raise here happens INSIDE production
+                # code, where `_cmd_doctor`'s own `except Exception` turns it into
+                # a ⚠️ "check unavailable" row and the assertion is swallowed —
+                # removing the cap stayed green through that path (fresh review
+                # round 6). Asserting on the recorded values afterwards is the
+                # only shape that can fail.
                 caps_seen.append(n)
-                assert n is not None, "unbounded read() — the body cap is not applied"
-                assert n <= 65536, f"read cap too large: {n}"
-                return self._body[:n]
+                return self._body[:n] if n is not None else self._body
 
         def handler(url, req):
             if url.endswith("/health"):
@@ -941,8 +948,12 @@ class TestDoctorHostedCredential:
         _run_doctor([])
         out = capsys.readouterr().out
 
-        assert len(caps_seen) >= 2, caps_seen
-        assert _row(out, "Hosted") is not None
+        assert None not in caps_seen, (
+            "an unbounded read() reached the wire — the body cap is not applied "
+            f"on every leg: {caps_seen}")
+        assert caps_seen == [65536, 65536], caps_seen
+        hosted = _row(out, "Hosted")
+        assert hosted is not None and "✅" in hosted, out[-1200:]
 
     def test_an_unreadable_store_directory_is_a_refusal_not_an_environment_note(
             self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
