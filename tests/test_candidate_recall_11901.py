@@ -1202,3 +1202,157 @@ def test_the_artifact_records_every_miss_so_a_cap_cannot_return(tool_mod, monkey
     assert arms["exact_misses_total"] == arms["exact_misses_recorded"] == 300, (
         f"total={arms['exact_misses_total']} vs "
         f"recorded={arms['exact_misses_recorded']}: with no cap these are equal")
+
+
+# ── #12297 residual 1: the LEXICAL BASELINE CONTROL ──────────────────────────
+#
+# The control exists to answer one question and the answer is load-bearing for
+# the #12297 recommendation: does a ~5 microsecond string compare reproduce what
+# the cross-encoder is paid ~207 ms/mention for? The pins below keep the control
+# HONEST in three independent ways — its contract, its artifact, the document
+# that quotes it, and the fact that it never reaches product code.
+
+LEXICAL_ARTIFACT = (DOC_DIR.parent / "2026-11-12-12297-rerank-calibration"
+                    / "measurement-lexical-control.json")
+RERANK_BRIEF = (DOC_DIR.parent / "2026-11-12-12297-rerank-calibration"
+                / "research-brief.md")
+
+
+@pytest.fixture(scope="module")
+def lexical() -> dict:
+    assert LEXICAL_ARTIFACT.exists(), (
+        f"missing committed control artifact {LEXICAL_ARTIFACT}")
+    return json.loads(LEXICAL_ARTIFACT.read_text())
+
+
+def test_the_lexical_scorer_has_the_cross_encoder_interface(tool_mod):
+    """Same call shape, so ONLY the scorer changes and the pools stay identical.
+
+    A control that had to reshape the arm would not be a control — the before
+    order, the cut and the tie-break would all be free to differ.
+    """
+    for mode in tool_mod.LEXICAL_MODES:
+        scorer = tool_mod.LexicalScorer(mode)
+        out = scorer.score("the credential",
+                           ["the credential", "the deployment", ""])
+        assert isinstance(out, list) and len(out) == 3, (
+            f"{mode}: score() must return one float per candidate")
+        assert all(isinstance(x, float) for x in out), (
+            f"{mode}: score() must return floats, got {[type(x) for x in out]}")
+        assert scorer.score("q", []) == [], (
+            f"{mode}: an empty candidate list must score to an empty list")
+
+
+def test_the_lexical_scorer_is_deterministic_and_ranks_identity_first(tool_mod):
+    """Deterministic (so a re-run is comparable) and sane on the exact case.
+
+    ⛔ These are properties of a CONTROL, not accuracy claims: the exact case is
+    the one surface where the whole §3 arm admits its query is byte-identical to
+    the gold's name, so a scorer that did NOT rank identity first would not be a
+    fair opponent to the cross-encoder.
+    """
+    for mode in tool_mod.LEXICAL_MODES:
+        scorer = tool_mod.LexicalScorer(mode)
+        cands = ["the deployment pipeline", "the credential", "a credential file"]
+        first, second = scorer.score("the credential", cands), scorer.score(
+            "the credential", cands)
+        assert first == second, f"{mode}: score() is not deterministic"
+        assert max(range(3), key=lambda i: (first[i], -i)) == 1, (
+            f"{mode}: identity did not rank first: {first}")
+
+
+def test_an_unknown_lexical_mode_is_refused(tool_mod):
+    """A typo must not silently become a scorer nobody declared."""
+    with pytest.raises(ValueError):
+        tool_mod.LexicalScorer("semantic-ish")
+
+
+def test_the_control_never_reaches_product_code():
+    """⛔ The control is a control. If it is ever WIRED, this reds.
+
+    This is the pin that keeps #12297 residual 1 from turning into an unmeasured
+    product change by drift: the lexical scorer is allowed to exist in
+    `tools/`, and is not allowed to appear in the shipped rerank path.
+    """
+    rerank_src = (Path(__file__).resolve().parent.parent
+                  / "tortoise" / "rerank.py").read_text()
+    assert "LexicalScorer" not in rerank_src, (
+        "the #12297 lexical baseline was wired into tortoise/rerank.py — it is "
+        "a CONTROL for the calibration, not an implementation; wiring it is a "
+        "product decision that needs its own measurement")
+    assert "candidate_recall_11901" not in rerank_src, (
+        "tortoise/rerank.py imports the calibration tool")
+
+
+def test_the_control_artifact_covers_both_pools_and_all_three_scorers(lexical):
+    """Every cell §8 quotes must exist in the artifact, at both pool widths."""
+    arms = lexical["arms"]
+    for arm in ("rerank", "lexical_difflib", "lexical_overlap"):
+        assert arm in arms, f"artifact is missing the {arm} arm"
+        for pool in ("15", "40"):
+            assert pool in arms[arm], f"{arm} is missing pool {pool}"
+            exact = arms[arm][pool]["exact"]
+            assert exact["mentions"] == lexical["corpus"]["sample"], (
+                f"{arm}/{pool}: {exact['mentions']} mentions scored against a "
+                f"sample of {lexical['corpus']['sample']}")
+            assert exact["pairs_scored"] == exact["mentions"] * int(pool) or (
+                exact["pairs_scored"] >= 0)
+    for arm in ("lexical_difflib", "lexical_overlap"):
+        assert "lexical_control" in arms[arm], (
+            f"{arm} does not carry the note saying it is a control")
+
+
+def test_the_control_arms_are_not_labelled_with_the_models_cost_story(lexical):
+    """A lexical arm must not carry the cross-encoder's latency note.
+
+    The artifact's note is a SHARED string in `_rerank_arm`; a lexical arm that
+    inherited "including the torch sigmoid / threads PINNED to 1" would describe
+    a 5 us string compare with the model's cost, which is the false-label class
+    this repo refuses. Pinned because the string is generated, not literal.
+    """
+    for arm in ("lexical_difflib", "lexical_overlap"):
+        note = lexical["arms"][arm]["latency"]["note"]
+        assert "LEXICAL control" in note, (
+            f"{arm} latency note does not say it is a lexical control: {note!r}")
+        assert "torch sigmoid" not in note, (
+            f"{arm} latency note claims a torch sigmoid it never ran: {note!r}")
+        assert "PINNED" not in note, (
+            f"{arm} latency note claims a pinned torch thread it never used: "
+            f"{note!r}")
+    assert "torch sigmoid" in lexical["arms"]["rerank"]["latency"]["note"], (
+        "the cross-encoder arm's note lost the cost it actually pays")
+
+
+def test_the_briefs_lexical_section_recomputes_from_the_artifact(lexical):
+    """§8's central claims are RECOMPUTED, never trusted from the prose.
+
+    §8 is the section that changes the recommendation, so a stale figure there
+    is worse than a stale figure anywhere else: a reader acts on it.
+    """
+    arms = lexical["arms"]
+    text = _squash(RERANK_BRIEF.read_text())
+    for pool in ("15", "40"):
+        ce = arms["rerank"][pool]["exact"]
+        lo = arms["lexical_overlap"][pool]["exact"]
+        # 1. recall is IDENTICAL — the control's headline claim
+        assert ce["recall_3_after"] == lo["recall_3_after"], (
+            f"pool {pool}: §8 claims identical recall@3, artifact holds "
+            f"{ce['recall_3_after']} vs {lo['recall_3_after']}")
+        # 2. the lexical is at least as good on nDCG — the claim that decides it
+        assert lo["ndcg_mean_after"] >= ce["ndcg_mean_after"], (
+            f"pool {pool}: §8 claims the lexical matches or beats the "
+            f"cross-encoder on nDCG, artifact holds {lo['ndcg_mean_after']} "
+            f"vs {ce['ndcg_mean_after']} — the conclusion inverted")
+        # 3. and every figure §8 prints is the artifact's own
+        for value in (f"{ce['recall_pct_after']:.1f} %",
+                      f"{ce['ndcg_mean_after']:.4f}",
+                      f"{lo['ndcg_mean_after']:.4f}"):
+            assert value in text, (
+                f"§8 does not carry the recomputed pool-{pool} figure {value}")
+    # 4. the cost gap §8 prints is the artifact's
+    ce_ms = arms["rerank"]["latency"]["ms_per_pair"]
+    lo_ms = arms["lexical_overlap"]["latency"]["ms_per_pair"]
+    assert f"{ce_ms}" in text and f"{lo_ms}" in text, (
+        f"§8 does not carry the measured ms/pair pair ({ce_ms} / {lo_ms})")
+    assert ce_ms > lo_ms, (
+        f"the cost claim inverted: cross-encoder {ce_ms} <= lexical {lo_ms}")

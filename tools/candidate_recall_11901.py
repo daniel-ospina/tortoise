@@ -613,14 +613,24 @@ def _rerank_arm(
                         if pairs_scored else None),
         "device": "cpu (this box has no GPU)",
         "torch_threads": threads,
-        "note": ("per-pair wall clock around ONE score() call per mention, "
-                 "including the scorer's lock and the torch sigmoid; it "
-                 "excludes model load. torch threads are PINNED to "
-                 f"{threads} and recorded here, because the unpinned default "
-                 "(one thread per core) measured ~20x slower on this box "
-                 "under fleet load — an unpinned figure describes the "
-                 "scheduler, not the model"),
+        # ⛔ The note must describe the scorer that ACTUALLY ran. A lexical arm
+        # has no lock and no torch sigmoid, and carrying the cross-encoder's
+        # note onto it would label a 5 us string compare with the model's cost
+        # story — the false-label class this repo refuses.
+        "note": (
+            "per-pair wall clock around ONE score() call per mention, "
+            "excluding model load. "
+            + ("This arm is a LEXICAL control: no torch, no lock, no sigmoid."
+               if model.startswith("lexical:") else
+               "Includes the scorer's lock and the torch sigmoid.")),
     }
+    if not model.startswith("lexical:"):
+        out["latency"]["note"] += (
+            " torch threads are PINNED to "
+            f"{threads} and recorded here, because the unpinned default "
+            "(one thread per core) measured ~20x slower on this box "
+            "under fleet load — an unpinned figure describes the "
+            "scheduler, not the model")
     return out
 
 

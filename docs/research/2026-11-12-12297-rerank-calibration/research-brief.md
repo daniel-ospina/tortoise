@@ -312,28 +312,114 @@ NOT affordable there: ≈ 3.4 s per query on CPU.** So the honest scope of this
 result is: **keep the gate, ship it OFF, and treat the noun path — not user
 search — as the surface it earns.**
 
+⚠️ **§7 above answers the falsifier AS WRITTEN, and §8 then qualifies it in a way
+that changes the recommendation rather than the measurement.** The falsifier compares
+the rerank against **the unreranked order**; it does not ask whether the *model* is
+the thing that produced the gain. §8 answers that, and the answer is no: a Jaccard
+token compare matches every recall figure, matches-or-beats every nDCG figure, and
+wins the variant arm outright, at ~1/1,000th the cost. **So the gain is real and
+the cross-encoder is not what earns it.** The gate stays OFF either way, and the
+noun-path note above should be read as "this lever is worth turning on" **not** as
+"this model is worth paying for".
+
 ### Residuals (stated, not hidden)
 
-1. **No lexical-baseline control was run.** The decisive missing experiment is a
-   trivial token-overlap / `difflib` scorer over the same pools. If it reproduces
-   §3, then this lever buys name-matching that a 5 µs string compare already
-   provides, and its 207 ms/mention is unjustified. **This is the first thing a
-   follow-up should run** — it is one flag on the arm already on this branch.
+1. **The lexical-baseline control was RUN — see §8, and it does NOT rescue the
+   lever.** It reproduces every recall figure, matches or beats every nDCG figure,
+   and wins the variant arm, at **0.005 ms/pair vs 5.463 ms/pair**. The consequence
+   is recorded in §8 rather than left as an open flag: on the noun path the
+   cross-encoder is not the implementation that earns this lever. **The user-search
+   surface's lexical control was NOT run** (it needs a second ~46-minute arm) and
+   nothing in §5 is inferred from §8.
 2. **The exact arm's query is byte-identical to the gold's name** (it is the
    stored name), so its 100 % is an upper bound on that surface, not an estimate
    of production precision.
 3. **Surface variants are character-level only.** No morphological, reordering,
    or synonym perturbation was measured, so "99.5 %" describes separator/case
    noise, not paraphrase.
-4. **Single corpus, single run.** 300 mentions is a sample; the sample is
-   stratified and the population digest is recorded, so a re-run is comparable,
-   but there is no second corpus.
+4. **Single corpus.** 300 mentions is a stratified sample of a recorded population.
+   The §8 run's population is a **regenerated** one (`c9f290a2866ec996`) because
+   this box's corpus grew after the §3 run (`0aa80dff278c4e58`); the unreranked
+   baseline moved with it (nDCG@10 0.7847 → 0.7830, recall unchanged at 81.3 %),
+   so **§3's absolute numbers and §8's are not pooled** — §8's comparison is
+   internal to its own run, where all three scorers saw the same pools.
 5. **`score()` is called once per mention over the whole pool** in this arm.
    Production calls it once per derived query too, so the latency maps directly —
    but the production caller also pays a batched content read, which is **not**
-   included in the 5.179 ms/pair.
+   included in the ms/pair figures.
 
 ---
+
+---
+
+## 8. The lexical control — residual 1, run, and it does NOT rescue the lever
+
+§Residuals-1 named this the decisive missing experiment and said a follow-up should
+run it first. It has now been run, over **the same pools in the same process**:
+one `--rerank --lexical-baseline both` invocation emits the cross-encoder arm and
+both lexical arms from a single fused read, so the comparison is counterfactual
+rather than merely adjacent — same mentions, same pool, same cut, same tie-break.
+
+`LexicalScorer` implements the cross-encoder's own `score(query, contents)`
+interface, so **only the scorer changes**. Two declared, untuned modes:
+
+- `difflib` — `SequenceMatcher(None, a, b).ratio()` on lowercased text (character level).
+- `overlap` — Jaccard over lowercased alphanumeric tokens (token level).
+
+| pool 40, exact arm | recall@3 | nDCG@10 | gained / lost | **ms/pair** |
+|---|---|---|---|---|
+| cross-encoder (`ms-marco-MiniLM-L6`) | 300/300 = **100.0 %** | 0.9865 | +56 / −0 | **5.463** |
+| lexical `difflib` | 300/300 = **100.0 %** | **1.0000** | +56 / −0 | **0.030** |
+| lexical `overlap` | 300/300 = **100.0 %** | **1.0000** | +56 / −0 | **0.005** |
+
+| pool 15, exact arm | recall@3 | nDCG@10 | gained / lost |
+|---|---|---|---|
+| cross-encoder | 277/300 = **92.3 %** | 0.9135 | +33 / −0 |
+| lexical `difflib` | 277/300 = **92.3 %** | **0.9233** | +33 / −0 |
+| lexical `overlap` | 277/300 = **92.3 %** | **0.9233** | +33 / −0 |
+
+| surface variants (426 pairs) | pool 15 | pool 40 |
+|---|---|---|
+| cross-encoder | 95.1 % → 99.8 % (+21 / **−1**) | 95.1 % → 99.5 % (+20 / **−1**) |
+| lexical `difflib` | 95.1 % → 99.5 % (+21 / −2) | 95.1 % → 99.5 % (+21 / −2) |
+| lexical `overlap` | 95.1 % → **100.0 %** (+21 / **−0**) | 95.1 % → **100.0 %** (+21 / **−0**) |
+
+### What this establishes, exactly
+
+**Recall is identical in every cell** — the cross-encoder recovers no candidate a
+Jaccard token compare does not. On **nDCG the lexicals are equal or better**
+(1.0000 vs 0.9865 at pool 40; 0.9233 vs 0.9135 at pool 15), and on the variant
+arm `overlap` is **strictly better** — 100.0 % with **zero** regressions where the
+cross-encoder loses one row. And the cost difference is not marginal: **0.005
+ms/pair vs 5.463 ms/pair, ~1,090×**.
+
+**→ The cross-encoder does not earn its cost on the noun path.** The ranking gain
+§3 measured is **real** and **reproduced**, and §4's mechanism claim ("lexical
+near-identity, not semantics") is now **measured rather than inferred**: what the
+207 ms/mention buys is token overlap that a string compare gives in 5 µs. This is
+the reading residual 1 was written to test for, and the test has returned the
+answer the residual predicted as the adverse case.
+
+**What it does NOT say.** It does not say the *wiring* is wrong, and it does not
+touch the gate's posture: the gate stays **OFF**, which is now doubly justified.
+It does not license replacing `CrossEncoderScorer` in product code — that is a
+product decision for the owner, and the lexical scorer here is a **control that
+is deliberately not wired into `rerank_pool`** and reaches no product path. It
+does not measure morphology, reordering, paraphrase or any semantic relation,
+because **no arm here does**: every arm is a permutation over candidates the legs
+already returned.
+
+### The recommendation this supports
+
+1. **The gate stays OFF.** Unchanged, and now for a measured reason.
+2. **On the noun path the cross-encoder is not the right implementation.** A
+   lexical reorder reaches the same or better ranking at ~1/1,000th the cost, so
+   if this lever is ever turned on for link-before-create, it should be turned on
+   with a lexical scorer, not the model. That is a product change and **is not
+   made here**.
+3. **On user search neither is affordable as wired** (§5): ranking improves, but
+   the cross-encoder costs ≈ 3.4 s/query. The lexical control was **not** run on
+   that surface — stated as a residual below rather than inferred from §5.
 
 ## Sources
 
