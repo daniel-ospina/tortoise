@@ -4732,19 +4732,35 @@ def _pin_row_failures(rows, docs, sources, default_source: str = "extractor_v2")
 #: `times`/`characters` in this very module's comments), so the list is not a nice-to-
 #: have: add the unit when you add a count, and put the count in
 #: `…_does_not_fire_on_correct_prose` where the next widening has to keep it green.
-_UNIT = (r"(?!\s*(?:(?:s|sec|secs|seconds|ms|us|µs|min|mins|h|hr|hrs|hour|hours|days?|"
-         r"weeks?|months?|years?|times?|tests?|pins?|defs?|files|lines|rows|cases|"
-         r"characters?|chars?|bytes|shards|entries|points|modules?|arms?|keys?|nodes?|"
-         r"commits?|sessions?|issues?|prs?|pp|percentage points|(?i:kb|mb|gb|tb))\b|%))")
+_UNIT_WORDS = (r"s|sec|secs|seconds|ms|us|µs|min|mins|h|hr|hrs|hour|hours|days?|"
+               r"weeks?|months?|years?|times?|tests?|pins?|defs?|files|cases|"
+               r"characters?|chars?|bytes|shards|entries|points|modules?|arms?|keys?|nodes?|"
+               r"commits?|sessions?|issues?|prs?|pp|percentage points|(?i:kb|mb|gb|tb)")
+#: ⛔ `lines` / `rows` ARE POSITION NOUNS AS WELL AS UNITS, and that ambiguity is a
+#: FALSE-PASS surface, not only the false-red one this list is usually discussed as.
+#: They are kept OUT of `_UNIT_WORDS` and added only to the plain `_UNIT`, so an arm
+#: that must refuse a POSITION (`9987 lines into the manifest`, `at 9987 lines`,
+#: `9987 rows down`) can use the positional variant and still leave a genuine COUNT
+#: (`— 155 lines`, `on 1450 files`) green. Measured: with `lines|rows` in the shared
+#: list, EVERY spelling of a line position written with a unit noun was GREEN while
+#: `:9987` was RED — one arm, two spellings, opposite verdicts (#12369 review, P2).
+_UNIT_POSITION_WORDS = r"lines|rows"
+#: Used where a POSITION must be refused: everything is a unit except `lines`/`rows`.
+_UNIT_NO_POSITION = rf"(?!\s*(?:(?:{_UNIT_WORDS})\b|%))"
+_UNIT = rf"(?!\s*(?:(?:{_UNIT_WORDS}|{_UNIT_POSITION_WORDS})\b|%))"
 #: ⛔ `(?!,\d)` IS LOAD-BEARING: without it the thousands-separated alternative
 #: BACKTRACKS to a prefix, so `1,320,023 bytes` matched as the integer `1,320` and was
 #: reported as a line cite. The existing pass-fixture never showed it because its
 #: number had no separator beside it; `config/ci-surfaces.yml — 1,320,023 bytes` did.
 _NUM = rf"(?:\d{{1,3}}(?:,\d{{3}})+|\d{{3,}}){_UNIT}(?![\d])(?!,\d)(?!\.\d)(?!-\d)(?!:\d)"
+#: The same integer, with `lines`/`rows` treated as POSITIONS rather than units.
+_NUM_NO_POSITION = (
+    rf"(?:\d{{1,3}}(?:,\d{{3}})+|\d{{3,}}){_UNIT_NO_POSITION}(?![\d])(?!,\d)(?!\.\d)(?!-\d)(?!:\d)")
 #: ⛔ THE `.` IN THIS LOOKBEHIND IS LOAD-BEARING: without it a DECIMAL FRAGMENT is
 #: read as an integer (`1.093 %` matched `093`), contradicting the rule stated three
 #: paragraphs up. Reproduced, then closed.
 _LEADING_NUM = rf"(?<![\w#.]){_NUM}"
+_LEADING_NUM_NO_POSITION = rf"(?<![\w#.]){_NUM_NO_POSITION}"
 _WRAP = r"[`*]*"
 _SEP = r"(?::|#L|—|–|\bL\.?|\b(?:at|on|line|lines|row|rows|entry|entries|of)\b)"
 #: ⛔ THE GAP IS BOUNDED, AND THE BOUND USED TO TRUNCATE SILENTLY — the module's own
@@ -4808,13 +4824,30 @@ _MANIFEST = r"(?:ci-surfaces\.yml|the\s+manifest)"
 #: Measured True before this guard, False after; a cite of THIS file in this order is
 #: written ``… `:9987`, see `config/ci-surfaces.yml```, so its separator follows
 #: whitespace or a wrapper character, while `sdk.py`'s colon follows a letter.
+#: ⛔ THE POSITIONAL SHAPE, ADDED BECAUSE THE SUBSET ABOVE CANNOT SEE IT (#12369
+#: review, P2). A line POSITION written with a unit noun — `the entry sits 9987 lines
+#: into the manifest`, `on 9987 lines`, `9987 rows down` — reads as `number + unit`
+#: to `_NUM`, i.e. a COUNT, so every one of those was GREEN while `:9987` was RED.
+#: ⛔ AND THE BLANKET FIX IS NOT AVAILABLE: making `lines`/`rows` non-units
+#: doc-wide refused `— 155 lines of rows`, which this file pins as CORRECT PROSE
+#: (a count is not a cite). So the discriminator is the POSITIONAL TAIL — `into`,
+#: `down`, `deep`, `below`, `above`, `from the top` — which a count does not carry.
+#: Residual, stated: a bare `9987 lines` with no tail is genuinely ambiguous with a
+#: count and is NOT caught here; on the CLAIM sentence it is, because that arm has no
+#: count exemption at all (`_BARE_NUM`).
+_POSITION_TAIL = r"(?:into|down|deep|below|above|from\s+the\s+top|of\s+the\s+(?:manifest|file))"
 _MANIFEST_CITE = re.compile(
     rf"{_MANIFEST}{_GAP}{_SEP}\s*{_WRAP}{_NUM}{_WRAP}"
     rf"|(?<![\w.]){_SEP}\s*{_WRAP}{_NUM}{_WRAP}{_GAP}{_MANIFEST}"
     rf"|{_WRAP}{_LEADING_NUM}{_WRAP}\s*{_SEP}{_GAP}{_MANIFEST}"
     rf"|{_MANIFEST}{_GAP}{_SEP}\s*{_WRAP}{_RANGE_NUMS}{_WRAP}"
     rf"|{_WRAP}{_RANGE_NUMS}{_WRAP}\s*{_SEP}{_GAP}{_MANIFEST}"
+    rf"|{_MANIFEST}{_GAP}{_WRAP}{_LEADING_NUM_NO_POSITION}{_WRAP}"
+    rf"\s*(?:lines?|rows?)\s*{_POSITION_TAIL}\b"
+    rf"|{_WRAP}{_LEADING_NUM_NO_POSITION}{_WRAP}\s*(?:lines?|rows?)\s*{_POSITION_TAIL}\b"
+    rf"{_GAP}{_MANIFEST}"
 )
+
 
 #: A bare NUMBER in cite position with no separator and no filename binding — the
 #: form a maintainer produces when trimming the recorded history down to its number
@@ -4837,7 +4870,17 @@ _MANIFEST_CITE = re.compile(
 #: was wrong, and it now says what the policy says. The `.` in the lookbehind is
 #: load-bearing in its own right: without it a DECIMAL FRAGMENT is read as an integer
 #: (`1.093 %` matched `093`).
-_BARE_NUM = re.compile(_LEADING_NUM)
+#: ⛔ THIS ARM READS A POSITION, SO `lines`/`rows` ARE NOT UNITS TO IT. With the
+#: shared `_UNIT` they were, and every spelling of a line position written with a unit
+#: noun passed: `the entry sits 9987 lines into the manifest`, `9987 rows`, `at 9987
+#: lines`, `9987 rows down` were ALL GREEN while `:9987` was RED — the same guard
+#: giving opposite verdicts for the same claim, on the one sentence whose contract says
+#: it carries no number at all. `_LEADING_NUM_NO_POSITION` closes that whole class
+#: rather than adding the four spellings to a list. Residual, stated: a genuine COUNT
+#: whose noun is `lines`/`rows` on THIS sentence (`— 155 lines`) is now refused too;
+#: that is the direction this pin prefers (the sentence is not where a line count
+#: belongs), and it is the only sentence this arm reads.
+_BARE_NUM = re.compile(_LEADING_NUM_NO_POSITION)
 
 #: ⛔ A LONE FOUR-DIGIT 19xx/20xx RUN IS A YEAR AS OFTEN AS A LINE NUMBER, and the bare
 #: arm cannot tell them apart — so it refuses the year rather than punishing prose that
@@ -4917,7 +4960,14 @@ def _neighbour_number_strays(line: str) -> list[str]:
 
 
 def _stray_entry_finding(sentence: str, entry: str) -> str | None:
-    """The finding for a filename on the `carve_out:` sentence that is not `entry`.
+    r"""The finding for a filename on the `carve_out:` sentence that is not `entry`.
+
+    ⚠️ RAW STRING ON PURPOSE: the paragraph below quotes `(?<![\w/])`, and in a
+    non-raw docstring Python escape-processes `\w` into a `SyntaxWarning` on every
+    run of this file — a warning nothing refuses (`ruff` does not enable W605), so
+    it would sit in the suite output forever. Measured: the same text was an `#`
+    COMMENT before this function existed, where it was free; moving it into a
+    docstring without the `r` prefix is what made it a live warning.
 
     ⛔ GATED ON THE ENTRY BEING NAMED, and the gate is the whole point (#12369
     review, P3, measured). Ungated, this arm fired on the D2 state — the sentence
@@ -6087,6 +6137,12 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     "`config/ci-surfaces.yml`'s `durations:` row: 166 s",
     "the whole `config/ci-surfaces.yml` on 1450 files",
     "`config/ci-surfaces.yml` — 155 lines of rows",
+    # ⛔ THIS ONE IS THE COUNTER-CASE TO THE POSITIONAL ALTERNATIVE BELOW, and it is
+    # WHY that alternative is tail-gated rather than blanket (#12369 review, P2):
+    # `— 155 lines of rows` is a COUNT beside the manifest's name and must stay
+    # green, while `— 9987 lines into the manifest` is a POSITION and must red. Only
+    # the positional TAIL separates them; making `lines`/`rows` non-units doc-wide
+    # refused this fixture, measured.
     "`config/ci-surfaces.yml` costs — 166 s",
     "`config/ci-surfaces.yml` lists 60 entries in `carve_out:`",
     "`config/ci-surfaces.yml` is 1319360 bytes",
@@ -6157,6 +6213,13 @@ def test_the_manifest_line_cite_matcher_does_not_fire_on_correct_prose(prose):
     "the `carve_out:` entry sits on line 9987 of the manifest at this head",
     "(`config/ci-surfaces.yml:9987-9995`)",
     "the manifest, lines 9987-9995",
+    # ⛔ A LINE POSITION WRITTEN WITH A UNIT NOUN (#12369 review, P2, measured):
+    # `_NUM` reads `number + lines` as a COUNT, so all four of these were GREEN
+    # while `:9987` was RED — the same guard, opposite verdicts, for one claim.
+    "`config/ci-surfaces.yml` — 9987 lines into the manifest",
+    "the entry sits 9987 lines down in `config/ci-surfaces.yml`",
+    "`config/ci-surfaces.yml`, 9987 rows from the top",
+    "`config/ci-surfaces.yml` — the entry is 9987 lines into the file",
     "`config/ci-surfaces.yml` lines 9987–9995",
     # ⛔ THE LONG FORM, and it was GREEN until this arm's `_GAP` was widened from 160
     # to 400: a heavily qualified sentence put MORE prose than the old bound between
@@ -6200,6 +6263,20 @@ def test_the_manifest_line_cite_matcher_catches_every_spelling(prose):
     # of exactly 2026 with no separator is indistinguishable and is not caught).
     ("the block was reviewed in 2026", False),
     ("the entry moved in 9987", True),
+    # ⛔ A LINE POSITION WRITTEN WITH A UNIT NOUN — the false-PASS class a review
+    # found (#12369, P2). `_NUM` reads `number + lines`/`rows` as a COUNT, so every
+    # one of these was GREEN while `:9987` was RED: one guard, opposite verdicts for
+    # one claim, on the one sentence whose contract is that it carries no number at
+    # all. `_BARE_NUM` now reads `_LEADING_NUM_NO_POSITION`, so the whole class is
+    # refused instead of four spellings being appended to a list. The cost is stated
+    # where the regex is: a genuine `— 155 lines` on THIS sentence is refused too,
+    # which is the direction this pin prefers (a line count is not a carve-out claim)
+    # and is the only sentence this arm reads.
+    ("the entry sits 9987 lines into the manifest", True),
+    ("9987 rows", True),
+    ("at 9987 lines", True),
+    ("on 9987 lines", True),
+    ("9987 rows down", True),
     # ⛔ AND THE COUNT UNITS THE CLOSED LIST DOES NOT NAME — measured RED before the
     # list was extended, every one of them a spelling this repo actually writes: `pp`
     # in the `durations:` prose, `pins` for tests, `times` / `characters` in this very
