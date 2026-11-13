@@ -1320,6 +1320,25 @@ _SOURCE_INDEX_ENTRIES = (
 )
 
 
+#: #12368: the characters the INDEX's own tokeniser treats as separators —
+#: ASCII punctuation and space, but NOT ``_`` and NOT anything non-ASCII.
+#:
+#: ⛔ Both halves are measured, and both directions are load-bearing:
+#:
+#: * ``_`` is a WORD character to RediSearch (every ``snake_case`` name is one
+#:   term), so this must not be :data:`_indexed_term_runs`' ``[\W_]+`` class — that
+#:   splits on ``_`` too, which is what makes the READ's terms and the INDEX's
+#:   terms differ for exactly that character.
+#: * every NON-ASCII character stays INSIDE the word as well — the eight-shape
+#:   probe in :func:`tortoise.sparse._continues_a_word` shows only ASCII space,
+#:   ``.`` and ``-`` separating, and :func:`probe_phrase_rejection`'s own history
+#:   records ``!``/``?``/``/`` splitting while ``NBSP``/U+3000/CJK do not.
+#:
+#: Used by :func:`probe_phrase_rejection` to ask its length bound the only
+#: question that matters: can the read address ANY index term at all?
+_INDEX_WORD_RUN_SPLIT_RE = re.compile(r"[^A-Za-z0-9_\x80-\U0010ffff]+")
+
+
 def _indexed_term_runs(text: str) -> list[str]:
     """The RAW alphanumeric runs of *text*, as the READ splits them.
 
@@ -1494,34 +1513,56 @@ def probe_phrase_rejection(phrase: str) -> str | None:
     # escaped literal, == the token), while for `('ab_'*43)[:129]` it sends
     # twelve; the earlier wording narrated the first as if it were the second.
     #
-    # ⛔ NOT GATED ON ``deferred`` (#12368 independent review, P2 — a FALSE PASS
-    # this branch was leaving open). ``deferred`` requires a ``_``, so gating the
-    # bound on it let every SEPARATOR-FREE token longer than the bound through:
-    # MEASURED ``probe_phrase_rejection('a' * 129) is None`` (accepted) while the
-    # index returns nothing for that name and returns rows for the 128-char one —
-    # so the guard certified "the pre-fix prose is gone" over a still-present
-    # sentence, which is the exact failure the paragraph above says it prevents.
-    # The truncation is a property of the INDEX's term length, not of ``_``, so
-    # the bound has to apply to the TOKEN (which ``len(token)`` already is).
-    # Refusing a long phrase-costs nothing: a probe of this length cannot address
-    # one indexed term either way, and the multi-term shapes are refused below
-    # regardless. PRE-EXISTING on ``origin/main`` (same ``None`` there), repaired
-    # here because this branch is where the bound was introduced.
-    if len(token) > MAX_COMPOSITE_RUN_LEN:
-        # ⛔ THE CONSEQUENCE CLAUSE IS NOT ONE THING (#12360 review round 11, P3).
-        # It used to assert "so the query is ONE literal term the index cannot
-        # hold and the probe would match NOTHING", which is FALSE for any
-        # over-bound token that still has segments the tokeniser keeps: MEASURED
-        # ``('ab_'*43)[:129]`` builds ``ab|ab|...`` (twelve alternatives of one
-        # SHORT term) — the OPPOSITE failure from a literal that matches nothing.
-        # The refusal and the advice are right either way; only the reason had to
-        # describe what the read actually does.
-        return (f"it is longer than {MAX_COMPOSITE_RUN_LEN} characters, and the "
-                f"index does not hold a term that long (#12360: MEASURED — a "
-                f"128-char name returns rows, 129/131/200-char names return "
-                f"NONE), so a token this long cannot be a probe: the read sends "
-                f"one escaped literal the index cannot match, or splits it into "
-                f"several alternatives instead — pass a SHORTER token")
+    # ⛔ THE BOUND IS ON A REACHABLE INDEX TERM, IN **BYTES** — not on the token
+    # and not in characters (#12368 independent reviews, two P2s, both measured).
+    #
+    # Round 1 found the gate was ``deferred and len(token) > …``. ``deferred``
+    # requires a ``_``, so every SEPARATOR-FREE token past the bound was accepted
+    # (``probe_phrase_rejection('a' * 129) is None``) while the index holds nothing
+    # above the bound — a FALSE PASS: the guard certified "the pre-fix prose is
+    # gone" over a still-present sentence, which is the failure the paragraph
+    # above says it exists to prevent.
+    #
+    # Round 2 then falsified BOTH of the obvious repairs, which is why this is not
+    # simply ``len(token) > bound``:
+    #
+    # 1. CHARACTERS ARE THE WRONG UNIT. RediSearch's length limit is in UTF-8
+    #    BYTES, so ``'é' * 65`` (65 chars, 130 bytes) sailed through a
+    #    character-counted bound and still addressed nothing: MEASURED 64 chars /
+    #    128 bytes -> rows, 65 chars / 130 bytes -> none.
+    # 2. THE WHOLE TOKEN IS THE WRONG QUANTITY. ``'a' * 120 + '!' * 9`` is 129
+    #    chars but the read sends it as ONE literal that the index then splits at
+    #    ``!`` — so it really does reach the 120-byte term ``'a' * 120`` and returns
+    #    rows. Refusing it was a NEW FALSE BLOCK introduced by the character-count
+    #    repair (the class this branch had already repaired three times).
+    #
+    # So the question is the one the guard actually cares about: can the read
+    # address ANY index term this long? The terms a literal can reach are its
+    # maximal word runs, and per the eight-shape probe above the index's word
+    # characters are ``[A-Za-z0-9_]`` PLUS every non-ASCII character — only ASCII
+    # punctuation and space separate. Refuse only when EVERY such run is over the
+    # bound in bytes, i.e. when no alternative the read can send addresses
+    # anything.
+    if len(token.encode("utf-8")) > MAX_COMPOSITE_RUN_LEN:
+        word_runs = [r for r in _INDEX_WORD_RUN_SPLIT_RE.split(token) if r]
+        if all(len(r.encode("utf-8")) > MAX_COMPOSITE_RUN_LEN
+               for r in word_runs):
+            # ⛔ THE CONSEQUENCE CLAUSE IS NOT ONE THING (#12360 review round 11, P3).
+            # It used to assert "so the query is ONE literal term the index cannot
+            # hold and the probe would match NOTHING", which is FALSE for any
+            # over-bound token that still has segments the tokeniser keeps: MEASURED
+            # ``('ab_'*43)[:129]`` builds ``ab|ab|...`` (twelve alternatives of one
+            # SHORT term) — the OPPOSITE failure from a literal that matches nothing.
+            # The refusal and the advice are right either way; only the reason had to
+            # describe what the read actually does.
+            return (f"it is longer than {MAX_COMPOSITE_RUN_LEN} bytes, and every "
+                    f"word in it is too — the index does not hold a term that "
+                    f"long (#12360: MEASURED — a 128-byte name returns rows, "
+                    f"129/131/200-byte names return NONE), so no alternative the "
+                    f"read can send addresses one indexed term: it sends one "
+                    f"escaped literal the index cannot match, or splits the "
+                    f"query into several alternatives instead — pass a SHORTER "
+                    f"token")
     if (single_run and token.lower() == runs[0]
             and token.lower() in SPARSE_STOPWORDS):
         return ("it is a search stopword; a probe must be a RARE token that "

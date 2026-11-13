@@ -513,6 +513,29 @@ class TestPin:
             bare = "a" * past
             refusal = probe_phrase_rejection(bare)
             assert refusal is not None and "128" in refusal, (past, refusal)
+        # ⛔ AND THE TWO SHAPES THAT FALSIFIED THE OBVIOUS REPAIRS (#12368 second
+        # independent review — both P2, both measured on a live Object index).
+        #
+        # (1) THE UNIT IS BYTES, NOT CHARACTERS. RediSearch's length limit is UTF-8
+        # bytes, so a character-counted bound let `'é' * 65` (65 chars, 130 bytes)
+        # through while the index truncates it: measured 64 chars / 128 bytes
+        # returns rows, 65 chars / 130 bytes returns none. A character bound here
+        # would still be a false PASS for any multi-byte probe.
+        assert probe_phrase_rejection("\u00e9" * 64) is None, (
+            "64 chars is exactly 128 BYTES and the index holds it")
+        assert probe_phrase_rejection("\u00e9" * 65) is not None, (
+            "65 chars is 130 BYTES, past the index's limit — accepting it is a "
+            "false PASS")
+        #
+        # (2) THE QUANTITY IS A REACHABLE INDEX TERM, NOT THE WHOLE TOKEN. This
+        # token is 129 chars, but the read sends it as ONE literal and the index
+        # splits at `!`, so it genuinely reaches the 120-byte term and returns
+        # rows. Refusing it is a FALSE BLOCK — the class this branch repaired
+        # three times. Only a run that is itself over the bound is unreachable.
+        reaches = "a" * 120 + "!" * 9
+        assert len(reaches) == 129 and probe_phrase_rejection(reaches) is None, (
+            "the read reaches `'a' * 120` through the literal — refusing it is a "
+            "false block")
         # ⛔ CORRECTED (#12368 review): `_café` is NOT an expansion case. The
         # composite `_caf` is a TRUNCATION of the index term `_café` — the
         # ASCII-only splitter splits at `é` — so nothing holds it and the read
