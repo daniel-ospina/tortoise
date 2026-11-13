@@ -265,14 +265,17 @@ route and do not hand-splice a removal — #12327 tracks the pin that would see 
 halves of the baseline are compared (`rows:` and `retired:`, because a retired MCP name is
 still served), unless the committed baseline carries no `retired:` half, which `check`
 already reds — the cut then says that half was not compared
-([#12237](https://github.com/daniel-ospina/tortoise/issues/12237)): account for it by **exactly
-one** of an `archive/MANIFEST.json` entry of the matching kind (`tools/archive_surface.py
+([#12237](https://github.com/daniel-ospina/tortoise/issues/12237)): account for it by an
+`archive/MANIFEST.json` entry of the matching kind (`tools/archive_surface.py
 archive mcp-tool|sdk-method <symbol> --batch <slug> --reason <text>`, run **before** the
-deletion — see [`archive/README.md`](archive/README.md)), or `RETIRED_SDK_METHODS` /
-`REMOVED_SDK_METHODS`
-(the SDK's fail-closed `AttributeError` record — for an SDK method the freeze and the map entry
-count as ONE record, since `archive_surface.py check` requires a frozen method to appear in the
-map; the requirement runs that way only, a map entry needs no archive row). A
+deletion — see [`archive/README.md`](archive/README.md)). For an **SDK method** that entry is
+ONE HALF of the record: it must be paired with `RETIRED_SDK_METHODS` / `REMOVED_SDK_METHODS`
+(the SDK's fail-closed `AttributeError` record). **The two halves are ONE record and BOTH are
+required** — the freeze keeps the code, the map records the departure, and neither alone is the
+record: a map entry with no frozen code deletes a method that no other gate compares against
+the archive (`archive_surface.py check` iterates the archive manifest, so an unfrozen method is
+invisible to it), and a frozen method with no map entry leaves a caller with a bare
+`AttributeError` (which `check` reds from its own side). A
 `RETIRED_USE_INSTEAD` entry is **not** a route for a removal, and the refusal no longer pretends
 it is: with the declaration still live the symbol is RETIRED rather than removed (it is still
 served, and the baseline's `retired:` half is compared), and with the declaration gone the map

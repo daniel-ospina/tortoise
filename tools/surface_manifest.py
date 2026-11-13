@@ -2139,8 +2139,20 @@ REMOVAL_WAYS = (
     "without the map entry strips the caller with a bare `AttributeError` instead of a "
     "recorded departure (the freeze and the map entry are ONE record, and `CONTRIBUTING.md` "
     "says so)",
-    "`RETIRED_SDK_METHODS` / `REMOVED_SDK_METHODS` (an SDK method only — the fail-closed "
-    "`AttributeError` record)",
+)
+
+# ⛔ THE MAP IS **NOT** A ROUTE ON ITS OWN, and advertising it as one was a hole, not a
+# courtesy: `RETIRED_SDK_METHODS` / `REMOVED_SDK_METHODS` records the DEPARTURE (a fail-closed
+# `AttributeError`), it keeps no code — and `archive_surface.check` iterates the archive
+# manifest, so a method that was never frozen is invisible to every gate. The refusal that
+# listed it as a standalone route therefore told the operator to delete the method and move on
+# (review round 14 of PR #12313: reproduced with the real `cmd_cut` — map-only, no archive
+# entry, exit 0, baseline rewritten).
+SDK_PAIR_RULE = (
+    "`RETIRED_SDK_METHODS` / `REMOVED_SDK_METHODS` is NOT a route on its own: it records the "
+    "departure but keeps no code, and removed code is what the #11609 ruling archives. For an "
+    "SDK method, freeze it AND record it — the two halves are ONE record and this cut "
+    "requires BOTH."
 )
 
 # ⛔ `RETIRED_USE_INSTEAD` IS NOT A ROUTE HERE, and listing it as one sent lanes to a dead end.
@@ -2415,9 +2427,10 @@ def removal_report(
     """`(problems, accounting)` for the symbols that disappeared from the surface.
 
     A symbol present in `prior` and absent from `derived` is a REMOVAL. It is accounted for
-    by EXACTLY ONE record — the archive entry of its own kind, or the retirement map for its
-    own half — with ONE documented exception, because the two halves' records are not the
-    same artifact:
+    by EXACTLY ONE record: an `archive/MANIFEST.json` entry of the symbol's own kind — and
+    for an SDK method that entry is ONE HALF, paired with the retirement map entry (BOTH are
+    required, and together they are one record, not two). Two edges follow from what those
+    artifacts actually are:
 
     * a TOOL in `RETIRED_USE_INSTEAD` is REFUSED, and that refusal is REACHABLE: the map is
       read RAW here (`forward_raw`), not as the served subset, because a key whose tool
@@ -2430,15 +2443,16 @@ def removal_report(
       cannot emit. Both are replaced by this one arm, which fires on the state that really
       happens: retired-name cleanup that forgot the map key;
     * an SDK method archived AND in `RETIRED_SDK_METHODS` / `REMOVED_SDK_METHODS` is ONE
-      record, not two. `archive_surface.check` requires a frozen `sdk-method` to ALSO appear
-      in the map — **one-directionally**: a map entry needs no archive row, a frozen entry
-      needs the map entry ("a caller would then hit a bare AttributeError instead of the
-      recorded departure"). So counting the pair as two records refused the DOCUMENTED
-      procedure (freeze the code, record the departure) and pushed the operator to the
-      map-only form — which loses the frozen code, the exact loss this archive exists to
-      prevent. Found by review round 5 of PR #12313, and the one-directional reading by
-      round 6. The pair IS the record: the archive freezes the code, the map records the
-      departure.
+      record, not two: the archive freezes the code, the map records the departure, and
+      counting the pair apart refused the DOCUMENTED procedure (freeze the code, record the
+      departure) — found by review round 5 of PR #12313.
+      **BOTH halves are required, and NEITHER alone is the record.** The map without the
+      freeze loses the code permanently — the #11609 ruling keeps removed code "in case we
+      made a mistake" — and nothing else can see that loss, because `archive_surface.check`
+      iterates the ARCHIVE MANIFEST: a method that was never frozen is invisible to it, so a
+      map-only cut exited 0 over a deletion no gate would ever report (review round 14 of
+      PR #12313). The freeze without the map strips a caller with a bare `AttributeError`
+      instead of a recorded departure, which `archive_surface.check` reds from its own side.
 
     `allowed` is the deliberate-rename escape hatch (`cut --allow-removal`), applied to a
     NAMED symbol only — there is no blanket flag, because a blanket flag is how a gate
@@ -2479,15 +2493,26 @@ def removal_report(
         kind = ARCHIVE_KIND_BY_CLASS[cls]
         archived = (kind, symbol) in records.get("archived", ())
         if cls == "sdk" and symbol in records.get("sdk_retired", ()):
-            # ONE record: `archive_surface.check` requires a frozen `sdk-method` to ALSO
-            # appear in the map (that direction only — a map entry needs no archive row), so
-            # the freeze and the map entry are the same record, not two. Counting them apart
-            # refused this tree's own procedure and left the map-only shape — which loses the
-            # frozen code — as the only passing one (see the docstring).
-            label = "RETIRED_SDK_METHODS/REMOVED_SDK_METHODS"
-            found.append(f"{label} + archived code" if archived else label)
+            # ONE record (round 5: counting the pair apart refused this tree's own procedure),
+            # whose BOTH halves are REQUIRED (round 14: the map alone accepted a deletion of
+            # code that nothing else can see — `archive_surface.check` iterates the archive
+            # manifest, so a method that was never frozen is invisible to every other gate).
+            # The map records the DEPARTURE; it does not keep the code.
+            if not archived:
+                problems.append(RemovalProblem(
+                    "no-record",
+                    f"{symbol} (sdk) is in RETIRED_SDK_METHODS / REMOVED_SDK_METHODS but its "
+                    "code is NOT archived — the map records the DEPARTURE, it does not keep "
+                    "the code, and the #11609 ruling keeps removed code so a mistake can be "
+                    "inspected later. FREEZE IT FIRST: `uv run python "
+                    f"tools/archive_surface.py archive sdk-method {symbol} --batch <slug> "
+                    "--reason <text>` (the freeze and the map entry are ONE record, and this "
+                    "cut requires BOTH halves)"
+                ))
+                continue
+            found.append("RETIRED_SDK_METHODS/REMOVED_SDK_METHODS + archived code")
         elif cls == "sdk" and archived:
-            # The OTHER half of that one-directional rule, and NOT a pass.
+            # The OTHER half of the pair, and NOT a pass.
             # `surface_violations` reds this exact shape — "archived but absent from
             # RETIRED_SDK_METHODS / REMOVED_SDK_METHODS — a caller would then hit a bare
             # AttributeError instead of the recorded departure" — so accepting it here told
@@ -2753,10 +2778,11 @@ def cmd_cut(args: argparse.Namespace) -> int:
                   "tell an archived removal from a silent deletion:")
             for problem in problems:
                 print(f"  {problem}")
-            print("  Account for each row reported above as 'DROPPED with no record' by "
-                  "exactly one of:")
+            print("  Account for each row reported above as 'DROPPED with no record' this "
+                  "way:")
             for way in REMOVAL_WAYS:
                 print(f"    - {way}")
+            print(f"  {SDK_PAIR_RULE}")
             print(f"  {NOT_A_REMOVAL_ROUTE}")
             print("  A genuine RENAME (the old name is gone by design) passes "
                   "`--allow-removal <symbol> --allow-removal-reason <why>`; it is logged "

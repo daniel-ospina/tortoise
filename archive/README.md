@@ -68,8 +68,8 @@ It **composes** — it replaces neither, because they answer different questions
 | mechanism | what the name does | is it in the product? | archived? |
 |---|---|---|---|
 | `tool_registry.RETIRED_USE_INSTEAD` | **served**, with a warning naming the replacement (#3883) | **yes** — it still answers | **no** |
-| `sdk_retired.RETIRED_SDK_METHODS` | raises `AttributeError` **naming** the replacement (#3836 (c)) | no (the map is the failure, not the code) | the code may be |
-| `sdk_retired.REMOVED_SDK_METHODS` | raises `AttributeError` with **no** hint (went internal or was deleted) | no | the code may be |
+| `sdk_retired.RETIRED_SDK_METHODS` | raises `AttributeError` **naming** the replacement (#3836 (c)) | no (the map is the failure, not the code) | **yes** — a `cut` that drops the method requires the frozen entry too (one half of one record) |
+| `sdk_retired.REMOVED_SDK_METHODS` | raises `AttributeError` with **no** hint (went internal or was deleted) | no | **yes** — same requirement |
 | **this archive** | **nothing** — the name does not resolve | **no** | **yes — this is where the code goes** |
 
 The 23 existing `RETIRED_USE_INSTEAD` entries are therefore **not** in this archive: they are
@@ -120,8 +120,10 @@ enforced at two different seams, deliberately:
   retired name is still SERVED: `RETIRED_TOOL_REGISTRY` is derived from
   `RETIRED_USE_INSTEAD`, so one edit to that map detaches both, and a gate reading only
   `rows:` would watch a live name leave the product and report nothing. A dropped symbol must
-  be accounted for by exactly ONE of an archive entry of the matching kind, or
-  `RETIRED_SDK_METHODS` / `REMOVED_SDK_METHODS` (SDK). A `RETIRED_USE_INSTEAD` entry is **not**
+  be accounted for by an archive entry of the matching kind — and for an **SDK method** that
+  entry is ONE HALF of the record: it must be paired with `RETIRED_SDK_METHODS` /
+  `REMOVED_SDK_METHODS`. **The two halves are ONE record and BOTH are required** — the freeze
+  keeps the code, the map records the departure, and neither alone is the record. A `RETIRED_USE_INSTEAD` entry is **not**
   one of these routes:
   that map is what makes a name a RETIREMENT rather than a removal — `TOOL_REGISTRY` excludes it
   and `RETIRED_TOOL_REGISTRY` includes it, so the name is still served and the baseline's
@@ -129,12 +131,13 @@ enforced at two different seams, deliberately:
   refuses ("delete the stale forward key"). For a
   **tool**, an archive entry AND a `RETIRED_USE_INSTEAD` row is two records and is refused: a
   name that is both archived and still served is the inconsistency `check` reds from its own
-  side. For an **SDK method** the freeze and the map entry are ONE record: `check` requires a
-  frozen `sdk-method` to appear in the map — **one-directionally**, so a map entry needs no
-  archive row, while a frozen entry with no map entry leaves a caller with a bare
-  `AttributeError` — and counting the pair apart refused this file's own procedure (freeze,
-  then record) while leaving no STABLE shape that carries the frozen code: archive-only passed
-  `cut` but red `check`, and map-only passed both while freezing nothing. A genuine rename passes `cut --allow-removal <symbol>
+  side. For an **SDK method** the freeze and the map entry are ONE record, and `cut` requires
+  **both** halves: the pair apart is refused (counting it as two records refused this file's
+  own procedure — freeze, then record), archive-only is refused by `check` (a frozen entry with
+  no map entry leaves a caller with a bare `AttributeError`), and map-only is refused by `cut`
+  (the map records the departure but keeps no code, and `check` iterates the ARCHIVE MANIFEST,
+  so a method that was never frozen is invisible to it — map-only passed both gates while
+  freezing nothing until review round 14 of #12237). A genuine rename passes `cut --allow-removal <symbol>
   --allow-removal-reason <why>`, which is logged in the cut output and belongs in the PR body;
   a reason with no symbol is refused, because it records an override that did not happen.
   **The refusal happens BEFORE the write**, so a refused cut never leaves a baseline that has

@@ -5179,8 +5179,57 @@ def test_a_dropped_tool_still_in_RETIRED_USE_INSTEAD_is_REFUSED_like_check(
     assert "tortoise_get (tool) was DROPPED with no record" in out, out
 
 
-def test_cut_ACCEPTS_a_dropped_sdk_method_recorded_as_REMOVED(monkeypatch, tmp_path, derived_baseline, capsys):
-    """The SDK half's fail-closed map is the second record, read from the real module."""
+def test_cut_REFUSES_a_dropped_sdk_method_recorded_in_the_MAP_but_NOT_archived(
+    monkeypatch, tmp_path, derived_baseline, capsys
+):
+    """The map records the DEPARTURE; it does not keep the code — and nothing else sees that loss.
+
+    Map-only used to be ACCEPTED here (exit 0, baseline rewritten). `archive_surface.check`
+    iterates the archive MANIFEST, so a method that was never frozen is invisible to it: the
+    cut was the only gate in a position to notice, and it reported success. The #11609 owner
+    ruling keeps removed code "in case we made a mistake", so both halves are required.
+    """
+    sm = _load_manifest_tool()
+    prior = _prior_with_extra_rows(
+        derived_baseline, [{"name": "sdk:backfill_sources", "method": "backfill_sources"}]
+    )
+    path = tmp_path / "surface-manifest.yml"
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    before = path.read_text(encoding="utf-8")
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+
+    rc = sm.cmd_cut(argparse.Namespace(commit=CUT_SHA, allow_approval_reset=True))
+
+    out = capsys.readouterr().out
+    assert rc == 1, f"a map entry alone was accepted as the record for an SDK removal:\n{out}"
+    assert "backfill_sources (sdk)" in out and "NOT archived" in out, out
+    assert "archive_surface.py archive sdk-method backfill_sources" in out, out
+    assert path.read_text(encoding="utf-8") == before, "the refusal WROTE the baseline"
+
+
+    # The other single half stays refused too: the pair is the record, and it is ONE record.
+    monkeypatch.setattr(
+        sm,
+        "removal_records",
+        lambda *a, **k: {
+            "archived": {("sdk-method", "backfill_sources")},
+            "forward": set(),
+            "forward_raw": set(),
+            "sdk_retired": set(),
+        },
+    )
+    rc = sm.cmd_cut(argparse.Namespace(commit=CUT_SHA, allow_approval_reset=True))
+    out = capsys.readouterr().out
+    assert rc == 1, f"a freeze without the map entry was accepted as the record:\n{out}"
+    assert "archived but absent from RETIRED_SDK_METHODS" in out, out
+    assert path.read_text(encoding="utf-8") == before, "the refusal WROTE the baseline"
+
+
+def test_cut_ACCEPTS_a_dropped_sdk_method_when_BOTH_halves_are_recorded(
+    monkeypatch, tmp_path, derived_baseline, capsys
+):
+    """ONE record, TWO halves: the freeze and the map entry together are what `cut` accepts."""
     sm = _load_manifest_tool()
     prior = _prior_with_extra_rows(
         derived_baseline, [{"name": "sdk:backfill_sources", "method": "backfill_sources"}]
@@ -5189,12 +5238,24 @@ def test_cut_ACCEPTS_a_dropped_sdk_method_recorded_as_REMOVED(monkeypatch, tmp_p
     path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
     monkeypatch.setattr(sm, "MANIFEST_FILE", path)
     monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+    monkeypatch.setattr(
+        sm,
+        "removal_records",
+        lambda *a, **k: {
+            "archived": {("sdk-method", "backfill_sources")},
+            "forward": set(),
+            "forward_raw": set(),
+            "sdk_retired": {"backfill_sources"},
+        },
+    )
 
     rc = sm.cmd_cut(argparse.Namespace(commit=CUT_SHA, allow_approval_reset=True))
 
     out = capsys.readouterr().out
     assert rc == 0, out
-    assert "backfill_sources: RETIRED_SDK_METHODS/REMOVED_SDK_METHODS" in out, out
+    assert (
+        "backfill_sources: RETIRED_SDK_METHODS/REMOVED_SDK_METHODS + archived code" in out
+    ), out
 
 
 def test_cut_ACCEPTS_a_dropped_tool_that_is_ARCHIVED(monkeypatch, tmp_path, derived_baseline, capsys):
@@ -5467,13 +5528,14 @@ def test_a_NON_MAPPING_baseline_row_is_UNREADABLE_not_absent(monkeypatch, tmp_pa
 
 
 def test_the_SDK_archive_pair_is_ONE_record_not_two():
-    """`archive_surface.check` requires a frozen sdk-method to ALSO be in the map.
+    """The pair is ONE record, and `cut` requires BOTH halves of it.
 
-    One-directionally: a map entry needs no archive row, a frozen entry needs the map entry.
-    Counting the pair as two records therefore refused the DOCUMENTED procedure (freeze the
-    code, record the departure) and left the map-only form — which loses the frozen code —
-    as the only passing shape. Review round 5 of PR #12313 found the refusal; round 6
-    corrected this rationale, which had claimed the requirement was symmetric.
+    Counting the pair as two records refused the DOCUMENTED procedure (freeze the code, record
+    the departure) — review round 5 of PR #12313. That fix then accepted the MAP ALONE, which
+    keeps no code and is invisible to `archive_surface.check` (it iterates the archive
+    manifest), so a method could be deleted by a one-line map edit with every gate green —
+    review round 14, which made the freeze half required too. One record, two halves, neither
+    optional.
     """
     sm = _load_manifest_tool()
     problems, accounting = sm.removal_report(
@@ -6086,7 +6148,10 @@ def test_an_SDK_archive_entry_without_the_map_entry_is_REFUSED_by_both_gates():
     )
     assert violations and "RETIRED_SDK_METHODS" in violations[0], violations
 
-    # non-vacuity: the map entry (with or without the freeze) is the record and passes.
+    # non-vacuity: the PAIR (frozen entry AND map entry) is the record and passes. The map
+    # ALONE is refused — `test_cut_REFUSES_a_dropped_sdk_method_recorded_in_the_MAP_but_
+    # NOT_archived` covers that shape end to end; the frozen entry is still in `records`
+    # here, which is the whole point of the half this assertion adds.
     records["sdk_retired"] = {"backfill_sources"}
     problems, accounting = sm.removal_report({("backfill_sources", "sdk")}, set(), records)
     assert problems == [], problems
