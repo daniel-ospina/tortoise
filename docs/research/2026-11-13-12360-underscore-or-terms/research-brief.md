@@ -83,9 +83,18 @@ the `#8933` alias/phrase tails.
 ⚠️ **The trap `#12360` warned about, confirmed by code reading.** `run_fts_query` REBUILDS the
 query through `build_or_query`, so a term set handed to it is re-tokenised straight back:
 `#12298`'s first arm passed `search|web|web_search` and measured **+0.33 pts**. That is why
-the repair had to live *inside* the builder, and why every assertion in
-`tests/test_12360_underscore_or_terms.py` is on the **emitted** `$query` parameter of the
-Cypher that reaches `db.idx.fulltext.queryNodes` — never on the builder's input.
+the repair had to live *inside* the builder, and why the assertions that PROVE the
+mechanism are on the **emitted** `$query` parameter of the Cypher that reaches
+`db.idx.fulltext.queryNodes` — never on the builder's input.
+
+⚠️ Scoped, not "every assertion" (#12368 review): only three tests capture the issued
+Cypher (`TestTheEmittedQueryCarriesTheComposite::test_run_fts_query_emits_the_composite`,
+`::test_the_label_route_is_the_production_one`,
+`TestBothSurfacesPassTheRawQuery::test_builder_keeps_the_door_agnostic`). The remaining
+classes — `TestPin`, `TestAdditive`, `TestRunTerms` and the artifact pins — assert the
+builder's RETURN VALUE, which is legitimate only because `run_fts_query` passes it through
+verbatim (and that seam is itself pinned). The test module's own docstring draws this
+distinction; an earlier revision of this paragraph claimed the stronger, false version.
 
 Three properties the port keeps:
 

@@ -255,6 +255,58 @@ class TestAdditive:
             monkeypatch.setenv(UNDERSCORE_ENV, "1")
             assert build_or_query(q) == on, q
 
+    def test_a_non_ascii_word_is_not_truncated_into_a_fake_composite(
+            self, monkeypatch):
+        """A composite the ASCII splitter builds from a Unicode word is a FRAGMENT.
+
+        ``[A-Za-z0-9_]+`` is an ASCII class while the index treats Unicode letters
+        as word characters, so splitting ``año_actual`` at the ``ñ`` yields
+        ``o_actual`` — a fragment of the index term ``año_actual`` that NOTHING
+        holds (``underscore_run_terms``' own module comment says so). Emitting it
+        is not additive-but-harmless: the read then sends TWO alternatives, so
+        ``probe_phrase_rejection`` refused a valid, reachable ONE-index-term probe
+        — a FALSE BLOCK, measured on the default-ON arm across five shapes that
+        the switch-OFF arm ACCEPTED (#12368 review).
+
+        ⛔ THIS IS THE PIN. Reverting the abutment refusal — back to
+        ``_COMPOSITE_SPLIT_RE.split(text)`` — reds it on BOTH the byte assertion
+        and the probe assertion, for every shape below.
+
+        The property asserted is stronger than "additive": these bytes are
+        IDENTICAL on both arms, because the switch can only add a term that
+        EXISTS, and no such term exists for a truncated Unicode word.
+        """
+        from tortoise.session_source_prose_migration import probe_phrase_rejection
+
+        for word in ("año_actual", "the_café", "_café", "dé_installer",
+                     "x_café"):
+            monkeypatch.setenv(UNDERSCORE_ENV, "0")
+            before = build_or_query(word)
+            assert probe_phrase_rejection(word) is None, word
+            monkeypatch.setenv(UNDERSCORE_ENV, "1")
+            assert build_or_query(word) == before, word
+            assert probe_phrase_rejection(word) is None, word
+
+        # …and the refusal must NOT over-reach: a pure-ASCII word still gains its
+        # composite, which is the mechanism this PR exists for.
+        monkeypatch.setenv(UNDERSCORE_ENV, "1")
+        assert _or_terms(build_or_query("web_search")) == [
+            "search", "web", "web_search"]
+        # A MULTI-token query that happens to carry a Unicode word is still
+        # refused — on both arms, and for the ordinary reason (several terms),
+        # not because of the truncation: the composite was never the issue there.
+        # ⚠️ `naïve_web` belongs HERE, not above: the ASCII tokeniser splits the
+        # accented segment itself (`web|na|ve`), so the read really does expand it
+        # and refusing the probe is correct on BOTH arms — a pre-existing
+        # behaviour this PR does not move. It is listed with its own assertion
+        # rather than dropped, so the next lane cannot mistake it for a control.
+        for multi in ("b años_web", "naïve_web"):
+            monkeypatch.setenv(UNDERSCORE_ENV, "0")
+            before = build_or_query(multi)
+            assert probe_phrase_rejection(multi) is not None, multi
+            monkeypatch.setenv(UNDERSCORE_ENV, "1")
+            assert build_or_query(multi) == before, multi
+
     def test_the_degenerate_branch_keeps_the_escaped_literal(self, monkeypatch):
         """A composite that the index does NOT hold must not replace the literal.
 
@@ -290,7 +342,11 @@ class TestAdditive:
             assert build_or_query(capitalised) == capitalised, capitalised
         # …and the shapes that MUST keep two terms are untouched by the fold
         assert build_or_query("10:00_u") == "10\\:00_u|00_u"
-        assert _or_terms(build_or_query("año_actual")) == ["año_actual", "o_actual"]
+        # ⚠️ `año_actual` USED TO BE HERE as "a shape that must keep two terms" —
+        # it kept `o_actual`, which is not a term at all but a TRUNCATION of the
+        # index term `año_actual` that nothing holds (#12368 review). It is now
+        # correctly ONE term, and that property is pinned by
+        # `test_a_non_ascii_word_is_not_truncated_into_a_fake_composite` below.
         assert _or_terms(build_or_query("web_search")) == [
             "search", "web", "web_search"]
 
@@ -382,10 +438,15 @@ class TestPin:
                          "_" * 129):
             refusal = probe_phrase_rejection(too_long)
             assert refusal is not None and "128" in refusal, (len(too_long), refusal)
-        # a `_` run that the read DOES expand is still refused — by the read's
-        # own answer (`_café` -> `_café|_caf`), not by run count.
-        refusal = probe_phrase_rejection("_café")
-        assert refusal is not None and "expands" in refusal, refusal
+        # ⛔ CORRECTED (#12368 review): `_café` is NOT an expansion case. The
+        # composite `_caf` is a TRUNCATION of the index term `_café` — the
+        # ASCII-only splitter splits at `é` — so nothing holds it and the read
+        # now sends the literal alone, byte-identical to the switch-OFF arm. It
+        # is therefore ACCEPTED, as it was before this PR. Pinned by
+        # `test_a_non_ascii_word_is_not_truncated_into_a_fake_composite`.
+        for shape in ("_café", "año_actual", "the_café", "dé_installer",
+                      "x_café"):
+            assert probe_phrase_rejection(shape) is None, shape
 
     def test_a_garbage_switch_value_is_the_default_not_off(self, monkeypatch):
         monkeypatch.setenv(UNDERSCORE_ENV, "yes please")

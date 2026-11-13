@@ -1467,14 +1467,25 @@ def probe_phrase_rejection(phrase: str) -> str | None:
     from tortoise.sparse import MAX_COMPOSITE_RUN_LEN
 
     # ⛔ MEASURE THE COMPOSITE, NOT A SEGMENT (#12360 review round 9, P2). The
-    # bound is on the maximal ``[A-Za-z0-9_]`` run, and for a `deferred` token that
-    # run IS the whole token (no other separator) — while ``runs`` splits ON ``_``,
+    # bound is on the maximal ``[A-Za-z0-9_]`` run, while ``runs`` splits ON ``_``,
     # so ``max(len(r) …)`` is strictly smaller and let through every input whose
     # length comes from `_` separation rather than from one long segment. MEASURED
     # before this: `'a'*128 + '_b'` (130) and `'a_'*70 + 'b'` (141) were ACCEPTED,
     # and against the lane their own names return ZERO rows from
     # `run_fts_query`/`queryNodes` while a 128-char name returns one — the same
     # false PASS this branch exists to prevent.
+    #
+    # ⚠️ The quantity compared below is ``len(token)``, which is a deliberate
+    # CONSERVATIVE UPPER BOUND on that run, NOT the run itself (#12368 review). A
+    # ``[A-Za-z0-9_]`` run can never be longer than the token that contains it, so
+    # `len(token) > MAX_COMPOSITE_RUN_LEN` refuses a few tokens whose run is
+    # actually under the bound — and it must, because the INDEX's word characters
+    # are Unicode while the run class is ASCII: ``'ñ'*130 + '_b'`` has a 2-char
+    # ASCII run but a 132-char INDEX term, which the index truncates, so the probe
+    # really would match nothing. Refusing it is correct; the earlier revision of
+    # this comment claimed the run "IS the whole token (no other separator)",
+    # which is false for exactly that shape, so the refusal below names the TOKEN
+    # rather than a run length it did not measure.
     if deferred and len(token) > MAX_COMPOSITE_RUN_LEN:
         # ⛔ THE CONSEQUENCE CLAUSE IS NOT ONE THING (#12360 review round 11, P3).
         # It used to assert "so the query is ONE literal term the index cannot
@@ -1484,8 +1495,8 @@ def probe_phrase_rejection(phrase: str) -> str | None:
         # SHORT term) — the OPPOSITE failure from a literal that matches nothing.
         # The refusal and the advice are right either way; only the reason had to
         # describe what the read actually does.
-        return (f"its `_` run is longer than {MAX_COMPOSITE_RUN_LEN} characters, "
-                f"the bound at which the read stops emitting the composite "
+        return (f"it is longer than {MAX_COMPOSITE_RUN_LEN} characters, the "
+                f"bound at which the read stops emitting the composite "
                 f"(#12360) — so the composite the index actually holds is NOT "
                 f"sent and the probe cannot address ONE indexed term: the read "
                 f"falls back to one escaped literal or to a split of its "

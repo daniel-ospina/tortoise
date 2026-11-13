@@ -255,6 +255,11 @@ UNDERSCORE_ENV = "TORTOISE_UNDERSCORE_TERMS"
 #: run here where the tokenizer above breaks it into segments.
 _COMPOSITE_SPLIT_RE = re.compile(r"[^A-Za-z0-9_]+")
 
+#: The POSITIVE form of the same class, used where the run's OFFSETS matter and
+#: :data:`_COMPOSITE_SPLIT_RE`'s separator spans do not — see
+#: :func:`underscore_run_terms`' truncation refusal (#12368 review).
+_COMPOSITE_RUN_RE = re.compile(r"[A-Za-z0-9_]+")
+
 def identifier_tokens_enabled() -> bool:
     """Is identifier preservation on for this process? (#8933)
 
@@ -472,7 +477,19 @@ def underscore_run_terms(text: str) -> list[str]:
     duplicates are the caller's problem — :func:`build_or_query` dedupes).
 
     Two deliberate hardenings over the measurement arm, both declared rather
-    than silent:
+    than silent — plus a third that is not a bound but a CORRECTNESS refusal
+    (#12368 review), also declared:
+
+    * **a run that ABUTS a non-ASCII alphanumeric is dropped, and it is NOT
+      lossy** — because the emitted term never existed. ``[A-Za-z0-9_]+`` is an
+      ASCII class while RediSearch treats Unicode letters as word characters, so
+      in ``año_actual`` the ASCII splitter sees ``o_actual``: a fragment of the
+      real index term, which nothing holds. Dropping it is what keeps this
+      function ADDITIVE in the only sense that matters (no term is removed that
+      the index could match) and keeps a `_` token that is ONE index term
+      PROBE-ABLE — emitting the fragment made the read send two alternatives, so
+      the probe guard refused a valid probe (measured false block on
+      ``año_actual``/``the_café``/``_café``/``dé_installer``/``x_café``).
 
     * no alphanumeric character in the run -> dropped (``___``), and it is
       **LOSSY TOO** — corrected by measurement (#12360 review round 8): the
@@ -505,7 +522,25 @@ def underscore_run_terms(text: str) -> list[str]:
         return []
     out: list[str] = []
     seen: set[str] = set()
-    for run in _COMPOSITE_SPLIT_RE.split(text):
+    # ⛔ THE RUN'S OFFSETS MATTER, so this walks :data:`_COMPOSITE_RUN_RE` rather
+    # than splitting on :data:`_COMPOSITE_SPLIT_RE` (#12368 review). Both yield the
+    # same runs for pure ASCII, but the splitter is ASCII-ONLY while the index's
+    # word characters are UNICODE: for `año_actual` it splits at the `ñ` and hands
+    # back `o_actual`, a FRAGMENT of the index term `año_actual` that NOTHING
+    # holds (the module comment below says so itself). Emitting it was not
+    # additive-but-harmless — it is what made
+    # `session_source_prose_migration.probe_phrase_rejection` REFUSE
+    # `año_actual`/`the_café`/`_café`/`dé_installer`/`x_café`, every one of which
+    # is a valid, reachable ONE-index-term probe the switch-OFF arm accepted: a
+    # FALSE BLOCK, measured on both arms. A run is therefore emitted only when
+    # nothing alphanumeric ABUTS it, i.e. when the splitter did not truncate a
+    # longer Unicode word.
+    for match in _COMPOSITE_RUN_RE.finditer(text):
+        run = match.group(0)
+        start, end = match.span()
+        if (start > 0 and text[start - 1].isalnum()) or (
+                end < len(text) and text[end].isalnum()):
+            continue
         if len(run) < 2 or "_" not in run:
             continue
         if len(run) > MAX_COMPOSITE_RUN_LEN:
@@ -820,8 +855,16 @@ def build_or_query(
         # ``A_bc|a_bc`` where ``'a_bc'`` is ``a_bc``, MEASURED on a lane to return
         # the record for either spelling (RediSearch folds case). ``literal.lower()``
         # equals the composite exactly when the literal is unescaped and IS that run
-        # modulo case — precisely the duplicate case — so escaped literals
-        # (``10\:00_u``), multi-run literals and non-ASCII literals are untouched.
+        # modulo case, so escaped literals (``10\:00_u``), multi-run literals and
+        # non-ASCII literals are untouched.
+        # ⚠️ NOT "precisely the duplicate case" (#12368 review): a WHITESPACE-PADDED
+        # token escapes the fold, so the same index term is still emitted twice —
+        # measured ``build_or_query('a_b ')`` -> ``'a_b |a_b'`` and
+        # ``build_or_query('  a_b')`` -> ``'  a_b|a_b'``; neither this function nor
+        # ``run_fts_query`` strips its input, so a search-box query with a leading
+        # or trailing space reaches this branch. No recall or ranking harm (both
+        # alternatives address the identical term), but it does spend one OR-budget
+        # slot — stated rather than silently covered by an over-claimed word.
         tail = [c for c in composites if c != literal and c != literal.lower()]
         return "|".join([literal, *tail])
     tokens.sort(key=len, reverse=True)  # stable — ties keep source order
