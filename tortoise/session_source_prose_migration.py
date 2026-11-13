@@ -1548,11 +1548,10 @@ def probe_phrase_rejection(phrase: str) -> str | None:
             return (f"it is longer than {MAX_COMPOSITE_RUN_LEN} bytes, and every "
                     f"word in it is too — the index does not hold a term that "
                     f"long (#12360: MEASURED — a 128-byte name returns rows, "
-                    f"129/131/200-byte names return NONE), so no alternative the "
-                    f"read can send addresses one indexed term: it sends one "
-                    f"escaped literal the index cannot match, or splits the "
-                    f"query into several alternatives instead — pass a SHORTER "
-                    f"token")
+                    f"129/131/200-byte names return NONE), so the term this "
+                    f"token DENOTES is not one the index holds: it cannot find "
+                    f"its own name however the read spells the query — pass a "
+                    f"SHORTER token")
     # ⛔ THE BARE-NUMBER ACCEPTANCE COMES *AFTER* THE BOUND (#12368 review round
     # 16, P2 — a FALSE PASS this ORDERING left open). It used to precede the
     # bound, so every SEPARATOR-FREE ALL-DIGIT token past the bound was accepted
