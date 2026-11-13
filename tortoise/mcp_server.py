@@ -11,7 +11,6 @@ import sys
 import threading
 import time as _time
 from contextvars import ContextVar
-from pathlib import Path
 from typing import Any, Literal
 
 from fastmcp import FastMCP
@@ -21,6 +20,7 @@ from fastmcp.tools import ToolResult
 from pydantic import ValidationError as PydanticValidationError
 from tortoise.auth import is_dev_mode as _is_dev_mode
 from tortoise import deletion as _deletion  # #9660 preview-then-confirm
+from tortoise import dotenv_file as _dotenv_file  # #12407 shared .env parser
 from tortoise.config import is_db_uri as _is_db_uri
 from tortoise.sdk import (TortoiseSDK, INGEST_GRANULARITIES,
                           INGEST_PROMOTION_POLICIES, _first_non_draft_status,
@@ -51,7 +51,12 @@ _log = logging.getLogger(__name__)
 
 
 def _load_dotenv(path: str | None = None) -> None:
-    """Tiny .env loader — repo-root .env, KEY=VALUE lines, no new deps.
+    """Apply the repo-root ``.env`` — the daemon's half of the #12407 seam.
+
+    The parser lives in :mod:`tortoise.dotenv_file` and is shared with the
+    reporting verbs (``tortoise config show`` / ``doctor``), because a second
+    parser would be a report that can disagree with the loader it describes.
+    See that module for the file format and the regular-files-only rule.
 
     Only sets environment keys that are ABSENT from ``os.environ`` — a key
     that is explicitly set, even to the empty string, is never overridden.
@@ -61,38 +66,14 @@ def _load_dotenv(path: str | None = None) -> None:
     An explicit TORTOISE_DB_URI in the process env always wins. Mirrors the
     hosted entrypoint philosophy: the DB target must be explicit, never
     accidental.
+
+    ⚠️ The CLI verbs deliberately do NOT call this (#12407): loading here and
+    not there is exactly the divergence ``config show`` now reports, and
+    widening the load to every verb would change what every ``.env`` in the
+    wild does to every command. The asymmetry is the disclosed contract, not
+    an oversight.
     """
-    if path is None:
-        path = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "..", ".env"
-        )
-    if not os.path.exists(path):
-        return
-    try:
-        for raw in Path(path).read_text().splitlines():
-            line = raw.strip()
-            if not line or line.startswith("#"):
-                continue
-            if line.startswith("export "):
-                line = line[len("export "):]
-            if "=" not in line:
-                continue
-            key, _, value = line.partition("=")
-            key = key.strip()
-            # python-dotenv semantics: quoted values are literal (no inline
-            # comment stripping); unquoted values strip inline comments
-            # (whitespace + '#'). A bare '#' in an unquoted value is preserved.
-            value = value.strip()
-            if value[:1] in ('"', "'") and value[-1:] == value[:1]:
-                value = value[1:-1]
-            else:
-                value = value.split(" #", 1)[0].strip()
-            # Only fill keys that are absent — never override an explicitly
-            # set (even empty) environment variable.
-            if key and key not in os.environ:
-                os.environ[key] = value
-    except OSError as e:
-        _log.debug("Could not read .env (%s): %s — continuing without it", path, e)
+    _dotenv_file.load_dotenv(path)
 
 
 if "pytest" not in sys.modules:
@@ -2891,8 +2872,18 @@ def _get_sdk():
     if _sdk is not None:
         return _sdk
 
-    _db_uri = os.environ.get("TORTOISE_DB_URI", "")
-    if _db_uri.startswith(("docker://", "redis://", "rediss://")):
+    # The daemon's target comes from ONE implementation (`config.daemon_db_target`),
+    # which the #12407 disclosure also consumes — so the report can never describe
+    # a ladder this function does not run. Its rungs, verbatim: supported-scheme
+    # URI -> from_uri; any other non-empty URI -> resolve_db_path(uri) (a bare
+    # path, backward compat, and TORTOISE_DB_PATH is then IGNORED); else
+    # TORTOISE_DB_PATH -> resolve_db_path(); else the canonical default (main()
+    # refuses that last case unless TORTOISE_ALLOW_EMBEDDED=1).
+    from tortoise.config import daemon_db_target as _daemon_db_target
+    from tortoise.config import resolve_db_path
+    _db_target, _db_rung = _daemon_db_target()
+    if _db_rung == "uri":
+        _db_uri = _db_target
         from tortoise.projection import FalkorProjection  # noqa: I001
         import time as _time
         # Retry Docker connection 3x with backoff; exit on exhaustion (#25 P3a, #32).
@@ -2931,15 +2922,17 @@ def _get_sdk():
                 else:
                     _log.error("Docker connection failed after 3 attempts. Set TORTOISE_DB_URI or ensure FalkorDB is running.")
                     sys.exit(1)
-    elif _db_uri:
-        # File path — use Lite mode (backward compat: bare non-docker URI).
-        # resolve_db_path() rejects relative paths + applies canonical default.
-        from tortoise.config import resolve_db_path as _resolve_db_path
-        _sdk = TortoiseSDK(db_path=_resolve_db_path(_db_uri))
     else:
-        # No URI: default to canonical embedded path via resolve_db_path()
-        from tortoise.config import resolve_db_path as _resolve_db_path
-        _sdk = TortoiseSDK(db_path=_resolve_db_path())
+        # Every other rung is already an absolute path (a bare-path URI,
+        # TORTOISE_DB_PATH, or the canonical embedded default). The `refuses`
+        # rung has NO target — pass the canonical default rather than `None`, or
+        # `TortoiseSDK.__init__`'s own production guard raises RuntimeError and
+        # pre-empts `main()`'s clean "set TORTOISE_DB_URI … in the environment or
+        # .env" + exit 1 (measured on a `FLY_APP_NAME` host, #12428 review
+        # round 2). `main()` still refuses right after this; the SDK merely
+        # stays constructible so the refusal is the one the user sees.
+        _sdk = TortoiseSDK(db_path=_db_target
+                           if _db_rung != "refuses" else resolve_db_path())
     return _sdk
 
 # #329: node/edge-creating MCP write tools that MUST be quota-gated. Completeness

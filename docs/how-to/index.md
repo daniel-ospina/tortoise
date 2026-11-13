@@ -15,6 +15,12 @@ aboutObjects: tortoise
 
 New how-to guides and operational procedures should be added to `docs/how-to/`.
 
+## Building on the hosted API
+
+| Guide | Path | Summary |
+|---|---|---|
+| **Provision a graph per end-user** | [`docs/how-to/provision-a-graph-per-end-user.md`](provision-a-graph-per-end-user.md) | The builder path end to end — account-level key → `POST /v1/organizations/{org_id}/graphs` → the per-graph `tk_` key it mints in the same 201 → per-end-user isolation, with **one-level-deep** stated as the security property (a minted key can never provision, delete, or reach team surfaces), the plan/key-cap arithmetic (`max_graphs` unlimited on `pro`/`team`, but `max_api_keys` 10/20 is the real bound), and each credential-scope refusal's `error_code` with its remedy (the plan/quota gates return string details — the guide says so) (#12447). |
+
 ## Infrastructure & Operations Runbooks
 
 | Guide | Path | Summary |

@@ -3962,6 +3962,16 @@ def test_both_verbs_take_the_count_and_the_layer_in_one_window(monkeypatch, tmp_
     surface = _operator_surface(operators=OPERATOR_ROWS, reported=len(OPERATOR_ROWS),
                                events=EVENTS)
     status_calls = [0]
+    # ⛔ A FLAG, not an ordinal (measured FALSE RED). Keying the disagreeing count on
+    # `status_calls[0] == 2` assumed EXACTLY ONE `status` request sits between the top-of-verb
+    # `counts()` and the layer read. That is not a property of the code: a
+    # freshness-PRESERVING tidy-up (an extra `counts = reader.counts()` after the walk, for
+    # the report — the motion the comment below requires to stay green) makes the count
+    # immediately before the layer read the TRUE one, so no re-count happens, the note is
+    # absent, and this pin redded CORRECT code (`events_read=1 events_total_reported=1
+    # events_reconciled=True`). What matters is not WHICH status call it is, but whether the
+    # whole-layer request has already returned.
+    layer_done = [False]
 
     def recording(name, args=None):
         args = args or {}
@@ -3969,6 +3979,8 @@ def test_both_verbs_take_the_count_and_the_layer_in_one_window(monkeypatch, tmp_
         typed.append((name, args.get("type")))
         limited.append((name, args.get("limit")))
         payload = surface(name, args)
+        if name == "tortoise_get_entity" and args.get("limit") == mod.EVENT_READ_CEILING:
+            layer_done[0] = True
         # ⛔ THE FIRST status READ IS TOO EARLY TO VOUCH (review cycle 14). It is the
         # top-of-verb `counts`, taken BEFORE the 34+-call point walk. Stripping its `Event`
         # key makes the stale and fresh arms produce DIFFERENT artifacts, which is what
@@ -3980,7 +3992,7 @@ def test_both_verbs_take_the_count_and_the_layer_in_one_window(monkeypatch, tmp_
             status_calls[0] += 1
             if status_calls[0] == 1:
                 payload = {"counts": {"Point": 1, "Source": 0}}
-            elif status_calls[0] == 2:
+            elif not layer_done[0]:
                 # ⛔ THE COUNT IMMEDIATELY BEFORE THE LAYER MUST NOT ALREADY BE THE ANSWER
                 # (review cycle 16, measured). Reporting `len(EVENTS)` here let a change
                 # write the ARTIFACT field from a fresh count while reconciling the read
@@ -3999,6 +4011,7 @@ def test_both_verbs_take_the_count_and_the_layer_in_one_window(monkeypatch, tmp_
         typed.clear()
         limited.clear()
         status_calls[0] = 0
+        layer_done[0] = False
         monkeypatch.setattr(mod, "_live_call_tool", recording)
         argv = [verb, "--graph", "org_x_g_old", "--no-verify-read",
                 "--out", str(tmp_path / f"{verb}.json")]
@@ -4041,6 +4054,14 @@ def test_both_verbs_take_the_count_and_the_layer_in_one_window(monkeypatch, tmp_
         # alone could be satisfied by a fresh count that the layer read never consumed.
         assert "CHANGED between the status count and this read" in (out.get("read_note") or ""), (
             verb, out)
+        # ⛔ AND THE WHOLE-LAYER READ HAPPENS EXACTLY ONCE (measured EVASION). Every
+        # single-read shape is closed, but a SECOND `read_events(counts)` call satisfied the
+        # artifact — `events_reported` and the note come from the first, fresh read, while the
+        # ROWS the census/plan uses come from a read reconciled against the stale count — with
+        # the whole file at 240 passed. Contrived, and one line to close.
+        whole = [lim for name, lim in limited
+                 if name == "tortoise_get_entity" and lim == mod.EVENT_READ_CEILING]
+        assert len(whole) == 1, (verb, limited)
 
 
 def test_the_plan_payload_carries_the_layers_three_fields(monkeypatch, tmp_path):
