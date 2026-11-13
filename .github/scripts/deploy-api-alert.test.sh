@@ -646,10 +646,17 @@ fi
 export PATH="$PATH_BEFORE_ICONV_SHIM"
 
 # ── case 17h: a failing ASCII FALLBACK must not deafen the notifier ──────────────────
-# `tr` is coreutils, but the guard around it is what a merge already dropped once
-# (review P2, PR #12110): without `|| true`, `set -e` aborts `build_body` AT the
-# assignment and NOTHING is filed — the exact silence #2240 exists to remove. The
-# guard is pinned here rather than assumed away as "tr never fails".
+# `tr` is coreutils, but the `|| true` guard around it is LOAD-BEARING, not
+# decoration: without it, `set -e` aborts `build_body` AT the assignment and NOTHING
+# is filed — the exact silence #2240 exists to remove. The guard is pinned here
+# rather than assumed away as "tr never fails".
+# ⚠️ HISTORY, CORRECTED (review round 14): this comment used to say the guard "is
+# what a merge already dropped once". Measured over every commit that has ever
+# carried the `tr` line on main — two of them — both carry `|| true`, and
+# `origin/main:368` has it today; no merge dropped it. The sentence was inherited
+# from main and is the same class this PR removes, so it is corrected here rather
+# than left standing one function away from the script comment that declares it
+# false.
 REAL_TR="$(command -v tr)"
 if [ -n "$REAL_TR" ]; then
   ok "case 17h: a real tr exists, so the failing-squeeze shim can wrap it"
