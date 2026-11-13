@@ -1071,7 +1071,15 @@ def test_the_gate_steps_cannot_be_DEFUSED_into_a_green_job():
         undefused(step, f"publish-pypi build / the `{step.get('name') or step.get('uses')}` step")
 
     # …and the client build job is the same one-way door: `publish-client` runs on `needs:`
-    # alone, so its acceptance gate must not be swallowable either.
+    # alone, so its acceptance gate must not be swallowable either — and, for parity with
+    # `publish` below, neither may its own enforcement link (#12422 round-20 review, P3:
+    # the comment claimed parity while only the gate half was pinned — `if: always()` on
+    # `publish-client`, or deleting its `needs:`, left this suite green. Measured bound on
+    # that gap: it cannot produce a false PASS on its own, because a failed `build-client`
+    # uploads no `dist-client` artifact and the defused job then reds at download-artifact;
+    # the COMPOUND that would publish a broken client is caught by the `dist-client`
+    # upload clause above. So this is comment-vs-pin asymmetry, closed here rather than
+    # left as a claim a reader would over-trust.)
     client_steps = yaml.safe_load((workflows / "publish-pypi.yml").read_text())["jobs"][
         "build-client"
     ]["steps"]
@@ -1079,6 +1087,18 @@ def test_the_gate_steps_cannot_be_DEFUSED_into_a_green_job():
         undefused(
             step, f"publish-pypi build-client / the `{step.get('name') or step.get('uses')}` step"
         )
+
+    publish_client_job = yaml.safe_load((workflows / "publish-pypi.yml").read_text())["jobs"][
+        "publish-client"
+    ]
+    assert publish_client_job.get("needs") == "build-client", (
+        "`publish-client` no longer declares `needs: build-client`, so it can run without "
+        "the client acceptance gate ever having executed"
+    )
+    assert "if" not in publish_client_job, (
+        f"`publish-client` carries `if: {publish_client_job['if']!r}` — a condition on the "
+        f"publishing job can let it run when the gate's job failed"
+    )
 
     canary_steps = yaml.safe_load((workflows / "release-artifact-canary.yml").read_text())["jobs"][
         "canary"
@@ -1114,6 +1134,31 @@ def test_the_gate_steps_cannot_be_DEFUSED_into_a_green_job():
     ]
     assert len(dist_upload) == 1, "the `dist` artifact upload is missing from the build job"
     undefused(dist_upload[0], "publish-pypi build / the `dist` upload (the wheel `publish` reads)")
+
+    # ── THE PUBLISH ACTIONS THEMSELVES (#12422 round-20 review, P3). `gates()` sweeps
+    # `run:` steps and the `dist*` uploads, so it stops one job short of the two steps whose
+    # failure IS the release not happening: `continue-on-error: true` on
+    # `pypa/gh-action-pypi-publish` left all 72 green, in BOTH jobs — the same defuser class,
+    # one job up. `if:` is deliberately NOT asserted here: a step-level `if:` on a publish
+    # action is not load-bearing while `needs:` and the job's own `if` are pinned above.
+    all_jobs = yaml.safe_load((workflows / "publish-pypi.yml").read_text())["jobs"]
+    publish_actions = [
+        (job_name, step)
+        for job_name, job in all_jobs.items()
+        for step in job.get("steps", [])
+        if str(step.get("uses", "")).startswith("pypa/gh-action-pypi-publish")
+    ]
+    assert {job for job, _ in publish_actions} == {"publish", "publish-client"}, (
+        "the upload steps are no longer where this pin looks for them: "
+        f"{sorted({job for job, _ in publish_actions})}"
+    )
+    for job_name, step in publish_actions:
+        assert "continue-on-error" not in step, (
+            f"{job_name} / the upload step carries `continue-on-error: "
+            f"{step['continue-on-error']!r}` — the step whose failure IS the release not "
+            f"happening is now swallowable, so a failed upload reads as a green run with "
+            f"nothing published"
+        )
 
     # ── THE ALERT'S OWN TWO LEGS (#12422 review cycle 5, P2). The filing and the close are
     # the workflow's durable record; `continue-on-error: true` on either makes a failed
@@ -1251,16 +1296,27 @@ def test_the_pre_upload_gate_step_EXITS_with_the_tool_VERDICT(tmp_path):
     upload and `publish` (both pinned by the cycle-5 commit) then run, and an uninstallable
     wheel is uploaded irreversibly.
 
-    ⛔ EXECUTED, not grepped — and it closes `|| true`, `; true`, a trailing `exit 0` and
-    `set +e` in ONE row, instead of enumerating shell spellings a future edit can always
-    avoid. Same technique as `test_an_INTERPRETER_level_failure_…` next door: the step's own
-    `run:` block, a stub interpreter, and the observed exit code.
+    ⛔ EXECUTED, not grepped — and it closes `|| true`, `; true`, a trailing `exit 0` and a
+    `set +e` that is followed by another command, in ONE row, instead of enumerating shell
+    spellings a future edit can always avoid. Same technique as
+    `test_an_INTERPRETER_level_failure_…` next door: the step's own `run:` block, a stub
+    interpreter, and the observed exit code.
+
+    ⚠️ STATED BOUND (#12422 round-20 review, P3): `set +e` ALONE, with the tool invocation
+    still last, is NOT caught here and does not need to be — with the verdict as the block's
+    last command, `set +e` cannot swallow it, and this harness runs the block under
+    `bash -c` without `-e`, so errexit is not in play either way. The dangerous form is
+    `set +e` PLUS a trailing command that returns 0, which is the row above. This paragraph
+    used to claim the pin closed `set +e` flatly, which measured FALSE (`72 passed` with
+    `set +e` inserted after `set -o pipefail`).
     """
     import subprocess
 
     import yaml
 
-    workflow = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "publish-pypi.yml").read_text())
+    workflow = yaml.safe_load(
+        (REPO_ROOT / ".github" / "workflows" / "publish-pypi.yml").read_text()
+    )
     run = next(
         step["run"]
         for step in workflow["jobs"]["build"]["steps"]
@@ -1860,11 +1916,7 @@ def test_an_INTERPRETER_level_failure_is_not_published_as_a_release_finding(tmp_
         # script path. Without the delegation the stub would answer the parse too, and the
         # harness would pass for a reason that does not exist on a real runner.
         python_stub.write_text(
-            "#!/bin/sh\n"
-            'case "$1" in\n'
-            '  -c|-) exec "$REAL_PYTHON" "$@" ;;\n'
-            "esac\n"
-            f"{stub_body}\n"
+            f'#!/bin/sh\ncase "$1" in\n  -c|-) exec "$REAL_PYTHON" "$@" ;;\nesac\n{stub_body}\n'
         )
         python_stub.chmod(0o755)
         runner_temp = tmp_path / "runner"
@@ -2723,7 +2775,9 @@ def test_the_canary_cannot_be_SILENCED_without_reding_this_file():
     )
 
 
-def test_an_UNWRITABLE_or_UNREADABLE_report_is_an_exit_2_not_a_traceback(monkeypatch, tmp_path, capsys):
+def test_an_UNWRITABLE_or_UNREADABLE_report_is_an_exit_2_not_a_traceback(
+    monkeypatch, tmp_path, capsys
+):
     """Every I/O fault in `main` must say "detector", never borrow the release verdict.
 
     A traceback is exit 1, and exit 1 is what BOTH consumers render as "the published
