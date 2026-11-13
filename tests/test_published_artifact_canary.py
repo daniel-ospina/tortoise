@@ -1007,6 +1007,66 @@ def test_the_gate_steps_cannot_be_DEFUSED_into_a_green_job():
     undefused(canary_step[0], "release-artifact-canary / the `id: canary` step")
 
 
+def test_the_publish_time_smoke_resolves_EXACTLY_ONE_wheel_before_it_runs():
+    """`--wheel "$(ls dist/*.whl)"` tests the PREVIOUSLY PUBLISHED release (#12363 review E3).
+
+    The pre-upload gate must read the wheel THIS RUN built. Bash does not abort on a failing
+    substitution inside an argument, so an empty `dist/*.whl` glob reaches the tool as an
+    empty string; the tool refuses that (pinned next door), but the step must ALSO fail
+    closed on its own terms, with the BUILD defect named — otherwise a `whl=$(ls dist/*.whl
+    | head -1)`-shaped edit silently tests an arbitrary wheel and reports PASS over bytes
+    that are not the ones about to be uploaded.
+
+    ⛔ Why this pin exists at all (#12422 review, P1, MEASURED): the resolution block was
+    correct and NOTHING read it. Reverting it to the exact pre-fix `whl="$(ls dist/*.whl)"`
+    left `113 passed`, exit 0 — a guard the PR body presented as covered, whose removal the
+    whole suite watched happen. That is the agent-infra#3442 "assertion whose value cannot
+    vary" defect, and it is why the three clauses below are asserted separately: each names
+    one half a plausible "tidy" would drop.
+    """
+    import yaml
+
+    workflows = REPO_ROOT / ".github" / "workflows"
+    build_steps = yaml.safe_load((workflows / "publish-pypi.yml").read_text())["jobs"]["build"][
+        "steps"
+    ]
+    preupload = [
+        step for step in build_steps if "published_artifact_canary.py" in str(step.get("run") or "")
+    ]
+    assert len(preupload) == 1, "the pre-upload gate step is missing"
+    # ⛔ COMMENTS COME OFF FIRST. The step's own comment quotes the defect it documents
+    # (`` `--wheel "$(ls dist/*.whl)"` ``), so scanning the raw `run:` text makes clause (iii)
+    # below red on the DOCUMENTATION instead of on the code — measured on the first cut of
+    # this pin. Assertions read executable lines only.
+    code = "\n".join(
+        line for line in str(preupload[0]["run"]).splitlines() if not line.lstrip().startswith("#")
+    )
+    run = code
+
+    # (i) the glob's ARITY is checked, not assumed: a count guard has to exist.
+    assert "dist/*.whl" in run, "the step no longer resolves the built wheel at all"
+    assert "-ne 1" in run, (
+        "the pre-upload step no longer asserts that the glob matched EXACTLY ONE wheel — with "
+        "no count guard `--wheel` receives whatever the glob produced, including nothing"
+    )
+
+    # (ii) it is a REFUSAL, not a warning: the step must exit non-zero.
+    assert re.search(r"^\s*exit 1\s*$", run, re.MULTILINE), (
+        "the pre-upload step's count guard does not `exit 1`, so a zero-or-multi wheel dist/ "
+        "warns and the smoke runs anyway"
+    )
+
+    # (iii) `--wheel` receives the RESOLVED VARIABLE, never an inline substitution — the
+    #       inline form is the defect itself.
+    assert re.search(r'--wheel\s+"?\$\{?whl\}?"?', run), (
+        "`--wheel` is not handed the resolved variable $whl"
+    )
+    assert not re.search(r'--wheel\s+"?\$\(', run), (
+        "`--wheel` takes an inline `$(...)` substitution: an empty `dist/*.whl` glob collapses "
+        "it to an empty argument and the smoke tests a DIFFERENT release than the one uploaded"
+    )
+
+
 def test_the_alert_job_keeps_the_write_scope_the_alert_RUNS_under():
     """JOB-level `permissions` REPLACES the workflow's for that job, so the job block is the one that counts (#12363 round 13).
 
@@ -2149,15 +2209,25 @@ def test_the_index_read_ignores_the_ambient_proxy_the_child_strips(monkeypatch):
     environment") plus the seam that every index read goes through that one object: a
     behavioural test here would need a proxy to exist, and a monkeypatched `urlopen` is
     exactly the seam this replaced.
+
+    ⛔ THE OPENER IS BUILT HERE, AFTER THE ENVIRONMENT IS SET — reading
+    `canary._INDEX_OPENER.handlers` cannot work (#12422 review, P1; measured). That opener
+    is constructed at IMPORT, so a `monkeypatch.setenv` afterwards cannot affect it, and
+    `build_opener(ProxyHandler({}))` and a bare `build_opener()` both yield an EMPTY
+    handler list when no proxy is configured — a `ProxyHandler` with no proxies has only
+    `proxy_open`, which `add_handler` skips, so it is never appended. The pre-fix cut of
+    this test therefore passed with the fix REVERTED on every runner without a proxy
+    (measured: `59 passed`, exit 0). Building through the factory after the env is set is
+    what makes the two forms differ, and the second assertion below is what stops
+    PRODUCTION from bypassing that factory.
     """
     import urllib.request
 
     for name in ("http_proxy", "https_proxy", "all_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
         monkeypatch.setenv(name, "http://127.0.0.1:9")
 
-    proxies = [
-        h for h in canary._INDEX_OPENER.handlers if isinstance(h, urllib.request.ProxyHandler)
-    ]
+    opener = canary._build_index_opener()
+    proxies = [h for h in opener.handlers if isinstance(h, urllib.request.ProxyHandler)]
     # An EMPTY `ProxyHandler` passed to `build_opener` makes it SKIP the default one, and the
     # default is the only thing that reads `http_proxy`/`https_proxy` — so the assertion is
     # the ABSENCE of any ProxyHandler. One present with non-empty `.proxies` means the
@@ -2166,6 +2236,14 @@ def test_the_index_read_ignores_the_ambient_proxy_the_child_strips(monkeypatch):
         f"the index opener carries a ProxyHandler {proxies!r}, so the ambient proxy environment "
         "is honoured — a proxy-egress runner would read INDEX_OK here while the child's "
         "proxy-less pip cannot reach the index at all"
+    )
+
+    # ⛔ And PRODUCTION must go through the factory. Without this, the assertion above is a
+    # statement about a function nothing calls: reverting `_INDEX_OPENER` to a bare
+    # `build_opener()` leaves it green, which is the same dead-weight defect one level up.
+    assert getattr(canary._INDEX_OPENER, "_tortoise_index_policy", None) == "no-proxy", (
+        "`_INDEX_OPENER` was not built by `_build_index_opener()`, so the policy this test "
+        "measures is not the policy the canary actually uses"
     )
 
     # And every read must go through it: patching the module-level opener is enough to

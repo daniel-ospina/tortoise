@@ -159,10 +159,24 @@ grep -qF 'TITLE=release-artifact-canary: could not evaluate the published artifa
   note "a release finding must resolve the stale outage ledger (it proves the artifact evaluates)"
 
 # ── 2b. an UNSET exit code (a cancelled step writes no output) is an outage ─────────
+# ⛔ ASSERT THE FILED TITLE AND BODY, NOT THE RECORDER AS A WHOLE (#12422 review, P1,
+# MEASURED). The earlier cut was `grep -q 'could not evaluate' "$RECORDER"`, and that string
+# is satisfied by the `af_resolve --title "$TITLE_OUTAGE"` line that `open_issue` issues on
+# the RELEASE path (see `open_issue`'s bookkeeping block) — so a mutant that sent every code
+# except `2` down the release branch (`= "1"` -> `!= "2"`) filed "the published artifact is
+# red — cut a release" for a run that measured NOTHING and this assertion stayed GREEN
+# (`harness: PASS`, exit 0). The aggregate recorder is not the filing; the filing's own
+# title and body are.
 rm -f "$RECORDER" "$RECORDER.body"
 EXIT_CODE="" GH_TOKEN="fake-token" GITHUB_REPOSITORY="o/r" RUNNER_TEMP="$tmp" open_issue >/dev/null 2>&1
-grep -q 'could not evaluate' "$RECORDER" ||
-  note "an empty exit code must not post a release-owed body"
+filed_title="$(awk '/^VERB=file$/{f=1;next} f&&/^TITLE=/{sub(/^TITLE=/,"");print;exit}' "$RECORDER" 2>/dev/null)"
+[ "$filed_title" = "release-artifact-canary: could not evaluate the published artifact" ] ||
+  note "an empty exit code FILED '<${filed_title}>' — it must file the OUTAGE title (the resolve line's title is not the filing's)"
+if grep -qF 'clears when a release lands' "$RECORDER.body"; then
+  note "an empty exit code filed the RELEASE body — a cancelled/timed-out step measured nothing, and this body orders an irreversible upload"
+fi
+grep -qF 'not** evidence the artifact is broken' "$RECORDER.body" ||
+  note "an empty exit code did not file the outage body"
 
 # ── 3. the transcript TAIL, not the head ────────────────────────────────────────────
 # 60 preamble lines, then the diagnosis: a head would show only the preamble.
