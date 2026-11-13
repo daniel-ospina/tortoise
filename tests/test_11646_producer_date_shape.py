@@ -824,6 +824,17 @@ def test_the_zone_child_gets_the_parents_sys_path_not_just_the_repo_root() -> No
         "PYTHONPATH carries duplicate entries — the parent's order was not deduped: "
         f"{entries}"
     )
+    # ⛔ ORDER, not just membership (#12330 review, P3). `sys.path` order IS the
+    # resolution order, so a dedupe that sorts — or that moves an entry — changes WHICH
+    # module a child resolves, and the assertions above cannot see it (measured:
+    # replacing the dedupe with `[repo_root, *sorted(set(...))]` kept this test green).
+    position = {p: i for i, p in enumerate(sys.path)}
+    tail = [position[p] for p in entries[1:]]
+    assert tail == sorted(tail), (
+        "the child's PYTHONPATH does not preserve the PARENT's `sys.path` order — that "
+        "order is the resolution order, so reordering changes what the child resolves: "
+        f"{entries[:6]}"
+    )
 
 
 def _run_zone_child(script: str, env_base: dict[str, str], zone: str) -> list[str]:

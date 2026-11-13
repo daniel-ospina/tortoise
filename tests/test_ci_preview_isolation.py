@@ -1014,6 +1014,58 @@ def test_a_raising_ps_poll_still_reaps_the_peer_decoy(
             _reap_group(pid)
 
 
+def test_a_raising_job_a_spawn_still_reaps_the_peer_decoy(
+    tmp_path: Path, state, monkeypatch
+) -> None:
+    """⛔ `_reap(peer.pid)` SITS OUTSIDE THE `own is not None` GUARD — PINNED (#12330).
+
+    The job-A arm is `except BaseException: if own is not None: _reap_group(own.pid);
+    _reap(peer.pid); raise`. That guard is load-bearing, not decoration: when `_spawn`
+    raises, `own` is still `None`, and an UNGUARDED `_reap_group(own.pid)` raises
+    `AttributeError: 'NoneType' object has no attribute 'pid'`, which (a) leaks the 120 s
+    `workerd` decoy because the `_reap(peer.pid)` on the next line never runs, and (b)
+    MASKS the real `OSError` that CI needs to see. Removing the guard leaves the whole
+    file green (measured: 44 passed), so it is pinned here: make `_spawn`'s SECOND call
+    (job A's tree root) raise the EAGAIN/ENOMEM `OSError` the comment names, then assert
+    that `OSError` — not `AttributeError` — surfaces, and that the decoy is gone.
+    """
+    spawned: list[int] = []
+    calls = {"n": 0}
+    real_spawn = _spawn
+
+    def raising_second_spawn(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 2:  # #1 is the peer decoy; #2 is job A's tree root
+            raise OSError(11, "Resource temporarily unavailable")
+        proc = real_spawn(*args, **kwargs)
+        spawned.append(proc.pid)
+        return proc
+
+    monkeypatch.setattr(sys.modules[__name__], "_spawn", raising_second_spawn)
+    try:
+        with pytest.raises(OSError, match="Resource temporarily unavailable"):
+            test_stop_all_leaves_a_peer_jobs_decoy_workerd_alone(tmp_path, state)
+        assert calls["n"] == 2, (
+            f"`_spawn` was called {calls['n']} time(s) — the job-A raise was not reached, "
+            "so this pin did NOT exercise the `own is None` path"
+        )
+        assert spawned, "the peer decoy was never spawned, so a leak check over it is vacuous"
+        peer_pid = spawned[0]
+        # A BOUNDED WAIT, for the same reason as the other arms: SIGKILL is asynchronous.
+        deadline = time.time() + 10
+        while _pid_alive(peer_pid) and time.time() < deadline:
+            time.sleep(0.05)
+        assert not _pid_alive(peer_pid), (
+            f"a raise from job A's `_spawn` left the peer decoy ({peer_pid}) alive — "
+            "`_reap(peer.pid)` must sit OUTSIDE the `own is not None` guard, or an "
+            "unguarded `_reap_group(own.pid)` raises `AttributeError` first and the "
+            "decoy leaks while the real `OSError` is masked (#12330)."
+        )
+    finally:
+        for pid in spawned:
+            _reap_group(pid)
+
+
 def test_await_exec_REFUSES_a_decoy_that_never_shows_its_name(tmp_path: Path) -> None:
     """`_await_exec` is the predicate that can refuse — pin the refusal, not just the pass.
 
