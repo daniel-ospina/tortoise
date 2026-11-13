@@ -41690,6 +41690,7 @@ class TortoiseSDK:
         #     → byte-identical. ``id_field`` is the existing per-entity id
         #     (``id`` for Point, ``eventId`` for Event) and ``graph_label``
         #     likewise — the one batch Cypher per call stays label-correct.
+        _recency_applied = False
         if recency_field and recency_boost > 0 and result_ids:
             try:
                 rows = graph.query(
@@ -41709,6 +41710,9 @@ class TortoiseSDK:
                                     key=lambda x: (x[1], weights.get(x[0], 0.0)),
                                     reverse=True))
                 result_ids = list(fused.keys())
+                # What the #12297 rerank below keys its skip on: the ORDER was
+                # actually rewritten, not merely requested.
+                _recency_applied = True
             except Exception as e:
                 _logger.warning("recency weighting failed (%s) — plain RRF", e)
 
@@ -41901,7 +41905,13 @@ class TortoiseSDK:
         # no degrade, no disclosure. The skip is DISCLOSED for the same reason
         # the degrade arms below are: an opted-in lever that declined to run must
         # not be indistinguishable from one that was never switched on.
-        _rr_recency_conflict = bool(recency_field and recency_boost > 0)
+        # ⛔ KEYED ON WHAT STEP 4b DID, NOT ON WHAT THE CALLER ASKED FOR. 4b
+        # fails OPEN — its ``except`` arm leaves plain RRF order — so a recency
+        # REQUEST whose read broke reordered nothing; skipping the rerank then,
+        # while reporting ``recency_order_requested``, names a cause that never
+        # applied and suppresses a lever that was free to run. ``_recency_applied``
+        # is set inside 4b's ``try`` only.
+        _rr_recency_conflict = bool(_recency_applied)
         if (result_ids and rerank_pool_enabled() and (query or "").strip()
                 and _rr_recency_conflict and status_trace is not None):
             status_trace.append(dict(

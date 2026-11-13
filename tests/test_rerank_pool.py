@@ -863,8 +863,6 @@ def test_an_ALL_empty_pool_says_nothing_scorable(sdk, monkeypatch):
     for i in range(4):
         sdk.create_point(kind="statement",
                          content=f"{q} passage that will read as blank {i}")
-    real_read = sdk_mod._fetch_rerank_pool_texts
-    assert real_read is not None
 
     def _all_blank(graph, entity_type, graph_label, id_field, ids):
         # every id comes back (the read SUCCEEDED), every text is empty
