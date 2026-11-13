@@ -331,13 +331,17 @@ deliberate exception on the write path: it keeps the rerank, under its own
 `OVERRIDES:` record.
 
 ⛔ And the composition change is **bounded by arithmetic, not by the sweep**: the
-rerank permutes only the scored head, so a caller reading `limit >= _pool_n` gets
-the same **membership** — in a page whose ORDER the rerank did change (`count` on
-the trace entry is exactly how many positions moved). That is why the public reads
-at `limit >= 50` are safe today, and why the lever buys them nothing. That bound moves with `TORTOISE_FUSED_RERANK_POOL`,
-the knob this PR wires end to end; raise it above a caller's `limit` and that
-caller's page composition starts moving. The opt-out list above is what keeps that
-from being silent.
+rerank permutes only the scorable head, whose length is the WIDTH
+(`min(len(pool), TORTOISE_FUSED_RERANK_POOL)` — `_pool_n` in `sdk.py`), not the number
+of rows that carried text (`rerank_scored` on the trace entry). A caller reading
+`limit >= that width` gets the same **membership** — while the ORDER of that page did
+change, `count` on the trace entry being exactly how many positions moved, which is
+also why the lever buys such a caller nothing. That is why the public reads at
+`limit >= 50` are safe today, with the shipped width 40. ⛔ Read the width, not the
+scored count: at width 40 a pool with two scorable slots can rewrite `limit=5`'s FIRST
+row while `scored` reports 2. The bound moves with `TORTOISE_FUSED_RERANK_POOL`, the
+knob this PR wires end to end; the opt-out list above is what keeps a caller from
+crossing it silently.
 
 Default-off does not bound the blast radius of turning it on; it only means nothing
 changes until someone turns it on for all three — one of which this calibration does
