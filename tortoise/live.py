@@ -996,6 +996,44 @@ def epistemic_identity(alias: str) -> str:
 
 
 
+#: The property each epistemic label stores its KIND under (#11928 review
+#: round 1). One declaration for a question several reads ask, because the
+#: per-label answer is NOT the same property and a read that assumes one is
+#: silently blind on the others: ``create_object``/``create_event`` write
+#: ``objectKind``/``eventKind`` and leave ``pointKind`` NULL, so a kind gate
+#: written as ``n.pointKind`` is DEAD on exactly the labels #11928 widened to
+#: (``why._assemble_tradeoffs`` had two of them; see its ``_TRADEOFFS_CYPHER``).
+#:
+#: ⛔ SCOPED TO THE EPISTEMIC FOUR, deliberately. ``ranking._enrich`` spells a
+#: WIDER chain for its display kind (it appends ``documentKind`` and
+#: ``sourceKind``, ``ranking.py``:2560) — this helper does NOT, because the
+#: fields that consume it are restricted to ``EPISTEMIC_LABELS`` by
+#: ``epistemic_disjunction``. A ``:Document``/``:Source`` kind read through
+#: ``kind_expression`` is therefore ``''``: widen it HERE when a consumer needs
+#: those labels, and never assume the two chains are the same rule.
+KIND_PROPERTIES = ("pointKind", "objectKind", "subjectKind", "eventKind")
+
+
+def kind_expression(alias: str) -> str:
+    """Cypher expression: ``alias``'s KIND, whatever property its layer uses.
+
+    ⚠️ "Its layer" means one of the four EPISTEMIC labels — see
+    :data:`KIND_PROPERTIES` for the scope and for what a ``:Document``/
+    ``:Source`` kind would answer (``''``).
+
+    Use for any read that COMPARES or PARSES a node's kind across labels; the
+    absent case coalesces to ``''`` (never NULL) so a caller's ``== "option"``
+    arm is false rather than unanswerable, which is what every existing reader
+    of this value does.
+
+    ⛔ Do NOT use it as an identity, and do not confuse it with a label: an
+    ``:Object {objectKind: 'option'}`` and a ``:Point {pointKind: 'option'}``
+    answer the same KIND and are different layers.
+    """
+    return "coalesce(" + ", ".join(
+        f"{alias}.{prop}" for prop in KIND_PROPERTIES) + ", '')"
+
+
 def epistemic_disjunction(alias: str) -> str:
     """WHERE fragment: ``alias`` holds one of the epistemic labels.
 

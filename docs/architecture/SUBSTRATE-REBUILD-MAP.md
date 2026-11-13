@@ -274,11 +274,11 @@ it ("at `4f68a2aa7`"). Without that sentence the conventions look like one, and 
 reader who re-derives the stale half concludes the live half is stale too.
 
 ⚠️ **The claim "`:Document` is not minted" is deliberately NOT regex-checked**,
-and the reason is measured: `:Document` occurs on **68** lines across **20**
-files under `tortoise/` (`git grep -n ':Document' -- tortoise/` → 68 lines,
-`git grep -l ':Document' -- tortoise/` → 20 files — the file count is not the line count).
+and the reason is measured: `:Document` occurs on **71** lines across **22**
+files under `tortoise/` (`git grep -n ':Document' -- tortoise/` → 71 lines,
+`git grep -l ':Document' -- tortoise/` → 22 files — the file count is not the line count).
 It was **55** across **17** when this was first measured at `4f68a2aa7`, and
-five moves have since been made, one per workstream: the #10976
+six moves have since been made, one per workstream: the #10976
 census's own note on why node labels do not partition the node set
 (`cache_eviction.py:956`, which is also one of those that lifted the file
 count, being a new file), #8447's ingest door (`tortoise/ingest.py`, the
@@ -286,13 +286,22 @@ count, being a new file), #8447's ingest door (`tortoise/ingest.py`, the
 `tortoise/hosted_backup.py` — a file the population had not previously reached,
 carrying no `:Document` mention at `4f68a2aa7`, whose served-label bound added
 the pre-D10 dump/restore refusal and repair prose — #11682's BM25 corpus-join
-comment (`tortoise/search_engine.py:2109` — the counted `:Document` line; the block opens at
-`:2107`, one added line in an existing file) — and #12015's edge-vector prose,
-which added three lines to that same `hosted_backup.py` bound and one to
-`tortoise/cache_projection.py` (a file the population had not previously
-reached), where the dropped-target report's remedy clause has to say which
-repairs `relabel_legacy_documents()` can and cannot reach.
-All five are the point rather than an
+comment (`tortoise/search_engine.py:3337` — the counted `:Document` line; the block opens at
+`:3335`, one added line in an existing file, re-measured at this head because the
+`:2107`/`:2109` this sentence used to carry was true only at `d06c001ff9` and had
+drifted since) — #12015's edge-vector prose, which added three lines to that same
+`hosted_backup.py` bound and one to `tortoise/cache_projection.py` (a file the
+population had not previously reached), where the dropped-target report's remedy
+clause has to say which repairs `relabel_legacy_documents()` can and cannot reach
+— and #11928's three lines in `tortoise/live.py` and `tortoise/why.py`, which are
+the two files this population had never reached: the KIND and STATUS rules that
+now say which layers carry a `status` family, and name the retired label where
+they say what does NOT (`live.KIND_PROPERTIES`' scope note, `kind_expression`'s
+docstring, and `_entity_label`'s record of why the local copy of the canonical
+map had to go). That move is the same kind as the five before it — prose that
+names the retired label in order to explain a rule about it — and it is the first
+one whose point is a WIDENING rather than a retirement.
+All six are the point rather than an
 accident: this population grows for good reasons, so the figure tracks the tree
 and not a past commit.
 `tests/test_substrate_map.py` re-derives both numbers over the **same**

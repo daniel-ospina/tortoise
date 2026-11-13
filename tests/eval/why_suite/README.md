@@ -10,8 +10,20 @@ The Tortoise-original why-layer eval: grade how well the **W4 why-block
 assembly** answers the four why-questions from the **surfaced context
 alone**.  This is the A11 pilot — the harness and the product surface are
 the SAME artifact: the canonical §3.1.4 why-block (`{point_id,
-support_chain, ep, conflicts, supersession, tradeoffs, dig_deeper}`)
-produced by `tortoise.why.assemble_why_blocks` is all the grader ever sees.
+support_chain, ep, conflicts, supersession, assessment?, tradeoffs,
+dig_deeper}` — `assessment` is #11928's additive dimension, absent when nothing
+judged the node) produced by `tortoise.why.assemble_why_blocks` is all the
+grader ever sees.
+
+> ⛔ `grading.py`'s own module docstring still lists the SEVEN keys, without
+> `assessment?`, and that is deliberate rather than missed (#11928 review round 1).
+> `grading.py` is part of the pinned protocol: `judge._protocol_bytes()` folds its
+> sha256 into `protocol_sha256()` / `judge_pin()`, so editing even a docstring byte
+> there is a PROTOCOL change — a new `judge_why_suite_vN` plus `--bless-protocol`,
+> not a comment fix. The docstring stays stale until that bless happens; this note
+> is where the choice is recorded, so a reader meets a stated gap and not a silent
+> one. `assessment` is produced by the assembly and graded elsewhere, so this has
+> no effect on what this corpus measures.
 
 | | |
 |---|---|
