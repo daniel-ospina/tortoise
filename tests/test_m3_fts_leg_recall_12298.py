@@ -66,6 +66,13 @@ TOOL = REPO_ROOT / "tools" / "m3_fts_leg_recall.py"
 CHANGELOG = (REPO_ROOT / "docs" / "architecture"
              / "SEARCH-ARCHITECTURE-CHANGELOG.md")
 SEARCH_ARCH = REPO_ROOT / "docs" / "architecture" / "SEARCH-ARCHITECTURE.md"
+# ⛔ The `#11901` artifact the brief's §6 cross-references ONE figure from (§6.3's
+# `rows_zero` "11 there, 21 here"). It is a committed artifact of another lane, so
+# the pin derives both halves rather than trusting the prose (round-25 reviewer,
+# finding 3): `12 there` planted GREEN with nothing to see it.
+CANDIDATE_RECALL_11901_FTS = (REPO_ROOT / "docs" / "research"
+                              / "2026-11-12-11901-candidate-recall"
+                              / "measurement-fts-only.json")
 
 
 @pytest.fixture(scope="module")
@@ -502,6 +509,11 @@ _DIRECTIONAL = frozenset({
     # `does beat it` (the verb the whole §6.2 paragraph turns on) and
     # `the same 300` (`same`/`different` is the reuse claim's content).
     "beat", "beats", "same", "different",
+    # ⛔ §5's declared-limits bullet says the harness measures a STRICTER leg than
+    # the capture prior uses, so `understate` is its entire content: a one-token
+    # `understate` → `overstate` rewrite planted GREEN at round 25 (finding 4), the
+    # same class the set's docstring already claims.
+    "understate", "overstate",
     "+", "\u2212",
     "==", "!=", ">=", "<=", "<", ">", "\u2192", "\u00d7", "\u00f7", "\u00b1",
     "\u2248",
@@ -3506,3 +3518,167 @@ def test_the_falsifier_predicate_is_stated_the_same_way_in_every_document(
             f"{name} calls the falsifier 'satisfied by' the arm — that is the "
             f"closure condition, which the deployable arm leaves UNSATISFIED; only "
             f"the pre-authorisation's trigger is satisfied")
+
+
+# ── round 25: the figures OUTSIDE the pinned tables ────────────────────────
+# ⛔ Ten one-line edits to the brief were measured GREEN at `63b767b8` (120
+# passed, CONTROL) before this test existed: §4.2's whole decomposition
+# paragraph (the paragraph §4.1 names as the reason the narrower rule decides),
+# §2's corpus provenance, §3.3's "30 points" sentence, §3.4's `rows_zero` count,
+# §5's `understate`, §3.5's "does not hold" and §6's cross-referenced `#11901`
+# count. Every one of them is DERIVABLE from a committed artifact, so "the
+# tables are pinned" was a coverage claim the file did not enforce — the same
+# class this file has closed four times (round 24 reviewer).
+def test_brief_derived_prose_figures_are_the_artifact(
+        artifact, population, brief: str) -> None:
+    """Every remaining re-derivable figure in the brief's PROSE, à la §0's bullets.
+
+    Scope is the section that CARRIES each claim, never the whole document: a
+    `"0.9633" in brief` is satisfied by four other places, which is how these
+    survived.
+    """
+    cmp = artifact["comparisons"]
+    k3 = cmp["falkordb_tfidf__vs__postgres_bm25/tokens"]["k3"]
+    k15 = cmp["falkordb_tfidf__vs__postgres_bm25/tokens"]["k15"]
+    subset = artifact["verdict"]["primary_arm_tokens_controlled_subset"]
+    recovery = artifact["verdict"]["recovery_arm_no_index_move"]
+    inplace = cmp["falkordb_tfidf__vs__falkordb_tfidf__tokens_fixed"]["k3"]
+    dep = artifact["verdict"]["deployable_arm"]
+
+    # ── §4.2 — the decomposition the FAIL verdict rests on ──────────────────
+    # §0 states the same three bullets and IS pinned; §4.2 restates them in a
+    # different format (`p = 0.34` at 2 dp, not `0.344` at 3) and nothing read
+    # it. §4.1 says in terms: "the reason the narrower one decides is §4.2".
+    s42 = _scoped(brief, "4.2").replace("**", "")
+    assert dep["recall_at_3"] > dep["recall_at_3_base"], (
+        "§4.2 says the deployable arm beats the current scorer; the artifact "
+        f"now records {dep['recall_at_3']} vs {dep['recall_at_3_base']}")
+    _only_claim(
+        s42,
+        f"It does ({dep['recall_at_3']:.4f} vs {dep['recall_at_3_base']:.4f})",
+        "§4.2's deployable-arm figure",
+        values=(f"{dep['recall_at_3']:.4f}", f"{dep['recall_at_3_base']:.4f}"))
+    assert k15["discordant"] == 0 and k15["delta_pts"] == 0.0, (
+        "§4.2's `+0.00 at k=15 with zero discordant pairs` needs re-deriving: "
+        f"the artifact records delta {k15['delta_pts']} and "
+        f"{k15['discordant']} discordant pairs")
+    _only_claim(
+        s42,
+        "moving to BM25 with the same terms: "
+        f"+{k3['delta_pts']:.2f} pts (p = {k3['mcnemar_p_two_sided']:.2f}), "
+        f"+{subset['delta_pts']:.2f} (p = {subset['mcnemar_p_two_sided']:.2f}) "
+        f"controlled, +{k15['delta_pts']:.2f} at k=15 with "
+        f"{'zero' if k15['discordant'] == 0 else k15['discordant']} discordant pairs",
+        "§4.2's scorer decomposition",
+        values=(f"{k3['delta_pts']:.2f}", f"{k3['mcnemar_p_two_sided']:.2f}",
+                f"{subset['delta_pts']:.2f}",
+                f"{subset['mcnemar_p_two_sided']:.2f}",
+                f"{k15['delta_pts']:.2f}", str(k15["discordant"])),
+        # ⛔ `same` is the sentence's claim (the terms are HELD, not re-chosen),
+        # and `zero` is the value when the count is 0 — the §0 bullet's own branch.
+        # ⛔ Plain, not `same|different`: an alternation NARROWS the slot for no
+        # reason when neither neighbour is a free slot (round-24 reviewer, cycle
+        # 11 — `same` → `other` stayed GREEN under the alternation, RED plain).
+        free=("same",) + (("zero",) if k15["discordant"] == 0 else ()))
+    assert inplace["delta_pts"] == recovery["delta_pts"], (
+        "§4.2 says the deployable gain is recovered IN PLACE at the same size; "
+        f"the two arms now differ ({recovery['delta_pts']} vs {inplace['delta_pts']})")
+    _only_claim(
+        s42,
+        f"recovering that same +{recovery['delta_pts']:.2f} pts inside the "
+        "current index: p < 0.001, "
+        f"{'zero' if inplace['only_a'] == 0 else inplace['only_a']} regressions",
+        "§4.2's in-place recovery figure",
+        values=(f"{recovery['delta_pts']:.2f}", str(inplace["only_a"])),
+        # ⛔ `inside` is the recovery's DIRECTION (`inside` → `outside` inverts
+        # the claim), `<` is the comparison, and `0.001` is its threshold.
+        free=("inside", "same", "<", "0.001")
+        + (("zero",) if inplace["only_a"] == 0 else ()))
+
+    # ── §2 — the corpus provenance the population pin rests on ──────────────
+    # `population.json` records every one of these; none was read.
+    corpus = population["corpus"]["input"]
+    _only_claim(
+        _scoped(brief, "2").replace("**", ""),
+        f"{population['population']:,} names from this box's real capture "
+        f"corpus (`{population['corpus']['dir']}`, {corpus['files']} files, "
+        f"{corpus['lines']:,} lines, {corpus['parse_errors']} parse errors, "
+        f"{corpus['records_without_text']} records without text)",
+        "§2's corpus provenance",
+        values=(str(corpus["files"]), str(corpus["parse_errors"]),
+                str(corpus["records_without_text"])),
+        # ⛔ The COMMA-FORMATTED counts are not `_SIGNED_NUMBER` tokens, so they
+        # are freed as whole entries (the token-boundary rules make each one
+        # remove itself and nothing else) — and a changed count then reds here
+        # rather than stopping the shape from matching at all.
+        free=(f"{population['population']:,}", f"{corpus['lines']:,}"))
+
+    # ── §3.3 — "the in-place fix beats the deployable BM25 option by 30 points" ─
+    # The two §3.3 TABLE cells behind it are pinned; the sentence that turns them
+    # into the "the migration is not uniformly better" argument was not.
+    in_path = artifact["arms"]["falkordb_tfidf__tokens_fixed"]["per_class"]["path"]["3"]
+    nat_path = artifact["arms"]["postgres_bm25/native"]["per_class"]["path"]["3"]
+    gap = round((in_path - nat_path) * 100, 1)
+    assert gap > 0, (
+        "§3.3 says the in-place fix beats the deployable arm on paths; the "
+        f"artifact now records {in_path} vs {nat_path}")
+    _only_claim(
+        _scoped(brief, "3.3").replace("**", ""),
+        f"in-place fix beats the deployable BM25 option by {gap:.0f} points "
+        f"({in_path:.4f} vs {nat_path:.4f})",
+        "§3.3's path-gap sentence",
+        values=(f"{gap:.0f}", f"{in_path:.4f}", f"{nat_path:.4f}"),
+        free=("beats",))
+
+    # ── §3.4 — the whole-population empty-result count ──────────────────────
+    rows_zero = artifact["arms"]["falkordb_tfidf"]["recall_by_k"]["3"]["rows_zero"]
+    _only_claim(
+        _scoped(brief, "3.4").replace("**", ""),
+        f"{rows_zero} of the {artifact['sample']} population queries return an "
+        "empty result set at k=3",
+        "§3.4's empty-result count",
+        values=(str(rows_zero), str(artifact["sample"])))
+
+    # ── §3.5 — the mechanism sentence of the DEFECT claim ───────────────────
+    # A one-token `does not hold` → `holds` inverted the defect at its mechanism;
+    # `not` and `holds` are both pivots the shape cannot leave literal.
+    fixture_rows = {r["stored"]: r for r in
+                   artifact["arms"]["falkordb_tfidf"]["identifier_fixture"]["results"]}
+    assert fixture_rows.get("abc_def", {}).get("rank") is None and \
+        fixture_rows["abc_def"]["rank_wide"] is None, (
+        "§3.5's mechanism sentence says the shipped leg never returns `abc_def`; "
+        f"the artifact now records {fixture_rows.get('abc_def')}")
+    _only_claim(
+        _scoped(brief, "3.5"),
+        "are two terms the index does not hold; it holds `abc_def`",
+        "§3.5's mechanism sentence",
+        free=("not", "holds"))
+
+    # ── §5 — the declared-limit whose DIRECTION is its entire content ───────
+    _only_claim(
+        _scoped(brief, "5"),
+        "the measured baseline can understate that caller's recall",
+        "§5's stricter-leg disclosure",
+        # ⛔ Plain, not `understate|overstate`, for the reason above: the slot's
+        # neighbours are literal, so the broader entry is strictly better — and it
+        # reds a rewrite to a THIRD word too, which the alternation also reds but
+        # only by not matching at all.
+        free=("understate",))
+
+    # ── §6 — the `#11901` count the brief cross-references ──────────────────
+    # Both halves are committed artifacts; `12 there` planted GREEN before this.
+    assert CANDIDATE_RECALL_11901_FTS.exists(), (
+        f"§6 cross-references #11901's rows_zero and its artifact is missing: "
+        f"{CANDIDATE_RECALL_11901_FTS}")
+    other_zero = json.loads(
+        CANDIDATE_RECALL_11901_FTS.read_text())["arms"]["exact"]["3"]["rows_zero"]
+    _only_claim(
+        _scoped(brief, "6"),
+        f"`rows_zero` ({other_zero} there, {rows_zero} here)",
+        "§6's #11901 cross-reference",
+        values=(str(other_zero), str(rows_zero)),
+        # ⛔ `rows_zero` is the COUNTER's name, not a claim value — but the shape
+        # tokeniser splits it at `_`, so its `zero` arm was read as a pivot left
+        # literal (the gate refuses that). Naming the whole identifier keeps the
+        # gate's answer honest: the NAME is wildcarded, the two counts are values.
+        free=("rows_zero",))
