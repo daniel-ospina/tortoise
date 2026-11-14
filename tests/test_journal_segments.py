@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -1168,18 +1169,28 @@ def test_a_file_that_changes_under_the_measurement_is_REFUSED(
     monkeypatch.setenv(ENV_FLAG, "1")
     write_journal(graph_dir, records(2, "a"))
 
-    real_fstat = os.fstat
-    calls = {"n": 0}
+    real_fstat, real_close = os.fstat, os.close
+    opened: set[int] = set()
 
     def growing_fstat(fd):
-        """Report a larger size at close, as a concurrent append would."""
+        """Report a larger size at CLOSE, as an append landing mid-read would.
+
+        State is per DESCRIPTOR and dropped on close, because `discover` runs
+        first (also through `_measure`) and the seal may reuse the same fd
+        number afterwards.
+        """
         st = real_fstat(fd)
-        calls["n"] += 1
-        if calls["n"] == 2:                      # the re-check, not the open
+        if fd in opened:
             return os.stat_result((*tuple(st)[:6], st.st_size + 39, *tuple(st)[7:]))
+        opened.add(fd)
         return st
 
+    def clearing_close(fd):
+        opened.discard(fd)
+        return real_close(fd)
+
     monkeypatch.setattr(journal_segments.os, "fstat", growing_fstat)
+    monkeypatch.setattr(journal_segments.os, "close", clearing_close)
     with pytest.raises(SegmentModifiedError) as exc:
         seal_active(graph_dir)
     monkeypatch.undo()
@@ -1529,3 +1540,118 @@ def test_adopt_refuses_a_SYMLINKED_segment_and_a_SYMLINKED_tail(
         adopt_crashed_seal(graph_dir)
     assert "SYMLINK" in str(exc.value)
     assert not outside.exists()
+
+
+# ---------------------------------------------------------------------------
+# cycle-5 findings
+# ---------------------------------------------------------------------------
+
+
+def test_a_manifest_that_is_NOT_UTF8_is_a_NAMED_refusal_not_a_traceback(
+        graph_dir: Path):
+    """`UnicodeDecodeError` is a ValueError, not an OSError.
+
+    Cycle-5's P1, measured: one `\\xff\\xfe` in the manifest escaped every
+    `except JournalLayoutError` and made `summarise` RAISE — the one thing that
+    verb promises never to do. The pre-existing test only wrote `"{ not json"`,
+    which is valid UTF-8, so the class was untested.
+    """
+    write_journal(graph_dir, records(1))
+    write_manifest(graph_dir, ["events.0000.jsonl"])
+    raw = (graph_dir / MANIFEST_NAME).read_bytes()
+    (graph_dir / MANIFEST_NAME).write_bytes(raw[:10] + b"\xff\xfe" + raw[10:])
+
+    report = summarise(graph_dir)                     # ⛔ must not raise
+    assert report["verified"] is False
+    assert "as UTF-8" in report["reason"]
+    with pytest.raises(JournalLayoutError) as exc:
+        discover(graph_dir)
+    assert "as UTF-8" in str(exc.value)
+
+
+def test_a_LIVE_APPENDER_does_not_make_the_reader_refuse(graph_dir: Path):
+    """The length invariant belongs to WRITERS, not to readers.
+
+    Cycle-5 (P2-1), measured: applying it to every file made a 200-call read loop
+    refuse **142 times** against a journal under a live appender, reporting a
+    routine append as "the segment was rewritten in place". A reader must
+    describe the bytes it read; only a writer can mint an unsatisfiable row.
+    """
+    write_journal(graph_dir, records(5, "a"))
+    active = graph_dir / ACTIVE_NAME
+    stop = threading.Event()
+
+    def appender():
+        log = EventLog(active)
+        while not stop.is_set():
+            log.append({"type": "PointRevised", "id": "live"})
+            time.sleep(0.001)
+
+    thread = threading.Thread(target=appender, daemon=True)
+    thread.start()
+    try:
+        refused = 0
+        for _ in range(40):
+            scope = summarise(graph_dir)
+            if not scope["verified"]:
+                refused += 1
+                assert "changed while it was being measured" not in scope["reason"]
+    finally:
+        stop.set()
+        thread.join(timeout=5)
+
+    assert refused == 0, f"{refused}/40 reads refused on a healthy journal"
+
+
+def test_a_STRICT_measure_still_refuses_when_the_file_moves(graph_dir: Path):
+    """The writer's guard is not weakened by the reader being tolerant."""
+    write_journal(graph_dir, records(2))
+    active = graph_dir / ACTIVE_NAME
+    with active.open("ab") as fh:
+        fh.write(b'{"type":"PointRevised","id":"late"}\n')
+    # a coherent triple is returned from a single read, and the *writer* still
+    # refuses when its own re-check disagrees
+    assert journal_segments._measure(active) == (
+        active.stat().st_size,
+        journal_segments._measure(active)[1],
+        journal_segments._measure(active)[2],
+    )
+    assert journal_segments._measure(active, strict=True) == \
+        journal_segments._measure(active)
+
+
+def test_the_three_values_on_a_segment_come_from_ONE_read(graph_dir: Path):
+    """`_segment_from_path` must not `stat()` after reading.
+
+    Cycle-5 (P2-3): `bytes` came from a second syscall taken after the digest
+    pass, so a `Segment` could report a size that never co-existed with the
+    digest printed beside it.
+    """
+    write_journal(graph_dir, records(2, "a"))
+    layout = discover(graph_dir)
+    segment = layout.segments[0]
+    size, lines, sha = journal_segments._measure(graph_dir / segment.name)
+    assert (segment.bytes, segment.lines, segment.sha256) == (size, lines, sha)
+
+
+def test_a_boundary_BEYOND_every_row_is_REFUSED(graph_dir: Path):
+    """`through_index` is the only record of how far the sequence went.
+
+    Cycle-5 (P2-5), measured: rows 0000/0001 present with `through_index: 9`
+    certified `full=True, anchored=True`, so rows for 0002…0009 could be deleted
+    together with their segments and nothing noticed.
+    """
+    write_journal(graph_dir, records(1, "a"))
+    seal_active(graph_dir) if journal_segments.enabled() else None
+    (graph_dir / "events.0000.jsonl").write_bytes(
+        (graph_dir / ACTIVE_NAME).read_bytes())
+    (graph_dir / ACTIVE_NAME).unlink()
+    (graph_dir / ACTIVE_NAME).touch()
+    write_manifest(graph_dir, ["events.0000.jsonl"])
+    payload = json.loads((graph_dir / MANIFEST_NAME).read_text(encoding="utf-8"))
+    payload["boundary"]["through_index"] = 9
+    (graph_dir / MANIFEST_NAME).write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(SegmentSequenceError) as exc:
+        verify(discover(graph_dir))
+    assert "went further than the rows" in str(exc.value)

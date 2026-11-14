@@ -31,23 +31,33 @@ the flag off would disable the honesty guarantee on a journal that had already
 crossed a boundary — the fail-open shape AGENTS.md classifies as category A. A
 manifest, once present, is verified on **every** read whatever the flag says.
 
-THE FOUR ANCHORS, and why a manifest alone is not enough. "What is on disk
+THE SIX ANCHORS, and why a manifest alone is not enough. "What is on disk
 matches the manifest's rows" is a weaker question than "what is on disk is what
 the journal had", and the difference is where every false completeness claim
-lives. So the module records and checks four things, not one:
+lives. So the module records and checks six things, not one — and each of the
+last three exists because a review cycle MEASURED a way past the ones before it:
 
 1. **The segment set is the REPLAY's set.** ``rebuild_all`` replays *any*
    ``*.jsonl`` in the directory (``projection/__init__.py``), so a ``*.jsonl``
    this module cannot place in the sequence is REFUSED rather than ignored — an
    ignored file is one the replay folds and the claim does not know about.
-2. **A present segment is the size it was sealed at.** Each row records
-   ``bytes``/``lines``; a segment that no longer matches is REFUSED
+2. **A present segment is the size AND line count it was sealed at.** Each row
+   records ``bytes``/``lines``; a segment that no longer matches is REFUSED
    (:class:`SegmentModifiedError`). Without this, truncating a sealed segment to
-   zero bytes certifies "full reconstruction" over an empty journal.
+   zero bytes certifies "full reconstruction" over an empty journal — and a
+   dropped record whose bytes were padded back is invisible to ``bytes`` alone.
 3. **A manifested journal has an active segment.** :func:`seal_active` creates
    the next ``events.jsonl`` (empty) as part of sealing, which turns "somebody
    deleted the live tail" into a detectable state rather than an ambiguous one.
-4. **The lexicographic order IS the replay order.** ``rebuild_all`` uses
+4. **A present segment has the IDENTITY it was sealed at.** Each row also records
+   a ``sha256``. Size and line count are BOTH preserved by a same-length in-place
+   rewrite, and by two equal-length segments SWAPPED during a migration — which
+   was measured certifying ``full=True`` with the replay order inverted.
+5. **The sequence's ORIGIN is accounted for.** Contiguity is checked from the
+   lowest index present, so deleting ``events.0000.jsonl`` *and* its row left a
+   contiguous sequence certifying "full"; the lowest sealed index must be 0
+   unless the boundary records that 0000 left.
+6. **The lexicographic order IS the replay order.** ``rebuild_all`` uses
    ``sorted(os.listdir(...))``, so the names carry the sequence. A fixed width
    makes that true only up to its width — ``events.10000.jsonl`` sorts *before*
    ``events.9999.jsonl`` — so :func:`verify` compares the sorted name order
@@ -322,22 +332,37 @@ class RotationPlan:
 # --------------------------------------------------------------------------
 
 
-def _measure(path: Path, *, lock: bool = False) -> tuple[int, int, str]:
+def _measure(path: Path, *, lock: bool = False,
+             strict: bool = False) -> tuple[int, int, str]:
     """``(bytes, non-empty lines, sha256)`` from ONE read of ONE descriptor.
 
-    ⛔ ALL THREE ANCHORS MUST COME FROM THE SAME READ. Cycle 4 measured the
-    alternative: `stat()` for the size and a SEPARATE open for the digest let an
-    appender land in between, producing a row that no byte string can satisfy —
-    recorded 74 B with the digest of 113 B's content — after which EVERY read and
-    EVERY writer refused forever, and the module's own repair advice ("restore
-    the segment's bytes") was impossible. The size now comes from the same
-    descriptor the digest was computed over, and a length that disagrees with
-    what was read is a refusal rather than a row.
+    ⛔ ALL THREE COME FROM THE SAME READ. Cycle 4 measured the alternative:
+    `stat()` for the size and a SEPARATE open for the digest let an appender land
+    in between, producing a row that no byte string can satisfy — recorded 74 B
+    with the digest of 113 B's content — after which EVERY read and EVERY writer
+    refused forever, and the module's own repair advice ("restore the segment's
+    bytes") was impossible.
 
-    ``lock=True`` additionally takes the journal's own append lock
-    (``log._lock_exclusive``, the same key `EventLog.append` uses), so a
-    COMPLIANT appender is refused for the window instead of racing it. A
-    non-compliant writer is still caught by the length re-check.
+    ⛔ AND ``strict`` IS FOR WRITERS ONLY. Cycle 5 measured the first version,
+    which applied the length re-check to EVERY file — including the live tail,
+    which is BY DEFINITION being appended to. A 200-call read loop against a
+    journal under a live appender refused **142 times**, reporting a routine
+    append as "the segment was rewritten in place". On the read path the triple
+    describes the bytes actually read, which is the strongest true statement
+    available; only a WRITER needs the refusal, because only a writer mints a row
+    that could become unsatisfiable.
+
+    ``lock=True`` (writers only) takes the journal's own append lock
+    (``log._lock_exclusive``, the same key `EventLog.append` uses) so a compliant
+    appender is serialised out of the measurement window. ⚠️ That lock is
+    BEST-EFFORT and its failure is not local: on its 5 s timeout the appender
+    proceeds unlocked and the journal path is marked unhealthy for 30 s
+    (``log._FLOCK_UNHEALTHY_FOR_S``), so a measurement that outlasts the deadline
+    degrades the WRITE path. Local throughput is ~484 MB/s in this read loop
+    (measured), i.e. the deadline is ~2.4 GB on a local disk and a few hundred MB
+    on a networked volume — inside this module's working range. That window is
+    the price of never minting an unsatisfiable row, and it is declared rather
+    than hidden.
     """
     digest = hashlib.sha256()
     n = 0
@@ -346,7 +371,7 @@ def _measure(path: Path, *, lock: bool = False) -> tuple[int, int, str]:
         key = os.path.realpath(path)
         if lock:
             from .log import _lock_exclusive
-            _lock_exclusive(fh.fileno(), key)      # best effort; documented above
+            _lock_exclusive(fh.fileno(), key)      # best effort; see above
         before = os.fstat(fh.fileno()).st_size
         for chunk in fh:
             if chunk.strip():
@@ -354,13 +379,14 @@ def _measure(path: Path, *, lock: bool = False) -> tuple[int, int, str]:
             digest.update(chunk)
             total += len(chunk)
         after = os.fstat(fh.fileno()).st_size
-    if not (before == after == total):
-        # The file changed under us. Refusing is the point: a row built from
-        # mixed reads is unsatisfiable, and an unsatisfiable row is unrepairable.
+    if strict and not (before == after == total):
+        # The file changed under us. Refusing is the point ON THE WRITE PATH: a
+        # row built from mixed reads is unsatisfiable, and an unsatisfiable row
+        # is unrepairable. A READER must not refuse — see the docstring.
         raise SegmentModifiedError(
             f"{path.name} changed while it was being measured ({before} B at "
             f"open, {total} B read, {after} B at close) — another writer holds "
-            f"it open. Re-run the measurement once it is quiet; a row built "
+            f"it open. Re-run the seal once the journal is quiet; a row built "
             f"from two different reads can never be satisfied.")
     return total, n, digest.hexdigest()
 
@@ -380,11 +406,13 @@ def _segment_from_path(path: Path, disposition: Disposition = "present",
                        recorded_bytes: int | None = None,
                        recorded_lines: int | None = None) -> Segment:
     match = SEALED_RE.match(path.name)
-    lines, sha = _digest(path)
+    # ⛔ all three from ONE read — `stat()` afterwards could describe a different
+    # read than the digest beside it (cycle 5).
+    size, lines, sha = _measure(path)
     return Segment(
         name=path.name,
         index=int(match.group(1)) if match else None,
-        bytes=path.stat().st_size,
+        bytes=size,
         lines=lines,
         sha256=sha,
         disposition=disposition,
@@ -409,8 +437,16 @@ def read_manifest(graph_dir: str | Path) -> dict | None:
         return None
     try:
         raw = path.read_text(encoding="utf-8")
-    except OSError as exc:                      # pragma: no cover - fs fault
-        raise JournalLayoutError(f"cannot read {path}: {exc}") from exc
+    except (OSError, UnicodeDecodeError) as exc:
+        # ⛔ `UnicodeDecodeError` is a ValueError, NOT an OSError — so it escaped
+        # every `except JournalLayoutError` in this module and made `summarise`
+        # raise, which is the one thing that verb promises not to do (cycle 5,
+        # measured with a single `\xff\xfe` in the file). Same class as the
+        # recorded `[unicode-decode-is-not-oserror]` gotcha.
+        raise JournalLayoutError(
+            f"cannot read {path} as UTF-8: {exc} — a manifest that cannot be "
+            f"decoded is still a recorded boundary, so it is refused by name "
+            f"rather than escaping as a decode error") from exc
     try:
         data = json.loads(raw)
     except ValueError as exc:
@@ -754,6 +790,19 @@ def verify(layout: Layout) -> None:
         raise SegmentSequenceError(
             f"sealed segment {max(indices):04d} is ahead of the recorded "
             f"boundary ({layout.boundary.through_index:04d})")
+    if layout.boundary is not None and indices \
+            and max(indices) != layout.boundary.through_index:
+        # ⛔ AND THE OTHER SIDE (cycle 5, measured): a boundary BEYOND every row
+        # was accepted, so a manifest whose rows for 0002…0009 were deleted
+        # together with those segments certified `full=True, anchored=True` —
+        # `through_index` is the only field recording how far the sequence went,
+        # and it was never compared to the rows. All three writers maintain
+        # `through_index == max(row index)`, so an inequality is a refusal.
+        raise SegmentSequenceError(
+            f"{MANIFEST_NAME} records through_index="
+            f"{layout.boundary.through_index} but the highest row is "
+            f"{max(indices)} — the boundary went further than the rows describe, "
+            f"so rows (and their segments) were removed without a disposition")
     if layout.boundary is not None and indices \
             and min(indices) > 0 \
             and layout.boundary.first_missing != "events.0000.jsonl":
@@ -1113,7 +1162,8 @@ def seal_active(graph_dir: str | Path) -> Path:
         # ⛔ ONE read, one anchor set, under the journal's own append lock — see
         # `_measure`. This used to be `stat()` + a separate `_digest()`, which a
         # concurrent appender could split into an unsatisfiable row.
-        sealed_bytes, sealed_lines, sealed_sha = _measure(source, lock=True)
+        sealed_bytes, sealed_lines, sealed_sha = _measure(
+            source, lock=True, strict=True)
 
         source.rename(target)
         # ANCHOR 3: the live tail exists from the moment the journal is sealed.
@@ -1272,7 +1322,7 @@ def adopt_crashed_seal(graph_dir: str | Path) -> Path:
         # REPLAYABLE: a segment of garbage adopted as `present` would pass
         # `verify` and certify `full=True` while `read_all_segments` refuses the
         # same layout (cycle 4, measured).
-        sealed_bytes, lines, sha = _measure(path)
+        sealed_bytes, lines, sha = _measure(path, strict=True)
         _assert_adoptable_records(path)
         payload["segments"].append({
             "name": name, "index": index, "bytes": sealed_bytes,
