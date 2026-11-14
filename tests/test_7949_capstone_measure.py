@@ -6002,6 +6002,18 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("1007", "export function postCapture("),
             ("999", "export function postInstallProbe("),
         ), "pi_hooks"),
+        # ...and the THIRD cite on that same sentence is `hosted_api.py`'s
+        # install-probe route, which the row above cannot see (a row carries ONE
+        # source key). `#12545`'s squash-merge review found it stale by the same
+        # `+9` that moved the 402 gate, and measured the gap: flipping `:20354`
+        # back to `:20345` left the whole file GREEN — 413 passed. Unpinned is
+        # exactly how it rotted, and the comment on `pi_hooks` above already says
+        # why that matters ("a repaired cite that nothing pins is a repair the
+        # next move of the symbol undoes silently"). Pinned by the DECORATOR, so
+        # the route's own line is the anchor rather than the `def` under it.
+        ("00-align.md", "`llm:deepseek-direct` is what", (
+            ("20354", 'app.post("/v1/sessions/install-probe")'),
+        ), "hosted_api"),
         ("04-plan.md", "operator / label path", (
             ("25396", "declared = declared_relation_predicates()"),
         ), "sdk"),
