@@ -58,7 +58,7 @@ note **or a justified skip citing the brief**. Both are **justified skips**, cit
    `:969`, its `attrs` tuple at `:975-976` — keyed by symbol, since this row moved twice), and
    "this batch" vs "a previous batch" is exactly that distinction — so the tier is **reported from `batch_id`**
    and no new edge property is added. A persisted marker would have to update the five MAP-form writers and
-   `sdk.py:19803`'s per-door `_honours` set in the same change, and a free-form `props` key is the branch this
+   `sdk.py:19860`'s per-door `_honours` set in the same change, and a free-form `props` key is the branch this
    scope refuses (`STORAGE-ARCHITECTURE.md` §11.4/§13: an OPEN set no guard bounds).
 4. **A5 evidence** — the `Subject` layer either populated (count + the four subject-edge families + the
    customer-visible readers) **or** the honest finding that it is not, with the reason — *"which of

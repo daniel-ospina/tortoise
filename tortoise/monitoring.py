@@ -1116,7 +1116,10 @@ def record_wait_bound_control_breach(at: float | None = None) -> None:
 
 #: #12477: registered by the APP (`hosted_api._start_liveness`) so this module
 #: never imports it. Returns True while a one-time cold-start load is in flight.
-_COLD_START_SOURCE: callable | None = None
+#: ⛔ `Callable[[], bool]`, never the BUILTIN `callable`: `callable` is a function,
+#: not a type, so annotating with it is not a narrower or looser claim — it is not
+#: a claim at all, and `mypy tortoise/` refuses the file (`valid-type`, #12644).
+_COLD_START_SOURCE: Callable[[], bool] | None = None
 
 
 def set_cold_start_source(source) -> None:

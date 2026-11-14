@@ -19,18 +19,16 @@ the two user-visible consequences: the sentence, and the ledger entry.
 """
 from __future__ import annotations
 
-import io
-import json
-import urllib.error
 from pathlib import Path
-from unittest import mock
 
 import pytest
 
+from tests._capture_504 import run_capture as _run_capture_through_504
+from tests._capture_504 import served_detail as _served_detail_for
+from tests._capture_504 import text_transcript as _text_transcript
 from tests._provider_env import pin_provider_routing_env
 from tortoise import __main__ as main
 from tortoise import capture_backlog as backlog
-from tortoise.session_confirm import expected_turns
 
 SESSION = "unknown-outcome-1"
 
@@ -52,61 +50,27 @@ def places(monkeypatch, tmp_path):
     return home, receipts
 
 
-def _text_transcript(tmp_path: Path, turns: int = 4) -> Path:
-    lines = [f"{'User' if i % 2 == 0 else 'Assistant'}: saved turn {i} with content"
-             for i in range(turns)]
-    path = tmp_path / "hook-tmp.jsonl"
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return path
-
-
-def _wait_bound_refusal(url: str = "https://api.example/v1/sessions"):
-    """A 504 whose body is the hosted wait-bound refusal."""
-    body = json.dumps({"detail": "The server's wait budget for this request was "
-                                 "exceeded before a response was ready."}).encode()
-    return urllib.error.HTTPError(
-        url, 504, "Gateway Timeout",
-        {"Content-Type": "application/json"}, io.BytesIO(body))
-
-
+#: The 504 → confirmation-read harness is SHARED with `#12379`'s composed test
+#: (`tests/_capture_504.py`), which drives the same producer for its own surface.
+#: The served detail is a SERVER contract that grows additive keys, so a copy
+#: would be a second thing to forget — and the failure mode of
+#: forgetting one is a suite that keeps passing against a body production no
+#: longer serves. These two bindings keep this file's call sites readable while
+#: the shape has ONE definition.
 def _served_detail(turns: list[dict], *, extracted: int,
                    outcome_known: bool) -> dict:
-    """A `GET /v1/sessions/<id>` payload: role and body served as own fields."""
-    rows = [{"id": tid, "role": role, "content": body}
-            for tid, (role, body) in expected_turns(SESSION, turns).items()]
-    return {"id": SESSION, "turns": len(turns), "extracted": extracted,
-            "turn_points": rows,
-            "extraction": {"status": "stored", "extractor": None,
-                           "outcome_known": outcome_known}}
+    return _served_detail_for(SESSION, turns, extracted=extracted,
+                              outcome_known=outcome_known)
 
 
 def _run_capture(places, transcript: Path, detail_for):
     """Drive `session capture` through a 504 and a fake read-back.
 
-    `detail_for(turns)` returns the served detail the confirmation reads.
+    `detail_for(turns)` returns the served detail the confirmation reads. `places`
+    is unused here and kept so every call site reads the same as before the
+    harness moved out.
     """
-    captured: dict[str, list[dict]] = {}
-
-    def _urlopen(req, timeout=None):
-        raise _wait_bound_refusal(getattr(req, "full_url", "https://api.example"))
-
-    def _detail(api_url, api_key, session_id, *, timeout=None):
-        # The turns the CLIENT actually posted are the ones the confirmation
-        # compares against — recover them from the parsed transcript so this
-        # fake is derived, not hand-written (a hand-written echo is the
-        # format-mismatch blind spot `_detail` in test_session_confirm guards).
-        return detail_for(captured["turns"])
-
-    with mock.patch("urllib.request.urlopen", _urlopen), \
-         mock.patch("tortoise.session_verify.session_detail", _detail):
-        # `_spool_transcript` parses the file before the POST; capture the same
-        # turn list the poster will send by parsing it here.
-        captured["turns"] = main._parse_transcript(transcript.read_text())
-        return main._cmd_session_capture(
-            main.argparse.Namespace(file=str(transcript), harness="pi",
-                                    session_id=SESSION, transcript_path=None,
-                                    model=None),
-            "tt_test_key", "https://api.example")
+    return _run_capture_through_504(transcript, detail_for, session_id=SESSION)
 
 
 def test_an_unrecorded_outcome_is_not_reported_as_extraction_failure(

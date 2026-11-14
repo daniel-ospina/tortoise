@@ -7922,6 +7922,24 @@ async def health():
     against ``origin/main``); this block publishes the datum that comparison
     needs, plus ``build_identified`` so an unstamped deployment is readable as
     unstamped rather than as current.
+
+    Consent-key check (#10488, §2.5): ``consent_token_key`` publishes
+    ``sha256(CONSENT_TOKEN_SECRET)[:12]`` — the consent bridge's signing key's
+    PUBLIC identity — plus ``configured`` and a closed-set ``reason``. It exists
+    because that secret has TWO homes and only one is managed: Fly's copy is
+    staged by ``deploy-hosted.yml``, Cloudflare Pages' copy is typed into a
+    dashboard by hand, and on 2026-11-01 they held different values (mint
+    answered ``200``, this AS answered ``401 signature does not verify``) while
+    every deploy stayed green. Neither provider returns a secret's VALUE, so the
+    only way to answer "do the halves agree?" is for each half to publish a
+    derived tag and a third party to compare — ``tools/consent_key_check.py``
+    (scheduled: ``.github/workflows/consent-key-drift.yml``). ⛔ It does NOT fold
+    into ``status``: an unprovisioned consent arm is legitimate on a self-hosted
+    install that never enables the bridge, and a process degraded by a
+    configuration choice would be restarted by Fly forever. ⛔ The ``reason`` is
+    a CODE, never `consent_token_secret_problem`'s message — that message names
+    the byte length of a short key, which on an unauthenticated surface would
+    narrow exactly the key space the `_MIN_SECRET_BYTES` floor exists to refuse.
     """
     try:
         db = _HEALTH_PROBE.snapshot()
@@ -8025,7 +8043,14 @@ async def health():
             # (`int | null`), so the degraded path is inside the published shape (#12482 fresh
             # review, P3; measured: `AttributeError` out of `health()` on a partial module).
             "health_setup_clamped": _health_setup_clamped(),
-            "record": record, "build": _build_identity()}
+            "record": record, "build": _build_identity(),
+            # #10488: the consent bridge's key, published as a truncated hash so
+            # a split between this deployment and the Pages mint is one COMPARISON
+            # instead of a diagnosis cycle. Reported, never folded into `status`
+            # (see the docstring). Resolved through the SAME module the verifier
+            # uses, so the reading cannot describe a key this process does not
+            # actually sign with.
+            "consent_token_key": _consent_token_key_health()}
 
 
 @app.get("/health/ready")
@@ -8362,6 +8387,30 @@ def _build_identity() -> dict:
         # indistinguishable, and the packaged one is plausible and wrong.
         "migrations_source": _MIGRATIONS_SOURCE,
     }
+
+
+def _consent_token_key_health() -> dict:
+    """The consent bridge's key, as a PUBLISHABLE tag (#10488, §2.5).
+
+    Thin on purpose: the rule that decides "is this deployment provisioned" and the digest that
+    describes the key BOTH live in ``tortoise/consent_token.py``, which is the module the verifier
+    uses. Re-implementing either here would let ``/health`` describe a key this process does not
+    actually sign with — the second-opinion failure #10447 removed from ``/health``/``/v1/version``.
+
+    Lazy import, like every other ``consent_token`` use in this module: the arm is optional, and an
+    import-time dependency would make ``/health`` — the liveness surface — share fate with it.
+
+    Never raises: ``/health`` must answer always (#2850). A failure is reported as unreadable, which
+    is a READING ("cannot state the key") and not a green one.
+    """
+    try:
+        from tortoise.consent_token import consent_token_key_health
+    except Exception:                                       # pragma: no cover - import-time only
+        return {"key_fingerprint": None, "configured": None, "reason": "unreadable"}
+    try:
+        return consent_token_key_health()
+    except Exception:
+        return {"key_fingerprint": None, "configured": None, "reason": "unreadable"}
 
 
 @app.get("/v1/version")
@@ -49594,7 +49643,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 183 tracked files (446 distinct
+# ABSOLUTE line number from 183 tracked files (448 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason

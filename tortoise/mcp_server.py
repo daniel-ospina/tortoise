@@ -4301,7 +4301,7 @@ def tortoise_query(kind: str | None = None,
       by the accessor's own. They
       are applied on the text= arm, but each on a different condition:
       `min_confidence` only for `entity_type="point"` (the fts leg gates the
-      floor on the literal `entity_type == "point"`, sdk.py:43288), and
+      floor on the literal `entity_type == "point"`, sdk.py:43377), and
       `order_by="confidence"`/`"graph"` for every type except `document` and
       `source` (both map to the `Source` label: it is outside the ranker's
       belief sweep, so the graph boost is 0 on every row, and neither hit dict
@@ -4375,8 +4375,11 @@ def tortoise_query(kind: str | None = None,
     # ── #12372: `entity_type` was DROPPED on every arm except `text=` ────────
     # The signature has always taken `entity_type`, but only the `text=` arm
     # forwarded it (into `sdk.tortoise_fts_query`, which honours it). The tag
-    # arm documents that it ignores the argument; the paginated arm and the
-    # plain structural arm call `sdk.paginated_query(kind, skip, limit, …)`,
+    # arm USED to document that it ignores the argument (that sentence was itself
+    # replaced by #12372 — the served tag bullet now says a non-Point
+    # `entity_type` is REFUSED there, and `ToolDefinition.description` does not
+    # mention the argument at all; round-23 P2 1, measured). The paginated arm and
+    # the plain structural arm call `sdk.paginated_query(kind, skip, limit, …)`,
     # which has no `entity_type` parameter at all — it is a Point reader by
     # construction (`MATCH (n:Point) …`). Measured against live-v4 on
     # 2026-11-13: `entity_type="operator", offset=0, limit=5` answered
@@ -4398,14 +4401,14 @@ def tortoise_query(kind: str | None = None,
         # missing key hands us `None`, and `""` is the same caller intent. The
         # structural arms used to serve both as Points while the `text=` arm
         # passed the RAW value to the SDK, whose `tortoise_fts_query` refuses it
-        # (`ValueError`, sdk.py:41127) — one argument value answering two
+        # (`ValueError`, sdk.py:41216-41217) — one argument value answering two
         # different ways depending on which arm a caller happened to use.
         # Resolved HERE, above every arm, so all of them see one value.
         entity_type = "point"
     # The vocabulary refusal is the OWNER's (tortoise/security.py), and it is
     # asked ONCE, above every arm — a per-arm copy is how one invalid value ends
     # up with two different messages (`text=` used to surface the SDK's own
-    # re-typed copy from sdk.py:41128 while the structural arms surfaced this
+    # re-typed copy from sdk.py:41217 while the structural arms surfaced this
     # one), and a second copy of the message is what drifts. `point` is a
     # member, so the served path cannot be blocked here.
     from tortoise.security import validate_entity_type
@@ -4452,7 +4455,7 @@ def tortoise_query(kind: str | None = None,
     # finding 4, measured with `mcp.list_tools()`; recorded on #12500). Both
     # structural arms call `sdk.paginated_query(kind, skip, limit,
     # include_retracted, **filters)`, which declares NEITHER parameter
-    # (sdk.py:26585-26588), and the tag arm calls `query_points_by_tag(tag)`,
+    # (sdk.py:26642-26645), and the tag arm calls `query_points_by_tag(tag)`,
     # which takes the tag and nothing else. Measured: `kind="statement",
     # min_confidence=0.9` reaches the accessor as
     # `paginated_query(kind='statement', skip=0, limit=100,
@@ -4475,7 +4478,10 @@ def tortoise_query(kind: str | None = None,
     # same `tag=`-first precedence those arms use (`_arm` below), so a caller
     # passing both keeps a message about the arm that ACTUALLY answers — there is
     # no separate "precedence split" above this point (round-17 P2 2: the comment
-    # claimed one that did not exist; the tag branch is 200-odd lines below).
+    # claimed one that did not exist; the tag branch is `if tag is not None:`,
+    # far below — named, not counted, because a line count inside the block it
+    # measures drifts with every edit above it (round-23 P2 4: it was 245 at r17
+    # and 282 at r22, with nothing red when it passed "200-odd").
     # TRUTHINESS, not `is not None` (round-1 P1, measured): this arm's own
     # semantics define the falsy values as ABSENT — the `text=` call below
     # normalises with `min_confidence or 0.0` and `order_by or "relevance"`, and
@@ -4538,8 +4544,8 @@ def tortoise_query(kind: str | None = None,
                 and isinstance(min_confidence, (int, float))
                 and 0.0 <= min_confidence <= 1.0):
             # The fts leg compares the floor against EP belief under a literal
-            # `entity_type == "point"` gate (sdk.py:43288; `ep` is None for
-            # every other type at sdk.py:43273), so any other
+            # `entity_type == "point"` gate (sdk.py:43377; `ep` is None for
+            # every other type at sdk.py:43362), so any other
             # entity_type passed the floor straight through. Round-3 P1,
             # measured at the tool boundary: `text="…", entity_type="document",
             # min_confidence=0.9` returned the 0.1-belief rows, and the same read
@@ -4549,18 +4555,20 @@ def tortoise_query(kind: str | None = None,
             #
             # A USABLE floor only (round-20 P2 3, measured): this branch's reason,
             # its harm ("rows they excluded came back") and its route are all
-            # false of a value the SDK itself rejects — `sdk.py:41133-41134`
+            # false of a value the SDK itself rejects — `sdk.py:41222-41223`
             # range-checks `min_confidence` BEFORE any retrieval, so
-            # `min_confidence=1.5` here used to raise, never return rows, and the
-            # offered `entity_type='point'` route lands on that same range error.
+            # `min_confidence=1.5` here was REFUSED BY THE SDK'S OWN CHECK and
+            # never returned rows (it did not "raise" at the tool boundary —
+            # `_safe` turns the exception into an `_SafeError`, round-26 P2 2), and
+            # the offered `entity_type='point'` route lands on that same check.
             # Out-of-range and non-numeric floors are therefore left to the SDK,
-            # the way `order_by="garbage"` already is (`sdk.py:41138`). The
+            # the way `order_by="garbage"` already is (`sdk.py:41228`). The
             # `isinstance` test is load-bearing: a non-numeric floor makes the
             # SDK's own `not (0.0 <= …)` raise `TypeError`, and this guard must
             # not turn that into a scoping paragraph. A `bool` is NOT excluded
             # (round-21 P2 1, measured): `0.0 <= True <= 1.0` holds, so the SDK
             # does not reject it, and the fts leg then skips the floor on a
-            # non-Point read (sdk.py:43288) — `min_confidence=True` came back with
+            # non-Point read (sdk.py:43377) — `min_confidence=True` came back with
             # the 0.01 rows, while `1` and `1.0` were refused. One floor must not
             # answer two ways depending on its Python spelling. `False` is still
             # served: it is falsy, so the first conjunct already excludes it.
@@ -4607,7 +4615,13 @@ def tortoise_query(kind: str | None = None,
 
     if _unapplied:
         _names = [name for name, _ in _unapplied]
-        _named = " and ".join(_names)
+        # List punctuation, the way `_loss` is built below: a bare " and " chain
+        # rendered a three-argument tag refusal as "min_confidence and order_by and
+        # kind", one sentence after the harm clause spelled the same three as
+        # "A, B and C" (round-31 P2 2, measured). Byte-identical for one or two
+        # names, so no existing pin moves.
+        _named = (", ".join(_names[:-1])
+                  + (" and " if len(_names) > 1 else "") + _names[-1])
         # Agreement in number: two named arguments shipped as "min_confidence and
         # order_by IS not applied" (round-3 P2, measured on a real call).
         _verb = "are" if len(_names) > 1 else "is"
@@ -4625,6 +4639,9 @@ def tortoise_query(kind: str | None = None,
         if "kind" in _names:
             _losses.append("a wider population than they asked for")
         _loss = ", ".join(_losses[:-1]) + (" and " if len(_losses) > 1 else "") + _losses[-1]
+        # The paging requirement is a PRECONDITION of the whole route, so it is
+        # emitted before it (set where the route is built, below).
+        _page_note = ""
         # The route must terminate HERE. "Pass text=" was the round-1 dead end on
         # the tag arm (`tag=` takes precedence, so the caller re-reads the same
         # sentence); it is a second dead end on the text= arm, which is refused
@@ -4665,6 +4682,52 @@ def tortoise_query(kind: str | None = None,
         else:
             _route = (f"To use {_them}, pass text= — the floor and the ordering "
                       f"are applied on that arm")
+        # The structural and tag arms DROP any value, so the SDK never judges it
+        # — which means the refusal can be about a value the destination would
+        # reject outright. `pass text=` with `min_confidence=1.5` lands on the
+        # SDK's range refusal, and `order_by="garbage"` on its vocabulary one, so
+        # the route must name the domain that arm actually applies rather than
+        # promising the value is applied (round-26 P2 1, measured on both arms).
+        # The clause's SUBJECT is the arguments it actually qualifies, not `_them`:
+        # `_them` counts every refused argument, so a mixed refusal (one value
+        # outside the domain, one inside it, or `kind`, which `text=` DOES apply)
+        # told the caller that the perfectly good value was wrong too — round-27's
+        # own P2 2 defect, reopened through round-27's pronoun fix (round-28 P2 1,
+        # measured: `min_confidence=0.9, order_by="garbage"` "corrected" 0.9, and a
+        # `kind` refusal was folded into an ordering domain).
+        _domain = []
+        _domain_names = []
+        if "min_confidence" in _names and not (
+                isinstance(min_confidence, (int, float))
+                and 0.0 <= min_confidence <= 1.0):
+            _domain.append("a floor of 0.0-1.0")
+            _domain_names.append("min_confidence")
+        if ("order_by" in _names
+                and order_by not in ("relevance", "confidence", "graph")):
+            # Rendered with braces, not "'a', 'b' or 'c'": the trailing `or` landed
+            # immediately before the template's own ", or drop …" (round-27 P2 3c).
+            _domain.append("an order in {'relevance', 'confidence', 'graph'}")
+            _domain_names.append("order_by")
+        if _domain:
+            _accepted = (_domain[0] if len(_domain) == 1
+                         else ", ".join(_domain[:-1]) + " and " + _domain[-1])
+            # No trailing stop: the template appends ", or drop …" to the route,
+            # and a full stop here produced "…0.0-1.0., or drop" — the same
+            # junction defect round 22 removed from the paging note.
+            #
+            # The arm is NAMED, not "That arm" (round-27 P2 3a, measured): on the
+            # tag route this clause lands straight after "…keeping it re-reads this
+            # same arm", so "That arm" bound by proximity to the arm the same
+            # message has just said CANNOT apply a floor — self-contradictory in
+            # adjacent sentences. And the subject is `_domain_names` — only the
+            # arguments actually out of domain — so an in-domain value is never
+            # "corrected" and `kind` is never folded into a floor/ordering domain
+            # (round-28 P2 1; the earlier `{_them}` counted every refused argument,
+            # and restoring it reds EVERY param of the route test — named, not
+            # counted: the count said nine and became ten when round 29 added a
+            # param to that very test, in the same commit that fixed a stale count).
+            _route += (f". The text= arm applies "
+                       f"{' and '.join(_domain_names)} only as: {_accepted}")
         if paginated and not (_arm == "tag=" and _names == ["kind"]):
             # `text=` takes no offset/page (measured: following the route with
             # offset= kept answers "offset/page not supported with text"), so a
@@ -4677,11 +4740,20 @@ def tortoise_query(kind: str | None = None,
             # Its own SENTENCE, not a trailing parenthetical (round-21 P2 2,
             # measured): appended at the end of a route with two alternatives it
             # read as qualifying only the last one, and `text=`+`offset=` is
-            # refused whatever `entity_type` says (mcp_server.py:4422-4424) — so
+            # refused whatever `entity_type` says (the `text=` arm's `if paginated:`
+            # → "offset/page not supported with text" — cited by that string, not
+            # by a line number, because a count INSIDE this file drifts with every
+            # edit above it; four rounds have now re-pointed this one, 2026-11) — so
             # following the FIRST alternative ("pass entity_type='point'") landed
             # on "offset/page not supported with text". The drop is required for
             # EVERY alternative, so it is stated once, for the route.
-            _route += ". Also drop offset=/page= — text= takes no offset."
+            #
+            # It is emitted BEFORE the route (see `_page_note` below), not appended
+            # to it: appended with its own full stop it collided with the
+            # template's ", or drop …" and shipped "… takes no offset., or drop
+            # min_confidence for this read" on every paged refusal (round-22 P2 2,
+            # measured on all six paged shapes).
+            _page_note = " Also drop offset=/page= — text= takes no offset."
         # Only where a floor/ordering is what was refused: the STRUCTURAL arm
         # applies `filters=` together with `kind=` quite happily, so this note on
         # a kind-only tag refusal told the caller to drop a filter that another
@@ -4693,9 +4765,15 @@ def tortoise_query(kind: str | None = None,
             if filters and ({"min_confidence", "order_by"} & set(_names)) else ""
         )
         return _SafeError({"error": (
-            f"{_named} {_verb} not applied on the {_arm} arm (#12500): {_why}. It "
+            # "They"/"It" — the SECOND sentence has to agree too. It shipped "It
+            # used to be dropped silently" for two arguments, inside one message
+            # that then says "To use them", and nothing could tell the two apart
+            # (round-30 P2 2, measured: singular kept the gate set green). Same
+            # class as the round-3 aux verb and the round-27 domain pronoun.
+            f"{_named} {_verb} not applied on the {_arm} arm (#12500): {_why}. "
+            f"{'They' if _verb == 'are' else 'It'} "
             f"used to be dropped silently, so the caller got {_loss}.{_filters_note}"
-            f" {_route}, or drop {_named} for this read."
+            f"{_page_note} {_route}, or drop {_named} for this read."
         )})
     # ── #12455: `filters=` was ACCEPTED on the `text=` and `tag=` arms and DROPPED
     # `filters` is a STRUCTURAL-path argument. `text=` forwards
@@ -4703,7 +4781,7 @@ def tortoise_query(kind: str | None = None,
     # promoted from `include_retracted` — never a property filter) into
     # `sdk.tortoise_fts_query`, whose knobs are named (`exclude_status`,
     # `claim_class`, `exclude_turn_echo_session`, `relationship_filter`, …) and
-    # which has NO property-filter parameter (sdk.py:40637-40710). `tag=` reads
+    # which has NO property-filter parameter (sdk.py:40729-40909). `tag=` reads
     # `query_points_by_tag(tag)`, which has no filter parameter either. So a dict
     # a caller passed on EITHER arm was never looked at, and the answer was the
     # unfiltered population with `total`/ordering computed over it — the #6146
@@ -4790,7 +4868,7 @@ def tortoise_query(kind: str | None = None,
         # a caller who asked for tombstoned rows got them excluded with no
         # signal. The fts leg already has the knob (`include_terminal`, an
         # EXISTING parameter — no surface change), and its documented semantics
-        # are exactly this flag (sdk.py:40823).
+        # are exactly this flag (sdk.py:40915-40924).
         return _safe(_get_org_sdk().tortoise_fts_query, text, kind=kind,
                      entity_type=entity_type, limit=eff_limit,
                      min_confidence=min_confidence or 0.0,

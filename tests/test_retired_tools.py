@@ -47,7 +47,7 @@ class TestDeclaration:
             assert callable(handler), f"handler {spec.name}() was removed"
 
     def test_public_sdk_surface_is_unchanged(self):
-        """The SDK surface did not GROW: 124 public methods, as pinned today.
+        """The SDK surface did not GROW: 125 public methods, as pinned today.
 
         This used to read *"Only MCP tool NAMES are retired — every public SDK method
         stays"*, which #4282 phase 2 made false: `events_poll`/`restore_point_at`
@@ -55,10 +55,46 @@ class TestDeclaration:
         (#10053) implemented three approved-but-absent names, so the count
         moves by design and this test is the pin on where it lands. A retirement or
         an approved name gaining a `def` is an OWNER-APPROVED row in
-        `docs/product/beta-sdk-surface.md` (gated by
-        `tests/test_sdk_retirement.py`), never this assertion. The 150 → 124 move is
+        `docs/product/beta-sdk-surface.md`, never this assertion. The 150 → 124 move is
         #4282's owner-ruled deletion of the 26 surplus methods nothing called
-        (2026-10-27, PR #10187).
+        (2026-10-27, PR #10187); the 124 → 125 move is an owner-approved
+        **implementation** of an already-approved row — row 28,
+        `get_organisation_account`, which the canonical doc says "already **is** the
+        name, so this delivers it rather than **adding to it**" (the approved 40 did
+        not grow), with its manifest row in `config/surface-manifest.yml`.
+
+        ⛔ This assertion is defence-in-depth, NOT the approval gate. What refuses an
+        UNAPPROVED addition is `tools/surface-guard.py` **step 1** — an SDK method or
+        tool that is not in the frozen baseline (`surface-guard.py:964`, "is not in the
+        frozen baseline") — plus `tests/test_sdk_surface.py` (`DECLARED_COUNT` /
+        declaration-vs-baseline). Measured: adding a stray public method to
+        `TortoiseSDK` leaves `tests/test_sdk_retirement.py` green (14 passed; it is a
+        FLOOR, so growth cannot red it), reds `test_sdk_surface.py` on FOUR rows
+        (`test_the_declaration_describes_the_live_class_exactly` plus the three
+        `test_the_clean_run_reports_all_three_views` arms) and reds THIS pin too —
+        five failures across the two files, not five in `test_sdk_surface.py` alone.
+
+        Two guard layers, and the path decides which you meet: WITHOUT a re-cut a
+        stray method is refused by `tools/surface-guard.py` **step 1** ("is not in the
+        frozen baseline", rc 1). WITH a re-cut, `cut` writes the new method's own
+        baseline row, which GREENS step 1, and CARRIES `high_water_counts` — an EXCEEDS
+        check (`live_n > high_water`) that is therefore silent in the band this surface
+        sits in: measured, live 150 + re-cut → rc 0, live 151 → rc 1 ("public SDK
+        methods live 151 > pin 150"). So the guard pair alone does NOT bound a small
+        regenerate-and-push addition.
+
+        Other instruments do red it, and this list is neither exhaustive nor an
+        approval: the count is hand-typed in several test registers (`DECLARED_COUNT`,
+        this assertion, `test_surface_manifest.py`'s live-vs-baseline check, the typed
+        count in `docs/product/canonical-mcp-tools.md`); every rendered artifact
+        (`docs/product/sdk-surface-baseline.md`, `mcp-sdk-surface.md`,
+        `sdk-surface-declaration.md`, `config/sdk-surface.json`) must be REGENERATED
+        with the new row, and `surface_manifest.py check` / `tools/sdk_surface.py
+        --check` red the stale ones; and `tools/sdk_rename_table.py --check` REFUSES an
+        unmapped public method outright — it demands a canonical group and a
+        disposition, so the surface cannot grow without someone saying what the method IS.
+
+        Do not read this count as approval.
         """
         from tortoise.sdk import TortoiseSDK
 
@@ -67,7 +103,7 @@ class TestDeclaration:
             for n in dir(TortoiseSDK)
             if not n.startswith("_") and callable(getattr(TortoiseSDK, n))
         ]
-        assert len(public) == 124, f"SDK surface changed: {len(public)} != 124"
+        assert len(public) == 125, f"SDK surface changed: {len(public)} != 125"
 
     def test_retired_sdk_bindings_that_resolve_are_still_public(self):
         from tortoise.sdk import TortoiseSDK

@@ -1,0 +1,298 @@
+# consent-key-drift (#10488) — do the two deployments that mint and verify consent
+# tokens hold the SAME `CONSENT_TOKEN_SECRET`?
+#
+# THE DEFECT THIS EXISTS FOR
+# -------------------------
+# The consent bridge has two halves that must share one signing key:
+#
+#   mint   → `app.premiselabs.co/api/consent/token`  (Cloudflare Pages Function, env typed
+#                                                     into the dashboard BY HAND)
+#   verify → `api.premiselabs.co/oauth/consent/preview` (Fly machine, secret staged by CI)
+#
+# Measured 2026-11-01: they held DIFFERENT values. The mint answered `200` with a well-formed
+# 680-byte JWT and the AS answered `401 {"error":"invalid_token","error_description":"Invalid
+# consent token: signature does not verify."}` — which reads like a CODE bug, so it cost a full
+# diagnosis cycle. Nothing was red: `deploy-hosted` green, `deploy-pages` green, mint 200, and the
+# only user-visible symptom was the consent page telling the visitor "Your approval expired before
+# it was issued", i.e. blaming the visitor's session. It also survived the obvious manual fix —
+# Pages BAKES ENV AT DEPLOY TIME, so a corrected dashboard value does not reach an
+# already-deployed Function until a new deployment exists.
+#
+# WHY A SCHEDULED POLL AND NOT A DEPLOY STEP (`deploy-pages.yml`)
+# --------------------------------------------------------------
+# Cloudflare's own GIT INTEGRATION builds Pages directly on push — measured: production
+# deployment 0ce4ee20, trigger `ad_hoc`, commit 7adf5cea, 02:53:41Z, created while the GitHub
+# `deploy-pages` run was still QUEUED. So a check placed only inside `deploy-pages.yml` misses the
+# DOMINANT build path, and a check placed only inside `deploy-hosted.yml` misses every Pages-side
+# change. This one is INDEPENDENT OF THE BUILD ENTIRELY: it reads the two LIVE deployments, so it
+# cannot be bypassed by whichever route produced them.
+#
+# The condition is a STEADY STATE (two deployments holding different keys), not an event — only a
+# poll sees it, and nothing fires when a value stays wrong. A dropped scheduled fire is not a loss:
+# the next tick repeats the reading (the same reason `deploy-staleness.yml` gives). Its own
+# concurrency group with `cancel-in-progress: false` means a run is never superseded mid-flight.
+#
+# A SCHEDULED TICK CANNOT BLOCK A MERGE, AND THE ISSUE IS THE SIGNAL. A `schedule`-event run is a
+# NON-CODE event — `schedule` is a MEMBER of the merge rail's `NON_CODE_EVENTS`
+# (`tools/merge_throughput.py`), which is what EXCLUDES it from the merge decision — so a red tick
+# never gates a PR.
+#
+# ⛔ THAT EXEMPTION IS BY EVENT, NOT BY WORKFLOW, AND A DISPATCH IS NOT A SCHEDULE. `NON_CODE_EVENTS`
+# is `{schedule, issues, issue_comment}`, so a `workflow_dispatch` run is NOT exempt: its check suite
+# attaches to the sha of the ref it was dispatched against, so dispatching this at `main`'s HEAD enters
+# the rail as a BLOCKING base red for every PR — and during a rotation this workflow reads MISMATCH by
+# construction, which the runbook says is "not a regression".
+#
+# ⛔ AND A "SCRATCH BRANCH" IS NOT AUTOMATICALLY SAFE, which is the trap: `git push
+# origin main:refs/heads/tmp` points the scratch ref at main's OWN HEAD, so the run attaches the same
+# blocking red while looking like compliance. **The dispatched ref must carry a commit that is NOT
+# main's HEAD** — any open feature branch, or a scratch branch plus one empty commit. The
+# unconditionally safe path is LOCAL: `uv run python tools/consent_key_check.py` (runbook §4.4).
+# Never dispatch this against `main`.
+#
+# The monitor's output is the issue `.github/scripts/auto-file-issue.sh` files — ONE issue per streak,
+# with recurrences commented on it, closed when the reading recovers. That substrate is reused
+# deliberately: the #2706/#3907 lesson is that a title embedding a run id files a duplicate on every
+# tick, and a monitor that fires constantly is a monitor nobody reads.
+#
+# WHAT IT READS (no credential, no browser — `docs/engineering/auth/consent-identity-bridge.md` §2.5)
+#   GET {api}/health          → `.consent_token_key`   = {key_fingerprint, configured, reason}
+#   GET {app}/api/consent/key → the same three keys, as the body
+# `key_fingerprint` is `sha256(CONSENT_TOKEN_SECRET)[:12]` — a truncated hash, never the key. That
+# is the only way to answer this: Cloudflare Pages does not return a `secret_text` env var's VALUE
+# and Fly never returns a secret's, so `tools/check_pages_bindings.py` can prove the NAME exists on
+# both platforms and can never prove the two VALUES agree.
+#
+# THE FIX IS THREE STEPS when this fires, and the issue body carries them: set Fly, set Pages,
+# REDEPLOY Pages (§2.5 / `docs/infra-runbook.md`).
+name: consent-key-drift
+
+on:
+  schedule:
+    # Every 30 minutes, offset off the hour boundary (GitHub documents that scheduled events are
+    # delayed during high load, "especially at the start of each hour"). A rotation is a human
+    # action taking minutes, so 30-minute resolution is the useful bound; a dropped fire is not a
+    # loss — the next tick re-reads the same steady state.
+    - cron: '11,41 * * * *'
+  workflow_dispatch:
+    inputs:
+      api_url:
+        description: 'AS origin to read (default https://api.premiselabs.co)'
+        required: false
+        type: string
+      app_url:
+        description: 'session origin to read (default https://app.premiselabs.co)'
+        required: false
+        type: string
+
+# Never cancel a run: the whole point is a completed reading, and a cancelled tick measures nothing.
+concurrency:
+  group: consent-key-drift
+  cancel-in-progress: false
+
+# contents: read for actions/checkout; issues: write for the alert issue (the monitor's signal).
+# The repo's default token is restricted (#2140), so the scopes are granted explicitly — without
+# them the detector is deaf while looking green.
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      # ── THE RUNNER TOOL CONTRACT (#9018) ──────────────────────────────
+      # The alert is filed by `.github/scripts/auto-file-issue.sh`, which calls `gh` AND `jq`
+      # (`af_have_gh` requires both). `runs-on: ubuntu-latest` is normally a hosted image WITH both,
+      # but the fallback pool carries the same label on a bare runner whose service PATH is a minimal
+      # non-login one, where the call would die `exit 127` — reading as an instrument fault instead
+      # of a verdict. Provide the tools or fail NAMING them, before the check's own logic runs.
+      # ⛔ `jq` is named HERE even though the sibling monitors that call the same substrate ensure
+      # only `gh`: without it the filing step fails at `af_have_gh` with "gh and jq are required",
+      # i.e. the alert cannot be filed at all — and this workflow's whole output IS the alert.
+      - name: Runner tool contract — provide gh + jq (#9018)
+        run: bash .github/scripts/runner-tools.sh ensure gh jq
+      # `tools/consent_key_check.py` is stdlib-only; this pin supplies the >=3.12 interpreter every
+      # tool in `tools/` requires (#5128).
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Compare the two halves' key fingerprints (#10488)
+        id: check
+        env:
+          API_URL: ${{ github.event.inputs.api_url || 'https://api.premiselabs.co' }}
+          APP_URL: ${{ github.event.inputs.app_url || 'https://app.premiselabs.co' }}
+        run: |
+          set +e
+          python3 tools/consent_key_check.py --api-url "$API_URL" --app-url "$APP_URL" \
+            --json > /tmp/consent-key.json 2>/tmp/consent-key.err
+          rc=$?
+          set -e
+          # ⛔ The exit code IS the verdict (0 AGREE · 1 MISMATCH/SPLIT · 2 OFF/UNVERIFIABLE), so it
+          # is passed through untouched: a step that swallowed it would be the false PASS this
+          # whole workflow exists to refuse. Both non-zero codes are RED — one is a measured
+          # disagreement, the other is no measurement, and the operator needs to know which (the
+          # alert body below branches on it). The VERDICT is extracted too, so the alert never
+          # asserts a disagreement that was not measured.
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          verdict=UNKNOWN
+          if command -v python3 >/dev/null 2>&1; then
+            verdict=$(python3 -c 'import json,sys;print(json.load(open("/tmp/consent-key.json")).get("verdict","UNKNOWN"))' 2>/dev/null || echo UNKNOWN)
+          fi
+          echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
+          cat /tmp/consent-key.json
+          cat /tmp/consent-key.err >&2 || true
+          exit "$rc"
+
+      - name: Auto-file the drift (monitor signal — never blocks merges)
+        # `always()` so a RED reading still files: the reading is the artifact, and the auto-file step
+        # must run on the failing path it exists for. The GREEN path resolves a standing issue.
+        # ⛔ `outcome != 'skipped'` is a SECOND condition, and it is not belt-and-braces: an
+        # `always()` step also runs when an EARLIER step failed, and if `checkout` or `setup-python`
+        # failed then the compare step never ran — there is no `/tmp/consent-key.json`, and the
+        # fallback below would fabricate `{"verdict": "UNVERIFIABLE"}` into an issue body that
+        # presents it as "The reading (this run)" while pointing an operator at the two PRODUCTION
+        # deployments for what is a runner fault. A step that ran and failed has outcome `failure`,
+        # not `skipped`, so the red path this step exists for is untouched: the run is simply RED
+        # with no issue, and the failing run IS the alert (that substrate's own doctrine).
+        # ⛔ `!cancelled()` is the THIRD exclusion and not a formality: `steps.<id>.outcome` is
+        # `success|failure|cancelled|skipped`, so a cancel landing INSIDE the compare step (a manual
+        # `gh run cancel`, a superseded scheduled run, a job-level cancel) yields `cancelled` — which
+        # satisfies `!= 'skipped'`, and `always()` is precisely what runs a step on a cancelled run.
+        # The body would then render an empty reading under "The reading (this tool, this run)" and
+        # point an operator at two PRODUCTION deployments for a run that measured neither half. This
+        # is the idiom the fleet already uses for the same reason (`deploy-hosted.yml`:
+        # "`if: always() && !cancelled()` on purpose").
+        if: always() && !cancelled() && steps.check.outcome != 'skipped'
+        env:
+          # Actions exposes the token only as a CONTEXT, never as an env var (#3092), and
+          # `auto-file-issue.sh` asserts the author from the write's own response (a PAT files as its
+          # owner and never dedupes — #3907). STEP-level only, so `actions/checkout` never sees it.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RC: ${{ steps.check.outputs.rc }}
+          VERDICT: ${{ steps.check.outputs.verdict }}
+        run: |
+          set -u
+          # ⛔ THREE STABLE TITLES, because these are THREE DIFFERENT FINDINGS and the title is also
+          # the dedupe key:
+          #   MISMATCH         → a MEASURED disagreement. Both halves hold a key, and they differ.
+          #   SPLIT            → HALF CONFIGURED. One half has no usable key at all, so there is no
+          #                      second key for the other to differ from — asserting "hold different
+          #                      keys" would name a rotation for what is an unset/padded secret.
+          #   OFF/UNVERIFIABLE → NO measurement (or the arm is off on both halves). Nothing disagrees;
+          #                      something could not be seen, or a feature is disabled.
+          # Reusing the first title's prose for another would have the alert assert "the two halves
+          # hold different keys" about a run that measured neither half, or about a run where one half
+          # holds NOTHING (§2.5) — and the SPLIT arm is the one an operator meets DURING a rotation.
+          drift_title="CONSENT_TOKEN_SECRET: the consent bridge's two halves hold different keys (#10488)"
+          split_title="CONSENT_TOKEN_SECRET: the consent bridge is only HALF configured (#10488)"
+          unknown_title="CONSENT_TOKEN_SECRET: the consent bridge's key could not be verified (#10488)"
+          # A GREEN reading resolves ALL THREE — whichever half of the ledger was standing.
+          if [ "${RC:-}" = "0" ]; then
+            bash .github/scripts/auto-file-issue.sh resolve --title "$drift_title" \
+              --why "the two live deployments published the same key fingerprint (AGREE)"
+            bash .github/scripts/auto-file-issue.sh resolve --title "$split_title" \
+              --why "both halves are configured again and publish the same key fingerprint (AGREE)"
+            bash .github/scripts/auto-file-issue.sh resolve --title "$unknown_title" \
+              --why "the comparison now runs and both halves agree (AGREE)"
+            exit 0
+          fi
+          body="$(mktemp)"
+          {
+            echo '<!-- consent-key-drift-alert -->'
+            case "${VERDICT:-UNKNOWN}" in
+              MISMATCH)
+                title="$drift_title"
+                echo '## The consent bridge'"'"'s two halves hold DIFFERENT keys'
+                echo
+                echo 'Every consent grant is dead: the mint answers `200` with a well-formed JWT and the'
+                echo 'AS answers `401 {"error":"invalid_token","error_description":"Invalid consent token:'
+                echo 'signature does not verify."}`. The visitor sees *"Your approval expired before it was'
+                echo 'issued"*, which blames their session. Nothing else goes red (#10488).'
+                ;;
+              SPLIT)
+                title="$split_title"
+                echo '## The consent bridge is only HALF configured'
+                echo
+                echo 'One half has NO usable `CONSENT_TOKEN_SECRET` and the other does, so no grant can'
+                echo 'complete. ⛔ **This is NOT "the two halves hold different keys"** — there is no second'
+                echo 'key for the working half to differ from, and a ONE-sided rotation would not fix it.'
+                echo
+                echo 'The fenced reading below names WHICH half is dark and its `reason`, and both decide'
+                echo 'the remedy — these are NOT the same repair:'
+                echo
+                echo '- **`not_set` / `unreadable`** — that half holds NOTHING. Copy the working half'"'"'s'
+                echo '  value onto it, by the route that half is actually written through: if the dark'
+                echo '  half is `app`, set it on the Pages project, then REDEPLOY Pages. If it is `api`,'
+                echo '  put it in the GITHUB REPO SECRET (`gh secret set`) and land `deploy-hosted` —'
+                echo '  ⛔ never `fly secrets set` alone, which the next deploy silently reverts. ⚠️ The'
+                echo '  AS enforces floors Pages does NOT (Pages takes any non-empty string), so a copy'
+                echo '  can still be refused as `too_short`/`padded`/`not_utf8`/`reused_credential` —'
+                echo '  then rotate BOTH halves instead.'
+                echo '- **`padded` / `too_short` / `not_utf8` / `reused_credential`** — that half HOLDS a'
+                echo '  value this deployment refuses. Copying across MIGHT clear it, but the reading'
+                echo '  compares fingerprints only and cannot tell: one fresh key on BOTH halves is the'
+                echo '  only repair that always works. Run the FULL rotation in §2.5 (repo secret, then'
+                echo '  the Pages value, then REDEPLOY Pages).'
+                echo
+                echo '⛔ Never set ONE half and STOP. A half-applied change leaves the two halves'
+                echo 'disagreeing — that is the 2026-11-01 incident — and fixing the wrong half leaves the'
+                echo 'split exactly as it was. The ABSENCE repair above does set one half, on purpose, and'
+                echo 'is correct: it copies an EXISTING value onto an EMPTY half, so both then hold the'
+                echo 'same thing. The VALUE-FAULT repair is a rotation and passes through a disagreeing'
+                echo 'state by design — finish all THREE steps rather than stopping after the first.'
+                ;;
+              *)
+                title="$unknown_title"
+                echo '## The consent bridge'"'"'s key could NOT be verified'
+                echo
+                echo 'This is **not** a measured disagreement — nothing was compared. Either a half could'
+                echo 'not be read (a non-200, a timeout, a malformed field) or the arm is not configured on'
+                echo 'one/both halves, and an unreadable reading is never an agreement (§2.5). Check the'
+                echo 'reading below before treating this as a rotation.'
+                ;;
+            esac
+            echo
+            echo '### The reading (`tools/consent_key_check.py`, this run)'
+            echo
+            echo '```json'
+            # ⛔ `-s`, not just `cat`: a 0-byte file EXISTS (the shell redirect in the compare step
+            # creates it before `python3` has written anything), so `cat` succeeds on it and the fence
+            # renders EMPTY under the heading "The reading" — the alert then asserts a cause with no
+            # reading at all. `-s` is true only for a NON-EMPTY file, so the fallback still fires.
+            if [ -s /tmp/consent-key.json ]; then
+              cat /tmp/consent-key.json
+            else
+              echo '{"verdict": "UNVERIFIABLE", "why": "the tool wrote no reading"}'
+            fi
+            echo '```'
+            echo
+            echo '### If it IS a key mismatch — THREE steps, because Pages bakes env at deploy time'
+            echo
+            echo '1. **Rotate the GitHub repo secret** — `gh secret set CONSENT_TOKEN_SECRET` — then land'
+            echo '   (or `workflow_dispatch`) the `deploy-hosted` run so Fly picks it up.'
+            echo '   ⛔ `fly secrets set` ALONE IS NOT ENOUGH: `.github/scripts/fly-managed-secrets.txt`'
+            echo '   declares `CONSENT_TOKEN_SECRET gh-secret:CONSENT_TOKEN_SECRET`, so every'
+            echo '   `deploy-hosted` run re-stages the GitHub value and silently REVERTS a hand-set Fly'
+            echo '   value — after you had seen `AGREE`.'
+            echo '2. Set the SAME value on the `tortoise-dashboard` Cloudflare Pages project.'
+            echo '3. **REDEPLOY Pages.** A corrected dashboard value does not reach an already-deployed'
+            echo '   Function — measured 2026-11-01, and it is the step with no reminder.'
+            echo
+            echo 'Then re-run `uv run python tools/consent_key_check.py` and require `AGREE`.'
+            echo
+            echo '⛔ **BETWEEN STEP 1 AND STEP 3 THIS ALERT IS EXPECTED.** Pages bakes env at deploy time,'
+            echo 'so a correct rotation reads as `MISMATCH` for exactly as long as it takes to redeploy'
+            echo 'Pages. That is the rotation in progress, not a second regression — finish step 3 rather'
+            echo 'than re-rotating. (§2.5 states the same thing, so the alert and the runbook cannot'
+            echo 'disagree.)'
+            echo 'See `docs/engineering/auth/consent-identity-bridge.md` §2.5.'
+            echo
+            echo "Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          } > "$body"
+          bash .github/scripts/auto-file-issue.sh file --title "$title" --body-file "$body"
