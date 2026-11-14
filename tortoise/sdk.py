@@ -13171,11 +13171,15 @@ class TortoiseSDK:
             # half-initialized handle whose next call would return it and skip
             # both the journal and the indexes, minting the registry graph
             # UNOWNED (the E2E-7 leak this append exists to stop).
-            # ONCE, and the NAME before the handle: `close()` clears in this order
-            # too, and a handle visible with no name yet (the reverse order) is a
-            # window in which a concurrent probe on this same instance reads
-            # "handle set, name None" and answers `None` for a store that HAS the
-            # account — the one answer this method's docstring forbids.
+            # ONCE, and the NAME before the handle — the MIRROR of `close()`, which
+            # clears the handle and then the name. Both orders exist to keep one
+            # state unobservable: "a handle with no name yet". Build: name first, so
+            # the moment a handle is visible its name is already known. Close: handle
+            # first, so the moment the name disappears no handle is visible. Reversed,
+            # a probe on this same instance reads "handle set, name None" and answers
+            # `None` for a store that HAS the account — the one answer this method's
+            # docstring forbids. (Do not "restore consistency" by matching `close()`:
+            # the two directions are deliberately opposite.)
             self._registry_name = registry_name
             self._registry_g = registry_graph
             self._ensure_registry_indexes()
