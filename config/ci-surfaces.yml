@@ -746,6 +746,24 @@ surfaces:
   # exists for (the "guard for X does not run when X changes" class). The `core`
   # arm covers the `record_projection.py` migration resolver the same pin reads.
   - test_health_build_identity_10447.py
+  # #12477: `/health` answered `ok` while every data request timed out or was
+  # refused — the 9090 listener read a reader that was never registered, and the
+  # body's verdict never consulted the probe. DUAL-REGISTERED (`api` + `core`) for
+  # the reason the /health guards above are: what the pin asserts is the WIRING in
+  # `tortoise/hosted_api.py` (an exact `api` SOURCE_PATTERN, which REPLACES the
+  # `core` fallback — so a `core`-only row would never run on the diff it exists
+  # for), while the reader it must find registered lives in `tortoise/monitoring.py`,
+  # which selects `core`. DB-free and no EXTERNAL network: it binds an EPHEMERAL
+  # loopback listener (`start_health_listener(port=0, bind="127.0.0.1")`) and polls it
+  # over 127.0.0.1 — no fixed port, no DNS, no auth — so no FalkorDB and no Postgres;
+  # the module calls `_start_liveness` for real and injects the failure by moving the
+  # probe's own recorded result (the #1381/#2850 stopped-server shape).
+  # ⚠️ Regression provenance: this file reached `main` in #12488 UNREGISTERED, so
+  # `--integrity` red `manifest-integrity` — and through it the REQUIRED
+  # `python-ci-gate` (`needs: manifest-integrity`) — for EVERY pull request
+  # (the recurring class, #2876/#3153). The rows below are the fix for that
+  # instance, not a new classification.
+  - test_12477_health_honesty.py
   # #7816: importing tortoise.hosted_api must not write the audit JSONL fallback
   # into $HOME. Dual-registered from `core` for the reason this list exists: the
   # guard subprocess-imports tortoise/hosted_api.py, an exact `api` surface match
@@ -4853,6 +4871,15 @@ surfaces:
   # `core` fallback, so the file also has an `api` row above — without it this
   # guard is dropped on every hosted_api.py-only diff.
   - test_health_build_identity_10447.py
+  # #12477: `/health` answered `ok` while every data request timed out or was
+  # refused. This row is the SECOND half of a dual registration: the wiring the
+  # module pins is `tortoise/hosted_api.py` (an exact `api` SOURCE_PATTERN that
+  # REPLACES the `core` fallback, so the `api` row above is the one that makes it
+  # run on a hosted_api.py-only diff), while the reader it requires to be
+  # REGISTERED lives in `tortoise/monitoring.py`, which selects `core`. DB-free and no
+  # external network — it binds an ephemeral loopback listener and polls it over
+  # 127.0.0.1; no FalkorDB, no Postgres, no fixed port, no DNS.
+  - test_12477_health_honesty.py
   - test_graph_write_loop_responsiveness.py  # #3718: REST graph-write off-loop (dual: api)
   # #11092 (review round 2, P1): the ONLY non-vacuous guard for the Sentry
   # disconnect fix. Dual-registered for the reason the hosted_api.py guards above
