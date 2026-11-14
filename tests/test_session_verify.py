@@ -1208,6 +1208,22 @@ def test_guard_a_bool_count_is_not_a_count(hosted, setup):
     assert "(extracted=0, served True, outcome_known=false)" in memory["detail"], (
         memory["detail"])
     assert "extracted=True" not in memory["detail"], memory["detail"]
+    # ⛔ AND THE FAIL ARM RENDERS THE SAME PAIR (#12730 review round 2, P2).
+    # Setting only the UNVERIFIABLE arm's rendering left the sibling pinned by
+    # nothing: every other FAIL-arm assertion is the substring "no memory Point"
+    # on a detail whose served value EQUALS the canonical count, so reverting
+    # `session_verify.py`'s FAIL arm to the raw field rendered a byte-identical
+    # line and the whole file stayed green (measured: 56 passed under exactly
+    # that one-arm revert). `outcome_known: true` keeps the FAIL, and the line
+    # must still name the count the verdict used, never the value it rejected.
+    graph.extracted_override = True
+    graph.extraction = True           # recorded outcome -> the FAIL arm
+    report = _verify(hosted, home, "claude", root)
+    memory = report["links"]["memory"]
+    assert memory["status"] == "FAIL", memory
+    assert "(extracted=0, served True)" in memory["detail"], memory["detail"]
+    assert "extracted=True" not in memory["detail"], memory["detail"]
+    assert report["exit_code"] == EXIT_BROKEN, report["exit_code"]
 
 
 def test_guard_the_count_is_the_canonical_reader_too(hosted, setup,
