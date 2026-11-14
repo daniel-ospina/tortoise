@@ -633,6 +633,14 @@ _KNOWN_NARROW_READS: dict[tuple[str, str], tuple[int, str]] = {
             "instrument that can serve a truncated transcript as COMPLETE and count one "
             "`:Source` twice; a `=true` written for legibility would silently report a "
             "census number taken by the wrong instrument"),
+    ("tortoise/journal_segments.py", "TORTOISE_JOURNAL_SEGMENTS"):
+        (1, "OVERRIDES (#4128): #4097's truthy-set parsing — the ONLY switch that arms this "
+            "module's three SEALERS (`seal_active`, `record_disposition`, "
+            "`adopt_crashed_seal`), and the module has NO un-seal, so a `=true` written for "
+            "legibility — or inherited from an ambient shell profile or another product's "
+            "env — would arm a write path nobody chose, on a journal, with no verb to take "
+            "it back. #12551 R3 records the decision: the switch gates WRITING, never "
+            "REFUSING"),
 }
 
 def _module_string_constants(tree: ast.Module) -> dict[str, str]:
