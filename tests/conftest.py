@@ -864,6 +864,15 @@ def _no_ambient_dead_heartbeat_ticker():
       file's 122 tests** read ``True`` over a
       ``<Task cancelled …loop_heartbeat_task()>`` left by an earlier test; with
       the fixture in place, **0** do.
+
+    ⛔ AT THIS BASE THE FIXTURE IS PREVENTIVE, NOT THE GREEN FOR A RED. No
+    committed assertion reds when it is removed — the pair above is 124/124
+    either way, because #12482 gave the one wedge-reading class its own reset.
+    What it removes is the leaked state those 12 tests would otherwise inherit,
+    and any future wedge-reading assertion that does not remember the seam. A
+    committed falsifier would have to encode a cross-FILE collection order,
+    which is the green-by-ordering-luck class this repo refuses, so the guard is
+    pinned by the measurement above rather than by a test.
     * The issue's own profile at ``30c9e7c4d3`` / ``8dc4f06ba5`` —
       ``test_monitoring.py`` alone **219 passed**, the pair **2 failed, 122
       passed** with ``loop_stale: true``, ``served.registered: true``,
@@ -878,10 +887,12 @@ def _no_ambient_dead_heartbeat_ticker():
     ::``TestHealthzListener._isolated_verdict_inputs`` (both CLASS-LOCAL autouse
     fixtures; the fixture is #12488's, its ticker reset landed with #12482)
     plus the hard-ceiling cases that reset inline, and
-    ``test_12477_health_honesty.py``::``_clean`` (entry only).
-    A fixture scoped to a class cannot cover a leg in ANOTHER file, and the one
-    reset that covers a whole file (``test_12477``'s) is function-scoped and runs
-    on the way IN with nothing on the way out — so a
+    ``test_12477_health_honesty.py`` — its ``_clean`` fixture (entry only) and its
+    module-level ``_start`` helper, which forgets the closed loop's ticker so the
+    tick arm stays testable.
+    A fixture scoped to a class cannot cover a leg in ANOTHER file, and the two
+    resets in ``test_12477`` both live INSIDE that file (one function-scoped
+    fixture, one helper) and run on the way IN with nothing on the way out — so a
     leak still crosses FILE boundaries, and the next test to read the wedge term
     inherits a disarmed instrument unless it happens to remember the seam.
     Hence the conftest scope: the leak is process-wide, so the default has to be
