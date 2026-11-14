@@ -4539,11 +4539,28 @@ def _cmd_config(args) -> int:
                         print("     TORTOISE_ALLOW_EMBEDDED=1 — no ladder key, from")
                         print("     this file or the environment, chose it")
                     elif _deciding and _deciding not in env_file["graph_keys"]:
+                        # ⛔ One more distinction INSIDE this sentence: a DECIDING
+                        # key whose value is BLANK. The ladder accepted it (raw
+                        # truthiness: `'   '` is truthy) and `resolve_db_path` then
+                        # THREW IT AWAY for the canonical default — so "decides it"
+                        # alone reads as "your value is in use", inches below a row
+                        # that says "nothing is configured — this is the resolved
+                        # default" (review round 4, P3). The key still DECIDED, so
+                        # it is named; what it produced is said separately.
+                        _blank_decider = _deciding in (
+                            (env_file.get("blank_graph_keys") or {}).get("env") or ())
                         print("  →  the same graph target as above: the ENVIRONMENT's")
                         print(f"     {_printable(_deciding)} decides it for the daemon,")
-                        print("     so the file's "
-                              f"{_printable(', '.join(env_file['graph_keys']))}"
-                              " cannot change the target")
+                        if _blank_decider:
+                            print("     but its value is BLANK — that resolves to the")
+                            print("     canonical EMBEDDED default, not to a store it")
+                            print("     names, so the file's "
+                                  f"{_printable(', '.join(env_file['graph_keys']))}"
+                                  " cannot change the target")
+                        else:
+                            print("     so the file's "
+                                  f"{_printable(', '.join(env_file['graph_keys']))}"
+                                  " cannot change the target")
                     else:
                         print("  →  the same graph target as above: the file's "
                               f"{_printable(', '.join(env_file['graph_keys']))}")
@@ -12329,11 +12346,24 @@ def _dotenv_rows(env_file: dict) -> list[tuple[str, str, str]]:
                       f"default, selected by TORTOISE_ALLOW_EMBEDDED=1 — no ladder "
                       f"key, from this file or the environment, chose it")
         elif _deciding and _deciding not in env_file["graph_keys"]:
+            # ⛔ The value being BLANK is stated, not implied: the key DECIDED (the
+            # ladder accepted it on raw truthiness) and `resolve_db_path` then threw
+            # it away for the canonical default, so "decides it" alone reads as
+            # "your value is in use" (review round 4, P3 — the twin of the
+            # `embedded-allowed` sentence, one state over).
+            _blank_decider = _deciding in (
+                (env_file.get("blank_graph_keys") or {}).get("env") or ())
             detail = (f"{path} sets "
                       f"{_printable(', '.join(env_file['graph_keys']))} — "
                       f"{_read_clause}; the ENVIRONMENT's {_printable(_deciding)} "
-                      f"decides it for the daemon, so the file's key cannot change "
-                      f"the target the rows below grade ({_printable(str(graded))})")
+                      f"decides it for the daemon"
+                      + (", but its value is BLANK — that resolves to the canonical "
+                         "EMBEDDED default, not to a store it names, so the "
+                         "file's key cannot change it"
+                         if _blank_decider else
+                         ", so the file's key cannot change "
+                         "the target the rows below grade "
+                         f"({_printable(str(graded))})"))
         else:
             detail = (f"{path} sets "
                       f"{_printable(', '.join(env_file['graph_keys']))} — "

@@ -2447,12 +2447,15 @@ def test_the_embedded_hatch_is_not_described_as_an_environment_key(
     the table alone printed *"the ENVIRONMENT's TORTOISE_DB_PATH decides it for
     the daemon"* about a variable that does not exist.
 
-    ⛔ Measured before the gate: `.env` = `TORTOISE_DB_URI=` (blank), shell
-    `TORTOISE_ALLOW_EMBEDDED=1`, nothing else — `config show` AND `doctor` both
-    named the unset `TORTOISE_DB_PATH`. That is the same false-mechanism class
-    this whole change exists to remove, so it is gated (the key must be an
-    environment key) and pinned here on both surfaces. Mutant: dropping the
-    `_deciding_in_env` gate reddens this test.
+    ⛔ Measured before the hatch got its own sentence: `.env` = `TORTOISE_DB_URI=`
+    (blank), shell `TORTOISE_ALLOW_EMBEDDED=1`, nothing else — `config show` AND
+    `doctor` both named the unset `TORTOISE_DB_PATH`; removing that gate instead
+    fell through to the FILE sentence, crediting the file's blank key with
+    choosing the embedded default. Both are the false-mechanism class this whole
+    change exists to remove, so this rung draws its own sentence on both surfaces
+    and is pinned here. Mutant: reverting the hatch branch to either the
+    environment-credited or the file-credited sentence reddens this test; so does
+    deleting the `graph_keys` branch from both renderers (5 failed).
     """
     _write_env(_isolated, "TORTOISE_DB_URI=\n")
     monkeypatch.setenv("TORTOISE_ALLOW_EMBEDDED", "1")
@@ -2512,8 +2515,12 @@ def test_a_whitespace_only_env_key_is_still_the_ONE_THAT_DECIDED(
     assert payload["blank_graph_keys"]["env"] == ["TORTOISE_DB_PATH"], payload
     assert payload["differs"] is False, payload
 
+    # ⛔ And the sentence must say what the blank value PRODUCED. "decides it"
+    # alone reads as "your value is in use", inches below the same screen's
+    # "nothing is configured — this is the resolved default" (review round 4, P3).
     out = _show_text(capsys)
     assert "the ENVIRONMENT's" in out and "TORTOISE_DB_PATH decides it" in out, out
+    assert "but its value is BLANK" in out, out
     assert "resolves to it for the daemon too" not in out, (
         "a whitespace-only TORTOISE_DB_PATH was consumed by the `path` rung, so "
         "the file's blank key cannot be the decider: " + out)
@@ -2521,3 +2528,4 @@ def test_a_whitespace_only_env_key_is_still_the_ONE_THAT_DECIDED(
     assert _run(("doctor",)) in (0, 1)
     doc = capsys.readouterr().out
     assert "the ENVIRONMENT's TORTOISE_DB_PATH decides it for the daemon" in doc, doc
+    assert "but its value is BLANK" in doc, doc
