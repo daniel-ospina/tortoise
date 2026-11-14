@@ -1675,6 +1675,12 @@ surfaces:
   # SQL↔Python contract (the RPC/param names) — the #2938/#3154 silent-drop
   # class. See the `core` entry for the other half.
   - test_postgres_storage.py
+  # #12762: the per-org Postgres-bytes meter + its ledger writer. Registered on
+  # `api` because two of its three sources are exact `api` SOURCE_PATTERNS —
+  # `tortoise/metering.py` (the increment writer) and `tortoise/supabase_control.py`
+  # (`metering_increment_postgres_bytes`) — so an `api`-only change to either
+  # runs this pin. See the `core` entry for the other half.
+  - test_postgres_bytes.py
   - test_oauth_mcp.py
   # #2853: the `oauth_clients` row count that ruling C made part of the decision.
   # Registered on `api` because the ONLY file it guards, `tortoise/hosted_api.py`,
@@ -4133,6 +4139,15 @@ surfaces:
   # NON_PYTHON_PREFIX and takes the tier-1 smoke return. Only the CORE_ALSO
   # paths below select `core`; #8744 review P2.)
   - test_postgres_storage.py
+  # #12762: the other half of the per-org bytes pin. Registered on `core`
+  # because the meter itself (`tortoise/postgres_bytes.py`), the write seam
+  # (`tortoise/record_writer.py`) and `tortoise/cost_dimensions.py` match NO
+  # SOURCE_PATTERN and fall to `core` — measured: `--changed-files
+  # tortoise/postgres_bytes.py` -> ['core'], and the `api` arm alone left a
+  # core-only diff running this file's pins not at all. The migration and the
+  # ops doc are in `CORE_ALSO` for the #1349/#3332/#3616 silent-drop reason the
+  # postgres-storage entry above states.
+  - test_postgres_bytes.py
   # #3634: guards the graph-name ownership vocabulary (the prefix sets that
   # authorise a sweep) — the register, the deny-safe residue predicate, and the
   # AST pin keeping the opt-in legacy sweep out of every default path.

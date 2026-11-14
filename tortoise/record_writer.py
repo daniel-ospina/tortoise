@@ -1706,6 +1706,20 @@ def _meter_written_bytes(
 
     ⛔ TOTAL — every failure is logged at DEBUG and dropped. A meter must never
     fail, delay past its one read, or change the outcome of a record write.
+
+    ⛔ AND THAT REQUIRES THE READ TO BE TRANSACTION-SAFE, NOT JUST
+    EXCEPTION-SAFE (#12764, measured 2026-11-14). This runs inside the write's
+    OPEN transaction, on a connection the caller commits. A failing statement
+    ABORTS that transaction on the server, so swallowing the exception left the
+    caller's ``commit()`` rolling back the ENTIRE record write — silently, and
+    reporting ``APPLIED``. Ten record integration tests measured exactly that
+    (the CI record database does not carry ``journal_event_bytes_for_rows``, so
+    every write took the failure path and every table read 0 rows).
+    :func:`tortoise.postgres_bytes.measure_written_rows` brackets its read in a
+    SAVEPOINT and rolls back TO it, which is what makes the swallow harmless —
+    do not remove that guard, and do not move the reading into another
+    transaction (uncommitted rows are invisible outside this one, and the
+    reading must be of what this write STORED).
     """
     if not position or n_records <= 0:
         return
@@ -1725,7 +1739,7 @@ def _meter_written_bytes(
 
         metering.record_postgres_bytes_written(
             org_id, n_bytes=written.row_bytes, n_records=written.rows)
-    except Exception:  # noqa: BLE001 - never fail a write for a meter
+    except Exception:  # noqa: BLE001, RUF100 - never fail a write for a meter
         _logger.debug(
             "postgres byte metering skipped for org=%s graph=%s "
             "first_seq=%s (non-fatal)", org_id, graph_id, first_seq,

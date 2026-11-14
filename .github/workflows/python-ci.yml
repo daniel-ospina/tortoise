@@ -5061,6 +5061,21 @@ jobs:
           # that can run it (`pgvector/pgvector:pg16` above), which is why the
           # file is here and not merely registered on `core`: there it collects
           # and skips, and a skip on this job reds the leg gate below.
+          # #12762: the per-org bytes meter's LIVE leg. Its subject is a
+          # property no DB-free test can reach — that a FAILED metering read
+          # does not abort the caller's transaction (a swallowed error used to
+          # roll the whole record write back silently, which is what reddened
+          # this job on the head that introduced the meter). The file lives
+          # here because this is the job that exports `TEST_RECORD_DB_URI` and
+          # installs the `[postgres]` extra; its own hermetic half also runs on
+          # `core`/`api`, where the live leg skips. Measured armed: 27 passed,
+          # 0 skipped — so the any-skip leg gate below stays green, and a later
+          # lane that deletes the savepoint reds a REQUIRED context instead of
+          # a skipped test. ⛔ Placed BEFORE `test_9567_record_capstone.py`:
+          # that file stays LAST on purpose (D10's policy drill re-applies the
+          # tenancy migration, so nothing another file asserts on may run after
+          # it) — every earlier addition obeyed that invariant, and this line
+          # does too.
           timeout -s INT -k 10 12m stdbuf -oL python -m pytest \
             tests/test_9078_record_written_by_production_path.py \
             tests/test_9555_narrative_carrier.py \
@@ -5069,6 +5084,7 @@ jobs:
             tests/test_9881_rename_reaches_the_record.py \
             tests/test_11642_vector_move_live.py \
             tests/test_9558_record_write_cost.py \
+            tests/test_postgres_bytes.py \
             tests/test_9567_record_capstone.py \
             -v --timeout=300 -p no:cacheprovider -r fEs \
             --junitxml="$SCRATCH/junit.xml" -o junit_family=xunit1 \

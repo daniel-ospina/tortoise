@@ -26,14 +26,13 @@ Hermetic: no Docker, no network. Every engine figure below was measured
 from __future__ import annotations
 
 import json
+import os
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
-from datetime import UTC, datetime
-
 from tortoise import metering
-from tortoise import postgres_bytes as pb
 from tortoise.postgres_bytes import (
     AUDIT_RPC,
     DEFAULT_EXCESS_BAND,
@@ -46,6 +45,12 @@ from tortoise.postgres_bytes import (
     per_org_bytes,
     reconcile,
 )
+
+#: The record lane's DSN (`TEST_RECORD_DB_URI`) — the one CI's
+#: `test-record-postgres` job exports. Unset ⇒ the LIVE leg below skips, and the
+#: hermetic leg still pins the statement order.
+RECORD_DB_ENV = "TEST_RECORD_DB_URI"
+
 
 def _dt(day: str) -> datetime:
     """A UTC instant from an ISO date — the ledger's window bounds are real
@@ -98,7 +103,7 @@ class _FakeCursor:
         self.value = value
         self.calls = []
 
-    def execute(self, sql, params):
+    def execute(self, sql, params=None):
         self.calls.append((sql, params))
 
     def fetchone(self):
@@ -227,9 +232,15 @@ def test_measure_written_rows_reads_the_rows_this_segment_wrote():
     written = measure_written_rows(
         conn, org_id="org_v", graph_id="g_v", seqs=range(1, 4))
     assert written.row_bytes == 7_241
-    sql, params = conn.cur.calls[0]
+    sql, params = conn.cur.calls[-2]
     assert ROWS_RPC in sql
     assert params == ("org_v", "g_v", [1, 2, 3])
+    # ⛔ THE READ IS BRACKETED BY A SAVEPOINT (#12764). The meter runs inside
+    # the caller's OPEN write transaction, so the guard is what stops a failed
+    # statement from aborting it — see the SAVEPOINT/ROLLBACK legs beside this
+    # one, and the live leg that measures the mechanism on a real server.
+    assert conn.cur.calls[0][0].startswith("SAVEPOINT")
+    assert conn.cur.calls[-1][0].startswith("RELEASE SAVEPOINT")
 
 
 def test_measure_written_rows_is_TOTAL():
@@ -246,6 +257,138 @@ def test_measure_written_rows_is_TOTAL():
 
     assert measure_written_rows(Boom(None), org_id="o", graph_id="g",
                                 seqs=[1]) is None
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 2b. THE TRANSACTION GUARD — swallowing the error is NOT enough (#12764)
+# ══════════════════════════════════════════════════════════════════════════
+
+try:  # psycopg2 is the `[postgres]` extra; these legs skip without it.
+    import psycopg2
+    _HAVE_PSYCOPG2 = True
+except Exception:  # noqa: BLE001, RUF100 - the optional extra's own absence
+    _HAVE_PSYCOPG2 = False
+
+
+class _FailingRpcCursor(_FakeCursor):
+    """A cursor whose meter call FAILS, as a missing function does on the server."""
+
+    def execute(self, sql, params=None):
+        self.calls.append((sql, params))
+        if ROWS_RPC in sql:
+            raise RuntimeError("function public.journal_event_bytes_for_rows "
+                               "does not exist")
+
+
+class _FailingRpcConn:
+    def __init__(self):
+        self.cur = _FailingRpcCursor(None)
+        # A transactional handle, explicitly: the guard under test is the one a
+        # NON-autocommit connection needs.
+        self.autocommit = False
+
+    def cursor(self):
+        return self.cur
+
+
+def test_a_failed_measurement_ROLLS_BACK_TO_ITS_SAVEPOINT_instead_of_aborting():
+    """The statement order that makes 'never change a write's outcome' true.
+
+    Without the savepoint the failed read leaves the caller's transaction
+    ABORTED, and the caller's `commit()` then discards the whole write — valued
+    as the meter's contract being honoured while it silently destroyed the
+    record. The order pinned here is the contract: the meter opens its own
+    bracket, and CLOSES it on the failure path before re-raising.
+    """
+    conn = _FailingRpcConn()
+    assert measure_written_rows(conn, org_id="o", graph_id="g", seqs=[1]) is None
+
+    statements = [sql for sql, _params in conn.cur.calls]
+    assert statements[0].startswith("SAVEPOINT"), statements
+    assert ROWS_RPC in statements[1], statements
+    # ⛔ BOTH halves: roll back TO the savepoint (undo the meter's statement)
+    # and RELEASE it (leave the caller's transaction exactly as we found it).
+    assert statements[2].startswith("ROLLBACK TO SAVEPOINT"), statements
+    assert statements[3].startswith("RELEASE SAVEPOINT"), statements
+    assert len(statements) == 4, statements
+
+
+def test_an_AUTOCOMMIT_connection_gets_no_savepoint():
+    """No transaction to poison ⇒ no savepoint to invent (it would be an error)."""
+    conn = _FakeConn(json.dumps(STORED_VECTOR))
+    conn.autocommit = True
+    assert measure_written_rows(
+        conn, org_id="o", graph_id="g", seqs=[1]).row_bytes == 7_241
+    statements = [sql for sql, _params in conn.cur.calls]
+    assert statements == [f"SELECT public.{ROWS_RPC}(%s, %s, %s)"], statements
+
+
+@pytest.mark.skipif(not _HAVE_PSYCOPG2, reason="the [postgres] extra is absent")
+def test_a_failed_measurement_does_not_roll_back_the_callers_WRITE(monkeypatch):
+    """⛔ THE MEASURED INCIDENT, PINNED ON A REAL SERVER (#12764).
+
+    This is the leg that reds if someone "simplifies" the meter by deleting the
+    savepoint: the failure path is exercised end-to-end on a real Postgres, and
+    the assertion is on the CALLER'S OWN ROW — not on the meter's reply.
+
+    Measured on pgvector:16 before the guard existed: `CREATE TABLE` + `INSERT`
+    in one transaction, this module's read of a function the schema did not
+    carry, then `commit()` → the table did not exist at all, and NO exception
+    was raised anywhere. That is the record write vanishing in production, with
+    the write reporting `APPLIED`.
+
+    ⛔ ARMED WHERE IT RUNS, and it skips only without a DSN. The `api`/`core`
+    surfaces have no record database, so this file is ALSO in the
+    `test-record-postgres` job's pytest list — that job exports
+    `TEST_RECORD_DB_URI` and its any-skip leg gate (#9551) FAILS on a skip,
+    which is what keeps this leg from being the "the guard never ran" shape
+    (#12764 review).
+    """
+    dsn = os.environ.get(RECORD_DB_ENV)
+    if not dsn:
+        pytest.skip(f"{RECORD_DB_ENV} is unset — the live leg needs a Postgres")
+    # The CI record database is exactly the shape that produced the incident:
+    # it carries the record migrations and NOT the control-plane meter function.
+    # Named rather than assumed, so the leg also reds on a server that happens
+    # to carry the real function.
+    from tortoise import postgres_bytes as pb
+
+    monkeypatch.setattr(pb, "ROWS_RPC", "meter_function_absent_12764")
+
+    writer = psycopg2.connect(dsn)
+    try:
+        with writer.cursor() as cur:
+            cur.execute("CREATE TEMP TABLE meter_survives_12764 (v int)")
+            cur.execute("INSERT INTO meter_survives_12764 VALUES (42)")
+
+        # The meter fails INSIDE the caller's open transaction.
+        assert pb.measure_written_rows(
+            writer, org_id="org_12764", graph_id="g_12764", seqs=[1]) is None
+
+        # The transaction is still USABLE — this is the half a bare `except`
+        # cannot provide. ⛔ MEASURED, so the claim is exact: without the
+        # bracket this read is where the leg goes red, with
+        # `InFailedSqlTransaction: current transaction is aborted` — the abort
+        # is already fatal by here, and the commit below would discard the row
+        # without raising (measured: `commit()` returns success in that state).
+        with writer.cursor() as cur:
+            cur.execute("SELECT count(*) FROM meter_survives_12764")
+            assert cur.fetchone()[0] == 1
+
+        writer.commit()
+
+        # …and the caller's work SURVIVED the commit. This is the assertion a
+        # broken guard cannot satisfy: the row is gone after `commit()`.
+        with writer.cursor() as cur:
+            cur.execute("SELECT count(*) FROM meter_survives_12764")
+            assert cur.fetchone()[0] == 1, (
+                "the caller's row was rolled back by a FAILED METER — the "
+                "failed statement aborted the caller's transaction and the "
+                "commit discarded it silently (#12764)")
+            cur.execute("DROP TABLE meter_survives_12764")
+        writer.commit()
+    finally:
+        writer.close()
 
 
 def test_chunk_detail_unavailable_is_NULL_never_zero():

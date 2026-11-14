@@ -78,14 +78,29 @@ is logged and reported as ``None`` / ``ok=False``. The pure parsers
 (:func:`parse_written_rows`, :func:`parse_per_org_bytes`) DO raise, so a
 malformed payload fails its reading instead of masquerading as a zero — a
 failed reading's zeros are PLACEHOLDERS, never a measured zero.
+
+⛔ "TOTAL" IS NOT ENOUGH ON A CONNECTION SOMEONE ELSE WILL COMMIT — THE METER
+READS THROUGH A SAVEPOINT (measured 2026-11-14, #12764). Catching the exception
+is only half of fail-soft: the FAILED STATEMENT has already aborted the
+caller's transaction on the server, and Postgres then discards everything the
+transaction did at COMMIT — silently, and with a COMMIT that reports SUCCESS
+(psycopg2 issues the ROLLBACK for you). Measured on a bare pgvector:16, in one
+transaction, `CREATE TABLE` + `INSERT` + this module's read of a function the
+schema did not carry + `commit()` → ``rows kept: 0`` and the table did not
+exist, with no exception anywhere. In production that is the WHOLE RECORD
+WRITE — the rows, not the meter — and it presents as ``APPLIED``. So the read
+runs inside :data:`_SAVEPOINT`, and a failure rolls back TO it: the meter owns
+its own failure, and the caller's transaction survives it.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Sequence
+from typing import Any
 
 _logger = logging.getLogger(__name__)
 
@@ -109,6 +124,11 @@ __all__ = [
 #: The two SQL entry points. One place, so the SQL and the caller cannot drift.
 ROWS_RPC = "journal_event_bytes_for_rows"
 AUDIT_RPC = "postgres_per_org_bytes"
+
+#: The savepoint the meter's single read is wrapped in (see the module
+#: docstring's ⛔ block, and :func:`measure_written_rows`). Named so a failure
+#: log can say which savepoint was rolled back to.
+_SAVEPOINT = "tortoise_pg_bytes_meter"
 
 #: The sentence a reader must see beside any per-org figure. Carried on every
 #: reading so the number cannot be consumed as an invoice or a cap input
@@ -264,7 +284,8 @@ def measure_written_rows(
     graph_id: str,
     seqs: Sequence[int] | Iterable[int],
 ) -> WrittenRows | None:
-    """Read the stored bytes of the rows just written. TOTAL — never raises.
+    """Read the stored bytes of the rows just written. TOTAL — never raises,
+    and never poisons the caller's transaction.
 
     Call this in the SAME transaction as the insert, so the rows it sums are
     the ones this write put there — and so what it reports is what Postgres
@@ -272,6 +293,22 @@ def measure_written_rows(
     see later. Returns ``None`` on any failure (no connection, an unarmed
     record, a missing function on an older schema, a malformed reply), logging
     at DEBUG: a metering fault must never change a write's outcome.
+
+    ⛔ THE SAVEPOINT IS WHAT MAKES THAT LAST SENTENCE TRUE (#12764, measured
+    2026-11-14). Swallowing the exception is not enough: the failing STATEMENT
+    has already aborted the caller's transaction, and the caller's later
+    ``commit()`` then rolls the whole write back — silently, reporting success.
+    Measured on pgvector:16: one transaction, an ``INSERT``, then this read of
+    a function the schema did not carry (the exact CI shape — the record
+    migrations do not create ``journal_event_bytes_for_rows``), then
+    ``commit()`` → the row was GONE and no exception was raised. Ten record
+    integration tests went red from that one mechanism, every one of them
+    reading ``0 rows``.
+
+    So the read is bracketed by ``SAVEPOINT`` / ``ROLLBACK TO SAVEPOINT``: a
+    failure undoes the meter's OWN statement and nothing else. An autocommit
+    connection needs no savepoint (each statement is its own transaction, so
+    nothing can carry the abort), and is left alone.
 
     ``seqs`` is a sequence of journal positions — one indexed read per segment,
     not one per record.
@@ -282,16 +319,35 @@ def measure_written_rows(
             return None
         if conn is None:
             raise ValueError("no record connection supplied")
+        # A driver that does not expose `autocommit` is treated as transactional:
+        # that is the DBAPI default, and it is the case where a savepoint is
+        # REQUIRED. Only an explicitly autocommit handle skips it.
+        guarded = not bool(getattr(conn, "autocommit", False))
         with conn.cursor() as cur:
-            cur.execute(
-                f"SELECT public.{ROWS_RPC}(%s, %s, %s)",
-                (org_id, graph_id, positions),
-            )
-            row = cur.fetchone()
+            if guarded:
+                cur.execute(f"SAVEPOINT {_SAVEPOINT}")
+            try:
+                cur.execute(
+                    f"SELECT public.{ROWS_RPC}(%s, %s, %s)",
+                    (org_id, graph_id, positions),
+                )
+                row = cur.fetchone()
+            except Exception:
+                if guarded:
+                    # Both are suppressed: this block exists to make sure the
+                    # transaction is NOT left aborted, and a raising cleanup
+                    # would be the very failure it is here to prevent.
+                    with contextlib.suppress(Exception):
+                        cur.execute(f"ROLLBACK TO SAVEPOINT {_SAVEPOINT}")
+                        cur.execute(f"RELEASE SAVEPOINT {_SAVEPOINT}")
+                raise
+            if guarded:
+                with contextlib.suppress(Exception):
+                    cur.execute(f"RELEASE SAVEPOINT {_SAVEPOINT}")
         if not row:
             raise ValueError(f"{ROWS_RPC} returned no row")
         return parse_written_rows(row[0])
-    except Exception:  # noqa: BLE001 - a meter must never break the write
+    except Exception:  # noqa: BLE001, RUF100 - a meter must never break the write
         _logger.debug("postgres byte measurement failed (non-fatal)", exc_info=True)
         return None
 
@@ -439,7 +495,7 @@ def per_org_bytes(cp: Any) -> PerOrgPostgresBytes:
         if cp is None:
             raise ValueError("no control-plane handle supplied")
         return parse_per_org_bytes(cp.rpc_value(AUDIT_RPC, {}))
-    except Exception as e:  # noqa: BLE001 - a measurement fault is a reading
+    except Exception as e:  # noqa: BLE001, RUF100 - a measurement fault is a reading
         _logger.debug("per-org postgres bytes audit failed (non-fatal)", exc_info=True)
         return PerOrgPostgresBytes(
             orgs=(), rows=0, attributed_bytes=0,

@@ -2742,6 +2742,19 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # tests/test_ci_selection.py::test_postgres_storage_guard_runs_on_migration_or_doc_change.
              "supabase/migrations/20261015000001_postgres_storage_footprint.sql",
              "docs/ops/postgres-storage-measurement.md",
+             # #12762: the SAME silent-drop class, for the per-org bytes meter.
+             # `tests/test_postgres_bytes.py` (registered `api` AND `core`) pins
+             # the three RPC names, their parameter names and the ledger SQL
+             # against the migration TEXT — and a migration-only edit selected
+             # NO surface before this entry (measured: `--changed-files
+             # supabase/migrations/20261114000001_per_org_postgres_bytes.sql` ->
+             # surfaces=[], full=False, the pin absent), so a rename on the SQL
+             # side would have shipped with the guard never running. The doc is
+             # already listed above (`docs/ops/postgres-storage-measurement.md`
+             # gained the #12762 section), so only the migration is new here.
+             # Pinned by
+             # tests/test_ci_selection.py::test_postgres_bytes_guard_runs_on_a_migration_only_change.
+             "supabase/migrations/20261114000001_per_org_postgres_bytes.sql",
              # #8051: `tools/` is a flat NON_PYTHON_PREFIXES entry, so a
              # `tools/lane_stash.py`-only change was filtered out BEFORE the
              # "not matched -> core" fallback: `select(["tools/lane_stash.py"])`

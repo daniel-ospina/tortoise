@@ -10,8 +10,7 @@ created: 2026-10-15
 updated: 2026-10-15
 ---
 
-# Postgres storage footprint + per-org analytics row growth (#4492)
-# — and per-org bytes from what we WRITE (#12762)
+# Postgres storage footprint + per-org analytics row growth (#4492) — and per-org bytes from what we WRITE (#12762)
 
 > **This is a MEASUREMENT, not a policy.** It answers two questions the B7
 > cost-structure audit found unanswerable: *how large is the control plane's
@@ -112,7 +111,7 @@ is a measurement of the account's own stored content, not a share of a total.
 
 ### The TOAST question, settled by measurement — and the issue's premise is FALSE
 
-#12762 was filed on the premise that `sum(pg_column_size(...))` reports the
+The premise. #12762 was filed on the premise that `sum(pg_column_size(...))` reports the
 **18-byte TOAST pointer** for a value moved out of line, a ~100× undercount.
 Two sources were said to disagree, so this was measured rather than cited.
 

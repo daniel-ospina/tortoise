@@ -5477,6 +5477,39 @@ def test_postgres_storage_guard_runs_on_migration_or_doc_change():
         assert "test_postgres_storage.py" in r["test_files"], (changed, r)
 
 
+def test_postgres_bytes_guard_runs_on_a_migration_only_change():
+    # #12762: `tests/test_postgres_bytes.py` pins the three RPC names
+    # (`journal_event_bytes_for_rows`, `postgres_per_org_bytes`,
+    # `metering_increment_postgres_bytes`), their parameter names and the ledger
+    # SQL against the migration TEXT — the same SQL↔Python contract shape as
+    # `test_postgres_storage.py` above, and the same silent-drop class: the
+    # migration path is under `supabase/` (a NON_PYTHON_PREFIXES entry), matches
+    # no SOURCE_PATTERNS row, and came back with `changed == []` before the
+    # CORE_ALSO entry — so a rename on the SQL side alone selected no surface
+    # and the guard never ran on the one change that can break it.
+    #
+    # Measured before the entry: `_sel([migration])` -> surfaces=[], full=False,
+    # test_postgres_bytes.py absent. Mutation check: dropping the CORE_ALSO
+    # entry fails this arm.
+    migration = ("supabase/migrations/"
+                 "20261114000001_per_org_postgres_bytes.sql")
+    r = _sel([migration])
+    assert r["full"] is False, r
+    assert r["surfaces"] == ["core"], r
+    assert "test_postgres_bytes.py" in r["test_files"], r
+
+    # And the Python half is dual-registered, so neither side's diff leaves the
+    # pin unselected: `core` for the meter module, `api` for the two files that
+    # are exact `api` SOURCE_PATTERNS.
+    for changed, surface in (("tortoise/postgres_bytes.py", "core"),
+                             ("tortoise/record_writer.py", "core"),
+                             ("tortoise/metering.py", "api"),
+                             ("tortoise/supabase_control.py", "api")):
+        got = _sel([changed])
+        assert surface in got["surfaces"], (changed, got)
+        assert "test_postgres_bytes.py" in got["test_files"], (changed, got)
+
+
 def test_a_linter_policy_file_at_any_depth_runs_the_full_matrix():
     # #7435 review P1 (with its round-6 correction): cli2 reads a `.markdownlint*`
     # config from ANY directory on the path to a linted file, and a more specific
