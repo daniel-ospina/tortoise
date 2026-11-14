@@ -1032,18 +1032,23 @@ jobs:
       #
       # ARM 2, ARITHMETICALLY (`docs/ops/ci-wall-clock.md` §2: `cap >= SUM x 1.5`
       # and the `test` cap stays 90 ⇒ SUM <= 60 m). The measured `test` SUM without
-      # any cache-write term is 51.6 m — 10 m last-failed pre-phase + 28 m emitted
-      # worst shard watchdog + 6 m embedder + 3.03 m `Set up job` + 4.23 m of
-      # uncapped pre-suite + 0.38 m last-failed save — so <= 8.4 m is available;
-      # this shape takes 8 (1 m prune + 7 m save), SUM 59.6, x 1.5 = 89.5.
+      # any cache-write term is 50.64 m on the 2026-11-14 map — 10 m last-failed
+      # pre-phase + 27 m emitted worst shard watchdog + 6 m embedder + 3.03 m
+      # `Set up job` + 4.23 m of uncapped pre-suite + 0.38 m last-failed save — so
+      # <= 9.36 m is available; this shape takes 8 (1 m prune + 7 m save), SUM 58.64,
+      # x 1.5 = 87.96 against the 90 m cap.
       # (The watchdog read 32 m at `fast_shards: 9` on the 2026-11-09 map; #11602
-      # raised it to 10, which re-packs the worst shard to 28 m. Two numbers, two
-      # owners: the emission is `tools/ci_selection.py --emit-push-matrix`'s, and
-      # §2's own copy in `docs/ops/ci-wall-clock.md` is held to it by
+      # raised it to 10, which re-packed the worst shard to 28 m, and #11576 raised
+      # it to 11, which re-packs it to 27 m. ⛔ EVERY NUMERAL ABOVE IS A SNAPSHOT,
+      # not a derivation: this paragraph has now read 52.6, 51.6 and 50.64 for the
+      # same sub-total as the map was re-packed, each time a human noticing by hand
+      # (#11602 review P2, then #11290). Re-derive from the emission before quoting
+      # the headroom; two numbers, two owners: the emission is
+      # `tools/ci_selection.py --emit-push-matrix`'s, and §2's own copy in
+      # `docs/ops/ci-wall-clock.md` is held to it by
       # `tests/test_ci_selection.py::test_the_test_job_carries_no_unbounded_cache_post_step`
       # (that pin parses §2's phrase `the emitted <N> m per-shard watchdog`). THIS
-      # paragraph is NOT pin-read — that is why the sub-total here read 52.6 for a
-      # 28 m watchdog until it was recomputed by hand (#11602 review, P2).)
+      # paragraph is NOT pin-read.)
       #
       # WHY SPLIT RATHER THAN JUST BOUND 3.88 GB, at its real size: the degraded
       # uplink this run measured is 0.9 MB/s sustained (3,019,898,880 B in 3,412 s),

@@ -238,7 +238,7 @@ watchdog + 6 m embedder + **~7.3 m of MEASURED startup, not the ~1 m an earlier 
 suite's first line — the 10:24:32 → 10:28:58 window of 266 s MINUS the embedder's own measured 12 s,
 whose 6 m cap is already a term above; run 42000057137, job `test (d)`, `actions/jobs/127165076497`)
 plus **an 8 m cache-write term (1 m prune + 7 m save)** and ~0.4 m last-failed save = **58.6 m against
-90, x 1.5 = 87.9** — 2.1 m of headroom, where the refreshed map at 9 shards stood at
+90, x 1.5 = 88.0** — 2.0 m of headroom, where the refreshed map at 9 shards stood at
 **63.6 m, x 1.5 = 95.5** and reded
 `test_the_test_job_carries_no_unbounded_cache_post_step`. The term that moved is
 the watchdog: it read **26 m** until #10999 registered its own fast suite
@@ -258,7 +258,7 @@ later**: main's `test_embed_decision_step_11086.py` and that branch's
 packs the worst shard at **840.2 s** (either parent alone packed 840.0 s), `ceil(840.2/60 x 2)`
 rounds up to **29 m**, and the arm-2 SUM became **60.64 m, x 1.5 = 90.96 m against the 90 m cap**
 — RED where both parents pass. `fast_shards: 11` packs the same map to 780.2 s → 27 m, i.e. the
-58.6 m above: 2.1 m of real headroom instead of the 0.5 m S=10 had been clearing by. The cap was
+58.6 m above: 2.0 m of real headroom instead of the 0.5 m S=10 had been clearing by. The cap was
 NOT moved — `#3239`'s stale-head exposure is what raising it re-opens, and the SUM rose from the
 POOL, not from the pre-suite terms.) The write term fits because #11063 split this job's cache by payload: `~/.cache/pip`
 (3,616,385,308 B in a PR scope, the torch wheel set, 93% of the 3.88 GB payload the defect uploaded)
