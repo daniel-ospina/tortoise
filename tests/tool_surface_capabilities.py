@@ -62,8 +62,22 @@ READ_THROUGH_WRITE_METHODS: dict[str, str] = {
     "get_confidence": "lazy `dream(dirty_only=True)` writes n.confidence (#1157/#4122)",
     # `get_tenant_packs` LEFT this set in #11609 batch 1 with its only MCP door
     # (`tortoise_packs_list`, ARCHIVED); the read-through posture it recorded is
-    # unchanged on the REST twin `GET /v1/packs`. A future MCP door must re-add it.
+    # unchanged on the REST twin `GET /v1/packs`. A future MCP door must re-add it —
+    # until then it is declared in REST_READ_THROUGH_WRITERS below, so no gate loses
+    # sight of it.
 }
+
+# Read-through writers whose only MCP **door** was archived (#11609 batch 1) while the
+# writer itself stayed live on the REST surface. Same authority as the maps above — kept
+# in this file so there is no second ledger to fall out of date — narrowed to the routes
+# that outlived their MCP door.
+REST_READ_THROUGH_WRITERS: dict[str, str] = dict(
+    get_tenant_packs=(
+        "self-heal `ensure_tenant_packs` MERGEs a missing starter `:PackInstall` "
+        "activation (#2728/#8648); reached by `GET /v1/packs`, whose handler says so "
+        "(#9583)"
+    ),
+)
 
 # Graph writers reached through helpers OUTSIDE the sdk.py derivation boundary
 # (pack_manifest_store.py, mining.py, hosted_api.py).  Each must be bound to a

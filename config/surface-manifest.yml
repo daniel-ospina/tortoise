@@ -153,13 +153,6 @@ response_fields:
     body to keep byte-identical; the three states above are its initial contract.
 - response: sdk:get_organisation_account
   field: plan.at_cap
-  emitted_when: 'PRESENT only when the answer is knowable: `true` when `used >= limit` (the predicate
-    `enforce_org_limit` itself refuses on, so the read and the 402 agree) and `false` when the plan is
-    unlimited. ABSENT when `used` could not be counted under a bounded limit — a `false` there would be
-    the falsely reassuring answer #4331 forbids on /v1/team. At-cap is a STATE in this reply, never an
-    exception: the account is held at its cap on purpose (#10175) and must read as held.'
-  unchanged_when_off: 'n/a — not flag-gated; PAIRED with `plan.used`, which is null (never a false 0)
-    when the count failed.'
   emitted_when: 'PRESENT only when the answer is knowable: `true` when `used >= limit` (the predicate `enforce_org_limit`
     itself refuses on, so the read and the 402 agree) and `false` when the plan is unlimited. ABSENT when `used`
     could not be counted under a bounded limit — a `false` there would be the falsely reassuring answer #4331 forbids
@@ -919,7 +912,7 @@ approval_date: '2026-09-18'
 # excluded from that drift check and graded only by the provenance property. Do not read
 # the pair as one snapshot: this very baseline is such a case — #11609 batch 1 cut a lane
 # tree with four no-destination MCP tools removed and recorded `origin/main`, so the counts
-# below read 68 while `6408da01ce` itself still holds 72. ⛔ A hand-edited `counts` reds
+# below read 68 while `30c9e7c4d` itself holds 72. ⛔ A hand-edited `counts` reds
 # `check` — re-cut instead (`cut --commit $(git rev-parse origin/main)`), and never paste a
 # number in.
 # ⚠️ `counts` is DERIVED by `render`, and `cut_at_commit` above is the provenance of
@@ -927,10 +920,11 @@ approval_date: '2026-09-18'
 # dead public SDK methods at `45eefb26c`, so `sdk_public_methods` was 124 here while
 # `d05370918` held 150 — and it is 125 since #10015 implemented approved row 28
 # (`get_organisation_account`). The `counts:` value is DERIVED and moves whenever a
-# row does; read the live number beside it, not here. Re-cutting is the durable fix and is deliberately NOT done
-# here: `cut` is owner-gated per this tool's own docstring ("ask Daniel FIRST, before
-# the re-cut") because it re-derives every row from the declaration. Until then, read
-# the count as "at this head" and the sha as "when the rows were cut".
+# row does; read the live number beside it, not here. This baseline HAS been cut since
+# (`cut_at_commit` above records it), so the two agree by construction rather than by
+# convention — a future `counts` edit still reds `check`, and the durable fix is still
+# `cut` (owner-gated per this tool's own docstring: "ask Daniel FIRST, before the
+# re-cut", because it re-derives every row from the declaration).
 counts:
   tools: 68
   sdk_public_methods: 125
