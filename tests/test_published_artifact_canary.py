@@ -2893,6 +2893,48 @@ def test_the_cli_writes_the_summary_file_and_the_json_shape(tmp_path, monkeypatc
     engine = next(a for a in payload["arms"] if a["name"] == "engine-init")
     assert engine["status"] == canary.FAIL, payload
 
+    # ⛔ THE MACHINE SURFACE MUST NOT CARRY A VERDICT THE TABLE REFUSES TO PRINT (#12589 review
+    # round 10, P3). `release-age` is informational and its own detail says the timestamp was not
+    # obtained ("uploaded unknown ago"); the table renders `—` there, so `--json` must not stamp
+    # "OK". One rendering of one fact, or the two surfaces disagree about whether a non-reading is
+    # a verdict.
+    age = next(a for a in payload["arms"] if a["name"] == "release-age")
+    assert age["gated"] is False, payload
+    assert age["status"] == "—", age
+
+
+def test_the_tree_version_row_implicates_only_the_arm_that_failed():
+    """⛔ A `FAIL` ROW MAY NOT BLAME AN ARTIFACT THAT PASSED (#12589 review round 10, P3).
+
+    At the same version the pre-fix text said "the published build at this version predates the
+    fix" for ANY FAIL. When the failing arm is `client-published` (a `tortoise-client` 404 here)
+    while `engine-init` PASSes at that same version, that sentence claims the engine's published
+    artifact is stale — the opposite of the row directly above it. Two sentences, one per arm.
+    """
+    # The engine is healthy and installs; the CLIENT answers with an empty release, so
+    # `client-published` is the FAIL and `engine-init` is OK.
+    report = _client_report(
+        {"info": {"version": "0.2.0"}, "releases": {"0.2.0": []}},
+    )
+    assert report.verdict == canary.FAIL, [a.name for a in report.arms if a.status == canary.FAIL]
+    failing = [a.name for a in report.arms if a.gated and a.status == canary.FAIL]
+    assert failing == ["client-published"], failing
+    row = next(a for a in report.arms if a.name == "tree-version")
+    assert "predates the fix" not in row.detail, row.detail
+    assert "NOT the engine build" in row.detail, row.detail
+
+    # ...and the engine FAIL at the same version keeps the sentence it earned.
+    engine_fail = canary.build_report(
+        engine_doc={"info": {"version": "0.2.0"}, "releases": {"0.2.0": [_CLIENT_GOOD]}},
+        client_doc=_client_doc(),
+        tree_version="0.2.0",
+        init_arm=canary.Arm("engine-init", canary.FAIL, "tortoise init exits 1"),
+        now=NOW,
+    )
+    assert engine_fail.get("engine-init").status == canary.FAIL
+    row = next(a for a in engine_fail.arms if a.name == "tree-version")
+    assert "predates the fix" in row.detail, row.detail
+
 
 def test_a_wheel_that_installs_without_the_console_script_is_a_FAIL_not_UNKNOWN(tmp_path):
     """An artifact that installs but ships no `tortoise` entry point cannot run the
@@ -3529,8 +3571,10 @@ def test_the_index_read_ignores_the_ambient_proxy_the_child_strips(monkeypatch):
 #   2. a document whose `info` is not an object → `AttributeError` → `main()`'s backstop → exit
 #      2. The exit code was right; the REASON was a traceback.
 #
-# The rule these pin is: the arms read a document COMPLETELY or they judge nothing. A FAIL may
-# only assert what a complete reading established.
+# The rule these pin is one-directional (#12589 review round 10, P3 — the earlier wording here
+# said "read COMPLETELY or judge nothing", which the partial-read OK cases below deliberately
+# reject): **a FAIL** may only assert what a COMPLETE reading established, while the OK claim is
+# EXISTENTIAL — it may stand on a partial read, disclosed in its own detail.
 # --------------------------------------------------------------------------
 
 _CLIENT_GOOD = {
@@ -3705,6 +3749,17 @@ def test_an_UNPARSEABLE_release_VALUE_is_UNKNOWN_and_never_orders_a_release():
     assert report.exit_code == 0, report.exit_code
     assert canary.RELEASES_UNREADABLE in arm.detail, arm.detail
     assert "READABLE subset" in arm.detail, arm.detail
+    # ⛔ THE NOTE'S CAUSE ENUMERATION IS PINNED HERE, at the one place that prints it (#12589 review
+    # round 10, P3). Narrowing it to a single cause left all 83 tests green, so the invariant
+    # ("all four sites say the SAME words") had drifted to three. The wording names what the
+    # reader actually rejects, so the operator can tell which shape broke.
+    for phrase in (
+        "a value that is not an array",
+        "an entry that is not an object",
+        "no boolean `yanked`",
+        "no non-empty string `filename`",
+    ):
+        assert phrase in arm.detail, (phrase, arm.detail)
     # ...and an UNREADABLE-only map still gets the disclosure-free UNKNOWN detail.
     assert (
         canary.RELEASES_UNREADABLE

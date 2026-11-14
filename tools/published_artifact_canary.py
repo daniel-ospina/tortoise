@@ -1136,12 +1136,28 @@ def build_report(
                 # that version — today's exact state (0.2.0 published, 0.2.0 in the
                 # tree, wheel missing #2204). Saying "no bump pending" here tells the
                 # operator the opposite of what the summary row requires (#12363 round 5).
-                relationship = (
-                    "the tree carries the same version — a bump IS required: the "
-                    "published build at this version predates the fix"
-                    if report.verdict == FAIL
-                    else "the tree's version (no bump pending)"
+                # ⛔ AND ONLY THE ENGINE ARM IMPLICATES THE ENGINE BUILD (#12589 review round 10,
+                # P3). "the published build at this version predates the fix" was emitted for ANY
+                # FAIL, so a client-arm FAIL (e.g. `tortoise-client` 404) — with the engine build
+                # at that version PASSing in the row above — claimed the engine artifact was stale.
+                # Two sentences, each true of its arm.
+                engine_failed = any(
+                    arm.gated and arm.status == FAIL and arm.name != "client-published"
+                    for arm in report.arms
                 )
+                if report.verdict == FAIL and engine_failed:
+                    relationship = (
+                        "the tree carries the same version — a bump IS required: the "
+                        "published build at this version predates the fix"
+                    )
+                elif report.verdict == FAIL:
+                    relationship = (
+                        "the tree carries the same version — the failing arm above is NOT the "
+                        "engine build, so this version's engine artifact is not implicated; "
+                        "read the failing row before deciding what a bump would fix"
+                    )
+                else:
+                    relationship = "the tree's version (no bump pending)"
             else:
                 relationship = "the tree's version differs (a release is owed or in flight)"
             report.add(
@@ -1911,7 +1927,11 @@ def _main(argv: list[str] | None = None) -> int:
                     "arms": [
                         {
                             "name": a.name,
-                            "status": a.status,
+                            # ⛔ THE MACHINE SURFACE RENDERS IT THE SAME WAY THE TABLE DOES
+                            # (#12589 review round 10, P3): a non-gated row has no verdict, so
+                            # `--json` must not stamp "OK" on an informational row whose own
+                            # detail says the reading was not obtained ("uploaded unknown ago").
+                            "status": a.status if a.gated else "—",
                             "gated": a.gated,
                             "detail": a.detail,
                         }
