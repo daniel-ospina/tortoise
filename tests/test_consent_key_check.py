@@ -175,6 +175,39 @@ def test_one_configured_half_is_a_SPLIT_not_agreement(monkeypatch, capsys) -> No
     # verbatim into the public alert, so a swap sends an operator to set the secret on the half that
     # already has it — the mutation must red here, not be resolved by a human reading two log lines.
     assert "api is configured and app is not" in out, out
+    # ⛔ AND THE CONSEQUENCE MUST FOLLOW THE DARK HALF. The halves are not interchangeable: `app`
+    # MINTS and `api` VERIFIES. A review found this arm rendering "one half signs, the other cannot
+    # verify" — which is right when `api` is dark and INVERTED when `app` is, i.e. here. Pinned as the
+    # PAIR (the right sentence present, the other orientation's absent) because "contains 'cannot'"
+    # would pass on either.
+    assert "nothing can sign a consent token" in out, (
+        "the api-configured SPLIT no longer says the missing `app` half is the one that MINTS: "
+        f"{out!r}"
+    )
+    assert "every minted token is refused" not in out, (
+        "the api-configured SPLIT carries the `api`-is-dark consequence — the roles are inverted, and "
+        f"this sentence is pasted into the public alert: {out!r}"
+    )
+
+
+def test_the_OTHER_SPLIT_orientation_states_ITS_own_consequence(monkeypatch, capsys) -> None:
+    """The mirror image: `app` configured, `api` dark. One orientation cannot see an inversion.
+
+    With `app` live nothing can VERIFY, so every minted token is refused — the opposite consequence
+    and the opposite remediation from the `api`-live arm above. A detail computed from a constant
+    string instead of from `dark` renders the wrong one of the two.
+    """
+    _serve(monkeypatch, _health(None, configured=False, reason="not_set"), _pages(_fp(_KEY_A)))
+    assert CKC.main([]) == 1
+    out = capsys.readouterr().out
+    assert "CONSENT-KEY: SPLIT" in out
+    assert "app is configured and api is not" in out, out
+    assert "every minted token is refused" in out, (
+        f"the app-configured SPLIT does not say the missing `api` half is the one that VERIFIES: {out!r}"
+    )
+    assert "nothing can sign a consent token" not in out, (
+        f"the app-configured SPLIT carries the `app`-is-dark consequence — the roles are inverted: {out!r}"
+    )
 
 
 def test_neither_configured_is_OFF_and_never_AGREE(monkeypatch, capsys) -> None:

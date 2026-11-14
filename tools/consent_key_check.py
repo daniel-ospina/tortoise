@@ -259,10 +259,25 @@ def compare(api: Reading, app: Reading) -> Verdict:
     if configured["api"] != configured["app"]:
         live = [r.half for r in readings if r.configured]
         dark = [r.half for r in readings if not r.configured]
+        # ⛔ THE CONSEQUENCE FOLLOWS THE DARK HALF, because the two halves do NOT do the same thing:
+        # `app` MINTS (its Pages Function signs the consent token) and `api` VERIFIES it. A single
+        # static sentence — "one half signs, the other cannot verify" — was right in one orientation
+        # and INVERTED in the other, and this detail is pasted verbatim into the PUBLIC alert body, so
+        # the wrong version tells an operator that the working half is the broken one. Pinned in BOTH
+        # orientations, because one orientation cannot see the inversion.
+        # ⛔ THE CONSEQUENCE FOLLOWS THE DARK HALF, because the two halves do NOT do the same thing:
+        # `app` MINTS (its Pages Function signs the consent token) and `api` VERIFIES it. A single
+        # static sentence — "one half signs, the other cannot verify" — was right in one orientation
+        # and INVERTED in the other, and this detail is pasted verbatim into the PUBLIC alert body, so
+        # the wrong version tells an operator that the working half is the broken one. Pinned in BOTH
+        # orientations, because one orientation cannot see the inversion.
+        if dark == ["app"]:
+            consequence = "the `app` half mints, so nothing can sign a consent token"
+        else:
+            consequence = "the `api` half verifies, so every minted token is refused"
         return Verdict(
             "SPLIT",
-            f"{'/'.join(live)} is configured and {'/'.join(dark)} is not — one half signs, the other "
-            "cannot verify",
+            f"{'/'.join(live)} is configured and {'/'.join(dark)} is not — {consequence}",
             EXIT_DISAGREE,
             readings,
         )

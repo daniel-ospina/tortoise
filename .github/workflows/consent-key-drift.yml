@@ -32,10 +32,21 @@
 # the next tick repeats the reading (the same reason `deploy-staleness.yml` gives). Its own
 # concurrency group with `cancel-in-progress: false` means a run is never superseded mid-flight.
 #
-# IT CANNOT BLOCK A MERGE, AND THE ISSUE IS THE SIGNAL. A `schedule`-event run is a NON-CODE event —
-# `schedule` is a MEMBER of the merge rail's `NON_CODE_EVENTS` (`tools/merge_throughput.py`), which is
-# what EXCLUDES it from the merge decision — so a red tick never gates a PR. The
-# monitor's output is the issue `.github/scripts/auto-file-issue.sh` files — ONE issue per streak,
+# A SCHEDULED TICK CANNOT BLOCK A MERGE, AND THE ISSUE IS THE SIGNAL. A `schedule`-event run is a
+# NON-CODE event — `schedule` is a MEMBER of the merge rail's `NON_CODE_EVENTS`
+# (`tools/merge_throughput.py`), which is what EXCLUDES it from the merge decision — so a red tick
+# never gates a PR.
+#
+# ⛔ THAT EXEMPTION IS BY EVENT, NOT BY WORKFLOW, AND A DISPATCH IS NOT A SCHEDULE. `NON_CODE_EVENTS`
+# is `{schedule, issues, issue_comment}`, so a `workflow_dispatch` run is NOT exempt: dispatched
+# against `main` it attaches a check-run to main's HEAD sha and enters the rail as a BLOCKING base red
+# for every PR. That is exactly the ad-hoc path §2.5/§4.4 send an operator to — and during a rotation
+# this workflow reads MISMATCH BY CONSTRUCTION, which the same sections say is "not a regression". So
+# an operator following the runbook could red main's base for everyone. **Dispatch against a
+# THROWAWAY BRANCH (`gh workflow run consent-key-drift.yml --ref <scratch>`), or run
+# `uv run python tools/consent_key_check.py` locally — never dispatch this against `main`.**
+#
+# The monitor's output is the issue `.github/scripts/auto-file-issue.sh` files — ONE issue per streak,
 # with recurrences commented on it, closed when the reading recovers. That substrate is reused
 # deliberately: the #2706/#3907 lesson is that a title embedding a run id files a duplicate on every
 # tick, and a monitor that fires constantly is a monitor nobody reads.

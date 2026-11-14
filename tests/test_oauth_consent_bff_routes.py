@@ -403,6 +403,22 @@ if (scenario === "mint_no_session" || scenario === "mint_no_attempt" || scenario
     });
     cases.push({ label: "other_key", status: res.status, body: await res.json() });
   }
+  // 3.5 A PADDED value — the SAME key with a leading space and a trailing newline. ⛔ THIS ARM IS
+  //     WHAT MAKES THE CROSS-LANGUAGE PIN ABLE TO SEE A NORMALISATION: every other case uses a
+  //     whitespace-free secret, on which `secret.trim()` is a NO-OP, so a `trim()` added to
+  //     `consentKeyFingerprint` alone would leave the whole suite green while the Pages half hashed
+  //     different bytes from the ones the mint signs — a false AGREE over a bridge that answers 401
+  //     (`key.ts` has NO padded-value refusal; the Python half short-circuits on
+  //     `_secret_state() == "padded"`, which is exactly why the assertion compares the two
+  //     FUNCTIONS on the padded bytes rather than the two published payloads).
+  const padded = env({ CONSENT_TOKEN_SECRET: " test-consent-secret-0123456789abcdef\n" });
+  {
+    const res = await keyRoute.onRequest({
+      request: new Request("https://app.premiselabs.co/api/consent/key", { method: "GET" }),
+      env: padded,
+    });
+    cases.push({ label: "padded", status: res.status, body: await res.json() });
+  }
   // 4. Every non-GET verb is answered BY THIS ROUTE (405), never handed to the asset server — the
   //    `next()` stand-in answers 418 and records whether it was reached.
   for (const method of ["POST", "PUT", "DELETE", "OPTIONS"]) {
@@ -2294,6 +2310,23 @@ def test_the_BFF_publishes_the_SAME_fingerprint_the_AS_computes() -> None:
         "consent-key comparison would report a split that does not exist"
     )
     assert configured["configured"] is True and configured["reason"] is None, configured
+    # ⛔ THE WHITESPACE ARM, and it is the only case that can SEE A NORMALISATION on the TS side.
+    # Every case above uses a whitespace-free secret, where `secret.trim()` is a no-op — measured: a
+    # `trim()` added to `consentKeyFingerprint` alone kept this whole suite green, while the Pages
+    # half published `fp(trimmed)` for a secret the mint signs as `fp(padded)` — the false AGREE this
+    # field exists to prevent, with a green light in front of it. `key.ts` has NO padded-value refusal
+    # (the Python half short-circuits on `_secret_state() == "padded"`), so this arm compares the two
+    # FUNCTIONS on the padded bytes instead of the two published payloads — which is the only
+    # comparison a padding difference cannot be routed around.
+    padded_case = cases["padded"]["body"]
+    assert padded_case["key_fingerprint"] == consent_key_fingerprint(" " + secret + "\n"), (
+        "the Pages half NORMALISED the secret before hashing it. The AS signs the RAW bytes (byte-exact,"
+        " never stripped), so the two halves would publish the same fingerprint for different signing"
+        " inputs — the silent split, wearing an AGREE"
+    )
+    assert padded_case["key_fingerprint"] != consent_key_fingerprint(secret), (
+        "the padded arm did not move the fingerprint, so it cannot detect a normalisation at all"
+    )
     # The SHAPE the checker refuses anything else from (`tools/consent_key_check.py`): 12 lowercase
     # hex. A prefix of the key, a full digest or an uppercase value are all UNVERIFIABLE there.
     assert re.fullmatch(r"[0-9a-f]{12}", configured["key_fingerprint"]), configured
