@@ -2551,8 +2551,13 @@ def test_a_keyless_rejection_is_reported_as_unknown_origin(
     branch disabled the phrase appeared on STDOUT while the payload assertion
     stayed green).
 
-    All THREE attribution arms are driven, because they are separate branches and
-    each was wrong in its own way; each is mutation-proven below.
+    All THREE attribution arms are driven, and each is mutation-proven below. ⛔
+    The two OVERLAY branches were each wrong in its own way (`env` / `file`); the
+    non-overlay site was never wrong — `_db_value_source(None)` always answered
+    `unknown` — it was UNTESTED, which is why it gets its own arm rather than a
+    claim. An earlier version of this docstring said all three "were wrong in
+    their own way", which the third arm's own comment contradicts two lines later
+    (review, P2).
     """
     import tortoise.config as config
 
@@ -2580,7 +2585,15 @@ def test_a_keyless_rejection_is_reported_as_unknown_origin(
     payload = _show_json(capsys)["env_file"]
     assert payload["daemon_error_source"] == "unknown", (
         payload.get("daemon_error"))
-    assert "the value is the one this `.env` supplied" not in _rendered()
+    # ⛔ ARM 2 must forbid the sentence ITS OWN bug printed. This branch is the
+    # OVERLAY one, and the "value is the one this `.env` supplied" suffix is built
+    # only in the NON-overlay branch — so that clause can never appear here and
+    # asserting it absent pinned nothing (review, P2, measured: with the overlay
+    # branch reverted to `env` this arm passed). What `env` renders is "the
+    # ENVIRONMENT's own value does not resolve; this file did not supply it",
+    # which is false of a keyless rejection: there is no environment value.
+    assert "the ENVIRONMENT's own value does not resolve" not in _rendered()
+    assert "which entry point supplied the value is not" in _rendered()
 
     # ARM 3 — the NON-OVERLAY arm (`effective` empty: the file's value is already
     # in the environment), which is a third site with its own key derivation. It
