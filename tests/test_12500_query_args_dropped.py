@@ -355,6 +355,10 @@ def test_the_tag_arm_message_names_the_precedence_that_blocks_pass_text(stub) ->
     assert _is_refusal(result), "no refusal to read a message off"
     assert "tag=" in result["error"], result["error"]
     assert "drop tag=" in result["error"], result["error"]
+    # …and WHY keeping tag= is a dead end. Without this clause the route is
+    # "drop tag= and pass text=" with no explanation, so a caller who keeps tag=
+    # re-reads the same sentence with no hint why (round-10 P2 3).
+    assert "takes precedence" in result["error"], result["error"]
 
 
 #: Valid NON-Point types only. "session" is not in VALID_ENTITY_TYPES, so it
@@ -669,19 +673,24 @@ _DOCSTRING_FALSE = (
     '`entity_type="point"`',
     # round-6/7: BOTH ranking orderings (`confidence` and `graph`) are refused on
     # document/source — each computes the same key for every row — while
-    # `relevance` is applied to every type. This sentence was mandated as TRUE by
-    # this very test for one round, which is how a pin turns into a false-PASS
-    # generator. SCOPED to `order_by`: the same words about a CONFIDENCE ordering
-    # are TRUE (it IS applied for the other five types), so an unscoped ban
-    # forbade a correct edit — the same defect, mirrored (measured: inserting the
-    # true `confidence` sentence reded the unscoped fragment while the
-    # order_by-scoped one stays green).
+    # `order_by="relevance"` IS applied there. So the UNQUALIFIED form is false
+    # for a reason the qualified one is not: it drops the value and implies no
+    # ordering works on those two types, which sends a caller away from a read
+    # that works. Banned in that unqualified form only; the sentence that ships
+    # names the values, and `order_by="relevance"` served for `document`/`source`
+    # is pinned by `test_the_relevance_ordering_is_served_for_every_type`
+    # (round 10: the previous comment still argued the refuted round-6 premise —
+    # "only a CONFIDENCE ordering is refused there" — while the ban itself stands
+    # on the measurement above).
     "`order_by` for every type EXCEPT `document`/`source`",
     # round-8: the harm clause was lumped, so it claimed an ORDERING let rows
     # through — an ordering excludes nothing; it only re-decides their sequence.
     "an accepted value was discarded and rows the caller excluded came back",
-    # round-4: operators are Points, so this reason was self-contradictory.
-    "selects non-Point rows",
+    # round-4 banned "selects non-Point rows" here, but that sentence is TRUE of
+    # `document`/`source` (they map to the `Source` label) and was never a
+    # docstring claim at all — it was the MESSAGE's reason for `operator`, which
+    # IS a Point. Pinned as a message assertion instead, scoped to `operator`
+    # (see `test_an_operator_floor_refusal_names_the_gate_not_a_label`).
 )
 
 
@@ -869,3 +878,43 @@ def test_a_paged_caller_is_told_to_drop_offset_in_the_route(stub, kwargs) -> Non
 
     assert "drop offset=/page=" in message, message
     assert "text= takes no offset" in message, message
+
+
+def test_an_operator_floor_refusal_names_the_gate_not_a_label(stub) -> None:
+    """Operators ARE Points, so the false reason must not come back (#12500 r4/r10).
+
+    The refuted sentence was `entity_type='operator' selects non-Point rows — so
+    no row could ever be excluded`: `operator` maps to the `Point` label
+    (`security.py:166-174`), and the floor is skipped because the SDK's gate is
+    the literal `entity_type == "point"`, not because the rows are non-Point.
+    Fails if the reason reverts to a label claim.
+    """
+    from tortoise.mcp_server import tortoise_query
+
+    message = tortoise_query(text="x", entity_type="operator",
+                             min_confidence=_CONFIDENCE_FLOOR)["error"]
+
+    assert "literal" in message and "point" in message, message
+    assert "selects non-Point rows" not in message, message
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"tag": "pricing", "kind": "statement", "offset": 0},
+    {"tag": "pricing", "kind": "statement", "page": 2},
+])
+def test_a_paged_kind_only_refusal_does_not_advise_dropping_paging(
+        stub, kwargs) -> None:
+    """The kind route lands on the STRUCTURAL arm, which pages (#12500 r10 P2 1).
+
+    Appending the paging suffix to every route told a paged caller to drop
+    `offset=` while sending them to an arm that supports it — and named `text=`,
+    an arm the route never mentions, while silently downgrading the response from
+    `{results,total,hasMore}` to a plain list. Fails if the suffix is
+    unconditional.
+    """
+    from tortoise.mcp_server import tortoise_query
+
+    message = tortoise_query(**kwargs)["error"]
+
+    assert "pass kind= to the structural arm" in message, message
+    assert "drop offset=/page=" not in message, message

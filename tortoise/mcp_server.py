@@ -4281,11 +4281,14 @@ def tortoise_query(kind: str | None = None,
         else:
             _route = (f"To use {_them}, pass text= — the floor and the ordering "
                       f"are applied on that arm")
-        if paginated:
+        if paginated and not (_arm == "tag=" and _names == ["kind"]):
             # `text=` takes no offset/page (measured: following the route with
             # offset= kept answers "offset/page not supported with text"), so a
             # route that sends a PAGED caller there lands on a second refusal
-            # (round-9 finding 3).
+            # (round-9 finding 3). The ONE route that does not land on `text=` is
+            # the kind-only tag route — it sends the caller to the structural arm,
+            # which pages fine — so the suffix there was advice to drop a
+            # capability, naming an arm the route never mentions (round-10 P2).
             _route += " (and drop offset=/page= — text= takes no offset)"
         # Only where a floor/ordering is what was refused: the STRUCTURAL arm
         # applies `filters=` together with `kind=` quite happily, so this note on
