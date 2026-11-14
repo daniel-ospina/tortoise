@@ -50,6 +50,9 @@ def _carriage(client, kind, nodes):
         H.build(client, src, nodes)
         H.create_index(client, src, kind)
         row, _ = H.await_index(client, src, label, kind, nodes)
+        # ⛔ `await_index` already refuses below this bound, so the comparison is not a second
+        # gate (the same construct was DELETED from fulltext_restore_cost.py for that reason) —
+        # it is kept here only to name which half failed in the error message.
         if (row["numDocuments"] or 0) < nodes:
             H._invalid_harness(
                 f"the {kind} index on the SOURCE is not populated "
@@ -64,6 +67,14 @@ def _carriage(client, kind, nodes):
             source["hits"] = H.fts_hits(client, src)
         else:
             source["rows"] = H.range_hits(client, src, nodes)
+        # ⛔ The SOURCE must ANSWER, not merely be registered: #12768 is exactly the case where
+        # `numDocuments` is right and the postings are short, so a source that registers N
+        # documents and answers nothing has nothing meaningful to carry and no reading is taken.
+        if (source.get("hits", source.get("rows")) or 0) <= 0:
+            H._invalid_harness(
+                f"the {kind} index on the SOURCE registers {row['numDocuments']} documents but "
+                f"answers nothing — nothing measurable to carry"
+            )
 
         payload = client.execute_command("DUMP", src)
         client.execute_command("DEL", src)
@@ -91,7 +102,13 @@ def _carriage(client, kind, nodes):
                 result["target"]["rows"] = H.range_hits(client, dst, nodes)
         result["verdict"] = (
             "CARRIED-BY-THE-GRAPH-KEY"
-            if after is not None and (after["numDocuments"] or 0) >= nodes
+            if after is not None
+            and (after["numDocuments"] or 0) >= nodes
+            # ⛔ AND ANSWERING. A target that registers every document while answering
+            # nothing is H3 (the index data did not survive) — the exact failure this whole
+            # probe exists to be able to report. Registration alone would mint
+            # CARRIED-BY-THE-GRAPH-KEY over an empty index, i.e. a false PASS.
+            and (result["target"].get("hits", result["target"].get("rows")) or 0) > 0
             else "NOT-CARRIED (the same-name arm was registry retention)"
         )
         return result
