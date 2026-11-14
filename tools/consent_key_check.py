@@ -155,6 +155,14 @@ EXIT_AGREE = 0
 EXIT_DISAGREE = 1
 EXIT_NO_VERDICT = 2
 
+#: The most body bytes this tool will read from one half. Both endpoints answer a tiny JSON object
+#: (three fields, or the whole `/health` document); anything larger is not a reading. A bounded read
+#: matters because `response.read()` with no argument buffers whatever the peer sends — a hostile or
+#: proxy-streamed body could OOM the workflow's 10-minute job BEFORE any shape gate runs, which is a
+#: failure the fingerprint/reason gates cannot see. A truncated legitimate body simply fails to parse
+#: and becomes `body_not_json`, i.e. it fails CLOSED.
+MAX_BODY_BYTES = 256 * 1024
+
 
 @dataclass(frozen=True)
 class Reading:
@@ -308,7 +316,7 @@ def _get_json(url: str, timeout: float) -> tuple[object | None, str | None]:
         )
         with urllib.request.urlopen(request, timeout=timeout) as response:
             status = response.status
-            body = response.read()
+            body = response.read(MAX_BODY_BYTES)
     except urllib.error.HTTPError as exc:
         return None, f"http_{exc.code}"
     except (urllib.error.URLError, TimeoutError, OSError):
@@ -323,6 +331,14 @@ def _get_json(url: str, timeout: float) -> tuple[object | None, str | None]:
     try:
         return json.loads(body), None
     except (ValueError, UnicodeDecodeError):
+        return None, "body_not_json"
+    except Exception:
+        # ⛔ `RecursionError` is neither `ValueError` nor `UnicodeDecodeError` (it is a
+        # `RuntimeError`), so a deeply nested body — measured with 200k nested arrays — raised past
+        # every handler and the process died with **exit 1**, which is `EXIT_DISAGREE`. That is the
+        # SAME defect as the malformed-origin one above, one line away from it: a tool fault reported
+        # as the 2026-11-01 measured split. The docstring promises "a problem CODE, never an
+        # exception", so the parse is guarded by the contract, not by a list of exception names.
         return None, "body_not_json"
 
 
@@ -350,8 +366,23 @@ def read_app(app_url: str, timeout: float) -> Reading:
 
 
 def _fix_hint(verdict: Verdict) -> str:
-    """What to DO — the rotation is three steps, and only the first is automated (§2.5)."""
-    if verdict.verdict in ("MISMATCH", "SPLIT"):
+    """What to DO — and ⛔ a SPLIT is NOT a rotation, so it must not borrow MISMATCH's advice."""
+    if verdict.verdict == "SPLIT":
+        # ⛔ ONE HALF HOLDS NO USABLE KEY, so there is no second value to reconcile and NOTHING to
+        # rotate. Emitting MISMATCH's hint here was actively harmful: its step (1) is
+        # `gh secret set CONSENT_TOKEN_SECRET` + a `deploy-hosted` run, i.e. a ONE-SIDED rotation,
+        # which from a SPLIT state MANUFACTURES the measured disagreement — the 2026-11-01 incident
+        # this whole check exists to catch. The workflow's own SPLIT alert says "rotating a key would
+        # not fix it", and this hint is catted into that same PUBLIC issue body, so the two must not
+        # contradict each other. Named BEFORE the MISMATCH arm so the two cannot be confused.
+        return (
+            "fix: do NOT rotate — one half holds no usable key, so there is nothing to reconcile and "
+            "a one-sided rotation would CREATE the split this check exists to catch. Set the SAME "
+            "value the LIVE half already holds on the dark half (the reading above names which half "
+            "and its `reason`), then REDEPLOY Pages if the dark half is `app` — Pages bakes env at "
+            "deploy time. §2.5."
+        )
+    if verdict.verdict == "MISMATCH":
         return (
             "fix: a rotation is THREE steps, because Pages bakes env at deploy time — "
             "(1) `gh secret set CONSENT_TOKEN_SECRET` (the GitHub repo secret is the SOURCE OF TRUTH: "

@@ -294,6 +294,28 @@ def test_a_non_json_body_is_UNVERIFIABLE(monkeypatch) -> None:
     assert CKC.main([]) == 2
 
 
+def test_a_DEEPLY_NESTED_body_is_UNVERIFIABLE_and_never_a_DISAGREEMENT(monkeypatch) -> None:
+    """⛔ A parse failure that is NOT a `ValueError` still exited **1** — `EXIT_DISAGREE`.
+
+    `json.loads` raises `RecursionError` (a `RuntimeError`, so neither `ValueError` nor
+    `UnicodeDecodeError`) on a deeply nested document — measured: 2 000 levels parse fine, 20 000
+    raise. That depth is 40 KB here, comfortably inside `MAX_BODY_BYTES`, so the guard (not body
+    truncation) is what this pin tests. The guard
+    listed only those two names, so the exception escaped `_get_json`, escaped `main`, and the
+    process died with **exit 1**, which the module docstring, `--help` and runbook §4.4 publish as
+    "a measured disagreement". Same defect class as the malformed-origin arm, one line below it: an
+    instrument fault reported as the 2026-11-01 split. `_get_json`'s own docstring promises a problem
+    CODE and never an exception, so the guard is the CONTRACT, not a list of exception names.
+    """
+    nested = b"[" * 20000 + b"]" * 20000
+
+    def fake_urlopen(request, timeout=None):
+        return _Response(nested)
+
+    monkeypatch.setattr(CKC.urllib.request, "urlopen", fake_urlopen)
+    assert CKC.main([]) == 2, "a document this tool cannot parse is NO MEASUREMENT, not a split"
+
+
 def test_a_malformed_fingerprint_is_UNVERIFIABLE_and_the_VALUE_IS_NOT_ECHOED(monkeypatch, capsys) -> None:
     """THE DISCLOSURE GATE.
 
@@ -444,6 +466,29 @@ def test_a_key_placed_in_reason_is_NEVER_ECHOED(monkeypatch, capsys) -> None:
         blob = capsys.readouterr().out
         assert json.loads(blob)["verdict"] == "UNVERIFIABLE"
         assert hostile not in blob, "a hostile `reason` reached the JSON payload (→ the issue body)"
+
+
+def test_a_SPLIT_never_borrows_the_ROTATION_remedy(monkeypatch, capsys) -> None:
+    """⛔ A SPLIT IS NOT A ROTATION, and the hint is pasted into the same body as the alert prose.
+
+    One half holds NO usable key, so there is no second value to reconcile. The MISMATCH hint's step 1
+    is `gh secret set CONSENT_TOKEN_SECRET` followed by a `deploy-hosted` run — a ONE-SIDED rotation,
+    which from a SPLIT state MANUFACTURES the measured disagreement the tool exists to detect (the
+    2026-11-01 incident). The workflow's own SPLIT arm says "rotating a key would not fix it" a few
+    lines above the `cat` that embeds this `fix` string, so emitting the rotation here makes the
+    public issue contradict itself AND names the harmful step.
+    """
+    _serve(monkeypatch, _health(_fp(_KEY_A)), _pages(None, configured=False, reason="not_set"))
+    assert CKC.main(["--json"]) == 1
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed["verdict"] == "SPLIT"
+    hint = parsed["fix"]
+    assert "do NOT rotate" in hint, f"the SPLIT hint must refuse the rotation: {hint!r}"
+    for forbidden in ("THREE steps", "gh secret set"):
+        assert forbidden not in hint, (
+            f"the SPLIT hint carries MISMATCH's rotation remedy ({forbidden!r}), which CREATES the "
+            f"split it is meant to resolve: {hint!r}"
+        )
 
 
 def test_every_published_reason_code_is_accepted(monkeypatch, capsys) -> None:
@@ -846,7 +891,38 @@ def test_the_filing_step_only_RESOLVES_the_ledger_on_a_MEASURED_AGREE() -> None:
     )
 
 
-def test_the_filing_step_files_the_RIGHT_finding_and_never_resolves_a_split(tmp_path) -> None:
+@pytest.fixture()
+def clean_reading():
+    """Neutralise `/tmp/consent-key.json` for the duration, under the lock the sibling pins use.
+
+    The filing step's body `cat`s that ABSOLUTE path into the public issue body, so whatever is on
+    disk becomes the body's "reading". A leftover real MISMATCH reading contains `401 signature does
+    not verify` — which the SPLIT pin asserts must be ABSENT — so a correct change would red on a
+    file this test never wrote. Only bytes THIS fixture removes are removed; a pre-existing file (an
+    operator's real reading) is restored byte-for-byte, and the `flock` serialises concurrent copies
+    of this suite, exactly as `test_the_check_step_exits_with_the_code_the_checker_returned` does.
+    """
+    import fcntl
+
+    reading = Path("/tmp/consent-key.json")
+    lock = Path("/tmp/consent-key.json.lock").open("a+")
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    pre_existing = reading.read_bytes() if reading.exists() else None
+    reading.unlink(missing_ok=True)
+    try:
+        yield reading
+    finally:
+        if pre_existing is None:
+            reading.unlink(missing_ok=True)
+        else:
+            reading.write_bytes(pre_existing)
+        fcntl.flock(lock, fcntl.LOCK_UN)
+        lock.close()
+
+
+def test_the_filing_step_files_the_RIGHT_finding_and_never_resolves_a_split(
+    tmp_path, clean_reading
+) -> None:
     """EXECUTED, because the filing step's reading->ledger mapping was entirely unexercised.
 
     Cycle 4 measured six one-token edits GREEN on the decision half of this workflow: `RC:` set to a
