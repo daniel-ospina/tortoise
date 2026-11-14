@@ -506,7 +506,7 @@ def info_unreadable(index_doc: dict[str, Any]) -> bool:
     code (1 → 2) on purpose: fail-closed, NOT a correction of a false sentence. The falsy non-objects
     carry no version at all, so "carries no latest version" was literally true of them; what was
     wrong was issuing a VERDICT off an unparsed field. (``version_unreadable`` is the sibling case
-    where the old sentence really was false: ``{"version": 0.3}`` carries a version.)
+    where the old sentence really was false: ``{"info": {"version": 0.3}}`` carries one.)
     #12589 review, P2: state the split rather than claiming an invariance that does not hold.
     """
     return "info" in index_doc and not isinstance(index_doc["info"], dict)

@@ -4835,8 +4835,9 @@ def test_a_non_object_info_is_a_LEGIBLE_NON_READING_on_BOTH_arms():
         and reported exit 1 — the "cut a release" text — off an `info` this client never parsed.
         Those documents carry no version at all, so "carries no latest version" was literally true
         of them; what was wrong was issuing a VERDICT off an unparsed field. (The sibling
-        `version_unreadable` case is the one where the old sentence was false: `{"version": 0.3}`
-        does carry a version.)
+        `version_unreadable` case is the one where the old sentence was false:
+        `{"info": {"version": 0.3}}` does carry a version — measured, pre-diff `latest_version`
+        returned `""` for it and the FAIL arm said "carries no latest version".)
 
     So the fix MOVES the exit code (1 → 2) for the falsy shapes, deliberately and fail-closed. The
     invariance that actually matters is the one a naive "don't raise" fix would break: a
