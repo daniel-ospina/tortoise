@@ -612,6 +612,75 @@ def test_every_published_reason_code_is_accepted(monkeypatch, capsys) -> None:
         assert CKC.main([]) == 0, code
         assert f"reason={code}" in capsys.readouterr().out
 
+    # ⛔ The remedy split is DERIVED, so a seventh code cannot silently inherit one. The two absence
+    # codes are the ones where "copy the working value" is the repair; every OTHER code describes a
+    # value the dark half already HOLDS and refuses.
+    assert CKC.ABSENCE_REASONS | CKC.VALUE_FAULT_REASONS == CKC.REASON_CODES
+    assert not (CKC.ABSENCE_REASONS & CKC.VALUE_FAULT_REASONS)
+    assert {"not_set", "unreadable"} == CKC.ABSENCE_REASONS
+
+
+def test_a_value_fault_SPLIT_never_tells_the_operator_to_copy_the_working_value(
+    monkeypatch, capsys
+) -> None:
+    """⛔ THE SPLIT REMEDY IS TWO REMEDIES, and the wrong one can never clear the alert.
+
+    A SPLIT says one half is dark — but not that it is EMPTY. Reachable, measured: the Pages half has
+    NO length floor (`consent-bridge.ts::consentKeyFingerprint` guards only `if (!secret)`) while
+    `consent_token.py` refuses anything under 32 bytes with `too_short`. Set the SAME 20-byte key on
+    BOTH halves and you get `configured: true` from Pages and `configured: false, reason: "too_short"`
+    from the AS. The OLD hint told the operator to copy the working half's value onto the dark half —
+    which reproduces `too_short` for as long as they keep following it, so the monitor stayed red and
+    its own documented remedy was why. The same holds for `padded`, `not_utf8` and `reused_credential`.
+
+    So each absence code must name the copy repair, each value-fault code must name the two-sided
+    rotation, and NEITHER may offer a ONE-sided rotation (from a SPLIT state that manufactures the
+    2026-11-01 disagreement).
+    """
+    for reason in sorted(CKC.VALUE_FAULT_REASONS):
+        _serve(monkeypatch, _health(_fp(_KEY_A)), _pages(None, configured=False, reason=reason))
+        assert CKC.main(["--json"]) == 1, reason
+        hint = json.loads(capsys.readouterr().out)["fix"]
+        assert "TWO-SIDED rotation" in hint, (
+            f"the `{reason}` SPLIT hint must name the two-sided rotation — copying the working value "
+            f"reproduces the same refusal: {hint!r}"
+        )
+        assert "REDEPLOY" in hint and "§2.5" in hint, reason
+        # ⛔ It must still forbid the HALF-rotation, which is the harm this arm also has to prevent.
+        assert "Never set only ONE half" in hint, f"{reason}: the one-sided prohibition is gone"
+
+    for reason in sorted(CKC.ABSENCE_REASONS):
+        _serve(monkeypatch, _health(_fp(_KEY_A)), _pages(None, configured=False, reason=reason))
+        assert CKC.main(["--json"]) == 1, reason
+        hint = json.loads(capsys.readouterr().out)["fix"]
+        assert "do NOT rotate" in hint and "TWO-SIDED" not in hint, (
+            f"the `{reason}` SPLIT hint must keep the copy repair — that half holds nothing to "
+            f"reproduce: {hint!r}"
+        )
+
+
+def test_the_workflow_prose_branches_the_SPLIT_remedy_the_same_way() -> None:
+    """The alert body and the tool's `fix` string are read as ONE message, so they cannot disagree.
+
+    The workflow echoes the SPLIT remedy and the `--json` payload (which carries `fix`) is `cat`ed into
+    the SAME issue body. A workflow that still says "set the SAME value on that half" for every SPLIT
+    would contradict the tool on exactly the value-fault case, and the operator would follow whichever
+    line they read first.
+    """
+    body = "\n".join(s.get("run") or "" for s in _steps())
+    assert "not_set` / `unreadable`" in body, (
+        "the SPLIT alert no longer names the absence arm's copy repair"
+    )
+    for code in ("padded", "too_short", "not_utf8", "reused_credential"):
+        assert code in body, f"the SPLIT alert no longer names the value-fault arm (`{code}`)"
+    assert "FULL rotation" in body, (
+        "the SPLIT alert no longer sends the value-fault case to §2.5's full rotation — it would "
+        "tell an operator to copy a value that reproduces the refusal"
+    )
+    assert "Never set only ONE half" in body, (
+        "the SPLIT alert lost its one-sided-rotation prohibition"
+    )
+
 
 def test_a_null_reason_is_legitimate(monkeypatch) -> None:
     """A configured half has nothing to report — `None` is not a fault, and must not become one."""
@@ -1384,7 +1453,28 @@ def test_the_THREE_dedupe_TITLES_are_stable_constants() -> None:
         "body asserts a rotation the fault does not need"
     )
     assert unknown in body, "the unknown title changed — that abandons the standing issue"
-    assert len({drift, split, unknown}) == 3, "three findings must not share one dedupe key"
+    # ⛔ THE DISTINCTNESS MUST BE READ OFF THE WORKFLOW, not off the three literals above: this line
+    # used to be `len({drift, split, unknown}) == 3`, which is true by construction (three distinct
+    # string constants assigned eight lines earlier) and therefore asserted nothing — the exact
+    # dead-assertion class this PR has already shipped twice. What actually matters is that the
+    # workflow binds each pinned title to a DIFFERENT variable, because the dedupe key is the value the
+    # filing step sends, so two arms sharing one assignment is the defect. Parsed from the `run:` body,
+    # so deleting or re-pointing an assignment reds here.
+    assigned = {name: title for name, _q, title in re.findall(r"(\w+_title)=([\"'])(.+?)\2", body)}
+    assert set(assigned) == {"drift_title", "split_title", "unknown_title"}, (
+        f"the three arms no longer assign three distinct title variables: {sorted(assigned)}"
+    )
+    assert len(set(assigned.values())) == 3, (
+        f"two arms would file under the SAME dedupe title, merging two findings into one issue: {assigned}"
+    )
+    assert set(assigned.values()) == {drift, split, unknown}, (
+        f"an arm's title is not one of the three pinned findings: {assigned}"
+    )
+    assert assigned["drift_title"] == drift and assigned["split_title"] == split, (
+        "a title variable was re-pointed at another arm's title — the SPLIT arm must not file under "
+        "the mismatch title, whose body asserts a rotation the fault does not need"
+    )
+    assert assigned["unknown_title"] == unknown
 
 
 def test_the_workflow_steps_are_all_syntactically_valid_shell() -> None:

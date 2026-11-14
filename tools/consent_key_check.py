@@ -147,6 +147,26 @@ REASON_CODES = frozenset(
     {"not_set", "padded", "reused_credential", "too_short", "not_utf8", "unreadable"}
 )
 
+#: ⛔ THE SPLIT REMEDY IS NOT ONE SENTENCE, and this set is what decides which one is true. A SPLIT
+#: means one half is dark, but it does NOT mean that half is EMPTY. Five of the six `reason` codes
+#: describe a value the dark half already HOLDS and finds unusable — `padded`, `reused_credential`,
+#: `too_short`, `not_utf8` — and for those "copy the live half's value onto the dark half" is
+#: exactly the advice that cannot work, because the same value reproduces the same refusal.
+#:
+#: REACHABLE, not theoretical (measured at this head): the Pages half has NO length floor
+#: (`consent-bridge.ts::consentKeyFingerprint` guards only `if (!secret)`), while `consent_token.py`
+#: refuses anything under `_MIN_SECRET_BYTES` (32) with `too_short`. So an operator who sets the SAME
+#: 20-byte key on BOTH halves gets `configured: true` from Pages and `configured: false,
+#: reason: "too_short"` from the AS -> SPLIT -> and the old hint told them to copy the 20-byte value,
+#: which reproduces `too_short` for as long as they keep following it. The monitor stayed red and its
+#: own documented remedy was the reason.
+#:
+#: The two absence codes are the ones where copying IS the right move: nothing is there to copy from.
+#: ⛔ Derived from `REASON_CODES` by subtraction (asserted in the suite), so a seventh code added on
+#: the publishing side cannot silently inherit the wrong remedy.
+ABSENCE_REASONS = frozenset({"not_set", "unreadable"})
+VALUE_FAULT_REASONS = REASON_CODES - ABSENCE_REASONS
+
 #: ⛔ THE USER-AGENT IS LOAD-BEARING, and finding out why cost a production measurement. Cloudflare's
 #: edge in front of `app.premiselabs.co` refuses urllib's DEFAULT agent — `Python-urllib/3.12`, which
 #: is exactly what the workflow's pinned `python-version: 3.12` produces — with
@@ -419,6 +439,32 @@ def _fix_hint(verdict: Verdict) -> str:
         # this whole check exists to catch. The workflow's own SPLIT alert says "rotating a key would
         # not fix it", and this hint is catted into that same PUBLIC issue body, so the two must not
         # contradict each other. Named BEFORE the MISMATCH arm so the two cannot be confused.
+        #
+        # ⛔ BUT "HOLDS NO USABLE KEY" IS TWO DIFFERENT STATES, and the remedy differs or the
+        # monitor can never be cleared:
+        #   * ABSENT (`not_set`, `unreadable`) — nothing is there. Copy the live value. One-sided IS
+        #     the repair, because the dark half has no value of its own to preserve.
+        #   * VALUE FAULT (`padded`, `too_short`, `not_utf8`, `reused_credential`) — a value IS there
+        #     and this deployment refuses it. Copying the live value reproduces the same refusal, so
+        #     the only repair is to give BOTH halves one fresh usable value (a two-sided rotation —
+        #     still never a ONE-sided one, which is the harm the paragraph above is about).
+        # The dark half's own `reason` is what decides; it is already in the reading, printed in the
+        # same body, and is a member of the closed set (an unmapped code is UNVERIFIABLE, never here).
+        reasons = {r.reason for r in verdict.readings if not r.configured}
+        if reasons & VALUE_FAULT_REASONS:
+            return (
+                "fix: this needs a TWO-SIDED rotation — the dark half's `reason` above says the value "
+                "it HOLDS is unusable, so copying the working half's value onto it would reproduce "
+                "the same refusal and leave this check red forever. Give BOTH halves one fresh "
+                "random key of at least 32 bytes: (1) `gh secret set CONSENT_TOKEN_SECRET` (the "
+                "GitHub repo secret is the SOURCE OF TRUTH: `fly secrets set` alone is silently "
+                "reverted by the next deploy-hosted run, because "
+                "`.github/scripts/fly-managed-secrets.txt` declares it `gh-secret:` and re-stages "
+                "it), (2) set the same value on the `tortoise-dashboard` Pages project, "
+                "(3) REDEPLOY Pages (a corrected value does NOT reach an already-deployed "
+                "Function). ⛔ Never set only ONE half — from this state that CREATES the split this "
+                "check exists to catch. §2.5."
+            )
         return (
             "fix: do NOT rotate — one half holds no usable key, so there is nothing to reconcile and "
             "a one-sided rotation would CREATE the split this check exists to catch. Set the SAME "

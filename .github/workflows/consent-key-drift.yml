@@ -223,10 +223,17 @@ jobs:
                 echo 'complete. ⛔ **This is NOT "the two halves hold different keys"** — there is no second'
                 echo 'key for the working half to differ from, and rotating a key would not fix it.'
                 echo
-                echo 'The fenced reading below names WHICH half is dark and its `reason` (`not_set`,'
-                echo '`padded`, `reused_credential`, `too_short`, `not_utf8`, `unreadable`). Remedy: set'
-                echo 'the SAME value on that half per §2.5 — and remember Pages bakes env at deploy time,'
-                echo 'so the Pages half needs a redeploy before it is seen.'
+                echo 'The fenced reading below names WHICH half is dark and its `reason`, and the'
+                echo '`reason` decides the remedy — these are NOT the same repair:'
+                echo
+                echo '- **`not_set` / `unreadable`** — that half holds NOTHING. Copy the working half'"'"'s'
+                echo '  value onto it per §2.5, then REDEPLOY Pages if the dark half is `app`.'
+                echo '- **`padded` / `too_short` / `not_utf8` / `reused_credential`** — that half HOLDS a value'
+                echo '  this deployment refuses, so copying the working value reproduces the same refusal and'
+                echo '  this check can never go green. Run the FULL rotation in §2.5 (repo secret, then the'
+                echo '  Pages value, then REDEPLOY Pages) so BOTH halves get one fresh usable key.'
+                echo
+                echo '⛔ Never set only ONE half, from either state — that CREATES this split.'
                 ;;
               *)
                 title="$unknown_title"
