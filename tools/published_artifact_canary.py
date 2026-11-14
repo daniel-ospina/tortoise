@@ -678,8 +678,12 @@ def judged_value(files: Any) -> tuple[bool, bool]:
         that is not a file record.
 
     PyPI documents each entry as a file object carrying `filename` + a boolean `yanked`, so
-    anything else is a shape outside the contract: the entry is dropped and ``unreadable`` is set,
-    which lets the value neither establish nor withdraw the existential OK claim by itself.
+    anything else is a shape outside the contract: the entry is dropped and ``unreadable`` is set.
+    ⛔ THE DROPPED ENTRY neither establishes nor withdraws the existential OK claim — but a VALUE
+    holding one readable installable entry still DOES establish it, and the arm then discloses the
+    partial read in its detail (the "MIXED at entry grain" pin). This paragraph said "the value
+    neither establish nor withdraw" until #12589 review round 18, i.e. the pre-round-2 rule its own
+    code rejects.
 
     ⛔ ONE DEFINITION, because the OK detail ALSO asks this question about ONE version ("is the
     advertised release installable?") and re-deriving it from ``release_files`` — which only sees

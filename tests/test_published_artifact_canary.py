@@ -374,7 +374,10 @@ def test_a_client_version_with_no_INSTALLABLE_file_in_ANY_release_is_red():
         resolves to the older release, and yanking is whole-release on PyPI.
 
     So: red only when NO release has a non-yanked file — the sole state where the sentence is
-    true — and green when any release does, naming which.
+    true — and green when any release does, naming which. ⛔ AND UNKNOWN when a release VALUE could
+    not be read: the FAIL sentence needs a COMPLETE parse, so an unreadable sibling withholds it
+    (that third state is `#12589`'s whole subject; this docstring stated a two-valued rule until
+    review round 18, contradicting the section header below).
     """
 
     def _report(releases: dict) -> object:
@@ -2837,6 +2840,45 @@ def _UNKNOWN_REPORT():
     )
 
 
+GOLDEN_INFO_UNREADABLE_DETAIL = (
+    "could not read the index metadata for tortoise-client — the document's `info` is PRESENT but "
+    "is not an object (info-unreadable), so the version metadata this arm reads is UNPARSEABLE "
+    "(any version the document may carry was never obtained). That is a NON-READING: it says "
+    "nothing about whether the distribution resolves, and it is NOT a reason to cut a release"
+)
+
+GOLDEN_VERSION_UNREADABLE_DETAIL = (
+    "could not read the version the index serves for tortoise-client — `info.version` is PRESENT "
+    "but is not a string (version-unreadable), so the metadata this arm reads is UNPARSEABLE. That "
+    "is a NON-READING: it says nothing about whether the distribution resolves, and it is NOT a "
+    "reason to cut a release"
+)
+
+
+def test_the_two_info_and_version_non_reading_details_are_PINNED_VERBATIM():
+    """⛔ A NON-READING'S SCRAP OF TEXT IS WHERE A NEGATIVE FINDING SNEAKS IN (#12589 round 18, P2).
+
+    These two arms were the last non-reading details guarded only by a PHRASE DENY-LIST
+    (`assert "carries no" not in detail`). A deny-list cannot stop a claim worded differently: on a
+    /tmp copy, appending ", so the documented install is not resolvable" after "That is a
+    NON-READING" — an artifact-negative claim made by a non-reading, and self-contradictory inside
+    one sentence — kept the suite green. Verbatim, as for their two siblings.
+    """
+    info_detail = (
+        _client_report({"info": "x", "releases": {"0.3.0": [_CLIENT_GOOD]}})
+        .get("client-published")
+        .detail
+    )
+    assert info_detail == GOLDEN_INFO_UNREADABLE_DETAIL, info_detail
+
+    version_detail = (
+        _client_report({"info": {"version": 3}, "releases": {"0.3.0": [_CLIENT_GOOD]}})
+        .get("client-published")
+        .detail
+    )
+    assert version_detail == GOLDEN_VERSION_UNREADABLE_DETAIL, version_detail
+
+
 GOLDEN_RELEASES_ABSENT_DETAIL = (
     "could not read the tortoise-client release map — the index document carries no usable "
     "`releases` map (the key is absent, null, or not an object). PyPI documents `releases` as "
@@ -4329,6 +4371,11 @@ def test_an_UNPARSEABLE_release_VALUE_is_UNKNOWN_and_never_orders_a_release():
     assert report.exit_code == 0, report.exit_code
     assert canary.RELEASES_UNREADABLE in arm.detail, arm.detail
     assert "READABLE subset" in arm.detail, arm.detail
+    # ⛔ AND THE PREFIX THAT SAYS *PART* OF THE MAP WAS UNREAD (#12589 review round 18, P3): this
+    # sentence is the only disclosure that an OK stands on a PARTIAL read, and inverting it to "this
+    # ENTIRE release map could not be read" kept the arm OK/exit 0 with the suite green.
+    assert "part of this release map could not be read" in arm.detail, arm.detail
+    assert "ENTIRE" not in arm.detail, arm.detail
     # ⛔ THE NOTE'S CAUSE ENUMERATION IS PINNED HERE, at the one place that prints it (#12589 review
     # round 10, P3). Narrowing it to a single cause left all 83 tests green, so the invariant
     # ("all four sites say the SAME words") had drifted to three. The wording names what the
