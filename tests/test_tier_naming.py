@@ -310,13 +310,21 @@ class TestEverySurfaceAgreesWithTheDeclaration:
 #:         bullet was not updated. Recorded as a miss, not a block;
 #:       * a PARENTHETICAL-aside record whose aside is COMMA-delimited —
 #:         `Previously the doc said, until #12444 corrected it, that there is no Builder
-#:         plan.` — BLOCKED here while `origin/main` exempts it (cycle-20 round 3,
-#:         measured). The reported clause is cut at its first break and that break is the
-#:         aside's own comma. The `--…--` / `—…—` forms are fixed by
-#:         :data:`_REPORTED_ASIDE`; the comma form is NOT, because treating a lone comma
-#:         as strippable would re-open `… said the naming was wrong, there is no Builder
-#:         plan.`, which every head here and `origin/main` agree must stay FLAGGED. It is
-#:         a false positive on correct prose and is listed rather than silently traded;
+#:         plan.` — BLOCKED here while `origin/main` exempts it (cycle-20 rounds 3–4,
+#:         measured). ⛔ THE MECHANISM IS NOT THE CLAUSE SPLIT, and a round-3 revision of
+#:         this bullet said it was: the reported arm never RUNS on this sentence, because
+#:         `_REPORTED_CLAIM`'s tail is `\b\s+(?:that\s+)?` and the verb here is followed
+#:         by `,` — `_REPORTED_CLAIM.search` returns None, so no clause is ever cut (the
+#:         split is only a SECOND blocker, shown by patching the verb tail alone). So the
+#:         round-3 conclusion that it is NOT fixable did not follow either: a cue-gated
+#:         PAIRED comma pre-strip — the same device as :data:`_REPORTED_ASIDE`, applied to
+#:         the whole fragment before the verb scan — was measured to exempt this record
+#:         while leaving `… wrong, there is no Builder plan.` FLAGGED, with 0 pins
+#:         reddened and 0 `docs/` offenders. It is NOT taken here because it moves the
+#:         strip outside the reported arm (where the `and`/set arithmetic no longer bounds
+#:         it), and that is a change that deserves its own cycle and its own pins. Listed
+#:         as a false positive on correct prose, and recorded as a CHOICE, not a
+#:         necessity;
 #:       * an APOSTROPHE pseudo-span in the CUE arm: two ordinary apostrophes (an
 #:         elision `'90s` opening, a plural possessive `customers'` closing) produce a
 #:         CLOSED span, and a cue word beside it exempts the drift —
@@ -948,9 +956,23 @@ _REPORTED_CLAIM = re.compile(
 #: plan.` and `… said yet again that there is no Builder plan; #12444 corrected it.` are
 #: CORRECT records that `origin/main` exempts and the round-2 terms BLOCKED.
 #: :data:`_REPORTED_ASIDE` strips a matched pair / the adverbial before the split, so both
-#: are exempt again without giving back the assertions those terms were added for
-#: (`… wrong -- there is no Builder plan.` stays FLAGGED: a lone `--` is not a pair).
-_REPORTED_ASIDE = re.compile(r"--[^-]*--|\u2014[^\u2014]*\u2014|\byet\s+again\b", re.I)
+#: are exempt again without giving back the assertions those terms were added for.
+#:
+#: ⛔ …BUT THE STRIP MUST BE CUE-GATED, OR IT SWALLOWS THE ASSERTION (cycle-20 round 4,
+#: measured). An ungated pair strip defeats the `--`/`—` members of
+#: `_REPORTED_CLAUSE_END`, because the pair's own delimiters are consumed and the denial
+#: behind the aside is glued into the reported clause — so the PINNED live denial simply
+#: gains a parenthetical and escapes:
+#: `Until #12444 the doc said the naming was wrong -- and the page still carries it --
+#: there is no Builder plan.` was EXEMPT, as was its `—` twin and `… wrong yet again
+#: there is no Builder plan.` — all three FLAGGED by `origin/main` and by the pre-fix head.
+#: So a pair is stripped only when the material INSIDE it carries a `_RETRACTION_CUES` cue.
+#: An aside that is a retraction is an aside; an aside that is not is a second clause.
+_REPORTED_ASIDE = re.compile(
+    r"--(?=[^-]*(?:" + _RETRACTION_CUES.pattern + r"))[^-]*--"
+    r"|\u2014(?=[^\u2014]*(?:" + _RETRACTION_CUES.pattern + r"))[^\u2014]*\u2014"
+    r"|^(?:\s*)yet\s+again\b",
+    re.I)
 _REPORTED_CLAUSE_END = re.compile(
     r"[;:,\u2014\u2013]|--|\b(?:and|but|so|which|therefore|thus|hence|whereas|"
     r"while|although|though|yet|since|because)\b",
@@ -1805,6 +1827,17 @@ class TestNoDocDeniesABuilderPlanExists:
                 "Until #12444 the doc said the naming was wrong since there is no Builder "
                 "plan.\n",
                 "Until #12444 the doc said the naming was wrong because there is no "
+                "Builder plan.\n",
+                # ⛔ AN UNGATED ASIDE STRIP SWALLOWS THE ASSERTION (cycle-20 round 4,
+                # measured): each of these is one of the pinned denials above with a
+                # NON-retraction parenthetical inserted, and each was EXEMPT until
+                # `_REPORTED_ASIDE` was cue-gated. `origin/main` flags all three, so a
+                # regression here is invisible to a main-comparison sweep.
+                "Until #12444 the doc said the naming was wrong -- and the page still "
+                "carries it -- there is no Builder plan.\n",
+                "Until #12444 the doc said the naming was wrong — the page was never "
+                "fixed — there is no Builder plan.\n",
+                "Until #12444 the doc said the naming was wrong yet again there is no "
                 "Builder plan.\n",
         ):
             assert _denials_in_document(live), (
