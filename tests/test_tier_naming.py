@@ -1054,7 +1054,7 @@ _REPORTED_ASIDE = re.compile(
 #: that …`, `… said -- flatly, as noted -- that …` (13 of 28 aside shapes swept). An inner
 #: reads as an INDEPENDENT ASSERTION when it OPENS with a coordinating conjunction or
 #: carries a hard clause break of its own — nothing else.
-_REPORTED_ASIDE_CLAUSE = re.compile(r"^\s*(?:and|but|so|yet)\b|[;:\u2014\u2013]|--", re.I)
+_REPORTED_ASIDE_CLAUSE = re.compile(r"^\s*(?:and|but|so|yet)\b|[;:\u2013]|--", re.I)
 
 
 def _leading_aside_is_parenthetical(aside: str) -> bool:
