@@ -150,7 +150,7 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # undeclared mutation in the tree).
     "test_9664_capstone_connector_to_record.py": [
         r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
-    # #12521: `test_10015_organisation_account.py` landed two URI-unsets with no
+    # #12521: `test_10015_organisation_account.py` landed URI-unsets with no
     # register row (`monkeypatch.delenv("TORTOISE_DB_URI", raising=False)`, at `:49`
     # and `:257`), which reds this gate on `main` — the same "module landed without
     # its entry" shape as #9664 above and #12275 below. Both are the embedded-lane
@@ -185,19 +185,22 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
         # `raising=False` is the DOMINANT spelling across `tests/` — an order of
         # magnitude more common than the key-only form — so a future site repeating
         # this exact literal is SILENCED by this arm and must be triaged BY HAND. No
-        # numeral is quoted on purpose: the count moves with every commit that
-        # touches `tests/`, and a cardinal nobody can state twice is how "Two sites"
-        # went stale here. The narrowing still earns its place, and no other arm in
-        # this table does it: every other `delenv` arm here stops at the variable
-        # name. The one thing it DOES guarantee is asserted, not merely claimed —
-        # `test_declaration_path_rejects_undeclared` reds if the arm is widened.
+        # TREE-WIDE numeral is quoted on purpose: the count moves with every commit
+        # that touches `tests/`, and a cardinal nobody can state twice is how "Two
+        # sites" went stale here. The narrowing still earns its place, and no other
+        # arm in this table does it: every other `delenv` arm here stops at the
+        # variable name. The one thing it DOES guarantee is asserted, not merely
+        # claimed — `test_declaration_path_rejects_undeclared` reds if the arm is
+        # widened.
         # ⛔ The in-flight #12601 carries BOTH of this file's rows — this one AND the
         # `test_published_artifact_canary.py` row above — with IDENTICAL arms. A
-        # second identical row is still a duplicate dict key (ruff F601, and the
-        # later key silently shadows the earlier), and `ruff` is the ONLY detector
-        # here: this module carries no AST duplicate-key guard. So whichever of the
-        # two PRs lands second must DELETE BOTH rows, not add another — clearing
-        # only this one re-creates the duplicate canary key this PR exists to clear.
+        # second identical row is a duplicate dict key: `ruff` reds it `F601` in the
+        # lint leg, and `test_dod_5090_probe.py`'s duplicate-key scan (see this
+        # file's own note on it further down) reds it in the pytest shard. Neither removes the hazard —
+        # the later key still shadows the earlier — so whichever of the two PRs lands
+        # second must drop the duplicate row in EACH of the two pairs, not add a
+        # third: clearing only the `test_10015…` one leaves the duplicate
+        # `test_published_artifact_canary.py` key this PR exists to clear.
         r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI",\s*raising=False'],
     # #12275: `test_candidate_recall_11901.py` (#12159) landed with three
     # untriaged URI mutations, which reds this gate on `main` in `test (d)` —
