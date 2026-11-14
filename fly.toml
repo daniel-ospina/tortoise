@@ -175,11 +175,15 @@ kill_timeout = 30
 #       stay DATA-plane evidence, and a 404 from a path no route matched never
 #       counts as demand). Who may be COUNTED as demand (the serving side) is a
 #       separate rule from what a refusal MEANS: a route the app answers without
-#       the plane (`/.well-known/*` discovery, `/oauth/*`, `/v1/invites/info`,
-#       the readiness/security probes, `/v1/version`, `/v1/build`, the `/mcp`
-#       metadata GET) is not demand when it is SERVED — 8 served discovery
+#       the plane (`/.well-known/*` discovery, the readiness/security probes,
+#       `/v1/capabilities`, an index-job status, the `/mcp` metadata GET and its
+#       `DELETE`, and EVERY CORS preflight) is not demand when it is SERVED — 8
+#       served discovery
 #       requests beside 7 refusals measured `share 0.467 -> 200` over a refusing
-#       plane — while a POST to `/mcp` is a tool call and always counts. A SHARE, because
+#       plane — while a POST to the `/mcp` mount root is a tool call and always
+#       counts (`/oauth/*` and `/register` are THIRD-PARTY work and are excluded
+#       from both sides, because a grant's own phase timeouts sum above the
+#       bound). A SHARE, because
 #       the bound is breached BY DESIGN for ~2.1% of calls: a count is blind on a
 #       quiet box (the two measured traces ran at 3.5/min and 17/min) and a
 #       bucket-density reds a HEALTHY box as traffic rises (measured: 92% of

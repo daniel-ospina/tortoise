@@ -175,6 +175,7 @@ from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
     record_telemetry_drop,  # #4095 allowlist-drop counter (the /metrics seam)
     run_control_plane_call,
     run_on_daemon_worker,
+    set_cold_start_source,  # #12477: the warming-machine carve-out, both arms
     set_dataplane_verdict_source,  # #12477: the 9090 check's data-plane term
     set_served_progress_source,  # #12477: …and its served-request counter
     start_health_listener,
@@ -2708,6 +2709,13 @@ def _start_liveness(app) -> None:
     # missing SERVE and not merely a missing tick (#10892's instrument, read by
     # both arms).
     set_served_progress_source(_liveness_served_progress)
+    # #12477: …and the COLD-START predicate, so a warming machine's refusals stay
+    # out of the verdict on BOTH arms. Registered here (not called from
+    # `mcp_server`) because the MCP dispatch seam stamps its breach through
+    # `monitoring.record_wait_bound_breach`, which consults this — round 9
+    # measured the MCP arm red on a healthy warming box while the REST arm was
+    # green at the same instant.
+    set_cold_start_source(_embedder_load_in_flight)
 
 
 async def _stop_liveness(app) -> None:
@@ -5475,6 +5483,16 @@ _WAIT_BOUND_LONG_ROUTES = (
     re.compile(r"^/v1/onboarding/github/(repos|branches|status|callback|disconnect)/?$"),
     # whole-repository indexing walks, the same class as `import`/`export`
     re.compile(r"^/v1/index/github(/re-poll)?/?$"),
+    # ⛔ THE OAUTH CONTROL PLANE IS NOT THE DATA PLANE, and its waits are a THIRD
+    # PARTY's: the grant is deliberately awaited WITHOUT a seam bound
+    # (`_oauth_token` — "its own httpx phase timeouts bound it"), and those
+    # phase timeouts SUM above the transport bound (`cimd.FETCH_MAX_S = 6.0`,
+    # `supabase_control` 5 s per phase). Five refused `/oauth/token` measured
+    # `share 1.0 -> 503` with no other traffic (#12477 review round 9). Its
+    # SERVING is already excluded from the denominator, so leaving the refusal in
+    # the numerator was one-sided.
+    re.compile(r"^/oauth/(token|authorize|consent|revoke|register)/?.*$"),
+    re.compile(r"^/register/?$"),
     re.compile(r"^/webhooks/stripe/?$"),
 )
 
@@ -5567,11 +5585,12 @@ _WAIT_BOUND_NO_PLANE_PREFIXES = (
 
 #: Same idea, exact paths / shapes rather than prefixes.
 _WAIT_BOUND_NO_PLANE_ROUTES = (
-    re.compile(r"^/v1/invites/info/?$"),        # invite preview: an unauthenticated lookup
     re.compile(r"^/health/ready/?$"),           # a probe: served from the last probe result
     re.compile(r"^/health/security/?$"),
-    re.compile(r"^/v1/version/?$"),
-    re.compile(r"^/v1/build/?$"),
+    # in-process only: `capability_catalog()` never touches the graph, and an
+    # index-job status is read out of the `_INDEX_JOBS` dict
+    re.compile(r"^/v1/capabilities/?$"),
+    re.compile(r"^/v1/index/[^/]+/[^/]+/?$"),
 )
 
 #: Path shapes whose SERVING proves nothing for ONE method only. `/mcp` is the
@@ -5579,6 +5598,10 @@ _WAIT_BOUND_NO_PLANE_ROUTES = (
 #: there is a tool call (served through SSE, which starts before the tool
 #: dispatches — so it must count as demand or MCP refusals have no denominator).
 _WAIT_BOUND_NO_PLANE_METHODS_GET = frozenset({"/mcp"})
+
+#: `DELETE /mcp` ends a Streamable-HTTP SESSION: the vendored handler calls
+#: `terminate()` on its in-memory stream store. No store access, so no demand.
+_WAIT_BOUND_NO_PLANE_METHODS_DELETE = frozenset({"/mcp"})
 
 
 def _route_is_served_without_the_plane(route_path: str,
@@ -5589,9 +5612,23 @@ def _route_is_served_without_the_plane(route_path: str,
     out of both sides, and this only narrows the SERVING side further.
     """
     path = route_path or ""
-    if (method or "GET").upper() == "GET":
-        if "/" + path.strip("/") in _WAIT_BOUND_NO_PLANE_METHODS_GET:
-            return True
+    verb = (method or "GET").upper()
+    # ⛔ A CORS PREFLIGHT IS NEVER DEMAND, on any path. `CORSMiddleware` answers
+    # `OPTIONS` from configuration — before auth, before routing, no body,
+    # microseconds — and it is the cheapest request a browser can be made to send.
+    # Measured (#12477 review round 9): 8 x `OPTIONS /mcp` beside 7 refused
+    # `/v1/search` gave `attempts 15, share 0.4667`, and the real 9090 listener
+    # answered 200 with `reasons: []` over a fully refusing plane.
+    if verb == "OPTIONS":
+        return True
+    if verb == "GET" and "/" + path.strip("/") in _WAIT_BOUND_NO_PLANE_METHODS_GET:
+        return True
+    if verb == "DELETE" and "/" + path.strip("/") in _WAIT_BOUND_NO_PLANE_METHODS_DELETE:
+        return True
+    # a sub-path of the MCP mount that is not a POST to the root is not a tool
+    # call: `POST /mcp/<junk>` is a 404 from the sub-app
+    if verb == "POST" and path.startswith("/mcp") and "/" + path.strip("/") != "/mcp":
+        return True
     if path.startswith(_WAIT_BOUND_NO_PLANE_PREFIXES):
         return True
     for pattern in _WAIT_BOUND_NO_PLANE_ROUTES:
@@ -5626,7 +5663,18 @@ def _exchange_reached_a_route(scope) -> bool:
     # a healthy MCP-heavy deployment therefore read `share 1.0` and failed its
     # own Fly check (#12477 review round 7). The mount always matches this
     # surface; `_is_jsonrpc_surface` excludes the `/mcpfoo` sibling.
-    if _is_jsonrpc_surface(str(scope.get("path") or "")):
+    # ⛔ BUT ONLY A `POST` TO THE MOUNT ROOT IS A TOOL CALL. The first version of
+    # this escape returned True for EVERY method and every sub-path, so
+    # `OPTIONS /mcp` (CORS preflight), `DELETE /mcp` (in-memory session teardown)
+    # and `POST /mcp/<junk>` (a 404 from the sub-app) all became "demand" — the
+    # round-9 P0-1, measured as 8 free preflights turning 7 refusals into
+    # `share 0.4667 -> 200`. The `OPTIONS` / `DELETE` rules in
+    # `_route_is_served_without_the_plane` and this narrowing are three halves of
+    # one fix.
+    mcp_path = str(scope.get("path") or "")
+    if (_is_jsonrpc_surface(mcp_path)
+            and str(scope.get("method") or "").upper() == "POST"
+            and "/" + mcp_path.strip("/") == "/mcp"):
         return True
     return not getattr(scope.get("app"), "routes", None)
 

@@ -2447,7 +2447,6 @@ async def test_a_refused_health_ready_probe_is_NOT_a_control_refusal(
     "/.well-known/oauth-authorization-server",
     "/.well-known/mcp/oauth-protected-resource",
     "/oauth/authorize",
-    "/v1/invites/info",
     "/health/ready",
     "/health/security",
     "/v1/version",
@@ -2542,10 +2541,115 @@ def test_the_mcp_surface_is_reachable_for_the_denominator():
     breaches — a healthy MCP-heavy deployment read `share 1.0` and failed its
     own Fly check (#12477 review round 7).
     """
-    # a copied scope: no endpoint, an app that DOES declare routes
-    scope = {"type": "http", "path": "/mcp", "app": ha.app}
+    # a copied scope (no endpoint, an app that DOES declare routes): only a POST
+    # to the mount root is a tool call — round 9 measured `OPTIONS /mcp`,
+    # `DELETE /mcp` and `POST /mcp/<junk>` all being admitted by the first
+    # version of this escape, 8 free preflights turning 7 refusals into 200.
+    scope = {"type": "http", "path": "/mcp", "method": "POST", "app": ha.app}
     assert ha._exchange_reached_a_route(scope) is True
     assert ha._exchange_reached_a_route(dict(scope, path="/mcp/")) is True
+    for other in ("GET", "OPTIONS", "DELETE"):
+        assert ha._exchange_reached_a_route(dict(scope, method=other)) is False
+    assert ha._exchange_reached_a_route(dict(scope, path="/mcp/junk")) is False
     # the sibling is not the surface, and a real router miss stays a miss
     assert ha._exchange_reached_a_route(dict(scope, path="/mcpfoo")) is False
     assert ha._exchange_reached_a_route(dict(scope, path="/wp-login.php")) is False
+
+
+@pytest.mark.asyncio
+async def test_a_CORS_preflight_is_never_demand(fast_bound, refusal_window):
+    """`OPTIONS` is answered from configuration — before auth, before routing.
+
+    Measured (#12477 review round 9): 8 × `OPTIONS /mcp` (a browser can be made
+    to send them) beside 7 refused `/v1/search` gave `attempts 15, share 0.4667`,
+    and the real 9090 listener answered **200** with `reasons: []` over a fully
+    refusing plane — the #12477 shape, end to end, at HEAD.
+    """
+    preflight = ha.WaitBoundMiddleware(_slow_app(0.001))
+    hanging = ha.WaitBoundMiddleware(_slow_app(10.0))
+    for _ in range(8):
+        rec = await _drive(preflight, _scope("/mcp", method="OPTIONS"))
+        assert rec.status == 200
+    for _ in range(7):
+        await _breach(hanging, "/v1/search")
+    window = refusal_window.wait_bound_breach_window()
+    assert window["attempts"] == 7, ("a preflight is not data-plane demand", window)
+    assert window["refusing"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_DELETE_or_a_junk_POST_on_mcp_is_not_demand(fast_bound, refusal_window):
+    """`DELETE /mcp` tears down an in-memory stream; `POST /mcp/x` is a sub-app 404."""
+    mw = ha.WaitBoundMiddleware(_slow_app(0.001))
+    for _ in range(4):
+        assert (await _drive(mw, _scope("/mcp", method="DELETE"))).status == 200
+    for _ in range(4):
+        assert (await _drive(mw, _scope("/mcp/junk", method="POST"))).status == 200
+    assert refusal_window.wait_bound_breach_window()["attempts"] == 0
+
+
+def test_an_MCP_refusal_during_a_cold_start_is_not_the_verdict(refusal_window,
+                                                              monkeypatch):
+    """The carve-out must reach BOTH counting sites.
+
+    #12477 review round 6 built it into the REST arm only. Round 9 measured the
+    MCP arm (`mcp_server`'s dispatch seam) on a warming box — the model lock held
+    by a pre-warm — `attempts 5, total 5, share 1.0, refusing True` → 503, while
+    the REST arm recorded `total 0` at the same instant. Both arms stamp through
+    `monitoring.record_wait_bound_breach`, so the predicate is consulted there.
+    """
+    from tortoise import monitoring
+
+    monitoring.set_cold_start_source(lambda: True)
+    try:
+        for _ in range(5):
+            monitoring.record_wait_bound_attempt("mcp")
+            monitoring.record_wait_bound_breach("mcp")   # the dispatch seam's call
+        window = refusal_window.wait_bound_breach_window()
+        assert window["total"] == 0, ("a warming machine is not a failing plane", window)
+        assert window["attempts"] == 5
+        assert window["refusing"] is False
+    finally:
+        monitoring.set_cold_start_source(None)
+
+    # …and the same refusals DO count once the load is over
+    for _ in range(5):
+        monitoring.record_wait_bound_attempt("mcp")
+        monitoring.record_wait_bound_breach("mcp")
+    window = refusal_window.wait_bound_breach_window()
+    assert window["total"] == 5 and window["refusing"] is True
+
+
+@pytest.mark.asyncio
+async def test_the_oauth_control_plane_is_not_the_data_plane(fast_bound, refusal_window):
+    """A grant waits on a THIRD PARTY, with no seam bound, for longer than the bound.
+
+    `_oauth_token` is awaited WITHOUT a wait bound ("its own httpx phase timeouts
+    bound it"), and those phase timeouts sum above it (`cimd.FETCH_MAX_S = 6.0`,
+    `supabase_control` 5 s per phase). Measured: five refused `/oauth/token` gave
+    `share 1.0 -> 503` with no other traffic.
+    """
+    hanging = ha.WaitBoundMiddleware(_slow_app(10.0))
+    for path, method in (("/oauth/token", "POST"), ("/oauth/register", "POST"),
+                         ("/register", "POST")):
+        for _ in range(5):
+            await _breach(hanging, path, method=method)
+    window = refusal_window.wait_bound_breach_window()
+    assert window["total"] == 0 and window["attempts"] == 0
+    assert window["refusing"] is None
+
+
+def test_the_org_mint_lock_answers_before_the_transport_bound():
+    """An invariant nothing pinned (#12477 review round 9).
+
+    The lock's own answer is `503 Retry-After: 5` — "busy, not an outage" — and
+    the transport bound measures the SAME request from arrival. At 10 s the two
+    deadlines collide and the designed 503 can never be delivered; a mutation
+    restoring 10.0 was caught by NOTHING (both tests that touch the constant
+    patch it to 0.25). Measured with the lock held: a delivered 503 at 8.08 s.
+    """
+    from tortoise import mcp_auth as _ma
+
+    assert ha._ORG_MINT_LOCK_TIMEOUT_S < _ma._TRANSPORT_WAIT_BOUND_S, (
+        "the mint lock must answer before the transport bound does, or its own "
+        "503 is undeliverable and a concurrent mint is scored as a plane breach")

@@ -1085,6 +1085,33 @@ def record_wait_bound_control_breach(at: float | None = None) -> None:
         _WAIT_BOUND_CONTROL_RECENT.append(stamp)
 
 
+#: #12477: registered by the APP (`hosted_api._start_liveness`) so this module
+#: never imports it. Returns True while a one-time cold-start load is in flight.
+_COLD_START_SOURCE: "callable | None" = None
+
+
+def set_cold_start_source(source) -> None:
+    """Register (or clear, with ``None``) the cold-start predicate (#12477).
+
+    A zero-I/O reader of "is a one-time setup load in flight", consulted on the
+    breach path by BOTH arms. Registered rather than imported: this module is
+    imported by the 9090 listener, which must never import the app.
+    """
+    global _COLD_START_SOURCE
+    _COLD_START_SOURCE = source
+
+
+def _cold_start_in_flight() -> bool:
+    """True while a one-time load is warming the process; never raises."""
+    source = _COLD_START_SOURCE
+    if source is None:
+        return False
+    try:
+        return bool(source())
+    except Exception:  # noqa: BLE001 — a state probe must not replace a refusal
+        return False
+
+
 def record_wait_bound_breach_recent(surface: str, at: float | None = None) -> None:
     """Remember ONE breach timestamp for :func:`wait_bound_breach_window`.
 
@@ -2153,6 +2180,17 @@ def record_wait_bound_breach(surface: str, *, windowed: bool = True) -> None:
     # sites catch around the counter, and a stamp failure must not replace the
     # refusal the caller is already composing.
     if not windowed:
+        return
+    # ⛔ AND THE COLD-START CARVE-OUT BELONGS HERE, not at one call site. A
+    # machine that is merely WARMING (a one-time embedder load holds the model
+    # lock, ~57 s measured) refuses everything that waits on it, and five such
+    # refusals in a window is `share 1.0` — a warming box failing its own deploy.
+    # #12477 review round 6 added the carve-out to the REST arm only, and round 9
+    # measured the consequence on the MCP arm (`mcp_server`'s dispatch seam):
+    # `attempts 5, total 5, share 1.0, refusing True` -> 503 on a healthy box
+    # while the REST arm recorded `total 0` for the same instant. Both arms stamp
+    # through here, so the predicate is consulted once, here.
+    if _cold_start_in_flight():
         return
     try:
         record_wait_bound_breach_recent(surface)
