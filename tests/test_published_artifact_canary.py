@@ -857,6 +857,12 @@ def test_an_install_failure_is_only_RED_when_the_INDEX_confirms_the_absence(tmp_
         # one-token relaxations to stay green. Narrow exposure (only a capturable proper
         # suffix reaches it) but the same verdict, so it is pinned with the rest.
         ("graph", canary.UNKNOWN),  # named is a proper SUFFIX of wanted
+        # T6: the OTHER spelling `_canonical_dist_name`'s docstring names. The suite pinned
+        # `Tortoise_Graph` (case + `_`) but never the DOTTED form, so relaxing `[-_.]+` to
+        # `[-_]+` survived the whole file — and a dotted absence would then grade UNKNOWN
+        # instead of FAIL. Suppression rather than a false release, but the function contract
+        # states all three spellings, so all three are pinned (#12422 round-27 review P2).
+        ("tortoise.graph", canary.FAIL),  # dotted spelling normalises to the same name
         ("tortoise-graph[embeddings]", canary.FAIL),  # extras: the SAME project
     )
     for named, expected in boundary:
