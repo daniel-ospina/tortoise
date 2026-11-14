@@ -56,7 +56,7 @@ class _StubSDK:
     — so a test cannot pass by inventing a knobs path the product does not have.
     ``query_points_by_tag`` takes the tag and its own ``_record_reads`` flag — no
     floor, no ordering, no kind. There is deliberately no ``query`` method: BOTH
-    structural arms read ``paginated_query`` (`mcp_server.py:4929`, `:4956` — the
+    structural arms read ``paginated_query`` (`mcp_server.py:4933`, `:4960` — the
     un-paginated path goes through it too, precisely to apply ``limit``), so a
     ``query`` stub was a call the tool cannot make (measured round 34: zero calls
     across this file, while the docstring claimed it mirrored a real signature).
