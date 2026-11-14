@@ -329,7 +329,12 @@ class TestEverySurfaceAgreesWithTheDeclaration:
 #:         elision `'90s` opening, a plural possessive `customers'` closing) produce a
 #:         CLOSED span, and a cue word beside it exempts the drift —
 #:         `The docs are stale: since the '90s there is no Builder plan, and the customers'
-#:         rows are wrong.` is exempt here AND at `origin/main`, so pre-existing. The
+#:         rows are wrong.` is EXEMPT here (cycle-20 round 5, measured: `_denial_in` is
+#:         False). ⛔ IT IS NOT PRE-EXISTING, and a round-3/4 revision of this bullet said
+#:         it was: `origin/main` returns **True** for that sentence (main has no apostrophe
+#:         spans at all), so this hole was INTRODUCED by the span scanner this PR adds and
+#:         a main-comparison sweep WILL see it — the earlier "so pre-existing" reasoning
+#:         was inverted. The
 #:         CUE-FREE mention path does NOT share this hole: it requires the denial to OPEN
 #:         the span, which that pseudo-span fails (four pins). Two ordinary apostrophes
 #:         were a false PASS on the MENTION path for one round and ARE closed there;
@@ -342,10 +347,17 @@ class TestEverySurfaceAgreesWithTheDeclaration:
 #:         because its scoped twin (`… called Builder on the self-hosted install.`) is
 #:         indistinguishable here and is a TRUE statement (cycle 8);
 #:       * a sentence that REPORTS an old denial and then re-asserts one WITHIN THE SAME
-#:         CITED sentence (`Previously the page stated there is no Builder plan per
-#:         #12444, and today there is no Builder plan either.`): the exemption is per
-#:         SENTENCE, so a reported clause and a live one sharing one sentence are not
-#:         separated here. ⛔ THE COST IS THE CITATION, NOT THE SEPARATOR (cycle-14 P2):
+#:         CITED sentence (`Previously the page stated there is no Builder plan;
+#:         #12444 tracks the correction, and today there is no Builder plan either.` —
+#:         cycle-20 round 5, measured: EXEMPT here and at `origin/main`): the exemption
+#:         is per SENTENCE, so a reported clause and a live one sharing one sentence are
+#:         not separated here. ⛔ THE CLASS IS NARROWER THAN “IT CITES”, which a later
+#:         revision of this bullet over-claimed by naming
+#:         `Previously the page stated there is no Builder plan per #12444, and today
+#:         there is no Builder plan either.` as the example: that sentence is FLAGGED at
+#:         this head and was exempt only under `5cf012d2a53e`'s 6-character offset, so the
+#:         example had been closed and the bullet was not updated. What escapes needs cue +
+#:         citation AND a reported denial that ENDS ITS CLAUSE before the first break. ⛔ THE COST IS THE CITATION, NOT THE SEPARATOR (cycle-14 P2):
 #:         UNCITED, both the reported and the `;`-split twin are FLAGGED — and the
 #:         QUOTED twin that REPEATS THE NOUN is FLAGGED too as of cycle 18, where it used
 #:         to be exempt (the quotation stood in for the citation;
@@ -353,8 +365,9 @@ class TestEverySurfaceAgreesWithTheDeclaration:
 #:         sentence also asserts outside the quote, and both twins are pinned live).
 #:         ⛔ "THE QUOTED TWIN IS FLAGGED" IS TOO WIDE AS STATED (cycle-19 P2, measured):
 #:         the ANAPHORIC form escapes — see the `there is no such plan anymore` bullet
-#:         above. What remains is the sentence that CITES: exempt with or without a
-#:         quotation, which is why the residual is named rather than claimed closed.
+#:         above. What remains is the sentence that CITES **and** whose reported denial
+#:         ends its clause before the first break: exempt with or without a quotation,
+#:         which is why the residual is named rather than claimed closed.
 #:       * a denial continued PAST its existential predicate (`The Builder tier does not
 #:         exist because it was merged into Team.`, `No Builder plan exists in the OSS
 #:         build any longer.`): the `no … exists` and `builder … does not exist` arms
@@ -966,13 +979,20 @@ _REPORTED_CLAIM = re.compile(
 #: `Until #12444 the doc said the naming was wrong -- and the page still carries it --
 #: there is no Builder plan.` was EXEMPT, as was its `—` twin and `… wrong yet again
 #: there is no Builder plan.` — all three FLAGGED by `origin/main` and by the pre-fix head.
-#: So a pair is stripped only when the material INSIDE it carries a `_RETRACTION_CUES` cue.
-#: An aside that is a retraction is an aside; an aside that is not is a second clause.
+#: So an aside must be identified by POSITION, NOT by vocabulary (cycle-20 round 5,
+#: measured — and the round-4 cue gate was a ONE-WORD BYPASS): keying the strip on
+#: `_RETRACTION_CUES` meant any sentence could wrap a cue word in a pair and have its
+#: delimiter consumed — `… wrong -- stale -- there is no Builder plan.` read EXEMPT for
+#: 20 of the 20 pinned joins (every `_REPORTED_CLAUSE_END` member behind `-- <cue> --`),
+#: all of them FLAGGED by the pre-fix head. It also BLOCKED correct records whose aside
+#: carried no cue: the dash twin of every round-1 pin — `Previously the doc claimed —
+#: wrongly — that there is no Builder plan; #12444 corrected it.` — was FLAGGED here
+#: while `origin/main` exempts it. Position fixes both directions at once, because a
+#: genuine aside in these records LEADS the reported material and a second clause cannot:
+#: a pair that leads is stripped, a pair anywhere after it is a clause break. (A cue word
+#: alone is not a record — the file's own doctrine at the `_RETRACTION_CUES` block.)
 _REPORTED_ASIDE = re.compile(
-    r"--(?=[^-]*(?:" + _RETRACTION_CUES.pattern + r"))[^-]*--"
-    r"|\u2014(?=[^\u2014]*(?:" + _RETRACTION_CUES.pattern + r"))[^\u2014]*\u2014"
-    r"|^(?:\s*)yet\s+again\b",
-    re.I)
+    r"^(?:\s*(?:--[^-]*--|\u2014[^\u2014]*\u2014|yet\s+again))+\s*", re.I)
 _REPORTED_CLAUSE_END = re.compile(
     r"[;:,\u2014\u2013]|--|\b(?:and|but|so|which|therefore|thus|hence|whereas|"
     r"while|although|though|yet|since|because)\b",
@@ -1587,6 +1607,15 @@ class TestNoDocDeniesABuilderPlanExists:
             'Builder plan.',
             'Previously the doc said yet again that there is no Builder plan; #12444 '
             'corrected it.',
+            # ⛔ THE DASH TWIN MUST STAY EXEMPT (cycle-20 round 5, measured): the round-4
+            # CUE gate blocked these while `origin/main` exempts them, and a later
+            # revision of the class docstring claimed the class was pre-existing when it
+            # was introduced here. Position — a pair that LEADS the reported material — is
+            # what makes them asides.
+            'Previously the doc claimed — wrongly — that there is no Builder plan; '
+            '#12444 corrected it.',
+            'Previously the doc said -- flatly -- that there is no Builder plan; #12444 '
+            'corrected it.',
             "Previously the doc said the Builder tier does not exist; #12444 corrected it.",
             'The doc previously read "There is no Builder plan."; #12444 corrected it.',
             # ⛔ A MENTION OF THE FORBIDDEN SENTENCE IS NOT AN ASSERTION OF IT
@@ -1838,6 +1867,13 @@ class TestNoDocDeniesABuilderPlanExists:
                 "Until #12444 the doc said the naming was wrong — the page was never "
                 "fixed — there is no Builder plan.\n",
                 "Until #12444 the doc said the naming was wrong yet again there is no "
+                "Builder plan.\n",
+                # ⛔ A CUE WORD IS NOT AN ASIDE (cycle-20 round 5, measured): the round-4
+                # gate keyed the strip on `_RETRACTION_CUES`, so wrapping ANY cue in a
+                # pair defeated all 20 `_REPORTED_CLAUSE_END` joins at once — 20 of 20
+                # pinned denials read EXEMPT behind `-- <cue> --`. Position, not
+                # vocabulary, decides; this pin is the bypass.
+                "Until #12444 the doc said the naming was wrong -- stale -- there is no "
                 "Builder plan.\n",
         ):
             assert _denials_in_document(live), (
