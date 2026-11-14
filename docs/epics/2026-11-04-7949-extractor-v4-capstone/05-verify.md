@@ -123,7 +123,6 @@ and why this paragraph names one rather than claiming a current set.
 Re-read it at the head you
 merge, because a typed list of paths rots exactly the way a typed line number does.
 
-
 **No longer in the diff — absorbed by the forward merges, kept as history:**
 
 | file | what it changed when this branch carried it | effect |
