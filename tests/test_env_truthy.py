@@ -670,8 +670,9 @@ _KNOWN_NARROW_READS: dict[tuple[str, str], tuple[int, str]] = {
     # `adopt_crashed_seal`), which RENAME a deployment's journal, RECORD a disposition and
     # APPEND one repair row. A `=true` written for legibility would switch journal sealing
     # on for a deployment that never opted in, against a graph whose bytes the journal
-    # describes — the same fail-open-on-a-WRITE-nobody-chose shape #4128 recorded for
-    # every entry above. ⛔ Not "irreversible": the module's own docstring says everything
+    # describes — the same fail-open shape #4128 recorded for the entries above, in
+    # whichever surface that read governs (there: a delete, a trust grant, a silenced
+    # guard; here an unrequested WRITE). ⛔ Not "irreversible": the module's own docstring says everything
     # it does today is "reversible and removes no byte" and the writers "delete nothing",
     # so the objection is an unrequested WRITE surface, not data loss. The module's own
     # docstring makes the asymmetry load-bearing: the flag gates WRITING and never
