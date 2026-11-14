@@ -785,6 +785,17 @@ const suites = [
   // exists" is then mistaken for "the suite passes". Add the entry in the same
   // commit as the file.
   '20261102000001_graphs_promote_default.sql',  // #10180
+  // #12762 — per-org Postgres bytes measured from what we WRITE, plus the
+  // TOAST-aware audit. This suite CARRIES THE FALSIFIER: it inserts a ~19 KB
+  // incompressible payload (moved out of line), proves `pg_column_size` reports
+  // its STORED size rather than the 18-byte pointer (falsifying the premise the
+  // issue was filed on), and proves the naive write-time measure
+  // `INSERT … RETURNING pg_column_size(payload)` OVER-counts the same row by
+  // 3.4x while the stored-state read does not. NOTE: this list is EXPLICIT, not
+  // a glob — a suite file that is not named here never runs, and "the suite
+  // exists" is then mistaken for "the suite passes". Add the entry in the same
+  // commit as the file.
+  '20261114000001_per_org_postgres_bytes.sql',  // #12762
   // #4492 — the Postgres storage footprint + per-org analytics row growth,
   // driven against the REAL SQL functions. NOTE: this list is EXPLICIT, not a
   // glob — a suite file that is not named here never runs, and "the suite
