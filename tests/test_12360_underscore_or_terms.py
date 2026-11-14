@@ -307,8 +307,8 @@ class TestAdditive:
         # probe verdict", NOT "NFD is accepted": it is pinned as "same on both
         # arms" so a verdict difference cannot be mistaken for a control.
         # ⚠️ The MECHANISM this comment used to state was FALSE (#12368 fourth
-        # review, corrected by measurement) — and the assertions below could not
-        # see it, because they compare the two arms and never the verdict.
+        # review, corrected by measurement) — and until the verdict pin below, the
+        # assertions could not see it: they compared the two arms, never the verdict.
         # NFD `año_actual` is `an` + U+0303 + `o_actual`, and the token CARRIES
         # `_`, so `deferred` is True: the run-count branch this comment used to
         # name is SKIPPED BY CONSTRUCTION, and the verdict is the read's own

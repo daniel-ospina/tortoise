@@ -547,8 +547,8 @@ def underscore_run_terms(text: str) -> list[str]:
       on ``año_actual``/``the_café``/``_café``/``dé_installer``/``x_café``, in the
       precomposed spelling).
       ⚠️ NOT "both spellings" (#12368 fourth review, MEASURED). A ``_``-carrying
-      token is ``deferred``, so the run-count branch is SKIPPED; the discriminator
-      is the surviving TOKEN count. On the FIVE NFD shapes this file measures:
+      token is ``deferred``, so the run-count AND term-count branches are BOTH
+      skipped; ``build_or_query``'s alternative comparison decides. Per shape:
       ``año_actual``/``the_café``/``x_café`` — 1 token each, ACCEPT here, REFUSED
       on ``main`` (run count), so this CURES three; ``dé_installer`` — 2 tokens,
       REFUSED on ``main`` (term count) and here, so UNCHANGED; ``_café`` —
