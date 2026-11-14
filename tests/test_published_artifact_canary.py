@@ -840,6 +840,41 @@ def test_an_install_failure_is_only_RED_when_the_INDEX_confirms_the_absence(tmp_
         f"mis-order the LONGER-name case closes"
     )
     assert "users cannot even install" not in shorter_arm.detail, shorter_arm.detail
+    # ⛔ AND THE REST OF THE BOUNDARY, AS A TABLE (#12422 round-25 review P2). Rounds 23–24
+    # closed this boundary one mutation at a time — first `named in wanted`, then
+    # `named.startswith(wanted)` — and each round found ANOTHER one-token relaxation the
+    # cases above could not see: `_canonical_dist_name(named).endswith(wanted)` keeps the
+    # whole file green, and pip naming `x-tortoise-graph` is then graded as
+    # `tortoise-graph`'s absence while the probe answers `ok` — the release call again.
+    # So the neighbouring matchers are pinned TOGETHER here, including the one shape that
+    # MUST still attribute: pip naming this very project with an extras specifier, which
+    # parses to the same normalised name and is a genuine absence of THIS distribution.
+    boundary = (
+        ("x-tortoise-graph", canary.UNKNOWN),  # suffix matcher
+        ("foo-tortoise-graph", canary.UNKNOWN),  # suffix matcher, longer prefix
+        ("tortoise-graph[embeddings]", canary.FAIL),  # extras: the SAME project
+    )
+    for named, expected in boundary:
+        boundary_marks = (
+            f"ERROR: Could not find a version that satisfies the requirement {named}==1.0 "
+            "(from versions: none)\n"
+            f"ERROR: No matching distribution found for {named}==1.0"
+        )
+        boundary_arm = canary.install_and_run(
+            package="tortoise-graph",
+            version="0.2.0",
+            workdir=tmp_path,
+            timeout=10,
+            runner=_Runner({"pip": _completed(["pip", "install"], 1, "", boundary_marks)}),
+            absent_probe=lambda package: canary.INDEX_OK,
+        )[0]
+        assert boundary_arm.status == expected, (
+            f"pip naming {named!r} must be {expected} against package 'tortoise-graph' "
+            f"(got {boundary_arm.status}: {boundary_arm.detail}); the attribution is an "
+            f"EQUALITY on the PEP 503-normalised name — a prefix, substring or suffix "
+            f"matcher in ANY direction re-opens the release call this arm was narrowed "
+            f"to close"
+        )
     # and a failure pip does not attribute to a missing distribution is never a FAIL
     arm = canary.install_and_run(
         package="tortoise-graph",
