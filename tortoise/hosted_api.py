@@ -2044,6 +2044,24 @@ _HEALTH_PROBE_START_FAILED = False
 #: `503 data-plane-failed` over a healthy, freshly booted process). A second name
 #: cannot collide, and `test_the_boot_clock_is_a_float_and_not_the_identity_string`
 #: pins the type so a future rename cannot bring the collision back.
+#:
+#: ⛔ AND IT IS RE-BASED ON EVERY LIFESPAN ENTRY (`_lifespan`, beside
+#: `_HEALTH_PROBE.reset()`) — this is the epoch of the CURRENT health-probe
+#: state, not the process's age (#12630). The bound above asks "has THIS probe
+#: coordinator been waiting past a cold start", and `reset()` starts a new
+#: waiting period, so a process-age clock answers a different question: a
+#: lifespan entered 6 minutes into the process (a second in-process app
+#: instance, a `TestClient` reuse, a re-entered lifespan) reset the probe while
+#: the clock kept counting, so the bound was already blown the moment it was
+#: evaluated and the listener answered `503 data-plane-failed` through the whole
+#: of a perfectly healthy boot. Measured: `tests/test_hosted_api.py::
+#: TestLivenessDecouple::test_lifespan_starts_the_dedicated_healthz_listener`
+#: reds in any shard where the process crosses 120 s before that test runs
+#: (reproduced by aging this global to -400 s with nothing else changed).
+#: Re-basing HERE rather than adding a second clock is deliberate: one epoch has
+#: one writer, so it cannot drift from the reset it describes, and a second
+#: module global would make the read depend on which file's fixture ran last
+#: (the #12666 leak class).
 _PROCESS_BOOT_MONOTONIC = time.monotonic()
 
 
@@ -2105,8 +2123,10 @@ def _liveness_dataplane_verdict() -> dict:
       start teaches operators to ignore it, and the loop-stale term already
       covers a boot that never gets going. This state is only reachable while
       something is actually running that can produce the missing result, or
-      within ``_health_probe_never_produced_bound_s()`` of process start —
-      past that bound, nothing-produced is a FAILURE.
+      within ``_health_probe_never_produced_bound_s()`` of THIS app instance's
+      probe reset (``_PROCESS_BOOT_MONOTONIC``, re-based per lifespan entry —
+      not of process start, which is the #12630 defect) — past that bound,
+      nothing-produced is a FAILURE.
     """
     try:
         # ⛔ ``peek()``, NOT ``snapshot()`` (#12477): snapshot() self-heals by
@@ -2942,7 +2962,17 @@ async def _lifespan(app):
     # ── #2850: every app instance starts from a clean health-probe state.
     # A probe worker wedged during a previous app instance (TestClient reuse
     # in-process, or an in-process reload) must not survive into this one.
+    # ⛔ AND THE EPOCH MOVES WITH IT (#12630): `reset()` starts a new "has this
+    # probe produced a result yet" waiting period, so the bound that judges that
+    # period must be dated from HERE. Leaving the clock at the process's own age
+    # made a re-entered lifespan answer `503 data-plane-failed` for the whole of
+    # its boot — already past the 120 s bound the moment it was evaluated — and
+    # that reds `test-slow` in any shard whose process is that old, which is a
+    # required check. One `global` write, at the same seam as the reset, so the
+    # two can never disagree.
+    global _PROCESS_BOOT_MONOTONIC
     _HEALTH_PROBE.reset()
+    _PROCESS_BOOT_MONOTONIC = time.monotonic()
     _READY_PROBE.reset()
     _CONTROL_PLANE_PROBE.reset()
     _probe_sdk_reset()
