@@ -150,9 +150,9 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # undeclared mutation in the tree).
     "test_9664_capstone_connector_to_record.py": [
         r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
-    # #12521: `test_10015_organisation_account.py` landed two
-    # `delenv("TORTOISE_DB_URI")` sites with no
-    # register row, which reds this gate on `main` — the same "module landed without
+    # #12521: `test_10015_organisation_account.py` landed two URI-unsets with no
+    # register row (`monkeypatch.delenv("TORTOISE_DB_URI", raising=False)`, at `:49`
+    # and `:257`), which reds this gate on `main` — the same "module landed without
     # its entry" shape as #9664 above and #12275 below. Both are the embedded-lane
     # control, and they point the resolver in OPPOSITE ways, so one sentence does not
     # describe both:
@@ -186,11 +186,9 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
         # under `tests/`, against 7 key-only), so a future site repeating this exact
         # literal is SILENCED by this arm and must be triaged BY HAND. The narrowing
         # still earns its place, and no other arm in this table does it: every other
-        # `delenv` arm here stops at the variable name.
-        # No count is stated on purpose — the number changes with the counting rule,
-        # and a cardinal nobody can state twice is how "Two sites" went stale here.
-        # (Every count above is scoped to the LITERAL form: the module also spells a
-        # variable-name `delenv(var, …)` at `:287`, which no arm here can match.)
+        # `delenv` arm here stops at the variable name. The one thing it DOES
+        # guarantee is asserted, not merely claimed —
+        # `test_declaration_path_rejects_undeclared` reds if the arm is widened.
         # ⛔ The in-flight #12601 carries this SAME key with this SAME arm. A second
         # identical row is still a duplicate dict key (ruff F601, and the later key
         # silently shadows the earlier) — so whichever of the two lands second must
