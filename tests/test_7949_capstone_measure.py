@@ -5805,13 +5805,16 @@ _EPIC_CITE_DOCS = {
     "11083/README.md":
         _REPO / "docs/evidence/11083/README.md",
     # ⛔ REGISTERED BY THE REVIEW THAT FOUND IT UNPINNED (#12462). `05-verify.md` D5 states
-    # SEVEN this-head `file:line` measurements in one sentence, and the reviewer measured that
+    # NINE this-head `file:line` measurements in one sentence, and the reviewer measured that
     # reverting them left the suite GREEN — so the sentence whose whole subject is "numbers
     # rot" was itself the one block in this PR nothing read. Three are pinned on the two rows
     # below (`18396`/`18503` here, `sdk.py:10037` on its own row because a row carries ONE
     # source key), `10064`/`10117` by the `subject_binding_available` rows that already exist,
-    # and the last two (`capstone_run.py:1186`, `EXTRACTOR-V4-ARCHITECTURE.md:1400`) on the two
-    # source keys registered just below. A document this bundle EDITS is a document this
+    # and the last four (`capstone_run.py:1186`, `:1194`, `EXTRACTOR-V4-ARCHITECTURE.md:1400`,
+    # `:1418`) on the two source keys registered just below. ⛔ THE POPULATION IS NINE, NOT
+    # SEVEN: the first two cuts each miscounted it, and the two numbers they left out were
+    # exactly the shape this PR exists to close (mutating `:1194` or `:1418` alone left 420
+    # GREEN until they were pinned). A document this bundle EDITS is a document this
     # bundle READS — the convention the `_EPIC_CITE_DOCS` comment above states; registering the
     # file is what makes the next insertion red instead of silent.
     "05-verify.md":
@@ -5840,12 +5843,14 @@ _EPIC_CITE_SOURCES = {
     # by a test. A source key is the only way `_pin_row_failures` can resolve a
     # `hosted_api` number at all, so its absence was the hole.
     "hosted_api": _REPO / "tortoise/hosted_api.py",
-    # ⛔ THE LAST TWO THIS-HEAD NUMBERS IN `05-verify.md` D5 (#12462 review cycle 2). The
-    # first cut registered the DOCUMENT and pinned three of its seven cites, and a fresh
-    # reviewer measured the residual the honest way — mutating `capstone_run.py:1186` and
-    # `EXTRACTOR-V4-ARCHITECTURE.md:1400` in the sentence left 413 GREEN. Both are probe /
-    # architecture-document paths, so neither is under `tortoise/`; registering them is what
-    # gives the D5 sentence its full set of readers claim.
+    # ⛔ THE RESIDUAL THIS-HEAD NUMBERS IN `05-verify.md` D5 (#12462 review cycle 2, then a
+    # later cycle that counted the population at NINE, not seven). The first cut registered
+    # the DOCUMENT and pinned three of its seven cites, and a fresh reviewer measured the
+    # residual the honest way — mutating `capstone_run.py:1186` and
+    # `EXTRACTOR-V4-ARCHITECTURE.md:1400` in the sentence left 413 GREEN; the same method then
+    # found `:1194` and `:1418` green too. All are probe / architecture-document paths, so
+    # none is under `tortoise/`; registering them is what gives the D5 sentence its full set
+    # of readers.
     "capstone_run":
         _REPO / "docs/evidence/7949-capstone/probes/capstone_run.py",
     "extractor_v4_arch":
@@ -6120,10 +6125,10 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("18503", "if count + est > max_points:"),
         ), "hosted_api"),
         # ⛔ `05-verify.md` D5's own "Measured at" sentence (#12462 review). The row whose
-        # SUBJECT is that line numbers rot carried SEVEN this-head cites and no reader at
-        # all. Four rows here, because a row carries ONE source key; the phrase is unique in
-        # the file. The first cut pinned only three of the seven, and review cycle 2 measured
-        # the residual by mutating the two below — 413 GREEN — so they are pinned too.
+        # SUBJECT is that line numbers rot carried NINE this-head cites and no reader at
+        # all. Five rows here, because a row carries ONE source key; the phrase is unique in
+        # the file. The first cut pinned only three of the nine, and review measured the
+        # residual by mutating the rest — 413/420 GREEN — so they are pinned too.
         ("05-verify.md", "Measured at `6916a6cd89`", (
             ("18396", "``body.harness`` only ever introduces a harness on a session the server"),
             ("18503", "if count + est > max_points:"),
@@ -6141,6 +6146,15 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         ), "capstone_run"),
         ("05-verify.md", "Measured at `6916a6cd89`", (
             ("1400", "a **two-method** event-sourced Protocol"),
+        ), "extractor_v4_arch"),
+        # ⛔ THE TWO THIS-HEAD NUMBERS THE EARLIER CUTS LEFT UNREAD (#12569 review): D5 states
+        # NINE, not seven — `:1194` ("the frozen literal is at") and `:1418` ("D6 sits at")
+        # are stated in the same sentence, and mutating either alone left 420 GREEN.
+        ("05-verify.md", "Measured at `6916a6cd89`", (
+            ("1194", 'if not frozen.get("sha256"):'),
+        ), "capstone_run"),
+        ("05-verify.md", "Measured at `6916a6cd89`", (
+            ("1418", "| **D6** | **Two distinct connection sets**"),
         ), "extractor_v4_arch"),
         # ⛔ `00-plan.md`'s `_capture_lane` CITE (#12462 review cycle 3, P2): the diff
         # re-pointed it to `:17936` and no row read it — `_BUNDLE_CITE` matches
@@ -6160,7 +6174,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         ("04-plan.md", "**point budget - a POINTER, not a snapshot**", (
             ("13521", "point_count = await asyncio.to_thread("),
         ), "hosted_api"),
-        # ⛔ `:1186` IS NOT PINNED BY A ROW, and the reason is measured rather than
+        # ⛔ `:1186` IS NOT PINNED BY A ROW *ALONE*, and the reason is measured rather than
         # stylistic: it is stated TWICE on ONE doc line ("is STAMP-bound (`:1186` is the
         # `corpus` line here" and "`capstone_run.py:1186` is the `corpus` line here"), and
         # a phrase-scoped row asserts only that the NUMBER is somewhere on the line — so a
@@ -6288,9 +6302,11 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # `hosted_api.py:13521-13598`, and the END of that range is a BLANK line — so the row
     # above can only anchor the start, and a range that drifts by a line still "contains"
     # the number the doc names (the reason this file pins ranges at both endpoints where it
-    # can). Both boundaries are pinned here BY CONTENT instead of by a second anchor: the
-    # block must still open at `point_count` and still contain exactly one `nodes_used`
-    # read and one `max_nodes` derivation inside the stated span.
+    # can). ⛔ THE SPAN LOOP BELOW DOES NOT PIN THE END, and an earlier version of this
+    # comment claimed it did: it asserts each needle occurs once INSIDE the window, which is
+    # true for every end from `:13560` to `:13700`. The end is therefore pinned by the
+    # structural assertion at `_i7_end_ok` — the stated last line must still be the blank
+    # line immediately before `return OrgInfoResponse(`.
     _i7 = _EPIC_CITE_DOCS["04-plan.md"].read_text(encoding="utf-8")
     assert _i7.count("`hosted_api.py:13521-13598`") == 1, (
         "04-plan.md I7's range cite moved or was re-spelled — re-derive BOTH endpoints from "
@@ -6303,6 +6319,13 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             f"04-plan.md I7 says `:13521-13598` publishes `nodes_used` / `max_nodes`, but "
             f"{_what} occurs {sum(_needle in _l for _l in _span)} time(s) in that span — the "
             "range has moved, so re-derive it (start AND end) rather than bumping one end")
+    # …and the END by structure, because membership inside a window cannot see it move.
+    _i7_end_ok = _org_info[13598 - 1].strip() == "" and bool(
+        _org_info[13598].lstrip().startswith("return OrgInfoResponse("))
+    assert _i7_end_ok, (
+        "04-plan.md I7's range end (`:13598`) is no longer the blank line before "
+        "`return OrgInfoResponse(` — re-derive BOTH endpoints from `hosted_api.py`, "
+        "because the span-membership check above stays green while the end drifts")
 
     # ⛔ THE BLOCK ARM — the claim `03-test-design.md` actually makes, checked
     # against the structure instead of a number that a tool rewrites under it.
