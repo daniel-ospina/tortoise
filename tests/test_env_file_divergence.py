@@ -2434,3 +2434,40 @@ def test_every_rung_the_ladder_can_return_has_a_deciding_key(monkeypatch):
     assert RUNG_DECIDING_KEY["path"] == RUNG_DECIDING_KEY["embedded-allowed"] == (
         "TORTOISE_DB_PATH")
     assert RUNG_DECIDING_KEY["refuses"] is None
+
+
+def test_the_embedded_hatch_is_not_described_as_an_environment_key(
+        capsys, _isolated, monkeypatch):
+    """`embedded-allowed` must not name a variable the user does not have.
+
+    `RUNG_DECIDING_KEY` maps `embedded-allowed` to `TORTOISE_DB_PATH` because
+    that is the ladder key whose EMPTINESS produced the rung — the ladder read it
+    and fell through. The rung itself was selected by the `TORTOISE_ALLOW_EMBEDDED`
+    hatch, so `TORTOISE_DB_PATH` is UNSET in this state, and a renderer that reads
+    the table alone printed *"the ENVIRONMENT's TORTOISE_DB_PATH decides it for
+    the daemon"* about a variable that does not exist.
+
+    ⛔ Measured before the gate: `.env` = `TORTOISE_DB_URI=` (blank), shell
+    `TORTOISE_ALLOW_EMBEDDED=1`, nothing else — `config show` AND `doctor` both
+    named the unset `TORTOISE_DB_PATH`. That is the same false-mechanism class
+    this whole change exists to remove, so it is gated (the key must be an
+    environment key) and pinned here on both surfaces. Mutant: dropping the
+    `_deciding_in_env` gate reddens this test.
+    """
+    _write_env(_isolated, "TORTOISE_DB_URI=\n")
+    monkeypatch.setenv("TORTOISE_ALLOW_EMBEDDED", "1")
+    monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+
+    payload = _show_json(capsys)["env_file"]
+    assert payload["daemon_rung"] == "embedded-allowed", payload
+    assert payload["env_graph_keys"] == [], payload   # no ladder key is set
+    assert payload["differs"] is False, payload
+
+    out = _show_text(capsys)
+    assert "TORTOISE_DB_PATH decides it" not in out, (
+        "the embedded hatch was described as the ENVIRONMENT's "
+        "TORTOISE_DB_PATH deciding it, and TORTOISE_DB_PATH is unset here: " + out)
+
+    assert _run(("doctor",)) in (0, 1)
+    doc = capsys.readouterr().out
+    assert "TORTOISE_DB_PATH decides it" not in doc, doc

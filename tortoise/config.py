@@ -567,17 +567,25 @@ class DaemonTargetError(ValueError):
 #:
 #: ⛔ WHY THIS TABLE EXISTS. The disclosure asks "which key decided the daemon's
 #: target" in four places, and each answered it by walking ``DAEMON_DB_KEYS``
-#: itself and restating the ladder as "the first key present". That was faithful
-#: about ORDER and wrong about TRUTHINESS, which is the test the ladder actually
-#: applies (``if uri:``): a `.env` carrying a BLANK ``TORTOISE_DB_URI`` beside a
-#: shell ``TORTOISE_DB_PATH=/tmp/env-path.db`` resolved to the shell's path on
-#: the ``path`` rung, and the row still said *"the file's TORTOISE_DB_URI
-#: resolves to it for the daemon too"* — naming a value the ladder never read, in
-#: the surface whose whole purpose is truthful disclosure (#12441 item 1).
+#: itself and restating the ladder as "the first key present". At the TWO
+#: ASSERTION sites that walk was already WRONG, because it tested PRESENCE while
+#: the ladder tests TRUTHINESS (``if uri:``): a `.env` carrying a BLANK
+#: ``TORTOISE_DB_URI`` beside a shell ``TORTOISE_DB_PATH=/tmp/env-path.db``
+#: resolved to the shell's path on the ``path`` rung, and the row still said
+#: *"the file's TORTOISE_DB_URI resolves to it for the daemon too"* — naming a
+#: value the ladder never read, in the surface whose whole purpose is truthful
+#: disclosure (#12441 item 1). At the two MIXED (``_top``) sites the input was
+#: already non-blank filtered, so the walk COINCIDED with the ladder there and no
+#: state distinguished them; the walk went anyway because it re-spelt the ladder's
+#: ORDER, which a new rung would silently desync. Both halves are why the answer
+#: belongs to the resolver.
 #:
 #: ⛔ ``embedded-allowed`` maps to ``TORTOISE_DB_PATH`` deliberately: that rung is
 #: reached only AFTER ``TORTOISE_DB_PATH`` was read and found falsy, so DB_PATH is
-#: the ladder key the rung answers for. ``refuses`` consumed NEITHER key, and
+#: the ladder key the rung answers for. It is NOT a claim that DB_PATH is SET — a
+#: renderer that says "the ENVIRONMENT's DB_PATH decides it" must still check
+#: that DB_PATH is an environment key, or it invents a variable the user does not
+#: have (the hatch selected the rung). ``refuses`` consumed NEITHER key, and
 #: ``None`` is not a rung at all (a caller that did not grade the daemon).
 RUNG_DECIDING_KEY: dict[str, str | None] = {
     "uri": "TORTOISE_DB_URI",

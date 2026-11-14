@@ -4512,7 +4512,19 @@ def _cmd_config(args) -> int:
                     # `None` here means the rung is unmapped — see
                     # `config.RUNG_DECIDING_KEY`, which a test keeps complete.
                     _deciding = rung_deciding_key(env_file.get("daemon_rung"))
-                    if _deciding and _deciding not in env_file["graph_keys"]:
+                    # ⛔ The sentence below is "the ENVIRONMENT's <key> decides
+                    # it", so that key must BE an environment key.
+                    # `rung_deciding_key` names the ladder key a rung answers
+                    # FOR, and for `embedded-allowed` that is
+                    # `TORTOISE_DB_PATH` — a value the ladder read and found
+                    # FALSY, i.e. a variable the user does not have (the rung was
+                    # selected by the `TORTOISE_ALLOW_EMBEDDED` hatch). Without
+                    # this gate the row named an UNSET variable as the decider —
+                    # the same false-mechanism class this whole change exists to
+                    # remove (review round 2, P1).
+                    _deciding_in_env = _deciding in (env_file.get("env_graph_keys") or ())
+                    if (_deciding and _deciding_in_env
+                            and _deciding not in env_file["graph_keys"]):
                         print("  →  the same graph target as above: the ENVIRONMENT's")
                         print(f"     {_printable(_deciding)} decides it for the daemon,")
                         print("     so the file's "
@@ -4542,12 +4554,17 @@ def _cmd_config(args) -> int:
                               f"{_from_file}")
                         print("     — the target above is the one it selects")
                     elif _from_file and _from_env:
-                        # The MIXED state. WHICH key decides is an ordering fact,
+                        # The MIXED state. WHICH key decides is an ORDERING fact,
                         # ⛔ and it is the RESOLVER's to state (#12441 item 1):
                         # the rung the payload carries names the key it consumed.
-                        # A `next(key for key in _DB_LADDER_KEYS if present)` walk
-                        # re-spelled the ORDER and ignored TRUTHINESS, so a BLANK
-                        # file key was credited as the deciding rung.
+                        # ⛔ STRUCTURAL ONLY, and stated as such: `applied` and
+                        # `shadowed` are both built from `env_graph_keys`, which
+                        # is already non-blank filtered, so the walk this replaced
+                        # COINCIDED with the rung here — no input distinguishes
+                        # them (measured: restoring it leaves the suite green). It
+                        # is gone because it re-spelt the ORDER, which a new rung
+                        # would desync; the completeness test on
+                        # `RUNG_DECIDING_KEY` is its pin.
                         _top = rung_deciding_key(env_file.get("daemon_rung"))
                         if _top in env_file["applied_graph_keys"]:
                             print("  →  the same graph target as above: this process")
@@ -12285,9 +12302,13 @@ def _dotenv_rows(env_file: dict) -> list[tuple[str, str, str]]:
     if env_file.get("graph_keys"):
         # ⛔ The RESOLVER's answer, not a walk of `_DB_LADDER_KEYS` (#12441 item
         # 1) — see the twin site in `_cmd_config` for the blank-value state the
-        # walk mis-attributed.
+        # walk mis-attributed, AND for why the "the ENVIRONMENT's <key>" sentence
+        # also requires that key to be an environment key (`embedded-allowed`
+        # names `TORTOISE_DB_PATH`, which the hatch left UNSET).
         _deciding = rung_deciding_key(env_file.get("daemon_rung"))
-        if _deciding and _deciding not in env_file["graph_keys"]:
+        _deciding_in_env = _deciding in (env_file.get("env_graph_keys") or ())
+        if (_deciding and _deciding_in_env
+                and _deciding not in env_file["graph_keys"]):
             detail = (f"{path} sets "
                       f"{_printable(', '.join(env_file['graph_keys']))} — "
                       f"{_read_clause}; the ENVIRONMENT's {_printable(_deciding)} "
@@ -12320,8 +12341,10 @@ def _dotenv_rows(env_file: dict) -> list[tuple[str, str, str]]:
             # MIXED: the shell supplied one ladder key and the file the other.
             # Whichever the ladder ranks FIRST decides, so name it rather than
             # assume either side — ⛔ by asking the RESOLVER (#12441 item 1): the
-            # rung names the key the ladder actually CONSUMED, where the walk
-            # this replaces re-spelled the ORDER and ignored TRUTHINESS.
+            # rung names the key the ladder actually CONSUMED.
+            # ⛔ STRUCTURAL ONLY (see the twin site in `_cmd_config`): both sets
+            # here are non-blank filtered, so the walk this replaces coincided
+            # with the rung and no input distinguishes them.
             _top = rung_deciding_key(env_file.get("daemon_rung"))
             if _top in env_file["applied_graph_keys"]:
                 detail = (f"{_sets}; this process applied it at import, so the "
