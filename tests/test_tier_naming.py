@@ -280,17 +280,28 @@ class TestEverySurfaceAgreesWithTheDeclaration:
 #:         `… no Builder plan on the roadmap` — listed because this list is claimed to
 #:         be MEASURED rather than complete (cycle-19 P2, re-measured cycle 20);
 #:       * a LEADING parenthetical whose inner text is ITSELF A CLAUSE — the residual of
-#:         :data:`_REPORTED_ASIDE`'s content check (cycle-20 round 6, measured). A leading
-#:         `--…--` / `—…—` pair is stripped only when its inner text carries no
-#:         `_REPORTED_CLAUSE_END` member, which closes
+#:         :data:`_REPORTED_ASIDE`'s content check (cycle-20 rounds 6–8, measured). A
+#:         leading `--…--` / `—…—` pair is stripped only when its inner text neither OPENS
+#:         with `and|but|so|yet` nor carries `;`/`:`/`--`/`—`/`–`
+#:         (:data:`_REPORTED_ASIDE_CLAUSE`) — which closes
 #:         `… said -- and the page still carries it -- there is no Builder plan.` (its
-#:         inner holds `and`). It does NOT close the same shape written with NO break
-#:         marker: `Until #12444 the doc said — the page was never fixed — there is no
-#:         Builder plan.` is EXEMPT here while `origin/main` FLAGS it. Telling an aside
-#:         from a clause when nothing marks the difference is a semantic question this
-#:         heuristic cannot answer, and requiring a `_RETRACTION_CUES` word inside would
-#:         re-BLOCK the cue-free asides `… said -- flatly -- that …` — the round-5 false
-#:         block, measured. The trade is taken toward the false block, per the doctrine at
+#:         inner opens with `and`). ⛔ IT IS NOT CLOSED FOR AN INNER THAT IS A CLAUSE
+#:         WITHOUT ONE OF THOSE MARKS, and a round-6/7 revision of this bullet said the
+#:         predicate was the WIDER `_REPORTED_CLAUSE_END`, which would have claimed the
+#:         whole region. Measured shapes that are EXEMPT here while `origin/main` and the
+#:         round-6 head both FLAG them:
+#:         `Until #12444 the doc said — the page was never fixed — there is no Builder
+#:         plan.` (no mark at all), and — after round 7 narrowed the predicate —
+#:         `… said -- the page still carries it, and we never fixed it -- there is no
+#:         Builder plan.`, `… said -- because nobody fixed it -- …`,
+#:         `… said -- which nobody fixed -- …`, `… said -- although nobody fixed it -- …`,
+#:         `… said -- wrong, so we keep it -- …`. 16 of 24 probes of that family diverge
+#:         from `origin/main` this way. NO PUNCTUATION-ONLY PREDICATE SEPARATES THEM from
+#:         the six records round 7 restored — `… said -- until #12444, which corrected it
+#:         -- that …` carries `,` AND `which` too — so this is a documented residual rather
+#:         than a re-widening, and requiring a `_RETRACTION_CUES` word inside would
+#:         re-BLOCK the cue-free asides `… said -- flatly -- that …` (the round-5 false
+#:         block, measured). The trade is taken toward the false block, per the doctrine at
 #:         the top of this list;
 #:       * an ANAPHORIC re-assertion after a quoted record (`Previously the doc read
 #:         "there is no Builder plan"; there is no such plan anymore.` / `…; that plan
@@ -1970,6 +1981,27 @@ class TestNoDocDeniesABuilderPlanExists:
                 # only the content check distinguishes them.
                 "Until #12444 the doc said -- and the page still carries it -- there is "
                 "no Builder plan.\n",
+                # ⛔ EVERY MEMBER OF `_REPORTED_ASIDE_CLAUSE` IS PINNED, ONE FOR ONE
+                # (cycle-20 round 8, measured): five of its six alternatives could be
+                # deleted with the suite at `19 passed` while each turned a FLAGGED denial
+                # into an exempt one — the same gap `_REPORTED_CLAUSE_END` had at round 2,
+                # and the cycle-11 rule this file restates below.
+                "Until #12444 the doc said -- but nobody fixed it -- there is no Builder "
+                "plan.\n",
+                "Until #12444 the doc said -- so nobody fixed it -- there is no Builder "
+                "plan.\n",
+                "Until #12444 the doc said -- yet nobody fixed it -- there is no Builder "
+                "plan.\n",
+                "Until #12444 the doc said -- the page was stale; nobody fixed it -- "
+                "there is no Builder plan.\n",
+                "Until #12444 the doc said -- the page was stale: nobody fixed it -- "
+                "there is no Builder plan.\n",
+                "Until #12444 the doc said — the page -- never fixed — there is no "
+                "Builder plan.\n",
+                "Until #12444 the doc said -- the page — never fixed -- there is no "
+                "Builder plan.\n",
+                "Until #12444 the doc said -- the page – never fixed -- there is no "
+                "Builder plan.\n",
         ):
             assert _denials_in_document(live), (
                 f"a live denial was exempted by a following fragment that is not a "
@@ -2233,6 +2265,14 @@ class TestNoDocDeniesABuilderPlanExists:
             # cycles 6/8/11/12/13). The rest of the scanner/instrument surface is banned
             # with it rather than left reachable for the next author to rediscover.
             "_quoted_span_offsets",
+            # ⛔ …and the three ingredients rounds 3/6/7 added for the reported-ASIDE strip
+            # (cycle-20 round 8, measured: injected tests pinning `_REPORTED_ASIDE`,
+            # `_REPORTED_ASIDE_CLAUSE` and `_leading_aside_is_parenthetical` each ran
+            # GREEN, so the guard was silent on them — the same defect this set was
+            # extended for in cycles 6/8/11/12/13 and again at `_REPORTED_CLAUSE_END`).
+            "_REPORTED_ASIDE",
+            "_REPORTED_ASIDE_CLAUSE",
+            "_leading_aside_is_parenthetical",
             # ⛔ `_REPORTED_CLAUSE_BREAK` and `_NEGATION_WORD` were DELETED in the
             # round-2 review and are no longer banned — banning a name that does not
             # exist is not a guard (the same rule that removed `_BUILDER_PHRASE` and
