@@ -1,0 +1,73 @@
+{
+ "measured_at": "2026-11-14T02:04:38Z",
+ "source": "cache:/tmp/11739-g3-rows.jsonl",
+ "criterion_source": "#399 (candidate surface + calibrated 0.72 paraphrase floor) / #438 (precision of candidates)",
+ "frame": {
+  "endpoint": "cache:/tmp/11739-g3-rows.jsonl",
+  "rows_walked": 900,
+  "pages": null,
+  "offset_reached": null,
+  "refused_at": null,
+  "live_rows": 900,
+  "population_used": 823,
+  "frame_note": "page PREFIX of the default read order at limit 100; not a random sample \u2014 a prefix, declared."
+ },
+ "arms": {
+  "threshold": 0.72,
+  "lens_key": "session_id",
+  "encoder": "BAAI/bge-small-en-v1.5"
+ },
+ "audit_samples": {
+  "shared_T4": 100,
+  "raw_only_T4": 40,
+  "shared_T4_tier": 899,
+  "raw_only_T4_tier": 1760,
+  "note": "seeded random samples (seed 11739) of the only tier that needs judgement; the true/false LABELS are recorded in the bundle README and #11739, not here"
+ },
+ "proposals": {
+  "raw": 2661,
+  "composed": 4220,
+  "shared": 901,
+  "composed_only": 3319,
+  "raw_only_lost": 1760,
+  "composed_only_crossing_0_89": 0
+ },
+ "composed": {
+  "proposals": 4220,
+  "true_exact": 0,
+  "false_exact": 3321,
+  "false_by_tier": {
+   "T2_identical_composed_text": 2,
+   "T3_below_calibrated_floor": 3319
+  },
+  "needs_label": 899
+ },
+ "composed_only": {
+  "proposals": 3319,
+  "true_exact": 0,
+  "false_exact": 3319,
+  "false_by_tier": {
+   "T2_identical_composed_text": 0,
+   "T3_below_calibrated_floor": 3319
+  },
+  "needs_label": 0
+ },
+ "raw": {
+  "proposals": 2661,
+  "true_exact": 0,
+  "false_exact": 2,
+  "false_by_tier": {
+   "T2_identical_composed_text": 2,
+   "T3_below_calibrated_floor": 0
+  },
+  "needs_label": 2659
+ },
+ "duration_s": 65.1,
+ "provenance": {
+  "probe_path": "probes/gate3_false_proposals.py",
+  "probe_sha256": "ef32a4b753e813f779f1174757d546ac2c72b173ea55acc0dc2db8fa478d05bd",
+  "payload_sha256": "c5aaa639ccf7260463dff03b4e8dae0b4d0724411a48859ff22531b8ec514c99",
+  "rows_source": "cache:/tmp/11739-g3-rows.jsonl",
+  "encoder": "BAAI/bge-small-en-v1.5 (tortoise.embeddings.EMBEDDING_MODEL)"
+ }
+}

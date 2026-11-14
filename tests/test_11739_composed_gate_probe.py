@@ -109,6 +109,45 @@ def test_quote_identity_json_was_produced_by_the_committed_quote_identity_probe(
         "(`--rows <cache> --out …`); do not hand-edit the artifact")
 
 
+def test_gate3_json_was_produced_by_the_committed_gate3_probe():
+    """FAILS IF `probes/gate3_false_proposals.py` is edited without re-running (or re-attesting).
+
+    This artifact carries the FALSE-PROPOSAL count — the number #11739's verdict comment mis-stated
+    as `13,691` (a NEW-proposal count). It is the only place in the bundle where a proposal is
+    classified true/false, so re-pointing the probe's bytes silently would re-point the correction.
+    The repair is a fresh run against the declared row cache, or `--attest` for a non-logic edit.
+    """
+    artifact = _artifact("gate3_false_proposals.json")
+    assert artifact["provenance"]["probe_path"].rsplit("/", 1)[-1] == "gate3_false_proposals.py"
+    assert artifact["provenance"]["probe_sha256"] == _digest_of("gate3_false_proposals.py"), (
+        "gate3_false_proposals.json was produced by a DIFFERENT gate3_false_proposals.py — re-run "
+        "the probe (or `--attest` it) rather than hand-editing the artifact")
+
+
+def test_the_gate3_counts_are_the_ones_the_issue_quotes():
+    """FAILS IF the false-proposal counts #11739 now quotes are edited.
+
+    The correction is the deliverable: composed 4,202/4,220 false, raw 2,599/2,661, and the
+    composed-ONLY delta 3,319/3,319 — all three derive from these fields (T2 + T3 exact, plus the
+    audited strata whose LABELS live in the README, not here). A drift in any field below moves a
+    published number, and `payload_sha256` alone would report it as "some byte changed".
+    """
+    gate3 = _artifact("gate3_false_proposals.json")
+    assert gate3["proposals"] == {"raw": 2661, "composed": 4220, "shared": 901,
+                                 "composed_only": 3319, "raw_only_lost": 1760,
+                                 "composed_only_crossing_0_89": 0}
+    assert gate3["composed"]["false_by_tier"] == {
+        "T2_identical_composed_text": 2, "T3_below_calibrated_floor": 3319}
+    assert gate3["composed"]["needs_label"] == 899
+    assert gate3["composed_only"]["false_exact"] == 3319, (
+        "the composed-ONLY delta is the switch's own effect — it must stay exactly false")
+    assert gate3["composed_only"]["needs_label"] == 0
+    assert gate3["raw"]["needs_label"] == 2659
+    assert gate3["audit_samples"]["shared_T4"] == 100
+    assert gate3["audit_samples"]["raw_only_T4"] == 40
+    assert gate3["arms"]["threshold"] == DEFAULT_THRESHOLD
+
+
 def test_the_two_artifacts_name_different_probes():
     """FAILS IF one artifact's provenance block is copy-pasted onto the other.
 
@@ -118,8 +157,9 @@ def test_the_two_artifacts_name_different_probes():
     """
     gate = _artifact("gate.json")["provenance"]["probe_sha256"]
     identity = _artifact("quote_identity.json")["provenance"]["probe_sha256"]
-    assert gate != identity, (
-        "both artifacts claim the same probe digest — one provenance block was copy-pasted")
+    third = _artifact("gate3_false_proposals.json")["provenance"]["probe_sha256"]
+    assert len({gate, identity, third}) == 3, (
+        "two artifacts claim the same probe digest — one provenance block was copy-pasted")
     assert gate == _digest_of("composed_gate.py")
     assert identity == _digest_of("quote_identity.py")
 
@@ -175,7 +215,8 @@ def test_the_declared_bands_are_the_products_bands():
 # `test_the_declared_bands_are_the_products_bands` owns the BANDS; the tests below cover what
 # neither can see: that the artifact's own FIELDS are the fields that were attested.
 # ---------------------------------------------------------------------------------------
-@pytest.mark.parametrize("name", ["gate.json", "quote_identity.json"])
+@pytest.mark.parametrize("name", ["gate.json", "quote_identity.json",
+                                      "gate3_false_proposals.json"])
 def test_artifact_evidence_is_the_evidence_that_was_attested(name: str):
     """FAILS IF a number, a count or a verdict inside either artifact is hand-edited.
 
@@ -293,12 +334,17 @@ def test_the_artifacts_name_the_row_cache_and_encoder_the_dates_rest_on():
     # The encoder key is named per probe (`encoder` describes the embedder that produced the
     # vectors; `composed_encoder` says the root-cause probe encodes nothing and reads the
     # composer's word budget) — so check the field that artifact actually publishes.
+    gate3 = _artifact("gate3_false_proposals.json")
     for name, artifact, encoder_key in (("gate.json", gate, "encoder"),
-                                        ("quote_identity.json", identity, "composed_encoder")):
+                                        ("quote_identity.json", identity, "composed_encoder"),
+                                        ("gate3_false_proposals.json", gate3, "encoder")):
         prov = artifact["provenance"]
         assert prov["rows_source"], f"{name} names no row source — nothing attributes the numbers"
         assert prov[encoder_key], (
             f"{name} names no `{encoder_key}` — the 0.89/0.72 bands are model-calibrated")
+    assert gate3["provenance"]["rows_source"] == gate3["source"], (
+        "gate3_false_proposals.json's `source` and `provenance.rows_source` disagree — the numbers "
+        "must stay attributable to ONE cache")
     assert gate["provenance"]["rows_source"] == gate["source"], (
         "gate.json's `source` and `provenance.rows_source` disagree — a cache-sourced artifact must "
         "name ONE cache, or `--attest` (which derives the second from the first) can silently move it")
@@ -426,6 +472,7 @@ def test_quote_identity_attest_refuses_the_tamper_shapes(shape, mutate):
     # worlds, i.e. it pinned nothing).
     ("composed_gate.py", ["verdict", "gate1_similarity"]),
     ("quote_identity.py", ["measured_points", "shared_composed_text_groups"]),
+    ("gate3_false_proposals.py", ["proposals", "frame"]),
 ])
 def test_attest_refuses_an_artifact_whose_root_is_not_an_object(probe_name, root):
     """FAILS IF either probe's shape guard is removed, so a JSON ARRAY exits 1 instead of 2.
@@ -470,7 +517,8 @@ def test_attest_rewrites_on_a_legitimate_rebind_and_still_carries_the_residual()
     assert rebound["verdict"]["all_pass"] is True
 
 
-@pytest.mark.parametrize("probe_name", ["composed_gate.py", "quote_identity.py"])
+@pytest.mark.parametrize("probe_name", ["composed_gate.py", "quote_identity.py",
+                                        "gate3_false_proposals.py"])
 def test_attest_refuses_an_unreadable_artifact(probe_name):
     """FAILS IF either probe's `ATTEST-UNREADABLE` arm is weakened into a crash or a blessing.
 
@@ -499,6 +547,7 @@ def test_attest_refuses_an_unreadable_artifact(probe_name):
 @pytest.mark.parametrize("probe_name,artifact_name", [
     ("composed_gate.py", "gate.json"),
     ("quote_identity.py", "quote_identity.json"),
+    ("gate3_false_proposals.py", "gate3_false_proposals.json"),
 ])
 def test_attest_reports_probe_write_on_an_unwritable_target(probe_name, artifact_name):
     """FAILS IF either probe's unwritable-target arm reverts to a bare `PermissionError` (exit 1).

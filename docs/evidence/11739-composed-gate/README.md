@@ -49,6 +49,9 @@ GATE: rank distribution            items displaced from top-10 = 3,706 over 500 
                                    raw-relevant (≥0.72) items in raw top-10 lost from composed top-10 = 3,033 of 4,186 (72.5%)  → FAIL
 GATE: false-proposal (cross_lens)  13,691 new proposals out of 17,305 composed proposals (sample n=1,500;
                                    10,232 at raw); 20 of them cross 0.89; max new similarity 1.000  → FAIL
+                                   RE-DERIVED 2026-11-14 (a NEW-PROPOSAL count is not a FALSE count):
+                                   4,202 of 4,220 composed proposals are FALSE (99.6%), 2,599 of 2,661 raw
+                                   (97.7%), and 3,319/3,319 composed-ONLY proposals are FALSE (100%)  → still FAIL
 VERDICT: the composed text may NOT ship ON
 ```
 
@@ -62,6 +65,59 @@ Field map (artifact → field):
 | 13,691 / 17,305 / 10,232 / 20 / 1.000 | `gate.json` → `gate3_false_proposal` |
 | 15,842 · 15,008 · 997 · 14,941 · 384 · encoder 1.0 · 949.2 s | `gate.json` → `population`, `subject_groups`, `duration_s` |
 | 13,341 distinct texts · 2,059 Points (13.72%) · 392 groups · 28,994 pairs · 0 same-content · 16,114 below 0.89 · 117 largest group · 12 raw exact duplicates | `quote_identity.json` |
+
+## Gate 3 re-derived: the FALSE-PROPOSAL count (2026-11-14)
+
+`gate.json`'s `gate3_false_proposal` publishes **proposal** counts and no classification: its fields are
+`sample`, `threshold`, `lens_key`, `proposals_raw`, `proposals_composed`, `new_proposals`,
+`new_proposals_crossing_0_89`, `new_proposals_entering_0_70_0_85`, `max_similarity_among_new_proposals`,
+`pass` — there is no false-count field, and no pair in that run was ever labelled true/false. The
+2026-11-13 **verdict comment** on #11739 rendered `13,691` as *"13,691 false proposals out of 17,305"*;
+13,691 is `new_proposals`. **A new-proposal count is not a false-proposal count**, and the field name
+`gate3_false_proposal` is what pre-seeded the substitution. The figures below are the missing measurement.
+
+`probes/gate3_false_proposals.py` (this bundle, landed 2026-11-14) runs BOTH arms over the SAME rows —
+stored vector (`content`) vs `compose_embedding_text(quote, ())` encoded with the pinned embedder —
+through the real `find_cross_lens_matches` at **0.72**, `lens_key="session_id"`, and classifies every
+proposal under the criterion declared in its docstring before the run (#399's candidate surface and its
+calibrated 0.72 paraphrase / below-0.72-noise split; #438's candidate precision):
+
+| tier | rule | verdict |
+|---|---|---|
+| T1 | the two `content`s are identical (whitespace-collapsed) | TRUE — same claim |
+| T2 | composed texts byte-identical **and** contents differ | FALSE — one quote span, two different facts |
+| T3 | raw (content-space) similarity **< 0.72** | FALSE — never reaches the product's own same-concept floor |
+| T4 | raw ≥ 0.72, texts differ | AUDITED on a seeded sample (the only tier needing judgement) |
+
+T1–T3 are mechanical and exhaustive; T4 is dumped by the probe (`--pairs-out`, `set` = `shared_T4` /
+`raw_only_T4`) and **labelled by the lane**, which is what the artifact honestly says: the sample frame
+and its size are the probe's, the labels are not.
+
+`gate3_false_proposals.json` (823 live quoted+embedded Points — a page PREFIX of the default read order
+at limit 100, declared as a prefix, not a random sample; 4,220 composed / 2,661 raw candidate pairs):
+
+| | composed | raw |
+|---|---|---|
+| proposals | **4,220** | **2,661** |
+| T2 identical composed text, different content | 2 | 2 |
+| T3 below the calibrated 0.72 floor | 3,319 | 0 (cannot occur) |
+| T4 audited (raw ≥ 0.72) | 899 → **98/100 false** | 899 shared (98/100) + 1,760 raw-only (**39/40 false**) |
+| **false total** | **4,202 (99.6% of 4,220)** | **2,599 (97.7% of 2,661)** |
+
+**Composed-only delta — the pairs the switch actually causes: 3,319, all 3,319 FALSE (100%), exact, no
+sampling** (every one sits below 0.72 in content space) and **0** of them crosses 0.89 on this prefix
+(the pinned 1,500-Point sample recorded 20 — same mechanism, different sample). Wilson 95% intervals on
+the audited strata: shared T4 n=100 k=98 → 93.0–99.4%; raw-only n=40 k=39 → 87.1–99.6%; all-Point
+composed ≈ 4,157–4,215 (98.5–99.9%), raw ≈ 2,372–2,648 (89.1–99.5%) — bounds rounded **outward**, and
+the true/proposed totals derived from the audited rates (≈18 composed, ≈62 raw) are **estimates, not
+counts**.
+
+Two counter-movements are recorded so the delta is not read as purely additive: composition **loses**
+1,760 raw proposals (66% of raw's set) whose content is ≥ 0.72 but whose quote diverges below it — false
+under the same criterion and no longer proposed (a recall loss, which is gate 2's subject) — and the 2 T2
+pairs were already proposed by raw, so they change neither arm. ⚠️ **T3 is definitional-by-calibration,
+not a semantic audit**: the lane did not read 3,319 contents, so a purely semantic argument would have to
+be had exactly where #399's own floor lives.
 
 ## Root cause (measured, not inferred)
 
@@ -172,13 +228,21 @@ uv run python docs/evidence/11739-composed-gate/probes/composed_gate.py \
 # 2. the root cause (no encoding, ~30 s)
 uv run python docs/evidence/11739-composed-gate/probes/quote_identity.py \
     --rows /tmp/11739-rows.jsonl --out /tmp/quote_identity.json
-# 3. only after a probe EDIT — rebinds provenance (code digest + payload digest) to the edited
+# 3. gate 3's false-proposal count (both arms, ~70 s against the row cache; no network beyond it)
+#    ⛔ it DUMPS the T4 samples for labelling, it does not label them — see the gate-3 section
+uv run python docs/evidence/11739-composed-gate/probes/gate3_false_proposals.py \
+    --out /tmp/11739-g3.json --pairs-out /tmp/11739-g3-pairs.jsonl
+#    (row cache from step 1 via G3_ROWS_CACHE, default /tmp/11739-g3-rows.jsonl)
+# 4. only after a probe EDIT — rebinds provenance (code digest + payload digest) to the edited
 #    probe WITHOUT re-running the measurement; every fresh run already writes its own provenance
 uv run python docs/evidence/11739-composed-gate/probes/composed_gate.py \
     --attest docs/evidence/11739-composed-gate/gate.json
 # …and the same for the root-cause artifact (no row cache needed for a rebind)
 uv run python docs/evidence/11739-composed-gate/probes/quote_identity.py \
     --attest docs/evidence/11739-composed-gate/quote_identity.json
+# …and the gate-3 artifact
+uv run python docs/evidence/11739-composed-gate/probes/gate3_false_proposals.py \
+    --attest docs/evidence/11739-composed-gate/gate3_false_proposals.json
 ```
 
 Then compare: `diff <(uv run python -m json.tool /tmp/gate.json) <(uv run python -m json.tool
@@ -198,11 +262,12 @@ definition — in-toto's Statement itself has no build-definition field):
 
 * `provenance.probe_sha256` binds it to the **code** that produced it (gate.json:
   `4f066693fbc1c742e36d29875f4b970af7ee12df264217cf95911f480b47a411`; quote_identity.json:
-  `b66f8a174708f855501ac02ae3e5da57dd9e7ae62fac5721cb77c2036f3dfc65`), and
+  `b66f8a174708f855501ac02ae3e5da57dd9e7ae62fac5721cb77c2036f3dfc65`;
+  gate3_false_proposals.json: `ef32a4b753e813f779f1174757d546ac2c72b173ea55acc0dc2db8fa478d05bd`), and
 * `provenance.payload_sha256` binds it to the **numbers** it produced **and to the row cache they
   are attributed to** — sha256 over `{"artifact": <every field except provenance>,
   "rows_source": …}`, canonicalised `indent=2, sort_keys=True` (gate.json:
-  `cfbe7ad4eaee3868ddc52e5432b79fc7baf92a541e581dbcbff6398cf00693be`; quote_identity.json: `31ba4cf0deb6d0bee1f95e0ccf8e66211fe2f0fbb0ba290971f1d735d40dd296`). Without the second, a hand-edit of a NUMBER
+  `cfbe7ad4eaee3868ddc52e5432b79fc7baf92a541e581dbcbff6398cf00693be`; quote_identity.json: `31ba4cf0deb6d0bee1f95e0ccf8e66211fe2f0fbb0ba290971f1d735d40dd296`; gate3_false_proposals.json: `c5aaa639ccf7260463dff03b4e8dae0b4d0724411a48859ff22531b8ec514c99`). Without the second, a hand-edit of a NUMBER
   — `gate2_rank.top_k.items_displaced_from_top_k` 3706 → 3707, or `global_worst_composed`
   1.0 → 0.10 — left the first untouched and passed the pin, which is what the payload binding
   closes; and without `rows_source` INSIDE it, re-pointing the attribution at another cache also
