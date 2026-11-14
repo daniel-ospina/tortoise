@@ -2707,7 +2707,6 @@ to answer.
   read-back for THIS branch's merged tree are §10.36's** (that tree sits a further `+90` above
   `070d97360c` on that file), and the `#548` window is §10.35's.
 
-
 ### 10.30 — the §11/§9 cite block re-derived on `main` after the post-§10.29 merge wave (2026-11-13, `#12266`)
 
 > ⛔ **Superseded for the merged tree by §10.31.** §10.30 measured `main` at `5bacb44e0b`; `#12492`

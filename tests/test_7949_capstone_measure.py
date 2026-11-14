@@ -5930,13 +5930,13 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # tree (`grep -nF 'relation_write = apply_relation_edges(' tortoise/sdk.py`),
             # never carried forward from either side. The anchors are unchanged —
             # that is the point of keying a row on the symbol.
-            ("19012", "relation_write = apply_relation_edges("),
+            ("19069", "relation_write = apply_relation_edges("),
         ), "sdk"),
         ("RECONCILE-A1-A2-A5.md", "is the line above it, `:", (
-            ("19011", "from tortoise.relation_write import apply_relation_edges"),
+            ("19068", "from tortoise.relation_write import apply_relation_edges"),
         ), "sdk"),
         ("RECONCILE-A1-A2-A5.md", "`relation_write.py:7`, `sdk.py:", (
-            ("18999", "# `#10999` made the channel TRANSPORT ONLY"),
+            ("19056", "# `#10999` made the channel TRANSPORT ONLY"),
         ), "sdk"),
         # `subject_binding_available`'s DEFINITION and its CONSUME pair, in both
         # documents that state them — a row per document, because a row scopes to
@@ -5962,7 +5962,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # The A5 binder's CALL SITE (its `def` is in `subject_binding.py`; the plan
         # names the call), keyed by the quoted form the sentence prints.
         ("00-plan.md", "point-creation path at", (
-            ("18659", "bind_point_subjects(proj, self, point_id=pid,"),
+            ("18716", "bind_point_subjects(proj, self, point_id=pid,"),
         ), "sdk"),
         # The two cites this forward merge re-pointed in the documents no row read —
         # each is a RANGE, pinned at BOTH endpoints, because a range that moves by a
@@ -6001,8 +6001,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("2503", 'errors.append("hierarchies: entry missing \'type\' field")'),
         ), "pack_registry"),
         ("00-align.md", "`llm:deepseek-direct` is what", (
-            ("16458", "The v2 path reports"),
-            ("16459", '"extraction_mode": "llm:<route>"'),
+            ("16515", "The v2 path reports"),
+            ("16516", '"extraction_mode": "llm:<route>"'),
         ), "sdk"),
         # ...and THAT sentence names a second file, so its `.ts` pair takes its
         # own row: a row carries ONE source key. Both anchors are the FUNCTIONS
@@ -6035,7 +6035,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # next move of the symbol undoes silently"). Pinned by the DECORATOR, so
         # the route's own line is the anchor rather than the `def` under it.
         ("00-align.md", "`llm:deepseek-direct` is what", (
-            ("20354", 'app.post("/v1/sessions/install-probe")'),
+            ("21196", 'app.post("/v1/sessions/install-probe")'),
         ), "hosted_api"),
         # ⛔ The four repairs `#12587` round 2 made, each given the reader it lacked.
         # Every one was measured UNPINNED first (revert -> 776 passed), which is the
@@ -6045,13 +6045,13 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # LINE as the cite (`_pin_row_failures` scopes to one line, not a paragraph),
         # so it is the clause after the number, not the heading above it.
         ("00-plan.md", 'returns `"v2"` **unless**', (
-            ("17936", "def _capture_lane() -> str:"),
+            ("18778", "def _capture_lane() -> str:"),
         ), "hosted_api"),
         ("00-plan.md", "**default-ON**: `TORTOISE_S4_DELTA`", (
             ("1174", 'env_flag("TORTOISE_S4_DELTA", True)'),
         ), "extractor_v2"),
         ("02-scope.md", "per-door `_honours` set", (
-            ("19803", "_honours: dict[str, frozenset[str]] = {"),
+            ("19860", "_honours: dict[str, frozenset[str]] = {"),
         ), "sdk"),
         ("A4-PER-LAYER.md", "compares `pkind.lower()` against", (
             # RE-DERIVED by CONTENT on the merged tree (main added this row, but this
@@ -6065,7 +6065,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("11686", '"pointKind": pkind,'),
         ), "extractor_v2"),
         ("04-plan.md", "operator / label path", (
-            ("25396", "declared = declared_relation_predicates()"),
+            ("25453", "declared = declared_relation_predicates()"),
         ), "sdk"),
         # ⛔ THE 402 QUOTA GUARD, `03-test-design.md`'s A-corpus capture row (#12369
         # review, P2). This row is the one that would have caught #12369's own
@@ -6089,15 +6089,15 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # The hardened form occurs exactly once in the file, so a re-point onto a
         # sibling arm now reds.
         ("03-test-design.md", "the A-corpus capture", (
-            ("18503", "if count + est > max_points:"),
-            ("18528", "quota_refusal_payload(QuotaExceededError("),
+            ("19345", "if count + est > max_points:"),
+            ("19370", "quota_refusal_payload(QuotaExceededError("),
         ), "hosted_api"),
         # ...and the STAMP paragraph below it restates `:82`'s number, so it needs its
         # own row: a row scopes to ONE line, and `:236` is a different line from `:82`.
         # Measured unpinned (round-4 review): reverting `:236` to `:18494` left 776
         # passed, re-creating a document that contradicts its own table two lines up.
         ("03-test-design.md", "`:82`'s `hosted_api.py", (
-            ("18503", "if count + est > max_points:"),
+            ("19345", "if count + est > max_points:"),
         ), "hosted_api"),
         # ⛔ NOT A ROW ANY MORE — the `carve_out:` claim below the rows is checked
         # against the BLOCK (`_section_entries`) and not against a line number: the
