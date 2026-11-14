@@ -4468,7 +4468,7 @@ def test_the_runbook_inventory_matches_the_tree_and_says_the_read_refuses(tmp_pa
         "the `ubuntu-24.04` job count moved — re-derive the runbook's table with this pin: "
         f"{counts}"
     )
-    assert counts["ubuntu-latest"] == 78, (
+    assert counts["ubuntu-latest"] == 79, (
         "the `ubuntu-latest` job count moved (the runbook states it as a dated measurement, and "
         "this arm is what makes 'dated' honest) — re-derive the table and this number together, do "
         f"not assume {counts['ubuntu-latest']} is right: {counts}"
@@ -5357,7 +5357,7 @@ def test_the_correlated_probe_figure_is_the_same_naive_count_at_this_head():
     """The runbook's `N / M` pre-strip figure is a LIVE measurement, not a dated record.
 
     Review round 3 (P1): `docs/ops/ci-runner-x64.md` states, in the present tense about THIS
-    tree, *"it counted 87 / 13 before it stripped whole-line comments"* — the count the
+    tree, *"it counted 89 / 13 before it stripped whole-line comments"* — the count the
     `--status` block would print if it did not refuse on this tree. The first axis had already
     been re-derived (`85` -> `87`) when #12422 added the two canary `ubuntu-latest` jobs, and the
     SECOND axis was left at `12` on the reasoning that #12422 had not touched it — true, and
@@ -5365,8 +5365,10 @@ def test_the_correlated_probe_figure_is_the_same_naive_count_at_this_head():
     two days before the page was re-dated to 2026-11-14, so the sentence was carrying one axis
     from a 76-job tree and the other from a 9-job tree.
 
-    Measured across that fix: `142241697321^` -> 85 / 12, `142241697321` -> 87 / 13, `HEAD` ->
-    87 / 13. The rule is the sentence's own — every LINE containing `runs-on` AND the label
+    Measured across that fix: `142241697321^` -> 85 / 12, `142241697321` -> 87 / 13, `30c9e7c4d3` ->
+    87 / 13, `#12464`'s head -> 89 / 13 (its `consent-key-drift.yml` contributes the job's
+    `runs-on:` line and a comment line that quotes it — both are in the pre-strip population). The
+    rule is the sentence's own — every LINE containing `runs-on` AND the label
     token, whole-line comments included (that is what "before it stripped whole-line comments"
     means), which is a different population from the sibling job-count pin above (that one
     `yaml.safe_load`s jobs). Token boundaries keep `ubuntu-24.04` from matching a longer label;
