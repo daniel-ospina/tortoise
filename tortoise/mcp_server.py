@@ -4361,12 +4361,14 @@ def tortoise_query(kind: str | None = None,
 
     Validation: page must be >= 1, offset >= 0, limit >= 1 — violations return
     a structured error dict. A `kind` that is SET but not a string (`True`, `1`,
-    `5`, `["statement"]`) is REFUSED for the same reason the tag arm refuses it
-    (#12582): a point kind is a string property, the accessor compares it
-    against one, so a non-string can never MATCH — serving `kind=True` as an
-    empty page would present "this kind has no rows" as a true answer when the
-    population was simply unfilterable (the #6146 wrong-empty class). A FALSY
-    non-str (`False`, `0`, `0.0`) is "absent" and stays served, as above.
+    `5`, `["statement"]`) is REFUSED (#12582): a point kind is a string property
+    and the accessor builds an equality against it, so a non-string can never
+    MATCH — serving `kind=True` as an empty page would present "this kind has no
+    rows" as a true answer when the population was simply unfilterable (the #6146
+    wrong-empty class). (The tag arm refuses the same values by its OWN rule —
+    tag mode reads every kind (#12500) — which is why one message for both arms
+    needed the refusal here, above the arms.) A FALSY non-str (`False`, `0`,
+    `0.0`) is "absent" and stays served, as above.
 
     Use tortoise_query for known shapes; use tortoise_search for semantic
     relevance; use tortoise_get_point for a single known ID.
@@ -4379,13 +4381,16 @@ def tortoise_query(kind: str | None = None,
     if limit is not None and limit < 1:
         return _SafeError({"error": "limit must be >= 1, got " + str(limit)})
     # #12582: a `kind` that is SET but not a string cannot name a point kind. The
-    # read expands it (`_read_filter_kinds`) into a `pointKind IN $kinds` filter,
-    # and there a non-str cannot match either way: a HASHABLE one (`True`/`1`/`5`)
-    # expands to a vocabulary no row carries, so it matched NOTHING and was served
-    # as `[]` — a true-looking "this kind has no rows" for a filter that could
-    # never be applied (the #6146 wrong-empty class) — while an UNHASHABLE one (a
-    # list) raises at that same lookup and leaked `unhashable type: 'list'` out as
-    # an error dict. Neither is the refusal such a value deserves. The tag arm
+    # read hands it to `_read_filter_kinds`, which has no entry for a non-str and
+    # falls back to `[kind]` (`pack_registry.py`: `self._kind_read_filters.get(
+    # kind, [kind])`), so the accessor builds an EQUALITY `n.pointKind = $kind`
+    # (`sdk.py`: the `len(expanded) == 1` branch — the `IN [...]` form is for a
+    # string that expands) and no row can carry it. So a HASHABLE non-str
+    # (`True`/`1`/`5`) matched NOTHING and was served as `[]` — a true-looking
+    # "this kind has no rows" for a filter that could never be applied (the #6146
+    # wrong-empty class) — while an UNHASHABLE one (a list) raises at that same
+    # lookup and leaked `unhashable type: 'list'` out as an error dict. Neither is
+    # the refusal such a value deserves. The tag arm
     # already refuses the same values (#12500), so leaving the structural and fts
     # arms to answer them as an empty page (or a leaked internal error) made one
     # argument value answer two ways depending on the arm the caller happened to

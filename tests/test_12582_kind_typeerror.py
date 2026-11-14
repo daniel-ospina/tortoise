@@ -113,11 +113,12 @@ def test_a_falsy_non_str_kind_is_served_instead_of_raising(stub, falsy_kind) -> 
 
     This is the OUTCOME the contract promises (a served read, never an exception),
     and it is deliberately not the test that pins WHICH half produces it: measured
-    at this head, restoring the shipped tail (`kind is not None`) leaves this test
+    at this head, restoring the shipped tail (`kind is not None`) leaves THIS case
     green, because the defensive guard in `compute_suggestion` then absorbs the
     non-str and returns None. Each half prevents the crash on its own. The
     tail-level invariant — that a non-str never reaches a string-only API at all —
-    is pinned by `test_a_non_str_kind_never_reaches_the_suggestion_builder`.
+    is pinned by `test_a_non_str_kind_never_reaches_the_suggestion_builder`, and
+    the served ROWS by `test_a_falsy_non_str_kind_serves_the_whole_population`.
 
     The fixture reaches the value: the stub answers with an EMPTY page, which is
     what makes the suggestion path run at all.
@@ -164,8 +165,8 @@ def test_a_truthy_non_str_kind_is_refused_not_served_as_an_empty_page(
     the SDK's kind-expansion map, which was neither a refusal nor a route. Fails
     if the refusal is absent (the empty page, or the leaked error, comes back),
     if it is placed BELOW an arm (the read happens and the tag arm's message
-    differs), or if it is widened to falsy values (the served-read tests above
-    red instead).
+    differs), or if it is widened to falsy values (the served-read tests red
+    instead — five, measured).
 
     Reaches the value: no read may happen at all, which is what the empty call
     log asserts — a refusal placed after the accessor would still return an error
@@ -222,17 +223,19 @@ def test_a_non_str_kind_never_reaches_the_suggestion_builder(
       already refused upstream — 4 reds, measured;
     - the truthy-non-str refusal removed -> `True`/`1` reach the builder here,
       the five refusal params are served as empty pages, and the two-arm test
-      sees one arm refuse while the other serves — 8 reds, measured.
+      sees one arm refuse while the other serves — 8 reds, measured;
+    - a refusal for a FALSY kind -> the served-read cases red (5 in all), because
+      they assert the read is SERVED, not refused.
 
     It is the tail-level half of #12582;
     `test_a_falsy_non_str_kind_is_served_instead_of_raising` covers the outcome.
     The truthy params pin the OTHER half: they are refused above the arm
     (`test_a_truthy_non_str_kind_is_refused_not_served_as_an_empty_page`), which
-    is why a non-str never reaches the builder whatever the tail does — measured,
-    removing the tail's instance test entirely leaves this test green, because
-    the refusal already stopped `True`/`1` upstream (the tail's own `and kind` is
-    pinned by the FALSY params: back to `kind is not None`, and `False`/`0`/`0.0`
-    reach the builder, 4 reds).
+    is why a non-str never reaches the builder whatever the tail does: the
+    refusal stopped `True`/`1` upstream, so the truthy params here are a belt on
+    that half, not its pin. The tail's own `and kind` is pinned by the FALSY
+    params — back to `kind is not None`, `False`/`0`/`0.0` reach the builder,
+    4 reds, measured.
     """
     from tortoise import query_suggestions
     from tortoise.mcp_server import tortoise_query
@@ -247,6 +250,31 @@ def test_a_non_str_kind_never_reaches_the_suggestion_builder(
         f"kind={not_a_kind!r} reached the suggestion builder, which is a "
         f"string-only API: {calls}"
     )
+
+
+@pytest.mark.parametrize("falsy_kind", [False, 0])
+def test_a_falsy_non_str_kind_serves_the_whole_population(stub, falsy_kind) -> None:
+    """The served half must deliver the ROWS, not a fabricated empty page.
+
+    The empty-page case above cannot tell "the accessor answered with its page"
+    from "an empty list was manufactured for this input" — measured: inserting
+    either `if not isinstance(kind, str): return []` or `if not kind: return []`
+    between the read and the tail leaves every other case in this file green
+    (26 passed), i.e. the very #6146 wrong-empty this diff removes for TRUTHY
+    values could ship for falsy ones with no test red. Fails if such a
+    short-circuit is introduced after the read: the rows must come back.
+
+    Reaches the value: the stub is given two rows, so an empty answer is
+    distinguishable from a served one.
+    """
+    from tortoise.mcp_server import tortoise_query
+
+    stub.rows = [{"id": "p0", "kind": "observation"},
+                 {"id": "p1", "kind": "statement"}]
+
+    assert tortoise_query(kind=falsy_kind) == stub.rows, (
+        f"kind={falsy_kind!r} must serve the accessor's page")
+    assert stub.kind_clause_applied is False, stub.calls
 
 
 def test_an_empty_string_kind_is_served_as_before(stub) -> None:
