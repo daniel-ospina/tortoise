@@ -269,6 +269,20 @@ class TestEverySurfaceAgreesWithTheDeclaration:
 #:         indistinguishable by this heuristic, so the block was paid for with the miss.
 #:         `;` belongs here too as of cycle 11 — see `_CLAUSE_END_STRICT` — so a
 #:         `;`-closed denial IS a miss, which is what this bullet always claimed;
+#:       * a TEMPORAL qualifier in the same position (`… no Builder plan yet`, `… today`,
+#:         `… currently`, `… on the roadmap`) — the same class as `anymore`, one word
+#:         deep; true on `origin/main` too, so pre-existing, and listed because this
+#:         list is claimed to be MEASURED rather than complete (cycle-19 P2);
+#:       * an ANAPHORIC re-assertion after a quoted record (`Previously the doc read
+#:         "there is no Builder plan"; there is no such plan anymore.` / `…; that plan
+#:         does not exist.`): :func:`_asserts_a_denial_outside_the_quotes` asks whether
+#:         the remainder names `builder` WITH a negation, and a pronoun does not. The
+#:         twin that REPEATS the noun is flagged (`…; today there is no Builder plan
+#:         either.`) and is pinned live, so the residual is the anaphoric form only;
+#:       * a BACKTICK-quoted mention (`` `there is no Builder plan` ``): `_plain` strips
+#:         backticks before the spans are taken, so the mention reads as an assertion —
+#:         true on `origin/main` too, and pre-existing; the double/typographic-quote
+#:         mentions ARE exempt as of cycle 19 (see :func:`_quotes_the_whole_denial`);
 #:       * a following fragment that records a correction in a `That was corrected in
 #:         #N.` shape (pronoun + auxiliary): :data:`_RETRACTION_TIE` requires the pronoun
 #:         at a clause boundary, so a genuine record in that phrasing would be BLOCKED —
@@ -283,12 +297,14 @@ class TestEverySurfaceAgreesWithTheDeclaration:
 #:         SENTENCE, so a reported clause and a live one sharing one sentence are not
 #:         separated here. ⛔ THE COST IS THE CITATION, NOT THE SEPARATOR (cycle-14 P2):
 #:         UNCITED, both the reported and the `;`-split twin are FLAGGED — and the
-#:         QUOTED twin is FLAGGED too as of cycle 18, where it used to be exempt (the
-#:         quotation stood in for the citation; :func:`_asserts_a_denial_outside_the_quotes`
-#:         now requires the citation when the sentence also asserts outside the quote, and
-#:         both twins are pinned live). What remains is the sentence that CITES: exempt
-#:         with or without a quotation, which is why the residual is named rather than
-#:         claimed closed.
+#:         QUOTED twin that REPEATS THE NOUN is FLAGGED too as of cycle 18, where it used
+#:         to be exempt (the quotation stood in for the citation;
+#:         :func:`_asserts_a_denial_outside_the_quotes` now requires the citation when the
+#:         sentence also asserts outside the quote, and both twins are pinned live).
+#:         ⛔ "THE QUOTED TWIN IS FLAGGED" IS TOO WIDE AS STATED (cycle-19 P2, measured):
+#:         the ANAPHORIC form escapes — see the `there is no such plan anymore` bullet
+#:         above. What remains is the sentence that CITES: exempt with or without a
+#:         quotation, which is why the residual is named rather than claimed closed.
 #:       * a denial continued PAST its existential predicate (`The Builder tier does not
 #:         exist because it was merged into Team.`, `No Builder plan exists in the OSS
 #:         build any longer.`): the `no … exists` and `builder … does not exist` arms
@@ -726,16 +742,23 @@ def _quotes_the_denial(sentence: str) -> bool:
     shapes it calls denials.
 
     ⛔ AND THE `13 of 52` FIGURE THIS PARAGRAPH USED TO CARRY WAS NOT A MEASUREMENT
-    (cycle-18 P1, measured). It described a population that does not exist. The numbers
-    that DO reproduce, at `77deb656`: the parent (`77deb656^`) holds **60** correct-prose
-    sentences, **12** of them cue-bearing, and blocks **0** of its own 12 — the six
-    cycle-17 pins (three quoted, three reported) are the whole delta, and the same tuple
-    at that head holds 66 / 18 because those six pins are new. ⛔ THE TUPLE GROWS WITH
-    EVERY FIX, so no absolute count belongs here: re-run the probe rather than quoting
-    this paragraph's numbers — parse the tuple with `ast.literal_eval`, count
-    `_RETRACTION_CUES` matches, and evaluate `_denial_in` per sentence, against BOTH
-    `git show 77deb656^:tests/test_tier_naming.py` and `git show
-    origin/main:tests/test_tier_naming.py`.
+    (cycle-18 P1, measured). It described a population that does not exist. The
+    reproducible figures, each against the commit it belongs to:
+
+        at `77deb656`   correct tuple 66 · cue-bearing 18 · parent `77deb656^` blocks 6
+                        (the six cycle-17 pins ARE the whole delta: three quoted,
+                        three reported) — and the PARENT's own tuple is 60 / 12, of
+                        which it blocks 0, which is the same statement twice
+        `origin/main`   correct tuple 21 · cue-bearing 3
+
+    ⛔ THE TUPLE GROWS WITH EVERY FIX, so the "at this head" row this paragraph carried
+    in cycle 19 is the one figure that re-stales by construction: RE-RUN the probe
+    rather than quoting a head count. Parse the tuple with `ast.literal_eval`, count
+    `_RETRACTION_CUES` matches, and evaluate `_denial_in` per sentence, against
+    `git show 77deb656^:tests/test_tier_naming.py` and
+    `git show origin/main:tests/test_tier_naming.py`. Every count above is a command's
+    output, not a recall.
+
 
     ⛔ AND A QUOTATION MUST NOT SHEATHE A DENIAL THE SENTENCE ASSERTS OUTSIDE IT
     (cycle-18 P1, measured, two lanes independently): once ANY span is a denial, a
@@ -878,6 +901,48 @@ def _asserts_a_denial_outside_the_quotes(sentence: str) -> bool:
     return any(pattern.search(outside) for pattern in _DENIAL_PATTERNS)
 
 
+def _quotes_the_whole_denial(sentence: str) -> bool:
+    """Does the sentence only MENTION the denial — every denial inside a CLOSED quotation?
+
+    ⛔ A DOC THAT PRINTS THE FORBIDDEN SENTENCE IS NOT ASSERTING IT (cycle-19 P1,
+    measured). :func:`_quotes_a_retracted_claim` reaches a quoted claim only through
+    :data:`_RETRACTION_CUES` — a CLOSED cue list — so a mention introduced by any verb
+    outside that list was FLAGGED, while `origin/main` was GREEN on every one of them
+    because it had no closing-quote tolerance at all:
+
+        Never write "there is no Builder plan".
+        The forbidden sentence is "there is no Builder plan".
+        Correction: the page said "there is no Builder plan".
+        The old wording, "there is no Builder plan", was removed in #12444.
+        A doc must never say “there is no Builder plan”.
+
+    The fourth is the worst: it QUOTES the superseded claim AND cites the retraction,
+    which is precisely the convention this exemption exists to protect. All of them are
+    the module's own expensive half (a lint that blocks correct prose) and they were a
+    REGRESSION against `origin/main`, so the exemption cannot be gated on a cue word: a
+    MENTION is a mention whatever verb introduces it.
+
+    The rule is structural, and it needs no cue. Every :data:`_DENIAL_PATTERNS` match
+    must sit inside a CLOSED span, and nothing outside the spans may assert a denial —
+    so `There is no "Builder plan".` stays RED (`_BUILDER_PLAN` matches from the OPENING
+    quote, which is outside its own span) and a live re-assertion beside a quoted
+    record stays RED (via :func:`_asserts_a_denial_outside_the_quotes`). Offsets are
+    taken from `_plain`, the same coordinate space as the matches: markdown stripping
+    (`**Never**`, `[Builder](url)`) moves them.
+    """
+    plain = _plain(sentence)
+    spans = [(start, end) for start, end, closed in _quoted_span_offsets(plain) if closed]
+    if not spans:
+        return False
+    matches = [match for pattern in _DENIAL_PATTERNS for match in pattern.finditer(plain)]
+    if not matches:
+        return False
+    if not all(any(start <= match.start() and match.end() <= end
+                   for start, end in spans) for match in matches):
+        return False
+    return not _asserts_a_denial_outside_the_quotes(sentence)
+
+
 def _quotes_a_retracted_claim(sentence: str) -> bool:
     """Is this sentence itself a QUOTED record of the retraction?
 
@@ -939,6 +1004,8 @@ def _denial_in(sentence: str) -> bool:
     whose tests can diverge from the guard is not a pin.
     """
     if not any(pattern.search(_plain(sentence)) for pattern in _DENIAL_PATTERNS):
+        return False
+    if _quotes_the_whole_denial(sentence):
         return False
     return not _quotes_a_retracted_claim(sentence)
 
@@ -1198,9 +1265,13 @@ class TestNoDocDeniesABuilderPlanExists:
             # kept — a cue that a real record uses is not free surface, it is the
             # exemption's weaker half earning its place; the unpinned ones are the
             # remaining risk, stated here rather than implied away).
-            'Formerly the page read "there is no Builder plan".',
-            'Stale as of #12444, the page read "there is no Builder plan".',
-            'Up to #12444 the page read "there is no Builder plan".',
+            # ⛔ UNQUOTED on purpose: a QUOTED mention is exempt without any cue once
+            # `_quotes_the_whole_denial` exists, so a quoted form would pin the mention
+            # rule instead of the cue it is here for (measured: with `formerly` removed
+            # from `_RETRACTION_CUES`, the quoted twin still passed).
+            'Formerly, per #12444, the doc said there is no Builder plan.',
+            'Stale per #12444, the doc said there is no Builder plan.',
+            'Up to #12444 the doc said there is no Builder plan.',
             # A RECORD written without quotation marks (cycle 7): a reported clause is
             # the same record, and rejecting it was a false positive.
             "Previously this doc asserted there is no Builder plan; #12444 corrected it.",
@@ -1254,9 +1325,12 @@ class TestNoDocDeniesABuilderPlanExists:
             # calls denials — six records, three per arm, each BLOCKED at `77deb656^`
             # and green at this head and at `origin/main`. ⛔ The `13 of 52` / `23 of 52`
             # figures an earlier revision stated here were not measurements and are
-            # retracted (cycle-18 P1): the population is 66 correct-prose sentences, 18 of
-            # them cue-bearing, and the parent blocked 0 of those 18 — the six pins below
-            # are the whole delta. Two pins per arm, so a re-narrowing cannot be silent.
+            # retracted (cycle-18 P1) — and so is the `blocked 0 of those 18` this
+            # comment carried until cycle 19, which contradicted its own next clause.
+            # Measured: at `77deb656` the tuple is 66 sentences / 18 cue-bearing and the
+            # parent blocks 6 of them (the six pins below are the whole delta); at this
+            # head it is 76 / 23 and the parent blocks 10 of the 76. Two pins per arm,
+            # so a re-narrowing cannot be silent.
             'Previously the doc read "Builder is not a plan."; #12444 corrected it.',
             'Until #12444 the page read "Builder is not a plan".',
             'Previously the page read "There is no plan called Builder".',
@@ -1264,6 +1338,19 @@ class TestNoDocDeniesABuilderPlanExists:
             "Previously the doc said there isn't a Builder plan; #12444 corrected it.",
             "Previously the doc said the Builder tier does not exist; #12444 corrected it.",
             'The doc previously read "There is no Builder plan."; #12444 corrected it.',
+            # ⛔ A MENTION OF THE FORBIDDEN SENTENCE IS NOT AN ASSERTION OF IT
+            # (cycle-19 P1, measured). The exemption above reaches a quoted claim only
+            # through the CLOSED `_RETRACTION_CUES` list, so a doc that PRINTS the
+            # sentence it forbids was flagged — a regression against `origin/main`,
+            # which was green on every one of these because it had no closing-quote
+            # tolerance. The style-guide form (`never write …`) and the cited-retraction
+            # form (`…, was removed in #12444`) are both ordinary correct prose.
+            'Never write "there is no Builder plan".',
+            'The forbidden sentence is "there is no Builder plan".',
+            'Correction: the page said "there is no Builder plan".',
+            'The old wording, "there is no Builder plan", was removed in #12444.',
+            'A doc must never say \u201cthere is no Builder plan\u201d.',
+            'The phrase \u201cthere is no **Builder** plan\u201d is forbidden in this doc.',
         )
         for sentence in correct:
             assert not _denial_in(sentence), (
@@ -1513,6 +1600,12 @@ class TestNoDocDeniesABuilderPlanExists:
             'Until #12444 the doc said "the Builder plan is unlimited"; the Builder tier '
             'does not exist.',
             'Until then the doc said "no plan called Builder" and there is no Builder plan.',
+            # ⛔ …and the MENTION exemption added in cycle 19 must not become a new
+            # sheath (cycle-19 P1, measured in both directions): a sentence that prints
+            # the forbidden sentence and THEN asserts it is still a denial. Without these
+            # the new exemption could be widened into a licence and no test would red.
+            'Never write "there is no Builder plan"; there is no Builder plan.',
+            'The doc says "there is no Builder plan" and there is no Builder plan.',
             # ⛔ THE TWO CLAUSE ENDS ARE REDUNDANTLY COVERED BY EVERY `There is no …
             # plan (…)` PIN (cycle-16 P2, measured): deleting `_CITATION` from EITHER
             # one alone left the suite fully green, while distinct classes escaped —
@@ -1646,7 +1739,22 @@ class TestNoDocDeniesABuilderPlanExists:
             # ⛔ `_BUILDER_PHRASE` and `_QUOTED_NEGATION` were DELETED in cycle 17 and are
             # no longer banned — banning a name that does not exist is not a guard.
             "_quoted_spans",
+            # …and the OFFSETS view the cycle-9/18 scanner added, which the set above
+            # missed (cycle-19 P2, measured: an injected test pinning
+            # `_quoted_span_offsets` ran GREEN, so the guard was silent on the ingredient
+            # the scanner work introduced — the same defect this set was extended for in
+            # cycles 6/8/11/12/13). The rest of the scanner/instrument surface is banned
+            # with it rather than left reachable for the next author to rediscover.
+            "_quoted_span_offsets",
+            # ⛔ `_REPORTED_CLAUSE_BREAK` and `_NEGATION_WORD` were DELETED in the
+            # round-2 review and are no longer banned — banning a name that does not
+            # exist is not a guard (the same rule that removed `_BUILDER_PHRASE` and
+            # `_QUOTED_NEGATION` here in cycle 17).
+            "_REPORTED_DENIAL_OFFSET",
+            "_QUOTE_PAIRS",
+            "_BLOCK_START",
             "_asserts_a_denial_outside_the_quotes",
+            "_quotes_the_whole_denial",
             "_CITATION",
             "_RESTATEMENT_TAIL",
             "_RETRACTION_TIE",
