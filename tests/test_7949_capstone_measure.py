@@ -5786,7 +5786,11 @@ _EPIC_CITE_DOCS = {
     # `declared_relation_predicates` cite both went stale under the merge's own
     # +38 / +157 shifts in `sdk.py`. A document this bundle EDITS is a document this
     # bundle reads — registering them is what makes the next insertion red instead of
-    # silent (#12138's convention: the row exists so the rot has a reader).
+    # silent (the convention this file states: the row exists so the rot has a reader).
+    # ⛔ It USED to be attributed to `#12138`, which is a propagation-cap chore with no
+    # citation-bundle content — a false cite in the file whose whole job is citations
+    # (#12462 review cycle 2, measured: `git grep 12138` and that issue's body/comments
+    # carry nothing about line-number rot).
     "00-align.md":
         _REPO / "docs/epics/2026-11-04-7949-extractor-v4-capstone/00-align.md",
     "04-plan.md":
@@ -5801,11 +5805,15 @@ _EPIC_CITE_DOCS = {
     "11083/README.md":
         _REPO / "docs/evidence/11083/README.md",
     # ⛔ REGISTERED BY THE REVIEW THAT FOUND IT UNPINNED (#12462). `05-verify.md` D5 states
-    # four `file:line` measurements of THIS head, and the reviewer measured that reverting
-    # all of them left the suite GREEN — so the sentence whose whole subject is "numbers
-    # rot" was itself the one block in this PR nothing read. A document this bundle EDITS
-    # is a document this bundle reads (#12138's convention); registering it is what makes
-    # the next insertion red instead of silent.
+    # SEVEN this-head `file:line` measurements in one sentence, and the reviewer measured that
+    # reverting them left the suite GREEN — so the sentence whose whole subject is "numbers
+    # rot" was itself the one block in this PR nothing read. Three are pinned on the two rows
+    # below (`18396`/`18503` here, `sdk.py:10037` on its own row because a row carries ONE
+    # source key), `10064`/`10117` by the `subject_binding_available` rows that already exist,
+    # and the last two (`capstone_run.py:1186`, `EXTRACTOR-V4-ARCHITECTURE.md:1400`) on the two
+    # source keys registered just below. A document this bundle EDITS is a document this
+    # bundle READS — the convention the `_EPIC_CITE_DOCS` comment above states; registering the
+    # file is what makes the next insertion red instead of silent.
     "05-verify.md":
         _REPO / "docs/epics/2026-11-04-7949-extractor-v4-capstone/05-verify.md",
 }
@@ -5832,6 +5840,16 @@ _EPIC_CITE_SOURCES = {
     # by a test. A source key is the only way `_pin_row_failures` can resolve a
     # `hosted_api` number at all, so its absence was the hole.
     "hosted_api": _REPO / "tortoise/hosted_api.py",
+    # ⛔ THE LAST TWO THIS-HEAD NUMBERS IN `05-verify.md` D5 (#12462 review cycle 2). The
+    # first cut registered the DOCUMENT and pinned three of its seven cites, and a fresh
+    # reviewer measured the residual the honest way — mutating `capstone_run.py:1186` and
+    # `EXTRACTOR-V4-ARCHITECTURE.md:1400` in the sentence left 413 GREEN. Both are probe /
+    # architecture-document paths, so neither is under `tortoise/`; registering them is what
+    # gives the D5 sentence its full set of readers claim.
+    "capstone_run":
+        _REPO / "docs/evidence/7949-capstone/probes/capstone_run.py",
+    "extractor_v4_arch":
+        _REPO / "docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md",
     # `03-test-design.md` cites the manifest's OWN `carve_out:` block — by BLOCK and
     # filename now, not by line number: `surfaces:` sits ABOVE `carve_out:` in the
     # manifest, so every registration `tools/ci_selection.py::register_tests` splices
@@ -6097,9 +6115,11 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         ("03-test-design.md", "`:82`'s `hosted_api.py:", (
             ("18503", "if count + est > max_points:"),
         ), "hosted_api"),
-        # ⛔ `05-verify.md` D5's own "Measured at" sentence (#12462 review): the row whose
-        # SUBJECT is that line numbers rot carried four of them and no reader at all.
-        # Two rows because a row carries ONE source key; the phrase is unique in the file.
+        # ⛔ `05-verify.md` D5's own "Measured at" sentence (#12462 review). The row whose
+        # SUBJECT is that line numbers rot carried SEVEN this-head cites and no reader at
+        # all. Four rows here, because a row carries ONE source key; the phrase is unique in
+        # the file. The first cut pinned only three of the seven, and review cycle 2 measured
+        # the residual by mutating the two below — 413 GREEN — so they are pinned too.
         ("05-verify.md", "Measured at `6916a6cd89`", (
             ("18396", "``body.harness`` only ever introduces a harness on a session the server"),
             ("18503", "if count + est > max_points:"),
@@ -6107,6 +6127,28 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         ("05-verify.md", "Measured at `6916a6cd89`", (
             ("10037", "_registry_cache = PackRegistry(packs_dir)"),
         ), "sdk"),
+        ("05-verify.md", "Measured at `6916a6cd89`", (
+            ("1186", '"sha256": sha, "turns": None'),
+        ), "capstone_run"),
+        ("05-verify.md", "Measured at `6916a6cd89`", (
+            ("1400", "a **two-method** event-sourced Protocol"),
+        ), "extractor_v4_arch"),
+        # ⛔ `:1186` IS NOT PINNED BY A ROW, and the reason is measured rather than
+        # stylistic: it is stated TWICE on ONE doc line ("is STAMP-bound (`:1186` is the
+        # `corpus` line here" and "`capstone_run.py:1186` is the `corpus` line here"), and
+        # a phrase-scoped row asserts only that the NUMBER is somewhere on the line — so a
+        # partial edit that moves one statement still finds `:1186` and stays GREEN
+        # (measured: mutating the first spelling alone left 413 green even with a row
+        # scoped to "is STAMP-bound", because its scoping phrase sits on the same line as
+        # the twin). Both spellings are therefore pinned by CONTENT in the assertion right
+        # after this table — the round-4 shape, closed the way that one had to be closed.
+        # ⚠️ DELIBERATELY UNPINNED, and stated because silence here reads as coverage:
+        # `:1400`'s OTHER occurrence in this sentence is the historical list ("was re-pointed,
+        # each at the head it was read at") naming `EXTRACTOR-V4-ARCHITECTURE.md:1400` D6.
+        # Verified: at `a577d0e25c` the D6 row IS on line 1400 (`git show a577d0e25c:…`), and
+        # at this head D6 is `:1418` while 1400 is `Projection` — so that statement is TRUE as
+        # history and MUST NOT be re-pointed. Pinning it would red a true record, which is why
+        # this pin is scoped to the current-tense statement only.
         # ⛔ NOT A ROW ANY MORE — the `carve_out:` claim below the rows is checked
         # against the BLOCK (`_section_entries`) and not against a line number: the
         # entry sits BELOW the `surfaces:` blocks `tools/ci_selection.py::register_tests`
@@ -6188,6 +6230,24 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     sources = {name: path.read_text(encoding="utf-8").splitlines()
                for name, path in _EPIC_CITE_SOURCES.items()}
     row_failures = _pin_row_failures(rows, _EPIC_CITE_DOCS, sources)
+
+    # ⛔ THE TWO SPELLINGS OF ONE HIT, PINNED BY CONTENT (#12462 review cycle 2). `:1186`
+    # appears twice on ONE line of D5, so a phrase-scoped row cannot separate them: it
+    # asserts the NUMBER is somewhere on the line, and a partial edit that moves one
+    # statement leaves the other — green (measured, with a row scoped to "is STAMP-bound").
+    # The failing case this closes is the one that matters: BOTH must keep the number, and
+    # a re-derivation that moves the pair must move both spellings. `count == 1` per
+    # spelling makes a half-done move red, and the rows above make an all-done move red.
+    _d5 = _EPIC_CITE_DOCS["05-verify.md"].read_text(encoding="utf-8")
+    for _spelling in (
+        "is STAMP-bound (`:1186` is the `corpus = {…}` line here",
+        "`capstone_run.py:1186` is the `corpus = {…}` line here",
+    ):
+        assert _d5.count(_spelling) == 1, (
+            f"05-verify.md states `:1186` twice and this spelling now occurs "
+            f"{_d5.count(_spelling)} time(s): {_spelling!r}. Both halves are the same hit \u2014 "
+            "if the line moved, re-derive BOTH, and keep each spelled with its own filename "
+            "so a reader can tell the STAMP-bound clause from the measured one")
 
     # ⛔ THE BLOCK ARM — the claim `03-test-design.md` actually makes, checked
     # against the structure instead of a number that a tool rewrites under it.
