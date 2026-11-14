@@ -225,10 +225,14 @@ async def test_a_plain_dict_payload_is_still_recorded_ok_at_the_seam(
     dict LITERAL carrying a CONSTANT ``"error"`` key. It is therefore not a
     proof that a refusal the gate cannot see cannot be written. The named
     limits live in ``tests/test_mcp_refusal_telemetry_9084.py`` under
-    "WHAT THE GATE STILL DOES NOT SEE"; one of them is live today —
-    ``tortoise_overview()`` with no ``section`` nests each section's payload one
-    level down (``combined[sec] = result``), which the seam's two-level read
-    does not reach, so a failing section is recorded ``ok``. A KEYLESS refusal
+    "WHAT THE GATE STILL DOES NOT SEE"; one of them is live today — a **PARTIAL**
+    summary of ``tortoise_overview()`` with no ``section`` still nests each
+    section's payload one level down (``combined[sec] = result``), which the seam's
+    two-level read does not reach, so such a section is recorded ``ok``. A
+    **TOTAL** outage is NOT that shape: since #11153 it returns the refusal at the
+    TOP level, so the wire says `isError: true` and the row stops reading ``ok``.
+    Stating the qualifier is what keeps this paragraph from teaching a lane to
+    "restore" the nesting for the total case. A KEYLESS refusal
     is the other boundary: the seam classifies one only when the body returns
     an `_SafeError` (the exact-payload arm), and the gate cannot match a
     keyless dict at all — the last served body that answered one with a plain
@@ -287,8 +291,10 @@ async def test_a_union_envelope_tool_is_classified_through_the_envelope(
 
     assert result.structured_content == {
         "result": {"error": "points quota exceeded", "code": ms.ERR_QUOTA}}
-    assert result.is_error is False, (
-        "a union envelope admits a dict result, so #8482 leaves the wire alone")
+    assert result.is_error is True, (
+        "#8482 leaves the union envelope's PAYLOAD alone (a dict result is admitted), "
+        "but #11153 makes the VERDICT truthful: the dispatch failed, so the client "
+        "is told so. Before #11153 this asserted `is False`.")
     row = events[-1]
     assert row["status"] == "exec_error", row
     assert row["error_kind"] == "safe_error", row
@@ -449,12 +455,17 @@ async def test_the_type_is_gone_at_the_seam(events, stdio):
 
 
 @pytest.mark.asyncio
-async def test_the_wire_is_unchanged_by_the_classification(events, stdio):
-    """#8135 is a TELEMETRY fix: the client sees exactly what it saw before.
+async def test_the_payload_is_unchanged_by_the_classification(events, stdio):
+    """#8135 is a TELEMETRY fix: the PAYLOAD the client receives is unchanged.
 
-    Same ``structured_content``, same ``is_error`` (False — an object-annotated
-    tool's error dict is a legal payload, and #8482 deliberately left it alone),
-    same text. Only the analytics row changes.
+    ⛔ Named `payload`, not `wire` (review round 8): the WIRE verdict did change
+    with #11153, so a name promising "the wire is unchanged" sat directly above an
+    assertion that it changed. A lane grepping that phrase would land here and
+    either revert the #11153 assertion or read the #8135 contract as unguarded.
+    Same ``structured_content``, same text — that is what is pinned; ``is_error``
+    and the analytics row are asserted separately, one line each, so the two
+    concerns stay legible: ``is_error`` is now ``True`` (#11153; before that
+    change this asserted ``False``) and the analytics row says ``exec_error``.
     """
     def quota_tool() -> dict:
         return ms._safe(_QuotaSDK().query, "statement")
@@ -463,7 +474,7 @@ async def test_the_wire_is_unchanged_by_the_classification(events, stdio):
 
     assert result.structured_content == {"error": "points quota exceeded",
                                         "code": ms.ERR_QUOTA}
-    assert result.is_error is False
+    assert result.is_error is True, "#11153: the refusal's verdict must be an error"
     assert "points quota exceeded" in "".join(
         getattr(b, "text", "") for b in (result.content or ()))
     assert events[-1]["status"] == "exec_error"

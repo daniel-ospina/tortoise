@@ -989,6 +989,51 @@ def test_a_transport_failure_does_not_fall_back_to_another_graph():
     assert len(calls) == 1, "a transport error must not trigger a second, unbound read"
 
 
+def test_a_labelled_refusal_quoting_the_graph_still_does_NOT_fall_back():
+    """Round-9: this file's OWN site label must not satisfy `_looks_like_graph_refusal`.
+
+    `_section_call` / `_operator_call` re-raise as
+    ``"read of section 'status' was refused: <raw>"``. The classifier requires the text to
+    QUOTE a graph AND read like a refusal — and the label supplies **"refused"**, so ANY
+    raw text that quotes a graph matched it. A timeout or a DB fault
+    (``"timed out reading graph 'org_x_g_aaa'"``) was therefore classified as a graph
+    refusal and the read FELL BACK to the credential's own graph, mixing two graphs into
+    one census while the artifact was stamped with the requested one — the exact failure
+    the fallback's own guard exists to prevent.
+    
+    On `origin/main` the handler classified the RAW text (there was no label), so this was
+    introduced by the wrapper, not inherited.
+
+    ⛔ The fake must raise `C.CurationRefused`, NOT a `TimeoutError`: `_section_call` /
+    `_operator_call` only wrap a `CurationRefused` (a `TimeoutError` propagates unlabelled,
+    so it reproduces nothing — measured, an earlier draft of this test passed under the
+    mutation). The refusal's OWN text must also quote the graph while carrying NONE of
+    the classifier's trigger words ("quota exhausted on graph 'x'"): that is the raw
+    half the classifier must say NO to. Measured: with `str(exc)` restored BOTH reads
+    make a second, unbound call; with `_unlabelled_refusal` they raise after ONE.
+    """
+    mod = _tool_module()
+
+    for which in ("section", "operators"):
+        calls: list[dict] = []
+
+        def call(_name, args, _which=which, _calls=calls):
+            _calls.append(dict(args or {}))
+            # Quotes the graph; contains NO trigger word (no "refus"/"unknown"/"cannot"…).
+            raise C.CurationRefused("quota exhausted on graph 'org_x_g_aaa'")
+
+        reader = mod.MCPReader(call, "org_x_g_aaa")
+        with pytest.raises(C.CurationRefused):
+            if which == "section":
+                reader._section("status")
+            else:
+                reader.read_operators()
+        assert len(calls) == 1, (
+            f"{which}: a refusal whose text merely QUOTES the graph was misread as a "
+            f"graph refusal because this file's own label says 'was refused', so the "
+            f"census re-read the credential's own graph ({calls})")
+
+
 def test_a_graph_refusal_does_fall_back_and_says_so_once_per_section():
     mod = _tool_module()
 
@@ -1275,8 +1320,10 @@ def test_an_unknown_kind_prefix_is_not_pack_ownership():
 
 
 def test_a_points_refusal_names_its_real_cause():
-    """Round-12: a `_safe` quota envelope reads as "0 rows" (is_error=False), and the
-    refusal discarded the cause, sending the operator to the wrong remedy."""
+    """Round-12: a `_safe` quota envelope must not read as "0 rows", and the
+    refusal must keep its cause. Since #11153 that envelope arrives with
+    `is_error=True` (it used to arrive false — the false PASS), so the reader sees
+    it as a `CurationRefused` either way; the cause still has to survive."""
     mod = _tool_module()
 
     def call(_name, args):
@@ -4576,6 +4623,30 @@ def test_a_non_graph_refusal_on_the_event_read_does_NOT_fall_back():
                 f"{shape}: a non-graph refusal was re-read without the graph argument, so "
                 "the Event layer came from a DIFFERENT graph than the one requested")
         assert not reader.note or "read from the credential" not in reader.note, reader.note
+
+
+def test_the_event_layer_error_arm_is_a_designed_refusal():
+    """The in-band `_error_of` arm must raise `CurationRefused`, NOT a bare `RuntimeError`.
+
+    The rc table (`docs/architecture/CURATION-11469.md`) answers **3** for a designed
+    refusal and **1** for "the run crashed", and `cmd_inventory`/`cmd_plan` catch
+    `C.CurationRefused` only — so a bare `RuntimeError` here reported a designed
+    Event-layer refusal to a driver as a crash.
+
+    ⛔ The class needs its OWN assertion: `CurationRefused` IS a `RuntimeError` subclass, so
+    every `pytest.raises(RuntimeError, ...)` in this file (and `except Exception` in the
+    fallback test above) stays green either way — measured, with a bare `RuntimeError` the
+    whole suite passed. Same reason the sibling arms in `read_sources` and `read_operators`
+    are `CurationRefused`.
+    """
+    mod = _tool_module()
+
+    def call(name, args):
+        return {"error": "Team points limit reached (25000). Upgrade your plan."}
+
+    reader = mod.MCPReader(call, None)
+    with pytest.raises(C.CurationRefused, match="read of the Event layer was refused"):
+        reader.read_events({"counts": {"Event": 3}})
 
 
 def test_an_event_payload_that_is_not_a_row_listing_is_refused():

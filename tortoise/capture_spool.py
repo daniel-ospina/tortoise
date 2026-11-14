@@ -339,8 +339,26 @@ class PostOutcome:
 
 #: The key a 2xx body (and the spool meta of the entry it filed) uses to say the
 #: server has NOT recorded whether extraction ran. Set by
-#: ``__main__._session_post._refused`` for the ``PENDING`` verdict (#12362) and
-#: copied onto the spool entry by ``_flush_one`` so the state outlives the run.
+#: ``__main__._session_post._refused`` for the ``PENDING`` verdict — the branch
+#: #12374 (unmerged at the time of writing) adds; on a tree without it, the key
+#: has no producer and the trace is INERT, not wrong — and copied onto the spool
+#: entry by ``_flush_one`` so the state outlives the run.
+#:
+#: ⛔ TWO body shapes reach this vocabulary, and conflating them is how the Pi leg's
+#: port went dead (measured in #12460's lane):
+#:   * the synthesised confirmation body — ``{"confirmed": "filed" |
+#:     "unextracted"}`` (plus ``extraction_mode`` for ``UNEXTRACTED``), and on the
+#:     PENDING branch #12374 adds, ``{"confirmed": "pending",
+#:     "extraction_outcome": "unknown"}``. ``_session_post`` builds it for a
+#:     REFUSAL THAT COMMITTED; Python-only, and the Pi hook POSTs to
+#:     ``/v1/sessions`` directly so it never sees this shape;
+#:   * the raw capture receipt (``hosted_api`` POST ``/v1/sessions``:
+#:     ``{session_id, turns, extracted, points, extraction_mode, …}``) — carries
+#:     NEITHER ``confirmed`` nor ``extraction_outcome``, so both legs derive what
+#:     they can from ``extracted >= 1`` alone (see ``outcome_recorded``). ⛔ NOT
+#:     from ``extraction_mode``: it says only that THIS request skipped extraction,
+#:     and a keyless re-capture records no outcome at all — a cleared marker there
+#:     is the false-PASS direction (PR #12507 review).
 UNRECORDED_OUTCOME_KEY = "extraction_outcome"
 UNRECORDED_OUTCOME_VALUE = "unknown"
 
@@ -355,9 +373,16 @@ def outcome_unrecorded(body) -> bool:
     ⛔ It is NOT "extracted nothing". A keyless capture (#4188) or a team with
     extraction switched off (#4258) genuinely produced no memory points and the
     server SAYS so (``outcome_known: true``); those keep their priced deferral,
-    because re-extracting them is the remedy that works. This marker means the
-    opposite — the server has not said either way — so pricing it would offer a
-    re-attempt for a session that may already have extracted (the #12362 bug).
+    because re-extracting them is the remedy that works. ⚠️ ``outcome_known`` is
+    read off the STORED session (``capture_ok is not None``), not per write: a
+    keyless RE-capture writes no new outcome, so a session whose ``capture_ok``
+    is NULL (built by a driver that never records one) STAYS ``outcome_known:
+    false``, while a session that already carries a recorded lane keeps reading
+    true. The re-capture is therefore never evidence either way — which is why
+    this marker is stamped from the server's explicit word and never inferred
+    from a zero. This marker means the opposite — the server has not said either
+    way — so pricing it would offer a re-attempt for a session that may already
+    have extracted (the #12362 bug).
 
     Deliberately narrow and fail-safe: only the explicit marker counts. A body
     from a tree that does not carry #12362, a malformed body, or ``None`` all
@@ -368,29 +393,96 @@ def outcome_unrecorded(body) -> bool:
             and body.get(UNRECORDED_OUTCOME_KEY) == UNRECORDED_OUTCOME_VALUE)
 
 
-#: The ``confirmed`` verdicts that mean the server KNOWS how the capture ended, so
-#: a marker standing over one of them is stale. ``filed`` is ``extracted >= 1``
-#: (#12374's ``FILED`` verdict); ``unextracted`` is the store-only outcome the
-#: server recorded (``outcome_known: true``, #4188 / #4258). Everything else —
+#: The ``confirmed`` verdicts that mean the capture's ending is settled, so a marker
+#: standing over one of them is stale. ``filed`` is ``extracted >= 1``
+#: (#12374's ``FILED`` verdict); ``unextracted`` is the confirmation read's "durable,
+#: no points visible yet" (``session_confirm.UNEXTRACTED``) — a verdict that fires on
+#: any zero count BEHIND A TURN MATCH (a non-empty mismatch or a grown set returns
+#: ``TURNS_MISSING``, an absent one ``UNKNOWN`` — both defer), not only on a
+#: store-only capture, and which
+#: ``_session_post`` derives from a GET read of the session — ⚠️ on this tree that
+#: read does not yet consult ``extraction.outcome_known``, so an ``unextracted``
+#: confirmation is only as strong as the confirmation read; #12374's PENDING
+#: branch is what qualifies it. Everything else —
 #: ``pending`` (still unknown), ``replayed`` (already captured, says nothing about
 #: extraction), an absent verdict, a malformed body — leaves the marker alone.
+#:
+#: ⛔ A store-only ``extraction_mode`` (``no-provider`` / ``extraction-disabled``,
+#: #4188 / #4258) is NOT on this list, and no constant is kept for it: it says
+#: only that THIS REQUEST skipped extraction, while the server records the durable
+#: outcome only on a non-replay (``hosted_api._record_session_state = (not
+#: session_existed) if store_only``) — so a keyless RE-capture records NOTHING yet
+#: still reports ``no-provider`` with ``extracted: 0``. Clearing a marker on that
+#: destroys the only trace of a session nobody resolved (found in review of
+#: PR #12507, verified against ``hosted_api``). The ``unextracted`` verdict reaches
+#: this module through the ``confirmed`` vocabulary above instead, which
+#: ``_session_post`` derives from a GET read (:func:`session_confirm.confirm_capture`)
+#: rather than from the receipt.
 RECORDED_OUTCOME_VERDICTS = ("filed", "unextracted")
 
 
 def outcome_recorded(body) -> bool:
-    """True when a 2xx body PROVES the server recorded how the capture ended.
+    """True when a 2xx body settles how the capture ended.
 
     The inverse question to :func:`outcome_unrecorded`, and the ONLY evidence
     allowed to clear the spool marker. It is deliberately narrow: an
     uninformative body (``replayed``, a bare 2xx, a malformed one) must not be
-    read as a resolved outcome — that reading is what deleted the only trace on
+    read as a settled outcome — that reading is what deleted the only trace on
     the routine resume/clear/compact replay path (see ``_flush_one``'s comment).
+
+    ⚠️ RESIDUAL, mirrored from ``outcomeRecorded`` in
+    ``tortoise/pi-hooks/tortoise-capture.ts``: the ``unextracted`` verdict rests
+    on the confirmation READ matching the posted turns, NOT on the server having
+    recorded an extraction outcome — ``session_confirm.confirm_capture`` does not
+    consult ``extraction.outcome_known`` on this tree, so a store-only RE-capture
+    that records nothing produces the same verdict. The clause is kept because
+    #12379's accepted decision is that a keyless session must stop being reported
+    unresolved forever; #12374's PENDING branch is what qualifies it.
+
+    ⛔ TWO body shapes reach this function, and reading only one of them made the
+    clear inert on whichever leg saw the other (#12460's verification measured
+    exactly that, twice — once on the Pi leg, once here):
+
+      * the **synthesised confirmation** body (``{"confirmed": "filed" |
+        "unextracted"}``) ``__main__._session_post`` builds for a REFUSAL that
+        turned out to have committed;
+      * the **raw capture receipt** (``hosted_api`` POST ``/v1/sessions``:
+        ``{session_id, turns, extracted, points, extraction_mode, …}``), which is
+        every ROUTINE 2xx on both legs and carries neither ``confirmed`` nor
+        ``extraction_outcome``.
+
+    The receipt clause is the same evidence ``session_confirm.confirm_capture``
+    turns into its ``FILED`` verdict: ``extracted >= 1`` ⇒ extraction ran. A
+    REPLAY reports ``extracted: 0``, so the routine resume/clear/compact path can
+    never satisfy it.
+
+    ⛔ ``extracted: 0`` in a normal mode is NOT evidence. The capture handler the
+    transport bound abandoned may still be extracting — the server's own "no
+    outcome yet" state — so a zero is AMBIGUOUS, not a negative, and reading it
+    as one is the #12362 bug wearing the other mask.
+
+    ⛔ A store-only ``extraction_mode`` is NOT evidence either, and is deliberately
+    not read here: it says only that THIS REQUEST skipped extraction, while the
+    server records the durable outcome only on a non-replay (``hosted_api``:
+    ``_record_session_state = (not session_existed) if store_only``) — so a keyless
+    RE-capture records nothing yet still reports ``no-provider``. Clearing there
+    would destroy the only trace of a session whose outcome was never recorded.
+    The ``unextracted`` verdict reaches this leg from a GET confirmation read
+    instead, through the ``confirmed`` vocabulary above — and that read is a
+    turn-match plus a zero, so it cannot tell a store-only re-capture from a
+    resolved store-only outcome either (see the residual below).
     """
     if not isinstance(body, dict):
         return False
     verdict = body.get("confirmed")
-    return (isinstance(verdict, str)
-            and verdict.strip().lower() in RECORDED_OUTCOME_VERDICTS)
+    if (isinstance(verdict, str)
+            and verdict.strip().lower() in RECORDED_OUTCOME_VERDICTS):
+        return True
+    extracted = body.get("extracted")
+    # ``session_confirm.session_extracted``'s rule exactly: a bool or a
+    # non-integer reads as 0, so an odd count can never satisfy the test.
+    return (isinstance(extracted, int) and not isinstance(extracted, bool)
+            and extracted >= 1)
 
 
 @dataclass
@@ -1892,23 +1984,34 @@ def write_spool_entry(
     # WHO STAMPS AND WHO CLEARS: the drain's own filing CAS (`_flush_one`) does
     # BOTH, and this carry is neither. It stamps when the body says the outcome
     # was never recorded (:func:`outcome_unrecorded`) and CLEARS on the same
-    # content's filing when the body instead REPORTS how it ended
-    # (:func:`outcome_recorded` — `filed` / `unextracted`) — a client-verified
-    # clear, because keeping the marker over a resolved session is the permanent
-    # false alarm a review measured. Nothing on the turn path can decide either
-    # way, so a new turn only ever PRESERVES what the last filing concluded.
+    # content's filing when the body instead settles the ending
+    # (:func:`outcome_recorded` — `filed` from `extracted >= 1`, `unextracted`
+    # from a confirmation read that matched the turns and saw no points). It is a
+    # client-side clear, and it is worth taking because keeping the marker over a
+    # session the client can no longer do anything about is the permanent false
+    # alarm a review measured — ⚠️ but `unextracted` alone does NOT prove the server
+    # recorded an outcome (a keyless RE-capture records nothing yet reads the same
+    # way; see :func:`outcome_recorded`'s residual and #12374). Nothing on the
+    # turn path can decide either way, so a new turn only ever PRESERVES what the
+    # last filing concluded.
     # ⛔ MIRRORED on the Pi leg — `writeSpoolEntry` in
     # `tortoise/pi-hooks/tortoise-capture.ts` carries the same key forward as a
     # PRESERVATION obligation, because a fresh meta literal there would otherwise
     # erase a Python-stamped entry's marker (the cross-leg gap a reviewer proved).
-    # ⚠️ RESIDUAL, stated rather than implied: that leg ALSO files (its own
-    # `flushSpool`), but its filing path reads no response body (`PostResult`
-    # carries none), so it can neither stamp this key nor CLEAR it — a session
-    # whose growth is filed by the Pi leg keeps a marker that a Python-side
-    # filing of the same verdict would have cleared. Not a false PASS (the trace
-    # only ever over-reports an unknown state, never hides one) and it is what
-    # the health line's HISTORICAL wording exists to survive; porting the clear
-    # to the Pi CAS needs the body on that path.
+    # ✅ #12460 CLOSED the residual that used to stand here: that leg's own filing
+    # (`flushSpool`) now reads the 2xx body and applies the SAME two predicates
+    # (`outcomeUnrecorded` stamps, `outcomeRecorded` clears, anything else leaves
+    # the marker alone), so a CLEAR decided on one leg is decided the same way on
+    # the other. Both the marker key/value and the recorded-verdict allow-list are
+    # pinned equal across the two files by
+    # `tests/test_12379_unrecorded_trace.py::test_the_two_legs_share_one_marker_and_verdict_vocabulary`.
+    # ⚠️ STATED RESIDUAL: the PREDICATES are identical, the BODIES are not. Python
+    # also receives a synthesised `{"confirmed": "unextracted"}` for a refused POST
+    # that a confirm-on-refusal GET found committed (`__main__._session_post`), and
+    # the Pi leg has no such path — so on a Pi-filing box a keyless session resolved
+    # that way keeps the marker until eviction. Fail-SAFE in the sense that matters:
+    # the Pi leg can only clear on bodies it actually receives, and each of those is
+    # a body this leg would clear on too.
     if (prior or {}).get(UNRECORDED_OUTCOME_KEY) == UNRECORDED_OUTCOME_VALUE:
         meta[UNRECORDED_OUTCOME_KEY] = UNRECORDED_OUTCOME_VALUE
     # Set-only-when-present, FIRST-WRITER-WINS, and — unlike `model` below,
@@ -3376,15 +3479,18 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
             # condition provably persisted (measured in review: marker set →
             # replay filing → marker gone, `filed_key` set).
             #
-            # ⛔ But a body that DOES report the outcome is evidence, and keeping
+            # ⛔ But a body that DOES settle the ending is evidence, and keeping
             # the marker over it is the alert-fatigue failure the health line
             # exists to avoid: `confirmed: filed` means the server imported the
-            # turns (so extraction ran) and `confirmed: unextracted` means it
-            # knows it did not — either way the session is no longer "unknown",
-            # and a marker left standing would make `session health` report a
-            # permanent false alarm until the entry is evicted. So the marker is
-            # CLEARED by a recorded verdict and only by one
-            # (:func:`outcome_recorded`). What remains after that is the case
+            # turns (so extraction ran), and `confirmed: unextracted` means the
+            # confirmation read matched the posted turns and saw no extracted
+            # points — ⚠️ NOT that a recorded outcome exists (that read does not
+            # consult `extraction.outcome_known`; #12374 qualifies it), but
+            # enough, on #12379's accepted decision, that the session is no longer
+            # reported "unknown". Either way a marker left standing would make
+            # `session health` report a permanent false alarm until the entry is
+            # evicted. So the marker is CLEARED by a settled verdict and only by
+            # one (:func:`outcome_recorded`). What remains after that is the case
             # nothing on the client can resolve — no later filing at all — which
             # is why the health line states it HISTORICALLY ("filed with no
             # recorded outcome at the time") rather than as a live claim.

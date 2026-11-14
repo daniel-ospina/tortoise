@@ -1459,8 +1459,8 @@ place a machine reads it.
   be either observed or witnessed **idle** with a basis. The conditional set is read from this record
   at the pre-registration commit; a run log may not declare it.
 - **Why it is not a relaxation**: `S2.3` structurally cannot run on a corpus whose S2 map types every
-  candidate — `_collect_classify_items` (`tortoise/extractor_v2.py:11803-11825`) collects only
-  kind-missing/`unclassified` candidates and both passes sit behind `if items:` (`:14222`, `:14375`).
+  candidate — `_collect_classify_items` (`tortoise/extractor_v2.py:12730-12752`) collects only
+  kind-missing/`unclassified` candidates and both passes sit behind `if items:` (`:15149`, `:15302`).
   The old rule therefore could not be satisfied by **any** legitimate run of the registered corpus,
   so the gate could not return a verdict at all (§11.2's four ordered refusals). Every one of the
   eight still has to be accounted for, and an idle claim needs the run's own four facts — flag ON,
@@ -2527,8 +2527,9 @@ to answer.
 > ⛔ **Superseded for the merged tree by §10.28** — but only for the cites that entry names.
 > This entry's `tortoise/projection/__init__.py:14248-14250` window is untouched by `#12067`
 > (that diff has no hunk in `projection/__init__.py`), so it stayed the live value through
-> §10.28; §10.29 then measured it at `:14265-14267` for the merged tree this record ships
-> with, and §10.29 owns that window.
+> §10.28; §10.29 then measured it at `:14265-14267` for the merged tree that record shipped
+> with, and the probe's own cite (`capstone_measure.py`, re-pointed to `:14272-14274` in the same
+> commit as this line) is what carries the live window.
 >
 - **What redded.** `probes/capstone_measure.py:2989` carried
   `tortoise/projection/__init__.py:14245-14247` from §10.26, and `29ec0f3471` ("name :PackSelection at
@@ -2549,19 +2550,24 @@ to answer.
   are the ones this record froze. `document_sha256` is re-cut in this same commit, per §8's rule for
   *any* edit to this file, and the probe's cite and this document's cite are re-pointed TOGETHER so
   they cannot disagree about this anchor.
-- ⛔ **Superseded for THIS tree by §10.29.** This entry's window was the live one when it was
+- ⛔ **Superseded for THIS tree by §10.29, and then by §10.31 — which owns the live window.** This entry's window was the live one when it was
   written, and `#12067` has no hunk in `tortoise/projection/__init__.py` — but a later merge on
   the branch inserted above the anchor, so the window this tree carries is
-  `projection/__init__.py:14265-14267`, not `:14248-14250`. §10.29 owns the values this tree
-  carries. (§10.26 records the `:14245` window; `29ec0f3471` then inserted a net `+3` above the
-  anchor, making `:14248-14250` what this entry measured.)
+  `projection/__init__.py:14272-14274`, not `:14248-14250` — re-derived by opening the lines
+  (`14272` is the `# Ensure pointKind is present` comment, `14274` is `clean["pointKind"] = ""`),
+  and the probe's cite of the same anchor is re-pointed with it so the two cannot disagree. (§10.26 records the `:14245` window; `29ec0f3471` then inserted a net `+3` above the
+  anchor, making `:14248-14250` what this entry measured.) ⚠️ The live window is `:14272-14274`, and
+  §10.31 owns it — `42409813a7` (`#12348`) inserted above the anchor. It is named here only because
+  the probe cites the same anchor and the two must not disagree; this entry's OWN numbers below are
+  unchanged, so it was not re-pointed in place.
 
 ### 10.28 — the §11/§9 cite block re-derived for `#12067`'s `+54`, and the `#10360` read-back re-pointed (2026-11-13, `#12067`)
 
-> ⛔ **Superseded for THIS tree by §10.29.** No cite below moved: `34bb716315` inserted `+9`
+> ⛔ **Superseded for THIS tree by §10.29, and then by §10.30 for `main`'s later merges.** No cite below moved: `34bb716315` inserted `+9`
 > inside the same relation-builder hunk and `391313ca9a` then removed it again (the mechanism
 > guard became the DECLARED table in `tortoise/ep.py`), so §10.29 re-measured the same numbers
-> this entry recorded while the branch's total delta grew elsewhere. §10.29 owns them.
+> this entry recorded while the branch's total delta grew elsewhere. §10.29 re-measured them;
+> **§10.30 owns the live values for this tree.**
 >
 > **A successor entry, not an edit to §10.23 or §10.24.** Both of those number the head
 > they name and must stay byte-identical to `main` — §10.19's rule, restated by §10.22
@@ -2615,10 +2621,17 @@ to answer.
   per §8's rule for *any* edit to this file.
 - **§10.29 succeeds this entry**, and it re-measures the same values: `34bb716315`'s `+9`
   insert was removed again by `391313ca9a`, so nothing below moved. The entry that carries
-  a `LIVE for the merged tree` bullet is §10.29, not this one.
+  a `LIVE for the merged tree` bullet is §10.31, not this one.
 
 ### 10.29 — the §11/§9 cite block re-derived for THIS branch's delta, round 15's code included (2026-11-13, `#12067`)
 
+> ⛔ **Superseded for the merged tree by §10.30.** §10.29 measured this branch's own delta against
+> the base it names; `main` then moved under it (`#12348`'s `+971/-48` inside `extractor_v2.py` and
+> `#12343`'s `+48` after it, plus the `tortoise/sdk.py` carriers below), so the lines it opens are no
+> longer the lines this tree carries. Nothing
+> below is corrected in place — those numbers are a faithful record of the head this entry names.
+> §10.30 owns the live values.
+>
 > **A successor entry, not an edit to §10.28.** §10.28's numbers are a faithful record of the head
 > it names. Two merges have landed since: `34bb716315` added 9 lines to the relation builder, and
 > `391313ca9a` then REMOVED them again — the mechanism guard became the DECLARED table in
@@ -2675,5 +2688,107 @@ to answer.
   cite sweep edited them in place and was reverted. A reader who needs the live numbers takes
   the `edges.py` ones from §3.4/§3.7/§7 above, and the `record_projection.py` one from this
   entry, because no live carrier holds it.
+- **§10.30 succeeds this entry**, and it re-measures the §11/§9 cite block above against `main` at
+  `5bacb44e0b`. The entry that carries a `LIVE for the merged tree` bullet is §10.31, not this one.
+  ⛔ For the `edges.py` windows the live carriers are §3.4/§3.7/§7 (this entry names them); for
+  `record_projection.py:4996-4999` this entry is still the ONLY carrier, and it stays correct.
+
+### 10.30 — the §11/§9 cite block re-derived on `main` after the post-§10.29 merge wave (2026-11-13, `#12266`)
+
+> ⛔ **Superseded for the merged tree by §10.31.** §10.30 measured `main` at `5bacb44e0b`; `#12492`
+> then inserted a net `+3` inside `tortoise/sdk.py` above every `sdk.py` carrier below, so the
+> `sdk.py` lines this entry opens are no longer the lines this tree carries. Nothing below is corrected
+> in place — those numbers are a faithful record of the head this entry names. §10.31 owns the live
+> `sdk.py` values and the `#548` window; the `tortoise/extractor_v2.py` values this entry opens did
+> **not** move (`git diff --numstat 5bacb44e0b HEAD -- tortoise/extractor_v2.py` is empty) and still
+> open on the content they claim, as §10.31 re-measures.
+>
+> **A successor entry, not an edit to §10.29.** §10.29 recorded the branch's own delta against the
+> base it names, and that record stays true to that head. `main` has since advanced: `#12348`
+> inserted `+971/-48` inside `tortoise/extractor_v2.py` (net `+923`) and `#12343` then added 48 more,
+> and `#12120` then `#12343` moved the `tortoise/sdk.py` carriers (the meta fold
+> `_capture_stats_with_step_witness(out, len(extracted))`: `18864` → `18942` → `19051`; the write seam
+> `relation_write = apply_relation_edges(`: `18822` → `18900` → `19009`; `#12348`'s own tree carried
+> it at `18799`, and `#12325` moved both anchors `+23` to `18864`/`18822` before `#12120` ran). §10.29's numbers
+> therefore describe a tree that is no longer the one
+> this record ships with.
+
+- ⚠️ **An offset cannot describe the move, which is why every line below was opened.** The
+  `result["classify_later"]` block was displaced `+923` and `_collect_classify_items` `+825` on the
+  same tree — two regions of one file moved by different amounts, so a single offset is wrong at one
+  of them. (`#12348`'s `+971/-48` is an INSERTION count, not a displacement; the block's own travel is
+  `14640` → `15563`.) The decomposition, measured line by line across the two commits: `42409813a7`
+  (`#12348`) introduced `+971/-48` and moved the block `14640` → `15563` and the collector
+  `11857` → `12682`; `b85194d6bc` (`#12343`) then added 48 above both, giving `15611` and `12730`.
+- **New value — measured on `main` at `5bacb44e0b`, by opening each line:**
+  `_collect_classify_items` at `:12730`, extent `:12730-12752` (`def` to `return items`); the two
+  `if items:` gates at `:15149`/`:15302`; the two fail-open `except` arms at `:15162`/`:15313`; the
+  two result blocks at `:15611` (closing `:15617`) and `:15621` (closing `:15625`);
+  `_run_vet_pass`'s S2.2 call at `:17805` and its post-S4 union call at `:15278`; and the `#10360`
+  read-back (`_value_fidelity_judged = _state_value_verbatim_enforced()`) at `:11409`.
+- **Verified by content, not by arithmetic.** `:12730` is
+  `def _collect_classify_items(embed_list: dict) -> list[dict]:` and `:12752` is `return items`;
+  `:15149`/`:15302` are the two `if items:` gates; `:15162`/`:15313` are the two fail-open `except`
+  arms whose warnings name `classify(S2) failed` / `classify(union) failed`; `:15611` opens
+  `result["classify_later"]` and `:15617` closes it (`}`), `:15621` opens `result["vet"]` and
+  `:15625` closes it; `:17805` is
+  `embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass(` and `:15278` is
+  `complete_list, vet_union_stats, _w, _ = _run_vet_pass(`; `:11409` is the read-back assignment.
+  The selection flags this block sits under are at `:14693` (`vet_enabled`), `:14662`
+  (`classify_later`) and `:14687` (its construction-failure arm, `classify_later = False`), and the
+  early return that emits both OFF surfaces is `if not edus:` at `:14697`, with
+  `edus = _edus_from_conversation(...)` at `:14696` above it.
+- **What moved: the citations, and nothing that is a protocol value.** No metric, denominator,
+  threshold, class set or corpus pin is changed — every §1–§9 criterion VALUE and the E4
+  denominator are the ones this record froze. `document_sha256` is re-cut in this same commit,
+  per §8's rule for *any* edit to this file.
+- ⛔ **§10.1–§10.29 are HISTORY and were NOT re-pointed.** Their numbers name the head each entry
+  measured, per §10.19/§10.22/§10.24; a re-point in place would be a false record of what was
+  measured. The live carriers are §11, §9, §3.4/§3.7/§7 for the `edges.py` windows, §10.29 for
+  the one `record_projection.py` value that has no other carrier, and §10.31 — which succeeds this
+  entry for the `sdk.py` carriers AND for the `#548` window, `projection/__init__.py:14272-14274`
+  (`42409813a7`, `#12348`), whose sentence lives in §10.27.
+- **This entry was LIVE for the merged tree until §10.31**; §10.31 now carries the `sdk.py` values
+  for the next head, and this entry stays true to the `main` it names (`5bacb44e0b`).
+
+### 10.31 — the `sdk.py` carriers re-derived after `#12492`'s `+3` (2026-11-13, `#12266`)
+
+> **A successor entry, not an edit to §10.30.** §10.30 recorded the values at `main` `5bacb44e0b`
+> and stays true to that head. `main` has since advanced: `cca42fa599` (`#12492`) inserted a net
+> **`+3`** above `_extract_session_v2` in `tortoise/sdk.py` (5 insertions, 2 deletions), which moved
+> **every** `sdk.py` carrier below it by exactly `+3`. Measured per commit: `18022` at `89c41ad8ba`,
+> `c2e579e629`, `017a9af331` and `adb6800c1e`; `18025` at `cca42fa599` and after.
+> `tortoise/extractor_v2.py`, `tortoise/projection/` and `tortoise/pi-hooks/tortoise-capture.ts`
+> did **not** move; `tortoise/search_engine.py` gained `+30` (`31` / `1` at `:2507`–`:2584`, from
+> `#12536`), which is why its cite moves `6607`→`6637` in this same PR — re-measured, not assumed:
+> `12730`, `15149`, `15277`, `15302`, `15611`, `15621`, `17804`, `6637` and `955`/`947` all still open
+> on the content they claim.
+
+- **The move is uniform for THIS wave, which is why a mapping is legitimate here and was not at
+  §10.30.** `+3` describes every one of the twelve carriers; the §10.30 wave was the one where an
+  offset could not work (displacements of `+923` and `+825` in one file). Each value was still
+  confirmed by opening the line, never by adding three.
+- **The mapping**, all twelve, old (at `5bacb44e0b`) → new (this tree):
+  `_extract_session_v2` `18022`→`18025`; `proj.link_source_to_event(` `19449`→`19452`;
+  `relation_write = apply_relation_edges(` `19009`→`19012`; `from tortoise.relation_write import
+  apply_relation_edges` `19008`→`19011`; the `#10999` TRANSPORT-ONLY comment `18996`→`18999`;
+  `"stats": _capture_stats_with_step_witness(...)` `19051`→`19054`;
+  `bind_point_subjects(proj, self, point_id=pid,` `18656`→`18659`;
+  `The v2 path reports` `16455`→`16458`; `"extraction_mode": "llm:<route>"` `16456`→`16459`;
+  `extracted, meta = self._extract_session_v2(` `16911`→`16914`;
+  `declared = declared_relation_predicates()` `25393`→`25396`; the kind→label write seam
+  `18203-18227`→`18206-18230`.
+- **What moved: the citations, and nothing that is a protocol value.** No metric, denominator,
+  threshold, class set or corpus pin changes; `document_sha256` is re-cut in the same commit, per §8.
+- ⛔ **§10.1–§10.30 stay HISTORY.** §10.30's `18799`/`18822`/`18900`/`19009`/`19051` chain is a
+  per-commit record of ITS wave and must keep those numbers even though `19009` and `19051` now name
+  different lines on this tree — that is the whole point of recording a head.
+- **The `#548` window travels with this entry too**, because it has no other live carrier:
+  `projection/__init__.py:14272-14274` (`14272` = the `# Ensure pointKind is present` comment,
+  `14274` = `clean["pointKind"] = ""`). Measured per commit: `0dca7fcadc`/`31b29c3ceb` `14248`,
+  `201bd941e0` `14255`, `1a0ace242a`/`c7499ac7a7` `14265`, and `42409813a7` (`#12348`) `14272` — the
+  same commit that did the `extractor_v2.py` insert, which is why the two moved together. (An
+  earlier draft of §10.30 attributed this move to `d63caecf56`/`#12338`; that commit never touches
+  `projection/__init__.py`, and `d63caecf56^` already reads `14272` — measured, not inferred.)
 - **This entry is LIVE for the merged tree** — it has no successor, so it must not carry a
   supersede marker.

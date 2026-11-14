@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import contextlib
 import gc
+import json
 from unittest import mock
 
 import pytest
@@ -211,8 +212,19 @@ async def test_the_envelope_is_untouched_when_the_tool_succeeds(quiet):
 
 @pytest.mark.asyncio
 async def test_an_object_tool_keeps_its_structured_error(quiet):
-    """The established `_safe` contract for dict-returning tools WORKS (the
-    advertised schema is an object), so it must not be swept up by the fix."""
+    """The established `_safe` PAYLOAD contract for dict-returning tools WORKS
+    (the advertised schema is an object), so #8482 must not drop it.
+
+    ⚠️ The VERDICT assertion in this test was REVERSED by #11153, deliberately and
+    in one place so the change is findable: this test used to assert
+    `is_error is False` here. That verdict is what made a refused write read as a
+    success — `_safe` answers a quota/auth/transport failure with a dict, a
+    dict-annotated tool's dict is schema-valid, and the client was therefore told
+    the call SUCCEEDED. #8482's own reasoning ("keep the payload readable, move the
+    failure to the channel MCP has for it") always pointed at `is_error`; it stopped
+    one field short for these tools. The PAYLOAD half of the assertion is unchanged
+    and still pins exactly what #8482 fixed.
+    """
     def _mapping() -> dict:
         return ms._SafeError({"error": "boom"})
 
@@ -221,8 +233,12 @@ async def test_an_object_tool_keeps_its_structured_error(quiet):
         result = await ms.mcp.call_tool("_8482_mapping", {})
     finally:
         _drop("_8482_mapping")
-    assert result.structured_content == {"error": "boom"}
-    assert result.is_error is False
+    assert result.structured_content == {"error": "boom"}, (
+        "a schema-VALID error payload must not be dropped — #8482 drops only the "
+        "envelope its own schema forbids")
+    assert result.is_error is True, (
+        "a refused call reported `isError: false` — the false PASS #11153 is about "
+        "(this assertion was `is False` before #11153; see the docstring)")
 
 
 @pytest.mark.asyncio
@@ -610,9 +626,16 @@ async def test_the_named_read_path_siblings(quiet, stdio):
     `tortoise_search` and `tortoise_expand_relationships` carry an ARRAY
     envelope and are repaired. `tortoise_recall` is NOT in that class: it is
     annotated `-> dict`, so it has no wrap envelope and `_safe`'s flat dict is
-    exactly what its advertised OBJECT schema admits. It must be left as it is
-    — which is the proof this repair is driven by the DECLARED SCHEMA and not
-    by "the call failed".
+    exactly what its advertised OBJECT schema admits. **Its PAYLOAD must be left
+    as it is** — the proof this repair is driven by the DECLARED SCHEMA and not by
+    "the call failed".
+
+    ⚠️ The two halves are decided by DIFFERENT questions, which is the correction
+    #11153 makes: the PAYLOAD follows the declared schema (this test, unchanged),
+    and the VERDICT follows whether the dispatch failed (so `tortoise_recall`'s
+    refusal now ships `is_error=True` while keeping its dict). Before #11153 this
+    test asserted `is_error is False` for the recall arm, which is what let a
+    refused call reach the client as a success.
 
     Both repaired tools returning a client-ACCEPTABLE error is the point: the
     pre-fix payload was refused by the client as a schema violation, so the
@@ -643,8 +666,12 @@ async def test_the_named_read_path_siblings(quiet, stdio):
                     _wire_payload(result), schema), name
             else:
                 # Recall: no envelope, so `_safe`'s dict IS the advertised
-                # shape — untouched, and NOT an error result.
-                assert result.is_error is False, name
+                # shape — the PAYLOAD is untouched. Its VERDICT is not the
+                # payload's business: the dispatch failed, so the client is told
+                # so (#11153).
+                assert result.structured_content is not None, name
+                assert "boom" in json.dumps(result.structured_content), name
+                assert result.is_error is True, name
                 assert result.structured_content == {
                     "mode": "state", "error": "boom-recall"}, name
 

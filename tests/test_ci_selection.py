@@ -3001,20 +3001,21 @@ def test_root_file_read_by_a_test_is_never_allowlisted():
     the removed blanket `*.md`-at-root clause is reintroduced (it admitted
     README.md).
 
-    #8785: CHANGELOG.md and CLAUDE.md are deliberately NOT in this list. They are
-    prose whose CONTENT no test or tool reads (their only mentions are docstrings,
-    a generated-doc link, or `record-review.sh`'s basename case), so they are
-    reprieved to the tier-1 smoke by `NON_CODE_DOC_PATHS` — pinned by
-    `test_non_code_doc_paths_have_no_content_reader`.
-    ⛔ CONTRIBUTING.md is NOT reprieved (it was, until #12313's
-    `tests/test_surface_manifest.py` started READING its text to hold the
-    documented surface rule to the shipped one). A doc a guard reads must run the
-    full matrix on the PR that edits it, so it left the list and
-    `test_doc_reprieve_is_per_path_not_per_diff` pins the FULL selection it now
-    takes. Every name below IS read
+    #8785: CHANGELOG.md and CLAUDE.md are deliberately NOT in
+    this list. They are prose whose CONTENT no test or tool reads (their only
+    mentions are docstrings, a generated-doc link, or `record-review.sh`'s
+    basename case), so they are reprieved to the tier-1 smoke by
+    `NON_CODE_DOC_PATHS` — pinned by
+    `test_non_code_doc_paths_have_no_content_reader`. ⛔ `CONTRIBUTING.md` was in
+    that group too, on a MENTION census, and it is NOT any more: `#12313` added
+    the reader IN `tests/test_surface_manifest.py` (a suite that already existed;
+    `#12313` did not create it), which reads the file's content, so the
+    doc's edit must keep the FULL matrix or that guard is skipped on the only PR
+    that needs it. Every name below IS read
     (README.md by `test_embedded_durability_claim.py:62`; AGENTS.md by the
     base-subset pin; `.gitignore` by
-    `test_kind_index.py::TestMemoizationAndLazy::test_gitignored_cache_dir`; …) and keeps FULL.
+    `test_kind_index.py::TestMemoizationAndLazy::test_gitignored_cache_dir`; CONTRIBUTING.md by
+    `test_surface_manifest.py`'s removal-docs pin; …) and keeps FULL.
     (`.gitignore` used to be cited as `:290` — a DIFFERENT test — while the read has
     been at `:302` since before both parents merged, so a line citation here is a claim
     that re-stales on the next neighbouring edit; that one is a symbol now. `README.md`'s
@@ -3111,6 +3112,42 @@ _READ_CALLS = frozenset({"open", "read_text", "read_bytes", "read",
 # machine since #9475, not tracked — so it must be walked on disk, not read from
 # `git ls-files`.
 _NON_CODE_DOC_ROOTS = ("tests", "tools", "scripts", ".github", "tortoise")
+
+#: `_NON_CODE_DOC_ROOTS` spelled out a THIRD time, ON PURPOSE, for the census's
+#: non-vacuity test — the mention census's `_CENSUS_ROOTS` above is the second,
+#: and the test binds all three. The BIND is what reds a single-list edit; the
+#: literal expectation catches NOTHING a SYNCHRONISED edit produces — the case the
+#: bind cannot see either: a synchronised edit arrives with a matching literal, so
+#: THIS assertion stays GREEN for it. Exceptions to "a synchronised edit is free"
+#: exist (do not write a COUNT here — an earlier "two" was falsified by the third
+#: a paragraph later, which is how this block has gone wrong before), and NONE of
+#: them is caught by this literal:
+#:   - a synchronised edit that REMOVES `scripts` is not free: `scripts/` is the
+#:     one spelling `_readers_of` needs, so the trailing-slash pin reds (measured:
+#:     3 failed — the pin among them);
+#:   - a synchronised ADD is not free either — `config` added to all three leaves
+#:     this assertion green but reds TWO tests in this file:
+#:     `test_the_mention_census_announces_an_unmaterialised_root` (its fixture
+#:     hard-codes four roots, so materialising `scripts/` leaves `config` absent
+#:     and the control leg's expected silence does not hold — it sees an
+#:     announcement it does not expect) and
+#:     `test_no_allowlisted_root_file_has_a_reader`, which immediately surfaces
+#:     `config/docs-lint-baseline.json` as a reader of the allowlisted
+#:     `.scope-1894.md` (measured: 2 failed, 508 passed).
+#:
+#: The residual is PER ROOT, not a class — do not generalise it again: a
+#: synchronised DROP of `tortoise` from all three is GREEN (measured: 510 passed,
+#: 1 skipped), while dropping `tests` is NOT — `_CENSUS_ROOTS` no longer declares
+#: it, so the announce test's `rmdir` finds nothing "newly absent" and its
+#: different-loss leg reds (`test_the_mention_census_announces_an_absent_root_
+#: ONCE`; the dedupe-once leg itself stays green).
+#:
+#: So the header above is a review PROMPT, not an enforced re-derivation: what
+#: the tests below enforce is the MECHANISM — a reader under every declared root,
+#: in both file kinds, must come back, so a walk that stopped seeing readers
+#: reds — plus one-list edits at the BIND. A SYNCHRONISED edit is caught only
+#: where the rows above say so.
+_CENSUS_ROOTS_PINNED = ("tests", "tools", "scripts", ".github", "tortoise")
 
 # A shell read operation. `read\b` deliberately does NOT match "reads" (word
 # boundary), so prose like "pi's loader reads AGENTS.md" is not a read op.
@@ -3249,6 +3286,124 @@ def test_non_code_doc_paths_have_no_content_reader():
         f"smoke would skip those guards on the PR that edits the file: {offenders}")
 
 
+def test_the_content_census_leaf_detectors_see_a_reader():
+    """The two LEAF detectors actually detect (#12448 review, P2).
+
+    `test_non_code_doc_paths_have_no_content_reader` asserts `assert not
+    offenders` over every member — and once `CONTRIBUTING.md` left the set
+    (`f244be9bc7`; the removal was this PR's own finding, whose issue is
+    `#12443`) every remaining member answers `[]`
+    (measured: `.github/pull_request_template.md`, `CHANGELOG.md`, `CLAUDE.md`).
+    So a DETECTOR that
+    answered "no" for everything would leave that ratchet green forever: rename a
+    `_READ_CALLS` entry, or change the AST shape it matches, and the guard
+    protects nothing while reporting clean. The sibling
+    `test_no_allowlisted_root_file_has_a_reader` cannot cover it — it derives
+    readers with `_readers_of`, the GREP-based MENTION census, a different
+    function.
+
+    This pins the leaves, one positive and one negative each (`read_text` and a
+    bare mention in Python; a read op and a non-read `echo` in shell). It does
+    NOT cover the ENUMERATION — that is the end-to-end test below, and it is
+    the half that was missing when this was first written.
+    """
+    assert _content_read_in_py(
+        'c = (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")\n',
+        "CONTRIBUTING.md",
+    ), "a literal-path read call must be SEEN"
+    assert not _content_read_in_py(
+        'x = "CONTRIBUTING.md"\n', "CONTRIBUTING.md",
+    ), "a bare mention is not a read — the census must not cry wolf"
+    assert _content_read_in_shell(
+        "cat CONTRIBUTING.md\n", "CONTRIBUTING.md",
+    ), "a shell read op must be SEEN"
+    assert not _content_read_in_shell(
+        "echo CONTRIBUTING.md is generated\n", "CONTRIBUTING.md",
+    ), "naming a file in a shell line is not reading it"
+
+
+def test_the_content_census_sees_a_reader_end_to_end(tmp_path, monkeypatch):
+    """The ENUMERATION sees a reader, on EVERY root and in BOTH file kinds.
+
+    Right leaves do not make a right census: `_content_readers_of` walks
+    `_NON_CODE_DOC_ROOTS` and `continue`s SILENTLY on a root that is not a
+    directory, so a census that saw nothing at all would still satisfy
+    `test_non_code_doc_paths_have_no_content_reader` — and, before this test,
+    satisfied the leaf test above too. MEASURED: with `_NON_CODE_DOC_ROOTS`
+    emptied, every member answers `[]` and the leaf assertions are unaffected.
+    That is not hypothetical on CI, where `scripts/` is absent by design (it is a
+    machine-local symlink, #9475), so the walk is permanently narrower there.
+
+    ⛔ The expectation is built from a LITERAL tuple rather than from
+    `_NON_CODE_DOC_ROOTS`, as DEFENCE IN DEPTH — not as a live detector: the BIND
+    below forces the lists to be equal before this comparison is reached, so a
+    shrunk tuple ALWAYS arrives here WITH a matching expectation — which is
+    exactly why this comparison cannot catch it (MEASURED: drop `tortoise` from
+    all three -> GREEN). It is kept because it becomes discriminative the moment
+    the bind is loosened (MEASURED: loosened bind + one-list shrink -> the literal
+    REDs here, a derived expectation stays GREEN). Before the bind and the
+    trailing-slash pin landed, deriving the expectation DID leave this green over
+    a shrunk tuple — measured then; do not re-use that reading.
+
+    What this test REDS, MEASURED with the mutant that should cause each (the full
+    row-by-row matrix is on PR #12448, with the `config`-add rows corrected by the
+    comment posted after it): a single-list edit of any root
+    (the BIND), a synchronised edit that removes or renames `scripts` (the
+    trailing-slash pin), a walk that stops seeing readers (this comparison), and
+    a walk that drops `.sh` (the `.sh` reader below). A SYNCHRONISED DROP of
+    `tortoise` from all three is GREEN — the stated residual, not a hidden one —
+    but the residual is PER ROOT, not a class: dropping `tests` reds
+    `test_the_mention_census_announces_an_absent_root_ONCE` (its different-loss
+    leg — nothing is "newly absent" once `tests` is undeclared), and dropping
+    `scripts` reds the trailing-slash pin. A synchronised ADD is not suite-GREEN
+    either: it leaves this comparison green but reds
+    `test_the_mention_census_announces_an_unmaterialised_root` and
+    `test_no_allowlisted_root_file_has_a_reader` (measured: `config` added to all
+    three surfaces `config/docs-lint-baseline.json` as a reader of
+    `.scope-1894.md`). The
+    `REPO` this test sets cannot be overridden from outside, so pointing `REPO`
+    elsewhere is NOT a mutation.
+    """
+    assert (tuple(r.rstrip("/") for r in _CENSUS_ROOTS)
+            == _NON_CODE_DOC_ROOTS == _CENSUS_ROOTS_PINNED), (
+        "the three root lists have diverged — the mention census (`_readers_of`, "
+        "`_CENSUS_ROOTS`) and the content census (`_content_readers_of`, "
+        "`_NON_CODE_DOC_ROOTS`) must cover the SAME roots, or one of them is "
+        "silently narrower than the other two (#1349/#3332/#3616)")
+    # The bind above NORMALISES, and rstrip("/") erases the one spelling that is
+    # load-bearing: `_readers_of` needs `scripts/` WITH the slash, because BSD
+    # grep does not descend a symlinked directory named without one (its own
+    # docstring: 0 hits vs 72 on macOS), which would make
+    # `test_no_allowlisted_root_file_has_a_reader` vacuous for every reader under
+    # `scripts/` — while the normalised bind stayed green (measured).
+    assert "scripts/" in _CENSUS_ROOTS, (
+        "`scripts` is no longer spelled `scripts/` in `_CENSUS_ROOTS`: either it "
+        "was RENAMED or DROPPED — then decide what reads the reprieved docs from "
+        "any replacement root — or it lost its TRAILING SLASH, which is "
+        "load-bearing: BSD grep does not descend a symlinked directory named "
+        "without one, so the mention census would silently search NOTHING under "
+        "scripts/ on macOS (see `_readers_of`) and the allowlist ratchet would go "
+        "vacuous for every reader there. The normalised bind above CANNOT see "
+        "either shape.")
+    py_reader = ('from pathlib import Path\n'
+                 'Path("CHANGELOG.md").read_text(encoding="utf-8")\n')
+    sh_reader = "cat CHANGELOG.md\n"
+    for root in _CENSUS_ROOTS_PINNED:
+        base = tmp_path / root
+        base.mkdir(parents=True, exist_ok=True)
+        (base / "read_doc.py").write_text(py_reader, encoding="utf-8")
+        (base / "read_doc.sh").write_text(sh_reader, encoding="utf-8")
+    monkeypatch.setattr(sys.modules[__name__], "REPO", tmp_path)
+    expected = sorted([f"{root}/read_doc.{suffix}"
+                       for root in _CENSUS_ROOTS_PINNED
+                       for suffix in ("py", "sh")])
+    assert _content_readers_of("CHANGELOG.md") == expected, (
+        "the content census cannot SEE a reader end to end — a pinned root is "
+        "walked but yields no reader, so every member would answer [] and "
+        "test_non_code_doc_paths_have_no_content_reader would stay green over a "
+        "silently-skipped root")
+
+
 def test_non_code_docs_select_tier1_not_full(monkeypatch):
     """#8785: a prose doc no guard reads selects the tier-1 smoke, not FULL."""
     members = sorted(cs.NON_CODE_DOC_PATHS)
@@ -3321,7 +3476,9 @@ def test_doc_reprieve_is_per_path_not_per_diff():
     assert r["full"] is False
     assert "api" in r["surfaces"] and "core" in r["surfaces"]
 
-    # The measured #8726 shape: two prose files, no Python -> tier-1 smoke.
+    # The #8726 SHAPE (its own pair was `CONTRIBUTING.md` + the template, which
+    # now selects FULL because a test reads `CONTRIBUTING.md`), carried here with
+    # `CHANGELOG.md` standing in: two prose files, no Python -> tier-1.
     r2 = _sel(["CHANGELOG.md", ".github/pull_request_template.md"])
     assert r2["full"] is False and r2["surfaces"] == []
     assert r2["slow_run"] is False and r2["carve_out_run"] is False
@@ -4440,7 +4597,7 @@ def test_the_step1_eval_evidence_doc_selects_core_not_tier1():
     MEASURED before the CORE_ALSO entry (`select()` in-process):
     `select(["docs/ax/how-to-use-tortoise-step1-eval.md"])` → `surfaces=[]`,
     `full=False`, pin ABSENT. `docs/` is a flat NON_PYTHON_PREFIXES
-    entry and `_is_non_code_doc` recognises four exact paths, so the changed
+    entry and `_is_non_code_doc` recognises only exact paths, so the changed
     list came back empty and `select()` took the docs-only early return. A
     one-file PR could therefore re-cut the headline to any number and merge with
     the guard that re-measures it never having run — the #1349/#3332/#3616

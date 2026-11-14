@@ -124,10 +124,12 @@ tool-level refusal is answered as an `_SafeError` and recorded `exec_error` /
 `status` filter) keeps it closed. Two named residuals still read `ok` and are
 NOT refusals a `status` filter should find: a domain answer that carries an
 `error` key on purpose (`tortoise_get_operator` on a point that is not an
-operator — a successful fetch reporting that fact, #4576), and a refusal
-buried deeper than the seam reads (`tortoise_overview()` with no `section`
-nests each section's payload one level down, so a failing section is not
-classified). The gate's own match is a dict **literal** carrying a constant
+operator — a successful fetch reporting that fact, #4576), and a PARTIAL
+summary of `tortoise_overview()` with no `section`, where a REFUSED section's
+payload is nested one level down and is not classified. (A TOTAL outage no
+longer nests: since #11153 the aggregate returns the refusal at the payload's
+TOP level, which the seam classifies — so an orientation read where every
+section failed now reads `exec_error` / `safe_error` and ships `isError: true`.) The gate's own match is a dict **literal** carrying a constant
 `error` key (or a body that returns one by name), so a refusal answered with a
 KEYLESS plain dict — or with an `error` key built any other way (`dict(error=…)`,
 a key assigned after construction, an unpack, a conditional) — would be invisible

@@ -39,6 +39,10 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # Declared so the per-command budget below has a boundary to fit inside (cycle-2
+    # review): GitHub's default here is 360 min, which a wedged `pip` could hold. Build
+    # (a couple of minutes) + 3 x 300 s of documented-command smoke is far inside 40.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -80,6 +84,49 @@ jobs:
           EOF
           /tmp/wheelcheck/bin/tortoise --help >/dev/null 2>&1 \
             && echo "CLI entrypoint OK"
+      - name: Documented first command on the built wheel (#12363)
+        # The smoke above asserts CONTENT (packs, transcript, entrypoint) and
+        # never RUNS a command, so a wheel whose first documented command fails
+        # still uploaded and stayed on the index for 97 days: `tortoise init`
+        # exited 1 with "FATAL CONFIG FILE ERROR ... 'dir ~/.tortoise' No such
+        # file or directory" because the wheel predated #2204's `os.makedirs`.
+        # Same tool the scheduled canary runs (`--wheel` mode), so the pre-publish
+        # and post-publish readings cannot drift apart (#12363).
+        run: |
+          set -o pipefail
+          # Resolve the wheel EXPLICITLY before invoking: `--wheel "$(ls dist/*.whl)"`
+          # degrades to index mode when the glob matches nothing (bash does not abort on
+          # a failing substitution inside an argument), which would test the PREVIOUS
+          # release and report PASS while a broken wheel is uploaded (#12363 review E3).
+          whl=$(ls dist/*.whl 2>/dev/null) || whl=""
+          if [ -z "$whl" ] || [ "$(printf '%s\n' "$whl" | wc -l)" -ne 1 ]; then
+            echo "::error::expected exactly one wheel in dist/, found: ${whl:-none}"
+            exit 1
+          fi
+          # This job declares `timeout-minutes: 40` above, so bound the per-command
+          # budget to fit inside it: 3 runner calls (venv, pip, `tortoise init`) x 300 s
+          # = 900 s, well inside 2400 s. (Cycle-2 review: this comment used to claim a
+          # 20 min job timeout that this job did not declare, and a bound chosen for a
+          # boundary that did not exist would only have halved the allowance for a cold
+          # `pip install` of the wheel's full dependency graph.)
+          python tools/published_artifact_canary.py \
+            --wheel "$whl" \
+            --timeout 300 \
+            --summary-file "$GITHUB_STEP_SUMMARY" \
+            --transcript-dir "$RUNNER_TEMP/canary-publish"
+      - name: Keep the install/run transcript (every terminal state)
+        # The step above writes its evidence to $RUNNER_TEMP, which the runner deletes;
+        # the tool's own FAIL detail says "see the transcript", so without this upload
+        # that pointer is unsatisfiable and a blocked release cannot be diagnosed from
+        # CI at all (#12363 review E2-1). Mirrors the scheduled canary's step — the two
+        # are pinned together by tests/test_published_artifact_canary.py. `always()`, for
+        # the same reason as the canary's: a cancelled job runs no `failure()` step.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: publish-canary-log
+          path: ${{ runner.temp }}/canary-publish/
+          if-no-files-found: warn
       - name: sdist presence check (#1929)
         # sdist must carry the catalog (MANIFEST.in stub include) — a wheel
         # rebuilt from it must still ship packs (verified by the slow suite;

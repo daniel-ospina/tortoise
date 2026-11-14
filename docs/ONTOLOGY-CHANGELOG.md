@@ -33,6 +33,45 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 
 ---
 
+> **Changelog v3.35 (2026-11-13 — the temporal-immutability constraint states the model, not its enforcement):**
+>
+> **Owner approval of the exact changes:** 2026-11-13, given in-session. The approval's artifact is the
+> text itself: what §5 carries below is what was approved.
+>
+> **What changed.** §5's Point-status vocabulary previously stated the temporal-immutability constraint as
+> a report on which doors enforce it. It now states the constraint, and the report is gone from the file.
+>
+> **What the file now says** (the approved words, quoted in full):
+>
+> > **A terminal claim's temporal record is immutable.** Once a claim reaches a terminal status, its
+> > valid-time window (`validFrom`, `validTo`, and their precision markers), its transaction-time expiry
+> > (`expiredAt`), and its occurrence anchor (`when`) no longer change. Content and metadata stay
+> > revisable: a revision is a newer assertion of the same identity, not a restatement of when the claim
+> > held.
+> >
+> > **Consequence:** a stored inverted window (`validTo` before `validFrom`) on a terminal claim cannot
+> > be corrected — it is reported, not repaired.
+>
+> **The history that was removed, recorded here.** The constraint was reached in stages: the lifecycle
+> guard and its terminal predicate (#2498), its extension to `update_point` (#7819), the replay fold's
+> tolerance of a later same-id revision (#3305), the closure of `update_entity`'s Point arm — the door
+> that could resurrect a terminal claim or rewrite its window (#9649) — and the window damage the
+> inverted-window audit still reports (#4021).
+>
+> **One residual from the removed paragraph, recorded here because it is not a fact about the model.**
+> The draft→live promote arm on `update_point` does not read the legacy `outdated` flag, so a point that
+> is flag-dead (`outdated=true`) with a NULL status can still be given `status='live'`, and the flag
+> keeps it terminal for readers. Measured at this change: that call is still ACCEPTED and lands
+> `['live', outdated=true]`, while `update_entity` refuses the same shape. §5's `outdated` row already
+> states the rule (*"Terminal on every read surface and for every lifecycle transition"*), so this is a
+> code lag against the model — a work item, not a property of it. The `_update_entity` note in
+> `tortoise/sdk.py` points here for it.
+>
+> **The file header gains a rule against the recurrence:** *"No issue state, no change history."* New
+> prose names no PR, issue or build status as history. The rule is scoped to new prose because the file
+> retains references that record where a term or a decision lives; sweeping those is a separate change.
+> The `Convention` line loses its `(v3.6, #909)` version-and-ticket tail for the same reason.
+
 > **Changelog v3.34 (2026-11-12 — issue #11824 — the successor clause becomes a definition of the word):**
 >
 > **Owner approval of the exact changes** is on record on #11824 (comment `6815950417`, the decision relay:
@@ -131,22 +170,24 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 > corrected_by_id)` requires the corrector, so **the invalidation path** cannot mark something no-longer-current without naming a
 > successor — but the shape IS reachable and already in use through `update_entity(<Subject>, status='superseded')` and
 > `create_object(name, status='superseded')`, which store it with `supersededBy` absent (`sdk.py:5267-5273` says of the mirror
-> shape "*it is a shape in use*"; `:63-67` above records the measurement). What withdraws `stale` is not that the state is
-> unreachable: it is that `archived` does not cover it either (`:71-75`), the vocabulary's own `outdated` flag does not carry the
+> shape "*it is a shape in use*"; the measurement recorded under (3) above). What withdraws `stale` is not that the state is
+> unreachable: it is that `archived` does not cover it either (the paragraph above on `archived` as a successorless route), the vocabulary's own `outdated` flag does not carry the
 > distinction (§4.1: the flag and the `CORRECTS` edge *"do not distinguish the two"*), so a word would also need a consumer, and
 > there is none —
 > `archived` **and** `superseded` both leave retrieval and belief (`TERMINAL_STATUS_VALUES` → `TERMINAL_EXCLUDED_STATUSES`), so a
 > third terminal word changes nothing a reader or a retriever would act on. ⚠️ That argument does not rest on terminal being
 > frozen: it is not — `update_entity`'s Point arms carry no lifecycle guard, so a `retracted` Point can be flipped to `live`
-> (`docs/ONTOLOGY.md:1177`, tracked as #9649 — **OPEN**, `state_reason: reopened` on 2026-11-12 after this very entry's merge text closed it by keyword accident; the defect this argument rests on is therefore still live), and the `:Object` write path carries no status vocabulary guard at all, so an
+> (the §5 paragraph as it then stood, tracked as #9649; it was **OPEN**, `state_reason: reopened`, on 2026-11-12 after this
+> very entry's merge text closed it by keyword accident — the correction block below records the fix), and the `:Object`
+> write path carries no status vocabulary guard at all, so an
 > `archived` Object can be given `status='live'` (`docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md:1076`, tracked as #10371 — a
 > Point-arm fix cannot close it). Policy B therefore stays
 > **unimplemented**, and when it is built it needs a word *then*, with a producer and a revival path that respects both — its own
 > change, not this one. **`archived` does not close policy B**: it is the retirement route, not the replacement-not-yet-known one,
 > which is why the clause above is buildable without an expansion **and** why `sdk.py`'s over-block note still stands for that
-> shape (`:71-75`, and the owner's relay, `#11824` comment `6815950417`: *"`archived` does not close policy B"*).
+> shape (the same paragraph above on `archived`, and the owner's relay, `#11824` comment `6815950417`: *"`archived` does not close policy B"*).
 >
-> **⚠️ CORRECTION APPENDED 2026-11-12 — the Point half of the paragraph above is no longer true.** `#9649` was
+> **⚠️ CORRECTION APPENDED 2026-11-13 — the Point half of the paragraph above is no longer true.** `#9649` was
 > fixed (PR #12325): `update_entity`'s Point arm now applies the lifecycle guard and refuses a lifecycle write
 > on a terminal Point — measured: `update_entity(<superseded>, status='live')` and
 > `update_entity(<terminal>, validTo=…)` are both REFUSED, with content/metadata revisions still accepted
@@ -154,8 +195,7 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 > and the v3.34 argument must not be read as resting on it any more. **What survives, and is the load-bearing
 > half:** the `:Object` write path still carries no status-vocabulary guard at all (**#10371**, open), and
 > policy B still needs a word *then*, with a producer and a revival path. `archived` still does not close
-> policy B. The v3.34 history above is left as written — this note dates the correction rather than
-> rewriting it.
+> policy B.
 >
 > **Still unbuilt, deliberately:** the guard that enforces this vocabulary, including the AX three-part
 > refusals (`status='outdated'` naming both `archived` and `superseded`; one refusal shape across
@@ -333,7 +373,7 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 > reports (`'live'` for a status-carrying label, `''` for an `:Event`). **Scope of the trap:** `:Object` and
 > `:Subject` only. `Point` births keep the `#7856` born-live contract and still STORE `status='live'`, so the
 > `MATCH (p:Point {status:'live'})` idiom printed in **§5's Point Status Vocabulary**
-> (`ONTOLOGY.md:1172`) remains correct as written.
+> (`ONTOLOGY.md:1174`) remains correct as written.
 
 ---
 
