@@ -113,18 +113,15 @@ CLIENT_PACKAGE = "tortoise-client"
 INDEX_JSON = "https://pypi.org/pypi/{package}/json"
 PYPI_SIMPLE = "https://pypi.org/simple"
 
-#: pip's "this distribution does not exist on the index" vocabulary. Used to tell a
-#: genuinely absent artifact (FAIL) from a pip run that could not be evaluated at all
-#: (network/proxy/config trouble → UNKNOWN). Matching is on pip's own wording because
-#: that is the only signal a subprocess gives us; the cost of being wrong in the
-#: UNKNOWN direction is a non-zero exit with a clear detail, not a silent pass.
-_INSTALL_ABSENCE_MARKERS = (
-    "no matching distribution found",
-    "could not find a version that satisfies",
-    "from versions: none",
-)
-
-#: The half of pip's absence vocabulary that NAMES what it could not resolve. The other
+#: ⛔ ONE PATTERN, NOT A MARKER GATE PLUS A NAME CHECK (#12422 round-21 review, P2).
+#: `_INSTALL_ABSENCE_MARKERS` used to sit in front of this comparison, and that made the
+#: `Failed to build '<pkg>' …` alternative CO-OCCUR instead of DECIDE: the line names our
+#: artifact and contains no member of the marker tuple, so on its own it returned False and
+#: only worked when an unrelated line happened to supply a marker (measured). A named
+#: absence phrase IS pip's absence vocabulary, so the two halved predicates are one here.
+#:
+#: pip's "this distribution does not exist on the index" vocabulary — the half that NAMES
+#: what it could not resolve, which is the half that can decide whose absence this is. The other
 #: markers are corroboration only: `from versions: none` is printed on the same line and
 #: names nothing, so it cannot say WHOSE absence this is. ⛔ THAT DISTINCTION IS THE
 #: DIFFERENCE BETWEEN A VERDICT AND A RELEASE CALL — `pip install tortoise-graph` fails
@@ -132,18 +129,35 @@ _INSTALL_ABSENCE_MARKERS = (
 #: the probe then answers `ok` (the project IS served), which the caller routes to FAIL.
 #: Without this, a yanked third-party dependency tells a human to cut an irreversible
 #: PyPI release that cannot possibly fix it (#12422 round-21 review P2).
+#:
+#: ⛔ THE THIRD ALTERNATIVE IS `Failed to build '<name>' when installing build
+#: dependencies` (#12422 round-21 review, P2, MEASURED). That line names OUR artifact and
+#: nothing else, and it is what pip prints for an sdist whose own `build-system.requires`
+#: cannot resolve — a defect in the artifact's metadata that only a release fixes. The
+#: first cut of this predicate missed it, so the correct FAIL was reported as a detector
+#: outage: measured on real pip output from a local sdist, `old=True new=False`.
 _ABSENCE_NAMED = re.compile(
     r"(?:no matching distribution found for|could not find a version that satisfies the requirement)"
-    r"\s+(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)",
+    r"\s+(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)"
+    r"|failed to build\s+['\"]?(?P<built>[A-Za-z0-9][A-Za-z0-9._-]*)",
     re.IGNORECASE,
 )
+#: ⛔ CORROBORATION ONLY, and no longer a GATE in front of the naming comparison: the
+#: `Failed to build '<pkg>' …` line names the artifact and contains none of these, so a
+#: marker gate made the naming predicate co-occur instead of decide (#12422 round-21, P2).
 
 
 def _canonical_dist_name(name: str) -> str:
     """PEP 503 normalisation, so `Tortoise_Graph`, `tortoise-graph` and `tortoise.graph`
     are one name. pip echoes the requirement as the caller wrote it, which is not
-    guaranteed to be the spelling the console script or the index uses."""
-    return re.sub(r"[-_.]+", "-", name.strip().lower())
+    guaranteed to be the spelling the console script or the index uses.
+
+    ⛔ The trailing `.strip("-")` is load-bearing, not tidiness: the pattern above stops at
+    the name, but the `Failed to build '…'` form can leave punctuation attached, and the
+    normaliser would turn `tortoise-graph.` into `tortoise-graph-` — a name no package
+    has — losing the match it was just widened to catch (measured, #12422 round-21).
+    """
+    return re.sub(r"[-_.]+", "-", name.strip().lower()).strip("-")
 
 
 def _install_failure_is_absence(
@@ -176,17 +190,39 @@ def _install_failure_is_absence(
     as `tortoise-graph`'s absence: the probe — which reports on `tortoise-graph` alone —
     answered `ok`, and `ok` is the FAIL that orders an irreversible release. Wheel mode
     already refused to attribute a dependency's failure to the artifact; index mode now
-    does the same. Anything that does not POSITIVELY name this package is not evidence
+    does the same. A failure that does not POSITIVELY name this package is not evidence
     about this package, so it returns False and the caller takes the UNKNOWN path.
+
+    ⚠️ STATED RESIDUAL, because it is a real blind spot and pretending otherwise is how
+    the next lane mistakes it for a bug: a release whose OWN declared dependency is
+    unsatisfiable (`Requires-Dist: falkordblite>=999`) produces output byte-identical to a
+    third-party yank — pip names the dependency, never us — so it reads as UNKNOWN
+    ("detector outage", exit 2) instead of FAIL. That is fail-closed (it never orders an
+    upload that cannot help), and attributing it needs the release's own `requires_dist`
+    threaded into this arm, which is NOT done here. The narrower claim this function now
+    makes is exactly: a failure that names no package, or names a different one, is not
+    evidence about this one.
     """
     text = (stderr or "").lower()
     if wheel is not None:
         return Path(wheel).name.lower() in text
-    if package is None or not any(marker in text for marker in _INSTALL_ABSENCE_MARKERS):
+    if package is None:
         return False
     wanted = _canonical_dist_name(package)
+    # ⛔ A NAMED ABSENCE PHRASE IS ITSELF THE MARKER — do not gate this on
+    # a marker tuple first (#12422 round-21 review, P2, MEASURED). The
+    # `Failed to build '<pkg>' …` form names the artifact and carries NO member of that
+    # tuple, so with the gate in front it returned False on its own and only worked when
+    # an unrelated line happened to supply a marker. That made the new alternative
+    # co-occur rather than decide, contradicting the sentence above it.
+    #
+    # Two alternatives, both of which NAME something: the requirement pip could not
+    # resolve, and the artifact whose build dependencies it could not resolve. Either may
+    # be absent from a given message, so read whichever matched and compare THAT. A
+    # message with markers but no name (`from versions: none`) matches nothing and is
+    # therefore still not evidence — the corroboration-only rule is preserved.
     return any(
-        _canonical_dist_name(match.group("name")) == wanted
+        _canonical_dist_name(match.group("name") or match.group("built")) == wanted
         for match in _ABSENCE_NAMED.finditer(text)
     )
 

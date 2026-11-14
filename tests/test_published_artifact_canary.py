@@ -142,9 +142,9 @@ def test_absent_client_distribution_is_red_not_absent_ok():
     # that substring too, so restoring the 404-versus-timeout conflation on this branch
     # left the assertion green. Pin the branch's OWN sentence, which only the finding
     # spells.
-    assert "is not resolvable on the index" in report.get("client-published").detail, (
-        report.get("client-published").detail
-    )
+    assert "is not resolvable on the index" in report.get("client-published").detail, report.get(
+        "client-published"
+    ).detail
     assert "could not read the" not in report.get("client-published").detail
     # ⛔ AND THE EVIDENCE ITSELF STILL HAS TO REACH THE HUMAN (#12422 round-24 review P2).
     # Replacing the old `assert "HTTP 404" in …` (too weak a conflation pin) silently
@@ -153,9 +153,9 @@ def test_absent_client_distribution_is_red_not_absent_ok():
     # the detail named the finding and withheld the URL that justifies it — and this is
     # the sentence a human reads before an IRREVERSIBLE upload. The URL is the evidence,
     # not the verdict word, so it is pinned by hand here rather than inferred.
-    assert "pypi.org/pypi/tortoise-client" in report.get("client-published").detail, (
-        report.get("client-published").detail
-    )
+    assert "pypi.org/pypi/tortoise-client" in report.get("client-published").detail, report.get(
+        "client-published"
+    ).detail
 
 
 def test_an_unreadable_index_is_unknown_and_exits_nonzero():
@@ -261,16 +261,16 @@ def test_a_MISSING_engine_project_is_red_and_an_UNREADABLE_index_is_unknown():
     # of the two-branch detail restored "could not read the … index metadata: HTTP 404"
     # over a FINDING and all 72 tests stayed green. That is the "nothing reds on them"
     # disease this PR documents; a hand check is not a pin.
-    assert "is not on the index" in absent.get("engine-index").detail, (
-        absent.get("engine-index").detail
-    )
+    assert "is not on the index" in absent.get("engine-index").detail, absent.get(
+        "engine-index"
+    ).detail
     assert "could not read the" not in absent.get("engine-index").detail
     # the underlying index error is the evidence for the finding, so it must survive
     # into the detail — see the sibling note in
     # `test_absent_client_distribution_is_red_not_absent_ok` (round-24 review P2).
-    assert "pypi.org/pypi/tortoise-graph" in absent.get("engine-index").detail, (
-        absent.get("engine-index").detail
-    )
+    assert "pypi.org/pypi/tortoise-graph" in absent.get("engine-index").detail, absent.get(
+        "engine-index"
+    ).detail
 
     unreadable = canary.build_report(
         engine_doc=None,
@@ -293,12 +293,12 @@ def test_a_MISSING_engine_project_is_red_and_an_UNREADABLE_index_is_unknown():
     # not absent" passed every one of the 72 tests while telling a reader the project was
     # absent on a timeout. The finding phrase is therefore pinned ABSENT here, which is
     # what makes the sentence above true.
-    assert "UNKNOWN, not absent" in unreadable.get("engine-index").detail, (
-        unreadable.get("engine-index").detail
-    )
-    assert "is not on the index" not in unreadable.get("engine-index").detail, (
-        unreadable.get("engine-index").detail
-    )
+    assert "UNKNOWN, not absent" in unreadable.get("engine-index").detail, unreadable.get(
+        "engine-index"
+    ).detail
+    assert "is not on the index" not in unreadable.get("engine-index").detail, unreadable.get(
+        "engine-index"
+    ).detail
 
 
 def test_an_unreadable_CLIENT_index_is_unknown_not_absent():
@@ -736,10 +736,17 @@ def test_an_install_failure_is_only_RED_when_the_INDEX_confirms_the_absence(tmp_
     # refused this attribution
     # (`test_the_wheel_mode_install_failure_is_never_attributed_to_the_index`); index mode
     # now does too — the failure must NAME the package under test.
+    #
+    # ⛔ THE FIXTURE IS THE MEASURED REAL OUTPUT, including pip's `(from tortoise-graph)`
+    # clause (#12422 round-21 review, P3). Without that clause a near-miss implementation
+    # — "the package name appears ANYWHERE in the failure" — passes this test and is wrong
+    # on the only input that matters, because real pip puts our name in the dependency's
+    # line. Measured: the near-miss returned True for the real bytes while this fixture
+    # stayed green.
     dependency_marks = (
         "ERROR: Could not find a version that satisfies the requirement "
-        "falkordblite==0.9 (from versions: none)\n"
-        "ERROR: No matching distribution found for falkordblite==0.9"
+        "falkordblite>=0.4 (from tortoise-graph) (from versions: none)\n"
+        "ERROR: No matching distribution found for falkordblite>=0.4"
     )
     dependency_arm = canary.install_and_run(
         package="tortoise-graph",
@@ -758,6 +765,54 @@ def test_an_install_failure_is_only_RED_when_the_INDEX_confirms_the_absence(tmp_
     # detail must still SHOW the evidence, so a human can see WHOSE absence pip reported.
     assert "could not be evaluated" in dependency_arm.detail, dependency_arm.detail
     assert "falkordblite" in dependency_arm.detail, dependency_arm.detail
+
+    # ⛔ AND THE POSITIVE DIRECTION OF THE SAME CLAUSE (#12422 round-21 review, P2): pip
+    # names OUR artifact when an sdist's own `build-system.requires` cannot resolve, and
+    # that IS a finding about the artifact — its metadata is unbuildable, which only a
+    # release fixes. The first cut of the naming predicate missed it and reported the
+    # correct FAIL as a detector outage (measured on real pip output from a local sdist).
+    build_deps_marks = (
+        "ERROR: Could not find a version that satisfies the requirement "
+        "not-a-real-build-backend>=1 (from versions: none)\n"
+        "ERROR: Failed to build 'tortoise-graph' when installing build dependencies for "
+        "tortoise-graph"
+    )
+    build_deps_arm = canary.install_and_run(
+        package="tortoise-graph",
+        version="0.2.0",
+        workdir=tmp_path,
+        timeout=10,
+        runner=_Runner({"pip": _completed(["pip", "install"], 1, "", build_deps_marks)}),
+        absent_probe=lambda package: canary.INDEX_OK,
+    )[0]
+    assert build_deps_arm.status == canary.FAIL, (
+        f"pip naming the artifact's own unbuildable metadata IS a finding about the "
+        f"artifact, so it must stay a release call (got {build_deps_arm.status}: "
+        f"{build_deps_arm.detail})"
+    )
+    # …and the SAME sentence naming a DEPENDENCY's build is still not ours.
+    dep_build_arm = canary.install_and_run(
+        package="tortoise-graph",
+        version="0.2.0",
+        workdir=tmp_path,
+        timeout=10,
+        runner=_Runner(
+            {
+                "pip": _completed(
+                    ["pip", "install"],
+                    1,
+                    "",
+                    "ERROR: Failed to build 'falkordblite' when installing build "
+                    "dependencies for falkordblite",
+                )
+            }
+        ),
+        absent_probe=lambda package: canary.INDEX_OK,
+    )[0]
+    assert dep_build_arm.status == canary.UNKNOWN, (
+        f"a DEPENDENCY's unbuildable metadata is not a finding about tortoise-graph (got "
+        f"{dep_build_arm.status}: {dep_build_arm.detail})"
+    )
     # …and the arm is NARROWED, not disabled: the attribution is PEP 503-normalised, so a
     # failure that names this package in another spelling still reaches the probe verdict.
     respelled_arm = canary.install_and_run(
@@ -922,6 +977,30 @@ def test_an_install_failure_is_only_RED_when_the_INDEX_confirms_the_absence(tmp_
         ),
     )[0]
     assert arm.status == canary.UNKNOWN, arm.detail
+
+
+def test_the_absence_name_match_NORMALISES_the_name_it_compares(tmp_path):
+    """`_install_failure_is_absence` compares PEP 503-normalised names, and that
+    normaliser is load-bearing rather than tidiness (#12422 round-21 review, P3).
+
+    Measured before this test existed: removing `.strip("-")` reddened NOTHING — the
+    suite stayed green while `_canonical_dist_name("tortoise-graph.")` became
+    `tortoise-graph-`, a name no package has, so a message whose name ends in punctuation
+    silently stopped matching. The docstring called the strip load-bearing; this is the
+    assertion that makes the word true.
+    """
+    assert canary._canonical_dist_name("Tortoise_Graph") == "tortoise-graph"
+    assert canary._canonical_dist_name("tortoise.graph") == "tortoise-graph"
+    assert canary._canonical_dist_name("tortoise-graph.") == "tortoise-graph", (
+        "a name carrying trailing punctuation normalised to a DIFFERENT name, so pip's "
+        "wording would stop matching the package under test"
+    )
+    assert canary._install_failure_is_absence(
+        "ERROR: No matching distribution found for tortoise-graph.", None, "tortoise-graph"
+    ), "the punctuation-attached spelling no longer matches its own package"
+    # …and the CORROBORATION-ONLY half stays corroboration: `from versions: none` names
+    # nobody, so on its own it is not evidence about this artifact.
+    assert not canary._install_failure_is_absence("from versions: none", None, "tortoise-graph")
 
 
 def test_the_wheel_mode_install_failure_is_never_attributed_to_the_index(tmp_path):
