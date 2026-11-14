@@ -240,9 +240,12 @@ jobs:
                 echo '  only repair that always works. Run the FULL rotation in §2.5 (repo secret, then'
                 echo '  the Pages value, then REDEPLOY Pages).'
                 echo
-                echo '⛔ Never set one half to a NEW value while the other keeps the old one — that CREATES'
-                echo 'this split. (The absence repair above is the opposite move: it puts the working half'"'"'s'
-                echo 'EXISTING value on an EMPTY half, so afterwards the two are the same.)'
+                echo '⛔ Never set ONE half and STOP. A half-applied change leaves the two halves'
+                echo 'disagreeing — that is the 2026-11-01 incident — and fixing the wrong half leaves the'
+                echo 'split exactly as it was. The ABSENCE repair above does set one half, on purpose, and'
+                echo 'is correct: it copies an EXISTING value onto an EMPTY half, so both then hold the'
+                echo 'same thing. The VALUE-FAULT repair is a rotation and passes through a disagreeing'
+                echo 'state by design — finish all THREE steps rather than stopping after the first.'
                 ;;
               *)
                 title="$unknown_title"

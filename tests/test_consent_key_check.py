@@ -724,19 +724,25 @@ def test_every_published_reason_code_is_accepted(monkeypatch, capsys) -> None:
     # `REASON_CODES` minus the absence literal, so a seventh code the halves start publishing lands in
     # the ROTATION arm — the repair that always works — with nobody editing this split. That is the
     # fail-closed direction, and it is why the derivation sits on this side.
-    # ⚠️ DECLARED RESIDUAL, and the reason for the count pin below: a seventh code that is an ABSENCE
-    # fault would be given the rotation, which it does not need. Nothing here can infer "absence" from
-    # a string, so the count pin is the guard — the two set-algebra assertions are true by construction
-    # (VALUE is *defined* as REASON minus ABSENCE, so a new code joins it automatically) and can
-    # therefore never catch an omission. MEASURED, not assumed: adding a seventh code to
-    # `REASON_CODES` without touching either set leaves every line but the count pin green.
+    # ⚠️ DECLARED RESIDUAL: a seventh code that is an ABSENCE fault would be given the rotation, which
+    # it does not need. Nothing here can infer "absence" from a string, and a code the halves start
+    # publishing cannot be seen as an omission at all — it simply joins `VALUE_FAULT_REASONS`.
+    # The guard is the EXACT-SET equality below: `ABSENCE_REASONS` is pinned to the two literals, so any
+    # later edit to it must be deliberate. It cannot detect an omission and does not claim to.
+    # ⛔ The two set-algebra lines above are true by construction — `VALUE` is *defined* as
+    # `REASON` minus `ABSENCE`, so a new code joins it automatically — and catch nothing.
+    # ⛔ An earlier cut of this block added `assert len(CKC.ABSENCE_REASONS) == 2` and called it the
+    # guard. It was unreachable: the exact-set line beneath it already requires that set to be the
+    # two literals, so the length arm could never be the one that fails (measured: a third absence code
+    # reds the exact-set line, never the length). A dead assertion advertised as the guard is the class
+    # this PR removes, not ships.
     assert CKC.ABSENCE_REASONS | CKC.VALUE_FAULT_REASONS == CKC.REASON_CODES
     assert not (CKC.ABSENCE_REASONS & CKC.VALUE_FAULT_REASONS)
-    assert {"not_set", "unreadable"} == CKC.ABSENCE_REASONS
-    assert len(CKC.ABSENCE_REASONS) == 2, (
-        "a third ABSENCE code was added — classify it here deliberately. An absence fault is repaired "
-        "by copying the working half's value; every unlisted code is given the ROTATION instead, so an "
-        "unclassified absence code sends an operator to rotate a key that a copy would have fixed"
+    assert {"not_set", "unreadable"} == CKC.ABSENCE_REASONS, (
+        "the absence set moved — classify every new code here deliberately. An absence fault is "
+        "repaired by copying the working half's value onto the empty one; every OTHER code is given "
+        "the rotation, so an absence code left out of this literal sends an operator to rotate a key "
+        "that a copy would have fixed"
     )
 
 
@@ -813,7 +819,7 @@ def test_the_workflow_prose_branches_the_SPLIT_remedy_the_same_way() -> None:
         assert len(starts) == 1, f"expected exactly one `{marker}` bullet, found {len(starts)}"
         out: list[str] = []
         for line in lines[starts[0] :]:
-            if out and ("echo '- **" in line or "Never set one half to a NEW value" in line):
+            if out and ("echo '- **" in line or "Never set ONE half and STOP" in line):
                 break
             out.append(line)
         return "\n".join(out)
@@ -843,17 +849,26 @@ def test_the_workflow_prose_branches_the_SPLIT_remedy_the_same_way() -> None:
         assert code in fault, f"the value-fault arm no longer names `{code}`"
 
     body = "\n".join(s.get("run") or "" for s in _steps())
-    assert "Never set one half to a NEW value" in body, (
+    assert "Never set ONE half and STOP" in body, (
         "the SPLIT alert lost its one-sided-rotation prohibition"
     )
-    # ⛔ AND IT MUST NOT FORBID THE REPAIR IT PRESCRIBES. The first cut said "Never set only ONE half,
-    # from either state", six lines under a bullet telling the operator to set the working half's
-    # value on the empty one — a remedy and an absolute prohibition of that remedy, in the same public
-    # issue. The prohibition that is TRUE is about setting one half to a NEW value; copying an
-    # EXISTING value onto an empty half is the opposite move and must stay permitted.
+    # ⛔ AND IT MUST NOT FORBID THE REPAIR IT PRESCRIBES. Two earlier cuts failed this one way each.
+    # The first said "Never set only ONE half, from either state" — six lines under a bullet telling
+    # the operator to set the working half's value on the empty one, i.e. a remedy and an absolute
+    # prohibition of that remedy in the same public issue. The second narrowed it to "set one half to
+    # a NEW value … that CREATES this split", which still forbade step 1 of the FULL rotation the
+    # value-fault bullet prescribes three lines above, and mis-described the state it produces (a
+    # half-rotation yields MISMATCH, not this SPLIT). What is TRUE, and what is pinned now: setting
+    # one half and STOPPING is the harm; both prescribed repairs pass through one-half changes and
+    # each says so in its own bullet.
     assert "Never set only ONE half" not in body, (
         "the SPLIT alert forbids setting one half outright — which is exactly what its own absence "
-        "bullet prescribes for a `not_set`/`unreadable` half; scope the prohibition to a NEW value"
+        "bullet prescribes for a `not_set`/`unreadable` half"
+    )
+    assert "that CREATES this split" not in body, (
+        "the SPLIT alert says a one-sided change CREATES this split — but the value-fault bullet "
+        "prescribes a rotation whose step 1 is a one-sided change, and a half-rotation produces a "
+        "MISMATCH, not a SPLIT"
     )
     # ⛔ The opening sentence must not contradict the value-fault bullet three lines below it: the
     # first cut said "rotating a key would not fix it" UNCONDITIONALLY, and the same body then

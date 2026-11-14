@@ -177,10 +177,11 @@ REASON_CODES = frozenset(
 #: anyone having to edit this split. That is the whole reason the derivation is on this side rather
 #: than on the absence side.
 #: ⚠️ DECLARED RESIDUAL: a seventh code that is an ABSENCE fault would therefore be handed the
-#: rotation, which it does not need. Nothing here can infer "absence" from a string, so the guard is
-#: the suite's count pin on `ABSENCE_REASONS` — adding an absence code means editing the literal, and
-#: that reds until the addition is deliberate. (The set-algebra assertions beside it are true by
-#: construction and cannot catch an omission; the count pin is what can.)
+#: rotation, which it does not need. Nothing here can infer "absence" from a string, and a code the
+#: halves start publishing simply joins `VALUE_FAULT_REASONS` — it does not read as an omission. The
+#: guard is therefore the suite's EXACT-SET pin on `ABSENCE_REASONS`: any edit to that literal must be
+#: deliberate, and the suite reds on one that is not. (An earlier cut of this comment said the count
+#: pin was the guard; that pin was unreachable behind the exact-set line, so it guarded nothing.)
 ABSENCE_REASONS = frozenset({"not_set", "unreadable"})
 VALUE_FAULT_REASONS = REASON_CODES - ABSENCE_REASONS
 
