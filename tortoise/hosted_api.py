@@ -2996,11 +2996,13 @@ async def _lifespan(app):
     # `failed` / `probe-never-produced-a-result` over a healthy boot (measured
     # with the epoch aged to -400 s: `uptime_s: 400.0`) — the microsecond-width
     # version of the very 503 this change exists to remove. Epoch-first makes that
-    # window read a fresh epoch over the PREVIOUS state, so the answer is the one
-    # that state already had: `healthy` if the previous result was fresh AND ok,
-    # `failed` if it was stale, not-ok or in flight past the window, `unknown` if
-    # the previous coordinator had no result. It cannot mask a real failure: the
-    # `age`, not-ok and `in_flight_s` arms never read the epoch.
+    # window compute its answer over the PREVIOUS state with a fresh epoch, so it
+    # reports what that state supports: `healthy` if the previous result was fresh
+    # AND ok, `failed` if it was stale, not-ok or in flight past the window,
+    # `unknown` if the previous coordinator had no result (the #12630 shape, where
+    # epoch-first becomes `unknown` instead of `failed` — which IS the point). It
+    # cannot mask a real failure: the `age`, not-ok and `in_flight_s` arms never
+    # read the epoch.
     global _HEALTH_PROBE_EPOCH_MONOTONIC
     _HEALTH_PROBE_EPOCH_MONOTONIC = time.monotonic()
     _HEALTH_PROBE.reset()

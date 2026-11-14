@@ -1195,11 +1195,11 @@ class TestLivenessDecouple:
         when the request beat the refresher's first probe the verdict rode the
         epoch arm, but when the probe landed `ok: true` first the verdict was
         `healthy` and the test passed **with or without** the re-base — a green
-        for the wrong reason. A blocked probe means no result can exist INSIDE
-        THIS TEST'S WINDOW, so the assertion sees `unknown` / `no-probe-result-yet`
-        and the epoch bound is the term that answers. The `in_flight_s` arm would
-        answer `failed` first at ~30 s — long after this test is done, which is
-        why the blocked probe cannot turn it into a flake.
+        for the wrong reason. The blocked probe returns only when the test
+        releases it, so inside the sub-second assertion window the verdict can
+        only be `unknown` / `no-probe-result-yet`, and the epoch bound is the term
+        that answers. Nothing here depends on the 30 s stale window, which is what
+        would otherwise hand the verdict a completed result.
         """
         import json
         import urllib.error
@@ -1227,7 +1227,13 @@ class TestLivenessDecouple:
         release = threading.Event()
 
         def _blocked_probe() -> dict:
-            release.wait(30)  # never produces a result inside this test
+            # Returns only when THIS TEST releases it, so no result can exist while
+            # the assertions run. Without this the request can beat the refresher's
+            # first probe by ~40 ms and the test would pass with or without the
+            # re-base — the vacuity this pin exists to remove. (`HealthProbe.run()`
+            # is hard-bounded, so nothing waits on this thread; it is a daemon and
+            # the `finally` below releases it.)
+            release.wait(300)
             return {"ok": True, "observed": True, "latency_ms": 0.0,
                     "error": None}
 
