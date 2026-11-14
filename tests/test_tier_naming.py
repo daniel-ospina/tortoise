@@ -279,30 +279,31 @@ class TestEverySurfaceAgreesWithTheDeclaration:
 #:         clause-break miss as the bullet above, plus the no-break scope spelling
 #:         `… no Builder plan on the roadmap` — listed because this list is claimed to
 #:         be MEASURED rather than complete (cycle-19 P2, re-measured cycle 20);
-#:       * a LEADING parenthetical whose inner text is ITSELF A CLAUSE — the residual of
-#:         :data:`_REPORTED_ASIDE`'s content check (cycle-20 rounds 6–8, measured). A
-#:         leading `--…--` / `—…—` pair is stripped only when its inner text neither OPENS
-#:         with `and|but|so|yet` nor carries `;`/`:`/`--`/`—`/`–`
-#:         (:data:`_REPORTED_ASIDE_CLAUSE`) — which closes
-#:         `… said -- and the page still carries it -- there is no Builder plan.` (its
-#:         inner opens with `and`). ⛔ IT IS NOT CLOSED FOR AN INNER THAT IS A CLAUSE
-#:         WITHOUT ONE OF THOSE MARKS, and a round-6/7 revision of this bullet said the
-#:         predicate was the WIDER `_REPORTED_CLAUSE_END`, which would have claimed the
-#:         whole region. Measured shapes that are EXEMPT here while `origin/main` and the
-#:         round-6 head both FLAG them:
-#:         `Until #12444 the doc said — the page was never fixed — there is no Builder
-#:         plan.` (no mark at all), and — after round 7 narrowed the predicate —
-#:         `… said -- the page still carries it, and we never fixed it -- there is no
-#:         Builder plan.`, `… said -- because nobody fixed it -- …`,
-#:         `… said -- which nobody fixed -- …`, `… said -- although nobody fixed it -- …`,
-#:         `… said -- wrong, so we keep it -- …`. 16 of 24 probes of that family diverge
-#:         from `origin/main` this way. NO PUNCTUATION-ONLY PREDICATE SEPARATES THEM from
-#:         the six records round 7 restored — `… said -- until #12444, which corrected it
-#:         -- that …` carries `,` AND `which` too — so this is a documented residual rather
-#:         than a re-widening, and requiring a `_RETRACTION_CUES` word inside would
-#:         re-BLOCK the cue-free asides `… said -- flatly -- that …` (the round-5 false
-#:         block, measured). The trade is taken toward the false block, per the doctrine at
-#:         the top of this list;
+#:       * a LEADING parenthetical whose inner text is ITSELF A CLAUSE — **CLOSED in
+#:         cycle-20 round 9**, and the paragraph it lived in is kept because the refuted
+#:         trade is what the rule replaces. Rounds 6 and 7 stripped a leading pair on a
+#:         CONTENT test and round 8 documented the surviving shapes as an accepted
+#:         residual on the premise that no punctuation-only predicate separates an aside
+#:         from a clause. That premise is FALSIFIED by a rule that reads no content at
+#:         all: a pair may be stripped only when the reported claim RESUMES after it with
+#:         a `that` complement, which every canonical record does and no trailing
+#:         assertion does. The shapes rounds 6–8 got wrong are pinned live below:
+#:         `… said -- and the page still carries it -- there is no Builder plan.` (a
+#:         content test re-flagged it), `Until #12444 the doc said — the page was never
+#:         fixed — there is no Builder plan.` (EXEMPT here, FLAGGED at `origin/main`),
+#:         and `… said -- flatly -- that …` (the cue-free aside the content test had to
+#:         keep). Deleting the resume test reds them, and the 19-shape probe plus the
+#:         whole `docs/` corpus (819 files, 290,485 sentences) move **0** verdicts away
+#:         from `origin/main`;
+#:       * a BARE reported denial behind the adverbial (`Until #12444 the doc said yet
+#:         again there is no Builder plan.`) — **OPEN, inherited from round 3 and
+#:         re-measured in round 9**: EXEMPT here, FLAGGED at `origin/main` and by the
+#:         pre-round-2 head. The adverbial is stripped before the reported clause is cut,
+#:         so the remainder reads as a plain record (`… said there is no Builder plan.`),
+#:         which the record rule exempts. It is listed rather than fixed because closing
+#:         it means deciding whether `yet`/`yet again` beside a speech verb is a clause
+#:         break or an adverb — a vocabulary question this rule deliberately refuses to
+#:         answer, and the round-4/5 history above is what a vocabulary test cost;
 #:       * an ANAPHORIC re-assertion after a quoted record (`Previously the doc read
 #:         "there is no Builder plan"; there is no such plan anymore.` / `…; that plan
 #:         does not exist.`): :func:`_asserts_a_denial_outside_the_quotes` asks whether
@@ -341,7 +342,7 @@ class TestEverySurfaceAgreesWithTheDeclaration:
 #:         by `,` — `_REPORTED_CLAIM.search` returns None, so no clause is ever cut (the
 #:         split is only a SECOND blocker, shown by patching the verb tail alone). So the
 #:         round-3 conclusion that it is NOT fixable did not follow either: a cue-gated
-#:         PAIRED comma pre-strip — the same device as :data:`_REPORTED_ASIDE`, applied to
+#:         PAIRED comma pre-strip — the same device as :func:`_leading_aside`, applied to
 #:         the whole fragment before the verb scan — was measured to exempt this record
 #:         while leaving `… wrong, there is no Builder plan.` FLAGGED, with 0 pins
 #:         reddened and 0 `docs/` offenders. It is NOT taken here because it moves the
@@ -996,7 +997,8 @@ _REPORTED_CLAIM = re.compile(
 #: `Previously the doc said -- until #12444 corrected it -- that there is no Builder
 #: plan.` and `… said yet again that there is no Builder plan; #12444 corrected it.` are
 #: CORRECT records that `origin/main` exempts and the round-2 terms BLOCKED.
-#: :data:`_REPORTED_ASIDE` strips a matched pair / the adverbial before the split, so both
+#: :func:`_leading_aside` / :data:`_YET_AGAIN` strip a matched pair / the adverbial,
+#: in :func:`_reports_a_denial`, before the split, so both
 #: are exempt again without giving back the assertions those terms were added for.
 #:
 #: ⛔ …BUT THE STRIP MUST BE CUE-GATED, OR IT SWALLOWS THE ASSERTION (cycle-20 round 4,
@@ -1024,55 +1026,108 @@ _REPORTED_CLAUSE_END = re.compile(
     r"while|although|though|yet|since|because)\b",
     re.I)
 
-#: ⛔ …AND A LEADING PAIR IS NOT ENOUGH EITHER: THE STRIP MUST ALSO BE CONTENT-AWARE
-#: (cycle-20 round 6, measured). Position alone re-opened round 4's false pass one token
-#: to the left — a leading pair whose content IS a second, live clause was swallowed, so
-#: `Until #12444 the doc said -- and the page still carries it -- there is no Builder
-#: plan.` read EXEMPT while `origin/main` and the pre-fix head both FLAG it, and the same
-#: clause in the pair-AFTER position is a pinned live denial. So a leading pair is stripped
-#: only when its INNER content is not itself a clause (see
-#: :func:`_leading_aside_is_parenthetical`): `… said -- until #12444 corrected it -- that …`
-#: qualifies, `… said -- and the page still carries it -- …` does not.
-#: ⛔ THE `--` ARM IS TEMPERED, not `[^-]*` (round 6, measured): `[^-]*` cannot span a
-#: hyphen, so a correct record whose aside contains a hyphenated word —
-#: `… said -- well-known to be wrong -- that there is no Builder plan; #12444 corrected
-#: it.` — was BLOCKED here while its `—` twin and `origin/main` exempt both.
-#: ⛔ AND THE INNER TEST IS IN CODE, NOT A REGEX LOOKAHEAD (round 6, measured): a
-#: lookahead of the form `--(?![^-]*(?:<breaks>))…--` can never succeed, because `[^-]*`
-#: stops exactly at the CLOSING `--` and `<breaks>` contains `--`, so every pair looks
-#: like a clause. :func:`_leading_aside_is_parenthetical` tests the extracted inner text.
-_REPORTED_ASIDE = re.compile(
-    r"^(?:\s*(?:--(?:(?!--).)+--|\u2014[^\u2014]*\u2014|yet\s+again))+\s*", re.I)
+#: ⛔ A LEADING PAIR IS STRIPPED ONLY WHEN THE REPORTED CLAIM RESUMES AFTER IT
+#: (cycle-20 round 9, measured — the rule that replaced the content test).
+#:
+#: Position alone was not enough (round 6): a leading pair whose content IS a second, live
+#: clause was swallowed, so `Until #12444 the doc said -- and the page still carries it --
+#: there is no Builder plan.` read EXEMPT while `origin/main` FLAGS it. Round 6 answered
+#: with a CONTENT test — strip only when the inner text is not a clause — and round 7
+#: narrowed that test to keep `-- until #12444, which corrected it --` and five more
+#: canonical records exempt. **Both rounds then left the class open**, because content
+#: cannot decide it: `-- until #12444 corrected it --` and `-- the page was never fixed --`
+#: are both subject+verb. Round 7 declared the residue acceptable ("a leading parenthetical
+#: whose inner text is a clause but carries NO break marker is EXEMPT here and FLAGGED at
+#: `origin/main`"), and that is the trade this rule removes.
+#:
+#: What SEPARATES a genuine aside from a clause that ends the reported material is what
+#: RESUMES after the closing mark — not what sits inside it. A genuine aside hands the
+#: reported claim back with a `that` complement (`said -- <aside> -- that <claim>`); a pair
+#: that ends the reported clause is followed by a new assertion (`… -- there is no Builder
+#: plan`). Measured (round 9) on 19 probe sentences and on the whole `docs/` corpus
+#: (819 files, 290,485 sentences): the structural rule classifies all 19 correctly —
+#: including the eight the content test got wrong — and changes **0** document verdicts
+#: relative to the round-7 head and **0** relative to `origin/main`.
+#:
+#: ⛔ AND A BARE DASH MARKER IS NOT A CLAUSE BREAK (round 9, measured): the pair is what
+#: carries a reported claim across a break, so a marker with NO closer — `Previously the
+#: doc said -- there is no Builder plan (#12444).` — is an INTRODUCER before the reported
+#: clause, not a clause that ended. Splitting at offset 0 left `reported` empty and BLOCKED
+#: all three dash forms and their cited twins while `origin/main` exempts every one.
+#:
+#: ⛔ THE HYPHEN AND THE PAIR SIDES ARE ONE SCAN, NOT THREE ALTERNATIONS (round 9): the
+#: round-3/6 alternations matched only `--…--` and `—…—`, so an en-dash pair and a MIXED
+#: pair (`— … --`) were BLOCKED here while `origin/main` exempts them. (`-- pre-2024
+#: wording --` was already exempt: `(?:(?!--).)+` forbids only a doubled hyphen, and the
+#: round-6 note that says otherwise is about the `[^-]*` form it replaced.) The closer is
+#: the FIRST dash marker after the opener, whichever of `--` / `—` / `–` it is; a single
+#: hyphen is not a marker, so `pre-2024` cannot close a pair.
+_YET_AGAIN = re.compile(r"^\s*yet\s+again\s*", re.I)
+_RESUMES_WITH_THAT = re.compile(r"^[\s,]*(?:yet\s+again\s+)?that\b", re.I)
+#: ⛔ THE INNER SET IS NARROW **AND** THE PAIR'S INNER CAN NEVER HOLD A DASH (round-9
+#: review, measured): the closer is the FIRST marker of any side, so the extracted inner text
+#: contains none of `--` / `—` / `–` — a dash member here would be unreachable surface, which
+#: this file's own cycle-14 rule removes (dropping it left the suite green). The live members
+#: are `;`/`:` and an opening coordinator, which is the set round 6 measured; that round's own
+#: `_REPORTED_CLAUSE_END`-shaped dash members were reachable only because it scanned per
+#: marker, and round 7 measured that the WIDE set blocks `-- until #12444, which corrected it --`.
+_ASIDE_INNER_BREAK = re.compile(r"^\s*(?:and|but|so|yet)\b|[;:]", re.I)
+_DASH_MARKERS = ("--", "\u2014", "\u2013")
 
 
-#: ⛔ WHAT MAKES A LEADING ASIDE'S INNER TEXT A CLAUSE IS A NARROWER TEST THAN
-#: `_REPORTED_CLAUSE_END` (cycle-20 round 7, measured). That set is tuned for the OUTER
-#: clause end: it carries `,` and the SUBORDINATORS, which inside an aside are ordinary
-#: prose. Reusing it here BLOCKED six correct records that `origin/main` exempts —
-#: `… said -- until #12444, which corrected it -- that …`,
-#: `… said -- while the page was stale -- that …`, `… said -- although #12444 fixed it --
-#: that …`, `… said -- flatly, as noted -- that …` (13 of 28 aside shapes swept). An inner
-#: reads as an INDEPENDENT ASSERTION when it OPENS with a coordinating conjunction or
-#: carries a hard clause break of its own — nothing else.
-_REPORTED_ASIDE_CLAUSE = re.compile(r"^\s*(?:and|but|so|yet)\b|[;:\u2014\u2013]|--", re.I)
+def _leading_aside(rest: str) -> tuple[str, int]:
+    """Classify what sits immediately after a speech verb: `(kind, offset)`.
 
+    ``rest`` must already be free of leading whitespace (the caller strips it once, which is
+    also why no offset padding is needed here — a padded offset in the ``intro`` branch was
+    unpinned surface that could return 0 and stop ``rest`` shrinking).
 
-def _leading_aside_is_parenthetical(aside: str) -> bool:
-    """Is a LEADING aside's inner text parenthetical rather than a clause of its own?
+    ``kind`` is one of
 
-    A leading `--…--` / `—…—` pair is stripped before the reported clause is cut, so a
-    pair can only be stripped if what it CONTAINS is not itself an assertion — otherwise
-    the denial behind it is glued into the reported clause and escapes. Measured (cycle-20
-    round 6): `-- until #12444 corrected it --` is an aside; `-- and the page still
-    carries it --` is a second clause, and stripping it EXEMPTED a sentence `origin/main`
-    FLAGS.
+    * ``pair`` — a LEADING dash pair that sits inside the reported material and may be
+      removed: a ``that`` complement resumes after it AND its inner text is not a clause
+      of its own; ``offset`` is just past the closer.
+    * ``rejected`` — a leading dash pair that is either NOT resumed by ``that`` or whose
+      inner text IS a clause: its closing marker ends the reported material, so the pair
+      must stay. Removing it would glue a second assertion onto the verb and exempt a
+      live denial.
+    * ``intro`` — one dash marker with no closer: an introducer before the reported
+      clause; ``offset`` is just past it.
+    * ``none`` — neither.
 
-    ⛔ The test is :data:`_REPORTED_ASIDE_CLAUSE`, NOT `_REPORTED_CLAUSE_END` (round 7,
-    measured): the wider set blocked six correct records `origin/main` exempts, because a
-    comma or a subordinator inside an aside is ordinary prose rather than a clause break.
+    The two tests answer two different questions and BOTH are needed (round-9 review,
+    measured): the RESUME test asks whether the reported claim continues after the pair,
+    the INNER test asks whether the pair is a clause rather than a parenthetical. Adding
+    `that` to round 6's attack satisfies the first and not the second.
     """
-    inners = re.findall(r"--(.+?)--", aside) + re.findall(r"\u2014(.+?)\u2014", aside)
-    return not any(_REPORTED_ASIDE_CLAUSE.search(inner) for inner in inners)
+    body = rest
+    opener = next((m for m in _DASH_MARKERS if body.startswith(m)), None)
+    if opener is None:
+        return "none", 0
+    closer = None
+    for marker in _DASH_MARKERS:
+        found = body.find(marker, len(opener))
+        if found != -1 and (closer is None or found < closer[0]):
+            closer = (found, marker)
+    if closer is None:
+        return "intro", len(opener)
+    close_at, close = closer
+    inner = body[len(opener):close_at]
+    if _ASIDE_INNER_BREAK.search(inner):
+        return "rejected", 0
+    tail = body[close_at + len(close):]
+    if _RESUMES_WITH_THAT.match(tail):
+        return "pair", close_at + len(close)
+    # ⛔ A SECOND PAIR MAY BE THE ONE THAT RESUMES (round-9 review cycle 2, P3, measured):
+    # `… said -- flatly -- -- as noted -- that …` was BLOCKED here while the round-7 head
+    # and `origin/main` exempt it, because a resume failure returned the same `rejected`
+    # kind as "the inner is a clause" and the caller only ever consumed one pair. The
+    # recursive call is on a strictly shorter string, so this terminates.
+    nxt = tail.lstrip()
+    yet = _YET_AGAIN.match(nxt)
+    if _leading_aside(nxt[yet.end():] if yet is not None else nxt)[0] == "pair":
+        return "pair", close_at + len(close)
+    return "rejected", 0
 
 #: ⛔ `_REPORTED_CLAUSE_BREAK` LIVED HERE AND IS GONE (round-2 review, measured). It
 #: was added for a real finding — a reported denial whose match STARTED inside a
@@ -1124,16 +1179,33 @@ def _reports_a_denial(sentence: str) -> bool:
         # depends on it — an unpinned term with no corpus behind it, which is this file's
         # own cycle-14 rule for removing surface rather than carrying it.
         # ⛔ AN ASIDE IS NOT A CLAUSE BREAK (cycle-20 round 3, measured — see
-        # `_REPORTED_ASIDE`): a LEADING `--…--` / `—…—` pair, or the adverbial `yet again`,
-        # sits INSIDE the reported material, so it is removed before the clause is cut.
-        # Without this the split keeps only the prefix and `reported` is empty, which
+        # :func:`_leading_aside`): a LEADING `--…--` / `—…—` pair, or the adverbial `yet
+        # again`, sits INSIDE the reported material, so it is removed before the clause is
+        # cut. Without this the split keeps only the prefix and `reported` is empty, which
         # BLOCKED two correct records while `origin/main` exempts both.
-        # …and the pair is stripped only when its inner text is not a clause of its own
-        # (cycle-20 round 6, measured — see `_leading_aside_is_parenthetical`).
+        # …and round 9 replaced the content test with a RESUME test: the pair is stripped
+        # only when a `that` complement follows it, and a bare marker with no closer is an
+        # INTRODUCER, not a break (both measured — see the block above the constant).
         rest = plain[verb.end():]
-        lead = _REPORTED_ASIDE.match(rest)
-        if lead is not None and _leading_aside_is_parenthetical(lead.group(0)):
-            rest = rest[lead.end():]
+        # ⛔ CONSUME IN A LOOP, NOT AN `if/else` (round-9 review, P2, measured): a record
+        # may carry the adverbial AND a pair, in either order — `… said yet again -- until
+        # #12444 corrected it -- that …` and `… said -- until #12444 corrected it -- yet
+        # again that …` were both BLOCKED here while the round-7 head and `origin/main`
+        # exempt them, because round 7's `(?:--…--|yet\s+again)+` repeated and the single
+        # `if` does not. Every branch strictly shortens `rest`, so this terminates.
+        while True:
+            yet = _YET_AGAIN.match(rest)
+            if yet is not None:
+                rest = rest[yet.end():]
+                continue
+            kind, end = _leading_aside(rest)
+            if kind in ("pair", "intro"):
+                # a comma between the closer and the complement is punctuation, not a
+                # break — without this trim `_RESUMES_WITH_THAT`'s `,` tolerance would
+                # be inert and `--…--, that …` blocked (round-9 review, P3, measured)
+                rest = rest[end:].lstrip(" ,")
+                continue
+            break
         # ⛔ …AND ONLY UP TO THE FIRST CLAUSE BREAK (cycle-20, measured — see
         # `_REPORTED_CLAUSE_END`): a denial beginning after one is a second claim, so
         # `said the naming was wrong and there is no Builder plan` stays FLAGGED while
@@ -1679,7 +1751,7 @@ class TestNoDocDeniesABuilderPlanExists:
             "Previously the doc said there isn't a Builder plan; #12444 corrected it.",
             # ⛔ AN ASIDE INSIDE THE REPORTED CLAUSE IS NOT A CLAUSE BREAK (cycle-20 round
             # 3, measured): both are exempt at `origin/main` and were BLOCKED by the
-            # round-2 terms until `_REPORTED_ASIDE` stripped the matched pair / adverbial.
+            # round-2 terms until the aside strip consumed the matched pair / adverbial.
             # The lone-`--` twin stays FLAGGED and is pinned in the live-denial tuple, so
             # this pair cannot be satisfied by dropping `--` from the break set.
             'Previously the doc said -- until #12444 corrected it -- that there is no '
@@ -1716,6 +1788,51 @@ class TestNoDocDeniesABuilderPlanExists:
             'Builder plan.',
             "Previously the doc said the Builder tier does not exist; #12444 corrected it.",
             'The doc previously read "There is no Builder plan."; #12444 corrected it.',
+            # ⛔ A BARE DASH MARKER BEFORE THE REPORTED CLAUSE IS AN INTRODUCER, NOT A
+            # CLAUSE BREAK (cycle-20 round 9, measured): the PAIR is what carries a
+            # reported claim across a break, so a marker with no closer is ordinary
+            # punctuation for the claim that follows. Splitting at offset 0 left
+            # `reported` empty and BLOCKED all three dash forms, while `origin/main`
+            # exempts every one of them.
+            'Previously the doc said -- there is no Builder plan (#12444).',
+            'Previously the doc said — there is no Builder plan (#12444).',
+            'Previously the doc said – there is no Builder plan (#12444).',
+            'Previously the doc said -- there is no Builder plan; #12444 corrected it.',
+            # ⛔ …AND A PAIR MAY BE WRITTEN IN ANY DASH, INCLUDING A MIXED ONE (round 9,
+            # measured): the round-3/6 alternations knew only `--…--` and `—…—`, so an
+            # en-dash pair and a `— … --` pair were BLOCKED here — both exempt at
+            # `origin/main`. The closer is the first marker of any side, so all four
+            # spellings are one rule.
+            'Previously the doc said – until #12444 corrected it – that there is no '
+            'Builder plan.',
+            'Previously the doc said — until #12444 corrected it -- that there is no '
+            'Builder plan.',
+            # ⛔ THE ADVERBIAL AND THE PAIR MAY BOTH BE PRESENT, IN EITHER ORDER (round-9
+            # review, P2, measured): round 7's `(?:--…--|yet\s+again)+` repeated, so both
+            # spellings were exempt there and at `origin/main`; the first cut of this rule
+            # consumed ONE of the two and BLOCKED both.
+            'Previously the doc said yet again -- until #12444 corrected it -- that there is '
+            'no Builder plan.',
+            'Previously the doc said -- until #12444 corrected it -- yet again that there is '
+            'no Builder plan.',
+            # ⛔ A COMMA BETWEEN THE CLOSER AND THE COMPLEMENT IS PUNCTUATION (round-9
+            # review, P3, measured): the resume test tolerated it but the split then stopped
+            # at the comma and left `reported` empty, so the tolerance was inert and this
+            # record was BLOCKED.
+            'Previously the doc said -- until #12444 corrected it --, that there is no '
+            'Builder plan.',
+            # ⛔ A SECOND PAIR MAY BE THE ONE THAT RESUMES (round-9 review cycle 2, P3,
+            # measured): `… said -- flatly -- -- as noted -- that …` was BLOCKED here
+            # because a resume failure returned the same kind as "the inner is a clause".
+            'Previously the doc said -- flatly -- -- as noted -- that there is no Builder '
+            'plan (#12444).',
+            # ⛔ …AND THE RESUME TEST IS CASE-INSENSITIVE AND SPACE-TOLERANT (round-9
+            # review cycle 2): both are behaviour the rule relies on and neither was pinned,
+            # so `re.I` and the caller's single `lstrip` survived deletion.
+            'Previously the doc said -- until #12444 corrected it -- THAT there is no Builder '
+            'plan.',
+            'Previously the doc said   -- until #12444 corrected it -- that there is no '
+            'Builder plan.',
             # ⛔ A MENTION OF THE FORBIDDEN SENTENCE IS NOT AN ASSERTION OF IT
             # (cycle-19 P1, measured). The exemption above reaches a quoted claim only
             # through the CLOSED `_RETRACTION_CUES` list, so a doc that PRINTS the
@@ -1958,7 +2075,7 @@ class TestNoDocDeniesABuilderPlanExists:
                 # ⛔ AN UNGATED ASIDE STRIP SWALLOWS THE ASSERTION (cycle-20 round 4,
                 # measured): each of these is one of the pinned denials above with a
                 # NON-retraction parenthetical inserted, and each was EXEMPT until
-                # `_REPORTED_ASIDE` was cue-gated. `origin/main` flags all three, so a
+                # the aside strip was cue-gated. `origin/main` flags all three, so a
                 # regression here is invisible to a main-comparison sweep.
                 "Until #12444 the doc said the naming was wrong -- and the page still "
                 "carries it -- there is no Builder plan.\n",
@@ -1981,11 +2098,14 @@ class TestNoDocDeniesABuilderPlanExists:
                 # only the content check distinguishes them.
                 "Until #12444 the doc said -- and the page still carries it -- there is "
                 "no Builder plan.\n",
-                # ⛔ EVERY MEMBER OF `_REPORTED_ASIDE_CLAUSE` IS PINNED, ONE FOR ONE
-                # (cycle-20 round 8, measured): five of its six alternatives could be
-                # deleted with the suite at `19 passed` while each turned a FLAGGED denial
-                # into an exempt one — the same gap `_REPORTED_CLAUSE_END` had at round 2,
-                # and the cycle-11 rule this file restates below.
+                # ⛔ EVERY MEMBER OF THE INNER TEST IS PINNED, ONE FOR ONE (cycle-20
+                # round 8, measured): five of its six alternatives could be deleted with
+                # the suite at `19 passed` while each turned a FLAGGED denial into an
+                # exempt one — the same gap `_REPORTED_CLAUSE_END` had at round 2, and the
+                # cycle-11 rule this file restates below. Round 9 kept every one of these
+                # rows: the inner break is :data:`_ASIDE_INNER_BREAK` and the pair sides
+                # are :data:`_DASH_MARKERS`, so the `;`/`:` rows pin the first and the
+                # en-dash / mixed rows pin the second.
                 "Until #12444 the doc said -- but nobody fixed it -- there is no Builder "
                 "plan.\n",
                 "Until #12444 the doc said -- so nobody fixed it -- there is no Builder "
@@ -2002,6 +2122,51 @@ class TestNoDocDeniesABuilderPlanExists:
                 "Builder plan.\n",
                 "Until #12444 the doc said -- the page – never fixed -- there is no "
                 "Builder plan.\n",
+                # ⛔ A LEADING PAIR WHOSE INNER TEXT IS A CLAUSE IS NOT AN ASIDE
+                # (cycle-20 round 9, measured): rounds 6/7 keyed the strip on the pair's
+                # CONTENT, which cannot separate `-- until #12444 corrected it --` from
+                # `-- the page was never fixed --` — both are subject+verb — so this shape
+                # lived in the class docstring as an accepted residual and read EXEMPT
+                # here while `origin/main` FLAGS it. The discriminator is the RESUME, not
+                # the content: a pair sits inside the reported material only when a `that`
+                # complement follows it, and this one is followed by a new assertion.
+                "Until #12444 the doc said -- the page was never fixed -- there is no "
+                "Builder plan.\n",
+                "Until #12444 the doc said — the page was never fixed — there is no "
+                "Builder plan.\n",
+                # ⛔ THE RESUME TEST ALONE RE-OPENED THIS ONE WORD LATER (round-9 review,
+                # P2, measured): appending `that` satisfied the new resume test and EXEMPTED
+                # it here, while the round-7 head AND `origin/main` both FLAG it. A pair is
+                # an aside only when the claim resumes AND the inner text is no clause.
+                "Until #12444 the doc said -- and the page still carries it -- that there "
+                "is no Builder plan.\n",
+                "Until #12444 the doc said -- the page; still broken -- that there is no "
+                "Builder plan.\n",
+                # ⛔ THE COORDINATOR-OPENED INNER IS PINNED FOR EVERY MEMBER, NOT JUST
+                # `and` (round-9 review cycle 2): `so` and `yet` are asserted by the
+                # comment and no pin used either, so narrowing the set to `and|but` left
+                # the suite green.
+                "Until #12444 the doc said the naming was wrong -- so the page is still "
+                "stale -- there is no Builder plan.\n",
+                "Until #12444 the doc said the naming was wrong -- yet the page is stale -- "
+                "there is no Builder plan.\n",
+                # ⛔ …AND EACH MEMBER IS PINNED WHERE ONLY IT CAN DECIDE (round-9 review
+                # cycle 2): a coordinator-opened inner followed by `that` satisfies the
+                # resume test, so these are stripped — and the denial behind is glued onto
+                # the verb — unless the inner test rejects `so`/`yet`. The two pins above
+                # do NOT kill that mutant; these do.
+                "Until #12444 the doc said -- so the page is still stale -- that there is "
+                "no Builder plan.\n",
+                "Until #12444 the doc said -- yet the page is stale -- that there is no "
+                "Builder plan.\n",
+                # ⛔ THE SECOND PAIR MAY BE THE INVALID ONE (round-9 review cycle 2, P3):
+                # the strip now tolerates an adjacent pair, so this pins that the
+                # recursion still refuses when the SECOND pair's inner is a clause, and
+                # that a chain with no `that` at all stays flagged.
+                "Until #12444 the doc said -- flatly -- -- page; broken -- that there is "
+                "no Builder plan.\n",
+                "Until #12444 the doc said -- flatly -- -- as noted -- there is no Builder "
+                "plan.\n",
         ):
             assert _denials_in_document(live), (
                 f"a live denial was exempted by a following fragment that is not a "
@@ -2265,14 +2430,20 @@ class TestNoDocDeniesABuilderPlanExists:
             # cycles 6/8/11/12/13). The rest of the scanner/instrument surface is banned
             # with it rather than left reachable for the next author to rediscover.
             "_quoted_span_offsets",
-            # ⛔ …and the three ingredients rounds 3/6/7 added for the reported-ASIDE strip
-            # (cycle-20 round 8, measured: injected tests pinning `_REPORTED_ASIDE`,
-            # `_REPORTED_ASIDE_CLAUSE` and `_leading_aside_is_parenthetical` each ran
-            # GREEN, so the guard was silent on them — the same defect this set was
-            # extended for in cycles 6/8/11/12/13 and again at `_REPORTED_CLAUSE_END`).
-            "_REPORTED_ASIDE",
-            "_REPORTED_ASIDE_CLAUSE",
-            "_leading_aside_is_parenthetical",
+            # ⛔ …and the ingredients the reported-ASIDE strip carries NOW (cycle-20
+            # round 8, measured, re-pointed in round 9 when the strip replaced its three
+            # content-test ingredients with one structural rule: injected tests pinning
+            # the names below each ran GREEN, so the guard was silent on them — the same
+            # defect this set was extended for in cycles 6/8/11/12/13 and again at
+            # `_REPORTED_CLAUSE_END`). `_REPORTED_ASIDE`, `_REPORTED_ASIDE_CLAUSE` and
+            # `_leading_aside_is_parenthetical` were DELETED in round 9 and are no longer
+            # banned, by the rule stated two lines below: banning a name that does not
+            # exist is not a guard.
+            "_leading_aside",
+            "_ASIDE_INNER_BREAK",
+            "_DASH_MARKERS",
+            "_YET_AGAIN",
+            "_RESUMES_WITH_THAT",
             # ⛔ `_REPORTED_CLAUSE_BREAK` and `_NEGATION_WORD` were DELETED in the
             # round-2 review and are no longer banned — banning a name that does not
             # exist is not a guard (the same rule that removed `_BUILDER_PHRASE` and
