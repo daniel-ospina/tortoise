@@ -22207,8 +22207,11 @@ def test_the_health_honesty_suite_is_selected_on_BOTH_halves_of_its_module_pair(
     order `git merge-file -p --union` over current=`d05688df5990`, base=`c1db6f3df`,
     other=`9122a08a72` (each `config/ci-surfaces.yml`) is BYTE-IDENTICAL to
     `f2ec5ec092:config/ci-surfaces.yml`
-    (`sha256 50d1b19d74a40a52d84ea6d68234913175bd0bba4e1f54608c2a1f6b72a241da`), a tree
-    carrying two `api` rows and NO `core` row, which selects this suite on a
+    (`sha256 50d1b19d74a40a52d84ea6d68234913175bd0bba4e1f54608c2a1f6b72a241da`). ⚠️ Those
+    two are HISTORICAL revisions — `9122a08a72` is #12645's pre-rebase original and
+    `f2ec5ec092` is the replay's output, and NEITHER is on `main`, so a fresh clone cannot
+    fetch them; re-measure from the command above rather than trusting the numbers. That
+    tree carries two `api` rows and NO `core` row, which selects this suite on a
     `hosted_api.py` diff and NOT on a `monitoring.py` one.
 
     That replay produced two symptoms with different causes, which is why neither a clean
