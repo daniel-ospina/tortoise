@@ -239,8 +239,11 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # mutation IS the point (DELIBERATE_URI): without a value in the parent env there
     # is nothing to strip, and the test would pass over a command that silently
     # inherits a runner's target instead of measuring a new user's default.
+    # The arm is bound to THIS site's literal value on purpose: an unanchored
+    # `setenv("TORTOISE_DB_URI"` arm would authorize any future one-line setenv in this
+    # 3.4k-line file, which the entry 13 lines above refuses to do for its own file.
     "test_published_artifact_canary.py": [
-        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*"docker://:x@localhost:6379/other"'],
     # #9567 capstone: the D11/D12 quota case forces the EMBEDDED lane (delenv
     # the URI, then pin TORTOISE_DB_PATH to a tmp_path db) so the gate's count
     # never rides a shared server graph. The delenv IS the point; the

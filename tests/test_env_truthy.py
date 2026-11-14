@@ -570,7 +570,7 @@ _KNOWN_NARROW_READS: dict[tuple[str, str], tuple[int, str]] = {
             "written for legibility would authorise unrecoverable data loss"),
     ("tortoise/config.py", "TORTOISE_ALLOW_EMBEDDED"):
         (1, "OVERRIDES (#4128): #4097's truthy-set parsing — the same hatch read by "
-            "`resolve_daemon_target` to REPORT which rung the daemon starts on; a "
+            "`daemon_db_target()` to REPORT which rung the daemon starts on; a "
             "`=true` written for legibility would make the report claim "
             "`embedded-allowed` for a daemon that `mcp_server.main()` exits 1 over, "
             "so the divergence this function exists to disclose would be inverted"),
