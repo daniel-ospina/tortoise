@@ -2631,8 +2631,8 @@ to answer.
 >
 > ⚠️ **The handling is still §10.26→§10.27's**: a new dated entry, never a re-point in place.
 
-- **What moved, and why an offset cannot describe it.** The branch's delta against `origin/main` WAS
-  **`+99 / -12` in fifteen hunks**, not one band: `+0` above `:1761`, `+28` at the `#10360`
+- **What moved, and why an offset cannot describe it.** The branch's delta against `main`
+  `4b1d6cd0d4` WAS **`+99 / -12` in fifteen hunks**, not one band: `+0` above `:1761`, `+28` at the `#10360`
   read-back (`:10508` on `main`, `:10536` on the branch), and `+54` from `_collect_classify_items`
   (`:11803` → `:11857`) through the S2.2 VET gate (`:16779` → `:16833`). ⛔ **THE DELTA FIGURES IN
   THIS BULLET ARE `c7499ac7a7`'S DELTA AGAINST `main` `4b1d6cd0d4` — kept as the record of that
