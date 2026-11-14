@@ -5429,7 +5429,7 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # which is why every ASSERTED number in this table is verified by
         # content instead.
         ("docs/00_index.md", "emitted unconditionally at", (
-            ("15701", 'result["classify_later"] = {'),
+            ("15702", 'result["classify_later"] = {'),
             ("15711", 'result["vet"] = {'),
         )),
         # ⛔ THE CLASSIFY SWITCH ITSELF (the rebase onto `a1dff7cec8` re-staled it).
@@ -5538,7 +5538,7 @@ def test_the_bare_continuation_cites_name_what_they_say():
         ("probes/capstone_measure.py", "so an acceptance test of", (
             ("14814", '"classify_later": {"enabled": classify_later,'),
             ("14818", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
-            ("15701", 'result["classify_later"] = {'),
+            ("15702", 'result["classify_later"] = {'),
             ("15707", ("exact", "}")),
             ("15711", 'result["vet"] = {'),
             ("15715", ("exact", "}")),
@@ -5621,7 +5621,7 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # nothing red-ed. Held by CONTENT on the block's opening and closing line, so a
         # re-derivation that lands mid-comment reds instead of drifting.
         ("README.md", '`result["classify_later"]` block at', (
-            ("15701", 'result["classify_later"] = {'),
+            ("15702", 'result["classify_later"] = {'),
             ("15707", ("exact", "}")),
         )),
         ("README.md", 'the `result["vet"]` block, and it is corrected to', (
@@ -5629,11 +5629,11 @@ def test_the_bare_continuation_cites_name_what_they_say():
             ("15715", ("exact", "}")),
         )),
         ("README.md", "the two result blocks)", (
-            ("15701", 'result["classify_later"] = {'),
+            ("15702", 'result["classify_later"] = {'),
             ("15711", 'result["vet"] = {'),
         )),
         ("README.md", "and now reaches the receipt through the seam", (
-            ("15701", 'result["classify_later"] = {'),
+            ("15702", 'result["classify_later"] = {'),
             ("15711", 'result["vet"] = {'),
         )),
         # ⛔ THE LITERAL THE SENTENCE QUOTES, on its OWN row because the claim
