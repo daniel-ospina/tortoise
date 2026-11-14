@@ -1006,6 +1006,12 @@ surfaces:
   # exists to catch (#5373), and undetected on `main` because `manifest-integrity` had not
   # yet run on the sha that carried it. The redundant copies are deleted, not merged: both
   # carried the same classification.
+  # one-surface registration drops this file on the other half's own diff. MEASURED, with the
+  # `core` row alone: `--changed-files tortoise/hosted_api.py` did NOT select this file, so a
+  # `hosted_api.py`-only regression of the `/health` verdict — #12477 itself — carried no
+  # guard. (Two independent fixes for this registration landed in the same merge, so this
+  # list held the row TWICE and `--integrity` reported the duplicate on `main`; one row per
+  # surface is what `integrity()` requires, and the second copy is gone.)
   - test_12477_health_honesty.py
   - test_agent_signup.py
   - test_agent_signup_idempotency.py
@@ -1550,8 +1556,10 @@ surfaces:
   # tortoise/mcp_auth.py` selects this surface and did NOT include any of the
   # three, so a transport-context regression (the flag that decides whether
   # `_get_org_sdk` is the accessor those pins stub) ran them zero times. The same
-  # measurement the `test_wait_bound_write_ack.py` row above records, and why
-  # these sit beside `test_mcp_server.py` rather than under `core` alone.
+  # measurement the `test_wait_bound_write_ack.py` row BELOW records (below, not
+  # above: this sentence was copied from the `#12477` note further down, where
+  # that sibling really is above the row it annotates), and why these sit beside
+  # `test_mcp_server.py` rather than under `core` alone.
   - test_12500_query_args_dropped.py
   - test_12455_text_filters_dropped.py
   - test_12372_entity_type_dropped.py
@@ -2438,8 +2446,10 @@ surfaces:
   # and every `test_integrity_covers_all_test_files`-shaped pin in
   # `tests/test_ci_selection.py` redded, which would have failed `test-slow`
   # BEFORE the merge could happen). Its only SELECTION effect is on a diff to the
-  # test file itself, which selects `core` (measured: `--changed-files
-  # tests/test_12372_entity_type_dropped.py` -> `surfaces=['core']`); an
+  # test file itself, which selects `core` beside the `api` row this file later
+  # gained, so that row reaches it too (re-derived after that row landed:
+  # `--changed-files tests/test_12372_entity_type_dropped.py` -> `surfaces=['api',
+  # 'core']`; it was `['core']` alone when this note was first written); an
   # `mcp_server.py` diff reaches every test file through the FULL matrix that a
   # SHARED_MODULES path forces (`--changed-files tortoise/mcp_server.py` ->
   # `full: true, test_files: ALL`), not through this row.
@@ -2469,7 +2479,8 @@ surfaces:
   # leg completed AFTER the merge ("The gate is correct — it simply reported after
   # the tree was already on `main`"); here it completed FAILURE 47 minutes BEFORE
   # it, so the leg does not GATE the merge either. Registered here so
-  # the recovery travels with the next PR that touches this file.
+  # the recovery travels with the next PR that touches this file. DUAL: the `api`
+  # row is what reaches a `hosted_api.py`-only diff (see it for the module pair).
   - test_12477_health_honesty.py
   - test_candidate_recall_11901.py
   - test_journal_segments.py

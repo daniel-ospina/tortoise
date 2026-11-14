@@ -50,10 +50,15 @@ _LOW_CONFIDENCE = 0.01
 class _StubSDK:
     """Records what each accessor was asked for; applies no floor and no order.
 
-    The two structural accessors mirror the REAL signatures — ``paginated_query``
-    and ``query`` take ``(kind, …, **filters)`` and have no ``min_confidence`` or
+    The structural accessor mirrors the REAL signature — ``paginated_query``
+    takes ``(kind, …, **filters)`` and has no ``min_confidence`` or
     ``order_by`` — so a test cannot pass by inventing a knobs path the product
-    does not have. ``query_points_by_tag`` takes the tag and nothing else.
+    does not have. ``query_points_by_tag`` takes the tag and nothing else. There
+    is deliberately no ``query`` method: BOTH structural arms read
+    ``paginated_query`` (`mcp_server.py:4572`, `:4599` — the un-paginated path
+    goes through it too, precisely to apply ``limit``), so a ``query`` stub was a
+    call the tool cannot make (measured round 34: zero calls across this file,
+    while the docstring claimed it mirrored a real signature).
     """
 
     def __init__(self, n=3):
@@ -97,10 +102,6 @@ class _StubSDK:
         total = len(self.rows)
         return {"results": self.rows[skip:skip + limit], "total": total,
                 "hasMore": skip + limit < total}
-
-    def query(self, kind=None, **kwargs):
-        self.calls.append(("query", kind, kwargs))
-        return self.rows
 
     def query_points_by_tag(self, tag, *, _record_reads=True):
         self.calls.append(("query_points_by_tag", tag, _record_reads))
@@ -1150,6 +1151,14 @@ def test_a_graph_ordering_with_no_signal_is_refused_not_silently_reordered(
 #: only this file). They are presence checks, wrap-insensitive, like
 #: `_REFUSAL_CLAIMS` — they cannot re-red a true sentence.
 _DOCSTRING_BEHAVIOUR_CLAIMS = (
+    # The LIMIT bound on the plain structural list (inverted: "**unbounded**" —
+    # measured green at round 34), and the universal ordering the refusal routes
+    # send callers TO (inverted: "is not applied to every type" — also measured
+    # green). Both were found in the same bullet as the five above, which is why
+    # the tuple is described as covering THESE SENTENCES and not the bullet: the
+    # next behaviour sentence added there is not automatically held.
+    "property-filter query, **bounded to `limit`**",
+    '`order_by="relevance"` is applied to every type',
     # which arm applies the floor at all (inverted: "for every type")
     '`min_confidence` only for `entity_type="point"`',
     # why an accepted structural value was discarded (inverted: "declares both")
