@@ -165,7 +165,13 @@ def test_the_tag_arm_refuses_arguments_it_cannot_apply(stub, argument, value) ->
     """RED before the fix: `query_points_by_tag(tag)` was called regardless.
 
     Tag mode reads every kind of tagged Point and has no confidence floor and no
-    ordering, so a caller who names one gets a wider population than asked for.
+    ordering, so a caller who names one gets a result they did not ask for — a
+    WIDER population for `kind`/`min_confidence`, a SEQUENCE the arm chose for
+    `order_by`. (This docstring used to lump all three as "wider population",
+    which is false of an ordering — an ordering re-decides the sequence, it
+    cannot widen the population. The shipped message already gets this right per
+    argument, and `test_the_message_states_the_harm_for_the_argument_it_names`
+    forbids "rows they excluded" on the `order_by` message — round-20 P2 2.)
     """
     from tortoise.mcp_server import tortoise_query
 
@@ -332,7 +338,11 @@ def test_falsy_values_are_no_ops_and_never_refused(stub, kwargs) -> None:
     `is not None` refused `min_confidence=0.0` / `order_by=""` / `kind=""` on
     every structural and tag read, where the answer had always been CORRECT (a
     floor of 0.0 excludes nothing; an empty order names none). Measured before
-    the fix: all six shapes REFUSED.
+    the fix: every shape in this list that existed then (six) was REFUSED. The
+    list has since grown to twelve — rounds 2–4 added the int-zero, `False` and
+    `text=`+non-Point shapes — and re-measuring the `is not None` key on this head
+    reds ten of them, the two `text=` shapes being the ones that red under that
+    arm's own key instead (round-20 P2 4: the sentence still said "six").
     """
     from tortoise.mcp_server import tortoise_query
 
@@ -420,13 +430,50 @@ def test_the_text_arm_floor_message_offers_a_route_that_terminates(stub) -> None
     assert "pass text=" not in message, message
 
 
+def test_an_unusable_floor_is_left_to_the_sdk_to_refuse(stub) -> None:
+    """An out-of-range floor must NOT get the arm-scoping paragraph (round-20 P2 3).
+
+    That paragraph's reason ("the fts leg applies its floor under a literal
+    `entity_type == 'point'` gate"), its harm ("rows they excluded came back") and
+    its route ("pass entity_type='point'") are all false of a floor the SDK
+    rejects outright: `sdk.py:41133-41134` range-checks `min_confidence` BEFORE
+    any retrieval, so `min_confidence=1.5` here used to RAISE — it never returned
+    the rows the message apologised for — and the offered route lands on that same
+    range error. Following a terminating route into a second error is the class
+    this guard exists to remove.
+
+    Fails if the text=-arm clause stops checking that the floor is usable: the
+    value is then intercepted and answered with a `#12500` paragraph.
+    """
+    from tortoise.mcp_server import tortoise_query
+
+    for bad in (1.5, -0.5):
+        result = tortoise_query(text="x", entity_type="document", min_confidence=bad)
+
+        # Served, not refused here — and the stub records the forward, which is
+        # the seam the real SDK validates at (a stub cannot reproduce the range
+        # check, so the assertion is on the forward).
+        assert not _is_refusal(result), (
+            f"min_confidence={bad} is not a usable floor, so the #12500 paragraph "
+            f"is false about it (and its route dead-ends): {result}"
+        )
+        fts = [c for c in stub.calls if c[0] == "tortoise_fts_query"]
+        assert fts and fts[-1][3]["min_confidence"] == bad, fts
+
+
 def test_the_text_arm_still_applies_the_floor_to_POINTS(stub) -> None:
     """The control for the branch above: `entity_type="point"` is the default.
 
     Fails if the new condition is written without the `entity_type != "point"`
-    clause (over-block: the arm that DOES apply the floor gets refused) or
-    without the truthiness key (`min_confidence=0.0` is the shipped "filter off"
-    default and must stay served).
+    clause (over-block: the arm that DOES apply the floor gets refused).
+
+    NOT the truthiness key, though an earlier version of this docstring claimed
+    it: this test's inputs are `min_confidence=0.9` with `entity_type` `point`/None,
+    where the key is unobservable — a POINT read normalises with
+    `min_confidence or 0.0`, so `0.0` forwards identically under either key
+    (round-20 P2 1, measured: an `is not None` key here leaves this test green).
+    The falsy axis is pinned by the `{text, document, 0.0}` / `{text, source, 0}`
+    shapes in `test_falsy_values_are_no_ops_and_never_refused`.
     """
     from tortoise.mcp_server import tortoise_query
 

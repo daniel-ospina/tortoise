@@ -4185,7 +4185,10 @@ def tortoise_query(kind: str | None = None,
     else:
         # ── the `text=` arm: it DOES apply both, for the rows that carry a
         # belief, so these two are narrower than the arm itself.
-        if min_confidence and entity_type != "point":
+        if (min_confidence and entity_type != "point"
+                and isinstance(min_confidence, (int, float))
+                and not isinstance(min_confidence, bool)
+                and 0.0 <= min_confidence <= 1.0):
             # The fts leg compares the floor against EP belief under a literal
             # `entity_type == "point"` gate (sdk.py:43288; `ep` is None for
             # every other type at sdk.py:43273), so any other
@@ -4195,6 +4198,18 @@ def tortoise_query(kind: str | None = None,
             # at 0.0 returned the identical page. NOTE the wording: `operator`
             # rows ARE Points (security.py:166-174), so the reason is the literal
             # gate, never "this type has no Point rows" (round-4 P2 3).
+            #
+            # A USABLE floor only (round-20 P2 3, measured): this branch's reason,
+            # its harm ("rows they excluded came back") and its route are all
+            # false of a value the SDK itself rejects — `sdk.py:41133-41134`
+            # range-checks `min_confidence` BEFORE any retrieval, so
+            # `min_confidence=1.5` here used to raise, never return rows, and the
+            # offered `entity_type='point'` route lands on that same range error.
+            # Out-of-range and non-numeric floors are therefore left to the SDK,
+            # the way `order_by="garbage"` already is (`sdk.py:41138`). The
+            # `isinstance` test is load-bearing: a non-numeric floor makes the
+            # SDK's own `not (0.0 <= …)` raise `TypeError`, and this guard must
+            # not turn that into a scoping paragraph.
             _unapplied.append((
                 "min_confidence",
                 f"the fts leg applies its floor under a literal `entity_type == "
