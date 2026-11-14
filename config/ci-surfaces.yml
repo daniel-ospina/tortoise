@@ -1708,6 +1708,19 @@ surfaces:
   # ['tortoise/quota.py'])` → this file selected.
   - test_11892_health_quota.py
   - test_quota.py
+  # #12477: the health surfaces must not read GREEN over a failing data plane —
+  # measured on `tortoise-y4mjjq` (build 43db5c0f5), every data request timed out
+  # while `GET /health` answered `status: "ok"` and the Fly check passed. ⛔
+  # DUAL-REGISTERED with `core`, and BOTH are load-bearing for the same measured
+  # reason the `#11892` row above records: `#12488` changed
+  # `tortoise/hosted_api.py` (an EXACT `api` SOURCE_PATTERN — `select([
+  # 'tortoise/hosted_api.py'])` → `['api', 'onboarding']`) AND
+  # `tortoise/monitoring.py` (which matches NO source pattern, so
+  # `select(['tortoise/monitoring.py'])` → `['core']`). A single-surface row
+  # therefore runs these pins ZERO times on one of the two change classes they
+  # guard. The pins are WIRING assertions, not stubs: `_start_liveness` is called
+  # for real and the failure is injected by moving the probe's own recorded result.
+  - test_12477_health_honesty.py
   # #8906: the points gate must count the graph the request WRITES. Every pin
   # lives in `tortoise/hosted_api.py` (`_check_org_limit`'s `sdk` threading + the
   # five points doors that omitted it: /v1/points, /v1/objects, /v1/subjects,
@@ -2393,6 +2406,11 @@ surfaces:
   # matrix run. Hermetic apart from the throwaway EMBEDDED engine the SDK-door
   # cases build under `tmp_path`: no docker, no Postgres, no network, no model.
   - test_11892_health_quota.py
+  # #12477: the health-honesty pins — see the `api` row for the dual registration
+  # and WHY both are load-bearing: `tortoise/monitoring.py` matches no source
+  # pattern, so a monitoring-only diff selects `core`, and a `core`-absent row
+  # would run these zero times on that exact change class.
+  - test_12477_health_honesty.py
   # #12444: the tier-NAMING pin — `pro` is the identifier, Builder is the display
   # name (#4336). `core` is the classifying surface because `tortoise/pricing.py`
   # (where `TIER_DISPLAY_NAMES` now lives) is a `core` source. The `tier1` row is
