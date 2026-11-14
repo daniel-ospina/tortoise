@@ -786,12 +786,17 @@ def test_the_allowance_is_a_hard_step_at_the_reserve():
     """The cliff the docstring and the runbook quote as a NUMBER is pinned, not prose.
 
     ``_health_setup_allowance`` is ``max(0.0, min(knob, remaining - reserve))``, so the allowance is
-    exactly 0.0 at the reserve and rises the moment the deadline is one tick longer. Five places now
-    quote that threshold as ``6.5 s`` — ``mcp_server._health_setup_allowance`` (twice),
-    ``monitoring.probe_setup_timeout``, ``monitoring.record_health_setup_clamp`` and the runbook's
-    §4.1.1a (its arithmetic and the ``TORTOISE_PROBE_SETUP_TIMEOUT`` bullet); ``rg -n '6.5' <those three files>`` is the audit. Every OTHER case here derives the reserve from the constants,
-    so moving ``QUOTA_STATE_TIMEOUT`` (3.0) would silently falsify all five while the suite stayed
-    green (re-review, P3). This reds instead.
+    exactly 0.0 at the reserve and rises, one second per second, as soon as the deadline is longer.
+    The value is pinned, not merely its sign: a quantised step that hands back the whole knob at
+    ``reserve + tick`` would overrun the deadline it just cleared, and an uncapped ramp would ignore
+    the knob (whose cap is pinned by the knob cases in this file — measured: an uncapped ramp reds
+    ``test_a_generous_deadline_keeps_the_3143_allowance`` and
+    ``test_a_low_knob_IS_the_spend_and_says_so``, not the deadline-fit case).
+
+    The threshold is quoted as ``6.5 s`` in ``_health_setup_allowance``, ``probe_setup_timeout``,
+    ``record_health_setup_clamp`` and the runbook's 4.1.1a; every OTHER case in this file derives the
+    reserve from the constants, so moving ``QUOTA_STATE_TIMEOUT`` (3.0) would silently falsify those
+    passages while the suite stayed green (re-review, P3). This case reds instead.
 
     The consequence the number buys: below the cliff a store answering in milliseconds still comes
     back UNOBSERVED, which is why the counter counts it (see the third/fourth causes in
@@ -801,9 +806,10 @@ def test_the_allowance_is_a_hard_step_at_the_reserve():
     assert mcp_server._health_setup_allowance(reserve) == 0.0, (
         f"at the reserve ({reserve}s) the allowance must be a hard 0.0, not "
         f"{mcp_server._health_setup_allowance(reserve)}")
-    assert mcp_server._health_setup_allowance(reserve + 0.01) > 0.0, (
-        f"one tick above the reserve ({reserve}s) must grant a nonzero allowance — otherwise the "
-        f"cliff prose is describing a plateau, not a step")
+    assert mcp_server._health_setup_allowance(reserve + 0.01) == pytest.approx(0.01, abs=1e-6), (
+        f"one tick above the reserve ({reserve}s) must grant exactly that tick, not more — a "
+        f"quantised step handing back the whole knob would overrun the deadline, and an uncapped "
+        f"ramp would ignore it")
     assert reserve == pytest.approx(6.5, abs=1e-9), (
         f"the reserve moved to {reserve}s; the cliff quoted in `_health_setup_allowance`,\n"
         f"`probe_setup_timeout`, `record_health_setup_clamp` and the runbook's 4.1.1a all say\n"

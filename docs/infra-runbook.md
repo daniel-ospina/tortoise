@@ -868,8 +868,8 @@ reserve:** with `allowance + PROBE_TIMEOUT + GRAPH_SIZE_TIMEOUT + QUOTA_STATE_TI
 the 0.5 s margin` (9.50 s at a 10.00 s bound and 6.00 s at 6.50 s — the two points
 `test_the_planned_phases_fit_the_bound_when_the_reserve_fits` iterates). Below 6.5 s the four
 constants no longer sum inside the deadline at all (they total 6.00 s at 3.00 s of remaining), which
-is why what bounds the tail there is the QUOTA phase's own deadline read, plus the count's planned cap
-(which cannot run in that band), not the constant sum.
+is why what bounds the tail there is the QUOTA phase's own deadline read — the count cannot run in that
+band at all — not the constant sum.
 ⛔ **Below the reserve two of those terms are also unreachable, and the allowance is a hard step,
 not a gradient:** it is `max(0.0, min(knob, remaining − 6.5))`, so at `remaining <= 6.5 s` it is
 exactly **0.0** — the probe is submitted and abandoned before its reachability query, `metrics` skips
@@ -927,7 +927,8 @@ curl -sS https://api.premiselabs.co/health | jq '{breaches: .wait_bound_breaches
   allowance 0.0). It also means this key does **not** read `0` on every process whose stores are
   answering. ⛔ **And `/health` cannot tell you which cause it was:** the discriminating
   `setup_timeout_clamped_s` (`0.0` = the zero-grant arm) is on the **per-call `tortoise_health`
-  response only** — the aggregate body carries this counter and nothing else, so from `/health` a rise
+  response only** — the aggregate body carries this counter and no discriminating clamp marker — so
+  from `/health` a rise
   is a rise, and attributing it needs the per-call payload or the logs.
 - The hosted body carries it because it builds its own JSON (`tortoise/hosted_api.py`'s `health()`);
   `monitoring.serve_health`'s **`/health`** carries the same key from `monitoring.metrics()`. A `0`
