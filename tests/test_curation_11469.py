@@ -989,6 +989,51 @@ def test_a_transport_failure_does_not_fall_back_to_another_graph():
     assert len(calls) == 1, "a transport error must not trigger a second, unbound read"
 
 
+def test_a_labelled_refusal_quoting_the_graph_still_does_NOT_fall_back():
+    """Round-9: this file's OWN site label must not satisfy `_looks_like_graph_refusal`.
+
+    `_section_call` / `_operator_call` re-raise as
+    ``"read of section 'status' was refused: <raw>"``. The classifier requires the text to
+    QUOTE a graph AND read like a refusal — and the label supplies **"refused"**, so ANY
+    raw text that quotes a graph matched it. A timeout or a DB fault
+    (``"timed out reading graph 'org_x_g_aaa'"``) was therefore classified as a graph
+    refusal and the read FELL BACK to the credential's own graph, mixing two graphs into
+    one census while the artifact was stamped with the requested one — the exact failure
+    the fallback's own guard exists to prevent.
+    
+    On `origin/main` the handler classified the RAW text (there was no label), so this was
+    introduced by the wrapper, not inherited.
+
+    ⛔ The fake must raise `C.CurationRefused`, NOT a `TimeoutError`: `_section_call` /
+    `_operator_call` only wrap a `CurationRefused` (a `TimeoutError` propagates unlabelled,
+    so it reproduces nothing — measured, an earlier draft of this test passed under the
+    mutation). The refusal's OWN text must also quote the graph while carrying NONE of
+    the classifier's trigger words ("quota exhausted on graph 'x'"): that is the raw
+    half the classifier must say NO to. Measured: with `str(exc)` restored BOTH reads
+    make a second, unbound call; with `_unlabelled_refusal` they raise after ONE.
+    """
+    mod = _tool_module()
+
+    for which in ("section", "operators"):
+        calls: list[dict] = []
+
+        def call(_name, args, _which=which, _calls=calls):
+            _calls.append(dict(args or {}))
+            # Quotes the graph; contains NO trigger word (no "refus"/"unknown"/"cannot"…).
+            raise C.CurationRefused("quota exhausted on graph 'org_x_g_aaa'")
+
+        reader = mod.MCPReader(call, "org_x_g_aaa")
+        with pytest.raises(C.CurationRefused):
+            if which == "section":
+                reader._section("status")
+            else:
+                reader.read_operators()
+        assert len(calls) == 1, (
+            f"{which}: a refusal whose text merely QUOTES the graph was misread as a "
+            f"graph refusal because this file's own label says 'was refused', so the "
+            f"census re-read the credential's own graph ({calls})")
+
+
 def test_a_graph_refusal_does_fall_back_and_says_so_once_per_section():
     mod = _tool_module()
 
@@ -1275,8 +1320,10 @@ def test_an_unknown_kind_prefix_is_not_pack_ownership():
 
 
 def test_a_points_refusal_names_its_real_cause():
-    """Round-12: a `_safe` quota envelope reads as "0 rows" (is_error=False), and the
-    refusal discarded the cause, sending the operator to the wrong remedy."""
+    """Round-12: a `_safe` quota envelope must not read as "0 rows", and the
+    refusal must keep its cause. Since #11153 that envelope arrives with
+    `is_error=True` (it used to arrive false — the false PASS), so the reader sees
+    it as a `CurationRefused` either way; the cause still has to survive."""
     mod = _tool_module()
 
     def call(_name, args):
@@ -3110,8 +3157,8 @@ OPERATOR_ROWS = [
 _UNSET = object()
 
 
-def _with_operator_count(call, operators=()):
-    """Adapt a PRE-OPERATOR fake surface: it now has to answer ONE more section.
+def _with_operator_count(call, operators=(), events=()):
+    """Adapt a PRE-OPERATOR fake surface: it now has to answer MORE reads.
 
     Every fake written before 2026-11-13 answers an unknown section with an empty
     listing, which the harness cannot tell from an UNREAD operator layer — so the
@@ -3119,25 +3166,47 @@ def _with_operator_count(call, operators=()):
     fail for an unrelated reason. The wrapper makes the fake's graph explicit: these
     rows answer `tortoise_search`, and this count answers `structure.operators`.
     A test that exercises the operator read itself must NOT be wrapped.
+
+    The EVENT layer (#12378) needs the same adaptation for the same reason, and without
+    it the whole pre-existing suite would fail on a refusal that has nothing to do with
+    what each test is about: `events` answers `tortoise_get_entity(type="events")` and
+    its length answers `counts.Event` in the status section. The default `events=()` is a
+    graph with NO Event layer, which is a legitimate census — and because the count is
+    merged as well, it reconciles to 0 rather than hitting the silent-zero refusal.
+    A test that exercises the EVENT read itself must NOT be wrapped either.
     """
     def wrapped(name, args):
         args = args or {}
         if name == "tortoise_search":
             return {"result": list(operators)}
+        if name == "tortoise_get_entity" and args.get("type") == "events":
+            return {"result": list(events)}
         res = call(name, args)
         if args.get("section") == "structure" and isinstance(res, dict) and "error" not in res:
             merged = {k: v for k, v in res.items() if k not in ("result", "results", "points")}
             merged.setdefault("operators", len(operators))
             return merged
+        if args.get("section") == "status" and isinstance(res, dict) and "error" not in res:
+            merged = dict(res)
+            counts = merged.get("counts")
+            if isinstance(counts, dict):
+                counts = dict(counts)
+                counts.setdefault("Event", len(events))
+                merged["counts"] = counts
+            else:
+                merged.setdefault("Event", len(events))
+            return merged
         return res
     return wrapped
 
 
-def _operator_surface(operators=None, *, reported=_UNSET, points=None):
+def _operator_surface(operators=None, *, reported=_UNSET, points=None, events=()):
     """A fake surface whose operator layer answers `tortoise_search`, like the real one.
 
     ``reported=None`` means the `structure` section carries NO `operators` key at all
     (the unreported arm) — distinct from the default, which is the layer's own length.
+    ``events`` answers the Event read (#12378) and for the same reason: every surface in
+    this file now has to, or the census refuses a layer the fake simply never mentioned.
     """
     operators = OPERATOR_ROWS if operators is None else operators
     points = ([{"id": "p1", "kind": "decision", "content": "a durable claim"}]
@@ -3150,6 +3219,8 @@ def _operator_surface(operators=None, *, reported=_UNSET, points=None):
             if args.get("entity_type") == "operator":
                 return {"result": list(operators)}
             return {"result": []}
+        if name == "tortoise_get_entity" and args.get("type") == "events":
+            return {"result": list(events)}
         if name == "tortoise_query":
             return {"result": list(points), "total": len(points)}
         if args.get("section") == "structure":
@@ -3158,7 +3229,8 @@ def _operator_surface(operators=None, *, reported=_UNSET, points=None):
                 structure["operators"] = reported
             return structure
         if args.get("section") == "status":
-            return {"counts": {"Point": len(points), "Source": 0}}
+            return {"counts": {"Point": len(points), "Source": 0,
+                               "Event": len(events)}}
         if args.get("section") == "sources":
             return {"result": []}
         if args.get("section") == "graphs":
@@ -3197,13 +3269,11 @@ def test_the_operator_layer_is_not_claimed_unlistable():
     mod = _tool_module()
     assert "operator" not in mod.NOT_ENUMERABLE, mod.NOT_ENUMERABLE
     # ...and the classes this pass does NOT read stay named, each with its own reason.
-    # `event` belongs here because it is NOT read by this pass — not because it is
-    # unlistable (it is not: see the entry's own text and #12378).
-    for still_named in ("object", "event", "subject"):
+    # ⛔ `event` is NOT in this tuple any more: #12378 made the Event layer a READ layer,
+    # so an entry describing it as unenumerated would be the same defect one layer over.
+    # (`test_the_event_layer_is_no_longer_claimed_unreadable` pins that side.)
+    for still_named in ("object", "subject"):
         assert still_named in mod.NOT_ENUMERABLE, still_named
-    assert "no listing surface" not in mod.NOT_ENUMERABLE["event"], (
-        "the Event layer IS readable in one call (measured 2026-11-13); its entry "
-        "records that it is deliberately not read here, not that it cannot be read")
 
 
 def test_an_operator_is_never_carried_as_a_floating_node():
@@ -3300,20 +3370,14 @@ def test_an_operator_layer_beyond_one_call_is_refused_not_truncated(monkeypatch,
     )
 
 
-def test_an_operator_read_that_fills_its_limit_is_refused_unless_the_count_vouches(
-        monkeypatch, capsys, tmp_path):
-    """A response that fills the requested limit EXACTLY may be truncated.
+def test_an_operator_read_that_fills_its_bound_is_refused(monkeypatch, capsys, tmp_path):
+    """A response that FILLS the requested limit may be truncated — so it is refused.
 
     `tortoise_search` has a `limit` and no `offset`, so there is no page to walk to:
-    "a full page" and "a truncated layer" are the same bytes unless a reported count
-    says that is the whole population. Round-1 review found this arm unpinned.
-
-    ⛔ BOTH arms are pinned here. Refusing is the safe failure, but always refusing is
-    the OVER-BROAD one: a layer of exactly `OPERATOR_READ_CEILING` rows that
-    `structure.operators` vouches for as complete is a legitimate full read, and round-7
-    review measured that flipping the guard to `if len(raw) == OPERATOR_READ_CEILING:`
-    (refuse the vouched-for case too) left every test green while blocking the whole
-    census — the carry set included, since the refusal has no override.
+    "a full page" and "a truncated layer" are the same bytes. This is the arm that held
+    the UNREPORTED half, split out when #12440 made the fill refusal absolute — it is the
+    reachable pin on the fill shape (the at-bound arm lives in the test below, which
+    refuses before the read).
     """
     mod = _tool_module()
     at_limit = [{"id": f"o{i}", "content": "", "point_kind": "IMPL"}
@@ -3324,17 +3388,66 @@ def test_an_operator_read_that_fills_its_limit_is_refused_unless_the_count_vouch
     assert rc == 3, (rc, capsys.readouterr())
     assert "truncat" in capsys.readouterr().err.lower()
 
-    # …and the ACCEPT arm: the same 10,000 rows WITH a count that vouches for them is a
-    # complete layer, not a truncation.
+
+def test_an_operator_layer_at_the_bound_is_refused_before_the_read(
+        monkeypatch, capsys, tmp_path):
+    """A count AT the bound is not a voucher — the layer is refused BEFORE the read.
+
+    ⛔ #12440 reverses what this test asserted until it landed. Round-7 review had pinned
+    the opposite ("a layer of exactly `OPERATOR_READ_CEILING` rows that
+    `structure.operators` vouches for as complete is a legitimate full read") to keep the
+    refusal from being over-broad. That reasoning holds for a count that DISAGREES; it
+    fails exactly at the bound, where the count coincides with the engine's default
+    `RESULTSET_SIZE` and the SDK slices the answer back at `limit` — so a layer ENDING
+    there and one the engine CUT there return the same bytes, and no count on this
+    surface can tell them apart. The genuinely-whole at-bound layer is refused with them:
+    that cost is stated in the refusal text and in `docs/architecture/CURATION-11469.md`,
+    and the counter-arm below pins that a layer BELOW the bound is still accepted.
+
+    ⛔ The fixture is keyed on the COUNT, not on rows: three operator rows beside a
+    reported 10,000 refuses for the count alone, and the assertion that NO read was spent
+    is what separates this arm from the disagreement arm one line further down (which
+    would refuse the same input AFTER spending a `tortoise_search` call, with a different
+    message).
+    """
+    mod = _tool_module()
+    calls: list[str] = []
+    surface = _operator_surface(operators=OPERATOR_ROWS,
+                                reported=mod.OPERATOR_READ_CEILING)
+
+    def call(name, args):
+        calls.append(name)
+        return surface(name, args)
+
+    monkeypatch.setattr(mod, "_live_call_tool", call)
+    rc = mod.main(["inventory", "--out", str(tmp_path / "inv.json"), "--no-verify-read"])
+    assert rc == 3, (rc, capsys.readouterr())
+    assert "RESPONSE BOUND" in capsys.readouterr().err, (
+        "the refusal must be the bound gate's, not the disagreement arm's")
+    assert "tortoise_search" not in calls, (
+        "a count at the bound must refuse BEFORE the read is spent")
+
+
+def test_an_operator_layer_one_row_below_the_bound_is_accepted(monkeypatch, tmp_path):
+    """The counter-arm: the strict bound must not become an over-broad refusal.
+
+    A layer of `OPERATOR_READ_CEILING - 1` rows with a count that agrees is provably the
+    whole layer — the RESPONSE fills nothing (9 999 rows against a 10 000-row request that
+    is itself the engine's cap), so it cannot have been cut. #12440
+    moves only the single cell where the count and the response are both AT the bound;
+    everything below it must keep reading, or the fix would block a census it can measure.
+    """
+    mod = _tool_module()
+    below = [{"id": f"o{i}", "content": "", "point_kind": "IMPL"}
+             for i in range(mod.OPERATOR_READ_CEILING - 1)]
     monkeypatch.setattr(mod, "_live_call_tool",
-                        _operator_surface(operators=at_limit,
-                                          reported=mod.OPERATOR_READ_CEILING))
-    out = tmp_path / "inv_accepted.json"
+                        _operator_surface(operators=below, reported=len(below)))
+    out = tmp_path / "inv_below.json"
     rc = mod.main(["inventory", "--out", str(out), "--no-verify-read"])
-    assert rc == 0, (rc, capsys.readouterr())
+    assert rc == 0, (rc, "")
     payload = json.loads(out.read_text())
-    assert payload["operators_read"] == mod.OPERATOR_READ_CEILING, payload["operators_read"]
-    assert payload["operators_total_reported"] == mod.OPERATOR_READ_CEILING
+    assert payload["operators_read"] == mod.OPERATOR_READ_CEILING - 1, payload["operators_read"]
+    assert payload["operators_total_reported"] == mod.OPERATOR_READ_CEILING - 1
     assert payload["operators_reconciled"] is True
 
 
@@ -3392,12 +3505,17 @@ def test_the_operator_read_is_routed_to_the_graph_and_falls_back_on_a_binding_re
                 return {"error": "This credential is bound to one graph and cannot be "
                                  "re-targeted by a `graph` argument (requested x)"}
             return {"result": list(OPERATOR_ROWS)}
+        if name == "tortoise_get_entity" and args.get("type") == "events":
+            # This surface's Event layer is empty but RECONCILED: the census reads it
+            # now (#12378), and an unmentioned layer would refuse the run for a reason
+            # this test is not about.
+            return {"result": []}
         if name == "tortoise_query":
             return {"result": [{"id": "p1", "kind": "decision", "content": "c"}], "total": 1}
         if args.get("section") == "structure":
             return {"total": 1, "operators": len(OPERATOR_ROWS)}
         if args.get("section") == "status":
-            return {"counts": {"Point": 1, "Source": 0}}
+            return {"counts": {"Point": 1, "Source": 0, "Event": 0}}
         if args.get("section") == "sources":
             return {"result": []}
         return {"result": []}
@@ -3914,14 +4032,76 @@ def test_both_verbs_take_the_count_and_the_layer_in_one_window(monkeypatch, tmp_
     """
     mod = _tool_module()
     seen: list[tuple[str, str | None]] = []
-    surface = _operator_surface(operators=OPERATOR_ROWS, reported=len(OPERATOR_ROWS))
+    # ⛔ The `type` argument, recorded separately (review cycle 13). `tortoise_get_entity` is
+    # used by the EVENT read only today (all four `_call` sites are inside `_get_entities`;
+    # points go through `tortoise_query`, everything else through `tortoise_graph_overview`),
+    # so this filter is future-proofing, NOT a defence against a points read — an earlier
+    # revision of this comment claimed the latter and that was false (review cycle 14).
+    typed: list[tuple[str, str | None]] = []
+    # ⛔ The request SIZE, recorded separately (review cycle 15). `typed` alone binds to the
+    # EARLIEST events-typed call in the verb, so any earlier read-only
+    # `tortoise_get_entity(type="events", limit=1)` probe would re-point the order assertion
+    # at a call that is not the layer read — a FALSE RED with freshness intact (measured),
+    # and, placed after a `status` read, it satisfied the order half while proving nothing.
+    # `limit == EVENT_READ_CEILING` is the whole-layer request, so binding to it is exact.
+    limited: list[tuple[str, int | None]] = []
+    # ⛔ THE LAYER NEEDS A ROW TO RECONCILE (review cycle 14): with an EMPTY layer the
+    # stale and fresh arms are indistinguishable on the artifact, so the value pin below
+    # would have nothing to see.
+    EVENTS = [{"id": "e1", "eventKind": "domain", "content": "an event"}]
+    surface = _operator_surface(operators=OPERATOR_ROWS, reported=len(OPERATOR_ROWS),
+                               events=EVENTS)
+    status_calls = [0]
+    # ⛔ A FLAG, not an ordinal (measured FALSE RED). Keying the disagreeing count on
+    # `status_calls[0] == 2` assumed EXACTLY ONE `status` request sits between the top-of-verb
+    # `counts()` and the layer read. That is not a property of the code: a
+    # freshness-PRESERVING tidy-up (an extra `counts = reader.counts()` after the walk, for
+    # the report — the motion the comment below requires to stay green) makes the count
+    # immediately before the layer read the TRUE one, so no re-count happens, the note is
+    # absent, and this pin redded CORRECT code (`events_read=1 events_total_reported=1
+    # events_reconciled=True`). What matters is not WHICH status call it is, but whether the
+    # whole-layer request has already returned.
+    layer_done = [False]
 
     def recording(name, args=None):
-        seen.append((name, (args or {}).get("section")))
-        return surface(name, args)
+        args = args or {}
+        seen.append((name, args.get("section")))
+        typed.append((name, args.get("type")))
+        limited.append((name, args.get("limit")))
+        payload = surface(name, args)
+        if name == "tortoise_get_entity" and args.get("limit") == mod.EVENT_READ_CEILING:
+            layer_done[0] = True
+        # ⛔ THE FIRST status READ IS TOO EARLY TO VOUCH (review cycle 14). It is the
+        # top-of-verb `counts`, taken BEFORE the 34+-call point walk. Stripping its `Event`
+        # key makes the stale and fresh arms produce DIFFERENT artifacts, which is what
+        # gives the value pin below something to distinguish. Order alone is not enough:
+        # `live_counts = reader.counts()` followed by `read_events(counts)` keeps a `status`
+        # request immediately before the events read while reconciling against the stale
+        # count, and passed the order-only pin with the whole file green and ruff clean.
+        if args.get("section") == "status":
+            status_calls[0] += 1
+            if status_calls[0] == 1:
+                payload = {"counts": {"Point": 1, "Source": 0}}
+            elif not layer_done[0]:
+                # ⛔ THE COUNT IMMEDIATELY BEFORE THE LAYER MUST NOT ALREADY BE THE ANSWER
+                # (review cycle 16, measured). Reporting `len(EVENTS)` here let a change
+                # write the ARTIFACT field from a fresh count while reconciling the read
+                # against the STALE one -- `events_reported = _node_count(reader.counts(),
+                # "Event")` then `read_events(counts)` -- and the whole file stayed GREEN
+                # (240 passed), with the artifact showing `events_reconciled: True` next to
+                # a note saying nothing reconciled it. A count that DISAGREES forces the
+                # re-count path, so only a read that CONSUMED this count can end with
+                # `events_total_reported == len(EVENTS)`.
+                payload = {"counts": {"Point": 1, "Source": 0,
+                                       "Event": len(EVENTS) + 1}}
+        return payload
 
     for verb in ("inventory", "plan"):
         seen.clear()
+        typed.clear()
+        limited.clear()
+        status_calls[0] = 0
+        layer_done[0] = False
         monkeypatch.setattr(mod, "_live_call_tool", recording)
         argv = [verb, "--graph", "org_x_g_old", "--no-verify-read",
                 "--out", str(tmp_path / f"{verb}.json")]
@@ -3932,6 +4112,46 @@ def test_both_verbs_take_the_count_and_the_layer_in_one_window(monkeypatch, tmp_
         # the layer read is the ONLY `tortoise_search` this run makes
         layer_at = next(i for i, (name, _) in enumerate(seen) if name == "tortoise_search")
         assert layer_at == count_at + 1, (verb, seen)
+        # ⛔ THE EVENT LAYER'S OWN FRESH COUNT (review cycle 13, measured UNPINNED). The
+        # operator pair above was pinned, but the Event layer — added OVER it — was not,
+        # and `read_events(reader.counts())` could be reverted to `read_events(counts)` at
+        # either verb with the whole file still GREEN (measured: 240 passed, 0 failed).
+        # That revert is not cosmetic: `counts` predates the 34+-call point walk, so a graph
+        # sitting at the bound whose layer shrank mid-walk REFUSES (rc 3) a layer that was
+        # read whole, and widens #12445's stale-high window from two requests to the walk.
+        #
+        # ⚠️ THE REQUEST IMMEDIATELY BEFORE the events read — not the LAST `status` request
+        # (review cycle 14): `max(...)` pinned "no status read anywhere AFTER the events",
+        # which is not the property, and a freshness-PRESERVING tidy-up (refresh `counts`
+        # after the walk, for the report) redded this test falsely. Measured.
+        events_at = next(i for i, (name, lim) in enumerate(limited)
+                         if name == "tortoise_get_entity"
+                         and lim == mod.EVENT_READ_CEILING)
+        assert events_at >= 1, (verb, seen, typed)
+        assert seen[events_at - 1] == ("tortoise_graph_overview", "status"), (
+            verb, events_at, seen, typed)
+        # ⛔ AND THE VALUE, not just the order (review cycle 14, measured EVASION). A
+        # `status` request immediately before the read proves only that a request was made —
+        # NOT that its answer was used. Under the stale count the layer is filed on the
+        # UNREPORTED arm, so the artifact carries `events_total_reported: None`; under the
+        # fresh count it carries the layer's own length. That difference is the property.
+        out = json.loads((tmp_path / f"{verb}.json").read_text())
+        assert out.get("events_total_reported") == len(EVENTS), (verb, out)
+        # ⛔ AND IT GOT THERE BY RECONCILING AGAINST THE FRESH COUNT, not by writing the field
+        # from a separate read (review cycle 16). The count immediately before the layer now
+        # DISAGREES (`len(EVENTS) + 1`), so a correct read must take the re-count path — which
+        # is what puts this note on the artifact. Without this assertion the artifact field
+        # alone could be satisfied by a fresh count that the layer read never consumed.
+        assert "CHANGED between the status count and this read" in (out.get("read_note") or ""), (
+            verb, out)
+        # ⛔ AND THE WHOLE-LAYER READ HAPPENS EXACTLY ONCE (measured EVASION). Every
+        # single-read shape is closed, but a SECOND `read_events(counts)` call satisfied the
+        # artifact — `events_reported` and the note come from the first, fresh read, while the
+        # ROWS the census/plan uses come from a read reconciled against the stale count — with
+        # the whole file at 240 passed. Contrived, and one line to close.
+        whole = [lim for name, lim in limited
+                 if name == "tortoise_get_entity" and lim == mod.EVENT_READ_CEILING]
+        assert len(whole) == 1, (verb, limited)
 
 
 def test_the_plan_payload_carries_the_layers_three_fields(monkeypatch, tmp_path):
@@ -3991,3 +4211,1262 @@ def test_a_structure_refusal_is_the_designed_refusal_on_BOTH_verbs(monkeypatch, 
                        "--out", str(tmp_path / "p.json")])
     assert rc == 3, (verb, rc, capsys.readouterr())
     assert "REFUSED" in capsys.readouterr().err
+
+
+# ── the Event layer is READABLE, and the census must not omit it (#12378) ──
+#
+# Measured on live-v4, 2026-11-13, read-only: `tortoise_get_entity(None,
+# type="events", limit=5000)` returns **4,670 rows in ONE call**, exactly `counts.Event`
+# — the ADVERTISED path (the older `tortoise_get_events` name is retired at the server,
+# #3883). The harness recorded the layer as "READABLE but NOT read by this pass" and
+# never enumerated it, so the census carried no per-kind resolution for the episodic
+# tier and #11469's Target 2 ("every dropped row is named with its reason") could not be
+# satisfied for rows it never read.
+#
+# What the layer does NOT do is move a row: `classify_event` answers `undecidable` on
+# both of its arms (an agent-session container, whose home is #10000's open D1 question;
+# a domain Event, whose write path has no `events` section). The read buys per-kind
+# census resolution, and these cases pin it plus the guards that keep a truncated layer
+# out of the census.
+
+#: The real `get_events` row shape: `properties(e)` of a `:Event`, whose text is `name`
+#: (persisted because it is absent from `_EVENT_HANDLED`, `projection/entities.py`).
+#: A meeting persists `title` instead — that is the declared fallback, and `ev3` pins it.
+#: Each row exercises a DIFFERENT text carrier, because the reader declares three and a
+#: test that only ever sees two of them pins two (round-2 review measured that deleting
+#: `subject` from `_event_text` left the named-for-three test green):
+#:   ev-1 `name` (the canonical carrier, persisted because it is absent from
+#:        `_EVENT_HANDLED`) · ev-2 `title` ONLY, with no `name` — the real meeting shape,
+#:        which is what makes `title` a FALLBACK rather than a coincidence · ev-3
+#:        `subject` ONLY, the last declared carrier.
+EVENT_ROWS = [
+    {"id": "ev-1", "eventKind": "AgentSession", "name": "session 2026-11-13"},
+    {"id": "ev-2", "eventKind": "meeting", "title": "kickoff"},
+    {"id": "ev-3", "eventKind": "deployment", "subject": "deploy 4f2a"},
+]
+
+
+def _event_surface(events=None, *, reported=_UNSET, points=None, operators=None):
+    """A fake surface whose Event layer answers `tortoise_get_entity(type="events")`.
+
+    ``reported=None`` means the STATUS section carries no `Event` count at all (the
+    unreported arm) — distinct from the default, which is the layer's own length.
+    """
+    events = EVENT_ROWS if events is None else events
+    reported = len(events) if reported is _UNSET else reported
+
+    def call(name, args):
+        args = args or {}
+        if name == "tortoise_get_entity" and args.get("type") == "events":
+            return {"result": list(events)}
+        if name == "tortoise_search":
+            return {"result": list(operators or [])}
+        if name == "tortoise_query":
+            pts = ([{"id": "p1", "kind": "decision", "content": "a durable claim"}]
+                   if points is None else points)
+            return {"result": list(pts), "total": len(pts)}
+        if args.get("section") == "structure":
+            return {"total": 1, "operators": len(operators or [])}
+        if args.get("section") == "status":
+            counts = {"Point": 1, "Source": 0}
+            if reported is not None:
+                counts["Event"] = reported
+            return {"counts": counts}
+        return {"result": []}
+    return call
+
+
+def test_the_event_layer_reaches_the_census(monkeypatch, tmp_path, capsys):
+    """The episodic layer is 4,670 readable rows in one call, and the census must carry it.
+
+    Omitting it made `total_rows` a claim about a population the pass never read, and
+    left the episodic tier as one undifferentiated number in `by_class` — where the
+    operator layer was before PR #12380.
+    """
+    mod = _tool_module()
+    monkeypatch.setattr(mod, "_live_call_tool", _event_surface())
+    assert mod.main(["inventory", "--out", str(tmp_path / "inv.json"),
+                     "--no-verify-read"]) == 0
+    report = json.loads((tmp_path / "inv.json").read_text())
+    census = report["census"]
+    assert census["total_rows"] == 4, census            # 1 point + 3 events
+    assert census["by_class"]["event:AgentSession"]["undecidable"] == 1, census["by_class"]
+    assert census["by_class"]["event:meeting"]["undecidable"] == 1, census["by_class"]
+    assert census["by_class"]["event:deployment"]["undecidable"] == 1, census["by_class"]
+    assert report["events_read"] == 3, report.get("events_read")
+    assert report["events_total_reported"] == 3, report.get("events_total_reported")
+    assert report["events_reconciled"] is True, report.get("events_reconciled")
+    # ⛔ The STDOUT SUMMARY, which nothing pinned (PR review round 1): it named points,
+    # sources and operators and omitted the 4,670 Events the run had just classified, so
+    # the one line an operator reads without opening the JSON stated 21,147 over a census
+    # of 25,817. Reading the JSON in the other tests did not make that line safe — it can
+    # drift freely while every artifact assertion stays green.
+    assert "3 events" in capsys.readouterr().out, "the summary line must name the layer"
+
+
+def test_the_event_layer_reaches_the_PLAN_census_too(monkeypatch, tmp_path):
+    """The `plan` verb's census population, which nothing pinned (review round 2).
+
+    `cmd_plan` builds its OWN census (`C.build_plan(points + sources + operators +
+    events)`), so the two call sites are independent: measured, dropping `+ events`
+    there left the whole file green, because every `event:*` assertion above drives
+    `inventory`. The payload would then carry `events_read: 3` /
+    `events_reconciled: True` beside a census of 1 row with NO `event:*` key — the run
+    claiming it read and reconciled a layer its own plan artifact does not contain.
+
+    Both halves are asserted for that reason: the counting half (`total_rows`) and the
+    KEY-SHAPE half (`event:<kind>`), because a key regressed to something else still
+    leaves `total_rows` right. The doc-text pins guard the PROSE that describes the
+    request; this guards the ARTIFACT the plan verb actually emits.
+    """
+    mod = _tool_module()
+    monkeypatch.setattr(mod, "_live_call_tool", _event_surface())
+    rc = mod.main(["plan", "--graph", "org_x_g_old", "--target", "org_x_g_new", "--off",
+                   "--no-verify-read", "--ledger", str(tmp_path / "l.jsonl"),
+                   "--out", str(tmp_path / "p.json")])
+    assert rc == 0
+    payload = json.loads((tmp_path / "p.json").read_text())
+    census = payload["census"]
+    assert census["total_rows"] == 4, census            # 1 point + 3 events
+    assert census["by_class"]["event:AgentSession"]["undecidable"] == 1, census["by_class"]
+    assert census["by_class"]["event:meeting"]["undecidable"] == 1, census["by_class"]
+    assert census["by_class"]["event:deployment"]["undecidable"] == 1, census["by_class"]
+
+
+def test_an_event_row_that_is_not_an_object_is_refused_not_a_traceback(
+        monkeypatch, capsys, tmp_path):
+    """Shape drift at the ROW level gets the designed refusal, not an AttributeError.
+
+    `_is_row_listing` accepts any list, so a junk element reaches `.get` and raises (rc 1
+    traceback) instead of rc 3 — the guard `read_operators` (and `read_sources`) already
+    carry, and the one arm of this change that had NO revert proof: measured, deleting the
+    `isinstance` block left the whole suite at 230 passed (PR review round 1).
+    """
+    mod = _tool_module()
+    rows = [*EVENT_ROWS, "junk"]
+    monkeypatch.setattr(mod, "_live_call_tool",
+                        _event_surface(rows, reported=len(rows)))
+    rc = mod.main(["inventory", "--graph", "org_x_g_old", "--no-verify-read",
+                   "--out", str(tmp_path / "i.json")])
+    assert rc == 3, (rc, capsys.readouterr())
+    assert "not an object" in capsys.readouterr().err
+
+
+def test_the_event_layer_is_no_longer_claimed_unreadable():
+    """The surface table must not describe a read layer as one this pass does not read.
+
+    `NOT_ENUMERABLE["event"]` said "READABLE but NOT read by this pass" — a scope
+    decision written in the table whose job is to name what *cannot* be reached, and the
+    report then presented itself as complete over 4,670 unread rows.
+    """
+    mod = _tool_module()
+    assert "event" not in mod.NOT_ENUMERABLE, mod.NOT_ENUMERABLE
+    # ...and the classes this pass still does NOT read stay named.
+    for still_named in ("object", "subject"):
+        assert still_named in mod.NOT_ENUMERABLE, still_named
+
+
+def test_an_events_text_is_its_name_with_title_and_subject_fallbacks():
+    """An Event's text is `name`; a meeting persists `title`. Content-address on either.
+
+    `Row.stable_key` is content-addressed for this class, so rows sharing an empty text do
+    share one keeper. ⚠️ Do not describe that as the operator layer's trap: there the
+    defect was a false duplicate CLAIM (one row reported as the other's duplicate, which
+    the report then contradicted). Event duplicates are withheld outright — `classify()`
+    passes `duplicate_of` only to `classify_point` — so on this class the shared keeper is
+    invisible in the report and is not a false claim. What matters here is only that the
+    text is `name`-derived rather than empty, which is what the assertions below pin.
+    """
+    mod = _tool_module()
+    reader = mod.MCPReader(_event_surface(), None)
+    rows, reported = reader.read_events({"counts": {"Event": 3}})
+    assert reported == 3
+    # name · title-as-fallback (ev-2 has NO name) · subject-as-fallback (ev-3 has neither).
+    assert [r.content for r in rows] == ["session 2026-11-13", "kickoff", "deploy 4f2a"]
+    assert [r.kind for r in rows] == ["AgentSession", "meeting", "deployment"]
+    assert len({r.stable_key for r in rows}) == 3, [r.stable_key for r in rows]
+
+
+def test_an_event_row_carrying_eventId_is_read():
+    """`_upsert_event` writes `id` == the MERGE key `eventId`, but legacy/by-url rows
+    carry the `eventId` spelling — refusing those would drop a readable layer."""
+    mod = _tool_module()
+    reader = mod.MCPReader(
+        _event_surface([{"eventId": "ev-9", "eventKind": "meeting", "name": "x"}]), None)
+    rows, _ = reader.read_events({"counts": {"Event": 1}})
+    assert [r.node_id for r in rows] == ["ev-9"]
+
+
+def test_an_event_row_with_no_identity_is_refused(monkeypatch, tmp_path, capsys):
+    """Two id-less Events are indistinguishable and would fold onto one keeper."""
+    mod = _tool_module()
+    monkeypatch.setattr(mod, "_live_call_tool",
+                        _event_surface([{"eventKind": "meeting", "name": "x"}]))
+    rc = mod.main(["inventory", "--out", str(tmp_path / "i.json"),
+                   "--no-verify-read"])
+    assert rc == 3, capsys.readouterr()
+    err = capsys.readouterr().err
+    assert "eventId" in err and "Event row" in err, err
+
+
+def test_an_event_layer_above_the_ceiling_is_refused(monkeypatch, tmp_path, capsys):
+    """There is no offset walk, so a population at the ceiling has no whole read.
+
+    ⛔ AT, not above: FalkorDB silently caps a non-aggregate read at its server-global
+    `RESULTSET_SIZE`, which DEFAULTS to 10 000 — the same number as `EVENT_READ_CEILING`.
+    A layer AT the bound is therefore indistinguishable from one the server capped there,
+    so accepting it would file a possibly-cut layer as complete (PR-review cycle 5).
+    """
+    mod = _tool_module()
+    monkeypatch.setattr(mod, "_live_call_tool",
+                        _event_surface(events=[], reported=mod.EVENT_READ_CEILING))
+    rc = mod.main(["inventory", "--out", str(tmp_path / "i.json"), "--no-verify-read"])
+    assert rc == 3, capsys.readouterr()
+    err = capsys.readouterr().err
+    # ⛔ The BOUND's own words, not just "Event layer": the disagreement arm also says
+    # "Event layer" (0 rows vs a reported 10,001), so an assertion on the subject only
+    # stayed green with this arm deleted — measured, and it is why the ceiling text is
+    # named here.
+    assert "RESPONSE BOUND" in err, err
+
+
+def test_a_truncation_shaped_event_read_is_refused(monkeypatch, tmp_path, capsys):
+    """A response that FILLS the limit, with nothing vouching for it, may be truncated.
+
+    `sdk.get_events` is `MATCH (e:Event) … LIMIT $lim` with no `SKIP`, so "a full page"
+    and "a truncated layer" are the same bytes. Deleting this arm reds this test.
+    """
+    mod = _tool_module()
+    # ⛔ The fill must reach the REQUEST, and the request IS `EVENT_READ_CEILING` (a
+    # response below the bound is provably whole — see read_events). This fixture also
+    # models the ENGINE: a server whose `RESULTSET_SIZE` equals the bound returns exactly
+    # this many rows for a larger layer, so this is the shape a real truncation has.
+    at_limit = [{"id": f"ev-{i}", "eventKind": "meeting", "name": f"m{i}"}
+                for i in range(mod.EVENT_READ_CEILING)]
+    monkeypatch.setattr(mod, "_live_call_tool",
+                        _event_surface(at_limit, reported=None))
+    rc = mod.main(["inventory", "--out", str(tmp_path / "i.json"), "--no-verify-read"])
+    assert rc == 3, capsys.readouterr()
+    assert "truncated" in capsys.readouterr().err
+
+
+def test_a_zero_row_event_read_with_no_count_refuses(monkeypatch, tmp_path, capsys):
+    """"No Events in this graph" and "the layer was not read" are the same bytes."""
+    mod = _tool_module()
+    monkeypatch.setattr(mod, "_live_call_tool", _event_surface([], reported=None))
+    rc = mod.main(["inventory", "--out", str(tmp_path / "i.json"), "--no-verify-read"])
+    assert rc == 3, capsys.readouterr()
+    assert "Event" in capsys.readouterr().err
+
+
+def test_an_event_read_disagreeing_with_the_count_is_refused(monkeypatch, tmp_path,
+                                                             capsys):
+    """Two surfaces describing one population must agree, or one did not read it."""
+    mod = _tool_module()
+    monkeypatch.setattr(mod, "_live_call_tool",
+                        _event_surface(EVENT_ROWS, reported=9))
+    rc = mod.main(["inventory", "--out", str(tmp_path / "i.json"), "--no-verify-read"])
+    assert rc == 3, capsys.readouterr()
+    assert "counts.Event" in capsys.readouterr().err
+
+
+def test_an_unreported_event_count_is_disclosed_not_refused(monkeypatch, tmp_path):
+    """A lost cross-check over a NON-EMPTY read is a note, not a lost population."""
+    mod = _tool_module()
+    monkeypatch.setattr(mod, "_live_call_tool", _event_surface(EVENT_ROWS, reported=None))
+    assert mod.main(["inventory", "--out", str(tmp_path / "i.json"),
+                     "--no-verify-read"]) == 0
+    report = json.loads((tmp_path / "i.json").read_text())
+    assert report["events_read"] == 3
+    assert report["events_total_reported"] is None
+    assert report["events_reconciled"] is False
+    assert "Event" in (report["read_note"] or ""), report.get("read_note")
+
+
+# ⛔ THE FIELD ON THE OTHER TWO ARTIFACTS, which had no revert proof (PR-review cycle 7).
+# `docs/architecture/CURATION-11469.md:196` promises `events_reconciled: false` on EVERY
+# artifact and enumerates the tests, but the only unreported-count test above drives
+# `inventory`: hardcoding `True` at `curate_graph.py`'s plan payload or at
+# `_disarmed_artifact` left the whole file at 238 passed (measured, both). That is the
+# unproven-guard class this PR has already been charged for twice — and this field is the
+# machine-readable form of "no cross-check existed for this layer", the exact prose->field
+# conversion two review cycles produced, so it is the one a lane would "simplify" to True.
+def test_the_plan_payload_carries_the_unreconciled_event_field(monkeypatch, tmp_path):
+    """The ARMED plan artifact states the lost cross-check, not just the inventory one."""
+    mod = _tool_module()
+    monkeypatch.setattr(mod, "_live_call_tool", _event_surface(EVENT_ROWS, reported=None))
+    rc = mod.main(["plan", "--graph", "org_x_g_old", "--target", "org_x_g_new",
+                   "--no-verify-read", "--ledger", str(tmp_path / "l.jsonl"),
+                   "--out", str(tmp_path / "p.json")])
+    assert rc == 0
+    payload = json.loads((tmp_path / "p.json").read_text())
+    assert payload["events_read"] == 3, payload
+    assert payload["events_total_reported"] is None, payload
+    assert payload["events_reconciled"] is False, payload
+
+
+def test_the_disarmed_artifact_carries_the_unreconciled_event_field(monkeypatch, tmp_path):
+    """...and so does the THIRD call site: a completed read with no count to reconcile.
+
+    ⚠️ `--off` alone does NOT reach `_disarmed_artifact` — a disarmed run that finishes
+    normally writes the ARMED plan payload with `run.off: true` (measured: a first revision
+    of this test asserted the field on that payload, so it pinned the plan's field a second
+    time and stayed GREEN with `_disarmed_artifact` hardcoded to `True`). The helper is
+    reached on a REFUSAL or an exception AFTER the Event read, so this drives a `graphs()`
+    failure — the same shape `test_a_completed_event_read_survives_a_graphs_failure_on_both
+    _disarmed_arms` uses for the `True` half of the tri-state.
+    """
+    mod = _tool_module()
+
+    def call(name, args):
+        args = args or {}
+        if args.get("section") == "graphs":
+            return RealCallToolResult({"error": "429 Too Many Requests"}, is_error=True)
+        return _event_surface(EVENT_ROWS, reported=None)(name, args)
+
+    monkeypatch.setattr(mod, "_live_call_tool", call)
+    rc = mod.main(["plan", "--graph", "org_x_g_old", "--target", "org_x_g_new", "--off",
+                   "--no-verify-read", "--ledger", str(tmp_path / "l.jsonl"),
+                   "--out", str(tmp_path / "p.json")])
+    assert rc == 0
+    payload = json.loads((tmp_path / "p.json").read_text())
+    # The read COMPLETED (3 rows) and reported NO count, so the tri-state is (3, None) and
+    # the field must say the cross-check was lost — not `True`, and not `None` (which would
+    # mean "no completed read", the round-2/3 defect this PR exists to close).
+    assert payload["events_read"] == 3, payload
+    assert payload["events_total_reported"] is None, payload
+    assert payload["events_reconciled"] is False, payload
+
+
+def test_the_event_read_is_routed_to_the_graph():
+    """Omitting `graph` reads the DEFAULT graph while every other section came from
+    `--graph` — a census mixing two graphs, which is the operator read's own defect."""
+    mod = _tool_module()
+    calls: list[dict] = []
+
+    def call(name, args):
+        calls.append({"name": name, **(args or {})})
+        return {"result": list(EVENT_ROWS)}
+
+    reader = mod.MCPReader(call, "org_x_g_old")
+    reader.read_events({"counts": {"Event": 3}})
+    assert calls and calls[0]["name"] == "tortoise_get_entity", calls
+    assert calls[0].get("type") == "events", calls
+    assert calls[0].get("graph") == "org_x_g_old", calls
+    # ⛔ The REQUEST SHAPE, and specifically `limit`: every fake ignored it, so dropping
+    # the argument outright left the suite green — and the live effect is that
+    # `tortoise_get_entity` falls back to its own default (`limit=20`), so a 4,670-row
+    # layer would return 20 rows and the census would refuse on EVERY run.
+    # ⛔ The request is EXACTLY `EVENT_READ_CEILING` — deliberately NOT `reported + 1` and
+    # NOT the bound plus one. Sizing it to the count gave one row of headroom, so a single
+    # grown Event FILLED it and the read became truncation-shaped (PR-review cycle 4);
+    # sizing it to the bound PLUS ONE was worse, because FalkorDB caps a non-aggregate read
+    # at `RESULTSET_SIZE` (default 10 000, i.e. this bound), so `bound + 1` can never be
+    # filled and the fill refusal became inert (cycle 5).
+    assert calls[0].get("limit") == mod.EVENT_READ_CEILING, calls
+
+
+def test_a_bound_credential_falls_back_and_discloses_on_the_event_read():
+    """A graph-BOUND credential cannot be re-targeted: re-read without the argument and
+    SAY SO — but only for a refusal about the graph itself."""
+    mod = _tool_module()
+
+    def call(name, args):
+        if (args or {}).get("graph"):
+            return {"error": "This credential is bound to one graph and cannot be "
+                             "re-targeted by a `graph` argument"}
+        return {"result": list(EVENT_ROWS)}
+
+    reader = mod.MCPReader(call, "org_x_g_old")
+    rows, reported = reader.read_events({"counts": {"Event": 3}})
+    assert len(rows) == 3 and reported == 3
+    assert "Event read" in (reader.note or ""), reader.note
+
+
+def test_a_non_graph_refusal_on_the_event_read_does_NOT_fall_back():
+    """Only a refusal ABOUT the graph may be re-read without it.
+
+    Re-reading a different graph under the requested graph's identity is how a census
+    mixes two graphs — the doctrine this module states for `_section`. Measured: deleting
+    either `_looks_like_graph_refusal` guard (the RAISED arm and the ENVELOPE arm) left the
+    whole suite green, so a 429 or a timeout on the requested graph was silently re-read
+    against the credential's own graph and only caught when the counts happened to
+    disagree (final review, F3).
+    """
+    mod = _tool_module()
+
+    # Both arms, both shapes: the raised arm needs something that RAISES, the envelope arm
+    # an error payload — a fixture that only exercises one leaves the other unpinned.
+    for shape in ("envelope-429", "envelope-deadline", "raises-timeout"):
+        def call(name, args, _shape=shape):
+            if (args or {}).get("graph"):
+                if _shape == "raises-timeout":
+                    raise TimeoutError("read timed out after 10s")
+                # ⛔ A plain DICT envelope for the envelope arm: a `RealCallToolResult`
+                # with `is_error=True` is refused EARLIER (inside `normalise_tool_result`,
+                # i.e. on the RAISED arm), so it never reaches the envelope arm and leaves
+                # that arm's `_looks_like_graph_refusal` guard unpinned — measured, with a
+                # `RealCallToolResult` the guard could be deleted and this test stayed
+                # green.
+                err = ("429 Too Many Requests" if _shape == "envelope-429"
+                       else "Deadline Exceeded")
+                return {"error": err}
+            return {"result": list(EVENT_ROWS)}
+
+        reader = mod.MCPReader(call, "org_x_g_old")
+        try:
+            reader.read_events({"counts": {"Event": 3}})
+        except Exception as exc:  # the refusal shape is what is under test
+            assert "429" in str(exc) or "timed out" in str(exc) or "Deadline" in str(exc), exc
+        else:
+            raise AssertionError(
+                f"{shape}: a non-graph refusal was re-read without the graph argument, so "
+                "the Event layer came from a DIFFERENT graph than the one requested")
+        assert not reader.note or "read from the credential" not in reader.note, reader.note
+
+
+def test_the_event_layer_error_arm_is_a_designed_refusal():
+    """The in-band `_error_of` arm must raise `CurationRefused`, NOT a bare `RuntimeError`.
+
+    The rc table (`docs/architecture/CURATION-11469.md`) answers **3** for a designed
+    refusal and **1** for "the run crashed", and `cmd_inventory`/`cmd_plan` catch
+    `C.CurationRefused` only — so a bare `RuntimeError` here reported a designed
+    Event-layer refusal to a driver as a crash.
+
+    ⛔ The class needs its OWN assertion: `CurationRefused` IS a `RuntimeError` subclass, so
+    every `pytest.raises(RuntimeError, ...)` in this file (and `except Exception` in the
+    fallback test above) stays green either way — measured, with a bare `RuntimeError` the
+    whole suite passed. Same reason the sibling arms in `read_sources` and `read_operators`
+    are `CurationRefused`.
+    """
+    mod = _tool_module()
+
+    def call(name, args):
+        return {"error": "Team points limit reached (25000). Upgrade your plan."}
+
+    reader = mod.MCPReader(call, None)
+    with pytest.raises(C.CurationRefused, match="read of the Event layer was refused"):
+        reader.read_events({"counts": {"Event": 3}})
+
+
+def test_an_event_payload_that_is_not_a_row_listing_is_refused():
+    """A count-only or renamed-key payload is not "an empty layer" (final review, F4).
+
+    `_is_row_listing` is the arm that separates an unreadable payload from an empty one.
+    Measured: deleting it left the suite green, so a `{"total": 3}` answer (a renamed
+    `result` key, or a resolution block arriving as the first parseable part) would have
+    read as zero Events.
+    """
+    mod = _tool_module()
+    base = _event_surface(reported=3)
+
+    def call(name, args):
+        # ⛔ The raw payload, NOT through `_event_surface` — that helper wraps whatever it
+        # is given in `{"result": [...]}`, which is exactly the shape this test must not
+        # produce (a dict inside `result` is a ROW-list of one non-row, and the failure it
+        # then reaches is the row-shape arm, not this one).
+        if name == "tortoise_get_entity" and (args or {}).get("type") == "events":
+            return {"total": 3}
+        return base(name, args)
+
+    # ⚠️ Asserted at the READER, not through `main`: an unrecognisable payload RAISES
+    # (a RuntimeError), so it never reaches the census as rows — which is the property
+    # this arm exists for. A `main`-level assertion would just be observing the traceback.
+    reader = mod.MCPReader(call, None)
+    try:
+        reader.read_events({"counts": {"Event": 3}})
+    except RuntimeError as exc:
+        # ⛔ The ARM's own words. `CurationRefused` subclasses RuntimeError, so an assertion
+        # on the exception TYPE alone is satisfied by the DISAGREEMENT arm when this guard
+        # is deleted (measured green under exactly that mutation) — a false pin.
+        assert "unrecognised shape" in str(exc), exc
+        assert "counts.Event reports" not in str(exc), exc
+    else:
+        raise AssertionError(
+            "a count-only payload was accepted as the Event layer — an unreadable payload "
+            "became an empty or partial layer")
+
+
+def test_an_error_envelope_on_the_event_read_is_named_as_a_refusal_not_a_shape():
+    """The refusal must be ATTRIBUTABLE: an envelope is an error, not a weird payload.
+
+    Measured: deleting the `_error_of` check left the suite green; the 429 the surface
+    returned then surfaced as "answered in an unrecognised shape", which sends an operator
+    to the wrong place entirely (final review, F5).
+    """
+    mod = _tool_module()
+    base = _event_surface(reported=3)
+
+    def call(name, args):
+        if name == "tortoise_get_entity" and (args or {}).get("type") == "events":
+            # A plain dict envelope — the shape `_error_of` reads. A `RealCallToolResult`
+            # with `is_error=True` is refused EARLIER (by `normalise_tool_result`), so it
+            # never reaches this arm and would pin nothing.
+            return {"error": "429 Too Many Requests"}
+        return base(name, args)
+
+    # Asserted at the READER: the payload-shape arm raises here rather than returning rows.
+    reader = mod.MCPReader(call, None)
+    try:
+        reader.read_events({"counts": {"Event": 3}})
+    except RuntimeError as exc:
+        # The refusal must be ATTRIBUTABLE. Measured: with the `_error_of` check deleted,
+        # the 429 is still refused (fail-closed) but arrives as "answered in an
+        # unrecognised shape", which sends an operator to the wrong place entirely.
+        assert "was refused" in str(exc) and "429" in str(exc), exc
+        assert "unrecognised shape" not in str(exc), exc
+    else:
+        raise AssertionError("an error envelope was accepted as the Event layer")
+
+
+def test_a_disarmed_event_read_failure_reports_the_layer_as_unread(monkeypatch, tmp_path):
+    """`None` means NO COMPLETED READ — not "this graph has no Events".
+
+    The round-2/3 defect class on the operator layer, one layer over: a disarmed payload
+    that DROPS the layer's fields leaves its state unknowable exactly when the run has
+    been reduced to reporting it.
+    """
+    mod = _tool_module()
+
+    def call(name, args):
+        args = args or {}
+        if name == "tortoise_get_entity" and args.get("type") == "events":
+            return RealCallToolResult({"error": "429 Too Many Requests"}, is_error=True)
+        return _with_operator_count(_event_surface())(name, args)
+
+    monkeypatch.setattr(mod, "_live_call_tool", call)
+    rc = mod.main(["plan", "--graph", "org_x_g_old", "--target", "org_x_g_new", "--off",
+                   "--no-verify-read", "--ledger", str(tmp_path / "l.jsonl"),
+                   "--out", str(tmp_path / "p.json")])
+    assert rc == 0
+    payload = json.loads((tmp_path / "p.json").read_text())
+    assert payload["events_read"] is None, payload
+    assert payload["events_total_reported"] is None, payload
+    assert payload["events_reconciled"] is None, payload
+    # The READ that refused is identified by the tri-state (`None`, not 0), and the
+    # envelope's own text rides `read_failure` — the same shape the operator layer's
+    # refusal takes, because `normalise_tool_result` raises before the layer-specific
+    # message is reachable. One state, one spelling, both layers.
+    assert "429" in (payload["read_failure"] or ""), payload
+
+
+def test_a_disarmed_run_after_a_completed_event_read_reports_the_pair(monkeypatch,
+                                                                     tmp_path):
+    """The OTHER arm of the same tri-state: a completed read travels with its count."""
+    mod = _tool_module()
+    monkeypatch.setattr(mod, "_live_call_tool", _event_surface())
+    rc = mod.main(["plan", "--graph", "org_x_g_old", "--target", "org_x_g_new", "--off",
+                   "--no-verify-read", "--ledger", str(tmp_path / "l.jsonl"),
+                   "--out", str(tmp_path / "p.json")])
+    assert rc == 0
+    payload = json.loads((tmp_path / "p.json").read_text())
+    assert payload["run"]["off"] is True, payload["run"]
+    assert payload["events_read"] == 3, payload
+    assert payload["events_total_reported"] == 3, payload
+    assert payload["events_reconciled"] is True, payload
+
+
+def test_an_agent_session_event_gets_the_session_reason_not_the_domain_one():
+    """`AgentSession` is the real spelling; the classifier used to test lower-case only.
+
+    `sdk.index_sessions` writes `"eventKind": "AgentSession"` and `_upsert_event` stores
+    it verbatim, while `classify_event` compared against `agentSession` case-SENSITIVELY.
+    That was unreachable while nothing read the layer; once `read_events` enumerated it,
+    every agent-session row fell through to the domain branch and was reported as
+    "a domain Event … no `events` write section" — the disposition stayed `undecidable`
+    (nothing was carried by mistake), but the per-row REASON, which is the one thing
+    reading the layer buys, was false for the whole 4,670-row layer.
+    """
+    _tool_module()          # the module must import; the classifier is the subject
+    packs: dict[tuple[str, str], str] = {}
+    for kind in ("AgentSession", "agentSession", "session", ""):
+        row = C.Row(node_id="ev-x", node_type="event", kind=kind, content="a session")
+        decision = C.classify_event(row, packs)
+        assert decision.disposition == C.UNDECIDABLE, (kind, decision)
+        assert "agent-session Event" in decision.reason, (kind, decision.reason)
+    # ...and a real domain Event keeps the domain reason.
+    domain = C.classify_event(
+        C.Row(node_id="ev-y", node_type="event", kind="deployment", content="deploy 4f2a"),
+        packs)
+    assert domain.disposition == C.UNDECIDABLE, domain
+    assert "no `events` section" in domain.reason, domain.reason
+    # ⛔ A PACK-NAMESPACED event kind is NOT the same decision as a bare one, which is
+    # exactly what `curation.Plan.bundle`'s spelling note says now (PR review round 1):
+    # the fix case-FOLDS the kind, and case-folding strips no namespace — so the
+    # namespaced spelling still falls through to the domain branch. This arm reds if a
+    # later reader "corrects" that note by bare-folding the comparison instead.
+    for namespaced in ("core:agentSession", "core:AgentSession"):
+        ns = C.classify_event(
+            C.Row(node_id="ev-z", node_type="event", kind=namespaced, content="a session"),
+            packs)
+        assert ns.disposition == C.UNDECIDABLE, (namespaced, ns)
+        assert "no `events` section" in ns.reason, (namespaced, ns.reason)
+
+
+def test_the_ledger_disarmed_arm_carries_the_completed_event_layer(monkeypatch, tmp_path):
+    """The THIRD disarmed stop point — and the one a two-arm tri-state test would miss.
+
+    `cmd_plan` reaches `_disarmed_artifact` from three call sites (a refused census read,
+    an unexpected exception, and a refused/damaged LEDGER). The operator precedent passes
+    its layer to all three; a test that only exercises the first two stays green with the
+    ledger arm silently dropping `events_*`, which is exactly the round-2/3 defect class
+    on the operator layer one layer over.
+    """
+    mod = _tool_module()
+    led = tmp_path / "l.jsonl"
+    led.write_text("null\n")          # a damaged ledger line: unreadable keys
+    monkeypatch.setattr(mod, "_live_call_tool", _event_surface())
+    rc = mod.main(["plan", "--graph", "org_x_g_old", "--target", "org_x_g_new",
+                   "--apply", "--off", "--ledger", str(led), "--no-verify-read",
+                   "--out", str(tmp_path / "p.json")])
+    assert rc == 0
+    payload = json.loads((tmp_path / "p.json").read_text())
+    assert payload["census"] is not None and payload["census_measured"] is True, payload
+    # The audit of this arm is "the census WAS read; the LEDGER is what failed".
+    assert payload["events_read"] == 3, payload
+    assert payload["events_total_reported"] == 3, payload
+    assert payload["events_reconciled"] is True, payload
+
+
+def test_the_architecture_doc_no_longer_claims_the_event_layer_is_unread():
+    """The doc is the other half of the artifact: a stale row makes the read look optional.
+
+    `docs/architecture/CURATION-11469.md` stated the Event layer as "counted here, NOT
+    enumerated … this pass deliberately does not read it (class table; #12378)" and, in
+    the class table, "this pass does NOT read it". Once `read_events` lands those rows are
+    false — and a false doc is how the next lane re-derives the omission as intended.
+    """
+    mod = _tool_module()          # noqa: F841  (the module must import; the doc is the subject)
+    doc = (_pathlib.Path(__file__).resolve().parent.parent
+           / "docs" / "architecture" / "CURATION-11469.md").read_text(encoding="utf-8")
+    assert "this pass does NOT read it" not in doc, (
+        "the class table still says the Event layer is not read")
+    assert "deliberately does not read it" not in doc, (
+        "the node-count table still says the omission is deliberate")
+    assert "counted here, NOT enumerated" not in doc, (
+        "the node-count table still describes the Event layer as unenumerated")
+    # ⛔ The THIRD sentence, one paragraph above the row this test was written for: the
+    # first version of this pin asserted three phrasings and stayed green over
+    # "Events are readable in one call too and are deliberately NOT read here", which is
+    # the same false claim in different words (round-2 review). Pin the CLAIM, not a
+    # phrase: no sentence in this doc may say the Event layer is not read.
+    assert "NOT read here" not in doc, (
+        "a paragraph still says the Event layer is not read")
+    assert "deliberately NOT read" not in doc, (
+        "a paragraph still says the omission is deliberate")
+    # ...and the spelling-invariance claim must match the classifier (case-folded since
+    # #12378): "compare the EXACT `row.kind`" is now true for `classify_source` only.
+    assert "compare the EXACT" not in doc or "classify_source` compares the" in doc, (
+        "the doc must attribute the EXACT comparison to classify_source only")
+    # ⛔ The POPULATION ARITHMETIC, which the phrase pin could not see (round-3 review):
+    # the doc's stated enumerable population must equal the sum of the class table, and
+    # reading the Event layer moved it by 4,670. Assert the SUM, not a number copied by
+    # hand, so a future layer that is read without updating this line reds here.
+    # ⛔ PARSE the class table's row for each class and check the doc's stated population
+    # against their sum. A dict of literals with substring checks stayed GREEN when the
+    # Event ROW was changed to 4,671 while the population/dispositions lines still said
+    # 4,670/25,817 — i.e. it could not see the self-contradiction it was written for
+    # (PR-review cycle 2), because every literal it looked for also occurs elsewhere.
+    import re as _re
+
+    # ⛔ Parse the POPULATION LINE as a sum of its class addends and check the arithmetic.
+    # Adding up the class-table ROWS instead double-counts: the Point row states 19,595,
+    # which already includes the 3,727 operators (the row says so). And a dict of literals
+    # with substring checks stayed GREEN when the Event ROW was changed to 4,671 while the
+    # population line still said 4,670 — it could not see the self-contradiction it was
+    # written for, because every literal it looked for also occurs elsewhere.
+    flat = _re.sub(r"\s+", " ", doc)
+    m = _re.search(
+        r"\*\*([\d,]+) points \+ ([\d,]+) sources \+ ([\d,]+) operators \+ ([\d,]+) "
+        r"events = ([\d,]+)\*\*", flat)
+    assert m, "the doc no longer states the enumerable population as a sum of its classes"
+    pts, srcs, ops, evts, total = (int(g.replace(",", "")) for g in m.groups())
+    assert pts + srcs + ops + evts == total, (pts, srcs, ops, evts, total)
+    # The BY-NODE-TYPE Event row must agree with the population's events addend — the
+    # exact check that catches the round-3 defect (a row updated without the population
+    # line). ⚠️ This is doc:49, NOT the class table: its `**Event**` bold-count shape is
+    # unique to the node-type table.
+    row = _re.search(r"^\| \*\*Event\*\* \| \*\*([\d,]+)\*\*", doc, _re.M)
+    assert row, "the by-node-type table has no Event row"
+    assert int(row.group(1).replace(",", "")) == evts, (
+        f"the Event row states {row.group(1)} but the population line counts {evts:,}")
+    # ⛔ ...and the CLASS table's own Event row, which the assertion above does NOT reach
+    # (review cycle 6 measured it: the regex above matches the by-node-type row, so
+    # setting this one to 4,671 left the file at 236 passed). Its shape is different —
+    # a backticked kind and an unbolded count — so it needs its own parse. Without this,
+    # the class table can contradict its own population and dispositions lines silently,
+    # which is precisely the self-contradiction the check exists to catch.
+    cls = _re.search(r"^\| `event` \(session container\) \| ([\d,]+) \(", doc, _re.M)
+    assert cls, "the class table has no `event` (session container) row"
+    assert int(cls.group(1).replace(",", "")) == evts, (
+        f"the class-table Event row states {cls.group(1)} but the population line counts "
+        f"{evts:,}")
+    # ...and the dispositions line must add up to the same population.
+    assert f"127 carry · 5 not-carried · {total - 132:,} undecidable" in flat, (
+        "the dispositions line does not add up to the population")
+    # ⛔ The PLAN's wiring row must not prescribe the clamp the code was fixed to remove:
+    # it said `limit=EVENT_READ_CEILING` while the code then sent `reported + 1`, i.e. the
+    # plan documented the fail-open (PR-review cycle 2), and nothing pinned it.
+    plan = (_pathlib.Path(__file__).resolve().parent.parent / "docs" / "plans"
+            / "2026-11-13-issue-12378-event-layer-read.md").read_text(encoding="utf-8")
+    assert "limit=EVENT_READ_CEILING + 1" not in plan, (
+        "the plan still prescribes the request one row ABOVE the bound, which can never be "
+        "filled and makes the fill refusal inert (PR-review cycle 5)")
+    # ⛔ Pin the WIRING ROW, not the whole document: the plan legitimately RECORDS the two
+    # superseded sizings as history (a reader needs to know why the request is no longer
+    # sized to the count), so a whole-document "absent" assertion reds on the very
+    # paragraph that documents the fix. What must never come back is the row a lane would
+    # re-implement from.
+    wiring = [ln for ln in plan.splitlines() if ln.startswith("| `tools/curate_graph.py::"
+                                                             "MCPReader._get_entities`")]
+    assert wiring, "the plan has no MCPReader._get_entities wiring row"
+    assert "limit` = `EVENT_READ_CEILING`" in wiring[0], wiring[0]
+    assert "reported + 1" not in wiring[0] and "min(" not in wiring[0], wiring[0]
+    assert "EVENT_READ_CEILING + 1" not in wiring[0], wiring[0]
+    # The plan must not describe the re-count as growth-only either: since the symmetric
+    # fix, a SHRINK with an agreeing fresh count is accepted, and the growth-only wording
+    # states the opposite of the code for the mirror direction (PR-review cycle 3).
+    assert "growth direction is re-counted" not in plan, (
+        "the plan still describes the re-count as growth-only")
+    # The plan must describe the request the code actually sends, and must not resurrect
+    # EITHER superseded sizing: the one-row headroom (cycle 4) or the bound-plus-one that
+    # the engine's own `RESULTSET_SIZE` cap turns into an inert guard (cycle 5).
+    assert "**sized to exactly `EVENT_READ_CEILING`**" in plan, (
+        "the plan does not describe the request the code sends")
+    assert "RESULTSET_SIZE" in plan, (
+        "the plan does not name the engine cap that makes `bound + 1` unfillable")
+    # ⚠️ PRESENT TENSE, not the broad substring (PR-review cycle 7): the plan legitimately
+    # RECORDS the superseded sizing ("the first draft WAS sized to `counts.Event + 1`"), and
+    # a bare `sized to ...` test false-reds on exactly that note.
+    #
+    # ⛔ BUT THE "`is sized to`" FORM WAS A NO-OP GATE, AND THAT IS WORSE THAN BRITTLE
+    # (review cycle 8, measured). The withdrawn sentence this pin exists for reached the
+    # doc EMHPHASIS-WRAPPED and mid-sentence — "The read is therefore\n**sized to
+    # `counts.Event + 1`**, which is…" — so neither `is sized to` nor any `is `-prefixed
+    # form can match it, and re-inserting it VERBATIM from
+    # `git show 3770e1e59a:docs/plans/…:118-123` left this test GREEN (`1 passed`).
+    # A test that cannot fail on the exact defect it was written for is not a pin.
+    #
+    # The check is therefore per-CLAUSE on emphasis-normalised text, EXCLUDING clauses whose
+    # history marker is attached to the SIZING — so recorded history stays writable and a
+    # present-tense prescription of `counts.Event + 1` reds under emphasis, clause splits and
+    # verb inflection.
+    # ⛔ ITS SCOPE IS `counts.Event + 1`, AND THAT IS NARROWER THAN "any wrong sizing"
+    # (review cycle 12, measured). A differently-SPELLED wrong sizing — `reported + 1`, or
+    # `EVENT_READ_CEILING + 1` — prescribes the same defect and this detector does NOT see
+    # it, because `_SIZING` matches one token. That is a STATED GAP, not a covered case:
+    # the CODE forms of both are pinned by the `limit_sent` assertions further down, so a
+    # lane cannot ship them; only a prose resurrection of them would pass here. Closing it
+    # by widening `_SIZING` was NOT done deliberately — the plan doc discusses these numbers
+    # constantly, so a wider pattern reds on the doc's own recorded history and trades a
+    # narrow gap for a false-RED loop.
+    # ⚠️ NOT per-sentence: this paragraph still said "per-SENTENCE" for several commits after
+    # the unit became a clause, contradicting the rule documented nine lines below it — and
+    # describing exactly the SENTENCE-WIDE EXEMPTION the clause rule was written to close, so
+    # a maintainer reconciling prose to code would re-open the bypass.
+    plan_norm = _re.sub(r"\*+", "", _re.sub(r"\s+", " ", plan))
+    # ⛔ THE MARKER MUST BE TIED TO THE SIZING, NOT TO THE SENTENCE'S SUBJECT (review
+    # cycle 10, measured). Leaving the loose markers in (`cycle N`, `original`, `first
+    # draft`, `earlier`) exempted a clause that PRESCRIBES as soon as it mentioned one:
+    # "Cycle 3 confirmed the read is sized to `counts.Event + 1` today." stayed GREEN,
+    # because the clause itself carried `Cycle 3` — no comma to split on, so the
+    # per-clause rule could not separate them. Only a marker attached to the SIZING makes
+    # a statement historical rather than prescriptive; a bare `cycle N` or `original`
+    # says where the number came from, not that it was withdrawn.
+    # ⛔⛔ AND A HISTORY *WORD* IS NOT A HISTORY *STATEMENT* (review cycle 11, measured).
+    # Exempting any clause that merely CONTAINS one of `withdrawn|superseded|no longer|used
+    # to` let an unrelated subject donate the marker while the prescription rode along:
+    #
+    #     The withdrawn clamp left the read sized to `counts.Event + 1`.
+    #     The clamp was withdrawn and the read is sized to `counts.Event + 1` today.
+    #     An earlier revision was superseded and the read is sized to `counts.Event + 1`.
+    #
+    # all stayed GREEN (measured, 1 passed apiece). The exemption is therefore on the
+    # SIZING PHRASE BEING PAST-FORM, which is (nearly) the only shape that REPORTS a
+    # withdrawn sizing rather than prescribing a current one.
+    # ⚠️ "(nearly)": a past-form sizing and a live present-tense sizing that share a
+    # PUNCTUATION-FREE clause still collapse into one unit, and the past one donates the
+    # exemption — `The first draft was sized to `counts.Event + 1` and it is sized to
+    # `counts.Event + 1` today.` is NOT flagged (measured). The gap is NARROWED by this
+    # rule, not closed; it is re-pinned as a known gap below rather than left implied.
+    _HISTORY = _re.compile(
+        r"\b(?:was|were|had been)\s+(?:\w+\s+){0,2}sized\b"      # "was [therefore] sized"
+        r"|\bsized\s+the\s+request\s+to\b"                       # narrative past
+        r"|\b(?:no longer|never)\s+sized\b", _re.I)               # "is no longer sized"
+
+    # ⛔ THE VERB FAMILY, not one inflection (PR-review cycle 10, measured): the plan pin
+    # matched only `sized to ...`, so "The read sizes its request to `counts.Event + 1`."
+    # stayed GREEN — while the CODE pin below already guards the `sizes each request to`
+    # phrasing. Two pins disagreeing about what a prescription IS means a
+    # lane reconciling the plan in the code's own voice evades the plan pin.
+    _SIZING = _re.compile(r"siz\w*[^.;:]{0,40}?`counts\.Event\s*\+\s*1`", _re.I)
+    # ⚠️ `\s*` around the `+` (review cycle 12, measured): the literal-space form missed
+    # "sized to `counts.Event+1`" — the spelling Python code itself uses — so the pin was
+    # evadable by dropping two spaces. Relaxing only the spacing inside this one token
+    # cannot introduce a false positive: it matches the same numerator, more loosely.
+
+    def _prescribes(text: str) -> list[str]:
+        """Clauses that state the withdrawn sizing as if it were current.
+
+        ⚠️ THE UNIT IS A CLAUSE, NOT A SENTENCE (PR-review cycle 9, measured). Excluding
+        the whole SENTENCE when any history word appears anywhere in it let a live
+        prescription ride along in the same sentence: "Earlier revisions aside, the read is
+        no longer sized to the bound, it is **sized to `counts.Event + 1`** today" stayed
+        GREEN — a single "no longer" excused a sentence that prescribes the defect. Commas
+        split too.
+        ⚠️ NOT a universal, and the split was described as sufficient when it is not:
+        history and a live prescription CAN share a unit when no `.,;:` separates them, and
+        a PAST-FORM sizing then exempts a live present-tense sizing in the same unit. That
+        shape is NARROWED, not closed — the marker rule above removed the loose history words
+        but one past-form sizing still donates the exemption — and it is pinned as a KNOWN
+        GAP by the self-test case below that asserts it is NOT flagged. The plan's history
+        block is a separate paragraph, so it does not take this shape.
+        """
+        return [
+            c.strip() for c in _re.split(r"(?<=[.;:,])\s+", text)
+            if _SIZING.search(c) and not _HISTORY.search(c)
+        ]
+
+    # ⛔ THE DETECTOR IS SELF-TESTED, because a pin that cannot fail on its own defect is
+    # the class this block has produced twice already. Each case below is a MEASURED
+    # mutation of the plan doc: the first is the withdrawn sentence's TEXT — ⚠️ mid-sentence,
+    # but NOT emphasis-wrapped: the input below carries no `**` and no line break, and it is
+    # passed to `_prescribes` without the `plan_norm` strip. The emphasis form is handled by
+    # that normalisation, not by this case (the label used to claim otherwise), the second is
+    # the clause-splitting bypass, the last two must stay writable as history.
+    assert _prescribes(
+        "The read is therefore sized to `counts.Event + 1`, which is the smallest "
+        "request that PROVES non-truncation."), (
+        "the plan-doc detector cannot see the withdrawn sentence it exists for")
+    # ⛔ THE NO-SPACE SPELLING (review cycle 12, measured GREEN before the `\s*` relaxation):
+    # `counts.Event+1` is how the code is written, so a lane quoting code into the plan would
+    # have evaded the pin while prescribing the defect.
+    assert _prescribes(
+        "The read is sized to `counts.Event+1` so a filled response proves growth."), (
+        "the no-space spelling of the withdrawn sizing evades the plan pin")
+    assert _prescribes(
+        "Earlier revisions aside, the read is no longer sized to the bound, it is sized "
+        "to `counts.Event + 1` today."), (
+        "a history word in the same sentence still exempts a live prescription")
+    assert not _prescribes(
+        "A first draft said the request was sized to `counts.Event + 1`."), (
+        "recorded history must stay writable")
+    assert not _prescribes(
+        "The superseded row sized the request to `counts.Event + 1`."), (
+        "recorded history must stay writable")
+    # ✅ ONE KNOWN-GAP SHAPE, now CLOSED (review cycle 11) — but see the re-pin below: the
+    # GAP ITSELF was narrowed, not closed, because a PAST-FORM sizing still donates the
+    # exemption inside a punctuation-free clause (review cycle 12, measured). This case is
+    # the "bare history WORD" shape. It read: "with no `.,;:` between a
+    # history marker and a live prescription, they share one unit and the marker exempts
+    # it", and it was pinned as `assert not _prescribes(...)` with the instruction "if this
+    # ever starts failing, the detector got STRONGER — update the note it pins". The
+    # exemption is now on the SIZING PHRASE BEING PAST-FORM rather than on any history word
+    # in the clause, so `used to size` no longer excuses the live `sizes its request to`
+    # that follows it in the same unit. Updated rather than deleted, per that instruction.
+    assert _prescribes(
+        "Earlier revisions used to size the read to `counts.Event + 1` and the read sizes "
+        "its request to `counts.Event + 1` today."), (
+        "the no-punctuation mixed shape regressed: a history word is exempting the live "
+        "prescription that shares its clause")
+    # ⚠️ THE REMAINING KNOWN GAP, pinned so it cannot pass for safety: a PAST-FORM sizing
+    # and a live present-tense sizing in ONE punctuation-free clause are not separated, and
+    # the past one exempts the live one. If this assertion starts failing, the detector got
+    # STRONGER — narrow this note rather than deleting the case.
+    assert not _prescribes(
+        "The first draft was sized to `counts.Event + 1` and it is sized to "
+        "`counts.Event + 1` today."), (
+        "the residual puntuation-free mixed shape is now flagged: narrow the note above")
+    # ⛔ ...and the other direction of the same trap: a history WORD is not a history
+    # STATEMENT. `Cycle 3` says where the number came from; it does not withdraw it.
+    # Measured GREEN before this case was added (review cycle 10).
+    assert _prescribes(
+        "Cycle 3 confirmed the read is sized to `counts.Event + 1` today."), (
+        "a bare history word in the same clause still exempts a live prescription")
+    assert _prescribes(
+        "As earlier, the read is sized to `counts.Event + 1`."), (
+        "a bare history word in the same clause still exempts a live prescription")
+    # ⛔ ...and an UNRELATED subject must not be able to donate the marker (review cycle
+    # 11, measured GREEN before these three): the history word is in the clause, but it is
+    # not what the sizing is doing.
+    assert _prescribes(
+        "The withdrawn clamp left the read sized to `counts.Event + 1`."), (
+        "an unrelated historical subject still exempts a live prescription")
+    assert _prescribes(
+        "The clamp was withdrawn and the read is sized to `counts.Event + 1` today."), (
+        "an unrelated historical subject still exempts a live prescription")
+    assert _prescribes(
+        "An earlier revision was superseded and the read is sized to `counts.Event + 1`."), (
+        "an unrelated historical subject still exempts a live prescription")
+    prescribing = _prescribes(plan_norm)
+    assert not prescribing, (
+        "the plan prescribes sizing the request to the count (one row of headroom), which "
+        f"the code does not send; offending clause(s): {prescribing[:2]}")
+    # ⛔ ...and the CODE's own text, which nothing pinned (PR-review cycle 5). The plan pin
+    # above guards the plan, but `tools/curate_graph.py` carried the SAME superseded
+    # prescription in TWO places — the `read_events` docstring bullet and the
+    # `EVENT_READ_CEILING` constant's comment — while the code then sent
+    # `EVENT_READ_CEILING + 1` (`curate_graph.py:limit_sent`, cycle 3; it sends the bound
+    # itself since cycle 5). It survived four review
+    # cycles and one peer fix for exactly that reason: the phrase was pinned in the plan
+    # only. A maintainer reconciling code to that text deletes the bound-sized request and
+    # restores the one-row-headroom truncation window, so the wrong direction is the
+    # DANGEROUS one and the absence is asserted on the prescribing phrasing, not on the
+    # digits (the corrective comments legitimately quote the old sizing as history).
+    #
+    # ⚠️ The `#:` markers are STRIPPED before matching, and that is load-bearing: the
+    # constant's comment wraps, so the raw text carries `sizes each request to\n#:
+    # `counts.Event + 1`` and a phrase assertion on the un-stripped text matches NOTHING —
+    # a first revision of this pin passed over the exact defect it was written for
+    # (measured: reverted the comment, the pin stayed green).
+    source_text = (_pathlib.Path(__file__).resolve().parent.parent
+                   / "tools" / "curate_graph.py").read_text(encoding="utf-8")
+    source_flat = _re.sub(r"\s*#:\s*", " ", _re.sub(r"\s+", " ", source_text))
+    # ⚠️ Each assertion below is SCOPED, for three measured reasons (PR-review cycle 6):
+    # a bare whole-file occurrence count cannot attribute anything — `limit_sent =
+    # EVENT_READ_CEILING + 1` supplies one for free, so `count(...) >= 2` stayed GREEN with
+    # the constant's comment reverted; and a whole-file absence test FALSE-REDS on a
+    # legitimate historical sentence ("the request WAS sized to `counts.Event + 1` before
+    # cycle 4" is exactly the kind of note this file keeps and must keep).
+    #
+    # The two ABSENCE assertions are therefore pinned to the PRESENT-TENSE prescription —
+    # `is sized to` / `sizes each request to`, which a past-tense note cannot contain — and
+    # they are checked against text with `#:` markers stripped, because the constant's
+    # comment WRAPS and the phrase would otherwise straddle a marker and match nothing
+    # (measured: an earlier revision of this pin passed over the very defect it was written
+    # for). ⚠️ Plain-`#` comments are deliberately NOT stripped: the corrective comments at
+    # `read_events`'s call site legitimately quote the old sizing to explain why it was
+    # removed, and stripping them would red on that history.
+    #
+    # The two PRESENCE assertions are the ones that catch a revert ATTRIBUTABLY — each names
+    # its own site's sentence, so no historical mention can satisfy them and neither can the
+    # code line.
+    assert "is sized to `counts.Event + 1`" not in source_flat, (
+        "curate_graph.py still prescribes sizing the Event request to the count; the code "
+        "sizes it to exactly EVENT_READ_CEILING")
+    assert "sizes each request to `counts.Event + 1`" not in source_flat, (
+        "the EVENT_READ_CEILING comment still prescribes sizing the request to the count")
+    # ⛔ THE CODE'S OWN VALUE, which nothing pinned until cycle 7 — the assertions above are
+    # all about PROSE. A meaning-preserving rewording of either sentence redded the previous
+    # pair (measured: "So the read must size its request TO the bound, not above it" →
+    # "The read therefore requests exactly this bound and never more" left 1 failed), which
+    # is the cost that gets a pin deleted rather than honoured. The value the code assigns is
+    # mechanical — no rewording can move it — and it is the thing every sentence above is
+    # trying to describe, so it is asserted directly, in BOTH directions: the shipped
+    # assignment present, and the superseded bound-plus-one absent.
+    # ⚠️ The presence side pins the ASSIGNMENT, not the line's termination (PR-review cycle
+    # 8): `"limit_sent = EVENT_READ_CEILING\n"` redded a MEANING-PRESERVING edit — appending
+    # `# the declared response bound` to that line — while its own message accused the code
+    # of not sizing the request to the bound (measured: 1 failed). That is the same
+    # brittleness this block removed one assertion earlier, and it is the shape that gets a
+    # pin deleted rather than honoured. The regex allows a trailing comment and nothing else.
+    assert _re.search(r"^\s*limit_sent = EVENT_READ_CEILING\s*(?:#.*)?$", source_text,
+                      _re.M), (
+        "curate_graph.py does not size the Event request to the bound")
+    assert "limit_sent = EVENT_READ_CEILING + 1" not in source_text, (
+        "curate_graph.py still sizes the Event request one ABOVE the bound, which the "
+        "engine's RESULTSET_SIZE cap makes unfillable and therefore leaves the fill "
+        "refusal inert")
+    # ...and both must say WHY, because the reason is what a future lane edits away: the
+    # engine caps a non-aggregate read at `RESULTSET_SIZE`, DEFAULT 10 000, i.e. AT this
+    # bound, so `bound + 1` can never be filled and the fill refusal becomes inert.
+    assert "RESULTSET_SIZE" in source_flat, (
+        "curate_graph.py never names the engine cap that sizes this read's request")
+
+    # ...and the row records the change rather than dropping the subject.
+    assert "enumerated** since #12378" in doc or "**enumerated** — agent-session" in doc, (
+        "the Event row must say it IS enumerated now, and cite #12378")
+    # ⛔ The GUARANTEE TABLE, which none of the phrase pins could see (PR review round 1):
+    # "What the harness guarantees (and how each is proven)" carried a row for the
+    # reasoning layer and NONE for the episodic one, so it presented itself as the
+    # complete guarantee set over a census that had just grown by 4,670 rows. The row is
+    # pinned by its own name plus the test the mutation proof leans on, so a revert of
+    # either reds here rather than drifting back to a guarantees section that is silent
+    # about a layer the census reads.
+    assert "the episodic layer is read, not assumed" in doc, (
+        "the guarantee table has no row for the Event layer the census now reads")
+    assert "test_an_event_row_that_is_not_an_object_is_refused_not_a_traceback" in doc, (
+        "the Event guarantee row must name the row-shape guard's test")
+    assert "EVENT_READ_CEILING" in doc, (
+        "the Event guarantee row must name the bound it refuses above")
+    # ⛔ The DOC INDEX (PR review cycle 2): `docs/00_index.md` is the routing entry
+    # `AGENTS.md` sends every lane to, and it carried the PRE-Event number set
+    # (21,147 rows / 21,015 undecidable) while this change moved the census to 25,817 /
+    # 25,685 — the exact under-statement #12378 exists to stop, in the index rather than
+    # in the doc the phrase pins cover. The operator layer's own PR updated this line
+    # (`a6948020c6`), so the precedent makes the omission drift.
+    # Pin the CURRENT claim, not the absence of the digits: the index may keep a withdrawn
+    # number as history (it does for 17,420), so a bare `"21,147" not in index` would
+    # forbid a correct footnote while still passing if the current figure regressed.
+    index = (_pathlib.Path(__file__).resolve().parent.parent
+             / "docs" / "00_index.md").read_text(encoding="utf-8")
+    assert "over **21,147** enumerable rows" not in index, (
+        "docs/00_index.md still states the pre-Event-layer population as CURRENT")
+    assert "and 21,015 stay undecidable" not in index, (
+        "docs/00_index.md still states the pre-Event-layer undecidable count as CURRENT")
+    assert "over **25,817** enumerable rows" in index, (
+        "docs/00_index.md must state the population the Event read moved the census to")
+    assert "25,685 stay undecidable" in index, (
+        "docs/00_index.md must state the undecidable count the Event read moved")
+
+
+def test_an_event_with_no_text_is_counted_on_the_report(monkeypatch, tmp_path):
+    """An Event with no name/title/subject has an empty text, and the report SAYS so.
+
+    The pass keys Events by content, so those rows share one `stable_key`. What does NOT
+    happen is a duplicate CLAIM: `classify_event` takes no `duplicate_of`/`keeper_id` and
+    every Event arm is `undecidable`, so the row count and the per-row reasons are
+    unaffected — an earlier draft of the `read_note` asserted a fold outcome that never
+    reaches an Event decision (round-2 review), which is why the counter is pinned here
+    and the wording says only what is true.
+    """
+    mod = _tool_module()
+    surface = _event_surface([
+        {"id": "ev-1", "eventKind": "deployment", "subject": "has text"},
+        {"id": "ev-2", "eventKind": "deployment", "subject": ""},
+    ])
+    monkeypatch.setattr(mod, "_live_call_tool", surface)
+    assert mod.main(["inventory", "--out", str(tmp_path / "i.json"),
+                     "--no-verify-read"]) == 0
+    report = json.loads((tmp_path / "i.json").read_text())
+    note = report["read_note"] or ""
+    assert "1 of 2 Event rows carry no name/title/subject" in note, note
+    # The disclosure must not claim a duplicate fold, and the count must be intact.
+    assert "content duplicates" not in note, note
+    assert report["census"]["total_rows"] == 3, report["census"]      # 1 point + 2 events
+    assert report["census"]["by_class"]["event:deployment"]["undecidable"] == 2
+    assert report["events_read"] == 2, report
+
+
+def test_a_layer_that_grew_past_the_bound_is_not_accepted_as_complete():
+    """A layer that grew past the bound must not be vouched for by the count.
+
+    `limit_sent` used to be `min(reported + 1, EVENT_READ_CEILING)`, which collapses to
+    `reported` exactly when `counts.Event == EVENT_READ_CEILING`: a layer that had grown to
+    10,050 then came back as 10,000 rows == the count, passed the reconciliation, and was
+    filed `events_reconciled: True` with 50 rows unread. Measured by the PR reviewer.
+    `reported + 1` was the next wrong answer (ONE row of headroom: a single Event created
+    between the count and the read fills the request), and `EVENT_READ_CEILING + 1` was the
+    third — the engine caps a non-aggregate read at `RESULTSET_SIZE` (default 10,000, i.e.
+    the bound), so a request one ABOVE the bound can never be filled and this very layer
+    came back as 10,000 rows == the count and was accepted with 50 unread. The shipped
+    request is exactly `EVENT_READ_CEILING`: the fake below models real LIMIT semantics, so
+    10,000 rows fill the request and refuse.
+    """
+    mod = _tool_module()
+    ceiling = mod.EVENT_READ_CEILING
+    # The count sits BELOW the bound (so the bound refusal does not pre-empt the read) and
+    # the true layer sits ABOVE it: exactly the growth the cap makes invisible.
+    true_layer = [{"id": f"ev-{i}", "eventKind": "meeting", "name": f"m{i}"}
+                  for i in range(ceiling + 50)]
+    stale = ceiling - 1
+    sent: list[int] = []
+
+    def call(name, args):
+        args = args or {}
+        if name == "tortoise_get_entity" and args.get("type") == "events":
+            sent.append(args["limit"])
+            # LIMIT semantics AND the server's cap, which equals the request here: the
+            # response tops out at `limit` however large the layer really is.
+            return {"result": true_layer[:args["limit"]]}
+        if args.get("section") == "status":
+            return {"counts": {"Event": stale}}            # the stale count, both reads
+        return {"result": []}
+
+    reader = mod.MCPReader(call, None)
+    with pytest.raises(C.CurationRefused, match=r"counts\.Event"):
+        reader.read_events({"counts": {"Event": stale}})
+    # The request is the bound itself: a capped response EQUALS it and refuses, and a
+    # response below it was not capped. A request of `bound + 1` could never be filled.
+    assert sent == [ceiling], sent
+
+
+def test_a_layer_that_grew_with_an_agreeing_recount_is_accepted_not_refused():
+    """The GROWTH direction is a correct read, and this tenant grows while sessions index.
+
+    `counts.Event` is fed by `index_sessions`, so the two-request window can close on a
+    layer one row larger than the count. The read re-counts ONCE and accepts when the fresh
+    count agrees with the rows; a stale count must not present as a broken layer.
+    """
+    mod = _tool_module()
+    rows = [{"id": "ev-1", "eventKind": "meeting", "name": "a"},
+            {"id": "ev-2", "eventKind": "meeting", "name": "b"},
+            {"id": "ev-3", "eventKind": "meeting", "name": "c"},
+            {"id": "ev-4", "eventKind": "meeting", "name": "d"}]
+    counts_seen: list[int] = []
+
+    def call(name, args):
+        args = args or {}
+        if name == "tortoise_get_entity" and args.get("type") == "events":
+            return {"result": rows[:args["limit"]]}
+        if args.get("section") == "status":
+            counts_seen.append(1)
+            # The caller holds the STALE count (3); this re-read sees the newer 4.
+            return {"counts": {"Event": 4}}
+        return {"result": []}
+
+    reader = mod.MCPReader(call, None)
+    out, reported = reader.read_events({"counts": {"Event": 3}})
+    assert len(out) == 4 and reported == 4, (len(out), reported)
+    assert "CHANGED" in (reader.note or ""), reader.note
+
+
+def test_a_completed_event_read_survives_a_graphs_failure_on_both_disarmed_arms(
+        monkeypatch, tmp_path):
+    """Two of the three disarmed call sites were unpinned, and both can drop a READ layer.
+
+    `graphs()` is read AFTER the Event read, so a failure there leaves the layer read — and
+    an arm that dropped `events=` on the way out reported `events_read: None` ("no completed
+    read") over a read that HAD completed. Measured: deleting `events=episodic` from either
+    the `CurationRefused` arm or the `Exception` arm left the whole suite green.
+    """
+    mod = _tool_module()
+
+    # ⛔ Two arms, two SHAPES: the `CurationRefused` arm takes an error ENVELOPE, and the
+    # `Exception` arm needs something that RAISES — a plain dict here does not reach it
+    # (`graphs()` ignores unrecognised rows), so the test would pass while never entering
+    # the arm it names. Measured: with a dict, dropping `events=` from the `Exception` arm
+    # still left the test green.
+    for shape in ("envelope", "raises"):
+        def call(name, args, _shape=shape):
+            args = args or {}
+            if args.get("section") == "graphs":
+                if _shape == "envelope":
+                    return RealCallToolResult({"error": "429 Too Many Requests"},
+                                              is_error=True)
+                raise TimeoutError("graphs read timed out after 10s")
+            return _event_surface()(name, args)
+
+        monkeypatch.setattr(mod, "_live_call_tool", call)
+        out = tmp_path / f"p-{shape}.json"
+        rc = mod.main(["plan", "--graph", "org_x_g_old", "--target", "org_x_g_new",
+                       "--off", "--no-verify-read",
+                       "--ledger", str(tmp_path / f"l-{shape}.jsonl"),
+                       "--out", str(out)])
+        assert rc == 0, (shape, rc)
+        payload = json.loads(out.read_text())
+        assert payload["run"]["off"] is True, (shape, payload["run"])
+        # The layer read COMPLETED before `graphs()` failed, so it travels as (n, m):
+        # `None` here would be the round-2/3 defect this PR exists to close.
+        assert payload["events_read"] == 3, (shape, payload.get("events_read"))
+        assert payload["events_total_reported"] == 3, (shape, payload)
+        assert payload["events_reconciled"] is True, (shape, payload)
+
+
+def test_a_layer_that_shrank_with_an_agreeing_recount_is_accepted_not_refused():
+    """The MIRROR of the growth case: a delete between count and read is a correct read.
+
+    The re-count was applied only when `read > reported`, so a `:Event` deleted by the
+    hosted entity-delete path in the two-request window made a COMPLETE read refuse —
+    the same false block in the other direction (PR-review cycle 2). The request is
+    exactly `EVENT_READ_CEILING`, so a response STRICTLY BELOW it was not capped and is the
+    exact layer in either direction, and a fresh count that equals the rows confirms the
+    disagreement was a stale count — while a response that FILLS the request refuses even
+    when the fresh count agrees (see the reported-arm fill arm), because `bound + 1` did
+    not survive cycle 5: a request one above the bound can never be filled at the engine's
+    cap, which made that refusal inert.
+    """
+    mod = _tool_module()
+    rows = [{"id": "ev-1", "eventKind": "meeting", "name": "a"},
+            {"id": "ev-2", "eventKind": "meeting", "name": "b"}]
+
+    def call(name, args):
+        args = args or {}
+        if name == "tortoise_get_entity" and args.get("type") == "events":
+            return {"result": rows[:args["limit"]]}
+        if args.get("section") == "status":
+            return {"counts": {"Event": 2}}       # the newer, lower count
+        return {"result": []}
+
+    reader = mod.MCPReader(call, None)
+    out, reported = reader.read_events({"counts": {"Event": 5}})   # stale, higher count
+    assert len(out) == 2 and reported == 2, (len(out), reported)
+    assert "CHANGED" in (reader.note or ""), reader.note
+
+
+def test_a_response_that_FILLED_its_request_refuses_even_when_a_recount_agrees():
+    """An agreeing re-count does not prove the rows are whole when the response was FULL.
+
+    The dangerous shape is a COMPOUND race: the layer grew past the request (so the
+    response was TRUNCATED), then shrank back to exactly the requested size before the
+    re-read — the equality holds, and accepting files `events_reconciled: True` over rows
+    that are partly dead and partly missing. Measured by the PR reviewer (4 live rows
+    unread, 4 deleted rows reported, accepted). A response that fills its request is the
+    only truncation-capable accept, so it must refuse instead of trusting the re-count.
+    """
+    mod = _tool_module()
+    def call(name, args):
+        args = args or {}
+        if name == "tortoise_get_entity" and args.get("type") == "events":
+            # Fill the REQUEST exactly: this is the truncation-capable shape.
+            return {"result": [{"id": f"ev-{i}", "eventKind": "meeting", "name": f"e{i}"}
+                               for i in range(args["limit"])]}
+        if args.get("section") == "status":
+            # The re-count AGREES with the rows (the grow-then-shrink-back race), so the
+            # disagreement arm resolves in favour of the read and only the FILL arm is
+            # left to refuse it.
+            return {"counts": {"Event": mod.EVENT_READ_CEILING}}
+        return {"result": []}
+
+    reader = mod.MCPReader(call, None)
+    try:
+        reader.read_events({"counts": {"Event": 3}})     # stale count: the re-count decides
+    except mod.C.CurationRefused as exc:
+        msg = str(exc)
+        assert "filling the" in msg, msg
+        assert "may also have been CUT" in msg, msg
+    else:
+        raise AssertionError(
+            "a full request + an agreeing re-count was ACCEPTED: the compound race "
+            "(grow past the request, shrink back before the re-read) files "
+            "events_reconciled=True over unread rows")
+
+
+def test_a_server_capped_response_disagreeing_with_the_count_refuses():
+    """The ENGINE'S cap, modelled: a non-aggregate read returns at most `RESULTSET_SIZE`.
+
+    FalkorDB truncates any non-aggregate read at its server-global `RESULTSET_SIZE`
+    (**default 10 000** — measured on docker 4.20.4, #4515/#4233/#5062) with no error and
+    no marker, so `MATCH (e:Event) … LIMIT $lim` cannot return more than the cap however
+    large the request is. The fake below enforces exactly that, which the earlier fakes did
+    not: they returned `args["limit"]` rows, an input the real server cannot produce, so
+    the "reverting the guard reds this test" property held only against impossible data.
+
+    The shape under test is the one the cap makes possible and the request geometry cannot
+    see: a layer LARGER than the cap comes back as exactly `cap` rows. Here the count says
+    9,999 and the truncated response says 10,000 — a disagreement the re-count resolves
+    against the read, so the census refuses instead of filing a cut layer as complete.
+    """
+    mod = _tool_module()
+    cap = mod.EVENT_READ_CEILING          # the engine's default RESULTSET_SIZE
+    true_layer = [{"id": f"ev-{i}", "eventKind": "meeting", "name": f"m{i}"}
+                  for i in range(cap + 500)]
+
+    def call(name, args):
+        args = args or {}
+        if name == "tortoise_get_entity" and args.get("type") == "events":
+            # ⛔ LIMIT semantics AND the server's silent cap: never more than `cap` rows,
+            # whatever `limit` was requested.
+            return {"result": true_layer[:min(args["limit"], cap)]}
+        if args.get("section") == "status":
+            return {"counts": {"Event": len(true_layer)}}   # the TRUE population
+        return {"result": []}
+
+    reader = mod.MCPReader(call, None)
+    with pytest.raises(C.CurationRefused, match=r"counts\.Event"):
+        reader.read_events({"counts": {"Event": cap - 1}})   # the stale, pre-growth count
+
+
+def test_a_layer_at_the_bound_refuses_because_the_server_caps_there():
+    """"At the bound" and "capped at the bound" are the same bytes, so it refuses.
+
+    This is the half an `EVENT_READ_CEILING + 1` request could not see: with the cap equal
+    to the bound, a request one row above it is never filled, so a 10,000-row layer was
+    accepted as whole even after it had grown to 10,001. The refusal is a FALSE BLOCK at
+    exactly 10,000 rows and that is the correct trade: an unverifiable layer is refused,
+    never filed as complete.
+    """
+    mod = _tool_module()
+    reader = mod.MCPReader(_event_surface([], reported=mod.EVENT_READ_CEILING), None)
+    with pytest.raises(C.CurationRefused, match=r"at or above"):
+        reader.read_events({"counts": {"Event": mod.EVENT_READ_CEILING}})

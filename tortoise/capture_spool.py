@@ -89,6 +89,7 @@ __all__ = [
     "is_probe_session_id",
     "is_spooled",
     "list_spool_metas",
+    "outcome_unrecorded",
     "quota_refusal",
     "read_capture_status",
     "read_discards",
@@ -97,6 +98,7 @@ __all__ = [
     "remove_spool_entry",
     "reset_terminal_entries",
     "spool_dir",
+    "unrecorded_captures",
     "write_capture_status",
     "write_spool_entry",
 ]
@@ -195,6 +197,27 @@ DISCARD_ENTRY_FAILED = "entry_failed"
 #: The spool's own `entries/` listing cannot be read — every capture is invisible.
 DISCARD_SPOOL_UNREADABLE = "spool_unreadable"
 DISCARD_CORRUPT = "corrupt_entry"
+#: The META could not be READ: EACCES/EACCES-adjacent I/O refusals (``EIO``,
+#: ``EISDIR``, ``ESTALE``) or an ``ENOENT`` that raced another drain's unlink.
+#: We never saw the bytes, so we know nothing about whether they are valid
+#: (#11802).
+#:
+#: Distinct from ``DISCARD_CORRUPT``, which now means only "the bytes were read
+#: and are not a usable meta". The two used to share one ``except OSError`` /
+#: ``except JSONDecodeError`` arm, and the shared arm reported a READ refusal as
+#: "meta is not valid JSON" — a statement about bytes the process never opened —
+#: then quarantined the turn log and unlinked the meta.
+#:
+#: This arm RECORDS and KEEPS (``retained: True``): the meta and its turn log
+#: stay where they are and the next drain retries. A read refusal is a property
+#: of WHO IS ASKING, not of the entry — the same file is often perfectly
+#: readable a second later or by another uid — so destroying it turns a
+#: permission mismatch into permanent loss. The meta is also the only copy of
+#: the ``session_id``/``client_captured_at`` that anchor the ``AgentSession``
+#: Event (``docs/ONTOLOGY.md`` §5, content-addressed ``eventId``) and of the
+#: retry state, so removing it makes the entry unfilable by any verb
+#: (``_quarantine_log`` says so itself).
+DISCARD_META_UNREADABLE = "meta_unreadable"
 #: A filesystem error while writing the spool — recorded, never silent.
 DISCARD_WRITE_FAILED = "spool_write_failed"
 #: A PERMANENT HTTP refusal (4xx). The entry is RECORDED and KEPT (#7708): the
@@ -237,7 +260,12 @@ RETAINED_DISCARD_REASONS = frozenset(
      # An over-bound entry is now RECORDED + KEPT (terminal) instead of unlinked,
      # so it is not a loss either — the same instrument rule: the ledger must not
      # report a destroyed capture when the turn log is still on disk.
-     DISCARD_ENTRY_TOO_LARGE})
+     DISCARD_ENTRY_TOO_LARGE,
+     # A meta we could not READ is recorded and KEPT (#11802): nothing was read,
+     # concluded, quarantined or unlinked, so the entry survives to retry. The
+     # arm also writes `retained: True` on the record — this membership is the
+     # reading for a record that carries no flag (an older leg's line).
+     DISCARD_META_UNREADABLE})
 
 
 def is_lost_discard(record: dict) -> bool:
@@ -309,6 +337,154 @@ class PostOutcome:
     body: dict = field(default_factory=dict)
 
 
+#: The key a 2xx body (and the spool meta of the entry it filed) uses to say the
+#: server has NOT recorded whether extraction ran. Set by
+#: ``__main__._session_post._refused`` for the ``PENDING`` verdict — the branch
+#: #12374 (unmerged at the time of writing) adds; on a tree without it, the key
+#: has no producer and the trace is INERT, not wrong — and copied onto the spool
+#: entry by ``_flush_one`` so the state outlives the run.
+#:
+#: ⛔ TWO body shapes reach this vocabulary, and conflating them is how the Pi leg's
+#: port went dead (measured in #12460's lane):
+#:   * the synthesised confirmation body — ``{"confirmed": "filed" |
+#:     "unextracted"}`` (plus ``extraction_mode`` for ``UNEXTRACTED``), and on the
+#:     PENDING branch #12374 adds, ``{"confirmed": "pending",
+#:     "extraction_outcome": "unknown"}``. ``_session_post`` builds it for a
+#:     REFUSAL THAT COMMITTED; Python-only, and the Pi hook POSTs to
+#:     ``/v1/sessions`` directly so it never sees this shape;
+#:   * the raw capture receipt (``hosted_api`` POST ``/v1/sessions``:
+#:     ``{session_id, turns, extracted, points, extraction_mode, …}``) — carries
+#:     NEITHER ``confirmed`` nor ``extraction_outcome``, so both legs derive what
+#:     they can from ``extracted >= 1`` alone (see ``outcome_recorded``). ⛔ NOT
+#:     from ``extraction_mode``: it says only that THIS request skipped extraction,
+#:     and a keyless re-capture records no outcome at all — a cleared marker there
+#:     is the false-PASS direction (PR #12507 review).
+UNRECORDED_OUTCOME_KEY = "extraction_outcome"
+UNRECORDED_OUTCOME_VALUE = "unknown"
+
+
+def outcome_unrecorded(body) -> bool:
+    """True when a 2xx body says the EXTRACTION OUTCOME was never recorded.
+
+    THE one definition of the state #12379 owns, so the three surfaces that see
+    one wire body (the spool drain, the day-file drain and the spool entry's own
+    durable marker) cannot drift apart about it.
+
+    ⛔ It is NOT "extracted nothing". A keyless capture (#4188) or a team with
+    extraction switched off (#4258) genuinely produced no memory points and the
+    server SAYS so (``outcome_known: true``); those keep their priced deferral,
+    because re-extracting them is the remedy that works. ⚠️ ``outcome_known`` is
+    read off the STORED session (``capture_ok is not None``), not per write: a
+    keyless RE-capture writes no new outcome, so a session whose ``capture_ok``
+    is NULL (built by a driver that never records one) STAYS ``outcome_known:
+    false``, while a session that already carries a recorded lane keeps reading
+    true. The re-capture is therefore never evidence either way — which is why
+    this marker is stamped from the server's explicit word and never inferred
+    from a zero. This marker means the opposite — the server has not said either
+    way — so pricing it would offer a re-attempt for a session that may already
+    have extracted (the #12362 bug).
+
+    Deliberately narrow and fail-safe: only the explicit marker counts. A body
+    from a tree that does not carry #12362, a malformed body, or ``None`` all
+    read as "nothing known to be unrecorded" — an absent marker never
+    fabricates a trace, and it never suppresses a real one.
+    """
+    return (isinstance(body, dict)
+            and body.get(UNRECORDED_OUTCOME_KEY) == UNRECORDED_OUTCOME_VALUE)
+
+
+#: The ``confirmed`` verdicts that mean the capture's ending is settled, so a marker
+#: standing over one of them is stale. ``filed`` is ``extracted >= 1``
+#: (#12374's ``FILED`` verdict); ``unextracted`` is the confirmation read's "durable,
+#: no points visible yet" (``session_confirm.UNEXTRACTED``) — a verdict that fires on
+#: any zero count BEHIND A TURN MATCH (a non-empty mismatch or a grown set returns
+#: ``TURNS_MISSING``, an absent one ``UNKNOWN`` — both defer), not only on a
+#: store-only capture, and which
+#: ``_session_post`` derives from a GET read of the session — ⚠️ on this tree that
+#: read does not yet consult ``extraction.outcome_known``, so an ``unextracted``
+#: confirmation is only as strong as the confirmation read; #12374's PENDING
+#: branch is what qualifies it. Everything else —
+#: ``pending`` (still unknown), ``replayed`` (already captured, says nothing about
+#: extraction), an absent verdict, a malformed body — leaves the marker alone.
+#:
+#: ⛔ A store-only ``extraction_mode`` (``no-provider`` / ``extraction-disabled``,
+#: #4188 / #4258) is NOT on this list, and no constant is kept for it: it says
+#: only that THIS REQUEST skipped extraction, while the server records the durable
+#: outcome only on a non-replay (``hosted_api._record_session_state = (not
+#: session_existed) if store_only``) — so a keyless RE-capture records NOTHING yet
+#: still reports ``no-provider`` with ``extracted: 0``. Clearing a marker on that
+#: destroys the only trace of a session nobody resolved (found in review of
+#: PR #12507, verified against ``hosted_api``). The ``unextracted`` verdict reaches
+#: this module through the ``confirmed`` vocabulary above instead, which
+#: ``_session_post`` derives from a GET read (:func:`session_confirm.confirm_capture`)
+#: rather than from the receipt.
+RECORDED_OUTCOME_VERDICTS = ("filed", "unextracted")
+
+
+def outcome_recorded(body) -> bool:
+    """True when a 2xx body settles how the capture ended.
+
+    The inverse question to :func:`outcome_unrecorded`, and the ONLY evidence
+    allowed to clear the spool marker. It is deliberately narrow: an
+    uninformative body (``replayed``, a bare 2xx, a malformed one) must not be
+    read as a settled outcome — that reading is what deleted the only trace on
+    the routine resume/clear/compact replay path (see ``_flush_one``'s comment).
+
+    ⚠️ RESIDUAL, mirrored from ``outcomeRecorded`` in
+    ``tortoise/pi-hooks/tortoise-capture.ts``: the ``unextracted`` verdict rests
+    on the confirmation READ matching the posted turns, NOT on the server having
+    recorded an extraction outcome — ``session_confirm.confirm_capture`` does not
+    consult ``extraction.outcome_known`` on this tree, so a store-only RE-capture
+    that records nothing produces the same verdict. The clause is kept because
+    #12379's accepted decision is that a keyless session must stop being reported
+    unresolved forever; #12374's PENDING branch is what qualifies it.
+
+    ⛔ TWO body shapes reach this function, and reading only one of them made the
+    clear inert on whichever leg saw the other (#12460's verification measured
+    exactly that, twice — once on the Pi leg, once here):
+
+      * the **synthesised confirmation** body (``{"confirmed": "filed" |
+        "unextracted"}``) ``__main__._session_post`` builds for a REFUSAL that
+        turned out to have committed;
+      * the **raw capture receipt** (``hosted_api`` POST ``/v1/sessions``:
+        ``{session_id, turns, extracted, points, extraction_mode, …}``), which is
+        every ROUTINE 2xx on both legs and carries neither ``confirmed`` nor
+        ``extraction_outcome``.
+
+    The receipt clause is the same evidence ``session_confirm.confirm_capture``
+    turns into its ``FILED`` verdict: ``extracted >= 1`` ⇒ extraction ran. A
+    REPLAY reports ``extracted: 0``, so the routine resume/clear/compact path can
+    never satisfy it.
+
+    ⛔ ``extracted: 0`` in a normal mode is NOT evidence. The capture handler the
+    transport bound abandoned may still be extracting — the server's own "no
+    outcome yet" state — so a zero is AMBIGUOUS, not a negative, and reading it
+    as one is the #12362 bug wearing the other mask.
+
+    ⛔ A store-only ``extraction_mode`` is NOT evidence either, and is deliberately
+    not read here: it says only that THIS REQUEST skipped extraction, while the
+    server records the durable outcome only on a non-replay (``hosted_api``:
+    ``_record_session_state = (not session_existed) if store_only``) — so a keyless
+    RE-capture records nothing yet still reports ``no-provider``. Clearing there
+    would destroy the only trace of a session whose outcome was never recorded.
+    The ``unextracted`` verdict reaches this leg from a GET confirmation read
+    instead, through the ``confirmed`` vocabulary above — and that read is a
+    turn-match plus a zero, so it cannot tell a store-only re-capture from a
+    resolved store-only outcome either (see the residual below).
+    """
+    if not isinstance(body, dict):
+        return False
+    verdict = body.get("confirmed")
+    if (isinstance(verdict, str)
+            and verdict.strip().lower() in RECORDED_OUTCOME_VERDICTS):
+        return True
+    extracted = body.get("extracted")
+    # ``session_confirm.session_extracted``'s rule exactly: a bool or a
+    # non-integer reads as 0, so an odd count can never satisfy the test.
+    return (isinstance(extracted, int) and not isinstance(extracted, bool)
+            and extracted >= 1)
+
+
 @dataclass
 class FlushSummary:
     attempted: int = 0
@@ -350,6 +526,14 @@ class FlushSummary:
     #: need (the org's spend cap must not read as a plan quota). Mirrors the Pi
     #: leg's ``summary.quota``.
     quota: dict | None = None
+    #: #12379: how many of the 2xx answers in THIS pass said the server had not
+    #: recorded the extraction outcome (see :func:`outcome_unrecorded`). The
+    #: session ids are kept beside the count because a number with no id is not
+    #: actionable — the surviving trace a human can act on is the marker on the
+    #: entry itself (``unrecorded_captures``), and this pair is what the
+    #: drain's own line names.
+    unrecorded: int = 0
+    unrecorded_sessions: list[str] = field(default_factory=list)
     discarded: list[dict] = field(default_factory=list)
     outcomes: dict[str, PostOutcome] = field(default_factory=dict)
 
@@ -857,6 +1041,30 @@ def _read_refusal_stamps(root: Path) -> list[dict]:
     return [parsed] if "session_id" in parsed else []
 
 
+def _stem_set_stamp(stems: list[str]) -> str:
+    """A stable dedupe stamp for a SET of names (#11802).
+
+    ``_entries_dir_stamp`` answers "is this refusal verdict still true?", so it
+    deliberately includes ``entries/`` mtime — which ANY write to the directory
+    moves. That is right for an admission refusal and wrong for a set of
+    unreadable files: a turn writes a new (readable) meta, the mtime moves, and a
+    dir-stamp key therefore suppresses nothing on exactly the per-turn path the
+    dedupe exists for. This stamp changes only when the SET changes.
+
+    The TS leg's ``stemSetStamp`` produces the SAME string, so the two legs —
+    which share one spool root and one ledger — dedupe each other's records
+    rather than each writing its own -- for every entry EITHER leg writes, whose
+    stem is an `entry_key()` hex digest. Scope, stated because it is not the whole
+    directory: both sort the stem list (Python by code point, JS by UTF-16 code
+    unit) and the scan does not filter names to key shape, so a foreign or
+    hand-placed file whose ordering differs between the two sorts yields two
+    digests, and the legs then record one line each for the same set. Cost, never
+    correctness: the retention decision is per entry, not per digest.
+    """
+    digest = hashlib.sha256("\n".join(stems).encode("utf-8")).hexdigest()[:16]
+    return f"set:{digest}"
+
+
 def _entries_dir_stamp(root: Path) -> str:
     """A cheap fingerprint of the spool state a refusal was measured against.
 
@@ -996,6 +1204,7 @@ def _record_refusal(
     bounds: Bounds | None = None,
     projected_bytes: int | None = None,
     replaces_session_id: str | None = None,
+    stamp: str | None = None,
 ) -> dict:
     """Record a REFUSAL once per (session, reason, spool state).
 
@@ -1024,7 +1233,7 @@ def _record_refusal(
     fingerprint: dict = {
         "session_id": key[0],
         "reason": key[1],
-        "entries_stamp": _entries_dir_stamp(root),
+        "entries_stamp": stamp if stamp is not None else _entries_dir_stamp(root),
         # The verdict's INPUTS, alongside its key. `_admission_saturated` reuses
         # this stamp to answer "is this refusal still true?" without a scan, and
         # that reuse is only sound for the same ceilings and a projection no
@@ -1035,12 +1244,15 @@ def _record_refusal(
         "replaces_session_id": replaces_session_id,
     }
     history = _read_refusal_stamps(root)
-    for stamp in history:
-        if (stamp.get("session_id"), stamp.get("reason")) != key:
+    # NB: the loop variable is `observed`, NOT `stamp` — `stamp` is this
+    # function's parameter and shadowing it would make any future use after this
+    # loop silently read the last history entry (review cycle 4).
+    for observed in history:
+        if (observed.get("session_id"), observed.get("reason")) != key:
             continue
-        if stamp.get("entries_stamp") != fingerprint["entries_stamp"]:
+        if observed.get("entries_stamp") != fingerprint["entries_stamp"]:
             continue
-        prior = stamp.get("record")
+        prior = observed.get("record")
         if isinstance(prior, dict):
             return prior
     full = record_discard(root, record)
@@ -1256,7 +1468,21 @@ def reset_terminal_entries(root: Path) -> int:
 
 
 def list_spool_metas(root: Path, *, repair: bool = True) -> tuple[list[dict], list[dict]]:
-    """All spool metas; malformed ones become ``corrupt_entry`` discards.
+    """All spool metas, with two DISTINCT non-meta outcomes (#11802).
+
+    - ``meta_unreadable`` — the meta could not be READ (``EACCES``/``EIO``/
+      ``EISDIR``, or an ``ENOENT`` that raced another drain's unlink). Nothing is
+      concluded about the entry and NOTHING IS DESTROYED: the record is
+      ``retained: True``, the meta and its turn log stay exactly where they are,
+      and the next drain retries.
+    - ``corrupt_entry`` — the bytes WERE read and are not a usable meta (invalid
+      JSON, valid JSON with no usable ``session_id``, or bytes that are not
+      UTF-8). This keeps the #7708 repair path: record it, quarantine the turn
+      log, remove the meta.
+
+    Sharing one repair between them reported a permission refusal as data
+    corruption and destroyed sessions the draining process was never allowed to
+    read. Pinned in BOTH directions by ``tests/test_capture_spool.py``.
 
     A meta that is valid JSON but has no usable ``session_id`` is ALSO corrupt —
     otherwise the drain crashes on `meta["session_id"]` instead of recording it.
@@ -1274,6 +1500,10 @@ def list_spool_metas(root: Path, *, repair: bool = True) -> tuple[list[dict], li
     """
     metas: list[dict] = []
     discards: list[dict] = []
+    # #11802 review cycle 2: an unreadable meta is STATE, not a per-turn event, so
+    # it is recorded ONCE per distinct unreadable SET (the aggregate after this
+    # loop) rather than once per file per scan.
+    unreadable: list[tuple[str, str]] = []
     d = _entries_dir(root)
     # `Path.is_dir()` is True for a mode-000 directory and `Path.glob` SWALLOWS
     # the EACCES its `scandir` hits — so the old `is_dir()` + glob returned an
@@ -1300,13 +1530,36 @@ def list_spool_metas(root: Path, *, repair: bool = True) -> tuple[list[dict], li
         return metas, discards
     for name in names:
         path = d / name
-        meta = None
+        # ⛔ READING and PARSING are two different diagnoses and must not share
+        # one handler (#11802). A read refusal proves we never saw the bytes; a
+        # parse failure proves we saw them and they are unusable. Collapsing
+        # them made this function report "meta is not valid JSON" about files
+        # the process never opened, and — worse — act on it destructively.
         try:
-            meta = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-            # `UnicodeDecodeError` is a `ValueError`: a non-UTF-8 meta is a
-            # CORRUPT entry (recorded below), not a crash.
-            meta = None
+            raw: str | None = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            # Every errno in this arm is the same class: the entry was not read,
+            # so nothing may be concluded about it. ENOENT here is a race with
+            # another drain's unlink — wrong MOMENT, not wrong bytes.
+            # Collected, not recorded: see the aggregate after this loop.
+            if repair:
+                unreadable.append((name[: -len(".meta.json")], str(exc)))
+            continue
+        except UnicodeDecodeError as exc:
+            # The bytes were read in full; they are just not UTF-8. That is a
+            # property of the CONTENT, so it takes the corrupt path below — but
+            # the detail must SAY that, not claim a JSON failure `json.loads`
+            # never reached (the same false-reason class #11802 is about).
+            raw = None
+            decode_error: str | None = str(exc)
+        else:
+            decode_error = None
+        meta = None
+        if raw is not None:
+            try:
+                meta = json.loads(raw)
+            except json.JSONDecodeError:
+                meta = None
         if not isinstance(meta, dict) or not isinstance(meta.get("session_id"), str) \
                 or not meta["session_id"]:
             if not repair:
@@ -1316,7 +1569,9 @@ def list_spool_metas(root: Path, *, repair: bool = True) -> tuple[list[dict], li
                 "session_id": f"unreadable:{stem}",
                 "reason": DISCARD_CORRUPT,
                 "detail": ("meta has no usable session_id" if meta is not None
-                           else "meta is not valid JSON") + f": {path}",
+                           else (f"meta is not valid UTF-8: {decode_error}"
+                                 if decode_error is not None
+                                 else "meta is not valid JSON")) + f": {path}",
             }))
             # The corrupt META is removed (the ledger line is its evidence), but
             # the turn log is QUARANTINED, not deleted (#7708): the transcript
@@ -1328,6 +1583,65 @@ def list_spool_metas(root: Path, *, repair: bool = True) -> tuple[list[dict], li
                 path.unlink()
             continue
         metas.append(meta)
+    # ── #11802: ONE record per distinct unreadable SET ─────────────────────┐
+    # An unreadable meta is STATE ("these entries cannot be read by this uid"),
+    # not a per-turn event. Recorded per FILE per scan, `discarded.jsonl` grows
+    # with turns: the repairing scan also runs on the per-turn write path
+    # (`prune_spool`), and 1,356 unreadable entries is the measured population.
+    #
+    # Two things make this bounded, and the FIRST is the subtle one:
+    #  - The dedupe stamp is a digest of the unreadable STEM SET, NOT `entries/`
+    #    mtime. A turn writes a NEW (readable) meta, which moves `entries/` mtime
+    #    on every turn — so a dir-stamp key suppresses nothing on exactly the path
+    #    this exists for. The stem set is unchanged by a new session, so a steady
+    #    state is ONE line no matter how many turns pass.
+    #  - ONE aggregate per distinct SET consumes ONE slot of the (32-wide)
+    #    refusal window, so N unreadable entries in a STABLE set cost one slot,
+    #    not N. That is not the same as "cannot crowd the window": the digest is
+    #    in the pair key, so K distinct sets occupy up to K slots and can evict an
+    #    admission refusal once K approaches 32 (measured, review cycle 4). That
+    #    outcome is FAIL-SAFE — `_refused_at_current_state` misses and pays a full
+    #    scan instead of short-circuiting, and the evicted refusal simply
+    #    re-records once — so it costs work, never correctness. Stated exactly
+    #    because the invariant a reader trusts here is what decides whether the
+    #    window is safe.
+    #
+    # ⚠️ The trade, stated: the record names a COUNT and one example path, not one
+    # record per entry, so an operator holding only `discarded.jsonl` cannot
+    # enumerate all of them from the ledger — they read the count here and list
+    # `entries/` for the rest. Boundedness is worth that; an unbounded per-entry
+    # ledger is not an audit trail, it is a second problem.
+    if unreadable:
+        stems = sorted(stem for stem, _msg in unreadable)
+        stamp = _stem_set_stamp(stems)
+        _stem, example = unreadable[0]
+        discards.append(_record_refusal(
+            root,
+            {
+                # The digest is IN the pair key, not only in the stamp. Only ONE
+                # observation is remembered per (session_id, reason), so a fixed
+                # id would remember just the newest set — and an alternating set
+                # (the ENOENT race this very arm names, or real prune churn)
+                # would re-record BOTH directions on every alternation, forever.
+                # Keying on the set makes each distinct set its own pair: bounded
+                # by the 32-wide window — a set is recorded once while the number of
+                # DISTINCT unreadable sets seen inside that window stays <= 32; past
+                # that a cycling set is evicted and re-records, which costs one
+                # ledger line per scan and never correctness.
+                "session_id": f"unreadable:{stamp}",
+                "reason": DISCARD_META_UNREADABLE,
+                # RETAINED: every one of these metas AND its turn log stay on
+                # disk, unquarantined and un-unlinked, so the next drain retries.
+                # Never a loss — a read refusal is reversible (fix the
+                # permission, or run as the uid that owns the file), and each
+                # entry keeps its ONLY copy of the session id and retry state.
+                "retained": True,
+                "detail": (f"cannot read {len(unreadable)} spool meta(s): {example}"
+                           " — left in place and retryable; the bytes were never"
+                           " seen, so these are NOT corrupt entries"),
+            },
+            stamp=stamp,
+        ))
     return metas, discards
 
 
@@ -1658,6 +1972,48 @@ def write_spool_entry(
         "attempts": _attempts(prior or {}),
         "next_attempt_at_ms": _carried_window(prior or {}),
     }
+    # #12379: the "extraction outcome was never recorded" marker is STICKY.
+    # Carried forward across snapshots like the backoff above, because a growing
+    # session rewrites this meta on EVERY turn and the state it describes is not
+    # resolved by a new turn: the server's re-capture gate requires a RECORDED
+    # failure (`prior_capture_ok is False`), so a NULL-outcome session replays
+    # instead of re-extracting, however many times it is sent. Without this carry
+    # the only durable trace of a session that can never gain memory points would
+    # vanish on its next turn (measured in review).
+    #
+    # WHO STAMPS AND WHO CLEARS: the drain's own filing CAS (`_flush_one`) does
+    # BOTH, and this carry is neither. It stamps when the body says the outcome
+    # was never recorded (:func:`outcome_unrecorded`) and CLEARS on the same
+    # content's filing when the body instead settles the ending
+    # (:func:`outcome_recorded` — `filed` from `extracted >= 1`, `unextracted`
+    # from a confirmation read that matched the turns and saw no points). It is a
+    # client-side clear, and it is worth taking because keeping the marker over a
+    # session the client can no longer do anything about is the permanent false
+    # alarm a review measured — ⚠️ but `unextracted` alone does NOT prove the server
+    # recorded an outcome (a keyless RE-capture records nothing yet reads the same
+    # way; see :func:`outcome_recorded`'s residual and #12374). Nothing on the
+    # turn path can decide either way, so a new turn only ever PRESERVES what the
+    # last filing concluded.
+    # ⛔ MIRRORED on the Pi leg — `writeSpoolEntry` in
+    # `tortoise/pi-hooks/tortoise-capture.ts` carries the same key forward as a
+    # PRESERVATION obligation, because a fresh meta literal there would otherwise
+    # erase a Python-stamped entry's marker (the cross-leg gap a reviewer proved).
+    # ✅ #12460 CLOSED the residual that used to stand here: that leg's own filing
+    # (`flushSpool`) now reads the 2xx body and applies the SAME two predicates
+    # (`outcomeUnrecorded` stamps, `outcomeRecorded` clears, anything else leaves
+    # the marker alone), so a CLEAR decided on one leg is decided the same way on
+    # the other. Both the marker key/value and the recorded-verdict allow-list are
+    # pinned equal across the two files by
+    # `tests/test_12379_unrecorded_trace.py::test_the_two_legs_share_one_marker_and_verdict_vocabulary`.
+    # ⚠️ STATED RESIDUAL: the PREDICATES are identical, the BODIES are not. Python
+    # also receives a synthesised `{"confirmed": "unextracted"}` for a refused POST
+    # that a confirm-on-refusal GET found committed (`__main__._session_post`), and
+    # the Pi leg has no such path — so on a Pi-filing box a keyless session resolved
+    # that way keeps the marker until eviction. Fail-SAFE in the sense that matters:
+    # the Pi leg can only clear on bodies it actually receives, and each of those is
+    # a body this leg would clear on too.
+    if (prior or {}).get(UNRECORDED_OUTCOME_KEY) == UNRECORDED_OUTCOME_VALUE:
+        meta[UNRECORDED_OUTCOME_KEY] = UNRECORDED_OUTCOME_VALUE
     # Set-only-when-present, FIRST-WRITER-WINS, and — unlike `model` below,
     # which is never carried forward — carried forward across snapshots. The
     # `prior` lane wins when both are set, so a later snapshot can only FILL IN
@@ -2351,6 +2707,58 @@ def count_pending_captures(root: Path) -> int | None:
     return pending
 
 
+def unrecorded_captures(root: Path) -> list[str] | None:
+    """Session ids of captures whose extraction outcome the server never recorded.
+
+    The DURABLE half of #12379's trace. A drain's counter lives in one run's
+    console line, and the hook that produces most captures throws that stderr
+    away (``claude-hooks/session-end.sh`` → ``2>/dev/null``), so the state is
+    also stamped onto the spool entry when it is filed (:func:`_flush_one`) and
+    listed here by the surface that survives the redirect, ``session health``.
+
+    Ids, not a bare count: a number a user cannot resolve to a session is a
+    fact they cannot act on, and the entry is the only thing left that names it.
+
+    Read through the SAME read-only scanner the health line uses
+    (``list_spool_metas(repair=False)``), so this cannot disagree with the
+    ``queued``/``saturated`` reading about an unparseable meta, and a probe id is
+    skipped exactly as the ledger writer skips it (``session view`` cannot resolve
+    a synthetic probe). ``None`` means the spool could not be LISTED — an
+    unreadable directory is not an empty one.
+
+    Includes an entry that was stamped by an earlier pass and left unfiled since
+    (a replayed snapshot, or a later filing that did not carry it): that
+    session's outcome is just as unrecorded, and the next pass re-posts it. A
+    pass whose own compare-and-swap MISSES stamps nothing — see
+    :func:`_flush_one`, which states that rule where it is decided.
+    """
+    try:
+        metas, discards = list_spool_metas(root, repair=False)
+    except OSError:
+        return None
+    if any(d.get("reason") == DISCARD_SPOOL_UNREADABLE for d in discards):
+        return None
+    return _unrecorded_from_metas(metas)
+
+
+def _unrecorded_from_metas(metas: list[dict]) -> list[str]:
+    """The #12379 ids among already-parsed metas — one reading, no second walk."""
+    found: list[str] = []
+    for meta in metas:
+        if not isinstance(meta, dict):
+            continue
+        if meta.get(UNRECORDED_OUTCOME_KEY) != UNRECORDED_OUTCOME_VALUE:
+            continue
+        sid = str(meta.get("session_id") or "")
+        if not sid or is_probe_session_id(sid):
+            # A synthetic `session verify` probe is never filed by a drain and
+            # `session view` cannot resolve it, so naming it would be a dead end
+            # (`_record_backlog_deferral` skips it for the same reason).
+            continue
+        found.append(sid)
+    return found
+
+
 def _health_scan(root: Path) -> tuple[int, list[dict]] | None:
     """ONE read-only pass over `entries/`: the pending count AND the metas.
 
@@ -2388,12 +2796,22 @@ def _health_scan(root: Path) -> tuple[int, list[dict]] | None:
 
 
 class CaptureHealth(NamedTuple):
-    """The per-box answer: the state, the count, the refusal, and the LINE."""
+    """The per-box answer: the state, the count, the refusal, and the LINE.
+
+    ``unrecorded`` is the #12379 half, carried as DATA rather than re-derived by
+    the caller: every meta in the spool has already been parsed to answer
+    ``queued``/``saturated`` (:func:`_health_scan` exists because two walks over
+    this directory cost 2221 ms per line at the 20 000-entry ceiling), so a
+    second scan for the marker would re-introduce exactly the cost that one-scan
+    consolidation removed. It never appears on ``line`` — that spelling is
+    byte-identical to the Pi leg's and pinned by a cross-leg parity test.
+    """
 
     state: str
     queued: int
     status: int | None
     line: str
+    unrecorded: tuple[str, ...] = ()
 
 
 def _refusal_label(reason: object) -> str:
@@ -2532,6 +2950,10 @@ def _spool_health_line(
             "unreadable", 0, None,
             f"capture: UNREADABLE (cannot list {_entries_dir(root)})")
     queued, scan_metas = scan
+    # #12379: the unrecorded-outcome ids are taken from THIS scan's metas (see
+    # `CaptureHealth.unrecorded`) — the caller prints them, the pinned line never
+    # carries them, and no second walk over `entries/` is needed.
+    unrecorded = tuple(_unrecorded_from_metas(scan_metas))
     recorded = read_capture_status(root)
     if queued == 0 and recorded is not None and recorded.get("state") != "ok":
         # Self-healing: the block is over (or the other leg filed everything).
@@ -2562,7 +2984,8 @@ def _spool_health_line(
         return CaptureHealth(
             "blocked", queued, blocked_status,
             f"capture: BLOCKED ({queued} queued, {blocked_status} "
-            f"{_refusal_label(recorded.get('reason'))})")
+            f"{_refusal_label(recorded.get('reason'))})",
+            unrecorded)
     if saturated:
         # `queued` is the PENDING count, so a ceiling filled by terminal entries
         # reads `SATURATED (0 queued, …)` — true on both counts: nothing will be
@@ -2574,21 +2997,24 @@ def _spool_health_line(
             return CaptureHealth(
                 "saturated", queued, None,
                 "capture: SATURATED (no TORTOISE_API_KEY, "
-                f"{queued} queued, refusing new captures)")
+                f"{queued} queued, refusing new captures)",
+                unrecorded)
         return CaptureHealth(
             "saturated", queued, None,
-            f"capture: SATURATED ({queued} queued, refusing new captures)")
+            f"capture: SATURATED ({queued} queued, refusing new captures)",
+            unrecorded)
     if api_key == "":
         # The count is NOT dropped here: a keyless box is exactly the box whose
         # spool grows forever (nothing can file it), so the backlog stays on the
         # line that explains why.
         return CaptureHealth(
             "inactive", queued, None,
-            f"capture: INACTIVE (no TORTOISE_API_KEY, {queued} queued)")
+            f"capture: INACTIVE (no TORTOISE_API_KEY, {queued} queued)",
+            unrecorded)
     if queued > 0:
         return CaptureHealth("draining", queued, None,
-                             f"capture: DRAINING ({queued} queued)")
-    return CaptureHealth("ok", 0, None, "capture: OK (0 queued)")
+                             f"capture: DRAINING ({queued} queued)", unrecorded)
+    return CaptureHealth("ok", 0, None, "capture: OK (0 queued)", unrecorded)
 
 
 def _with_store_sync_terms(base: CaptureHealth, root: Path) -> CaptureHealth:
@@ -2956,6 +3382,16 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
         # left the breadcrumb standing (and `session verify` reading a failure
         # that had already been resolved) (#4714 review).
         _clear_breadcrumb_for(meta.get("harness"), sid)
+        # #12379: the 2xx may be honest about the turns and silent about the
+        # extraction — the server stored them and never recorded whether
+        # extraction ran. FILING is right (the spool's contract is turn
+        # durability) but the state must leave a trace: #12362 removed the false
+        # "no memory points were extracted" claim AND the priced deferral, which
+        # is the correct trade, and left nothing anywhere naming the session.
+        unrecorded = outcome_unrecorded(outcome.body)
+        if unrecorded:
+            summary.unrecorded += 1
+            summary.unrecorded_sessions.append(sid)
         # COMPARE-AND-SWAP, on the POSTED CONTENT **AND LANE**. A concurrent
         # capture (a resumed session, or the SessionStart drain racing a live
         # turn) can grow this entry while the POST is in flight. Stamp
@@ -3027,6 +3463,45 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
                 now_ms / 1000.0, tz=UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
             fresh["attempts"] = 0
             fresh["next_attempt_at_ms"] = 0
+            # #12379: the DURABLE half of the trace, written in the same CAS as
+            # `filed_key` so it describes the content that was actually filed.
+            # Set-only-when-present (the same omit-rather-than-write-null rule
+            # `filed_lane`/`filed_stamp` follow for the TS leg's strict
+            # comparison).
+            #
+            # ⛔ An UNINFORMATIVE body never clears it. A re-capture of this
+            # session cannot resolve the state: the server's re-capture gate
+            # requires a RECORDED failure (`prior_capture_ok is False`), so a
+            # session whose outcome is NULL replays and answers `replayed` — a
+            # body that says "already captured", not "recorded how extraction
+            # ended". Treating that as evidence of a recorded outcome deleted the
+            # only trace, on the routine resume/clear/compact path, while the
+            # condition provably persisted (measured in review: marker set →
+            # replay filing → marker gone, `filed_key` set).
+            #
+            # ⛔ But a body that DOES settle the ending is evidence, and keeping
+            # the marker over it is the alert-fatigue failure the health line
+            # exists to avoid: `confirmed: filed` means the server imported the
+            # turns (so extraction ran), and `confirmed: unextracted` means the
+            # confirmation read matched the posted turns and saw no extracted
+            # points — ⚠️ NOT that a recorded outcome exists (that read does not
+            # consult `extraction.outcome_known`; #12374 qualifies it), but
+            # enough, on #12379's accepted decision, that the session is no longer
+            # reported "unknown". Either way a marker left standing would make
+            # `session health` report a permanent false alarm until the entry is
+            # evicted. So the marker is CLEARED by a settled verdict and only by
+            # one (:func:`outcome_recorded`). What remains after that is the case
+            # nothing on the client can resolve — no later filing at all — which
+            # is why the health line states it HISTORICALLY ("filed with no
+            # recorded outcome at the time") rather than as a live claim.
+            #
+            # A CAS miss leaves the entry unfiled and unstamped: its content was
+            # not what this POST carried, so the next pass re-posts it and that
+            # attempt's own outcome stamps it.
+            if unrecorded:
+                fresh[UNRECORDED_OUTCOME_KEY] = UNRECORDED_OUTCOME_VALUE
+            elif outcome_recorded(outcome.body):
+                fresh.pop(UNRECORDED_OUTCOME_KEY, None)
             _write_meta(root, fresh)
         # else: the posted content WAS filed; the entry keeps the newer turns
         # and stays unfiled, so they are re-posted next time.

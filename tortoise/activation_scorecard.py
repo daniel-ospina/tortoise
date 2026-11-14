@@ -354,15 +354,15 @@ FUNNEL_QUERY = (
 #
 # The prefix is INTERPOLATED from its one owner (``session_schema``), not bound
 # as a ``$`` parameter, and what that buys is LINE COST, stated at its real size:
-# the one PRODUCTION execution is ``hosted_api.py:23502`` (the two TEST sites are
+# the one PRODUCTION execution is ``hosted_api.py:23667`` (the two TEST sites are
 # ``tests/test_activation_scorecard.py`` — a stubbed ``_G``, through the hosted
 # route — and ``tests/test_demo_session_read_exclusion_8290.py``, which queries it
 # directly on a real embedded engine), and a ``params=…`` argument there does not
 # fit in 100 columns, so it wraps and pushes later lines down. Measured over every
 # ``hosted_api.py:<line>`` cite in the tracked tree: **12** distinct cite
-# targets have a line number LARGER than 23502 (24252 … 99999) and those are the
-# ones that shift; **429** have a number smaller than it (26 … 23466) and cannot
-# move. (442 distinct targets in all — the remainder is 23502 itself, which this
+# targets have a line number LARGER than 23667 (24252 … 99999) and those are the
+# ones that shift; **432** have a number smaller than it (26 … 23466) and cannot
+# move. (445 distinct targets in all — the remainder is 23667 itself, which this
 # very comment names. NEVER re-take these by hand — that is how they went wrong
 # twice. `uv run python tools/hosted_api_cite_census.py --refresh` re-states every
 # figure in this note AND the list-helper's in one command whenever
@@ -1226,9 +1226,11 @@ LIMITATIONS: tuple[str, ...] = (
     "residuals still read `ok` and are NOT refusals: a domain answer that "
     "carries an `error` key on purpose (`tortoise_get_operator` on a point "
     "that is not an operator — a SUCCESSFUL fetch reporting that fact, "
-    "#4576), and a refusal buried deeper than the seam reads "
-    "(`tortoise_overview()` with no `section` nests each section's payload "
-    "one level down). The gate's own match is a dict LITERAL carrying a "
+    "#4576), and a PARTIAL summary of `tortoise_overview()` with no "
+    "`section`: a REFUSED section's payload is nested one level down and "
+    "reads `ok` (a TOTAL outage no longer nests — since #11153 the aggregate "
+    "returns the refusal at the top level, where the gate classifies it). "
+    "The gate's own match is a dict LITERAL carrying a "
     "constant `error` key (or a body that returns one by name), so a refusal "
     "answered with a KEYLESS plain dict — or with an `error` key built any "
     "other way (`dict(error=...)`, a key assigned after construction, an "

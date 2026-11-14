@@ -66,6 +66,14 @@ fixes:
                        DECLINED — the full record is beside the predicate,
                        further down this file, and in
                        `tests/test_name_entropy_12294.py`.
+  ARM 5  THE RERANK    `#12297`'s cross-encoder, over the SAME fused
+                       candidates: recall@3 and nDCG@10 before vs after a
+                       permuting rerank at each `--rerank-pool` width, paired
+                       on one pool so `gained`/`lost` are counterfactual.
+                       OPT-IN (`--rerank`) and DEFAULT OFF, so every artifact
+                       committed before it is byte-identical. Its ceiling is
+                       `in_window(P)`, never `miss_past_k` — see
+                       `_rerank_arm`'s own note.
 
 POPULATION — WHAT IS REAL AND WHAT IS NOT (read before quoting a number)
 -----------------------------------------------------------------------
@@ -147,6 +155,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 -- intentional RUNTIME guard
 import argparse
 import collections
 import contextlib
+import difflib
 import hashlib
 import json
 import math
@@ -383,6 +392,442 @@ def _fold_punct(text: str) -> str:
     t = re.sub(r"[-_./]+", " ", (text or "").strip().lower())
     return re.sub(r"\s+", " ", t).strip()
 
+
+#: #12297: the cut the reranked pool is reduced to. 3 is the production
+#: per-query window ``_fts_rows`` passes, so "recall@3 after the rerank" is the
+#: SAME quantity as arm 1's ``in_window`` at k=3 and the two are comparable.
+TOP_K_RERANK_CUT = 3
+#: #12297: the rank at which the rerank arm reports nDCG. 10 is the issue's
+#: named metric; with one gold per mention nDCG@10 = 1/log2(rank+2)
+#: for the 0-based ``rank`` this code carries (rank 0 is the top hit).
+NDCG_K = 10
+#: #12297: the pool widths the rerank arm fetches at. 15 is Zep's candidate
+#: count — the width #11901 measured — and 40 is the mean effective
+#: candidate-list length #11901 measured for a production capture at the
+#: `max_queries=15` budget (research-brief §1, consequence 1). Both are
+#: MEASURED; neither is adopted.
+RERANK_POOLS: tuple[int, ...] = (15, 40)
+
+
+def build_rerank_arm(args, sample, window, variants) -> dict:
+    """The ``--rerank`` arm, built from the model the RESOLVER names.
+
+    A seam rather than an inline call so the wiring is pinnable without a graph:
+    a test that drives ``resolve_rerank_model`` alone stays green over a
+    hard-coded model id at this call site (measured — that mutation passed all 43
+    tests, which is exactly the regression this arm's provenance depends on).
+    """
+    return _rerank_arm(
+        sample, window, variants,
+        model=resolve_rerank_model(args),
+        pools=tuple(args.rerank_pool or RERANK_POOLS),
+        top_k=TOP_K_RERANK_CUT, ndcg_k=NDCG_K,
+        threads=args.rerank_threads)
+
+
+def resolve_rerank_model(args) -> str:
+    """The cross-encoder this arm measures — resolved the way the PRODUCT does.
+
+    ⛔ ``fused_rerank_model()``, not the constant: the shipped read passes no
+    model to ``rerank_pool``, which resolves through ``load_scorer(model or
+    fused_rerank_model())``, so ``TORTOISE_FUSED_RERANK_MODEL`` decides which
+    cross-encoder the product actually loads. Hard-coding
+    ``RERANK_MODEL_DEFAULT`` measured — and RECORDED, in the arm's own ``model``
+    field — a model the product would not load whenever that knob was set; the
+    sibling ``tools/rerank_calibration_12297.py`` resolved the same defect.
+
+    A function rather than an inline expression so the pin on it is BEHAVIOURAL:
+    a source-text check is satisfied by this docstring's own prose (measured —
+    the first version of that test stayed green over a hard-coded model id).
+    """
+    if args.rerank_model:
+        return args.rerank_model
+    from tortoise.rerank import fused_rerank_model
+    return fused_rerank_model()
+#: #12297: torch threads for the rerank arm. PINNED to 1 and recorded in the
+#: artifact: the unpinned default (one thread per core, 16 here) thrashes under
+#: fleet load and measured ~20x slower per pair on identical input, so an
+#: unpinned latency figure would describe the scheduler rather than the model.
+RERANK_THREADS = 1
+
+
+# ── #12297 residual 1 — the LEXICAL BASELINE CONTROL ─────────────────────
+#
+# The PR's own stated residual, and the decisive missing experiment: **does a
+# 5 microsecond string compare already do what the cross-encoder is being paid
+# 207 ms/mention for?** The noun-path arm asks "does `the credential` match
+# `the credential`", which is token overlap over 2-4 word strings — so if a
+# lexical scorer reproduces the arm's numbers, the lever's justification is
+# gone and its cost is pure overhead.
+#
+# ⛔ This is a CONTROL, never a candidate matcher. It is not shipped, not wired
+# into `rerank_pool`, and reaches no product path: it exists only to be measured
+# against the cross-encoder over the SAME pools. Turning a string score into an
+# attach decision is the refused "second similarity constant" of #11901 §7 and
+# is deliberately out of scope here.
+LEXICAL_MODES: tuple[str, ...] = ("difflib", "overlap")
+
+
+class LexicalScorer:
+    """A deterministic string-compare scorer with the cross-encoder's interface.
+
+    ``score(query, contents) -> list[float]`` mirrors
+    ``rerank.CrossEncoderScorer.score`` exactly, so the arm can swap it in and
+    change NOTHING else — the same pool, the same cut, the same tie-break, the
+    same paired before/after.
+
+    Two modes, both declared rather than tuned:
+
+    * ``difflib`` — ``SequenceMatcher(None, a, b).ratio()`` on lowercased text.
+      Character-level, so it rewards the surface variants the noun path's
+      character-only perturbations produce.
+    * ``overlap`` — Jaccard over lowercased alphanumeric tokens. Token-level,
+      so it is the strongest fair form of "a 5 us string compare". (An exact
+      match needs no short-circuit: equal NON-EMPTY token sets make the Jaccard
+      ratio 1.0 on its own, and a branch that returned early would have been a
+      second code path to time. ⛔ Two EMPTY token sets are 0.0 — returned by the
+      ``if not ta or not tb`` guard in ``_one``, not by the ratio — so the
+      shortcut is safe to omit either way.)
+    """
+
+    def __init__(self, mode: str = "difflib") -> None:
+        if mode not in LEXICAL_MODES:
+            raise ValueError(f"unknown lexical mode {mode!r}")
+        self.mode = mode
+
+    @staticmethod
+    def _tokens(text: str) -> frozenset[str]:
+        return frozenset(re.findall(r"[a-z0-9]+", (text or "").lower()))
+
+    def _one(self, a: str, b: str) -> float:
+        a_l, b_l = (a or "").lower().strip(), (b or "").lower().strip()
+        if not a_l or not b_l:
+            return 0.0
+        if self.mode == "difflib":
+            return difflib.SequenceMatcher(None, a_l, b_l).ratio()
+        ta, tb = self._tokens(a_l), self._tokens(b_l)
+        if not ta or not tb:
+            return 0.0
+        return len(ta & tb) / len(ta | tb)
+
+    def score(self, query: str, contents) -> list[float]:
+        return [self._one(query, c) for c in contents]
+
+
+def _ndcg_at(rank: int | None, k: int = NDCG_K) -> float:
+    """nDCG@k for ONE gold per query (IDCG = 1, so DCG is the whole value).
+
+    ``rank`` is 0-based; ``None`` means the gold never entered the pool, which
+    scores 0 rather than being dropped from the denominator — dropping it would
+    let a reranker raise nDCG by *losing* queries.
+    """
+    if rank is None or rank >= k:
+        return 0.0
+    return 1.0 / math.log2(rank + 2)
+
+
+def _rerank_arm(
+    sample: list[dict],
+    window,
+    variants,
+    *,
+    model: str,
+    pools: tuple[int, ...],
+    top_k: int = TOP_K_RERANK_CUT,
+    ndcg_k: int = NDCG_K,
+    threads: int = RERANK_THREADS,
+    scorer=None,
+    label: str = "rerank",
+) -> dict:
+    """#12297 arm 5 — the cross-encoder over the SAME fused candidates.
+
+    For each mention we take the real fused read at pool width ``P`` (wider than
+    production's 3) and hand it to the SHIPPED ``rerank.rerank_pool`` — one
+    ``score(query, contents)`` call per mention, scoring only the slots whose text
+    is non-empty and writing those back into their OWN slots, exactly as the
+    product does (a textless row is never scored and never moves). The harness
+    then scores that order at ``top_k`` — the cut is the measurement's, not this
+    function's.
+
+    ⛔ THREE things this arm deliberately does NOT do, each because doing it
+    would make the number unreadable:
+
+    1. **It never widens the production default.** ``pools`` are measured, not
+       adopted. #11901 measured the window lever and declined it standalone
+       ("do not widen `limit` on its own", §7-1); this arm measures the PAIRED
+       configuration the issue asks about, and the shipped default stays 3.
+    2. **It does not use MMR.** ``mmr_select`` exists for a context pool where
+       near-duplicate passages should not fill the slots. A link-before-create
+       prior wants the single best match, so MMR would be a different (and
+       worse-conditioned) question — it is exercised by the ask lane and by
+       ``tests/test_longmem_rerank.py``, not here.
+    3. **It does not use the score as a MATCHER.** Turning the cross-encoder
+       score into an attach decision needs a threshold, and #11901 records a
+       SECOND similarity constant as a REFUSED row beside
+       ``embeddings.DEFAULT_THRESHOLD``. This arm only reorders, so the phase-1
+       attach rate is untouched BY CONSTRUCTION — the matcher is never called on
+       the reranked order, and this artifact therefore makes **no** claim about
+       the attach rate moving (an earlier draft said it computed one; it does
+       not, and it no longer says so).
+    """
+    from tortoise.rerank import get_scorer, rerank_pool
+
+    # ⛔ PIN THE THREADS BEFORE THE FIRST SCORE, and record the pin.
+    # Measured on this box (`tools/rerank_calibration_12297.py` docstring): the
+    # default (one thread per core, 16) thrashes under fleet load at ~100 ms/pair
+    # where one thread reports ~5.3 ms/pair — a 20x difference on identical
+    # input. A latency figure taken under the default would describe the
+    # scheduler, not the model, and would be quoted as if it described the model.
+    if threads and threads > 0:
+        import torch  # local: arm 5 is this tool's only torch consumer
+        torch.set_num_threads(threads)
+
+    if scorer is None:
+        scorer, reason = get_scorer(model)
+        if scorer is None:
+            return {"applied": False, "degrade_reason": reason, "model": model}
+
+    out: dict = {
+        "applied": True,
+        "arm": label,
+        "model": model,
+        "top_k": top_k,
+        "ndcg_k": ndcg_k,
+        "torch_threads": threads,
+        # ⛔ NO MEASURED FIGURE IN THIS STRING. It used to carry one run's
+        # numbers ("277/300 at a 15-window, 300/300 at 40") as a literal, so a
+        # re-run on a grown corpus (this file already records `population_digest`
+        # moving between runs) would have shipped a note contradicting its OWN
+        # `arms.<label>.<P>.exact`, and a hand-edit of either artifact's copy was
+        # invisible (measured: rewriting 277 -> 299 in the noun-path artifact left
+        # every test green). The figures now live only where they are COMPUTED —
+        # `arms.<label>.<P>.exact.recall_3_after` / `mentions` — and the note says
+        # which cell to read AND that it is the ACHIEVED count, not the ceiling
+        # (`recall_3_before` minus `lost` plus `gained` is what separates them; the
+        # note called the two identical, then called `lost` the discriminator, which
+        # is wrong in ONE direction at a pool wider than the top-3 cut — there `lost`
+        # 0 is NECESSARY but not sufficient: the witness is a rerank with `lost` 0 and
+        # `gained` 0 that still leaves an in-pool gold outside the top 3 (at a pool no
+        # wider than the cut, `lost` 0 IS sufficient — every in-window gold is already
+        # in the top 3).
+        # ⛔ LABEL-DERIVED, and it has to be: this same note is emitted onto the
+        # lexical carriers too (`_rerank_arm(..., label=...)`), where "this arm" is
+        # `lexical_difflib` / `lexical_overlap`. A hard-coded `arms.rerank` pointer
+        # read the WRONG ARM there — the same defect the ceiling half of this note
+        # was rewritten to remove, reintroduced by a constant string.
+        "ceiling_note": (  # noqa: UP032 — .format keeps the literal segments the test parses
+            "a reranker only reorders rows the legs already returned, so its "
+            "CEILING is in_window(P) — the number of golds the legs put INSIDE the "
+            "scored window at that width — while the figure this arm records as its "
+            "HEADLINE is the ACHIEVED one: "
+            "`arms.{label}.<P>.exact.recall_3_after` over its `mentions` "
+            "denominator. ⛔ The two are not the same quantity: the achieved figure "
+            "is the ceiling MINUS the in-pool golds the arm still leaves outside "
+            "the top 3, i.e. `recall_3_before` minus `lost` plus `gained`, so read "
+            "those three fields in the same cell rather than treating the achieved "
+            "count as the ceiling — at a pool wider than the top-3 cut `lost` 0 is "
+            "necessary but not sufficient (it can be 0 with the achieved figure still "
+            "below the ceiling). WIDTH "
+            "DEPENDENT throughout, and not quoted here. "
+            "⛔ `arms.exact` is a DIFFERENT table: arm 1's in-window count at arm 1's "
+            "widths, beside arm 1's own miss counters, sliced by class under "
+            "`arms.exact_by_class.<cls>.<k>.in_window`. A pool width outside arm 1's "
+            "key set has no cell there at all, so read it only where the key matches "
+            "the width you are asking about; this arm's own at-pool figures live in "
+            "its `arms.{label}.<P>.exact` cell instead, which stores no in_window "
+            "of its own — no other arm records a FULL-POPULATION mention-level in-pool "
+            "count (arm 4 keeps one for its gated subset), and arm 1's is at arm 1's "
+            "own four widths only — so at a pool width "
+            "outside that set the ceiling is NOT recorded here: it is a measurement "
+            "of what the legs returned at that width, not a function of the width, so "
+            "it has to be re-measured rather than read off. The VARIANT pairs carry "
+            "at-pool TOP-3 "
+            "counts of their own (`variant.in_window_3_before` / `in_window_3_after`); "
+            "the variant pairs' in-pool count is arm 2's, in "
+            "`arms.variant.<k>.in_window` and `arms.variant_by_class.<cls>.<k>.in_window` "
+            "at arm 2's widths — WINDOW containment like arm 1's, but over the "
+            "variant-PAIR population rather than this arm's mentions, which is why it is "
+            "not this arm's ceiling. The separate `in_window_3_before` / "
+            "`in_window_3_after` fields measure TOP-3 containment instead: they are "
+            "counted over the same variant PAIRS, so their comparand is that pair-level "
+            "window count, not this arm's mention ceiling — they equal it only where "
+            "every in-window gold happens to land in the top 3, which is always the "
+            "case at a pool no wider than the cut. So treat them as a different "
+            "quantity, not as the ceiling. miss_past_k is "
+            "0 BY CONSTRUCTION only "
+            "at arm 1's WIDEST window (a response has at most that many rows, so "
+            "'the rank is past it' cannot occur) and can be non-zero at a narrower "
+            "k, where a gold the legs returned further down is genuinely past the "
+            "cut — so it is never a width-independent ceiling at any width; "
+            "miss_absent_at_max_k is "
+            "not a width-independent bound either — it counts golds absent within "
+            "arm 1's MAXIMUM window").format(label=label),
+    }
+    # ⛔ THE ORDER IS PRODUCED BY THE SHIPPED FUNCTION, NOT BY A COPY OF IT.
+    # This arm used to sort the scores itself and reorder EVERY row, including a
+    # textless one — and an empty passage outranks an unrelated real one, so the
+    # arm credited the reranker with a promotion `rerank_pool` structurally
+    # refuses (measured: a textless gold moved to rank 3 in the arm where the
+    # product leaves it in its slot), and counted a pair the product never
+    # scores. Both arms below therefore call ``rerank_pool`` with the ``scorer``
+    # seam, and the timing proxy wraps the scorer so ``ms_per_pair`` still
+    # describes ONE ``score()`` call per mention.
+
+    class _Timed:
+        def __init__(self, inner) -> None:
+            self.inner = inner
+            self.seconds = 0.0
+            self.pairs = 0
+
+        def score(self, query, texts):
+            t0 = time.perf_counter()
+            out = self.inner.score(query, texts)
+            self.seconds += time.perf_counter() - t0
+            self.pairs += len(texts)
+            return out
+
+    timed = _Timed(scorer)
+
+    def _shipped_order(query: str, rows: list[dict], width: int) -> list[str] | None:
+        """Ids in the SHIPPED post-rerank order, or None when it degraded."""
+        cands = [{"id": r["id"], "content": r.get("name") or ""} for r in rows]
+        # ⛔ THE COUNTER IS CUMULATIVE ACROSS THE RUN, ``scored`` IS THIS CALL.
+        # Comparing them totals-to-call passed on the FIRST query and raised on
+        # every one after it (measured: "the timed scorer saw 4 pairs but
+        # rerank_pool reported 2" on the second) — an instrument that crashed on
+        # any real corpus. Delta, not total.
+        pairs_before = timed.pairs
+        out_rows, stats = rerank_pool(
+            query, cands, text_key="content", pool=width,
+            enabled=True, model=model, scorer=timed)
+        if not stats.get("applied"):
+            return None
+        # The proxy's count and the product's own disclosure must agree; a
+        # divergence means this instrument is measuring a different call.
+        if timed.pairs - pairs_before != stats.get("scored"):
+            raise AssertionError(
+                f"the timed scorer saw {timed.pairs - pairs_before} pairs but "
+                f"rerank_pool reported {stats.get('scored')}")
+        return [r["id"] for r in out_rows]
+
+    for pool in pools:
+        key = str(pool)
+        row_exact = {"mentions": 0, "pairs_scored": 0, "rerank_degraded": 0}
+        row_variant = {"pairs": 0, "rerank_degraded": 0}
+        for name_k in ("before", "after"):
+            row_exact[f"recall_{top_k}_{name_k}"] = 0
+            row_exact[f"ndcg{ndcg_k}_{name_k}"] = 0.0
+        row_exact["gained"] = 0
+        row_exact["lost"] = 0
+        for name_k in ("before", "after"):
+            row_variant[f"in_window_{top_k}_{name_k}"] = 0
+        row_variant["gained"] = 0
+        row_variant["lost"] = 0
+
+        for row in sample:
+            rows = window(row["name"], pool)
+            if not rows:
+                row_exact["mentions"] += 1
+                continue
+            before_pairs = timed.pairs
+            after_ids = _shipped_order(row["name"], rows, pool)
+            if after_ids is None:
+                row_exact["rerank_degraded"] += 1
+                continue
+
+            row_exact["mentions"] += 1
+            row_exact["pairs_scored"] += timed.pairs - before_pairs
+            gold = row["id"]
+            rank_before = next(
+                (i for i, r in enumerate(rows) if r["id"] == gold), None)
+            rank_after = (after_ids.index(gold) if gold in after_ids else None)
+            for name_k, rank in (("before", rank_before), ("after", rank_after)):
+                if rank is not None and rank < top_k:
+                    row_exact[f"recall_{top_k}_{name_k}"] += 1
+                row_exact[f"ndcg{ndcg_k}_{name_k}"] += _ndcg_at(rank, ndcg_k)
+            in3_before = rank_before is not None and rank_before < top_k
+            in3_after = rank_after is not None and rank_after < top_k
+            row_exact["gained"] += int(in3_after and not in3_before)
+            row_exact["lost"] += int(in3_before and not in3_after)
+
+            # The VARIANT arm on the same reranked order: does the rerank put a
+            # surface variant's canonical inside the top-k the verdict step
+            # reads? Measured, not asserted — the rerank does not make phase 1
+            # able to bind it (that is the fold's job, #11901 §7-2b).
+            for _vclass, surface in variants(row["name"], row["cls"]):
+                vrows = window(surface, pool)
+                if not vrows:
+                    row_variant["pairs"] += 1
+                    continue
+                vafter = _shipped_order(surface, vrows, pool)
+                if vafter is None:
+                    row_variant["rerank_degraded"] += 1
+                    continue
+                row_variant["pairs"] += 1
+                vb = next((i for i, r in enumerate(vrows)
+                           if r["id"] == gold), None)
+                va = vafter.index(gold) if gold in vafter else None
+                for name_k, rank in (("before", vb), ("after", va)):
+                    if rank is not None and rank < top_k:
+                        row_variant[f"in_window_{top_k}_{name_k}"] += 1
+                inb = vb is not None and vb < top_k
+                ina = va is not None and va < top_k
+                row_variant["gained"] += int(ina and not inb)
+                row_variant["lost"] += int(inb and not ina)
+
+        n = row_exact["mentions"] or 1
+        row_exact["recall_pct_before"] = round(
+            100.0 * row_exact[f"recall_{top_k}_before"] / n, 1)
+        row_exact["recall_pct_after"] = round(
+            100.0 * row_exact[f"recall_{top_k}_after"] / n, 1)
+        row_exact["ndcg_mean_before"] = round(
+            row_exact[f"ndcg{ndcg_k}_before"] / n, 4)
+        row_exact["ndcg_mean_after"] = round(
+            row_exact[f"ndcg{ndcg_k}_after"] / n, 4)
+        vn = row_variant["pairs"] or 1
+        row_variant["in_window_pct_before"] = round(
+            100.0 * row_variant[f"in_window_{top_k}_before"] / vn, 1)
+        row_variant["in_window_pct_after"] = round(
+            100.0 * row_variant[f"in_window_{top_k}_after"] / vn, 1)
+        out[key] = {"exact": row_exact, "variant": row_variant}
+
+    pairs_scored = timed.pairs
+    score_s = timed.seconds
+    out["latency"] = {
+        "pairs_scored": pairs_scored,
+        "score_s": round(score_s, 3),
+        "ms_per_pair": (round(1000.0 * score_s / pairs_scored, 3)
+                        if pairs_scored else None),
+        "device": "cpu (this box has no GPU)",
+        "torch_threads": threads,
+        # ⛔ The note must describe the scorer that ACTUALLY ran. A lexical arm
+        # has no lock and no torch sigmoid, and carrying the cross-encoder's
+        # note onto it would label a 5 us string compare with the model's cost
+        # story — the false-label class this repo refuses.
+        "note": (
+            "per-pair wall clock around ONE score() call per mention, "
+            "excluding model load. "
+            + ("This arm is a LEXICAL control: no torch, no lock, no sigmoid."
+               if model.startswith("lexical:") else
+               "Includes the scorer's lock and the torch sigmoid.")),
+    }
+    if not model.startswith("lexical:"):
+        # ⛔ THE NOTE MUST MATCH WHAT HAPPENED TO TORCH. `--rerank-threads 0`
+        # leaves the default pool in place, and the artifact said "PINNED to 0" —
+        # a pin the run never made, on the one field a reader uses to decide
+        # whether the figure describes the scheduler or the model.
+        if threads > 0:
+            out["latency"]["note"] += (
+                f" torch threads are PINNED to {threads} and recorded here, "
+                "because the unpinned default (one thread per core) measured "
+                "~20x slower on this box under fleet load — an unpinned figure "
+                "describes the scheduler, not the model")
+        else:
+            out["latency"]["note"] += (
+                " torch threads are NOT pinned (torch's default pool, one thread "
+                "per core): this figure describes the scheduler as much as the "
+                "model")
+    return out
 
 # ── the NAME-ENTROPY GATE (#12294) — MEASURED HERE, DECLINED ────────────────
 #
@@ -637,6 +1082,26 @@ def _interleave(by_cls: dict[str, list[dict]], shares: dict[str, int]) -> list[d
 
 
 def run(args: argparse.Namespace) -> int:
+    from tortoise.rerank import rerank_pool_enabled
+
+    #: ⛔ BEFORE THE STORE CHECK, deliberately. The gate shapes what "before" IS;
+    #: with TORTOISE_FUSED_RERANK armed the read reranks the pool first, so every
+    #: arm's "before" is a rerank and the cells report ``gained 0 / lost 0`` — a
+    #: false zero that looks exactly like a real one, on the instrument that
+    #: produced the artifacts this PR's §3, §5 and §7 cite. Its sibling
+    #: (``tools/rerank_calibration_12297.py``) has refused this since the gate
+    #: landed; this instrument did not, and that asymmetry is a hole in the
+    #: evidence chain the PR rests on. The committed artifacts are provably
+    #: unarmed (``gained 56 / lost 0``), so this closes a hazard for the NEXT run.
+    _ambient_gate = rerank_pool_enabled()
+    if _ambient_gate and not args.allow_reranked_baseline:
+        print("REFUSED: TORTOISE_FUSED_RERANK is armed, so the read's own order "
+              "is ALREADY reranked and \"before\" is not the fused baseline — "
+              "this run would report a rerank-vs-rerank zero. Unset it "
+              "(TORTOISE_FUSED_RERANK=) or pass --allow-reranked-baseline to "
+              "measure an armed read on purpose.", file=sys.stderr)
+        return 3
+
     uri = os.environ.get("TORTOISE_DB_URI") or ""
     if not uri.startswith(("docker://", "redis://")):
         print("REFUSED: no live FalkorDB in TORTOISE_DB_URI — S3 itself refuses "
@@ -1171,6 +1636,73 @@ def run(args: argparse.Namespace) -> int:
         arms["pooled_gate"] = pooled_gate
         arms["pooled"] = pooled
 
+        # ── ARM 5 (#12297): the cross-encoder rerank over the SAME candidates.
+        #
+        # ⛔ A reranker REORDERS what retrieval returned; it cannot surface a row
+        # the leg never produced. So this arm's ceiling is `in_window(P)` — the
+        # golds the legs put INSIDE the scored window at that width — which is
+        # WIDTH DEPENDENT, so the ACHIEVED figures live in `arms.rerank.<P>.exact`
+        # (`recall_3_after` / `mentions`, computed) and NOT as a literal here: a
+        # re-run moves them, and an earlier draft hardcoded one run's pair in the
+        # emitted note. ⛔ `recall_3_after` is what the arm ACHIEVED, not the
+        # ceiling, so the note names both the ceiling (in_window) and the achieved
+        # cell: they coincide when `recall_3_before - lost + gained` reaches
+        # `in_window`, and at a pool wider than the top-3 cut `lost` 0 is NECESSARY
+        # but not sufficient (a no-gain rerank has it 0 with the achieved figure
+        # still below the ceiling; at a pool no wider than the cut it IS sufficient).
+        # ⛔ Not `arms.exact.<P>`: that
+        # table is arm 1's own width-by-width one, and a pool width outside its
+        # keys has no cell there.
+        #
+        # ⛔ `miss_past_k` is NOT that ceiling, and this comment used to say it
+        # was: it is 0 BY CONSTRUCTION only at arm 1's WIDEST window (a response
+        # has at most that many rows, so "the rank is past it" cannot occur) and
+        # only possibly non-zero at a narrower k, where a gold the legs returned
+        # further down is genuinely past the cut — so at the widest window it
+        # measures the counter, not the legs; at a narrower k it is a real
+        # measurement that is still not a bound. ⛔ "non-zero at every narrower k" was the previous
+        # wording and it bakes a corpus fact into a generated string: 0 is reachable
+        # whenever every in-window gold sits inside the top k. `miss_absent_at_max_k` is not a width-independent bound either —
+        # it is "absent within arm 1's maximum window (15)", and a wider window
+        # returns some of those golds — which is why the bound is width-dependent
+        # rather than a constant. The count is the artifact's own
+        # field, deliberately not restated as a literal here (an earlier draft
+        # said 81, which was a previous run's number). The bound is stated rather
+        # than left to inference because a rerank arm reporting a recall figure
+        # without it invites "the reranker fixed recall", which is the one thing
+        # it cannot do (issue #12297).
+        #
+        # The measurement is per-mention and PAIRED against the unreranked order
+        # of the SAME rows, so `gained` / `lost` are counterfactual on one pool
+        # and cannot be explained by a population difference:
+        #   gained  gold sat past the top-3 and the rerank moved it in.
+        #   lost    gold sat inside the top-3 and the rerank moved it out —
+        #           the failure a rerank-only story hides, and the reason the
+        #           net is reported beside both components.
+        if args.rerank:
+            arms["rerank"] = build_rerank_arm(args, sample, window, variants)
+
+        # ── #12297 residual 1: the LEXICAL BASELINE CONTROL ──────────────────
+        # Same arms, same pools, same pairs, same cut — only the scorer changes.
+        # It is emitted under its own arm name so a reader can never mistake a
+        # string-compare figure for the cross-encoder's, and it records the
+        # `lexical_control` note that says what it is for.
+        if args.lexical_baseline:
+            for mode in ([args.lexical_baseline]
+                         if args.lexical_baseline != "both" else LEXICAL_MODES):
+                key = f"lexical_{mode}"
+                arms[key] = _rerank_arm(
+                    sample, window, variants,
+                    model=f"lexical:{mode}",
+                    pools=tuple(args.rerank_pool or RERANK_POOLS),
+                    top_k=TOP_K_RERANK_CUT, ndcg_k=NDCG_K,
+                    threads=0, scorer=LexicalScorer(mode), label=key)
+                arms[key]["lexical_control"] = (
+                    "NOT a matcher and NOT shipped: the decisive control for "
+                    "#12297 residual 1. If this reproduces the cross-encoder "
+                    "arm over the same pools, the lever buys name matching a "
+                    "string compare already gives.")
+
         # ⛔ A MIXED run is refused: `legs_seen` OR-s the looser #3005 predicate
         # over thousands of windows, so a run where the dense leg held for some
         # windows and degraded for others would carry the label "hybrid" for a
@@ -1197,6 +1729,11 @@ def run(args: argparse.Namespace) -> int:
         report = {
             "issue": 11901,
             "measured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            #: Whether the read's own rerank gate was armed during this run. False
+            #: is the only shape whose "before" is the fused baseline; True is
+            #: only reachable with --allow-reranked-baseline, and a reader
+            #: comparing cells needs to know which they are looking at.
+            "config": {"fused_rerank_gate_armed": bool(_ambient_gate)},
             "corpus": {"dir": str(sessions),
                        "files": _harvest_files,
                        "input": dict(_input_stats),
@@ -1262,6 +1799,51 @@ def main(argv: list[str] | None = None) -> int:
                         "by default, because a mixture published as one mode is "
                         "the false-label class #2952/#3005 exist to prevent")
     p.add_argument("--out", default=None)
+    # ── #12297: the cross-encoder rerank arm. DEFAULT OFF, so every existing
+    # invocation — and every committed artifact — is byte-identical.
+    p.add_argument("--rerank", action="store_true",
+                   help="also measure arm 5: the cross-encoder rerank over the "
+                        "same fused candidates at each --rerank-pool width. "
+                        "Off by default so the committed artifacts' shape is "
+                        "unchanged.")
+    p.add_argument("--rerank-pool", type=int, action="append", default=None,
+                   help="pool width(s) the rerank arm fetches at; repeatable. "
+                        "Default 15 (Zep's candidate count, the width #11901 "
+                        "measured) and 40 (the mean effective candidate-list "
+                        "length #11901 measured for a production capture — the "
+                        "figure `TORTOISE_FUSED_RERANK_POOL` now defaults to). "
+                        "MEASURED HERE, never adopted HERE: this flag is not the "
+                        "product's default. The `limit` this harness reads at stays "
+                        "3 (the capture prior's own), a DIFFERENT quantity from the "
+                        "rerank width.")
+    p.add_argument("--rerank-model", default=None,
+                   help="cross-encoder to measure; default is "
+                        "`tortoise.rerank.fused_rerank_model()` — the resolver "
+                        "the shipped read goes through, so the arm measures the "
+                        "model the product would load (including a "
+                        "TORTOISE_FUSED_RERANK_MODEL override)")
+    p.add_argument("--rerank-threads", type=int, default=RERANK_THREADS,
+                   help=f"torch threads for the rerank arm (default "
+                        f"{RERANK_THREADS}, PINNED and recorded). The unpinned "
+                        f"default measured ~20x slower per pair on this box "
+                        f"under fleet load; 0 leaves torch's default in place "
+                        f"and the artifact then says so")
+    p.add_argument("--lexical-baseline", choices=(*LEXICAL_MODES, "both"),
+                   default=None,
+                   help="#12297 residual 1 — also measure a LEXICAL string "
+                        "scorer over the SAME pools as the rerank arm, to test "
+                        "whether a ~5us compare reproduces what the "
+                        "cross-encoder is paid 207 ms/mention for. A control "
+                        "only: not shipped, not a matcher, reaches no product "
+                        "path.")
+    p.add_argument("--allow-reranked-baseline", action="store_true",
+                   help="#12297 — proceed even when TORTOISE_FUSED_RERANK is "
+                        "armed. Without this the run REFUSES (exit 3), because "
+                        "the read's own order is already reranked and every "
+                        "arm's \"before\" would be a rerank, i.e. a "
+                        "rerank-vs-rerank zero that looks exactly like a real "
+                        "one. The artifact records `fused_rerank_gate_armed` "
+                        "either way.")
     return run(p.parse_args(argv))
 
 

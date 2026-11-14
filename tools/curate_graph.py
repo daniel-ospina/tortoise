@@ -107,6 +107,21 @@ class MCPReader:
             args["graph"] = self.graph
         return self._call("tortoise_query", args)
 
+    def _labelled(self, label: str, call, *args: Any, **kwargs: Any) -> Any:
+        """Call, re-raising a client-level refusal UNDER this site's label.
+
+        #11153 moved a refusal from DATA to a CLIENT RAISE (fastmcp
+        `raise_on_error=True`), which happens BELOW these call sites — so the
+        `_error_of` arms that named the site ("read of section 'status' was
+        refused: …", "verification read of the first page was refused: …") stopped
+        firing and every refusal read as an anonymous error. Wrapping the CALL keeps
+        the label on the shape that now actually occurs.
+        """
+        try:
+            return call(*args, **kwargs)
+        except C.CurationRefused as exc:
+            raise C.CurationRefused(f"{label}: {str(exc)[:300]}") from exc
+
     def _fingerprint_walk(self, *, page: int = PAGE) -> list[str]:
         """The id+content sequence of one full walk — used to VERIFY a census.
 
@@ -116,10 +131,20 @@ class MCPReader:
         out: list[str] = []
         offset = 0
         while True:
-            res = C.normalise_tool_result(self._q(offset=offset, limit=page))
+            try:
+                raw = self._q(offset=offset, limit=page)
+            except C.CurationRefused as exc:
+                # #11153: the client-raise shape (see `read_points`) must keep
+                # saying WHERE the verification walk was refused, and must stay on
+                # the refusal class `main()` answers rc 3 for — `CurationRefused`
+                # (a `RuntimeError` subclass) is what `cmd_inventory` catches.
+                raise C.CurationRefused(
+                    f"verification pass was refused at offset {offset} after "
+                    f"{len(out)} rows: {str(exc)[:300]}") from exc
+            res = C.normalise_tool_result(raw)
             err = _error_of(res)
             if err:
-                raise RuntimeError(f"verification pass was refused: {err[:300]}")
+                raise C.CurationRefused(f"verification pass was refused: {err[:300]}")
             batch = _rows_from_tool(res)
             if not batch:
                 break
@@ -142,18 +167,41 @@ class MCPReader:
         seen: dict[str, tuple[int, str]] = {}
         totals: set[int] = set()
         while True:
-            res = C.normalise_tool_result(self._q(offset=offset, limit=page))
-            # A refusal on this surface is a `_safe`-answered payload with
-            # `is_error=False`, so `normalise_tool_result` does NOT raise for it and it
-            # would read as "0 rows". It is TERMINAL wherever it lands: on a LATER page
-            # it used to reach `if not batch: break` with rows already collected, and
-            # when the surface reports no `total` the short walk was then returned as a
-            # complete census — the shortfall guard has no total to compare against and
-            # the page re-check re-reads the last SUCCESSFUL page, so neither can see it.
-            # That is the silent partial census R7 forbids (round-34 finding 1).
+            try:
+                raw = self._q(offset=offset, limit=page)
+            except C.CurationRefused as exc:
+                # #11153: `_live_call_tool` raises the client-level refusal BELOW
+                # this loop, so without this arm the offset/row diagnostic the
+                # data arm produces would be lost on the shape that now actually
+                # occurs (fastmcp `raise_on_error=True`). `CurationRefused`, not a
+                # bare `RuntimeError`: `cmd_inventory`/`cmd_plan` catch THAT class
+                # and answer rc 3, and raising its parent would turn a designed
+                # refusal into an uncaught traceback (review round 3, measured).
+                raise C.CurationRefused(
+                    f"read refused at offset {offset} after {len(rows)} rows: "
+                    f"{str(exc)[:300]} — refusing a partial census") from exc
+            res = C.normalise_tool_result(raw)
+            # A refusal on this surface is a `_safe`-answered payload, and since
+            # #11153 it arrives on the CLIENT-RAISE shape, not as data:
+            # `fastmcp`'s client runs `call_tool(raise_on_error=True)`, so a refused
+            # call raises BEFORE any payload exists, and `_live_call_tool`
+            # translates it into `CurationRefused` (#11153). The old
+            # `is_error=False` false PASS — which read as "0 rows" — is gone, and
+            # with it the reachable-ness of the `_error_of` arm below (kept: it
+            # still covers a refusal that reaches this file as DATA, e.g. a dict
+            # carrying `error` that the surface did not flag).
+            #
+            # The refusal is TERMINAL wherever it lands, and it must still say
+            # WHERE: on a LATER page it used to reach `if not batch: break` with
+            # rows already collected, and when the surface reports no `total` the
+            # short walk was then returned as a complete census — the shortfall
+            # guard has no total to compare against and the page re-check re-reads
+            # the last SUCCESSFUL page, so neither can see it. That is the silent
+            # partial census R7 forbids (round-34 finding 1), which is why the
+            # offset/row diagnostic is re-raised on the client-raise shape too.
             page_refusal = _error_of(res)
             if page_refusal:
-                raise RuntimeError(
+                raise C.CurationRefused(
                     f"read refused at offset {offset} after {len(rows)} rows: "
                     f"{page_refusal[:300]} — refusing a partial census")
             batch = _rows_from_tool(res)
@@ -236,11 +284,14 @@ class MCPReader:
                 ("first", first_page_fp, {"offset": 0, "limit": page}),
                 ("last", last_page_fp, {"offset": last_offsets[0], "limit": last_offsets[1]}),
             ):
-                res2 = C.normalise_tool_result(self._q(**args))
+                res2 = C.normalise_tool_result(
+                    self._labelled(f"verification read of the {label} page was refused",
+                                   self._q, **args))
                 err2 = _error_of(res2)
                 if err2:
-                    raise RuntimeError(f"verification read of the {label} page was refused: "
-                                       f"{err2[:300]}")
+                    raise C.CurationRefused(
+                        f"verification read of the {label} page was refused: "
+                        f"{err2[:300]}")
                 got = tuple(f"{r.get('id') or ''}\x00{r.get('content') or ''}"
                             for r in _rows_from_tool(res2))
                 if got != want:
@@ -273,14 +324,18 @@ class MCPReader:
         """
         args = {"section": section}
         if not self.graph:
-            return self._checked(self._call("tortoise_graph_overview", args), section)
+            return self._checked(self._section_call(args, section), section)
         try:
-            res = C.normalise_tool_result(self._call("tortoise_graph_overview", {**args, "graph": self.graph}))
+            res = C.normalise_tool_result(
+                self._section_call({**args, "graph": self.graph}, section))
         except Exception as exc:
             # ONLY a recognised graph-refusal may fall back. A timeout/429 says
             # nothing about the binding, and re-reading a DIFFERENT graph under the
             # requested graph's identity is how a census mixes two graphs.
-            reason = str(exc) or type(exc).__name__
+            # ⛔ The CAUSE, never the wrapper: `_section_call` labels the refusal with
+            # "was refused", which would itself satisfy this classifier — see
+            # `_unlabelled_refusal`.
+            reason = _unlabelled_refusal(exc)
             if not _looks_like_graph_refusal(reason):
                 raise
             res, reason = None, reason
@@ -290,14 +345,31 @@ class MCPReader:
                 # An error envelope is the NORMAL delivery shape on this surface, so
                 # the gate has to be here too: a quota/DB error must not re-read a
                 # different graph and label the artifact with the requested one.
-                raise RuntimeError(f"read of section {section!r} failed: {reason[:300]}")
+                raise C.CurationRefused(
+                    f"read of section {section!r} failed: {reason[:300]}")
         if reason:
             self._note(f"section {section!r}: the explicit graph argument was refused "
                        f"({reason[:160]}); read from the credential's own graph instead")
-            return self._checked(self._call("tortoise_graph_overview", args), section)
+            return self._checked(self._section_call(args, section), section)
         # An EMPTY result is a legitimate answer (a graph with no sources), so it is
         # returned as-is rather than re-read from a different graph.
         return res
+
+    def _section_call(self, args: dict[str, Any], section: str) -> Any:
+        """One `graph_overview` read, with a refusal re-raised UNDER its section name.
+
+        ⛔ The call is spelled `self._call("tortoise_graph_overview", …)` INLINE, not
+        delegated to `_labelled`: `tests/test_curation_11469.py`'s AST audit
+        (`_first_arg_strings({"_call"}, CLI_SRC)`) reads exactly that shape to prove
+        every tool name this file uses is on the served registry, and handing `_call`
+        around as a VALUE made `tortoise_graph_overview` vanish from that audit — the
+        non-vacuity floor caught it (measured). Keep the literal call.
+        """
+        try:
+            return self._call("tortoise_graph_overview", args)
+        except C.CurationRefused as exc:
+            raise C.CurationRefused(
+                f"read of section {section!r} was refused: {str(exc)[:300]}") from exc
 
     def _note(self, text: str) -> None:
         """Notes ACCUMULATE: a single slot kept only the last falling section, so a
@@ -317,7 +389,7 @@ class MCPReader:
         res = C.normalise_tool_result(raw)
         err = _error_of(res)
         if err:
-            raise RuntimeError(f"read of section {section!r} was refused: {err[:300]}")
+            raise C.CurationRefused(f"read of section {section!r} was refused: {err[:300]}")
         return res
 
     def read_sources(self) -> tuple[list[C.Row], int | None]:
@@ -416,9 +488,21 @@ class MCPReader:
         * a row with no ``id`` is REFUSED — the class's identity key is its id (its text
           is a label, routinely empty), so two id-less rows are indistinguishable and
           would fold onto one;
-        * a read that fills the requested ``limit`` exactly is REFUSED when no reported
-          count says that is the whole layer — there is no offset walk here, so "a full
-          page" and "a truncated layer" are the same bytes;
+        * a population AT OR ABOVE ``OPERATOR_READ_CEILING`` is REFUSED before the read is
+          spent — a layer that ENDS at the bound and one the engine CUT there are the same
+          bytes, because that number is both this reader's ``limit`` and the engine's
+          default ``RESULTSET_SIZE`` (#12440). Unlike Events there is no bound to raise:
+          10,000 is the SDK's hard maximum, so a bigger constant raises ``ValueError`` out
+          of the SDK instead of reading a wider layer;
+        * a read that FILLS the requested ``limit`` is REFUSED, whichever count accompanies
+          it — there is no offset walk here, so "a full page" and "a truncated layer" are
+          the same bytes. The count cannot vouch for a filled response: one at or above
+          the bound has already refused before the read, and any other disagrees. (For a
+          filled response WITH a count, the bound gate and the disagreement rule already
+          refuse, so this arm's own reachable cell is the UNREPORTED one — it is also the
+          arm that keeps a gate deletion fail-CLOSED, which is the fail-open #12378
+          measured for Events at ``read_events``'s gate, so it is ABSOLUTE rather than
+          conditioned on a count);
         * a read whose row count disagrees with ``structure.operators`` is REFUSED. The
           reconciliation is the same discipline the source listing gets, and for the same
           reason: two surfaces describing one population must agree, or one of them did
@@ -449,18 +533,55 @@ class MCPReader:
             value = structure.get("operators")
             if isinstance(value, int) and not isinstance(value, bool):
                 reported = value
-        if reported is not None and reported > OPERATOR_READ_CEILING:
+        # ⛔ AT the bound, not merely above it (#12440). Three bounds coincide on this
+        # number: this read's `limit`, the SDK's hard maximum (a larger one raises
+        # `ValueError`, so there is nothing to raise it TO), and the engine's default
+        # `RESULTSET_SIZE`. The structural leg asks for twice the limit and the SDK then
+        # slices the answer at `limit` (`sdk.py`), so a reader can never SEE more than
+        # `OPERATOR_READ_CEILING` rows: `len(raw) == bound` reads "the layer is at least
+        # this many", never "the layer is this many". A count AT the bound is therefore
+        # not a voucher, and the count is all this gate has.
+        if reported is not None and reported >= OPERATOR_READ_CEILING:
             raise C.CurationRefused(
-                f"the operator layer holds {reported} rows, above the "
-                f"{OPERATOR_READ_CEILING}-row single-call ceiling — that ceiling IS the "
-                "surface's maximum `limit` (the SDK refuses a larger one), so there is no "
-                "wider read to raise it to, only a `limit` and NO `offset`: no page walk, "
-                "and a truncated layer entering the census is indistinguishable from a "
-                "complete one; refusing rather than reporting a partial reasoning layer")
+                f"the operator layer holds {reported} rows, AT OR ABOVE this read's "
+                f"declared {OPERATOR_READ_CEILING}-row RESPONSE BOUND. ⛔ That count is "
+                "`is_operator = true OR op_type IS NOT NULL` with NO status filter, so it "
+                "can EXCEED the layer this read serves — the disagreement rule below names "
+                "the causes — and a count AT the bound is no voucher either way. A layer "
+                "ENDING at "
+                "this number and one the engine CUT there return the SAME bytes: this "
+                "request's `limit` is the SDK's own maximum (a larger `limit` raises "
+                "`ValueError` out of the SDK, not this refusal), the structural leg asks "
+                "for twice it and the answer is sliced back at it, and FalkorDB silently "
+                "truncates any non-aggregate read at its server-global `RESULTSET_SIZE`, "
+                "which DEFAULTS to 10 000 — the same number. Unlike the Event read there "
+                "is NO bound to raise and NO `offset` to walk (`tortoise_search` has a "
+                "`limit` and no page walk), and reading `RESULTSET_SIZE` is not a remedy "
+                "either: a `-1` cap cannot widen the SDK's own slice at `limit`. ⚠️ Do NOT "
+                "read 'below the bound' as immunity: a server tuned with `RESULTSET_SIZE` "
+                "BELOW this bound caps such a read INVISIBLY, and a count that EQUALS its "
+                "cap cannot detect it — verify the tuning with `config_get` and lower this "
+                "constant with it (the residual #12440 states, and the same one the Event "
+                "read carries). The layer must come BELOW this bound to be read whole "
+                "without that tuning — MERGE or DELETE operators (a STATUS CHANGE does NOT "
+                "lower `structure.operators`, which counts with no status filter) — or "
+                "the enumeration needs a SURFACE change: an `offset` (a page walk) is the "
+                "cap remedy, and a filter whose result is a PROVABLE partition would let "
+                "the layer be read in pieces — today's per-`op_type` `kind=` is NOT one "
+                "(`create_operator` accepts 7 values and raw writes can store any, so a "
+                "union of per-`op_type` calls cannot be shown complete) — an MCP/SDK "
+                "surface decision, not a constant; refusing rather than reporting a "
+                "partial "
+                "reasoning layer. ⚠️ Second residual, the other direction: this gate refuses "
+                "WITHOUT reading, "
+                "and operators have no re-count rescue (unlike Events), so a count that is "
+                "stale-HIGH across the bound refuses un-read even where a read would have "
+                "come in below it — fail-CLOSED, and it clears on a re-run; the same root "
+                "as #12445, which tracks the Events instance")
         res = self._search_operators()
         err = _error_of(res)
         if err:
-            raise RuntimeError(f"read of the operator layer was refused: {err[:300]}")
+            raise C.CurationRefused(f"read of the operator layer was refused: {err[:300]}")
         if not _is_row_listing(res):
             raise RuntimeError(
                 "read of the operator layer answered in an unrecognised shape "
@@ -473,12 +594,31 @@ class MCPReader:
                 "the operator read returned no rows AND the structure section reported no "
                 "`operators` count, so an empty layer cannot be told from an unread one — "
                 "refusing a census that would report the reasoning layer as empty")
-        if len(raw) == OPERATOR_READ_CEILING and reported != OPERATOR_READ_CEILING:
+        # ⛔ ABSOLUTE on purpose (#12378's lesson, measured for Events at `read_events`'s
+        # gate): a filled response is "at least this many" whatever the count says, and
+        # conditioning this arm on the count is what made removing THAT gate a FAIL-OPEN
+        # — `len(raw) == reported == bound` then reached no fill check at all. With the
+        # bound gate above in place, a filled response that CARRIES a count is refused by
+        # the gate or by the disagreement rule, so this arm's own remaining cell is the
+        # UNREPORTED one (a fill with no count to disagree with) — which is why deleting
+        # this arm re-opens a real fail-open rather than removing dead code. It is the
+        # BELT that keeps a gate deletion fail-CLOSED, not a second detector.
+        if len(raw) >= OPERATOR_READ_CEILING:
+            # The count is SPLIT OUT rather than rendered blind: `reported=None` is the
+            # reachable arm here (a fill WITH a count is refused by the gate above), and
+            # "the reported count (None) ... any other disagrees with the rows" was a
+            # sentence about a count that does not exist.
+            voucher = (
+                "no count accompanied this read, so nothing can vouch for it"
+                if reported is None else
+                "the reported count cannot vouch for it: a count at or above the bound "
+                "refuses BEFORE this read, and any other disagrees with the rows")
             raise C.CurationRefused(
-                f"the operator read returned exactly its {OPERATOR_READ_CEILING}-row limit and "
-                f"no reported count says that is the whole layer (structure.operators "
-                f"reported {reported!r}) — the response may be truncated, and `tortoise_search` "
-                "has no offset walk to continue from; refusing a partial reasoning layer")
+                f"the operator read returned {len(raw)} rows, FILLING its "
+                f"{OPERATOR_READ_CEILING}-row response — a filled response says `at least "
+                f"this many`, so it cannot be told from one the engine truncated, and "
+                f"`tortoise_search` has no offset walk to continue from; {voucher}; "
+                f"refusing a partial reasoning layer")
         if reported is not None and len(raw) != reported:
             raise C.CurationRefused(
                 f"the operator layer read {len(raw)} rows but structure.operators reports "
@@ -543,23 +683,382 @@ class MCPReader:
         graph's identity is how a census mixes two graphs.
         """
         args: dict[str, Any] = {"entity_type": "operator", "limit": OPERATOR_READ_CEILING}
+        label = "read of the operator layer was refused"
         if not self.graph:
-            return C.normalise_tool_result(self._call("tortoise_search", dict(args)))
+            return C.normalise_tool_result(self._operator_call(dict(args), label))
         try:
-            res = C.normalise_tool_result(self._call("tortoise_search", {**args, "graph": self.graph}))
+            res = C.normalise_tool_result(
+                self._operator_call({**args, "graph": self.graph}, label))
         except Exception as exc:
-            reason = str(exc) or type(exc).__name__
+            # ⛔ The CAUSE, not the wrapper label — see `_unlabelled_refusal`.
+            reason = _unlabelled_refusal(exc)
             if not _looks_like_graph_refusal(reason):
                 raise
             self._note(f"the operator read: the explicit graph argument was refused "
                        f"({reason[:160]}); read from the credential's own graph instead")
-            return C.normalise_tool_result(self._call("tortoise_search", dict(args)))
+            return C.normalise_tool_result(self._operator_call(dict(args), label))
         reason = _error_of(res)
         if reason and _looks_like_graph_refusal(reason):
             self._note(f"the operator read: the explicit graph argument was refused "
                        f"({reason[:160]}); read from the credential's own graph instead")
-            return C.normalise_tool_result(self._call("tortoise_search", dict(args)))
+            return C.normalise_tool_result(self._operator_call(dict(args), label))
         return res
+
+    def read_events(
+        self, counts: Mapping[str, Any] | None = None,
+    ) -> tuple[list[C.Row], int | None]:
+        """The episodic layer — readable in one call, and never read until this change.
+
+        `tortoise_get_entity(type="events", limit=N)` is the ADVERTISED path (the older
+        `tortoise_get_events` name is retired at the server, #3883) and it forwards to
+        `get_events`, which is `MATCH (e:Event) … ORDER BY e.startedAt DESC LIMIT $lim`.
+        Measured on live-v4, 2026-11-13, read-only: **4,670 rows in one call**, exactly
+        `counts.Event`. The harness recorded that layer as *"READABLE but NOT read by
+        this pass"* (`NOT_ENUMERABLE["event"]`) — a scope decision it then reported as
+        a complete census, which is the omission #12378 names.
+
+        Reading it moves NO row into `carry`: `classify_event` answers `undecidable` on
+        both of its arms (an agent-session container, whose home is #10000's open D1
+        question; a domain Event, whose write path has no `events` section), so this
+        buys per-kind census resolution and per-row reasons, nothing more.
+
+        The read is ROUTED like every other one (`graph` is the credential's per-call
+        routing argument and `tortoise_get_entity` is NOT in `GRAPH_ARGUMENT_EXCLUDED`),
+        for the reason the operator read is: omitting it reads the DEFAULT graph while
+        every other section came from `--graph`, and the reconciliation then compares
+        one graph's count against another graph's rows.
+
+        Fail-closed rules, each mirroring the operator read:
+
+        * a row with neither `id` nor `eventId` is REFUSED — two id-less Events are
+          indistinguishable and would fold onto one; `_upsert_event` writes `id` equal
+          to the MERGE key `eventId`, and by-url/legacy rows carry the `eventId`
+          spelling, so both are read;
+        * a population AT OR ABOVE `EVENT_READ_CEILING` is REFUSED — there is no offset
+          walk to page through it, AND FalkorDB silently caps any non-aggregate read at its
+          server-global `RESULTSET_SIZE` (default 10 000 — measured on docker 4.20.4:
+          10 050 Points read back as 10 000 rows, #4515/#4233/#5062), so a layer at the cap
+          and a layer truncated BY the cap return the same bytes;
+        * a read that FILLS the request is REFUSED, because there is no offset walk, so "a
+          full page" and "a truncated layer" are the same bytes. The request is sized to
+          `EVENT_READ_CEILING` — NOT to `EVENT_READ_CEILING + 1` and NOT to
+          `counts.Event + 1`. The `+1` looks like extra safety and is the opposite: the
+          engine's cap sits AT the bound, so a request of `bound + 1` can never be filled,
+          a capped response always lands one row UNDER the request, and the fill refusal
+          becomes an inert arm that can only fire on inputs no server can return. Sizing
+          the request TO the bound makes a capped response (== the bound) fill it and
+          refuse — and a response strictly below the bound is uncapped, hence exactly the
+          layer;
+        * a read whose row count disagrees with `counts.Event` is re-counted ONCE and then
+          either ACCEPTED or REFUSED. Both surfaces describe `:Event` with the same
+          predicate (unlike the operator pair), so equality was expected — but the count is
+          read moments earlier, and `counts.Event` moves in BOTH directions on a live graph
+          (`index_sessions` creates; the hosted entity-delete path deletes). Completeness
+          rests on `len(raw) < limit_sent`, NOT on the count: a response below the request
+          is the exact layer — because the engine cannot have capped it below the bound —
+          so a disagreement whose fresh count equals the rows is ACCEPTED (the disagreement
+          was a stale count) and anything else is REFUSED. The refusal still names
+          `counts.Event` and what the re-read reported.
+
+        ⛔ RESIDUAL, stated rather than hidden: on the UNREPORTED arm completeness rests
+        only on the response having stayed below the bound. A server tuned with
+        `RESULTSET_SIZE` BELOW `EVENT_READ_CEILING` would cap such a read invisibly, and
+        nothing in this tool can see that tuning. A `counts.Event` catches it only where
+        that count EXCEEDS the cap — the disagreement arm then refuses. A capped response
+        EQUALS an equal-or-smaller count, and the equality path carries no fill check by
+        design, so immunity on the REPORTED arm rests on
+        `RESULTSET_SIZE >= EVENT_READ_CEILING`, NOT on the count. That coupling is why the
+        count is still preferred and why `events_total_reported` is on the artifact.
+        A deployment that tunes the cap below the bound must lower `EVENT_READ_CEILING`
+        with it.
+
+        An UNREPORTED count over a NON-EMPTY read is a lost cross-check, not a lost
+        population: the rows came from their own read, so it is recorded on the report.
+        A ZERO-ROW read with no count to reconcile it REFUSES — "this graph has no
+        Events" and "the layer was not read" are otherwise the same bytes, which is the
+        silent-zero class `read_points` and `_unreconciled_sources` already fail closed
+        on.
+        """
+        reported = _node_count(counts, "Event")
+        # ⚠️ KNOWN RESIDUAL, stated so the comment below is not read as claiming more than
+        # the code delivers: this gate refuses WITHOUT reading, so a count that is
+        # stale-HIGH across the bound refuses un-read even when the layer has since shrunk
+        # BELOW the bound — where a read would have returned `len(raw) < limit_sent`, which
+        # the arms below ACCEPT. Narrow (a graph sitting exactly AT the bound with a delete
+        # inside the count->read window) and it clears on a re-run, so it is fail-CLOSED
+        # and filed as issue #12445 rather than fixed here.
+        #
+        # ⛔ Why it is not a one-line fix: moving the refusal after the read is only safe if
+        # the fill check ALSO moves onto the EQUALITY path. The fill arm below lives INSIDE
+        # the `len(raw) != reported` block, so `len(raw) == reported == EVENT_READ_CEILING`
+        # reaches no fill check at all — measured, disabling THIS gate reds
+        # `test_a_layer_at_the_bound_refuses_because_the_server_caps_there` and
+        # `test_an_event_layer_above_the_ceiling_is_refused`, i.e. removing it alone is a
+        # FAIL-OPEN. It is a two-part change with its own mutation proofs.
+        if reported is not None and reported >= EVENT_READ_CEILING:
+            raise C.CurationRefused(
+                f"the Event layer holds {reported} rows, at or above this read's declared "
+                f"{EVENT_READ_CEILING}-row RESPONSE BOUND. ⛔ TWO limits meet at this "
+                "number: `sdk.get_events` validates no upper `limit` and passes it straight "
+                "into the Cypher `LIMIT` (so the bound is OURS, a size/memory bound on ONE "
+                "response), and FalkorDB silently truncates any non-aggregate read at its "
+                "server-global `RESULTSET_SIZE`, which DEFAULTS TO 10 000 — the same "
+                "number. A layer at the bound is therefore indistinguishable from a layer "
+                "the server capped there, and there is a `limit` and NO `offset` "
+                "(`MATCH (e:Event) … LIMIT $lim`), so it cannot be read whole at all. "
+                "Raising `EVENT_READ_CEILING` alone does NOT fix this: it widens the gap "
+                "between the request and the server's cap, which makes a capped response "
+                "look MORE like a whole one. Raise the server's `RESULTSET_SIZE` with it "
+                "and verify it (`config_get`), or add an offset walk; "
+                "do not let a partial episodic layer be reported as complete")
+        # ⛔ Ask for EXACTLY the DECLARED BOUND — never `bound + 1`, never `reported + 1`.
+        # The response size is what decides whether a read is provably whole: `limit` goes
+        # straight into the Cypher `LIMIT`, so a response SHORTER than the request is the
+        # exact layer, and a response that FILLS the request is "at least this many" and
+        # cannot be distinguished from a truncated one.
+        #
+        # Sizing the request to `reported + 1` (what this code did until the fourth review
+        # cycle) gives exactly ONE row of headroom, so a layer that grew by even one row
+        # FILLED the request — the very case the re-count below was meant to accept became
+        # the truncation-capable case instead, and a grow-then-shrink race was accepted as
+        # `events_reconciled: True` over unread rows (reproduced by the reviewer: 4 live
+        # rows unread, 4 deleted rows reported).
+        #
+        # `bound + 1` was the fifth cycle's answer and it fails for a different reason: the
+        # engine caps a non-aggregate read at `RESULTSET_SIZE`, DEFAULTS TO 10 000, i.e. AT
+        # this bound. A request of 10 001 can then never be filled, so the fill refusal
+        # below is inert — and a layer of 10 001 (one Event created after the count said
+        # 10 000) comes back as 10 000 rows == the count and was ACCEPTED with a row
+        # unread. Requesting the bound itself closes it: a capped response EQUALS the bound
+        # and refuses; a response below the bound was not capped.
+        #
+        # ⛔ NOT `min(reported + 1, EVENT_READ_CEILING)` either: that clamp ate the headroom
+        # exactly at the bound (a layer reporting 10,000 sent `limit=10,000`, so one that
+        # had grown to 10,050 came back as 10,000 rows == the count and was filed
+        # `events_reconciled: True` with 50 rows unread — the first reviewer round).
+        # `reported` is already bounded by the refusal above, and `get_events` validates no
+        # upper `limit`, so this is always a legal request.
+        limit_sent = EVENT_READ_CEILING
+        res = self._get_entities(limit_sent)
+        err = _error_of(res)
+        if err:
+            # ⛔ `CurationRefused`, NOT bare `RuntimeError`: `main()` answers rc 3 for this
+            # class and rc 1 ("the run crashed") for anything else — the same contract the
+            # `_fingerprint_walk` refusal below states. `cmd_inventory` (and `cmd_plan`)
+            # catch `C.CurationRefused` only, so a bare `RuntimeError` here escaped uncaught
+            # and reported a DESIGNED refusal as a crash. It is a `RuntimeError` subclass,
+            # so the existing `pytest.raises(RuntimeError, ...)` assertions still hold.
+            raise C.CurationRefused(f"read of the Event layer was refused: {err[:300]}")
+        if not _is_row_listing(res):
+            # ⛔ bare `RuntimeError` ON PURPOSE — rc 1, not rc 3. This is the PAYLOAD-level
+            # guard, and it matches the sibling layers exactly (`read_sources`,
+            # `read_operators`, both `RuntimeError` here). The rc table
+            # (`docs/architecture/CURATION-11469.md`) decides rc by the exception CLASS
+            # rather than naming listings, so keeping the class the siblings use is what
+            # keeps the three layers answering the same rc; the table's own Event row
+            # separately counts ROW-level shape drift as a `CurationRefused` site, which is
+            # a finer guard than this one and is pinned by
+            # `test_an_event_row_that_is_not_an_object_is_refused_not_a_traceback`. Only the
+            # `_error_of` arm above is a designed refusal.
+            raise RuntimeError(
+                "read of the Event layer answered in an unrecognised shape "
+                f"({type(res).__name__} with keys "
+                f"{sorted(res)[:6] if isinstance(res, dict) else 'n/a'}) — refusing to "
+                "report an unreadable layer as an empty one")
+        raw = _rows_from_tool(res)
+        if reported is None and not raw:
+            raise C.CurationRefused(
+                "the Event read returned no rows AND the status section reported no "
+                "`Event` count, so an empty layer cannot be told from an unread one — "
+                "refusing a census that would report the episodic layer as empty")
+        if reported is None and len(raw) >= limit_sent:
+            raise C.CurationRefused(
+                f"the Event read returned {len(raw)} rows, filling the "
+                f"{limit_sent}-row request, and "
+                "no reported count says that "
+                "is the whole layer — the response may be truncated, and this read has no "
+                "offset walk to continue from; refusing a partial episodic layer")
+        if reported is not None and len(raw) != reported:
+            # ⛔ BOTH directions are re-counted, not only growth. A layer that GREW or
+            # SHRANK between the count and this read is a CORRECT read being refused, and
+            # both are reachable on a live graph: `counts.Event` is fed by
+            # `index_sessions`, and `:Event` nodes are deleted by the hosted entity-delete
+            # path. Equality with a fresh count accepts, in either direction.
+            #
+            # ⚠️ WHY ACCEPTING HERE IS SOUND. Completeness rests on ONE fact, and the
+            # request is sized to establish it: `len(raw) < limit_sent`, i.e. the response
+            # did not fill the request, so the engine cannot have capped it at
+            # `RESULTSET_SIZE` (which defaults to the bound) and it is the exact layer.
+            # The
+            # re-count then only answers a different question: is the number this read
+            # disagrees with simply stale? (A `:Event` created by `index_sessions` or
+            # deleted by the hosted entity-delete path between the two requests.)
+            #
+            # ⛔ Do NOT weaken that to "the re-count proves the read is whole": it does not,
+            # and an earlier revision said so. Equality plus a FILLED request is
+            # satisfiable by a layer that grew past the request and then shrank back to
+            # exactly its size before the re-read — the read truncated, the census filed
+            # `events_reconciled: True` over unread rows (reproduced by the reviewer). The
+            # arm below therefore refuses whenever the response filled the request, in
+            # either direction.
+            fresh = _node_count(self.counts(), "Event")
+            if fresh is not None and fresh == len(raw) and len(raw) >= limit_sent:
+                raise C.CurationRefused(
+                    f"the Event layer read {len(raw)} rows, filling the "
+                    f"{limit_sent}-row request, and a re-read of "
+                    f"counts.Event now also reports {fresh} — but this layer is above what "
+                    "ONE response may accept, and a filled response may also have been CUT, "
+                    "so the rows cannot be shown to be the whole layer. Refusing rather "
+                    "than filing a possibly-short layer")
+            if fresh is not None and fresh == len(raw):
+                self._note(
+                    "the Event layer CHANGED between the status count and this read "
+                    f"({reported} -> {len(raw)} rows); the count was re-read and now "
+                    "agrees with the rows, so this is a complete read of the newer layer")
+                reported = fresh
+            else:
+                raise C.CurationRefused(
+                    f"the Event layer read {len(raw)} rows but counts.Event reports {reported} "
+                    "— refusing a layer two surfaces disagree about. Both count `:Event` with "
+                    "the same predicate, so the difference is one of: a genuinely partial / "
+                    "clamped read; a change between the status read and this read, "
+                    "repeated before the re-read (a DISAGREEMENT is re-counted once "
+                    f"before refusing — the re-read reported {fresh!r}, not "
+                    f"{len(raw)}); or a `counts` section that is itself stale, or scoped "
+                    "to a different graph")
+        empty_text = 0
+        out: list[C.Row] = []
+        for r in raw:
+            if not isinstance(r, dict):
+                # `_is_row_listing` accepts any list, so shape drift here would otherwise
+                # surface as an AttributeError (rc 1 traceback) instead of this module's
+                # designed refusal — the guard `read_operators` and `read_sources` apply.
+                raise C.CurationRefused(
+                    f"an Event row arrived as {type(r).__name__}, not an object — "
+                    "refusing the layer rather than guessing which field carries its id")
+            node_id = str(r.get("id") or r.get("eventId") or "")
+            if not node_id:
+                raise C.CurationRefused(
+                    "an Event row arrived with neither `id` nor `eventId` — the class is "
+                    "identified by its key (`_upsert_event` writes `id` equal to the "
+                    "MERGE key `eventId`), so two id-less rows would fold onto one; "
+                    "refusing the layer")
+            content = _event_text(r)
+            if not content:
+                empty_text += 1
+            out.append(C.Row(
+                node_id=node_id,
+                node_type="event",
+                # The Event surface spells the kind `eventKind`; read the curation
+                # spellings too rather than assume one (the operator read's lesson).
+                kind=r.get("eventKind") or r.get("kind") or r.get("pointKind"),
+                content=content,
+                content_hash=r.get("contentHash") or r.get("content_hash"),
+                props={k: v for k, v in r.items() if k not in ("embedding",)},
+            ))
+        if reported is None:
+            self._note("the status section reported no `Event` count, so the Event layer "
+                       "read is unreconciled (it is still the read's rows, not a count)")
+        if empty_text:
+            # ⛔ Disclosed, not hidden — and stated EXACTLY as far as it goes. An Event with
+            # no `name`/`title`/`subject` has an EMPTY text, and this pass keys Events by
+            # CONTENT (`Row.stable_key`), so those rows share one key: `--rows` shows the
+            # same `stable_key` string for each of them. What does NOT happen is a duplicate
+            # CLAIM — `classify_event` takes no `duplicate_of`/`keeper_id`, and every Event
+            # arm is `undecidable`, so the row count and the per-row reasons are unaffected.
+            # (An earlier draft of this note asserted a fold outcome that never reaches an
+            # Event decision; round-2 review measured it and it was wrong.) The count is
+            # still the difference between a reader that understood the layer and one that
+            # silently collapsed it, so it travels on the artifact.
+            self._note(f"{empty_text} of {len(raw)} Event rows carry no name/title/subject "
+                       "and therefore an empty text: rows of the SAME KIND among them share "
+                       "one `stable_key` in `--rows` WHEN they carry no `contentHash` of "
+                       "their own (the key is `curate-11469:event:<kind>:<contentHash or "
+                       "sha256(text)>`, so the sharing is per-kind and only for the rows "
+                       "with neither; no duplicate claim is made for them — every Event "
+                       "decision is `undecidable`, and nothing is carried)")
+        return out, reported
+
+    def _get_entities(self, limit: int) -> Any:
+        """The Event enumeration, ROUTED to `self.graph` like every other read.
+
+        `graph` is the credential's per-call routing argument (#9340,
+        `mcp_server._take_graph_argument`) and `tortoise_get_entity` honours it: every tool
+        advertises `graph` unless it is in `GRAPH_ARGUMENT_EXCLUDED`
+        (`_with_graph_argument`), and `tortoise_get_entity` is not in that set — so
+        omitting it would read the Event layer from the DEFAULT graph while every other
+        section came from `--graph` — a census mixing two graphs.
+
+        The fallback is `_search_operators`' and `_section`'s, for their reason: a
+        graph-BOUND credential cannot be re-targeted, so a refusal ABOUT the graph
+        argument is answered by re-reading WITHOUT it (omission means "this credential's
+        own graph", a legal read) and recording the fact on the report. Any other
+        refusal — a quota, a timeout, a DB fault — raises: re-reading a different graph
+        under the requested graph's identity is how a census mixes two graphs.
+
+        `type="events"` with no `id` is the whole-layer listing (`tortoise_get` treats
+        `id` as an optional eventKind FILTER on this arm), and `limit` is the response the
+        truncation check in `read_events` is sized against — ALWAYS exactly
+        `EVENT_READ_CEILING`, never the reported count and never the bound plus one:
+        `reported + 1` leaves exactly one row of headroom, so a single Event created between
+        the count and the read fills the request and a truncated response becomes
+        indistinguishable from a whole one; `min(reported + 1, EVENT_READ_CEILING)` loses
+        the headroom entirely at the bound; and `bound + 1` can never be filled at all,
+        because FalkorDB caps a non-aggregate read at its `RESULTSET_SIZE` (default 10 000,
+        i.e. the bound), which makes the fill refusal inert. Sizing to the bound makes a
+        capped response EQUAL it and refuse, and a response strictly below it uncapped,
+        hence the whole layer.
+        """
+        args: dict[str, Any] = {"type": "events", "limit": limit}
+        if not self.graph:
+            return C.normalise_tool_result(self._event_call(dict(args)))
+        try:
+            res = C.normalise_tool_result(
+                self._event_call({**args, "graph": self.graph}))
+        except Exception as exc:
+            reason = _unlabelled_refusal(exc)
+            if not _looks_like_graph_refusal(reason):
+                raise
+            self._note(f"the Event read: the explicit graph argument was refused "
+                       f"({reason[:160]}); read from the credential's own graph instead")
+            return C.normalise_tool_result(self._event_call(dict(args)))
+        reason = _error_of(res)
+        if reason and _looks_like_graph_refusal(reason):
+            self._note(f"the Event read: the explicit graph argument was refused "
+                       f"({reason[:160]}); read from the credential's own graph instead")
+            return C.normalise_tool_result(self._event_call(dict(args)))
+        return res
+
+    def _event_call(self, args: dict[str, Any]) -> Any:
+        """One Event-layer read, with a refusal re-raised UNDER its layer name.
+
+        ⛔ Same AST constraint as `_section_call`: `self._call("tortoise_get_entity", …)`
+        stays a LITERAL call so `tests/test_curation_11469.py`'s registry audit still
+        reads the tool name out of this file.
+
+        The LABEL matters on this shape (#11153 review round 9): `read_events` labelled
+        its in-band `_error_of` arm but a client-raised refusal came out of
+        `_get_entities` bare, so an operator saw `Team points limit reached (25000)`
+        with no indication which of the five census reads died — the same gap rounds
+        3–4 closed for `_section`, `read_points` and the operator layer.
+        """
+        try:
+            return self._call("tortoise_get_entity", args)
+        except C.CurationRefused as exc:
+            raise C.CurationRefused(
+                f"read of the Event layer was refused: {str(exc)[:300]}") from exc
+
+    def _operator_call(self, args: dict[str, Any], label: str) -> Any:
+        """One operator-layer read, with a refusal re-raised UNDER its label.
+
+        ⛔ Same AST constraint as `_section_call`: `self._call("tortoise_search", …)`
+        stays a LITERAL call so `tests/test_curation_11469.py`'s registry audit still
+        reads the tool name out of this file.
+        """
+        try:
+            return self._call("tortoise_search", args)
+        except C.CurationRefused as exc:
+            raise C.CurationRefused(f"{label}: {str(exc)[:300]}") from exc
 
     def audit(self) -> dict[str, Any]:
         res = self._section("audit")
@@ -567,9 +1066,88 @@ class MCPReader:
 
 
 def _live_call_tool(name: str, args: dict[str, Any] | None = None) -> Any:
+    """Call the hosted surface, reporting a refusal on THIS file's own seam.
+
+    #11153: the surface now flags a refused call with `isError: true`, and fastmcp's
+    client is built with `raise_on_error=True` (`tortoise/mcp_client.py::call_tool`),
+    so it raises `ToolError` BEFORE the payload can reach `normalise_tool_result`.
+    Without this translation a refusal left `read_points` as an uncaught client
+    traceback — losing the offset/row diagnostics and the documented rc-3 refusal
+    path — instead of the `CurationRefused` this file already handles.
+
+    ⚠️ NARROW ON PURPOSE: fastmcp raises `ToolError` for ANY error result, including
+    a server-side crash (`Error calling tool: TypeError: …`). Translating that into
+    a refusal would report a crash as a DESIGNED rc-3 refusal, so a driver paging
+    on rc 1 ("the run crashed") would stay silent. So the translation is keyed on
+    `_is_refusal_envelope` → `tortoise.mcp_client.refusal_message`, whose matched
+    set is BOTH shapes a designed refusal arrives in: the JSON error envelope
+    (`{"error": …}`, the text of a `_safe`/`_quota_gated` payload) AND the prose
+    refusals listed in `tortoise.mcp_auth.REFUSAL_PROSE_MESSAGES` (all three
+    transport wait-bound arms — dispatched, never-dispatched, and a refused WRITE —
+    plus the graph-lookup margin arm, the sensitive-op rate-limit 429, the four AUTHZ
+    refusals, the graph-target arms and, through `REFUSAL_PROSE_PHRASES`, the two
+    resolver refusals whose graph NAME comes first) — matched by PREFIX for a lead and
+    by interior PHRASE for that last pair, because a wrapped message keeps its prefix
+    and a variable-first message keeps none. ⛔ The cannot-be-opened arm is
+    deliberately OUT — see the note beside `mcp_auth._REFUSAL_GRAPH_TARGET_LEADS`: a
+    lead wide enough to catch it also catches "Graph disclosure: …" and
+    "Graph was purged …", which must stay crash-class. A `-32009`
+    prose refusal is the ROUTINE answer for an
+    expensive census read, so dropping the prose arm silently turned it back into a
+    crash (the round-4 bug); the matched set lives in that one function, and this
+    sentence names its scope so a maintainer aligning the code cannot narrow it by
+    accident. Everything else is re-raised untouched.
+    """
+    from fastmcp.exceptions import ToolError
+
     from tortoise import mcp_client
 
-    return mcp_client.call_tool(name, args or {})
+    try:
+        return mcp_client.call_tool(name, args or {})
+    except ToolError as exc:
+        if not _is_refusal_envelope(str(exc)):
+            raise
+        raise C.CurationRefused(str(exc)) from exc
+
+
+def _is_refusal_envelope(text: str) -> bool:
+    """True when a client error's message IS one of the surface's refusals.
+
+    Delegates to `tortoise.mcp_client.refusal_message`, which OWNS the
+    classification (it owns `call_tool`, the boundary that raises). It matches a
+    JSON ERROR ENVELOPE (`_safe`/`_quota_gated`, where fastmcp raises
+    `content[0].text` = the JSON error dict) PLUS every prose entry in
+    `tortoise.mcp_auth.REFUSAL_PROSE_MESSAGES` — the three `-32009` wait-bound arms
+    (dispatched, never-dispatched, a refused WRITE), the graph-lookup margin
+    refusal, the sensitive-op rate-limit 429, the four AUTHZ refusals, and the
+    graph-target arms (a retarget refusal, requires-a-workspace, a non-string
+    argument, an empty argument) — matched by prefix, PLUS the two variable-first
+    graph-target arms through `REFUSAL_PROSE_PHRASES` ("is reachable from this
+    workspace.", "graphs in this workspace:"), matched on an interior phrase because
+    their GRAPH NAME comes first. ⛔ The cannot-be-opened arm is deliberately OUT
+    (see the note beside `mcp_auth._REFUSAL_GRAPH_TARGET_LEADS`): a lead wide enough
+    to catch it also catches "Graph disclosure: …" and "Graph was purged…", which
+    must stay crash-class. That registry is the ONE source; do NOT restate a
+    count here, because this docstring has already gone stale doing exactly that
+    ("FOUR shapes" while the delegate matched six). A bare "Graph " lead was tried
+    and REMOVED for the reason above. Each
+    graph-target entry exists because a reader site receives that family as
+    `ToolError` and must answer it as the refusal it is, not as a crash: the three
+    sites that take a graph FALLBACK (`_section`, `read_operators`, `read_events`)
+    and `read_points`, whose refusal is terminal — it has no fallback ON PURPOSE, and
+    adding one would re-read a different graph under the requested graph's identity,
+    so it answers rc 3 with its offset/row diagnostic instead. A
+    server-side CRASH's text (`Error calling tool: TypeError: …`) matches none and
+    stays a `ToolError`, so a driver paging on "the run crashed" is not silenced.
+
+    The rationale for the split, measured: review round 4 (the prose arm, which
+    turned the routine refusal into an uncaught traceback with rc 1), round 8
+    (a second copy of this predicate would have been the third owner of it) and
+    round 10 (this docstring's own count was the narrowing hazard it described).
+    """
+    from tortoise.mcp_client import refusal_message
+
+    return refusal_message(text) is not None
 
 
 #: A fallback to the credential's own graph is only legitimate when the refusal is
@@ -605,6 +1183,32 @@ def _looks_like_graph_refusal(reason: str) -> bool:
         or "not found" in low or "not reachable" in low or "cannot" in low)
 
 
+def _unlabelled_refusal(exc: BaseException) -> str:
+    """A refusal's OWN text, without this module's site label.
+
+    ⛔ NEVER classify ``str(exc)`` on an exception that `_section_call` /
+    `_operator_call` may have re-raised. Those wrappers prepend
+    ``"read of section 'status' was refused: "`` — and that label supplies the word
+    **"refused"**, which is itself one of `_looks_like_graph_refusal`'s trigger words.
+    The classifier's rule is "the message must QUOTE the graph AND read like a refusal",
+    so the wrapper silently satisfied the second half for ANY refusal text that quotes a
+    graph: a `CurationRefused` such as ``"quota exhausted on graph 'live-v4'"`` matches
+    NOTHING on its own, but wrapped it became
+    ``"read of section 'status' was refused: quota exhausted on graph 'live-v4'"`` —
+    classified as a graph refusal, and the read then FELL BACK to the credential's own
+    graph: a census mixing two graphs while the artifact was stamped with the requested
+    one, the exact failure the fallback's own comment says must never happen (measured,
+    review round 9). On `origin/main` the handler classified the RAW text, so this was
+    introduced by the label wrapper, not inherited.
+
+    Only a `CurationRefused` is wrapped, so that is the class this matters for; the
+    wrappers chain with ``raise … from exc``, making the original text ``__cause__``.
+    """
+    cause = exc.__cause__
+    text = str(cause) if isinstance(cause, BaseException) else str(exc)
+    return text or type(exc).__name__
+
+
 def _source_gap(counts: Any, read: int) -> int | None:
     """`counts.Source` minus what this read path enumerated (None if unreported).
 
@@ -616,6 +1220,42 @@ def _source_gap(counts: Any, read: int) -> int | None:
     node_counts = counts.get("counts") if isinstance(counts.get("counts"), dict) else counts
     total = node_counts.get("Source") if isinstance(node_counts, dict) else None
     return (total - read) if isinstance(total, int) else None
+
+
+def _node_count(counts: Any, node_type: str) -> int | None:
+    """`counts.<node_type>` from the status section, or None when it reports none.
+
+    The status section nests its node counts under `counts` on some builds and
+    carries them at the top level on others (`_source_gap` reads both spellings), and
+    a missing or non-int value is None — NEVER 0, because "the surface reports no
+    Event count" and "the graph holds no Events" are different facts and the
+    reconciliation must be able to tell them apart (the silent-zero class).
+    """
+    if not isinstance(counts, dict):
+        return None
+    node_counts = counts.get("counts") if isinstance(counts.get("counts"), dict) else counts
+    value = node_counts.get(node_type) if isinstance(node_counts, dict) else None
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return None
+
+
+def _event_text(row: Mapping[str, Any]) -> str:
+    """An Event's text, in the order the write path actually stores it.
+
+    `name` is the Event's text and IS persisted on the node — it is deliberately
+    absent from `_EVENT_HANDLED`, so `_persist_extra_props` carries it through
+    (`projection/entities.py`, the #2788 note). Two narrower carriers exist and are
+    declared here rather than discovered later: a MEETING Event persists its `title`
+    through the guarded merge (and `backfill_sources` reads it back), and a domain
+    Event always has a `subject`. An Event with none of the three keeps an empty text
+    — `read_events` counts those on the report rather than inventing content for them.
+    """
+    for key in ("name", "title", "subject"):
+        value = row.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return ""
 
 
 def _unreconciled_sources(read: int, gap: int | None) -> str | None:
@@ -637,20 +1277,25 @@ def _unreconciled_sources(read: int, gap: int | None) -> str | None:
 
 NOT_ENUMERABLE = {
     "object": "no listing surface on the MCP tool set — count from counts.Object",
-    "event": "READABLE but NOT read by this pass: `tortoise_get_entity(None, "
-             "type='events', limit=N)` returns the WHOLE layer in one call (measured "
-             "2026-11-13: limit=5000 -> 4,670 rows, exactly counts.Event). Reading it is a "
-             "separate decision, not an unreachability fact: every Event classifies "
-             "`undecidable` today (session containers have no safe destination while the "
-             "record holds 0 rows for this tenant, #10000/D1; a domain Event has no "
-             "`events` write section), so it changes no disposition — only the census' "
-             "per-kind resolution. The layer's home is #10000's open question; reading it "
-             "is filed as #12378. Until then count from counts.Event",
     "subject": "no listing surface on the MCP tool set — count from counts.Subject",
     "source": "tortoise_list_sources matches `documentKind IS NULL` (sdk.list_sources), "
               "so a Document-kind Source is NOT listed — reconcile sources_read against "
               "counts.Source rather than reading the source count as complete",
 }
+#: ⛔ `event` is deliberately NOT in the table either, and its entry used to say
+#: "READABLE but NOT read by this pass" — a scope decision written where a
+#: REACHABILITY fact belongs, which made the census look complete over a layer of
+#: **4,670 rows** it had never read (#12378). The layer is enumerated by
+#: `read_events`: `tortoise_get_entity(type="events", limit=N)` forwards to
+#: `get_events` (`MATCH (e:Event) … LIMIT $lim`, a bare list, no total) and answers the
+#: whole layer in ONE call, reconciled against `counts.Event`.
+#: ⚠️ Reading it moves NO row into `carry` — `classify_event` answers `undecidable` on
+#: both arms — so the omission was never costing dispositions. What it cost was the
+#: census's per-kind resolution (an undifferentiated episodic tier) and #11469's
+#: Target 2, "every dropped row is named with its reason", for rows never enumerated.
+#: The episodic tier's DESTINATION is still #10000's open D1 question; that is the part
+#: that stayed a decision after the read landed.
+
 #: ⛔ `operator` is deliberately NOT in the table above. It used to be, with the
 #: reason "tortoise_query excludes operator Points unless an operator kind is
 #: requested" — and that is false twice over, measured on live-v4 2026-11-13:
@@ -662,19 +1307,62 @@ NOT_ENUMERABLE = {
 #: reasoning layer — stayed out of a census that then reported itself complete.
 
 #: The operator layer is read in ONE call: `tortoise_search` takes a `limit` and has no
-#: `offset`, so there is no page walk to fall back on. A population above this ceiling
-#: is therefore REFUSED rather than truncated — a partial layer entering the census
-#: looks exactly like a complete one.
+#: `offset`, so there is no page walk to fall back on. A population AT OR ABOVE this
+#: ceiling is therefore REFUSED, and refused BEFORE the read is spent (#12440) — a layer
+#: ending exactly here and one the engine cut here are the same bytes, and a partial layer
+#: entering the census looks exactly like a complete one.
 #:
 #: ⛔ 10,000 is NOT a chosen trade-off, it is the SURFACE'S hard maximum: the SDK refuses
-#: `limit > 10000` outright (`tortoise_fts_query`, `sdk.py:40575`), so this constant is
-#: also the `limit` every operator read sends. There is no headroom to spend — raising
-#: it does not read a wider layer, it makes every operator read raise `ValueError` out
-#: of the SDK, which is NOT a `CurationRefused`: an ARMED run reaches rc 1 through the
-#: generic `except Exception` arm, and a DISARMED run reports it on the artifact and
-#: exits 0 — that arm exists for exactly this. A population above 10,000 has no
-#: single-call read on this surface at all, which is what the refusal says.
+#: `limit > 10000` outright (`tortoise_fts_query`, `sdk.py:41126`), so this constant is
+#: also the `limit` every operator read sends, and the structural leg's own request
+#: (`2 × limit`) is sliced back to it before it reaches this reader. There is no headroom
+#: to spend — raising it does not read a wider layer, it makes every operator read raise
+#: `ValueError` out of the SDK, which is NOT a `CurationRefused`: an ARMED run reaches rc 1
+#: through the generic `except Exception` arm, and a DISARMED run reports it on the
+#: artifact and exits 0 — that arm exists for exactly this. A population at or above
+#: 10,000 has no single-call read on this surface at all, which is what the refusal says,
+#: and a layer of exactly 10,000 rows that is genuinely WHOLE is refused with it: nothing
+#: on this surface can show it whole.
 OPERATOR_READ_CEILING = 10_000
+
+
+#: The Event layer is read in ONE `tortoise_get_entity(type="events", limit=…)` call,
+#: which forwards to `tortoise_get_events` (`mcp_server.py`) — a
+#: `MATCH (e:Event) … ORDER BY e.startedAt DESC LIMIT $lim` with NO offset and a BARE
+#: LIST return (`sdk.py`). A response that FILLS the request is therefore
+#: indistinguishable from a truncated layer, while a response STRICTLY BELOW it is the
+#: exact layer — which is what `read_events` rests completeness on. The operator read now
+#: refuses the SAME two shapes (#12440, closing the arm #12380 left weaker): a count AT OR
+#: ABOVE `OPERATOR_READ_CEILING` refuses before the read, and a FILLED response refuses
+#: whatever count accompanies it. What still differs is the RESIDUAL: Events have a bound
+#: that can be RAISED (`get_events` validates no upper `limit`) plus a re-count rescue,
+#: while 10,000 is the SDK's hard maximum for operators and they have no re-count arm — so
+#: a stale count there is always a refusal, with no accept path.
+#:
+#: ⛔ 10,000 is TWO bounds that happen to coincide, and the coincidence is the whole
+#: hazard. Ours: the SDK refuses `tortoise_search(limit > 10000)` outright, which makes
+#: `OPERATOR_READ_CEILING` a wall, while `get_events` validates no upper bound and passes
+#: `limit` straight into the Cypher `LIMIT` — so for Events this is a DECLARED
+#: size/memory bound on ONE response, not a surface maximum. Theirs: FalkorDB silently
+#: truncates any non-aggregate read at its server-global `RESULTSET_SIZE`, which DEFAULTS
+#: to 10,000, with no error and no marker (measured on docker 4.20.4: 10 050 Points read
+#: back as 10 000 rows — #4515/#4233/#5062). A `MATCH (e:Event) … LIMIT $lim` IS that
+#: shape. So the read must size its request TO the bound, not above it: at `bound + 1` a
+#: capped response always lands one row under the request, the fill refusal below can
+#: never fire, and a layer that grew by one row past the cap is filed as complete. Sizing
+#: to the bound makes a capped response equal it and refuse.
+#:
+#: The residual is a server tuned BELOW this bound, which caps the read invisibly. On the
+#: UNREPORTED arm nothing can see it. On the reported arm only a count DIFFERING from the
+#: cap sees it — a count that EQUALS the cap cannot, because it agrees with the capped
+#: response (`len(raw) == reported` short-circuits the whole re-count path). Nothing fires
+#: at the shipped default, where the cap is the bound; a deployment that lowers the cap
+#: must lower this constant with it.
+#:
+#: The bound exists because this layer can only be read in ONE response (a `limit` and no
+#: `offset`), so "the whole layer" needs a stated size a refusal can name — and it is a
+#: size/memory bound, not an enforcement.
+EVENT_READ_CEILING = 10_000
 
 
 def cmd_inventory(args: argparse.Namespace) -> int:
@@ -701,6 +1389,13 @@ def cmd_inventory(args: argparse.Namespace) -> int:
         # for the verb a driver runs FIRST — the window would be the whole walk.
         structure = reader.structure()
         operators, operators_reported = reader.read_operators(structure)
+        # ⛔ The episodic layer — readable in one call and omitted from every census
+        # before this change (#12378). ⛔ Its count is re-read HERE, immediately before the
+        # read, rather than reusing `counts` from the top: that one is read before the
+        # point walk (34+ calls on a real graph), and reconciling this layer against it
+        # would make the refusal's "two requests" window claim false and turn a correct
+        # read into a refusal the moment an Event was created mid-walk.
+        events, events_reported = reader.read_events(reader.counts())
         # ⛔ The audit section is a census read too (it is in the `used` set the tests
         # assert, and it feeds the report), so it belongs INSIDE this handler: outside
         # it, an `is_error` payload here raised as rc 1 while the other four answered
@@ -715,7 +1410,7 @@ def cmd_inventory(args: argparse.Namespace) -> int:
     if unreconciled:
         print(f"REFUSED: {unreconciled}", file=sys.stderr)
         return 3
-    plan = C.build_plan(points + sources + operators,
+    plan = C.build_plan(points + sources + operators + events,
                         source_graph=args.graph or "(credential-bound)",
                         target_graph=args.target or "(none: inventory only)")
     if args.rows:
@@ -747,6 +1442,22 @@ def cmd_inventory(args: argparse.Namespace) -> int:
         # leaving it at `True` was the machine-readable form of "this layer was read
         # whole", which the read cannot claim when nothing vouched for the count.
         "operators_reconciled": operators_reported is not None,
+        # The episodic layer this census used to omit entirely (#12378). Same two facts
+        # as the operator pair, for the same reason: `events_read` is the READ's own
+        # count, and `events_total_reported` is the count THIS READ WAS RECONCILED AGAINST
+        # — `counts.Event` normally, or the FRESH RE-READ when the two disagreed and the
+        # re-count resolved it (so on a staleness accept this field is the newer number,
+        # not the status count the run started with). A disagreement is re-counted once
+        # and then accepted or refused, so a reader of this artifact can see both.
+        "events_read": len(events),
+        "events_total_reported": events_reported,
+        # `events_total_reported is None` means NO cross-check was available: the layer's
+        # completeness then rests on the response having stayed STRICTLY BELOW the
+        # `EVENT_READ_CEILING` request, because a response that FILLS it cannot be told
+        # from a truncation — FalkorDB caps a non-aggregate read at `RESULTSET_SIZE`,
+        # which defaults to exactly this bound. A driver must be able to
+        # answer that from a FIELD rather than from prose.
+        "events_reconciled": events_reported is not None,
         "source_count_gap": gap,
         "structure": structure,
         "graphs": graphs,
@@ -770,8 +1481,14 @@ def cmd_inventory(args: argparse.Namespace) -> int:
     if args.out:
         with open(args.out, "w", encoding="utf-8") as fh:
             fh.write(text + "\n")
+        # ⛔ EVERY read layer is named, because this line is the ONE place an operator
+        # sees the population without opening the JSON. It said "points + sources +
+        # operators" and omitted the 4,670 Events the census had just classified — a
+        # line stating 21,147 as the census over a run that measured 25,817, which is
+        # the same "presents itself as the census over a population it did not count"
+        # defect #12378 is filed about, one output over (PR review round 1).
         print(f"inventory: {len(points)} points + {len(sources)} sources + "
-              f"{len(operators)} operators -> {args.out}")
+              f"{len(operators)} operators + {len(events)} events -> {args.out}")
         print(json.dumps(report["census"]["totals"], indent=1))
     else:
         print(text)
@@ -789,6 +1506,7 @@ def _disarmed_artifact(
     census_measured: bool | None = None,
     read_note: str | None = None,
     operators: tuple[int, int | None] | None = None,
+    events: tuple[int, int | None] | None = None,
 ) -> int:
     """A DISARMED run that stopped early: exit 0, the reason on the artifact.
 
@@ -847,6 +1565,8 @@ def _disarmed_artifact(
     # makes — with the only contrary fact in `read_note` prose, which is the defect the
     # field exists to close, one artifact over.
     operators_read, operators_reported = (None, None) if operators is None else operators
+    #: The episodic layer's own tri-state, resolved ONCE for the same reason.
+    events_read, events_reported = (None, None) if events is None else events
     payload = {
         # `null` when the census could not be measured — never a zeroed census, which
         # is indistinguishable from "the graph is empty" (the silent-zero class R7
@@ -867,6 +1587,16 @@ def _disarmed_artifact(
         "operators_total_reported": operators_reported,
         "operators_reconciled": (None if operators is None
                                  else operators_reported is not None),
+        # ⛔ The episodic layer's TRI-STATE travels on the disarmed arms too, and for the
+        # reason the operator pair does: `None` means NO COMPLETED LAYER READ, not "this
+        # graph has no Events"; `(n, m)` is a completed read, `(n, None)` a completed read
+        # with no count to reconcile it. A disarmed payload that dropped these fields made
+        # the layer's state unknowable exactly when the run was reduced to reporting it
+        # (the round-2/3 defect class on the operator layer, one layer over).
+        "events_read": events_read,
+        "events_total_reported": events_reported,
+        "events_reconciled": (None if events is None
+                              else events_reported is not None),
         "run": {
             "applied": False, "off": True, "skipped_known": 0, "written": 0,
             "target_graph": args.target, "digest": None, "refused": refused,
@@ -903,6 +1633,14 @@ def cmd_plan(args: argparse.Namespace) -> int:
     #: `(rows, reported)`. Declared before the `try` so every disarmed arm reports the
     #: truth for its own point in the sequence (see the assignment below).
     layer: tuple[int, int | None] | None = None   # set only when the read COMPLETES
+    #: The episodic layer's own tri-state — `None` until the Event read completes, then
+    #: `(rows, reported)`. A SECOND field, not a reuse of `layer`: "the reasoning layer was
+    #: read" says nothing about the episodic one. ⛔ Declared before the `try` for `layer`'s
+    #: reason and one more: the refusal handler below reports it, so a refusal raised by
+    #: any read at or before the Event read would leave a later assignment unreached — an
+    #: UnboundLocalError inside the handler, turning a designed rc 3 into a traceback
+    #: (measured: the disarmed-Event-read-failure test caught exactly that).
+    episodic: tuple[int, int | None] | None = None
     try:
         counts = reader.counts()
         points, points_total = reader.read_points(page=args.page, verify=args.verify_read)
@@ -922,6 +1660,11 @@ def cmd_plan(args: argparse.Namespace) -> int:
         # `None` ("never read") would state the opposite of what happened (round-3
         # review). `None` now means only what it says.
         layer = (len(operators), operators_reported)
+        # ⛔ The episodic layer (#12378): count FRESH, immediately before the read, for the
+        # reason `cmd_inventory` states — the `counts` above predates the point walk, and
+        # the refusal claims a two-request window.
+        events, events_reported = reader.read_events(reader.counts())
+        episodic = (len(events), events_reported)
         # INSIDE the guard too: `graphs()` feeds the identity guard and the ledger
         # scope, so a failure there is the same census class.
         graphs = reader.graphs()
@@ -940,7 +1683,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
         # end — dropping it would lose the only record that part of this census came from
         # a different graph than `--graph` names.
         return _disarmed_artifact(args, str(exc), refused=str(exc), read_failure=str(exc),
-                                  read_note=reader.note, operators=layer)
+                                  read_note=reader.note, operators=layer, events=episodic)
     except Exception as exc:
         # ⛔ THE SWITCH IS RESOLVED BEFORE THE CENSUS, for EVERY read — not only the
         # source section. An armed run still raises (a failed read must be loud); a
@@ -960,7 +1703,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
         # commit's own `run.refused` defect, one field over (round-2 review).
         return _disarmed_artifact(args, f"{type(exc).__name__}: {exc}",
                                   refused=f"{type(exc).__name__}: {exc}",
-                                  read_note=reader.note, operators=layer,
+                                  read_note=reader.note, operators=layer, events=episodic,
                                   read_failure=f"{type(exc).__name__}: {exc}")
     gap = _source_gap(counts, len(sources))
     unreconciled = _unreconciled_sources(len(sources), gap)
@@ -984,7 +1727,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
               "`--target` names cannot be proven — an applying run is refused rather "
               "than resolved by shape", file=sys.stderr)
         return 3
-    plan = C.build_plan(points + sources + operators,
+    plan = C.build_plan(points + sources + operators + events,
                         source_graph=args.graph or "(credential-bound)",
                         target_graph=args.target)
     try:
@@ -1020,6 +1763,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
                                       pending=len(plan.carry_rows()), refused=str(exc),
                                       census_measured=unreconciled is None,
                                       operators=layer,
+                                      events=episodic,
                                       read_note=reader.note)
         print(f"REFUSED: {exc}", file=sys.stderr)
         return 3
@@ -1051,6 +1795,10 @@ def cmd_plan(args: argparse.Namespace) -> int:
                "operators_total_reported": operators_reported,
                # See `cmd_inventory`: the layer's completeness is a field, not a note.
                "operators_reconciled": operators_reported is not None,
+               # The episodic layer (#12378), same three facts as the reasoning one.
+               "events_read": len(events),
+               "events_total_reported": events_reported,
+               "events_reconciled": events_reported is not None,
                "source_count_gap": gap,
                # The plan is the artifact a driver writes; a census without the
                # classes this read path cannot enumerate reads as complete.

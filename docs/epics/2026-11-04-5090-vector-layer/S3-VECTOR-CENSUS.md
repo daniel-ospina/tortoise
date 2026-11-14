@@ -321,11 +321,11 @@ assertion measures.
 ```text
 $ uv run python tools/test_lane.py run -- tests/test_dod_5090_probe.py -q
 121 passed, 1 skipped in 42.50s   # the #11088 transcript this row was cut from
-                                 # this tree: 187 collected
-                                 # (docker lane: 186 passed, 1 skipped)
+                                 # this tree: 215 collected
+                                 # (docker lane: 214 passed, 1 skipped)
 ```
 
-(115 collected before #11088's round 7; the file collects **187 in the tree this document sits in** —
+(115 collected before #11088's round 7; the file collects **215 in the tree this document sits in** —
 nine added by #11337 over the then-122 baseline, nineteen by `#11444`'s writer-register falsifiers, one
 by `#11471`'s GATED-writer bypass arm, fourteen by `#11492`, one by `#11437`, five by `#11747`
 (which brought the cache projection into row 2's served-set comparison — the write path the source
@@ -338,10 +338,13 @@ the falsifier for the PLANTED property set, without which reverting that derivat
 (`#11415`/`#11455` landed it; no sha is restated here, for the reason the paragraph
 below gives about branch heads), which SCORES the `#11455` clause itself (`test_the_row_VERDICT_reads_the_DEPLOYMENT_not_the_any_surface_bool`
 — reverting `on_by_default = deployment["on"]` to the any-surface bool left every other row-1 test
-green, so the artefact `#11086` item 4 is ticked on was pinned nowhere), and one by `#12284`
-(`test_a_duplicate_literal_key_in_the_census_dicts_cannot_land_silently` — `#9314`'s missing
-pytest-lane catcher: a duplicated literal key in `WRITER_CENSUS`/`CENSUS_EVIDENCE` collapses
-before any code can see it, so only `ruff`'s `F601` caught `#11996`'s pair, post-merge), and three by
+green, so the artefact `#11086` item 4 is ticked on was pinned nowhere), and one by
+`#12182`'s duplicate-key detector for the CENSUS half
+(`test_the_census_has_no_DUPLICATE_dict_key_in_its_source` — the register half refuses a duplicate at
+import via `load()`, while a dict literal here accepted one silently and kept the LAST entry. That is
+the shape `#11996` actually left on `main`, where only `ruff`'s `F601` saw it post-merge, and which
+`#12284` then had to de-duplicate; this tree's detector is the pytest-lane catcher `#9314` was missing),
+and three by
 `#12015` (the EDGE
 doors: a relationship has no label at all, so the projection's edge writer can store a vector nothing
 can query — and the row could not see it, because the node measurement only ever asked about labels.
@@ -366,8 +369,48 @@ holds both rows AND whose diff selects this file, including the MERGE tree, wher
 actually born and where
 `main-lint.yml`'s ruff gate (`#2174`) only reds it after the fact; the scan also found the live
 `# noqa: F601` duplicate in `tests/test_commit_schema.py`, which the census-scoped pin cannot see —
-and which lint itself does NOT catch, because the suppression is on the repeated line)
-(`122 + 9 + 19 + 1 + 14 + 1 + 5 + 7 + 1 + 1 + 3 + 4 = 187`). ⚠️ No figure here names what `main` collects TODAY:
+and which lint itself does NOT catch, because the suppression is on the repeated line), and twenty-six by
+`#12022`/`#12054`/`#12070`/`#12312` together (four DEPLOYMENT-CHANNEL falsifiers (among them: a `fly.toml` `[env]`
+key arms while a `[build.args]` one does not, a second `fly*.toml` is discovered rather than listed, and the
+entrypoint is found through the image's `ENTRYPOINT` and its `export`/`${VAR:-default}` read, and an
+UNEXPORTED shell variable is not an environment entry — plus an INDETERMINATE `${OTHER}` assignment
+holding as `UNMEASURED`); one that holds row 1 over a deployment channel which arms NOTHING and names
+it, one that reaches `MET` when `fly.toml` is the only channel and asserts the
+note names it, one that a compose `entrypoint:`-named script is still DISCOVERED
+(the route was dead code behind a docstring claiming it — review of PR #12474), one
+that a Dockerfile `ARG` is build-time and not a hit, one that an absent
+`builds_from` reads UNMEASURED while a measured none reads none, one that a LOWERCASE
+`env` instruction still arms (Dockerfile names are case-insensitive) and that a
+lowercase `arg` is still build-time, one that a compose BLOCK-LIST `entrypoint:` is
+discovered and that a QUOTED compose key is too, and one that an UNPARSEABLE test file
+fails the citation check CLOSED instead of vanishing, one that EVERY service's compose
+`build:` reference is reported rather than the first, one that a value-less compose
+`environment:` entry (the DISARMING direction) is reported as UNSET, and one that the
+legacy `ENV KEY value` form is a hit, and one that the LAST assignment in a file
+decides its arming (an earlier truthy value does not survive a later non-truthy one);
+two on the shared per-file caveat both row-1 notes now call, one of them naming the MEASURED
+compose→image build edge; and two CITATION guards, one asserting every `test_…` citation this family
+makes resolves and one driving the guard against the stale stem `#12312` was filed for; and two
+SCORING-SCOPE falsifiers the rebase review measured (PR #12474, P1/P2) — that a file appending no
+decision of its own does not INHERIT the previous file's, so `deployment["on"]` cannot move with the
+`glob` sort order, and that an INDETERMINATE last assignment holds its file `UNMEASURED` instead of
+leaving an earlier truthy value standing, and that a shell `unset FLAG` is the shell channel's
+DISARMING direction — reported and LAST-WINS, so an earlier `export FLAG=1` cannot stand over it —
+each shown RED against the pre-fix walk, with the `unset` fix's controls pinning that an `unset` of
+ANOTHER name (or a longer name the flag prefixes) still leaves the arm standing, `unset -f`/`-n` (a
+FUNCTION and a NAMEREF) do not disarm, a COMPUTED name holds the file `UNMEASURED`, and an ALLEXPORT
+(`set -a`) entrypoint still reaches the arm; and one that a compose VALUE-LESS entry is LAST-WINS
+rather than merely reported, so `environment: [- FLAG=1, - FLAG]` reads `OFF`; and one PROSE-CONTRACT
+falsifier a later review measured at this head (PR #12474, P2) — that the `UNMEASURED` doctrine names the
+one ordering it does not cover, since a LATER resolvable assignment still decides the file while the
+unresolvable line stays REPORTED in `indeterminate` in both orders; shown RED by reverting its own fix,
+with the phrase pin normalising the docstring's whitespace so a reflow cannot red it)
+(`122 + 9 + 19 + 1 + 14 + 1 + 5 + 7 + 1 + 1 + 3 + 4 + 27 + 1 = 215`). The final `1` is PR #12474's
+row-1 falsifier for the `DISARMS it` leading clause — a compose `environment: [- FLAG, - FLAG=1]`
+REPORTS the value-less entry and ends `ON`, so a tree whose only disarmed file was a SILENT sibling
+published a false cause for its own OFF; the test reds against the pre-fix tool and greens after,
+because the clause now attributes a disarm by PATH and only where that file really ends unarmed.
+⚠️ No figure here names what `main` collects TODAY:
 which of those additions are already merged moves with `main`, so any "`main` at N" would be a moving
 reference this paragraph forbids — the total is bound to THIS TREE alone): seven
 row-2 resolution pins (register resolves every writer; the unserved-label falsifier; the
@@ -407,7 +450,7 @@ under
 `tests/_live_utils.py`'s live-graph fixture, which only the docker lane satisfies, so the
 LASTING statement is the invariant rather than either figure: the carve-out lane reads one more
 skip and one fewer pass than the docker lane, and at any one tree the two splits add to that tree's
-collected count — `186 passed, 1 skipped` and `185 passed, 2 skipped` here, both adding to the same `187` the pin re-derives, while the `eee465029a` pair quoted above (`185/1` and `184/2`) adds to the
+collected count — `214 passed, 1 skipped` and `213 passed, 2 skipped` here, both adding to the same `215` the pin re-derives, while the `eee465029a` pair quoted above (`185/1` and `184/2`) adds to the
 `186` THAT tree collects. Neither figure is therefore stale: a carve-out run that
 "corrects" 186/1 to 185/2 rewrites a true record into a false one, and the pin deliberately does
 not cover the split for exactly that reason. ⚠️ The COUNT is bound to THIS TREE, never to a branch

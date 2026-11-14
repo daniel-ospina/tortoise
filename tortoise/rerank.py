@@ -40,6 +40,7 @@ a hard per-session cap (one session can't monopolize the context).
 from __future__ import annotations
 
 import logging
+import math
 import os
 import threading
 import time
@@ -72,6 +73,262 @@ ASK_RERANK_LAMBDA_ENV = "TORTOISE_ASK_RERANK_LAMBDA"
 #: per-session 2, lambda 0.7 — measured in the R6 burn).
 DEFAULT_ASK_RERANK_PER_SESSION_CAP = 2
 DEFAULT_ASK_RERANK_LAMBDA = 0.7
+
+
+# ── #12297 — the FUSED-CANDIDATE-LIST rerank (search + noun path) ─────────
+#
+# A SECOND gate, deliberately not the ask lane's. The two differ in every knob
+# that matters: the ask lane reranks a deduped CONTEXT pool and then applies MMR
+# diversity with a per-session cap, while a fused candidate list is a RETRIEVAL
+# pool whose only consumer is a truncation (`[:limit]`) — MMR there would be
+# diversity for its own sake, and a per-session cap would reorder on a grouping
+# the caller never asked for. Sharing one gate would mean shipping the ask
+# lane's MMR semantics onto the search path by accident.
+FUSED_RERANK_ENV = "TORTOISE_FUSED_RERANK"
+FUSED_RERANK_POOL_ENV = "TORTOISE_FUSED_RERANK_POOL"
+FUSED_RERANK_MODEL_ENV = "TORTOISE_FUSED_RERANK_MODEL"
+#: How many of the fused pool's leading candidates get SCORED. The retrieval
+#: pool is ~120 per leg (`retrieval.DEFAULT_POOL_SIZE`), so scoring all of it is
+#: ~3x the pairs (120 / 40) for candidates the caller's `limit` will never show.
+#: 40 is the
+#: SIZE of #11901's measured mean effective candidate set for a production
+#: capture, which is the surface this lever is calibrated on: #11901 measured
+#: **40.4** at `k=3` — the capture prior's own per-query `limit`, UNIONED over the
+#: 15 reads a capture makes (807 / 20; the 11901 brief's own section 1 table) —
+#: and 40 is that figure rounded DOWN. The re-measurement on the grown corpus
+#: reads 42.7 (854 / 20, `arms.pooled["3"]` of `measurement-noun-path.json`); the
+#: two agree to ~5 %, which is why the width is quoted as an order of magnitude
+#: rather than an equality. ⛔ And name the step: the same tables' `k=15` row is
+#: 3 713 / 20 = 185.7 (3 416 / 20 = 170.8 in #11901), so a reader who assumes the
+#: budget's own `k` lands 4-5x off. ⛔ And the set is the per-CAPTURE
+#: union while this width bounds the SCORED HEAD of ONE derived query, which the
+#: wiring applies up to 15 times per capture: the two quantities are the same
+#: order and not the same thing, so a capture at the default prices at
+#: ~15 x 40 = 600 pairs, which is the arithmetic §6 of the brief uses. Candidates
+#: past the width keep their retrieval order and stay in the list.
+DEFAULT_FUSED_RERANK_POOL = 40
+
+#: #12297 — the trace-entry keys carrying the rerank's OWN decision, written on
+#: the ``leg="rerank"`` entry. Additive keys, the #4999 ``mechanism`` precedent:
+#: the cap is reported ALONGSIDE the leg verdict, never through ``degraded``
+#: (which in a leg trace means "a retrieval leg did not run", #8487 review P1).
+#: ``rerank_pool`` is the CONFIGURED WIDTH — the cap the knob resolved — ⛔ NOT
+#: ``min(len(candidates), width)`` and NOT the number that were scored: a
+#: ONE-candidate read at width 40 reports ``pool=40``. (The applied bound is that
+#: min; reporting it would need a fourth key for the candidate count, which the
+#: two counters below already carry between them.) ⛔ THE OTHER TWO ARE COUNTED
+#: AGAINST DIFFERENT DENOMINATORS, so do not cross-check them against the bound:
+#: ``rerank_scored`` is how many were actually scored, and ``rerank_unscored`` is
+#: the CANDIDATE LIST minus ``rerank_scored`` — every row past the width PLUS the
+#: rows inside the width that had no usable text (an operator with no ``content``
+#: that no label could supply, a ``:Source`` with no title) — which is why it
+#: exceeds ``rerank_pool - rerank_scored`` as soon as the pool is wider than the
+#: bound (a 60-candidate read at width 40 reports
+#: ``pool=40, scored=40, unscored=20``; ``tests/test_rerank_pool.py`` pins that
+#: shape at width 2). ⛔ The two readings coincide at EXACTLY ONE width —
+#: ``len(candidates) == rerank_pool`` — because ``unscored`` is ``candidates -
+#: scored`` while the entry's ``pool`` is the bound. ⛔ TEXT IS THE OTHER AXIS, so
+#: neither half is exactly zero: a row INSIDE the width that came back textless is
+#: counted unscored but not scored, so below the bound ``unscored`` is one per
+#: textless row inside the width while ``pool - scored`` is the UNUSED part of the
+#: bound, and above the bound ``unscored`` is the rows past the width PLUS one per
+#: textless row inside it while ``pool - scored`` is that same textless count —
+#: with the wiring's own shape (45 candidates, width 40, 3 textless inside) the
+#: entry reads ``pool=40, scored=37, unscored=8``, so ``pool - scored`` is 3, not
+#: 0. The condition is the list's width, never
+#: ``scored == 0``: a degraded arm on a 4-candidate read reports ``pool=40,
+#: scored=0, unscored=4``, where ``pool - scored`` is 40.
+#: Read the bound as the cap, never as an achievement, and read ``unscored`` as
+#: the rows the reranker could not promote.
+#: Rows past the width keep their retrieval order and can never be promoted, so a
+#: caller that opted in must be able to tell "the reranker decided" from "it
+#: never saw that row".
+RERANK_POOL_KEY = "rerank_pool"
+RERANK_SCORED_KEY = "rerank_scored"
+RERANK_UNSCORED_KEY = "rerank_unscored"
+
+
+def rerank_pool_enabled(flag: bool | None = None) -> bool:
+    """#12297 gate. Explicit kwarg wins; else ``TORTOISE_FUSED_RERANK`` —
+    fail-safe OFF (only 1/true/yes/on enables, the #4097 truthy contract).
+
+    ⛔ OFF is the shipped state, and the reason is measured rather than
+    stylistic (the ``#1745`` fail-safe convention): see
+    ``docs/research/2026-11-12-12297-rerank-calibration/`` for the calibration
+    this gate waits on."""
+    if flag is not None:
+        return bool(flag)
+    return is_truthy(os.environ.get(FUSED_RERANK_ENV))
+
+
+def fused_rerank_model() -> str:
+    """#12297's model name — its own env namespace, the same default model.
+
+    ``load_scorer`` caches by NAME, so when both gates are on they share ONE
+    loaded cross-encoder rather than paying a second load — measured ~6.4 s from
+    the local HF cache on this box (a one-off observation, not an artifact field;
+    brief section 6 bounds it as mechanism, not as a number to quote)."""
+    return (os.environ.get(FUSED_RERANK_MODEL_ENV, RERANK_MODEL_DEFAULT)
+            .strip() or RERANK_MODEL_DEFAULT)
+
+
+def fused_rerank_pool_width(pool: int | str | None = None) -> int:
+    """#12297 — the effective number of leading candidates that get SCORED.
+
+    ONE resolution for the env knob and the read path (the ``_clamp_int``
+    contract, #2513): the explicit/kwarg value wins over
+    ``TORTOISE_FUSED_RERANK_POOL``, and garbage, blank or out-of-range (< 1)
+    falls back to :data:`DEFAULT_FUSED_RERANK_POOL`.
+
+    ⛔ It exists so the WIRING and the scorer cannot disagree about the width.
+    Before it, ``sdk.py`` sliced the pool text read with the DEFAULT constant
+    while ``rerank_pool`` resolved the knob: a configured width BELOW the
+    default worked, and a width ABOVE it was silently ignored (the batch read
+    had already dropped the extra ids), so a tuning run believed it had raised
+    a width it never scored. Both callers now take the number from here.
+    """
+    return _clamp_int(
+        pool if pool is not None else os.environ.get(FUSED_RERANK_POOL_ENV),
+        DEFAULT_FUSED_RERANK_POOL)
+
+
+def rerank_pool(
+    query: str,
+    candidates: list[dict],
+    *,
+    text_key: str = "content",
+    pool: int | None = None,
+    enabled: bool | None = None,
+    model: str | None = None,
+    scorer=None,
+) -> tuple[list[dict], dict]:
+    """#12297 — reorder a FUSED candidate list by cross-encoder relevance.
+
+    ⛔ **A PERMUTATION, NEVER A FILTER.** The returned list has the same rows as
+    the input — same length, same identities, same objects reordered. That is
+    the property that makes this safe to insert ahead of an existing truncation
+    (`tortoise_fts_query`'s ``result_ids[:limit]``): a reranker that DROPPED
+    rows would be a silent recall loss on a surface whose every measurement is
+    taken at a fixed ``limit``, and it would be indistinguishable from the
+    reranker ranking well. The caller's own ``[:limit]`` is the only cut.
+
+    ``pool`` bounds how many leading candidates are SCORED; the rest keep their
+    retrieval order and stay in the list. Within that bound, only the slots whose
+    text is non-empty are scored, and they are reordered by descending score with
+    the original index as a stable tie-break — writing back into THEIR OWN slots,
+    so a row the scorer never saw keeps the position the caller's order gave it
+    (nothing is demoted below a row it outranked, and nothing past the bound
+    moves). ``scored``/``unscored`` count exactly that split.
+
+    Degrade (``applied: False`` + ``degrade_reason``) on: the gate off, an empty
+    query or pool, a pool whose scored window carries NO usable text
+    (``no_scorable_text``), a scorer that will not load, a score exception, a
+    length-mismatched score vector, a non-numeric score entry, a non-finite
+    (``nan``/``inf``) score. Every one of them returns the input order
+    untouched — this function never raises and never changes a caller's
+    behaviour on failure.
+    """
+    untouched = list(candidates)
+    if not rerank_pool_enabled(enabled):
+        return untouched, {"applied": False, "degrade_reason": "disabled"}
+    if not untouched:
+        return untouched, {"applied": False, "degrade_reason": "empty_pool"}
+    if not (query or "").strip():
+        return untouched, {"applied": False, "degrade_reason": "empty_query"}
+
+    pool_n = fused_rerank_pool_width(pool)
+    n_scored = min(len(untouched), pool_n)
+    head = untouched[:n_scored]
+
+    # ⛔ ``scorer`` IS A SEAM FOR OFFLINE HARNESSES, NEVER A PRODUCT PATH. The
+    # calibration/control tools must drive THIS function (a re-implementation of
+    # its scoring+reorder credited the reranker with a promotion the product
+    # structurally refuses — an empty passage is never scored, so it never
+    # moves), and a tool that re-implemented the semantics measured a different
+    # lever. Injecting the scorer is what lets them measure the SHIPPED one;
+    # nothing in ``tortoise/`` passes it.
+    if scorer is None:
+        scorer, reason = load_scorer(model or fused_rerank_model())
+    if scorer is None:
+        return untouched, {"applied": False, "degrade_reason": reason}
+
+    texts = [str(h.get(text_key) or "")[:RERANK_TRUNCATE_CHARS] for h in head]
+    # ⛔ ONLY THE SCORABLE SLOTS REACH THE SCORER. A row with no text cannot be
+    # scored on its text, and an EMPTY passage outranks an unrelated real one —
+    # passing ``""`` in would both waste a pair and let an unscored row be
+    # PROMOTED over scored ones.
+    scorable = [i for i in range(n_scored) if texts[i].strip()]
+    if not scorable:
+        return untouched, {"applied": False,
+                           "degrade_reason": "no_scorable_text"}
+    try:
+        scores = scorer.score(query, [texts[i] for i in scorable])
+    except Exception as e:  # noqa: BLE001, RUF100 — degrade, never raise
+        return untouched, {"applied": False, "degrade_reason": f"{e!r}"}
+    if not isinstance(scores, (list, tuple)) or len(scores) != len(scorable):
+        return untouched, {
+            "applied": False,
+            "degrade_reason": "scorer returned length-mismatched scores "
+                              f"({len(scores) if isinstance(scores, (list, tuple)) else '?'} "
+                              f"vs {len(scorable)})",
+        }
+
+    # ⛔ THE COERCION IS INSIDE THE GUARD, not just the call: a scorer that
+    # returns ``None``/a string for one entry raised ``TypeError`` out of
+    # ``sorted``/``min`` below and failed the whole SEARCH, while the contract
+    # says every failure degrades to the retrieval order. A non-finite value is
+    # a failure too, and it also must not reach a trace a caller serializes
+    # (``NaN`` is not JSON).
+    try:
+        values = [float(s) for s in scores]
+    except (TypeError, ValueError) as e:
+        return untouched, {"applied": False,
+                           "degrade_reason": f"non-numeric scores: {e!r}"}
+    if not all(math.isfinite(v) for v in values):
+        return untouched, {"applied": False,
+                           "degrade_reason": "non-finite scores"}
+
+    reordered, moved, top_score = _reorder_scorable_slots(
+        head, untouched, n_scored, scorable, values)
+    return reordered, {
+        "applied": True,
+        "pool": pool_n,
+        "scored": len(scorable),
+        "unscored": len(untouched) - len(scorable),
+        "moved": moved,
+        "top_score": top_score,
+        "min_scored": round(min(values), 4),
+    }
+
+
+def _reorder_scorable_slots(head: list[dict], untouched: list[dict],
+                            n_scored: int, scorable: list[int],
+                            values: list[float]
+                            ) -> tuple[list[dict], int, float | None]:
+    """Reorder the SLOTS whose text the scorer saw; leave every other slot alone.
+
+    ⛔ A slot with NO text was not scored, so it must keep the position the fused
+    order gave it. Sorting a COMPACTED list of only the scored rows and appending
+    everything else demotes an unscored row below rows it outranked — measured: a
+    row whose pool text was blank, sitting FIRST in the fused order, was pushed to
+    last with a zeroed scorer, and at the caller's fixed limit it dropped off the
+    page while the trace reported ``count: 0`` ("nothing moved"). That is silent
+    recall loss on a surface whose every measurement is taken at a fixed limit,
+    and it is the mirror of the inversion this function already refuses (an
+    excluded row being PROMOTED over included ones).
+
+    ``moved`` counts only score-driven moves, so the disclosure stays true.
+    """
+    out = list(head)
+    # ``values[j]`` is the score of ``head[scorable[j]]`` — the scorer saw the
+    # scorable slots ONLY, so both sides are indexed by position in ``scorable``.
+    order = sorted(range(len(scorable)), key=lambda j: (-values[j], scorable[j]))
+    for slot, j in zip(scorable, order, strict=True):
+        out[slot] = head[scorable[j]]
+    moved = sum(1 for slot, j in zip(scorable, order, strict=True)
+                if slot != scorable[j])
+    top = round(values[order[0]], 4) if order else None
+    return out + untouched[n_scored:], moved, top
 
 
 def rerank_enabled(flag: bool | None = None) -> bool:

@@ -11,7 +11,6 @@ import sys
 import threading
 import time as _time
 from contextvars import ContextVar
-from pathlib import Path
 from typing import Any, Literal
 
 from fastmcp import FastMCP
@@ -21,6 +20,7 @@ from fastmcp.tools import ToolResult
 from pydantic import ValidationError as PydanticValidationError
 from tortoise.auth import is_dev_mode as _is_dev_mode
 from tortoise import deletion as _deletion  # #9660 preview-then-confirm
+from tortoise import dotenv_file as _dotenv_file  # #12407 shared .env parser
 from tortoise.config import is_db_uri as _is_db_uri
 from tortoise.sdk import (TortoiseSDK, INGEST_GRANULARITIES,
                           INGEST_PROMOTION_POLICIES, _first_non_draft_status,
@@ -51,7 +51,12 @@ _log = logging.getLogger(__name__)
 
 
 def _load_dotenv(path: str | None = None) -> None:
-    """Tiny .env loader — repo-root .env, KEY=VALUE lines, no new deps.
+    """Apply the repo-root ``.env`` — the daemon's half of the #12407 seam.
+
+    The parser lives in :mod:`tortoise.dotenv_file` and is shared with the
+    reporting verbs (``tortoise config show`` / ``doctor``), because a second
+    parser would be a report that can disagree with the loader it describes.
+    See that module for the file format and the regular-files-only rule.
 
     Only sets environment keys that are ABSENT from ``os.environ`` — a key
     that is explicitly set, even to the empty string, is never overridden.
@@ -61,38 +66,14 @@ def _load_dotenv(path: str | None = None) -> None:
     An explicit TORTOISE_DB_URI in the process env always wins. Mirrors the
     hosted entrypoint philosophy: the DB target must be explicit, never
     accidental.
+
+    ⚠️ The CLI verbs deliberately do NOT call this (#12407): loading here and
+    not there is exactly the divergence ``config show`` now reports, and
+    widening the load to every verb would change what every ``.env`` in the
+    wild does to every command. The asymmetry is the disclosed contract, not
+    an oversight.
     """
-    if path is None:
-        path = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "..", ".env"
-        )
-    if not os.path.exists(path):
-        return
-    try:
-        for raw in Path(path).read_text().splitlines():
-            line = raw.strip()
-            if not line or line.startswith("#"):
-                continue
-            if line.startswith("export "):
-                line = line[len("export "):]
-            if "=" not in line:
-                continue
-            key, _, value = line.partition("=")
-            key = key.strip()
-            # python-dotenv semantics: quoted values are literal (no inline
-            # comment stripping); unquoted values strip inline comments
-            # (whitespace + '#'). A bare '#' in an unquoted value is preserved.
-            value = value.strip()
-            if value[:1] in ('"', "'") and value[-1:] == value[:1]:
-                value = value[1:-1]
-            else:
-                value = value.split(" #", 1)[0].strip()
-            # Only fill keys that are absent — never override an explicitly
-            # set (even empty) environment variable.
-            if key and key not in os.environ:
-                os.environ[key] = value
-    except OSError as e:
-        _log.debug("Could not read .env (%s): %s — continuing without it", path, e)
+    _dotenv_file.load_dotenv(path)
 
 
 if "pytest" not in sys.modules:
@@ -1505,16 +1486,15 @@ def _enforce_mcp_tool_scope(name: str) -> None:
         # default used to be "read", so a write missing from the parallel list
         # was reachable from a graphs:read-only key.
         raise AuthorizationError(
-            f"Unknown tool {name} — denied (not present in the registry).")
+            f"{_mcp_auth._REFUSAL_AUTHZ_UNKNOWN_TOOL_LEAD}{name} — denied "
+            "(not present in the registry).")
     if entry.writes:
         if "graphs:write" not in have:
             raise AuthorizationError(
-                f"Key lacks graphs:write scope for tool {name}.")
+                f"{_mcp_auth._REFUSAL_AUTHZ_WRITE_SCOPE_LEAD}{name}.")
     elif "graphs:read" not in have and "graphs:write" not in have:
         raise AuthorizationError(
-            f"Key lacks a graph data scope (graphs:read) for tool {name}.")
-
-
+            f"{_mcp_auth._REFUSAL_AUTHZ_READ_SCOPE_LEAD}{name}.")
 def _reject_graph_bound_mcp_org_surface(surface: str) -> None:
     """C5 #2114 (re-review 3): MCP tools that write ORG-level state (the
     DEFAULT graph's onboarding node / pack installs / session-recording
@@ -1526,7 +1506,7 @@ def _reject_graph_bound_mcp_org_surface(surface: str) -> None:
 
     if _current_graph_id.get():
         raise AuthorizationError(
-            f"Graph-scoped keys cannot access {surface}.")
+            f"{_mcp_auth._REFUSAL_AUTHZ_GRAPH_SCOPED_LEAD}{surface}.")
 
 
 #: #2050 — MCP tools that perform a budgeted SENSITIVE OP in-process, mapped to
@@ -1832,7 +1812,12 @@ _dispatch_safe_failures: ContextVar[list[dict[str, Any]] | None] = ContextVar(
 #: Failures retained per dispatch. A tool body calls `_safe` a handful of times,
 #: so this is not reached in practice; it bounds the holder for a body that
 #: loops over caller-sized batches. Dropping the OLDEST can only make a failure
-#: MISS (it reads ``ok``) — it can never misclassify a success.
+#: MISS — it can never misclassify a success, but a MISS now has a WIRE
+#: consequence since #11153 (the verdict flip reads this list), not only a
+#: telemetry one. `tortoise_overview`'s no-`section` aggregate constructs eleven
+#: in one dispatch, so it is reachable: a producer that returns a refusal built
+#: EARLY must re-record it (`_SafeError(dict(...))`, which re-appends) rather than
+#: hand back an object already evicted from the window.
 _MAX_RECORDED_SAFE_FAILURES = 8
 
 
@@ -1907,10 +1892,19 @@ def _returned_safe_failure(payload: Any) -> dict[str, Any] | None:
 
     Residual, deliberate: a tool that REWRITES the text (prefixes it with its
     own prose) or buries it deeper than the top level / wrap envelope still
-    reads ``ok``. No tool in the tree does either — every `_safe` return site
-    hands the `_SafeError` back verbatim, and `tortoise_recall`'s only reshape
-    keeps the text at the `error` key. That false-negative direction is
-    preferred to inventing a failure the wire never showed.
+    reads ``ok``. That false-negative direction is preferred to inventing a
+    failure the wire never showed.
+
+    ⚠️ The second half of that sentence USED to read "No tool in the tree does
+    either" — it was false, and #11153's contract depended on it: ``tortoise_
+    overview()`` with no ``section`` copied each section's `_SafeError` into
+    ``combined[sec]``, one level down, so a TOTAL outage shipped
+    ``isError: false`` on the orientation door (measured, review round 6). Fixed
+    at the producer instead: when NO section answered, the refusal is returned at
+    the top level, where this gate sees it (a PARTIAL summary keeps the old
+    shape). A tool that buries a failure today would still read ``ok`` here —
+    that is the residual, stated as a property of a hypothetical rather than of
+    a tool that exists.
     """
     failures = _dispatch_safe_failures.get()
     if not failures or not isinstance(payload, dict):
@@ -2010,6 +2004,43 @@ def _schema_error_result(result, name: str, schema: dict) -> ToolResult:
         content=content,
         structured_content=None,
         meta=meta or None,
+        is_error=True,
+    )
+
+
+def _payload_refusal_result(result) -> ToolResult:
+    """Flip a payload-carried refusal's VERDICT: same payload, ``is_error=True`` (#11153).
+
+    Why this exists at all. ``_safe`` answers a failure with an ``_SafeError`` dict, and
+    for a DICT-annotated tool that dict is schema-valid — so FastMCP ships it as a
+    *successful* payload and nothing in the envelope says the call failed::
+
+        {"structuredContent": {"error": "Team points limit reached (25000)…",
+                              "code": -32006},
+         "isError": false}
+
+    ``isError`` is the only failure signal uniform across MCP clients, so a client that
+    keys on it records a REFUSED WRITE as a success — measured on the production
+    workspace (#11153) and on the fleet's own graph CLI, which printed the refusal and
+    exited 0.
+
+    Why the payload is NOT dropped, unlike :func:`_schema_error_result`. #8482 has to
+    drop its envelope because the payload VIOLATES the advertised schema. A dict tool's
+    error dict does not: it is exactly the shape it advertised, so dropping it would
+    cost the client the machine-readable half (``code``) for no gain, and break every
+    reader that already parses ``payload["error"]``. The verdict was never the
+    payload's business — only the envelope's.
+
+    What this is NOT allowed to do. It is applied only to a payload the seam has already
+    PROVEN to be this dispatch's `_safe` failure (:func:`_returned_safe_failure`), never
+    to key presence: a successful write whose user props carry a key literally named
+    ``error`` is not a failure (#3926), and a tool that RECOVERED from a secondary
+    `_safe` failure answered successfully (#8135).
+    """
+    return ToolResult(
+        content=getattr(result, "content", None),
+        structured_content=getattr(result, "structured_content", None),
+        meta=getattr(result, "meta", None),
         is_error=True,
     )
 
@@ -2447,13 +2478,22 @@ def _disclose_graph_resolution(result: Any, name: str,
     for it would mean re-deriving a target this seam does not own.
 
     It leaves an `is_error` result and a non-`ToolResult` UNTOUCHED (the same
-    object, by identity). ⚠️ It does NOT catch a `_safe`-answered failure: that is
-    a plain `ToolResult` with `is_error=False`, so the thing that keeps a failure
-    from being disclosed is the CALLER's gate — `if status == "ok":` in
-    `_wrapped_call_tool`, which is where `exec_error`/`safe_error` is already
-    classified. Pinned by
-    `test_a_safe_answered_failure_is_not_disclosed`, because a reader (or a
-    mutant) that believes this function is the guard would be wrong.
+    object, by identity). For a `_safe`-answered failure TWO guards now cover it,
+    and the ORDER matters when you are deciding what may be deleted:
+
+    * since #11153 such a failure IS an `is_error` result, so this function's own
+      check below would return it untouched — belt-and-braces;
+    * but this function is never ENTERED for one: the caller gate
+      `if status == "ok":` in `_wrapped_call_tool` is false first, because the
+      payload was already classified `exec_error`/`safe_error` a few lines above
+      (measured: wrapping this call in a recorder and driving a refused write
+      through the seam records ZERO invocations).
+
+    So the seam gate is the guard that RUNS and this check is the second layer —
+    and that in turn is why `test_a_safe_answered_failure_is_not_disclosed` no
+    longer kills the mutant that deletes the seam gate: with the gate replaced by
+    `if True:`, this check still returns early. State that plainly rather than
+    letting the test read as a non-vacuity proof it is not.
     """
     if name not in WRITE_TOOL_NAMES:
         return result
@@ -2586,8 +2626,7 @@ async def _resolve_graph_argument(ref: str | None,
             # the dispatch is never created. Hence a self-contained message
             # rather than that prefix with a different parenthetical.
             raise ToolError(
-                "The graph lookup for this request did not finish inside the "
-                "time it had left, so the call was not executed. "
+                f"{_mcp_auth._REFUSAL_GRAPH_LOOKUP_MARGIN_MESSAGE}"
                 f"Retry after {_mcp_auth._TRANSPORT_WAIT_RETRY_AFTER_S}s."
             ) from None
         # No time left at all (the transport had already spent the bound): keep
@@ -2811,6 +2850,20 @@ async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None,
                     # SAME pair this line produces, so the two producers of one
                     # failure class agree on what it is called.
                     status, error_kind = "exec_error", "safe_error"
+        # #11153: ...and the VERDICT must agree with the payload even when the payload
+        # is schema-VALID. #8482 repaired only the tools whose declared schema forbids
+        # the `_safe` error dict, which left every DICT-annotated tool shipping a
+        # refusal as `isError: false` — a false PASS for the caller, and the reason a
+        # refused write reads as a recorded one. The payload is kept byte-identical
+        # here (see `_payload_refusal_result`); only `is_error` changes.
+        #
+        # Keyed on the seam's own proof (`_returned_safe_failure`, the discriminator
+        # #8135 established) rather than on `status`/`error_kind`, so an auth refusal
+        # (`auth_error`) is covered too and a payload the tool merely CONTAINS an
+        # `error` key in stays a success. Applied AFTER #8482's repair, whose result is
+        # already an error and must not be rebuilt.
+        if not getattr(result, "is_error", False) and _returned_safe_failure(payload) is not None:
+            result = _payload_refusal_result(result)
         # #10084 (owner ruling: default-graph-with-disclosure): a WRITE that
         # named no `graph` has just landed somewhere, and until now nothing in
         # the result said where. Applied LAST — after every classification and
@@ -2891,8 +2944,18 @@ def _get_sdk():
     if _sdk is not None:
         return _sdk
 
-    _db_uri = os.environ.get("TORTOISE_DB_URI", "")
-    if _db_uri.startswith(("docker://", "redis://", "rediss://")):
+    # The daemon's target comes from ONE implementation (`config.daemon_db_target`),
+    # which the #12407 disclosure also consumes — so the report can never describe
+    # a ladder this function does not run. Its rungs, verbatim: supported-scheme
+    # URI -> from_uri; any other non-empty URI -> resolve_db_path(uri) (a bare
+    # path, backward compat, and TORTOISE_DB_PATH is then IGNORED); else
+    # TORTOISE_DB_PATH -> resolve_db_path(); else the canonical default (main()
+    # refuses that last case unless TORTOISE_ALLOW_EMBEDDED=1).
+    from tortoise.config import daemon_db_target as _daemon_db_target
+    from tortoise.config import resolve_db_path
+    _db_target, _db_rung = _daemon_db_target()
+    if _db_rung == "uri":
+        _db_uri = _db_target
         from tortoise.projection import FalkorProjection  # noqa: I001
         import time as _time
         # Retry Docker connection 3x with backoff; exit on exhaustion (#25 P3a, #32).
@@ -2931,15 +2994,17 @@ def _get_sdk():
                 else:
                     _log.error("Docker connection failed after 3 attempts. Set TORTOISE_DB_URI or ensure FalkorDB is running.")
                     sys.exit(1)
-    elif _db_uri:
-        # File path — use Lite mode (backward compat: bare non-docker URI).
-        # resolve_db_path() rejects relative paths + applies canonical default.
-        from tortoise.config import resolve_db_path as _resolve_db_path
-        _sdk = TortoiseSDK(db_path=_resolve_db_path(_db_uri))
     else:
-        # No URI: default to canonical embedded path via resolve_db_path()
-        from tortoise.config import resolve_db_path as _resolve_db_path
-        _sdk = TortoiseSDK(db_path=_resolve_db_path())
+        # Every other rung is already an absolute path (a bare-path URI,
+        # TORTOISE_DB_PATH, or the canonical embedded default). The `refuses`
+        # rung has NO target — pass the canonical default rather than `None`, or
+        # `TortoiseSDK.__init__`'s own production guard raises RuntimeError and
+        # pre-empts `main()`'s clean "set TORTOISE_DB_URI … in the environment or
+        # .env" + exit 1 (measured on a `FLY_APP_NAME` host, #12428 review
+        # round 2). `main()` still refuses right after this; the SDK merely
+        # stays constructible so the refusal is the one the user sees.
+        _sdk = TortoiseSDK(db_path=_db_target
+                           if _db_rung != "refuses" else resolve_db_path())
     return _sdk
 
 # #329: node/edge-creating MCP write tools that MUST be quota-gated. Completeness
@@ -3759,6 +3824,94 @@ def _public_filters(filters: Any) -> dict:
     return {k: v for k, v in filters.items() if k not in PRIVATE_FILTER_KEYS}
 
 
+#: #12372 — where to enumerate each entity type, once `tortoise_query`'s
+#: structural/tag arms have refused it. EVERY entry either completes in one
+#: call, or states the bound it hits and where the layer's SIZE comes from —
+#: because a remedy that answers `[]` (no conditions) or a `limit`-truncated
+#: bare list is the same false PASS this guard removes, one level down:
+#: `run_structural_query` returns `[]` when it has no conditions
+#: (`tortoise/search_engine.py`, the `if not conditions` gate records
+#: `reason="empty_results"`), and `tortoise_search` slices at `limit`
+#: (default 10) with no total in the response. `operator` is the one type whose
+#: bare search REACHES its layer directly (the leg appends
+#: `n.is_operator = true`) — but through a status-filtered view, and only for
+#: operators stated that way — and even that needs `limit` raised, which is why
+#: the generic advice looked plausible when this was written.
+_ENTITY_TYPE_REMEDY: dict[str, str] = {
+    "operator": (
+        "Enumerate it with tortoise_search(entity_type='operator', "
+        "limit=10000) — one call at the SDK's maximum. That tool has no "
+        "offset walk and slices at `limit` (default 10), so a limit-less "
+        "call answers a SILENTLY TRUNCATED layer, and a layer above 10,000 "
+        "rows has no single-call read. It answers the CURRENT VIEW, not the "
+        "label: the structural leg is status-filtered "
+        "(`search_engine._STATUS_FILTERED_LABELS` includes `Point`), so a "
+        "terminally-stated operator is not returned. A short answer therefore "
+        "has NAMED causes — that status filter, and operators carrying only "
+        "`op_type`, which this leg cannot see although "
+        "tortoise_graph_overview(section='structure').operators counts them "
+        "over EVERY status — and a SILENT one: the leg has a 500 ms driver "
+        "budget and a circuit breaker, and on either it answers [] with no "
+        "field reporting it."),
+    "event": (
+        "Enumerate it with tortoise_get_entity(None, type='events', "
+        "limit=...) — reconcilable against the graph's own Event count — "
+        "but it DEFAULTS TO 20 and answers a bare list with no total, so a "
+        "limit-less call returns a SILENTLY TRUNCATED window: pass the "
+        "limit you need. Or tortoise_search(entity_type='event', "
+        "kind=<eventKind>, limit=10000) — one kind per call, which also "
+        "slices at `limit` (default 10, no total) — and that arm carries the "
+        "structural leg's SILENT causes too: a 500 ms driver budget and a "
+        "circuit breaker, either of which answers [] with no field reporting "
+        "it."),
+    "source": (
+        "Enumerate it with tortoise_graph_overview(section='sources') — it "
+        "lists every provenance Source with its point count, in one call."),
+    "document": (
+        "No bulk listing: tortoise_search(entity_type='document', "
+        "kind=<documentKind>, limit=10000) answers ONE kind at a time and "
+        "slices at `limit` (default 10, no total). D10 retires :Document — a "
+        "document IS a :Source — so the layer is counts.Source in "
+        "tortoise_graph_overview(section='status') MINUS the provenance "
+        "Sources that section 'sources' lists: those are the "
+        "`documentKind IS NULL` complement (`sdk.list_sources`), and "
+        "counts.Source is the union of both. A gap against that partition has "
+        "NAMED causes (the kinds you did not name) and a SILENT one: the leg "
+        "has a 500 ms driver budget and a circuit breaker, and on either it "
+        "answers [] with no field reporting it."),
+    "object": (
+        "No bulk listing — and none is planned (#12378 keeps these as counts): "
+        "tortoise_search(entity_type='object', kind=<objectKind>, "
+        "limit=10000) answers ONE kind at a time, slices at `limit` (default "
+        "10, no total) and reads the CURRENT VIEW — a terminal-status Object "
+        "is excluded (`search_engine._STATUS_FILTERED_LABELS`) — so a gap "
+        "against counts.Object in tortoise_graph_overview(section='status') "
+        "has NAMED causes (that status filter, and the kinds you did not "
+        "name) and a SILENT one: the leg has a 500 ms driver budget and a "
+        "circuit breaker, and on either it answers [] with no field "
+        "reporting it."),
+    "subject": (
+        "No bulk listing — and none is planned (#12378 keeps these as counts): "
+        "tortoise_search(entity_type='subject', kind=<subjectKind>, "
+        "limit=10000) answers ONE kind at a time, slices at `limit` (default "
+        "10, no total) and reads the CURRENT VIEW — a terminal-status Subject "
+        "is excluded (`search_engine._STATUS_FILTERED_LABELS`) — so a gap "
+        "against counts.Subject in tortoise_graph_overview(section='status') "
+        "has NAMED causes (that status filter, and the kinds you did not "
+        "name) and a SILENT one: the leg has a 500 ms driver budget and a "
+        "circuit breaker, and on either it answers [] with no field "
+        "reporting it."),
+}
+
+#: #12372 — the remedy for a vocabulary member that arrives without an entry: a
+#: refusal, never a `KeyError` out of the tool body (the docstring promises a
+#: structured error dict for validation violations, and only a test — not the
+#: code — would otherwise stand between the two).
+_ENTITY_TYPE_REMEDY_FALLBACK = (
+    "No bulk enumeration is known for this entity type yet; its size is in "
+    "tortoise_graph_overview.")
+
+
 # ⚠️ DOC NOTE (#10063) — the docstring below opens with "structural exact-match
 # retrieval", and since #10063's fix that phrase is very slightly NARROW for
 # exactly two keys: `extractedFrom` / `extractedFromAll` answer through a UNION
@@ -3791,16 +3944,37 @@ def tortoise_query(kind: str | None = None,
       (default 100 — see the #10602 note below).
     - tag=<name>: filter Points by TAGGED edge (previously
       tortoise_query_points_by_tag). Tag mode takes precedence over text and
-      ignores kind/filters/min_confidence/entity_type/order_by.
+      ignores kind/min_confidence/order_by, and REFUSES `filters=` (see the
+      tag= bullet below — it used to ignore it silently, #12455); a non-Point
+      `entity_type` is REFUSED there (and on the structural arms) rather than
+      dropped — those arms read the Point label only, and the refusal names the
+      per-type enumerator to use instead (#12372).
     - Pagination: pass offset=/limit= (or 1-based page=). When offset=/page= is
       set, returns {results, total, hasMore} (previously
       tortoise_paginated_query); a plain list is returned otherwise. `limit`
       alone does NOT switch the return shape — it BOUNDS the plain list. Not
       combinable with text= (fts has no offset/skip) — error dict returned.
     - text=<query>: routes through tortoise_fts_query() for hybrid search
-      (unchanged behavior; limit defaults to 100).
+      (unchanged behavior; limit defaults to 100). `filters=` is REFUSED on
+      this arm rather than dropped (#12455): the fts leg takes named knobs
+      (exclude_status, claim_class, relationship_filter, …) and has no
+      property-filter parameter, so an accepted dict used to be silently
+      discarded and the UNFILTERED population served as if it applied. Use the
+      structural path for property filters. `include_retracted` is the one
+      exception: it is promoted to the parameter (never a property filter) and
+      IS applied here, forwarded as the fts leg's include_terminal.
+    - tag=<name> mode: a Point reader keyed on the tag only. It has no
+      property-filter parameter either, so `filters=` is REFUSED here too rather
+      than dropped (#12455). `kind`/`min_confidence`/`order_by` are NOT applied
+      by this arm: the same accepted-and-dropped class as #12500, which tracks
+      the STRUCTURAL arms — this arm's `kind`/`min_confidence`/`order_by` drop is
+      recorded in #12500's comment thread (its body scopes the structural arms
+      only), and is a known gap rather than a documented feature.
     - include_retracted=True surfaces tombstones on every path (structural,
-      paginated, and tag modes); default False excludes them.
+      paginated, text, and tag modes); default False excludes them. Known gap, tracked
+      in #12502: the TAG arm's own exclusion is `status != "retracted"` only, so
+      it still serves superseded/archived/outdated/deprecated rows by default,
+      where the structural and fts arms exclude the whole terminal vocabulary.
 
     Validation: page must be >= 1, offset >= 0, limit >= 1 — violations return
     a structured error dict.
@@ -3826,6 +4000,124 @@ def tortoise_query(kind: str | None = None,
             filters.pop("include_retracted")
     paginated = offset is not None or page is not None
     eff_limit = limit if limit is not None else (20 if paginated else 100)
+    # ── #12372: `entity_type` was DROPPED on every arm except `text=` ────────
+    # The signature has always taken `entity_type`, but only the `text=` arm
+    # forwarded it (into `sdk.tortoise_fts_query`, which honours it). The tag
+    # arm documents that it ignores the argument; the paginated arm and the
+    # plain structural arm call `sdk.paginated_query(kind, skip, limit, …)`,
+    # which has no `entity_type` parameter at all — it is a Point reader by
+    # construction (`MATCH (n:Point) …`). Measured against live-v4 on
+    # 2026-11-13: `entity_type="operator", offset=0, limit=5` answered
+    # `{total: 15842, …points…}` — byte-identical to `entity_type="point"` —
+    # for a layer that is 3,727 rows (`structure.operators`), with `total` and
+    # `hasMore` shaped as if they described the REQUESTED population. That is a
+    # false PASS on a read instrument (#6146): the wrong answer is
+    # indistinguishable from the right one.
+    #
+    # So the arms that cannot serve a non-Point type now REFUSE, above the
+    # branch so they refuse BEFORE any read (a guard placed after the read
+    # would still pay it, and could still serve it on an error path).
+    # `entity_type="point"` — the default — is what these arms actually serve
+    # and stays served; the `text=` arm keeps its forward unchanged, because
+    # the fts leg DOES honour the argument (refusing it here would be a false
+    # block on a combination that works).
+    if entity_type in (None, ""):
+        # ONE spelling, one meaning (#12372 review P2). A JSON payload with a
+        # missing key hands us `None`, and `""` is the same caller intent. The
+        # structural arms used to serve both as Points while the `text=` arm
+        # passed the RAW value to the SDK, whose `tortoise_fts_query` refuses it
+        # (`ValueError`, sdk.py:40829) — one argument value answering two
+        # different ways depending on which arm a caller happened to use.
+        # Resolved HERE, above every arm, so all of them see one value.
+        entity_type = "point"
+    # The vocabulary refusal is the OWNER's (tortoise/security.py), and it is
+    # asked ONCE, above every arm — a per-arm copy is how one invalid value ends
+    # up with two different messages (`text=` used to surface the SDK's own
+    # re-typed copy from sdk.py:40830 while the structural arms surfaced this
+    # one), and a second copy of the message is what drifts. `point` is a
+    # member, so the served path cannot be blocked here.
+    from tortoise.security import validate_entity_type
+
+    try:
+        validate_entity_type(entity_type)
+    except ValueError as exc:
+        return _SafeError({"error": str(exc)})
+    # A blank `text` is classified by the legs as "no query" (`query.strip()` in
+    # `tortoise/search_engine.py`), so the structural leg fires with NO condition
+    # and answers `[]` with `reason="empty_results"` — an empty result
+    # indistinguishable from a complete one. Refuse that shape for a non-point
+    # type, with three bounds that keep it exactly as wide as the problem:
+    #   * `not kind` (not `kind is None`): the leg's own predicate is truthiness,
+    #     so `kind=""` leaves it conditionless too;
+    #   * EXCEPT `operator`, whose leg appends its own condition
+    #     (`n.is_operator = true`) and therefore really does answer;
+    #   * and never for a non-str `text`: refusing that is the SDK's job, and
+    #     `.strip()` here would raise out of the tool body instead of returning
+    #     the structured error the docstring promises.
+    _blank_text = (
+        isinstance(text, str) and not text.strip() and not kind
+        and entity_type != "operator"
+    )
+    if entity_type != "point" and (tag is not None or not text or _blank_text):
+        return _SafeError({"error": (
+            f"entity_type={entity_type!r} is not served on this path: "
+            f"tortoise_query's structural and tag arms read the Point label "
+            f"only, and this argument used to be dropped silently (#12372), "
+            f"answering the Points population as if it were the requested "
+            f"one. {_ENTITY_TYPE_REMEDY.get(entity_type, _ENTITY_TYPE_REMEDY_FALLBACK)} "
+            f"For a structural Point read, omit entity_type or pass 'point' "
+            f"(its default).")})
+    # ── #12455: `filters=` was ACCEPTED on the `text=` and `tag=` arms and DROPPED
+    # `filters` is a STRUCTURAL-path argument. `text=` forwards
+    # kind/entity_type/limit/min_confidence/order_by (plus `include_terminal`,
+    # promoted from `include_retracted` — never a property filter) into
+    # `sdk.tortoise_fts_query`, whose knobs are named (`exclude_status`,
+    # `claim_class`, `exclude_turn_echo_session`, `relationship_filter`, …) and
+    # which has NO property-filter parameter (sdk.py:40637-40710). `tag=` reads
+    # `query_points_by_tag(tag)`, which has no filter parameter either. So a dict
+    # a caller passed on EITHER arm was never looked at, and the answer was the
+    # unfiltered population with `total`/ordering computed over it — the #6146
+    # wrong-answer-indistinguishable-from-right class, the same one #12372
+    # removed for `entity_type`.
+    #
+    # Both arms are covered by ONE guard, placed above them, for the reason
+    # #12372 records at length: close the CLASS, not the instance. A guard on
+    # `text=` alone left `tag=…, filters=…` (and `tag=…, text=…, filters=…`,
+    # where tag takes precedence) still answering the unfiltered tag population
+    # — round-1 review proved it with a stub: `[('tag', 'pricing')]`, no error,
+    # every row.
+    #
+    # Honouring it is not the smaller change: it means teaching the fts leg (and
+    # the tag reader) to apply property filters at a pre-truncation seam, i.e.
+    # SDK SURFACE changes, which this repo's rule reserves to the owner. So the
+    # fail-open is closed by REFUSING — the shape `offset=`/`page=` already have
+    # on the `text=` arm.
+    #
+    # `include_retracted` is NOT refused and NOT dropped: it is popped out of
+    # `filters` into its own parameter above, and the `text=` arm now forwards it
+    # as the fts leg's `include_terminal`. Refusing a name that is not a property
+    # filter would be a false block; leaving it unapplied was the same defect one
+    # level down. NOTE the `tag=` arm APPLIES the flag but with a narrower
+    # vocabulary than the other arms (`status != "retracted"` only) — a real gap
+    # filed as #12502, and the reason this comment does not say the arms agree.
+    if filters and (text or tag is not None):
+        _arm = "tag=" if tag is not None else "text="
+        # A caller who set BOTH must drop both to reach the structural path —
+        # naming only `tag=` (which wins) sends them back into the guard with
+        # `_arm="text="` and the structural path still unreachable (#12455
+        # round-2 finding 4, measured by re-running with `tag` removed).
+        _also = " and text=" if (tag is not None and text) else ""
+        return _SafeError({"error": (
+            f"filters= is not applied on the {_arm} arm, and it used to be "
+            f"dropped silently (#12455): that arm reads through a leg with no "
+            f"property-filter parameter, so your filters would be ignored and "
+            f"the UNFILTERED population returned as if they had applied. Drop "
+            f"{_arm}{_also} to use the structural path "
+            f"(tortoise_query(kind=..., filters={{...}})), or drop filters= for "
+            f"this read. (`include_retracted` is NOT affected: it is promoted to "
+            f"its own parameter, and the text= arm forwards it as the fts leg's "
+            f"include_terminal.)"
+        )})
     if tag is not None:
         # #7983: record what this call SERVES — the page delivered from the
         # post-filter list (at most `limit`), for a paginated or un-paginated
@@ -3862,10 +4154,18 @@ def tortoise_query(kind: str | None = None,
         if paginated:
             return _SafeError({"error": "offset/page not supported with text — "
                                         "use limit only, or tortoise_search"})
+        # #12455 round-1 (P2): `include_retracted` was the same accepted-and-
+        # dropped defect one level down — the tool's docstring promises it
+        # "surfaces tombstones on every path", and this arm never applied it, so
+        # a caller who asked for tombstoned rows got them excluded with no
+        # signal. The fts leg already has the knob (`include_terminal`, an
+        # EXISTING parameter — no surface change), and its documented semantics
+        # are exactly this flag (sdk.py:40823).
         return _safe(_get_org_sdk().tortoise_fts_query, text, kind=kind,
                      entity_type=entity_type, limit=eff_limit,
                      min_confidence=min_confidence or 0.0,
-                     order_by=order_by or "relevance")
+                     order_by=order_by or "relevance",
+                     include_terminal=include_retracted)
     # #10602 review (F3, then round-6 finding 2): `kind`, `skip` and `limit` are
     # reserved filter keys (`security.validate_filter_key`) AND names the binding
     # below already binds, so a caller's `filters={"limit": 5}` collides. The two
@@ -4147,10 +4447,22 @@ def tortoise_suggest_entry_points(query: str, limit: int = 5,
 
     Uses hybrid search (tortoise_fts_query) for semantic entity resolution.
     Falls back to string match (CONTAINS) if hybrid search unavailable.
-    Returns [{id, name, kind, confidence}] sorted by confidence DESC.
+    Returns [{id, name, kind, confidence}] in the read's own (relevance) order;
+    the ``suggest_entry_points`` FALLBACK sorts the match by confidence DESC.
     """
     try:
-        results = _safe(_get_org_sdk().tortoise_fts_query, query, kind=kind_filter, limit=limit)
+        # #12297: THE RETURNED PAGE **IS** THE RESOLUTION RESULT SET, at
+        # ``limit`` default 5 — far inside the shipped pool width of 40 — so an
+        # armed rerank changes WHICH entities resolve rather than merely their
+        # order, and there is no ``leg_trace`` here to disclose it: the
+        # "membership probe reading a page smaller than the pool width" class
+        # this PR's own docstring defines. ⛔ This function does NOT sort (it
+        # returns ``_safe(...)``'s list as-is, see the return below); the
+        # confidence-DESC sort lives in the SDK lane it mirrors,
+        # ``sdk.suggest_entry_points``, which opts out for its own reason.
+        results = _safe(_get_org_sdk().tortoise_fts_query, query,
+                        kind=kind_filter, limit=limit,
+                        _rerank_candidates=False)
         # #3926: a _safe failure is an _SafeError (never a list), so the
         # list check alone is the failure gate — a row whose props carry a
         # user key named "error" must still resolve.
@@ -4576,6 +4888,13 @@ def tortoise_get_operator(id: str) -> dict:
     if isinstance(point, _SafeError):
         return point
     if isinstance(point, dict) and point and not point.get("is_operator"):
+        # ⛔ DELIBERATELY a plain dict, NOT `_SafeError` (#4576, pinned by
+        # `test_get_operator_still_rejects_real_non_operator` and named as a
+        # deliberate residual in `tortoise/activation_scorecard.py`'s refusal
+        # telemetry contract): this is a SUCCESSFUL fetch reporting a domain fact,
+        # not a refused call. Typing it would classify it `exec_error`/`safe_error`
+        # and hand a caller a failure verdict for an answer that arrived.
+        # #11153's verdict flip does NOT reach it, on purpose.
         return {"error": f"Point {id!r} is not an operator"}
     return point
 
@@ -6097,12 +6416,24 @@ def tortoise_overview(section: str | None = None,
     """
     if section is None:
         combined: dict[str, Any] = {}
+        answered = 0
+        first_refusal: Any = None
         for sec in _OVERVIEW_SECTIONS:
             if sec in _OVERVIEW_SUMMARY_SKIP:
                 # requires an argument, or is deliberately not part of the
                 # default summary — see `_OVERVIEW_SUMMARY_SKIP`.
                 continue
             result = _overview_section(sec, entity_id, days, limit)
+            if isinstance(result, _SafeError):
+                # #11153: a section that was REFUSED is remembered, not buried.
+                # Folding it into `combined[sec]` puts the failure one level down
+                # where neither the verdict flip nor the #8135 telemetry arm can
+                # see it — so a total outage shipped `isError: false` on the
+                # orientation door (measured, review round 6).
+                if first_refusal is None:
+                    first_refusal = result
+            else:
+                answered += 1
             # #3510: every data-proportional section is folded to bounded
             # counts here — the rows themselves stay behind the explicit
             # section= calls. `tags`/`pointkinds` fold in their section's own
@@ -6120,6 +6451,21 @@ def tortoise_overview(section: str | None = None,
             elif sec == "structure_check":
                 result = _overview_summary(result, "type", "by_rule")
             combined[sec] = result
+        if answered == 0 and first_refusal is not None:
+            # NOTHING answered: this is a refused call, not an empty graph. Return
+            # the refusal at the payload's TOP level, where the seam's
+            # `_returned_safe_failure` gate flips the verdict and the telemetry row
+            # stops reading `ok`.
+            #
+            # ⛔ RE-CONSTRUCTED, not returned as-is: `_SafeError.__init__` is what
+            # RECORDS the failure, and the holder keeps only the last
+            # `_MAX_RECORDED_SAFE_FAILURES` (8) of them — while this aggregate
+            # builds eleven. Returning the first section's object verbatim handed
+            # the seam a payload that had already been evicted, so on a TOTAL
+            # outage whose per-section texts DIFFER the match missed and the wire
+            # still said `isError: false` (measured, review round 7). Building a
+            # new `_SafeError` from it re-records it as the most recent one.
+            return _SafeError(dict(first_refusal))
         return combined
     if not isinstance(section, str):
         return _SafeError({"error": f"overview: section must be a string, got "
