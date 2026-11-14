@@ -5858,6 +5858,13 @@ _EPIC_CITE_SOURCES = {
         _REPO / "docs/evidence/7949-capstone/probes/capstone_run.py",
     "extractor_v4_arch":
         _REPO / "docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md",
+    # ⛔ THE TWO CHECKERS D5 NAMES BY NUMBER (#12462 review cycle 4). `capstone_verdict_check`
+    # is also a `_BUNDLE_TOOL_SOURCES` key for the bare-continuation test; a key may live in
+    # both maps — this one resolves it for a DOCUMENT-scoped row, which is what D5 needs.
+    # Both are `tools/`, outside every `tortoise/` sweep, so a row is the only reader they
+    # can have: `:191`, `:4201-4208` and `:4209-4230` all reverted GREEN when mutated.
+    "capstone_verdict_check": _REPO / "tools/capstone_verdict_check.py",
+    "capstone_preregistration_check": _REPO / "tools/capstone_preregistration_check.py",
     # `03-test-design.md` cites the manifest's OWN `carve_out:` block — by BLOCK and
     # filename now, not by line number: `surfaces:` sits ABOVE `carve_out:` in the
     # manifest, so every registration `tools/ci_selection.py::register_tests` splices
@@ -6177,6 +6184,26 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         ("05-verify.md", "Measured at `6916a6cd89`", (
             ("1194", 'if not frozen.get("sha256"):'),
         ), "capstone_run"),
+        # ⛔ THE THREE THIS-HEAD NUMBERS IN D5's SECOND HALF (#12462 review cycle 4):
+        # `capstone_verdict_check.py:191` (the `RECOGNISED_CRITERIA` composition) and
+        # `capstone_preregistration_check.py:4201-4208` / `:4209-4230` (the two-sanctioned-sets
+        # refusal and its reverse arm). Mutating each left the suite GREEN (measured), and they
+        # are `tools/`, so no `tortoise/` sweep can reach them.
+        ("05-verify.md", "Measured at `6916a6cd89`", (
+            ("191", "RECOGNISED_CRITERIA = (*CRITERIA, *E6_CRITERIA, *A_CRITERIA)"),
+        ), "capstone_verdict_check"),
+        ("05-verify.md", "Measured at `6916a6cd89`", (
+            ("4201", "sanctioned = [list(CORE_REQUIRED_CRITERIA), list(REQUIRED_CRITERIA)]"),
+            ("4208", "elif declared != list(REQUIRED_CRITERIA) and rows is not None:"),
+        ), "capstone_preregistration_check"),
+        # ⚠️ `:4230` — the END of the reverse arm — is a bare `)`, which no anchor can
+        # honestly hold, so the arm is anchored at its START and guarded by its NEIGHBOURS
+        # below (exactly one `if defined_beyond_core:` inside, `return failures` on the next
+        # line). The residual is stated: an arm that grows while keeping both of those would
+        # pass. Declared rather than left to a reader.
+        ("05-verify.md", "Measured at `6916a6cd89`", (
+            ("4209", "# …and the reverse direction: a bundle that DEFINES a required id and does not require it."),
+        ), "capstone_preregistration_check"),
         # ⛔ `00-plan.md`'s `_capture_lane` CITE (#12462 review cycle 3, P2): the diff
         # re-pointed it to `:17936` and no row read it — `_BUNDLE_CITE` matches
         # `sdk|edges|extractor_v2` only, so a `hosted_api` number needs its own row. The
@@ -6347,6 +6374,29 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         "04-plan.md I7's range end (`:13598`) is no longer the blank line before "
         "`return OrgInfoResponse(` — re-derive BOTH endpoints from `hosted_api.py`, "
         "because the span-membership check above stays green while the end drifts")
+
+    # ⛔ THE REVERSE ARM'S RANGE IS PINNED IN THE DOC AS WELL AS THE TREE (#12462 review
+    # cycle 4). The tree-side guard alone is blind to the sentence: mutating the document's
+    # `:4209-4230` to `:4209-4231` left the suite GREEN (measured) because the guard read the
+    # SOURCE. The exact string is required once, and the span is then checked by its
+    # neighbours — a line added inside the arm shifts `return failures` and reds, which an
+    # anchor on `)` could never do.
+    _prc = _EPIC_CITE_SOURCES["capstone_preregistration_check"].read_text(
+        encoding="utf-8").splitlines()
+    _d5_doc = _EPIC_CITE_DOCS["05-verify.md"].read_text(encoding="utf-8")
+    assert _d5_doc.count(":4209-4230") == 1, (
+        "05-verify.md's reverse-arm cite is no longer stated exactly once as `:4209-4230` — "
+        "re-derive BOTH ends from `tools/capstone_preregistration_check.py` rather than "
+        "editing one end of the sentence")
+    _arm = _prc[4209 - 1:4230]
+    assert sum("if defined_beyond_core:" in _l for _l in _arm) == 1, (
+        "05-verify.md cites the reverse arm as `:4209-4230`, but `if defined_beyond_core:` "
+        f"occurs {sum('if defined_beyond_core:' in _l for _l in _arm)} time(s) in that span — "
+        "the arm moved, so re-derive BOTH ends rather than bumping the start")
+    assert _prc[4231 - 1].strip() == "return failures", (
+        "05-verify.md cites the reverse arm as ending at `:4230`, but the line after that "
+        f"span reads {_prc[4231 - 1].strip()!r}, not 'return failures' — the arm grew or "
+        "shrank, so the range is stale even if `:4209` still anchors")
 
     # ⛔ THE BLOCK ARM — the claim `03-test-design.md` actually makes, checked
     # against the structure instead of a number that a tool rewrites under it.
