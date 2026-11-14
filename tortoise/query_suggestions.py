@@ -135,7 +135,17 @@ def compute_suggestion(kind: str) -> str | None:
     2. Kind is NOT valid → "did you mean" Levenshtein suggestions
 
     Returns a suggestion string, or None if no suggestion can be made.
+
+    #12582: a NON-STR input returns None rather than raising. This is a library
+    entry point (`tortoise.query_suggestions.compute_suggestion`) as well as an
+    internal helper, and every branch below assumes a string — ``kind in known``
+    is a containment test that accepts any hashable, and ``":" not in kind``
+    raises TypeError for a bool/int. The MCP caller now filters non-str values
+    before it gets here, so this is defence for the callers this module cannot
+    see, not a second guard for that one.
     """
+    if not isinstance(kind, str):
+        return None
     known = _collect_known_kinds()
     if not known:
         return None
