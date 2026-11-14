@@ -547,9 +547,10 @@ _LEDGER_LITERAL_OWNERS: dict[str, tuple[int, str]] = {
 #: destructive interlock. NO entry was deleted by #4128: deleting one means the read was
 #: widened, and no name's disposition was widen.
 #:
-#: THE DELIBERATE EXCEPTIONS — FIVE entries in this ledger are deliberate, and each
-#: carries a recorded `OVERRIDES` (not by accident). THREE were added SINCE #4128
-#: ruled the deferred set: `TORTOISE_11070_CENSUS_DEDUPE_DISABLED`
+#: THE DELIBERATE EXCEPTIONS — five entries are called out here, and each carries
+#: a recorded `OVERRIDES` (as every entry in this ledger does, not by accident).
+#: THREE were added SINCE #4128 ruled the deferred set:
+#: `TORTOISE_11070_CENSUS_DEDUPE_DISABLED`
 #: (`tortoise/session_source_prose_migration.py`, #11453), `TORTOISE_JOURNAL_SEGMENTS`
 #: (`tortoise/journal_segments.py`, #12551), and `tortoise/config.py`'s
 #: `TORTOISE_ALLOW_EMBEDDED` (#12407/#12428, restructured by #12555). The other TWO
