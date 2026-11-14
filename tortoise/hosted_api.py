@@ -2024,6 +2024,27 @@ def _health_probe_stale_after_s() -> float:
 #: evidence fresh does not exist" — and the second must not report green forever.
 _HEALTH_PROBE_START_FAILED = False
 
+#: #12477 (review round 12): how long a process may be up with NO probe result
+#: before "nothing yet" becomes "nothing is ever coming". A LIFESPAN that fails,
+#: a task cancelled by a re-entered lifespan, or a probe that never gets its
+#: turn all leave `in_flight: False, result_age_s: None`, which the `in_flight`
+#: arm above cannot see and the start-failure flag does not cover — measured: a
+#: reset coordinator beside a FRESH heartbeat reads `unknown` -> `200 reasons=[]`
+#: FOREVER, i.e. one of the three claimed terms silently inert.
+#: The floor is the stale window times four, itself floored at 120 s: a cold start
+#: must never red the deploy gate, and this listener is only reachable once
+#: startup has finished, by which point the refresher has had many intervals.
+_PROCESS_STARTED_AT = time.monotonic()
+
+
+def _health_probe_never_produced_bound_s() -> float:
+    """The uptime past which "no probe result yet" is a FAILURE (seconds)."""
+    try:
+        return max(120.0, 4.0 * _health_probe_stale_after_s())
+    except Exception:  # a resolver must never raise into a verdict
+        return 120.0
+
+
 
 def _liveness_dataplane_verdict() -> dict:
     """The 9090 check's data-plane term, read from MEMORY only (#12477).
@@ -2053,7 +2074,9 @@ def _liveness_dataplane_verdict() -> dict:
       seconds after boot). NOT a failure: a check that is red during every cold
       start teaches operators to ignore it, and the loop-stale term already
       covers a boot that never gets going. This state is only reachable while
-      something is actually running that can produce the missing result.
+      something is actually running that can produce the missing result, or
+      within ``_health_probe_never_produced_bound_s()`` of process start —
+      past that bound, nothing-produced is a FAILURE.
     """
     try:
         # ⛔ ``peek()``, NOT ``snapshot()`` (#12477): snapshot() self-heals by
@@ -2095,6 +2118,22 @@ def _liveness_dataplane_verdict() -> dict:
             return {"state": "failed",
                     "detail": {"reason": "probe-never-produced-a-result",
                                "in_flight_s": in_flight_s},
+                    "error": None}
+        # ⛔ AND NOTHING-IS-RUNNING IS THE THIRD NEVER-PRODUCED SHAPE (round 12).
+        # `in_flight: False` with no result is what a failed/cancelled/never-
+        # scheduled refresher looks like, and without an uptime bound it is
+        # indistinguishable from "boot, a few seconds in" — forever. Measured: a
+        # reset coordinator beside a FRESH heartbeat answered 200 with
+        # `reasons: []`, one of the three claimed terms silently inert. The
+        # bound is generous on purpose (four stale windows, floored at 120 s) so
+        # a genuine cold start never reds the deploy gate.
+        uptime_s = max(0.0, time.monotonic() - _PROCESS_STARTED_AT)
+        if uptime_s > _health_probe_never_produced_bound_s():
+            return {"state": "failed",
+                    "detail": {"reason": "probe-never-produced-a-result",
+                               "in_flight": False,
+                               "in_flight_s": None,
+                               "uptime_s": round(uptime_s, 1)},
                     "error": None}
         return {"state": "unknown",
                 "detail": {"reason": "no-probe-result-yet",

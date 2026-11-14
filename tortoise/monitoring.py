@@ -5880,9 +5880,19 @@ class _HealthzHandler(BaseHTTPRequestHandler):
         # docstring's "always answers" contract broken in its worst direction:
         # measured `loop_heartbeat_info` raising -> `RemoteDisconnected: Remote end
         # closed connection without response`, while the same raise one line lower
-        # gave the legible `503 verdict-unreadable`. `info` is bound below with a
-        # default so the arms that use it still have a dict.
-        info: dict = {}
+        # gave the legible `503 verdict-unreadable`. `info` is PRE-SEEDED with the
+        # UNMEASURED shape (round 12), because the raise that drops it is most
+        # likely `loop_heartbeat_info` itself — leaving `**info` empty on exactly
+        # the response where an operator needs those diagnostics, which is the
+        # opposite of the rule the degraded arm states.
+        info: dict = {
+            "loop_age_ms": None,
+            "loop_ticks": None,
+            "loop_stale": None,
+            "loop_lag_max_ms": None,
+            "loop_lag_p99_ms": None,
+            "loop_lag_samples": None,
+        }
         # ── #12477: the verdict is STALE **OR** A FAILED DEPENDENCY. ────────
         #
         # The `stale AND idle` conjunct this replaces could not see the wedge it
@@ -5938,6 +5948,7 @@ class _HealthzHandler(BaseHTTPRequestHandler):
                 "dataplane": {"state": "unknown", "detail": None,
                               "error": "verdict-unreadable"},
                 "served": {"registered": None, "last_served_age_s": None,
+                           "last_plane_serve_age_s": None,
                            "served": None, "error": "verdict-unreadable"},
                 "recent_breaches": _wait_bound_error(
                     f"verdict-unreadable: {type(exc).__name__}", window=None),
@@ -6001,9 +6012,17 @@ class _HealthzHandler(BaseHTTPRequestHandler):
         # actually served something.
         plane_age = served.get("last_plane_serve_age_s")
         demand = not idle
-        # A serve INSIDE the window defeats "nothing was served", from EITHER
-        # datum: the plane stamp is the stronger evidence and the liveness stamp
-        # is the one a lane without a plane seam still has.
+        # ⛔ EITHER datum defeats "nothing was served" — and that is deliberate,
+        # not a fallback chain (#12477 review round 12). Both are ages of a
+        # request the app ANSWERED, so both prove the loop RAN: the plane stamp
+        # moves on real traffic, the `/liveness` stamp only when something polls
+        # it (one `*/5` cron in production, so it is usually stale — which is why
+        # it cannot be the PRIMARY datum). Reading them as "whichever is fresher"
+        # is honest in both directions: a fresh plane serve keeps a busy box
+        # green, and a fresh `/liveness` answer is likewise evidence the loop is
+        # not blocked — during a real wedge NEITHER can be stamped, because the
+        # handler cannot run. A reader that supplies only `last_served_age_s`
+        # (a lane with no plane seam) is therefore already covered by this line.
         no_serve = not (_served_inside_window(plane_age)
                         or _served_inside_window(served_age))
         if served.get("registered") is not True:

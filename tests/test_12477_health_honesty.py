@@ -53,6 +53,8 @@ def _clean(monkeypatch):
     hosted_api._LAST_PLANE_SERVED_AT = None
     hosted_api._LIVENESS_LAST_SERVED_AT = None
     hosted_api._HEALTH_PROBE_START_FAILED = False
+    # a fresh process for every test: the never-produced arm reads uptime
+    hosted_api._PROCESS_STARTED_AT = time.monotonic()
     # ⛔ the harness's `asyncio.run(_boot())` CLOSES the loop, so the heartbeat
     # task `_start_liveness` installs is DONE by the time any assertion runs —
     # and `heartbeat_task_is_dead()` would then disarm the wedge term in every
@@ -312,6 +314,69 @@ def test_a_DEAD_ticker_is_not_a_wedge_on_the_deploy_gate(monkeypatch):
     assert status == 200, body
     assert body["loop_stale"] is True
     assert body["reasons"] == []
+
+
+def test_a_fresh_LIVENESS_answer_is_serve_evidence_too():
+    """The other datum, pinned on purpose (#12477 review round 12).
+
+    A reviewer read `no_serve = not (fresh(plane) or fresh(liveness))` as
+    fail-open because a `/liveness` poll could then hold the term green. It is
+    not: the stamp is written by the HANDLER as it runs, so a fresh one proves
+    the loop executed a coroutine — during a real wedge neither datum can be
+    stamped, because neither handler runs. The states differ only in what they
+    measure: the plane stamp moves on real traffic (which is what makes the
+    runbook's "a busy loop stays green" promise true), the `/liveness` stamp moves
+    only when something polls it.
+
+    This pins the direction so a later change cannot turn the OR into a silent
+    preference: with a stale plane age and a fresh `/liveness` age the box is
+    SERVING, and the term must not claim otherwise.
+    """
+    app = _FakeApp()
+    _start(app)
+    port = monitoring.start_health_listener(port=0, bind="127.0.0.1").server_address[1]
+    hosted_api._HEALTH_PROBE._result = {
+        "ok": True, "observed": True, "latency_ms": 5.0, "error": None}
+    hosted_api._HEALTH_PROBE._completed_at = time.monotonic()
+    monitoring.heartbeat_record(
+        at=time.monotonic() - (monitoring.LOOP_STALE_AFTER + 2.0))
+    hosted_api._LAST_PLANE_SERVED_AT = time.monotonic() - 300.0
+    hosted_api._LIVENESS_LAST_SERVED_AT = time.monotonic() - 1.0
+    monitoring.workload_enter()
+    try:
+        status, body = _get(port)
+    finally:
+        monitoring.workload_exit()
+    assert status == 200, body
+    assert body["reasons"] == []
+    assert body["loop_stale"] is True
+
+
+def test_a_process_past_the_bound_with_NO_probe_result_is_a_FAILURE():
+    """The third never-produced shape: nothing is running, and nothing ran.
+
+    The start-failure flag covers a refresher whose `create_task` raised. It does
+    NOT cover a lifespan that failed later, a task cancelled by a re-entered
+    lifespan, or a probe that never got its turn — all of which report
+    `in_flight: False, result_age_s: None`, the shape the `in_flight` arm cannot
+    see. Measured: a reset coordinator beside a FRESH heartbeat answered 200 with
+    `reasons: []` forever. Past the uptime bound that is a failure; inside it, it
+    is still a cold start.
+    """
+    app = _FakeApp()
+    _start(app)
+    hosted_api._HEALTH_PROBE._result = None
+    hosted_api._HEALTH_PROBE._completed_at = None
+    hosted_api._HEALTH_PROBE_START_FAILED = False
+    assert hosted_api._liveness_dataplane_verdict()["state"] == "unknown"
+    # the assertion above is the COLD START. Age the process past the bound and
+    # the same state must read as a failure, not as `unknown` for ever.
+    hosted_api._PROCESS_STARTED_AT = time.monotonic() - (
+        hosted_api._health_probe_never_produced_bound_s() + 5.0)
+    verdict = hosted_api._liveness_dataplane_verdict()
+    assert verdict["state"] == "failed", verdict
+    assert verdict["detail"]["reason"] == "probe-never-produced-a-result"
+    assert verdict["detail"]["uptime_s"] > 0
 
 
 def test_a_NEVER_started_probe_refresher_is_a_FAILURE_not_unknown():

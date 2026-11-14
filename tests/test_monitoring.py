@@ -5781,6 +5781,20 @@ def test_a_raise_in_the_heartbeat_read_answers_503_instead_of_going_dark(monkeyp
     assert raw.startswith("HTTP/1."), f"the listener went DARK instead of answering: {raw!r}"
     assert " 503 " in raw.split("\r\n", 1)[0], raw.split("\r\n", 1)[0]
     assert "verdict-unreadable" in raw
+    # ⛔ AND THE DIAGNOSTICS SURVIVE THE VERY RAISE THAT DROPS THEM (#12477
+    # review round 12). `info` used to start as `{}` and be filled only by the
+    # call that raised, so the ONE response an operator needs the heartbeat
+    # diagnostics on carried none of them — the opposite of the rule the degraded
+    # arm states. Measured before: `loop_stale`/`loop_ticks` absent entirely.
+    body = json.loads(raw.split("\r\n\r\n", 1)[1])
+    for key in ("loop_age_ms", "loop_ticks", "loop_stale",
+                "loop_lag_max_ms", "loop_lag_p99_ms", "loop_lag_samples"):
+        assert key in body, (
+            f"{key} is missing from the degraded arm — every diagnostic must be "
+            "present and reported as UNMEASURED, never omitted")
+        assert body[key] is None, (key, body[key])
+    assert body["served"]["last_plane_serve_age_s"] is None, (
+        "the degraded arm must carry the FULL served shape too")
 
 
 def test_stopping_the_app_clears_every_registered_reader():
