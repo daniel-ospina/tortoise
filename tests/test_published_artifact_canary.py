@@ -766,14 +766,20 @@ def test_an_install_failure_is_only_RED_when_the_INDEX_confirms_the_absence(tmp_
     assert "could not be evaluated" in dependency_arm.detail, dependency_arm.detail
     assert "falkordblite" in dependency_arm.detail, dependency_arm.detail
 
-    # ⛔ AND THE POSITIVE DIRECTION OF THE SAME CLAUSE (#12422 round-21 review, P2): pip
-    # names OUR artifact when an sdist's own `build-system.requires` cannot resolve, and
-    # that IS a finding about the artifact — its metadata is unbuildable, which only a
-    # release fixes. The first cut of the naming predicate missed it and reported the
-    # correct FAIL as a detector outage (measured on real pip output from a local sdist).
+    # ⛔ AND THE NEGATIVE DIRECTION OF THE SAME CLAUSE, MEASURED (#12422 round-21 delta
+    # review, P1). `Failed to build '<us>' when installing build dependencies for <us>` is
+    # pip's wrapper naming THE CANDIDATE BEING PREPARED, and the cause is the line above
+    # it: the subprocess installs OTHER distributions. So this exact byte sequence — our
+    # page 200, our sdist downloaded, a transient failure only on the build dependency's
+    # page — is a pip run that tells us NOTHING about whether our artifact is absent, and
+    # attributing it to the artifact orders an irreversible release a retry would have made
+    # unnecessary. The previous cut graded it FAIL (measured); it must be UNKNOWN.
     build_deps_marks = (
-        "ERROR: Could not find a version that satisfies the requirement "
+        "  × installing build dependencies for tortoise-graph did not run successfully.\n"
+        "  ╰─> [3 lines of output]\n"
+        "      ERROR: Could not find a version that satisfies the requirement "
         "not-a-real-build-backend>=1 (from versions: none)\n"
+        "      ERROR: No matching distribution found for not-a-real-build-backend>=1\n"
         "ERROR: Failed to build 'tortoise-graph' when installing build dependencies for "
         "tortoise-graph"
     )
@@ -785,10 +791,75 @@ def test_an_install_failure_is_only_RED_when_the_INDEX_confirms_the_absence(tmp_
         runner=_Runner({"pip": _completed(["pip", "install"], 1, "", build_deps_marks)}),
         absent_probe=lambda package: canary.INDEX_OK,
     )[0]
-    assert build_deps_arm.status == canary.FAIL, (
-        f"pip naming the artifact's own unbuildable metadata IS a finding about the "
-        f"artifact, so it must stay a release call (got {build_deps_arm.status}: "
+    assert build_deps_arm.status == canary.UNKNOWN, (
+        f"a build DEPENDENCY's fetch failure is not a finding about tortoise-graph's own "
+        f"absence, so it must not order a release (got {build_deps_arm.status}: "
         f"{build_deps_arm.detail})"
+    )
+    assert "users cannot even install" not in build_deps_arm.detail, build_deps_arm.detail
+    assert "build dependencies" in build_deps_arm.detail, (
+        "the detail must still SHOW the evidence, so a human can see this was a step that "
+        f"installs OTHER distributions, not our absence from the index (got "
+        f"{build_deps_arm.detail})"
+    )
+
+    # ⛔ …and the arm is NOT disabled: the steps that DO run our own backend on our own
+    # sdist stay release calls, so an unbuildable sdist is still caught (the intent the
+    # over-wide alternative was reaching for). Each is a real pip step description
+    # (`operations/build/metadata.py`, `operations/build/wheel.py`,
+    # `distributions/sdist.py`) — not a paraphrase of one.
+    for step, marks in (
+        (
+            "preparing metadata",
+            "ERROR: Failed to build 'tortoise-graph' when preparing metadata (pyproject.toml)",
+        ),
+        (
+            "building wheel for",
+            "ERROR: Failed to build 'tortoise-graph' when building wheel for "
+            "tortoise-graph (pyproject.toml)",
+        ),
+        (
+            "getting requirements to build wheel",
+            "ERROR: Failed to build 'tortoise-graph' when getting requirements to build wheel",
+        ),
+    ):
+        own_build_arm = canary.install_and_run(
+            package="tortoise-graph",
+            version="0.2.0",
+            workdir=tmp_path,
+            timeout=10,
+            runner=_Runner({"pip": _completed(["pip", "install"], 1, "", marks)}),
+            absent_probe=lambda package: canary.INDEX_OK,
+        )[0]
+        assert own_build_arm.status == canary.FAIL, (
+            f"the artifact failing to build ITSELF at `{step}` IS a finding about the "
+            f"artifact, so it must stay a release call (got {own_build_arm.status}: "
+            f"{own_build_arm.detail})"
+        )
+
+    # ⛔ AND AN UNRECOGNISED STEP IS NOT A VERDICT. The allow-list is what buys this: a
+    # step pip adds later must fall to UNKNOWN, never to FAIL, because FAIL is the one
+    # verdict that orders an irreversible release. A deny-list would have graded it FAIL.
+    unknown_step_arm = canary.install_and_run(
+        package="tortoise-graph",
+        version="0.2.0",
+        workdir=tmp_path,
+        timeout=10,
+        runner=_Runner(
+            {
+                "pip": _completed(
+                    ["pip", "install"],
+                    1,
+                    "",
+                    "ERROR: Failed to build 'tortoise-graph' when some future pip step",
+                )
+            }
+        ),
+        absent_probe=lambda package: canary.INDEX_OK,
+    )[0]
+    assert unknown_step_arm.status == canary.UNKNOWN, (
+        f"a step this predicate does not know must fall to UNKNOWN, never to a release "
+        f"call (got {unknown_step_arm.status}: {unknown_step_arm.detail})"
     )
     # …and the SAME sentence naming a DEPENDENCY's build is still not ours.
     dep_build_arm = canary.install_and_run(
@@ -981,19 +1052,27 @@ def test_an_install_failure_is_only_RED_when_the_INDEX_confirms_the_absence(tmp_
 
 def test_the_absence_name_match_NORMALISES_the_name_it_compares(tmp_path):
     """`_install_failure_is_absence` compares PEP 503-normalised names, and that
-    normaliser is load-bearing rather than tidiness (#12422 round-21 review, P3).
+    normaliser is defensive rather than tidiness (#12422 round-21 review, P3).
 
-    Measured before this test existed: removing `.strip("-")` reddened NOTHING — the
-    suite stayed green while `_canonical_dist_name("tortoise-graph.")` became
-    `tortoise-graph-`, a name no package has, so a message whose name ends in punctuation
-    silently stopped matching. The docstring called the strip load-bearing; this is the
-    assertion that makes the word true.
+    Measured before this test existed: removing `.strip("-")` reddened NOTHING. The fix is
+    the direct-call assertions below, not a claim about a pip message: pip's
+    `Failed to build '…'` form is QUOTED, so the closing quote terminates the capture and
+    that form cannot carry trailing punctuation. What the strip really protects is an
+    unquoted, punctuation-attached spelling — which is why the last assertion calls the
+    normaliser directly instead of pretending pip emits it.
     """
     assert canary._canonical_dist_name("Tortoise_Graph") == "tortoise-graph"
     assert canary._canonical_dist_name("tortoise.graph") == "tortoise-graph"
     assert canary._canonical_dist_name("tortoise-graph.") == "tortoise-graph", (
         "a name carrying trailing punctuation normalised to a DIFFERENT name, so pip's "
         "wording would stop matching the package under test"
+    )
+    assert canary._ABSENCE_NAMED.search(
+        "failed to build tortoise-graph. when preparing metadata (pyproject.toml)"
+    ), (
+        "the unquoted, punctuation-attached `Failed to build` spelling pip does not emit "
+        "today is what the strip exists for; if this stops matching, the strip is dead "
+        "code and the docstring says otherwise"
     )
     assert canary._install_failure_is_absence(
         "ERROR: No matching distribution found for tortoise-graph.", None, "tortoise-graph"

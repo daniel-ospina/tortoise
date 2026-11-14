@@ -130,16 +130,49 @@ PYPI_SIMPLE = "https://pypi.org/simple"
 #: Without this, a yanked third-party dependency tells a human to cut an irreversible
 #: PyPI release that cannot possibly fix it (#12422 round-21 review P2).
 #:
-#: ⛔ THE THIRD ALTERNATIVE IS `Failed to build '<name>' when installing build
-#: dependencies` (#12422 round-21 review, P2, MEASURED). That line names OUR artifact and
-#: nothing else, and it is what pip prints for an sdist whose own `build-system.requires`
-#: cannot resolve — a defect in the artifact's metadata that only a release fixes. The
-#: first cut of this predicate missed it, so the correct FAIL was reported as a detector
-#: outage: measured on real pip output from a local sdist, `old=True new=False`.
+#: ⛔ THE SECOND ALTERNATIVE IS `Failed to build '<name>' when <step>`, AND ONLY THE STEPS
+#: THAT RUN THIS ARTIFACT'S OWN BUILD BACKEND (#12422 round-21 delta review, P1, MEASURED).
+#: pip raises one wrapper for every way a candidate can fail to prepare —
+#: `FailedToPrepareCandidate` in `pip/_internal/exceptions.py` and the raise site in
+#: `pip/_internal/resolution/resolvelib/candidates.py::_prepare` — and its
+#: `package_name` is **the candidate being prepared**, i.e. always OUR name whatever the
+#: cause was. The cause is printed ABOVE that line, not in it.
+#:
+#: ⛔ SO THE STEP NAMES IN THIS TUPLE ARE AN ALLOW-LIST ON PURPOSE. Every entry is a
+#: subprocess that executes THIS artifact's backend on THIS artifact's sdist:
+#: `getting requirements to build wheel` (`distributions/sdist.py`),
+#: `preparing metadata (pyproject.toml)` (`operations/build/metadata.py`), and
+#: `building wheel for <name>` (`operations/build/wheel.py`). A failure there is the
+#: artifact's own defect, so it is a finding about the artifact and a release can fix it.
+#:
+#: ⛔ `installing build dependencies` IS DELIBERATELY ABSENT, and a deny-list would not
+#: have caught it. Its step description embeds our name too —
+#: `f"installing {kind}{identify_requirement}"` with `f" for {for_req.name}"`
+#: (`build_env/installer.py`) — but the subprocess it runs installs OTHER distributions,
+#: so its failure says nothing about ours. Measured, pip 26.2.1, index serving our page
+#: and our sdist 200 and a transient 503 only on the build dependency's page:
+#:     ERROR: Could not find a version that satisfies the requirement not-a-real-build-backend>=1
+#:     ERROR: No matching distribution found for not-a-real-build-backend>=1
+#:     ERROR: Failed to build 'tortoise-graph' when installing build dependencies for tortoise-graph
+#: Attributing that to the artifact orders an IRREVERSIBLE release that a retry would
+#: have made unnecessary — the exact failure this module's own docstrings forbid. It is
+#: also byte-indistinguishable from a genuinely unsatisfiable `build-system.requires` in
+#: OUR pyproject (pip names the dependency there too), so the step is UNKNOWN by
+#: construction — fail-closed, and consistent with the `Requires-Dist` residual stated in
+#: `_install_failure_is_absence`.
+#: ⚠️ An unrecognised step falls to UNKNOWN, never to FAIL: that is what an allow-list
+#: buys, and it is the same reasoning that made the unnamed-probe-state arm an allow-list.
+_ABSENCE_OWN_BUILD_STEPS = (
+    "getting requirements to build wheel",
+    "preparing metadata",
+    "building wheel for",
+)
 _ABSENCE_NAMED = re.compile(
     r"(?:no matching distribution found for|could not find a version that satisfies the requirement)"
     r"\s+(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)"
-    r"|failed to build\s+['\"]?(?P<built>[A-Za-z0-9][A-Za-z0-9._-]*)",
+    r"|failed to build\s+['\"]?(?P<built>[A-Za-z0-9][A-Za-z0-9._-]*)['\"]?\s+when\s+(?P<step>"
+    + "|".join(re.escape(step) for step in _ABSENCE_OWN_BUILD_STEPS)
+    + r")",
     re.IGNORECASE,
 )
 #: ⛔ CORROBORATION ONLY, and no longer a GATE in front of the naming comparison: the
@@ -152,10 +185,15 @@ def _canonical_dist_name(name: str) -> str:
     are one name. pip echoes the requirement as the caller wrote it, which is not
     guaranteed to be the spelling the console script or the index uses.
 
-    ⛔ The trailing `.strip("-")` is load-bearing, not tidiness: the pattern above stops at
-    the name, but the `Failed to build '…'` form can leave punctuation attached, and the
-    normaliser would turn `tortoise-graph.` into `tortoise-graph-` — a name no package
-    has — losing the match it was just widened to catch (measured, #12422 round-21).
+    ⛔ The trailing `.strip("-")` is DEFENSIVE, and its old justification was wrong in a way
+    a reader would have cited: the `Failed to build '…'` form is quoted, and the closing
+    quote terminates the capture, so that form cannot carry trailing punctuation. What it
+    really protects is an UNQUOTED, punctuation-attached spelling —
+    `failed to build tortoise-graph. when …` captures `tortoise-graph.`, which without the
+    strip normalises to `tortoise-graph-`, a name no package has. pip does not emit that
+    spelling today (measured, pip 26.2.1), so the pin below it is a direct-call test on
+    synthetic input: it keeps the strip from being deleted as dead code, and says so,
+    instead of claiming a real pip message exercises it (#12422 round-21 delta review, P3).
     """
     return re.sub(r"[-_.]+", "-", name.strip().lower()).strip("-")
 
@@ -193,15 +231,22 @@ def _install_failure_is_absence(
     does the same. A failure that does not POSITIVELY name this package is not evidence
     about this package, so it returns False and the caller takes the UNKNOWN path.
 
-    ⚠️ STATED RESIDUAL, because it is a real blind spot and pretending otherwise is how
-    the next lane mistakes it for a bug: a release whose OWN declared dependency is
-    unsatisfiable (`Requires-Dist: falkordblite>=999`) produces output byte-identical to a
-    third-party yank — pip names the dependency, never us — so it reads as UNKNOWN
-    ("detector outage", exit 2) instead of FAIL. That is fail-closed (it never orders an
-    upload that cannot help), and attributing it needs the release's own `requires_dist`
-    threaded into this arm, which is NOT done here. The narrower claim this function now
-    makes is exactly: a failure that names no package, or names a different one, is not
-    evidence about this one.
+    ⚠️ STATED RESIDUALS, because they are real blind spots and pretending otherwise is how
+    the next lane mistakes them for bugs. Both are the SAME ambiguity — pip names the
+    dependency that could not resolve, never us — and both read as UNKNOWN ("detector
+    outage", exit 2) instead of FAIL. That is fail-closed: it never orders an upload that
+    cannot help.
+
+    1. A release whose OWN declared dependency is unsatisfiable (`Requires-Dist:
+       falkordblite>=999`). Attributing it needs the release's own `requires_dist`.
+    2. A release whose OWN `build-system.requires` is unsatisfiable, which pip reports as
+       `Failed to build '<us>' when installing build dependencies for <us>` — the step is
+       excluded above because the same bytes are produced by a transient failure of
+       SOMEONE ELSE'S build dependency, and the two cannot be told apart from stderr.
+
+    The narrower claim this function now makes is exactly: a failure that names no package,
+    names a different one, or names us only as the candidate whose build could not be
+    prepared is not evidence about this artifact's absence from the index.
     """
     text = (stderr or "").lower()
     if wheel is not None:
@@ -211,16 +256,18 @@ def _install_failure_is_absence(
     wanted = _canonical_dist_name(package)
     # ⛔ A NAMED ABSENCE PHRASE IS ITSELF THE MARKER — do not gate this on
     # a marker tuple first (#12422 round-21 review, P2, MEASURED). The
-    # `Failed to build '<pkg>' …` form names the artifact and carries NO member of that
-    # tuple, so with the gate in front it returned False on its own and only worked when
-    # an unrelated line happened to supply a marker. That made the new alternative
-    # co-occur rather than decide, contradicting the sentence above it.
+    # `Failed to build '<pkg>' …` form carries NO member of that tuple, so with the gate in
+    # front it returned False on its own and only worked when an unrelated line happened to
+    # supply a marker. That made the alternative co-occur rather than decide, contradicting
+    # the sentence above it.
     #
     # Two alternatives, both of which NAME something: the requirement pip could not
-    # resolve, and the artifact whose build dependencies it could not resolve. Either may
-    # be absent from a given message, so read whichever matched and compare THAT. A
-    # message with markers but no name (`from versions: none`) matches nothing and is
-    # therefore still not evidence — the corroboration-only rule is preserved.
+    # resolve, and the artifact whose OWN build step failed (see the step allow-list at
+    # `_ABSENCE_OWN_BUILD_STEPS` — the `when …` clause is what makes that alternative a
+    # claim about OUR build instead of about whoever else's distribution pip was fetching).
+    # Either may be absent from a given message, so read whichever matched and compare
+    # THAT. A message with markers but no name (`from versions: none`) matches nothing and
+    # is therefore still not evidence — the corroboration-only rule is preserved.
     return any(
         _canonical_dist_name(match.group("name") or match.group("built")) == wanted
         for match in _ABSENCE_NAMED.finditer(text)
