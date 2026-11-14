@@ -153,14 +153,25 @@ kill_timeout = 30
 # 2026-11-13 (#12477: 30-45 s timeouts on every data request, `2/2 checks
 # passing`). It now fails on ANY of three terms (tortoise/monitoring.py):
 #   (a) `loop-not-serving`  — the heartbeat is stale AND work is waiting AND the
-#       app has not SERVED a request inside the staleness window (the served
-#       counter is #10892's instrument, read from `GET /liveness`). On a lane
-#       that registers no served counter the reason is `loop-stale`: the tick is
-#       then all the evidence there is (#2850's original contract);
+#       app has not SERVED a data-plane request inside the staleness window. The
+#       served datum is the age of the last data-plane request this process
+#       ANSWERED (stamped at the same seam that decides the refusal share), NOT
+#       the `/liveness` poll age: that stamp is written only by the `/liveness`
+#       handler, its sole production poller is a `*/5` cron with ~15 min measured
+#       delivery, and it is reachable unauthenticated — so it is stale by default
+#       here and one GET could hold the veto open (measured, #12477 review round
+#       11). The `/liveness` age is still read as a FALLBACK for a lane whose app
+#       registers no plane seam. A ticker that cannot tick is NOT a wedge (#2850's
+#       ruling, which is why the hard exit is disarmed in the same state). On a
+#       lane that registers no served counter the reason is `loop-stale`: the tick
+#       is then all the evidence there is (#2850's original contract);
 #   (b) `data-plane-failed` — the DB probe's last result is FRESH and not ok, or
 #       is too OLD to vouch for anything (the refresher runs on the loop, so a
 #       wedge produces this within the probe's 30 s stale window), or it has
-#       never produced a result at all past that window;
+#       produced NO result while a probe is in flight past that window, or the
+#       REFRESHER TASK NEVER STARTED (`probe-refresher-never-started`, recorded
+#       where the startup `try/except` logs it) — the last one is why a refresher
+#       that was never created cannot leave this term silently green;
 #   (c) `requests-refused` — a SHARE of the traffic this bound applies to was
 #       refused inside the last 120 s (`TORTOISE_WAIT_BOUND_HEALTH_WINDOW_S`):
 #       at least `TORTOISE_WAIT_BOUND_HEALTH_MIN_SHARE` (0.5) of at least

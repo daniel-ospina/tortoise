@@ -47,12 +47,27 @@ def _clean(monkeypatch):
     monitoring._reset_loop_blocks()
     monitoring.set_dataplane_verdict_source(None)
     monitoring.set_served_progress_source(None)
+    # #12477 review round 11: the two app-side stamps this module asserts on are
+    # process-global, so a test that ran earlier in the same file must not decide
+    # this one's verdict.
+    hosted_api._LAST_PLANE_SERVED_AT = None
+    hosted_api._LIVENESS_LAST_SERVED_AT = None
+    hosted_api._HEALTH_PROBE_START_FAILED = False
+    # ⛔ the harness's `asyncio.run(_boot())` CLOSES the loop, so the heartbeat
+    # task `_start_liveness` installs is DONE by the time any assertion runs —
+    # and `heartbeat_task_is_dead()` would then disarm the wedge term in every
+    # test here (correctly: a ticker that cannot tick is not a wedge). Forgetting
+    # it makes the tick arm testable again on the same terms the deployed app has
+    # (a ticker that is still running), rather than masking a real regression.
+    monitoring._reset_heartbeat_task()
     monkeypatch.delenv("TORTOISE_LOOP_BLOCK_RECORD", raising=False)
     yield
     monitoring.stop_health_listener()
     monitoring.set_dataplane_verdict_source(None)
     monitoring.set_served_progress_source(None)
     monitoring.reset_wait_bound_breach_window()
+    hosted_api._LAST_PLANE_SERVED_AT = None
+    hosted_api._HEALTH_PROBE_START_FAILED = False
 
 
 def _get(port: int) -> tuple[int, dict]:
@@ -76,6 +91,13 @@ def _start(app) -> None:
         await asyncio.sleep(0)
 
     asyncio.run(_boot())
+    # ⛔ `asyncio.run` CLOSED that loop, so the heartbeat task `_start_liveness`
+    # installed is DONE — and `heartbeat_task_is_dead()` would then disarm the
+    # wedge term in every test here (correctly: a ticker that cannot tick is not
+    # a wedge). Forgetting it makes `test_a_DEAD_ticker_is_not_a_wedge…` vacuous
+    # AND makes the tick arm untestable; the deployed app's ticker is running, so
+    # the harness models that by forgetting the closed-loop one.
+    monitoring._reset_heartbeat_task()
 
 
 @pytest.fixture(autouse=True)
@@ -207,6 +229,111 @@ def test_the_served_reader_reports_the_liveness_counter():
     assert progress["registered"] is True
     assert progress["served"] == 17
     assert progress["last_served_age_s"] == pytest.approx(2.0, abs=0.5)
+
+
+def test_a_served_DATA_PLANE_request_is_what_keeps_a_stale_tick_green():
+    """The serve veto must measure SERVING, not who polls `/liveness` (#12477 r11).
+
+    Measured at the head this test was written against: the wedge term's
+    "nothing SERVED" half read `_LIVENESS_LAST_SERVED_AT`, which ONLY the
+    `/liveness` handler writes — so its age measured the poller, not the app. The
+    only production poller is `.github/scripts/availability-watchdog.sh` on a
+    `*/5` cron whose own header records ~15 min measured delivery, which is
+    longer than `LOOP_STALE_AFTER` (90 s). Two consequences, both wrong:
+
+    * the runbook's promise ("a busy loop that is still serving stays green")
+      could not fire, because a busy loop serving data traffic never refreshed
+      that stamp; and
+    * one unauthenticated `GET /liveness` per 89 s held the veto permanently
+      open — a client-drivable gate, which is the class #12477 exists for.
+
+    So the term now reads the age of the last DATA-PLANE request this process
+    ANSWERED (stamped at the same seam that decides the refusal share). This test
+    pins both directions through the real listener.
+    """
+    app = _FakeApp()
+    _start(app)
+    port = monitoring.start_health_listener(port=0, bind="127.0.0.1").server_address[1]
+    # a fresh DB verdict, so the plane term cannot be what decides this
+    hosted_api._HEALTH_PROBE._result = {
+        "ok": True, "observed": True, "latency_ms": 5.0, "error": None}
+    hosted_api._HEALTH_PROBE._completed_at = time.monotonic()
+    # a STALE tick, work waiting, and no `/liveness` poll for 5 minutes
+    monitoring.heartbeat_record(
+        at=time.monotonic() - (monitoring.LOOP_STALE_AFTER + 2.0))
+    hosted_api._LIVENESS_LAST_SERVED_AT = time.monotonic() - 300.0
+    monitoring.workload_enter()
+    try:
+        # (a) a data-plane request was ANSWERED a second ago -> a busy box
+        hosted_api._LAST_PLANE_SERVED_AT = time.monotonic() - 1.0
+        status, body = _get(port)
+        assert status == 200, body
+        assert body["reasons"] == [], (
+            "the app answered a data-plane request 1 s ago; the serve veto must "
+            "have seen it, whatever the /liveness poll cadence is")
+        assert body["loop_stale"] is True, "still reported, as a diagnostic"
+        assert body["served"]["last_plane_serve_age_s"] == pytest.approx(1.0, abs=0.5)
+
+        # (b) nothing served either -> the wedge term fires, naming the missing
+        #     SERVE rather than only the missing tick
+        hosted_api._LAST_PLANE_SERVED_AT = time.monotonic() - 300.0
+        status, body = _get(port)
+        assert status == 503, body
+        assert body["reasons"] == ["loop-not-serving"]
+    finally:
+        monitoring.workload_exit()
+
+
+def test_a_DEAD_ticker_is_not_a_wedge_on_the_deploy_gate(monkeypatch):
+    """#2850's own ruling, applied to the ONE consumer that ignored it.
+
+    `start_stall_watchdog` disarms the hard exit when `heartbeat_task_is_dead()`
+    ("a dead ticker must not be mistaken for a wedge", monitoring.py), and the
+    9090 verdict was the only reader that did not consult it. Measured: a ticker
+    that died while the loop kept serving pinned `/healthz` at 503 for as long as
+    no serve was stamped — i.e. permanently on the hosted box — which fails every
+    deploy with no in-process recovery, because the restart path declines to act
+    on a dead ticker BY DESIGN.
+    """
+    app = _FakeApp()
+    _start(app)
+    port = monitoring.start_health_listener(port=0, bind="127.0.0.1").server_address[1]
+    hosted_api._HEALTH_PROBE._result = {
+        "ok": True, "observed": True, "latency_ms": 5.0, "error": None}
+    hosted_api._HEALTH_PROBE._completed_at = time.monotonic()
+    monkeypatch.setattr(monitoring, "heartbeat_task_is_dead", lambda: True)
+    monitoring.heartbeat_record(
+        at=time.monotonic() - (monitoring.LOOP_STALE_AFTER + 2.0))
+    monitoring.workload_enter()
+    try:
+        status, body = _get(port)
+    finally:
+        monitoring.workload_exit()
+    assert status == 200, body
+    assert body["loop_stale"] is True
+    assert body["reasons"] == []
+
+
+def test_a_NEVER_started_probe_refresher_is_a_FAILURE_not_unknown():
+    """One of the three terms must not be silently inert (#12477 r11).
+
+    `fly.toml` and the runbook both say the term fires when the probe "has never
+    produced a result at all past that window", but the code's never-produced arm
+    was guarded on `in_flight` — so a process whose refresher task was never
+    created (the startup `try/except` logs and continues) reported `unknown`, and
+    `unknown` is GREEN on the listener, FOREVER. The flag is set where the failure
+    happens, so this is evidence rather than a boot-timing heuristic.
+    """
+    app = _FakeApp()
+    _start(app)
+    hosted_api._HEALTH_PROBE._result = None
+    hosted_api._HEALTH_PROBE._completed_at = None
+    # the control: a boot that has not produced a result YET is not a failure
+    assert hosted_api._liveness_dataplane_verdict()["state"] == "unknown"
+    hosted_api._HEALTH_PROBE_START_FAILED = True
+    verdict = hosted_api._liveness_dataplane_verdict()
+    assert verdict["state"] == "failed", verdict
+    assert verdict["detail"]["reason"] == "probe-refresher-never-started"
 
 
 def test_health_reports_the_refusal_window_without_touching_status(monkeypatch):

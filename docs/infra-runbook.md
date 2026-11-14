@@ -1776,8 +1776,8 @@ The check now fails on any of three terms, each an in-memory read:
 
 | reason | when | why it is honest |
 |---|---|---|
-| `loop-not-serving` | heartbeat stale **and** work waiting **and** nothing SERVED for `LOOP_STALE_AFTER` (90 s) | the tick alone is not the verdict — #10892's served-request counter (`GET /liveness`) joins it, so a busy loop that is still serving stays green |
-| `data-plane-failed` | the DB probe's last result is fresh and not ok, **or** too old to vouch for anything (30 s window) | the refresher task runs on the loop, so a wedge stops it refreshing — and the check reads it with `peek()`, never `snapshot()`, so the check cannot refresh its own evidence |
+| `loop-not-serving` | heartbeat stale **and** work waiting **and** nothing SERVED for `LOOP_STALE_AFTER` (90 s) | the tick alone is not the verdict — #10892's instrument joins it, so a busy loop that is still serving stays green. ⛔ **The served datum is the age of the last DATA-PLANE request this process ANSWERED**, stamped at the same seam that decides the refusal share (`_count_wait_bound_attempt_if_served`). It is NOT the `/liveness` poll age: that stamp is written only by the `/liveness` handler, so it measures who polls `/liveness` — and the only production poller is `.github/scripts/availability-watchdog.sh` on a `*/5` cron whose header records ~15 min measured delivery, i.e. LONGER than the 90 s window, so as the verdict's only serve term it was stale by default and one unauthenticated `GET /liveness` per 89 s held it permanently open (measured, #12477 review round 11). The `/liveness` age is still read as a fallback for a lane that registers no plane seam. A ticker that CANNOT tick is not a wedge: `heartbeat_task_is_dead()` disarms this arm, exactly as #2850 ruled when it disarmed the hard exit |
+| `data-plane-failed` | the DB probe's last result is fresh and not ok, **or** too old to vouch for anything (30 s window), **or** never produced while a probe is in flight past that window, **or** the REFRESHER TASK NEVER STARTED (`probe-refresher-never-started`) | the refresher task runs on the loop, so a wedge stops it refreshing — and the check reads it with `peek()`, never `snapshot()`, so the check cannot refresh its own evidence. The never-started arm is recorded where the startup `try/except` logs the failure, because a reader cannot otherwise tell "boot, nothing yet" from "the task that keeps this fresh does not exist" — and the second read `unknown`, which is GREEN, forever (#12477 review round 11) |
 | `requests-refused` | **SHARE**: ≥ `TORTOISE_WAIT_BOUND_HEALTH_MIN_SHARE` (0.5) of at least `TORTOISE_WAIT_BOUND_HEALTH_MIN_ATTEMPTS` (5) requests offered to the bound were refused inside `TORTOISE_WAIT_BOUND_HEALTH_WINDOW_S` (120 s) | the bound is breached BY DESIGN for ~2.1% of calls, so the verdict must be about the RATIO, not about volume. Both traffic-dependent forms were measured wrong: a count (10 per window) is blind to the first incident trace (3.5 refusals/min) and a bucket-density reds a HEALTHY box as traffic rises (20% of polls at 120 calls/min, 92% at 300, 100% at 600 — crossover ~3.3 req/s), which would fail every deploy. `~2.1%` is ~2.1% at 1 req/s and at 100 req/s, and a failing plane refuses most of what it is offered at any volume. `refusing: null` means NOT DECIDED (no traffic, too few attempts, or the term disabled by `MIN_SHARE=0`) — an idle plane refuses nobody. The cumulative total still never folds into a verdict (#10185/#10620), and `/health` reports the window as `refusals` without touching `status`. |
 
 Attempts are stamped at the same transport seam that decides a refusal, so the
@@ -1829,6 +1829,14 @@ unusable while the default one answers (or a keyword-only boot, `#2985`) still
 reports `db.ok: true` and this term stays green. The class this closes is the
 one measured on 2026-11-13 — refusals and timeouts — not every possible
 "serving but wrong" shape.
+
+⚠️ **Residual, stated not implied (#12477 review round 11).** A dead heartbeat
+ticker disarms the `loop-not-serving` arm, because #2850 ruled that a ticker
+that cannot tick is not a wedge (it disarms the hard exit for the same reason).
+The other two terms do not depend on the tick, so the surface is not blind — but
+a dead ticker is an instrument fault that this check reports rather than fails
+on: it appears in the payload (`loop_ticks`, `loop_stale`) and in the watchdog's
+own `heartbeat_task_is_dead()` log line, not as a 503.
 
 ⚠️ **And, like the Pages auth arm, it never consults the egress control probe.**
 `control_ok()` runs only on the restartable path — the restart decision's own

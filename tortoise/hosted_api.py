@@ -2018,6 +2018,13 @@ def _health_probe_stale_after_s() -> float:
     return float(getattr(_HEALTH_PROBE, "_stale_after", 30.0))
 
 
+#: #12477 (review round 11): the DB-probe REFRESHER never started. Recorded
+#: where the failure happens (`_lifespan`'s `except`), because the verdict reader
+#: cannot otherwise tell "boot, nothing yet" from "the task that keeps this
+#: evidence fresh does not exist" — and the second must not report green forever.
+_HEALTH_PROBE_START_FAILED = False
+
+
 def _liveness_dataplane_verdict() -> dict:
     """The 9090 check's data-plane term, read from MEMORY only (#12477).
 
@@ -2038,11 +2045,15 @@ def _liveness_dataplane_verdict() -> dict:
       stopped FalkorDB), or a result that is stale because the refresher itself
       stopped. "Unknown for too long" is a failure of the DATA PLANE as far as
       the door is concerned, and it is the shape a 600s wedge produces: the
-      refresher task is on the loop, so a blocked loop stops refreshing.
-    * ``unknown`` — no result at all yet (a few seconds after boot). NOT a
-      failure: a check that is red during every cold start teaches operators to
-      ignore it, and the loop-stale term already covers a boot that never gets
-      going.
+      refresher task is on the loop, so a blocked loop stops refreshing. Two
+      never-produced shapes are failures for the same reason: a probe that is
+      IN FLIGHT and has been for longer than the stale window, and a refresher
+      task that never STARTED at all (`probe-refresher-never-started`).
+    * ``unknown`` — no result at all yet, and a live probe is the reason (a few
+      seconds after boot). NOT a failure: a check that is red during every cold
+      start teaches operators to ignore it, and the loop-stale term already
+      covers a boot that never gets going. This state is only reachable while
+      something is actually running that can produce the missing result.
     """
     try:
         # ⛔ ``peek()``, NOT ``snapshot()`` (#12477): snapshot() self-heals by
@@ -2065,6 +2076,20 @@ def _liveness_dataplane_verdict() -> dict:
         # forever after: a probe that never completes must not leave the check
         # green indefinitely (the `in_flight`-true-forever fail-open). The bound
         # is the same stale window the fresh-result path uses.
+        #
+        # ⛔ AND THE SAME APPLIES WHEN NO PROBE IS RUNNING AT ALL (#12477 review
+        # round 11): the refresher task is what keeps this evidence fresh, and its
+        # creation is wrapped in a `try/except` that logs and continues. Without
+        # this branch, a process whose refresher never started reads `unknown`
+        # (green) FOREVER — one of the three terms the check claims to fail on
+        # would be silently inert, which is the defect class this PR exists for.
+        # The flag is set at the point of failure, so this is evidence rather than
+        # a boot-timing guess.
+        if _HEALTH_PROBE_START_FAILED:
+            return {"state": "failed",
+                    "detail": {"reason": "probe-refresher-never-started",
+                               "in_flight": in_flight},
+                    "error": None}
         if in_flight and in_flight_s is not None and \
                 float(in_flight_s) > _health_probe_stale_after_s():
             return {"state": "failed",
@@ -2095,6 +2120,26 @@ def _liveness_dataplane_verdict() -> dict:
             "error": None}
 
 
+def _last_plane_serve_age_s() -> float | None:
+    """Age of the last data-plane request this process ANSWERED (#12477).
+
+    ``None`` means "this process has answered no such request yet" — a fact the
+    verdict treats as NO EVIDENCE OF PROGRESS, never as health. Zero I/O, no
+    lock (one float store, one float read; a torn read is impossible for a
+    CPython float attribute and the value is only ever compared against a
+    bound), so it is safe on the liveness listener's thread while the app is
+    wedged.
+    """
+    at = _LAST_PLANE_SERVED_AT
+    if at is None:
+        return None
+    try:
+        age = time.monotonic() - at
+    except Exception:
+        return None
+    return round(max(0.0, age), 3) if math.isfinite(age) else None
+
+
 def _liveness_served_progress() -> dict:
     """The `/liveness` served-request counter, for the 9090 check (#12477).
 
@@ -2114,7 +2159,9 @@ def _liveness_served_progress() -> dict:
     got = _LIVENESS_SERVED_LOCK.acquire(timeout=0.05)
     try:
         if not got:
-            return {"last_served_age_s": None, "served": None,
+            return {"last_served_age_s": None,
+                    "last_plane_serve_age_s": _last_plane_serve_age_s(),
+                    "served": None,
                     "error": "served counter lock busy"}
         last = _LIVENESS_LAST_SERVED_AT
         served = _LIVENESS_SERVED_COUNT
@@ -2123,6 +2170,7 @@ def _liveness_served_progress() -> dict:
             _LIVENESS_SERVED_LOCK.release()
     return {"last_served_age_s": (None if last is None
                                   else round(max(0.0, time.monotonic() - last), 3)),
+            "last_plane_serve_age_s": _last_plane_serve_age_s(),
             "served": served, "error": None}
 
 
@@ -3275,6 +3323,12 @@ async def _lifespan(app):
                 _health_probe_loop())
         except Exception as exc:
             _logger.warning("health probe refresher not started: %s", exc)
+            # #12477 (review round 11): a refresher that does not exist cannot
+            # keep the `data-plane-failed` term's evidence fresh, so the term
+            # must FAIL instead of reading `unknown` (green) forever. Recorded
+            # here, at the failure, and read by `_liveness_dataplane_verdict`.
+            global _HEALTH_PROBE_START_FAILED
+            _HEALTH_PROBE_START_FAILED = True
         yield
 
         # ── shutdown: disarm the watchdog before the heartbeat task is
@@ -5707,6 +5761,23 @@ def _exchange_reached_a_route(scope) -> bool:
     return not getattr(scope.get("app"), "routes", None)
 
 
+#: #12477 (review round 11): monotonic instant this process last ANSWERED a
+#: request that had to reach the PLANE. Stamped at exactly the seam that decides
+#: an exchange is data-plane demand (`_count_wait_bound_attempt_if_served`), so a
+#: poll of a route the app answers from memory cannot refresh it.
+#:
+#: ⛔ WHY `_LIVENESS_LAST_SERVED_AT` IS NOT ENOUGH FOR THE WEDGE TERM, MEASURED:
+#: that stamp is written ONLY by the `/liveness` handler, so its age measures WHO
+#: POLLS `/liveness`, never whether the app is serving. The only production
+#: poller is `.github/scripts/availability-watchdog.sh` (`*/5` cron, header
+#: records ~15 min measured delivery), so the age exceeds `LOOP_STALE_AFTER`
+#: (90 s) almost always: the serve veto the runbook promises could not fire, and
+#: one unauthenticated `GET /liveness` per 89 s would have held it permanently
+#: open — a client-drivable gate, the class #12477 is about. A data-plane request
+#: this process ANSWERED is the evidence the docs claim.
+_LAST_PLANE_SERVED_AT: float | None = None
+
+
 def _count_wait_bound_attempt_if_served(traffic_class: str, surface: str,
                                         status: int | None,
                                         reached_route: bool = True,
@@ -5740,6 +5811,11 @@ def _count_wait_bound_attempt_if_served(traffic_class: str, surface: str,
     # See `_WAIT_BOUND_NO_PLANE_ROUTES`.
     if not demand_route:
         return
+    # The SERVE stamp and the attempt counter are the same population by
+    # construction: both sit below every gate above, so neither can count a poll
+    # of a route that never needed the plane, a router miss, or a 401.
+    global _LAST_PLANE_SERVED_AT
+    _LAST_PLANE_SERVED_AT = time.monotonic()
     try:
         _monitoring.record_wait_bound_attempt(surface)
     except Exception:  # measurement must never be a new failure mode

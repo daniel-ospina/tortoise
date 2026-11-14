@@ -5491,10 +5491,21 @@ def set_served_progress_source(reader: Callable[[], dict] | None) -> None:
     """Register the app's served-request counter for the liveness verdict.
 
     ``reader()`` must be zero-I/O and must read ONLY a counter the app stamps
-    when it actually SERVES a request (#10892's ``/liveness`` handler) — never a
-    gauge a background task writes. It must return
+    when it actually SERVES a request — never a gauge a background task writes.
+    It must return
     ``{"last_served_age_s": float|None, "served": int|None}``, and it must not
     block: the listener calls it while the app may be wedged.
+
+    ⛔ THE OPTIONAL THIRD KEY IS THE ONE THE WEDGE TERM NEEDS (#12477 review
+    round 11): ``"last_plane_serve_age_s": float|None`` — the age of the last
+    DATA-PLANE request this process ANSWERED. ``last_served_age_s`` is written
+    only by the ``/liveness`` handler, so its age measures who polls
+    ``/liveness``; the only production poller is a ``*/5`` cron with ~15 min
+    measured delivery, which is longer than ``LOOP_STALE_AFTER`` — so on the
+    hosted box that datum is stale by default and one unauthenticated GET could
+    hold the veto open. A reader that cannot supply it may omit the key; the
+    term then falls back to ``last_served_age_s``, which is the documented
+    behaviour for a lane whose app registers no plane seam.
     """
     global _SERVED_PROGRESS
     _SERVED_PROGRESS = reader
@@ -5519,21 +5530,28 @@ def served_progress() -> dict:
     reader = _SERVED_PROGRESS
     if reader is None:
         return {"registered": False, "last_served_age_s": None,
+                "last_plane_serve_age_s": None,
                 "served": None, "error": None}
     try:
         result = reader()
     except Exception as exc:  # noqa: BLE001 - liveness must still answer
-        return {"registered": True, "last_served_age_s": None, "served": None,
+        return {"registered": True, "last_served_age_s": None,
+                "last_plane_serve_age_s": None,
+                "served": None,
                 "error": f"served reader raised: {type(exc).__name__}: {exc}"[:200]}
     if not isinstance(result, dict):
-        return {"registered": True, "last_served_age_s": None, "served": None,
+        return {"registered": True, "last_served_age_s": None,
+                "last_plane_serve_age_s": None,
+                "served": None,
                 "error": "served reader returned a non-dict"}
     age, age_error = _coerce_age_s(result.get("last_served_age_s"))
+    plane_age, plane_error = _coerce_age_s(result.get("last_plane_serve_age_s"))
     served = result.get("served")
     return {"registered": True, "last_served_age_s": age,
+            "last_plane_serve_age_s": plane_age,
             "served": served if isinstance(served, int) and not isinstance(
                 served, bool) else None,
-            "error": age_error or result.get("error")}
+            "error": age_error or plane_error or result.get("error")}
 
 
 def _coerce_age_s(value) -> tuple[float | None, str | None]:
@@ -5547,6 +5565,19 @@ def _coerce_age_s(value) -> tuple[float | None, str | None]:
     if not math.isfinite(age) or age < 0:
         return None, f"served age is not a usable duration: {age!r}"
     return age, None
+
+
+def _served_inside_window(age_s: float | None) -> bool:
+    """Did a request get SERVED inside the wedge window? (#12477 round 11)
+
+    ``None`` — no such serve has ever been measured — is NOT evidence of a
+    serve: unmeasured is never health (#4034's family, the same rule
+    ``_coerce_age_s`` enforces for the numeric half). The bound is
+    ``LOOP_STALE_AFTER`` itself, because the term's question is "has anything
+    been served since the tick that should have been there", and any other
+    number would be a second, undocumented definition of the window.
+    """
+    return age_s is not None and float(age_s) <= LOOP_STALE_AFTER
 
 
 def set_dataplane_verdict_source(reader: Callable[[], dict] | None) -> None:
@@ -5960,9 +5991,21 @@ class _HealthzHandler(BaseHTTPRequestHandler):
         # pre-existing #2850 contract applies unchanged — so this is never a
         # WEAKER check than the one it replaced.
         served_age = served.get("last_served_age_s")
+        # ⛔ THE PLANE-SERVE AGE IS THE ONE THAT ANSWERS THE DOCUMENTED QUESTION
+        # (#12477 review round 11). `last_served_age_s` is the `/liveness`
+        # handler's own clock, i.e. WHO POLLS `/liveness` — one `*/5` cron with
+        # ~15 min measured delivery, so it is stale by default on the hosted box
+        # and a single unauthenticated GET could keep it fresh. The plane age is
+        # "this process ANSWERED a data-plane request", stamped at the same seam
+        # that decides the refusal share, so it moves only when the product
+        # actually served something.
+        plane_age = served.get("last_plane_serve_age_s")
         demand = not idle
-        no_serve = (served_age is None
-                    or float(served_age) > LOOP_STALE_AFTER)
+        # A serve INSIDE the window defeats "nothing was served", from EITHER
+        # datum: the plane stamp is the stronger evidence and the liveness stamp
+        # is the one a lane without a plane seam still has.
+        no_serve = not (_served_inside_window(plane_age)
+                        or _served_inside_window(served_age))
         if served.get("registered") is not True:
             # No served-progress reader (self-host, tests): the tick is the only
             # progress evidence available, so the pre-existing #2850 contract
@@ -5970,7 +6013,17 @@ class _HealthzHandler(BaseHTTPRequestHandler):
             # make the check STRICTER, never weaker, on a lane that has one.
             wedged = bool(stale)
         else:
-            wedged = bool(stale and demand and no_serve)
+            # ⛔ A DEAD TICKER IS NOT A WEDGE (#2850's own recorded ruling, two
+            # functions up: "a dead ticker must not be mistaken for a wedge" —
+            # which is exactly why `heartbeat_task_is_dead()` disarms the hard
+            # exit). Without this guard the 9090 arm was the ONE consumer that
+            # ignored it, so a ticker that died while the loop kept serving
+            # pinned `/healthz` at 503 forever — failing every deploy with no
+            # in-process recovery, since the restart path declines to act on a
+            # dead ticker by design. The payload still REPORTS the staleness, and
+            # the other two terms (plane + refusals) do not depend on the tick.
+            wedged = bool(stale and demand and no_serve
+                          and not heartbeat_task_is_dead())
         failing = bool(wedged or plane_failed or refusing or control_red)
         reasons = []
         if wedged:
