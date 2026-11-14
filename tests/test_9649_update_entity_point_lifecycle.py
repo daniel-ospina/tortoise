@@ -13,8 +13,8 @@ Two probes, both through the documented tenant route
 
 ``_assert_lifecycle_guard`` (#2498/#7819) is the shared terminality instrument;
 every one of its call sites sat ~24 000 lines above these two doors, so neither
-consulted it. The gap is a *known* one, not a decision: ``docs/ONTOLOGY.md`` §5
-records it as *"tracked as #9649"* and the model it violates is §5's Point
+consulted it. The gap was a *known* one, not a decision: it was tracked as #9649,
+and the model it violates is §5's Point
 Status Vocabulary table — ``retracted`` / ``superseded`` / ``outdated`` /
 ``archived`` each declare **no outgoing transition**.
 
