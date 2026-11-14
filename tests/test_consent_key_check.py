@@ -322,13 +322,17 @@ def test_a_body_OVER_the_cap_is_refused_rather_than_parsed(monkeypatch) -> None:
 def test_the_transport_bound_reaches_urlopen(monkeypatch) -> None:
     """The `timeout=` on `urlopen` is a second load-bearing bound with no pin.
 
-    Measured at this head: `urlopen(request, timeout=timeout)` -> `urlopen(request)` left **52
-    passed**. A request with no timeout blocks until the socket layer gives up, which on the
+    Measured at head `ffdcb499839a`: `urlopen(request, timeout=timeout)` -> `urlopen(request)` left
+    **52 passed**. A request with no timeout blocks until the socket layer gives up, which on the
     workflow's 10-minute job is the same class of wedge the body cap exists to stop — and the
     tool would report `unreachable` for a hang it caused itself.
 
-    Pinned end to end: the CLI's `--timeout` must arrive at the transport on BOTH halves. The
-    `--timeout 7` value is deliberately not the default (15.0) — a hard-coded literal reds.
+    ⛔ TWO DISTINCT VALUES, plus the no-flag default, because ONE value cannot tell the flag from a
+    literal. An earlier cut asserted `seen == [7.0, 7.0]`, and the reviewer measured the hole that
+    leaves: `urlopen(request, timeout=7.0)` — a hard-coded literal that makes `--timeout` a silent
+    no-op — passed `42 passed`, while the docstring claimed "a hard-coded literal reds". Both the
+    claim and the pin are fixed here: `7`, `3` and the default `15.0` are three different numbers, so
+    no single literal, and no `None`, can satisfy the list.
     """
     seen: list[float | None] = []
 
@@ -340,9 +344,12 @@ def test_the_transport_bound_reaches_urlopen(monkeypatch) -> None:
 
     monkeypatch.setattr(CKC.urllib.request, "urlopen", fake_urlopen)
     assert CKC.main(["--timeout", "7"]) == CKC.EXIT_AGREE
-    assert seen == [7.0, 7.0], (
-        f"each half must be read under the CLI's own bound, got {seen!r} — a `None` here is an "
-        "unbounded request (`urlopen(request)`) and a literal is a bound the flag cannot move"
+    assert CKC.main(["--timeout", "3"]) == CKC.EXIT_AGREE
+    assert CKC.main([]) == CKC.EXIT_AGREE
+    assert seen == [7.0, 7.0, 3.0, 3.0, 15.0, 15.0], (
+        f"each half must be read under the CLI's own bound and the default must be 15.0, got {seen!r} "
+        "— a `None` here is an unbounded request (`urlopen(request)`), and any single repeated value "
+        "is a hard-coded literal that makes `--timeout` a silent no-op"
     )
 
 
@@ -1601,6 +1608,20 @@ def test_the_workflow_grants_the_alert_scope_and_runs_on_its_stated_cadence() ->
     )
     assert "workflow_dispatch" in triggers, (
         "§2.5 and §4.4 both tell the operator to trigger this run by hand for an ad-hoc rotation check"
+    )
+    # ⛔ The TRIGGER SET, not just the two expected members. The merge-rail exemption is by EVENT, not
+    # by workflow (`NON_CODE_EVENTS`, `tools/merge_throughput.py`), so a non-`schedule` trigger makes
+    # THIS job's `check` run attach to the ref's sha as a check — and `check` is one of the names
+    # `docs/ci/required-contexts.json` now records this workflow as emitting. This job reads
+    # PRODUCTION state, so it is red BY CONSTRUCTION during any rotation (`MISMATCH`) or edge 503
+    # (`UNVERIFIABLE`); as a `push`/`pull_request` check that red would land on `main` or on an
+    # unrelated PR. MEASURED at this head: adding `push: {branches: [main]}` — and separately
+    # `pull_request:` — left this whole file GREEN (43 passed each), so a one-line edit converts a
+    # monitor into a repo-wide red. Asserted as an EQUALITY for the same reason the scopes above are.
+    assert set(triggers) == {"schedule", "workflow_dispatch"}, (
+        "a non-`schedule` trigger makes this monitor's `check` a check-run on the merged ref — and it "
+        "reads production, so a rotation or an edge 503 would red `main` and every PR. The monitor's "
+        f"trigger set is load-bearing; got {sorted(map(str, triggers))!r}"
     )
     assert "concurrency" not in workflow or workflow["concurrency"].get("cancel-in-progress") is False, (
         "a cancelled tick measures nothing — `cancel-in-progress` must stay false"
