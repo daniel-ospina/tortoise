@@ -1490,6 +1490,19 @@ surfaces:
   - test_mcp_route_challenge.py  # #2864: RFC 9728 challenge on /mcp 401s + /mcp route canonicalization (docker lane)
   - test_mcp_server.py
   - test_mcp_server_auth_modes.py
+  # The #12500/#12455/#12372 refusal pins all drive `mcp_server.tortoise_query`
+  # through an http-transport fixture that SETS `tortoise/mcp_auth.py`'s
+  # contextvars (`_transport_mode`, `_current_org_id`, `_current_org_limits`) —
+  # and `mcp_auth.py` is an exact `api` SOURCE_PATTERN, not a SHARED_MODULE, so a
+  # named match REPLACES the `core` fallback. Measured: `--changed-files
+  # tortoise/mcp_auth.py` selects this surface and did NOT include any of the
+  # three, so a transport-context regression (the flag that decides whether
+  # `_get_org_sdk` is the accessor those pins stub) ran them zero times. The same
+  # measurement the `test_wait_bound_write_ack.py` row above records, and why
+  # these sit beside `test_mcp_server.py` rather than under `core` alone.
+  - test_12500_query_args_dropped.py
+  - test_12455_text_filters_dropped.py
+  - test_12372_entity_type_dropped.py
   # #10849 (found by the fold's own `ci_selection.py --integrity`, NOT by CI — the gate
   # cannot see an unregistered file, only its absence): #10856 adds this file and registered
   # no surface, so `manifest-integrity` (a required `python-ci-gate.needs` leg) reddened by

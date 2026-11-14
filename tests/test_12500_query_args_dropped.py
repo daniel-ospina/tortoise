@@ -67,20 +67,24 @@ class _StubSDK:
         self.calls.append(("tortoise_fts_query", query, kind, {
             "min_confidence": min_confidence, "order_by": order_by,
             "limit": limit, "include_terminal": include_terminal, **kwargs}))
-        # FIXTURE FIDELITY (round-26 P2 1): the real SDK JUDGES these two before
-        # any retrieval (`sdk.py:41222-41223` range-checks `min_confidence`,
-        # `sdk.py:41228` vocabulary-checks `order_by`), so a stub that merely
-        # records them cannot tell a route that terminates from one that dead-ends
-        # in the caller's next call — the exact blind spot that let the
+        # FIXTURE FIDELITY (round-26 P2 1): the real SDK JUDGES the floor before
+        # any retrieval (`sdk.py:41222-41223` range-check it), so a stub that
+        # merely records it cannot tell a route that terminates from one that
+        # dead-ends in the caller's next call — the exact blind spot that let the
         # structural/tag routes promise `pass text=` for `min_confidence=1.5`.
+        # The floor half is the one the PRODUCT can reach: every arm refuses an
+        # out-of-domain floor rather than passing it on. The SDK's other
+        # pre-retrieval judgment, the `order_by` vocabulary check
+        # (`sdk.py:41228`), is deliberately NOT mirrored here — an out-of-domain
+        # `order_by` is refused on every arm too, so a check for it in this stub
+        # could never fire, and an unfireable check is a claim the fixture makes
+        # about itself that no case can hold (round-33 P2 3, measured: the branch
+        # was reported uncovered and deleting it left the file green).
         if not isinstance(min_confidence, (int, float)):
             raise TypeError("'<=' not supported between 'float' and "
                             f"'{type(min_confidence).__name__}'")
         if not (0.0 <= min_confidence <= 1.0):
             raise ValueError(f"min_confidence must be 0.0-1.0, got {min_confidence}")
-        if order_by not in ("relevance", "confidence", "graph"):
-            raise ValueError("order_by must be 'relevance', 'confidence', or "
-                             f"'graph', got {order_by!r}")
         return self.rows
 
     def paginated_query(self, kind=None, skip=0, limit=20, **kwargs):
@@ -1098,6 +1102,28 @@ def test_a_graph_ordering_with_no_signal_is_refused_not_silently_reordered(
 #: measured on the flattened docstring: round 18 said "two of these live in the
 #: SECOND bullet" — one does; round 19 caught the follow-up sentence still saying
 #: "two of the claims" sit inside the spans — three do.)
+#: The POSITIVE behaviour sentences in the same bullets — the ones a route reader
+#: acts on, and the ones this PR spent rounds re-pointing citations FOR. Each was
+#: measured unpinned at round 33: inverted in turn, the whole five-file gate set
+#: stayed green (260 passed, 16 skipped), because nothing else anywhere asserts
+#: on `tortoise_query.__doc__` (`grep -rln 'tortoise_query.__doc__' tests/` finds
+#: only this file). They are presence checks, wrap-insensitive, like
+#: `_REFUSAL_CLAIMS` — they cannot re-red a true sentence.
+_DOCSTRING_BEHAVIOUR_CLAIMS = (
+    # which arm applies the floor at all (inverted: "for every type")
+    '`min_confidence` only for `entity_type="point"`',
+    # why an accepted structural value was discarded (inverted: "declares both")
+    "read through sdk.paginated_query, which declares neither",
+    # the feature does not exist (inverted: "is a shipped feature")
+    "structural filtering by confidence is Phase 2 in the hybrid-search plan, "
+    "not a shipped feature",
+    # the precedence between the two answering modes (inverted: "Text mode takes
+    # precedence over tag")
+    "Tag mode takes precedence over text",
+    # the non-Point structural/tag outcome (inverted: "SERVED there")
+    "a non-Point `entity_type` is REFUSED there (and on the structural arms)",
+)
+
 _REFUSAL_CLAIMS = (
     "`min_confidence` and `order_by` are REFUSED on this arm rather than dropped",
     "A floor on any other `entity_type`, and a confidence or graph ordering on "
@@ -1152,6 +1178,11 @@ def test_the_tool_docstring_states_the_falsy_exception() -> None:
     # tag bullet's clause with "is REFUSED OUTRIGHT here" reds it, because the
     # served claim is then simply absent.
     assert "serialises its own defaults" in flat, flat[:600]
+
+    for _claim in _DOCSTRING_BEHAVIOUR_CLAIMS:
+        assert _claim in flat, (
+            f"the docstring must keep stating this behaviour; missing {_claim!r}"
+        )
 
     for _claim in _REFUSAL_CLAIMS:
         assert _claim in flat, (
