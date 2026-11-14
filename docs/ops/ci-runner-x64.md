@@ -33,7 +33,7 @@ online runner(s)` (a bare version pin is measured against the x64 sub-pool, its 
 and only ONLINE runners are counted — an offline runner cannot be handed a job) and
 `ubuntu-latest = 0 of 12 online runner(s)` (a report — the gate is simply not routing that label
 here). ⛔ On THIS tree that block refuses instead — `exit 4` and NO row — because one job has no
-static label set at all (see *Verify it*); it counted 87 / 13 before it stripped whole-line
+static label set at all (see *Verify it*); it counted 89 / 13 before it stripped whole-line
 comments. Both rows count only jobs whose `runs-on` names a single `ubuntu-*` label, so TWO jobs
 here are in neither — `python-ci.yml`'s `test` (`${{ fromJSON(matrix.runner) }}`, the refusal below)
 and `ci.yml`'s `repo-harnesses` (`[self-hosted, self-hosted-x64]`, the #10237 canary, which names
