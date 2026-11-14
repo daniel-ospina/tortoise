@@ -864,6 +864,15 @@ def _no_ambient_dead_heartbeat_ticker():
       file's 122 tests** read ``True`` over a
       ``<Task cancelled …loop_heartbeat_task()>`` left by an earlier test; with
       the fixture in place, **0** do.
+    * The red #12482 closed at class scope, as #12666 first reported it at
+      ``30c9e7c4d3``: ``test_monitoring.py`` alone **219 passed**, and
+      ``test_hosted_api.py`` + ``test_monitoring.py`` **2 failed, 722 passed,
+      1 skipped** — both failures answering 200 with ``loop_stale: true``,
+      ``served.registered: true``, ``status: "ok"``. The ``2 failed, 122
+      passed`` shape this PR was opened against is a DIFFERENT composition
+      (``test_dr_endpoints.py`` + the two wedge nodeids, measured at
+      ``8dc4f06ba5``); it is the one the neutered run above turns into
+      **124 passed**.
 
     ⛔ AT THIS BASE THE FIXTURE IS PREVENTIVE, NOT THE GREEN FOR A RED. No
     committed assertion reds when it is removed — the pair above is 124/124
@@ -873,10 +882,6 @@ def _no_ambient_dead_heartbeat_ticker():
     committed falsifier would have to encode a cross-FILE collection order,
     which is the green-by-ordering-luck class this repo refuses, so the guard is
     pinned by the measurement above rather than by a test.
-    * The issue's own profile at ``30c9e7c4d3`` / ``8dc4f06ba5`` —
-      ``test_monitoring.py`` alone **219 passed**, the pair **2 failed, 122
-      passed** with ``loop_stale: true``, ``served.registered: true``,
-      ``status: "ok"`` — is the red #12482 closed at class scope.
 
     ``_reset_heartbeat_task`` is the seam for exactly this — its own docstring
     says "Test seam: forget the recorded ticker (no cross-test latch to leak)".
