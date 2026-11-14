@@ -249,8 +249,15 @@ def _query_ids(surface: str, ctx: dict, query: str, limit: int) -> list[str]:
                                     entity_type="object", limit=limit)
         return [pid for pid, _s in rows]
     if surface == "mcp_search":
+        # ⛔ `_rerank_candidates=False`, and the literal matters: this tool's whole
+        # claim is about the ORDER and MEMBERSHIP the emitted index terms produce,
+        # and an armed rerank re-picks which rows survive `limit` — a confound the
+        # measurement cannot have. `tests/test_rerank_pool.py`'s census requires
+        # the literal (it evaluates the value, not the presence of the keyword),
+        # which is why this is not an `intentional_keep` entry.
         rows = ctx["sdk"].tortoise_fts_query(query, entity_type="object",
-                                             limit=limit)
+                                             limit=limit,
+                                             _rerank_candidates=False)
         return [r.get("id", "") for r in rows or []]
     if surface == "capture_prior":
         rows = ctx["fts_rows"](ctx["sdk"], "object", query, limit=limit)
