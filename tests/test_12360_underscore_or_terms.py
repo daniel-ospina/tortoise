@@ -328,6 +328,16 @@ class TestAdditive:
             monkeypatch.setenv(UNDERSCORE_ENV, "1")
             assert build_or_query(nfd) == off_built, word
             assert (probe_phrase_rejection(nfd) is None) == off_ok, word
+            # ⛔ The VERDICT itself, pinned — not only the arm-to-arm equality the
+            # comment above says cannot see a wrong mechanism. `_café` and the three
+            # NFD names whose mark follows the run are ACCEPTED; `dé_installer` is
+            # REFUSED, a remaining false block on the read path (`build_or_query`
+            # expands it into `'installer|de'`). Measured on both arms.
+            accepted = probe_phrase_rejection(nfd) is None
+            assert accepted is (word != "dé_installer"), (
+                f"{word!r} NFD verdict moved to accepted={accepted}: the comment "
+                "above names which of these the probe ACCEPTS, and pinning only "
+                "the two arms reads green whichever way the verdict goes")
 
         # ⛔ NON-ASCII SEPARATORS DO NOT EXIST ON THIS LANE (#12368 third review).
         # An earlier revision of this test asserted the OPPOSITE — that the run
