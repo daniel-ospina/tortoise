@@ -123,7 +123,7 @@
     "note": "no payload_sha256 self-binding and no pin test \u2014 this is a branch-only PROBE artifact, not the indexed bundle; see README.md's header",
     "probe_sha256_current": "bda727333c4b07b3d7543af129f18dab798f014b0ea72d4f1af2dbdafb75b4b5",
     "probe_digest_note": "probe_sha256 = the probe AS RUN (it produced every number in this file). probe_sha256_current = the committed probe, which differs by four review changes that cannot move a number: numeric shard ordering, a shard-set/shape assertion, the corrected B definition text (this file's B definition is that same corrected text), and a new `shards` key that adds a field. The published run used 10 shards, 0-9, where string and numeric order agree.",
-    "twin_groups_sha256": "2a5619dcf9338539dbead83a4c8d239dd85b530f16e68be4ca8f8f8f6aa87bbe",
+    "twin_groups_sha256": "34b0788ca38acf657045b3d8e335d2460075c2bcf3205301ee975c1268cf619e",
     "shards_as_run": {
       "count": 10,
       "names": "comp_vec_0..9",

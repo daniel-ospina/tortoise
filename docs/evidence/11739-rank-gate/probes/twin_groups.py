@@ -25,6 +25,8 @@ for s in range(0,n,CH):
 g=np.array([cnt[t] for t in texts])
 inband=(sims>=0.70)&(sims<0.85); dis=ranks>10
 res={
+ 'population':int(n),
+ 'distinct_composed_texts':int(len(cnt)),
  'displaced_total':int(dis.sum()),
  'displaced_in_band':int((dis&inband).sum()),
  'displaced_with_ge10_identical_text_twins':int((dis&(g>=11)).sum()),

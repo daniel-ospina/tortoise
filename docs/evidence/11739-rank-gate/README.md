@@ -120,8 +120,8 @@ only **13,341** distinct composed texts), and the median rank of a twin-group Po
   shard-set/shape assertion, the corrected B definition text, and a new `shards` key (count/rows/dim/
   comp_sha256) that ADDS a field and moves no number — see
   `gate.json.provenance.probe_sha256_current`) produced the population, both arms' ranks and histograms,
-  and the item-displacement counts. `probes/twin_groups.py` (sha256 `5d1894be…`) produced and re-derives every figure in
-  "Why the composed arm loses facts", and independently reproduces `displaced_total` **1,377** and
+  and the item-displacement counts. `probes/twin_groups.py` (sha256 `34b0788ca38acf657045b3d8e335d2460075c2bcf3205301ee975c1268cf619e…`) produced and re-derives every figure in
+  "Why the composed arm loses facts", including the section's population counts, and independently reproduces `displaced_total` **1,377** and
   `displaced_in_band` **803** from the raw + composed vectors — so those counts have two implementations
   that agree, not one.
 
