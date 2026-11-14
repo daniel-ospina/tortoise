@@ -274,8 +274,8 @@ it ("at `4f68a2aa7`"). Without that sentence the conventions look like one, and 
 reader who re-derives the stale half concludes the live half is stale too.
 
 ⚠️ **The claim "`:Document` is not minted" is deliberately NOT regex-checked**,
-and the reason is measured: `:Document` occurs on **71** lines across **22**
-files under `tortoise/` (`git grep -n ':Document' -- tortoise/` → 71 lines,
+and the reason is measured: `:Document` occurs on **72** lines across **22**
+files under `tortoise/` (`git grep -n ':Document' -- tortoise/` → 72 lines,
 `git grep -l ':Document' -- tortoise/` → 22 files — the file count is not the line count).
 It was **55** across **17** when this was first measured at `4f68a2aa7`, and
 six moves have since been made, one per workstream: the #10976

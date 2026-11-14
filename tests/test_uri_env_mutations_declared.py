@@ -234,6 +234,13 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     "test_candidate_recall_11901.py": [
         r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"',
         r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*$'],
+    # #12523/#12588: the published-artifact canary sets an AMBIENT `TORTOISE_DB_URI`
+    # (and DB_PATH/FALKORDB_HOST) to prove the install-and-run child STRIPS it — the
+    # mutation IS the point (DELIBERATE_URI): without a value in the parent env there
+    # is nothing to strip, and the test would pass over a command that silently
+    # inherits a runner's target instead of measuring a new user's default.
+    "test_published_artifact_canary.py": [
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     # #9567 capstone: the D11/D12 quota case forces the EMBEDDED lane (delenv
     # the URI, then pin TORTOISE_DB_PATH to a tmp_path db) so the gate's count
     # never rides a shared server graph. The delenv IS the point; the
