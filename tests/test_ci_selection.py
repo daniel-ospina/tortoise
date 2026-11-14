@@ -22238,8 +22238,7 @@ def test_the_health_honesty_suite_is_selected_on_BOTH_halves_of_its_module_pair(
     # NON-VACUITY, and the reason these two rows are load-bearing rather than decorative:
     # `tier1` is unioned into EVERY PR selection, so if this file ever joins `tier1` the
     # surface rows stop being what selects it and this pin would pass over a lost arm.
-    # Asserted here rather than left implicit (#9778 review P2: a pin that does not delete
-    # the row from a manifest copy can pass on a manifest that had lost it).
+    # Asserted rather than left implicit (#9778 review P2).
     assert pin not in load_manifest()["tier1"], (
         "if this file joins `tier1` the `api`/`core` rows stop being load-bearing, and "
         "this pin must be re-derived rather than assumed"
