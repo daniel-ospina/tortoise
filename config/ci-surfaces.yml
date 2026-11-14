@@ -1707,6 +1707,19 @@ surfaces:
   # are `api` for the same reason. Measured after the fix: `select(
   # ['tortoise/quota.py'])` → this file selected.
   - test_11892_health_quota.py
+  # #12477: the same silent-drop trap on the DIRECT sibling — this test drives
+  # `hosted_api._start_liveness` / `_HEALTH_PROBE` / `_LAST_PLANE_SERVED_AT` as well
+  # as `tortoise/monitoring.py`, and `hosted_api.py` selects `['api','onboarding']`
+  # only. Measured with the `core` row alone:
+  # `select(['tortoise/hosted_api.py'])` did NOT include this file, so a
+  # `hosted_api.py`-only regression of the `/health` verdict — #12477 itself —
+  # carried no guard. Registered in BOTH lists, like `test_11892_health_quota.py`.
+  # ⛔ Register it HERE and nowhere else in this list: two lanes (#12464 and #12640)
+  # registered this file independently and BOTH landed, so `main` carried a duplicate
+  # `api` AND `core` entry — and a duplicate is `--integrity` DRIFT, not a second
+  # guard (`select()` is membership, so the second row guards nothing). #12645 removed
+  # the duplicate pair; keep exactly one `api` and one `core` row for this file.
+  - test_12477_health_honesty.py
   - test_quota.py
   # #8906: the points gate must count the graph the request WRITES. Every pin
   # lives in `tortoise/hosted_api.py` (`_check_org_limit`'s `sdk` threading + the
@@ -2459,18 +2472,6 @@ surfaces:
   # `test_ci_selection.py` pins in `test-slow`), and a diff to this file must
   # select `core`, where it runs.
   - test_12500_query_args_dropped.py
-  # #12477: the health surfaces must not read green over a failing data plane
-  # (the `/health` body's verdict and the 9090 listener's registration). Landed in
-  # `main` UNREGISTERED — so `main` was red on `integrity()` and every PR's merge
-  # ref inherited it. The mechanism, measured on that PR (#12488): the leg is NOT
-  # blind before the merge — `manifest-integrity` runs on every event and completed
-  # FAILURE at 04:28:39Z, and the PR merged at 05:15:26Z anyway (enforce_admins:
-  # false, owner merge). That is a STRONGER instance than #11978 records: there the
-  # leg completed AFTER the merge ("The gate is correct — it simply reported after
-  # the tree was already on `main`"); here it completed FAILURE 47 minutes BEFORE
-  # it, so the leg does not GATE the merge either. Registered here so
-  # the recovery travels with the next PR that touches this file.
-  - test_12477_health_honesty.py
   - test_candidate_recall_11901.py
   - test_journal_segments.py
   - test_journal_segments_falsifier.py
