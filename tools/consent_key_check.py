@@ -157,11 +157,12 @@ REASON_CODES = frozenset(
 #: (`consent-bridge.ts::consentKeyFingerprint` guards only `if (!secret)`), while `consent_token.py`
 #: refuses anything under `_MIN_SECRET_BYTES` (32) with `too_short`. So an operator who sets the SAME
 #: 20-byte key on BOTH halves gets `configured: true` from Pages and `configured: false,
-#: reason: "too_short"` from the AS -> SPLIT -> and the old hint told them to copy the 20-byte value,
-#: which reproduces `too_short` for as long as they keep following it. The monitor stayed red and its
-#: own documented remedy was the reason.
+#: reason: "too_short"` from the AS -> SPLIT -> and "copy the live value across" reproduces
+#: `too_short` for as long as they keep following it.
 #:
-#: The two absence codes are the ones where copying IS the right move: nothing is there to copy from.
+#: The two absence codes are the ones where copying IS the repair: nothing is there to copy from.
+#: ⛔ FOUR value-fault codes, TWO absence codes — the counts are asserted in the suite, and an earlier
+#: cut of this comment said "five of the six" beside a list of four.
 #: ⛔ Derived from `REASON_CODES` by subtraction (asserted in the suite), so a seventh code added on
 #: the publishing side cannot silently inherit the wrong remedy.
 ABSENCE_REASONS = frozenset({"not_set", "unreadable"})
@@ -432,45 +433,78 @@ def read_app(app_url: str, timeout: float) -> Reading:
 def _fix_hint(verdict: Verdict) -> str:
     """What to DO — and ⛔ a SPLIT is NOT a rotation, so it must not borrow MISMATCH's advice."""
     if verdict.verdict == "SPLIT":
-        # ⛔ ONE HALF HOLDS NO USABLE KEY, so there is no second value to reconcile and NOTHING to
-        # rotate. Emitting MISMATCH's hint here was actively harmful: its step (1) is
-        # `gh secret set CONSENT_TOKEN_SECRET` + a `deploy-hosted` run, i.e. a ONE-SIDED rotation,
-        # which from a SPLIT state MANUFACTURES the measured disagreement — the 2026-11-01 incident
-        # this whole check exists to catch. The workflow's own SPLIT alert says "rotating a key would
-        # not fix it", and this hint is catted into that same PUBLIC issue body, so the two must not
-        # contradict each other. Named BEFORE the MISMATCH arm so the two cannot be confused.
+        # ⛔ ONE HALF IS DARK, so there is no second value to reconcile and a ONE-SIDED rotation
+        # MANUFACTURES the measured disagreement — the 2026-11-01 incident this check exists to catch.
+        # Emitting MISMATCH's hint here was actively harmful: its step (1) is a one-sided
+        # `gh secret set` + `deploy-hosted`. Named BEFORE the MISMATCH arm so the two cannot be
+        # confused.
         #
-        # ⛔ BUT "HOLDS NO USABLE KEY" IS TWO DIFFERENT STATES, and the remedy differs or the
-        # monitor can never be cleared:
-        #   * ABSENT (`not_set`, `unreadable`) — nothing is there. Copy the live value. One-sided IS
-        #     the repair, because the dark half has no value of its own to preserve.
-        #   * VALUE FAULT (`padded`, `too_short`, `not_utf8`, `reused_credential`) — a value IS there
-        #     and this deployment refuses it. Copying the live value reproduces the same refusal, so
-        #     the only repair is to give BOTH halves one fresh usable value (a two-sided rotation —
-        #     still never a ONE-sided one, which is the harm the paragraph above is about).
-        # The dark half's own `reason` is what decides; it is already in the reading, printed in the
-        # same body, and is a member of the closed set (an unmapped code is UNVERIFIABLE, never here).
+        # ⛔ BUT "ONE HALF IS DARK" IS NOT ONE STATE, and a single sentence cannot serve it:
+        #
+        #   (a) THE REMEDY DEPENDS ON THE DARK HALF'S `reason`, and this tool sees only
+        #       FINGERPRINTS. An ABSENCE code (`not_set`, `unreadable`) means nothing is there, so
+        #       copying the live value IS the repair. A VALUE FAULT (`padded`, `too_short`,
+        #       `not_utf8`, `reused_credential` — FOUR of the six, not five) means the dark half
+        #       already HOLDS a value it refuses, so copying may reproduce the refusal. It may ALSO
+        #       clear it, when the live half happens to hold a different usable value (e.g. Fly holds
+        #       " key\n" as `padded` while Pages holds the clean `key`) — the reading cannot
+        #       distinguish the two. So the claim is not "a copy can never work"; it is that a
+        #       two-sided rotation is the only repair that ALWAYS works, which is what the hint says.
+        #       Stating it as a certainty pushed an operator whose one-sided copy WOULD have cleared it
+        #       into rotating the production signing key on both halves under a false premise.
+        #
+        #   (b) THE ABSENCE REPAIR DEPENDS ON WHICH HOME IS DARK, because the two are written
+        #       differently. `app` (Pages) is set by hand in the dashboard, so the repair is
+        #       "set it there, then redeploy Pages". `api` (Fly) is CI-managed from the GitHub repo
+        #       secret, so the repair is `gh secret set` + `deploy-hosted` — NOT `fly secrets set`,
+        #       which the next deploy silently reverts (`.github/scripts/fly-managed-secrets.txt`
+        #       declares it `gh-secret:`). Naming the dark half as the write TARGET without naming
+        #       the route sent an api-dark operator to the one write the same issue body says is
+        #       reverted: they clear the alert, the next deploy re-stages the stale repo value, and
+        #       the monitor re-reds as MISMATCH for a fault that was `not_set`.
+        #
+        # An unmapped `reason` never reaches here — it is UNVERIFIABLE, never SPLIT (the closed-set
+        # gate is upstream), so the `else` below is the two absence codes.
         reasons = {r.reason for r in verdict.readings if not r.configured}
+        dark_halves = sorted(r.half for r in verdict.readings if not r.configured)
         if reasons & VALUE_FAULT_REASONS:
             return (
-                "fix: this needs a TWO-SIDED rotation — the dark half's `reason` above says the value "
-                "it HOLDS is unusable, so copying the working half's value onto it would reproduce "
-                "the same refusal and leave this check red forever. Give BOTH halves one fresh "
-                "random key of at least 32 bytes: (1) `gh secret set CONSENT_TOKEN_SECRET` (the "
-                "GitHub repo secret is the SOURCE OF TRUTH: `fly secrets set` alone is silently "
-                "reverted by the next deploy-hosted run, because "
-                "`.github/scripts/fly-managed-secrets.txt` declares it `gh-secret:` and re-stages "
-                "it), (2) set the same value on the `tortoise-dashboard` Pages project, "
-                "(3) REDEPLOY Pages (a corrected value does NOT reach an already-deployed "
-                "Function). ⛔ Never set only ONE half — from this state that CREATES the split this "
-                "check exists to catch. §2.5."
+                f"fix: the reliable repair is a TWO-SIDED rotation. The dark half "
+                f"({'/'.join(dark_halves)}) reports a `reason` that means the value it HOLDS is "
+                "unusable. Copying the working half's value across MIGHT clear it, but this check "
+                "compares fingerprints only, so it cannot tell a working half that holds a DIFFERENT "
+                "usable value from one that holds the same unusable one — and in the second case the "
+                "copy reproduces the refusal. A fresh key on BOTH halves is the only repair that "
+                "always works: (1) `gh secret set CONSENT_TOKEN_SECRET` (the GitHub repo secret is "
+                "the SOURCE OF TRUTH: `fly secrets set` alone is silently reverted by the next "
+                "deploy-hosted run, because `.github/scripts/fly-managed-secrets.txt` declares it "
+                "`gh-secret:` and re-stages it), (2) set the same value on the "
+                "`tortoise-dashboard` Pages project, (3) REDEPLOY Pages (a corrected value does NOT "
+                "reach an already-deployed Function). ⛔ Never set only ONE half — from this state "
+                "that CREATES the split this check exists to catch. §2.5."
+            )
+        # ABSENCE (`not_set` / `unreadable`): nothing is on the dark half, so copying the live value
+        # IS the repair — but WHERE you write it differs per half, and getting that wrong is how the
+        # alert clears and then re-reds. Branched on the dark half, which the reading prints.
+        if dark_halves == ["app"]:
+            return (
+                "fix: do NOT rotate — the dark half (`app`) holds no usable key, so there is nothing "
+                "to reconcile and a one-sided rotation would CREATE the split this check exists to "
+                "catch. Set the SAME value the LIVE half (`api`) already holds on the "
+                "`tortoise-dashboard` Pages project (Cloudflare dashboard → Settings → Environment "
+                "variables — it is not CI-written), then REDEPLOY Pages: Pages bakes env at deploy "
+                "time, so a corrected dashboard value does NOT reach an already-deployed Function. "
+                "§2.5."
             )
         return (
-            "fix: do NOT rotate — one half holds no usable key, so there is nothing to reconcile and "
-            "a one-sided rotation would CREATE the split this check exists to catch. Set the SAME "
-            "value the LIVE half already holds on the dark half (the reading above names which half "
-            "and its `reason`), then REDEPLOY Pages if the dark half is `app` — Pages bakes env at "
-            "deploy time. §2.5."
+            "fix: do NOT rotate — the dark half (`api`) holds no usable key, so there is nothing to "
+            "reconcile and a one-sided rotation would CREATE the split this check exists to catch. "
+            "Set the SAME value the LIVE half (`app`) already holds in the GITHUB REPO SECRET "
+            "(`gh secret set CONSENT_TOKEN_SECRET`), then land (or `workflow_dispatch`) the "
+            "`deploy-hosted` run so Fly is staged from it. ⛔ Do NOT hand-set it with "
+            "`fly secrets set`: `.github/scripts/fly-managed-secrets.txt` declares the binding "
+            "`gh-secret:`, so every `deploy-hosted` run re-stages the repo value and silently reverts "
+            "a hand-set Fly value — after you had seen AGREE. §2.5."
         )
     if verdict.verdict == "MISMATCH":
         return (

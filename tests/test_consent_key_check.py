@@ -626,9 +626,15 @@ def test_a_SPLIT_never_borrows_the_ROTATION_remedy(monkeypatch, capsys) -> None:
     One half holds NO usable key, so there is no second value to reconcile. The MISMATCH hint's step 1
     is `gh secret set CONSENT_TOKEN_SECRET` followed by a `deploy-hosted` run — a ONE-SIDED rotation,
     which from a SPLIT state MANUFACTURES the measured disagreement the tool exists to detect (the
-    2026-11-01 incident). The workflow's own SPLIT arm says "rotating a key would not fix it" a few
-    lines above the `cat` that embeds this `fix` string, so emitting the rotation here makes the
-    public issue contradict itself AND names the harmful step.
+    2026-11-01 incident). The workflow's own SPLIT arm forbids "a ONE-sided rotation" a few lines above
+    the `cat` that embeds this `fix` string, so emitting the rotation here makes the public issue
+    contradict itself AND names the harmful step.
+
+    ⛔ THIS IS THE `app`-DARK ORIENTATION. The `api`-dark absence case is a DIFFERENT hint: Fly is
+    CI-managed from the repo secret, so its repair IS `gh secret set` + `deploy-hosted` and only the
+    bare `fly secrets set` is forbidden. Pinned separately below, because a single unconditional
+    "never `gh secret set`" would send an `api`-dark operator to the one write the same body says the
+    next deploy reverts.
     """
     _serve(monkeypatch, _health(_fp(_KEY_A)), _pages(None, configured=False, reason="not_set"))
     assert CKC.main(["--json"]) == 1
@@ -636,11 +642,42 @@ def test_a_SPLIT_never_borrows_the_ROTATION_remedy(monkeypatch, capsys) -> None:
     assert parsed["verdict"] == "SPLIT"
     hint = parsed["fix"]
     assert "do NOT rotate" in hint, f"the SPLIT hint must refuse the rotation: {hint!r}"
+    assert "tortoise-dashboard" in hint and "REDEPLOY Pages" in hint, (
+        f"the app-dark hint must name the Pages home and its redeploy: {hint!r}"
+    )
     for forbidden in ("THREE steps", "gh secret set"):
         assert forbidden not in hint, (
             f"the SPLIT hint carries MISMATCH's rotation remedy ({forbidden!r}), which CREATES the "
             f"split it is meant to resolve: {hint!r}"
         )
+
+
+def test_an_api_dark_SPLIT_sends_the_operator_to_the_REPO_SECRET_not_fly_secrets(monkeypatch, capsys):
+    """⛔ THE ABSENCE REPAIR DEPENDS ON WHICH HOME IS DARK, and the wrong one clears then re-reds.
+
+    Fly's copy is staged by CI from the GitHub repo secret (`fly-managed-secrets.txt` declares
+    `CONSENT_TOKEN_SECRET gh-secret:CONSENT_TOKEN_SECRET`), so a hand `fly secrets set` is silently
+    reverted by the next `deploy-hosted` run. An `api`-dark split therefore cannot be repaired the way
+    an `app`-dark one is: the durable move is to put the LIVE (Pages) value into the repo secret and
+    redeploy. The old hint said "set the SAME value on the dark half" without naming the route, and
+    the same issue body warns — 37 lines later — that the direct Fly write is reverted. Following it
+    produced `AGREE`, then `MISMATCH` after the next deploy, i.e. the "every consent grant is dead"
+    finding for a fault that was `not_set`.
+    """
+    _serve(monkeypatch, _health(None, configured=False, reason="not_set"), _pages(_fp(_KEY_A)))
+    assert CKC.main(["--json"]) == 1
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed["verdict"] == "SPLIT", "an api-dark half must compare as SPLIT, not UNVERIFIABLE"
+    hint = parsed["fix"]
+    assert "GITHUB REPO SECRET" in hint and "gh secret set" in hint, (
+        f"the api-dark hint must route through the repo secret: {hint!r}"
+    )
+    assert "deploy-hosted" in hint, f"the api-dark hint must land the deploy that stages Fly: {hint!r}"
+    assert "fly secrets set" in hint and "reverts" in hint, (
+        f"the api-dark hint must warn that the direct Fly write is reverted: {hint!r}"
+    )
+    assert "do NOT rotate" in hint, f"a one-sided copy is the repair here, not a rotation: {hint!r}"
+    assert "TWO-SIDED" not in hint, f"a rotation is the needless repair here: {hint!r}"
 
 
 def test_every_published_reason_code_is_accepted(monkeypatch, capsys) -> None:
@@ -718,19 +755,61 @@ def test_the_workflow_prose_branches_the_SPLIT_remedy_the_same_way() -> None:
     the SAME issue body. A workflow that still says "set the SAME value on that half" for every SPLIT
     would contradict the tool on exactly the value-fault case, and the operator would follow whichever
     line they read first.
+
+    ⛔ PER-BULLET, not presence-only. The first cut of this pin asserted only that the two bullet
+    MARKERS and the string "FULL rotation" appeared somewhere in the body — so SWAPPING the two
+    remedies (giving `not_set` the full rotation and `too_short` the copy) left it GREEN, i.e. it
+    could not fail on the exact defect its docstring names. Measured, not assumed. Each bullet is now
+    extracted and its own remedy asserted, so a swap reds here.
     """
-    body = "\n".join(s.get("run") or "" for s in _steps())
-    assert "not_set` / `unreadable`" in body, (
-        "the SPLIT alert no longer names the absence arm's copy repair"
+
+    def _bullet(marker: str) -> str:
+        """The echoed text of ONE bullet, from its marker to the next bullet / the closing line."""
+        body = "\n".join(s.get("run") or "" for s in _steps())
+        lines = body.splitlines()
+        starts = [i for i, line in enumerate(lines) if marker in line]
+        assert len(starts) == 1, f"expected exactly one `{marker}` bullet, found {len(starts)}"
+        out: list[str] = []
+        for line in lines[starts[0] :]:
+            if out and ("echo '- **" in line or "Never set only ONE half" in line):
+                break
+            out.append(line)
+        return "\n".join(out)
+
+    absence = _bullet("`not_set` / `unreadable`")
+    fault = _bullet("`padded` / `too_short` / `not_utf8` / `reused_credential`")
+
+    # The absence arm: copy the live value, down the route that half is actually written through.
+    assert "Copy the working half" in absence, "the absence arm lost its copy repair"
+    assert "FULL rotation" not in absence, (
+        "the absence arm was given the value-fault rotation — that half holds nothing, so a copy IS "
+        "the repair and a rotation is the needless, disruptive one"
+    )
+    assert "gh secret set" in absence and "fly secrets set" in absence, (
+        "the absence arm no longer names the api-dark route — for an `api`-dark split the durable "
+        "repair is the repo secret, not `fly secrets set`, and every deploy reverts the latter"
+    )
+
+    # The value-fault arm: the always-works rotation, and never a copy stated as the repair.
+    assert "FULL rotation" in fault, (
+        "the value-fault arm no longer sends the operator to §2.5's full rotation"
+    )
+    assert "Copy the working half" not in fault, (
+        "the value-fault arm was given the copy remedy — it reproduces the same refusal"
     )
     for code in ("padded", "too_short", "not_utf8", "reused_credential"):
-        assert code in body, f"the SPLIT alert no longer names the value-fault arm (`{code}`)"
-    assert "FULL rotation" in body, (
-        "the SPLIT alert no longer sends the value-fault case to §2.5's full rotation — it would "
-        "tell an operator to copy a value that reproduces the refusal"
-    )
+        assert code in fault, f"the value-fault arm no longer names `{code}`"
+
+    body = "\n".join(s.get("run") or "" for s in _steps())
     assert "Never set only ONE half" in body, (
         "the SPLIT alert lost its one-sided-rotation prohibition"
+    )
+    # ⛔ The opening sentence must not contradict the value-fault bullet three lines below it: the
+    # first cut said "rotating a key would not fix it" UNCONDITIONALLY, and the same body then
+    # prescribed a rotation — three mutually exclusive instructions in one public issue.
+    assert "a ONE-sided rotation would not fix it" in body, (
+        "the SPLIT opening must forbid the ONE-SIDED rotation specifically; an unconditional "
+        "\"rotating a key would not fix it\" contradicts the value-fault remedy below it"
     )
 
 
