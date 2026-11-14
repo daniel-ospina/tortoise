@@ -1062,7 +1062,7 @@ retired:
   approval: null
 rows:
 - name: tortoise_query
-  served_from: tortoise/mcp_server.py:c533fb932ecfc2bc
+  served_from: tortoise/mcp_server.py:c54421cac2a86aab
   # ⛔ #12372: `served_from` is the `_code_digest` of the handler's CODE OBJECT, so any
   # edit inside `tortoise_query` re-stamps it. Refreshed BY HAND to the value `build_doc`
   # derives (`check` re-derives and compares — it is the code that is authoritative, not

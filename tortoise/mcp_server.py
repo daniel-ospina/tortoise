@@ -4276,6 +4276,9 @@ def tortoise_query(kind: str | None = None,
         if "kind" in _names:
             _losses.append("a wider population than they asked for")
         _loss = ", ".join(_losses[:-1]) + (" and " if len(_losses) > 1 else "") + _losses[-1]
+        # The paging requirement is a PRECONDITION of the whole route, so it is
+        # emitted before it (set where the route is built, below).
+        _page_note = ""
         # The route must terminate HERE. "Pass text=" was the round-1 dead end on
         # the tag arm (`tag=` takes precedence, so the caller re-reads the same
         # sentence); it is a second dead end on the text= arm, which is refused
@@ -4328,11 +4331,17 @@ def tortoise_query(kind: str | None = None,
             # Its own SENTENCE, not a trailing parenthetical (round-21 P2 2,
             # measured): appended at the end of a route with two alternatives it
             # read as qualifying only the last one, and `text=`+`offset=` is
-            # refused whatever `entity_type` says (mcp_server.py:4422-4424) — so
+            # refused whatever `entity_type` says (mcp_server.py:4444-4446) — so
             # following the FIRST alternative ("pass entity_type='point'") landed
             # on "offset/page not supported with text". The drop is required for
             # EVERY alternative, so it is stated once, for the route.
-            _route += ". Also drop offset=/page= — text= takes no offset."
+            #
+            # It is emitted BEFORE the route (see `_page_note` below), not appended
+            # to it: appended with its own full stop it collided with the
+            # template's ", or drop …" and shipped "… takes no offset., or drop
+            # min_confidence for this read" on every paged refusal (round-22 P2 2,
+            # measured on all six paged shapes).
+            _page_note = " Also drop offset=/page= — text= takes no offset."
         # Only where a floor/ordering is what was refused: the STRUCTURAL arm
         # applies `filters=` together with `kind=` quite happily, so this note on
         # a kind-only tag refusal told the caller to drop a filter that another
@@ -4346,7 +4355,7 @@ def tortoise_query(kind: str | None = None,
         return _SafeError({"error": (
             f"{_named} {_verb} not applied on the {_arm} arm (#12500): {_why}. It "
             f"used to be dropped silently, so the caller got {_loss}.{_filters_note}"
-            f" {_route}, or drop {_named} for this read."
+            f"{_page_note} {_route}, or drop {_named} for this read."
         )})
     # ── #12455: `filters=` was ACCEPTED on the `text=` and `tag=` arms and DROPPED
     # `filters` is a STRUCTURAL-path argument. `text=` forwards
