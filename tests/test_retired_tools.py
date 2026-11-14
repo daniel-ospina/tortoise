@@ -76,20 +76,23 @@ class TestDeclaration:
 
         Two guard layers, and the path decides which you meet: WITHOUT a re-cut a
         stray method is refused by `tools/surface-guard.py` **step 1** ("is not in the
-        frozen baseline"). WITH a re-cut, `cut` writes the new method's own baseline row
-        (greening step 1) and CARRIES `high_water_counts` (so it cannot be RAISED), and
-        the ceiling is an EXCEEDS check (`live_n > high_water`): measured, live 150 +
-        re-cut → rc 0, live 151 → rc 1, "public SDK methods live 151 > pin 150". So
-        between 126 and 150 **no guard REFUSES** a small addition that arrives with a
-        regenerate-and-push. What remains is not a refusal but four hand-typed count
-        registers — `DECLARED_COUNT` in `tests/test_sdk_surface.py`, THIS pin, the
-        `== 125` in `tests/test_surface_manifest.py::
-        test_the_live_surface_is_the_baseline_the_guard_froze`, and the typed `125` in
-        `docs/product/canonical-mcp-tools.md` — plus the two rendered docs `cut` leaves
-        STALE (`surface_manifest.py check` reds them). Every one of those is greened by
-        editing the same number, which makes the band reviewer-VISIBLE rather than
-        machine-refused. Measured evidence, and the SHRINK half of this same root, on
-        #12327 — which records only that half and treats growth as already pinned.
+        frozen baseline", rc 1). WITH a re-cut, `cut` writes the new method's own
+        baseline row, which GREENS step 1, and CARRIES `high_water_counts` — an EXCEEDS
+        check (`live_n > high_water`) that is therefore silent in the band this surface
+        sits in: measured, live 150 + re-cut → rc 0, live 151 → rc 1 ("public SDK
+        methods live 151 > pin 150"). So the guard pair alone does NOT bound a small
+        regenerate-and-push addition.
+
+        Other instruments do red it, and this list is neither exhaustive nor an
+        approval: the count is hand-typed in several test registers (`DECLARED_COUNT`,
+        this assertion, `test_surface_manifest.py`'s live-vs-baseline check, the typed
+        count in `docs/product/canonical-mcp-tools.md`); every rendered artifact
+        (`docs/product/sdk-surface-baseline.md`, `mcp-sdk-surface.md`,
+        `sdk-surface-declaration.md`, `config/sdk-surface.json`) must be REGENERATED
+        with the new row, and `surface_manifest.py check` / `tools/sdk_surface.py
+        --check` red the stale ones; and `tools/sdk_rename_table.py --check` REFUSES an
+        unmapped public method outright — it demands a canonical group and a
+        disposition, so the surface cannot grow without someone saying what the method IS.
 
         Do not read this count as approval.
         """
