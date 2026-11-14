@@ -188,14 +188,48 @@ def test_a_missing_key_refusal_keeps_the_endpoint_it_probed(monkeypatch, capsys)
 
 
 def test_call_failure_keeps_exit_one(monkeypatch, capsys):
-    """1 is KEPT for a query that genuinely fails — the supersede is narrow."""
+    """1 is KEPT for a query that genuinely fails — the supersede is narrow.
+
+    And a CRASH is not a refusal (#11153 review round 8): the refusal arm was the
+    only thing that ever printed a payload here, so a crash must leave stdout
+    EMPTY. Without that assertion a later change could route every failure
+    through the refusal shape and no test would notice.
+    """
 
     def boom(*_a, **_k):
-        raise RuntimeError("nope")
+        raise RuntimeError("Error calling tool: TypeError: 'NoneType' is not subscriptable")
 
     monkeypatch.setattr(cli, "call_tool", boom)
     assert cli.main(["call", "some_tool"]) == 1
-    assert "call failed" in capsys.readouterr().err
+    captured = capsys.readouterr()
+    assert "call failed" in captured.err
+    assert captured.out == "", (
+        f"a server-side crash was reported as a designed refusal: {captured.out!r}")
+
+
+def test_a_refused_call_reports_the_refusal_on_stdout(monkeypatch, capsys):
+    """A REFUSAL is not a crash (#11153).
+
+    The driver's client is built with `raise_on_error=True`, so a tool-level
+    failure raises here rather than returning a result — which made the
+    documented `{"is_error": true, "result": …}` shape unreachable and left a
+    scripted caller with an EMPTY stdout, rc 1, and no record of what the server
+    said. Both arms now report the same way, so the contract holds whichever
+    client configuration the caller's driver uses.
+    """
+    from fastmcp.exceptions import ToolError
+
+    def refused(*_a, **_k):
+        raise ToolError('{"error": "Team points limit reached (25000)", "code": -32006}')
+
+    monkeypatch.setattr(cli, "call_tool", refused)
+    assert cli.main(["call", "tortoise_update_point"]) == 1
+    captured = capsys.readouterr()
+    out = json.loads(captured.out)
+    assert out["is_error"] is True, out
+    assert "points limit" in out["result"], out
+    assert "call failed" not in captured.err, (
+        "a designed refusal was reported as a crash: " f"{captured.err!r}")
 
 
 def test_call_prints_the_payload_even_with_a_trailing_block(monkeypatch, capsys):

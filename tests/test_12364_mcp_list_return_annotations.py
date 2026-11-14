@@ -309,11 +309,15 @@ async def test_a_safe_failure_is_not_demoted_into_the_success_payload(
     Measured on a mutant that deletes the `isinstance(rows, _SafeError)` branch
     (mutation probe, this file unchanged): the call still returns 5 passed, and
     a raising SDK arrives as `structured_content == {"result": {"error": "db
-    down"}}` with `is_error=False` — a failure delivered in the SUCCESS channel,
-    which is the #8482 sin. It is invisible to the #8482 repair seam too: these
-    two tools carry no `x-fastmcp-wrap-result` envelope, so
-    `_maybe_wrap_envelope_violation` never fires on them. This is the test that
-    branch was missing.
+    down"}}`. It is invisible to the #8482 repair seam: these two tools carry no
+    `x-fastmcp-wrap-result` envelope, so `_maybe_wrap_envelope_violation` never
+    fires on them. This is the test that branch was missing.
+
+    ⚠️ Re-measured after #11153: that mutant's payload now carries
+    `is_error=True`, because the new arm reads the failure THROUGH the envelope
+    (`_returned_safe_failure`), so it no longer lands in the success channel. The
+    branch is still required — the PAYLOAD would be the failure dict instead of
+    the rows — but the verdict is no longer the half that regresses here.
     """
     class _Boom:
         """A stub whose ONE method raises, so `_safe` answers with its error dict."""
