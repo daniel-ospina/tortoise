@@ -3009,8 +3009,8 @@ def test_the_RENDERED_summaries_are_PINNED_VERBATIM():
     to be made DELIBERATELY, with this expectation updated in the same commit. The four shapes are
     one per verdict path plus the wheel (pre-publish) path. ⚠️ NOT every branch: the wheel
     tail's other FOUR sub-branches (does-not-install, console-script, init-success-no-database, the
-    foreign-arm fallback — the last three of those are pinned end-to-end by
-    `test_the_wheel_tail_reads_the_PRODUCERS_OWN_text_end_to_end`, the console-script shape by
+    foreign-arm fallback — the other three of those are pinned end-to-end by
+    `test_the_wheel_tail_reads_the_PRODUCERS_OWN_text_end_to_end`, and the console-script shape by
     `test_the_wheel_tail_names_the_CONSOLE_SCRIPT_case_separately`) and
     the UNKNOWN tail's EMPTY-`marked` variant are pinned by
     `test_wheel_mode_fail_names_a_build_defect_not_a_release`,
@@ -3310,7 +3310,8 @@ def test_the_wheel_tail_reads_the_PRODUCERS_OWN_text_end_to_end(tmp_path):
     # concludes about it.
     assert (
         "The BUILT wheel runs its documented first command successfully but creates no database, "
-        "so the documented flow does not work. Nothing has been uploaded."
+        "so the documented flow does not work. Nothing has been uploaded. Fix the tree and "
+        "re-dispatch this publish: this is a code defect, not a release-owed finding."
     ) in silent_summary, silent_summary
     assert "fails its documented first command" not in silent_summary, silent_summary
     assert "does not install" not in silent_summary, silent_summary
@@ -3331,7 +3332,13 @@ def test_the_wheel_tail_reads_the_PRODUCERS_OWN_text_end_to_end(tmp_path):
     assert "creates no database, so the documented flow does not work" not in foreign_summary, (
         foreign_summary
     )
-    assert "`docs-smoke`" in foreign_summary, foreign_summary
+    # ⛔ THE FALLBACK'S OWN ARM NAMING (#12589 review round 23, P3): a bare "`docs-smoke`" is
+    # satisfied by the TABLE row, so replacing the fallback's `{step.name}` with a placeholder
+    # stayed green. Assert the clause.
+    assert (
+        "the failing arm is `docs-smoke` (the docs note that `tortoise init` created no database "
+        "on a Windows box)"
+    ) in foreign_summary, foreign_summary
 
 
 def test_the_wheel_tail_only_reads_GATED_arms():
