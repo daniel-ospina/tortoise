@@ -121,6 +121,9 @@ def test_agreement_exits_zero(monkeypatch, capsys) -> None:
     assert CKC.main([]) == 0
     out = capsys.readouterr().out
     assert "CONSENT-KEY: AGREE" in out
+    assert "both halves publish the same key fingerprint" in out, (
+        "the AGREE detail must state the agreement — it is pasted into the public alert body"
+    )
     # Both readings are SHOWN — an operator comparing terminals needs the numbers, and a checker
     # that only says "equal" cannot be reconciled against a dashboard by eye.
     assert out.count(f"fingerprint={_fp(_KEY_A)}") == 2
@@ -167,6 +170,11 @@ def test_one_configured_half_is_a_SPLIT_not_agreement(monkeypatch, capsys) -> No
     out = capsys.readouterr().out
     assert "CONSENT-KEY: SPLIT" in out
     assert "reason=not_set" in out and "configured=false" in out
+    # ⛔ WHICH HALF IS LIVE, pinned in this order. Cycle 8 measured swapping the `{live}`/`{dark}`
+    # placeholders GREEN; the detail is the only sentence naming the broken half and it travels
+    # verbatim into the public alert, so a swap sends an operator to set the secret on the half that
+    # already has it — the mutation must red here, not be resolved by a human reading two log lines.
+    assert "api is configured and app is not" in out, out
 
 
 def test_neither_configured_is_OFF_and_never_AGREE(monkeypatch, capsys) -> None:
@@ -326,6 +334,14 @@ def test_the_json_payload_carries_the_verdict_and_both_readings(monkeypatch, cap
     assert {r["half"] for r in parsed["readings"]} == {"api", "app"}
     assert {r["fingerprint"] for r in parsed["readings"]} == {_fp(_KEY_A), _fp(_KEY_B)}
     assert parsed["fix"] and "THREE steps" in parsed["fix"]
+    # ⛔ THE `detail` SENTENCE IS PASTED INTO THE PUBLIC ALERT, and it is the only line that says WHAT
+    # is wrong. Cycle 8 measured swapping it for another arm's sentence GREEN here — an operator reading
+    # a MISMATCH alert whose detail says "both halves publish the same key fingerprint" has no way to
+    # tell which of the two contradictory statements to believe.
+    assert parsed["detail"] == (
+        "both halves are configured and hold DIFFERENT keys — every minted consent token is "
+        "refused `401 signature does not verify`"
+    ), parsed["detail"]
 
 
 def test_the_urls_asked_for_are_the_two_contracted_surfaces(monkeypatch) -> None:
@@ -351,7 +367,15 @@ def test_a_key_placed_in_reason_is_NEVER_ECHOED(monkeypatch, capsys) -> None:
     32-character all-lowercase key.
     """
     for hostile in (_KEY_A, _KEY_A[:12], "-----BEGIN PRIVATE KEY-----", "line1\nline2",
-                    "```", "x" * 200, "NOT_SET"):
+                    "```", "x" * 200, "NOT_SET",
+                    # ⛔ THE TWO THIS DOCSTRING NAMES AS THE BYPASS, actually fed. Cycle 8 measured the
+                    # gate degraded to `re.match(r"[a-z][a-z0-9_]{0,31}\Z", raw_reason)` GREEN here,
+                    # because every value above is ALSO refused by a charset filter — so the bypass the
+                    # comment documents was untested, and a 32-char all-lowercase key was published
+                    # verbatim into the public issue body.
+                    "passwordpasswordpasswordpassword",
+                    "a" * 64,
+                    "0f" * 32):
         _serve(monkeypatch, _health(_fp(_KEY_A), reason=hostile), _pages(_fp(_KEY_A)))
         assert CKC.main([]) == 2, hostile
         out = capsys.readouterr().out
@@ -820,6 +844,13 @@ def test_the_filing_step_files_the_RIGHT_finding_and_never_resolves_a_split(tmp_
     assert len(calls) == 2, f"AGREE must resolve both halves of the ledger, got {calls}"
     assert all(c.startswith("resolve") for c in calls), calls
     assert any(drift in c for c in calls) and any(unknown in c for c in calls), calls
+    # ⛔ AND THE CLOSING COMMENT MUST ASSERT THE AGREEMENT, not a disagreement. Cycle 8 measured the
+    # drift issue being CLOSED with `--why "…hold DIFFERENT keys"` GREEN: the ledger's own record of
+    # recovery would contradict the recovery it records, on a public issue an operator reads later.
+    assert all("(AGREE)" in c for c in calls), (
+        f"each resolve comment must state the agreement it is closing on: {calls}"
+    )
+    assert not any("DIFFERENT keys" in c for c in calls), calls
 
     # A MEASURED split files the DRIFT title, resolves nothing, and does not clear the ledger.
     proc = run("1", "MISMATCH")
@@ -874,6 +905,12 @@ def test_the_filing_step_files_the_RIGHT_finding_and_never_resolves_a_split(tmp_
     assert "<!-- consent-key-drift-alert -->" in body, "the dedupe marker is gone from the alert body"
     assert "REDEPLOY Pages" in body and "fly secrets set" in body, (
         "the alert body lost the rotation steps an operator acts on"
+    )
+    # ⛔ AND THE BODY MUST CARRY THE EVIDENCE. Cycle 8 measured the fenced reading replaced by `echo
+    # '{}'` GREEN: the alert is this monitor's ONLY output, and `### The reading (this run)` with an
+    # empty object sends the operator to the dashboard with nothing to compare.
+    assert '"verdict"' in body, (
+        f"the alert body no longer quotes the reading it was filed for: {body[:400]!r}"
     )
     # …and THIS arm (the last run above) is the UNMEASURED one, so its prose must say so.
     assert "could NOT be verified" in body and "not** a measured disagreement" in body, (
