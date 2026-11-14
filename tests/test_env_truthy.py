@@ -641,8 +641,11 @@ _KNOWN_NARROW_READS: dict[tuple[str, str], tuple[int, str]] = {
             "census number taken by the wrong instrument"),
     # #12551 landed this read without its ledger entry, which reds this gate on `main`
     # (`test (d)`), so it is raised here with its reason rather than widened. The read is
-    # `journal_segments.enabled()` — `os.environ.get(ENV_FLAG, "") == "1"` at module
-    # level, resolved through the module's own string constant — and it gates the three
+    # `journal_segments.enabled()` — `os.environ.get(ENV_FLAG, "") == "1"`, evaluated at
+    # CALL time inside that function (the module states why: "Read at call time, never
+    # cached at import: a fleet sets it per lane and a cached read would make the switch
+    # depend on which process imported first"), resolved through the module's own string
+    # constant — and it gates the three
     # WRITERS (`seal_active`, `record_disposition`, `adopt_crashed_seal`), which RENAME a
     # deployment's journal, RECORD a disposition and APPEND a repair row. A `=true`
     # written for legibility would switch journal sealing on for a deployment that never
