@@ -304,6 +304,16 @@ class TestEverySurfaceAgreesWithTheDeclaration:
 #:         it means deciding whether `yet`/`yet again` beside a speech verb is a clause
 #:         break or an adverb — a vocabulary question this rule deliberately refuses to
 #:         answer, and the round-4/5 history above is what a vocabulary test cost;
+#:       * an ASIDE BEFORE A `that`-LESS REPORT (`Previously the doc said -- flatly --
+#:         there is no Builder plan; #12444 corrected it.`) — **OPEN, INTRODUCED IN
+#:         round 9 and measured**: FLAGGED here, EXEMPT at the round-8 head AND at
+#:         `origin/main` (ditto `-- in the old wording --`, and the `yet again` twin). The
+#:         resume rule strips a pair only when a `that` complement follows it, so a report
+#:         whose clause simply has no `that` keeps the pair and its claim is glued onto the
+#:         verb's clause break. It is listed rather than fixed because the correct fix needs
+#:         the RETRACTION that makes these sentences records (all three end in a
+#:         `_RETRACTION_CUES` member) — a weaker resume test re-opens the class above, which
+#:         is measured. No `docs/` sentence is affected (corpus sweep: 0 verdict diffs);
 #:       * an ANAPHORIC re-assertion after a quoted record (`Previously the doc read
 #:         "there is no Builder plan"; there is no such plan anymore.` / `…; that plan
 #:         does not exist.`): :func:`_asserts_a_denial_outside_the_quotes` asks whether
@@ -1063,7 +1073,15 @@ _REPORTED_CLAUSE_END = re.compile(
 #: the FIRST dash marker after the opener, whichever of `--` / `—` / `–` it is; a single
 #: hyphen is not a marker, so `pre-2024` cannot close a pair.
 _YET_AGAIN = re.compile(r"^\s*yet\s+again\s*", re.I)
-_RESUMES_WITH_THAT = re.compile(r"^[\s,]*(?:yet\s+again\s+)?that\b", re.I)
+#: ⛔ THE `that` MUST BE THE COMPLEMENTIZER, NOT A DEMONSTRATIVE PRONOUN (round-9 review,
+#: P1, measured): `-- the page was never fixed -- that IS WHY there is no Builder plan.`
+#: resumes on a bare `^…that\b`, so the rule exempted a live denial one word away from the
+#: pinned shape while `origin/main` FLAGS it (ditto `that means`, `that proves`, `that's`).
+#: A demonstrative `that` is followed by a copula or a verb of evidence; the complementizer
+#: is followed by the reported clause's own subject.
+_RESUMES_WITH_THAT = re.compile(
+    r"^[\s,]*(?:yet\s+again\s+)?that\b(?!\s*(?:is|was|were|'s|means|proves|would|has|makes)\b)",
+    re.I)
 #: ⛔ THE INNER SET IS NARROW **AND** THE PAIR'S INNER CAN NEVER HOLD A DASH (round-9
 #: review, measured): the closer is the FIRST marker of any side, so the extracted inner text
 #: contains none of `--` / `—` / `–` — a dash member here would be unreachable surface, which
@@ -2141,6 +2159,22 @@ class TestNoDocDeniesABuilderPlanExists:
                 "Until #12444 the doc said -- and the page still carries it -- that there "
                 "is no Builder plan.\n",
                 "Until #12444 the doc said -- the page; still broken -- that there is no "
+                "Builder plan.\n",
+                # ⛔ …AND SO IS A DEMONSTRATIVE `that` (round-9 review cycle 2, P1, measured):
+                # a bare `^…that\b` resume test exempted a live denial ONE WORD away from
+                # the pinned shape above — `that IS WHY …` / `that MEANS …` / `that PROVES
+                # …` / `that's …` all read EXEMPT here while `origin/main` FLAGS every one.
+                # A demonstrative `that` is followed by a copula or a verb of evidence; the
+                # complementizer is followed by the reported clause's own subject.
+                "Until #12444 the doc said -- the page was never fixed -- that is why there "
+                "is no Builder plan.\n",
+                "Until #12444 the doc said -- the page was never fixed -- that proves there "
+                "is no Builder plan.\n",
+                # ⛔ `:` IS A MEMBER OF `_ASIDE_INNER_BREAK` AND IS LOAD-BEARING (round-9
+                # review cycle 2, P2, measured): deleting it left the suite at `19 passed`
+                # while turning this FLAGGED denial into an exempt one, so the "pinned one
+                # for one" claim for that constant was false for its second member.
+                "Until #12444 the doc said -- the page: never fixed -- that there is no "
                 "Builder plan.\n",
                 # ⛔ THE COORDINATOR-OPENED INNER IS PINNED FOR EVERY MEMBER, NOT JUST
                 # `and` (round-9 review cycle 2): `so` and `yet` are asserted by the
