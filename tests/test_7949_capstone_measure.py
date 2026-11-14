@@ -5985,8 +5985,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # own row: a row carries ONE source key. Both anchors are the FUNCTIONS
         # the row's prose names (`postCapture` and its `install-probe` sibling),
         # never a bare offset. The row named `:948`/`:938`; the tree carries those
-        # two `def`s at `:1007`/`:999`, which are **always 8 apart** across all 27
-        # revisions of the file — so nothing "rotted" and there is no offset to
+        # two `def`s at `:1007`/`:999`, which are **always 8 apart** across every
+        # revision of the file — so nothing "rotted" and there is no offset to
         # reuse: `:938` was `clearTimeout(timer);` and `:948` was
         # `cfg: CaptureConfig,`, i.e. the pair was WRONG, not shifted (the file did
         # not move in this wave at all). A reader who takes an offset from it
@@ -6015,10 +6015,18 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # ⛔ RE-DERIVED at `#12545`'s squash-merge base (`7ce0d65fa0`): both moved
         # `+9` (`:18494`/`:18519` → `:18503`/`:18528`) when the capture path above
         # them grew. Opened, not offset — and `:18528` is the `QuotaExceededError`
-        # refusal of the gate at `:18503`, not the `QuotaCheckError` arm at `:18590`.
+        # refusal of the gate at `:18503`, not the `CohortCostCapExceeded`
+        # (cohort spend-cap) arm at `:18590`.
+        #
+        # The anchor is `quota_refusal_payload(QuotaExceededError(`, not the bare
+        # `quota_refusal_payload(`, because the bare form occurs at THREE lines
+        # (`:9632`, `:18528`, `:18590`): a `(document, pin)` pair moved together onto
+        # `:18590` would satisfy the content arm and stay green on the WRONG refusal.
+        # The hardened form occurs exactly once in the file, so a re-point onto a
+        # sibling arm now reds.
         ("03-test-design.md", "the A-corpus capture", (
             ("18503", "if count + est > max_points:"),
-            ("18528", "detail=quota_refusal_payload("),
+            ("18528", "quota_refusal_payload(QuotaExceededError("),
         ), "hosted_api"),
         # ⛔ NOT A ROW ANY MORE — the `carve_out:` claim below the rows is checked
         # against the BLOCK (`_section_entries`) and not against a line number: the
