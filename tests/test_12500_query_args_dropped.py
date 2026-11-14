@@ -1044,7 +1044,15 @@ def test_following_the_kind_route_from_tag_and_text_terminates(stub) -> None:
     """
     from tortoise.mcp_server import tortoise_query
 
-    tortoise_query(tag="t", text="x", kind="statement", offset=0)  # refusal
+    first = tortoise_query(tag="t", text="x", kind="statement", offset=0)
+
+    # The refusal must EXIST and must carry the instruction this test follows.
+    # Discarding `first` (as the first version did) made the whole test inert: it
+    # passed with the entire guard disabled, and it passed on the round-10 route
+    # whose instruction dead-ends (round-16 P2, both measured).
+    assert _is_refusal(first), first
+    assert "drop tag= and text=, then pass kind=" in first["error"], first["error"]
+
     # …and the destination the route names, reached as instructed:
     retry = tortoise_query(kind="statement", offset=0)
 
