@@ -278,9 +278,15 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     #         both sides. An ambient URI would make the "gates read a different
     #         store" an accident of the box instead of the arrangement under test.
     # Both are fixture-param monkeypatch calls, so pytest auto-restores them (no
-    # lane leak); neither site dials anything.
+    # lane leak); neither site dials anything. ⛔ The arm is PINNED to the sites'
+    # own `raising=False` rather than left key-only: the entry 21 lines above refuses
+    # a key-only arm on the stated ground that it would auto-authorize any future
+    # one-line mutation, and the same argument applies here — a bare
+    # `delenv("TORTOISE_DB_URI"` arm would admit a future `delenv` in this module with
+    # no triage. Both measured sites (`:49`, `:257`) pass `raising=False`, so pinning
+    # it costs nothing and a NEW shape reds for its own triage.
     "test_10015_organisation_account.py": [
-        r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
+        r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI",\s*raising=False'],
     # #9567 capstone: the D11/D12 quota case forces the EMBEDDED lane (delenv
     # the URI, then pin TORTOISE_DB_PATH to a tmp_path db) so the gate's count
     # never rides a shared server graph. The delenv IS the point; the

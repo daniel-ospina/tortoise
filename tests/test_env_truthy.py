@@ -547,15 +547,25 @@ _LEDGER_LITERAL_OWNERS: dict[str, tuple[int, str]] = {
 #: destructive interlock. NO entry was deleted by #4128: deleting one means the read was
 #: widened, and no name's disposition was widen.
 #:
-#: THE DELIBERATE EXCEPTIONS — the ledger has GROWN twice, both under a recorded
-#: `OVERRIDES` (not by accident): the tenant-namespace opt-in pinned above
-#: (`TORTOISE_TEST_SWEEP_TEAM_STRAYS`; #1686/#1884) and `TORTOISE_TEST_SWEEP_LEGACY`
-#: (#3634 Task 3). Each read is the SOLE authorization for an irreversible
+#: THE DELIBERATE EXCEPTIONS — the ledger has GROWN FIVE times since #4128, each
+#: under a recorded `OVERRIDES` (not by accident): the tenant-namespace opt-in pinned
+#: above (`TORTOISE_TEST_SWEEP_TEAM_STRAYS`; #1686/#1884), `TORTOISE_TEST_SWEEP_LEGACY`
+#: (#3634 Task 3), `TORTOISE_11070_CENSUS_DEDUPE_DISABLED`
+#: (`tortoise/session_source_prose_migration.py`, #11453), and the two `#12551`/
+#: `#12477` raises (`tortoise/journal_segments.py` `TORTOISE_JOURNAL_SEGMENTS`, and
+#: `tortoise/config.py` `TORTOISE_ALLOW_EMBEDDED`). ⛔ The COUNT is not load-bearing
+#: and nothing pins it — it read "twice" while three had been added (measured at
+#: `#12551`: 21 entries, three of them post-#4128), which is exactly the rot the
+#: paragraph warns about for numeral-bearing prose. What IS load-bearing is the rule
+#: below; the list is kept so the next addendum has the precedent in front of it
+#: rather than a stale tally. Each read is the SOLE authorization for an irreversible
 #: journal-blind DETACH DELETE + GRAPH.DELETE of a cohort the journal cannot
-#: attribute — exactly the fail-open surface the ledger exists to freeze — so
-#: narrowing it is the safe policy. The #3634 entry is recorded on issue #3634 and in
+#: attribute, or (for the last three) for arming a WRITE path nobody chose — exactly
+#: the fail-open surface the ledger exists to freeze — so narrowing it is the safe
+#: policy. The #3634 entry is recorded on issue #3634 and in
 #: the epic CI-Fix Changelog, and pinned by
-#: tests/test_wipe_server.py::test_legacy_sweep_gate_is_narrow_by_design. A future
+#: tests/test_wipe_server.py::test_legacy_sweep_gate_is_narrow_by_design; the
+#: `#12551`/`#12477` pair carries CI-11/CI-12 in that same changelog. A future
 #: entry needs the same three: a recorded decision, an `OVERRIDES:` reason, and its
 #: changelog row.
 _KNOWN_NARROW_READS: dict[tuple[str, str], tuple[int, str]] = {
