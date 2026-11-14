@@ -833,6 +833,75 @@ def _clear_record_refusal_state() -> None:
 
 
 @pytest.fixture(autouse=True)
+def _no_ambient_dead_heartbeat_ticker():
+    """#12666: a CANCELLED heartbeat ticker is process state, never ambient.
+
+    ``hosted_api._stop_liveness`` cancels the loop's heartbeat ticker; the
+    cancelled task STAYS recorded in ``monitoring._HEARTBEAT_TASK``, and
+    ``heartbeat_task_is_dead()`` answers True for it by design ("orderly
+    shutdown; no further ticks are coming"), which disarms the ``/healthz``
+    wedge term in ``monitoring.py`` for the REST OF THE PROCESS::
+
+        wedged = bool(stale and demand and no_serve
+                      and not heartbeat_task_is_dead())
+
+    So any test that starts and stops a REAL hosted server (``test_dr_endpoints``,
+    ``test_hosted_api``) hands every later wedge test a 200 where it demands 503.
+    A leg of ``test_monitoring`` itself is never such a source — that file starts
+    only the ``/healthz`` listener, which touches no ticker — which is why its own
+    ticker-arming classes reset the seam themselves.
+
+    MEASURED in this branch's worktree (base ``origin/main`` ``8dc4f06ba5``; the
+    issue reported the same profile at ``30c9e7c4d3``), one pytest process each:
+
+    * ``tests/test_monitoring.py`` alone — **219 passed**;
+    * ``tests/test_dr_endpoints.py`` + the two wedge nodeids — **2 failed, 122
+      passed**, with the payload the issue quotes (``loop_stale: true``,
+      ``served.registered: true``, ``status: "ok"``);
+    * the same command with this fixture in place — **124 passed**.
+
+    ``_reset_heartbeat_task`` is the seam for exactly this — its own docstring
+    says "Test seam: forget the recorded ticker (no cross-test latch to leak)".
+    Production never calls it (0 call sites under ``tortoise/`` and ``tools/``;
+    the record is CORRECT for a process that has stopped its ticker), and the
+    only test-side callers were the two files that arm a ticker themselves —
+    ``test_monitoring.py::TestStallWatchdog._isolated_ticker`` (a CLASS-LOCAL
+    autouse fixture whose own docstring already names this hazard: "a
+    hosted-API test leaving a cancelled one behind would disarm the ceiling in
+    a later test") and ``test_12477_health_honesty``. A leg in ANOTHER file that
+    starts and stops a real server gets no isolation from either, so
+    ``test_dr_endpoints`` still handed the next FILE its cancelled ticker.
+    Hence the conftest scope: the leak is between files, and a fixture scoped to
+    the class that remembers cannot cover it. Cleared on BOTH sides, so a leg
+    that arms a ticker cannot hand it to the next one either.
+
+    ⛔ THE PRODUCT KEEPS THE RECORD. Clearing a cancelled ticker inside
+    ``_stop_liveness`` would make ``heartbeat_task_is_dead()`` answer False again
+    and RE-ARM the hard stall ceiling (``LOOP_STALL_HARD_EXIT_S``), turning "the
+    ticker is gone" back into "the loop is wedged" — the ``os._exit`` on a
+    healthy process that guard exists to prevent (#2850). The stale record is
+    correct for a process that has stopped its ticker; it is only wrong for a
+    TEST process, which comes back to life without a fresh ``_start_liveness``.
+
+    Resolved through ``sys.modules``, so an un-imported monitoring module costs
+    nothing — and if it is not imported, no ticker can be recorded.
+    """
+    _forget_recorded_heartbeat_task()
+    yield
+    _forget_recorded_heartbeat_task()
+
+
+def _forget_recorded_heartbeat_task() -> None:
+    """Clear the recorded heartbeat ticker, if the module is even imported."""
+    import sys
+
+    monitoring = sys.modules.get("tortoise.monitoring")
+    if monitoring is None:
+        return
+    monitoring._reset_heartbeat_task()
+
+
+@pytest.fixture(autouse=True)
 def _fresh_commit_ingest_budget():
     """#4051: start every test with an empty per-org commit ingest window.
 
