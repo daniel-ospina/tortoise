@@ -22201,11 +22201,11 @@ def test_the_health_honesty_suite_is_selected_on_BOTH_halves_of_its_module_pair(
     all, so a registration that lost one half was silent.
 
     That is not hypothetical: `config/ci-surfaces.yml` carries `merge=union`
-    (`.gitattributes`), and a plain `git rebase` of #12645 onto a `main` that had
-    already de-duplicated the file kept BOTH `api` rows and DROPPED the `core` row
-    with no conflict reported. Measured at `d05688df5990`: the rebase printed
-    "Successfully rebased", and the resulting tree selected this suite on a
-    `hosted_api.py` diff and NOT on a `monitoring.py` one.
+    (`.gitattributes`), and a plain `git rebase` of #12645 onto `main`'s
+    `d05688df5990` — which had ALREADY de-duplicated the file and carries both rows —
+    kept BOTH `api` rows and DROPPED the `core` row with no conflict reported. The
+    post-rebase tree (`f2ec5ec092`) selected this suite on a `hosted_api.py` diff and
+    NOT on a `monitoring.py` one; the base itself selects on both.
 
     `integrity()` is not a substitute for this pin, and that is the point: it answers ONE
     question — is every `tests/**/test_*.py` classified SOMEWHERE — so a file that keeps
