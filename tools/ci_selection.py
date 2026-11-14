@@ -1357,6 +1357,35 @@ SOURCE_PATTERNS = {
             # direction is covered instead by the required `docs` job, which runs
             # `tools/bridge_table.py --check` on every PR (#4454).
             "tools/bridge_table.py",
+            # #10488: the consent-key drift checker. `tools/` is in NON_PYTHON_PREFIXES, so a
+            # checker-only edit selected NO surface (`surfaces: []`, `full: false` — measured) and
+            # both of its guards (`test_consent_key_check.py` for the verdict table,
+            # `test_consent_key_fingerprint_10488.py` for the published reading) never ran on the PR
+            # that can break them. Same silent-drop class as the entries around this one, named as a
+            # CONCRETE file because `select()` matches with `startswith` and has no glob support.
+            # Both guards are registered in `api` (dual for the fingerprint one), so the match leaves
+            # nothing behind:
+            #     tools/ci_selection.py --changed-files tools/consent_key_check.py → ['api']
+            "tools/consent_key_check.py",
+            # #10488: the consent bridge SPEC itself. `docs/` is in NON_PYTHON_PREFIXES, and a
+            # bridge-doc-only edit currently selects `onboarding` (measured) — where three consent
+            # guards DO run (`test_oauth_consent_bridge.py`, `test_oauth_consent_bff_routes.py`,
+            # `test_oauth_consent_page_step4.py`). ⛔ SO "no guard runs" IS FALSE, and an earlier cut
+            # of this comment said exactly that. The gap is narrower and real: NONE of those three
+            # pins §2.5 — `test_oauth_consent_bridge.py` binds this doc as `SPEC` for §2.3/§7/§8/§10,
+            # so a §2.5-only rewrite of the rotation runbook — the section the tool's OFF arm sends
+            # an operator to — was invisible to every guard that ran.
+            # #10488 CLOSES that gap from both ends, and BOTH halves are needed: this row makes a
+            # bridge-doc edit select `api`, and `test_consent_key_fingerprint_10488.py` (registered
+            # `api`) now carries
+            # `test_the_SPEC_section_2_5_still_states_the_contract_the_code_implements`, which pins
+            # §2.5's surfaces, field names, verdict vocabulary and hex length. The row alone would
+            # route to guards that are blind to §2.5; the pin alone would sit in a surface a
+            # doc-only edit never selects.
+            # Same cross-row shape as the `docs/client-server-split.md` entry ABOVE (this row, `:1231`):
+            # one path, two surface rows, both deliberate — the doc belongs to `onboarding` because
+            # the BFF half of the bridge is there, and to `api` because the AS half is.
+            "docs/engineering/auth/consent-identity-bridge.md",
             # #4282 Phase 0.3: `tools/mcp_rename_table.py` GENERATES
             # `docs/product/mcp-rename-table.md` and `test_mcp_rename_table.py`
             # (registered in `api` + `core`) is the drift gate. Same shape as the

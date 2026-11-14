@@ -20,16 +20,25 @@ trace rather than a decision about re-attempting):
   stderr away, which is why an unrecorded state must not live only in a console
   line.
 
-⛔ The trace keys on the wire marker #12362 introduces
-(``body["extraction_outcome"] == "unknown"``). ⚠️ NOTHING ON THIS TREE PRODUCES
-IT YET: ``_session_post._refused`` builds only ``{"confirmed": verdict}`` (plus
-``extraction_mode`` for ``UNEXTRACTED``), ``session_confirm`` has no ``pending``
-verdict, and ``hosted_api``'s receipt carries no such field — the producer is
-#12374's PENDING branch, and until it lands the marker is ABSENT, so this trace
-never fires: inert, not wrong. The fixtures below are therefore #12374-SHAPED,
-not production-shaped (``capture_spool.UNRECORDED_OUTCOME_KEY`` says the same).
-It never prices anything: a deferral is an offer to re-extract, and the server
-has not said that extraction did not run.
+⛔ The trace keys on the wire marker ``body["extraction_outcome"] == "unknown"``
+(``#12362``). Its ONE producer is ``__main__._session_post._refused``, which
+synthesises that body when ``session_confirm._extraction_verdict`` returns
+``PENDING`` — the verdict that requires the confirmation READ to have matched the
+posted turns AND the served ``extraction.outcome_known`` to be explicitly
+``False``. That producer landed as #12374 (squash ``5e5845b141``,
+2026-11-14T01:32:37Z), so at or after it the trace is LIVE, not inert: the last
+section of this file drives the real 504 → real ``confirm_capture`` → real
+``_flush_one`` path and asserts the marker lands on the entry, so the hand-built
+bodies below are proven shape-compatible with the producer rather than
+taken on faith. It never prices anything: a deferral is an offer to re-extract,
+and the server has not said that extraction did not run.
+
+⚠️ SCOPE OF THE TRACE, recorded here because no other test in this file can see
+it: the producer is Python-CLI-only. The Pi leg posts to ``/v1/sessions``
+itself (``tortoise-capture.ts``'s ``post()``), so it never receives a body
+carrying the marker and its ``flushSpool`` stamp branch has no live input —
+``session health`` on a Pi box reports nothing for a session in exactly the
+measured state (filed, ``outcome_known: false``). Tracked in #12603.
 """
 from __future__ import annotations
 
@@ -38,6 +47,9 @@ from pathlib import Path
 
 import pytest
 
+from tests._capture_504 import run_capture, served_detail, text_transcript
+from tests._provider_env import pin_provider_routing_env
+from tortoise import __main__ as main
 from tortoise import capture_backlog
 from tortoise.capture_spool import (
     RECORDED_OUTCOME_VERDICTS,
@@ -48,10 +60,12 @@ from tortoise.capture_spool import (
     capture_health_line,
     flush_spool,
     read_spool_meta,
+    spool_dir,
     unrecorded_captures,
     write_spool_entry,
 )
 from tortoise.sdk import _CAPTURE_NO_PROVIDER_MODE
+from tortoise.session_confirm import PENDING
 from tortoise.session_events_drain import (
     drain_session_events,
     format_progress,
@@ -63,12 +77,25 @@ TURNS = [
     {"role": "assistant", "content": "On it."},
 ]
 
-#: ⚠️ #12374-SHAPED, not production-shaped: the `extraction_outcome` half is what
-#: #12374's PENDING branch will synthesise, and NO producer emits it on this tree
-#: (`_refused` builds only `{"confirmed": verdict}`). Durable turns, outcome not
-#: recorded — pinned so the predicate pair stays symmetric.
-UNRECORDED_BODY = {"confirmed": "pending", "extraction_outcome": "unknown"}
-#: The KNOWN store-only shape (#4188 keyless) — a real, priced deferral.
+#: The body `__main__._session_post._refused` synthesises for a `PENDING`
+#: confirmation (durable turns, outcome not recorded) — shape and spelling bound
+#: to the producer's own vocabulary (`session_confirm.PENDING` and the two
+#: `capture_spool` constants), never retyped here: a rename on either side would
+#: otherwise leave this fixture describing a body production no longer emits
+#: while all sixteen tests that feed it stayed green. The composed section
+#: at the end of the file asserts the real producer emits it and that it reaches
+#: the spool entry.
+UNRECORDED_BODY = {"confirmed": PENDING, UNRECORDED_OUTCOME_KEY: UNRECORDED_OUTCOME_VALUE}
+#: The KNOWN store-only shape (#4188 keyless) — a real, priced deferral. The
+#: verdict is deliberately typed in the SHOUTED spelling: `confirmed` is compared
+#: case-insensitively (`outcome_recorded`'s `strip().lower()`), and that is pinned
+#: by the two rows that clear on THIS fixture —
+#: `test_an_unextracted_confirmation_still_clears_the_marker` and
+#: `test_an_unextracted_verdict_clears_a_marker_a_real_flush_stamped` — each of
+#: which reds if the lowercase fold is dropped (measured; a third row feeds this
+#: fixture and is a non-verdict assertion). ⚠️ NOT by
+#: `test_only_a_closed_verdict_vocabulary_clears_the_marker`, whose junk bodies are
+#: non-verdicts whether folded or not: it stays GREEN on that mutant.
 STORE_ONLY_BODY = {"confirmed": "UNEXTRACTED",
                    "extraction_mode": _CAPTURE_NO_PROVIDER_MODE}
 
@@ -207,17 +234,19 @@ def test_a_later_recorded_verdict_CLEARS_the_marker(tmp_path):
 def test_an_unextracted_verdict_clears_a_marker_a_real_flush_stamped(tmp_path):
     """The ``unextracted`` verdict clears even when the marker was written by a
     flush (the full stamp → clear sequence on one entry) rather than by a direct
-    ``stamp_unrecorded_marker`` call. ⚠️ "A real prior pass" means the REAL code
-    path, not a live producer: the marker's own producer is #12374's PENDING
-    branch, which has not landed, so nothing on this tree emits it in production.
+    ``stamp_unrecorded_marker`` call. "A real prior pass" means the REAL code
+    path (``flush_spool``); the marker's live producer is #12374's PENDING
+    branch, proved end-to-end at the end of this file.
 
-    ⚠️ It rests on the confirmation READ matching the posted turns, NOT on the
-    server having recorded an extraction outcome — on this tree
-    ``session_confirm.confirm_capture`` does not consult
-    ``extraction.outcome_known``, so the verdict is exactly as strong as the read
-    (``#12374``'s PENDING branch qualifies it). It stays in the allow-list
-    because ``#12379``'s accepted decision is that a keyless session must stop
-    being reported as unresolved forever.
+    ⚠️ What the verdict proves, precisely: ``unextracted`` requires the
+    confirmation READ to have matched the posted turns AND the served
+    ``extraction.outcome_known`` NOT to be ``False`` (``_extraction_verdict``
+    answers ``PENDING`` for an explicit ``False``, #12374). ⚠️ It is still not
+    POSITIVE evidence of a recorded outcome: a detail with no ``extraction``
+    block at all (a pre-#3520 server, a fake) reads as ``None`` and opens the
+    same verdict. It stays in the allow-list because ``#12379``'s accepted
+    decision is that a keyless session must stop being reported as unresolved
+    forever.
 
     MUTATIONS THAT RED THIS: narrow `outcome_recorded` to `filed` alone.
     """
@@ -346,15 +375,17 @@ def test_an_unextracted_confirmation_still_clears_the_marker(tmp_path):
 
     ``confirmed: "unextracted"`` is synthesised by ``_session_post`` from
     ``session_confirm.confirm_capture``, which read the session back and matched
-    the posted turns. ⚠️ That read establishes DURABILITY, not the extraction
-    outcome: on this tree it does not consult ``extraction.outcome_known``, so an
-    ``unextracted`` confirmation cannot distinguish a store-only re-capture from a
-    resolved store-only outcome, and clearing on it is only as strong as the
-    confirmation read. It stays in the allow-list because #12379's accepted
-    decision is that a keyless session must stop being reported as unresolved;
-    #12374's PENDING branch is what qualifies the verdict. Removing it would make the
-    unresolved-alarm permanent for every keyless session, which is the trade the
-    issue already settled.
+    the posted turns. ⚠️ What that read proves, precisely: the turns are durable
+    AND the served ``extraction.outcome_known`` is NOT ``False`` —
+    ``_extraction_verdict`` answers ``PENDING`` for an explicit ``False``, so this
+    verdict cannot be reached over a capture whose outcome the server has not
+    recorded (#12374). ⚠️ It is still not POSITIVE evidence of a recorded
+    outcome: a detail with no ``extraction`` block at all (a pre-#3520 server, a
+    fake) reads ``None`` and opens the same verdict. It stays in the allow-list
+    because #12379's accepted decision is that a keyless session must stop being
+    reported as unresolved; removing it would make the unresolved-alarm
+    permanent for every keyless session, which is the trade the issue already
+    settled.
 
     MUTATIONS THAT RED THIS: narrow ``RECORDED_OUTCOME_VERDICTS`` to ``filed``
     alone (every keyless session then keeps a permanent false alarm).
@@ -682,3 +713,97 @@ def test_the_two_legs_share_one_marker_and_verdict_vocabulary():
             f"{name}'s recorded-outcome predicate reads `extraction_mode` — a "
             "keyless RE-capture would then clear the marker while recording no "
             "outcome at all")
+
+
+# ── The PRODUCER, end to end (the composed path) ───────────────────────────
+#
+# Everything above hands `flush_spool` a hand-built body. That pins the
+# PREDICATES, but a fixture only ever agrees with itself: it cannot tell you
+# whether the body a real capture produces is the shape these predicates read,
+# whether the verdict that produces it can be reached, or whether the marker
+# survives the filing to reach `session health`. Until #12374 landed there was
+# no producer at all, so this half was provably inert and the section below
+# would have been speculation. It has landed (`5e5845b141`), so the chain is
+# pinned here against the REAL 504 → REAL confirmation read → REAL `_flush_one`
+# path, and the qualifier — not the refusal — is shown to be what decides.
+
+def _capture_through_a_504(tmp_path, monkeypatch, *, outcome_known: bool) -> int:
+    """Drive the REAL `session capture` into the transport bound, then serve a
+    REAL confirmation read carrying `outcome_known`.
+
+    The 504 → confirmation-read harness itself lives in `tests/_capture_504.py`,
+    shared with `tests/test_12362_capture_outcome_unknown.py`, which drives the
+    same producer for the CLI sentence and the backlog ledger.
+    """
+    monkeypatch.setenv("TORTOISE_TEST_MODE", "1")
+    pin_provider_routing_env(monkeypatch)
+    return run_capture(
+        text_transcript(tmp_path),
+        lambda turns: served_detail(SESSION, turns, extracted=0,
+                                    outcome_known=outcome_known),
+        session_id=SESSION)
+
+
+def test_the_PRODUCERS_pending_body_reaches_the_entry_and_the_health_line(
+        tmp_path, monkeypatch, capsys):
+    """`#12374`'s producer → `_flush_one` → `session health`, on the real path.
+
+    The 504 is REAL (the `_session_post` wrapper synthesises the body), the
+    confirmation read is REAL (`session_confirm._extraction_verdict` answers
+    `PENDING` from the served qualifier), and the drain is REAL (`flush_spool`
+    → `_flush_one`'s compare-and-swap). Nothing in this test writes the marker
+    directly, so a broken link anywhere in that chain reds it.
+
+    MUTATIONS THAT RED THIS: drop `_refused`'s `PENDING` arm (the body loses the
+    marker); drop `_extraction_verdict`'s `PENDING` branch (the verdict becomes
+    `unextracted`, which CLEARS); make `_flush_one` skip the stamp; or make
+    `_unrecorded_from_metas` read a different key. The `outcome_known: True`
+    twin below is the other half: same 504, same turns, qualifier flipped.
+    """
+    rc = _capture_through_a_504(tmp_path, monkeypatch, outcome_known=False)
+    err = capsys.readouterr().err
+
+    root = spool_dir()
+    meta = read_spool_meta(root, SESSION) or {}
+    assert rc == 0
+    assert meta.get("filed_key") is not None, (
+        "the marker only proves anything on a FILED entry — an unfiled one is "
+        "re-stamped by the next pass, so a missing stamp there is not a defect")
+    assert meta.get(UNRECORDED_OUTCOME_KEY) == UNRECORDED_OUTCOME_VALUE, (
+        "the producer's own body did not reach the spool entry: the durable "
+        "half of the trace (#12379) is inert on the real path")
+    assert unrecorded_captures(root) == [SESSION], (
+        "the durable surface must name the session, not just hold a key")
+    health = capture_health_line(root)
+    assert health.unrecorded == (SESSION,)
+    main._print_unrecorded_captures(health)
+    named = capsys.readouterr().err
+    assert SESSION in named and "NO recorded extraction outcome" in named, (
+        "the hook's 2>/dev/null discards the drain's line, so this stderr "
+        "statement is the surface that must survive it")
+    assert "will retry" not in err, (
+        "a PENDING confirmation is terminal for TURN durability (#4675) — the "
+        "turns ARE stored")
+    assert capture_backlog.sessions() == [], (
+        "the trace is counted, never PRICED: the server never said extraction "
+        "did not run, so offering a re-extraction is the #12362 bug")
+
+
+def test_the_same_refusal_with_a_KNOWN_outcome_stamps_nothing(
+        tmp_path, monkeypatch):
+    """The QUALIFIER decides, not the refusal — the twin of the test above.
+
+    Same 504, same posted turns, same `extracted: 0`: flipping only
+    `extraction.outcome_known` to `True` must leave no marker at all. Without
+    this row a mutant that stamped on ANY refusal would pass the test above.
+    """
+    rc = _capture_through_a_504(tmp_path, monkeypatch, outcome_known=True)
+
+    root = spool_dir()
+    meta = read_spool_meta(root, SESSION) or {}
+    assert rc == 0
+    assert meta.get("filed_key") is not None
+    assert UNRECORDED_OUTCOME_KEY not in meta, (
+        "the server RECORDED the outcome (outcome_known: true) — stamping it "
+        "would report a resolved session as unresolved forever")
+    assert unrecorded_captures(root) == []

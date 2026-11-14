@@ -783,6 +783,10 @@ def test_the_record_schema_placement_pins_run_on_a_doc_only_diff():
         ):
             runbook_readers.add(reader_path.name)
     assert runbook_readers == {
+        # #10488: the consent-key OPERATOR table (§4.4) — registered in `tier1` for the same reason
+        # as the rest of this set, and in its own file so the always-run smoke gains one pin rather
+        # than fourteen.
+        "test_consent_key_runbook_10488.py",
         "test_deploy_workflow.py",
         "test_durability_posture.py",
         "test_fly_secret_drift.py",
@@ -22160,3 +22164,37 @@ def test_the_blank_session_id_guard_keeps_its_core_arm_too():
     assert "test_9599_blank_session_id.py" in m.get("durations", {}), (
         "a fast-pool file needs a durations row (the #3400/#4348 trap)"
     )
+
+
+def test_the_consent_key_runbook_pin_runs_on_a_runbook_only_diff():
+    """#10488 — the operator-facing table must not be reachable only through a surface.
+
+    `docs/infra-runbook.md` §4.4 is the field table a person HOLDING THE DRIFT ALERT reads: the
+    `consent_token_key` fields, `configured: null` being "did not say" rather than "has no key", the
+    closed `reason` vocabulary, and the two misreads (a rotation window that legitimately reads
+    MISMATCH; `fly secrets set` being reverted by the next deploy). It restates
+    `docs/engineering/auth/consent-identity-bridge.md` §2.5 for that reader.
+
+    The runbook selects NO surface (`docs/` is in `NON_PYTHON_PREFIXES` and the path matches no
+    SOURCE_PATTERNS row), so a runbook-only diff takes the docs-only early return and runs `tier1`
+    only — a `core`- or `api`-only registration would be ASLEEP on the one diff that can break the
+    table. That is the #4309/#11064 silent-drop class, and it is why this pin also asserts the
+    negative (no surface matches), which is the premise that makes `tier1` necessary rather than
+    merely sufficient.
+    """
+    r = _sel(["docs/infra-runbook.md"])
+    assert r["surfaces"] == [], (
+        "docs/infra-runbook.md now matches a SOURCE_PATTERNS row — if that is deliberate, re-derive "
+        "this registration instead of assuming it; if not, the row is a bug (three other pins assert "
+        "the opposite premise: `test_the_record_schema_placement_pins_run_on_a_doc_only_diff`)"
+    )
+    assert r["full"] is False
+    assert "test_consent_key_runbook_10488.py" in r["test_files"], (
+        "a runbook-only diff must select the §4.4 pin, or the operator table can be rewritten into a "
+        "falsehood with every guard asleep"
+    )
+    # …and it must ALSO run wherever the contract's own guards run, so an `api`/`core` edit cannot
+    # leave the restatement behind: `select()` unions `tier1` into every PR selection, so this is
+    # what makes the pin unconditional rather than surface-dependent.
+    for src in ("tools/consent_key_check.py", "tortoise/consent_token.py"):
+        assert "test_consent_key_runbook_10488.py" in _sel([src])["test_files"], src

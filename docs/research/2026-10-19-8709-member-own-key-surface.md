@@ -102,7 +102,8 @@ All line numbers are this tree (`5a19c88ec`).
 
 - The holder predicate the server enforces is `_session_key_holder` = `created_by` **iff**
   `created_via='bootstrap'`, else `None` (`hosted_api.py:6363-6396`). `created_by` is the
-  **minter**, never the holder, for durable rows (`MEMORY.md:47`).
+  **minter**, never the holder, for durable rows (`MEMORY.md` → `[keys]`: "the member's own
+  API key" is NOT `created_by == caller`).
 - The replace lane refuses fail-closed: 404 / 403 "Not your API key" / 409 (revoked or
   expired) **before any mint** (`hosted_api.py:26790-26845`); the replacement inherits the
   displaced row's **absolute** expiry, never widening it (`:27064` registry, `:27411` Supabase).
@@ -265,7 +266,7 @@ own ⟺ keys.filter(k => k.created_via === 'bootstrap' && k.created_by === sessi
 ```
 
 - `created_by` is the **minter**, so the class check is load-bearing: a durable row a member
-  once minted is **org-owned** and must **not** appear (`MEMORY.md:47`, #2427 §4.2).
+  once minted is **org-owned** and must **not** appear (`MEMORY.md` → `[keys]`, #2427 §4.2).
 - `sessionUserId` missing/falsy → **empty list** (fail-closed; never list rows you cannot
   attribute).
 - Revoked and expired rows **stay listed** with their status (tombstone doctrine, #2426).

@@ -15,7 +15,7 @@ approvedBy: daniel-ospina
 # Beta SDK surface
 
 **The recommended set a beta developer sees.** Designed from who the SDK is for and what
-they do — not pruned from the existing 124.
+they do — not pruned from the existing 125.
 
 > **Scope of this approval.** The owner settled the **target surface** on 2026-09-21, including the
 > ruling that `graph_set_recording` is kept — which is what sets the MCP count at **26** (26 at
