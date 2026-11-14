@@ -2819,7 +2819,7 @@ to answer.
 > `The v2 path reports` `16458`→`16523`; `"extraction_mode": "llm:<route>"` `16459`→`16524`;
 > `extracted, meta = self._extract_session_v2(` `16914`→`16979`;
 > `declared = declared_relation_predicates()` `25396`→`25461`; the kind→label write seam
-> `18206-18230`→`18271-18295` (`18271` = `_ekind = _payload_entity_kind(e)`, `18295` = the
+> `18206-18230`→`18272-18296` (`18271` = `_ekind = _payload_entity_kind(e)`, `18295` = the
 > OBJECT arm's `is_episodic=False)` — the subject arm's closes at `18290`).
 > ⛔ Each value was re-derived by OPENING THE LINE on that merged tree, never by arithmetic: the
 > offset here is `+65`, which is exactly what makes adding eight *tempting* and wrong. This
