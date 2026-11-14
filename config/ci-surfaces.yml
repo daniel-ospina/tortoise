@@ -216,22 +216,15 @@ surfaces:
   # ran" from a duplicate row. The shallow fold that merged `#10694` twice produced a
   # duplicate row of this shape.
   - test_cli_config_show.py
-  # #12407/#12428 (main-side drift unblock): `tortoise config show` and `tortoise
-  # doctor` DISCLOSE a repo-root `.env` that the daemon reads and the CLI does not.
-  # `tortoise/__main__.py` is an EXACT `api` SOURCE_PATTERNS match that REPLACES the
-  # `core` fallback, so an `__main__.py`-only diff never reaches `core` — the same
-  # shape, and the same reason, as the #10694 `test_cli_config_show.py` rows directly
-  # above. The file landed on `main` at `9fd4acddba10` with NO manifest row, so
-  # `manifest-integrity` (a required `python-ci-gate.needs` leg) reds `manifest
-  # drift: ['test_env_file_divergence.py']` on `main` ITSELF and therefore on every
-  # PR's merge ref — measured at `4bf1d782ad0f`: `tools/ci_selection.py --integrity`
-  # -> exit 1. That is #11978's class (the gate completes AFTER the merge), not a
-  # defect this PR introduced.
-  # ⛔ This is the `api` registration. The file is ALSO registered in `core`, once,
-  # for the `config.py` / `dotenv_file.py` selection argument — cross-surface (dual)
-  # registration is deliberate. A SECOND row in EITHER surface is what
-  # `--integrity` reds.
-  - test_env_file_divergence.py
+  # ⛔ FORWARD-MERGE #12304: the branch ALSO appended an `api` row for
+  # `test_env_file_divergence.py` here (its own #12407/#12428 drift unblock), while
+  # `main` had independently added the same registration further down this list — so
+  # the `merge=union` driver kept BOTH and `--integrity` redded on `duplicate entry
+  # 'test_env_file_divergence.py' at .surfaces.api[]` (lines 234, 1137). THE
+  # BRANCH'S DUPLICATE WAS DELETED; `main`'s row under the `#11978` comment is kept.
+  # One row per surface is all `--integrity` permits, and `classify_test_file`
+  # answers "api" from the surviving row either way — the two rows were the same
+  # registration, not two intents.
   - test_9583_openapi_read_only_claim.py
   # #4282: the `api` arm of the #4860 key-limit failover guard. The file drives the
   # hosted write door (`POST /v1/sessions` -> `hosted_api._capture_session_impl` ->
