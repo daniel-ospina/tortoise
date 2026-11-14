@@ -327,7 +327,16 @@ def main() -> int:
             # An unreadable or TRUNCATED cache is a refusal, not a crash: falling through to a live
             # walk would silently swap the frame (a 900-row prefix re-derived by a fresh read), and
             # raising would exit 1 with a traceback — the code a lane cannot tell from a crash.
+            # `UnicodeDecodeError` is a ValueError, so undecodable bytes are covered here too.
             _say(f"PROBE-READ({cache}): {e}\n")
+            return 2
+        # PARSED IS NOT A ROW: `1\n2\n3\n` parses cleanly and then dies on `row.get` in `_live()`
+        # — exit 1 with a traceback, from a path this file documents as a refusal. Same hazard
+        # `_attest` guards one level up (a JSON ARRAY parses fine). An EMPTY cache is left to the
+        # GATE-EMPTY arm below (exit 3), which is the honest answer for "no rows", not a refusal.
+        if rows and not all(isinstance(r, dict) and r.get("id") for r in rows):
+            _say(f"PROBE-READ({cache}): not a row cache — expected one JSON object carrying an "
+                 "`id` per line\n")
             return 2
         meta = {"endpoint": "cache:" + str(cache), "rows_walked": len(rows),
                 "pages": None, "offset_reached": None, "refused_at": None}

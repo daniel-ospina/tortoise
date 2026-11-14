@@ -108,7 +108,7 @@ at limit 100, declared as a prefix, not a random sample; 4,220 composed / 2,661 
 sampling** (every one sits below 0.72 in content space) and **0** of them crosses 0.89 on this prefix
 (the pinned 1,500-Point sample recorded 20 — same mechanism, different sample). Wilson 95% intervals on
 the audited strata: shared T4 n=100 k=98 → 92.9–99.5%; raw-only n=40 k=39 → 87.1–99.6%; all-Point
-composed ≈ 4,157–4,216 (98.5–99.9%), raw ≈ 2,371–2,649 (89.1–99.6%) — bounds rounded **outward**
+composed ≈ 4,157–4,216 (98.5–100.0%), raw ≈ 2,371–2,649 (89.1–99.6%) — bounds rounded **outward**
 (floor on the low end, ceil on the high end, 1 dp), and
 the true/proposed totals derived from the audited rates (≈18 composed, ≈62 raw) are **estimates, not
 counts**.
@@ -271,7 +271,7 @@ definition — in-toto's Statement itself has no build-definition field):
 * `provenance.probe_sha256` binds it to the **code** that produced it (gate.json:
   `4f066693fbc1c742e36d29875f4b970af7ee12df264217cf95911f480b47a411`; quote_identity.json:
   `b66f8a174708f855501ac02ae3e5da57dd9e7ae62fac5721cb77c2036f3dfc65`;
-  gate3_false_proposals.json: `d98e31aa450f5c3f2ea1d7b706fa6aba446a7b7dcae8d42eaa134c14f63ddc8b`), and
+  gate3_false_proposals.json: `9a6051e6d60a6b6001d672df64758fff50e11e4f4eeb62a7f6f2e08117b611ad`), and
 * `provenance.payload_sha256` binds it to the **numbers** it produced **and to the row cache they
   are attributed to** — sha256 over `{"artifact": <every field except provenance>,
   "rows_source": …}`, canonicalised `indent=2, sort_keys=True` (gate.json:
@@ -303,7 +303,14 @@ ARRAY parses fine, so that shape needs its own guard before any `.get`); an arti
 on `--attest`, and equally on the MEASUREMENT writes (`--out`, `--pairs-out`, and the row cache),
 so a full read plus a full encode never ends in an `OSError` traceback; an unreadable or TRUNCATED
 row cache is its own refusal (`PROBE-READ`, exit `2`) rather than a fall-through to a live walk,
-because that would swap the frame without saying so. It carries no verdict block,
+because that would swap the frame without saying so — and so is a cache that PARSES but is not a row
+cache (one JSON object carrying an `id` per line). ⚠️ The residual, stated precisely rather than
+waved at: a write that dies mid-line leaves a truncated cache, which the parse refuses; a cache
+truncated EXACTLY at a line boundary parses cleanly and cannot be detected from the cache itself —
+neither is there a committed row count to compare against (the cache is not committed). What a reader
+CAN check is the artifact's own `frame.rows_walked` / `frame.population_used` (900 / 823 for the
+committed frame): a shrunken cache moves them, so a re-derivation is falsifiable even though the
+cache itself is not self-verifying. It carries no verdict block,
 so it has no inconsistent-verdict arm. ⛔ **Every one of these exits `2` and none
 raises**: the shape checks come before any `.get`/`.values()` call, because a lane script cannot
 tell an `AttributeError` out of `main()` (exit `1`) from a refusal. It exists

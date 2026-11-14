@@ -65,7 +65,7 @@
  "duration_s": 65.1,
  "provenance": {
   "probe_path": "probes/gate3_false_proposals.py",
-  "probe_sha256": "d98e31aa450f5c3f2ea1d7b706fa6aba446a7b7dcae8d42eaa134c14f63ddc8b",
+  "probe_sha256": "9a6051e6d60a6b6001d672df64758fff50e11e4f4eeb62a7f6f2e08117b611ad",
   "payload_sha256": "c5aaa639ccf7260463dff03b4e8dae0b4d0724411a48859ff22531b8ec514c99",
   "rows_source": "cache:/tmp/11739-g3-rows.jsonl",
   "encoder": "BAAI/bge-small-en-v1.5 (tortoise.embeddings.EMBEDDING_MODEL)"

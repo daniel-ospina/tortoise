@@ -24,8 +24,11 @@ no assertion at that head read.) `provenance.payload_sha256` is what makes every
 
 Every test names the mutation that reds it. Hermetic: three probes are hashed and three JSON
 artifacts are parsed, plus one float-pair read from `tortoise.embeddings` (no model, no key, no
-network, no DB). No collected-case count is quoted anywhere in this file or its `ci-surfaces.yml`
-row: a hand-written count re-stales on every case a review round adds.
+network, no DB). No count describing this FILE'S CURRENT SIZE (collected cases, test functions,
+pass count) is quoted in this file or its `ci-surfaces.yml` row: a hand-written count re-stales on
+every case a review round adds. Counts that appear in the prose below are HISTORICAL — the observed
+result of a specific mutation at a named head, evidence for a claim — never a description of how many
+cases exist now.
 """
 from __future__ import annotations
 
@@ -59,7 +62,7 @@ def _artifact(name: str) -> dict:
 
 
 def _payload_digest(artifact: dict) -> str:
-    """The EVIDENCE binding, recomputed exactly as both probes compute it: sha256 over every
+    """The EVIDENCE binding, recomputed exactly as all three probes compute it: sha256 over every
     field of the artifact except `provenance`, TOGETHER WITH the row source those fields are
     attributed to, canonicalised `indent=2, sort_keys=True`.
 
@@ -67,7 +70,8 @@ def _payload_digest(artifact: dict) -> str:
     the file's formatting — reformatting the JSON does not red, editing a number does. The
     attribution is inside the digest (`rows_source`), because re-pointing it at a different cache
     is an edit to the evidence: measured before that, `rows_source` -> `/tmp/some-other-cache.jsonl`
-    left the pin at 10 passed.
+    left the pin entirely GREEN (10 cases collected at that head — the number differs from the `9`
+    quoted further down because a case landed in between, not because the measurement moved).
     """
     body = {k: v for k, v in artifact.items() if k != "provenance"}
     canon = json.dumps(
@@ -149,12 +153,13 @@ def test_the_gate3_counts_are_the_ones_the_issue_quotes():
     assert gate3["arms"]["threshold"] == DEFAULT_THRESHOLD
 
 
-def test_the_two_artifacts_name_different_probes():
-    """FAILS IF one artifact's provenance block is copy-pasted onto the other.
+def test_the_three_artifacts_name_different_probes():
+    """FAILS IF one artifact's provenance block is copy-pasted onto another.
 
-    The two artifacts answer different questions (gate verdicts vs the quote-identity root
-    cause) from different probes, so equal digests could only be a copy-paste — the shape that
-    would make both bindings pass while one of them was describing the wrong code.
+    The three artifacts answer different questions (gate verdicts, the quote-identity root cause,
+    the composed-arm false-proposal count) from different probes, so equal digests could only be a
+    copy-paste — the shape that would make all the bindings pass while one of them described the
+    wrong code.
     """
     gate = _artifact("gate.json")["provenance"]["probe_sha256"]
     identity = _artifact("quote_identity.json")["provenance"]["probe_sha256"]
@@ -269,6 +274,33 @@ def test_the_readme_quotes_each_probes_digest_in_its_own_context():
             "get swapped while being refreshed)")
 
 
+def test_the_readme_quotes_each_artifacts_PAYLOAD_digest_too():
+    """FAILS IF the README's three `payload_sha256` quotations are stale or SWAPPED.
+
+    The sibling probe-digest pin closed only the HALF that binds the code. The payload paragraph
+    carries the same three labels over the digests that bind the NUMBERS, and it was unpinned —
+    swapping `gate.json`'s payload digest with `quote_identity.json`'s left all 38 cases green
+    (measured, #12593 review finding 4). That is not a hypothetical shape: #12490's refresh mapped
+    old values by SORTED order rather than by artifact, so it would have swapped BOTH digests; the
+    repair that fixed the probe half left the evidence half exposed, which is the half a future
+    hand-edit of a NUMBER would need to survive.
+    """
+    readme = (BUNDLE / "README.md").read_text(encoding="utf-8")
+    assert "`provenance.payload_sha256`" in readme, (
+        "the README no longer carries the payload-digest paragraph this test parses")
+    paragraph = readme.split("`provenance.payload_sha256`", 1)[1]
+    for label, name in (("gate.json:", "gate.json"),
+                        ("quote_identity.json:", "quote_identity.json"),
+                        ("gate3_false_proposals.json:", "gate3_false_proposals.json")):
+        assert label in paragraph, f"the README's payload paragraph lost its `{label}` label"
+        quoted = _first_hex_after(paragraph, label)
+        own = _artifact(name)["provenance"]["payload_sha256"]
+        assert quoted == own, (
+            f"the README quotes {quoted[:12]}… after `{label}` in the PAYLOAD paragraph, but "
+            f"{name}'s attested payload digest is {own[:12]}… — refresh the README from the "
+            "artifacts (and check the three did not get swapped while being refreshed)")
+
+
 def _first_hex_after(text: str, label: str) -> str:
     """The first 64-hex token after `label` — the digest that label presents."""
     tail = text.split(label, 1)[1]
@@ -329,7 +361,9 @@ def test_the_artifacts_name_the_row_cache_and_encoder_the_dates_rest_on():
     `rows_source` is the anchor the README's reproducibility paragraph leans on ("the committed
     numbers are reproducible from the row cache named in `provenance.rows_source`"), and editing it
     re-points the evidence at a different cache while leaving both digests intact — measured before
-    this test existed: setting it to `/tmp/some-other-cache.jsonl` gave `9 passed`. `gate.json` also
+    this test existed: setting it to `/tmp/some-other-cache.jsonl` gave `9 passed` (the suite's size
+    at THAT head; the `10` quoted earlier is a later one — both are historical, neither describes the
+    file now). `gate.json` also
     records the same string at the top level as `source`, so the two must agree.
     """
     gate = _artifact("gate.json")
@@ -477,7 +511,7 @@ def test_quote_identity_attest_refuses_the_tamper_shapes(shape, mutate):
     ("gate3_false_proposals.py", ["proposals", "frame"]),
 ])
 def test_attest_refuses_an_artifact_whose_root_is_not_an_object(probe_name, root):
-    """FAILS IF either probe's shape guard is removed, so a JSON ARRAY exits 1 instead of 2.
+    """FAILS IF any probe's shape guard is removed, so a JSON ARRAY exits 1 instead of 2.
 
     `json.loads("[…]")` parses fine, so `ATTEST-UNREADABLE` cannot catch it. Once the membership
     arm passes, the pre-#12476 code called `.get` on a LIST and raised `AttributeError` out of
@@ -522,9 +556,9 @@ def test_attest_rewrites_on_a_legitimate_rebind_and_still_carries_the_residual()
 @pytest.mark.parametrize("probe_name", ["composed_gate.py", "quote_identity.py",
                                         "gate3_false_proposals.py"])
 def test_attest_refuses_an_unreadable_artifact(probe_name):
-    """FAILS IF either probe's `ATTEST-UNREADABLE` arm is weakened into a crash or a blessing.
+    """FAILS IF any probe's `ATTEST-UNREADABLE` arm is weakened into a crash or a blessing.
 
-    Both probes are driven, and this is the ONE refusal shape the other cases cannot reach: every
+    All three probes are driven, and this is the ONE refusal shape the other cases cannot reach: every
     other arm needs a PARSEABLE artifact to reason about, so nothing else exercises the
     `except (OSError, ValueError)` at the top of `_attest`. Measured before this test existed:
     deleting that `except` from `quote_identity.py` made the arm exit **1** (`FileNotFoundError`
@@ -583,34 +617,107 @@ def test_attest_reports_probe_write_on_an_unwritable_target(probe_name, artifact
         assert target.read_bytes() == before
 
 
-def test_gate3s_measurement_writes_refuse_instead_of_crashing():
-    """FAILS IF gate3's `--out` / `--pairs-out` / row-cache writes regress to a bare `open()`.
+def test_gate3_attest_refuses_an_artifact_with_no_source():
+    """FAILS IF gate3's `ATTEST-REFUSED` arm (no `source`) is deleted.
+
+    `config/ci-surfaces.yml` asserts that ALL THREE probes' `--attest` refusal arms are DRIVEN —
+    gate3's `ATTEST-REFUSED` arm was driven by nothing (the tamper parametrization covers
+    `composed_gate.py` and `quote_identity.py` only), so deleting `if not source: return 2` reddened
+    nothing while the row claimed coverage (#12593 review finding 5). The arm matters because
+    without it `--attest` blesses an artifact whose numbers are attributable to NO cache: the
+    `rows_source` it writes would be invented.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        target = Path(td) / "gate3_false_proposals.json"
+        artifact = _artifact("gate3_false_proposals.json")
+        artifact.pop("source")
+        target.write_text(json.dumps(artifact, indent=2) + "\n", encoding="utf-8")
+        before = target.read_bytes()
+        rc = _load_probe("gate3_false_proposals.py")._attest(str(target))
+        assert rc == 2, f"a source-less artifact was attested (exit {rc}), not refused (2)"
+        assert target.read_bytes() == before, "a refused attest must leave the artifact untouched"
+
+
+def test_gate3s_measurement_writes_all_route_through_the_one_guard():
+    """FAILS IF gate3 regrows a write path that bypasses `_write` (the PROBE-WRITE arm).
 
     The probe's docstring, the README's refusal inventory and `config/ci-surfaces.yml` all describe
     `PROBE-WRITE` as this probe's property, but the guard had to be EXTRACTED (`_write`) before it
     could be driven without a live read plus a full encode: the first version of this bundle
     documented the arm and implemented it only in `_attest`, so `--out /unwritable/path` raised
     `OSError` out of `main()` — exit 1 with a traceback, after the whole measurement (#12593 review
-    finding 1). Driving `_write` directly is what makes the promise mechanical, and the source
-    assertion below is what keeps the WIRING honest: without it, reverting `main()` to a bare
-    `open()` would leave this case green (it drives the helper, not the call sites) and red only the
-    digest pin — a green arm over a probe that still crashes.
+    finding 1). Driving `_write` directly is what makes the promise mechanical; THIS assertion is
+    what keeps the WIRING honest, because the behavioural case drives the helper and would stay
+    green over a `main()` that went back to a bare `open()`.
+
+    ⛔ A TEXTUAL `open(` scan is defeatable and this is an AST walk instead: `Path.write_text`,
+    `write_bytes`, `os.open`, `io.open` and `open ("x")` (a space) all slip past a line regex while
+    doing exactly the damage — and `Path.write_text` is the idiom THIS repo uses, this very file
+    included, so it is the plausible shape of a future regression (measured: the regex version left
+    `pathlib.Path(p).write_text(...)` in `main()` green).
+    """
+    import ast
+
+    src = (PROBES / "gate3_false_proposals.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    WRITE_ATTRS = {"write_text", "write_bytes", "open"}
+
+    writes = []          # (lineno, enclosing function or None)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = (func.id if isinstance(func, ast.Name)
+                else func.attr if isinstance(func, ast.Attribute) else "")
+        if name not in WRITE_ATTRS:
+            continue
+        # `open(path)` with no arguments is prose, not a call; every real one passes ≥1 arg.
+        if name == "open" and not node.args:
+            continue
+        writes.append(node)
+
+    def enclosing_ok(node) -> bool:
+        # Walk the tree once more for the innermost FunctionDef containing `node`.
+        for fn in ast.walk(tree):
+            if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if any(child is node for child in ast.walk(fn)):
+                    return fn.name == "_write"
+        return False
+
+    stray = [(w.lineno, getattr(w.func, "id", getattr(w.func, "attr", "")))
+             for w in writes if not enclosing_ok(w)]
+    assert not stray, (
+        "gate3 performs a file write outside its `_write` guard — a bare write on --out / "
+        "--pairs-out / the row cache raises OSError out of main() (exit 1, the code it promises "
+        f"never to return): {sorted(stray)}")
+
+    probe = _load_probe("gate3_false_proposals.py")
+    # …and the same guard is the one a WRITABLE target goes through, so it cannot be a
+    # refusal-only stub: a pass must actually write.
+    with tempfile.TemporaryDirectory() as td:
+        ok = Path(td) / "ok.json"
+        rc = probe._write(str(ok), lambda fh: fh.write('{"a": 1}'))
+        assert rc == 0, f"a writable target exited {rc}, not 0"
+        assert json.loads(ok.read_text(encoding="utf-8")) == {"a": 1}
+
+
+@pytest.mark.skipif(os.geteuid() == 0,
+                    reason="root ignores the mode bits the PROBE-WRITE arm needs")
+def test_gate3s_write_guard_refuses_an_unwritable_target():
+    """FAILS IF gate3's `_write` re-raises `OSError` instead of returning the documented exit 2.
+
+    ⛔ The root guard is NOT boilerplate: the sibling `test_attest_reports_probe_write_on_an_
+    unwritable_target` carries it for the same reason, and this case drives the same mechanism
+    (`chmod 0o400` + a write). Without it a uid-0 runner — a container lane, a cell, the docker
+    test lane — sees the `open` SUCCEED, gets `rc == 0`, and reds a file dual-registered `core` +
+    `tier1`, i.e. on exactly the docs-only diffs this pin exists for (#12593 review finding 2).
     """
     probe = _load_probe("gate3_false_proposals.py")
-    # Every write in this probe goes through the ONE guard: the module body must contain no
-    # `open(` outside `_write` (the only text `open(` appears in is that guard's own `with open(`).
-    src = (PROBES / "gate3_false_proposals.py").read_text(encoding="utf-8")
-    # `open()` inside prose (a docstring naming the hazard) is not a call: match only an `open(`
-    # that carries an ARGUMENT, which is what a bare write looks like.
-    write_calls = [ln for ln in src.splitlines()
-                   if re.search(r"\bopen\((?!\))", ln) and not ln.lstrip().startswith("#")]
-    assert len(write_calls) == 1, (
-        "gate3 opens a file outside its `_write` guard — a bare `open()` on --out / --pairs-out / "
-        f"the row cache raises OSError out of main() (exit 1, the code it promises never to "
-        f"return): {write_calls}")
     with tempfile.TemporaryDirectory() as td:
         target = Path(td) / "out.json"
         target.write_text("prior", encoding="utf-8")
+        # The FILE's mode, not the directory's — `open(..., "w")` truncates an existing file, so a
+        # read-only DIRECTORY still lets the write through.
         os.chmod(target, 0o400)
         try:
             rc = probe._write(str(target), lambda fh: fh.write("x"))
@@ -618,9 +725,3 @@ def test_gate3s_measurement_writes_refuse_instead_of_crashing():
             os.chmod(target, 0o600)
         assert rc == 2, f"an unwritable --out exited {rc}, not 2 (PROBE-WRITE)"
         assert target.read_bytes() == b"prior", "a refused write must leave the target untouched"
-        # …and the same guard is the one a WRITABLE target goes through, so it cannot be a
-        # refusal-only stub: a pass must actually write.
-        ok = Path(td) / "ok.json"
-        rc = probe._write(str(ok), lambda fh: fh.write('{"a": 1}'))
-        assert rc == 0, f"a writable target exited {rc}, not 0"
-        assert json.loads(ok.read_text(encoding="utf-8")) == {"a": 1}
