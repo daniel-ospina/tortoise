@@ -57,7 +57,15 @@ DOC = ROOT / "docs" / "product" / "sdk-surface-declaration.md"
 # #10187); the 26 with no caller under `tortoise/**` went, code archived at tag
 # `archive/4282-surplus-sdk-methods`. The approved 40 is untouched — this pin tracks what
 # EXISTS, and it moved only because 26 surplus methods stopped existing.
-DECLARED_COUNT = 124
+#
+# 124 → 125 (#10015, 2026-11-14): row 28 `get_organisation_account` was IMPLEMENTED. The
+# approved 40 did NOT grow — the owner's approval (`#10015` comment `6863608333`) is for
+# delivering a name that was already approved and unshipped, which is the same move PR
+# #10053 made for three rows ("what grew is the IMPLEMENTATION of three names the owner
+# already approved"). `high_water_counts.sdk_public_methods` stays at 150 in
+# `config/surface-manifest.yml` — the growth pin did not move, and this literal tracks the
+# frozen row set, which must move whenever a row is added.
+DECLARED_COUNT = 125
 
 
 def _declaration() -> dict:

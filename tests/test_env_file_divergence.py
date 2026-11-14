@@ -2101,15 +2101,137 @@ def test_a_blank_env_uri_beside_a_broken_file_key_is_not_reported_as_both(
         payload["daemon_error"])
 
 
+def test_the_daemon_resolver_reports_the_rung_it_was_on(monkeypatch):
+    """`daemon_db_target` attaches the KEY it was reading when it raised.
+
+    #12441 item 5. The disclosure has to say which key decided a rejection, and
+    it used to re-derive that with a second walk of `DAEMON_DB_KEYS` spelled
+    "first truthy key". That agrees with the ladder ONLY while the ladder stays
+    exactly that shape: the day it gains a rung which is not "first truthy", the
+    attribution desyncs silently and nothing fails. So the resolver owns the
+    answer and the report reads it.
+
+    Both keyed rungs are pinned, plus the `ValueError` compatibility every
+    existing caller (`mcp_server._get_sdk`, the `.env` disclosure) relies on.
+    """
+    from tortoise.config import RELATIVE_PATH_ERROR, DaemonTargetError, daemon_db_target
+
+    monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+    monkeypatch.setenv("TORTOISE_DB_URI", "relative/x.db")
+    with pytest.raises(DaemonTargetError) as uri_err:
+        daemon_db_target()
+    assert uri_err.value.key == "TORTOISE_DB_URI"
+    assert isinstance(uri_err.value, ValueError)      # call sites stay compatible
+    # ⛔ BYTE-IDENTICAL, not merely "mentions the value" (review, P3): the
+    # invariant `from exc` exists to keep is that the message survives the
+    # wrapping untouched, and `"relative/x.db" in str(...)` also passes for a
+    # message rewritten to `f"daemon target rejected: {exc}"` — a pin that cannot
+    # fail on the thing its own comment names is a finding, not a pin.
+    assert str(uri_err.value) == RELATIVE_PATH_ERROR.format(path="relative/x.db")
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    monkeypatch.setenv("TORTOISE_DB_PATH", "relative/y.db")
+    with pytest.raises(DaemonTargetError) as path_err:
+        daemon_db_target()
+    assert path_err.value.key == "TORTOISE_DB_PATH"
+    assert str(path_err.value) == RELATIVE_PATH_ERROR.format(path="relative/y.db")
+
+    # …and a whitespace-only URI is a DECIDING rung (`if uri:`), not an unset
+    # one — the distinction the whole attribution rests on.
+    monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+    monkeypatch.setenv("TORTOISE_DB_URI", "   ")
+    with pytest.raises(DaemonTargetError) as blank_err:
+        daemon_db_target()
+    assert blank_err.value.key == "TORTOISE_DB_URI"
+
+
+def test_the_rendered_diagnostic_keeps_its_ValueError_prefix(
+        capsys, _isolated, monkeypatch):
+    """The leading token of the USER-VISIBLE message must not move — at BOTH sites.
+
+    `config show` prints `env_file["daemon_error"]` verbatim and `doctor`
+    truncates it at 90 chars, so the prefix is what an operator grep or a runbook
+    keys on. Rendering `type(exc).__name__` would have changed `ValueError:` to
+    `DaemonTargetError:` now that the resolver raises a subclass — a silent change
+    to user-facing text that no test would have caught (review, P3).
+
+    ⛔ TWO render sites, and a pin on one says nothing about the other: measured,
+    reverting ONLY the no-overlay site below left all three affected suites green
+    (the count moves with every head, so it is a point-in-time measurement,
+    not a reproducible one) — the identical round-1 defect, fixed in code and
+    unpinned at the second arm. So both states are driven here.
+
+    The subclass exists to carry the rung INTERNALLY; the label stays the base
+    class, so every earlier run's output is byte-identical here.
+    """
+    # ── Site 1: the OVERLAY arm — the file still has a pending ladder key.
+    _write_env(_isolated, "TORTOISE_DB_URI=relative/x.db\n")
+    payload = _show_json(capsys)["env_file"]
+    daemon_error = payload["daemon_error"] or ""
+    assert daemon_error.startswith("ValueError: "), daemon_error
+    assert "DaemonTargetError" not in daemon_error, daemon_error
+
+    # ── Site 2: the NO-OVERLAY arm — nothing is left to fill, because the shell
+    # already carries the file's exact value. This is the state `doctor` reaches
+    # after its own mid-run import.
+    monkeypatch.setenv("TORTOISE_DB_URI", "relative/x.db")
+    payload = _show_json(capsys)["env_file"]
+    daemon_error = payload["daemon_error"] or ""
+    assert daemon_error.startswith("ValueError: "), daemon_error
+    assert "DaemonTargetError" not in daemon_error, daemon_error
+
+
+def test_the_attribution_reads_the_resolvers_key_not_a_second_walk(
+        capsys, _isolated, monkeypatch):
+    """Pinned by MUTATION, because no INPUT can distinguish the two forms.
+
+    Today "first truthy key" and "the rung the resolver was on" agree in every
+    reachable state — that IS item 5's hazard: a second spelling is only
+    detectably wrong after the ladder changes, and then it fails silently. So the
+    seam is tested the only way it can be: make the resolver name the LOWER rung
+    and require the attribution to follow it.
+
+    ⛔ WHAT THIS CASE KILLS, precisely (review, P3 — the first version overstated
+    it). It kills a PRESENCE re-walk (`key in os.environ`), demonstrated red. It
+    does NOT kill a first-NON-BLANK re-walk: in this test's own state the overlay
+    makes `TORTOISE_DB_PATH` present AND non-blank, so that spelling coincides
+    with the forged key — a non-blank re-walk is caught by
+    `test_a_blank_env_uri_beside_a_broken_file_key_is_not_reported_as_both` and
+    `test_a_whitespace_only_ladder_key_is_attributed_to_the_ENVIRONMENT`, which
+    redden instead. Both spellings are pinned; this case is not the sole pin, and
+    reading it as one would make those two look redundant.
+    """
+    import tortoise.config as config
+
+    monkeypatch.setenv("TORTOISE_DB_URI", "   ")     # deciding, and rejected
+    _write_env(_isolated, "TORTOISE_DB_PATH=/tmp/file-path.db\n")
+
+    real = config.daemon_db_target
+
+    def forged():
+        try:
+            return real()
+        except config.DaemonTargetError as exc:
+            # The resolver now claims the rejection came from the PATH rung.
+            raise config.DaemonTargetError(str(exc), "TORTOISE_DB_PATH") from exc
+
+    monkeypatch.setattr(config, "daemon_db_target", forged)
+
+    payload = _show_json(capsys)["env_file"]
+
+    # The file DOES supply `TORTOISE_DB_PATH`, so the key the resolver named was
+    # supplied by the file → `both`. A re-walking implementation says `env`.
+    assert payload["daemon_error_source"] == "both", payload.get("daemon_error")
+
+
 def test_the_mixed_shadowed_doctor_row_credits_the_FILE_when_its_key_is_the_top_rung():
     """The `doctor` surface's FILE-wins half, which no test reached at all.
 
     `_dotenv_rows` derives two mixed sentences and only the env-wins one was
     pinned. Measured by injecting `raise SystemExit` at the file-wins arm in the
     #12428 round-11 review: `test_env_file_divergence` + `test_doctor` +
-    `test_cli_config_show` — 434 tests at that head — stayed fully green. (With
-    this PR's two cases the same three files collect 437, so the figure is not
-    reproducible here; the substantive claim is: the mutant reddens exactly ONE
+    `test_cli_config_show` — 434 tests at that head — stayed fully green. (That
+    count moves with every head, so it is a point-in-time measurement, not a
+    reproducible one; what the pin rests on is: the mutant reddens exactly ONE
     test, the new one.) The sentence is true in every state a review reached;
     only its pin was missing, the same class as the `file_graph_keys` clause.
 
@@ -2213,3 +2335,330 @@ def test_a_whitespace_only_ladder_key_is_attributed_to_the_ENVIRONMENT(
     assert payload["daemon_error_source"] == "env", payload.get("daemon_error")
     assert "the value is the one this" not in (payload.get("daemon_error") or ""), (
         payload["daemon_error"])
+
+
+def test_a_blank_file_key_is_not_named_as_the_deciding_rung(
+        capsys, _isolated, monkeypatch):
+    """The ASSERTION side of the same truthiness rule, on both surfaces.
+
+    #12441 item 1, the state the scoping comment did not cover. `.env` carries a
+    BLANK `TORTOISE_DB_URI`; the shell exports `TORTOISE_DB_PATH=/tmp/env-path.db`.
+    `config.daemon_db_target` tests `if uri:`, so the blank URI is SKIPPED and the
+    `path` rung decides on the shell's key. The attribution walk was
+    presence-based, so it read `graph_keys == ["TORTOISE_DB_URI"]`, picked that
+    blank key first, and printed *"the file's TORTOISE_DB_URI resolves to it for
+    the daemon too"* — naming a value the ladder never read, which is the one
+    failure this disclosure exists to prevent.
+
+    ⛔ Pinned by MUTATION, because both forms answer VALIDLY-looking prose: restoring
+    `_deciding = next(k for k in _DB_LADDER_KEYS if k in graph_keys or k in
+    _carried)` reddens this test at BOTH surfaces, and the pre-fix form was green
+    everywhere else. That is the whole point of deriving from the resolver's rung
+    (`config.RUNG_DECIDING_KEY`): the wrong answer was plausible, not obviously
+    broken.
+    """
+    _write_env(_isolated, "TORTOISE_DB_URI=\n")
+    monkeypatch.setenv("TORTOISE_DB_PATH", "/tmp/env-path.db")
+
+    payload = _show_json(capsys)["env_file"]
+    # The state this test is about, asserted rather than assumed: the file's key
+    # is pending, blank, and the ladder stopped on the ENVIRONMENT's DB_PATH.
+    assert payload["graph_keys"] == ["TORTOISE_DB_URI"], payload
+    assert payload["env_graph_keys"] == ["TORTOISE_DB_PATH"], payload
+    assert payload["daemon_rung"] == "path", payload
+    assert payload["differs"] is False, payload
+
+    out = _show_text(capsys)
+    assert "the ENVIRONMENT's" in out and "TORTOISE_DB_PATH decides it" in out, out
+    assert "resolves to it for the daemon too" not in out, (
+        "the file's BLANK TORTOISE_DB_URI was credited with a rung the ladder "
+        "skipped — the environment's TORTOISE_DB_PATH decided: " + out)
+
+    # The SECOND surface over the same payload (`doctor`), because a pin on one
+    # renderer says nothing about the other — the round-1 defect of this file.
+    assert _run(("doctor",)) in (0, 1)
+    doc = capsys.readouterr().out
+    assert "the ENVIRONMENT's TORTOISE_DB_PATH decides it for the daemon" in doc, doc
+    assert "it selects the same graph target the rows below grade" not in doc, doc
+
+
+def test_every_rung_the_ladder_can_return_has_a_deciding_key(monkeypatch):
+    """`config.RUNG_DECIDING_KEY` is checked against the LADDER, not itself.
+
+    The table maps a rung to the `DAEMON_DB_KEYS` entry it consumed, so the four
+    attribution sites stop re-spelling the ladder (#12441 items 1 and 5). Its one
+    failure mode is INCOMPLETENESS: a rung added to `daemon_db_target` with no row
+    here would make the report name no key — `rung_deciding_key` returns `None` and
+    the arms degrade to "unknown origin" — with nothing failing. So every rung is
+    DRIVEN out of the resolver here and the set is compared both ways: a new rung
+    reddens this test, and so does a stale row for a rung the ladder can no longer
+    produce.
+    """
+    from tortoise.config import DAEMON_DB_KEYS, RUNG_DECIDING_KEY, daemon_db_target
+
+    for key in (*DAEMON_DB_KEYS, "TORTOISE_ALLOW_EMBEDDED"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("HOME", "/tmp")
+
+    driven: set[str] = set()
+
+    # refuses — nothing set.
+    driven.add(daemon_db_target()[1])
+    # embedded-allowed — the test hatch, both ladder keys unset.
+    monkeypatch.setenv("TORTOISE_ALLOW_EMBEDDED", "1")
+    driven.add(daemon_db_target()[1])
+    monkeypatch.delenv("TORTOISE_ALLOW_EMBEDDED")
+    # path — TORTOISE_DB_PATH only.
+    monkeypatch.setenv("TORTOISE_DB_PATH", "/tmp/x.db")
+    driven.add(daemon_db_target()[1])
+    monkeypatch.delenv("TORTOISE_DB_PATH")
+    # file-uri — a bare non-docker URI on TORTOISE_DB_URI.
+    monkeypatch.setenv("TORTOISE_DB_URI", "/tmp/uri.db")
+    driven.add(daemon_db_target()[1])
+    monkeypatch.delenv("TORTOISE_DB_URI")
+    # uri — a docker URI, which wins outright.
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
+    driven.add(daemon_db_target()[1])
+
+    assert set(driven) == set(RUNG_DECIDING_KEY), (
+        "the rung table and the ladder disagree — a rung the ladder can return "
+        f"is unmapped, or a mapped rung is unreachable. ladder={sorted(driven)} "
+        f"table={sorted(RUNG_DECIDING_KEY)}")
+    mapped = {key for key in RUNG_DECIDING_KEY.values() if key is not None}
+    assert mapped == set(DAEMON_DB_KEYS), (
+        "RUNG_DECIDING_KEY names a key that is not a ladder key (or leaves one "
+        f"unnameable): {sorted(mapped)}")
+    # The two keyed rungs, spelled out — the mapping an operator sees in the rows.
+    assert RUNG_DECIDING_KEY["uri"] == RUNG_DECIDING_KEY["file-uri"] == (
+        "TORTOISE_DB_URI")
+    assert RUNG_DECIDING_KEY["path"] == RUNG_DECIDING_KEY["embedded-allowed"] == (
+        "TORTOISE_DB_PATH")
+    assert RUNG_DECIDING_KEY["refuses"] is None
+
+
+def test_the_embedded_hatch_is_not_described_as_an_environment_key(
+        capsys, _isolated, monkeypatch):
+    """`embedded-allowed` must not name a variable the user does not have.
+
+    `RUNG_DECIDING_KEY` maps `embedded-allowed` to `TORTOISE_DB_PATH` because
+    that is the ladder key whose EMPTINESS produced the rung — the ladder read it
+    and fell through. The rung itself was selected by the `TORTOISE_ALLOW_EMBEDDED`
+    hatch, so `TORTOISE_DB_PATH` is UNSET in this state, and a renderer that reads
+    the table alone printed *"the ENVIRONMENT's TORTOISE_DB_PATH decides it for
+    the daemon"* about a variable that does not exist.
+
+    ⛔ Measured before the hatch got its own sentence: `.env` = `TORTOISE_DB_URI=`
+    (blank), shell `TORTOISE_ALLOW_EMBEDDED=1`, nothing else — `config show` AND
+    `doctor` both named the unset `TORTOISE_DB_PATH`; removing that gate instead
+    fell through to the FILE sentence, crediting the file's blank key with
+    choosing the embedded default. Both are the false-mechanism class this whole
+    change exists to remove, so this rung draws its own sentence on both surfaces
+    and is pinned here. Mutant: reverting the hatch branch to either the
+    environment-credited or the file-credited sentence reddens this test; so does
+    deleting the `graph_keys` branch from both renderers (5 failed).
+    """
+    _write_env(_isolated, "TORTOISE_DB_URI=\n")
+    monkeypatch.setenv("TORTOISE_ALLOW_EMBEDDED", "1")
+    monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+
+    payload = _show_json(capsys)["env_file"]
+    assert payload["daemon_rung"] == "embedded-allowed", payload
+    assert payload["env_graph_keys"] == [], payload   # no ladder key is set
+    assert payload["differs"] is False, payload
+    # ⛔ The PRECONDITION that puts the renderer in the arm under test: the file
+    # DOES hold a ladder key, so the `graph_keys` branch is the one that runs.
+    # Without this the absence assertions below would pass on a payload that
+    # never reached the arm at all (review round 3, P2).
+    assert payload["graph_keys"] == ["TORTOISE_DB_URI"], payload
+
+    # ⛔ POSITIVE, not merely absent: the state must be DESCRIBED, and described
+    # as the hatch. An absence-only pin passed with the whole branch deleted —
+    # it cannot tell "described correctly" from "not described at all", and it
+    # accepts the false file-credit sentence as readily as the false
+    # environment-credit one (review round 3, P2).
+    out = _show_text(capsys)
+    assert "selected by" in out and "TORTOISE_ALLOW_EMBEDDED=1" in out, out
+    assert "TORTOISE_DB_PATH decides it" not in out, (
+        "the embedded hatch was described as the ENVIRONMENT's "
+        "TORTOISE_DB_PATH deciding it, and TORTOISE_DB_PATH is unset here: " + out)
+    assert "resolves to it for the daemon too" not in out, (
+        "the file's BLANK TORTOISE_DB_URI was credited with choosing the "
+        "embedded default: " + out)
+
+    assert _run(("doctor",)) in (0, 1)
+    doc = capsys.readouterr().out
+    assert "TORTOISE_ALLOW_EMBEDDED=1" in doc and "canonical EMBEDDED" in doc, doc
+    assert "TORTOISE_DB_PATH decides it" not in doc, doc
+    assert "it selects the same graph target the rows below grade" not in doc, doc
+
+
+def test_a_whitespace_only_env_key_is_still_the_ONE_THAT_DECIDED(
+        capsys, _isolated, monkeypatch):
+    """The other half of the same discriminator, and the trap in the obvious fix.
+
+    Gating the "the ENVIRONMENT's X decides it" sentence on `X in env_graph_keys`
+    looks right and is WRONG: `env_graph_keys` filters `.strip()`, while the
+    ladder's own test is raw truthiness (`if os.environ.get(key):`), so a
+    WHITESPACE-ONLY `TORTOISE_DB_PATH` is consumed by the `path` rung and then
+    excluded from the set. The row fell through to the FILE sentence — crediting
+    the file's blank `TORTOISE_DB_URI` with a decision the environment's
+    whitespace value made (measured regression, review round 3, P1).
+
+    So the discriminator is the RUNG, not set membership. This pins it.
+    """
+    _write_env(_isolated, "TORTOISE_DB_URI=\n")
+    monkeypatch.setenv("TORTOISE_DB_PATH", "   ")
+
+    payload = _show_json(capsys)["env_file"]
+    assert payload["daemon_rung"] == "path", payload
+    assert payload["env_graph_keys"] == [], payload        # the strip() filter
+    assert payload["blank_graph_keys"]["env"] == ["TORTOISE_DB_PATH"], payload
+    assert payload["differs"] is False, payload
+
+    # ⛔ And the sentence must say what the blank value PRODUCED. "decides it"
+    # alone reads as "your value is in use", inches below the same screen's
+    # "nothing is configured — this is the resolved default" (review round 4, P3).
+    out = _show_text(capsys)
+    assert "the ENVIRONMENT's" in out and "TORTOISE_DB_PATH decides it" in out, out
+    assert "but its value is BLANK" in out, out
+    assert "resolves to it for the daemon too" not in out, (
+        "a whitespace-only TORTOISE_DB_PATH was consumed by the `path` rung, so "
+        "the file's blank key cannot be the decider: " + out)
+
+    assert _run(("doctor",)) in (0, 1)
+    doc = capsys.readouterr().out
+    assert "the ENVIRONMENT's TORTOISE_DB_PATH decides it for the daemon" in doc, doc
+    assert "but its value is BLANK" in doc, doc
+
+
+def test_a_keyless_rejection_is_reported_as_unknown_origin(
+        capsys, _isolated, monkeypatch):
+    """A rejection that names NO key must not blame a side that supplied none.
+
+    The `embedded-allowed` rung calls `resolve_db_path()` UNWRAPPED, so a
+    RELATIVE embedded default — what a uid with no passwd entry and no `HOME`
+    gets, because `os.path.expanduser("~")` leaves the literal `~` — is rejected
+    by a PLAIN `ValueError` carrying no key at all. The disclosure read that as
+    `None in effective` -> False and called it `env`, or (when the error did not
+    pre-exist) `file`: either way a side is named that supplied nothing, and the
+    `file` arm's RENDERED row also says "the value it rejects is the one this
+    `.env` supplied" about a value the file never carried — it supplied the HATCH.
+
+    ⛔ THE CLAUSE ASSERTIONS READ THE RENDERED OUTPUT, not `payload["daemon_error"]`:
+    that sentence exists only in the two renderers (`config show`'s prose and
+    `doctor`'s ❌ row), so asserting it absent from the payload is true in every
+    possible code state and pins nothing (review, P2 — measured: with the `file`
+    branch disabled the phrase appeared on STDOUT while the payload assertion
+    stayed green).
+
+    All THREE attribution arms are driven, and each is mutation-proven below. ⛔
+    The two OVERLAY branches were each wrong in its own way (`env` / `file`); the
+    non-overlay site was never wrong — `_db_value_source(None)` always answered
+    `unknown` — it was UNTESTED, which is why it gets its own arm rather than a
+    claim. An earlier version of this docstring said all three "were wrong in
+    their own way", which the third arm's own comment contradicts two lines later
+    (review, P2).
+    """
+    import tortoise.config as config
+
+    monkeypatch.setattr(config, "DEFAULT_DB_PATH", "relative/unresolvable.db")
+
+    def _rendered():
+        return _show_text(capsys)
+
+    # ARM 1 — clean environment, and the FILE supplies the hatch: the error does
+    # not pre-exist, so the overlay's `else` branch ran and used to say `file`.
+    _write_env(_isolated, "TORTOISE_ALLOW_EMBEDDED=1\n")
+    payload = _show_json(capsys)["env_file"]
+    assert payload["daemon_error_source"] == "unknown", (
+        payload.get("daemon_error"))
+    assert "the value it rejects is the one this `.env` supplied" not in _rendered()
+
+    # ARM 2 — the hatch is in the ENVIRONMENT (so the error pre-exists) while the
+    # file supplies a key of its own (so there IS something to overlay and the
+    # overlay arm runs). `None in effective` is False, so that arm said `env`.
+    # The file must not assign the hatch itself: the pre-existence probe REMOVES
+    # file-assigned values, which would make the error look new and route this to
+    # ARM 1 (measured — that is why the arms are separate).
+    monkeypatch.setenv("TORTOISE_ALLOW_EMBEDDED", "1")
+    _write_env(_isolated, "TORTOISE_LOG_LEVEL=info\n")
+    payload = _show_json(capsys)["env_file"]
+    assert payload["daemon_error_source"] == "unknown", (
+        payload.get("daemon_error"))
+    # ⛔ ARM 2 must forbid the sentence ITS OWN bug printed. This branch is the
+    # OVERLAY one, and the "value is the one this `.env` supplied" suffix is built
+    # only in the NON-overlay branch — so that clause can never appear here and
+    # asserting it absent pinned nothing (review, P2; measured: with the overlay
+    # branch reverted to `env`, the CLAUSE assertion passed — the arm itself still
+    # failed on the source assertion above, which is why an earlier version of
+    # this comment's "this arm passed" was false and is not what this says).
+    # What `env` renders is "the
+    # ENVIRONMENT's own value does not resolve; this file did not supply it",
+    # which is false of a keyless rejection: there is no environment value.
+    assert "the ENVIRONMENT's own value does not resolve" not in _rendered()
+    assert "which entry point supplied the value is not" in _rendered()
+
+    # ARM 3 — the NON-OVERLAY arm (`effective` empty: the file's value is already
+    # in the environment), which is a third site with its own key derivation. It
+    # is correct today only because `_db_value_source(None)` answers `unknown`;
+    # forcing that site to `file` left all three suites green before this arm
+    # existed (review, P2 — measured).
+    from tortoise import dotenv_file as _dotenv_file
+
+    _write_env(_isolated, "TORTOISE_LOG_LEVEL=info\n")
+    _dotenv_file.load_dotenv()
+    payload = _show_json(capsys)["env_file"]
+    assert payload["daemon_error_source"] == "unknown", (
+        payload.get("daemon_error"))
+    assert "the value is the one this `.env` supplied" not in _rendered()
+
+
+def test_a_blank_path_rung_is_not_credited_with_the_default_it_fell_through_to(
+        capsys, _isolated, monkeypatch):
+    """A whitespace-only `TORTOISE_DB_PATH` names no cause — it is DISCARDED.
+
+    The rung is entered on TRUTHINESS, but `resolve_db_path()` STRIPS a blank
+    value, logs it, and falls THROUGH to the embedded default. When that default
+    is itself unpalatable, the value that failed is the PROCESS's own: attaching
+    `TORTOISE_DB_PATH` to the error makes the disclosure credit the environment
+    (or the file) with a rejection of a value it never carried. `None` is the
+    honest attribution, and it renders `unknown` on every downstream arm.
+
+    The non-blank control matters as much as the blank case: it is what stops
+    this from becoming "the path rung never names a key", which would be a
+    different falsehood.
+    """
+    import tortoise.config as config
+
+    monkeypatch.setattr(config, "DEFAULT_DB_PATH", "relative/unresolvable.db")
+    monkeypatch.setenv("TORTOISE_DB_PATH", "   ")
+    # The `.env` must EXIST for the daemon ladder to be graded at all: with the
+    # file absent, `env_file` short-circuits to `state: absent` and carries no
+    # daemon section (measured — the first version of this test read
+    # `KeyError: 'daemon_error_source'` for that reason, and only passed when a
+    # neighbouring test happened to leave the module's file-state non-absent).
+    _write_env(_isolated, "TORTOISE_LOG_LEVEL=info\n")
+
+    payload = _show_json(capsys)["env_file"]
+    assert payload["daemon_error_source"] == "unknown", (
+        payload.get("daemon_error"))
+
+    # CONTROL — a non-blank value IS the one that failed, so the ladder keeps
+    # naming its key. Asserted AT THE LADDER because that is the surface the fix
+    # changes (`daemon_error_source` only mirrors it). ⛔ NOT because `config
+    # show` is unreachable here — an earlier version of this comment said that,
+    # citing a `cli_error`, and it was FALSE: with a `.env` present the payload
+    # does reach the ladder and reports `env`, with `cli_error` also set. The
+    # `KeyError` that prompted it came from an ABSENT `.env` (the `state: absent`
+    # short-circuit above), not from the CLI's error (review, P2 — measured
+    # step-by-step in one process).
+    monkeypatch.setenv("TORTOISE_DB_PATH", "relative/kept.db")
+    with pytest.raises(config.DaemonTargetError) as caught:
+        config.daemon_db_target()
+    assert caught.value.key == "TORTOISE_DB_PATH"
+
+    # …and the blank value attaches NO key, which is the fix itself.
+    monkeypatch.setenv("TORTOISE_DB_PATH", "   ")
+    with pytest.raises(config.DaemonTargetError) as caught:
+        config.daemon_db_target()
+    assert caught.value.key is None
