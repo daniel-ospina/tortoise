@@ -27,7 +27,15 @@ whole chain for the four beta harnesses (claude, pi, cursor, codex):
    window is.  A settled turn count that is NOT the expected one still breaks
    the window early, because it never becomes the expected one;
 3. **memory** — the session appears in the graph as a ``Source`` and its turns
-   were extracted into memory Points.
+   were extracted into memory Points.  An unobserved count (``extracted``
+   below 1, or not an integer at all) asserts an ABSENCE, so it is only a
+   ``FAIL`` when the server recorded an outcome
+   (``extraction.outcome_known``): beside ``outcome_known: false`` the server
+   has recorded NOTHING either way, and the link is ``UNVERIFIABLE`` — the
+   same half-pair obligation ``tortoise/session_confirm.py`` states for every
+   consumer of that detail (#12362/#12379, fixed here by #12497).  A served
+   count of 1 or more still proves the leg, and a malformed / absent
+   ``extraction`` block keeps the old reading (garbage is neither state).
 
 BEHAVIOURAL, NOT A SOURCE-TEXT SCAN.  Every guard executes the path and
 asserts the resolved outcome; nothing here greps an artifact.  The install
@@ -97,6 +105,7 @@ from urllib.error import HTTPError, URLError
 from tortoise import capture_install, hook_install
 from tortoise.capture_receipts import capture_receipt_key
 from tortoise.hook_install import KIND_INSTALL_INERT
+from tortoise.session_confirm import extraction_outcome_known
 
 __all__ = [
     "EXIT_BROKEN",
@@ -971,6 +980,25 @@ def verify_session_capture(harness: str,
                     STATUS_FAIL,
                     f"session {probe_id!r} has no Source node in the graph "
                     f"(url session:{probe_id})",
+                    extracted=extracted, source=source)
+            elif (not extracted_ok
+                  and extraction_outcome_known(detail) is False):
+                # #12497: the server published ``extracted: 0`` WITHOUT having
+                # recorded whether extraction ran (``outcome_known: false`` —
+                # the state behind an abandoned 504 handler, a commit-created
+                # session, a demo seed).  "No memory Point" is an absence we
+                # cannot observe, so this is NOT the ``FAIL`` below; it claims
+                # nothing about memory points and names no cause (it may still
+                # be running, or may never have started — the server has not
+                # said).  ``UNVERIFIABLE`` is the vocabulary's honest third
+                # value, and it keeps exit 2 (nothing provably broken) rather
+                # than the BROKEN exit a fabricated absence earns.
+                report["links"]["memory"] = _link(
+                    STATUS_UNVERIFIABLE,
+                    f"session {probe_id!r} appears as a Source, but the server "
+                    f"has not recorded an extraction outcome for it "
+                    f"(extracted={extracted}, outcome_known=false) — memory "
+                    f"points were neither observed nor ruled out",
                     extracted=extracted, source=source)
             elif not extracted_ok:
                 report["links"]["memory"] = _link(

@@ -42,6 +42,7 @@ from tortoise.capture_install import install_capture
 from tortoise.capture_receipts import capture_receipt_key
 from tortoise.session_verify import (
     EXIT_BROKEN,
+    EXIT_OK,
     EXIT_UNVERIFIABLE,
     resolve_install_root,
     verify_session_capture,
@@ -66,6 +67,12 @@ class _Graph:
         self.omit_source_field = False
         self.no_receipt = False
         self.zero_extracted = False
+        #: The `extraction` block the DETAIL endpoint serves (#3520). `None`
+        #: omits it entirely — the pre-#3520 shape, which every consumer must
+        #: still read. A bool serves `{status, outcome_known: <bool>}`; any
+        #: other value is served VERBATIM so a malformed block is reachable
+        #: (the fail-safe arms are pinned here, not only upstream).
+        self.extraction: object = None
         #: Write the per-harness receipt only from the Nth ``/v1/onboarding/state``
         #: read onward — models the server writing it AFTER the session row is
         #: visible (the abandoned handler completing), which is the real
@@ -137,6 +144,12 @@ def _make_handlers(graph: _Graph):
                 }
                 if graph.omit_source_field:
                     session.pop("source", None)
+                if graph.extraction is not None:
+                    session["extraction"] = (
+                        {"status": "stored",
+                         "outcome_known": graph.extraction}
+                        if isinstance(graph.extraction, bool)
+                        else graph.extraction)
                 graph.sessions[sid] = session
                 if graph.post_delay:
                     time.sleep(graph.post_delay)
@@ -1024,6 +1037,75 @@ def test_guard_zero_extraction_reds_memory(hosted, setup):
     assert report["exit_code"] == EXIT_BROKEN
     assert report["links"]["memory"]["status"] == "FAIL"
     assert "no memory Point" in report["links"]["memory"]["detail"]
+
+
+def test_guard_unrecorded_outcome_is_not_a_memory_FAIL(hosted, setup):
+    """#12497: ``extracted == 0`` beside ``outcome_known: false`` is the
+    server saying "no extraction outcome recorded" — the verifier must NOT
+    report it as a FAIL, because that asserts an absence it cannot observe.
+
+    Mutation: read ``extracted`` alone (drop the qualifier) and this test's
+    status/exit assertions fail with ``FAIL``/exit 1."""
+    home, _bindir, _fake = setup
+    root = _install(home, "claude")
+    graph, _url = hosted
+    graph.zero_extracted = True
+    graph.extraction = False          # outcome_known: false
+    report = _verify(hosted, home, "claude", root)
+    memory = report["links"]["memory"]
+    assert memory["status"] == "UNVERIFIABLE-IN-CI", memory
+    # The absence must not be claimed in ANY form, and the line must say what
+    # the server actually recorded, not invent a cause.
+    assert "no memory Point" not in memory["detail"], memory["detail"]
+    assert "outcome" in memory["detail"].lower(), memory["detail"]
+    # Nothing provably broken: exit 2, never the BROKEN exit a FAIL earns.
+    assert report["exit_code"] == EXIT_UNVERIFIABLE, report["exit_code"]
+
+
+def test_guard_recorded_empty_extraction_still_FAILs(hosted, setup):
+    """The OTHER half of the pair: ``outcome_known: true`` with
+    ``extracted == 0`` IS a recorded empty extraction (keyless
+    ``none``/``disabled``, #4188/#4258), so it keeps its FAIL.
+
+    Mutation: treat every ``extracted == 0`` as unknown and this assertion
+    drops to UNVERIFIABLE."""
+    home, _bindir, _fake = setup
+    root = _install(home, "claude")
+    graph, _url = hosted
+    graph.zero_extracted = True
+    graph.extraction = True           # outcome_known: true
+    report = _verify(hosted, home, "claude", root)
+    assert report["links"]["memory"]["status"] == "FAIL"
+    assert "no memory Point" in report["links"]["memory"]["detail"]
+    assert report["exit_code"] == EXIT_BROKEN
+
+
+def test_guard_malformed_outcome_known_keeps_the_FAIL(hosted, setup):
+    """A non-bool ``outcome_known`` is garbage, and garbage must not buy the
+    PENDING reading — the same fail-safe ``session_confirm`` pins for its own
+    PENDING arm."""
+    home, _bindir, _fake = setup
+    root = _install(home, "claude")
+    graph, _url = hosted
+    graph.zero_extracted = True
+    graph.extraction = {"status": "stored", "outcome_known": "false"}
+    report = _verify(hosted, home, "claude", root)
+    assert report["links"]["memory"]["status"] == "FAIL"
+    assert report["exit_code"] == EXIT_BROKEN
+
+
+def test_guard_a_recorded_count_outranks_the_unknown_qualifier(hosted, setup):
+    """The count is checked FIRST, exactly as ``session_confirm``'s FILED arm
+    does: a served ``extracted >= 1`` is proof even beside an
+    ``outcome_known: false`` (a projection that appends the qualifier late
+    must not un-prove an observed Point)."""
+    home, _bindir, _fake = setup
+    root = _install(home, "claude")
+    graph, _url = hosted
+    graph.extraction = False          # outcome_known: false, extracted == 1
+    report = _verify(hosted, home, "claude", root)
+    assert report["links"]["memory"]["status"] == "PROVEN"
+    assert report["exit_code"] == EXIT_OK
 
 
 def test_guard_cleanup_failure_is_surfaced_not_swallowed(hosted, setup):
