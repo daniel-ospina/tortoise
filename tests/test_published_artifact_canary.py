@@ -3188,6 +3188,217 @@ def test_summary_says_unknown_is_red_on_purpose():
     assert "never look like a pass" in summary
 
 
+def test_the_wheel_tail_only_reads_GATED_arms():
+    """⛔ A NON-GATED ROW MAY NOT DECIDE THE WHEEL'S TAIL (#12589 review round 19, P3).
+
+    `step` is the first GATED red arm. Dropping `arm.gated and` kept 97/97 green, and on a report
+    holding a non-gated `engine-init` FAIL plus a gated `wheel-smoke` FAIL the tail then rendered
+    the wheel's console-script claim for an arm that never decided the verdict.
+    """
+    report = canary.Report(wheel_mode=True)
+    report.add(canary.Arm("engine-init", canary.FAIL, "not consulted", gated=False))
+    report.add(canary.Arm("wheel-smoke", canary.FAIL, "the built wheel is missing a README"))
+    summary = canary.render_summary(report)
+    assert "is NOT judged by this summary" in summary, summary
+    assert "`wheel-smoke`" in summary, summary
+    assert "ships no `tortoise` console script" not in summary, summary
+
+
+def test_the_index_corroborated_FAIL_detail_orders_a_release():
+    """⛔ THE ARM DETAIL IS WHAT THE ALERT QUOTES (#12589 review round 19, P3).
+
+    The renderer's clause is pinned by GOLDEN_INDEX_FAIL, the arm's own "; a release is owed" was
+    not — dropping it left the FAIL with no instruction on the one path where the index CONFIRMS
+    the absence, i.e. where a release genuinely is owed.
+    """
+    report = canary.build_report(
+        engine_doc=_engine_doc(),
+        client_doc=_client_doc(),
+        tree_version="0.2.0",
+        init_arm=canary.Arm("engine-init", canary.FAIL, "x"),
+        now=NOW,
+    )
+    assert report.get("engine-init").detail == "x"  # the arm is passed through verbatim
+
+    # The producer of the sentence is `install_and_run`; drive it through the runner seam.
+    class _Done:
+        def __init__(self, returncode=0, stdout="", stderr=""):
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    def _runner_install_fails(cmd, **kwargs):
+        if cmd[:2] == ["-m", "venv"] or "venv" in cmd:
+            return _Done()
+        if "install" in cmd:
+            return _Done(
+                returncode=1,
+                stderr=(
+                    "ERROR: Could not find a version that satisfies the requirement "
+                    "tortoise-graph==0.2.0 (from versions: none)\n"
+                    "ERROR: No matching distribution found for tortoise-graph==0.2.0"
+                ),
+            )
+        return _Done()
+
+    # `install_and_run` needs a populated console script to reach the pip step; the index probe is
+    # what corroborates the absence, so stub it to the ABSENT verdict.
+    def _probe(name):
+        return canary.INDEX_ABSENT
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        workdir = Path(tmp)
+        (workdir / "venv" / "bin").mkdir(parents=True)
+        (workdir / "venv" / "bin" / "tortoise").write_text("#!/bin/sh\n")
+        arm, _ = canary.install_and_run(
+            package="tortoise-graph",
+            version="0.2.0",
+            workdir=workdir,
+            timeout=60,
+            runner=_runner_install_fails,
+            absent_probe=_probe,
+        )
+    assert arm.status == canary.FAIL, arm.detail
+    assert "a release is owed" in arm.detail, arm.detail
+
+
+def test_the_engine_init_non_reading_details_are_PINNED_VERBATIM(tmp_path):
+    """⛔ THE PRODUCER TEXTS, not just the renderer (#12589 review round 19, P3).
+
+    Rounds 16-18 pinned what `render_summary` PRINTS for hand-built arms; the details the tool
+    itself PRODUCES for a detector outage were still free. Each of these substitutions kept 97/97
+    green while wording a HARNESS fault as an artifact one:
+    "could not create the clean venv" → "the published artifact is not installable",
+    "timed out after {n}s" → "the documented command did not work",
+    "could not run: {exc}" → "the artifact could not run".
+
+    Driven through the `runner=` seam, one failing call per shape, so each sentence is produced by
+    the real code path rather than by a hand-built `Arm`.
+    """
+
+    class _Done:
+        def __init__(self, returncode=0):
+            self.returncode = returncode
+            self.stdout = ""
+            self.stderr = ""
+
+    def _runner_venv_fails(cmd, **kwargs):
+        return _Done(returncode=1)
+
+    arm, _ = canary.install_and_run(
+        package="tortoise-graph",
+        version="0.2.0",
+        workdir=tmp_path,
+        timeout=60,
+        runner=_runner_venv_fails,
+    )
+    assert arm.status == canary.UNKNOWN, arm.detail
+    assert arm.detail == "could not create the clean venv", arm.detail
+
+    # The console-script check runs BEFORE the first command, so the timeout and OSError shapes
+    # are only reachable once the venv looks populated.
+    (tmp_path / "venv" / "bin").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "venv" / "bin" / "tortoise").write_text("#!/bin/sh\n")
+
+    def _runner_init_times_out(cmd, **kwargs):
+        if "init" in cmd:
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=42)
+        return _Done()
+
+    arm, _ = canary.install_and_run(
+        package="tortoise-graph",
+        version="0.2.0",
+        workdir=tmp_path,
+        timeout=42,
+        runner=_runner_init_times_out,
+    )
+    assert arm.status == canary.UNKNOWN, arm.detail
+    assert arm.detail == "timed out after 42s", arm.detail
+
+    def _runner_init_unrunnable(cmd, **kwargs):
+        if "init" in cmd:
+            raise OSError("no such binary")
+        return _Done()
+
+    arm, _ = canary.install_and_run(
+        package="tortoise-graph",
+        version="0.2.0",
+        workdir=tmp_path,
+        timeout=42,
+        runner=_runner_init_unrunnable,
+    )
+    assert arm.status == canary.UNKNOWN, arm.detail
+    assert arm.detail == "could not run: no such binary", arm.detail
+
+    # ...and the arm `build_report` substitutes when no install was performed at all.
+    report = canary.build_report(
+        engine_doc=_engine_doc(),
+        client_doc=_client_doc(),
+        tree_version="0.2.0",
+        init_arm=None,
+        now=NOW,
+    )
+    assert report.get("engine-init").status == canary.UNKNOWN
+    assert (
+        report.get("engine-init").detail
+        == "the published artifact was not exercised (install could not run)"
+    ), report.get("engine-init").detail
+
+
+def test_the_answered_NO_VERSION_details_name_the_right_distribution():
+    """⛔ THE ENGINE ARM'S FAIL SENTENCE COULD NAME THE WRONG PACKAGE (#12589 review round 19, P3).
+
+    `missing_version_arm` builds one sentence per arm from `package`. Nothing pinned the literals,
+    so `index metadata for {ENGINE_PACKAGE}` could be swapped for `{CLIENT_PACKAGE}` — a FAIL about
+    the wrong distribution, on the shape (`{{"info": {{}}}}`) this PR refers out to #12636.
+    """
+    engine_side = canary.build_report(
+        engine_doc={"info": {}},
+        client_doc=_client_doc(),
+        tree_version="0.2.0",
+        init_arm=_ok_init_arm(),
+        now=NOW,
+    ).get("engine-index")
+    assert engine_side.status == canary.FAIL, engine_side.detail
+    assert engine_side.detail == "index metadata for tortoise-graph carries no latest version", (
+        engine_side.detail
+    )
+
+    client_side = _client_report({"info": {}}).get("client-published")
+    assert client_side.status == canary.FAIL, client_side.detail
+    assert (
+        client_side.detail == "the tortoise-client index document carries no published version"
+    ), client_side.detail
+
+
+def test_the_CLI_returns_the_verdicts_exit_code_not_a_coarser_one(monkeypatch, capsys):
+    """⛔ `main()`'s RETURN VALUE IS THE CONTRACT (#12589 review round 19, P2).
+
+    `.github/scripts/published-artifact-alert.sh` reads the process exit: 0 closes the alert ledger,
+    1 orders a release, 2 keeps it open. The suite pinned `report.exit_code` (the property) and the
+    EARLY returns, but never the verdict path — so replacing `return report.exit_code` with
+    `return 0 if report.verdict != FAIL else 1` made a CANNOT RUN exit **0** with all 97 tests
+    green, i.e. a non-reading published as a pass. Assert the call, not the property.
+    """
+    _stub_main(monkeypatch, canary.Arm("engine-init", canary.OK, "tortoise init succeeds"))
+
+    def _stub_report(verdict):
+        probe = canary.Report()
+        probe.add(canary.Arm("engine-index", verdict, "x"))
+        return lambda **kwargs: probe
+
+    for verdict, expected in (
+        (canary.OK, 0),
+        (canary.FAIL, 1),
+        (canary.UNKNOWN, 2),
+    ):
+        monkeypatch.setattr(canary, "build_report", _stub_report(verdict))
+        capsys.readouterr()
+        assert canary.main(["--json"]) == expected, verdict
+
+
 @pytest.mark.parametrize("rc,expected", [(0, canary.OK), (1, canary.FAIL), (2, canary.UNKNOWN)])
 def test_matrix_exit_codes_match_the_documented_contract(rc, expected):
     """The workflow's `rc=$?` relay depends on this mapping staying fixed."""
