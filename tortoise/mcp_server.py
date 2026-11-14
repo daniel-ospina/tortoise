@@ -8747,7 +8747,9 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
         """Hide HTTP-excluded tools from tools/list (D4) + optional curation
         group scoping (#523).
 
-        The excluded tools (org_create/ingest_corpus) remain
+        The HTTP-excluded tools — every registry entry whose `http_policy` is False
+        (`org_create`, `index_files`, `dream`, `expand_relationships`,
+        `mine_conversations`) plus the retired shims — remain
         registered on the shared module-level mcp instance for stdio, but are
         filtered out of the HTTP tool listing so tenants can't discover them.
         When tool_group is set, only that group's tools are listed — role-

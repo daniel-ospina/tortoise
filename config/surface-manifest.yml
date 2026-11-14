@@ -1289,7 +1289,7 @@ rows:
   approval: null
   class: agent-reachable
   cluster_canonical: null
-# #12297: SPLICED, not re-cut — and the two reasons are the REAL costs of a cut,
+# #12297: SPLICED, not re-cut — and the reasons below are the REAL costs of a cut,
 # not a claim that a cut would lose hand-curated cells (it would not:
 # `CARRIED_TOOL_ROW_KEYS` in tools/surface_manifest.py carries `used_by` /
 # `recommendation` / `basis` / `reason` / `exemption` forward from the committed
@@ -1297,9 +1297,11 @@ rows:
 # have: (1) `cut --commit` must be handed a DEFAULT-BRANCH sha (#11057 review F1)
 # — cut at a lane head, `provenance_report` reds — and (2) `cut` re-emits only
 # `MANIFEST_HEADER`, so every body comment in this file (this note included) is
-# lost. The `used_by` cells a cut once re-derived are now CARRIED forward —
-# `CARRIED_SDK_ROW_KEYS` gained `used_by` on this branch — so that churn is no
-# longer a cost, and neither is the `skill-docs` label. `cut` is also owner-gated.
+# lost. The `used_by` LABELS a cut once re-derived are now carried forward for any
+# label whose corpus came back UNREADABLE (`CARRIED_SDK_ROW_KEYS` gained `used_by`
+# on this branch; `used_by_with_unreadable_corpora` still re-derives every label it
+# CAN read) — so on a box whose `skills/` dangles, that churn is no longer a cost,
+# and neither is the `skill-docs` label. `cut` is also owner-gated.
 # ⛔ That 125 is re-derivable from this file: `rows` whose `name` starts `sdk:`.
 # So exactly one derived cell moves, to the value `check` itself derives from the
 # declaration (`_code_digest`; verified `aae4bf5f5ceffe7c` for the tool body as it
