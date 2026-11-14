@@ -6093,7 +6093,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # its own row, on its own source key.
         # ⚠️ BOTH routes are pinned, because the row distinguishes them and the number
         # alone had stopped doing so: `:18743` is `POST /v1/sessions` — the capture door
-        # the sentence is about, whose handler holds the quota 402 at `:19447` — and
+        # the sentence is about, whose handler holds the quota 402 at `:19448` — and
         # `:21298` is the `install-probe` sibling the row names as NOT that door (auth,
         # no quota gate). ⚠️ THESE ARE THIS HEAD'S NUMBERS. The same three at `6916a6cd89`
         # (an earlier round's base) were `:17799`/`:18503`/`:20354`, and the merge that
@@ -6206,7 +6206,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("19473", "quota_refusal_payload(QuotaExceededError("),
         ), "hosted_api"),
         # ⛔ THE LINE THAT *QUOTES* :82's NUMBER (#12462 review). `03-test-design.md:236`
-        # re-states `hosted_api.py:19447` as the same guard read at an older head, so it is
+        # re-states `hosted_api.py:19448` as the same guard read at an older head, so it is
         # a second statement of one hit — and the paragraph it sits in INSTRUCTS the next
         # merger to re-point line 82, which is exactly how 236 comes to assert the old
         # number while 82 moves. Unpinned until the review reverted it green. Only the
@@ -6245,7 +6245,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         ), "extractor_v4_arch"),
         # ⛔ THE TWO THIS-HEAD NUMBERS TWO EARLIER CUTS LEFT UNREAD (#12569 review), and the
         # count that hid one of them. D5's row states NINE distinct this-head numbers:
-        # `19340`, `19447`, `10037`, `10064`, `10117`, `1186`, `1194`, `1400`, `1418`. The
+        # `19341`, `19448`, `10037`, `10064`, `10117`, `1186`, `1194`, `1400`, `1418`. The
         # counts in the comments above said SEVEN, then EIGHT, and each time the number left
         # out was green under mutation: `:1418` (in the "Measured at" continuation) and
         # `:1194` — which is stated one clause EARLIER on the same markdown line, in the
