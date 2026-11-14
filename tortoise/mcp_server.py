@@ -4400,7 +4400,15 @@ def tortoise_query(kind: str | None = None,
       where the structural and fts arms exclude the whole terminal vocabulary.
 
     Validation: page must be >= 1, offset >= 0, limit >= 1 — violations return
-    a structured error dict.
+    a structured error dict. A `kind` that is SET but not a string (`True`, `1`,
+    `5`, `["statement"]`) is REFUSED (#12582): a point kind is a string property
+    and the accessor builds an equality against it, so a non-string can never
+    MATCH — serving `kind=True` as an empty page would present "this kind has no
+    rows" as a true answer when the population was simply unfilterable (the #6146
+    wrong-empty class). (The tag arm refuses the same values by its OWN rule —
+    tag mode reads every kind (#12500) — which is why one message for both arms
+    needed the refusal here, above the arms.) A FALSY non-str (`False`, `0`,
+    `0.0`) is "absent" and stays served, as above.
 
     Use tortoise_query for known shapes; use tortoise_search for semantic
     relevance; use tortoise_get_point for a single known ID.
@@ -4412,6 +4420,32 @@ def tortoise_query(kind: str | None = None,
         return _SafeError({"error": "offset must be >= 0, got " + str(offset)})
     if limit is not None and limit < 1:
         return _SafeError({"error": "limit must be >= 1, got " + str(limit)})
+    # #12582: a `kind` that is SET but not a string cannot name a point kind, and
+    # the two ways it failed differ. A HASHABLE non-str (`True`/`1`/`5`) gets
+    # `[kind]` back from both maps (`expand_kind` / `read_filter_kinds` fall back
+    # to `[kind]`, `pack_registry.py`), so the accessor builds an EQUALITY
+    # `n.pointKind = $kind` (`sdk.py`: the `len(expanded) == 1` branch — the
+    # `IN [...]` form is for a string that expands) and no row can carry it: it
+    # matched NOTHING and was served as `[]`, a true-looking "this kind has no
+    # rows" for a filter that could never be applied (the #6146 wrong-empty
+    # class). An UNHASHABLE one (a list) never gets that far — it raises inside
+    # the kind-expansion map BEFORE any read (`_operator_scope_clauses` ->
+    # `_expand_kind` -> `self._kind_expansions.get(kind, [kind])`) and leaked
+    # `unhashable type: 'list'` out as an error dict. Neither is the refusal such
+    # a value deserves. The tag arm
+    # already refuses the same values (#12500), so leaving the structural and fts
+    # arms to answer them as an empty page (or a leaked internal error) made one
+    # argument value answer two ways depending on the arm the caller happened to
+    # use — the defect #12372 removed for `entity_type`. Refused here, above every
+    # arm; a FALSY non-str stays "absent" and is served (see the docstring's
+    # `Validation:` paragraph).
+    if kind and not isinstance(kind, str):
+        return _SafeError({"error": (
+            f"kind must be a string naming a point kind — got "
+            f"{type(kind).__name__} ({kind!r}). Omit kind= for no kind filter "
+            f"(a falsy value such as False/0 already means that), or pass the "
+            f"kind name; a non-string is refused rather than served as an empty "
+            f"page, because it cannot match any kind (#12582).")})
     # Resolve include_retracted (#888): explicit param wins; else the filters-dict
     # value (don't silently drop a caller's True intent — review P2-2); else False.
     # Guard non-dict filters: a malformed-JSON string from _parse passes the substring
@@ -5009,8 +5043,27 @@ def tortoise_query(kind: str | None = None,
     # The un-paginated path's contract is a plain list; `paginated_query`
     # answers {results, total, hasMore}, so take only the page.
     result = bounded.get("results", []) if isinstance(bounded, dict) else bounded
-    # If empty results and a kind filter was provided, attach suggestion
-    if isinstance(result, list) and len(result) == 0 and kind is not None:
+    # If empty results and a kind filter was provided, attach suggestion.
+    # #12582: `and kind`, not `kind is not None`. A falsy non-str `kind`
+    # (`False`, `0`) is the shipped spelling of ABSENT — the same contract #12500
+    # gave `min_confidence`/`order_by`, and the same test the SDK itself applies
+    # (`sdk.py`: `if kind:` before it builds the clause) — so the read is served
+    # the whole population, exactly as `kind=""` is. `kind` is provably a
+    # non-empty string by the time this line runs: the validation block above
+    # refuses a truthy non-str, so what is left is either falsy (excluded by
+    # `and kind`) or a str. The old
+    # `is not None` sent that value to `compute_suggestion`, whose `":" not in
+    # kind` raised a bare TypeError out of the tool body: an IN-PROCESS caller
+    # saw the exception instead of the served read this contract documents. (The
+    # answer was never meant to be a refusal — the bullet above says a falsy
+    # `kind` "stays served", and it is; the crash was the tool failing to deliver
+    # what it had already promised.) Over MCP the wire already refuses a non-str
+    # `kind` before dispatch — the published schema is `anyOf[string, null]`,
+    # measured with `mcp.list_tools()` — so no client hit this; the body's
+    # contract must not depend on the transport narrowing its types. The
+    # suggestion feature is unchanged for a non-empty string — the only input it
+    # can say anything about.
+    if isinstance(result, list) and len(result) == 0 and kind:
         from tortoise.query_suggestions import compute_suggestion
         suggestion = compute_suggestion(kind)
         if suggestion:
