@@ -1088,7 +1088,23 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
         # the URI UNSET at :1946 so a file-supplied bad value is attributed to the
         # FILE that supplied it, and the "cannot be loaded at all" wording this
         # test exists to REFUTE stays out of the report.
-        r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
+        r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"',
+        # a docker-shaped URI used ONLY to drive the ladder to its `uri` rung in the
+        # rung-table completeness pin (:2420) — `daemon_db_target()` RETURNS the
+        # value, and neither that test nor any arm of this module dials it.
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*"docker://:pw@localhost:6379/g"',
+    ],
+    # ⛔ MAINLINE TRIAGE, not a site this PR added: `test_published_artifact_canary.py`
+    # landed with no register row, so `test_uri_env_mutations_declared` was RED on
+    # `origin/main` for every branch (an undeclared mutation reds until triaged),
+    # not just on this one — both this register and that module are byte-identical
+    # to main here, and the undeclared site is reported with them alone. Declared
+    # so main and every branch stop being red. The value is the AMBIENT env the
+    # canary exists to prove it STRIPS: the mutation is the INPUT, and the canary's
+    # own child process is what may resolve it.
+    "test_published_artifact_canary.py": [
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*"docker://:x@localhost:6379/other"',
+    ],
 }
 
 # Carve-out TEST-MODULE stems (Task 5 wires these into TEST_NO_REDIRECT_STEMS;
