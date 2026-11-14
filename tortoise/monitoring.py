@@ -1116,10 +1116,14 @@ def record_wait_bound_control_breach(at: float | None = None) -> None:
 
 #: #12477: registered by the APP (`hosted_api._start_liveness`) so this module
 #: never imports it. Returns True while a one-time cold-start load is in flight.
-_COLD_START_SOURCE: callable | None = None
+#: ⛔ `Callable[[], bool]`, NOT the builtin `callable` — the builtin is a
+#: predicate about an object, not a type, so `mypy` refuses it as an annotation
+#: (`[valid-type]`) and `agent-infra-ci / typecheck` cannot be green. Same shape
+#: as `_DATAPLANE_VERDICT` / `set_dataplane_verdict_source` below.
+_COLD_START_SOURCE: Callable[[], bool] | None = None
 
 
-def set_cold_start_source(source) -> None:
+def set_cold_start_source(source: Callable[[], bool] | None) -> None:
     """Register (or clear, with ``None``) the cold-start predicate (#12477).
 
     A zero-I/O reader of "is a one-time setup load in flight", consulted on the

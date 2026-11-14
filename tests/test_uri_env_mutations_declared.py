@@ -719,6 +719,14 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # differently-intentioned URI setenv in a module whose whole design is
     # "nothing here touches PyPI"; with the literal pinned, such a site reds
     # and forces its own triage.
+    # ⛔ ONE key, deliberately — this row is the SURVIVOR of an `F601` duplicate that
+    # re-red `agent-infra-ci / lint` on `main` (#9259's class, second occurrence).
+    # `a808f9f8ba5` appended a second `test_published_artifact_canary.py` row further
+    # down THIS dict on the premise that the module "landed with no register row" —
+    # false: this row already existed, and the two carried a BYTE-IDENTICAL pattern,
+    # so the later key silently overrode a rationale nobody was then reading. The
+    # duplicate is DELETED rather than merged (no value was lost), and the note stays
+    # here, at the surviving entry, so the next reader does not re-add it.
     "test_published_artifact_canary.py": [
         r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*"docker://:x@localhost:6379/other"'],
     # #8939/#8870: the lane-gate unit pins for the version-anchor live file. The
@@ -1117,17 +1125,6 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
         # rung-table completeness pin (:2420) — `daemon_db_target()` RETURNS the
         # value, and neither that test nor any arm of this module dials it.
         r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*"docker://:pw@localhost:6379/g"',
-    ],
-    # ⛔ MAINLINE TRIAGE, not a site this PR added: `test_published_artifact_canary.py`
-    # landed with no register row, so `test_uri_env_mutations_declared` was RED on
-    # `origin/main` for every branch (an undeclared mutation reds until triaged),
-    # not just on this one — both this register and that module are byte-identical
-    # to main here, and the undeclared site is reported with them alone. Declared
-    # so main and every branch stop being red. The value is the AMBIENT env the
-    # canary exists to prove it STRIPS: the mutation is the INPUT, and the canary's
-    # own child process is what may resolve it.
-    "test_published_artifact_canary.py": [
-        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*"docker://:x@localhost:6379/other"',
     ],
 }
 
