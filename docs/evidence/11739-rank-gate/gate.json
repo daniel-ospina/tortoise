@@ -56,7 +56,7 @@
       }
     },
     "B_prefix_query_sample": {
-      "definition": "query = first 25% of the point's content words (arm-neutral, seed 11739, n=1500 of 15008 queries, docs = full population)",
+      "definition": "query = the first max(6, 25%) of the point's content words (a 6-word floor for short content), seed 11739, n=1500 of 15008 queries, docs = full population; NOTE: the query text is the RAW arm's own index text (content) truncated, so this bounds the raw arm's full-text advantage rather than removing it \u2014 see the correction on #11739 comment 6869865848",
       "raw": {
         "n": 1500,
         "rank_1": 1005,
@@ -120,6 +120,9 @@
     "rows_source_sha256": "be2ee6353aa22e4103b4ab2f1db9576021152cceec7e82e99a82167788558439",
     "encoder": "BAAI/bge-small-en-v1.5 (384-d), mean cosine vs stored vectors = 1.000000",
     "issue_comment": 6869726971,
-    "note": "no payload_sha256 self-binding and no pin test \u2014 this is a branch-only PROBE artifact, not the indexed bundle; see README.md's header"
-  }
+    "note": "no payload_sha256 self-binding and no pin test \u2014 this is a branch-only PROBE artifact, not the indexed bundle; see README.md's header",
+    "probe_sha256_current": "26c7f5d86fae006e6c5e1efddd3024cd6bbd1d72193aeca64a6a98fbdcadae53",
+    "probe_digest_note": "probe_sha256 = the probe AS RUN (it produced every number above). probe_sha256_current = the committed probe, which differs only by the numeric-shard-sort fix (10 shards 0-9, where string and numeric order agree, so the numbers are identical either way). A re-run must reproduce the numbers from the current file."
+  },
+  "corrections": "#11739 comment 6869865848: byte-identical twins do NOT displace each other (rank counts STRICTLY greater similarities, probes/rank_gate.py rank_arm), so the twin-group class is a property of the displaced Points and not their proximate cause; the displacement COUNTS above are unchanged."
 }

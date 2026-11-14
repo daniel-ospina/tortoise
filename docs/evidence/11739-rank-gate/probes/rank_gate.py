@@ -174,7 +174,14 @@ def main(argv):
     if a.mode == "measure":
         d = json.load(open(f"{WORK}/comp_texts.json"))
         ids, texts = d["ids"], d["texts"]
-        parts = sorted(f for f in os.listdir(WORK) if f.startswith("comp_vec_"))
+        # ⛔ NUMERIC, not lexicographic: at >=11 shards `comp_vec_10` sorts BEFORE `comp_vec_2` in
+        # plain string order, which would re-pair the composed vectors with the wrong ids and silently
+        # corrupt every composed figure with no error. (The published run used exactly 10 shards,
+        # 0-9, where the two orders agree — so this fixes a re-run, not the numbers.)
+        parts = sorted(
+            (f for f in os.listdir(WORK) if f.startswith("comp_vec_")),
+            key=lambda f: int(f[len("comp_vec_"):-len(".npy")]),
+        )
         comp = unit(np.vstack([np.load(f"{WORK}/{f}") for f in parts]))
         rows, live_rows, pop = population(a.cache)
         src_rows = {r["id"]: r for r in pop}
