@@ -12,20 +12,33 @@ aboutObjects: SEARCH-ARCHITECTURE.md, FalkorDB, fulltext index, range index, key
 
 # Measurement — a graph-key RESTORE carrying a FULLTEXT or RANGE index (#12766)
 
-Measured at: `measure/12766-fulltext-restore@f6ac10e41f` on 2026-11-14
+Measured at: `measure/12766-fulltext-restore` on 2026-11-14 — the harness is byte-identical at
+`f6ac10e41f` and `c9ff52ad0c` (it was not edited between the two measured runs); the 20 000-node log
+landed in `f6ac10e41f`, the 90 000-node log in `c9ff52ad0c`, the range probe log in the commit after.
 
 > The measured artifact is the **FalkorDB engine image**, not this repository's tree: the repo
 > hosts the harness. The tree line above names the commit the harness was run from.
 
-**Verdict — the kept fulltext index DOES block the instance, and it is 33× cheaper than the vector
-index that motivated the decision. Zero-standing hot stays viable for `free`/`anon`.**
+**Verdict — the kept fulltext index DOES block the instance, for 1.585 s at 90 000 nodes. Zero-standing
+hot stays viable for `free`/`anon` against a caller read bound, but whether it is viable against a
+per-tenant latency objective is a question this record cannot answer (§7).**
 
 | | 20 000 nodes | 90 000 nodes |
 |---|---|---|
 | **fulltext kept** | RESTORE **0.405 s**, bystander **358.9 ms** | RESTORE **1.585 s**, bystander **1 535.2 ms** |
 | **fulltext dropped before DUMP** | RESTORE **0.011 s**, bystander **10.6 ms** | RESTORE **0.032 s**, bystander **41.2 ms** |
 | index-free floor (no index at all) | RESTORE 0.011 s, bystander 8.8 ms | RESTORE 0.041 s, bystander 53.0 ms |
-| **vector kept** (`#7846`, same record shape) | RESTORE 2.955 s, bystander 2 899.4 ms | **outlived a 10 s client read bound**, surfaced at 53.3 s |
+| *vector index, for comparison — ⚠️ **different engine AND different payload** (§3)* | *RESTORE 2.955 s, bystander 2 899.4 ms* | *outlived a 10 s client read bound, surfaced at 53.3 s* |
+
+⚠️ **The vector row is not like-for-like and is not used as a multiplier.** #7846's 20 000-node figure
+is graph module **42201** over a **9.66 MB** payload; its 90 000-node figure is graph module **60001**
+over **43.19 MB**. This record is graph module **42006** over **1.11 MB / 5.02 MB**. So "~7×" and
+"~33×" mix engine and payload with index type and **overstate the index-type difference**; what the
+comparison supports is the *direction* — a fulltext rebuild is far cheaper than a vector one at the
+same node count — not the multiplier. The one same-engine datapoint points the same way and is
+reported without a ratio because the sizes differ: #7846 `verify-ci-42006-5000.log` restores a
+vector-indexed graph at **5 000** nodes in **2.25 s**, against this record's fulltext-indexed
+**20 000**-node restore at **0.405 s** — same engine, four times the nodes, a fifth of the time.
 
 So the §7 sentence resolves the way the decision hoped rather than the way it feared: a kept
 `db.idx.fulltext` blocks a restore **exactly as the vector index did** — the bystander's worst `PING`
@@ -63,21 +76,44 @@ Three facts had to be established, and they are separable:
 | fulltext kept | **1.11 MB** | `OPERATIONAL`, 20 000 docs, 100 035 terms, 2 230 000 inverted bytes |
 | range kept | **1.11 MB** | `OPERATIONAL`, 20 000 docs |
 
-The payload is **byte-identical in size** whether or not an index exists — and identical again at
-90 000 nodes (5.02 MB across every arm). Yet the restored index reports **exactly** the pre-restore
-`numDocuments`, `numTerms` **and** `invertedSize` (2 230 000 → 2 230 000 at 20 000 nodes; 10 035 000 →
-10 035 000 at 90 000).
+The payload is **equal in size at the log's resolution** whether or not an index exists — 1.11 MB at
+20 000 nodes and 5.02 MB at 90 000 across every arm, recorded as MiB to two decimals, so the
+granularity is ~10.5 KB rather than a byte count. Yet the restored index reports **exactly** the
+pre-restore `numDocuments`, `numTerms` **and** `invertedSize` (2 230 000 → 2 230 000 at 20 000 nodes;
+10 035 000 → 10 035 000 at 90 000).
 
-⇒ **The index DEFINITION travels in the payload; the index DATA does not, and is rebuilt on the
-serving thread from the restored graph.** That is not an inference from timing — it is forced by the
-payload size together with the exact match of a derived statistic that cannot survive a partial
-rebuild.
+**What that does and does not prove — stated carefully, because it is two independent steps and only
+one of them is about the payload.**
+
+1. **The payload equality rules out the index DATA travelling in the payload.** An inverted index
+   this record measured at **2 230 000** bytes (20 000 nodes) and **10 035 000** bytes (90 000) does
+   not fit inside a 1.11 MB / 5.02 MB payload that is the same size with the index absent. So the
+   restore cannot be merely re-attaching serialized index data.
+2. **The `numTerms` / `invertedSize` equality does NOT prove "rebuilt" on its own**, and an earlier
+   revision of this document claimed it did. Those figures are *deterministic functions of the
+   restored documents*, so a complete, correct **rebuild** reproduces them exactly — the equality is
+   predicted equally by "the data travelled" and "the data was rebuilt from scratch". What it
+   discriminates is **H3** (index absent or empty), which is the hypothesis that would have changed
+   the verdict, and that is worth having on its own.
+
+⇒ **The conclusion — definition travels, data is rebuilt on the serving thread — rests on step 1
+(the payload cannot be carrying the index) plus the timing and the block (§3, §4): a restore of the
+same graph is 0.011 s without an index and 0.405 s with one, the extra time is CPU-bound inside the
+`RESTORE` call, and the instance answers nothing for its duration.** The timing is doing real work in
+that argument, not decorating it.
+
+⚠️ **One mechanism this record cannot exclude**, and says so rather than implying otherwise: index
+data persisted in a **separate** RDB key (RediSearch's own layout, which §2's research subsection
+fails to settle) would also be invisible to a graph-key `DUMP` — so "not in the payload" is proved,
+while "not persisted elsewhere" is **not**. That does not change the measured cost: whatever the
+engine does with persistence, the measured `RESTORE` blocks the serving thread for 0.405 s / 1.585 s
+with a fulltext index present and 0.011 s / 0.032 s without one.
 
 This settled the three hypotheses the plan named, and it is worth recording which one survived:
 
 | | predicted signature | outcome |
 |---|---|---|
-| **H1** data travels with the payload | restore ≈ index-free, index populated after | ✗ — payload size is unchanged |
+| **H1** data travels with the payload | restore ≈ index-free, index populated after | ✗ — the payload does not grow with the index (step 1 above) |
 | **H2** definition travels, data rebuilt | restore ≫ index-free; bystander ≈ restore | ✅ **this is what happens** |
 | **H3** neither travels | restore fast, index absent or EMPTY after | ✗ — index is `OPERATIONAL` **and** answers |
 
@@ -145,11 +181,14 @@ the floor, so the payload is structurally identical and only the index differs.
 
 Four readings:
 
-1. **The fulltext index costs the restore a factor of ~37–38×, consistently across sizes** (37.3× at
-   20 000, 38.4× at 90 000) — so the cost is linear in document count, and *predictable*.
+1. **The fulltext index costs the restore a stable ~37–38× the index-free floor** (37.3× at 20 000,
+   38.4× at 90 000). That the *ratio* holds shows the cost is **scale-invariant**, which is what makes
+   it predictable. ⚠️ It does **not** show the cost is linear in document count — 4.5× the nodes
+   produced 3.9× the time (0.405 s → 1.585 s), i.e. mildly **sublinear** in this range. Two points
+   cannot establish a curve; they establish a stable ratio and a finite extrapolation.
 2. **The absolute number is what decides feasibility, and it is small:** 0.405 s at 20 000 and
-   1.585 s at 90 000. The vector index on the same record shape cost **2.955 s at 20 000** and did not
-   return inside 10 s at 90 000.
+   1.585 s at 90 000. See the ⚠️ under the verdict table on why the vector comparison is confounded
+   and is used for direction only.
 3. **The range index is cheaper still** — 5.6×/6.3× the floor, i.e. 0.061 s and 0.261 s.
 4. ⚠️ **Dropping the fulltext index first does not make the work cheaper, it makes it non-blocking.**
    The rebuilt index is the same rebuild either way: whole cycle **0.536 s dropped vs 0.422 s kept** at
@@ -157,8 +196,8 @@ Four readings:
    path the serving thread pays it (bystander 358.9 ms / 1 535.2 ms); on the drop-first path a
    background build pays it (`build wait` 0.50 s / 1.51 s) while the bystander sees **10.6 ms /
    41.2 ms**. **The win is the outage, not the total.** This is the opposite of the vector case, where
-   drop-first was also 43× faster in total; a reader carrying that expectation into fulltext would be
-   wrong.
+   drop-first was also ~43× faster **at the RESTORE step** (#7846 §3a: 2.955 s → 0.069 s — a step
+   ratio, not a whole-cycle one); a reader carrying that expectation into fulltext would be wrong.
 
 > ⚠️ **The `build wait` figure at small sizes is poll granularity, not cost.** The harness polls the
 > catalogue every 0.25 s, so a 0.25 s "wait" at 20 000 nodes (range) means *the build finished inside
@@ -212,19 +251,28 @@ The range index follows the same shape (definition travels, data rebuilt, instan
 build) at roughly a sixth of the fulltext cost.
 
 While reading it, the arms disagreed: `range kept` answered **19 999** rows at 20 000 nodes and
-**89 999** at 90 000, where `range dropped` answered 20 000 / 90 000 for the same query. That is not
-probe noise — it isolates to a specific value, and it is filed as **#12768**:
+**89 999** at 90 000, where `range dropped` answered 20 000 / 90 000 for the same query. A one-row
+delta in a summary table is too weak to file a defect on, so it was isolated by a separate committed
+probe (`range_zero_probe.py`, `range-zero-42006.log`) rather than asserted from the harness run, and
+it is filed as **#12768**:
 
 > **A payload-carried `RANGE` index loses every entry whose value is `0`.** 5 nodes with
-> `score = [0, 0, 1, 2, 3]`: before the cycle the range query answers **5**; after a *kept* restore it
-> answers **3**, while both zero-valued nodes still exist (`MATCH (n) WHERE n.id = 0 RETURN n.score`
-> → `0`) and `count(n)` is still 5. Lowering the bound to `-1` does not recover them, so the entries
-> are absent from the index rather than excluded by the bound. The **drop-and-recreate** path answers
-> 5/5.
+> `score = [0, 0, 1, 2, 3]`: before the cycle the range window answers **5**; after a *kept* restore it
+> answers **3**, while `count(n)` is still 5 and node `id=0` **still holds `score 0`** — the data is
+> intact, the index is not. The index's own arithmetic agrees: `numDocuments` stays **5** (documents
+> are registered) but `invertedSize` drops **9 → 5 bytes**, i.e. exactly the two 0-valued postings are
+> missing. Lowering the bound to `-1` does not recover them (`>=0`, `>=-1` and `>-1` all answer 3), and
+> an equality lookup (`n.score = 0`) finds **0 of the 2** — so the entries are **absent** from the
+> index rather than excluded by the query bound. The **drop-and-recreate** path answers 5/5.
 
 It is **not** a minimum-bound artifact: with `score = 100..3099` the kept restore answers all 3 000
-correctly — it is the **value `0`** specifically. And it is not data loss: every node comes back, in
-every arm, and `nodes after` equals the node count in all ten runs above.
+correctly (0 lost) — it is the **value `0`** specifically. And it is not data loss: `nodes after`
+equals the node count in all ten harness runs and in the probe.
+
+The same 2-byte-per-entry loss is visible in the harness's own committed records at scale — range
+`invertedSize` **79 526 → 79 524** at 20 000 nodes and **383 265 → 383 263** at 90 000 — where the
+fulltext arms are exact (2 230 000 → 2 230 000; 10 035 000 → 10 035 000). Two independent artifacts,
+same conclusion.
 
 ⚠️ **Scope, stated narrowly on purpose.** It needs an indexed numeric property that legitimately
 holds `0`, and it bites only the kept path. It matters here because **"the index is `OPERATIONAL`" is
@@ -237,12 +285,30 @@ product behaviour. It is recorded here because the arms in the table above would
 
 The #7846 lane's **first** harness measured nothing, because its graph carried no populated index —
 an empty index definition is not an index (that record's §1). At 90 000 nodes that defect would hide
-inside a plausible-looking number, so this harness refuses to time anything until:
+inside a plausible-looking number, so this harness gates on, for **every** index arm:
 
-- the index reports **`OPERATIONAL`**, and
-- `numDocuments` ≥ the node count (**20 000 / 90 000**, measured as `pre_documents` in the logs), and
-- for fulltext, a live `db.idx.fulltext.queryNodes` returns **hits** (`pre_fts_hits` **5 000** /
-  **22 500**); for range, the range window returns rows (`pre_range_rows` **20 000** / **90 000**).
+- the index reports **`OPERATIONAL`**, **and**
+- `numDocuments` ≥ the node count (**20 000 / 90 000**, recorded as `pre_documents` in the logs).
+
+and, for the **fulltext** arms additionally, that a live `db.idx.fulltext.queryNodes` returns
+**hits** (`pre_fts_hits` **5 000** / **22 500**) — a refusal this harness actually enforces.
+
+⚠️ **The gate is asymmetric, and the asymmetry is stated rather than papered over.** The range arm
+only **records** `pre_range_rows`; it does not refuse on it, because that probe is
+`MATCH (n:Num) WHERE n.score >= 0 AND … RETURN count(n)` — a predicate count a plain label scan
+answers without consulting the index at all, so it **cannot detect an empty range index** and wiring
+it in as a gate would be a gate that cannot fail. What *does* evidence the range index's population
+is `pre_documents` equal to the node count (`numDocuments` is the range index's own document table),
+the `invertedSize` its catalogue entry reports (79 526 bytes at 20 000; 383 265 at 90 000), and the
+read-only probe in §5, which found the range index **answering differently from a scan** — proving it
+is populated *and* being consulted. The fulltext arms, which carry the verdict, have the stronger
+gate.
+
+A separate fail-open was found in review and closed: `Bystander.worst_ms` returns `0.0` for an empty
+sample set, so an engine that dropped mid-run would have been recorded as *"worst PING 0.0 ms"* —
+i.e. as **no block**, the opposite of what happened. The harness now refuses an arm with zero
+successful bystander samples (`_invalid_harness`, exit 2). The committed runs carry **11–41** samples
+each with **0** failed pings, so this closes a latent path rather than changing a published number.
 
 Failure exits **2 — INVALID HARNESS** (`SystemExit(2)`, not `assert`: an `assert` is stripped under
 `python -O` and exits 1, so a consumer keying on the documented code gets the case it was guarding
@@ -266,28 +332,47 @@ would leave the index absent on half the engines, which is #7846 §1 all over ag
 
 ## 7. What this means for §7 — and the contradiction test
 
-**The verdict, in one line: the kept fulltext index does NOT make the cold-graph window a feasibility
-problem; zero-standing hot remains viable for `free`/`anon`.**
+**The verdict, in one line: against a caller read bound the kept fulltext index does NOT make the
+cold-graph window a feasibility problem — zero-standing hot remains viable for `free`/`anon` at
+1.585 s worst case. Against a per-tenant latency objective it is NOT established, and no such
+objective exists in this record (point 0).**
 
-The reasoning, in the order it matters:
-
-1. **Bounded.** 1.585 s at 90 000 nodes — the top of the range the proposal cares about — against a
-   10 s client read bound that the *vector* index already exceeded at this size. The cost is linear
-   in document count (37.3× → 38.4×), so extrapolating past 90 000 is arithmetic, not a cliff.
-2. **Cheap relative to what drove the decision.** §7's feasibility worry came from a **2.955 s** /
-   **2 899.4 ms** restore at 20 000 nodes and a restore that outlived a 10 s read bound at 90 000. The
-   fulltext index costs **0.405 s / 358.9 ms** and **1.585 s / 1 535.2 ms** at the same sizes — ~7×
-   and ~33× cheaper. The index that stays is not the index that was expensive.
+0. ⛔ **The budget this is viable against, named, because without it "viable" is undecidable.** The
+   only bound available to quote is #7846's **caller-side read bound** on the `RESTORE` call (its
+   client's 10 s socket). Against *that*, 1.585 s is comfortable. It is **not** a serving objective
+   for the **instance-wide, all-tenant** block this record measures (§4): a per-tenant p99 target of a
+   few hundred milliseconds would fail a 1.585 s stall while the 10 s caller bound passes it
+   trivially. **This record does not know the product's latency objective and does not invent one.**
+   Read the verdict as "viable against a 10 s caller read bound; the accept/reject decision needs an
+   SLO this measurement cannot supply" — and point 3 is why the SLO, whatever it is, has a cheap
+   answer available.
+1. **Bounded and extrapolable.** 1.585 s at 90 000 nodes — the top of the range the proposal cares
+   about. The ratio to the index-free floor is stable across the two sizes (37.3× → 38.4×), so the
+   cost is **scale-invariant**; ⚠️ it is mildly **sublinear** in this range (4.5× nodes → 3.9× time),
+   so extrapolating past 90 000 is arithmetic with a mild favourable bias — not a cliff, and not a
+   proven straight line either.
+2. **Cheap relative to what drove the decision — direction, not multiplier.** §7's feasibility worry
+   came from a **2.955 s** / **2 899.4 ms** restore at 20 000 nodes and a restore that outlived a 10 s
+   read bound at 90 000. This record measures **0.405 s / 358.9 ms** and **1.585 s / 1 535.2 ms** at the
+   same node counts. ⚠️ The two sides differ in engine **and** payload size (see the ⚠️ under the
+   verdict table), so the "~7×" / "~33×" multipliers **overstate the index-type difference**; the
+   defensible statement is that a fulltext rebuild is **substantially cheaper** than a vector one at the
+   same node count, and the same-engine 5 000-node datapoint (2.25 s vector vs 0.405 s fulltext at
+   20 000) supports that direction without a clean ratio.
 3. **Avoidable if the pause is judged too long.** Dropping the fulltext index before the `DUMP` costs
    **nothing** in total time (cycle 0.536 s vs 0.422 s at 20 000; 1.603 s vs 1.654 s at 90 000) and
    removes the block entirely (bystander 10.6 ms / 41.2 ms), because the re-create builds in the
-   background. So even a stricter latency budget has a mitigation that does not buy its safety with
-   throughput.
+   background. So whatever latency bound the owner sets, there is a mitigation that does not buy its
+   safety with throughput.
 4. **What remains a real (and different) problem:** the pause is **instance-wide** — every other
    tenant is blocked for it, not just the graph being restored. At 1.6 s that is a tail-latency event,
    not an outage; it becomes a problem only if first touches *cluster*, which is a scheduling rule for
    the window (§7's admission-control row), not an index-cost finding. **This record does not decide
    that rule**, and the numbers here are its input.
+5. **A correctness caveat that outranks the cost question for the range index.** §5's `#12768` means a
+   payload-carried range index **answers short** after a restore. That is a *correctness* defect in the
+   kept path, and it is a stronger argument for dropping-and-recreating than any latency number here —
+   not because it is slow, but because it is wrong.
 
 ### ⛔ Contradiction test — stated explicitly, as this lane is required to
 
@@ -321,10 +406,16 @@ uv run python docs/evidence/12766-fulltext-restore/fulltext_restore_cost.py <por
 # one arm only, e.g. to re-check the fulltext kept/dropped pair
 uv run python docs/evidence/12766-fulltext-restore/fulltext_restore_cost.py <port> 20000 \
     --arms fulltext-kept,fulltext-dropped
+
+# §5 / #12768 — the range value-0 isolation probe (runs in its own directory: it imports
+# the harness module for the shared client/catalogue helpers)
+cd docs/evidence/12766-fulltext-restore && uv run python range_zero_probe.py <port>
 ```
 
 Exit code **2** means **INVALID HARNESS** — the index was not populated, so the run says nothing about
-an index-bearing restore (see §6).
+an index-bearing restore (see §6). The probe uses the same convention for its own precondition: it
+refuses (exit 2) if its minimum-value **control** case loses a row or if the nodes did not survive
+intact, because then the zero-case finding would not be about the value `0`.
 
 Each run prints a **self-describing first line** naming its own engine (`redis_version`, graph module,
 module args, persistence), so a committed log carries its provenance. That is deliberate: #7846's
@@ -337,10 +428,13 @@ recorded in the commit"* because its script printed no header, and that is not a
 |---|---|
 | `fulltext-42006-20000.log` | 20 000 nodes, all five arms — the §3 first table |
 | `fulltext-42006-90000.log` | 90 000 nodes, all five arms — the §3 second table |
+| `range-zero-42006.log` | the §5 / #12768 isolation probe — the value-0 case, its minimum-value control, and the bound tests |
 
-Raw stdout of `fulltext_restore_cost.py`, one JSON record per arm plus the summary table, with the
-engine header on line 1. Every figure in §2–§5 is read from these two files — not a range across runs
-and not an ad-hoc run.
+Raw stdout, one JSON record per arm plus the summary table, with the engine header on line 1.
+**Every figure in §2, §3 and §4 is read from the first two files; every figure in §5 is read from the
+third.** ⚠️ An earlier revision of this paragraph claimed §2–§5 were all covered by two files — they
+were not: the 5-node probe in §5 ran ad hoc and was not committed until review caught it. It is
+committed now, which is why the claim can be made at all.
 
 ## 10. What is NOT measured (residuals, stated rather than assumed)
 
@@ -349,9 +443,11 @@ and not an ad-hoc run.
   builds a larger inverted index and therefore a longer rebuild — the **ratio** should hold, the
   **absolute seconds** will move. These numbers are for the payload shape in §3, not a universal
   constant.
-- **One engine.** Graph module **42006** (`falkordb-server:v4.20.6`, the CI pin). #7846 measured three
-  engines and found the vector-index block on all of them; this record did not repeat that sweep for
-  fulltext, so the cross-engine claim is **not** made.
+- **One engine for the measurements.** Graph module **42006** (`falkordb-server:v4.20.6`, the CI pin).
+  #7846 measured three engines and found the vector-index block on all of them; this record did not
+  repeat that sweep for fulltext, so **no cross-engine claim is made** — and note that the vector
+  comparison row in the verdict table is itself **cross-engine and cross-payload** (42201 / 9.66 MB at
+  20 000; 60001 / 43.19 MB at 90 000), which is why it is used for direction only.
 - **One bystander, one probe in flight, sampled every 50 ms.** The bystander is a single connection
   polling `PING`; it measures the instance's serving-ness, not a realistic mixed workload, and it does
   not measure *other graphs* specifically (the #7846 record notes the same limitation for its criterion

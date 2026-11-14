@@ -41,10 +41,10 @@ correction there, not a style choice:
    measure**, so ONE probe spans the block and its latency IS the outage. With a shorter
    timeout, ``redis-py``'s default ``Retry`` lists ``TimeoutError`` in ``supported_errors``,
    so a timed-out PING is silently retried and the call RETURNS with the retry-SUMMED wall
-   time — a true number that cannot tell one 3 s stall from four 0.8 s ones (README §3a).
+   time — a true number that cannot tell one 3 s stall from four 0.8 s ones (README §4).
 3. **The bystander is read AFTER its thread is joined** — the one PING that spans the block
    is still in flight when the restore returns, so reading inside the block reports the
-   last COMPLETED probe and understates the outage by everything (README §3a).
+   last COMPLETED probe and understates the outage by everything (README §4).
 """
 
 from __future__ import annotations
@@ -276,7 +276,7 @@ class Bystander:
     """A ``PING`` poller on its OWN connection — the instance's serving-ness, measured.
 
     ``socket_timeout`` is deliberately far ABOVE the longest block this harness can
-    measure, so ONE probe spans the block and its latency IS the outage (README §3a).
+    measure, so ONE probe spans the block and its latency IS the outage (README §4).
     ``socket_connect_timeout`` stays short: a REFUSED port is a different diagnosis
     (the process died, #8270) and must not be confused with a block.
     """
@@ -376,8 +376,19 @@ def cycle(client, graph, arm, kind, nodes, ready_docs):
         # The WHOLE cycle, wall clock: DUMP through the last step this arm needs. Timed
         # here, not summed from the steps, so inter-step overhead cannot go missing.
         result["cycle_s"] = round(time.perf_counter() - cycle_started, 3)
-    # ⚠️ read the bystander AFTER its thread is joined (§3a).
+    # ⚠️ read the bystander AFTER its thread is joined (§4).
     result.update(bystander.summary())
+    if not bystander.latencies:
+        # ⛔ A VACUOUS PASS, refused. `worst_ms` returns 0.0 for an empty sample set, so an
+        # engine that dropped mid-run would be recorded as "worst PING 0.0 ms" — i.e. as
+        # NO BLOCK — which is the opposite of what happened. This harness's own doctrine is
+        # that a missing reading is a REFUSAL, never a proceed (``await_index`` says the
+        # same thing about a timeout). The committed runs all carry >= 11 samples.
+        _invalid_harness(
+            f"the bystander took NO successful samples in arm {arm!r} "
+            f"({bystander.failures} failed pings) — an empty sample set would report "
+            f"a 0.0 ms worst latency, i.e. no block, which is a false pass"
+        )
 
     result["nodes_after"] = node_count(client, graph)
     if kind:
