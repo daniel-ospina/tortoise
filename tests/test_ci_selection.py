@@ -22209,8 +22209,8 @@ def test_the_health_honesty_suite_is_selected_on_BOTH_halves_of_its_module_pair(
     carrying two `api` rows and NO `core` row, which selects this suite on a
     `hosted_api.py` diff and NOT on a `monitoring.py` one.
 
-    Two things went missing in that one replay and they have different causes, which is
-    why neither a clean merge nor a duplicate alarm substitutes for this pin:
+    That replay produced two symptoms with different causes, which is why neither a clean
+    merge nor a duplicate alarm substitutes for this pin:
 
       * the LOST ARM went silently. `core` is 0 in the merged output of EITHER mode —
         `--union` and plain alike — so no driver and no conflict report was ever going to
@@ -22221,8 +22221,9 @@ def test_the_health_honesty_suite_is_selected_on_BOTH_halves_of_its_module_pair(
       * the DUPLICATE came from the `merge=union` attribute (`.gitattributes:21`), which
         keeps BOTH sides of the conflicted `api` region — so the rebase printed
         "Successfully rebased". ⚠️ It did NOT go unnoticed: `--integrity` reds on it
-        (`duplicate_entries(f2ec5ec092)` → `['api: test_12477_health_honesty.py']`). That is
-        the half that WAS caught; the arm is the half that was not.
+        (`duplicate_entries()` on `f2ec5ec092`'s manifest →
+        `['api: test_12477_health_honesty.py']`). That is the half that WAS caught; the arm
+        is the half that was not.
 
     ⚠️ `config/ci-surfaces.yml`'s note retracts a DIFFERENT claim about this same driver,
     and borrowing it here would be wrong: it says a duplicate is not evidence union ran,
