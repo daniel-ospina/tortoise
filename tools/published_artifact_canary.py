@@ -1296,6 +1296,17 @@ def render_summary(report: Report) -> str:
             elif runs_the_wheel and "console script" in detail:
                 what = "installs but ships no `tortoise` console script, so the documented first command cannot run"
                 named_it = True
+            elif runs_the_wheel and "created no database" in detail:
+                # ⛔ THE COMMAND EXITED 0 (#12589 review round 21, P3). `install_and_run` reports
+                # "reported success but created no database" for a wheel whose documented command
+                # RAN and left nothing behind — saying it "fails its documented first command" is a
+                # claim the arm's own detail contradicts, in the row directly above it. Measured on
+                # the rendered summary; no test had exercised this producer shape.
+                what = (
+                    "runs its documented first command successfully but creates no database, "
+                    "so the documented flow does not work"
+                )
+                named_it = True
             elif runs_the_wheel:
                 # The arm that RUNS the built wheel's documented command — the only one whose
                 # failure establishes this sentence (`test_wheel_mode_fail_names_a_build_defect_

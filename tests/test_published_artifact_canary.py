@@ -3223,6 +3223,89 @@ def test_summary_says_unknown_is_red_on_purpose():
     assert "never look like a pass" in summary
 
 
+def test_the_wheel_tail_reads_the_PRODUCERS_OWN_text_end_to_end(tmp_path):
+    """⛔ THE PRODUCER → RENDERER CONTRACT (#12589 review round 21, P2).
+
+    Every render pin before this fed a HAND-BUILT `Arm`, so the wheel tail's two prose-keyed branches
+    were never exercised against the strings `install_and_run` actually produces. Rewording the
+    producer silently reinstated the #12634/#12363 rounds 5/6 false claim: a wheel that installed
+    cleanly and then failed `tortoise init` rendered "does not install".
+
+    Driven through the `runner=` seam, one failing call per shape, then RENDERED — the detail and
+    the sentence it must produce, together.
+    """
+
+    class _Done:
+        def __init__(self, returncode=0, stdout="", stderr=""):
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    wheel = Path("dist/tortoise_graph-0.2.0-py3-none-any.whl")
+
+    def _report_for(runner, workdir):
+        (workdir / "venv" / "bin").mkdir(parents=True, exist_ok=True)
+        (workdir / "venv" / "bin" / "tortoise").write_text("#!/bin/sh\n")
+        arm, _ = canary.install_and_run(
+            package="tortoise-graph",
+            version="0.2.0",
+            workdir=workdir,
+            timeout=60,
+            runner=runner,
+            wheel=wheel,
+        )
+        assert arm.status == canary.FAIL, arm.detail
+        return canary.render_summary(
+            canary.build_report(
+                engine_doc=None,
+                client_doc=None,
+                tree_version="0.2.0",
+                init_arm=arm,
+                now=NOW,
+                wheel_path=wheel,
+            )
+        )
+
+    # (a) pip could not install the BUILT wheel.
+    def _install_fails(cmd, **kwargs):
+        if "install" in cmd:
+            return _Done(returncode=1, stderr=f"ERROR: {wheel.name} is not a valid wheel")
+        return _Done()
+
+    install_summary = _report_for(_install_fails, tmp_path / "a")
+    assert "The BUILT wheel does not install." in install_summary, install_summary
+    assert "fails its documented first command" not in install_summary, install_summary
+
+    # (b) it installed, and `tortoise init` exited non-zero.
+    (tmp_path / "b").mkdir()
+    (tmp_path / "b" / "venv" / "bin").mkdir(parents=True)
+    (tmp_path / "b" / "venv" / "bin" / "tortoise").write_text("#!/bin/sh\n")
+
+    def _init_fails(cmd, **kwargs):
+        if "init" in cmd:
+            return _Done(returncode=3)
+        return _Done()
+
+    init_summary = _report_for(_init_fails, tmp_path / "b")
+    assert "The BUILT wheel fails its documented first command." in init_summary, init_summary
+    assert "does not install" not in init_summary, init_summary
+
+    # (c) it installed and `tortoise init` exited 0 but created nothing — the command RAN, so the
+    # summary may not say it failed. (#12589 review round 21, P3: this shape rendered the false
+    # "fails its documented first command" until the positive branch was added.)
+    (tmp_path / "c").mkdir()
+    (tmp_path / "c" / "venv" / "bin").mkdir(parents=True)
+    (tmp_path / "c" / "venv" / "bin" / "tortoise").write_text("#!/bin/sh\n")
+
+    def _init_succeeds_silently(cmd, **kwargs):
+        return _Done(returncode=0)
+
+    silent_summary = _report_for(_init_succeeds_silently, tmp_path / "c")
+    assert "creates no database" in silent_summary, silent_summary
+    assert "fails its documented first command" not in silent_summary, silent_summary
+    assert "does not install" not in silent_summary, silent_summary
+
+
 def test_the_wheel_tail_only_reads_GATED_arms():
     """⛔ A NON-GATED ROW MAY NOT DECIDE THE WHEEL'S TAIL (#12589 review round 19, P3).
 
