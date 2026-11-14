@@ -67,9 +67,9 @@ interacts with a live dense leg (declared in §5).
 
 ## 1. What was ported, exactly
 
-`#12298`'s harness arm (`tools/m3_fts_leg_recall.py::recovery_terms` — on PR **#12349**,
-branch `fix/12298-m3-splade`; #12298 is closed and that directory is NOT on `main`, so the
-citation names the branch), verbatim in its run
+`#12298`'s harness arm (`tools/m3_fts_leg_recall.py::recovery_terms` — PR **#12349**,
+merged to `main` at `af403bb811`; #12298 is the closed ISSUE that PR answered, and both the
+module and `docs/research/2026-11-13-12298-m3-fts-leg/` are on `main`), verbatim in its run
 test — *a maximal run of `[A-Za-z0-9_]` that still carries `_`, lowercased, length ≥ 2* —
 moved out of the harness and into `tortoise/sparse.py::underscore_run_terms`, appended by
 `build_or_query` as a **third additive tail** after the originals, the A4 expansion tail, and

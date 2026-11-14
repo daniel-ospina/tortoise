@@ -123,7 +123,8 @@ _CITE_CANDIDATE_RE = r"[[:alnum:]_.-]*hosted_api\.py:[0-9]+"
 #: 23131 -> 23466, where it had sat stale while the notes it is a fallback for
 #: had already been re-derived by hand; #11803 moved it 23466 -> 23477; #11977 moved
 #: it 23477 -> 23502 and re-derived neither this constant nor the notes, which is
-#: why the #11850 lane found the census red on main at `7e6baffc5d`). Two
+#: why the #11850 lane found the census red on main at `7e6baffc5d`; #12438's
+#: net +1 line moved it 24620 -> 24621, re-deriving none of the three). Two
 #: distinct wrongnesses, with distinct start points — do not merge them:
 #:   • `pivot_is_the_lifetime_site(<old pivot>)` goes FALSE the moment the CALL
 #:     moves, because the note still cites the old line (#11803, #11977);
