@@ -7,11 +7,10 @@ subjects.team: epistemic-team
 aboutSubjects: tortoise-supabase-control, tortoise-monitoring
 aboutObjects: tortoise, docs/architecture/STORAGE-ARCHITECTURE.md
 created: 2026-10-15
-updated: 2026-10-15
+updated: 2026-11-14
 ---
 
-# Postgres storage footprint + per-org analytics row growth (#4492)
-# — and per-org bytes from what we WRITE (#12762)
+# Postgres storage footprint + per-org analytics row growth (#4492) — and per-org bytes from what we WRITE (#12762)
 
 > **This is a MEASUREMENT, not a policy.** It answers two questions the B7
 > cost-structure audit found unanswerable: *how large is the control plane's
@@ -112,8 +111,9 @@ is a measurement of the account's own stored content, not a share of a total.
 
 ### The TOAST question, settled by measurement — and the issue's premise is FALSE
 
-#12762 was filed on the premise that `sum(pg_column_size(...))` reports the
-**18-byte TOAST pointer** for a value moved out of line, a ~100× undercount.
+Issue #12762 was filed on the premise that `sum(pg_column_size(...))` reports
+the **18-byte TOAST pointer** for a value moved out of line, a ~100×
+undercount.
 Two sources were said to disagree, so this was measured rather than cited.
 
 **Setup:** containers `postgres:17.12` and `postgres:16.9`, plus the repo's
@@ -185,10 +185,10 @@ accumulated counter with the audit and names which way they disagree:
 
 **Only the rows THIS transaction inserted.** The journal's insert is
 `ON CONFLICT (org_id, graph_id, seq) DO NOTHING` and the table is append-only, so
-a write that LOSES a position collision (reachable between two durable journals,
-#9307) stores nothing — while those positions still exist with bytes. Summing by
-position alone would charge the org a **second time**, and no row count could
-reveal it. The meter therefore filters `xmin = pg_current_xact_id()`: measured,
+a write that LOSES a position collision (reachable between two durable journals
+— #9307) stores nothing, while those positions still exist with bytes. Summing
+by position alone would charge the org a **second time**, and no row count
+could reveal it. The meter therefore filters `xmin = pg_current_xact_id()`: measured,
 an own insert matches and a suppressed conflict carries the older xid. It must
 be called **in the write's own transaction** (outside one it reports 0 rows —
 that is the contract, not a bug); under a `SAVEPOINT` it under-counts, which is
