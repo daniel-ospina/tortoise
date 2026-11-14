@@ -3058,9 +3058,13 @@ to answer.
   here, because a second unpinned copy of a number is a place to disagree.
 - **`tortoise/sdk.py` moved no cited line either, so §10.31's twelve carriers are the live ones.** It
   is NOT unchanged — `#12485` (`6efb1c3f7294`) rewrote the `#2498` residual comment line-neutrally,
-  as recorded above — but no carrier moved with it: this branch touches no file under `tortoise/`
-  that `main` moved after `cca42fa599` other than the extractor above, and all twelve were re-opened
-  on the merged tree: `_extract_session_v2` at
+  as recorded above — but no carrier moved with it: the intersection is EMPTY, not partial — `main`
+  moved 15 files under `tortoise/` after `cca42fa599` (`git diff --name-only cca42fa599
+  6916a6cd89d7 -- tortoise/`), and NOT ONE of them is a file this branch touches (`entity_blocking.py`,
+  `entity_resolver.py`, `extractor_v2.py`; `comm -12` of the two name lists is empty). The extractor
+  above is the BRANCH's change, not `main`'s — `git diff --numstat cca42fa599 6916a6cd89d7 --
+  tortoise/extractor_v2.py` is empty — so it was never an overlap to carve out. All twelve were
+  re-opened on the merged tree: `_extract_session_v2` at
   `18025`, `proj.link_source_to_event(` at `19452`, `relation_write = apply_relation_edges(` at
   `19012`, `from tortoise.relation_write import apply_relation_edges` at `19011`, the `#10999`
   transport-only comment at `18999`, the meta fold's `_capture_stats_with_step_witness` at `19054`,
