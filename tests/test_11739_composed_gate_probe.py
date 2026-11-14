@@ -401,7 +401,15 @@ _WRITE_ATTRS = frozenset({"write_text", "write_bytes", "open"})
 
 
 def _stray_writes(src: str) -> list[tuple[int, str]]:
-    """Every file write in `src` that is NOT routed through a function named `_write`.
+    """Every call to one of `_WRITE_ATTRS` in `src` that is NOT routed through a function named `_write`.
+
+    ⛔ NOT "every file write". Three names are not a class: `os.replace(tmp, out)`, `shutil.copyfile`
+    and a bare `os.rename` are file writes the scan cannot see, and the atomic-publish idiom this
+    repo uses is exactly `os.replace` (measured at this head, #12688 review round 31, P2 — the
+    previous wording promised a class and delivered a member list; the repo states the same limit
+    for its own guard at `tools/published_artifact_canary.py:364-368`). The residual is PINNED by
+    `test_the_write_scan_is_a_MEMBER_list_not_a_class`: whoever widens the list must update this
+    docstring, because that pin reddens the moment they do.
 
     ⛔ Extracted so the GUARD and its PIN are the same code path (#12688 review round 28, P2): the
     previous pin called `_innermost_enclosing_function` directly, so reverting `enclosing_ok` to a
@@ -479,6 +487,28 @@ def _innermost_enclosing_function(tree, node):
     while parent is not None and not isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)):
         parent = parents.get(parent)
     return parent
+
+
+def test_the_write_scan_is_a_MEMBER_list_not_a_class():
+    """⛔ PINS THE KNOWN GAP, so the docstring cannot drift back into a class claim (#12688 round 31).
+
+    `_WRITE_ATTRS` is a member denylist (`write_text`, `write_bytes`, `open`). A write through another
+    name is invisible to the stray-write assertion, and the atomic-publish idiom this repo uses is one
+    of them. This test asserts the gap EXISTS: widening the list (a good change) reddens it, which is
+    the signal to reword `_stray_writes`'s docstring to whatever the new coverage actually is.
+    """
+    opaque = (
+        "os.replace(tmp, out)\n"       # atomic publish — invisible today
+        "shutil.copyfile(a, b)\n"
+        "os.rename(a, b)\n"
+    )
+    assert _stray_writes(opaque) == [], (
+        "the write scan now sees a name it used to miss — good, but reword `_stray_writes`'s "
+        "docstring to say what it DOES cover instead of leaving this pin red"
+    )
+    # …and the members it does list are still caught, so this is a member list and not a blanket
+    assert _stray_writes("os.replace(tmp, out)\n") == []
+    assert _stray_writes("Path(p).write_text('x')\n") == [(1, "write_text")]
 
 
 def test_the_stray_write_guard_uses_the_INNERMOST_enclosing_function():
