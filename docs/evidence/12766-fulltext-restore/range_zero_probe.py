@@ -36,9 +36,8 @@ from __future__ import annotations
 import json
 import sys
 
-import redis
-
 import fulltext_restore_cost as H  # same directory; the shared client/plumbing helpers
+import redis
 
 WINDOW = "MATCH (n:Num) WHERE n.score >= 0 AND n.score <= 999999 RETURN count(n)"
 
