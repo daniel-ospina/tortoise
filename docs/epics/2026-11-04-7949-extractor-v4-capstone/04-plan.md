@@ -716,9 +716,11 @@ points**, double-minting silently. The door already owns the retry semantics: a 
 lane is the TRUE retry (`hosted_api.py:18131` assigns `retry_failed_capture`, `:18159` consumes it; blocked for `m2`);
 a **replay** fires only when `capture_ok` is `True`/legacy-`None` and returns `mode: "replayed"`
 (`hosted_api.py:18717`); and `#3129`'s abandoned marker writes `capture_ok=false` **precisely so that** a same-session
-retry is a true retry. ⚠️ §5.4's citation (`:17212-17217`) was wrong, **and so was the first correction to it**: at
-this head `:17212-17217` is `_SESSION_CAPTURED_AT_SOURCE_VALUES` and `class SessionRequest` — neither the 422 branch
-nor the replay path. **The retry contract is the door's; the plan declares it, it does not restate a different one.**
+retry is a true retry. ⚠️ §5.4's citation (`:17212-17217`) was wrong, **and so was the first correction to it** —
+which said that range held `_SESSION_CAPTURED_AT_SOURCE_VALUES` and `class SessionRequest`: those two symbols are at
+`:18298`/`:18302` (read at `d05688df59`), while `:17212-17217` holds a **422** branch at every head this plan has
+been read at — the 422 the citation claimed, as F3 records. Neither the range nor the correction named the replay
+path. **The retry contract is the door's; the plan declares it, it does not restate a different one.**
 
 ---
 
