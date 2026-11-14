@@ -3489,8 +3489,8 @@ def _is_safe_root_file(path: str) -> bool:
 # The membership test is the CONTENT-READER census, NOT a mention: a doc a guard
 # READS stays out. `README.md` (tests/test_embedded_durability_claim.py:62,
 # tests/test_capacity_page.py:40), `AGENTS.md` (the base-subset pin),
-# `.gitignore` (tests/test_kind_index.py:290) and `.env.example` are therefore
-# NOT here. At #8785 the census found no content reader for `CONTRIBUTING.md`
+# `.gitignore` (`test_kind_index.py::TestMemoizationAndLazy::test_gitignored_cache_dir`)
+# and `.env.example` are therefore NOT here. At #8785 the census found no content reader for `CONTRIBUTING.md`
 # either — every mention then was a docstring, a generated-doc link, or
 # `scripts/record-review.sh`'s basename case — and it was reprieved.
 #
@@ -3510,6 +3510,10 @@ def _is_safe_root_file(path: str) -> bool:
 # the PR that edits the paragraph it pins. (Two lanes fixed this independently; the blocks are
 # merged here rather than left as two rulings on one rule.)
 #
+# The three remaining members — `.github/pull_request_template.md`, `CHANGELOG.md`, `CLAUDE.md` —
+# keep the reprieve, and `test_non_code_docs_select_tier1_not_full` (whose monkeypatched arm is the
+# non-vacuity pin) is what keeps the reprieve from silently emptying into "nothing is reprieved".
+#
 # Ratchets: `test_non_code_doc_paths_exist` (liveness) and
 # `test_non_code_doc_paths_have_no_content_reader` (the read census).
 NON_CODE_DOC_PATHS = frozenset({
@@ -3517,7 +3521,6 @@ NON_CODE_DOC_PATHS = frozenset({
     "CHANGELOG.md",
     "CLAUDE.md",
 })
-
 
 
 def _is_non_code_doc(path: str) -> bool:

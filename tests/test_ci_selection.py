@@ -3015,9 +3015,10 @@ def test_root_file_read_by_a_test_is_never_allowlisted():
     (README.md by `test_embedded_durability_claim.py:62`; AGENTS.md by the
     base-subset pin; `.gitignore` by
     `test_kind_index.py::TestMemoizationAndLazy::test_gitignored_cache_dir`; …) and keeps FULL.
-    (Line numbers are deliberately gone from these citations — both parents' numbers
-    were already stale here by three lines, and a cited line that moved is a claim
-    that re-stales on every neighbouring edit.)
+    (`.gitignore` used to be cited as `:290` — a DIFFERENT test — while the read has
+    been at `:302` since before both parents merged, so a line citation here is a claim
+    that re-stales on the next neighbouring edit; that one is a symbol now. `README.md`'s
+    `:62` is still a number and is the next one to rot.)
     """
     for name in ("README.md", "AGENTS.md",
                  "LICENSE", "MEMORY.md", "index.md",
