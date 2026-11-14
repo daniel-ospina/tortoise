@@ -1034,6 +1034,18 @@ _REPORTED_ASIDE = re.compile(
     r"^(?:\s*(?:--(?:(?!--).)+--|\u2014[^\u2014]*\u2014|yet\s+again))+\s*", re.I)
 
 
+#: ⛔ WHAT MAKES A LEADING ASIDE'S INNER TEXT A CLAUSE IS A NARROWER TEST THAN
+#: `_REPORTED_CLAUSE_END` (cycle-20 round 7, measured). That set is tuned for the OUTER
+#: clause end: it carries `,` and the SUBORDINATORS, which inside an aside are ordinary
+#: prose. Reusing it here BLOCKED six correct records that `origin/main` exempts —
+#: `… said -- until #12444, which corrected it -- that …`,
+#: `… said -- while the page was stale -- that …`, `… said -- although #12444 fixed it --
+#: that …`, `… said -- flatly, as noted -- that …` (13 of 28 aside shapes swept). An inner
+#: reads as an INDEPENDENT ASSERTION when it OPENS with a coordinating conjunction or
+#: carries a hard clause break of its own — nothing else.
+_REPORTED_ASIDE_CLAUSE = re.compile(r"^\s*(?:and|but|so|yet)\b|[;:\u2014\u2013]|--", re.I)
+
+
 def _leading_aside_is_parenthetical(aside: str) -> bool:
     """Is a LEADING aside's inner text parenthetical rather than a clause of its own?
 
@@ -1043,9 +1055,13 @@ def _leading_aside_is_parenthetical(aside: str) -> bool:
     round 6): `-- until #12444 corrected it --` is an aside; `-- and the page still
     carries it --` is a second clause, and stripping it EXEMPTED a sentence `origin/main`
     FLAGS.
+
+    ⛔ The test is :data:`_REPORTED_ASIDE_CLAUSE`, NOT `_REPORTED_CLAUSE_END` (round 7,
+    measured): the wider set blocked six correct records `origin/main` exempts, because a
+    comma or a subordinator inside an aside is ordinary prose rather than a clause break.
     """
     inners = re.findall(r"--(.+?)--", aside) + re.findall(r"\u2014(.+?)\u2014", aside)
-    return not any(_REPORTED_CLAUSE_END.search(inner) for inner in inners)
+    return not any(_REPORTED_ASIDE_CLAUSE.search(inner) for inner in inners)
 
 #: ⛔ `_REPORTED_CLAUSE_BREAK` LIVED HERE AND IS GONE (round-2 review, measured). It
 #: was added for a real finding — a reported denial whose match STARTED inside a
@@ -1671,11 +1687,22 @@ class TestNoDocDeniesABuilderPlanExists:
             'Previously the doc said -- flatly -- that there is no Builder plan; #12444 '
             'corrected it.',
             # ⛔ A HYPHEN INSIDE THE ASIDE IS STILL AN ASIDE (cycle-20 round 6, measured):
-            # the `--` arm was `[^-]*`, which cannot span a hyphen, so these two records —
-            # which `origin/main` exempts — were BLOCKED here while their `—` twins were
+            # the `--` arm was `[^-]*`, which cannot span a hyphen, so this record —
+            # which `origin/main` exempts — was BLOCKED here while its `—` twin was
             # green. Tempered to `(?:(?!--).)+`.
             'Previously the doc said -- well-known to be wrong -- that there is no '
             'Builder plan; #12444 corrected it.',
+            # ⛔ …AND THE INNER TEST MUST NOT REUSE THE OUTER BREAK SET (cycle-20 round 7,
+            # measured): a comma or a subordinator inside an aside is ordinary prose, so
+            # these were BLOCKED here while `origin/main` exempts every one of them.
+            'Previously the doc said -- flatly, as noted -- that there is no Builder '
+            'plan; #12444 corrected it.',
+            'Previously the doc said -- until #12444, which corrected it -- that there is '
+            'no Builder plan.',
+            'Previously the doc said -- while the page was stale -- that there is no '
+            'Builder plan; #12444 corrected it.',
+            'Previously the doc said — wrongly, as #12444 established — that there is no '
+            'Builder plan.',
             "Previously the doc said the Builder tier does not exist; #12444 corrected it.",
             'The doc previously read "There is no Builder plan."; #12444 corrected it.',
             # ⛔ A MENTION OF THE FORBIDDEN SENTENCE IS NOT AN ASSERTION OF IT
