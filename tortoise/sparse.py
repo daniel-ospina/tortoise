@@ -546,13 +546,13 @@ def underscore_run_terms(text: str) -> list[str]:
       alternatives, so the probe guard refused a valid probe (measured false block
       on ``año_actual``/``the_café``/``_café``/``dé_installer``/``x_café``, in the
       precomposed spelling).
-      ⚠️ NOT "both spellings", and NOT a blanket "pre-existing refusal" (#12368
-      fourth review, MEASURED): a ``_``-carrying token is ``deferred``, so the
-      run-count branch is SKIPPED; the discriminator is the surviving TOKEN count.
-      Of the FIVE NFD shapes: ``año_actual``/``the_café``/``x_café``/``_café``
-      collapse to ONE token and are ACCEPTED on both arms — ``main`` refuses the
-      three accented ones by run count, so those accepts are NEW (this CURES
-      three); ``dé_installer`` keeps TWO (``['de','installer']``) and is REFUSED.
+      ⚠️ NOT "both spellings" (#12368 fourth review, MEASURED). A ``_``-carrying
+      token is ``deferred``, so the run-count branch is SKIPPED; the discriminator
+      is the surviving TOKEN count. On the FIVE NFD shapes this file measures:
+      ``año_actual``/``the_café``/``x_café`` — 1 token each, ACCEPT here, REFUSED
+      on ``main`` (run count), so this CURES three; ``dé_installer`` — 2 tokens,
+      REFUSED on ``main`` (term count) and here, so UNCHANGED; ``_café`` —
+      1 token, ACCEPTED on ``main`` and here, so also UNCHANGED.
       ⚠️ Scoped (#12368 second and third reviews): only THIS bullet is non-lossy.
       The two bounds below are both DECLARED LOSSY (``___``, and a run past
       ``MAX_COMPOSITE_RUN_LEN``), so an earlier "additive in the only sense that
