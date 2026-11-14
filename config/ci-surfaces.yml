@@ -911,6 +911,15 @@ surfaces:
   # `test_integrity_covers_all_test_files` fails (every tests/**/test_*.py must
   # be classified — the scope-v5 drift trap).
   - test_retrieval_metering.py
+  # #12764: per-org Postgres bytes MEASURED from what we write. Every source it
+  # pins is an `api` pattern — `tortoise/postgres_bytes.py` (the meter + audit
+  # wrapper, added by #12764), `tortoise/metering.py`
+  # (`record_postgres_bytes_written`), the ledger writer it accumulates through
+  # and `tortoise/supabase_control.py` (the increment) — so `api` is the surface
+  # that must run it. Unregistered on `main`, where it reds the REQUIRED
+  # `manifest-integrity` leg and every PR's `python-ci-gate` inherits the red
+  # (#11978/#11049).
+  - test_postgres_bytes.py
   # #3981: dual-registered with `core` for the same reason as test_boot_regressions.py
   # above. `api` is an exact-surface match that REPLACES the `core` fallback, so a
   # tortoise/hosted_api.py-only change would otherwise never run this file — which
@@ -4409,6 +4418,7 @@ surfaces:
   - test_installer_preserves_foreign_skill_content.py
   - test_installer_agents_block_3429.py  # #3429: block version + upgrade path (dual: installer-only surface above)
   - test_lifecycle_guards.py        # #2498: shared lifecycle guard — also runs on a tortoise/live.py-only change (terminal vocabulary pin)
+  - test_10371_nonpoint_lifecycle_guard.py  # #10371: `update_entity`'s Object and Subject arms reach the widened `_assert_lifecycle_guard` (off `:Point`); its sibling `test_9649_update_entity_point_lifecycle.py` is `core`, and `update_entity` is reached through the `core` fallback. Unregistered on `main`, where it reds the REQUIRED `manifest-integrity` leg for every PR (#11978/#11049)
   - test_7902_write_path_label_widening.py  # #7902: the epistemic-label declaration lives in tortoise/live.py (core fallback) — keep the write-path widening guard awake on a live.py-only change
   - test_7927_epistemic_read_surfaces.py  # #7927: the residual :Point-only epistemic READS (analyze BFS, sdk selection, ranking, audit scope, SVBP) admit all four labels — the same live.py declaration, read side
   - test_about_edges.py
