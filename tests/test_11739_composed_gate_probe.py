@@ -812,9 +812,9 @@ def test_gate3s_measurement_writes_all_route_through_the_one_guard():
     def enclosing_ok(node) -> bool:
         # Walk the tree once more for the innermost FunctionDef containing `node`.
         for fn in ast.walk(tree):
-            if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) and any(
-                    child is node for child in ast.walk(fn)):
-                return fn.name == "_write"
+            if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if any(child is node for child in ast.walk(fn)):
+                    return fn.name == "_write"
         return False
 
     stray = [(w.lineno, getattr(w.func, "id", getattr(w.func, "attr", "")))
