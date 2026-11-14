@@ -623,9 +623,18 @@ def test_a_stale_quota_module_cannot_turn_the_health_answer_into_an_error(monkey
     ``_health_tail_reserve`` and ``_health_quota_budget`` each read ``quota.QUOTA_STATE_TIMEOUT``,
     and both run OUTSIDE any ``try`` in ``tortoise_health``'s tail (fresh review, P3). A bare
     ``from tortoise.quota import QUOTA_STATE_TIMEOUT`` at a stale module therefore raised
-    ``ImportError``, which ``_safe`` turned into an error payload with **no ``status`` key at all** —
-    the clamp's own arithmetic fail-closing on the instrument that reports whether the product is up,
-    on a box where the pre-fix code answered normally. Measured on the reviewer's head.
+    ``ImportError``, which left ``tortoise_health`` entirely — measured on the reviewer's head:
+    ``_safe`` could not turn it into a payload either, because ``_safe``'s own handler imports
+    ``QuotaCheckError``/``QuotaExceededError`` from ``tortoise.quota`` unguarded (that gap is its
+    own issue, not this PR's). The clamp's own arithmetic took down the instrument that reports
+    whether the product is up, on a box where the pre-fix code answered normally.
+
+    Two MORE shapes the guarded helper must survive, both measured on the first fix (#12482): the
+    module can supply the NAME and not a number — pinned for three shapes by
+    ``test_a_non_numeric_quota_constant_falls_back_instead_of_raising`` below, because passing the
+    absent-attribute case says nothing about a wrong VALUE — and a stale ``monitoring`` module can
+    take out ``PROBE_TIMEOUT``/``GRAPH_SIZE_TIMEOUT`` exactly as it takes out this one, pinned by
+    ``test_a_stale_monitoring_module_cannot_cost_the_reserve_its_phase_constants``.
     """
     import sys
     import types
@@ -678,18 +687,58 @@ def test_a_non_numeric_quota_constant_falls_back_instead_of_raising(monkeypatch,
     ), f"a non-numeric quota constant {bad!r} did not fall back to the documented default"
 
 
+def test_a_stale_monitoring_module_cannot_cost_the_reserve_its_phase_constants(monkeypatch):
+    """Guarding the quota read closed ONE of the two modules the reserve depends on.
+
+    ``_health_tail_reserve`` adds ``monitoring.PROBE_TIMEOUT`` and ``monitoring.GRAPH_SIZE_TIMEOUT``
+    on the line below the guarded quota read, so a stale or partially written ``monitoring`` module
+    raised ``AttributeError`` out of the same PLANNING site and produced the identical status-less
+    outcome (fresh review, P3 — measured: ``_safe`` keys ``['error']``, no ``status``).
+
+    ``hosted_api._health_setup_clamped`` argues from exactly this premise, so leaving the constants
+    unguarded made the delta's own reasoning hit only half its cases.
+    """
+    monkeypatch.delattr(monitoring, "PROBE_TIMEOUT")
+    monkeypatch.delattr(monitoring, "GRAPH_SIZE_TIMEOUT")
+
+    assert mcp_server._health_tail_reserve() == pytest.approx(
+        mcp_server._PROBE_TIMEOUT_FALLBACK_S + mcp_server._GRAPH_SIZE_TIMEOUT_FALLBACK_S
+        + mcp_server._quota_state_timeout() + mcp_server._HEALTH_TAIL_MARGIN_S), (
+        "the reserve did not fall back to the documented monitoring constants")
+
+    token = mcp_server._WAIT_BOUND_DEADLINE.set(time.monotonic() + 10.0)
+    try:
+        _capture(monkeypatch)
+        report = mcp_server.tortoise_health()
+    finally:
+        mcp_server._WAIT_BOUND_DEADLINE.reset(token)
+
+    assert isinstance(report, dict) and "status" in report, (
+        "a stale `tortoise.monitoring` cost the health answer its `status` key — the reserve's "
+        f"phase constants are read unguarded: {report!r}")
+
+
 def test_the_quota_timeout_fallback_is_the_documented_constant():
-    """The fallback must not drift away from the value it stands in for.
+    """The fallbacks must not drift away from the values they stand in for.
 
     ``_QUOTA_STATE_TIMEOUT_FALLBACK_S`` is a literal (3.0) used only when ``tortoise.quota`` cannot
     be imported, so no ordinary test reaches it and a retune of ``quota.QUOTA_STATE_TIMEOUT`` would
-    leave the broken-deploy path reserving the wrong phase bound forever. This is the pin that makes
-    the duplication safe; it is deliberately NOT a claim that the literal is a second source of
-    truth.
+    leave the broken-deploy path reserving the wrong phase bound forever. The two ``monitoring``
+    fallbacks are the same shape (#12482 fresh review, P3 — guarding only the quota read left
+    ``monitoring.PROBE_TIMEOUT``/``GRAPH_SIZE_TIMEOUT`` unguarded in the same planning function).
+    Together they are the pin that makes the duplication safe; this is deliberately NOT a claim that
+    the literals are a second source of truth.
     """
     assert pytest.approx(quota.QUOTA_STATE_TIMEOUT) == mcp_server._QUOTA_STATE_TIMEOUT_FALLBACK_S, (
         "the stale-quota fallback no longer equals quota.QUOTA_STATE_TIMEOUT — retune it in the "
         "same commit that moves the constant")
+    assert pytest.approx(monitoring.PROBE_TIMEOUT) == mcp_server._PROBE_TIMEOUT_FALLBACK_S, (
+        "the stale-monitoring PROBE_TIMEOUT fallback no longer equals monitoring.PROBE_TIMEOUT — "
+        "a fallback BELOW the live constant would UNDER-reserve and widen the tail")
+    assert pytest.approx(monitoring.GRAPH_SIZE_TIMEOUT) == mcp_server._GRAPH_SIZE_TIMEOUT_FALLBACK_S, (
+        "the stale-monitoring GRAPH_SIZE_TIMEOUT fallback no longer equals "
+        "monitoring.GRAPH_SIZE_TIMEOUT — a fallback BELOW the live constant would UNDER-reserve "
+        "and widen the tail")
 
 
 def test_the_quota_deadline_reaches_the_bound_that_enforces_it(monkeypatch):
@@ -1077,10 +1126,10 @@ def test_a_clamped_count_budget_actually_starves_the_real_count(monkeypatch):
         "for the wrong reason")
     assert report["graph_size"] == 0
     # ⛔ THE FRAGMENT STARTS AT `graph_size count` ON PURPOSE (fresh review, P2): `docs/infra-runbook.md`
-    # §4.1.1a tells an operator to match on `count exceeded its`, "because there is no bare
-    # `graph_size exceeded its` in the payload" — and every assertion here used to start one token
-    # later, at `exceeded its`, which BOTH spellings satisfy. Measured: mutating the producer to the
-    # pre-fix bare `graph_size exceeded its` left this file 44/44 green, so the one anchor the
+    # §4.1.1a tells an operator to match on `count exceeded its`, because there is no bare
+    # `graph_size exceeded` anywhere in the payload — and every assertion here used to start one
+    # token later, at `exceeded its`, which BOTH spellings satisfy. Measured: mutating the producer
+    # to the pre-fix bare `graph_size exceeded its` left this file green, so the one anchor the
     # runbook relies on was pinned by nothing. Shortening these literals re-opens that gap.
     assert "graph_size count exceeded its 0.0s budget" in (
         report["graph_size_error"] or ""), (

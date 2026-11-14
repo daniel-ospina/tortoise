@@ -698,6 +698,32 @@ def _mcp_remaining_wait_bound() -> float | None:
 #: pins this figure equal to ``quota.QUOTA_STATE_TIMEOUT`` so the two cannot drift apart silently.
 _QUOTA_STATE_TIMEOUT_FALLBACK_S = 3.0
 
+#: Documented defaults for the two ``monitoring`` phase constants, used only when a stale or
+#: partially written module cannot supply them (#12482 fresh review, P3). Over-reserving only
+#: SHORTENS the allowance and can never widen the tail, so the documented value is the safe
+#: fallback. ``test_the_quota_timeout_fallback_is_the_documented_constant`` pins all three, so a
+#: constant that moves cannot leave its fallback behind.
+_PROBE_TIMEOUT_FALLBACK_S = 1.5
+_GRAPH_SIZE_TIMEOUT_FALLBACK_S = 1.5
+
+
+def _monitoring_timeout(attribute: str, fallback: float) -> float:
+    """``monitoring.<attribute>`` as a float, or ``fallback`` when the module cannot supply it.
+
+    ⛔ NEVER RAISES, for the same reason ``_quota_state_timeout`` does not: ``_health_tail_reserve``
+    is a PLANNING site outside any ``try`` in ``tortoise_health``'s tail, so an ``AttributeError``
+    here reached ``_safe`` and REPLACED the health answer with ``{'error': ...}`` — a payload with
+    no ``status`` key at all (measured on the pre-fix tree, ``monitoring.PROBE_TIMEOUT`` deleted and
+    ``quota`` intact: ``keys ['error']``). That is a different observable from the stale-QUOTA case
+    above (there the ``ImportError`` escapes the tool entirely, because ``_safe``'s own handler
+    imports ``QuotaCheckError`` unguarded — #12647); same class of harm, different last mile.
+    Guarding the quota read alone closed ONE of the two modules this arithmetic depends on.
+    """
+    try:
+        return float(getattr(monitoring, attribute))
+    except Exception:  # a planning read must never turn the health answer into an error
+        return fallback
+
 
 def _quota_state_timeout() -> float:
     """``quota.QUOTA_STATE_TIMEOUT``, or its documented default when the module cannot supply it.
@@ -705,24 +731,40 @@ def _quota_state_timeout() -> float:
     ⛔ NEVER RAISES, and that is the whole point (#12482 fresh review, P3). Both callers are
     PLANNING sites in ``tortoise_health``'s tail, reached outside any ``try``: a bare ``from
     tortoise.quota import QUOTA_STATE_TIMEOUT`` at a stale or partially-written module raised
-    ``ImportError``, which ``_safe`` turned into an error payload carrying **no ``status`` key at
-    all** — i.e. the clamp's own safety arithmetic fail-closed on the instrument that reports
-    whether the product is up, on a box where ``/health`` on main answered normally. The ``#11892``
-    block below imports ``tortoise.quota`` INSIDE its own ``try`` for exactly this reason; this
-    helper is that rule applied to the two planning sites that run BEFORE it.
+    ``ImportError``, which left the tool entirely — measured: ``_safe`` could not turn it into an
+    error payload, because ``_safe``'s OWN handler imports ``QuotaCheckError``/
+    ``QuotaExceededError`` from ``tortoise.quota`` unguarded, so the exception propagated out of
+    ``tortoise_health`` instead. Either way the clamp's own safety arithmetic took down the
+    instrument that reports whether the product is up, on a box where ``/health`` on main answered
+    normally. The ``#11892`` block below imports ``tortoise.quota`` INSIDE its own ``try`` for
+    exactly this reason; this helper is that rule applied to the two planning sites that run BEFORE
+    it.
+
+    ⛔ The coercion is inside the guard too: a partially written module can supply the NAME and not
+    a number (``QUOTA_STATE_TIMEOUT = None``), and ``float()`` outside the ``try`` raised
+    ``TypeError`` out of the same planning site (measured, fresh review P2) — the identical last
+    mile as the absent-name arm above, through the helper built to prevent it.
 
     Over-reserving only shortens the allowance and can never widen the tail, so the fallback is the
     constant's own documented value rather than ``0.0``: a phase whose bound cannot be read is
     still planned for, conservatively.
 
-    ⛔ THE CONVERSION IS INSIDE THE GUARD TOO (cycle-4 review, P3). An importable module carrying
-    a non-numeric constant raised ``TypeError``/``ValueError`` from ``float()`` OUTSIDE the ``try``
-    — the same ``_safe`` error payload with no ``status`` key that the guard exists to prevent,
-    while the paragraph above claimed the helper never raises. Measured on the previous head:
-    a ``None`` constant raised ``TypeError`` and ``'3.0s'`` raised ``ValueError``.
+    ⛔ THE CONVERSION IS INSIDE THE GUARD TOO (cycle-4 review, P3). An importable module carrying a
+    non-numeric constant raised ``TypeError``/``ValueError`` from ``float()`` OUTSIDE the ``try``,
+    while the first paragraph claimed the helper never raises. Measured on the previous head: a
+    ``None`` constant raised ``TypeError`` and ``'3.0s'`` raised ``ValueError``. The observable is
+    the one described above for a stale ``tortoise.quota`` — the exception ESCAPES
+    ``tortoise_health``, because ``_safe``'s own handler cannot import its quota exception classes
+    either (#12647) — NOT the ``{'error': ...}`` shape a stale ``monitoring`` module produces.
+
+    ⛔ CONSERVATIVE ONLY AT THE RESERVE (cycle-4 review, P3): there the fallback merely over-reserves,
+    which shortens the allowance. At the BUDGET site (``_health_quota_budget``) the same value is
+    handed to the quota phase as its SPEND, so it is exact rather than conservative — benign only
+    because the two are pinned equal by ``test_the_quota_timeout_fallback_is_the_documented_constant``.
     """
     try:
         from tortoise.quota import QUOTA_STATE_TIMEOUT
+
         return float(QUOTA_STATE_TIMEOUT)
     except Exception:  # a planning read must never turn the health answer into an error
         return _QUOTA_STATE_TIMEOUT_FALLBACK_S
@@ -746,7 +788,8 @@ def _health_tail_reserve() -> float:
     phases ran. If the deadline is shorter than this figure the allowance floors at 0.0 and the
     later phases would otherwise still spend their full constants.
     """
-    return (monitoring.PROBE_TIMEOUT + monitoring.GRAPH_SIZE_TIMEOUT
+    return (_monitoring_timeout("PROBE_TIMEOUT", _PROBE_TIMEOUT_FALLBACK_S)
+            + _monitoring_timeout("GRAPH_SIZE_TIMEOUT", _GRAPH_SIZE_TIMEOUT_FALLBACK_S)
             + _quota_state_timeout() + _HEALTH_TAIL_MARGIN_S)
 
 
@@ -6037,11 +6080,13 @@ def tortoise_health() -> dict:
         # slowly the earlier ones ran. Measured before this: a dispatch with 2.0 s left spent 3.00 s
         # in the quota phase alone and was refused inside the window where the runbook claimed a
         # clamped probe never breaches the bound.
-        probe_ceiling = allowance + monitoring.PROBE_TIMEOUT
+        probe_ceiling = allowance + _monitoring_timeout(
+            "PROBE_TIMEOUT", _PROBE_TIMEOUT_FALLBACK_S)
         graph_budget = None
         if remaining is not None:
-            graph_budget = max(0.0, min(monitoring.GRAPH_SIZE_TIMEOUT,
-                                       remaining - probe_ceiling - _HEALTH_TAIL_MARGIN_S))
+            graph_budget = max(0.0, min(
+                _monitoring_timeout("GRAPH_SIZE_TIMEOUT", _GRAPH_SIZE_TIMEOUT_FALLBACK_S),
+                remaining - probe_ceiling - _HEALTH_TAIL_MARGIN_S))
         metrics_kwargs: dict = {"sdk": sdk, "setup_timeout": allowance}
         if graph_budget is not None:
             # Only under a live deadline: an ABSENT kwarg is what every other caller and every test

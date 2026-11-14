@@ -7762,6 +7762,12 @@ def _health_setup_clamped() -> int | None:
     try:
         read = _monitoring.health_setup_clamped_count
     except AttributeError:  # a stale/partial monitoring module: nothing measured, not zero
+        # ⛔ Logged, because `null` on its own is a value with no reason attached: the callee's
+        # docstring justifies its own logging with "a failure here would land with no reason
+        # anywhere on the box", and on this path the callee is never reached (fresh review, P3).
+        _logger.warning(
+            "health: tortoise.monitoring has no health_setup_clamped_count attribute — a stale or "
+            "partially written module; publishing null (nothing measured, not zero)")
         return None
     try:
         return read()
