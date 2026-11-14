@@ -151,11 +151,11 @@ def probe_setup_timeout() -> float:
     for a rising ``health_setup_clamped`` on a clamped dispatch: there the transport bound is the
     constraint, so a larger knob buys nothing (fresh review, round 4 P3 — the earlier phrasing "NO
     seam-served call ever receives the value returned here" was FALSE for a legal low knob).
-    ⛔ That is ONE of that counter's three causes, never all of them (fresh review of the final
-    head, P2): it cannot separate "the clamp cost the observation" from "the store was too cold for
-    even the unclamped 20.0 s" from "the dispatch had already spent more than ``bound − reserve`` so
-    the probe was granted ZERO seconds". The last two are not fixed by a larger bound — see
-    ``record_health_setup_clamp``.
+    ⛔ That is ONE of that counter's CAUSES, never all of them (fresh review of the final head, P2;
+    and a re-review found a fourth): it cannot separate "the clamp cost the observation" from "the
+    store was too cold for even the unclamped 20.0 s" from "the dispatch had already spent more than
+    ``bound − reserve`` so the probe was granted ZERO seconds". None of those is fixed by a larger
+    KNOB — see ``record_health_setup_clamp``, which enumerates all four with their remedies.
 
     ⛔ And BELOW the ceiling the knob IS the spend, so raising it does help — ON A DISPATCH WHOSE
     DEADLINE STILL LEAVES ``knob + reserve``. Configured under ``bound − reserve`` (the documented
@@ -167,8 +167,8 @@ def probe_setup_timeout() -> float:
     still governs the OFF-request-path selfhost refresher at its full range (#2988/#3243; see
     ``PROBE_SETUP_TIMEOUT`` for the request-path-vs-background rule). A large/cold graph that needs
     more than the ceiling gets ``status="unknown"`` with ``setup_timeout_clamped: true`` rather
-    than a truthful deep report; restoring that is #12481 (split fast/deep, which needs the MCP
-    surface approval).
+    than a truthful deep report; restoring that is #12481, whose candidate shapes include serving the
+    deep probe from a background refresher — which may need no MCP-surface change at all.
 
     Read at CALL time, not import time, for two reasons:
 
@@ -1368,7 +1368,10 @@ def reset_wait_bound_breach_window() -> None:
 # process whose stores answer (fresh review of the final head, P2): a dispatch that had already
 # spent more than `bound - reserve` grants the probe a hard 0.0 s, so a store answering in
 # milliseconds still comes back unobserved and raises this key — there the remedy is the dispatch's
-# pre-handler latency (or #12481's split), not the store and not the knob. It is also NOT simply
+# pre-handler latency, not the store and not the knob. A submission QUEUED behind an occupied single
+# probe slot and never run for its whole allowance spells the same way too (re-review P2), and THERE
+# the remedy IS probe capacity. So: this counter does not name a cause it cannot separate — read
+# `record_health_setup_clamp` for the four and their remedies. It is also NOT simply
 # "the aggregate of `setup_timeout_clamped` AND `status="unknown"`", because a backlog refusal
 # satisfies both of those and is deliberately excluded. Unlabelled on purpose: the value is a single
 # fact, and a plain `Counter` is exported at 0 the moment it is registered, so the absent-vs-zero
@@ -1377,7 +1380,8 @@ HEALTH_SETUP_CLAMPED_COUNT = Counter(
     "tortoise_health_setup_clamped_total",
     "MCP health probes left UNOBSERVED on the SETUP-TIMEOUT spelling by a CLAMPED cold-start "
     "allowance (#10749) — NOT every clamped call, and NOT a backlog refusal the clamp did not "
-    "cause. It does NOT assert the store was slow: a probe granted a hard 0.0 s counts here too",
+    "cause. It does NOT assert the store was slow: a probe granted a hard 0.0 s, or one queued "
+    "behind an occupied probe slot, counts here too",
 )
 # #10515: a LEGITIMATE revision was refused by `update_point`'s ABSENT arm.
 #
@@ -2299,24 +2303,30 @@ def record_health_setup_clamp() -> None:
     is not this fact. Counting the APPLICATION would count health CALLS, not degradations; that
     mistake is the reason this gate exists (see ``HEALTH_SETUP_CLAMPED_COUNT`` above).
 
-    ⛔ WHAT THE SPELLING CANNOT SEPARATE (fresh review of cycle 5 round 3, P3). It covers BOTH arms
-    a smaller allowance genuinely worsens (a cold-start that overran it, and a submission queued and
-    never run for its whole budget) and excludes the backlog refusal, which carries the worker's own
-    message. It does NOT separate "the clamp cost it" from "the store was too cold for even the
-    UNCLLAMPED knob": both spell the same way, and the instrumentation cannot cheaply tell them
-    apart. So read this counter as "a CLAMPED probe came back unobserved" — which is exactly what it
-    measures. A store whose cold start exceeds even 20.0 s moves it too, and the remedy there is the
-    store, not #12481.
+    ⛔ WHAT THE SPELLING CANNOT SEPARATE (fresh review of cycle 5 round 3, P3; extended by a
+    re-review, P2). It covers the arms a smaller allowance genuinely worsens (a cold-start that
+    overran it, and a submission queued and never run for its whole budget) and excludes the backlog
+    refusal, which carries the worker's own message. FOUR causes spell identically and the
+    instrumentation cannot tell them apart, so read it as "a CLAMPED probe came back unobserved" and
+    nothing narrower:
 
-    ⛔ AND A THIRD CAUSE SPELLS IDENTICALLY, with a remedy that is neither (fresh review of the
-    final head, P2): the allowance is ``max(0.0, min(knob, remaining - 6.5))``, so a dispatch that
-    had already spent more than ``bound - reserve`` (the ~3.8 s of pre-handler cost #10749 measured)
-    grants the probe a hard **0.0 s** — ``setup.result(timeout=0.0)`` raises before the reachability
-    query — and a store answering in milliseconds comes back unobserved on this spelling and moves
-    this counter. Measured at this head through the real handler with a ~1 ms store: ``remaining``
-    6.4 s ⇒ ``observed=False``, ``error='probe setup timeout after 0.0s'``, counter +1. The remedy
-    there is the dispatch's pre-handler latency (or #12481's split fast/deep tool), NOT the store and
-    NOT the knob — which is why the counter is not a store-health signal.
+      1. the clamped allowance was too small for a cold start that DID run — remedy: a warmer store,
+         or #12481's truthful deep report;
+      2. the store was too cold for even the UNCLLAMPED 20.0 s knob — remedy: the store, not #12481;
+      3. the probe was granted a hard **0.0 s** because the dispatch had already spent more than
+         ``bound − reserve`` — remedy: the dispatch's pre-handler latency, or #12481;
+      4. the single probe slot was occupied by another dispatch, so this one spent its allowance
+         WAITING and never contacted the store — remedy: probe capacity (the #2850 single slot), not
+         the store, not the knob and not #12481.
+
+    ⛔ CAUSE (3) IN DETAIL (fresh review of the final head, P2): the allowance is
+    ``max(0.0, min(knob, remaining - 6.5))``, so a dispatch that had already spent more than
+    ``bound - reserve`` (the ~3.8 s of pre-handler cost #10749 measured) grants the probe a hard
+    **0.0 s** — ``setup.result(timeout=0.0)`` raises before the reachability query — and a store
+    answering in milliseconds comes back unobserved on this spelling and moves this counter.
+    Measured at this head through the real handler with a ~1 ms store: ``remaining`` 6.4 s ⇒
+    ``observed=False``, ``error='probe setup timeout after 0.0s'``, counter +1. That is why the
+    counter is not a store-health signal.
 
     ⛔ A VARIANT OF CAUSE (3) CAN MOVE IT WITH NOBODY LEFT TO SERVE (non-blocking, recorded rather
     than gated): the seam KEEPS an abandoned dispatch running (``_hold_mcp_dispatch_after_request``),

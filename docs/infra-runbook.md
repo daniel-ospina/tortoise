@@ -868,7 +868,8 @@ reserve:** with `allowance + PROBE_TIMEOUT + GRAPH_SIZE_TIMEOUT + QUOTA_STATE_TI
 the 0.5 s margin` (9.50 s at a 10.00 s bound and 6.00 s at 6.50 s — the two points
 `test_the_planned_phases_fit_the_bound_when_the_reserve_fits` iterates). Below 6.5 s the four
 constants no longer sum inside the deadline at all (they total 6.00 s at 3.00 s of remaining), which
-is why what bounds the tail there is each later phase's own deadline read, not the constant sum.
+is why what bounds the tail there is the QUOTA phase's own deadline read, plus the count's planned cap
+(which cannot run in that band), not the constant sum.
 ⛔ **Below the reserve two of those terms are also unreachable, and the allowance is a hard step,
 not a gradient:** it is `max(0.0, min(knob, remaining − 6.5))`, so at `remaining <= 6.5 s` it is
 exactly **0.0** — the probe is submitted and abandoned before its reachability query, `metrics` skips
@@ -913,17 +914,21 @@ curl -sS https://api.premiselabs.co/health | jq '{breaches: .wait_bound_breaches
   wrong remedy. It is
   therefore the **three-term** gate — `setup_timeout_clamped: true` **and** the probe unobserved
   **and** the setup-timeout spelling — and it is NOT the per-call pair: a backlog refusal satisfies
-  the pair and is deliberately excluded (see the bullet above). ⛔ **It carries THREE causes and
-  cannot separate them, so never read a rise as "the store is slow":** (1) a clamped allowance that
-  the cold start overran; (2) a store too cold for even the **unclamped** 20.0 s (the remedy is the
-  store, not #12481); (3) **the probe was granted a hard 0.0 s** — the dispatch had already spent
-  more than `bound − reserve` before the handler, so a store answering in milliseconds comes back
-  unobserved and moves this key, and the remedy is the dispatch's pre-handler latency or #12481's
-  split, not the store and not the knob. That third arm is **not** rare: it is the shape #10749
-  measured on the deployed process (~3.8 s of the 10.0 s bound gone before the probe's first byte ⇒
-  `remaining ≈ 6.2 s` ⇒ allowance 0.0). It also means this key does **not** read `0` on every process
-  whose stores are answering — read `setup_timeout_clamped_s` beside it: `0.0` there is the zero-grant
-  arm.
+  the pair and is deliberately excluded (see the bullet above). ⛔ **FOUR causes spell identically and
+  it cannot separate them, so never read a rise as "the store is slow":** (1) a clamped allowance
+  that the cold start overran; (2) a store too cold for even the **unclamped** 20.0 s (remedy: the
+  store); (3) **the probe was granted a hard 0.0 s** — the dispatch had already spent more than
+  `bound − reserve` before the handler, so a store answering in milliseconds comes back unobserved and
+  moves this key (remedy: the dispatch's pre-handler latency, or #12481); (4) **the single probe slot
+  was occupied**, so this dispatch spent its allowance waiting and never contacted the store (remedy:
+  **probe capacity** — the #2850 single slot — which is exactly the remedy the backlog exclusion
+  exists to protect). Cause (3) is **not** rare: it is the shape #10749 measured on the deployed
+  process (~3.8 s of the 10.0 s bound gone before the probe's first byte ⇒ `remaining ≈ 6.2 s` ⇒
+  allowance 0.0). It also means this key does **not** read `0` on every process whose stores are
+  answering. ⛔ **And `/health` cannot tell you which cause it was:** the discriminating
+  `setup_timeout_clamped_s` (`0.0` = the zero-grant arm) is on the **per-call `tortoise_health`
+  response only** — the aggregate body carries this counter and nothing else, so from `/health` a rise
+  is a rise, and attributing it needs the per-call payload or the logs.
 - The hosted body carries it because it builds its own JSON (`tortoise/hosted_api.py`'s `health()`);
   `monitoring.serve_health`'s **`/health`** carries the same key from `monitoring.metrics()`. A `0`
   here is a measured zero (an unlabelled counter is exported from registration); `null` means the

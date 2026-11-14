@@ -752,10 +752,12 @@ def _health_setup_allowance(remaining: float) -> float:
     3.0 or 3.4 alike, and ``setup_timeout_clamped`` IS set — so there, raising the knob widens
     nothing. The knob sets the CEILING; the deadline decides what is left under it.
 
-    ⛔ THIS DOES NOT RESTORE THE DEEP REPORT — that is shape **A**, an MCP tool-surface change,
-    which needs surface approval and is tracked in **#12481**. Reading this docstring as "the deep
-    probe still works" would be the same class of false claim as the counter docstring that said
-    it answered a degradation rate: state the number, and route the remedy.
+    ⛔ THIS DOES NOT RESTORE THE DEEP REPORT — tracked in **#12481**, whose candidate shapes include
+    serving the deep probe from a background refresher (the shape ``/health`` already uses), which may
+    need no MCP-surface change at all; read that issue rather than assuming this is owner-gated code.
+    Reading this docstring as "the deep probe still works" would be the same class of false claim as
+    the counter docstring that said it answered a degradation rate: state the number, and route the
+    remedy.
 
     ⛔ THE RESIDUAL IS AN ARITHMETIC BOUND, NOT A WINDOW THE TOOL REACHES (#12482 cycle 5,
     round 2). ``max(0.0, …)`` floors the allowance, and on the first version of this change the
@@ -774,7 +776,8 @@ def _health_setup_allowance(remaining: float) -> float:
     ``remaining`` 10.00 and 6.50, i.e. 9.50 and 6.00. (An earlier cut of this paragraph read the
     reservation BACKWARDS and claimed the tail could come out up to 1.5 s short OF THE MARGIN; the
     direction is the other way — over-reserving the probe shrinks the phases after it.)
-    ⛔ **And the allowance is a hard step, not a gradient:** it is ``max(0.0, min(knob, remaining −
+    ⛔ **And BELOW the reserve the allowance is a hard step, not a gradient** (above it, each second
+    of remaining buys a second of allowance until the knob caps it): it is ``max(0.0, min(knob, remaining −
     6.5))``, so at ``remaining <= 6.5`` it is exactly **0.0**. In that band the probe is submitted and
     abandoned before its reachability query, so ``metrics`` skips the ``graph_size`` count (that
     branch is reached only when the probe was OBSERVED) and the 1.5 s planned for the count is spent
@@ -782,8 +785,9 @@ def _health_setup_allowance(remaining: float) -> float:
     exactly ``remaining − margin`` at or below 3.5 s, at most 3.0 s above that. The over-reserve is
     conservative (it can only shorten the tail); 6.5 s is simply where the observable flips, so a
     store answering in milliseconds still reads ``status="unknown"`` on a dispatch whose pre-handler
-    cost exceeded ~3.5 s — the shape #10749 measured, whose remedy is the split in #12481, not a
-    bigger knob. With a warm projection the tool RESPONDS WITHOUT A REFUSAL at ``remaining`` 2.5 /
+    cost exceeded ~3.5 s — the shape #10749 measured, whose remedy is the deep report in #12481
+    (candidate shapes, one of which needs no surface change), not a bigger knob. With a warm
+    projection the tool RESPONDS WITHOUT A REFUSAL at ``remaining`` 2.5 /
     1.5 / 0.6 s (``status="unknown"`` wherever the allowance is 0.0). Read the figure as an upper
     bound the arithmetic permits, never as a refusal an operator should expect.
     ``test_the_planned_phases_fit_the_bound_when_the_reserve_fits`` and
@@ -1576,8 +1580,10 @@ async def _await_under_mcp_wait_bound(name: str, arguments, *, version,
         # already say so), the body would read `None`, and #10749's unclamped tail would return
         # SILENTLY. `test_the_REAL_hop_hands_the_tool_body_a_clamped_allowance` is the guard for
         # exactly that class, and it is the ONLY one: it awaits the real chain and asserts the body
-        # ran on a different thread (measured — under a bare `run_in_executor` it is the sole red,
-        # 1 failed / 39 passed, while a lost deadline reds 20 of 40). Keep that case if this seam
+        # ran on a different thread (measured at that head's 40-case file — under a bare
+        # `run_in_executor` it is the sole red, 1 failed / 39 passed, while a lost deadline reds 20
+        # of 40; the file has 45 cases now, so a re-run reads 1/44 and 20+/45). Keep that case if
+        # this seam
         # changes; the same dependency is relied on at ``tortoise_session_capture``'s cancellation
         # note.
         bound_token = _WAIT_BOUND_DEADLINE.set(_time.monotonic() + remaining)
@@ -5966,8 +5972,10 @@ def tortoise_health() -> dict:
     unobserved and ``status="unknown"`` (#3683) carries the truth, and ``setup_timeout_clamped``
     (a boolean — the duration beside it can be a falsy 0.0) names the clamp so an unknown is
     never read as a broken store. The clamp is a SAFETY NET, not the shape: where it bites, this
-    tool can no longer report a truthful deep state for a cold-but-reachable store at all, and
-    restoring that (split fast/deep; needs the MCP surface approval) is #12481."""
+    tool can no longer report a truthful deep state for a cold-but-reachable store at all — and at
+    or below the reserve it cannot for ANY store, because the allowance there is a hard 0.0 s (see
+    ``_health_setup_allowance``). Restoring the deep report is #12481, whose candidate shapes include
+    a background refresher that may need no MCP-surface change."""
     # #236: route through _safe() so every tool is gated (defense-in-depth;
     # reachable only post-auth over HTTP).
     # #3143: pass the cold-start allowance (call-time resolved) so a reachable
