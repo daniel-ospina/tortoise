@@ -319,7 +319,11 @@ class TestAdditive:
         # refused — three by the run-count branch, `dé_installer` by the TERM
         # COUNT (`it tokenises to 2 term(s)`) — so those three accepts are NOT
         # pre-existing: this change cures them. NFD `_café` is accepted on both
-        # sides because its mark follows the whole run.
+        # sides too, and NOT because of where its mark sits: all four collapse to
+        # ONE surviving token (`['actual']`, and `['cafe']` for the other three —
+        # `an`/`the` are stopwords, `o`/`x` are 1-char), so the degenerate branch
+        # sends the escaped RAW string, which IS the index term. `dé_installer`
+        # keeps two tokens, which is why it is the one still refused.
         for word in shapes:
             nfd = unicodedata.normalize("NFD", word)
             monkeypatch.setenv(UNDERSCORE_ENV, "0")
@@ -329,8 +333,8 @@ class TestAdditive:
             assert build_or_query(nfd) == off_built, word
             assert (probe_phrase_rejection(nfd) is None) == off_ok, word
             # ⛔ The VERDICT itself, pinned — not only the arm-to-arm equality the
-            # comment above says cannot see a wrong mechanism. `_café` and the three
-            # NFD names whose mark follows the run are ACCEPTED; `dé_installer` is
+            # comment above says cannot see a wrong mechanism. The four shapes that
+            # collapse to ONE surviving token are ACCEPTED; `dé_installer` is
             # REFUSED, a remaining false block on the read path (`build_or_query`
             # expands it into `'installer|de'`). Measured on both arms.
             accepted = probe_phrase_rejection(nfd) is None
