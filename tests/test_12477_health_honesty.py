@@ -388,14 +388,21 @@ def test_the_boot_clock_is_a_float_and_not_the_identity_string():
     every read raised `TypeError: unsupported operand type(s) for -: 'float' and
     'str'`, which the verdict reader reports as `failed`: measured on the real
     listener, a HEALTHY freshly-booted process answered
-    `503 reasons=['data-plane-failed']`. The suites could not see it because the
-    fixture hard-set the global to a float.
+    `503 reasons=['data-plane-failed']`.
 
-    Pinning the TYPE is what makes the collision unrepeatable: nothing here
-    asserts the identity string's value, only that the two are different globals
-    with different shapes.
+    ⛔ THIS TEST READS THE MODULE SOURCE, not the attribute value (round 14): the
+    autouse fixture sets `_PROCESS_BOOT_MONOTONIC` for isolation, i.e. it CREATES
+    the very attribute a value check would type-check — measured, the value form
+    of this test passed on the reverted code while the read raised. The runtime
+    guarantee is `test_a_cold_start_with_no_probe_result_does_not_fail_the_deploy_gate`;
+    this one asserts the DEFINITION exists under its own name, so a future rename
+    cannot silently re-collide.
     """
-    assert isinstance(hosted_api._PROCESS_BOOT_MONOTONIC, float)
+    import inspect
+
+    source = inspect.getsource(hosted_api)
+    assert "_PROCESS_BOOT_MONOTONIC = time.monotonic()" in source, (
+        "the boot clock must be DEFINED as a monotonic float under its own name")
     assert isinstance(hosted_api._PROCESS_STARTED_AT, str), (
         "_PROCESS_STARTED_AT is the ISO string `_build_identity()` publishes; if "
         "it is ever a float, an uptime subtraction has been pointed at it again")

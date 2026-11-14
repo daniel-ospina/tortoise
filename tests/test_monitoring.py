@@ -5795,6 +5795,9 @@ def test_a_raise_in_the_heartbeat_read_answers_503_instead_of_going_dark(monkeyp
         assert body[key] is None, (key, body[key])
     assert body["served"]["last_plane_serve_age_s"] is None, (
         "the degraded arm must carry the FULL served shape too")
+    assert "registered" in body["dataplane"], (
+        "the success arm publishes `dataplane.registered`; the degraded arm must "
+        "carry the same key as UNMEASURED rather than omitting it (round 14)")
 
 
 def test_stopping_the_app_clears_every_registered_reader():

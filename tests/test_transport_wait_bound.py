@@ -2367,6 +2367,11 @@ async def test_a_long_route_whose_own_timeout_exceeds_the_bound_is_not_the_gate(
     design and answers `503 Retry-After: 300`; signup/claim wait up to 15 s on
     Supabase. Measured before this fix: 5 refused restores in a window gave
     `share 1.0 -> 503`.
+
+    `/v1/session/login` was the member of that family the list missed (#12477
+    review round 14): `_session_login_exchange` awaits up to three `timeout=15.0`
+    GoTrue calls, and the route is in `SKIP_AUTH`, so any caller reaches it —
+    measured, five refused logins gave `share 1.0 -> 503` on the real listener.
     """
     hanging = ha.WaitBoundMiddleware(_slow_app(10.0))
     for path, method in (
@@ -2376,6 +2381,7 @@ async def test_a_long_route_whose_own_timeout_exceeds_the_bound_is_not_the_gate(
         ("/v1/claim/email", "POST"),
         ("/v1/user/identity/resend-confirmation", "POST"),
         ("/v1/user/identity/unlink", "POST"),
+        ("/v1/session/login", "POST"),
         ("/v1/onboarding/github/repos", "GET"),
         ("/v1/onboarding/github/status", "GET"),
         ("/v1/index/github", "POST"),

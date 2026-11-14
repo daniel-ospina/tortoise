@@ -5606,6 +5606,17 @@ _WAIT_BOUND_LONG_ROUTES = (
     re.compile(r"^/v1/signup/email/?$"),
     re.compile(r"^/v1/claim(/email)?/?$"),
     re.compile(r"^/v1/user/identity/(resend-confirmation|unlink)/?$"),
+    # ⛔ `/v1/session/login` IS THE SAME CLASS, and it was the one that got
+    # missed (#12477 review round 14). `_session_login_exchange` awaits THREE
+    # GoTrue calls — `_gotrue_admin_get_user` and `_gotrue_admin_mint_session`,
+    # each `timeout=15.0` — so up to ~45 s of third-party waiting sits inside a
+    # 10 s seam bound, and the route is in `SKIP_AUTH`, so ANY caller reaches it
+    # with no credential. Measured: five refused logins gave
+    # `share 1.0 -> refusing True` and the real 9090 listener answered
+    # `503 ['requests-refused']` — a healthy deploy failing its own gate because
+    # GoTrue was slow. Its siblings `/v1/signup/email`, `/v1/claim` and the
+    # identity routes were already here; this is the fourth member of one family.
+    re.compile(r"^/v1/session/login/?$"),
     # `GitHubIndexer._get_client` is `httpx.AsyncClient(timeout=20)` with bounded
     # retry-with-backoff — a designed ceiling above the bound at a moderate
     # upstream hiccup, for the same reason `/webhooks/github` is above
