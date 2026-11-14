@@ -5821,7 +5821,7 @@ _EPIC_CITE_DOCS = {
     # COUNT, NOT A SENTENCE COUNT: eight are in the `Measured at` sentence and `:1194` is in the sentence
     # BEFORE it on the same markdown line ("…is STAMP-bound (`:1186` is the `corpus = {…}`
     # line here; the frozen literal is at `:1194`)"). Three are pinned on the two rows
-    # below (`19238`/`19345` here, `sdk.py:10037` on its own row because a row carries ONE
+    # below (`19341`/`19448` here, `sdk.py:10037` on its own row because a row carries ONE
     # source key), `10064`/`10117` on their OWN `05-verify.md` row (round 6 — NOT by the
     # `subject_binding_available` rows that predate this PR: those scope `00-plan.md` and
     # `03-test-design.md`, and a row resolves only against the `doc_label` it names, so they
@@ -5864,7 +5864,10 @@ _EPIC_CITE_SOURCES = {
     # it merged into then, which WAS `d05688df5990` — those two `def`s were at `:1007`/`:999`
     # (`#12507` landed above them) while both the row and the document still said
     # `:955`/`:947`. ⚠️ The head is named because the measurement was taken there, and the
-    # pair happens to hold at both heads; nothing else here is claimed about either head. That is this source key's case in one
+    # pair holds at `d05688df5990` too; nothing else here is claimed about any head. It
+    # moved ONCE MORE since: `#12695` (`3893603b07`) took the pair to `:1023`/`:1015` at
+    # `origin/main` `5843fdf234` and re-derived no cite, so `main` was red for this row
+    # until that number was re-measured in the tree this head merges. That is this source key's case in one
     # line: the pin is what turned an invisible re-stale into a red; a name is pinned,
     # its line is re-opened.
     "pi_hooks": _REPO / "tortoise/pi-hooks/tortoise-capture.ts",
@@ -6190,8 +6193,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         #
         # The anchor is `quota_refusal_payload(QuotaExceededError(`, not the bare
         # `quota_refusal_payload(`, because the OLD anchor's `detail=quota_refusal_payload(`
-        # form occurs at THREE lines (`:10474`, `:19370`, `:19432`) — and the bare
-        # call occurs at four (`:10056` is `return quota_refusal_payload(`): a
+        # form occurs at THREE lines (`:10576`, `:19473`, `:19535`) — and the bare
+        # call occurs once too (`:10158` is `return quota_refusal_payload(`): a
         # `(document, pin)` pair moved together onto `:18590` would satisfy the
         # content arm and stay green on the WRONG refusal.
         # The hardened form occurs exactly once in the file, so a re-point onto a
@@ -6201,7 +6204,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("19473", "quota_refusal_payload(QuotaExceededError("),
         ), "hosted_api"),
         # ⛔ THE LINE THAT *QUOTES* :82's NUMBER (#12462 review). `03-test-design.md:236`
-        # re-states `hosted_api.py:19345` as the same guard read at an older head, so it is
+        # re-states `hosted_api.py:19448` as the same guard read at an older head, so it is
         # a second statement of one hit — and the paragraph it sits in INSTRUCTS the next
         # merger to re-point line 82, which is exactly how 236 comes to assert the old
         # number while 82 moves. Unpinned until the review reverted it green. Only the
