@@ -2624,20 +2624,24 @@ to answer.
 > `391313ca9a` then REMOVED them again — the mechanism guard became the DECLARED table in
 > `tortoise/ep.py`, so the band this block lives in is back to `+54` while the total grew elsewhere.
 > An entry that recorded the intermediate `+63` reading would name a head that no longer exists, so
-> this one is measured against the merged tree this record ships with.
+> this entry's `New value` block was measured on `main` at `070d97360c` — the tree the forward
+> integration of `main` had produced — and this branch's merged tree, which sits a further `+90`
+> above it, is carried by §10.34.
 >
 > ⚠️ **The handling is still §10.26→§10.27's**: a new dated entry, never a re-point in place.
 
 - **What moved, and why an offset cannot describe it.** The branch's delta against `origin/main` WAS
   **`+99 / -12` in fifteen hunks**, not one band: `+0` above `:1761`, `+28` at the `#10360`
   read-back (`:10508` on `main`, `:10536` on the branch), and `+54` from `_collect_classify_items`
-  (`:11803` → `:11857`) through the S2.2 VET gate (`:16779` → `:16833`). ⛔ **THIS ENTRY'S NUMBERS ARE
-  `main`'S TREE, NOT THIS BRANCH'S.** They were opened on `main` after the forward integration of
+  (`:11803` → `:11857`) through the S2.2 VET gate (`:16779` → `:16833`). ⛔ **THE DELTA FIGURES IN
+  THIS BULLET ARE THE OLDER TREE'S OWN — kept as the record of that delta, not restated here —
+  WHILE THE `New value` CITES BELOW ARE `main`'S TREE AT `070d97360c`, NOT THIS BRANCH'S.** They were
+  opened on `main` after the forward integration of
   `main` (`6408da01ce`) moved the file by `+48` — verified at `main` `070d97360c`, where `:12730` is
   the `def` and `:11409` the read-back. This branch's merged tree sits a further `+90` above that
   (`_collect_classify_items` at `:12820`), and its LIVE carriers are §10.34's, not this entry's.
   A dated entry records the tree it was measured on; it is never a re-point (§10.26→§10.27).
-- **New value — measured at this head, by opening each line:** `_collect_classify_items` at
+- **New value — measured on `main` at `070d97360c`, by opening each line:** `_collect_classify_items` at
   `:12730`, extent `:12730-12752` (`def` to `return items`, unchanged in size); the two `if items:`
   gates at `:15149`/`:15302`; the two fail-open `except` arms at `:15162`/`:15313`; the two result
   blocks at `:15611` (closing `:15617`) and `:15621` (closing `:15625`); `_run_vet_pass`'s S2.2
@@ -2645,7 +2649,7 @@ to answer.
   (`_value_fidelity_judged = _state_value_verbatim_enforced()`) at `:11409` — `main`'s value; the
   record's live `read_back` carries `:11499`, this branch's merged-tree value superseding
   §10.28's `:10536` sentence (§10.34 carries it).
-- **Verified by content, not by arithmetic.** `:12730` is
+- **Verified by content on `main` at `070d97360c`, not by arithmetic.** `:12730` is
   `def _collect_classify_items(embed_list: dict) -> list[dict]:` and `:12752` is `return items`;
   `:15149`/`:15302` are the two `if items:` gates; `:15162`/`:15313` are the two fail-open
   `except` arms whose warnings name `classify(S2) failed` / `classify(union) failed`; `:15611`
