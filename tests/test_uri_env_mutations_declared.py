@@ -243,12 +243,16 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # `setenv("TORTOISE_DB_URI"` arm would authorize any future one-line setenv in this
     # 3.5k-line file (`wc -l` → 3510 at this head), which the entry 10 lines above
     # refuses to do for its own file.
-    # ⛔ ONE key, not three. This file was declared TWICE MORE while it had no row at
-    # all (`#12422`'s canary landed after the `#12523` triage merged, so each pass
-    # added its own key), and a later literal key SILENTLY REPLACES an earlier one at
-    # runtime — the rows looked additive and were not. `ruff`'s F601 reads the repeat
-    # as a lint error, which is what surfaced it. The three rows carried this same
-    # regex, so consolidating loses no coverage; the prose each carried, kept:
+    # ⛔ ONE key, not three. `origin/main` carried TWO rows for this file and this
+    # branch's first commit added a third: `#12588` (the `#12523` triage) added the
+    # first, then `#12555` re-declared the same file from a base that PREDATED
+    # `#12588` (`git merge-base --is-ancestor 0f7f21c342 a808f9f8ba` → yes, so its
+    # "MAINLINE TRIAGE, not a site this PR added" row was a stale-base duplicate, and
+    # `#12422`'s canary had in fact merged at 01:32:47Z, hours BEFORE the triage at
+    # 05:13:00Z — not after it). A later literal key SILENTLY REPLACES an earlier one
+    # at runtime, so the rows looked additive and were not. `ruff`'s F601 reads the
+    # repeat as a lint error, which is what surfaced it. The three rows carried this
+    # same regex, so consolidating loses no coverage; the prose each carried, kept:
     # the site is `test_install_and_run_strips_ambient_tortoise_env`, which PLANTS an
     # ambient `TORTOISE_DB_URI` precisely so it can be shown to be STRIPPED before the
     # canary measures the default path a new user gets (an ambient URI inherited from
@@ -285,8 +289,8 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     #         store" an accident of the box instead of the arrangement under test.
     # Both are fixture-param monkeypatch calls, so pytest auto-restores them (no
     # lane leak); neither site dials anything. ⛔ The arm is PINNED to the sites'
-    # own `raising=False` rather than left key-only: the entry 21 lines above refuses
-    # a key-only arm on the stated ground that it would auto-authorize any future
+    # own `raising=False` rather than left key-only: the canary entry above refuses a
+    # key-only arm on the stated ground that it would auto-authorize any future
     # one-line mutation, and the same argument applies here — a bare
     # `delenv("TORTOISE_DB_URI"` arm would admit a future `delenv` in this module with
     # no triage. Both measured sites (`:49`, `:257`) pass `raising=False`, so pinning
