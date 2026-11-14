@@ -286,8 +286,8 @@ count, being a new file), #8447's ingest door (`tortoise/ingest.py`, the
 `tortoise/hosted_backup.py` — a file the population had not previously reached,
 carrying no `:Document` mention at `4f68a2aa7`, whose served-label bound added
 the pre-D10 dump/restore refusal and repair prose — #11682's BM25 corpus-join
-comment (`tortoise/search_engine.py:3337` — the counted `:Document` line; the block opens at
-`:3335`, one added line in an existing file, re-measured at this head because the
+comment (`tortoise/search_engine.py:3367` — the counted `:Document` line; the block opens at
+`:3365`, one added line in an existing file, re-measured at this head because the
 `:2107`/`:2109` this sentence used to carry was true only at `d06c001ff9` and had
 drifted since) — #12015's edge-vector prose, which added three lines to that same
 `hosted_backup.py` bound and one to `tortoise/cache_projection.py` (a file the
