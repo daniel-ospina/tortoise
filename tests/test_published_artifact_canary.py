@@ -57,6 +57,11 @@ def _engine_doc(version: str = "0.2.0", uploaded: str = "2026-08-08T00:30:10.719
             version: [
                 {
                     "filename": f"tortoise_graph-{version}-py3-none-any.whl",
+                    # ⛔ `yanked` IS PART OF A DOCUMENTED FILE RECORD (#12589 review round 12,
+                    # P3): without it the entry is an UNREADABLE value to `judged_value`, so this
+                    # "healthy" fixture was a shape the canary refuses to judge — and any future
+                    # test that handed it to a judging path would silently get UNKNOWN.
+                    "yanked": False,
                     "upload_time_iso_8601": uploaded,
                 }
             ]
@@ -2639,6 +2644,22 @@ def test_wheel_mode_fail_names_a_build_defect_not_a_release():
     assert "re-dispatch this publish" in summary
     assert "needs a release" not in summary
 
+    # ⛔ AND A GATED ARM THAT IS NOT THE WHEEL'S COMMAND MAY NOT INHERIT THE CLAIM (#12589 review
+    # round 12, P3). The pre-fix tail published "fails its documented first command" on `else:`,
+    # so any arm added later would be described as the built wheel failing a command it never ran.
+    foreign = canary.build_report(
+        engine_doc=None,
+        client_doc=None,
+        tree_version="0.2.0",
+        init_arm=canary.Arm("documented-command", canary.FAIL, "the README example exits 1"),
+        now=NOW,
+        wheel_path=Path("dist/tortoise_graph-0.2.0-py3-none-any.whl"),
+    )
+    foreign_summary = canary.render_summary(foreign)
+    assert "fails its documented first command" not in foreign_summary, foreign_summary
+    assert "documented-command" in foreign_summary, foreign_summary
+    assert "is NOT judged by this summary" in foreign_summary, foreign_summary
+
 
 def test_an_EMPTY_wheel_argument_is_refused_not_downgraded_to_index_mode(monkeypatch, capsys):
     """`pwsh`/bash do not abort on a failing `$(...)` INSIDE an argument, so
@@ -2859,6 +2880,21 @@ def _stub_main(monkeypatch, arm):
     monkeypatch.setattr(canary, "install_and_run", fake_install)
 
 
+def test_the_shared_engine_fixture_is_a_DOCUMENTED_file_record():
+    """⛔ THE "HEALTHY" FIXTURE MUST BE A SHAPE THE CANARY CAN JUDGE (#12589 review round 12, P3).
+
+    `_engine_doc()` is used as the healthy engine document throughout this module. Its only file
+    entry originally had `filename` + `upload_time_iso_8601` and NO `yanked`, which `judged_value`
+    classifies as an UNREADABLE value — so the healthy fixture was a record the canary refuses to
+    judge, and a future test handing it to a judging path would silently get UNKNOWN. This pins the
+    fixture itself: a documented record reads, and its release resolves.
+    """
+    # `judged_value` -> (any installable file, anything dropped as unreadable)
+    assert canary.judged_value(_engine_doc()["releases"]["0.2.0"]) == (True, False)
+    assert canary.installability(_engine_doc(), "0.2.0") == canary.INSTALLABLE
+    assert canary.resolvable_releases(_engine_doc()) == (["0.2.0"], "")
+
+
 def test_the_cli_writes_the_transcript_the_workflows_upload(tmp_path, monkeypatch, capsys):
     _stub_main(monkeypatch, canary.Arm("engine-init", canary.FAIL, "tortoise init exits 1"))
     logs = tmp_path / "canary"
@@ -2923,9 +2959,6 @@ def test_the_table_and_the_json_publish_the_SAME_status_for_every_arm(
     crafted.add(canary.Arm("release-age", canary.OK, "uploaded unknown ago", gated=False))
     monkeypatch.setattr(canary, "build_report", lambda **kwargs: crafted)
 
-    monkeypatch.setattr(
-        canary, "render_summary_for", lambda report: canary.render_summary(report), raising=False
-    )
     canary.main(["--json"])
     payload = json.loads(capsys.readouterr().out)
     by_name = {arm["name"]: arm for arm in payload["arms"]}

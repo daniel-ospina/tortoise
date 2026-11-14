@@ -697,12 +697,15 @@ def judged_value(files: Any) -> tuple[bool, bool]:
     return any(not entry.get("yanked") for entry in judged), partial or len(judged) != len(entries)
 
 
-#: ``installability`` results — three states, so a caller cannot fold "could not read" into
-#: "read and negative" (#12589 review round 7, P2).
 #: The arms whose failure means "the PUBLISHED ENGINE BUILD at this version is stale". Named
 #: positively so the `tree-version` row can never blame the engine artifact on some other arm's
 #: failure (#12589 review rounds 10 and 11).
 ENGINE_ARMS = frozenset({"engine-index", "engine-init"})
+
+#: The arms in WHEEL mode that exercise the wheel just built — the only ones whose red supports
+#: "The BUILT wheel fails its documented first command" (#12589 review round 12, P3). An arm that
+#: grows later cannot inherit that claim by failing.
+WHEEL_COMMAND_ARMS = frozenset({"engine-init"})
 
 
 def engine_build_implicated(report: Report) -> bool:
@@ -718,6 +721,9 @@ def engine_build_implicated(report: Report) -> bool:
     return any(arm.gated and arm.status == FAIL and arm.name in ENGINE_ARMS for arm in report.arms)
 
 
+#: ``installability`` results — three states, so a caller cannot fold "could not read" into
+#: "read and negative" (#12589 review round 7, P2). Round 11's comment shuffle left these three
+#: undocumented and the sentence attached to `ENGINE_ARMS`; the review caught it (#12589 round 12).
 INSTALLABLE = "installable"
 NOT_INSTALLABLE = "not-installable"
 INSTALLABILITY_UNKNOWN = "unreadable"
@@ -1248,14 +1254,34 @@ def render_summary(report: Report) -> str:
             # `tortoise` console script", which contains "install" and rendered as "does
             # not install" — false, it installed cleanly. Match the LEADING clause, and
             # name the entry-point case separately (#12363 rounds 5 and 6).
+            # ⛔ AN ALLOW-LIST, AND THE FALLBACK NAMES THE ARM (#12589 review round 12, P3). The
+            # trailing `else:` published "fails its documented first command" for ANY gated arm
+            # whose detail matched neither prefix, so an arm added later inherited the wheel's
+            # claim — the same class round 11 removed from `engine_build_implicated`. Only the two
+            # shapes that can NAME their claim keep it; anything else says which arm is red and
+            # asks the operator to read it.
             step = next((arm for arm in report.arms if arm.gated and arm.status == FAIL), None)
             detail = step.detail if step is not None else ""
             if detail.startswith("the BUILT wheel") and "failed to install" in detail:
                 what = "does not install"
             elif "console script" in detail:
                 what = "installs but ships no `tortoise` console script, so the documented first command cannot run"
-            else:
+            elif step is not None and step.name in WHEEL_COMMAND_ARMS:
+                # The arm that RUNS the built wheel's documented command — the only one whose
+                # failure establishes this sentence (`test_wheel_mode_fail_names_a_build_defect_
+                # not_a_release` is this shape: the wheel installs, `tortoise init` exits 1).
                 what = "fails its documented first command"
+            elif step is None:
+                what = (
+                    "is red, but no single arm names the failure — read the table above and "
+                    "treat this as a canary defect"
+                )
+            else:
+                what = (
+                    f"is NOT judged by this summary: the failing arm is `{step.name}` "
+                    f"({step.detail}) — read it, because that arm does not establish that the "
+                    f"built wheel fails its documented command"
+                )
             lines += [
                 "",
                 f"The BUILT wheel {what}. Nothing has been "
