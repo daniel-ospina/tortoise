@@ -3009,9 +3009,10 @@ def test_the_RENDERED_summaries_are_PINNED_VERBATIM():
     to be made DELIBERATELY, with this expectation updated in the same commit. The four shapes are
     one per verdict path plus the wheel (pre-publish) path. ⚠️ NOT every branch: the wheel
     tail's other FOUR sub-branches (does-not-install, console-script, init-success-no-database, the
-    foreign-arm fallback — the other three of those are pinned end-to-end by
-    `test_the_wheel_tail_reads_the_PRODUCERS_OWN_text_end_to_end`, and the console-script shape by
-    `test_the_wheel_tail_names_the_CONSOLE_SCRIPT_case_separately`) and
+    foreign-arm fallback — the other TWO (does-not-install, init-success-no-database) are pinned
+    end-to-end by `test_the_wheel_tail_reads_the_PRODUCERS_OWN_text_end_to_end`, the console-script
+    shape by `test_the_wheel_tail_names_the_CONSOLE_SCRIPT_case_separately`, and the foreign-arm
+    fallback on a hand-built `Report` from that same test) and
     the UNKNOWN tail's EMPTY-`marked` variant are pinned by
     `test_wheel_mode_fail_names_a_build_defect_not_a_release`,
     `test_the_wheel_tail_names_the_CONSOLE_SCRIPT_case_separately` and
@@ -4816,8 +4817,11 @@ def test_a_non_object_info_is_a_LEGIBLE_NON_READING_on_BOTH_arms():
       * a TRUTHY non-object (`"x"`) raised `AttributeError`, and `main()`'s backstop turned that
         into exit 2 — the right CODE by the wrong ROUTE (a traceback as the recorded reason);
       * the FALSY ones (`[]`, `0`, `null`) were swallowed by `or {}` into "", took the FAIL arm,
-        and reported exit 1 — the "cut a release" text — off a document that DID carry a version
-        in a shape this client refuses to parse.
+        and reported exit 1 — the "cut a release" text — off an `info` this client never parsed.
+        Those documents carry no version at all, so "carries no latest version" was literally true
+        of them; what was wrong was issuing a VERDICT off an unparsed field. (The sibling
+        `version_unreadable` case is the one where the old sentence was false: `{"version": 0.3}`
+        does carry a version.)
 
     So the fix MOVES the exit code (1 → 2) for the falsy shapes, deliberately and fail-closed. The
     invariance that actually matters is the one a naive "don't raise" fix would break: a

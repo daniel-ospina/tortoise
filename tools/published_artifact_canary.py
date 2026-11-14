@@ -51,7 +51,9 @@ Exit codes
   2  the canary could not be evaluated (unreadable index, no venv/network, a
      failed install that pip did NOT attribute to the artifact, or a document
      whose SHAPE this client refuses to read — `info-unreadable`,
-     `version-unreadable`, `releases-absent`, `releases-unreadable`) — fail-closed,
+     `version-unreadable`, `releases-absent`, or `releases-unreadable` WHEN NO
+     READABLE RELEASE RESOLVES: a partial parse that still holds an installable
+     release is a PASS, and its detail carries `releases-unreadable` as a NOTE) — fail-closed,
      reported as RED because a detector that cannot run must never look like a
      pass (the no-op-gate class). ⛔ An install failure the INDEX corroborates is
      exit 1: pip's absence vocabulary is not proof of absence, but a confirmed
@@ -498,9 +500,12 @@ def info_unreadable(index_doc: dict[str, Any]) -> bool:
     is an ``AttributeError``, which ``main()``'s exception backstop turned into exit 2 with a
     traceback as the recorded reason — the right CODE by the wrong ROUTE. The FALSY non-objects
     (``[]``, ``0``, ``null``) were swallowed by ``or {}`` into "" and reached the FAIL arm, i.e.
-    exit 1 and the "cut a release" text, off a document that DID carry a version. So this
-    predicate fixes two different defects at once, and the second one MOVES an exit code (1 → 2)
-    on purpose — fail-closed, because the old sentence "carries no latest version" was false.
+    exit 1 and the "cut a release" text — a release order issued off an ``info`` this client never
+    parsed. So this predicate fixes two different defects at once, and the second one MOVES an exit
+    code (1 → 2) on purpose: fail-closed, NOT a correction of a false sentence. The falsy non-objects
+    carry no version at all, so "carries no latest version" was literally true of them; what was
+    wrong was issuing a VERDICT off an unparsed field. (``version_unreadable`` is the sibling case
+    where the old sentence really was false: ``{{"version": 0.3}}`` carries a version.)
     #12589 review, P2: state the split rather than claiming an invariance that does not hold.
     """
     return "info" in index_doc and not isinstance(index_doc["info"], dict)
