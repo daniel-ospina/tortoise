@@ -1,0 +1,125 @@
+{
+  "gate": "2 of 3 \u2014 rank distribution / top-k displacement",
+  "rank_metric_from_issue": "#11739: 'count of items displaced from top-k' in the 0.70-0.85 band (band named in the issue, k=10 from the product)",
+  "k": 10,
+  "band": [
+    0.7,
+    0.85
+  ],
+  "population": {
+    "rows_in_cache": 15842,
+    "live_rows": 15842,
+    "live_with_quote_and_vector": 15008,
+    "distinct_composed_texts": 13341,
+    "encoder_provenance_mean_cosine_vs_stored_content": 1.0
+  },
+  "queries": {
+    "A_content_query_full": {
+      "definition": "query = the point's own content (the raw arm's own index text); effective fact = that point; n = full population",
+      "raw": {
+        "n": 15008,
+        "rank_1": 15006,
+        "rank_2": 2,
+        "rank_3": 0,
+        "rank_4_to_10": 0,
+        "out_of_top10": 0,
+        "median_rank": 1.0,
+        "mean_rank": 1.0001,
+        "sim_mean": 1.0,
+        "sim_in_band_070_085": 0,
+        "sim_lt_070": 0,
+        "sim_ge_085": 15008,
+        "IN_BAND_AND_OUT_OF_TOP10": 0,
+        "in_band_and_in_top10": 0,
+        "ge_085_and_out_of_top10": 0,
+        "lt_070_and_out_of_top10": 0,
+        "ANY_out_of_top10": 0
+      },
+      "composed": {
+        "n": 15008,
+        "rank_1": 11939,
+        "rank_2": 707,
+        "rank_3": 271,
+        "rank_4_to_10": 714,
+        "out_of_top10": 1377,
+        "median_rank": 1.0,
+        "mean_rank": 53.5247,
+        "sim_mean": 0.8975,
+        "sim_in_band_070_085": 3231,
+        "sim_lt_070": 424,
+        "sim_ge_085": 11353,
+        "IN_BAND_AND_OUT_OF_TOP10": 803,
+        "in_band_and_in_top10": 2428,
+        "ge_085_and_out_of_top10": 214,
+        "lt_070_and_out_of_top10": 360,
+        "ANY_out_of_top10": 1377
+      }
+    },
+    "B_prefix_query_sample": {
+      "definition": "query = first 25% of the point's content words (arm-neutral, seed 11739, n=1500 of 15008 queries, docs = full population)",
+      "raw": {
+        "n": 1500,
+        "rank_1": 1005,
+        "rank_2": 146,
+        "rank_3": 52,
+        "rank_4_to_10": 111,
+        "out_of_top10": 186,
+        "median_rank": 1.0,
+        "mean_rank": 25.3327,
+        "sim_mean": 0.826,
+        "sim_in_band_070_085": 837,
+        "sim_lt_070": 74,
+        "sim_ge_085": 589,
+        "IN_BAND_AND_OUT_OF_TOP10": 115,
+        "in_band_and_in_top10": 722,
+        "ge_085_and_out_of_top10": 13,
+        "lt_070_and_out_of_top10": 58,
+        "ANY_out_of_top10": 186
+      },
+      "composed": {
+        "n": 1500,
+        "rank_1": 652,
+        "rank_2": 111,
+        "rank_3": 43,
+        "rank_4_to_10": 140,
+        "out_of_top10": 554,
+        "median_rank": 2.0,
+        "mean_rank": 768.208,
+        "sim_mean": 0.7634,
+        "sim_in_band_070_085": 756,
+        "sim_lt_070": 393,
+        "sim_ge_085": 351,
+        "IN_BAND_AND_OUT_OF_TOP10": 174,
+        "in_band_and_in_top10": 582,
+        "ge_085_and_out_of_top10": 6,
+        "lt_070_and_out_of_top10": 374,
+        "ANY_out_of_top10": 554
+      }
+    }
+  },
+  "item_displacement": {
+    "reference": "items in a query's RAW top-k (self excluded) missing from the COMPOSED top-k; queries = full population",
+    "unbanded": {
+      "items_considered": 150080,
+      "items_displaced": 96133,
+      "queries_with_displacement": 15001
+    },
+    "band_070_085_only": {
+      "items_considered": 105442,
+      "items_displaced": 67259,
+      "queries_with_displacement": 11798
+    }
+  },
+  "duration_s": null,
+  "probe_sha256": "6cd1220ab762dfcd3f8dfebdfdff516dca529dc162a21d2519c9dcbf654bda9d",
+  "cache_sha256": "be2ee6353aa22e4103b4ab2f1db9576021152cceec7e82e99a82167788558439",
+  "provenance": {
+    "measured_at": "2026-11-14T01:44:00Z/2026-11-14T01:56:00Z",
+    "probe_sha256": "6cd1220ab762dfcd3f8dfebdfdff516dca529dc162a21d2519c9dcbf654bda9d",
+    "rows_source": "cache:/tmp/11739-rows.jsonl",
+    "rows_source_sha256": "be2ee6353aa22e4103b4ab2f1db9576021152cceec7e82e99a82167788558439",
+    "encoder": "BAAI/bge-small-en-v1.5 (384-d), mean cosine vs stored vectors = 1.000000",
+    "issue_comment": 6869726971,
+    "note": "no payload_sha256 self-binding and no pin test \u2014 this is a branch-only PROBE artifact, not the indexed bundle; see README.md's header"
+  }
+}
