@@ -2977,6 +2977,18 @@ def test_a_LONE_UNDERSCORE_probe_is_REFUSED(monkeypatch, capsys):
         #12360's review round 7 repaired, and `origin/main`'s refusal of ALL of
         them (for the false reason "it tokenises to 0 term(s)") is exactly what
         that round removed.
+    (4) THE PUNCTUATED SIBLINGS (#12368 review round 17, P1). The refusal above
+        was keyed on the bare string `token == "_"`, which happens to agree with
+        the index question for the ONE shape that has no punctuation in it. For
+        every other shape whose only index run is `_` it disagreed, and the
+        branch ACCEPTED them where `origin/main` refused: MEASURED at this head,
+        `probe_phrase_rejection` returned None for `'_'`-plus-separator in all
+        four positions. MEASURED on a live lane (one `:Object` per shape through
+        the real projection, index cycle awaited, each shape queried by its OWN
+        name through the real `run_fts_query`): `!_`, `_.`, `._`, `_!` are each
+        UNREACHABLE while `!__`, `__`, `_a`, `a_`, `0_` are each REACHABLE — so
+        the predicate is the token's index RUN (does every maximal
+        `[A-Za-z0-9_]+` run equal a bare `_`?), not the token's characters.
     """
     from tortoise.session_source_prose_migration import probe_phrase_rejection
 
@@ -2987,6 +2999,16 @@ def test_a_LONE_UNDERSCORE_probe_is_REFUSED(monkeypatch, capsys):
         "still-present sentence")
     assert "ZERO" in why or "zero" in why, why
 
+    # (4) THE PUNCTUATED SHAPES WHOSE ONLY INDEX RUN IS `_`. Each one's read
+    # emits the token itself as ONE literal (`build_or_query('_.') == '_.'`) and
+    # each one returns ZERO rows for its own indexed name.
+    for refused in ("!_", "_.", "._", "_!"):
+        assert probe_phrase_rejection(refused), (
+            f"{refused!r} was accepted as a probe, but its only index run is the "
+            f"bare `_`, which the index answers with ZERO rows — a still-present "
+            f"sentence would read as absent (MEASURED live, its own record is "
+            f"unreachable by its own name)")
+
     # ⛔ THE MESSAGE MUST NOT BE THE PRE-FIX ONE. `origin/main` refused `_` while
     # claiming "OR-joins multi-term input" for a token whose read emits ONE
     # literal; this refusal exists because the probe cannot be ANSWERED.
@@ -2994,8 +3016,13 @@ def test_a_LONE_UNDERSCORE_probe_is_REFUSED(monkeypatch, capsys):
         f"the refusal fell through to the term-count branch and repeats the "
         f"false reason #12360 round 7 removed: {why!r}")
 
+    # ⛔ AND THE WIDENING IS BOUNDED BY MEASUREMENT, NOT BY ANALOGY. `!__` is a
+    # punctuated sibling whose index run is `__`, which IS reachable — refusing it
+    # on the `!_` story would be exactly the false block this test's arm (3)
+    # exists to prevent.
     for accepted in ("__", "___", "____", "_____", "_a", "a_", "_1", "1_",
-                     "_a_", "a__b", "0_", "a_b", "a_bc", "x_axis", "A_B"):
+                     "_a_", "a__b", "0_", "a_b", "a_bc", "x_axis", "A_B",
+                     "!__"):
         assert probe_phrase_rejection(accepted) is None, (
             f"{accepted!r} was refused — the index holds it as ONE term and its "
             f"own record is reachable, so refusing it is a false block")

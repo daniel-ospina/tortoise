@@ -1489,38 +1489,56 @@ def probe_phrase_rejection(phrase: str) -> str | None:
     # `case` and `snake_case`) — the widening moves the decision, it does not relax
     # it.
     deferred = "_" in token
-    # ⛔ …BUT NOT THE LONE `_` (#12368 review, P1 — a FALSE PASS the deferral
-    # above opened, measured against a live lane). ``deferred`` admits EVERY
-    # ``_``-only token, and ``build_or_query('_') == '_'`` with ``_`` outside the
-    # escape set, so the read sends the bare ``_`` — which the index answers with
-    # ZERO rows even when an ``:Object`` literally NAMED ``_`` is indexed.
-    # MEASURED (one ``:Object`` per shape, each queried by its own name through
-    # the real ``run_fts_query`` on a live FalkorDB 4.20.6, over the twelve
-    # accepted ``_``-only shapes): ``'_'`` is the ONLY unreachable one —
-    # ``'__'``, ``'___'``, ``'____'``, ``'_____'``, ``'_a'``, ``'a_'``, ``'_1'``,
-    # ``'1_'``, ``'_a_'``, ``'a__b'``, ``'0_'`` each return their own record. And
-    # the term is really there: ``queryNodes('Object','\\_')`` returns the record
-    # named ``_`` where ``queryNodes('Object','_')`` returns nothing. So the bare
-    # token addresses no term, and accepting it certifies ``ran=True, leaked=[]``
-    # over a still-present sentence — the class this bound work exists to close.
+    # ⛔ THE QUESTION IS THE TOKEN'S **INDEX RUNS**, NOT ITS CHARACTERS (#12368
+    # review round 17, P1 — a FALSE PASS, and the round-9 repair of it was itself
+    # too narrow). ``deferred`` admits every ``_``-carrying token, so every
+    # refusal below it has to ask the question in the INDEX's sense; keying one
+    # of them on the bare string ``token == "_"`` answers a different question
+    # and only happens to agree for the one shape with no punctuation in it.
     #
-    # ⚠️ ``origin/main`` REFUSED this token too, but by ACCIDENT and for a FALSE
-    # reason — "it tokenises to 0 term(s) []; the FTS read OR-joins multi-term
-    # input", where there are no OR terms. The deferral above exists to stop
-    # exactly that misattribution, so this refusal is not a revert: it states the
-    # measured reason, and it is scoped to the ONE shape measured unreachable —
-    # refusing the other eleven on the same story would be a false block of the
-    # class review round 7 repaired.
-    if token == "_":
-        return ("it is a single `_`, and the index answers that query with ZERO "
-                "rows even when a record is literally named `_` (#12368 review, "
-                "MEASURED on a live index, twelve accepted `_`-only shapes each "
-                "queried by its own name: `_` is the only unreachable one, "
-                "`__`/`___`/`_a`/`a_`/`1_` all return their record, and "
-                "`queryNodes('Object','\\_')` finds the record named `_` where "
-                "`queryNodes('Object','_')` finds nothing) — a probe the read "
-                "cannot answer certifies 'the pre-fix prose is gone' over a "
-                "still-present sentence, so pass a LONGER token")
+    # What the read can address is the token's maximal word runs under
+    # :data:`_INDEX_WORD_RUN_SPLIT_RE` (``_`` stays INSIDE the run). A shape whose
+    # every such run is the bare ``_`` denotes a term the index does not answer,
+    # because ``_`` alone is unaddressable while ``__`` is not.
+    #
+    # MEASURED (one ``:Object`` per shape written through the real projection, the
+    # background index cycle awaited so a present name cannot book as a miss, then
+    # each shape queried BY ITS OWN NAME through the real ``run_fts_query`` on a
+    # live FalkorDB lane — the ten shapes below, index reporting 10 documents):
+    #
+    #     '_'  UNREACHABLE   '!_'  UNREACHABLE   '_.'  UNREACHABLE
+    #     '._' UNREACHABLE   '_!'  UNREACHABLE
+    #     '!__' REACHABLE    '__'  REACHABLE     '_a'  REACHABLE
+    #     'a_'  REACHABLE    '0_'  REACHABLE
+    #
+    # and the earlier twelve-shape run agrees on the reachable side (``___``,
+    # ``____``, ``_____``, ``_1``, ``1_``, ``_a_``, ``a__b`` each return their own
+    # record). And the term really is in the index: ``queryNodes('Object','\\_')``
+    # returns the record named ``_`` where ``queryNodes('Object','_')`` returns
+    # nothing. So a token whose ONLY index run is ``_`` addresses no term, and
+    # accepting it certifies ``ran=True, leaked=[]`` over a still-present
+    # sentence — the class this bound work exists to close.
+    word_runs = [r for r in _INDEX_WORD_RUN_SPLIT_RE.split(token) if r]
+    # ⚠️ ``origin/main`` REFUSED all five of the unreachable shapes, but by
+    # ACCIDENT and for a FALSE reason — "it tokenises to 0 term(s) []; the FTS
+    # read OR-joins multi-term input", where there are no OR terms. The deferral
+    # above exists to stop exactly that misattribution, so this refusal is not a
+    # revert: it states the measured reason. And it is scoped to the shapes
+    # measured unreachable — refusing ``__``/``!__``/``_a``/``a_`` on the same
+    # story would be a false block of the class review round 7 repaired, so the
+    # polarity is pinned in both directions by
+    # ``test_a_LONE_UNDERSCORE_probe_is_REFUSED``.
+    if word_runs and all(run == "_" for run in word_runs):
+        return ("every word in it is a single `_`, and the index answers that "
+                "query with ZERO rows even when a record is literally named "
+                "`_` (#12368 review round 17, MEASURED on a live index: `_`, "
+                "`!_`, `_.`, `._` and `_!` are each UNREACHABLE by their own "
+                "indexed name, while `__`, `!__`, `_a`, `a_` and `0_` return "
+                "their record; and `queryNodes('Object','\\_')` finds the "
+                "record named `_` where `queryNodes('Object','_')` finds "
+                "nothing) — a probe the read cannot answer certifies 'the "
+                "pre-fix prose is gone' over a still-present sentence, so pass "
+                "a token with a WORD in it")
     # ⛔ …BUT NOT PAST THE COMPOSITE BOUND (#12360 review round 8, P3). Deferring
     # EVERY `_`-only token accepted `'a'*129 + '_b'`: the composites are dropped
     # above that bound, so the read sends the whole 131-char string as ONE escaped
@@ -1588,25 +1606,29 @@ def probe_phrase_rejection(phrase: str) -> str | None:
     # punctuation and space separate. Refuse only when EVERY such run is over the
     # bound in bytes, i.e. when no alternative the read can send addresses
     # anything.
-    if len(token.encode("utf-8")) > MAX_COMPOSITE_RUN_LEN:
-        word_runs = [r for r in _INDEX_WORD_RUN_SPLIT_RE.split(token) if r]
-        if all(len(r.encode("utf-8")) > MAX_COMPOSITE_RUN_LEN
-               for r in word_runs):
-            # ⛔ THE CONSEQUENCE CLAUSE IS NOT ONE THING (#12360 review round 11, P3).
-            # It used to assert "so the query is ONE literal term the index cannot
-            # hold and the probe would match NOTHING", which is FALSE for any
-            # over-bound token that still has segments the tokeniser keeps: MEASURED
-            # ``('ab_'*43)[:129]`` builds ``ab|ab|...`` (twelve alternatives of one
-            # SHORT term) — the OPPOSITE failure from a literal that matches nothing.
-            # The refusal and the advice are right either way; only the reason had to
-            # describe what the read actually does.
-            return (f"it is longer than {MAX_COMPOSITE_RUN_LEN} bytes, and every "
-                    f"word in it is too — the index does not hold a term that "
-                    f"long (#12360: MEASURED — a 128-byte name returns rows, "
-                    f"129/131/200-byte names return NONE), so the term this "
-                    f"token DENOTES is not one the index holds: it cannot find "
-                    f"its own name however the read spells the query — pass a "
-                    f"SHORTER token")
+    # ⛔ ``word_runs`` IS COMPUTED ONCE, above the lone-`_` refusal, and reused
+    # here — this file's rule is that two predicates for one question is the bug,
+    # and the two refusals ask the same question about the same runs. One `if`
+    # rather than a nested pair for the same reason (a nested pair whose only
+    # sibling is a comment reds ruff SIM102).
+    if (len(token.encode("utf-8")) > MAX_COMPOSITE_RUN_LEN
+            and all(len(r.encode("utf-8")) > MAX_COMPOSITE_RUN_LEN
+                    for r in word_runs)):
+        # ⛔ THE CONSEQUENCE CLAUSE IS NOT ONE THING (#12360 review round 11, P3).
+        # It used to assert "so the query is ONE literal term the index cannot
+        # hold and the probe would match NOTHING", which is FALSE for any
+        # over-bound token that still has segments the tokeniser keeps: MEASURED
+        # ``('ab_'*43)[:129]`` builds ``ab|ab|...`` (twelve alternatives of one
+        # SHORT term) — the OPPOSITE failure from a literal that matches nothing.
+        # The refusal and the advice are right either way; only the reason had to
+        # describe what the read actually does.
+        return (f"it is longer than {MAX_COMPOSITE_RUN_LEN} bytes, and every "
+                f"word in it is too — the index does not hold a term that "
+                f"long (#12360: MEASURED — a 128-byte name returns rows, "
+                f"129/131/200-byte names return NONE), so the term this "
+                f"token DENOTES is not one the index holds: it cannot find "
+                f"its own name however the read spells the query — pass a "
+                f"SHORTER token")
     # ⛔ THE BARE-NUMBER ACCEPTANCE COMES *AFTER* THE BOUND (#12368 review round
     # 16, P2 — a FALSE PASS this ORDERING left open). It used to precede the
     # bound, so every SEPARATOR-FREE ALL-DIGIT token past the bound was accepted
