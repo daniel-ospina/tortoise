@@ -961,8 +961,11 @@ def build_report(
             # it did not (#12589). The exit code did NOT move for a TRUTHY non-object `info` —
             # that already raised into main()'s exit-2 backstop. It DID move (1 → 2) for the
             # falsy ones (`[]`, `0`, `null`), which `or {}` swallowed into the FAIL arm: a
-            # deliberate fail-closed move, because "carries no latest version" was a false
-            # claim about a document that carries one in a shape we refuse to parse.
+            # deliberate fail-closed move, NOT a correction of a false sentence — those documents
+            # carry no version at all, so "carries no latest version" was literally true of them;
+            # what was wrong was issuing a VERDICT off an `info` this client never parsed. (See
+            # `info_unreadable` for the sibling case where the old sentence really was false:
+            # `{"version": 0.3}` carries a version.)
             report.add(
                 missing_version_arm(
                     "engine-index",

@@ -3342,6 +3342,21 @@ def test_the_wheel_tail_reads_the_PRODUCERS_OWN_text_end_to_end(tmp_path):
     ) in foreign_summary, foreign_summary
 
 
+def test_the_unknown_tail_only_names_GATED_rows():
+    """⛔ THE TAIL'S POINTER MUST NAME A ROW THE TABLE MARKS (#12589 review round 25, P3).
+
+    `marked` reads `rendered_status`, which renders a non-gated row as `—`. Reading the raw
+    `arm.status` instead kept 104 green and made the tail name a row the table shows as `—` —
+    telling an operator to look for a CANNOT RUN mark that is not on that row.
+    """
+    report = canary.Report()
+    report.add(canary.Arm("engine-init", canary.UNKNOWN, "the install could not run"))
+    report.add(canary.Arm("release-age", canary.UNKNOWN, "uploaded unknown ago", gated=False))
+    summary = canary.render_summary(report)
+    assert "the row marked CANNOT RUN names which (`engine-init`)" in summary, summary
+    assert "`release-age`" not in summary.split("The canary could not READ")[1], summary
+
+
 def test_the_wheel_tail_only_reads_GATED_arms():
     """⛔ A NON-GATED ROW MAY NOT DECIDE THE WHEEL'S TAIL (#12589 review round 19, P3).
 
