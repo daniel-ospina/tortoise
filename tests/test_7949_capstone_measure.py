@@ -5862,15 +5862,15 @@ _EPIC_CITE_SOURCES = {
     # pins is a repair the next move of the symbol undoes silently. ⛔ AND IT ALREADY
     # HAS, TWICE: measured at `6916a6cd89` those two `def`s were at `:1007`/`:999`
     # while both the row and the document still said `:955`/`:947` (`#12507` landed
-    # above them) — and at THIS head they are at `:1023`/`:1015`, because `#12695`
-    # (`3893603b07`, the Pi leg stamping the unrecorded-outcome marker) inserted 572
-    # lines in this file (and deleted 51) after the last re-derivation, netting `+16`
-    # ABOVE both `def`s, so `:1007` is `}` and `:999` is a `reason =` binding now.
-    # ⚠️ No head is claimed for the earlier round beyond the
-    # head it names: the pair was ALSO read at `30c9e7c4d3` and at this head, and it
-    # holds at neither of the numbers that round wrote. That is this source key's case
-    # in one line: the pin is what turned an invisible re-stale into a red; a name is
-    # pinned, its line is re-opened.
+    # above them), so that round's re-point WAS right and held for several merges
+    # (`30c9e7c4d3` still carried the pair at `:999`/`:1007`, and its document said so).
+    # At THIS head they are at `:1023`/`:1015`, because `#12695` (`3893603b07`, the Pi
+    # leg stamping the unrecorded-outcome marker) inserted 572 lines in this file (and
+    # deleted 51) after the last re-derivation, netting `+16` ABOVE both `def`s, so
+    # `:1007` is `}` and `:999` is a `reason =` binding now —
+    # the second re-stale, not a mistake in the first repair. That is this source key's
+    # case in one line: the pin is what turned an invisible re-stale into a red; a name
+    # is pinned, its line is re-opened.
     "pi_hooks": _REPO / "tortoise/pi-hooks/tortoise-capture.ts",
     # ⛔ `03-test-design.md:82` cites the 402 quota guard and its refusal payload by
     # NUMBER, and that row was in NO pin: #12369 re-pointed a CORRECT
