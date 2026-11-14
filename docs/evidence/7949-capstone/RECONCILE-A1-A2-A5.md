@@ -343,8 +343,11 @@ mechanical half now defaults ON — the composition is the `vet_enabled = (vet_a
 _vet_enabled() or _value_gate_enabled())` assignment (`extractor_v2.py:11731-11732` at `80c912244`;
 **`:12302-12303` at `d69faaf38`**), and the default-ON itself lives at `tortoise/value_gate.py:81`
 (`is_truthy(os.environ.get(ENV_FLAG, "1"))`).
-`extractor_v2.py:1183` is the **`TORTOISE_VET` toggle**, still OFF by default — cite it for that and
-nothing else. ⚠️ **A line cite is pinned to a base, and cites drift SITE BY SITE.** Three points, each
+`extractor_v2.py:1185` is the **`TORTOISE_VET` toggle** on this tree
+(`return is_truthy(os.environ.get("TORTOISE_VET")) or _s2_seam_armed()`, `def _vet_enabled` at
+`:1177`), still OFF by default — cite it for that and nothing else. ⚠️ It was `:1183` only on the
+2026-11-09→11-12 commits, and a blank line on every sha this paragraph names below — which is the
+trap this very sentence is about: an unbased toggle number is safe at one head and wrong at the next. ⚠️ **A line cite is pinned to a base, and cites drift SITE BY SITE.** Three points, each
 named by the sha it is true at, so every delta has a reproducible operand: `:11351-11352` / `:1153` at
 **`aa414b4d5`** (the `#11211` landing — ⚠️ the immediate parent of the next point, `80c912244^`, holds
 `:11358`, i.e. **+373**, so the delta depends on which pre-merge base you pick) → `:11731-11732` / `:1154`
