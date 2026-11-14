@@ -1148,7 +1148,8 @@ def test_a_graph_ordering_with_no_signal_is_refused_not_silently_reordered(
 #: acts on, and the ones this PR spent rounds re-pointing citations FOR. Each was
 #: measured unpinned — the five at round 33, the two additions at round 34 — by
 #: inverting it in turn: the whole five-file gate set stayed green (261 passed,
-#: 16 skipped), because nothing else anywhere asserts
+#: 16 skipped at round 33 — dated, not claimed for this head), because nothing else
+#: anywhere asserts
 #: on `tortoise_query.__doc__` (`grep -rln 'tortoise_query.__doc__' tests/` finds
 #: only this file). They are presence checks, wrap-insensitive, like
 #: `_REFUSAL_CLAIMS` — they cannot re-red a true sentence.
@@ -1372,9 +1373,11 @@ def test_every_alternative_of_a_paged_text_route_terminates(stub) -> None:
     # Without this the executions below are unbound literals: deleting the
     # alternative from the route (keeping only `order_by='relevance'` — a
     # terminating alternative in its own right, applied to every type, so nothing
-    # noticed its twin disappearing) left this FILE green (round-25 P2, measured:
-    # 87 passed here; the five-file gate set was 251 passed / 16 skipped — the count
-    # is quoted per population because round-29 found it mislabelled as the set).
+    # noticed its twin disappearing) left this FILE green (round-25 P2, measured AT
+    # ROUND 25: 87 passed here; the five-file gate set was 251 passed / 16 skipped —
+    # both figures are dated to round 25 and neither is claimed for this head, where
+    # this file alone collects 98. The count is quoted per population because
+    # round-29 found it mislabelled as the set).
     assert "pass entity_type='point'" in order_only, order_only
     assert "or order_by='relevance'" in order_only, order_only
 
