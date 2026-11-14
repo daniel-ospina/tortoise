@@ -5808,12 +5808,12 @@ _EPIC_CITE_SOURCES = {
     # sweep `_BUNDLE_CITE` can see (it resolves `sdk|edges|extractor_v2` only), so its
     # two `.ts` numbers had no reader at all and were stale: the row named `:948`/`:938`
     # for the plain `postCapture` and its `install-probe` sibling while the tree carries
-    # those two `def`s at `:955`/`:947`. Registered because a repaired cite that nothing
+    # those two `def`s at `:1007`/`:999`. Registered because a repaired cite that nothing
     # pins is a repair the next move of the symbol undoes silently.
     "pi_hooks": _REPO / "tortoise/pi-hooks/tortoise-capture.ts",
     # ⛔ `03-test-design.md:82` cites the 402 quota guard and its refusal payload by
     # NUMBER, and that row was in NO pin: #12369 re-pointed a CORRECT
-    # `hosted_api.py:18494`/`:18519` to `:18493`/`:18518` (both comments) while
+    # `hosted_api.py:18503`/`:18528` to `:18493`/`:18518` (both comments) while
     # deleting the provenance section that said "do not re-point in passing", and
     # nothing red-ed — the regression was found by a reviewer reading the tree, not
     # by a test. A source key is the only way `_pin_row_failures` can resolve a
@@ -5985,7 +5985,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # own row: a row carries ONE source key. Both anchors are the FUNCTIONS
         # the row's prose names (`postCapture` and its `install-probe` sibling),
         # never a bare offset. The row named `:948`/`:938`; the tree carries those
-        # two `def`s at `:955`/`:947`, which are **always 8 apart** across all 27
+        # two `def`s at `:1007`/`:999`, which are **always 8 apart** across all 27
         # revisions of the file — so nothing "rotted" and there is no offset to
         # reuse: `:938` was `clearTimeout(timer);` and `:948` was
         # `cfg: CaptureConfig,`, i.e. the pair was WRONG, not shifted (the file did
@@ -5993,9 +5993,14 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # re-derives `948` → `957`, which lands on `postCapture`'s parameter list
         # (`payload: Record<string, unknown>,`) instead of its `def`, so the row
         # reds on content rather than silently resolving.
+        #
+        # ⛔ RE-DERIVED AGAIN at `#12545`'s squash-merge base (`7ce0d65fa0`): the
+        # pair moved `:955`/`:947` → `:1007`/`:999` between the base this branch
+        # was written against (`5bacb44e0b`) and the base the merge landed on, and
+        # the 8-line gap held. Every number here was opened, not offset.
         ("00-align.md", "`llm:deepseek-direct` is what", (
-            ("955", "export function postCapture("),
-            ("947", "export function postInstallProbe("),
+            ("1007", "export function postCapture("),
+            ("999", "export function postInstallProbe("),
         ), "pi_hooks"),
         ("04-plan.md", "operator / label path", (
             ("25396", "declared = declared_relation_predicates()"),
@@ -6007,9 +6012,13 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # cites by arithmetic onto two comment lines instead of two statements — the
         # exact failure the deleted "Provenance of the numbers" section named. Held by
         # CONTENT, so a number that lands on a comment cannot satisfy it.
+        # ⛔ RE-DERIVED at `#12545`'s squash-merge base (`7ce0d65fa0`): both moved
+        # `+9` (`:18494`/`:18519` → `:18503`/`:18528`) when the capture path above
+        # them grew. Opened, not offset — and `:18528` is the `QuotaExceededError`
+        # refusal of the gate at `:18503`, not the `QuotaCheckError` arm at `:18590`.
         ("03-test-design.md", "the A-corpus capture", (
-            ("18494", "if count + est > max_points:"),
-            ("18519", "detail=quota_refusal_payload("),
+            ("18503", "if count + est > max_points:"),
+            ("18528", "detail=quota_refusal_payload("),
         ), "hosted_api"),
         # ⛔ NOT A ROW ANY MORE — the `carve_out:` claim below the rows is checked
         # against the BLOCK (`_section_entries`) and not against a line number: the
