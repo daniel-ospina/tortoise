@@ -5351,3 +5351,59 @@ def test_the_version_pinned_hosted_label_citations_land_on_the_class_boundary():
             f"({span.strip()[:160]!r}) — re-derive the number at this head (the sentence is at "
             f"{actual})"
         )
+
+
+def test_the_correlated_probe_figure_is_the_same_naive_count_at_this_head():
+    """The runbook's `N / M` pre-strip figure is a LIVE measurement, not a dated record.
+
+    Review round 3 (P1): `docs/ops/ci-runner-x64.md` states, in the present tense about THIS
+    tree, *"it counted 87 / 13 before it stripped whole-line comments"* — the count the
+    `--status` block would print if it did not refuse on this tree. The first axis had already
+    been re-derived (`85` -> `87`) when #12422 added the two canary `ubuntu-latest` jobs, and the
+    SECOND axis was left at `12` on the reasoning that #12422 had not touched it — true, and
+    beside the point: `8126970432c9` (#12080, 2026-11-12) had moved `ubuntu-24.04` from 12 to 13
+    two days before the page was re-dated to 2026-11-14, so the sentence was carrying one axis
+    from a 76-job tree and the other from a 9-job tree.
+
+    Measured across that fix: `142241697321^` -> 85 / 12, `142241697321` -> 87 / 13, `HEAD` ->
+    87 / 13. The rule is the sentence's own — every LINE containing `runs-on` AND the label
+    token, whole-line comments included (that is what "before it stripped whole-line comments"
+    means), which is a different population from the sibling job-count pin above (that one
+    `yaml.safe_load`s jobs). Token boundaries keep `ubuntu-24.04` from matching a longer label;
+    both rules were measured at this head and they agree, so the pin does not depend on which
+    spelling a later edit chose.
+    """
+    runbook = (REPO_ROOT / "docs" / "ops" / "ci-runner-x64.md").read_text()
+    # ⛔ The sentence is LINE-WRAPPED (`… before it stripped whole-line` / `comments.`), so match
+    # against a whitespace-normalised copy — the first cut of this pin matched the raw text and
+    # reported "the runbook no longer states its probe figure" on its OWN line break, which is the
+    # same false-negative shape the sibling label-boundary pin records.
+    stated = re.search(
+        r"it counted (\d+) / (\d+) before it stripped whole-line comments",
+        " ".join(runbook.split()))
+    assert stated is not None, (
+        "the runbook no longer states its pre-strip `N / M` probe figure — re-anchor this pin "
+        "rather than deleting it, or the axis it measures rots again (it has rotted twice)"
+    )
+
+    wf_dir = REPO_ROOT / ".github" / "workflows"
+    naive: dict[str, int] = {}
+    for label in ("ubuntu-latest", "ubuntu-24.04"):
+        token = re.compile(r"(?<![\w.-])" + re.escape(label) + r"(?![\w.-])")
+        naive[label] = sum(
+            1
+            for path in sorted([*wf_dir.glob("*.yml"), *wf_dir.glob("*.yaml")])
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if "runs-on" in line and token.search(line)
+        )
+
+    assert (int(stated.group(1)), int(stated.group(2))) == (
+        naive["ubuntu-latest"],
+        naive["ubuntu-24.04"],
+    ), (
+        f"the runbook says the pre-strip count is {stated.group(1)} / {stated.group(2)}, the "
+        f"naive count over `.github/workflows/` at this head is "
+        f"{naive['ubuntu-latest']} / {naive['ubuntu-24.04']} — re-derive the sentence; do not "
+        "carry an axis from the tree the page used to describe (the `ubuntu-24.04` axis sat two "
+        "merges behind when this pin was written)"
+    )
