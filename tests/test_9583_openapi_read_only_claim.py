@@ -79,13 +79,27 @@ def _claim_in(description: str) -> str | None:
     return m.group(0) if m else None
 
 
+#: Writers whose only MCP **declaration** was ARCHIVED (#11609 batch 1), while the
+#: writer itself stayed live on the REST surface. `get_tenant_packs` is still a read that
+#: WRITES — its self-heal `ensure_tenant_packs` MERGEs a missing starter `:PackInstall`
+#: activation (#2728/#8648) — and `GET /v1/packs` still reaches it
+#: (`tortoise/hosted_api.py::list_packs`, which says so in its own docstring). What the
+#: archive removed is the MCP door (`tortoise_packs_list`), not the writer, so the
+#: read-only-claim gate must keep covering the REST route: dropping the name here made
+#: this test's own premise fail (`assert reached["hosted_api:/v1/packs"]` → empty).
+#: `tests/tool_surface_capabilities.py` records the MCP-side removal and why the
+#: declaration maps are empty; this is the REST-side remainder of that same declaration.
+_REST_READ_THROUGH_WRITERS = {"get_tenant_packs"}
+
+
 def _declared_read_through_writers() -> set[str]:
     """The declared reads that WRITE — one authority, shared with #4122/#9575."""
     from tool_surface_capabilities import (
         NON_SDK_READ_BINDINGS,
         READ_THROUGH_WRITE_METHODS,
     )
-    return set(READ_THROUGH_WRITE_METHODS) | set(NON_SDK_READ_BINDINGS)
+    return (set(READ_THROUGH_WRITE_METHODS) | set(NON_SDK_READ_BINDINGS)
+            | _REST_READ_THROUGH_WRITERS)
 
 
 def _names_reached(source: str, declared: set[str]) -> set[str]:

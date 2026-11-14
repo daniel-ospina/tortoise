@@ -76,7 +76,7 @@
 # only asks that question calls it fine — which is why this record also asks about ancestry).
 manifest_version: 1
 issue: 3863
-cut_at_commit: 6408da01ce9063c903405057e8160a5560d77460
+cut_at_commit: 30c9e7c4d397aa12876d215d64c92e4640e91429
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -143,15 +143,14 @@ response_fields:
     the #11702 contract change); a non-Point node payload is byte-identical. Not flag-gated'
 - response: sdk:get_organisation_account
   field: plan.limit
-  emitted_when: 'PRESENCE is the contract, and it has three states because a missing key and a null
-    one mean different things (#10015). A number = a bounded allowance. null = UNLIMITED — the encoding
-    `quota.resolve_org_limits` documents for a key that is PRESENT with no value (`billing.apply_limits`
-    writes NULL for exactly that). The key is ABSENT when the limit could not be read — the shape
-    `enforce_org_limit` treats as fail-closed — because `null` would read as unlimited and tell a capped
-    account it has no cap. A consumer must read the KEY, never only its value: `plan.limit` omitted is
-    UNKNOWN, not unlimited, and not 0.'
-  unchanged_when_off: 'n/a — not flag-gated. This is a NEW endpoint (approved SDK row 28), so there is no
-    prior response body to keep byte-identical; the three states above are its initial contract.'
+  emitted_when: 'PRESENCE is the contract, and it has three states because a missing key and a null one mean different
+    things (#10015). A number = a bounded allowance. null = UNLIMITED — the encoding `quota.resolve_org_limits`
+    documents for a key that is PRESENT with no value (`billing.apply_limits` writes NULL for exactly that). The
+    key is ABSENT when the limit could not be read — the shape `enforce_org_limit` treats as fail-closed — because
+    `null` would read as unlimited and tell a capped account it has no cap. A consumer must read the KEY, never
+    only its value: `plan.limit` omitted is UNKNOWN, not unlimited, and not 0.'
+  unchanged_when_off: n/a — not flag-gated. This is a NEW endpoint (approved SDK row 28), so there is no prior response
+    body to keep byte-identical; the three states above are its initial contract.
 - response: sdk:get_organisation_account
   field: plan.at_cap
   emitted_when: 'PRESENT only when the answer is knowable: `true` when `used >= limit` (the predicate
@@ -161,6 +160,20 @@ response_fields:
     exception: the account is held at its cap on purpose (#10175) and must read as held.'
   unchanged_when_off: 'n/a — not flag-gated; PAIRED with `plan.used`, which is null (never a false 0)
     when the count failed.'
+  emitted_when: 'PRESENT only when the answer is knowable: `true` when `used >= limit` (the predicate `enforce_org_limit`
+    itself refuses on, so the read and the 402 agree) and `false` when the plan is unlimited. ABSENT when `used`
+    could not be counted under a bounded limit — a `false` there would be the falsely reassuring answer #4331 forbids
+    on /v1/team. At-cap is a STATE in this reply, never an exception: the account is held at its cap on purpose
+    (#10175) and must read as held.'
+  unchanged_when_off: n/a — not flag-gated; PAIRED with `plan.used`, which is null (never a false 0) when the count
+    failed.
+# ⛔ The `tortoise_analyze` / `why` row lived here and LEFT with #11609 batch 1, which
+# ARCHIVED the tool (no destination in the approved surface): a `response_fields` row must
+# be anchored to a live surface (`check` refuses one whose `response:` is not a tool or
+# endpoint in this manifest — it caught this row when a forward merge carried main's copy
+# in). The row returns with the tool: restore the block from
+# `archive/mcp-tools/b1-removed-no-destination/tortoise_analyze.py` and put this row back,
+# which is why it is recorded here rather than merely deleted.
 - response: tortoise_search
   field: status
   emitted_when: the hosted GET /v1/search response, when TORTOISE_READ_STATUS is truthy (1/true/yes/on; unset or
@@ -406,35 +419,6 @@ response_fields:
     pair can also disagree BY DESIGN: a legacy `outdated=true` point with no stored status reads `status="live"`
     beside `terminal=true`, because `status` is the stored word (the #9974 R1 rendering rule) and `terminal` is
     the predicate.'
-# ⛔ FOUR rows stood here until #4282 deleted their carriers (2026-10-27), and they are recorded
-# here rather than dropped silently, because each named a REAL emitted field:
-#   • `sdk:capture_session` / `graph_ops` (#3561) — the capture's measured graph-operation count.
-#   • `sdk:capture_session` / `stats.step_witness` (#9116, landed by #10214) — the eight per-stage
-#     witness blocks under `stats`, one per extractor stage, each carrying that stage's own counts
-#     and (for the two flag-gated passes) the `enabled` flag beside them; a block witnesses its
-#     step only when the stage reports it did work, and the seam copies COUNTS, never the VET
-#     gate's per-candidate `decisions` text.
-#   • `sdk:get_provenance_chain` / `raw` — the Source index entry (source_id, content_hash,
-#     raw_state, raw_state_at, available, permanent, retryable, label, message) emitted on every
-#     returned item: the chain IS the Source link, so it existed whether or not the raw did.
-#     #4282 deleted the method and the row went with it.
-#   • `sdk:traverse` / `idx` (#6101) — now recorded on `tortoise_traverse` below, its surviving carrier.
-# The SEAM SURVIVES: it is `_capture_stats_with_step_witness`, a module-level function at the
-# `_extract_session_v2` meta fold (`tortoise/sdk.py`), and the whole extractor-v2 pipeline
-# still reaches it. What went with the surface is the public CARRIER, so `stats.step_witness`
-# is now observable in-process (and by the capstone probes) rather than through a declared
-# SDK response. `graph_ops` is in the SAME position, not gone: its decorator `counts_capture_ops`
-# still runs on the surviving private `TortoiseSDK._capture_session` and attaches `graph_ops`
-# to the returned dict — what the deletion removed was the public method that EXPOSED it.
-# Restoring either as a declared surface is a SURFACE CHANGE and needs owner approval (#4282).
-#
-# ⛔ AND THIS COMMENT SURVIVED A `cut` ONLY BY BEING RESTORED BY HAND (#11609 batch 1): `cut`
-# re-emits the file as `MANIFEST_HEADER + yaml.safe_dump(doc)`, so EVERY comment below the
-# emitted header dies — not only the ones inside `rows:`/`response_fields:` (this block sits
-# INSIDE `response_fields:` and died anyway; the `counts` block above `counts:`, which sits in
-# neither, died in the same cut).
-# Whoever cuts next must diff this file for lost comments and put them back — `check` cannot
-# see a comment, so nothing else will tell you.
 - response: tortoise_traverse
   field: idx
   emitted_when: 'always, on every hop in nodes[] — the traversed edge''s idx (the same value the #4282-deleted `sdk:traverse`
@@ -1085,17 +1069,6 @@ retired:
 rows:
 - name: tortoise_query
   served_from: tortoise/mcp_server.py:c533fb932ecfc2bc
-  # ⛔ #12372: `served_from` is the `_code_digest` of the handler's CODE OBJECT, so any
-  # edit inside `tortoise_query` re-stamps it. Refreshed BY HAND to the value `build_doc`
-  # derives (`check` re-derives and compares — it is the code that is authoritative, not
-  # this cell), because `cut` is owner-gated ("ask Daniel FIRST, before the re-cut",
-  # tools/surface_manifest.py) and this change adds/removes/renames NO tool or method.
-  # A full `cut` was measured on this box and DELIBERATELY NOT committed: with `skills/`
-  # dangling it drops `skill-docs` from 38 SDK `used_by` cells, and it DROPS every body
-  # rationale comment (`cut` re-emits only `MANIFEST_HEADER` verbatim, so the header
-  # survives and this note does not — no head-specific count belongs here, it moves with
-  # every line anyone adds). Both kinds are `NON_DERIVABLE` evidence a digest refresh
-  # must not move.
   served_attributes: 7a717e4e60ce3bfa
   family: memory
   family_rank: 1
@@ -1292,29 +1265,6 @@ rows:
   approval: null
   class: agent-reachable
   cluster_canonical: null
-# #12297: SPLICED, not re-cut — and the two reasons are the REAL costs of a cut,
-# not a claim that a cut would lose hand-curated cells (it would not:
-# `CARRIED_TOOL_ROW_KEYS` in tools/surface_manifest.py carries `used_by` /
-# `recommendation` / `basis` / `reason` / `exemption` forward from the committed
-# manifest, and a cut reproduces this tool row byte-for-byte). The costs it does
-# have: (1) `cut --commit` must be handed a DEFAULT-BRANCH sha (#11057 review F1)
-# — cut at a lane head, `provenance_report` reds — and (2) a cut re-derives EVERY
-# `sdk:` row's `used_by` cell (124 rows, all 124 carrying one; `CARRIED_SDK_ROW_KEYS`
-# is just `exemption`), churning a diff this change has nothing to do with.
-# ⛔ That 124 is re-derivable from this file: `rows` whose `name` starts `sdk:`.
-# ⚠️ COST (2) IS NOW CLOSED (#11609 batch 1): `CARRIED_SDK_ROW_KEYS` carries
-# `used_by` as well, because on a box where `skills/` does not resolve the
-# `skill-docs` corpus comes back EMPTY and a re-cut erased the label from 38
-# untouched rows. An EMPTY corpus is UNREADABLE, not absent — it is carried, and
-# only a READABLE corpus that does not mention the name drops the label. So the
-# cost above describes what a cut did BEFORE this change, and no longer applies.
-# So exactly one derived cell moved here, to the value `check` itself derives from the
-# declaration (`_code_digest`; verified `aae4bf5f5ceffe7c` for the tool body as it
-# stands on this branch, after the owner's 2239f94ff6 and c82c0337a4 rewrote the
-# same two comments). Nothing else in this row, and nothing in any other row,
-# moves. ⛔ Splicing a DERIVED cell is safe only because `check` re-derives it: if
-# this value ever disagrees with the declaration, both gates go red rather than
-# drifting. It is not a general licence to edit derived cells.
 - name: tortoise_suggest_entry_points
   served_from: tortoise/mcp_server.py:aae4bf5f5ceffe7c
   served_attributes: 542cf2dbb222d260
