@@ -846,12 +846,23 @@ def test_an_install_failure_is_only_RED_when_the_INDEX_confirms_the_absence(tmp_
     # cases above could not see: `_canonical_dist_name(named).endswith(wanted)` keeps the
     # whole file green, and pip naming `x-tortoise-graph` is then graded as
     # `tortoise-graph`'s absence while the probe answers `ok` — the release call again.
-    # So the neighbouring matchers are pinned TOGETHER here, including the one shape that
-    # MUST still attribute: pip naming this very project with an extras specifier, which
-    # parses to the same normalised name and is a genuine absence of THIS distribution.
+    # So the neighbouring matchers are pinned TOGETHER here, and the ONE row that MUST
+    # still attribute is the DOTTED spelling (`tortoise.graph`), which is a real spelling
+    # `_canonical_dist_name`'s docstring names. ⛔ THE EXTRAS ROW IS DEFENSIVE, NOT A SHAPE
+    # PIP EMITS (#12422 round-28 review P2): measured with real pip
+    # (`pip install 'tortoise-graph-doesnotexist-xyz[embeddings]==99.9.9'`), pip DROPS the
+    # extras before reporting — "No matching distribution found for
+    # tortoise-graph-doesnotexist-xyz==99.9.9" — because the resolver path applies
+    # `install_req_drop_extras`, so an `[extras]` specifier never reaches this matcher from
+    # a real install. The row stays anyway: it is the only row that reds if
+    # `_ABSENCE_NAMED` is ever widened to capture the bracket, and being wrong here orders
+    # a release — but it must not be described as pip's own output.
     boundary = (
         ("x-tortoise-graph", canary.UNKNOWN),  # suffix matcher
-        ("foo-tortoise-graph", canary.UNKNOWN),  # suffix matcher, longer prefix
+        # ⛔ `foo-tortoise-graph` used to sit here and was REMOVED: it had zero unique
+        # discriminating power over the row above — every matcher in the family treats the
+        # two identically, so no mutant redded it that did not red `x-tortoise-graph`
+        # first. A row nothing can fail alone is a row that documents nothing.
         # ⛔ AND THE MIRROR SUFFIX (#12422 round-26 review P2): `graph` is a proper suffix of
         # `tortoise-graph`, so `wanted.endswith(named)` accepts it — the last of the four
         # one-token relaxations to stay green. Narrow exposure (only a capturable proper
@@ -863,7 +874,13 @@ def test_an_install_failure_is_only_RED_when_the_INDEX_confirms_the_absence(tmp_
         # instead of FAIL. Suppression rather than a false release, but the function contract
         # states all three spellings, so all three are pinned (#12422 round-27 review P2).
         ("tortoise.graph", canary.FAIL),  # dotted spelling normalises to the same name
-        ("tortoise-graph[embeddings]", canary.FAIL),  # extras: the SAME project
+        # ⛔ AND THE NORMALISER ITSELF (#12422 round-28 review P2): every row above tests the
+        # COMPARISON, so a `_canonical_dist_name` that ERASES separators instead of
+        # collapsing them to `-` survived the whole file green — and `tortoisegraph` is a
+        # DIFFERENT project, so accepting it re-opens the release call the table exists to
+        # close (`re.sub(r"[-_.]+", "", …)` measured: 72 passed, this row reds).
+        ("tortoisegraph", canary.UNKNOWN),  # separators ERASED, not collapsed
+        ("tortoise-graph[embeddings]", canary.FAIL),  # extras: defensive, see above
     )
     for named, expected in boundary:
         boundary_marks = (
