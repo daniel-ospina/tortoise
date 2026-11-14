@@ -546,17 +546,13 @@ def underscore_run_terms(text: str) -> list[str]:
       alternatives, so the probe guard refused a valid probe (measured false block
       on ``año_actual``/``the_café``/``_café``/``dé_installer``/``x_café``, in the
       precomposed spelling).
-      ⚠️ NOT "both spellings", and the NFD half is NOT a pre-existing refusal
-      (#12368 fourth review — the earlier text here said both, and MEASUREMENT
-      refutes it): a ``_``-carrying token is ``deferred``, so the run-count
-      branch below does not run on it and the verdict is the READ's own answer,
-      compared in the INDEX's sense. MEASURED on this head — NFD ``año_actual``/
-      ``the_café``/``x_café`` are ACCEPTED on both arms (the read emits ONE term),
-      while NFD ``dé_installer`` is still REFUSED on both because
-      ``build_or_query`` expands it into two different terms (``'installer|de'``).
-      On ``origin/main`` all four are refused through the run-count branch, so
-      this change CURES three of the four. NFD ``_café`` is accepted on both
-      because its mark follows the whole run.
+      ⚠️ NOT "both spellings", and NOT a pre-existing refusal (#12368 fourth
+      review, MEASURED — the earlier text here and in the pin said both): a
+      ``_``-carrying token is ``deferred``, so the run-count branch is SKIPPED for
+      it. NFD ``año_actual``/``the_café``/``x_café`` are ACCEPTED on both arms;
+      NFD ``dé_installer`` is REFUSED on both (the read expands it to
+      ``'installer|de'``). On ``main`` all four are refused — three by the
+      run-count branch, ``dé_installer`` by the term count — so this CURES three.
       ⚠️ Scoped (#12368 second and third reviews): only THIS bullet is non-lossy.
       The two bounds below are both DECLARED LOSSY (``___``, and a run past
       ``MAX_COMPOSITE_RUN_LEN``), so an earlier "additive in the only sense that

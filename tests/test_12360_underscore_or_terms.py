@@ -316,8 +316,10 @@ class TestAdditive:
         # `año_actual`/`the_café`/`x_café` on both arms (one term), and still
         # REFUSES NFD `dé_installer` on both because `build_or_query` expands it
         # into two different terms ('installer|de'). On `origin/main` all four are
-        # refused through the run-count branch, so those three accepts are NOT
-        # pre-existing: this change cures them.
+        # refused — three by the run-count branch, `dé_installer` by the TERM
+        # COUNT (`it tokenises to 2 term(s)`) — so those three accepts are NOT
+        # pre-existing: this change cures them. NFD `_café` is accepted on both
+        # sides because its mark follows the whole run.
         for word in shapes:
             nfd = unicodedata.normalize("NFD", word)
             monkeypatch.setenv(UNDERSCORE_ENV, "0")
