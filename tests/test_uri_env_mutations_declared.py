@@ -150,6 +150,30 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # undeclared mutation in the tree).
     "test_9664_capstone_connector_to_record.py": [
         r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
+    # #12521: `test_10015_organisation_account.py` landed two `delenv` sites with no
+    # register row, which reds this gate on `main` — the same "module landed without
+    # its entry" shape as #9664 above and #12275 below. Both are the embedded-lane
+    # control, and they point the resolver in OPPOSITE ways, so one sentence does not
+    # describe both:
+    #   the `sdk` fixture — unsets the ambient URI and points `TORTOISE_DB_PATH` at a
+    #     tmp DB, then opens the handle on the SAME store, because `resolve_org_limits`
+    #     resolves the registry through `quota._make_sdk(namespace="registry")` and the
+    #     ambient env, never the caller's handle. A URI redirect THERE would make the
+    #     resolver read an ambient server, so the account row would be missing for a
+    #     reason unrelated to the code under test.
+    #   `test_an_account_the_gates_cannot_see_is_refused_not_reported_absent` — the
+    #     deliberate MISMATCH case, and it takes no `sdk` fixture: it unsets the URI in
+    #     the test body and points the resolver at a DIFFERENT local store than its own
+    #     handle, so TWO control planes ARE the thing under test. ⛔ A shared-server
+    #     graph still RAISES the same `ControlPlaneError` here — `_make_sdk` takes the
+    #     URI branch, the server holds no such Team row, and this handle's own registry
+    #     does — so the redirect does NOT change the assertion. Its cost is that the
+    #     second plane stops being the store this test NAMES, and on a box with no live
+    #     server the resolver fails before the assertion is reached at all.
+    # The `delenv` IS the point at both, and the monkeypatch is fixture/function-scoped
+    # and auto-restored, so no lane flip can leak into a later module.
+    "test_10015_organisation_account.py": [
+        r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     # #12275: `test_candidate_recall_11901.py` (#12159) landed with three
     # untriaged URI mutations, which reds this gate on `main` in `test (d)` —
     # the same "module landed without its entry" shape as #9664 above. None of
