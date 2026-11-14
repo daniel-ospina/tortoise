@@ -19,6 +19,14 @@ landed in `f6ac10e41f`, the 90 000-node log in `c9ff52ad0c`, the range probe log
 > The measured artifact is the **FalkorDB engine image**, not this repository's tree: the repo
 > hosts the harness. The tree line above names the commit the harness was run from.
 
+⚠️ **A later lint-only pass touched the harness, not its readings.** `ruff check .` was red on `main`
+over three files in this directory (`SIM905`, `RUF100`, `B905`, `RUF010` ×2, `I001` ×2); the fix
+replaced each construct with an equivalent form — a list literal for `str.split()`, `!s` for
+`str(…)` inside an f-string, an explicit `zip(strict=False)`, a re-sorted import block, and the
+removal of a `noqa` for a rule this repo does not select. **No expression changed its value**, so
+the figures above stand, and `f6ac10e41f` / `c9ff52ad0c` remain the commits the harness was
+measured at.
+
 **Verdict — the kept fulltext index DOES block the instance, for 1.585 s at 90 000 nodes. Zero-standing
 hot stays viable for `free`/`anon` against a caller read bound, but whether it is viable against a
 per-tenant latency objective is a question this record cannot answer (§7).**
