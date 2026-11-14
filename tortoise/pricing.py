@@ -295,6 +295,13 @@ def tier_display_name(tier: str) -> str:
     Unknown tiers resolve to the **Free** name, exactly as :func:`tier_limits`
     resolves them to the Free limits: a legacy/missing tier must never acquire a
     more expensive-looking name than the plan it is actually served.
+
+    ⚠️ That fallback covers ONLY a tier the map does not KNOW. It deliberately does
+    not soften the artifact check: this resolves through :func:`tier_display_names`,
+    so it raises ``KeyError`` whenever ``product/pricing.json`` declares a tier that
+    :data:`TIER_DISPLAY_NAMES` does not label — for EVERY input, a valid one
+    included — so a half-updated map is a load-time error rather than a silent
+    "Free" on a paid plan.
     """
     return tier_display_names().get(tier, TIER_DISPLAY_NAMES["free"])
 

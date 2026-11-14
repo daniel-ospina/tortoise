@@ -145,6 +145,28 @@ class TestTheAliasIsDeclaredInCode:
             _pricing.TIER_DISPLAY_NAMES.clear()
             _pricing.TIER_DISPLAY_NAMES.update(original)
 
+    def test_the_free_fallback_does_not_soften_the_artifact_check(self):
+        """The Free fallback covers a tier the map does not KNOW — never a
+        half-updated map.
+
+        Pinned because it is the non-obvious half of the contract: an unlabelled
+        tier makes the raise fire for EVERY input, including a perfectly valid one,
+        since :func:`tier_display_name` resolves through
+        :func:`tier_display_names`. That is the fail-closed posture (a load-time
+        error, not a silent "Free" on a paid plan), and a caller must code against
+        the raise rather than assume the fallback always answers.
+        """
+        from tortoise import pricing as _pricing
+
+        original = dict(_pricing.TIER_DISPLAY_NAMES)
+        try:
+            del _pricing.TIER_DISPLAY_NAMES["team"]
+            with pytest.raises(KeyError):
+                _pricing.tier_display_name("pro")
+        finally:
+            _pricing.TIER_DISPLAY_NAMES.clear()
+            _pricing.TIER_DISPLAY_NAMES.update(original)
+
     def test_an_unknown_tier_resolves_to_free_like_tier_limits_does(self):
         """A legacy/missing tier must never acquire a grander name than the plan
         it is actually served — the same rule as ``tier_limits``' free fallback."""
@@ -237,7 +259,7 @@ class TestEverySurfaceAgreesWithTheDeclaration:
 #: a record (:func:`_quotes_a_retracted_claim`). A cue word alone was a bypass: it
 #: let `The docs are stale: there is no Builder plan.` escape (cycle 2), and a cue
 #: word plus a quoted single word was still one.
-_BUILDER_PLAN = r"['\"`]?builder['\"`]?\s+(?:plan|tier)"
+_BUILDER_PLAN = r"['\"`]?builder['\"`]?\s+(?:plans?|tiers?)"
 
 #: The assertion must END its clause. Without this the patterns match the HEAD of a
 #: qualified true statement ("there is no Builder plan cheaper than Solo"), which is
@@ -310,13 +332,29 @@ _DENIAL_PATTERNS = (
                _CLAUSE_END, re.I),
     re.compile(r"\b(?:has|have|offer|offers|sell|sells)\s+no\s+" + _BUILDER_PLAN +
                _INTENSIFIER + _CLAUSE_END_STRICT, re.I),
+    # "there isn't a builder plan" / "there is not a builder plan" — the same
+    # assertion in NEGATED-AUXILIARY form, so `no` never appears and the `there is
+    # no` arm cannot reach it. Measured as a false NEGATIVE (review); `not` alone is
+    # not a match, the subject must still be bare `there`. Both clause-end forms,
+    # matching the convention above: the intensifier variant is TERMINAL-only.
+    re.compile(r"\bthere\s+(?:isn't|aren't|is\s+not|are\s+not)\s+an?\s+" +
+               _BUILDER_PLAN + _CLAUSE_END, re.I),
+    re.compile(r"\bthere\s+(?:isn't|aren't|is\s+not|are\s+not)\s+an?\s+" +
+               _BUILDER_PLAN + _INTENSIFIER + _CLAUSE_END_STRICT, re.I),
+    # "there exists no builder plan"
+    re.compile(r"\bthere\s+exists?\s+no\s+" + _BUILDER_PLAN + _CLAUSE_END, re.I),
+    re.compile(r"\bthere\s+exists?\s+no\s+" + _BUILDER_PLAN +
+               _INTENSIFIER + _CLAUSE_END_STRICT, re.I),
     # "no 'builder' plan exists" (with an explicit non-existence predicate)
     re.compile(r"\bno\s+(?:such\s+(?:thing\s+as\s+(?:a\s+)?)?)?" + _BUILDER_PLAN +
                r"\s+exists\b", re.I),
     # "no such thing as a builder tier"
     re.compile(r"\bno\s+such\s+(?:thing\s+as\s+(?:a\s+)?)?" + _BUILDER_PLAN, re.I),
     # "the builder plan does not exist"
-    re.compile(r"\bbuilder\b[^.]{0,40}\b(?:does|do)\s+not\s+exist\b", re.I),
+    # "builder plan doesn't exist" — the contracted form, a measured false
+    # NEGATIVE (review): `does|do` + `n't` shares the negated-existence
+    # predicate but never spells `not`.
+    re.compile(r"\bbuilder\b[^.]{0,40}\b(?:does|do)(?:n't|\s+not)\s+exist\b", re.I),
     # "Builder is not a plan/tier" — predicate nominative, clause-final, so a plan
     # name used as an OBJECT ("the Builder tier is not a tier you can downgrade
     # to") does not match.
@@ -525,6 +563,14 @@ class TestNoDocDeniesABuilderPlanExists:
             "docs/product/beta-sdk-surface.md previously read 'there is no "
             "\"builder\" plan'; #12444 corrected it.",
             "The denial is no longer present since 2026-09-21.",
+            # ⚠️ Neither case above NEEDS the exemption — their plain text raises no
+            # `_DENIAL_PATTERNS` hit at all, so deleting `_quotes_a_retracted_claim`
+            # wholesale left both green (measured, review). THIS case is the one the
+            # pattern DOES match, and only the documented exemption rescues it — it
+            # pins the SENTENCE-level path, while
+            # `test_a_retraction_record_split_across_blocks_is_exempt` pins the
+            # across-fragments one.
+            'The doc previously read "There is no Builder plan."; #12444 corrected it.',
         )
         for sentence in correct:
             assert not _denial_in(sentence), (
@@ -602,6 +648,13 @@ class TestNoDocDeniesABuilderPlanExists:
             "No **Builder** plan exists.",
             "Builder is not a **plan**.",
             "There is no [Builder](https://example.test) plan.",
+            # Negated-auxiliary, existential and contracted-predicate forms —
+            # each measured as a false NEGATIVE before the arms above (review).
+            "There isn't a Builder plan.",
+            "There is not a Builder plan.",
+            "There are no Builder plans.",
+            "There exists no Builder plan.",
+            "Builder plan doesn't exist.",
         )
         for sentence in denials:
             assert _denial_in(sentence), (
