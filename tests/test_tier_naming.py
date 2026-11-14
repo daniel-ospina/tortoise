@@ -360,13 +360,30 @@ _IDENTIFIER_RESTATEMENT = (
 #: correct shapes was RED: `There is no "Builder plan" — only the `pro` identifier
 #: (#4336).`; and the pinned intensifier class went blind to its own quoted twin:
 #: `There is no "Builder plan" anymore.`
+#: ⛔ AND A CITATION IS ONLY A CLAUSE END WHEN IT IS ITSELF CLAUSE-FINAL (cycle-15 P1,
+#: measured). Composed into a bare `[.)]|CITATION` alternation, an INLINE citation ended
+#: the clause before its qualifier arrived, so six qualified TRUE statements were RED
+#: while `origin/main` was green: `There is no Builder plan (see #12444) cheaper than
+#: Solo.`, `… (#12444) cheaper than Solo.`, `… (per #12444) without unlimited graphs.`,
+#: `… (see #12444) in the OSS install.`, `… (tracked in #12444) for self-hosters.`,
+#: `… (cf. #12444) available in your region.` — the expensive half the module's own
+#: doctrine names. And a bare `(#N)` is not this repo's only citation style either
+#: (`git grep -o '(see #' -- docs` counts 10), so the house phrasing has to be accepted
+#: AND bounded.
+_CITATION = (r"\(\s*(?:(?:see|per|tracked\s+in|cf\.?)\s+)?#\d+\s*\)"
+             r"(?=\s*['\"\u201d\u2019]?\s*(?:$|[.)]))")
+#: ⛔ …AND THE RESTATEMENT EXEMPTION WAS UNBOUNDED (cycle-15 P1, measured).
+#: `_CLAUSE_END` is `(?!_RESTATEMENT_TAIL)(?=…)`, a lookahead anchored at ONE position —
+#: immediately after `_BUILDER_PLAN`. When a restatement tail matched there the lookahead
+#: failed and `_BUILDER_PLAN` was never re-tried, so **the whole rest of the sentence
+#: became invisible**. On `origin/main` that unboundedness reached COMMAS only; hoisting
+#: the tail into a shared lookahead for `—`/`–`/`;`/`--` (cycle-6 P1, cycle-11 P2) put it
+#: on the repo's DOMINANT separator (`git grep -l ' — ' -- docs` = 948), and seven of
+#: eight base-flagged live denials became exempt — including this file's own measured
+#: drift reflowed with the exemption's own phrasing. The tail must now END the clause.
 _RESTATEMENT_TAIL = (r"\s*['\"\u201d\u2019]?\s*(?:[—–;,]|--)?\s*(?:"
-                     + _IDENTIFIER_RESTATEMENT + r")")
-#: A bare `(#N)` is not this repo's only citation style: `git grep -o '(see #' -- docs`
-#: counts 10, so a citation written the house way escaped the clause end entirely —
-#: `There is no Builder plan (see #12444).` and `… (per #12444).` were both GREEN while
-#: the bare form was pinned as a denial (cycle-11 P2, measured).
-_CITATION = r"\(\s*(?:(?:see|per|tracked\s+in|cf\.?)\s+)?#\d+\s*\)"
+                     + _IDENTIFIER_RESTATEMENT + r")"
+                     r"(?=\s*['\"\u201d\u2019]?\s*(?:$|[.)]|" + _CITATION + r"))")
 _CLAUSE_END = (r"(?!" + _RESTATEMENT_TAIL + r")"
                r"(?=\s*['\"\u201d\u2019]?\s*"
                r"(?:$|[.;)]|—|–|--|;|,|" + _CITATION + r"))")
@@ -907,6 +924,16 @@ class TestNoDocDeniesABuilderPlanExists:
             # arm, which had no clause end at all (cycle-13 P2, measured).
             "There is no such thing as a Builder plan cheaper than Solo.",
             "There is no such thing as a Builder plan, only the `pro` identifier (#4336).",
+            # ⛔ A CITATION IS A CLAUSE END ONLY WHEN IT IS CLAUSE-FINAL (cycle-15 P1,
+            # measured): composed unbounded, an inline citation ended the clause before
+            # its qualifier arrived, so the qualified-true-statement class this pin list
+            # exists for was RED while `origin/main` was green.
+            "There is no Builder plan (see #12444) cheaper than Solo.",
+            "There is no Builder plan (#12444) cheaper than Solo.",
+            "There is no Builder plan (per #12444) without unlimited graphs.",
+            "There is no Builder plan (see #12444) in the OSS install.",
+            "There is no Builder plan (tracked in #12444) for self-hosters.",
+            "There is no Builder plan (cf. #12444) available in your region.",
             # A RECORD written without quotation marks (cycle 7): a reported clause is
             # the same record, and rejecting it was a false positive.
             "Previously this doc asserted there is no Builder plan; #12444 corrected it.",
@@ -1110,6 +1137,15 @@ class TestNoDocDeniesABuilderPlanExists:
             # (cycle-13 P2, measured).
             "There is no Builder plan whatsoever.",
             "There is no Builder plan of any kind.",
+            # ⛔ THE RESTATEMENT EXEMPTION MUST END THE CLAUSE (cycle-15 P1, measured):
+            # unbounded, it made the whole REST of the sentence invisible, and on the
+            # repo's dominant `—` it exempted this file's OWN measured drift reflowed
+            # with the exemption's phrasing — base FLAGGED, this head EXEMPT.
+            'the tiers are free, solo, pro, team, anon — there is no "builder" plan — '
+            "the identifier is pro, so buy pro or team",
+            "There is no Builder plan — only the `pro` identifier, because Builder was "
+            "discontinued.",
+            "There is no Builder plan; only the `pro` identifier, so buy pro or team.",
             # ⛔ The three arms added in cycles 6/7 were born WITHOUT the intensifier
             # twin the older arms learned for in cycle 4 — one trailing qualifier
             # defeated all three (cycle-11 P2, measured).
