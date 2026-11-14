@@ -186,20 +186,48 @@ BEGIN
           INTO v_toast_rel
           FROM pg_catalog.pg_class c
          WHERE c.oid = 'public.journal_event'::regclass;
-        EXECUTE format(
-            'SELECT coalesce(sum(octet_length(ch.chunk_data)), 0)
-               FROM public.journal_event t
-               JOIN %s ch ON ch.chunk_id = pg_catalog.pg_column_toast_chunk_id(t.payload)
-              WHERE t.org_id = $1 AND t.graph_id = $2 AND t.seq = ANY ($3)
-                -- mod(), not the modulo OPERATOR: this string is a format()
-                -- template, where a bare percent sign starts a specifier.
-                AND t.xmin::text::bigint
-                      = pg_catalog.mod(
-                            pg_catalog.pg_current_xact_id()::text::bigint,
-                            4294967296)',
-            v_toast_rel)
-          INTO v_chunk
-          USING p_org_id, p_graph_id, p_seqs;
+        -- ⛔ THE DISCLOSURE MUST NOT BE ABLE TO ABORT THE WRITE. This block
+        -- reads the TOAST relation directly, and the role that calls this in
+        -- production (`tortoise_record_app`) holds SELECT on journal_event but
+        -- no USAGE on schema `pg_toast` and no SELECT on the chunk table —
+        -- measured on PG 17. Unguarded, that raise aborts the CALLER's
+        -- transaction, and a COMMIT on an aborted transaction returns SILENTLY
+        -- after rolling back (`psycopg2`: no exception, no row). The record
+        -- write would be LOST and its wrapper would still report APPLIED. So
+        -- the read is guarded twice: a privilege PRE-CHECK that keeps the
+        -- normal production path from raising at all, and a subtransaction
+        -- (an `EXCEPTION` block — an error here rolls back only this block)
+        -- that degrades to NULL/absent, which is what "we could not attribute
+        -- chunks here" is supposed to look like. `WHEN OTHERS` is deliberate:
+        -- this figure is DISCLOSURE ONLY and is never added to any total, so
+        -- the safe degenerate is the labelled absence, never a raise.
+        IF pg_catalog.has_schema_privilege(current_user, 'pg_toast', 'USAGE')
+           AND pg_catalog.has_table_privilege(current_user, v_toast_rel, 'SELECT')
+        THEN
+            BEGIN
+                EXECUTE format(
+                    'SELECT coalesce(sum(octet_length(ch.chunk_data)), 0)
+                       FROM public.journal_event t
+                       JOIN %s ch ON ch.chunk_id = pg_catalog.pg_column_toast_chunk_id(t.payload)
+                      WHERE t.org_id = $1 AND t.graph_id = $2 AND t.seq = ANY ($3)
+                        -- mod(), not the modulo OPERATOR: this string is a format()
+                        -- template, where a bare percent sign starts a specifier.
+                        AND t.xmin::text::bigint
+                              = pg_catalog.mod(
+                                    pg_catalog.pg_current_xact_id()::text::bigint,
+                                    4294967296)',
+                    v_toast_rel)
+                  INTO v_chunk
+                  USING p_org_id, p_graph_id, p_seqs;
+            EXCEPTION WHEN OTHERS THEN
+                v_chunk := NULL;
+                v_chunk_ok := false;
+            END;
+        ELSE
+            -- The caller may not read TOAST at all: report ABSENT, not zero.
+            v_chunk := NULL;
+            v_chunk_ok := false;
+        END IF;
     END IF;
 
     RETURN jsonb_build_object(

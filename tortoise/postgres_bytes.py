@@ -263,6 +263,23 @@ def parse_written_rows(payload: Any) -> WrittenRows:
     )
 
 
+def _release_savepoint(conn: Any, name: str) -> None:
+    """Drop the meter's savepoint — on an aborted transaction, un-abort first.
+
+    Never raises: this runs on the failure path of a measurement, where the
+    only thing that must not happen is another error.
+    """
+    try:
+        with conn.cursor() as cur:
+            try:
+                cur.execute(f"RELEASE SAVEPOINT {name}")
+            except Exception:  # noqa: BLE001 - expected when the txn is aborted
+                cur.execute(f"ROLLBACK TO SAVEPOINT {name}")
+                cur.execute(f"RELEASE SAVEPOINT {name}")
+    except Exception:  # noqa: BLE001 - a meter must never break the write
+        _logger.debug("could not release the byte-meter savepoint", exc_info=True)
+
+
 def measure_written_rows(
     conn: Any,
     *,
@@ -276,12 +293,24 @@ def measure_written_rows(
     the ones this write put there — and so what it reports is what Postgres
     STORED (post-TOAST, post-compression), which is exactly what the audit will
     see later. Returns ``None`` on any failure (no connection, an unarmed
-    record, a missing function on an older schema, a malformed reply), logging
-    at DEBUG: a metering fault must never change a write's outcome.
+    record, a missing function on an older schema, a malformed reply):
+    a metering fault must never change a write's outcome.
+
+    ⛔ **AND IT MUST NOT POISON THE CALLER'S TRANSACTION.** Catching the
+    exception in Python is not enough: a statement that fails server-side
+    leaves the transaction ABORTED, and a later ``commit()`` on an aborted
+    transaction returns SILENTLY after rolling back — so the caller's write
+    would be lost, its wrapper would report APPLIED, and the meter would read 0
+    forever. (That is not hypothetical: the function's chunk-disclosure read
+    against `pg_toast` raised exactly this way for the record role.) So the
+    measurement runs inside its OWN SAVEPOINT and the failure path rolls back
+    to it, which restores the transaction the caller is still holding.
 
     ``seqs`` is a sequence of journal positions — one indexed read per segment,
     not one per record.
     """
+    savepoint = "tortoise_byte_meter"
+    opened = False
     try:
         positions = [int(s) for s in seqs]
         if not positions:
@@ -289,6 +318,9 @@ def measure_written_rows(
         if conn is None:
             raise ValueError("no record connection supplied")
         with conn.cursor() as cur:
+            # A unique-ish name so a caller that nests savepoints cannot collide.
+            cur.execute(f"SAVEPOINT {savepoint}")
+            opened = True
             cur.execute(
                 f"SELECT public.{ROWS_RPC}(%s, %s, %s)",
                 (org_id, graph_id, positions),
@@ -300,6 +332,9 @@ def measure_written_rows(
     except Exception:  # noqa: BLE001 - a meter must never break the write
         _logger.debug("postgres byte measurement failed (non-fatal)", exc_info=True)
         return None
+    finally:
+        if opened:
+            _release_savepoint(conn, savepoint)
 
 
 @dataclass(frozen=True)

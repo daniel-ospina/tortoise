@@ -505,6 +505,94 @@ BEGIN
     END IF;
 END $$;
 
+-- ── 10. THE RUN, not the grant: the meter must EXECUTE as the tenancy role ──
+-- ⛔ `has_function_privilege` (asserted above) is a PROXY, and this suite runs
+-- as the migration applier — a superuser — so a proxy is all it was: the
+-- function can hold the grant and STILL fail for the role that calls it. It
+-- did. The chunk-disclosure read joins `%s` (the pg_toast chunk relation),
+-- and a NOBYPASSRLS app role holds neither USAGE on schema `pg_toast` nor
+-- SELECT on that relation: measured on PG 17 the call raised
+-- `permission denied for schema pg_toast` on EVERY healthy write. Unguarded
+-- that raise aborts the CALLER's transaction, and a COMMIT on an aborted
+-- transaction returns silently after rolling back — so the record write would
+-- have been LOST while its wrapper reported APPLIED, and the meter would have
+-- read 0 forever. Green-on-a-grant is how that shipped twice.
+--
+-- So this block reproduces the PRODUCTION posture — a fresh NOBYPASSRLS role
+-- holding exactly what the record role holds, reading through RLS with the
+-- tenant GUC set — and asserts the RUN: rows and bytes are metered, and the
+-- chunk disclosure degrades to ABSENT (never 0, never a raise).
+DO $$
+DECLARE
+    v_seq   bigint;
+    v_out   jsonb;
+    v_role  text := 't12762_record_app';
+    v_prior text;
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = v_role) THEN
+        EXECUTE format('DROP OWNED BY %I', v_role);
+        EXECUTE format('DROP ROLE %I', v_role);
+    END IF;
+    EXECUTE format('CREATE ROLE %I NOLOGIN NOBYPASSRLS', v_role);
+    -- Exactly the record role's posture: read the journal, run the meter.
+    EXECUTE format('GRANT USAGE ON SCHEMA public TO %I', v_role);
+    EXECUTE format('GRANT SELECT ON public.journal_event TO %I', v_role);
+    EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION '
+        'public.journal_event_bytes_for_rows(text, text, bigint[]) TO %I',
+        v_role);
+
+    v_prior := current_user;
+    BEGIN
+        EXECUTE format('SET LOCAL ROLE %I', v_role);
+        -- The GUC the tenancy policy reads; the app sets it per transaction.
+        PERFORM set_config('app.current_org_id', 'org_12762_a', true);
+
+        SELECT max(seq) INTO v_seq
+          FROM public.journal_event
+         WHERE org_id = 'org_12762_a';
+
+        -- ⛔ THE ASSERTION THAT WOULD HAVE CAUGHT THE LOST-WRITE DEFECT: a
+        -- raise here (or a 0-row answer) is red, not a swallowed no-op.
+        v_out := public.journal_event_bytes_for_rows(
+            'org_12762_a', 'graph_12762_a', ARRAY[v_seq]);
+
+        IF (v_out->>'rows')::bigint < 1 THEN
+            RAISE EXCEPTION '#12762: the meter returned % row(s) when run AS '
+                'the tenancy role — every live write would meter nothing', 
+                v_out->>'rows';
+        END IF;
+        IF (v_out->>'row_bytes')::bigint <= 0 THEN
+            RAISE EXCEPTION '#12762: the meter returned row_bytes=% as the '
+                'tenancy role', v_out->>'row_bytes';
+        END IF;
+        -- The role cannot read pg_toast, so the DISCLOSURE is absent — and it
+        -- must be ABSENT, not 0, and never an error. Nothing is billed from
+        -- it, so this is the correct degenerate.
+        IF (v_out->>'chunk_detail')::boolean IS TRUE THEN
+            RAISE EXCEPTION '#12762: chunk_detail is TRUE for a role that '
+                'cannot read pg_toast — the figure cannot be trusted';
+        END IF;
+        IF v_out->'chunk_bytes' <> 'null'::jsonb THEN
+            RAISE EXCEPTION '#12762: chunk_bytes is % for a role that cannot '
+                'read pg_toast — absent must never read as zero',
+                v_out->'chunk_bytes';
+        END IF;
+
+        -- And the transaction is still USABLE after the call: this is the
+        -- property the subtransaction guard exists to give the caller.
+        PERFORM 1;
+    EXCEPTION WHEN others THEN
+        EXECUTE format('RESET ROLE');
+        EXECUTE format('DROP OWNED BY %I', v_role);
+        EXECUTE format('DROP ROLE %I', v_role);
+        RAISE;
+    END;
+    EXECUTE 'RESET ROLE';
+    EXECUTE format('DROP OWNED BY %I', v_role);
+    EXECUTE format('DROP ROLE %I', v_role);
+END $$;
+
 -- ── Clean up ───────────────────────────────────────────────────────────────
 -- `journal_event` refuses DELETE unless the tenant-erasure flag is set (the
 -- append-only trigger, migration 20261012000001) — the same flag the cascade
