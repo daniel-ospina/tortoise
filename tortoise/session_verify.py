@@ -74,7 +74,10 @@ faked.  Cursor's ``sessionEnd`` fires only from a local desktop-editor session
 TypeScript extension the Pi process loads in-process — neither is a command
 this verifier can execute and present as "the harness fired it", so their
 links report ``UNVERIFIABLE-IN-CI``.  That ruling is about the INSTALL leg, not
-the seam's testability: Pi's handler logic is exercised hermetically by
+the seam's testability: the SAME token is used where the SERVER could not have
+asserted a link (an API build that serves no ``source`` field, and a session
+detail that records no extraction outcome), which is why the exit-2 summary
+says only that a link was NOT VERIFIED instead of naming a cause. Pi's handler logic is exercised hermetically by
 ``tortoise/pi-hooks/tortoise-capture.test.ts``, and the artifact AS INSTALLED
 is loaded and fired by the node probe in
 ``tests/test_pi_capture_hooks.py`` (into a temp ``HOME``); the residual (a real
@@ -137,8 +140,10 @@ STATUS_INERT = "INERT"
 
 #: Exit codes.  0 = every link PROVEN; 1 = a link is BROKEN (the install is
 #: wrong, or the capture/memory leg failed); 2 = nothing is provably broken,
-#: but at least one link could not be exercised in this environment (the
-#: harness is not headlessly firable) — a CI caller must treat 2 as "not
+#: but at least one link was NOT VERIFIED — either this command could not
+#: exercise it (a harness that is not headlessly firable), or the SERVER could
+#: not have asserted it (a detail that serves no Source field, or one that
+#: records no extraction outcome at all).  A CI caller must treat 2 as "not
 #: verified", never as a pass.
 EXIT_OK = 0
 EXIT_BROKEN = 1
@@ -1352,8 +1357,8 @@ def render_report(report: dict[str, Any]) -> str:
     verdict = {
         EXIT_OK: "all links PROVEN",
         EXIT_BROKEN: "a link is BROKEN",
-        EXIT_UNVERIFIABLE: "nothing provably broken, but a link could not be "
-                           "exercised in this environment",
+        EXIT_UNVERIFIABLE: "nothing provably broken, but a link was NOT "
+                           "VERIFIED — see its line above",
     }.get(code, "unknown")
     lines.append(f"  exit {code} — {verdict}")
     return "\n".join(lines)

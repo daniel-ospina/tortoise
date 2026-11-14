@@ -1058,6 +1058,17 @@ def test_guard_unrecorded_outcome_is_not_a_memory_FAIL(hosted, setup):
     # the server actually recorded, not invent a cause.
     assert "no memory Point" not in memory["detail"], memory["detail"]
     assert "outcome" in memory["detail"].lower(), memory["detail"]
+    # #12497 acceptance: the line must name NEITHER a cause NOR a guarantee
+    # that extraction is still running (``outcome_known: false`` also covers a
+    # handler that was SIGKILLed), so the words for those readings are
+    # checked as a closed list rather than trusted.
+    lowered = memory["detail"].lower()
+    invented = [word for word in (
+        "still running", "never started", "has not started", "pending",
+        "sigkill", "killed", "abandoned", "timed out", "crashed",
+        "failed",
+    ) if word in lowered]
+    assert not invented, (invented, memory["detail"])
     # Nothing provably broken: exit 2, never the BROKEN exit a FAIL earns.
     assert report["exit_code"] == EXIT_UNVERIFIABLE, report["exit_code"]
 
@@ -1083,7 +1094,12 @@ def test_guard_recorded_empty_extraction_still_FAILs(hosted, setup):
 def test_guard_malformed_outcome_known_keeps_the_FAIL(hosted, setup):
     """A non-bool ``outcome_known`` is garbage, and garbage must not buy the
     PENDING reading — the same fail-safe ``session_confirm`` pins for its own
-    PENDING arm."""
+    PENDING arm (``test_guard_the_arm_reads_the_canonical_predicate`` pins
+    that this link actually ASKS that reader).
+
+    Mutation: read the qualifier as truthiness (``not
+    extraction_outcome_known(detail)``) instead of ``is False`` and the served
+    ``"false"`` string — canonical ``None`` — becomes UNVERIFIABLE here."""
     home, _bindir, _fake = setup
     root = _install(home, "claude")
     graph, _url = hosted
@@ -1098,7 +1114,10 @@ def test_guard_a_recorded_count_outranks_the_unknown_qualifier(hosted, setup):
     """The count is checked FIRST, exactly as ``session_confirm``'s FILED arm
     does: a served ``extracted >= 1`` is proof even beside an
     ``outcome_known: false`` (a projection that appends the qualifier late
-    must not un-prove an observed Point)."""
+    must not un-prove an observed Point).
+
+    Mutation: drop the ``not extracted_ok`` conjunct (read the qualifier
+    BEFORE the count) and this link reports UNVERIFIABLE for extracted 1."""
     home, _bindir, _fake = setup
     root = _install(home, "claude")
     graph, _url = hosted
@@ -1106,6 +1125,56 @@ def test_guard_a_recorded_count_outranks_the_unknown_qualifier(hosted, setup):
     report = _verify(hosted, home, "claude", root)
     assert report["links"]["memory"]["status"] == "PROVEN"
     assert report["exit_code"] == EXIT_OK
+
+
+def test_guard_the_arm_reads_the_canonical_predicate(hosted, setup,
+                                                     monkeypatch):
+    """#12497 review P2: the one-reader property must be BEHAVIOURALLY pinned,
+    not held only by the import line. The link has to ask
+    ``session_confirm.extraction_outcome_known`` — never a second copy of the
+    pair logic that could drift from it.
+
+    Mutation: replace the call with an inline
+    ``detail.get("extraction", {}).get("outcome_known") is False`` and this
+    stays UNVERIFIABLE while the assertion below expects FAIL."""
+    import tortoise.session_verify as sv
+
+    home, _bindir, _fake = setup
+    root = _install(home, "claude")
+    graph, _url = hosted
+    graph.zero_extracted = True
+    graph.extraction = False          # the server says "not recorded"
+    # Force the CANONICAL reader's own "no usable block" arm. If the link
+    # consults it, the qualifier is unavailable and the old FAIL stands; a
+    # second, inline copy would not notice this at all.
+    monkeypatch.setattr(sv, "extraction_outcome_known", lambda _detail: None)
+    report = _verify(hosted, home, "claude", root)
+    assert report["links"]["memory"]["status"] == "FAIL"
+    assert report["exit_code"] == EXIT_BROKEN
+
+
+def test_the_exit_two_summary_does_not_invent_a_cause():
+    """#12497 review P2: exit 2 has THREE causes — a harness this command
+    cannot fire, an API build that serves no ``source`` field, and a server
+    that recorded no extraction outcome. The report's summary line must not
+    assert the first one for the other two, because that points the operator
+    at the wrong remedy (the link's own line already names the real reason).
+
+    Mutation: restore the fixed "a link could not be exercised in this
+    environment" sentence and the ``not in`` assertion below fails."""
+    import tortoise.session_verify as sv
+
+    report = {
+        "harness": "claude", "root": "/tmp/proj", "links": {
+            "memory": sv._link(
+                sv.STATUS_UNVERIFIABLE,
+                "the server has not recorded an extraction outcome")},
+        "cleanup": {}, "exit_code": sv.EXIT_UNVERIFIABLE,
+    }
+    text = sv.render_report(report)
+    assert "exit 2" in text, text
+    assert "could not be exercised" not in text, text
+    assert "NOT VERIFIED" in text, text
 
 
 def test_guard_cleanup_failure_is_surfaced_not_swallowed(hosted, setup):
