@@ -422,8 +422,13 @@ def _stray_writes(src: str) -> list[tuple[int, str]]:
         if not isinstance(node, ast.Call):
             continue
         func = node.func
-        name = (func.id if isinstance(func, ast.Name)
-                else func.attr if isinstance(func, ast.Attribute) else "")
+        name = (
+            func.id
+            if isinstance(func, ast.Name)
+            else func.attr
+            if isinstance(func, ast.Attribute)
+            else ""
+        )
         if name not in _WRITE_ATTRS:
             continue
         # `open()` with NO arguments at all is prose, not a call; every real one passes an
@@ -463,15 +468,15 @@ def _innermost_enclosing_function(tree, node):
     write stray. Both directions of divergence therefore exist, and the safety property does not
     rest on direction: it rests on the fact that neither rule credits a write that is outside every
     `_write`. Measured identical to the old rule for module level, class body, lambda,
-    comprehension, `if`/`try` blocks and `async def`.
+    comprehension, `if`/`try` blocks and a module-level `async def _write` — a write inside an
+    `async def` NESTED in `_write` diverges in the same direction as the nested `def` above, so the
+    list item is scoped to the module-level form rather than to `async` in general.
     """
     import ast
 
     parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
     parent = parents.get(node)
-    while parent is not None and not isinstance(
-        parent, (ast.FunctionDef, ast.AsyncFunctionDef)
-    ):
+    while parent is not None and not isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)):
         parent = parents.get(parent)
     return parent
 
@@ -486,12 +491,7 @@ def test_the_stray_write_guard_uses_the_INNERMOST_enclosing_function():
     """
     import ast
 
-    src = (
-        "def _write(p):\n"
-        "    def nested():\n"
-        "        open(p, 'w')\n"
-        "    return nested\n"
-    )
+    src = "def _write(p):\n    def nested():\n        open(p, 'w')\n    return nested\n"
     # the GUARD itself reports it — not a helper used only here
     assert _stray_writes(src) == [(3, "open")], _stray_writes(src)
     tree = ast.parse(src)
@@ -499,7 +499,8 @@ def test_the_stray_write_guard_uses_the_INNERMOST_enclosing_function():
     assert _innermost_enclosing_function(tree, write).name == "nested"
     # and the outermost rule the bug used is exactly what this refuses
     bfs_first = next(
-        fn for fn in ast.walk(tree)
+        fn
+        for fn in ast.walk(tree)
         if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
         and any(child is write for child in ast.walk(fn))
     )
