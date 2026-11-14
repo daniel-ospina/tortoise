@@ -890,8 +890,13 @@ def test_the_quota_budget_shrinks_by_what_the_earlier_phases_actually_spent(monk
     the quota sees "~3.5 s" here; that is the UNCAPPED figure, and it would put the four terms at
     6.5 s, which contradicts the 6.0 s the same sentence states (fresh review of the final head,
     P2). This drives the real relationship: make the
-    stubbed probe+count consume 2.0 s of a 4.0 s deadline and the quota budget must drop by that
-    2.0 s, which a budget computed once at handler start could not do (fresh review of cycle 5
+    stubbed probe+count consume 2.0 s of a 4.0 s deadline and the quota budget must FALL — by
+    **1.5 s**, not by the full 2.0 s, because its own 3.0 s cap absorbs the first 0.5 s
+    (`min(3.0, 4.0 − 0.5)` = 3.0) and only the rest passes through (`min(3.0, 4.0 − 2.0 − 0.5)` =
+    1.5). The case below asserts exactly that 1.5 s. ⚠️ An earlier wording said "must drop by that
+    2.0 s", which was only true against the uncapped 3.5 s baseline this same paragraph now
+    labels wrong (fresh review of the final head, P1 — the 3.0 s correction above left this
+    sentence un-re-derived) — a budget computed once at handler start could not do this (fresh review of cycle 5
     round 2, P2 — the mutant is "compute `_health_quota_budget()` next to the allowance").
     """
     monkeypatch.setattr(mcp_server, "_wait_bound_arrival", lambda: None)

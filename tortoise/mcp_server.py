@@ -887,7 +887,7 @@ def _health_setup_allowance(remaining: float) -> float:
     other three bounded phases still spent their own timeouts below the reserve, so a dispatch with
     ``remaining < reserve`` (~6.5 s) overran the deadline and was served the SAME ``-32009`` this
     change exists to remove. Both later phases are bounded too, in DIFFERENT ways — stated in full
-    above and in ``_health_setup_allowance``'s docstring, because an earlier wording here said "each
+    above, in ``_health_tail_reserve``'s docstring — because an earlier wording here said "each
     bounded by what is LEFT of the deadline", which is FALSE of the count:
     ``metrics(graph_size_timeout=…)`` is planned at handler start off the probe's CEILING (so it is
     the full constant on a fresh bound, and only shrinks when the reserve ate the deadline), while
