@@ -1653,9 +1653,13 @@ def test_the_workflow_grants_the_alert_scope_and_runs_on_its_stated_cadence() ->
     # `docs/ci/required-contexts.json` now records this workflow as emitting. This job reads
     # PRODUCTION state, so it is red BY CONSTRUCTION during any rotation (`MISMATCH`) or edge 503
     # (`UNVERIFIABLE`); as a `push`/`pull_request` check that red would land on `main` or on an
-    # unrelated PR. MEASURED at this head: adding `push: {branches: [main]}` — and separately
-    # `pull_request:` — left this whole file GREEN (43 passed each), so a one-line edit converts a
-    # monitor into a repo-wide red. Asserted as an EQUALITY for the same reason the scopes above are.
+    # unrelated PR. MEASURED BEFORE THIS ASSERTION EXISTED — at `3c53bd1205df`, where the two trigger
+    # checks above were presence-only: adding `push: {branches: [main]}` — and separately
+    # `pull_request:` — left this whole file GREEN (43 passed each), so a one-line edit converted a
+    # monitor into a repo-wide red. ⛔ That figure describes the state this equality FIXES, not the
+    # state it leaves: at this head the same mutation REDS the equality below (verified: 1 failed,
+    # 42 passed, for `push:`, for `pull_request:`, and for a removed `schedule`). Asserted as an
+    # EQUALITY for the same reason the scopes above are.
     assert set(triggers) == {"schedule", "workflow_dispatch"}, (
         "a non-`schedule` trigger makes this monitor's `check` a check-run on the merged ref — and it "
         "reads production, so a rotation or an edge 503 would red `main` and every PR. The monitor's "
