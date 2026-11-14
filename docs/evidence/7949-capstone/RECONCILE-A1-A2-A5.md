@@ -774,7 +774,8 @@ git grep -c 'result\["relations"\]' -- tests/          # tree-wide MATCHES — T
 #     `:424`), but the FILE is the strongest reader in the tree — it rebinds the result
 #     (`folded = ev2.execute_embed(...)`, `:439`) and asserts on `folded["relations"]` at `:441`,
 #     then drives it through the REAL commit leg (`_capture`, `:443`) and asserts
-#     `cap["relation_write"]["written"] == 2` plus both edges present in the graph (`:444-449`).
+#     `cap["relation_write"]["written"] == 2` plus both edges present in the graph (`:444-448`,
+#     the file's last line).
 #     A literal `result\["relations"\]` grep is blind to a REBIND — that is this block's own
 #     lesson (see the `-- tortoise/` scope note above), applied to itself.
 #   • `test_7949_capstone_measure.py`: the hit is a scan of `extractor_v2.py`'s source lines used to
