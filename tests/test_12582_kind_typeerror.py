@@ -15,13 +15,19 @@ Its mirror image is the SECOND half of the fix, over a slightly wider
 population — three different wrong answers for a `kind` the accessor can never
 match, all measured on a live lane:
 
-- a truthy hashable non-str (`True`, `1`, `5`) raised at `":" not in kind`, and
-  once the tail learned to tolerate a non-str the structural and fts arms served
-  it as `[]` — a true-looking "this kind has no rows";
-- a non-empty LIST (`["statement"]`) did not raise there; it reached the graph and
-  came back as `{"error": "unhashable type: 'list'"}` — an internal detail of the
-  kind-expansion map (`_kind_read_filters.get(kind)`), converted to a dict by
-  `_safe`, i.e. neither a refusal nor a route;
+- a truthy non-ITERABLE non-str (`True`, `1`, `5`) raised at `":" not in kind`,
+  and once the tail learned to tolerate a non-str the STRUCTURAL arm served it as
+  `[]` — a true-looking "this kind has no rows". (Non-iterability, not non-str-ness,
+  is what raised: a tuple `kind` never raised and was served `[]` all along. The
+  fts arm was never part of this: it answers through `tortoise_fts_query` and
+  returns above the tail, so `text=..., kind=True` was `[]` both before and after
+  the tail change — which is exactly why the refusal, not the tail, is what makes
+  one message for all three arms.)
+- a non-empty LIST (`["statement"]`) did not raise there; it raised EARLIER, in
+  the kind-expansion map before any read (`_operator_scope_clauses` ->
+  `_expand_kind` -> `_kind_expansions.get(kind, [kind])`), and surfaced as
+  `{"error": "unhashable type: 'list'"}` — an internal detail, converted to a dict
+  by `_safe`, i.e. neither a refusal nor a route;
 - the tag arm refused all of them by the #12500 rule, so the same value answered
   two different ways depending on which arm a caller happened to use.
 
@@ -157,8 +163,9 @@ def test_a_truthy_non_str_kind_is_refused_not_served_as_an_empty_page(
         stub, truthy_kind) -> None:
     """A kind that is SET but not a string cannot match, so it is REFUSED.
 
-    Measured at the previous head on a live lane holding 15 Points:
-    `kind=True`/`1`/`5` returned `[]` while `kind=False` returned all 15 — the
+    Measured at `2d19277237` (tail tolerant, refusal not yet added) on a live lane:
+    `kind=True`/`1`/`5` returned `[]` while `kind=False` returned the whole
+    population — the
     #6146 wrong-empty class, and the tag arm refused those same values (#12500),
     so one argument value answered two ways. The list param is here for its own
     measured pre-fix answer: `{"error": "unhashable type: 'list'"}` leaked out of
@@ -186,9 +193,10 @@ def test_a_truthy_non_str_kind_is_refused_not_served_as_an_empty_page(
 def test_the_two_arms_agree_that_a_truthy_non_str_kind_is_refused(stub) -> None:
     """The tag arm and the structural arm must give ONE answer for one value.
 
-    Measured on a live lane at the previous head: `tortoise_query(kind=True)`
-    returned `[]` (a wrong-empty) while `tortoise_query(tag="x", kind=True)` was
-    refused by the #12500 tag block — two answers for the same argument value,
+    Measured on a live lane at `2d19277237` (tail tolerant, refusal not yet added):
+    `tortoise_query(kind=True)` returned `[]` (a wrong-empty) while
+    `tortoise_query(tag="x", kind=True)` was refused by the #12500 tag block — two
+    answers for the same argument value,
     the defect #12372 removed for `entity_type`. With the refusal above every arm
     both answer with the SAME message: the #12582 one. Measured at this head, a
     STRING kind still reaches the per-arm block on the tag arm (`tag="x",

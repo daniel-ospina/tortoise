@@ -4380,17 +4380,19 @@ def tortoise_query(kind: str | None = None,
         return _SafeError({"error": "offset must be >= 0, got " + str(offset)})
     if limit is not None and limit < 1:
         return _SafeError({"error": "limit must be >= 1, got " + str(limit)})
-    # #12582: a `kind` that is SET but not a string cannot name a point kind. The
-    # read hands it to `_read_filter_kinds`, which has no entry for a non-str and
-    # falls back to `[kind]` (`pack_registry.py`: `self._kind_read_filters.get(
-    # kind, [kind])`), so the accessor builds an EQUALITY `n.pointKind = $kind`
-    # (`sdk.py`: the `len(expanded) == 1` branch — the `IN [...]` form is for a
-    # string that expands) and no row can carry it. So a HASHABLE non-str
-    # (`True`/`1`/`5`) matched NOTHING and was served as `[]` — a true-looking
-    # "this kind has no rows" for a filter that could never be applied (the #6146
-    # wrong-empty class) — while an UNHASHABLE one (a list) raises at that same
-    # lookup and leaked `unhashable type: 'list'` out as an error dict. Neither is
-    # the refusal such a value deserves. The tag arm
+    # #12582: a `kind` that is SET but not a string cannot name a point kind, and
+    # the two ways it failed differ. A HASHABLE non-str (`True`/`1`/`5`) gets
+    # `[kind]` back from both maps (`expand_kind` / `read_filter_kinds` fall back
+    # to `[kind]`, `pack_registry.py`), so the accessor builds an EQUALITY
+    # `n.pointKind = $kind` (`sdk.py`: the `len(expanded) == 1` branch — the
+    # `IN [...]` form is for a string that expands) and no row can carry it: it
+    # matched NOTHING and was served as `[]`, a true-looking "this kind has no
+    # rows" for a filter that could never be applied (the #6146 wrong-empty
+    # class). An UNHASHABLE one (a list) never gets that far — it raises inside
+    # the kind-expansion map BEFORE any read (`_operator_scope_clauses` ->
+    # `_expand_kind` -> `self._kind_expansions.get(kind, [kind])`) and leaked
+    # `unhashable type: 'list'` out as an error dict. Neither is the refusal such
+    # a value deserves. The tag arm
     # already refuses the same values (#12500), so leaving the structural and fts
     # arms to answer them as an empty page (or a leaked internal error) made one
     # argument value answer two ways depending on the arm the caller happened to
