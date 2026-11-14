@@ -1675,6 +1675,20 @@ surfaces:
   # SQL↔Python contract (the RPC/param names) — the #2938/#3154 silent-drop
   # class. See the `core` entry for the other half.
   - test_postgres_storage.py
+  # #12762: DUAL-REGISTERED with `core` — the `core` row is what clearing `main`'s
+  # red added, and on its own it is one-armed. This suite pins
+  # `metering.record_postgres_bytes_written` and it is the ONLY test in the tree
+  # that does (`git grep -l 'record_postgres_bytes_written' -- tests/` → this file
+  # alone). `tortoise/metering.py` is an exact `api` SOURCE_PATTERNS entry, which
+  # REPLACES the `core` fallback, so a `core`-only registration drops the suite on
+  # an `api`-only `metering.py` diff — MEASURED: `--changed-files
+  # tortoise/metering.py` → `surfaces ['api']`, `test_postgres_bytes.py in
+  # test_files = False`. The module the OTHER half lives in
+  # (`tortoise/postgres_bytes.py`, plus the `record_writer.py` seam the meter is
+  # called from) matches no pattern and falls to `core`, which is why that arm
+  # exists — the #2938/#3154 silent-drop class, the same shape as
+  # `test_postgres_storage.py` directly above. See the `core` entry for that half.
+  - test_postgres_bytes.py
   - test_oauth_mcp.py
   # #2853: the `oauth_clients` row count that ruling C made part of the decision.
   # Registered on `api` because the ONLY file it guards, `tortoise/hosted_api.py`,
