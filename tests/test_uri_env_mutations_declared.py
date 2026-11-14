@@ -243,8 +243,9 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # `setenv("TORTOISE_DB_URI"` arm would authorize any future one-line setenv in this
     # 3.5k-line file (`wc -l` → 3510 at this head), which the entry 10 lines above
     # refuses to do for its own file.
-    # ⛔ ONE key, not three. `origin/main` carried TWO rows for this file and this
-    # branch's first commit added a third: `#12588` (the `#12523` triage) added the
+    # ⛔ ONE key, not three. At `a808f9f8ba` the file carried TWO rows for this file and
+    # `#12628` collapsed them again on main (this branch rebased onto the collapsed base),
+    # so the state the FIRST commit had to repair was three: `#12588` (the `#12523` triage) added the
     # first, and `#12555` then added a SECOND over it — NOT from a base that predated it,
     # which is measurable: `git show 76b25fcfd1:tests/test_uri_env_mutations_declared.py
     # | grep -c '"test_published_artifact_canary.py":'` → **1** (that parent is `#12551`),

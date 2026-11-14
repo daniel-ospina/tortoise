@@ -6219,7 +6219,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("19238", "``body.harness`` only ever introduces a harness on a session the server"),
             ("19345", "if count + est > max_points:"),
         ), "hosted_api"),
-        ("05-verify.md", "Measured at `30c9e7c4d3`", (
+        ("05-verify.md", "Measured at `c1db6f3df28e`", (
             ("10037", "_registry_cache = PackRegistry(packs_dir)"),
             # …and the `subject_binding_available` consume pair on the SAME line, which the
             # registration above left unread (#12569 review round 6: `:10064`/`:10117` →
@@ -6227,10 +6227,10 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("10064", "subject_binding_available,"),
             ("10117", "and not subject_binding_available(graph):"),
         ), "sdk"),
-        ("05-verify.md", "Measured at `30c9e7c4d3`", (
+        ("05-verify.md", "Measured at `c1db6f3df28e`", (
             ("1186", '"sha256": sha, "turns": None'),
         ), "capstone_run"),
-        ("05-verify.md", "Measured at `30c9e7c4d3`", (
+        ("05-verify.md", "Measured at `c1db6f3df28e`", (
             ("1400", "a **two-method** event-sourced Protocol"),
             # ⛔ AND THE EIGHTH THIS-HEAD NUMBER IN THAT SENTENCE (#12569 review round 4):
             # "D6 sits at `:1418`" is present tense and this-head, and mutating it to
@@ -6248,7 +6248,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # literal is at `:1194`"), so a count taken over the continuation sentence alone
         # misses it even though the row's scoping phrase binds the whole line.
         # `:1418` is pinned on the row above already; only `:1194` needs its own here.
-        ("05-verify.md", "Measured at `30c9e7c4d3`", (
+        ("05-verify.md", "Measured at `c1db6f3df28e`", (
             ("1194", 'if not frozen.get("sha256"):'),
         ), "capstone_run"),
         # ⛔ THE THREE THIS-HEAD CITES IN THAT SAME PARAGRAPH THAT STILL HAD NO READER
