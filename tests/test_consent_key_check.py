@@ -294,6 +294,58 @@ def test_a_non_json_body_is_UNVERIFIABLE(monkeypatch) -> None:
     assert CKC.main([]) == 2
 
 
+def test_a_body_OVER_the_cap_is_refused_rather_than_parsed(monkeypatch) -> None:
+    """The `read(MAX_BODY_BYTES)` bound is the OOM backstop, and it is BEHAVIOURAL here.
+
+    `_get_json`'s contract calls the cap load-bearing — *"`response.read()` with no argument buffers
+    whatever the peer sends — a hostile or proxy-streamed body could OOM the workflow's 10-minute job
+    BEFORE any shape gate runs"*. Nothing else in this file exercised it: measured at this head,
+    `response.read(MAX_BODY_BYTES)` -> `response.read()` left **52 passed**, so the stated invariant
+    had no pin at all (review finding, cycle 7).
+
+    ⛔ Asserted through the OUTCOME, not through the call's arguments. The payload below is VALID
+    JSON — a `_health()` block plus an oversized filler — so it PARSES and yields AGREE if the read
+    is unbounded, and TRUNCATES mid-JSON (the filler is the last key, so the closing braces go) and
+    yields `body_not_json` if it is bounded. An argument scan would pin the spelling of one call; this
+    pins the property the caller needs.
+    """
+    big = dict(_health(_fp(_KEY_A)))
+    big["filler"] = "x" * (CKC.MAX_BODY_BYTES + 1024)
+    assert len(json.dumps(big)) > CKC.MAX_BODY_BYTES, "the fixture must exceed the cap or this proves nothing"
+
+    _serve(monkeypatch, big, _pages(_fp(_KEY_A)))
+    assert CKC.main([]) == CKC.EXIT_NO_VERDICT, (
+        "an oversized body produced a VERDICT — the read is unbounded, so the cap is decorative"
+    )
+
+
+def test_the_transport_bound_reaches_urlopen(monkeypatch) -> None:
+    """The `timeout=` on `urlopen` is a second load-bearing bound with no pin.
+
+    Measured at this head: `urlopen(request, timeout=timeout)` -> `urlopen(request)` left **52
+    passed**. A request with no timeout blocks until the socket layer gives up, which on the
+    workflow's 10-minute job is the same class of wedge the body cap exists to stop — and the
+    tool would report `unreachable` for a hang it caused itself.
+
+    Pinned end to end: the CLI's `--timeout` must arrive at the transport on BOTH halves. The
+    `--timeout 7` value is deliberately not the default (15.0) — a hard-coded literal reds.
+    """
+    seen: list[float | None] = []
+
+    def fake_urlopen(request, timeout=None):
+        seen.append(timeout)
+        url = request.full_url if hasattr(request, "full_url") else str(request)
+        payload = _health(_fp(_KEY_A)) if url.endswith(CKC.API_PATH) else _pages(_fp(_KEY_A))
+        return _Response(json.dumps(payload).encode())
+
+    monkeypatch.setattr(CKC.urllib.request, "urlopen", fake_urlopen)
+    assert CKC.main(["--timeout", "7"]) == CKC.EXIT_AGREE
+    assert seen == [7.0, 7.0], (
+        f"each half must be read under the CLI's own bound, got {seen!r} — a `None` here is an "
+        "unbounded request (`urlopen(request)`) and a literal is a bound the flag cannot move"
+    )
+
+
 def test_a_DEEPLY_NESTED_body_is_UNVERIFIABLE_and_never_a_DISAGREEMENT(monkeypatch) -> None:
     """⛔ A parse failure that is NOT a `ValueError` still exited **1** — `EXIT_DISAGREE`.
 
