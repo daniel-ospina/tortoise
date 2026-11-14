@@ -729,6 +729,23 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # here, at the surviving entry, so the next reader does not re-add it.
     "test_published_artifact_canary.py": [
         r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*"docker://:x@localhost:6379/other"'],
+    # #12521 (`8e4e335b05`, "deliver approved SDK row 28 — the account read carries its
+    # plan"): the tests it added to `test_10015_organisation_account.py` brought TWO
+    # `delenv("TORTOISE_DB_URI")` sites with no register row, so this census reported
+    # them undeclared and went RED on `main` for every branch — MEASURED by running a
+    # detached `origin/main` copy of THIS register against the same tripwire file, which
+    # fails the identical two sites (the same drift class the canary row above records).
+    # Both are DELIBERATE_EMBEDDED_LANE: each clears the ambient URI so the process
+    # resolves the store from the explicit `TORTOISE_DB_PATH` set beside it — the `sdk`
+    # fixture so the registry `resolve_org_limits` reads is the SAME store the handle is
+    # open on, and the two-control-plane case so the gates open on a DIFFERENT store
+    # from the caller's handle, which is precisely the mismatch that case refuses.
+    # KEY-ONLY on purpose: this module pins no value, so a FUTURE differently-intentioned
+    # `setenv` of the URI in it still reds and forces its own triage, while the two
+    # `delenv` sites need no literal to be authorized.
+    "test_10015_organisation_account.py": [
+        r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"',
+    ],
     # #8939/#8870: the lane-gate unit pins for the version-anchor live file. The
     # setenv is DELIBERATE_URI — a CONFIGURED docker URI is the test input, and
     # the assertion is that `_live_uri()` uses it AS-IS instead of probing a
