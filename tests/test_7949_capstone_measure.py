@@ -5805,9 +5805,12 @@ _EPIC_CITE_DOCS = {
     "11083/README.md":
         _REPO / "docs/evidence/11083/README.md",
     # ⛔ REGISTERED BY THE REVIEW THAT FOUND IT UNPINNED (#12462). `05-verify.md` D5 states
-    # NINE this-head `file:line` measurements in one sentence, and the reviewer measured that
-    # reverting them left the suite GREEN — so the sentence whose whole subject is "numbers
-    # rot" was itself the one block in this PR nothing read. Three are pinned on the two rows
+    # NINE this-head `file:line` measurements in that paragraph, and the reviewer measured that
+    # reverting them left the suite GREEN — so the paragraph whose whole subject is "numbers
+    # rot" was itself the one block in this PR nothing read. ⛔ NINE IS A CELL COUNT, NOT A
+    # SENTENCE COUNT: eight are in the `Measured at` sentence and `:1194` is in the sentence
+    # BEFORE it on the same markdown line ("…is STAMP-bound (`:1186` is the `corpus = {…}`
+    # line here; the frozen literal is at `:1194`)"). Three are pinned on the two rows
     # below (`18396`/`18503` here, `sdk.py:10037` on its own row because a row carries ONE
     # source key), `10064`/`10117` by the `subject_binding_available` rows that already exist,
     # and the last four (`capstone_run.py:1186`, `:1194`, `EXTRACTOR-V4-ARCHITECTURE.md:1400`,
@@ -6135,7 +6138,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         ), "hosted_api"),
         # ⛔ `05-verify.md` D5's own "Measured at" sentence (#12462 review). The row whose
         # SUBJECT is that line numbers rot carried NINE this-head cites and no reader at
-        # all. Five rows here, because a row carries ONE source key; the phrase is unique in
+        # all. Six rows here, because a row carries ONE source key; the phrase is unique in
         # the file. The first cut pinned only three of the nine, and review measured the
         # residual by mutating the rest — 413/420 GREEN — so they are pinned too.
         ("05-verify.md", "Measured at `6916a6cd89`", (
@@ -14297,8 +14300,9 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         "the record must cite the comment that says nothing consumes the channel")
     # ⛔ AND THE RECORD CITES **THIS FILE'S OWN LINE** — the scan below that DERIVES
     # `_relations_cite` — which is the one number its own diff moves: every row added
-    # above it shifts it, and #12569's rows moved it `14043` → `14139` → `14254` while the record
-    # kept the old value. Derived, never typed, for the same reason `_relations_cite` is:
+    # above it shifts it, and #12569's rows moved it `14043` → `14139` → `14254` → `14277` →
+    # `14291` → `14295` while the record kept the old value — a sequence printed AT a head has
+    # to reach that head, which is the same rule the row itself enforces. Derived, never typed, for the same reason `_relations_cite` is:
     # a record about citations cannot carry a hand-kept citation to its own checker.
     _self_scan_line = next(
         n for n, line in enumerate(
@@ -14311,7 +14315,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     assert f"(`:{_self_scan_line}`)" in text, (
         f"the record must cite the scan that derives `_relations_cite` at `:{_self_scan_line}` — "
         "it is the number this file's OWN diff moves, so a typed value re-stales the moment "
-        "a row is added above it (#12569: 14043 -> 14139 -> 14254)")
+        "a row is added above it (#12569: 14043 -> 14139 -> 14254 -> 14277 -> 14291 -> 14295)")
     # The SAME line is cited a SECOND time as a bare `:12397`, inside the
     # reproduction block's comment. A bare cite carries no file token, so the
     # prefixed arm above cannot see it: measured by re-staling it to `:10815` in
