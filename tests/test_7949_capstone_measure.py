@@ -5823,7 +5823,10 @@ _EPIC_CITE_DOCS = {
     # GREEN until they were pinned). ⛔ AND NINE WAS STILL NOT THE WHOLE PARAGRAPH (round 7,
     # P1): D5 also states three more this-head numbers, in the composition clauses EARLIER on
     # the same markdown line — `:191`, `:4201-4208`, `:4209-4230` — in two files that no row
-    # and no source key named at all. MEASURED: mutating all three at once left this file 413
+    # scoped to THIS document, and no `_EPIC_CITE_SOURCES` key, named at all (`capstone_verdict_check`
+    # DID have a source key and rows — in `E1-E5-PROOFS.md` and `docs/00_index.md` — but
+    # `_BUNDLE_TOOL_SOURCES`' phrase sweep reads `_BUNDLE_DOCS`, which does not contain
+    # this file, so none of them could read it). MEASURED: mutating all three at once left this file 413
     # GREEN. They are pinned on the three rows below; the nine above are the `Measured at`
     # population and the whole paragraph states twelve. A document this bundle EDITS is a document this
     # bundle READS — the convention the `_EPIC_CITE_DOCS` comment above states; registering the
@@ -6196,8 +6199,13 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # numbers: in present tense it also states the compositions `#11673` landed —
         # `capstone_verdict_check.py`'s `RECOGNISED_CRITERIA` at `:191`, and
         # `capstone_preregistration_check.py`'s two-sanctioned-sets refusal at `:4201-4208`
-        # with its reverse arm at `:4209-4230`. No source key and no row existed for either
-        # file, and `_BUNDLE_TOOL_SOURCES`' phrase arm cannot reach this document. MEASURED:
+        # with its reverse arm at `:4209-4230`. Neither file had a row scoped to THIS
+        # document or an `_EPIC_CITE_SOURCES` key — and `_BUNDLE_TOOL_SOURCES`' phrase arm
+        # cannot reach this one (its phrase sweep reads `_BUNDLE_DOCS`, which does not
+        # contain `05-verify.md`), which is why the pre-existing `capstone_verdict_check`
+        # rows in `E1-E5-PROOFS.md` and `docs/00_index.md` did not cover it. ⚠️ Those rows
+        # and that key are LIVE and must not be deleted on a reading of this comment: what
+        # was missing was a `05-verify.md` row, not the source. MEASURED:
         # mutating all three at once left `tests/test_7949_capstone_measure.py` 413 GREEN.
         # A row scopes to ONE line and every number below occurs exactly ONCE on it, so no
         # twin-spelling content pin is needed (the `:1186` shape above).
@@ -6210,11 +6218,23 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         ), "capstone_preregistration"),
         ("05-verify.md", "plus a reverse arm", (
             ("4209", "# …and the reverse direction: a bundle that DEFINES a required id"),
+            # ⛔ AND THE RANGE'S END IS HELD TOO (round 8, P1 — round 7 got both halves wrong).
+            # The first cut pinned only the START and then claimed the END was unpinnable
+            # because it is a bare `)`. ⚠️ `:4208` — which that comment called "its other
+            # endpoint" — is the endpoint of the FIRST range (`:4201-4208`), not this one; and
+            # an end IS pinnable by the exact form this file already uses (`("exact", "}")`
+            # in `_BUNDLE_RULES`), which compares the cited line STRIPPED.
+            # MEASURED, before this cell: `:4209-4230` -> `:4209-4231` left the suite GREEN
+            # (`4231` is `    return failures`), so the declared end could rot one line past
+            # the arm that names it. A BARE-STRING anchor there would indeed have had no
+            # discriminating power — that half of round 7's reasoning was right; the
+            # conclusion that the end was therefore unpinnable was not.
+            ("4230", ("exact", ")")),
         ), "capstone_preregistration"),
-        # ⚠️ `:4230` — the END of the second range — is deliberately NOT a cell, and the
-        # reason is the rule this file applies everywhere else: it is a BARE `)`, so an
-        # anchor any line satisfies would look like coverage while catching nothing. The
-        # range's START is pinned, and its other endpoint `:4208` carries text and is pinned.
+        # ⚠️ BOTH RANGE ENDS ARE NOW HELD: `:4208` by the `("4201", …)` row above (that line
+        # carries text) and `:4230` by the exact-closer form above. A range whose END a
+        # bare-string anchor cannot discriminate is pinned by comparing the STRIPPED line,
+        # not by leaving the end unread.
         # ⛔ `00-plan.md`'s `_capture_lane` CITE (#12462 review cycle 3, P2): the diff
         # re-pointed it to `:17936` and no row read it — `_BUNDLE_CITE` matches
         # `sdk|edges|extractor_v2` only, so a `hosted_api` number needs its own row. The
