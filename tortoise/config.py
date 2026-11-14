@@ -533,8 +533,18 @@ class DaemonTargetError(ValueError):
     exist, and no caller's CONTROL FLOW changes.
 
     ⛔ But it is not invisible, and an earlier version of this paragraph claimed
-    it was "no caller's behaviour" (review, P3). Control flow is unchanged; the
-    RENDERING of the one path that lets it escape uncaught is not. ``serve``
+    it was "no caller's behaviour" (review, P3). Control flow is unchanged; what
+    moves is what an UNCAUGHT exception renders — and, less obviously, the class
+    name the MCP dispatcher records for a CAUGHT one: `mcp_server` puts an
+    exception's class name into the machine-readable `error_kind` of its
+    `mcp_tool_call` row (`_classify_mcp_call_error`), so a tool body raising
+    through this type reports `DaemonTargetError` there where it reported
+    `ValueError`, and a consumer keying on the old name must be taught the new
+    one (measured: `_classify_mcp_call_error(DaemonTargetError("x", None))` →
+    `('exec_error', 'DaemonTargetError')`). That is a recorded VALUE, not prose —
+    so "only the traceback" was too narrow a second time (cycle-5 review).
+
+    The traceback arm: ``serve``
     (``__main__`` → ``mcp_server.main()`` → ``_get_sdk()``, none of the three
     guarded) used to die ending at ``ValueError:``, and now dies ending at
     ``tortoise.config.DaemonTargetError:`` with the original ``ValueError:`` line
@@ -551,13 +561,28 @@ class DaemonTargetError(ValueError):
 
     def __init__(self, message: str, key: str | None) -> None:
         super().__init__(message)
-        #: The ``DAEMON_DB_KEYS`` entry the ladder was ON when it raised.
-        #: ⛔ ``None`` is UNREACHABLE from this ladder today (both keyed rungs
-        #: attach a key, and no other rung can raise — verified by review), and
-        #: it is typed ``str | None`` on purpose: an unwrapped future rung would
-        #: then degrade the disclosure to "unknown origin" instead of silently
-        #: naming a wrong key. No test covers that arm because no state reaches
-        #: it (agent-infra#3442 rule 3) — the type is the guard, not a claim.
+        #: The ``DAEMON_DB_KEYS`` entry the ladder was ON when it raised, or
+        #: ``None`` in TWO states that are LIVE today — an earlier version of
+        #: this comment called ``None`` unreachable and "verified by review",
+        #: and both halves were false (measured; review cycles 2, 4 and 5):
+        #:
+        #: (a) THE RUNG HAD A VALUE THE RESOLVER DISCARDS. A whitespace-only
+        #: ``TORTOISE_DB_PATH`` enters the path rung on TRUTHINESS, but
+        #: ``resolve_db_path()`` STRIPS it and falls through to the embedded
+        #: default — the rejected value is the process's own, so no key can be
+        #: named. THIS TYPE IS CONSTRUCTED WITH ``None`` HERE, in `config.py`'s
+        #: path rung, and every downstream arm reports ``unknown``.
+        #:
+        #: (b) THE REJECTION NEVER ENTERS THIS TYPE AT ALL. The
+        #: ``embedded-allowed`` rung calls ``resolve_db_path()`` UNWRAPPED, so a
+        #: relative ``DEFAULT_DB_PATH`` (a uid with no passwd entry and no
+        #: ``HOME``, where ``expanduser("~")`` stays literal) raises a PLAIN
+        #: ``ValueError``; the disclosure reads its key with
+        #: ``getattr(exc, "key", None)`` and also reports ``unknown``.
+        #:
+        #: So ``str | None`` is NOT future-proofing — both arms are live and each
+        #: is pinned (`test_a_blank_path_rung_is_not_credited_with_the_default_it_
+        #: fell_through_to`, `test_a_keyless_rejection_is_reported_as_unknown_origin`).
         self.key = key
 
 
@@ -662,7 +687,23 @@ def daemon_db_target() -> tuple[str | None, str]:
         try:
             return resolve_db_path(), "path"
         except ValueError as exc:
-            raise DaemonTargetError(str(exc), "TORTOISE_DB_PATH") from exc
+            # ⛔ BLANK IS NOT "DECIDING AND REJECTED" FOR THIS RUNG (measured):
+            # `resolve_db_path()` STRIPS a whitespace-only `TORTOISE_DB_PATH`,
+            # logs it and falls THROUGH to the embedded default — so the value
+            # that failed is the PROCESS's own, and attaching the key made the
+            # disclosure say "the value it rejects is the one this `.env`
+            # supplied" about a value the resolver discarded. `None` is the
+            # honest answer; a non-blank value IS the one that failed and keeps
+            # its key.
+            # (For `TORTOISE_DB_URI` this guard is unnecessary, and the reason is
+            # narrower than "blank is deciding": an EMPTY URI does not enter the
+            # rung at all (`if uri:`), so the path rung decides; a WHITESPACE-ONLY
+            # URI is rejected as a relative path — by `resolve_db_path` STEP 1
+            # (`_abs` on the `explicit` argument the ladder passes), never
+            # step 3 — and it IS the value that failed.)
+            _path = os.environ.get("TORTOISE_DB_PATH", "")
+            raise DaemonTargetError(
+                str(exc), "TORTOISE_DB_PATH" if _path.strip() else None) from exc
     if os.environ.get("TORTOISE_ALLOW_EMBEDDED") == "1":
         return resolve_db_path(), "embedded-allowed"
     return None, "refuses"

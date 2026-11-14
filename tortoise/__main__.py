@@ -11974,8 +11974,31 @@ def _dotenv_divergence(graded_target: str | None = None, *,
                         # A re-spelled "first truthy key" scan could desync from
                         # the ladder silently (#12441 item 5).
                         _overlay_key = getattr(exc, "key", None)
-                        payload["daemon_error_source"] = (
-                            "both" if _overlay_key in effective else "env")
+                        if _overlay_key is None:
+                            # ⛔ A KEYLESS rejection is reachable: the
+                            # `embedded-allowed` rung calls `resolve_db_path()`
+                            # unwrapped, and a relative `DEFAULT_DB_PATH` (a uid
+                            # with no passwd entry and no `HOME`) rejects with no
+                            # rung to name (measured). `None in effective` is
+                            # False, so the expression below called that `env` —
+                            # blaming an environment value that does not exist.
+                            # No file and no key can be its cause: `unknown` is
+                            # the only true answer, and `_db_value_source(None)`
+                            # already says exactly that on the other arm.
+                            payload["daemon_error_source"] = "unknown"
+                        else:
+                            payload["daemon_error_source"] = (
+                                "both" if _overlay_key in effective else "env")
+                    elif getattr(exc, "key", None) is None:
+                        # ⛔ KEYLESS here as well (measured). The FILE can be why a
+                        # rung was TAKEN — `.env` carrying
+                        # `TORTOISE_ALLOW_EMBEDDED=1` — without having supplied the
+                        # value that FAILED: the relative embedded default is the
+                        # PROCESS's own. Calling that `file` renders "the value it
+                        # rejects is the one this `.env` supplied" about a value
+                        # the file never carried; it supplied the hatch, not the
+                        # path.
+                        payload["daemon_error_source"] = "unknown"
                     else:
                         payload["daemon_error_source"] = "file"
         except ValueError as exc:
@@ -12020,14 +12043,15 @@ def _dotenv_divergence(graded_target: str | None = None, *,
             # and only the record can tell (#12428 review).
             daemon_target = None
             # ⛔ The key the LADDER says it was on (`DaemonTargetError.key`) —
-            # never a second walk over `DAEMON_DB_KEYS`. ⛔ `getattr`'s `None`
-            # default is UNREACHABLE today: this arm is the no-overlay one, where
-            # no `os.environ` write happens, and no rung of the ladder can raise
-            # without attaching a key (review, P3 — an earlier version of this
-            # comment named the NUL-byte `ValueError`, which is raised and caught
-            # in the OUTER arm and can never arrive here). It is kept so an
-            # unwrapped future rung degrades to "unknown origin" rather than
-            # naming a wrong key.
+            # never a second walk over `DAEMON_DB_KEYS`. ⛔ ``None`` IS
+            # reachable here, and an earlier version of this comment called it
+            # unreachable "verified by review": the ``embedded-allowed`` rung
+            # calls `resolve_db_path()` UNWRAPPED, so a relative
+            # `DEFAULT_DB_PATH` (no passwd entry, no `HOME`) raises a PLAIN
+            # ``ValueError`` with no key at all. That state degrades to
+            # ``unknown`` origin — which is the correct answer, not a fallback
+            # for a future rung — and is pinned by
+            # `test_a_keyless_rejection_is_reported_as_unknown_origin`.
             _key = getattr(exc, "key", None)
             _source = _db_value_source(_key)
             daemon_error = _redact_db_value(

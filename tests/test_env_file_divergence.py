@@ -2529,3 +2529,98 @@ def test_a_whitespace_only_env_key_is_still_the_ONE_THAT_DECIDED(
     doc = capsys.readouterr().out
     assert "the ENVIRONMENT's TORTOISE_DB_PATH decides it for the daemon" in doc, doc
     assert "but its value is BLANK" in doc, doc
+
+
+def test_a_keyless_rejection_is_reported_as_unknown_origin(
+        capsys, _isolated, monkeypatch):
+    """A rejection that names NO key must not blame a side that supplied none.
+
+    The `embedded-allowed` rung calls `resolve_db_path()` UNWRAPPED, so a
+    RELATIVE embedded default — which is what a uid with no passwd entry and no
+    `HOME` gets, because `os.path.expanduser("~")` leaves the literal `~` — is
+    rejected by a PLAIN `ValueError` carrying no key at all. The disclosure read
+    that as `None in effective` -> False and called it `env`, or (when the error
+    did not pre-exist) `file`: either way a side is named that supplied nothing,
+    and the `file` arm also prints "the value it rejects is the one this `.env`
+    supplied" about a value the file never carried — it supplied the HATCH.
+
+    Both handlers are driven, because they are separate branches and each was
+    wrong in its own way: the overlay arm's `_env_error_preexists` branch said
+    `env`, its `else` branch said `file`. Mutation-proven — disabling either
+    branch reddens exactly one arm below (`file != unknown` / `env != unknown`).
+    """
+    import tortoise.config as config
+
+    monkeypatch.setattr(config, "DEFAULT_DB_PATH", "relative/unresolvable.db")
+
+    # ARM 1 — clean environment, and the FILE supplies the hatch: the error does
+    # not pre-exist, so the overlay's `else` branch ran and used to say `file`.
+    _write_env(_isolated, "TORTOISE_ALLOW_EMBEDDED=1\n")
+    payload = _show_json(capsys)["env_file"]
+    assert payload["daemon_error_source"] == "unknown", (
+        payload.get("daemon_error"))
+    assert "the value it rejects is the one this `.env` supplied" not in (
+        payload.get("daemon_error") or ""), payload["daemon_error"]
+
+    # ARM 2 — the hatch is in the ENVIRONMENT (so the error pre-exists) while
+    # the file supplies a key of its own (so there IS something to overlay and
+    # the overlay arm runs). `None in effective` is False, so that arm said
+    # `env`. The file must not assign the hatch itself: the pre-existence probe
+    # REMOVES file-assigned values, which would make the error look new and route
+    # this to the other branch (measured — that is why ARM 1 exists separately).
+    monkeypatch.setenv("TORTOISE_ALLOW_EMBEDDED", "1")
+    _write_env(_isolated, "TORTOISE_LOG_LEVEL=info\n")
+    payload = _show_json(capsys)["env_file"]
+    assert payload["daemon_error_source"] == "unknown", (
+        payload.get("daemon_error"))
+    assert "the value is the one this `.env` supplied" not in (
+        payload.get("daemon_error") or ""), payload["daemon_error"]
+
+
+def test_a_blank_path_rung_is_not_credited_with_the_default_it_fell_through_to(
+        capsys, _isolated, monkeypatch):
+    """A whitespace-only `TORTOISE_DB_PATH` names no cause — it is DISCARDED.
+
+    The rung is entered on TRUTHINESS, but `resolve_db_path()` STRIPS a blank
+    value, logs it, and falls THROUGH to the embedded default. When that default
+    is itself unpalatable, the value that failed is the PROCESS's own: attaching
+    `TORTOISE_DB_PATH` to the error makes the disclosure credit the environment
+    (or the file) with a rejection of a value it never carried. `None` is the
+    honest attribution, and it renders `unknown` on every downstream arm.
+
+    The non-blank control matters as much as the blank case: it is what stops
+    this from becoming "the path rung never names a key", which would be a
+    different falsehood.
+    """
+    import tortoise.config as config
+
+    monkeypatch.setattr(config, "DEFAULT_DB_PATH", "relative/unresolvable.db")
+    monkeypatch.setenv("TORTOISE_DB_PATH", "   ")
+    # The `.env` must EXIST for the daemon ladder to be graded at all: with the
+    # file absent, `env_file` short-circuits to `state: absent` and carries no
+    # daemon section (measured — the first version of this test read
+    # `KeyError: 'daemon_error_source'` for that reason, and only passed when a
+    # neighbouring test happened to leave the module's file-state non-absent).
+    _write_env(_isolated, "TORTOISE_LOG_LEVEL=info\n")
+
+    payload = _show_json(capsys)["env_file"]
+    assert payload["daemon_error_source"] == "unknown", (
+        payload.get("daemon_error"))
+
+    # CONTROL — a non-blank value IS the one that failed, so the ladder keeps
+    # naming its key. Asserted AT THE LADDER, because `config show` cannot reach
+    # it: the CLI resolves the same relative path and reports `cli_error` before
+    # the daemon ladder is asked again, so the payload carries no attribution at
+    # all (measured — the payload form of this control reads
+    # `KeyError: 'daemon_error_source'`, not a wrong source, which would have
+    # made the assertion vacuous).
+    monkeypatch.setenv("TORTOISE_DB_PATH", "relative/kept.db")
+    with pytest.raises(config.DaemonTargetError) as caught:
+        config.daemon_db_target()
+    assert caught.value.key == "TORTOISE_DB_PATH"
+
+    # …and the blank value attaches NO key, which is the fix itself.
+    monkeypatch.setenv("TORTOISE_DB_PATH", "   ")
+    with pytest.raises(config.DaemonTargetError) as caught:
+        config.daemon_db_target()
+    assert caught.value.key is None
