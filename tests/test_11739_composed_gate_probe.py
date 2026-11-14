@@ -401,7 +401,11 @@ _WRITE_ATTRS = frozenset({"write_text", "write_bytes", "open"})
 
 
 def _stray_writes(src: str) -> list[tuple[int, str]]:
-    """Every call to one of `_WRITE_ATTRS` in `src` that is NOT routed through a function named `_write`.
+    """Every `_WRITE_ATTRS` call in `src` outside a function named `_write` — except `open()`.
+
+    The exception is a zero-argument `open()` (`open()`, `open ()`): no argument and no keyword means
+    prose, not a call, so it cannot write (#12688 review round 33, P3 — the carve-out was documented
+    only in a body comment while the summary promised every call).
 
     ⛔ NOT "every file write". Three names are not a class: `os.replace(tmp, out)`, `shutil.copyfile`
     and a bare `os.rename` are file writes the scan cannot see, and the atomic-publish idiom this
@@ -411,10 +415,11 @@ def _stray_writes(src: str) -> list[tuple[int, str]]:
     `test_the_write_scan_is_a_MEMBER_list_not_a_class`: whoever widens the list must update this
     docstring, because that pin reddens the moment they do.
 
-    ⛔ Extracted so the GUARD and its PIN are the same code path (#12688 review round 28, P2): the
-    previous pin called `_innermost_enclosing_function` directly, so reverting `enclosing_ok` to a
-    breadth-first scan left the suite 45/45 green. Attribution lives here; `src` is the only input,
-    so a synthetic nested tree can be pinned and a probe source asserted clean, through ONE function.
+    ⛔ Extracted so the GUARD and its PIN are the same code path (#12688 review round 28, P2).
+    Attribution lives here; `src` is the only input, so a synthetic nested tree can be pinned and a
+    probe source asserted clean through ONE function — and reverting the attribution reddens the pin
+    (measured). Before the extraction the pin called `_innermost_enclosing_function` directly, so a
+    guard that grew its own scan could pass with the pin green.
 
     ⛔ A TEXTUAL `open(` scan is defeatable and this is an AST walk instead: `Path.write_text`,
     `write_bytes`, `os.open`, `io.open` and `open ("x")` (a space) all slip past a line regex while
@@ -497,8 +502,15 @@ def test_the_write_scan_is_a_MEMBER_list_not_a_class():
     of them. This test asserts the gap EXISTS: widening the list (a good change) reddens it, which is
     the signal to reword `_stray_writes`'s docstring to whatever the new coverage actually is.
     """
+    # ⛔ The SAMPLE cannot guard the class: widening `_WRITE_ATTRS` by a name this sample does not
+    # exercise left the file green (measured with `writelines`, `copy2`, `save`, `fdopen`, `writeFile`
+    # — #12688 review round 33, P2). So the pin asserts the SET ITSELF.
+    assert frozenset({"write_text", "write_bytes", "open"}) == _WRITE_ATTRS, (
+        "_WRITE_ATTRS grew — good, but `_stray_writes`'s docstring enumerates the members, so it must "
+        "be reworded to the new coverage, and the new member needs a catch-case here"
+    )
     opaque = (
-        "os.replace(tmp, out)\n"       # atomic publish — invisible today
+        "os.replace(tmp, out)\n"  # atomic publish — invisible today
         "shutil.copyfile(a, b)\n"
         "os.rename(a, b)\n"
     )
@@ -920,8 +932,9 @@ def test_gate3s_measurement_writes_all_route_through_the_one_guard():
     what keeps the WIRING honest, because the behavioural case drives the helper and would stay
     green over a `main()` that went back to a bare `open()`.
 
-    The scan and its attribution live in `_stray_writes`, so the synthetic nested-tree pin below
-    drives the SAME code this assertion does — a guard that grew a second, breadth-first attribution
+    The scan and its attribution live in `_stray_writes`, so the synthetic nested-tree pin
+    (`test_the_stray_write_guard_uses_the_INNERMOST_enclosing_function`, above) drives the SAME code
+    this assertion does — a guard that grew a second, breadth-first attribution
     could otherwise keep both green (#12688 review round 28, P2).
     """
     src = (PROBES / "gate3_false_proposals.py").read_text(encoding="utf-8")
