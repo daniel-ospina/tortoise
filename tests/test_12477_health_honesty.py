@@ -378,7 +378,15 @@ def test_a_probe_epoch_past_the_bound_with_NO_probe_result_is_a_FAILURE():
     verdict = hosted_api._liveness_dataplane_verdict()
     assert verdict["state"] == "failed", verdict
     assert verdict["detail"]["reason"] == "probe-never-produced-a-result"
-    assert verdict["detail"]["uptime_s"] > 0
+    # ⛔ THE DATUM THE BOUND COMPARES IS THE PROBE EPOCH, AND THE PAYLOAD MUST SAY
+    # SO (round-2 review P2): `uptime_s` alone is ambiguous — it was the PROCESS's
+    # age before #12630, and an operator told `uptime_s: 121.0` on this reason
+    # reads "the box just restarted". `probe_epoch_age_s` is the honest name; the
+    # two are rounded from the same variable, so pinning both here is what stops a
+    # future edit from reinstating the mislabelled-only payload (which would red
+    # nothing: this is the only test that reads the arm at all).
+    assert verdict["detail"]["probe_epoch_age_s"] == \
+        verdict["detail"]["uptime_s"] > 0, verdict["detail"]
 
 
 def test_the_probe_epoch_is_a_float_and_not_the_identity_string():

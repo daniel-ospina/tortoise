@@ -1276,8 +1276,19 @@ class TestLivenessDecouple:
                 assert body["status"] == "ok", body
         finally:
             release.set()
-            monitoring.stop_health_listener(
-                getattr(app_under_test.state, "_healthz_server", None))
+            # ⛔ `stop_health_listener(None)` means "stop EVERY listener in this
+            # process", not "stop none" (monitoring.py: the `server is None` arm
+            # clears the registry and shuts down all of them). `_healthz_server`
+            # IS `None` on exactly the path this test can hit — a rebind race on
+            # the probe-then-release port helper makes `start_health_listener`
+            # return `None` (monitoring.py: `return None` on a bind failure) — so
+            # an unguarded teardown would turn one local flake into process-wide
+            # listener destruction, silently killing `ha_mod.app`'s listener and
+            # any peer test's, with an unrelated traceback (review P2).
+            healthz_server = getattr(
+                app_under_test.state, "_healthz_server", None)
+            if healthz_server is not None:
+                monitoring.stop_health_listener(healthz_server)
 
 
 class TestBootOrder:
@@ -1353,8 +1364,12 @@ class TestBootOrder:
             release.set()
             import tortoise.monitoring as monitoring
 
-            monitoring.stop_health_listener(
-                getattr(app_under_test.state, "_healthz_server", None))
+            # Same `None`-means-ALL hazard as the test above (review P2): guard
+            # before calling, or a failed bind tears down every listener alive.
+            healthz_server = getattr(
+                app_under_test.state, "_healthz_server", None)
+            if healthz_server is not None:
+                monitoring.stop_health_listener(healthz_server)
         assert shutdown_was_prompt, "shutdown hung on the blocked boot sweep"
 
 

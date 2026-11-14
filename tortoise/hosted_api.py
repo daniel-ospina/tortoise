@@ -2080,6 +2080,33 @@ def _health_probe_never_produced_bound_s() -> float:
         return 120.0
 
 
+def _reset_probe_state() -> None:
+    """Start a fresh probe epoch AND a fresh coordinator — the one seam for both.
+
+    `_HEALTH_PROBE_EPOCH_MONOTONIC` dates the "has this probe produced a result
+    yet" waiting period that `_HEALTH_PROBE.reset()` starts, so the two MUST move
+    together (#12630). Pairing them here, rather than leaving two adjacent
+    statements in `_lifespan`, makes that invariant mechanical: `reset()` is a
+    supported escape hatch (`monitoring`, tests, an ops-recovery seam), and a
+    reset that left the epoch behind would answer `probe-never-produced-a-result`
+    on a perfectly healthy instance — the fail-closed twin of the defect this
+    epoch exists to fix, with no pin to catch it.
+
+    Order is load-bearing (see `_lifespan`): the epoch is written FIRST, so a
+    `/healthz` poll landing between the two statements reads a fresh epoch over
+    the PREVIOUS result (`healthy` only if that result was fresh and ok, `failed`
+    if stale or not-ok) rather than a fresh coordinator over a blown bound.
+
+    `tortoise/selfhost.py` is deliberately NOT routed through here: it resets its
+    own coordinator and never reads this epoch (the never-produced bound is
+    hosted-only).
+    """
+    global _HEALTH_PROBE_EPOCH_MONOTONIC
+    _HEALTH_PROBE_EPOCH_MONOTONIC = time.monotonic()
+    _HEALTH_PROBE.reset()
+    _READY_PROBE.reset()
+    _CONTROL_PLANE_PROBE.reset()
+
 
 def _arm_health_probe_refresher(app) -> None:
     """Arm the DB-probe refresher, recording whether it started (#12477).
@@ -2184,20 +2211,27 @@ def _liveness_dataplane_verdict() -> dict:
         # `reasons: []`, one of the three claimed terms silently inert. The
         # bound is generous on purpose (four stale windows, floored at 120 s) so
         # a genuine cold start never reds the deploy gate.
-        # ⛔ THE DATUM IS THE PROBE EPOCH, NOT THE PROCESS'S AGE (#12630): the
-        # variable keeps its local name because the payload key below still says
-        # `uptime_s`, but what it measures is "how long has THIS app instance's
-        # probe been waiting" — the two coincide in production, where a lifespan
-        # is entered once per process, and diverge only in the re-entry shape the
-        # epoch exists for. Reporting the epoch there is the honest answer: the
-        # old one reported the process's age as this boot's, which is the defect.
-        uptime_s = max(0.0, time.monotonic() - float(_HEALTH_PROBE_EPOCH_MONOTONIC))
-        if uptime_s > _health_probe_never_produced_bound_s():
+        # ⛔ THE DATUM IS THE PROBE EPOCH, NOT THE PROCESS'S AGE (#12630), and the
+        # payload now SAYS so (review P2): `probe_epoch_age_s` is the datum the
+        # bound actually compares, and `uptime_s` keeps its #12477 name/value as
+        # an alias so a reader written against that shape keeps working — but a
+        # reader that took `uptime_s` to mean the PROCESS's age was reading a
+        # number this verdict no longer produces. The two coincide in production,
+        # where a lifespan is entered once per process, and diverge only in the
+        # re-entry shape the epoch exists for — which is exactly the case where an
+        # operator must not be told "the box just restarted".
+        probe_epoch_age_s = max(
+            0.0, time.monotonic() - float(_HEALTH_PROBE_EPOCH_MONOTONIC))
+        if probe_epoch_age_s > _health_probe_never_produced_bound_s():
             return {"state": "failed",
                     "detail": {"reason": "probe-never-produced-a-result",
                                "in_flight": False,
                                "in_flight_s": None,
-                               "uptime_s": round(uptime_s, 1)},
+                               "probe_epoch_age_s": round(probe_epoch_age_s, 1),
+                               # #12477 alias — same value, retained so the
+                               # existing reader/pin keeps working; new readers
+                               # should use `probe_epoch_age_s`.
+                               "uptime_s": round(probe_epoch_age_s, 1)},
                     "error": None}
         return {"state": "unknown",
                 "detail": {"reason": "no-probe-result-yet",
@@ -2982,10 +3016,25 @@ async def _lifespan(app):
     # made a re-entered lifespan answer `503 data-plane-failed` for the whole of
     # its boot — already past the 120 s bound the moment it was evaluated — and
     # that reds `test-slow` in any shard whose process is that old, which is a
-    # required check. One `global` write, at the same seam as the reset, so
-    # exactly one place advances it — the two are still two STATEMENTS, and the
-    # order below matters.
+    # required check.
     #
+    # ⛔ THE EPOCH AND THE COORDINATOR RESETS ARE ONE CALL, not two conventions
+    # (review P3). `HealthProbe.reset()` is a supported escape hatch, not just an
+    # internal detail — the probe-reset suites call it directly against this very
+    # module (`tests/test_probe_reset_inflight_4608.py` resets `ha_mod._HEALTH_PROBE`
+    # and `sh_mod._HEALTH_PROBE` to test the in-flight contract), and
+    # `tortoise/selfhost.py` resets its own coordinator on every boot. So a comment
+    # promising the two "can never disagree" would be a guarantee nothing
+    # enforces: a reset this module performs without the epoch moves the waiting
+    # period and leaves the bound dating the OLD one — an immediate
+    # `probe-never-produced-a-result` on a healthy instance, i.e. the fail-closed
+    # twin of the #12630 defect, with no pin to catch it. `_reset_probe_state()`
+    # below is therefore the ONLY place in this module that does both, so the
+    # pairing is mechanical rather than remembered. (`tortoise/selfhost.py` is
+    # deliberately not routed through it: it owns a DISTINCT `_HEALTH_PROBE`
+    # instance, never reads this epoch, and never registers the data-plane verdict
+    # source — `set_dataplane_verdict_source` is called only here — so the
+    # never-produced bound is hosted-only.)
     # ⛔ THE EPOCH IS WRITTEN BEFORE THE RESET, AND THE ORDER IS LOAD-BEARING
     # (review P2, round 3). Two statements, no lock spanning them, and the
     # `/healthz` handler can poll on the listener's own thread. The LISTENER is
@@ -2996,20 +3045,16 @@ async def _lifespan(app):
     # reachable only when a previous lifespan FAILED BEFORE its shutdown half and
     # the reader is therefore still registered; there, reset-first answers
     # `failed` / `probe-never-produced-a-result` over a healthy boot (measured
-    # with the epoch aged to -400 s: `uptime_s: 400.0`) — the microsecond-width
-    # version of the very 503 this change exists to remove. Epoch-first makes that
-    # window compute its answer over the PREVIOUS state with a fresh epoch, so it
-    # reports what that state supports: `healthy` if the previous result was fresh
-    # AND ok, `failed` if it was stale, not-ok or in flight past the window,
-    # `unknown` if the previous coordinator had no result (the #12630 shape, where
-    # epoch-first becomes `unknown` instead of `failed` — which IS the point). It
-    # cannot mask a real failure: the `age`, not-ok and `in_flight_s` arms never
-    # read the epoch.
-    global _HEALTH_PROBE_EPOCH_MONOTONIC
-    _HEALTH_PROBE_EPOCH_MONOTONIC = time.monotonic()
-    _HEALTH_PROBE.reset()
-    _READY_PROBE.reset()
-    _CONTROL_PLANE_PROBE.reset()
+    # with the epoch aged to -400 s: `probe_epoch_age_s: 400.0`) — the
+    # microsecond-width version of the very 503 this change exists to remove.
+    # Epoch-first makes that window compute its answer over the PREVIOUS state
+    # with a fresh epoch, so it reports what that state supports: `healthy` if the
+    # previous result was fresh AND ok, `failed` if it was stale, not-ok or in
+    # flight past the window, `unknown` if the previous coordinator had no result
+    # (the #12630 shape, where epoch-first becomes `unknown` instead of `failed` —
+    # which IS the point). It cannot mask a real failure: the `age`, not-ok and
+    # `in_flight_s` arms never read the epoch.
+    _reset_probe_state()
     _probe_sdk_reset()
 
     # ── #3524 §9 step 1: the consent token's single-use register is SHARED state
