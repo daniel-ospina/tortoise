@@ -208,7 +208,7 @@ Numbers in `gate.json` (the three gates, ~15 min: it encodes 15,008 composed tex
 ⚠️ **The probes' own `Usage` docstrings still show the HISTORICAL in-place invocation**
 (`--out docs/evidence/11739-composed-gate/gate.json`, and the same for `quote_identity.py`). The
 recipe below supersedes them; they are left alone because rewriting a frozen baseline's prose is
-churn, **not** because it is unrepairable — since this round both probes carry `--attest`, so a
+churn, **not** because it is unrepairable — since this round all three probes carry `--attest`, so a
 docstring correction is a provenance rebind rather than a re-run that re-stamps `measured_at`.
 
 ```bash
@@ -271,11 +271,11 @@ definition — in-toto's Statement itself has no build-definition field):
 * `provenance.probe_sha256` binds it to the **code** that produced it (gate.json:
   `4f066693fbc1c742e36d29875f4b970af7ee12df264217cf95911f480b47a411`; quote_identity.json:
   `b66f8a174708f855501ac02ae3e5da57dd9e7ae62fac5721cb77c2036f3dfc65`;
-  gate3_false_proposals.json: `9a6051e6d60a6b6001d672df64758fff50e11e4f4eeb62a7f6f2e08117b611ad`), and
+  gate3_false_proposals.json: `059801e57cedc5f930999454febe7098e1ae2c3be1bcb65d7251ee8dbe02655e`), and
 * `provenance.payload_sha256` binds it to the **numbers** it produced **and to the row cache they
   are attributed to** — sha256 over `{"artifact": <every field except provenance>,
   "rows_source": …}`, canonicalised `indent=2, sort_keys=True` (gate.json:
-  `cfbe7ad4eaee3868ddc52e5432b79fc7baf92a541e581dbcbff6398cf00693be`; quote_identity.json: `31ba4cf0deb6d0bee1f95e0ccf8e66211fe2f0fbb0ba290971f1d735d40dd296`; gate3_false_proposals.json: `c5aaa639ccf7260463dff03b4e8dae0b4d0724411a48859ff22531b8ec514c99`). Without the second, a hand-edit of a NUMBER
+  `cfbe7ad4eaee3868ddc52e5432b79fc7baf92a541e581dbcbff6398cf00693be`; quote_identity.json: `31ba4cf0deb6d0bee1f95e0ccf8e66211fe2f0fbb0ba290971f1d735d40dd296`; gate3_false_proposals.json: `6d24c24f5b837035116bcc9d515b6a6c62972064bf80e9994ec83859d0d6b79b`). Without the second, a hand-edit of a NUMBER
   — `gate2_rank.top_k.items_displaced_from_top_k` 3706 → 3707, or `global_worst_composed`
   1.0 → 0.10 — left the first untouched and passed the pin, which is what the payload binding
   closes; and without `rows_source` INSIDE it, re-pointing the attribution at another cache also

@@ -1,5 +1,5 @@
 {
- "measured_at": "2026-11-14T02:04:38Z",
+ "measured_at": "2026-11-14T02:42:49Z",
  "source": "cache:/tmp/11739-g3-rows.jsonl",
  "criterion_source": "#399 (candidate surface + calibrated 0.72 paraphrase floor) / #438 (precision of candidates)",
  "frame": {
@@ -22,7 +22,13 @@
   "raw_only_T4": 40,
   "shared_T4_tier": 899,
   "raw_only_T4_tier": 1760,
-  "note": "seeded random samples (seed 11739) of the only tier that needs judgement; the true/false LABELS are recorded in the bundle README and #11739, not here"
+  "labels_false": {
+   "shared_T4": 98,
+   "raw_only_T4": 39
+  },
+  "labels_source": "hand labels recorded by the lane in #11739 comment 6869770907 and this bundle's README; the samples they label are dumped by --pairs-out",
+  "labels_derivation": "false_total = false_exact + round(labels_false.shared_T4/shared_T4*shared_T4_tier) [+ the raw_only term for the raw arm]",
+  "note": "seeded random samples (seed 11739) of the only tier that needs judgement; the FALSE counts are `labels_false`, whose hand audit is recorded in #11739 and the bundle README \u2014 this artifact RECORDS those labels and never derives one, and the sample they label is dumped by --pairs-out so they can be re-audited"
  },
  "proposals": {
   "raw": 2661,
@@ -62,11 +68,11 @@
   },
   "needs_label": 2659
  },
- "duration_s": 65.1,
+ "duration_s": 63.2,
  "provenance": {
   "probe_path": "probes/gate3_false_proposals.py",
-  "probe_sha256": "9a6051e6d60a6b6001d672df64758fff50e11e4f4eeb62a7f6f2e08117b611ad",
-  "payload_sha256": "c5aaa639ccf7260463dff03b4e8dae0b4d0724411a48859ff22531b8ec514c99",
+  "probe_sha256": "059801e57cedc5f930999454febe7098e1ae2c3be1bcb65d7251ee8dbe02655e",
+  "payload_sha256": "6d24c24f5b837035116bcc9d515b6a6c62972064bf80e9994ec83859d0d6b79b",
   "rows_source": "cache:/tmp/11739-g3-rows.jsonl",
   "encoder": "BAAI/bge-small-en-v1.5 (tortoise.embeddings.EMBEDDING_MODEL)"
  }

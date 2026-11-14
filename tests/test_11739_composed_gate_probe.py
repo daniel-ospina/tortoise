@@ -35,6 +35,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import re
 import tempfile
@@ -70,8 +71,8 @@ def _payload_digest(artifact: dict) -> str:
     the file's formatting — reformatting the JSON does not red, editing a number does. The
     attribution is inside the digest (`rows_source`), because re-pointing it at a different cache
     is an edit to the evidence: measured before that, `rows_source` -> `/tmp/some-other-cache.jsonl`
-    left the pin entirely GREEN (10 cases collected at that head — the number differs from the `9`
-    quoted further down because a case landed in between, not because the measurement moved).
+    left the pin entirely GREEN (the suite's size at that head, `ec9f702c9608`, was 38 cases — see
+    the payload test below, which names the same head).
     """
     body = {k: v for k, v in artifact.items() if k != "provenance"}
     canon = json.dumps(
@@ -279,8 +280,8 @@ def test_the_readme_quotes_each_artifacts_PAYLOAD_digest_too():
 
     The sibling probe-digest pin closed only the HALF that binds the code. The payload paragraph
     carries the same three labels over the digests that bind the NUMBERS, and it was unpinned —
-    swapping `gate.json`'s payload digest with `quote_identity.json`'s left all 38 cases green
-    (measured, #12593 review finding 4). That is not a hypothetical shape: #12490's refresh mapped
+    swapping `gate.json`'s payload digest with `quote_identity.json`'s left all 38 cases green at
+    `ec9f702c9608` (#12593's second review round, finding 4). That is not a hypothetical shape: #12490's refresh mapped
     old values by SORTED order rather than by artifact, so it would have swapped BOTH digests; the
     repair that fixed the probe half left the evidence half exposed, which is the half a future
     hand-edit of a NUMBER would need to survive.
@@ -299,6 +300,101 @@ def test_the_readme_quotes_each_artifacts_PAYLOAD_digest_too():
             f"the README quotes {quoted[:12]}… after `{label}` in the PAYLOAD paragraph, but "
             f"{name}'s attested payload digest is {own[:12]}… — refresh the README from the "
             "artifacts (and check the three did not get swapped while being refreshed)")
+
+
+def test_the_published_gate3_totals_are_derivable_and_quoted():
+    """FAILS IF the bundle's headline 4,202 / 2,599 drifts from the artifact, or is misquoted.
+
+    This is the number the bundle EXISTS to publish — the false-proposal COUNT — and until this
+    test it was asserted nowhere: a hand-edit of `4,202` to `4,302` in the README (and the
+    `docs/00_index.md` row) left every case green while `config/ci-surfaces.yml` claimed the
+    README's figures were asserted (#12593's second review round, finding 3). That is the
+    `false PASS` class the whole bundle is built to close, one layer below the digests.
+
+    The derivation is the artifact's OWN fields, not a restatement: `false_exact` (mechanical
+    tiers) plus the audited tier scaled by the recorded hand labels — `labels_false` over the
+    sampled `shared_T4` / `raw_only_T4` counts, times the tier sizes. A reader who distrusts the
+    labels re-audits the dumped `--pairs-out` sample; what this pin guarantees is that the
+    published totals are a FUNCTION of the artifact rather than prose that drifted.
+    """
+    a = _artifact("gate3_false_proposals.json")
+    s = a["audit_samples"]
+    shared_false = round(s["labels_false"]["shared_T4"] / s["shared_T4"] * s["shared_T4_tier"])
+    raw_only_false = round(s["labels_false"]["raw_only_T4"] / s["raw_only_T4"]
+                           * s["raw_only_T4_tier"])
+    composed_false = a["composed"]["false_exact"] + shared_false
+    raw_false = a["raw"]["false_exact"] + shared_false + raw_only_false
+    assert (composed_false, raw_false) == (4202, 2599), (
+        f"the artifact derives {composed_false} composed / {raw_false} raw false proposals, not "
+        "4,202 / 2,599 — a tier count or a recorded audit label moved")
+
+    composed_rate = round(composed_false / a["proposals"]["composed"] * 100, 1)
+    raw_rate = round(raw_false / a["proposals"]["raw"] * 100, 1)
+    readme = (BUNDLE / "README.md").read_text(encoding="utf-8")
+    index = (BUNDLE.parents[2] / "docs" / "00_index.md").read_text(encoding="utf-8")
+    # ⛔ The exact SENTENCES, not `"4,202" in doc`: the README carries the figure twice (the prose
+    # paragraph and the table row), so a one-site `in` check stayed green when only one of them was
+    # edited to 4,302 (measured — the first version of this pin did exactly that).
+    claims = {
+        "README": (
+            f"4,202 of 4,220 composed proposals are FALSE ({composed_rate}%), 2,599 of 2,661 raw",
+            f"| **false total** | **4,202 ({composed_rate}% of 4,220)** | "
+            f"**2,599 ({raw_rate}% of 2,661)** |",
+        ),
+        "docs/00_index.md": (
+            f"4,202 of 4,220 composed proposals false ({composed_rate}%), 2,599 of 2,661 raw "
+            f"({raw_rate}%)",
+        ),
+    }
+    for doc_name, doc in (("README", readme), ("docs/00_index.md", index)):
+        for sentence in claims[doc_name]:
+            assert sentence in doc, (
+                f"{doc_name} no longer carries the published figure sentence {sentence!r}")
+    # The composed-ONLY delta is the part the switch itself causes, and it is exact (all T3).
+    assert a["composed_only"]["proposals"] == 3319
+    assert a["composed_only"]["false_exact"] == 3319
+
+
+def test_the_readme_wilson_bands_are_the_outward_ones():
+    """FAILS IF the README's Wilson endpoints drift from the artifact, or are rounded INWARD.
+
+    The published bands were "rounded outward" in prose while 5 of 6 endpoints were rounded inward
+    (#12593's first review round) — and after that was fixed, nothing pinned it: a future edit to
+    `92.9` → `93.0` (inward, the exact defect) would have left every case green. The bands are
+    DERIVED here from the artifact's own recorded labels and sample sizes with the probe's z, then
+    rounded floor-on-low / ceil-on-high, which is the only reading under which "outward" is true.
+    """
+    a = _artifact("gate3_false_proposals.json")
+    s = a["audit_samples"]
+
+    def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
+        p = k / n
+        d = 1 + z * z / n
+        centre = (p + z * z / (2 * n)) / d
+        half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / d
+        return centre - half, centre + half
+
+    lo1, hi1 = wilson(s["labels_false"]["shared_T4"], s["shared_T4"])
+    lo2, hi2 = wilson(s["labels_false"]["raw_only_T4"], s["raw_only_T4"])
+    composed_lo = a["composed"]["false_exact"] + s["shared_T4_tier"] * lo1
+    composed_hi = a["composed"]["false_exact"] + s["shared_T4_tier"] * hi1
+    raw_lo = a["raw"]["false_exact"] + s["shared_T4_tier"] * lo1 + s["raw_only_T4_tier"] * lo2
+    raw_hi = a["raw"]["false_exact"] + s["shared_T4_tier"] * hi1 + s["raw_only_T4_tier"] * hi2
+    outward = (math.floor(lo1 * 1000) / 10, math.ceil(hi1 * 1000) / 10,
+               math.floor(lo2 * 1000) / 10, math.ceil(hi2 * 1000) / 10,
+               math.floor(composed_lo), math.ceil(composed_hi),
+               math.floor(raw_lo), math.ceil(raw_hi))
+    assert outward == (92.9, 99.5, 87.1, 99.6, 4157, 4216, 2371, 2649), (
+        f"the artifact's recorded labels/sizes now derive {outward} — the README's published bands "
+        "were re-derived from different numbers")
+    readme = (BUNDLE / "README.md").read_text(encoding="utf-8")
+    for band in ("92.9–99.5", "87.1–99.6", "4,157–4,216", "2,371–2,649"):
+        assert band in readme, f"the README no longer quotes the outward band {band}"
+    # ⛔ and the INWARD spellings must be gone: `in` alone would pass on a doc that quoted both.
+    for inward in ("93.0–99.4", "4,157–4,215", "2,372–2,648"):
+        assert inward not in readme, (
+            f"the README still quotes the inward bound {inward} somewhere — the outward claim and "
+            "the inward spelling cannot both be in a document whose value is declaration honesty")
 
 
 def _first_hex_after(text: str, label: str) -> str:
@@ -361,9 +457,10 @@ def test_the_artifacts_name_the_row_cache_and_encoder_the_dates_rest_on():
     `rows_source` is the anchor the README's reproducibility paragraph leans on ("the committed
     numbers are reproducible from the row cache named in `provenance.rows_source`"), and editing it
     re-points the evidence at a different cache while leaving both digests intact — measured before
-    this test existed: setting it to `/tmp/some-other-cache.jsonl` gave `9 passed` (the suite's size
-    at THAT head; the `10` quoted earlier is a later one — both are historical, neither describes the
-    file now). `gate.json` also
+    this test existed: setting it to `/tmp/some-other-cache.jsonl` left the pin GREEN at the head
+    that added `gate3` (a smaller suite than today's — historical, and it names no count of its own
+    because the head it was measured at is not recorded; the CLAIM is what matters here, not the
+    tally). `gate.json` also
     records the same string at the top level as `source`, so the two must agree.
     """
     gate = _artifact("gate.json")
@@ -617,6 +714,39 @@ def test_attest_reports_probe_write_on_an_unwritable_target(probe_name, artifact
         assert target.read_bytes() == before
 
 
+def test_gate3_read_cache_refuses_a_cache_that_is_not_a_row_cache():
+    """FAILS IF gate3's `PROBE-READ` cache arm is deleted or weakened into a crash.
+
+    The arm was driven by NOTHING after the round that introduced it (#12593's second review round,
+    finding 2): every other refusal this bundle added had a case, so deleting the guard left only
+    `probe_sha256` to notice — and `--attest` is the documented way to clear that. A `1\n2\n3\n`
+    cache parses cleanly and then dies on `row.get` in `_live()`: exit 1 with a traceback, the code
+    the probe's own docstring says a refusal must never return. Driven through `_read_cache`, the
+    extraction that makes it testable without a live read plus an encode.
+    """
+    probe = _load_probe("gate3_false_proposals.py")
+    with tempfile.TemporaryDirectory() as td:
+        bad_json = Path(td) / "bad.jsonl"
+        bad_json.write_text('{"id": \n', encoding="utf-8")
+        assert probe._read_cache(bad_json)[1] == 2, "a malformed cache was not refused (2)"
+        assert probe._read_cache(bad_json)[0] is None
+        not_rows = Path(td) / "not-rows.jsonl"
+        not_rows.write_text("1\n2\n3\n", encoding="utf-8")
+        rows, rc = probe._read_cache(not_rows)
+        assert rc == 2 and rows is None, (
+            "a cache whose lines parse but are not row objects was accepted — `_live()` would "
+            "then raise AttributeError out of main(), exit 1")
+        # …an EMPTY cache is NOT a refusal: main() owns that answer (GATE-EMPTY, exit 3).
+        empty = Path(td) / "empty.jsonl"
+        empty.write_text("", encoding="utf-8")
+        assert probe._read_cache(empty) == ([], 0)
+        # …and a real row cache still loads, so the guard cannot be a blanket refusal.
+        good = Path(td) / "good.jsonl"
+        good.write_text('{"id": "p1"}\n{"id": "p2"}\n', encoding="utf-8")
+        rows, rc = probe._read_cache(good)
+        assert rc == 0 and [r["id"] for r in rows] == ["p1", "p2"]
+
+
 def test_gate3_attest_refuses_an_artifact_with_no_source():
     """FAILS IF gate3's `ATTEST-REFUSED` arm (no `source`) is deleted.
 
@@ -671,8 +801,11 @@ def test_gate3s_measurement_writes_all_route_through_the_one_guard():
                 else func.attr if isinstance(func, ast.Attribute) else "")
         if name not in WRITE_ATTRS:
             continue
-        # `open(path)` with no arguments is prose, not a call; every real one passes ≥1 arg.
-        if name == "open" and not node.args:
+        # `open()` with NO arguments at all is prose, not a call; every real one passes an
+        # argument OR a keyword. ⛔ `not node.args` alone is a HOLE: `open(file=p, mode="w")` and
+        # `Path(p).open(mode="w")` are real writes with empty `args` (measured green on that
+        # version), so a keyword-only call must be caught too.
+        if name == "open" and not node.args and not node.keywords:
             continue
         writes.append(node)
 

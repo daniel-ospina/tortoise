@@ -86,6 +86,15 @@ PAGE_ATTEMPTS = 6         # the wait budget is intermittent; retry with linear b
 PAGE_BACKOFF_S = 8
 AUDIT_MAX = 100           # shared-T4 pairs dumped for the audit (seeded random sample)
 AUDIT_RAW_ONLY_MAX = 40   # raw-only T4 pairs dumped (the counter-movement's own sample)
+# The hand-audit RESULT, not a computed quantity. The lane read those two samples and recorded how
+# many were FALSE in #11739 (comment 6869770907) and in the bundle README. This probe RECORDS the
+# labels so the published totals (4,202 composed / 2,599 raw) are DERIVABLE from the artifact and
+# can be pinned by a test; it never derives a label, and nothing here is a measurement of the
+# sample — a reader who distrusts the labels re-audits the dumped sample, which is why the sample
+# frame and its seed are emitted beside them.
+AUDIT_LABELS_FALSE = {"shared_T4": 98, "raw_only_T4": 39}
+AUDIT_LABELS_SOURCE = ("hand labels recorded by the lane in #11739 comment 6869770907 and this "
+                       "bundle's README; the samples they label are dumped by --pairs-out")
 
 
 def _say(msg: str) -> None:
@@ -176,6 +185,37 @@ def _attest(path: str) -> int:
         return rc
     _say(f"attested {path} -> {report['provenance']['probe_sha256']}\n")
     return 0
+
+
+def _read_cache(cache) -> tuple[list | None, int]:
+    """Read a row cache: ``(rows, 0)`` on success, ``(None, 2)`` on a refusal. Never raises.
+
+    Extracted for the same reason as ``_write``: a refusal that lives inline in ``main()`` cannot be
+    driven without a full read and encode, so it goes undocumented-by-test and a regression to a
+    bare ``read_text``/``json.loads`` reds nothing but the probe digest — which ``--attest`` is the
+    documented way to clear. Two distinct refusals live here and both are ``PROBE-READ``:
+
+    * an unreadable or TRUNCATED cache — falling through to a live walk would silently swap the
+      frame (a 900-row prefix re-derived by a fresh read), and raising would exit 1 with a
+      traceback, the code a lane cannot tell from a crash. ``UnicodeDecodeError`` is a
+      ``ValueError``, so undecodable bytes are covered here too.
+    * a cache that PARSES but is not a row cache: ``1\\n2\\n3\\n`` loads cleanly and then dies on
+      ``row.get`` in ``_live()`` — exit 1, from a path this file documents as a refusal. Same
+      hazard ``_attest`` guards one level up (a JSON ARRAY parses fine).
+
+    An EMPTY cache is NOT a refusal: it returns ``([], 0)`` so ``main()`` reaches its own GATE-EMPTY
+    arm (exit 3), which is the honest answer for "no rows".
+    """
+    try:
+        rows = [json.loads(line) for line in cache.read_text(encoding="utf-8").splitlines()]
+    except (OSError, ValueError) as e:
+        _say(f"PROBE-READ({cache}): {e}\n")
+        return None, 2
+    if rows and not all(isinstance(r, dict) and r.get("id") for r in rows):
+        _say(f"PROBE-READ({cache}): not a row cache — expected one JSON object carrying an `id` "
+             "per line\n")
+        return None, 2
+    return rows, 0
 
 
 def _census():
@@ -321,23 +361,9 @@ def main() -> int:
 
     cache = pathlib.Path(os.environ.get("G3_ROWS_CACHE", "/tmp/11739-g3-rows.jsonl"))
     if cache.exists():
-        try:
-            rows = [json.loads(line) for line in cache.read_text(encoding="utf-8").splitlines()]
-        except (OSError, ValueError) as e:
-            # An unreadable or TRUNCATED cache is a refusal, not a crash: falling through to a live
-            # walk would silently swap the frame (a 900-row prefix re-derived by a fresh read), and
-            # raising would exit 1 with a traceback — the code a lane cannot tell from a crash.
-            # `UnicodeDecodeError` is a ValueError, so undecodable bytes are covered here too.
-            _say(f"PROBE-READ({cache}): {e}\n")
-            return 2
-        # PARSED IS NOT A ROW: `1\n2\n3\n` parses cleanly and then dies on `row.get` in `_live()`
-        # — exit 1 with a traceback, from a path this file documents as a refusal. Same hazard
-        # `_attest` guards one level up (a JSON ARRAY parses fine). An EMPTY cache is left to the
-        # GATE-EMPTY arm below (exit 3), which is the honest answer for "no rows", not a refusal.
-        if rows and not all(isinstance(r, dict) and r.get("id") for r in rows):
-            _say(f"PROBE-READ({cache}): not a row cache — expected one JSON object carrying an "
-                 "`id` per line\n")
-            return 2
+        rows, rc = _read_cache(cache)
+        if rc:
+            return rc
         meta = {"endpoint": "cache:" + str(cache), "rows_walked": len(rows),
                 "pages": None, "offset_reached": None, "refused_at": None}
         _say(f"rows from cache: {len(rows)}\n")
@@ -458,9 +484,17 @@ def main() -> int:
         "audit_samples": {"shared_T4": len(sample), "raw_only_T4": len(raw_only_sample),
                           "shared_T4_tier": len(shared_t4),
                           "raw_only_T4_tier": len(raw_only_t4),
+                          "labels_false": dict(AUDIT_LABELS_FALSE),
+                          "labels_source": AUDIT_LABELS_SOURCE,
+                          "labels_derivation": ("false_total = false_exact + round(labels_false."
+                                                "shared_T4/shared_T4*shared_T4_tier) [+ the "
+                                                "raw_only term for the raw arm]"),
                           "note": ("seeded random samples (seed 11739) of the only tier that "
-                                   "needs judgement; the true/false LABELS are recorded in "
-                                   "the bundle README and #11739, not here")},
+                                   "needs judgement; the FALSE counts are `labels_false`, whose "
+                                   "hand audit is recorded in #11739 and the bundle README — this "
+                                   "artifact RECORDS those labels and never derives one, and the "
+                                   "sample they label is dumped by --pairs-out so they can be "
+                                   "re-audited")},
         "proposals": {
             "raw": len(raw_pairs), "composed": len(comp_pairs),
             "shared": len(shared), "composed_only": len(new_pairs),
