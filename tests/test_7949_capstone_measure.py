@@ -6071,13 +6071,13 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # minutes BEFORE it (2026-11-13T19:30:00 vs 19:34:09) and is an ancestor of
         # `#12545`'s commit, while `#12545` measured at `5bacb44e0b` which does NOT
         # contain it — so that pair arrived ALREADY stale at its own landing commit,
-        # and `main` was red for this row at `6916a6cd89`. `#12695` (`3893603b07`, the
-        # Pi leg's unrecorded-outcome stamp) then added 16 lines above both `def`s,
-        # in `tortoise-capture.ts`, and re-derived no cite, so the pair is
-        # **`:1023`/`:1015`** here — measured at this head
-        # (`grep -nF 'export function postCapture(' …`) and repaired at this head
-        # rather than carried, because a red on `main` blocks every head. The two
-        # `def`s are always
+        # and `main` was red for this row at `6916a6cd89`, where the two `def`s sat at
+        # **`:1007`/`:999`**. `#12695` (`3893603b07`, the Pi leg's unrecorded-outcome
+        # stamp) then added 16 lines above both `def`s, in `tortoise-capture.ts`, and
+        # re-derived no cite, so the pair is **`:1023`/`:1015`** here — measured at
+        # this head (`grep -nF 'export function postCapture(' …`) and repaired at
+        # this head rather than carried, because a red on `main` blocks every head.
+        # The two `def`s are always
         # **8 apart** in this file, and that is exactly the trap: an offset read off
         # a stale pair re-derives `948` → `957`, which WAS `postCapture`'s parameter
         # list (`payload: Record<string, unknown>,`) at `5bacb44e0b` — at
