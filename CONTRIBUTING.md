@@ -80,11 +80,11 @@ existing method under a new name is a failure rather than an invisible addition.
 
 **What the gate does *not* fail on: an added field on an existing response.** A field that is off
 by default, and leaves the response unchanged when it is off, is neither a new tool nor a new
-endpoint — so it does not gate **as an addition**. The precedent is the W4 why-layer key on the
-`tortoise_analyze` response: written only when `TORTOISE_W4_ENRICHMENT` is truthy
-(1/true/yes/on; unset or `0` means off), with every other
-field byte-identical when it is absent. That is a different `why` key from the one on
-`volunteer_context`, which is present by default.
+endpoint — so it does not gate **as an addition**. The precedent is the W4 why-layer key: written
+only when `TORTOISE_W4_ENRICHMENT` is truthy (1/true/yes/on; unset or `0` means off), with every
+other field byte-identical when it is absent. It was recorded on the `tortoise_analyze` response,
+which #11609 batch 1 archived — the live examples are `tortoise_search` and `volunteer_context`
+(the latter's `why` key is a DIFFERENT one, present by default).
 
 **One qualification: the gate also fingerprints implementations.** It records a digest of each
 registered tool's own code object, so a field added *inside a tool's handler* changes that tool's

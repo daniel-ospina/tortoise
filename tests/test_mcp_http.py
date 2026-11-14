@@ -821,149 +821,6 @@ class TestRateLimit:
             assert statuses[-1] == 429
             assert sum(1 for s in statuses if s == 429) >= 1
 
-
-# ── #2050: pack_install consumes the pack_manifest budget ──────────────────
-
-class TestPackInstallRateBudget:
-    """#2050: ``tortoise_pack_install`` must consume the pack_manifest op
-    budget, exactly as its REST twin ``POST /v1/packs/manifests`` does.
-
-    #2038 added a ``pack_manifest`` entry to ``_SENSITIVE_OP_LIMITS`` and
-    charged it on the REST endpoint. The MCP tool reaches
-    ``upsert_tenant_manifest`` in-process (no HTTP), so it consumed NOTHING —
-    bounded only by the generic 100/min per-key middleware, a ~1200x looser
-    bound on the same expensive operation. These tests drive the MCP transport
-    end to end and pin the refusal.
-    """
-
-    #: A manifest the shared registry validator + tenant policy both accept
-    #: (mirrors tests/test_pack_manifest_store.py::VALID_MANIFEST).
-    MANIFEST = (
-        "namespace: tenant-ops\n"
-        "name: Tenant Operations\n"
-        "version: 0.1.0\n"
-        "tier: free\n"
-        "ontology:\n"
-        "  extends: core\n"
-        "  objectKinds:\n"
-        "  - contract\n"
-    )
-
-    @staticmethod
-    def _env(tmp_path, monkeypatch, name, limit):
-        """Registry + team default graph + mounted MCP app, limiter ENABLED.
-
-        ``RATE_LIMIT_DISABLED`` is set process-wide by conftest and read at
-        middleware CONSTRUCTION time, so it must be cleared before the app is
-        built (mirrors TestRateLimit.test_101st_post_429).
-        """
-        import tortoise.hosted_api as _ha  # the deployment gate + shared store
-        from tortoise.mcp_server import create_http_app
-
-        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
-        monkeypatch.setitem(_ha._SENSITIVE_OP_LIMITS, "pack_manifest", limit)
-        _ha._SENSITIVE_BUCKETS.clear()
-
-        db_path = str(tmp_path / f"{name}.db")
-        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
-        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
-        reg = TortoiseSDK(db_path=db_path, namespace="registry")
-        team = reg.org_create(name)
-        reg._graph_create(team["id"], "default", kind="default")
-        key = reg.apikey_create(team["id"], "#2050")["api_key"]
-        app = create_http_app(allowed_origins=[], _registry_sdk=reg)
-        return reg, team["id"], key, _mounted_test_client(app)
-
-    @classmethod
-    def _install(cls, tc, key):
-        """One ``tools/call tortoise_pack_install``; returns (result, text)."""
-        r = tc.post("/mcp", headers={
-            "Authorization": f"Bearer {key}",
-            "Accept": "application/json, text/event-stream",
-            "Content-Type": "application/json",
-        }, json={"jsonrpc": "2.0", "method": "tools/call", "id": 1,
-                 "params": {"name": "tortoise_pack_install",
-                            "arguments": {"manifest_yaml": cls.MANIFEST}}})
-        assert r.status_code == 200, r.text
-        body = _parse_sse_json(r)
-        result = body.get("result") or {}
-        text = "".join(c.get("text", "") for c in result.get("content", [])
-                       if isinstance(c, dict))
-        return result, text
-
-    def test_install_refused_once_budget_exhausted(self, tmp_path, monkeypatch):
-        """The (N+1)th install over MCP HTTP is REFUSED — not merely counted.
-
-        Fails before the #2050 fix: the MCP path consumed no budget, so every
-        call was admitted and the refusal assertion below never fired.
-        """
-        import tortoise.hosted_api as ha_mod
-        _reg, _tid, key, tc = self._env(tmp_path, monkeypatch, "pi-budget", 2)
-        try:
-            with tc:
-                for _ in range(2):
-                    result, text = self._install(tc, key)
-                    assert result.get("isError") is not True, text
-                    assert '"installed":true' in text, text
-                result, text = self._install(tc, key)
-                assert result.get("isError") is True, (
-                    "pack install was still ADMITTED after the pack_manifest "
-                    f"budget was exhausted (no refusal returned): {text}")
-                assert "Rate limit exceeded for pack_manifest" in text, text
-        finally:
-            ha_mod._SENSITIVE_BUCKETS.clear()
-
-    def test_install_charges_the_shared_sensitive_bucket(self, tmp_path,
-                                                         monkeypatch):
-        """The install charges the SHARED store under ``(team_id, op)``.
-
-        Pins the mechanism, not just the behaviour: a fork into a private MCP
-        store would leave this bucket empty while the refusal test above could
-        still pass against that fork's own counter.
-        """
-        import tortoise.hosted_api as ha_mod
-        _reg, tid, key, tc = self._env(tmp_path, monkeypatch, "pi-bucket", 5)
-        try:
-            with tc:
-                result, text = self._install(tc, key)
-                assert result.get("isError") is not True, text
-            assert ha_mod._SENSITIVE_BUCKETS.get((tid, "pack_manifest")), (
-                "the MCP install consumed no entry in the shared "
-                f"_SENSITIVE_BUCKETS store: {dict(ha_mod._SENSITIVE_BUCKETS)}")
-        finally:
-            ha_mod._SENSITIVE_BUCKETS.clear()
-
-    def test_budget_is_team_scoped_not_ip_scoped(self, tmp_path, monkeypatch):
-        """Two teams on the SAME client address have INDEPENDENT budgets.
-
-        An MCP caller is an authenticated agent server, frequently sharing one
-        egress address with unrelated tenants — a per-IP bucket would let one
-        tenant exhaust another's install allowance.
-        """
-        import tortoise.hosted_api as ha_mod
-        _reg, tid_a, key_a, tc = self._env(tmp_path, monkeypatch, "pi-team-a", 1)
-        try:
-            with tc:
-                # second tenant in the SAME registry, same TestClient (one IP)
-                team_b = _reg.org_create("pi-team-b")
-                _reg._graph_create(team_b["id"], "default", kind="default")
-                key_b = _reg.apikey_create(team_b["id"], "#2050")["api_key"]
-
-                result, text = self._install(tc, key_a)
-                assert result.get("isError") is not True, text
-                # team A is now exhausted...
-                result, text = self._install(tc, key_a)
-                assert result.get("isError") is True, text
-                # ...but team B, on the SAME IP, still has its own budget
-                result, text = self._install(tc, key_b)
-                assert result.get("isError") is not True, (
-                    "team B was refused by team A's exhausted budget — the "
-                    f"bucket is not team-scoped: {text}")
-                assert (team_b["id"], "pack_manifest") in ha_mod._SENSITIVE_BUCKETS
-                assert (tid_a, "pack_manifest") in ha_mod._SENSITIVE_BUCKETS
-        finally:
-            ha_mod._SENSITIVE_BUCKETS.clear()
-
     def test_clientless_request_still_returns_with_an_explicit_key(
             self, monkeypatch):
         """#5397 review: the widening for the Request-FREE arm must not widen
@@ -976,6 +833,13 @@ class TestPackInstallRateBudget:
         ``("invite-accept", "ip", None)`` bucket across unrelated tokens.
         The Request-free arm keeps enforcing on the SAME store, so the guard
         cannot be dropped without failing this test's second half.
+
+        ⛔ This test used to live in `TestPackInstallRateBudget` and was swept
+        away with it in #11609 batch 1 — but its SUBJECT was never the tool: the
+        `pack_manifest` key was only a bucket label. It pins two primitives of
+        `hosted_api._check_ip_bucket_rate_limit`, so it belongs beside the other
+        rate-limit tests; the bucket labels are arbitrary and the MCP arm's
+        per-team key is what #2050 added.
         """
         from collections import defaultdict
 
@@ -1004,16 +868,127 @@ class TestPackInstallRateBudget:
                 f"caller now enforces where it used to return: {dict(store)}")
             # The Request-free arm charges the SAME store and refuses at limit.
             await ha_mod._check_ip_bucket_rate_limit(
-                None, key=("team-x", "pack_manifest"), **kw)
+                None, key=("team-x", "agent-op"), **kw)
             with pytest.raises(HTTPException) as exc:
                 await ha_mod._check_ip_bucket_rate_limit(
-                    None, key=("team-x", "pack_manifest"), **kw)
+                    None, key=("team-x", "agent-op"), **kw)
             assert exc.value.status_code == 429
 
         asyncio.run(_scenario())
 
 
-# ── Excluded tools ──────────────────────────────────────────────────────────
+# ── #2050: pack_install consumes the pack_manifest budget ──────────────────
+
+class TestPackInstallRateBudgetMoved:
+    """The `pack_manifest` MCP rate budget is GONE with its only MCP door.
+
+    #11609 batch 1 ARCHIVED `tortoise_pack_install` (no destination in the approved
+    surface), so the in-process install path these three tests drove no longer
+    exists: there is no handler, no registry row, and no `tools/call` to charge a
+    budget. Restoring a door to keep the tests alive would resurrect the removal.
+
+    The `pack_manifest` budget itself is LIVE and still pinned where it still has a
+    door: `tests/test_pack_manifest_store.py::TestUploadRateLimit` covers the REST
+    twin `POST /v1/packs/manifests` (refusal at the limit, independence from the
+    export budget, no charge on a 401). The MCP arm's distinguishing property —
+    PER-TEAM rather than per-IP, because the seam has no `Request` — now has no
+    live caller; `tortoise/mcp_server.py::_check_mcp_op_budget` keeps the seam with
+    `_MCP_BUDGETED_OPS` empty and says so, rather than shipping a second
+    implementation the next budgeted op would have to choose between.
+
+    This class asserts the MCP door stays removed, so a future lane cannot quietly
+    re-add the tool and leave the budget half-uncovered.
+    """
+
+    def test_the_mcp_door_is_not_served(self):
+        import tortoise.mcp_server as ms
+        from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
+
+        served = {t.name for t in TOOL_REGISTRY} | {t.name for t in RETIRED_TOOL_REGISTRY}
+        assert "tortoise_pack_install" not in served
+        assert not hasattr(ms, "tortoise_pack_install")
+
+
+class TestTheBudgetSeamStillCharges:
+    """#2050's seam must keep WORKING now that its only member is archived.
+
+    #11609 batch 1 emptied `_MCP_BUDGETED_OPS`, which makes
+    `_check_mcp_op_budget` return on its first line for every call: the suite is
+    green and NOTHING proves the seam charges, converts a 429 into a tool
+    refusal, or skips the lane with no tenant to bill. The three end-to-end tests
+    it replaced were the only proof, and they needed the archived tool. These
+    probes drive the seam directly, so the next budgeted op inherits a charging
+    path that is known to FIRE — not an inert enforcer that appears to protect a
+    budget whose refusal can never be reached.
+    """
+
+    @staticmethod
+    def _ground(monkeypatch, name, *, refuse=False):
+        """Insert a map entry + a stand-in budget for the duration of a call."""
+        import tortoise.hosted_api as ha_mod
+        import tortoise.mcp_server as ms
+
+        charged = []
+
+        async def fake_check(op, org):
+            charged.append((op, org))
+            if refuse:
+                from fastapi import HTTPException
+
+                raise HTTPException(
+                    status_code=429,
+                    detail="Rate limit exceeded for pack_manifest",
+                    headers={"Retry-After": "600"},
+                )
+
+        monkeypatch.setitem(ms._MCP_BUDGETED_OPS, name, "pack_manifest")
+        monkeypatch.setattr(ha_mod, "_check_sensitive_op_budget", fake_check)
+        return ms, charged
+
+    def test_an_entry_in_the_map_charges_the_shared_team_bucket(self, monkeypatch):
+        ms, charged = self._ground(monkeypatch, "tortoise_probe_budgeted")
+        asyncio.run(ms._check_mcp_op_budget("tortoise_probe_budgeted", "team-1"))
+        assert charged == [("pack_manifest", "team-1")], (
+            "a tool named in `_MCP_BUDGETED_OPS` did not charge its mapped op — "
+            f"the seam is inert: {charged}"
+        )
+
+    def test_the_budget_refusal_reaches_the_caller_as_a_ToolError(self, monkeypatch):
+        """A 429 must become an MCP refusal carrying Retry-After, not a 500."""
+        from fastmcp.exceptions import ToolError
+
+        ms, charged = self._ground(monkeypatch, "tortoise_probe_budgeted", refuse=True)
+        with pytest.raises(ToolError) as excinfo:
+            asyncio.run(ms._check_mcp_op_budget("tortoise_probe_budgeted", "team-1"))
+        assert charged, "the seam never called the budget"
+        message = str(excinfo.value)
+        assert "Rate limit exceeded for pack_manifest" in message, message
+        assert "Retry-After: 600s" in message, message
+
+    def test_an_unmapped_name_charges_nothing(self, monkeypatch):
+        """The map is the switch: today's empty map must mean NO charge."""
+        import tortoise.hosted_api as ha_mod
+        import tortoise.mcp_server as ms
+
+        detonated = []
+
+        async def explode(op, org):
+            detonated.append((op, org))
+
+        monkeypatch.setattr(ha_mod, "_check_sensitive_op_budget", explode)
+        assert "tortoise_probe_unmapped" not in ms._MCP_BUDGETED_OPS
+        asyncio.run(ms._check_mcp_op_budget("tortoise_probe_unmapped", "team-1"))
+        assert detonated == [], "an unmapped tool charged the sensitive-op budget"
+
+    def test_the_selfhost_lane_is_skipped_there_is_no_tenant_to_bill(self, monkeypatch):
+        """No org, and the self-host placeholder org, are both exempt by design."""
+        from tortoise.mcp_auth import SELFHOST_ORG_ID
+
+        ms, charged = self._ground(monkeypatch, "tortoise_probe_budgeted")
+        asyncio.run(ms._check_mcp_op_budget("tortoise_probe_budgeted", SELFHOST_ORG_ID))
+        asyncio.run(ms._check_mcp_op_budget("tortoise_probe_budgeted", ""))
+        assert charged == [], f"a lane with no tenant to bill was charged: {charged}"
+
 
 class TestExcludedTools:
     def test_excluded_absent_from_tools_list(self, mcp_client):

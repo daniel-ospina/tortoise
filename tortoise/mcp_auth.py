@@ -157,9 +157,9 @@ def _journal_path_for(namespace: str | None,
     ``hosted_api``. Importing ``hosted_api`` here put the whole hosted app in
     ``sys.modules`` on EVERY stdio/self-host MCP process — and that module's
     *presence* is the runtime deployment discriminator the self-host branches
-    read (``mcp_server.tortoise_pack_install``'s HOSTED-only stub,
-    ``operator_alert.alert_store``'s light leg, the fast-path invariant at the
-    top of ``mcp_server``). The import also cost ~1 s on a lane whose result is
+    read (``operator_alert.alert_store``'s light leg, the fast-path invariant at the
+    top of ``mcp_server``, and — while it existed — ``tortoise_pack_install``'s
+    HOSTED-only stub, archived in #11609 batch 1). The import also cost ~1 s on a lane whose result is
     usually ``None``. Re-exported from ``hosted_api`` for its own callers, so
     there is still exactly ONE derivation (#7951 review P1).
     """

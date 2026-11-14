@@ -61,7 +61,8 @@ class ToolDefinition:
     rest_spec: Optional[RestSpec] = None         # For SDK-backed REST ops  # noqa: UP045
     group: str = "memory"        # Curation group (#523): memory|reasoning|graph|sessions|sources|journal|admin|onboarding
     hosted_only: bool = False    # #1935: register ONLY on the hosted surface
-                                 # (deployment-gated — e.g. tortoise_pack_install;
+                                 # (deployment-gated; no live entry sets it since
+                                 # #11609 batch 1 removed `tortoise_pack_install` —
                                  # self-host uses filesystem packs dir + CLI)
     #: Retry safety of the OPERATION — deliberately NOT a risk statement, and so
     #: deliberately not fully derivable from `risk`: `tortoise_create_point` is a
@@ -127,8 +128,10 @@ class ToolDefinition:
 # `OVERRIDES:` line on the `risk` field above.
 #
 # The three tools that motivated it (#4122): `tortoise_get_confidence`,
-# `tortoise_compute_confidence`, `tortoise_packs_list`. They keep `graphs:read`
-# and stop claiming `readOnlyHint: true` — the hint is what clients auto-approve
+# `tortoise_compute_confidence`, `tortoise_packs_list` — the third was REMOVED with the
+# MCP pack tools in #11609 batch 1, so the `maintenance` tier is carried by the two
+# confidence tools today (the tier, and #4122's reasoning, are unchanged). They keep
+# `graphs:read` and stop claiming `readOnlyHint: true` — the hint is what clients auto-approve
 # on. The hint was NOT the only wrong channel: the `tortoise_packs_list`
 # `description` kept telling the agent it was "Read-only;" after the hint was
 # fixed, and that second string was corrected under #9575 — the two are separate
@@ -430,37 +433,15 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         http_policy=True,
         sdk_method="list_batches",
     ),
-    ToolDefinition(
-        name="tortoise_packs_list",
-        id="surface.packs_list",
-        description="List this team's active packs (#318): the shared pack catalog "
-                    "joined with the tenant graph's PackInstall activation records. "
-                    "NOT a pure read: when the graph carries no PackInstall record "
-                    "at all, the handler re-seeds the starter set before it answers "
-                    "(one MERGE per starter namespace), so a graphs:read caller can "
-                    "cause a write. The re-seed is skipped when the graph's pack set "
-                    "was deliberately configured (#8648). Empty result when nothing "
-                    "is installed (existence masking — another tenant's packs are "
-                    "never observable).",
-        risk="maintenance",
-        http_policy=True,
-        sdk_method="",  # custom handler in mcp_server.py (calls pack_state.get_tenant_packs)
-    ),
-    ToolDefinition(
-        name="tortoise_pack_install",
-        id="surface.pack_install",
-        description="Install a custom expansion pack on the HOSTED surface (#1935): "
-                    "validates against the shared registry + tenant policy "
-                    "(reserved starter namespace, ontology-only v1), stores the "
-                    "manifest in the tenant graph and activates it. Deployment- "
-                    "gated: on self-host this is an actionable stub (use the "
-                    "filesystem packs dir + tortoise pack CLI).",  # C5 #2114 (re-review P2): MERGEs manifests/installs — a write
-        risk="admin",
-        http_policy=True,
-        sdk_method="",  # custom handler in mcp_server.py (calls pack_manifest_store.upsert_tenant_manifest)
-        group="admin",
-        hosted_only=True,
-    ),
+    # ⛔ TWO pack tools are REMOVED from the MCP surface (#11609 batch 1, owner ruling
+    # comment 6831894340): `tortoise_packs_list` and `tortoise_pack_install` have NO
+    # destination in the approved 27-tool target, so they left the product with a record
+    # instead of a replacement — `archive/mcp-tools/b1-removed-no-destination/` holds the
+    # verbatim `ToolDefinition` + handler, and `TOOL_REGISTRY` no longer serves either name.
+    # The CAPABILITY did not leave: `tortoise/pack_state.get_tenant_packs` (behind REST
+    # `GET /v1/packs`) and `tortoise/pack_manifest_store.upsert_tenant_manifest` (behind
+    # `POST /v1/packs/manifests`) are untouched, and self-host still configures packs via
+    # `TORTOISE_PACKS_DIR` + the `tortoise pack` CLI. Only the MCP doors are gone.
     # ── Tags (#215) ───────────────────────────────────────────────
     ToolDefinition(
         name="tortoise_list_tags",
@@ -1110,15 +1091,12 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         sdk_method="list_topics",
     ),
     # ── Graph Analysis ────────────────────────────────────────────
-    ToolDefinition(
-        name="tortoise_analyze",
-        id="surface.analyze",
-        description="Answer natural language questions about the Tortoise epistemic graph. "
-                    "Ask things like: 'where is the disagreement?' 'what supports claim X?'",
-        risk="read",
-        http_policy=True,
-        sdk_method="",  # custom handler in mcp_server.py (calls analyze.analyze)
-    ),
+    # ⛔ `tortoise_analyze` is REMOVED from the MCP surface (#11609 batch 1, owner ruling
+    # comment 6831894340): no destination in the approved 27-tool target, no replacement.
+    # The tool's `ToolDefinition` + handler are frozen verbatim in
+    # `archive/mcp-tools/b1-removed-no-destination/tortoise_analyze.py`;
+    # `tortoise/analyze.py` itself stays (it is a module with non-MCP callers, and a module
+    # removal is its own batch kind).
     # ── P1-3: Staleness Detection ─────────────────────────────────
     ToolDefinition(
         name="tortoise_stale",
@@ -1489,15 +1467,11 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         http_policy=True,
         sdk_method="",  # custom handler in mcp_server.py (dispatches to legacy tools)
     ),
-    ToolDefinition(
-        name="tortoise_backfill_v25",
-        id="surface.backfill_v25",
-        description="Backfill database to ONTOLOGY v2.5 schema. "
-                    "EXCLUDED from tenant HTTP — schema-level migration (operator-only).",
-        risk="destructive",
-        http_policy=False,
-        sdk_method="backfill_v25",
-    ),
+    # ⛔ `tortoise_backfill_v25` is REMOVED from the MCP surface (#11609 batch 1, owner
+    # ruling comment 6831894340): it targets ONTOLOGY v2.5 against a v3.13 schema, has no
+    # destination in the approved 27-tool target, and no replacement. Its `ToolDefinition`
+    # + handler are frozen in `archive/mcp-tools/b1-removed-no-destination/`. The SDK
+    # method `backfill_v25` still exists — the SDK surface is trimmed by its own batch.
     # ── Onboarding tools (#498/#499/#500) ─────────────────────────
     # ⛔ FIVE of the seven `onboarding_*` tools are REMOVED from the MCP surface
     # (#4282 Phase 3.2). Owner ruling 2026-09-22: the `run_onboarding` container
@@ -1666,9 +1640,7 @@ GRAPH_ARGUMENT_EXCLUDED: frozenset[str] = frozenset({
     "tortoise_list_graphs",          # the discovery surface — lists them all
     "tortoise_graph_set_recording",  # names its target with `graph_id`
     "tortoise_org_create",           # provisions the WORKSPACE
-    # workspace-level state (packs / sources / onboarding) — see the note above
-    "tortoise_pack_install",
-    "tortoise_packs_list",
+    # workspace-level state (sources / onboarding) — see the note above
     "tortoise_manage_sources",
     "tortoise_onboarding_session_recording",
     "tortoise_onboarding_github_index",
@@ -1683,9 +1655,6 @@ GRAPH_ARGUMENT_EXCLUDED: frozenset[str] = frozenset({
 #: opposite in its own body, and each rejects a graph-BOUND key outright
 #: (`_reject_graph_bound_mcp_org_surface`), so `workspace-default` is the only
 #: arm they can be on and the disclosure is true unconditionally:
-#:   * `tortoise_pack_install` — the manifest is stored graph-natively in the
-#:     tenant's (default) graph as `:PackManifest`; a per-custom-graph install
-#:     would orphan pack state that `tortoise_packs_list` never sees.
 #:   * `tortoise_onboarding_github_index` — "indexes into the DEFAULT graph".
 #:   * `tortoise_manage_sources` — a `source` **enable** of a GITHUB source
 #:     starts the index job that writes into that same default graph. The seam
@@ -1717,7 +1686,6 @@ GRAPH_ARGUMENT_EXCLUDED: frozenset[str] = frozenset({
 #: (`test_every_disclosed_excluded_writer_refuses_a_graph_bound_key`), not
 #: assumed here.
 GRAPH_ARGUMENT_EXCLUDED_DEFAULT_TARGET: frozenset[str] = frozenset({
-    "tortoise_pack_install",
     "tortoise_manage_sources",
     "tortoise_onboarding_github_index",
 })
@@ -2014,7 +1982,7 @@ GROUP_BY_NAME: dict[str, str] = {
     "tortoise_graph_overview": "reasoning",
     "tortoise_overview": "reasoning",
     "tortoise_traverse": "reasoning", "tortoise_entity_profile": "reasoning",
-    "tortoise_analyze": "reasoning", "tortoise_taxonomy": "reasoning",
+    "tortoise_taxonomy": "reasoning",
     "tortoise_list_topics": "reasoning", "tortoise_provenance": "reasoning",
     "tortoise_stale": "reasoning", "tortoise_dream": "reasoning",
     "tortoise_review_connections": "reasoning",
@@ -2036,7 +2004,6 @@ GROUP_BY_NAME: dict[str, str] = {
     "tortoise_session_context": "sessions", "tortoise_get_session": "sessions",
     "tortoise_index_sessions": "sessions", "tortoise_search_sessions": "sessions",
     "tortoise_list_graphs": "sessions", "tortoise_list_namespaces": "sessions",
-    "tortoise_packs_list": "admin", "tortoise_pack_install": "admin",  # #1935
     "tortoise_events_poll": "sessions",  # #432 CDC/subscription — not a memory tool
     # #1727 (Task 13): the session-capture filing tool groups under
     # "sessions" (else it falls to the "memory" default and is filtered out
@@ -2053,7 +2020,6 @@ GROUP_BY_NAME: dict[str, str] = {
     # admin
     "tortoise_status": "admin", "tortoise_health": "admin",
     "tortoise_org_create": "admin", "tortoise_get_governance": "admin",
-    "tortoise_backfill_v25": "admin",
     # onboarding
     # #3540 ruling B: the consolidated source-management tool. The two
     # per-source switches it replaces keep their entries (they are RETIRED via

@@ -468,9 +468,13 @@ def test_a_COERCED_true_is_a_preview_and_a_coerced_false_is_not():
     toward "nothing was written"; leaving them unread can only fall through to
     the conservative write arm.
     """
+    # ⛔ `tortoise_backfill_v25` was the subject and is ARCHIVED in #11609 batch 1,
+    # so `_wait_bound_refusal_result` no longer builds a `committed` payload for the
+    # name. `tortoise_supersede` declares `dry_run` and is a live served write, so
+    # the coercion table is exercised by the same code path on a live subject.
     def committed(v):
         return _error(ms._wait_bound_refusal_result(
-            "tortoise_backfill_v25", {"dry_run": v}))["data"]["committed"]
+            "tortoise_supersede", {"dry_run": v}))["data"]["committed"]
 
     for truthy in (True, "true", "TRUE", "1", 1, 1.0, "yes", "on"):
         assert committed(truthy) == "none", f"{truthy!r} coerces to True -> preview"
@@ -662,20 +666,38 @@ def test_an_argument_that_LOOKS_read_only_is_not_taken_at_face_value():
     assert listing["retry_rule"] == ms._WAIT_BOUND_RETRY_RULE_UNSAFE
 
 
-def test_a_tool_whose_DECLARED_default_is_the_preview_is_recognised():
-    """`tortoise_backfill_v25(dry_run: bool = True)` — the no-arg call is a preview.
+def test_a_tool_whose_DECLARED_default_is_the_preview_is_recognised(monkeypatch):
+    """A handler declaring `dry_run: bool = True` makes the no-arg call a preview.
 
-    Its most common invocation is a read-only schema inspection, and it writes
-    nothing: every write in the SDK door sits behind `if not dry_run`. A check
-    for an EXPLICIT `dry_run=True` misses it entirely and reports "a schema
-    migration may be half-applied; do not re-run".
+    ⛔ The live subject (`tortoise_backfill_v25`) is ARCHIVED in #11609 batch 1, and
+    no surviving `dry_run` tool declares a TRUE default (`tortoise_delete`,
+    `_entity`, `_point`, `invalidate`, `retract_point`, `supersede` all default
+    False), so the arm is driven by a PROBE from the same seam: a handler with the
+    declared default, registered in the served write set. The arm itself is kept
+    because it is not hypothetical — it fired on the real tool's most common
+    invocation, and a restore would hit it again.
+
+    Mutation: delete the `_declared_dry_run_default` arm and this reds (the
+    no-arg call falls through to `committed: "unknown"`).
     """
-    no_args = ms._wait_bound_refusal_result("tortoise_backfill_v25", {})
+    def probe_preview_tool(dry_run: bool = True) -> dict:
+        return {}
+
+    monkeypatch.setattr(ms, "probe_preview_tool", probe_preview_tool, raising=False)
+    monkeypatch.setattr(ms, "WRITE_TOOL_NAMES",
+                        set(ms.WRITE_TOOL_NAMES) | {"probe_preview_tool"})
+    live_dry_run = ms._dry_run_tool_names()
+    assert "probe_preview_tool" not in live_dry_run
+    monkeypatch.setattr(ms, "_dry_run_tool_names",
+                        lambda: set(live_dry_run) | {"probe_preview_tool"})
+    assert ms._declared_dry_run_default("probe_preview_tool") is True
+
+    no_args = ms._wait_bound_refusal_result("probe_preview_tool", {})
     assert _error(no_args)["data"]["committed"] == "none"
     assert _error(no_args)["data"]["retry_rule"] == ms._WAIT_BOUND_RETRY_RULE_PREVIEW
     # an explicit opt-in to the real run is a real write.
     real = _error(ms._wait_bound_refusal_result(
-        "tortoise_backfill_v25", {"dry_run": False}))["data"]
+        "probe_preview_tool", {"dry_run": False}))["data"]
     assert real["committed"] == "unknown"
 
 

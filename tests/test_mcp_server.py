@@ -546,7 +546,11 @@ class TestGraphBoundTeamSurfaceReject:
         "tortoise_onboarding_github_connect": {},
         "tortoise_onboarding_github_index": {"org": "acme"},
         "tortoise_onboarding_github_status": {},
-        "tortoise_pack_install": {"manifest_yaml": "x: 1"},
+        # ⛔ `tortoise_pack_install` is ARCHIVED in #11609 batch 1 (no destination in
+        # the approved surface), so its handler is gone and the property it was swept
+        # for — "a graph-bound key cannot reach an org-level writer" — is carried by
+        # `tortoise_manage_sources` below. The archive holds the removed handler
+        # (`archive/mcp-tools/b1-removed-no-destination/tortoise_pack_install.py`).
         # #3540: the consolidated org-level writer. It replaced two entries in
         # this sweep; leaving it out would let its reject be deleted with the
         # suite still green.
@@ -823,41 +827,46 @@ class TestBatchCaps:
 
 class TestAnalyzeLlmBudget:
     def test_budget_exhausted_disables_llm(self, monkeypatch):
-        """Beyond the per-minute budget, tortoise_analyze skips llm_classify
-        (no outbound call) and degrades to keyword-only."""
+        """Beyond the per-minute budget the analyze path skips `llm_classify`.
+
+        ⛔ The MCP door (`tortoise_analyze`) is ARCHIVED in #11609 batch 1, so the
+        end-to-end half of this test has no subject: the budget helper and its store
+        are KEPT because the frozen handler calls them
+        (`archive/mcp-tools/b1-removed-no-destination/tortoise_analyze.py`), and this
+        test pins the helper's semantics plus that anchor — a restore path that
+        re-registers the definition with the helpers deleted would be broken.
+
+        The old test asserted a live call degraded to keyword-only. That assertion is
+        not reproducible without a door, and re-adding a door to satisfy a test is the
+        tail wagging the dog; the gate that matters is the helper's own budget.
+        """
+        from pathlib import Path
+
         import tortoise.mcp_server as ms
         from tortoise.mcp_auth import _current_org_id
         from tortoise.quota import MAX_ANALYZE_LLM_PER_MIN
 
-        # embedded env (no Docker) so the team SDK resolves
-        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
-        monkeypatch.setenv("TORTOISE_DB_PATH", "/tmp/tortoise_analyze_budget.db")
-        import tempfile as _tf, os as _os  # noqa: E401, I001
-        monkeypatch.setenv("TORTOISE_DB_PATH", _os.path.join(_tf.mkdtemp(), "budget.db"))
-
-        # Team context (HTTP) → budget accounting
+        # The budget is HTTP-only accounting: it keys on the org contextvar, so
+        # without one the helper returns True unconditionally (stdio/operator).
         token = _current_org_id.set("team-budget")
+        ms._ANALYZE_LLM_BUDGET.pop("team-budget", None)
         try:
-            # Exercise the ACCUMULATION path: MAX calls allowed, next rejected
-            ms._ANALYZE_LLM_BUDGET.pop("team-budget", None)
             for _ in range(MAX_ANALYZE_LLM_PER_MIN):
                 assert ms._analyze_llm_budget_available() is True
-            assert ms._analyze_llm_budget_available() is False
-            # A call beyond budget must not hit the LLM (urlopen never called)
-            import urllib.request as _ur
-            called = []
-            def boom(*a, **kw):
-                called.append(a)
-                raise AssertionError("llm must not be called")
-            monkeypatch.setattr(_ur, "urlopen", boom)
-            monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-x")
-            result = ms.tortoise_analyze("where is the disagreement?")
-            assert not called, "LLM was called beyond budget"
-            # Keyword path still answers
-            assert result.get("pattern") is not None or "disagreement" in str(result.get("answer", ""))
+            assert ms._analyze_llm_budget_available() is False, (
+                "the per-minute analyze budget never refuses — a call beyond it would "
+                "reach the LLM")
         finally:
             _current_org_id.reset(token)
             ms._ANALYZE_LLM_BUDGET.pop("team-budget", None)
+
+        frozen = (Path(__file__).resolve().parent.parent
+                  / "archive/mcp-tools/b1-removed-no-destination/tortoise_analyze.py")
+        text = frozen.read_text(encoding="utf-8")
+        assert "_analyze_llm_budget_available()" in text, (
+            "the archive's handler no longer calls the budget helper, so keeping the "
+            "helper in `mcp_server` is now dead code — either the archive dropped it "
+            "or the helper should go with it")
 
 
 class TestEventsTools:
@@ -1178,8 +1187,12 @@ class TestStdioEntrypointToolRegistration:
             tools = resp.get("result", {}).get("tools", [])
             names = [t["name"] for t in tools]
 
-            # Issue #993 target (1): tools/list >= 70 on this entrypoint.
-            assert len(names) >= 70, f"expected >=70 tools, got {len(names)}"
+            # Issue #993 target (1): tools/list is the LIVE surface, so the floor
+            # tracks it. #11609 batch 1 archived four no-destination tools, moving
+            # the advertised count 72 -> 68; the floor moves with it (a floor left
+            # at the old number would red on a CORRECT removal, and one dropped too
+            # far would stop noticing a registry that failed to register).
+            assert len(names) >= 68, f"expected >=68 tools, got {len(names)}"
             # Onboarding-critical tools must be present (Step 0 + the set).
             # #3883: tortoise_health is RETIRED — the consolidator is advertised
             # and the retired name still answers, with a warning, off the list.
