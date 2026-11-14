@@ -281,12 +281,22 @@ class TestEverySurfaceAgreesWithTheDeclaration:
 #:         (`Previously the page stated there is no Builder plan; today there is no
 #:         Builder plan either.`): the exemption is per SENTENCE, so the reported
 #:         clause exempts the live one beside it (cycle 8).
+#:       * a COLON-closed denial (`There is no Builder plan: it never existed.`): `:`
+#:         is not in either clause end, so neither the arm nor the exemption fires. True
+#:         on `origin/main` too — pre-existing, and listed here because the list is
+#:         claimed to be measured (cycle-12 P2). A `:` usually INTRODUCES a scope
+#:         qualifier (`…: it is self-host only`), so accepting it as terminal would cost
+#:         a false block on the class this list exists to protect.
 #:
 #: A sentence recording the RETRACTION is exempt — but only when it QUOTES what it
-#: retracts (:func:`_quotes_the_denial`). A cue word alone was a bypass: it let
-#: `The docs are stale: there is no Builder plan.` escape (cycle 2); a cue plus a bare
-#: `#\d+` was the same bypass one word longer (cycle 6, measured — `The docs are stale
-#: per #12444: there is no Builder plan.` was exempt).
+#: retracts (:func:`_quotes_the_denial`) or introduces a REPORTED CLAIM *and cites it*
+#: (:data:`_REPORTED_CLAIM` + :data:`_RETRACTION_EVIDENCE`). A cue word alone was a
+#: bypass: it let `The docs are stale: there is no Builder plan.` escape (cycle 2); a cue
+#: plus a bare `#\d+` was the same bypass one word longer (cycle 6, measured — `The docs
+#: are stale per #12444: there is no Builder plan.` was exempt); and a cue plus a SPEECH
+#: VERB alone was the same bypass again (cycle-12 P1, measured — `The docs are stale: the
+#: page says there is no Builder plan.` was exempt, which both `origin/main` and
+#: `test_a_cue_word_alone_cannot_exempt_a_denial` say must be impossible).
 #: A quotation mark may sit on EITHER side of the noun too: `There is no "Builder
 #: plan".` and `no plan called "Builder".` were both invisible (cycle-9 P2, measured),
 #: because the quote could only wrap the WORD `builder`.
@@ -324,9 +334,8 @@ _IDENTIFIER_RESTATEMENT = (
     r"|it\s*(?:is|['\u2019]s)\s+(?:just\s+)?(?:the\s+)?(?:pro|builder)\s+"
     r"(?:identifier|key|name|spelling|tier)\b"
     r"|(?:the|its)\s+(?:identifier|key|name|spelling|tier)"
-    r"(?:\s+(?:key|name|spelling))?\s*(?:is|['\u2019]s)\s+"
-    r"(?:the\s+)?(?:pro|builder)\b"
-    r"|(?:the\s+)?(?:pro|builder)\s+(?:is|['\u2019]s)\s+"
+    r"(?:\s+(?:key|name|spelling))?\s*(?:is|['\u2019]s)\s+(?:the\s+)?pro\b"
+    r"|(?:the\s+)?pro\s+(?:is|['\u2019]s)\s+"
     r"(?:the\s+)?(?:identifier|key|name|spelling|tier)\b"
 )
 #: …and the exemption is NOT a property of the comma (cycle-6 P1, measured). Bolted onto
@@ -481,10 +490,17 @@ _DENIAL_PATTERNS = (
 #: A retraction RECORD, not the claim. `#4336` protects historical records that state
 #: the name "as it was at the time", and quoting the superseded claim is this repo's
 #: convention for recording a supersession — so a pin that reds that document punishes
-#: exactly the behaviour it wants.
+#: ⛔ …and `before #N` was not the only way this repo dates a supersession (cycle-12
+#: P1, measured): the cue list spelled only `before`/`prior to`, so `Until #12444 the
+#: page said "there is no Builder plan".` — the module's OWN protected convention, quote
+#: the superseded claim and cite the issue — was RED, because the closing-quote
+#: tolerance in `_CLAUSE_END` now reaches the claim and no cue matched. `git grep -niE
+#: 'until #|prior to #|through #' -- 'docs/*.md'` is 30+ files, so this is the house
+#: phrasing, not an edge case.
 _RETRACTION_CUES = re.compile(
     r"\b(?:previously|formerly|used\s+to|no\s+longer|retract\w*|stale\w*|"
-    r"corrected|corrects|outdated|supersed\w*|before\s+#\d+)\b", re.I)
+    r"corrected|corrects|outdated|supersed\w*|"
+    r"(?:before|until|until\s+then|through|prior\s+to|up\s+to)\s+#\d+)\b", re.I)
 
 #: …but a cue word alone is not a record — it is a bypass: it exempted
 #: `The docs are stale: there is no Builder plan.`, a live denial (cycle 2). The
@@ -628,7 +644,15 @@ def _quotes_a_retracted_claim(sentence: str) -> bool:
     """
     return bool(_RETRACTION_CUES.search(sentence)
                 and (_quotes_the_denial(sentence)
-                     or _REPORTED_CLAIM.search(_plain(sentence))))
+                     # ⛔ A SPEECH VERB IS NOT A CITATION (cycle-12 P1, measured). The
+                     # reported-clause arm used to stand alone, so `The docs are stale:
+                     # the page says there is no Builder plan.` was exempt — a cue plus a
+                     # verb, no citation, no quotation, no tie: the cycle-2 dressed denial
+                     # reopened three words wide, and `origin/main` flags it. The evidence
+                     # half is required here too, which is what the block comment above
+                     # this module's cue list always claimed.
+                     or (_RETRACTION_EVIDENCE.search(sentence)
+                         and _REPORTED_CLAIM.search(_plain(sentence)))))
 
 
 def _is_a_correction_record(fragment: str) -> bool:
@@ -822,11 +846,10 @@ class TestNoDocDeniesABuilderPlanExists:
             "There is no Builder plan at all, in the OSS install.",
             # …and the SAME two sentences with the dash the repo actually writes
             # (cycle-6 P1: the exemption was bolted onto the comma arm, so `—`/`–`/`;`
-            # false-blocked the restatement and the scope qualifier alike — `grep -rl
-            # ' — ' docs/` counts **948** files — this measurement is stated ONCE, in
-            # the `_IDENTIFIER_RESTATEMENT` block above; an earlier revision of this
-            # comment said 944, the figure that block retracts as unreproducible
-            # (cycle-11 P2, measured: `git grep -l ' — ' -- docs | wc -l` = 948).
+            # false-blocked the restatement and the scope qualifier alike). The 948-file
+            # measurement for this style lives ONCE, in the `_IDENTIFIER_RESTATEMENT`
+            # block above — it is not restated here (cycle-12 P2: the previous sentence
+            # claimed to state it once while stating it twice).
             "There is no Builder plan available — so self-hosters use the OSS build.",
             "There is no Builder plan at all — in the OSS install.",
             "There is no Builder plan — only the `pro` identifier (#4336).",
@@ -856,6 +879,13 @@ class TestNoDocDeniesABuilderPlanExists:
             # the same record, and rejecting it was a false positive.
             "Previously this doc asserted there is no Builder plan; #12444 corrected it.",
             "Before 2026-09-21 the doc read there is no Builder plan; #12444 corrected it.",
+            # …and the same record dated with `until`, which is how this repo writes it
+            # (`git grep -niE 'until #|prior to #|through #' -- 'docs/*.md'` = 30+ files).
+            # `before #N` was the ONLY form the cue list spelled, so this record was RED
+            # only because `_CLAUSE_END` had learned to reach the closing quote
+            # (cycle-12 P1, measured).
+            'Until #12444 the page said "there is no Builder plan".',
+            'Through #12444 this page asserted "there is no Builder plan".',
             # A SCOPED, true statement with the displacing adjective (cycle 6).
             "The Builder tier is not available in your region.",
             # ⚠️ DOCUMENTED RESIDUAL (false positive, cycle 4): a comma-SCOPE qualifier
@@ -929,6 +959,12 @@ class TestNoDocDeniesABuilderPlanExists:
                 # `#\d+` bolted onto it (cycle 6).
                 "The docs are stale per #12444: there is no Builder plan.\n",
                 "The doc was outdated until 2026-09-21; there is no Builder plan.\n",
+                # Cycle-12 P1: the reported-clause arm stood alone, so a cue plus a bare
+                # SPEECH VERB exempted a live denial — no citation, no quotation, no tie.
+                # `origin/main` flags this sentence and `test_a_cue_word_alone_cannot_
+                # exempt_a_denial` says it must.
+                "The docs are stale: the page says there is no Builder plan.\n",
+                "The stale `org` wording says there is no Builder plan.\n",
                 # Cycle-7 P2: a speech verb plus SOME quote satisfied the attribution,
                 # so an unrelated quotation exempted a live denial.
                 'The doc previously said "pro"; there is no Builder plan.\n',
@@ -1020,6 +1056,12 @@ class TestNoDocDeniesABuilderPlanExists:
             "Builder is not available as a plan.",
             "There is no such plan as Builder.",
             "There is no plan called Builder.",
+            # ⛔ The widened restatement must still NAME the identifier's VALUE
+            # (cycle-12 P2, measured): requiring only the noun let `Builder is the name
+            # of a plan` and `Builder is the tier you cannot buy` exempt a live denial.
+            'There is no "builder" plan — Builder is the name for the `pro` tier.',
+            "There is no Builder plan — Builder is the tier you cannot buy.",
+            "There is no Builder plan — Builder is the name of a plan.",
             # ⛔ The three arms added in cycles 6/7 were born WITHOUT the intensifier
             # twin the older arms learned for in cycle 4 — one trailing qualifier
             # defeated all three (cycle-11 P2, measured).
@@ -1127,6 +1169,15 @@ class TestNoDocDeniesABuilderPlanExists:
             "_is_a_correction_record",
             "_quotes_the_denial",
             "_REPORTED_CLAIM",
+            # …and the rest of the composition surface the same review left reachable
+            # (cycle-12 P2, measured: an injected test pinning `_BUILDER_PHRASE` ran
+            # green, so the guard was silent on an ingredient added by this commit).
+            "_BUILDER_PHRASE",
+            "_QUOTED_NEGATION",
+            "_quoted_spans",
+            "_CITATION",
+            "_RESTATEMENT_TAIL",
+            "_RETRACTION_TIE",
         }
         offenders: list[str] = []
         for node in cls.body:
