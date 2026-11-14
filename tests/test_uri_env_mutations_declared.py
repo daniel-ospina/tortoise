@@ -251,11 +251,12 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # | grep -c '"test_published_artifact_canary.py":'` → **1** (that parent is `#12551`),
     # while `git show a808f9f8ba:…` → **2**, and `#12555`'s own diff ADDS the
     # "MAINLINE TRIAGE, not a site this PR added" key. So the base already held
-    # `#12588`'s row and `#12555` re-declared it anyway. (Its BRANCH head
-    # `ee1942914a` did not contain `#12588`'s squash `0f7f21c342` (`merge-base
-    # --is-ancestor 0f7f21c342 ee1942914a` → no: the branch was cut before it), while the
-    # merged squash `a808f9f8ba` does — its parent is `76b25fcfd1`, already a descendant
-    # of `0f7f21c342`. Ancestry and tree-content are different instruments: a grep of the
+    # `#12588`'s row and `#12555` re-declared it anyway. (The merged squash
+    # `a808f9f8ba` does contain `#12588`'s squash `0f7f21c342` — its parent is
+    # `76b25fcfd1`, already a descendant of it. `#12555`'s own branch head is not in this
+    # clone, so its ancestry is UNMEASURABLE here, not absent: do not read a failing
+    # `merge-base --is-ancestor` against a missing object as a "no".
+    # Ancestry and tree-content are different instruments: a grep of the
     # squash's tree finds both rows because that tree is the parent's tree plus the
     # branch diff, which says nothing about what the branch saw. Do not cite either one
     # alone.) And `#12422`'s
