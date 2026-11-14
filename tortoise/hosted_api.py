@@ -2034,7 +2034,16 @@ _HEALTH_PROBE_START_FAILED = False
 #: The floor is the stale window times four, itself floored at 120 s: a cold start
 #: must never red the deploy gate, and this listener is only reachable once
 #: startup has finished, by which point the refresher has had many intervals.
-_PROCESS_STARTED_AT = time.monotonic()
+#: ⛔ THE NAME IS DELIBERATELY NOT `_PROCESS_STARTED_AT`: that global already
+#: exists 6,000 lines below as the ISO STRING `_build_identity()` publishes
+#: (`:8062`), and it is assigned AFTER this one at import — so a float under that
+#: name was silently replaced by the string and every read raised `TypeError`,
+#: which the verdict reader turns into `failed` (`http` 503) in exactly the state
+#: that must be `unknown` (measured: the real listener answering
+#: `503 data-plane-failed` over a healthy, freshly booted process). A second name
+#: cannot collide, and `test_the_boot_clock_is_a_float_and_not_the_identity_string`
+#: pins the type so a future rename cannot bring the collision back.
+_PROCESS_BOOT_MONOTONIC = time.monotonic()
 
 
 def _health_probe_never_produced_bound_s() -> float:
@@ -2044,6 +2053,26 @@ def _health_probe_never_produced_bound_s() -> float:
     except Exception:  # a resolver must never raise into a verdict
         return 120.0
 
+
+
+def _arm_health_probe_refresher(app) -> None:
+    """Arm the DB-probe refresher, recording whether it started (#12477).
+
+    A helper (rather than inlined in `_lifespan`) so the flag's LIFECYCLE is
+    testable without booting the whole app: a lifespan may legally run more than
+    once in one process, so a failure latched on one attempt must be CLEARED by
+    a later success — otherwise a single transient `create_task` failure pins
+    `data-plane-failed` for the life of the process, with no in-process recovery.
+    The same rule `_stop_liveness` applies to the three registered readers.
+    """
+    global _HEALTH_PROBE_START_FAILED
+    try:
+        app.state._health_probe_task = asyncio.get_event_loop().create_task(
+            _health_probe_loop())
+        _HEALTH_PROBE_START_FAILED = False
+    except Exception as exc:
+        _logger.warning("health probe refresher not started: %s", exc)
+        _HEALTH_PROBE_START_FAILED = True
 
 
 def _liveness_dataplane_verdict() -> dict:
@@ -2127,7 +2156,7 @@ def _liveness_dataplane_verdict() -> dict:
         # `reasons: []`, one of the three claimed terms silently inert. The
         # bound is generous on purpose (four stale windows, floored at 120 s) so
         # a genuine cold start never reds the deploy gate.
-        uptime_s = max(0.0, time.monotonic() - _PROCESS_STARTED_AT)
+        uptime_s = max(0.0, time.monotonic() - float(_PROCESS_BOOT_MONOTONIC))
         if uptime_s > _health_probe_never_produced_bound_s():
             return {"state": "failed",
                     "detail": {"reason": "probe-never-produced-a-result",
@@ -3357,17 +3386,7 @@ async def _lifespan(app):
 
         # ── #2850: the DB probe refresher — keeps /health's ``db`` field
         # honest without the request path doing any I/O at all.
-        try:
-            app.state._health_probe_task = asyncio.get_event_loop().create_task(
-                _health_probe_loop())
-        except Exception as exc:
-            _logger.warning("health probe refresher not started: %s", exc)
-            # #12477 (review round 11): a refresher that does not exist cannot
-            # keep the `data-plane-failed` term's evidence fresh, so the term
-            # must FAIL instead of reading `unknown` (green) forever. Recorded
-            # here, at the failure, and read by `_liveness_dataplane_verdict`.
-            global _HEALTH_PROBE_START_FAILED
-            _HEALTH_PROBE_START_FAILED = True
+        _arm_health_probe_refresher(app)
         yield
 
         # ── shutdown: disarm the watchdog before the heartbeat task is

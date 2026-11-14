@@ -54,7 +54,7 @@ def _clean(monkeypatch):
     hosted_api._LIVENESS_LAST_SERVED_AT = None
     hosted_api._HEALTH_PROBE_START_FAILED = False
     # a fresh process for every test: the never-produced arm reads uptime
-    hosted_api._PROCESS_STARTED_AT = time.monotonic()
+    hosted_api._PROCESS_BOOT_MONOTONIC = time.monotonic()
     # ⛔ the harness's `asyncio.run(_boot())` CLOSES the loop, so the heartbeat
     # task `_start_liveness` installs is DONE by the time any assertion runs —
     # and `heartbeat_task_is_dead()` would then disarm the wedge term in every
@@ -371,12 +371,95 @@ def test_a_process_past_the_bound_with_NO_probe_result_is_a_FAILURE():
     assert hosted_api._liveness_dataplane_verdict()["state"] == "unknown"
     # the assertion above is the COLD START. Age the process past the bound and
     # the same state must read as a failure, not as `unknown` for ever.
-    hosted_api._PROCESS_STARTED_AT = time.monotonic() - (
+    hosted_api._PROCESS_BOOT_MONOTONIC = time.monotonic() - (
         hosted_api._health_probe_never_produced_bound_s() + 5.0)
     verdict = hosted_api._liveness_dataplane_verdict()
     assert verdict["state"] == "failed", verdict
     assert verdict["detail"]["reason"] == "probe-never-produced-a-result"
     assert verdict["detail"]["uptime_s"] > 0
+
+
+def test_the_boot_clock_is_a_float_and_not_the_identity_string():
+    """A name collision made a healthy cold start fail its own deploy gate.
+
+    Round 12 added the uptime bound on a global called `_PROCESS_STARTED_AT` — the
+    SAME name `_build_identity()` publishes as an ISO string 6,000 lines below,
+    assigned after it at import. The float was therefore replaced by a string and
+    every read raised `TypeError: unsupported operand type(s) for -: 'float' and
+    'str'`, which the verdict reader reports as `failed`: measured on the real
+    listener, a HEALTHY freshly-booted process answered
+    `503 reasons=['data-plane-failed']`. The suites could not see it because the
+    fixture hard-set the global to a float.
+
+    Pinning the TYPE is what makes the collision unrepeatable: nothing here
+    asserts the identity string's value, only that the two are different globals
+    with different shapes.
+    """
+    assert isinstance(hosted_api._PROCESS_BOOT_MONOTONIC, float)
+    assert isinstance(hosted_api._PROCESS_STARTED_AT, str), (
+        "_PROCESS_STARTED_AT is the ISO string `_build_identity()` publishes; if "
+        "it is ever a float, an uptime subtraction has been pointed at it again")
+
+
+def test_a_cold_start_with_no_probe_result_does_not_fail_the_deploy_gate():
+    """The reachable false red round 12 introduced, through the real listener.
+
+    `_start_liveness` binds the 9090 listener BEFORE the refresher task is
+    created, so a poll in that window sees `in_flight: False` and no result. That
+    state must be `unknown` (green). It answered `503 data-plane-failed` because
+    the uptime read raised, which is the direction that fails every deploy.
+    """
+    app = _FakeApp()
+    _start(app)
+    port = monitoring.start_health_listener(port=0, bind="127.0.0.1").server_address[1]
+    hosted_api._HEALTH_PROBE.reset()
+    hosted_api._HEALTH_PROBE_START_FAILED = False
+    hosted_api._PROCESS_BOOT_MONOTONIC = time.monotonic()
+    monitoring.heartbeat_record()
+    status, body = _get(port)
+    assert status == 200, body
+    assert body["reasons"] == []
+    assert body["dataplane"]["state"] == "unknown"
+    assert body["dataplane"]["detail"]["reason"] == "no-probe-result-yet"
+
+
+def test_the_refresher_latch_is_CLEARED_by_a_successful_re_arm(monkeypatch):
+    """A transient start failure must not pin `data-plane-failed` for ever.
+
+    `_lifespan` may legally run more than once in one process (in-process
+    restart, `TestClient` reuse — `_start_liveness` documents re-entry as
+    supported), so a latch set by one failed `create_task` and never cleared
+    makes a HEALTHY re-entered process report `data-plane-failed` until the
+    process is replaced, with no in-process recovery. Measured before the fix:
+    nothing in production ever wrote the flag back to False.
+    """
+    app = _FakeApp()
+
+    class _DeadLoop:
+        def create_task(self, coro):
+            coro.close()          # no "never awaited" warning from the fake
+            raise RuntimeError("event loop is closed")
+
+    hosted_api._HEALTH_PROBE_START_FAILED = False
+    with monkeypatch.context() as patch:
+        patch.setattr(hosted_api.asyncio, "get_event_loop", lambda: _DeadLoop())
+        hosted_api._arm_health_probe_refresher(app)
+    assert hosted_api._HEALTH_PROBE_START_FAILED is True
+    assert hosted_api._liveness_dataplane_verdict()["detail"]["reason"] == \
+        "probe-refresher-never-started"
+
+    # now a real loop, i.e. the SECOND lifespan this process runs
+    async def _arm_for_real():
+        hosted_api._arm_health_probe_refresher(app)
+        task = app.state._health_probe_task
+        task.cancel()
+        with __import__("contextlib").suppress(BaseException):
+            await task
+
+    asyncio.run(_arm_for_real())
+    assert hosted_api._HEALTH_PROBE_START_FAILED is False, (
+        "a SUCCESSFUL re-arm must clear the latch; otherwise one transient "
+        "failure pins `data-plane-failed` for the life of the process")
 
 
 def test_a_NEVER_started_probe_refresher_is_a_FAILURE_not_unknown():
