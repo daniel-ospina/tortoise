@@ -210,6 +210,29 @@ def test_the_OTHER_SPLIT_orientation_states_ITS_own_consequence(monkeypatch, cap
     )
 
 
+def test_a_MALFORMED_origin_is_UNVERIFIABLE_and_never_a_DISAGREEMENT(capsys) -> None:
+    """⛔ A SCHEME-LESS ORIGIN IS NO MEASUREMENT, and it must not report as one.
+
+    `_get_json` built its `urllib.request.Request` OUTSIDE the `try`, so a scheme-less origin — the
+    natural typo in `--api-url api.premiselabs.co` — raised `ValueError("unknown url type")` past
+    every handler and the process exited **1**. That is `EXIT_DISAGREE`: the code the runbook publishes
+    as "a measured disagreement", i.e. the exact 2026-11-01 reading a human would act on by rotating a
+    production secret. Measured at the head before this pin: `--api-url api.example.com` → exit 1, with
+    the traceback on stderr.
+
+    Both origins are malformed on purpose, so `Request(...)` raises before any socket is opened and
+    this pin stays network-free.
+    """
+    assert CKC.main(["--api-url", "api.example.com", "--app-url", "app.example"]) == 2
+    out = capsys.readouterr().out
+    assert "CONSENT-KEY: UNVERIFIABLE" in out, (
+        f"a malformed origin must be UNREADABLE, not a disagreement: {out!r}"
+    )
+    assert "invalid_url" in out, (
+        f"the unreadable cause must name the malformed origin, not a generic transport fault: {out!r}"
+    )
+
+
 def test_neither_configured_is_OFF_and_never_AGREE(monkeypatch, capsys) -> None:
     """Consistent, and still not a green reading.
 
@@ -881,15 +904,19 @@ def test_the_filing_step_files_the_RIGHT_finding_and_never_resolves_a_split(tmp_
         )
 
     drift = "the consent bridge's two halves hold different keys"
+    split = "the consent bridge is only HALF configured"
     unknown = "the consent bridge's key could not be verified"
 
-    # A GREEN reading resolves BOTH titles and files nothing.
+    # A GREEN reading resolves ALL THREE titles and files nothing.
     proc = run("0", "AGREE")
     calls = [c for c in record.read_text().splitlines() if c.strip()]
     assert proc.returncode == 0, proc.stderr[-400:]
-    assert len(calls) == 2, f"AGREE must resolve both halves of the ledger, got {calls}"
+    assert len(calls) == 3, f"AGREE must resolve every finding in the ledger, got {calls}"
     assert all(c.startswith("resolve") for c in calls), calls
     assert any(drift in c for c in calls) and any(unknown in c for c in calls), calls
+    assert any(split in c for c in calls), (
+        f"AGREE did not resolve the HALF-configured issue, so a recovered split stays open forever: {calls}"
+    )
     # ⛔ AND THE CLOSING COMMENT MUST ASSERT THE AGREEMENT, not a disagreement. Cycle 8 measured the
     # drift issue being CLOSED with `--why "…hold DIFFERENT keys"` GREEN: the ledger's own record of
     # recovery would contradict the recovery it records, on a public issue an operator reads later.
@@ -965,6 +992,29 @@ def test_the_filing_step_files_the_RIGHT_finding_and_never_resolves_a_split(tmp_
     )
     assert "Every consent grant is dead" not in body, (
         "the UNKNOWN arm's body asserts a disagreement it did not measure"
+    )
+
+    # ⛔ SPLIT IS ITS OWN FINDING — it must not reuse the MISMATCH title or body. Nothing exercised
+    # this arm before, so `MISMATCH|SPLIT)` was green while a half-configured bridge alerted "the two
+    # halves hold DIFFERENT keys" and "the AS answers 401": with `app` dark there is no mint at all,
+    # and with `api` dark the AS answers 503 before verifying. A rotation does not fix an unset key.
+    proc = run("1", "SPLIT")
+    calls = [c for c in record.read_text().splitlines() if c.strip()]
+    assert proc.returncode == 0, proc.stderr[-400:]
+    assert len(calls) == 1 and calls[0].startswith("file"), calls
+    assert split in calls[0] and drift not in calls[0], (
+        f"a SPLIT must file the HALF-configured finding, not the key-disagreement one: {calls}"
+    )
+    split_body = Path(str(record) + ".body").read_text()
+    assert "HALF configured" in split_body and "NOT \"the two halves hold different keys\"" in split_body, (
+        "the SPLIT body must say one half holds NO key, not that the two differ"
+    )
+    assert "Every consent grant is dead" not in split_body, (
+        "the SPLIT body carries the MISMATCH prose, which names a rotation that does not fix it"
+    )
+    assert "401" not in split_body, (
+        "the SPLIT body claims the 401 signature symptom — with a half dark the AS answers 503 "
+        "(or nothing is minted at all), so the operator is sent to the wrong fault"
     )
 
 
@@ -1134,19 +1184,29 @@ def test_the_workflow_grants_the_alert_scope_and_runs_on_its_stated_cadence() ->
     )
 
 
-def test_the_two_dedupe_TITLES_are_stable_constants() -> None:
+def test_the_THREE_dedupe_TITLES_are_stable_constants() -> None:
     """The title IS the dedupe key (`auto-file-issue.sh` searches `in:title` and comments a recurrence
     rather than creating a second issue). Renaming one abandons the standing ledger issue and starts a
-    second streak — at 48 runs/day that is the duplicate spam the substrate exists to prevent. So both
-    titles are pinned byte-exactly, and they must differ: they assert different findings (a MEASURED
-    disagreement vs NO measurement).
+    second streak — at 48 runs/day that is the duplicate spam the substrate exists to prevent. So all
+    three titles are pinned byte-exactly, and they must differ: they assert DIFFERENT findings.
+
+    ⛔ THREE, not two. `SPLIT` was filed under the MISMATCH title, whose body claims the halves "hold
+    DIFFERENT keys" and that the AS answers `401 signature does not verify`. For a SPLIT both are
+    false — one half holds NO key, so there is no second key to differ from, and with `api` dark the
+    AS answers `503` before it ever verifies anything. An operator reading that alert is sent to
+    rotate a key when the fault is an unset/padded secret on one half.
     """
     body = "\n".join(s.get("run") or "" for s in _steps())
     drift = "CONSENT_TOKEN_SECRET: the consent bridge's two halves hold different keys (#10488)"
+    split = "CONSENT_TOKEN_SECRET: the consent bridge is only HALF configured (#10488)"
     unknown = "CONSENT_TOKEN_SECRET: the consent bridge's key could not be verified (#10488)"
     assert drift in body, "the drift title changed — that abandons the standing issue"
+    assert split in body, (
+        "the SPLIT title is gone — a half-configured bridge would file under the MISMATCH title, whose "
+        "body asserts a rotation the fault does not need"
+    )
     assert unknown in body, "the unknown title changed — that abandons the standing issue"
-    assert drift != unknown, "two findings must not share one dedupe key"
+    assert len({drift, split, unknown}) == 3, "three findings must not share one dedupe key"
 
 
 def test_the_workflow_steps_are_all_syntactically_valid_shell() -> None:

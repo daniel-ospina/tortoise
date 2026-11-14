@@ -265,16 +265,15 @@ def compare(api: Reading, app: Reading) -> Verdict:
         # and INVERTED in the other, and this detail is pasted verbatim into the PUBLIC alert body, so
         # the wrong version tells an operator that the working half is the broken one. Pinned in BOTH
         # orientations, because one orientation cannot see the inversion.
-        # ⛔ THE CONSEQUENCE FOLLOWS THE DARK HALF, because the two halves do NOT do the same thing:
-        # `app` MINTS (its Pages Function signs the consent token) and `api` VERIFIES it. A single
-        # static sentence — "one half signs, the other cannot verify" — was right in one orientation
-        # and INVERTED in the other, and this detail is pasted verbatim into the PUBLIC alert body, so
-        # the wrong version tells an operator that the working half is the broken one. Pinned in BOTH
-        # orientations, because one orientation cannot see the inversion.
+        # The `elif` is deliberate: an unrecognised state must NOT inherit a directional claim, so the
+        # `else` fails closed with a sentence that asserts no role (unreachable while there are two
+        # halves, but a third would otherwise be silently labelled with the `api` consequence).
         if dark == ["app"]:
             consequence = "the `app` half mints, so nothing can sign a consent token"
-        else:
+        elif dark == ["api"]:
             consequence = "the `api` half verifies, so every minted token is refused"
+        else:                                           # pragma: no cover - unreachable today
+            consequence = f"{'/'.join(dark)} is unreadable, so the bridge cannot be used"
         return Verdict(
             "SPLIT",
             f"{'/'.join(live)} is configured and {'/'.join(dark)} is not — {consequence}",
@@ -296,10 +295,17 @@ def _get_json(url: str, timeout: float) -> tuple[object | None, str | None]:
     """`(payload, problem)`. Any transport/parse failure is a `problem` CODE, never an exception."""
     # ⛔ `User-Agent` is NOT cosmetic here — see `USER_AGENT`: urllib's default is refused 403 by the
     # edge in front of the Pages project, which would make the Pages half permanently unreadable.
-    request = urllib.request.Request(
-        url, headers={"Accept": "application/json", "User-Agent": USER_AGENT}
-    )
     try:
+        # ⛔ `Request(...)` ITSELF CAN RAISE, so it belongs INSIDE this `try`. A scheme-less origin —
+        # the natural typo in an operator's `--api-url api.premiselabs.co` — raises
+        # `ValueError("unknown url type")`, and an ESCAPING exception exits **1**, which is
+        # `EXIT_DISAGREE`: the tool would report an input/tool fault as the 2026-11-01 MEASURED SPLIT,
+        # i.e. exactly the false signal this whole workflow exists to refuse. `ValueError` is neither
+        # `OSError` nor `URLError`, so the broad tuple below never caught it — measured at this head,
+        # `--api-url api.example.com` exited 1 with the traceback on stderr.
+        request = urllib.request.Request(
+            url, headers={"Accept": "application/json", "User-Agent": USER_AGENT}
+        )
         with urllib.request.urlopen(request, timeout=timeout) as response:
             status = response.status
             body = response.read()
@@ -307,6 +313,9 @@ def _get_json(url: str, timeout: float) -> tuple[object | None, str | None]:
         return None, f"http_{exc.code}"
     except (urllib.error.URLError, TimeoutError, OSError):
         return None, "unreachable"
+    except ValueError:
+        # A malformed origin is NO MEASUREMENT — `UNVERIFIABLE` (exit 2), never a disagreement.
+        return None, "invalid_url"
     except Exception:                                   # pragma: no cover - defensive
         return None, "transport_error"
     if status != 200:
