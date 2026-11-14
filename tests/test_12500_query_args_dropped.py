@@ -650,17 +650,23 @@ def test_a_kind_only_refusal_carries_no_filters_advice(stub) -> None:
 
 
 #: Sentences that were TRUE-LOOKING and FALSE, each measured and each shipped at
-#: some point in this PR. The docstring is served product text, so a false claim
-#: in it steers every reader of the tool contract; "the docstring says nothing
-#: wrong" is not decidable, but "these exact claims are gone" is.
+#: some point in this PR. This docstring is the tool's DEVELOPER-facing contract
+#: — NOT the description a model receives over MCP, which is
+#: `ToolDefinition.description` and does not mention these arguments at all
+#: (round-9 finding 4, measured with `mcp.list_tools()`). It still steers every
+#: developer reading the source; "the docstring says nothing wrong" is not
+#: decidable, but "these exact claims are gone" is.
 _DOCSTRING_FALSE = (
     # round-5: order_by is applied for every type but document/source, and
     # `event`/`subject`/`object`/`operator` DO carry a belief (measured live).
     "only a Point carries one",
-    # Scoped to `order_by`: the same sentence about `min_confidence` is TRUE
-    # (measured live — a 0.9 floor on a 0.05-belief point returns []), so banning
-    # the bare phrase forbade a correct edit, the round-6 defect mirrored.
-    '`order_by` is applied on the text= arm for `entity_type="point"`',
+    # The EXCLUSIVE form: `order_by` IS applied for `entity_type="point"` (and
+    # for event/subject/object/operator), so banning the bare phrase forbade a
+    # correct edit — the round-6 defect mirrored, and rounds 7/8 hit its scoped
+    # variants too. What was false is the "only" — that is what is pinned here.
+    '`order_by` is applied on the text= arm for `entity_type="point"` only',
+    '`min_confidence` and `order_by` are applied on the text= arm for '
+    '`entity_type="point"`',
     # round-6/7: BOTH ranking orderings (`confidence` and `graph`) are refused on
     # document/source — each computes the same key for every row — while
     # `relevance` is applied to every type. This sentence was mandated as TRUE by
@@ -679,7 +685,7 @@ _DOCSTRING_FALSE = (
 )
 
 
-def test_the_served_docstring_never_restates_a_falsified_claim() -> None:
+def test_the_tool_docstring_never_restates_a_falsified_claim() -> None:
     """The false claims this PR shipped, pinned so they cannot come back.
 
     Both are wrap-insensitive (whitespace-collapsed), because a re-wrap must not
@@ -757,14 +763,14 @@ def test_a_graph_ordering_with_no_signal_is_refused_not_silently_reordered(
     assert "relevance" in message, message
 
 
-def test_the_served_docstring_states_the_falsy_exception() -> None:
+def test_the_tool_docstring_states_the_falsy_exception() -> None:
     """The contract must not read as an unconditional refusal (#12500 round 8).
 
     The guard keys on truthiness, so `min_confidence=0.0` / `order_by=""` /
     `kind=""` are SERVED — pinned as required behaviour by
     `test_falsy_values_are_no_ops_and_never_refused`, and justified in the guard
     comment precisely because a client that serialises its own defaults must not
-    be refused. The served docstring said "are REFUSED" with no exception, so a
+    be refused. The docstring said "are REFUSED" with no exception, so a
     contract reader could not tell which behaviour applies to `min_confidence=0.0`.
     Fails if the exception is dropped from either bullet.
     """
@@ -779,7 +785,7 @@ def test_the_served_docstring_states_the_falsy_exception() -> None:
     assert "serialises its own defaults" in flat, flat[:600]
 
 
-def test_the_served_docstring_states_the_harm_per_argument() -> None:
+def test_the_tool_docstring_states_the_harm_per_argument() -> None:
     """A floor excludes rows; an ordering does not (#12500 round 8).
 
     The bullet used to say a dropped value meant "rows the caller excluded came
@@ -793,3 +799,73 @@ def test_the_served_docstring_states_the_harm_per_argument() -> None:
     flat = " ".join((tortoise_query.__doc__ or "").split())
 
     assert "an ordering they asked for was replaced" in flat, flat[:800]
+
+
+@pytest.mark.parametrize("kwargs,expected,forbidden", [
+    ({"kind": "statement", "order_by": "confidence"},
+     "an order they did not ask for", "rows they excluded"),
+    ({"kind": "statement", "min_confidence": _CONFIDENCE_FLOOR},
+     "rows they excluded", "an order they did not ask for"),
+    ({"tag": "pricing", "order_by": "confidence"},
+     "an order they did not ask for", "rows they excluded"),
+])
+def test_the_message_states_the_harm_for_the_argument_it_names(
+        stub, kwargs, expected, forbidden) -> None:
+    """The harm clause must match the argument (#12500 round 9).
+
+    A dropped ORDERING re-decides the sequence; it cannot admit a row the caller
+    excluded. Swapping the two harm halves left the whole suite green while the
+    served message told an `order_by` caller that "rows they excluded" came back
+    — the lumped-harm falsehood round 8 removed from the docstring, still live in
+    the artifact every refused caller receives.
+    """
+    from tortoise.mcp_server import tortoise_query
+
+    message = tortoise_query(**kwargs)["error"]
+
+    assert expected in message, message
+    assert forbidden not in message, message
+
+
+def test_the_filters_note_states_that_no_arm_applies_it_with_a_floor(stub) -> None:
+    """The note's CLAIM, not just its advice, must be pinned (#12500 round 9).
+
+    `test_a_floor_and_a_property_filter_have_no_common_arm` asserts only
+    "drop filters=", which an inverted note ("Every arm applies …") still
+    contains. Fails if the premise is negated or the pairing claim is dropped.
+    """
+    from tortoise.mcp_server import tortoise_query
+
+    message = tortoise_query(kind="statement", filters={"a": 1},
+                             min_confidence=_CONFIDENCE_FLOOR)["error"]
+
+    assert "No arm applies a property `filters=`" in message, message
+    assert "together with a confidence floor or an ordering" in message, message
+
+
+@pytest.mark.parametrize("kwargs", [
+    # structural + paged: the route sends the caller to text=, which refuses
+    # offset/page — a second refusal one call later (round-9 finding 3).
+    {"kind": "statement", "offset": 0, "min_confidence": _CONFIDENCE_FLOOR},
+    {"kind": "statement", "page": 1, "order_by": "confidence"},
+    {"tag": "pricing", "offset": 0, "min_confidence": _CONFIDENCE_FLOOR},
+    {"tag": "pricing", "page": 1, "order_by": "confidence"},
+    # text= arm + paged: the route changes entity_type, and the read is still paged
+    {"text": "x", "entity_type": "document", "min_confidence": _CONFIDENCE_FLOOR,
+     "offset": 0},
+    {"text": "x", "entity_type": "document", "order_by": "graph", "page": 1},
+])
+def test_a_paged_caller_is_told_to_drop_offset_in_the_route(stub, kwargs) -> None:
+    """Following a route to `text=` must not land on a second refusal (#12500 r9).
+
+    Measured: `text=` with `offset=` answers "offset/page not supported with
+    text", so a refusal whose route is "pass text=" left a paged caller one call
+    from another error. The route now names the paging drop too. Fails if the
+    `paginated` suffix is removed.
+    """
+    from tortoise.mcp_server import tortoise_query
+
+    message = tortoise_query(**kwargs)["error"]
+
+    assert "drop offset=/page=" in message, message
+    assert "text= takes no offset" in message, message

@@ -4088,9 +4088,16 @@ def tortoise_query(kind: str | None = None,
             f"For a structural Point read, omit entity_type or pass 'point' "
             f"(its default).")})
     # ── #12500: `min_confidence`/`order_by` (and `kind` on the tag arm) ──────
-    # The signature takes `min_confidence` and `order_by`, and the served
-    # description used to present them as general arguments — but ONLY the
-    # `text=` arm consumes them (forwarded into `sdk.tortoise_fts_query`). Both
+    # The signature takes `min_confidence` and `order_by`, and this docstring
+    # presented them as general arguments — but ONLY the `text=` arm consumes
+    # them (forwarded into `sdk.tortoise_fts_query`). NOTE the artifact: this
+    # docstring is DEVELOPER-facing. The description a model actually receives
+    # over MCP is `ToolDefinition.description` (`tortoise/tool_registry.py`,
+    # passed by `FastMCPAdapter` and rendered into
+    # `docs/product/mcp-sdk-surface.md`), and it does NOT mention these
+    # arguments at all — so the arm-scoping here is discoverable by reading the
+    # source or by hitting the refusal, never from the wire description (round-9
+    # finding 4, measured with `mcp.list_tools()`; recorded on #12500). Both
     # structural arms call `sdk.paginated_query(kind, skip, limit,
     # include_retracted, **filters)`, which declares NEITHER parameter
     # (sdk.py:26582-26585), and the tag arm calls `query_points_by_tag(tag)`,
@@ -4274,6 +4281,12 @@ def tortoise_query(kind: str | None = None,
         else:
             _route = (f"To use {_them}, pass text= — the floor and the ordering "
                       f"are applied on that arm")
+        if paginated:
+            # `text=` takes no offset/page (measured: following the route with
+            # offset= kept answers "offset/page not supported with text"), so a
+            # route that sends a PAGED caller there lands on a second refusal
+            # (round-9 finding 3).
+            _route += " (and drop offset=/page= — text= takes no offset)"
         # Only where a floor/ordering is what was refused: the STRUCTURAL arm
         # applies `filters=` together with `kind=` quite happily, so this note on
         # a kind-only tag refusal told the caller to drop a filter that another
