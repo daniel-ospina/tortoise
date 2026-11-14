@@ -410,9 +410,19 @@ def _invalid_harness(message):
 
 
 def _text(value):
-    """Bytes-to-str for a raw (``decode_responses=False``) client."""
+    """Bytes-to-str for a raw (``decode_responses=False``) client, recursively.
+
+    Recursive because ``MODULE LIST`` yields NESTED values: the graph module's ``args``
+    is a list (``['THREAD_COUNT', 8, 'TIMEOUT_MAX', 30000]``), so a flat bytes->str map
+    leaves a bytes element inside a list and ``json.dumps`` then dies on the header —
+    which is the one line that must never fail, since it is what names the engine.
+    """
     if isinstance(value, (bytes, bytearray)):
         return value.decode()
+    if isinstance(value, dict):
+        return {_text(k): _text(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_text(v) for v in value]
     return value
 
 
