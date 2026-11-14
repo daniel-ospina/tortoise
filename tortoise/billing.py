@@ -1096,7 +1096,7 @@ def reconcile_org(sdk, org_id: str, force: bool = False) -> dict:
 # derives upward) and its only writer was the Stripe webhook. A single missed
 # or failed delivery therefore capped a paying org at the lower tier FOREVER:
 # ``reconcile_org`` existed but had no production caller, so nothing ever
-# compared the store against Stripe. A paid Pro org was enforced as Solo
+# compared the store against Stripe. A paid Builder org was enforced as Solo
 # (25 000 nodes), every write refused with "upgrade your plan", and no error
 # was surfaced anywhere.
 #
@@ -1105,7 +1105,7 @@ def reconcile_org(sdk, org_id: str, force: bool = False) -> dict:
 # org pays is its Stripe subscription — there is no price column on the org row,
 # and ``/v1/team``'s ``checkout_price_id`` is the CATALOG's default CTA price
 # (``_default_checkout_price_id()`` → pro for EVERY org), so deriving from it
-# would hand every active org the Pro plan for free; and (b) a Stripe API call
+# would hand every active org the Builder plan for free; and (b) a Stripe API call
 # on the enforcement path would make every write depend on Stripe's latency and
 # availability. So the store stays the read model and this cadence keeps it
 # true — the same "external driver, independent failure domain" shape the

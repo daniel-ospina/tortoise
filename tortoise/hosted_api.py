@@ -2409,7 +2409,7 @@ def _sweep_expired_invitations() -> None:
     ``invitation_mint`` now retires the (org, email) row it is about to replace
     (#8089), which fixes the BLOCKING path on its own. This sweep is the other
     half: it materialises the terminal state for every other reader (the owner
-    pending list, the Pro seat count, the accepted/expired split) and it keeps
+    pending list, the Builder seat count, the accepted/expired split) and it keeps
     the terminal-state backlog from growing, which is the operator-visible
     indicator. Scheduled, not operator-run — the same seam as the sibling
     sweeps: armed by ``_run_boot_sweeps`` at boot and by
@@ -26888,7 +26888,8 @@ async def _create_org_registry_lane(sdk, name: str, user: dict) -> dict:
 # Tier gate: only tiers whose default graph FILLS the quota are blocked
 # (free=1, anon=1 — the default occupies slot 1; anon addition recorded in
 # the plan D2 note, free-pin unchanged). Solo=2 passes and gets exactly 1
-# custom; pro/org are unlimited (Gate #2 decision). 402 is the
+# custom; Builder (tier `pro`, #4336) and Team are unlimited (Gate #2 decision).
+# 402 is the
 # upgrade-CTA response, checked AFTER the suspension check (#1853: a
 # suspended FREE org must 403 SUSPENDED, never 402) and BEFORE the
 # quota gate per W1 ordering (E2E-3 pin — never any-4xx for a tier
@@ -26918,7 +26919,7 @@ async def _graph_quota_gate(org: dict) -> None:
     """Quota gate — 409 + X-Graph-Quota when at cap (distinct from the
     402 tier gate; D2/D3). Fail-closed: counting errors raise 500, never
     a silent pass (#686). No 80% warn band in v1 (Gate #2 — unreachable
-    at free=1/solo=2, dormant until a finite pro/org cap exists).
+    at free=1/solo=2, dormant until a finite Builder (tier `pro`) cap exists).
 
     Known mode divergence (review #2b arch, recorded): sdk._graph_count's
     Supabase branch drift-swallows to 1 (default-only) on ANY read error
@@ -26933,7 +26934,7 @@ async def _graph_quota_gate(org: dict) -> None:
     limits = _org_limits_from_node(org)
     max_graphs = limits.get("max_graphs")
     if max_graphs is None:
-        return  # unlimited (pro/org)
+        return  # unlimited (Builder = tier `pro`, #4336; and Team)
     try:
         count = _make_sdk(namespace="registry")._graph_count(org["id"])
     except Exception as e:
@@ -29583,7 +29584,7 @@ async def list_graphs(org_id: str, user: dict = Depends(get_current_user_graph_l
 
 # ── E3/E4/E8: invites + RBAC (Team tier, D7 #574) ──
 # Token-only accept in v1 (decision 1e); owner is NOT invitable (single-owner
-# model — invitable roles: admin, member). Free/Solo/Pro: invites disabled
+# model — invitable roles: admin, member). Free/Solo/Builder: invites disabled
 # (max_users=1 or invite path deferred to billing).
 
 async def _membership_role(user_id: str, org_id: str) -> str | None:
@@ -29883,10 +29884,10 @@ def _utc_now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
-# #1965: per-org in-process asyncio locks serializing the Pro capacity
+# #1965: per-org in-process asyncio locks serializing the Builder capacity
 # check + mint (invite side) and the capacity pre-check + consume (accept
 # side). Closes the count-then-mint TOCTOU from #1875 — concurrent
-# POST /v1/invites on a Pro org could both read active+pending < 2 and
+# POST /v1/invites on a Builder org could both read active+pending < 2 and
 # both mint, exceeding max_users. The lock makes the check-and-mint a
 # serialized critical section per org, so a losing concurrent request
 # re-reads the count AFTER the winner's mint and hits the gate.
@@ -29955,7 +29956,7 @@ async def invite_to_org(body: dict, user: dict = Depends(get_current_user)):  # 
             if org is None:
                 raise HTTPException(status_code=404, detail="Unknown organization")
             # #1875: tier gate matches pricing (free=1, solo=1, pro=2,
-            # org=∞). Pro capacity = active members + PENDING invitations
+            # team=∞). Builder capacity = active members + PENDING invitations
             # (the authoritative invitations source — never
             # org_memberships(status='invited'), which supabase never
             # writes).
@@ -29982,7 +29983,7 @@ async def invite_to_org(body: dict, user: dict = Depends(get_current_user)):  # 
                         op="pending_invitations")
                     pending = [i for i in _pending_rows
                                if not i.get("expires_at") or i["expires_at"] > now]
-                    if len(active) + len(pending) >= 2:  # Pro max_users=2
+                    if len(active) + len(pending) >= 2:  # Builder max_users=2
                         raise HTTPException(status_code=402,
                                             detail=with_limit_contact("Member limit reached — upgrade to invite more"))
                 inv = await _cp_offload(
@@ -30035,11 +30036,11 @@ async def invite_to_org(body: dict, user: dict = Depends(get_current_user)):  # 
             raise HTTPException(status_code=404, detail="Unknown organization")
         org_node = org_row[0][0]
         tier = org_node.get("tier", "free")
-        # #1875: tier gate matches pricing. Free/Solo → upgrade gate; Pro →
+        # #1875: tier gate matches pricing. Free/Solo → upgrade gate; Builder →
         # capacity = active members + PENDING invitations (authoritative
         # Invitation nodes — not the fake invite-{iid} membership rows, which
-        # are never cleaned); Org → unlimited (None-skip). Replaces the old
-        # active-only `_check_org_limit(limits, "users")` for Pro (cycle-2 P2:
+        # are never cleaned); Team → unlimited (None-skip). Replaces the old
+        # active-only `_check_org_limit(limits, "users")` for Builder (cycle-2 P2:
         # active-only under-counted pending seats).
         if tier in ("free", "solo"):
             raise HTTPException(status_code=402,
@@ -30057,7 +30058,7 @@ async def invite_to_org(body: dict, user: dict = Depends(get_current_user)):  # 
                 "AND (i.expires_at IS NULL OR i.expires_at > $now) RETURN count(i)",
                 params={"tid": org_id, "now": now},
             ).result_set[0][0]
-            if active + pending >= 2:  # Pro max_users=2
+            if active + pending >= 2:  # Builder max_users=2
                 raise HTTPException(status_code=402,
                                     detail=with_limit_contact("Member limit reached — upgrade to invite more"))
 
@@ -30071,7 +30072,7 @@ async def invite_to_org(body: dict, user: dict = Depends(get_current_user)):  # 
         # 'expired', so an invite whose ``expires_at`` has passed still counted
         # as a pending duplicate and 409'd every re-invite FOREVER.
         # ``expires_at`` is the authority here, exactly as the accept paths,
-        # the Pro capacity read and ``cleanup_expired_invitations`` already
+        # the Builder capacity read and ``cleanup_expired_invitations`` already
         # treat it.
         now = datetime.now(UTC).isoformat()
         dup = reg.query(
@@ -47646,7 +47647,7 @@ async def webhooks_stripe(request: Request):
 # The webhook above is the ONLY writer of the stored ``tier``, and the stored
 # tier IS the entitlement (``billing.effective_tier`` never derives upward).
 # One missed/failed delivery therefore capped a paying org at the lower tier
-# permanently — measured 2026-10-17 on the fleet's own org: billed on the Pro
+# permanently — measured 2026-10-17 on the fleet's own org: billed on the Builder
 # price, enforced at Solo's 25 000-node cap, every hosted write refused with
 # "upgrade your plan", reads still working so nothing looked broken.
 #
