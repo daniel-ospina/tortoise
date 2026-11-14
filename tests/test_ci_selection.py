@@ -3013,7 +3013,11 @@ def test_root_file_read_by_a_test_is_never_allowlisted():
     `test_doc_reprieve_is_per_path_not_per_diff` pins the FULL selection it now
     takes. Every name below IS read
     (README.md by `test_embedded_durability_claim.py:62`; AGENTS.md by the
-    base-subset pin; `.gitignore` by `test_kind_index.py:290`; …) and keeps FULL.
+    base-subset pin; `.gitignore` by
+    `test_kind_index.py::TestMemoizationAndLazy::test_gitignored_cache_dir`; …) and keeps FULL.
+    (Line numbers are deliberately gone from these citations — both parents' numbers
+    were already stale here by three lines, and a cited line that moved is a claim
+    that re-stales on every neighbouring edit.)
     """
     for name in ("README.md", "AGENTS.md",
                  "LICENSE", "MEMORY.md", "index.md",
@@ -3325,7 +3329,8 @@ def test_doc_reprieve_is_per_path_not_per_diff():
     assert r3["full"] is True
 
     # ⛔ CONTRIBUTING.md is NO LONGER reprieved (`main`, #12313's
-    # `tests/test_surface_manifest.py:5538` READS its text to hold the documented
+    # `tests/test_surface_manifest.py::test_the_REMOVAL_docs_do_not_name_a_route_the_writer_REFUSES`
+    # READS its text to hold the documented
     # surface rule to the shipped one). A root prose file outside the census list
     # falls through to the unknown-path branch, which fails closed to FULL — and
     # that is the point: the PR that edits the file runs the guard that reads it.

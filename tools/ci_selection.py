@@ -3501,6 +3501,15 @@ def _is_safe_root_file(path: str) -> bool:
 # on is "does anything READ it", and one reader is enough — the exemption would
 # have dropped exactly that guard from the PR that edits the file it guards.
 #
+# The reader is `test_surface_manifest.py::test_the_REMOVAL_docs_do_not_name_a_route_the_writer_REFUSES`
+# (#12237), which reads CONTRIBUTING's "**To REMOVE a symbol**" paragraph and reds if it names a
+# removal route the archive writer refuses. Measured before the removal: the ratchet
+# `test_non_code_doc_paths_have_no_content_reader` was RED at `origin/main` and on the PR that
+# carried the entry, i.e. it had been stale since #12313 landed. Reprieving a file a guard reads is
+# the silent-hole class — it drops the changed path to the tier-1 smoke, so the guard never runs on
+# the PR that edits the paragraph it pins. (Two lanes fixed this independently; the blocks are
+# merged here rather than left as two rulings on one rule.)
+#
 # Ratchets: `test_non_code_doc_paths_exist` (liveness) and
 # `test_non_code_doc_paths_have_no_content_reader` (the read census).
 NON_CODE_DOC_PATHS = frozenset({
@@ -3509,17 +3518,6 @@ NON_CODE_DOC_PATHS = frozenset({
     "CLAUDE.md",
 })
 
-# ⛔ `CONTRIBUTING.md` LEFT THIS TUPLE (#12313's read landed after the entry did). The reprieve
-# is "no guard reads its CONTENT", and that stopped being true: `#12237` added
-# `test_surface_manifest.py::test_the_REMOVAL_docs_do_not_name_a_route_the_writer_REFUSES`,
-# which reads CONTRIBUTING's "**To REMOVE a symbol**" paragraph and reds if it names a removal
-# route the archive writer refuses. Reprieving a file a guard reads is the silent-hole class
-# (`test_non_code_doc_paths_have_no_content_reader` states the rule) — it drops the changed
-# path to tier-1 smoke, so the guard never runs on the PR that edits the paragraph it pins.
-# Measured before this line: that ratchet red at `origin/main` and on this branch, i.e. the
-# entry had been stale since #12313 and `main` was already failing its own selection suite.
-# A CONTRIBUTING.md edit therefore keeps the fail-closed FULL matrix, like any root doc a
-# test reads; the three members above keep the reprieve (and its non-vacuity pin) alive.
 
 
 def _is_non_code_doc(path: str) -> bool:

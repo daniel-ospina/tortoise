@@ -112,7 +112,7 @@ The bundle's headline lists **7 files** under `docs/epics/2026-11-04-7949-extrac
 | file | what changes | effect |
 |---|---|---|
 | `docs/00_index.md` | one row registering the new bundle directory | index only |
-| `tools/ci_selection.py` | `CONTRIBUTING.md` leaves `NON_CODE_DOC_PATHS` — `tests/test_surface_manifest.py:5538` reads that file's TEXT, so the exemption would have dropped a guard from the PR editing the file it guards | **CI effect: a `CONTRIBUTING.md`-only PR now runs the full matrix instead of tier-1 smoke.** This is deliberate and it FIXES a red on `main` (`test_non_code_doc_paths_have_no_content_reader`) |
+| `tools/ci_selection.py` | `CONTRIBUTING.md` leaves `NON_CODE_DOC_PATHS` — `tests/test_surface_manifest.py::test_the_REMOVAL_docs_do_not_name_a_route_the_writer_REFUSES` reads that file's TEXT, so the exemption would have dropped a guard from the PR editing the file it guards | **CI effect: a `CONTRIBUTING.md`-only PR now runs the full matrix instead of tier-1 smoke.** This is deliberate and it FIXES a red on `main` (`test_non_code_doc_paths_have_no_content_reader`) |
 | `tests/test_ci_selection.py` | the arms over that list | none beyond the row above |
 
 **No longer in the diff — absorbed by the forward merges, kept as history:**
