@@ -1708,19 +1708,6 @@ surfaces:
   # ['tortoise/quota.py'])` → this file selected.
   - test_11892_health_quota.py
   - test_quota.py
-  # #12477: the health surfaces must not read GREEN over a failing data plane —
-  # measured on `tortoise-y4mjjq` (build 43db5c0f5), every data request timed out
-  # while `GET /health` answered `status: "ok"` and the Fly check passed. ⛔
-  # DUAL-REGISTERED with `core`, and BOTH are load-bearing for the same measured
-  # reason the `#11892` row above records: `#12488` changed
-  # `tortoise/hosted_api.py` (an EXACT `api` SOURCE_PATTERN — `select([
-  # 'tortoise/hosted_api.py'])` → `['api', 'onboarding']`) AND
-  # `tortoise/monitoring.py` (which matches NO source pattern, so
-  # `select(['tortoise/monitoring.py'])` → `['core']`). A single-surface row
-  # therefore runs these pins ZERO times on one of the two change classes they
-  # guard. The pins are WIRING assertions, not stubs: `_start_liveness` is called
-  # for real and the failure is injected by moving the probe's own recorded result.
-  - test_12477_health_honesty.py
   # #8906: the points gate must count the graph the request WRITES. Every pin
   # lives in `tortoise/hosted_api.py` (`_check_org_limit`'s `sdk` threading + the
   # five points doors that omitted it: /v1/points, /v1/objects, /v1/subjects,
@@ -2406,11 +2393,6 @@ surfaces:
   # matrix run. Hermetic apart from the throwaway EMBEDDED engine the SDK-door
   # cases build under `tmp_path`: no docker, no Postgres, no network, no model.
   - test_11892_health_quota.py
-  # #12477: the health-honesty pins — see the `api` row for the dual registration
-  # and WHY both are load-bearing: `tortoise/monitoring.py` matches no source
-  # pattern, so a monitoring-only diff selects `core`, and a `core`-absent row
-  # would run these zero times on that exact change class.
-  - test_12477_health_honesty.py
   # #12444: the tier-NAMING pin — `pro` is the identifier, Builder is the display
   # name (#4336). `core` is the classifying surface because `tortoise/pricing.py`
   # (where `TIER_DISPLAY_NAMES` now lives) is a `core` source. The `tier1` row is
@@ -12428,7 +12410,6 @@ durations:
   test_entity_delete_rebuild.py: 2.2  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 1.7
   test_env_truthy.py: 22.1  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 18.8
   test_health_client_effect.py: 3.4  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 3.5
-  test_12477_health_honesty.py: 2.0  # main-side drift unblock (#12477/#12488) — the #3400/#4348 trap: a file a PR ADDS cannot carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `api`/`core` registrations above are what put it in `fast_pool()`, and `--integrity` is green either way, so only this row records that the file was weighed at all. ⛔ No local timing is quoted beside this weight on purpose — a seconds figure copied next to a shard-layout input re-stales against the run it came from, and only a CI junit reading may move the value; any local reading lives in `WORKTREE-REPORT.md` beside its verbatim command. What the weight covers: the `/health` and `/healthz` honesty pins — `_start_liveness`'s registration of the readers the 9090 listener reads (called for real, with the failure injected by moving the probe's own recorded result), and the `/health` body's verdict over a failing data plane. No docker lane, no model call, and NO EXTERNAL egress — but ⛔ not "no network" as the sibling rows can say: six arms BIND an ephemeral loopback listener (`monitoring.start_health_listener(port=0, bind="127.0.0.1")`) and drive real HTTP GETs at it through `urllib.request.urlopen` (`/healthz`, `:77`), which is the point of the file — the Fly check's own path, executed. "No external egress" therefore rests on the LITERAL `127.0.0.1` host, not on the hermetic guard: `tests/conftest.py` patches only `httpx.HTTPTransport.handle_request` / `httpx.AsyncHTTPTransport.handle_async_request` (`:2393-2394`) and never intercepts `urllib.request`, so `test_hermetic_egress_guard.py::test_loopback_egress_is_not_blocked` documents the loopback rule for the httpx legs rather than governing this file's socket. `tools/ci_timing.py --refresh-durations` replaces this value from the first push-to-main junit sweep that includes the file.
   test_hook_upgrade.py: 9.4  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (6.5s) is a LOWER bound; kept 9.4
   test_issue_4010_sessions_unlimited.py: 2.4  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 2.9
   test_lifecycle_guards.py: 14.6  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 10.3
