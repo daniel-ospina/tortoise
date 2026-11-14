@@ -2202,8 +2202,7 @@ class TestNoDocDeniesABuilderPlanExists:
                 # PREFIX of a word that merely begins with the head (`that issues …`,
                 # `that wasted …`, `that haste …`, `that makeshift …`), the resume test
                 # rejects a legitimate complement, and two correct records are BLOCKED.
-                # Both COMPONENTS are pinned ("half" in this file means one of the two
-                # tests, and these rows are in neither of them): the enumeration by the nine
+                # Both COMPONENTS are pinned: the enumeration by the nine
                 # alternatives' rows BELOW — TEN rows, because `'s`/`’s` is one alternative in
                 # two spellings — and the boundary in the false-positive test
                 # (`… -- that issues with the old wording mean …`, `:1829`). Nothing wider
