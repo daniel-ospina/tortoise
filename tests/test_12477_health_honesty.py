@@ -53,7 +53,8 @@ def _clean(monkeypatch):
     hosted_api._LAST_PLANE_SERVED_AT = None
     hosted_api._LIVENESS_LAST_SERVED_AT = None
     hosted_api._HEALTH_PROBE_START_FAILED = False
-    # a fresh process for every test: the never-produced arm reads uptime
+    # a fresh probe epoch for every test: the never-produced arm reads the
+    # epoch age, not the process's age (#12630)
     hosted_api._HEALTH_PROBE_EPOCH_MONOTONIC = time.monotonic()
     # ⛔ the harness's `asyncio.run(_boot())` CLOSES the loop, so the heartbeat
     # task `_start_liveness` installs is DONE by the time any assertion runs —
@@ -352,7 +353,7 @@ def test_a_fresh_LIVENESS_answer_is_serve_evidence_too():
     assert body["loop_stale"] is True
 
 
-def test_a_process_past_the_bound_with_NO_probe_result_is_a_FAILURE():
+def test_a_probe_epoch_past_the_bound_with_NO_probe_result_is_a_FAILURE():
     """The third never-produced shape: nothing is running, and nothing ran.
 
     The start-failure flag covers a refresher whose `create_task` raised. It does
@@ -369,8 +370,9 @@ def test_a_process_past_the_bound_with_NO_probe_result_is_a_FAILURE():
     hosted_api._HEALTH_PROBE._completed_at = None
     hosted_api._HEALTH_PROBE_START_FAILED = False
     assert hosted_api._liveness_dataplane_verdict()["state"] == "unknown"
-    # the assertion above is the COLD START. Age the process past the bound and
-    # the same state must read as a failure, not as `unknown` for ever.
+    # the assertion above is the COLD START. Age the probe EPOCH past the bound
+    # (the datum is this app instance's probe reset, NOT the process's age —
+    # #12630) and the same state must read as a failure, not as `unknown` forever.
     hosted_api._HEALTH_PROBE_EPOCH_MONOTONIC = time.monotonic() - (
         hosted_api._health_probe_never_produced_bound_s() + 5.0)
     verdict = hosted_api._liveness_dataplane_verdict()
