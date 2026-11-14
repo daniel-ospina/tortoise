@@ -639,6 +639,22 @@ _KNOWN_NARROW_READS: dict[tuple[str, str], tuple[int, str]] = {
             "instrument that can serve a truncated transcript as COMPLETE and count one "
             "`:Source` twice; a `=true` written for legibility would silently report a "
             "census number taken by the wrong instrument"),
+    # #12551 landed this read without its ledger entry, which reds this gate on `main`
+    # (`test (d)`), so it is raised here with its reason rather than widened. The read is
+    # `journal_segments.enabled()` — `os.environ.get(ENV_FLAG, "") == "1"` at module
+    # level, resolved through the module's own string constant — and it gates the three
+    # WRITERS (`seal_active`, `record_disposition`, `adopt_crashed_seal`), which RENAME a
+    # deployment's journal, RECORD a disposition and APPEND a repair row. A `=true`
+    # written for legibility would switch journal sealing on for a deployment that never
+    # opted in, against a graph whose bytes the journal describes — the same fail-open-
+    # on-an-irreversible-write shape #4128 recorded for every entry above. The module's
+    # own docstring makes the asymmetry load-bearing: the flag gates WRITING and never
+    # REFUSING, so widening it cannot be buying honesty on the read side.
+    ("tortoise/journal_segments.py", "TORTOISE_JOURNAL_SEGMENTS"):
+        (1, "OVERRIDES (#4128): #4097's truthy-set parsing — the truthy value enables the "
+            "journal WRITERS (seal/record/adopt: rename, append, repair) on a deployment "
+            "that never opted in; the module deliberately gates writing only, never the "
+            "verification reads, so widening adds a write surface and buys no honesty"),
 }
 
 def _module_string_constants(tree: ast.Module) -> dict[str, str]:

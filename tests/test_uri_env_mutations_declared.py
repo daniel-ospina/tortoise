@@ -244,6 +244,27 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # 3.4k-line file, which the entry 13 lines above refuses to do for its own file.
     "test_published_artifact_canary.py": [
         r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*"docker://:x@localhost:6379/other"'],
+    # #12521 landed `test_10015_organisation_account.py` with two untriaged URI
+    # mutations, which reds this gate on `main` in `test (d)` — the same
+    # "module landed without its entry" shape as #9664 and #12275 above. Both
+    # sites are DELIBERATE_EMBEDDED_LANE, and the delenv IS the point in each:
+    #   :49   the `sdk` fixture. `get_organisation_account()`'s plan gates resolve
+    #         the registry through `quota._make_sdk(namespace="registry")` off the
+    #         AMBIENT env, never the caller's handle — so with an ambient docker
+    #         URI the resolver would read the SHARED server graph while the Team
+    #         row lives in this test's `TORTOISE_DB_PATH` db, and the plan gates
+    #         would answer about a store the assertion does not own (the row reads
+    #         as absent, which is the money-surface fail-open the suite is checking
+    #         for). The delenv plus the `TORTOISE_DB_PATH` setenv is what points the
+    #         resolver at THIS store.
+    #   :257  the split-store case: the test PROVES the refusal when the gates read
+    #         a different store from the one the SDK was opened on, so it must own
+    #         both sides. An ambient URI would make the "gates read a different
+    #         store" an accident of the box instead of the arrangement under test.
+    # Both are fixture-param monkeypatch calls, so pytest auto-restores them (no
+    # lane leak); neither site dials anything.
+    "test_10015_organisation_account.py": [
+        r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     # #9567 capstone: the D11/D12 quota case forces the EMBEDDED lane (delenv
     # the URI, then pin TORTOISE_DB_PATH to a tmp_path db) so the gate's count
     # never rides a shared server graph. The delenv IS the point; the
