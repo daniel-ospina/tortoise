@@ -1557,8 +1557,8 @@ surfaces:
   # three, so a transport-context regression (the flag that decides whether
   # `_get_org_sdk` is the accessor those pins stub) ran them zero times. The same
   # measurement the `test_wait_bound_write_ack.py` row BELOW records (below, not
-  # above: this sentence was copied from the `#12477` note further down, where
-  # that sibling really is above the row it annotates), and why these sit beside
+  # above: this sentence was copied from the `#11892` note later in this list,
+  # where the sibling really is above the row it annotates), and why these sit beside
   # `test_mcp_server.py` rather than under `core` alone.
   - test_12500_query_args_dropped.py
   - test_12455_text_filters_dropped.py

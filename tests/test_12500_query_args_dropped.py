@@ -51,14 +51,14 @@ class _StubSDK:
     """Records what each accessor was asked for; applies no floor and no order.
 
     The structural accessor mirrors the REAL signature — ``paginated_query``
-    takes ``(kind, …, **filters)`` and has no ``min_confidence`` or
-    ``order_by`` — so a test cannot pass by inventing a knobs path the product
-    does not have. ``query_points_by_tag`` takes the tag and nothing else. There
-    is deliberately no ``query`` method: BOTH structural arms read
-    ``paginated_query`` (`mcp_server.py:4572`, `:4599` — the un-paginated path
-    goes through it too, precisely to apply ``limit``), so a ``query`` stub was a
-    call the tool cannot make (measured round 34: zero calls across this file,
-    while the docstring claimed it mirrored a real signature).
+    takes ``(kind, …, **filters)`` and has no ``min_confidence`` or ``order_by``
+    — so a test cannot pass by inventing a knobs path the product does not have.
+    ``query_points_by_tag`` takes the tag and its own ``_record_reads`` flag — no
+    floor, no ordering, no kind. There is deliberately no ``query`` method: BOTH
+    structural arms read ``paginated_query`` (`mcp_server.py:4569`, `:4596` — the
+    un-paginated path goes through it too, precisely to apply ``limit``), so a
+    ``query`` stub was a call the tool cannot make (measured round 34: zero calls
+    across this file, while the docstring claimed it mirrored a real signature).
     """
 
     def __init__(self, n=3):
@@ -1145,8 +1145,9 @@ def test_a_graph_ordering_with_no_signal_is_refused_not_silently_reordered(
 #: "two of the claims" sit inside the spans — three do.)
 #: The POSITIVE behaviour sentences in the same bullets — the ones a route reader
 #: acts on, and the ones this PR spent rounds re-pointing citations FOR. Each was
-#: measured unpinned at round 33: inverted in turn, the whole five-file gate set
-#: stayed green (262 passed, 16 skipped), because nothing else anywhere asserts
+#: measured unpinned — the five at round 33, the two additions at round 34 — by
+#: inverting it in turn: the whole five-file gate set stayed green (262 passed,
+#: 16 skipped), because nothing else anywhere asserts
 #: on `tortoise_query.__doc__` (`grep -rln 'tortoise_query.__doc__' tests/` finds
 #: only this file). They are presence checks, wrap-insensitive, like
 #: `_REFUSAL_CLAIMS` — they cannot re-red a true sentence.
@@ -1154,9 +1155,10 @@ _DOCSTRING_BEHAVIOUR_CLAIMS = (
     # The LIMIT bound on the plain structural list (inverted: "**unbounded**" —
     # measured green at round 34), and the universal ordering the refusal routes
     # send callers TO (inverted: "is not applied to every type" — also measured
-    # green). Both were found in the same bullet as the five above, which is why
-    # the tuple is described as covering THESE SENTENCES and not the bullet: the
-    # next behaviour sentence added there is not automatically held.
+    # green). Both are in the STRUCTURAL bullet, where three of the five entries
+    # below also sit; the other two are in the `tag=` bullet. That is why the
+    # tuple is described as covering THESE SENTENCES and not a bullet or a pair of
+    # them: the next behaviour sentence added anywhere is not automatically held.
     "property-filter query, **bounded to `limit`**",
     '`order_by="relevance"` is applied to every type',
     # which arm applies the floor at all (inverted: "for every type")
