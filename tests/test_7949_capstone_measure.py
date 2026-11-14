@@ -6161,15 +6161,19 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # close survived one instance, in the count that certified the closure.
             ("1418", "| **D6** | **Two distinct connection sets**"),
         ), "extractor_v4_arch"),
-        # ⛔ THE TWO THIS-HEAD NUMBERS THE EARLIER CUTS LEFT UNREAD (#12569 review): D5 states
-        # NINE, not seven — `:1194` ("the frozen literal is at") and `:1418` ("D6 sits at")
-        # are stated in the same sentence, and mutating either alone left 420 GREEN.
+        # ⛔ THE TWO THIS-HEAD NUMBERS TWO EARLIER CUTS LEFT UNREAD (#12569 review), and the
+        # count that hid one of them. D5's row states NINE distinct this-head numbers:
+        # `18396`, `18503`, `10037`, `10064`, `10117`, `1186`, `1194`, `1400`, `1418`. The
+        # counts in the comments above said SEVEN, then EIGHT, and each time the number left
+        # out was green under mutation: `:1418` (in the "Measured at" continuation) and
+        # `:1194` — which is stated one clause EARLIER on the same markdown line, in the
+        # STAMP-bound parenthesis ("`:1186` is the `corpus = {…}` line here; the frozen
+        # literal is at `:1194`"), so a count taken over the continuation sentence alone
+        # misses it even though the row's scoping phrase binds the whole line.
+        # `:1418` is pinned on the row above already; only `:1194` needs its own here.
         ("05-verify.md", "Measured at `6916a6cd89`", (
             ("1194", 'if not frozen.get("sha256"):'),
         ), "capstone_run"),
-        ("05-verify.md", "Measured at `6916a6cd89`", (
-            ("1418", "| **D6** | **Two distinct connection sets**"),
-        ), "extractor_v4_arch"),
         # ⛔ `00-plan.md`'s `_capture_lane` CITE (#12462 review cycle 3, P2): the diff
         # re-pointed it to `:17936` and no row read it — `_BUNDLE_CITE` matches
         # `sdk|edges|extractor_v2` only, so a `hosted_api` number needs its own row. The
