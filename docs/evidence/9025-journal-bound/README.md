@@ -97,8 +97,9 @@ every projection built on it. The pin check is what caught it (recorded in
 `tortoise/journal_segments.py` — read-only discovery, a segment manifest with a
 recorded boundary, a rotation **planner**, and the refusal that makes a
 reconstruction claim honest (`assert_full_reconstruction` raises rather than
-returning a falsy value). Its writer (`seal_active`) is behind
-`TORTOISE_JOURNAL_SEGMENTS` (default OFF), renames rather than deletes, and with
+returning a falsy value). Its writers — `seal_active`, `record_disposition` and
+the crash-repair verb `adopt_crashed_seal` — are behind
+`TORTOISE_JOURNAL_SEGMENTS` (default OFF), rename rather than delete, and with
 the flag off the on-disk layout and the default write path are byte-for-byte
 unchanged. The falsifier is `tests/test_journal_segments_falsifier.py`, which
 removes each guard from the module's own source and shows the lie reachable when

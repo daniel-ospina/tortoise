@@ -19,10 +19,11 @@ reversible and removes no byte:
 * :func:`discover`, :func:`verify`, :func:`reconstruction_scope`,
   :func:`assert_full_reconstruction`, :func:`read_all_segments`,
   :func:`plan_rotation` and :func:`summarise` are **READ-ONLY**.
-* :func:`seal_active` and :func:`record_disposition` are the only writers. They
-  are gated behind :data:`ENV_FLAG` (default OFF), they **rename** and **record**
-  — they delete nothing — and with the flag off the deployment's on-disk layout
-  and the default write path are byte-for-byte what ships today.
+* :func:`seal_active`, :func:`record_disposition` and :func:`adopt_crashed_seal`
+  are the only writers. They are gated behind :data:`ENV_FLAG` (default OFF),
+  they **rename**, **record** and (the repair verb) **append one row** — they
+  delete nothing — and with the flag off the deployment's on-disk layout and the
+  default write path are byte-for-byte what ships today.
 
 ⛔ THE FLAG GATES WRITING, NEVER REFUSING. If ``TORTOISE_JOURNAL_SEGMENTS`` also
 disarmed :func:`verify` and :func:`assert_full_reconstruction`, then switching
@@ -102,6 +103,7 @@ import json
 import logging
 import os
 import re
+import stat
 import threading
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
@@ -135,6 +137,7 @@ SEALED_RE = re.compile(r"^events\.(\d{4,})\.jsonl$")
 Disposition = Literal["present", "archived", "compacted"]
 
 MANIFEST_VERSION = 2       # v2 added the per-segment sha256 (cycle 3)
+_SHA256_RE = re.compile(r"[0-9a-f]{64}")
 #: ⛔ A v1 manifest is REFUSED, not read with the digest check skipped: a missing
 #: digest must not mean "no identity anchor", because that is the hole v2 closes.
 OLD_MANIFEST_VERSIONS: frozenset[int] = frozenset({1})
@@ -244,7 +247,18 @@ class Layout:
 
     @property
     def total_bytes(self) -> int:
-        return sum(s.bytes for s in self.segments)
+        """Bytes ACTUALLY ON DISK. A departed segment's recorded size is not disk.
+
+        Cycle 4: summing every segment made a graph whose only segment was
+        archived report 37 bytes while `du` said 0 — and a rotation threshold
+        coded against the total would never fire once segments started leaving.
+        """
+        return sum(s.bytes for s in self.segments if s.on_disk)
+
+    @property
+    def departed_bytes(self) -> int:
+        """Recorded size of segments whose bytes this deployment no longer holds."""
+        return sum(s.bytes for s in self.segments if not s.on_disk)
 
     @property
     def active(self) -> Segment | None:
@@ -308,28 +322,58 @@ class RotationPlan:
 # --------------------------------------------------------------------------
 
 
-def _digest(path: Path) -> tuple[int, str]:
-    """``(non-empty line count, sha256 of the file)`` in ONE pass.
+def _measure(path: Path, *, lock: bool = False) -> tuple[int, int, str]:
+    """``(bytes, non-empty lines, sha256)`` from ONE read of ONE descriptor.
 
-    Both numbers are anchors and both are needed. Lines catch a record dropped
-    and the bytes padded back; the digest catches a rewrite that preserves BOTH
-    counts — two equal-length sealed segments SWAPPED during a migration, or a
-    same-length in-place substitution — which size and line count cannot see.
-    The manifest already read every byte for the count, so the digest is free.
+    ⛔ ALL THREE ANCHORS MUST COME FROM THE SAME READ. Cycle 4 measured the
+    alternative: `stat()` for the size and a SEPARATE open for the digest let an
+    appender land in between, producing a row that no byte string can satisfy —
+    recorded 74 B with the digest of 113 B's content — after which EVERY read and
+    EVERY writer refused forever, and the module's own repair advice ("restore
+    the segment's bytes") was impossible. The size now comes from the same
+    descriptor the digest was computed over, and a length that disagrees with
+    what was read is a refusal rather than a row.
+
+    ``lock=True`` additionally takes the journal's own append lock
+    (``log._lock_exclusive``, the same key `EventLog.append` uses), so a
+    COMPLIANT appender is refused for the window instead of racing it. A
+    non-compliant writer is still caught by the length re-check.
     """
     digest = hashlib.sha256()
     n = 0
+    total = 0
     with path.open("rb") as fh:
+        key = os.path.realpath(path)
+        if lock:
+            from .log import _lock_exclusive
+            _lock_exclusive(fh.fileno(), key)      # best effort; documented above
+        before = os.fstat(fh.fileno()).st_size
         for chunk in fh:
             if chunk.strip():
                 n += 1
             digest.update(chunk)
-    return n, digest.hexdigest()
+            total += len(chunk)
+        after = os.fstat(fh.fileno()).st_size
+    if not (before == after == total):
+        # The file changed under us. Refusing is the point: a row built from
+        # mixed reads is unsatisfiable, and an unsatisfiable row is unrepairable.
+        raise SegmentModifiedError(
+            f"{path.name} changed while it was being measured ({before} B at "
+            f"open, {total} B read, {after} B at close) — another writer holds "
+            f"it open. Re-run the measurement once it is quiet; a row built "
+            f"from two different reads can never be satisfied.")
+    return total, n, digest.hexdigest()
+
+
+def _digest(path: Path) -> tuple[int, str]:
+    """``(non-empty line count, sha256)`` — see :func:`_measure`."""
+    _, lines, sha = _measure(path)
+    return lines, sha
 
 
 def _count_lines(path: Path) -> int:
     """Non-empty lines in *path*. The journal's unit is the line."""
-    return _digest(path)[0]
+    return _measure(path)[1]
 
 
 def _segment_from_path(path: Path, disposition: Disposition = "present",
@@ -411,11 +455,18 @@ def read_manifest(graph_dir: str | Path) -> dict | None:
                     f"{path} row {row['name']!r} has no integer `{field}` — "
                     f"the size and line count are anchors, so a row cannot "
                     f"omit them (an absent field would disable the check)")
-        if not isinstance(row.get("sha256"), str):
+        # ⛔ not just "is a string": `""` is a string, passed this check, and then
+        # made the anchor's falsy guard skip itself — so the ONE anchor R5b
+        # exists to make un-skippable was skipped by an empty value, and the next
+        # seal rewrote the row's digest FROM DISK, laundering a same-size
+        # substitution permanently (cycle 4, measured). A digest is 64 hex chars
+        # or it is not a digest.
+        sha = row.get("sha256")
+        if not isinstance(sha, str) or not _SHA256_RE.fullmatch(sha):
             raise JournalLayoutError(
-                f"{path} row {row['name']!r} has no `sha256` — the identity "
-                f"anchor is what catches a same-size rewrite, so a row cannot "
-                f"omit it")
+                f"{path} row {row['name']!r} has no valid `sha256` "
+                f"({sha!r}) — the identity anchor is what catches a same-size "
+                f"rewrite, so a row cannot omit it or leave it blank")
         if row.get("disposition", "present") not in ("present", "archived",
                                                     "compacted"):
             raise JournalLayoutError(
@@ -449,6 +500,15 @@ def discover(graph_dir: str | Path) -> Layout:
             if not isinstance(row, dict) or "name" not in row:
                 raise JournalLayoutError(
                     f"{manifest_path(directory)} has a segment row without a name")
+            if row["name"] in declared:
+                # Last-wins is how a `[archived, present]` pair reproduces a
+                # segment the manifest says left: the set collapses, `verify`
+                # cross-checks the surviving row, and `full=True` comes back over
+                # a laundered boundary (cycle 4, measured).
+                raise JournalLayoutError(
+                    f"{manifest_path(directory)} declares {row['name']!r} more "
+                    f"than once — the second row would shadow the first, so a "
+                    f"recorded departure could be overwritten with `present`")
             declared[row["name"]] = row
 
     journalled: dict[str, Path] = {}
@@ -643,7 +703,9 @@ def verify(layout: Layout) -> None:
         # (the replay order then inverts with the claim still "full") or a
         # same-length substitution. The digest can, and it costs one pass the
         # manifest already makes.
-        if seg.on_disk and seg.recorded_sha256 \
+        # `is not None`, not truthiness: an empty string must FAIL the anchor,
+        # not skip it (cycle 4).
+        if seg.on_disk and seg.recorded_sha256 is not None \
                 and seg.sha256 != seg.recorded_sha256:
             raise SegmentModifiedError(
                 f"{seg.name} does not hash to what the manifest recorded at seal "
@@ -692,6 +754,22 @@ def verify(layout: Layout) -> None:
         raise SegmentSequenceError(
             f"sealed segment {max(indices):04d} is ahead of the recorded "
             f"boundary ({layout.boundary.through_index:04d})")
+    if layout.boundary is not None and indices \
+            and min(indices) > 0 \
+            and layout.boundary.first_missing != "events.0000.jsonl":
+        # ⛔ ANCHOR 6 — THE ORIGIN. Contiguity is checked from the LOWEST index
+        # present, so deleting `events.0000.jsonl` AND its row left a sequence
+        # that was contiguous, had `first_missing=None`, and certified
+        # `full=True, anchored=True` (cycle 4, measured). Nothing recorded that
+        # the journal STARTED at zero. A journal whose first segment is not
+        # `events.0000` must have a boundary that says 0000 left.
+        raise SegmentSequenceError(
+            f"the lowest sealed segment in {layout.directory} is "
+            f"{min(indices):04d}, but {MANIFEST_NAME} does not record "
+            f"events.0000.jsonl as the first missing segment — the journal's "
+            f"ORIGIN is unaccounted for, so its earliest records may simply be "
+            f"gone. Record the departure with "
+            f"record_disposition('events.0000.jsonl', ...)")
 
 
 def reconstruction_scope(layout: Layout) -> ReconstructionScope:
@@ -923,10 +1001,23 @@ def _rows(layout: Layout) -> list[dict]:
                      else seg.lines,
                      # ⛔ Keep the digest that was RECORDED at seal time, so a
                      # rewrite of the row does not launder a rewrite of the file.
-                     "sha256": seg.recorded_sha256 or seg.sha256,
+                     # A fallback to the DISK digest here is how a tampered
+                     # segment got re-blessed (cycle 4), so a missing recorded
+                     # digest on a segment we are re-writing is a refusal.
+                     "sha256": _recorded_sha(seg),
                      "disposition": seg.disposition,
                      "recorded_at": seg.recorded_at or _utcnow()})
     return rows
+
+
+def _recorded_sha(seg: Segment) -> str:
+    if seg.recorded_sha256 is not None:
+        return seg.recorded_sha256
+    if seg.on_disk and seg.sealed and seg.sha256 is not None:
+        return seg.sha256                       # first seal of this segment
+    raise JournalLayoutError(
+        f"{seg.name} has no recorded sha256 and is not on disk — refusing to "
+        f"write a row whose identity anchor is missing")
 
 
 def _first_missing(rows: list[dict]) -> str | None:
@@ -1017,9 +1108,12 @@ def seal_active(graph_dir: str | Path) -> Path:
         # the recorded number, so anchor 2 compares the grown file to the grown
         # size and BLESSES the extra record (which then replays before anything
         # written to the new active segment). Taken before the rename, any such
-        # append is a genuine mismatch — which is what residual (c) promises.
-        sealed_bytes = source.stat().st_size
-        sealed_lines, sealed_sha = _digest(source)
+        # append is a genuine mismatch — which is what the stale-append-handle
+        # residual promises.
+        # ⛔ ONE read, one anchor set, under the journal's own append lock — see
+        # `_measure`. This used to be `stat()` + a separate `_digest()`, which a
+        # concurrent appender could split into an unsatisfiable row.
+        sealed_bytes, sealed_lines, sealed_sha = _measure(source, lock=True)
 
         source.rename(target)
         # ANCHOR 3: the live tail exists from the moment the journal is sealed.
@@ -1132,8 +1226,13 @@ def adopt_crashed_seal(graph_dir: str | Path) -> Path:
                 f"{directory} has no {MANIFEST_NAME} — a crash between a rename "
                 f"and a manifest write needs a manifest to have been mid-write")
         recorded = {row["name"] for row in payload["segments"]}
-        on_disk_sealed = sorted(p.name for p in directory.iterdir()
-                                if SEALED_RE.match(p.name) and p.is_file())
+        # ⛔ `lstat`/`S_ISREG`, not `is_file()`: `is_file()` FOLLOWS symlinks, so
+        # `events.0001.jsonl -> ../other-graph/events.0000.jsonl` was adopted and
+        # certified `full=True` over ANOTHER graph's bytes (cycle 4, measured).
+        # Where a segment's name points is part of what the manifest describes.
+        on_disk_sealed = sorted(
+            p.name for p in directory.iterdir()
+            if SEALED_RE.match(p.name) and stat.S_ISREG(p.lstat().st_mode))
         unrecorded = [n for n in on_disk_sealed if n not in recorded]
         if len(unrecorded) != 1:
             raise SegmentSequenceError(
@@ -1150,31 +1249,96 @@ def adopt_crashed_seal(graph_dir: str | Path) -> Path:
                 f"{name} is index {index} but the manifest's highest is "
                 f"{highest} — the missing segment is behind the boundary, which "
                 f"is a LOSS, not a crash, and cannot be adopted")
-        if (directory / ACTIVE_NAME).exists():
-            raise SegmentSequenceError(
-                f"{directory} still holds {ACTIVE_NAME} — `seal_active` creates "
-                f"the live tail immediately after the rename, so its presence "
-                f"means the writer got past the step this repairs")
+        # ⛔ TWO windows, and they differ by the TAIL'S SIZE. `seal_active` is
+        # rename → touch(tail) → write(manifest). A crash before the touch leaves
+        # NO tail; a crash after it leaves an EMPTY one. Treating any tail as
+        # "past the repair" (cycle 4) meant the second window — the one a failing
+        # `_write_manifest` actually produces — had no repair verb at all. A tail
+        # with BYTES is a different thing: an appender got in.
+        tail = directory / ACTIVE_NAME
+        if os.path.lexists(tail):
+            if tail.is_symlink():
+                raise SegmentSequenceError(
+                    f"{tail} is a SYMLINK — refusing to adopt around it, because "
+                    f"settling the tail would create a file wherever it points")
+            if tail.stat().st_size:
+                raise SegmentSequenceError(
+                    f"{directory} holds a NON-EMPTY {ACTIVE_NAME} — records were "
+                    f"appended after the seal, so this is a live journal, not "
+                    f"the crash signature")
 
         path = directory / name
-        lines, sha = _digest(path)
+        # ⛔ One read, all three anchors (see `_measure`), and the bytes must be
+        # REPLAYABLE: a segment of garbage adopted as `present` would pass
+        # `verify` and certify `full=True` while `read_all_segments` refuses the
+        # same layout (cycle 4, measured).
+        sealed_bytes, lines, sha = _measure(path)
+        _assert_adoptable_records(path)
         payload["segments"].append({
-            "name": name, "index": index, "bytes": path.stat().st_size,
+            "name": name, "index": index, "bytes": sealed_bytes,
             "lines": lines, "sha256": sha, "disposition": "present",
             "recorded_at": _utcnow()})
+        for row in payload["segments"]:
+            if "index" not in row:
+                raise JournalLayoutError(
+                    f"{MANIFEST_NAME} row {row.get('name')!r} has no `index` — "
+                    f"refusing to guess where it sits in the sequence")
+            payload["boundary"].setdefault("through_index", 0)
         payload["segments"].sort(key=lambda r: r["index"] if r["index"] is not None
                                  else -1)
         payload["boundary"]["through_index"] = max(
             int(payload["boundary"]["through_index"]), index)
         payload["boundary"]["first_missing"] = _first_missing(payload["segments"])
-        written = _write_manifest(directory, payload)
-        # ⛔ The interrupted operation's LAST step, restored: `seal_active`
-        # creates the empty tail immediately after the rename, so a journal
-        # repaired without it would still fail anchor 3 — the repair has to leave
-        # the directory in the state the seal was trying to reach, or it is not a
-        # repair. This creates an EMPTY file; no journal byte changes.
-        (directory / ACTIVE_NAME).touch(exist_ok=True)
-        return written
+        # ⛔ EVERY REFUSAL BEFORE EVERY WRITE. Cycle 4 measured the alternative:
+        # the row was appended and the manifest written, and THEN the tail
+        # settlement refused — leaving a half-repaired directory whose signature
+        # (one unrecorded segment) was gone, so the repair could not be retried.
+        # The tail is settled first: it can only refuse, and a crash after it is
+        # the window this verb already handles.
+        _open_tail_exclusively(directory / ACTIVE_NAME)
+        return _write_manifest(directory, payload)
+
+
+def _assert_adoptable_records(path: Path) -> None:
+    """Refuse a segment whose records do not replay (a TORN tail stays fine).
+
+    `log.py` distinguishes a trailing fragment — never a complete record, the
+    SIGKILL-during-append signature — from a skipped MID-FILE line, which is a
+    record the journal held and lost. Adoption must make the same distinction:
+    admitting the second certifies a full claim over a layout its own reader
+    refuses.
+    """
+    data = path.read_bytes()
+    body = data if data.endswith(b"\n") else data[: data.rfind(b"\n") + 1]
+    for number, raw in enumerate(body.split(b"\n"), start=1):
+        if not raw.strip():
+            continue
+        try:
+            json.loads(raw)
+        except ValueError as exc:
+            raise JournalLayoutError(
+                f"{path.name} line {number} is not a record ({exc}) — refusing "
+                f"to adopt a segment whose bytes cannot be replayed") from exc
+
+
+def _open_tail_exclusively(path: Path) -> None:
+    """Create the empty tail, REFUSING a symlink at that name.
+
+    `Path.touch()` follows a symlink and would create the file wherever it
+    points — outside the graph directory — while this module promises to write
+    nothing but the manifest (cycle 4, measured with a dangling link).
+    """
+    try:
+        os.close(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644))
+    except FileExistsError:
+        if path.is_symlink():
+            raise SegmentSequenceError(
+                f"{path} is a symlink — refusing to treat it as the live tail"
+            ) from None
+        if path.stat().st_size:
+            raise SegmentSequenceError(
+                f"{path} is not empty — refusing to settle it as a fresh tail"
+            ) from None
 
 
 def summarise(graph_dir: str | Path) -> dict:
@@ -1191,6 +1355,7 @@ def summarise(graph_dir: str | Path) -> dict:
             "directory": str(graph_dir),
             "manifest_present": manifest_path(graph_dir).exists(),
             "total_bytes": None,
+            "departed_bytes": None,
             "segments": [],
             "verified": False,
             "full_reconstruction": False,
@@ -1205,6 +1370,7 @@ def summarise(graph_dir: str | Path) -> dict:
         "directory": str(layout.directory),
         "manifest_present": layout.manifest_present,
         "total_bytes": layout.total_bytes,
+        "departed_bytes": layout.departed_bytes,
         "segments": [
             {"name": s.name, "index": s.index, "bytes": s.bytes,
              "lines": s.lines, "disposition": s.disposition,

@@ -871,19 +871,24 @@ def test_the_writer_refuses_an_index_its_own_verifier_would_reject(
     after which every read and every write refused — the writer created the state
     anchor 4 exists to detect, and the repair was renaming ten thousand files.
     """
-    (graph_dir / "events.9999.jsonl").write_bytes(b'{"type":"X"}\n')
-    (graph_dir / ACTIVE_NAME).write_bytes(b'{"type":"Y"}\n')
-    write_manifest(graph_dir, ["events.9999.jsonl"])
-
     monkeypatch.setenv(ENV_FLAG, "1")
+    # A real sequence at the ceiling: `MAX_SEALABLE_INDEX` is lowered rather than
+    # materialising 10,000 files, so the guard fires on a layout that also passes
+    # every other anchor (an origin check would otherwise mask it).
+    monkeypatch.setattr(journal_segments, "MAX_SEALABLE_INDEX", 2)
+    for i in range(3):
+        write_journal(graph_dir, records(1, f"s{i}"))
+        seal_active(graph_dir)
+    write_journal(graph_dir, records(1, "live"))
+
     # ⛔ The WRITER, not its private helper: a guard reachable only through
     # `_next_index` would leave `seal_active` free to emit the broken name.
     with pytest.raises(SegmentSequenceError) as exc:
         seal_active(graph_dir)
     assert "5-digit name sorts BEFORE a 4-digit one" in str(exc.value)
     # …and nothing was renamed on the way to the refusal
-    assert (graph_dir / "events.9999.jsonl").exists()
-    assert not (graph_dir / "events.10000.jsonl").exists()
+    assert (graph_dir / ACTIVE_NAME).exists()
+    assert not (graph_dir / "events.0003.jsonl").exists()
 
 
 def test_summarise_reports_a_MISTYPED_manifest_instead_of_raising(graph_dir: Path,
@@ -1136,7 +1141,7 @@ def test_a_DELETED_live_tail_is_caught_even_if_a_row_claims_it_is_archived(
 
     payload = read_manifest(graph_dir)
     payload["segments"].append({"name": ACTIVE_NAME, "index": None, "bytes": 10,
-                                "lines": 1, "sha256": "z" * 64,
+                                "lines": 1, "sha256": "0" * 64,
                                 "disposition": "archived",
                                 "recorded_at": "2026-11-13T00:00:00+00:00"})
     payload["boundary"]["first_missing"] = ACTIVE_NAME
@@ -1149,44 +1154,57 @@ def test_a_DELETED_live_tail_is_caught_even_if_a_row_claims_it_is_archived(
     assert "the live tail is missing" in str(exc.value)
 
 
-def test_seal_records_the_size_BEFORE_the_rename(
+def test_a_file_that_changes_under_the_measurement_is_REFUSED(
         graph_dir: Path, monkeypatch: pytest.MonkeyPatch):
-    """An append in the rename→stat window must be a mismatch, not blessed.
+    """⛔ The size and the digest MUST come from one read (cycle 4, P1-A).
 
-    Cycle-3 (P2-4): the recorded size was read AFTER the rename, so a record that
-    landed in that window was folded into the number anchor 2 compares against.
+    Taking `stat()` and then a separate open for the digest let an appender land
+    in between, producing a row NO BYTE STRING COULD SATISFY (74 B recorded with
+    the digest of 113 B's content). Every read and every writer then refused
+    forever, and the module's own advice — "restore the segment's bytes" — was
+    impossible. `_measure` now takes all three anchors from one descriptor and
+    refuses a length that changed under it.
     """
     monkeypatch.setenv(ENV_FLAG, "1")
     write_journal(graph_dir, records(2, "a"))
-    before = (graph_dir / ACTIVE_NAME).stat().st_size
 
-    real_digest = journal_segments._digest
-
+    real_fstat = os.fstat
     calls = {"n": 0}
 
-    def growing_digest(path: Path):
-        """Simulate a writer appending inside the seal's stat→rename window.
+    def growing_fstat(fd):
+        """Report a larger size at close, as a concurrent append would."""
+        st = real_fstat(fd)
+        calls["n"] += 1
+        if calls["n"] == 2:                      # the re-check, not the open
+            return os.stat_result((*tuple(st)[:6], st.st_size + 39, *tuple(st)[7:]))
+        return st
 
-        `seal_active` calls this ONCE for the active segment after taking its
-        size, so the append below lands after the measurement and before the
-        rename — exactly the window cycle-3 found.
-        """
-        lines, sha = real_digest(path)
-        if path.name == ACTIVE_NAME:
-            calls["n"] += 1
-            if calls["n"] == 2:                  # call 1 is `discover`; this is the seal
-                with path.open("ab") as fh:
-                    fh.write(b'{"type":"PointRevised","id":"late"}\n')
-        return lines, sha
+    monkeypatch.setattr(journal_segments.os, "fstat", growing_fstat)
+    with pytest.raises(SegmentModifiedError) as exc:
+        seal_active(graph_dir)
+    monkeypatch.undo()
+    assert "changed while it was being measured" in str(exc.value)
+    # the refusal happened BEFORE the rename: the journal is still one file
+    assert (graph_dir / ACTIVE_NAME).exists()
+    assert not (graph_dir / "events.0000.jsonl").exists()
 
-    monkeypatch.setattr(journal_segments, "_digest", growing_digest)
+
+def test_every_sealed_row_is_SATISFIABLE_and_verify_accepts_it(
+        graph_dir: Path, monkeypatch: pytest.MonkeyPatch):
+    """The three anchors on a row must describe ONE byte string.
+
+    Cycle 4's impossibility check, as a test: after a seal, the recorded
+    (bytes, lines, sha256) is exactly what `_measure` reports for the file, so
+    `verify` passes and the row is restorable.
+    """
+    monkeypatch.setenv(ENV_FLAG, "1")
+    write_journal(graph_dir, records(3, "a"))
     seal_active(graph_dir)
-    monkeypatch.setattr(journal_segments, "_digest", real_digest)
 
     row = read_manifest(graph_dir)["segments"][0]
-    assert row["bytes"] == before                    # the size at SEAL time
-    with pytest.raises(SegmentModifiedError):
-        verify(discover(graph_dir))                  # the extra record is caught
+    size, lines, sha = journal_segments._measure(graph_dir / row["name"])
+    assert (row["bytes"], row["lines"], row["sha256"]) == (size, lines, sha)
+    verify(discover(graph_dir))
 
 
 def test_the_lock_closes_its_descriptor_exactly_once(graph_dir: Path,
@@ -1317,7 +1335,7 @@ def test_adopt_refuses_when_the_live_tail_is_still_there(graph_dir: Path,
 
     with pytest.raises(SegmentSequenceError) as exc:
         adopt_crashed_seal(graph_dir)
-    assert "still holds" in str(exc.value)
+    assert "NON-EMPTY" in str(exc.value)
 
 
 def test_adopt_is_gated_on_the_flag(graph_dir: Path):
@@ -1325,3 +1343,189 @@ def test_adopt_is_gated_on_the_flag(graph_dir: Path):
     write_journal(graph_dir, records(1))
     with pytest.raises(SegmentationDisabled):
         adopt_crashed_seal(graph_dir)
+
+
+# ---------------------------------------------------------------------------
+# cycle-4 findings
+# ---------------------------------------------------------------------------
+
+
+def test_an_EMPTY_recorded_digest_cannot_switch_the_anchor_off(graph_dir: Path):
+    """`""` is a string, so it passed the field check and skipped the guard.
+
+    Cycle-4's P1-B, measured: a row with `sha256: ""` made the falsy guard skip,
+    so a same-size in-place substitution certified `full=True, anchored=True` —
+    and the next seal then wrote the ON-DISK digest into the row, laundering the
+    tamper permanently. A digest is 64 hex characters or it is not a digest.
+    """
+    write_journal(graph_dir, records(2, "a"))
+    (graph_dir / "events.0000.jsonl").write_bytes(
+        (graph_dir / ACTIVE_NAME).read_bytes())
+    (graph_dir / ACTIVE_NAME).unlink()
+    write_manifest(graph_dir, ["events.0000.jsonl"])
+    segment = graph_dir / "events.0000.jsonl"
+    segment.write_bytes(segment.read_bytes().replace(b'"a0"', b'"z0"'))
+
+    raw = json.loads((graph_dir / MANIFEST_NAME).read_text(encoding="utf-8"))
+    for empty in ("", "0" * 63, "Z" * 64, "nothex"):
+        payload = json.loads(json.dumps(raw))       # a fresh copy per case
+        payload["segments"][0]["sha256"] = empty
+        (graph_dir / MANIFEST_NAME).write_text(json.dumps(payload), encoding="utf-8")
+        with pytest.raises(JournalLayoutError) as exc:
+            discover(graph_dir)
+        assert "no valid `sha256`" in str(exc.value)
+
+
+def test_the_ORIGIN_of_the_sequence_is_anchored(graph_dir: Path):
+    """Deleting 0000 AND its row used to certify a complete journal.
+
+    Cycle-4 (P2-E4), measured: contiguity is checked from the LOWEST index
+    present, so indices [1,2,…] were contiguous, `first_missing=None`, and the
+    claim was `full=True, anchored=True`. ANCHOR 6: the lowest sealed index must
+    be 0, unless the boundary records that 0000 left.
+    """
+    pytest_mp = pytest.MonkeyPatch()
+    pytest_mp.setenv(ENV_FLAG, "1")
+    try:
+        for i in range(2):
+            write_journal(graph_dir, records(1, f"s{i}"))
+            seal_active(graph_dir)
+    finally:
+        pytest_mp.undo()
+    write_journal(graph_dir, records(1, "live"))
+    payload = json.loads((graph_dir / MANIFEST_NAME).read_text(encoding="utf-8"))
+    (graph_dir / "events.0000.jsonl").unlink()
+    payload["segments"] = [r for r in payload["segments"]
+                           if r["name"] != "events.0000.jsonl"]
+    (graph_dir / MANIFEST_NAME).write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(SegmentSequenceError) as exc:
+        verify(discover(graph_dir))
+    assert "ORIGIN is unaccounted for" in str(exc.value)
+
+    # …and the module's OWN way of recording it — keep the row, mark it archived
+    # (a boundary set without a row is refused as a disagreement, which is the
+    # right answer: the manifest must say WHERE the bytes went, not just that
+    # they are gone)
+    payload["segments"].append({
+        "name": "events.0000.jsonl", "index": 0, "bytes": 1, "lines": 1,
+        "sha256": "0" * 64, "disposition": "archived",
+        "recorded_at": "2026-11-13T00:00:00+00:00"})
+    payload["boundary"]["first_missing"] = "events.0000.jsonl"
+    (graph_dir / MANIFEST_NAME).write_text(json.dumps(payload), encoding="utf-8")
+    scope = reconstruction_scope(discover(graph_dir))
+    assert scope.full is False
+    assert scope.first_missing == "events.0000.jsonl"
+
+
+def test_a_DUPLICATE_manifest_row_cannot_shadow_a_recorded_departure(
+        graph_dir: Path):
+    """`[archived, present]` for one name laundered the boundary.
+
+    Cycle-4 (P2-E1), measured: last-wins made the set collapse onto `present`,
+    `verify` cross-checked the survivor, and `full=True` came back over a
+    segment the manifest also recorded as archived.
+    """
+    write_journal(graph_dir, records(1))
+    write_manifest(graph_dir, ["events.0000.jsonl"],
+                   {"events.0000.jsonl": "archived"})
+    payload = read_manifest(graph_dir)
+    duplicate = dict(payload["segments"][0])
+    duplicate["disposition"] = "present"
+    payload["segments"].append(duplicate)
+    (graph_dir / MANIFEST_NAME).write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(JournalLayoutError) as exc:
+        discover(graph_dir)
+    assert "more than once" in str(exc.value)
+
+
+def test_total_bytes_is_DISK_and_departed_bytes_is_its_own_key(
+        graph_dir: Path):
+    """An archived segment's recorded size is not disk usage.
+
+    Cycle-4 (P2-H), measured: the only-segment-archived graph reported 37 bytes
+    while the directory held 0, and a threshold coded on the total would never
+    fire again.
+    """
+    write_journal(graph_dir, records(1))
+    (graph_dir / "events.0000.jsonl").write_bytes(
+        (graph_dir / ACTIVE_NAME).read_bytes())
+    (graph_dir / ACTIVE_NAME).unlink()
+    (graph_dir / ACTIVE_NAME).touch()
+    write_manifest(graph_dir, ["events.0000.jsonl"],
+                   {"events.0000.jsonl": "archived"})
+    (graph_dir / "events.0000.jsonl").unlink()
+
+    report = summarise(graph_dir)
+    assert report["total_bytes"] == 0
+    assert report["departed_bytes"] > 0
+    assert sum(p.stat().st_size for p in graph_dir.glob("*.jsonl")) == 0
+
+
+def test_adopt_repairs_the_window_AFTER_the_tail_was_created(
+        graph_dir: Path, monkeypatch: pytest.MonkeyPatch):
+    """`seal_active` is rename → touch(tail) → write(manifest): TWO crash windows.
+
+    Cycle-4 (P2-C): the second one — the tail exists and is EMPTY, the manifest
+    was never written, which is exactly what a failing `_write_manifest` produces
+    — was refused by `adopt` ("the writer got past the step this repairs"), so
+    no verb repaired it and the directory stayed unreadable.
+    """
+    monkeypatch.setenv(ENV_FLAG, "1")
+    write_journal(graph_dir, records(2, "a"))
+    seal_active(graph_dir)
+    (graph_dir / ACTIVE_NAME).write_bytes(b'{"type":"PointRevised","id":"b"}\n')
+    (graph_dir / ACTIVE_NAME).rename(graph_dir / "events.0001.jsonl")
+    (graph_dir / ACTIVE_NAME).touch()          # the seal got this far, then died
+
+    with pytest.raises(SegmentSequenceError):
+        verify(discover(graph_dir))
+    adopt_crashed_seal(graph_dir)
+    verify(discover(graph_dir))
+    assert summarise(graph_dir)["full_reconstruction"] is True
+
+
+def test_adopt_refuses_a_SEGMENT_THAT_DOES_NOT_REPLAY(graph_dir: Path,
+                                                      monkeypatch):
+    """Adopting garbage would certify `full` over a layout its own reader refuses."""
+    monkeypatch.setenv(ENV_FLAG, "1")
+    write_journal(graph_dir, records(1, "a"))
+    seal_active(graph_dir)
+    (graph_dir / ACTIVE_NAME).write_bytes(
+        b'{"type":"PointRevised","id":"b"}\nnot json at all\n')
+    (graph_dir / ACTIVE_NAME).rename(graph_dir / "events.0001.jsonl")
+    (graph_dir / ACTIVE_NAME).touch()
+
+    with pytest.raises(JournalLayoutError) as exc:
+        adopt_crashed_seal(graph_dir)
+    assert "cannot be replayed" in str(exc.value)
+
+
+def test_adopt_refuses_a_SYMLINKED_segment_and_a_SYMLINKED_tail(
+        graph_dir: Path, monkeypatch, tmp_path: Path):
+    """`is_file()`/`exists()` follow links; adoption must not.
+
+    Cycle-4 (P2-D), measured: `events.0001.jsonl -> ../other-graph/…` was adopted
+    and certified over ANOTHER graph's bytes, and a dangling `events.jsonl` link
+    made adoption create a file outside the directory.
+    """
+    monkeypatch.setenv(ENV_FLAG, "1")
+    write_journal(graph_dir, records(1, "a"))
+    seal_active(graph_dir)
+
+    outside = tmp_path / "outside.txt"
+    (graph_dir / "events.0001.jsonl").symlink_to(outside)   # dangling
+    with pytest.raises(SegmentSequenceError) as exc:
+        adopt_crashed_seal(graph_dir)
+    assert "crash signature" in str(exc.value)
+    assert not outside.exists()          # nothing was created through the link
+
+    (graph_dir / "events.0001.jsonl").unlink()
+    (graph_dir / "events.0001.jsonl").write_bytes(b'{"type":"PointRevised","id":"c"}\n')
+    (graph_dir / ACTIVE_NAME).unlink()
+    (graph_dir / ACTIVE_NAME).symlink_to(outside)
+    with pytest.raises(SegmentSequenceError) as exc:
+        adopt_crashed_seal(graph_dir)
+    assert "SYMLINK" in str(exc.value)
+    assert not outside.exists()

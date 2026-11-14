@@ -119,7 +119,7 @@ MUTANTS = (
         # segments can be SWAPPED — size and line count both survive, so nothing
         # else sees it, and the replay order inverts with the claim still "full".
         name="recorded-identity-anchor",
-        needle=("        if seg.on_disk and seg.recorded_sha256 \\"
+        needle=("        if seg.on_disk and seg.recorded_sha256 is not None \\"
                 "\n"
                 "                and seg.sha256 != seg.recorded_sha256:"),
         replacement="""        if False:  # MUTANT: a same-size rewrite is accepted""",
@@ -173,8 +173,18 @@ MUTANTS = (
         # The crash signature's third limb: `seal_active` creates the tail right
         # after the rename, so a present tail means this is NOT that crash.
         name="adopt-tail-must-be-absent",
-        needle="""        if (directory / ACTIVE_NAME).exists():""",
+        needle="""        if os.path.lexists(tail):""",
         replacement="""        if False:  # MUTANT: any unrecorded sealed segment is adopted""",
+        kills="test_adopt_refuses_when_the_live_tail_is_still_there",
+    ),
+    Mutant(
+        # The second limb of the same window: `_open_tail_exclusively` refuses to
+        # settle a tail that already has bytes. Removing it is only dangerous
+        # together with the check above — and that layering is asserted in the
+        # test rather than assumed.
+        name="tail-settle-must-be-empty",
+        needle="""        if path.stat().st_size:""",
+        replacement="""        if False:  # MUTANT: a live tail is settled as a fresh one""",
         kills="test_adopt_refuses_when_the_live_tail_is_still_there",
     ),
     Mutant(
@@ -612,7 +622,7 @@ def test_mutant_active_not_on_disk_reads_a_deleted_tail_as_present(
     _journal(graph, real, ["tail"])
     payload = json.loads((graph / "journal-manifest.json").read_text())
     payload["segments"].append({"name": "events.jsonl", "index": None,
-                               "bytes": 10, "lines": 1, "sha256": "z" * 64,
+                               "bytes": 10, "lines": 1, "sha256": "0" * 64,
                                "disposition": "archived",
                                "recorded_at": "2026-11-13T00:00:00+00:00"})
     payload["boundary"]["first_missing"] = "events.jsonl"
@@ -705,5 +715,58 @@ def test_mutant_adopt_tail_check_adopts_a_segment_mid_seal(
     with pytest.raises(real.SegmentSequenceError):
         real.adopt_crashed_seal(graph)
 
-    mutant = load_mutant(tmp_path, _by_name("adopt-tail-must-be-absent"))
+    # one guard removed: the tail SETTLEMENT still refuses a non-empty file
+    alone = load_mutant(tmp_path, _by_name("adopt-tail-must-be-absent"))
+    with pytest.raises(alone.SegmentSequenceError):
+        alone.adopt_crashed_seal(graph)
+
+    # BOTH removed: the live journal is adopted as a finished seal
+    mutant = load_mutant(tmp_path, (_by_name("adopt-tail-must-be-absent"),
+                                    _by_name("tail-settle-must-be-empty")))
     mutant.adopt_crashed_seal(graph)                     # ⛔ adopted mid-seal
+
+
+def test_mutant_unplaceable_jsonl_is_silently_ignored(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Kills ``test_ANCHOR1_an_unplaceable_jsonl_is_REFUSED_not_ignored``.
+
+    Was the one mutant no test loaded (cycle 4). `rebuild_all` replays EVERY
+    `*.jsonl`, so a name this module cannot place is replayed at a position
+    nothing described — and with the check removed `discover` returns a clean
+    layout over a journal whose replay folds a file of unknown origin.
+    """
+    monkeypatch.setenv(real.ENV_FLAG, "1")
+    graph = tmp_path / "graph"
+    graph.mkdir()
+    _journal(graph, real, ["a0"])
+    (graph / "stray.jsonl").write_bytes(b'{"type":"PointRevised","id":"ghost"}\n')
+
+    with pytest.raises(real.SegmentSequenceError) as exc:
+        real.discover(graph)
+    assert "stray.jsonl" in str(exc.value)
+
+    mutant = load_mutant(tmp_path, _by_name("unplaceable-jsonl"))
+    layout = mutant.discover(graph)                       # ⛔ no refusal
+    names = [s.name for s in layout.segments]
+    assert "stray.jsonl" not in names                     # …and it is INVISIBLE
+    # ⛔ the claim covers a set the REPLAY does not: `rebuild_all` folds every
+    # `*.jsonl` by NAME, and `stray.jsonl` is one of them
+    replayed = sorted(p.name for p in graph.iterdir()
+                      if p.name.endswith(".jsonl"))
+    assert "stray.jsonl" in replayed and "stray.jsonl" not in names
+    assert layout.total_bytes < sum(p.stat().st_size for p in graph.iterdir()
+                                    if p.name.endswith(".jsonl"))
+
+
+def test_every_mutant_is_LOADED_by_some_test():
+    """A mutant nothing loads is a falsifier entry that proves nothing.
+
+    Cycle 4 (P2-G): `unplaceable-jsonl` was matched only as a SUBSTRING by the
+    needle test, so the file claimed a kill it never performed.
+    """
+    source = Path(__file__).read_text(encoding="utf-8")
+    dead = [m.name for m in MUTANTS
+            if f'_by_name("{m.name}")' not in source]
+    assert dead == [], (
+        f"mutants no test loads: {dead} — a mutant that is never loaded is a "
+        f"claim, not a check")
