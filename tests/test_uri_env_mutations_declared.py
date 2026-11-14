@@ -1089,6 +1089,18 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
         # FILE that supplied it, and the "cannot be loaded at all" wording this
         # test exists to REFUTE stays out of the report.
         r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
+    # #12597: `test_install_and_run_strips_ambient_tortoise_env` sets a docker://
+    # URI as POISON INPUT — the assertion is that `install_and_run` STRIPS every
+    # ambient `TORTOISE_*`/`FALKORDB_*` key (plus `PYTHONPATH`/`VIRTUAL_ENV`) before
+    # the child runs, so the canary measures the DEFAULT path a new user gets. No
+    # lane is forced and nothing is dialled: the runner is the stub `_Runner`, and
+    # if the strip ever regressed the test REDS on its own assertion rather than
+    # passing green on the wrong lane — so this is not the #942 vacuity vector a
+    # docker-half test silently constructing embedded would be. Declared here
+    # because the module landed (#12422) without its entry, which reds this gate
+    # on `main` — the same "module landed without its entry" shape as #9664 above.
+    "test_published_artifact_canary.py": [
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
 }
 
 # Carve-out TEST-MODULE stems (Task 5 wires these into TEST_NO_REDIRECT_STEMS;

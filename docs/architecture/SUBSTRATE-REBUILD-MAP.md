@@ -274,11 +274,11 @@ it ("at `4f68a2aa7`"). Without that sentence the conventions look like one, and 
 reader who re-derives the stale half concludes the live half is stale too.
 
 ⚠️ **The claim "`:Document` is not minted" is deliberately NOT regex-checked**,
-and the reason is measured: `:Document` occurs on **71** lines across **22**
-files under `tortoise/` (`git grep -n ':Document' -- tortoise/` → 71 lines,
+and the reason is measured: `:Document` occurs on **72** lines across **22**
+files under `tortoise/` (`git grep -n ':Document' -- tortoise/` → 72 lines,
 `git grep -l ':Document' -- tortoise/` → 22 files — the file count is not the line count).
 It was **55** across **17** when this was first measured at `4f68a2aa7`, and
-six moves have since been made, one per workstream: the #10976
+seven moves have since been made, one per workstream: the #10976
 census's own note on why node labels do not partition the node set
 (`cache_eviction.py:956`, which is also one of those that lifted the file
 count, being a new file), #8447's ingest door (`tortoise/ingest.py`, the
@@ -301,7 +301,12 @@ docstring, and `_entity_label`'s record of why the local copy of the canonical
 map had to go). That move is the same kind as the five before it — prose that
 names the retired label in order to explain a rule about it — and it is the first
 one whose point is a WIDENING rather than a retirement.
-All six are the point rather than an
+#12434's served-page note in `tortoise/mcp_server.py` is the seventh: the
+description of what `limit` does has to say that a page of slices carries no
+total, and says it by naming the retired label (`D10 retires :Document`), one
+added prose line in a file the population already reached — the same shape as
+#11682's one-line move.
+All seven are the point rather than an
 accident: this population grows for good reasons, so the figure tracks the tree
 and not a past commit.
 `tests/test_substrate_map.py` re-derives both numbers over the **same**

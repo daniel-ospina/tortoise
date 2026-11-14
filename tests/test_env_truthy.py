@@ -572,6 +572,13 @@ _KNOWN_NARROW_READS: dict[tuple[str, str], tuple[int, str]] = {
         (1, "OVERRIDES (#4128): #4097's truthy-set parsing — the truthy value replaces a "
             "hard `sys.exit(1)` on a missing DB target with a silently EMPTY embedded "
             "graph, so widening turns a loud misconfiguration into a wrong-result state"),
+    ("tortoise/config.py", "TORTOISE_ALLOW_EMBEDDED"):
+        (1, "OVERRIDES (#4128): #4097's truthy-set parsing — this read MIRRORS "
+            "`tortoise/mcp_server.py`'s embedded hatch so the CLI report names the rung the "
+            "daemon will actually take. That site is narrow, so a truthy value here would "
+            "report `embedded-allowed` for a daemon that instead exits 1 with NO target — "
+            "the report describing a resolver that does not run, which is the divergence "
+            "#12428 wrote this function to remove"),
     ("tortoise/projection/__init__.py", "TORTOISE_ALLOW_NONSTANDARD_PATH"):
         (2, "OVERRIDES (#4128): #4097's truthy-set parsing — this read admits a "
             "non-canonical/`~` DB target, which mints a per-directory embedded server "
