@@ -25,11 +25,12 @@ database on ``localhost:6379``.
 from __future__ import annotations
 
 import inspect
+from unittest import mock
 
 import pytest
 
 from tortoise.exceptions import ControlPlaneError
-from tortoise.quota import QuotaCheckError, encode_plan_block
+from tortoise.quota import OrgNotFoundError, QuotaCheckError, encode_plan_block
 from tortoise.record_writer import use_record_tenant
 from tortoise.sdk import TortoiseSDK
 
@@ -330,3 +331,64 @@ class TestTenancy:
         with use_record_tenant(a["id"], "g-a"):
             reply = sdk.get_organisation_account()
         assert reply["org_id"] == a["id"]
+
+    def test_an_absent_account_creates_no_control_plane_graph(self, sdk, monkeypatch):
+        """The `OrgNotFoundError` arm must not MATERIALISE the registry it probes.
+
+        The arm asks the caller's own control plane whether the account exists —
+        `self.org_get` — and `org_get` resolves this handle's registry
+        (`_get_registry` -> `_ensure_registry_indexes`' CREATE INDEX set), which
+        creates `{ns}_control_plane` on a store that has no graph by that name.
+        In SUPABASE mode that is not a cosmetic leak: the registry is DELETED by
+        design (the #669 flip — see `quota.resolve_org_limits`' own docstring),
+        so a read of an account with no row would resurrect the graph the flip
+        removed, from the money surface, in a method whose docstring promises
+        "Read-only: nothing here clears, refills, prunes or overrides a cap".
+        So the probe is gated to registry mode, where it mints nothing (the
+        resolver had to query that same registry to reach this arm).
+
+        Both directions are asserted: the read answers None without creating a
+        graph, and the pre-fix shape — the probe with the gate forced off — DOES
+        create one. A guard that cannot fail is not a guard (#4872).
+        """
+        db = sdk._get_proj().db
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "supabase")
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        sdk._record_tenant = ("no-such-org-10015", "g-10015")
+
+        before = sorted(str(g) for g in (db.list_graphs() or []))
+        with mock.patch("tortoise.quota.resolve_org_limits",
+                        side_effect=OrgNotFoundError("no such org")):
+            assert sdk.get_organisation_account() is None
+        after = sorted(str(g) for g in (db.list_graphs() or []))
+        created = [g for g in after if g not in before]
+        assert created == [], (
+            "the account read materialised a graph: "
+            f"{created} — in Supabase mode that resurrects the registry the "
+            "#669 flip deleted, from a READ, on the money surface"
+        )
+
+    def test_the_supabase_gate_on_that_probe_is_load_bearing(self, sdk, monkeypatch):
+        """The negative control for the pin above, on the SAME store.
+
+        With `is_supabase_enabled` forced False the probe runs, so the graph IS
+        created — which is what proves the test above is measuring the gate and
+        not the absence of a side effect that was never there.
+        """
+        db = sdk._get_proj().db
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "supabase")
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        sdk._record_tenant = ("no-such-org-10015b", "g-10015")
+
+        before = sorted(str(g) for g in (db.list_graphs() or []))
+        with mock.patch("tortoise.quota.resolve_org_limits",
+                        side_effect=OrgNotFoundError("no such org")), \
+                mock.patch("tortoise.supabase_control.is_supabase_enabled",
+                           return_value=False):
+            assert sdk.get_organisation_account() is None
+        after = sorted(str(g) for g in (db.list_graphs() or []))
+        created = [g for g in after if g not in before]
+        assert created, (
+            "the pre-fix probe created no graph either — then the pin above "
+            "cannot distinguish the fix from the defect"
+        )

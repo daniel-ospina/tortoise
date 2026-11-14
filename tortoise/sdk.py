@@ -45880,6 +45880,9 @@ class TortoiseSDK:
             is_usable_tenant,
             record_tenant_effective,
         )
+        from .supabase_control import (  # method-local, like `quota`'s own: it pulls
+            is_supabase_enabled as _is_supabase_control_plane,  # the Supabase seam
+        )
 
         tenant = record_tenant_effective(self._record_tenant)
         if not is_usable_tenant(tenant):
@@ -45917,7 +45920,22 @@ class TortoiseSDK:
             # cannot see it — and silently substituting a DIFFERENT store's cap for
             # the same org id would be a fail-open on the money surface. Fail closed
             # and name the mismatch instead.
-            if self.org_get(org_id) is not None:
+            #
+            # ⛔ THE PROBE IS `org_get`, SO IT MAY NOT RUN IN SUPABASE MODE. It
+            # resolves this handle's registry (`_get_registry` →
+            # `_ensure_registry_indexes`' `CREATE INDEX` set), which MATERIALISES
+            # `{ns}_control_plane` on a store that has no graph by that name — and
+            # in Supabase mode the registry is DELETED by design (post-#669 flip),
+            # so probing there resurrects the very graph the flip removed, from a
+            # read, on the money surface, while `resolve_org_limits` (which reads
+            # the orgs row in that mode and never touches a graph) reports
+            # `OrgNotFoundError`. So the probe is gated to REGISTRY mode, where it
+            # mints nothing: `resolve_org_limits` had to query that same registry to
+            # reach this arm, so the graph already exists. In Supabase mode the
+            # gates' store and this handle's orgs row are the SAME store, so a
+            # registry-only org is not the state to report — `None` is the honest
+            # answer, and no graph is created to ask.
+            if not _is_supabase_control_plane() and self.org_get(org_id) is not None:
                 raise ControlPlaneError(
                     f"get_organisation_account cannot answer for {org_id!r}: the "
                     "account exists in this SDK's control plane but not in the one "
