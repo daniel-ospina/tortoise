@@ -298,7 +298,7 @@ the two files this population had never reached: the KIND and STATUS rules that
 now say which layers carry a `status` family, and name the retired label where
 they say what does NOT (`live.KIND_PROPERTIES`' scope note, `kind_expression`'s
 docstring, and `_entity_label`'s record of why the local copy of the canonical
-map had to go). That move is the same kind as the six before them — prose that
+map had to go). That move is the same kind as the five before it — prose that
 names the retired label in order to explain a rule about it — and it is the first
 one whose point is a WIDENING rather than a retirement — and #12434's `:Document` retirement
 prose in `tortoise/mcp_server.py:3873`, the seventh, whose point IS a retirement.
