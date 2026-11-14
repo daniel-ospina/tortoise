@@ -414,6 +414,15 @@ _INTENSIFIER = (r"(?:\s*['\"\u201d\u2019]?\s+"
 #: contradicted the regex underneath it and the `;` twin of the scope-qualifier class
 #: was RED on one separator while its `,` and `—` twins were pinned green. `;` is now
 #: out of the strict set, which is what the sentence above always claimed.
+#: ⛔ THE `(?!_RESTATEMENT_TAIL)` PREFIX HERE IS CURRENTLY UNREACHABLE, AND IS KEPT
+#: DELIBERATELY (cycle-16 P2, measured). The strict terminals are `$`/`.`/`)`/a
+#: clause-final citation, and `_RESTATEMENT_TAIL` can only begin with `[—–;,]`, `--` or
+#: the first letter of a restatement — disjoint sets — so the two can never match at the
+#: same position: 0 firings over a 105,600-sentence grid, and deleting the prefix changes
+#: 0 verdicts on that grid and 0 of the 111 files under `docs/`. It is kept because the
+#: strict set has already been widened by accident once (the `;` above), and the next
+#: widening is the one that would make this reachable. Stated so a reader does not take
+#: it as active protection: the intensifier arms do NOT honour the restatement bound.
 _CLAUSE_END_STRICT = (r"(?!" + _RESTATEMENT_TAIL + r")"
                       r"(?=\s*['\"\u201d\u2019]?\s*(?:$|[.)]|" + _CITATION + r"))")
 
@@ -955,6 +964,15 @@ class TestNoDocDeniesABuilderPlanExists:
             # provoked the exception above is the restrictive `only`/`just` restatement,
             # which is measured. The message names the fix ("keep the substance"), so a
             # docs author who hits it is redirected, not blocked by silence.
+            # ⛔ …and the SAME bound narrows the COMMA restatement itself when the
+            # sentence continues (cycle-16 P2, measured): `_RESTATEMENT_TAIL` must now
+            # END the clause, so `There is no Builder plan, only the `pro` identifier,
+            # and the Team plan sits above it.` is flagged at this head while
+            # `origin/main` exempted it. Coherent with the pin that makes
+            # `… , only the `pro` identifier, because Builder was discontinued.` a
+            # DENIAL — the two are the same shape — but it is a measured block and so it
+            # is written down here rather than discovered by a docs author. NOT added to
+            # this tuple: it is the documented residual, not a case the lint accepts.
             # A doc recording the retraction — cue AND evidence (#12444 cited).
             "docs/product/beta-sdk-surface.md previously read 'there is no "
             "\"builder\" plan'; #12444 corrected it.",
@@ -1137,6 +1155,16 @@ class TestNoDocDeniesABuilderPlanExists:
             # (cycle-13 P2, measured).
             "There is no Builder plan whatsoever.",
             "There is no Builder plan of any kind.",
+            # ⛔ THE TWO CLAUSE ENDS ARE REDUNDANTLY COVERED BY EVERY `There is no …
+            # plan (…)` PIN (cycle-16 P2, measured): deleting `_CITATION` from EITHER
+            # one alone left the suite fully green, while distinct classes escaped —
+            # the `builder is not a plan` arm has no intensifier twin and depends on
+            # `_CLAUSE_END` alone, and every intensifier arm depends on
+            # `_CLAUSE_END_STRICT` alone. One pin each, so neither term can be deleted
+            # silently (the cycle-11 rule: an exemption half that is stated but not
+            # pinned left the suite green when it was removed).
+            "Builder is not a plan (see #12444).",
+            "There is no Builder plan at all (#12444).",
             # ⛔ THE RESTATEMENT EXEMPTION MUST END THE CLAUSE (cycle-15 P1, measured):
             # unbounded, it made the whole REST of the sentence invisible, and on the
             # repo's dominant `—` it exempted this file's OWN measured drift reflowed
