@@ -2004,3 +2004,58 @@ def test_the_residual_scan_guard_names_an_invocation_that_actually_resolves(
         "the bare path exited 2, but not on argparse's missing-token error — `2` "
         "is also this tool's NO-VERDICT exit, so the code alone does not prove "
         f"the bare path is unusable: {bare.stderr[-300:]!r}")
+
+
+def test_the_underscore_or_terms_guard_names_an_invocation_that_actually_resolves(
+        monkeypatch, capsys):
+    """#12368 review — the same unpinned-claim defect, one tool over.
+
+    `tools/underscore_or_terms_12360.py` gained the `#5128` guard (the census
+    requires one on every tracked `tools/*.py`) with a refusal naming the BARE
+    path, which does not resolve: `main()` declares
+    `add_subparsers(dest="cmd", required=True)`, so the bare form exits 2 on
+    argparse's own usage error. The generic census pin does not catch it —
+    `_expected_invocation` returns the `uv run python <path>` prefix, and the
+    `--help` form CONTAINS that prefix, so BOTH texts pass. Reverting this
+    message to the bare path leaves the whole census green: the exact shape
+    `test_the_site_icon_guard_names_an_invocation_that_actually_resolves`
+    (#11507 round 7) was written for.
+
+    Pinned by PROVING the claim rather than by reading the string alone: the form
+    the refusal names must resolve, and the bare path must NOT — on argparse's own
+    missing-token text, not merely on the exit code.
+    """
+    path = (Path(__file__).resolve().parents[1]
+            / "tools" / "underscore_or_terms_12360.py")
+    guard = _guard_or_fail(path)
+    module = ast.Module(body=[guard], type_ignores=[])
+    ast.fix_missing_locations(module)
+    code = compile(module, _rel(path), "exec")
+
+    monkeypatch.setattr(sys, "version_info", (3, 11, 9))
+    with pytest.raises(SystemExit) as refusal:
+        exec(code, {"__name__": "__main__", "sys": sys})
+    # `raise SystemExit(<str>)` carries the message on the exception, not on
+    # stdout/stderr — the census reads it the same way (`str(refusal.value)`).
+    captured = capsys.readouterr()
+    message = str(refusal.value) + captured.out + captured.err
+
+    assert "tools/underscore_or_terms_12360.py --help" in message, (
+        "the refusal must name the `--help` form, which needs no `cmd` "
+        f"subcommand: {message!r}")
+
+    resolved = subprocess.run([sys.executable, str(path), "--help"],
+                              capture_output=True, text=True)
+    assert resolved.returncode == 0, (
+        "the invocation the refusal names must resolve; it exited "
+        f"{resolved.returncode}: {resolved.stderr[-400:]!r}")
+    bare = subprocess.run([sys.executable, str(path)],
+                          capture_output=True, text=True)
+    assert bare.returncode == 2, (
+        "the bare path must stay a USAGE error (argparse, `cmd` is required) — "
+        f"if it stops being one, this guard's advice is no longer the only form "
+        f"that resolves: rc={bare.returncode}, {bare.stderr[-300:]!r}")
+    assert "the following arguments are required" in bare.stderr, (
+        "the bare path exited 2, but not on argparse's missing-token error — the "
+        "exit code alone does not prove the bare path is unusable: "
+        f"{bare.stderr[-300:]!r}")

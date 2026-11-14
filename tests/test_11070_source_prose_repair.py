@@ -2955,6 +2955,102 @@ def test_a_token_the_read_would_ESCAPE_is_REFUSED(monkeypatch, capsys):
     assert "cannot serve as an FTS probe" in capsys.readouterr().err
 
 
+def test_a_LONE_UNDERSCORE_probe_is_REFUSED(monkeypatch, capsys):
+    r"""#12368 review, P1: the `_`-deferral admitted a probe the read cannot answer.
+
+    (1) FAILS on the committed tree before this fix: `deferred` admits every
+        `_`-only token, and `build_or_query('_') == '_'` with `_` outside
+        `escape_redisearch_literal`'s set — so the read sends the bare `_`, which
+        the index answers with ZERO rows even when an `:Object` literally NAMED
+        `_` is indexed. `probe_phrase_rejection('_')` returned None (ACCEPTED),
+        so `--dry-run --assert-clean --probe-phrase _` certified 'the pre-fix
+        prose is gone' over a still-present sentence.
+    (2) MEASURED on a live FalkorDB 4.20.6 (one `:Object` per shape, each queried
+        by its own name through the real `run_fts_query`), over the twelve
+        accepted `_`-only shapes: `_` is the ONLY unreachable one — `__`, `___`,
+        `____`, `_____`, `_a`, `a_`, `_1`, `1_`, `_a_`, `a__b`, `0_` each return
+        their own record. And the term really is there: `queryNodes('Object',
+        '\\_')` returns the record named `_` where `queryNodes('Object', '_')`
+        returns nothing.
+    (3) POLARITY THAT MUST NOT GO RED: the eleven reachable `_` shapes stay
+        accepted. Refusing them on the same story would be the false block that
+        #12360's review round 7 repaired, and `origin/main`'s refusal of ALL of
+        them (for the false reason "it tokenises to 0 term(s)") is exactly what
+        that round removed.
+    (4) THE PUNCTUATED SIBLINGS (#12368 review round 17, P1). The refusal above
+        was keyed on the bare string `token == "_"`, which happens to agree with
+        the index question for the ONE shape that has no punctuation in it. For
+        every other shape whose only index run is `_` it disagreed, and the
+        branch ACCEPTED them where `origin/main` refused: MEASURED at this head,
+        `probe_phrase_rejection` returned None for `'_'`-plus-separator in all
+        four positions. MEASURED on a live lane (one `:Object` per shape through
+        the real projection, index cycle awaited, each shape queried by its OWN
+        name through the real `run_fts_query`): `!_`, `_.`, `._`, `_!` are each
+        UNREACHABLE while `!__`, `__`, `_a`, `a_`, `0_` are each REACHABLE — so
+        the predicate is the token's index RUN (does every maximal
+        `[A-Za-z0-9_]+` run equal a bare `_`?), not the token's characters.
+    """
+    from tortoise.session_source_prose_migration import probe_phrase_rejection
+
+    why = probe_phrase_rejection("_")
+    assert why, (
+        "a lone `_` was accepted as a probe — the read sends the bare `_`, the "
+        "index answers 0 rows for it, and the guard would then certify over a "
+        "still-present sentence")
+    assert "ZERO" in why or "zero" in why, why
+
+    # (4) THE PUNCTUATED SHAPES WHOSE ONLY INDEX RUN IS `_`. Each one's read
+    # emits the token itself as ONE literal (`build_or_query('_.') == '_.'`) and
+    # each one returns ZERO rows for its own indexed name.
+    for refused in ("!_", "_.", "._", "_!"):
+        assert probe_phrase_rejection(refused), (
+            f"{refused!r} was accepted as a probe, but its only index run is the "
+            f"bare `_`, which the index answers with ZERO rows — a still-present "
+            f"sentence would read as absent (MEASURED live, its own record is "
+            f"unreachable by its own name)")
+
+    # ⛔ THE MESSAGE MUST NOT BE THE PRE-FIX ONE. `origin/main` refused `_` while
+    # claiming "OR-joins multi-term input" for a token whose read emits ONE
+    # literal; this refusal exists because the probe cannot be ANSWERED.
+    assert "OR-joins" not in why, (
+        f"the refusal fell through to the term-count branch and repeats the "
+        f"false reason #12360 round 7 removed: {why!r}")
+
+    # ⛔ AND THE WIDENING IS BOUNDED BY MEASUREMENT, NOT BY ANALOGY. `!__` is a
+    # punctuated sibling whose index run is `__`, which IS reachable — refusing it
+    # on the `!_` story would be exactly the false block this test's arm (3)
+    # exists to prevent.
+    #
+    # ⛔ AND THE PREDICATE IS `all`, NOT `any` (#12368 review round 18, found by
+    # the mutation pass). A token with SEVERAL index runs, one of them `_`, is
+    # accepted — `probe_phrase_rejection('a!_')` is None, and that is right: the
+    # read sends `a!_` as one literal, the index splits it at `!` and reaches `a`,
+    # so the probe is ANSWERED (it over-matches, which is #12535's disclosed
+    # residual and not this guard's class). Under `any` it would be REFUSED — a
+    # false block of an answerable probe. MEASURED live: records named `a!_` and
+    # `a zz` both written, index reporting 2 documents, and `run_fts_query('a!_')`
+    # returns BOTH (`['o-1', 'o-0']`), exactly as `run_fts_query('a')` does. Pinned
+    # here because `any` reads like a harmless simplification of `all` and no
+    # other row can tell them apart.
+    assert probe_phrase_rejection("a!_") is None, (
+        "a multi-run token whose runs INCLUDE a bare `_` was refused — its read "
+        "reaches a non-`_` term, so it is answerable (it over-matches, #12535) "
+        "and refusing it is a false block")
+    for accepted in ("__", "___", "____", "_____", "_a", "a_", "_1", "1_",
+                     "_a_", "a__b", "0_", "a_b", "a_bc", "x_axis", "A_B",
+                     "!__"):
+        assert probe_phrase_rejection(accepted) is None, (
+            f"{accepted!r} was refused — the index holds it as ONE term and its "
+            f"own record is reachable, so refusing it is a false block")
+
+    # The argv arm refuses it too, so no run can certify on a dead probe.
+    _export_a_record_dsn(monkeypatch)
+    _install_cli(monkeypatch, _RecordingGraph([(_post_fix_node(),)]),
+                 ["--dry-run", "--assert-clean", "--probe-phrase", "_"])
+    assert _cli.main() == 2
+    assert "cannot serve as an FTS probe" in capsys.readouterr().err
+
+
 def test_classify_fts_hits_REQUIRES_the_phrase_so_no_proof_can_be_dropped():
     """#11536 review round 7, P2: the default silently dropped two of three proofs.
 
@@ -3078,6 +3174,70 @@ def test_a_NUMBER_and_an_ACCENTED_word_are_probes_a_STOPWORD_is_not():
     for refused in ("the", "of", "and", "naïve", "zx-99", "friday,"):
         assert probe_phrase_rejection(refused), (
             f"{refused!r} was accepted — the read does not send it as one term")
+
+
+def test_a_PUNCTUATED_underscore_token_is_a_probe_because_the_read_addresses_ONE_term():
+    """#12368 review, P2: the backstop compared RAW ALTERNATIVES, not INDEX TERMS.
+
+    (1) FAILS on the pre-fix tree. `probe_phrase_rejection('a_.')` refused with
+        "the read expands it into several terms ('a_.|a_')" — while BOTH
+        alternatives reduce to the SAME index term `a_`, so the read addresses ONE
+        term and the record's own name returns it. The index splits every
+        alternative on its own separators; that is precisely the sense the raw
+        string comparison was blind to.
+    (2) MEASURED, live, not inferred: one `:Object` per shape in ITS OWN graph,
+        the background index cycle awaited (`CALL db.indexes()` numDocuments), then
+        the emitted string issued through the PRODUCTION Cypher on FalkorDB 4.20.6 —
+        `a_.`, `a_!`, `.a_`, `_a.` and `a_..` each returned their own record. So
+        refusing them was a false block, the class this guard has now repaired
+        five times.
+        ⛔ **THE DECOY HALF AND THE PROBE METHOD, because both were got wrong here**
+        (`#12368` review, P1). Reachability alone does not prove a probe is clean:
+        each shape was ALSO measured against a decoy carrying the bare word
+        (`zz a zz`), with a POSITIVE CONTROL that the decoy is indexed (query `a`
+        and see it come back). And the emitted string must be issued through the
+        Cypher directly — `run_fts_query` **re-builds** through `build_or_query`,
+        so passing it an already-emitted `'a_bc.|a_bc'` re-parses it into
+        `'bc|bc|a_bc'` and the bare `bc` matches the decoy. That artifact produced
+        a false "over-match" for `a_bc.` in an earlier round of this branch; with
+        the Cypher, `a_bc.`, `x_axis.`, `2_a.`, `a_b!`, `a_bc/` and `a_b_c.` return
+        ONLY their own record — they are clean probes, and refusing them was a
+        false block fixed in `probe_phrase_rejection`'s deferral. The REAL
+        over-match class is a `_` adjacent to a separator on either side (`ab._`,
+        `x1&_`, `2._`, `_&x1`) where the QUERY parser drops the `_`: those DO return
+        the decoy and are tracked as #12535.
+    (3) REACHABLE: such a token is exactly what an operator copies out of prose.
+    (4) AND THE OVER-MATCH CLASS STAYS REFUSED — pinned, so a future widening
+        cannot swallow it: `web_search` emits `search|web|web_search` (three index
+        terms, only one of which is the token), `abc_def` emits `abc|def|abc_def`,
+        `cafécafé` emits `caf|caf` where the index holds `cafécafé`, and
+        `überüber`/`testétest` are the same shape.
+
+    ⛔ AND THE DOUBLED-SEGMENT CLASS IS PART OF THAT PIN, not an afterthought
+    (`#12368` review, P1 — the first cut of this widening REOPENED it). The
+    comparison must be made in the INDEX's sense, which keeps `_` inside a word:
+    `_indexed_term_runs` splits on `_`, so it mapped both `test_test` and its own
+    alternative `test` to `{'test'}` and ACCEPTED `test_test` — whose read is
+    `test|test|test_test`, i.e. two distinct index terms, so the probe comes back
+    on the common word alone. `origin/main` refused it (two runs), so accepting it
+    was a reopening, not a widening.
+    """
+    from tortoise.session_source_prose_migration import probe_phrase_rejection
+
+    for accepted in ("a_.", "a_!", ".a_", "_a.", "a_..", "friday.",
+                     # the punctuated `_`-run: one index term either way, so these
+                     # are probes — the deferral widening that made them so is the
+                     # P1 fix, and they are REFUSED on the pre-fix tree
+                     "a_bc.", "x_axis.", "2_a.", "a_b!", "a_bc/", "a_b_c."):
+        assert probe_phrase_rejection(accepted) is None, (
+            f"{accepted!r} was refused — every alternative the read emits "
+            f"addresses the ONE index term this token denotes, so it is a probe "
+            f"(MEASURED live: it returns its own record)")
+    for refused in ("web_search", "abc_def", "cafécafé", "überüber", "testétest",
+                    "test_test", "ab_ab", "abc_abc", "foo_foo"):
+        assert probe_phrase_rejection(refused), (
+            f"{refused!r} was accepted — the read OR-joins terms this token is "
+            f"not, so the probe would match on any one of them")
 
 
 def test_a_NUMBER_probe_is_EXPLAINED_by_a_numeric_lexicon(monkeypatch):
