@@ -2631,7 +2631,7 @@ to answer.
 > longer the lines this tree carries. Nothing
 > below is corrected in place — those numbers are a faithful record of the head this entry names.
 > §10.30 owns the live values.
-
+>
 > **A successor entry, not an edit to §10.28.** §10.28's numbers are a faithful record of the head
 > it names. Two merges have landed since: `34bb716315` added 9 lines to the relation builder, and
 > `391313ca9a` then REMOVED them again — the mechanism guard became the DECLARED table in
@@ -2702,7 +2702,7 @@ to answer.
 > `sdk.py` values and the `#548` window; the `tortoise/extractor_v2.py` values this entry opens did
 > **not** move (`git diff --numstat 5bacb44e0b HEAD -- tortoise/extractor_v2.py` is empty) and still
 > open on the content they claim, as §10.31 re-measures.
-
+>
 > **A successor entry, not an edit to §10.29.** §10.29 recorded the branch's own delta against the
 > base it names, and that record stays true to that head. `main` has since advanced: `#12348`
 > inserted `+971/-48` inside `tortoise/extractor_v2.py` (net `+923`) and `#12343` then added 48 more,
