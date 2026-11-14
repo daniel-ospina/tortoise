@@ -6,7 +6,8 @@ presents them as general arguments — but only the ``text=`` arm consumes them
 (forwarded into ``sdk.tortoise_fts_query``). Both structural arms call
 ``sdk.paginated_query(kind, skip, limit, include_retracted, **filters)``, whose
 signature has **neither** parameter (``tortoise/sdk.py:26642-26645``), and the tag
-arm calls ``query_points_by_tag(tag)``, which takes the tag and nothing else.
+arm calls ``query_points_by_tag(tag, _record_reads=False)``, which takes the tag and that
+private flag and nothing else.
 
 Measured: ``tortoise_query(kind="statement", min_confidence=0.9)`` reaches the
 accessor as ``paginated_query(kind='statement', skip=0, limit=100,

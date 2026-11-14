@@ -1012,11 +1012,12 @@ surfaces:
   # entry is still exactly the duplicate `duplicate_entries()` exists to catch (#5373): it
   # reaches `--integrity` through `_manifest_contract_issues`, the step the
   # `manifest-integrity` job runs, and that job's `registry_integrity` step reports the raw
-  # duplicate-entry form as well. What does NOT catch it is `integrity()` the FUNCTION — it
-  # returns only the unclassified files, which a duplicated row is not — and selection
-  # cannot see a same-surface repeat either, so `duplicate_entries()` is the only reader
-  # that does. One row per surface is what it requires. The redundant copies are deleted,
-  # not merged: both carried the same classification, and the second copy is gone.
+  # duplicate-entry form as well — `duplicate_entries()` being the reader that names the
+  # offending SURFACE. What does NOT catch it is `integrity()` the FUNCTION — it returns
+  # only the unclassified files, which a duplicated row is not — and selection cannot see a
+  # same-surface repeat either. One row per surface is what `duplicate_entries()` requires.
+  # The redundant copies are deleted, not merged: both carried the same classification, and
+  # the second copy is gone.
   - test_12477_health_honesty.py
   - test_agent_signup.py
   - test_agent_signup_idempotency.py
