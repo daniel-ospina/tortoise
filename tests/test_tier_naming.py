@@ -906,14 +906,25 @@ _REPORTED_CLAIM = re.compile(
 #: tell a harmless adverbial from a detour, so three correct retraction records were
 #: BLOCKED here while `origin/main` exempts all three:
 #: `Previously the doc said flatly that there is no Builder plan; #12444 corrected it.`
-#: and its `claimed (wrongly)` / `said throughout` twins (the denial begins at 12–14 and
+#: and its `claimed (wrongly)` / `said throughout` twins (the denial begins at 12–16 and
 #: the offset was 6). `and`/`but` are in the set for the reason the offset existed:
 #: `said the naming was wrong and there is no Builder plan` asserts a denial and must stay
 #: FLAGGED, which is the pin below. `so`/`which`/`therefore` and friends are here because
 #: one bare `so` re-opens that same detour a word further out. A CLOSED set, like
 #: `_INTENSIFIER_WORDS`, so it cannot become a wildcard.
+#:
+#: ⛔ `--` AND THE SUBORDINATING CONNECTIVES ARE IN THE SET FOR THE SAME REASON (cycle-20
+#: round 2, measured). The first cut of this constant carried only `[;:,—–]` and
+#: `and/but/so/which/therefore/thus/hence/whereas`, and that was FOUR FALSE PASSES: `--`
+#: is a clause break everywhere else in this file (`_RESTATEMENT_TAIL`, `_CLAUSE_END`)
+#: and 65 `docs/` files use it, so `Until #12444 the docs said the naming was wrong --
+#: there is no Builder plan.` was exempt here while `origin/main` and the pre-fix head
+#: both FLAG it — likewise `while`, `although`/`though`, and a connective `yet`. A break
+#: AFTER the denial is harmless (the split keeps the prefix), so widening this set cannot
+#: add a false block.
 _REPORTED_CLAUSE_END = re.compile(
-    r"[;:,\u2014\u2013]|\b(?:and|but|so|which|therefore|thus|hence|whereas)\b",
+    r"[;:,\u2014\u2013]|--|\b(?:and|but|so|which|therefore|thus|hence|whereas|"
+    r"while|although|though|yet|since|because)\b",
     re.I)
 
 #: ⛔ `_REPORTED_CLAUSE_BREAK` LIVED HERE AND IS GONE (round-2 review, measured). It
@@ -1701,6 +1712,54 @@ class TestNoDocDeniesABuilderPlanExists:
                 # `_REPORTED_CLAUSE_END`.
                 "Until #12444 the doc said the naming was wrong and there is no Builder "
                 "plan.\n",
+                # ⛔ EVERY MEMBER OF `_REPORTED_CLAUSE_END` IS PINNED, ONE FOR ONE
+                # (cycle-20 round 2, measured). The set opened with `and` alone pinned, so
+                # deleting `;`/`:`/`,`/`—`/`–`/`--`/`so` still left `19 passed` while each
+                # one turned a FLAGGED denial into an exempt one — the cycle-11 rule this
+                # file restates below, and the reason the first cut of that constant shipped
+                # four false passes on `--`/`while`/`although`/`yet`. Every sentence below
+                # reads True at this head, at the pre-fix head (`5cf012d2a53e`) and at
+                # `origin/main`, so no new behaviour is demanded — only recorded.
+                # Punctuation, one pin each:
+                "Until #12444 the doc said the naming was wrong; there is no Builder "
+                "plan.\n",
+                "Until #12444 the doc said the naming was wrong: there is no Builder "
+                "plan.\n",
+                "Until #12444 the doc said the naming was wrong, there is no Builder "
+                "plan.\n",
+                "Until #12444 the doc said the naming was wrong — there is no Builder "
+                "plan.\n",
+                "Until #12444 the doc said the naming was wrong – there is no Builder "
+                "plan.\n",
+                "Until #12444 the doc said the naming was wrong -- there is no Builder "
+                "plan.\n",
+                # …and every connective, one pin each:
+                "Until #12444 the doc said the naming was wrong but there is no Builder "
+                "plan.\n",
+                "Until #12444 the doc said the naming was wrong so there is no Builder "
+                "plan.\n",
+                "Until #12444 the doc said the naming was wrong which is why there is no "
+                "Builder plan.\n",
+                "Until #12444 the doc said the naming was wrong therefore there is no "
+                "Builder plan.\n",
+                "Until #12444 the doc said the naming was wrong thus there is no Builder "
+                "plan.\n",
+                "Until #12444 the doc said the naming was wrong hence there is no Builder "
+                "plan.\n",
+                "Until #12444 the doc said the naming was wrong whereas there is no "
+                "Builder plan.\n",
+                "Until #12444 the doc said the naming was wrong while there is no Builder "
+                "plan.\n",
+                "Until #12444 the doc said the naming was wrong although there is no "
+                "Builder plan.\n",
+                "Until #12444 the doc said the naming was wrong though there is no Builder "
+                "plan.\n",
+                "Until #12444 the doc said the naming was wrong yet there is no Builder "
+                "plan.\n",
+                "Until #12444 the doc said the naming was wrong since there is no Builder "
+                "plan.\n",
+                "Until #12444 the doc said the naming was wrong because there is no "
+                "Builder plan.\n",
         ):
             assert _denials_in_document(live), (
                 f"a live denial was exempted by a following fragment that is not a "
