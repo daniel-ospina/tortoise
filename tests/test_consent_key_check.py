@@ -627,6 +627,109 @@ def test_the_check_step_exits_with_the_code_the_checker_returned(tmp_path) -> No
     )
 
 
+def test_the_SCRIPT_exits_non_zero_on_a_measured_split(tmp_path) -> None:
+    """⛔ THE PROCESS EXIT STATUS, which is the only thing the workflow actually consumes.
+
+    Every other test here calls `CKC.main([])` IN PROCESS and asserts the RETURN VALUE. Cycle 7
+    measured the consequence: turning `raise SystemExit(main())` into a bare `main()` makes the tool
+    print `CONSENT-KEY: MISMATCH` and exit 0 — every test green — and the whole chain then goes green
+    with the split live: `rc=0` -> the filing step's GREEN branch -> `resolve` BOTH standing issues
+    with "the two live deployments published the same key fingerprint (AGREE)", dedupe key released,
+    next tick files a fresh issue. Cycles C1/C3 pinned that the workflow PROPAGATES the rc; nothing
+    pinned that the checker PRODUCES one.
+
+    So this arm spawns the script as a PROCESS against a real local origin (a socket, not the
+    in-process `urlopen` fake, because `__main__` is what is under test) and reads `returncode`.
+    """
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    api_payload = json.dumps(_health(_fp(_KEY_A))).encode()
+    app_payload = json.dumps(_pages(_fp(_KEY_B))).encode()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 — http.server's contract
+            body = api_payload if self.path.startswith(CKC.API_PATH) else app_payload
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):  # keep pytest output clean
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(REPO / "tools" / "consent_key_check.py"),
+             "--api-url", base, "--app-url", base],
+            capture_output=True, text=True, timeout=180,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    assert "CONSENT-KEY: MISMATCH" in proc.stdout, (proc.stdout[-500:], proc.stderr[-500:])
+    assert proc.returncode == 1, (
+        "the SCRIPT must exit non-zero on a measured split — `raise SystemExit(main())` is what makes "
+        "the exit code the verdict; without it the workflow reads rc=0, resolves both standing issues "
+        f"with a false AGREE and never alerts. got rc={proc.returncode}"
+    )
+
+
+def test_the_SCRIPT_exits_zero_on_agreement_and_two_when_nothing_was_measured() -> None:
+    """The other two exit codes, as a PROCESS — an operator scripts against these."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    same = json.dumps(_health(_fp(_KEY_A))).encode()
+    app_same = json.dumps(_pages(_fp(_KEY_A))).encode()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            body = same if self.path.startswith(CKC.API_PATH) else app_same
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        agree = subprocess.run(
+            [sys.executable, str(REPO / "tools" / "consent_key_check.py"),
+             "--api-url", base, "--app-url", base],
+            capture_output=True, text=True, timeout=180,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+    assert agree.returncode == 0, f"agreement must exit 0 as a process, got {agree.returncode}"
+
+    # A closed port: nothing was measured, so it is 2 (UNVERIFIABLE), never 0 and never 1.
+    unreachable = subprocess.run(
+        [sys.executable, str(REPO / "tools" / "consent_key_check.py"),
+         "--api-url", "http://127.0.0.1:1", "--app-url", "http://127.0.0.1:1"],
+        capture_output=True, text=True, timeout=180,
+    )
+    assert unreachable.returncode == 2, (
+        "an unreadable origin is NO MEASUREMENT (exit 2) — never 0 (agreement) and never 1 (a "
+        f"measured disagreement), got {unreachable.returncode}: {unreachable.stdout[-300:]}"
+    )
+
+
 def test_the_filing_step_only_RESOLVES_the_ledger_on_a_MEASURED_AGREE() -> None:
     """The GREEN branch closes BOTH standing issues; nothing pinned its condition.
 
@@ -729,6 +832,19 @@ def test_the_filing_step_files_the_RIGHT_finding_and_never_resolves_a_split(tmp_
     assert not any(c.startswith("resolve") for c in calls), (
         "a split cleared the standing ledger — a false AGREE written into the public issue"
     )
+    # ⛔ EACH ARM'S OWN PROSE. Cycle 7 measured the body assertions below reading the file produced by
+    # the LAST run (the UNKNOWN arm), so the two arms' text was interchangeable: swapping the UNKNOWN
+    # body's claim for the DRIFT arm's left every test green, and an operator holding a transient-503
+    # alert would read "every consent grant is dead" and rotate a production secret — CREATING the
+    # split. The comment at the `case` states this contract ("the alert never asserts a disagreement
+    # that was not measured"); nothing observed it.
+    drift_body = Path(str(record) + ".body").read_text()
+    assert "hold DIFFERENT keys" in drift_body and "Every consent grant is dead" in drift_body, (
+        "the DRIFT arm's body no longer asserts the measured disagreement it is filed for"
+    )
+    assert "could NOT be verified" not in drift_body, (
+        "the DRIFT arm's body carries the UNVERIFIED claim — the two arms swapped their prose"
+    )
 
     # An UNMEASURED run files the OTHER title: an unreadable reading is never a disagreement (§2.5).
     for verdict in ("UNVERIFIABLE", "OFF", "UNKNOWN"):
@@ -759,6 +875,14 @@ def test_the_filing_step_files_the_RIGHT_finding_and_never_resolves_a_split(tmp_
     assert "REDEPLOY Pages" in body and "fly secrets set" in body, (
         "the alert body lost the rotation steps an operator acts on"
     )
+    # …and THIS arm (the last run above) is the UNMEASURED one, so its prose must say so.
+    assert "could NOT be verified" in body and "not** a measured disagreement" in body, (
+        "the UNKNOWN arm's body must state that nothing was compared — an unreadable reading is not a "
+        f"disagreement: {body[:400]!r}"
+    )
+    assert "Every consent grant is dead" not in body, (
+        "the UNKNOWN arm's body asserts a disagreement it did not measure"
+    )
 
 
 def test_the_step_outputs_are_WIRED_from_the_check_step_and_the_dispatch_inputs() -> None:
@@ -785,6 +909,11 @@ def test_the_step_outputs_are_WIRED_from_the_check_step_and_the_dispatch_inputs(
     )
     assert "github.event.inputs.app_url" in check_env["APP_URL"], (
         f"the dispatch's `app_url` input must reach the checker, got {check_env['APP_URL']!r}"
+    )
+    assert not filing[0].get("continue-on-error"), (
+        "the filing step must never `continue-on-error` — a 403 or a bare-pool runner without `jq` "
+        "would then lose the alert and the recurrence comment while the run reported success (the "
+        "deaf-detector class the file's own #2140 comment exists for)"
     )
 
 
