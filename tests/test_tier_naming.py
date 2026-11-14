@@ -644,8 +644,8 @@ _QUOTE_PAIRS = (('"', '"'), ('`', '`'), ('\u201c', '\u201d'), ('\u2018', '\u2019
 #: measured). Both became dead when `_quotes_the_denial` moved its gate from "the span
 #: holds a Builder phrase and a negation" to "the span IS a denial, by `_DENIAL_PATTERNS`"
 #: — the narrower pair refused to recognise the predicate-nominative and
-#: noun-before-name denials the lint itself flags, and blocked 13 of this file's own
-#: quoted records. A dead term left behind reads as protection it does not provide;
+#: noun-before-name denials the lint itself flags, and blocked retraction records in this
+#: file that quote one. A dead term left behind reads as protection it does not provide;
 #: removing it is this file's own cycle-16 rule for `before then`.
 
 
@@ -726,6 +726,15 @@ def _quotes_the_denial(sentence: str) -> bool:
     the same probe against `git show 77deb656^:tests/test_tier_naming.py` and against
     `git show origin/main:tests/test_tier_naming.py`.
 
+    ⛔ AND A QUOTATION MUST NOT SHEATHE A DENIAL THE SENTENCE ASSERTS OUTSIDE IT
+    (cycle-18 P1, measured, two lanes independently): once ANY span is a denial, a
+    trailing `… and there is no Builder plan` became invisible —
+    `Until then the doc said "no plan called Builder" and there is no Builder plan.
+    was EXEMPT while `origin/main` FLAGS it. A record QUOTES the denial; a drift ASSERTS
+    it. ENFORCED in :func:`_quotes_a_retracted_claim` through
+    :func:`_asserts_a_denial_outside_the_quotes`, which masks the spans by OFFSET rather
+    than by string replacement, so a span whose text repeats cannot blank the wrong one.
+
     ⛔ An UNCLOSED span counts only when the denial OPENS it (allowing for the opening
     mark itself), i.e. the span is the claim. A stray unmatched `"` earlier in the
     sentence must not make everything after it "quoted" (cycle-9 P2, measured).
@@ -743,7 +752,12 @@ def _quotes_the_denial(sentence: str) -> bool:
         if denial is None:
             continue
         if closed or denial.start() <= 2:
-            return True
+            # …and nothing OUTSIDE the quotations may be a denial (cycle-18 P2, above).
+            outside = _plain(sentence)
+            for inner, _closed in _quoted_spans(sentence):
+                outside = outside.replace(_plain(inner), " ", 1)
+            if not any(p.search(outside) for p in _DENIAL_PATTERNS):
+                return True
     return False
 
 
@@ -760,6 +774,10 @@ _REPORTED_CLAIM = re.compile(
 #: count, and its denial begins well past this bound.
 _REPORTED_DENIAL_OFFSET = 6
 
+#: …and the denial may not CROSS one of these either (cycle-18 P1, measured) — a match
+#: that starts inside a quotation and finishes after it is two claims, not one.
+_REPORTED_CLAUSE_BREAK = re.compile(r"[;:\u2014\u2013]|[\"\u201d\u2019]")
+
 
 def _reports_a_denial(sentence: str) -> bool:
     """Does a SPEECH VERB introduce a denial — recognised by `_DENIAL_PATTERNS`?
@@ -772,14 +790,27 @@ def _reports_a_denial(sentence: str) -> bool:
     :func:`_quotes_the_denial`; the population is 18 cue-bearing sentences, not 36.)
     Reusing the denial set makes the exemption's recognition the SAME set as the lint's,
     which is the only way the two cannot drift.
+
+    ⛔ AND THE DENIAL MUST NOT STRADDLE A CLAUSE BREAK (cycle-18 P1, measured, the OTHER
+    lane's finding on this PR). Bounding the match's START is not enough: the
+    `builder … (does|do) not exist` arm's free `[^.]{0,40}` window begins at a `Builder`
+    INSIDE a quoted claim and finishes its predicate AFTER the closing quote and a
+    semicolon, so `Until #12444 the doc said "the Builder plan is unlimited"; the
+    Builder tier does not exist.` was EXEMPT — an assertion that the tier EXISTS
+    followed by a live denial, and `origin/main` FLAGS it. The match may not cross `;`
+    `:` `—` `–` or a quotation, and the opening mark itself is skipped so a denial may
+    still begin immediately after it.
     """
     plain = _plain(sentence)
     for verb in _REPORTED_CLAIM.finditer(plain):
-        rest = plain[verb.end():]
+        rest = plain[verb.end():].lstrip('"\u201c\u2018 ')
         for pattern in _DENIAL_PATTERNS:
             match = pattern.search(rest)
-            if match is not None and match.start() <= _REPORTED_DENIAL_OFFSET:
-                return True
+            if match is None or match.start() > _REPORTED_DENIAL_OFFSET:
+                continue
+            if _REPORTED_CLAUSE_BREAK.search(rest[: match.end()]):
+                continue
+            return True
     return False
 
 
@@ -1171,8 +1202,9 @@ class TestNoDocDeniesABuilderPlanExists:
             # calls denials — six records, three per arm, each BLOCKED at `77deb656^`
             # and green at this head and at `origin/main`. ⛔ The `13 of 52` / `23 of 52`
             # figures an earlier revision stated here were not measurements and are
-            # retracted (cycle-18 P1): the population is 18 cue-bearing sentences and the
-            # parent blocked 0 of them.
+            # retracted (cycle-18 P1): the population is 66 correct-prose sentences, 18 of
+            # them cue-bearing, and the parent blocked 0 of those 18 — the six pins below
+            # are the whole delta. Two pins per arm, so a re-narrowing cannot be silent.
             'Previously the doc read "Builder is not a plan."; #12444 corrected it.',
             'Until #12444 the page read "Builder is not a plan".',
             'Previously the page read "There is no plan called Builder".',
@@ -1398,6 +1430,13 @@ class TestNoDocDeniesABuilderPlanExists:
             # (cycle-13 P2, measured).
             "There is no Builder plan whatsoever.",
             "There is no Builder plan of any kind.",
+            # ⛔ …and the two SHELTERING shapes (cycle-18 P1 + P2, measured): a denial
+            # may not be REPORTED across a clause break, and a quotation may not SHEATHE
+            # a denial the sentence asserts outside it. `origin/main` FLAGS both; this
+            # head exempted both.
+            'Until #12444 the doc said "the Builder plan is unlimited"; the Builder tier '
+            'does not exist.',
+            'Until then the doc said "no plan called Builder" and there is no Builder plan.',
             # ⛔ THE TWO CLAUSE ENDS ARE REDUNDANTLY COVERED BY EVERY `There is no …
             # plan (…)` PIN (cycle-16 P2, measured): deleting `_CITATION` from EITHER
             # one alone left the suite fully green, while distinct classes escaped —
