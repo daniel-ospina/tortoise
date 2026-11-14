@@ -88,11 +88,18 @@ import sys
 # An interpreter mismatch is NO MEASUREMENT of anything, so reporting it as the 2026-11-01 key split
 # is the same false signal this file fixes twice below for a malformed origin and an unparseable
 # body. The message is written separately because `SystemExit(int)` prints nothing.
+# ⛔ AND IT IS A `print(..., file=sys.stderr)`, NOT `sys.stderr.write(...)`: the #5128 census's
+# detector (`tests/test_entry_point_python_guard.py::_system_exit_message`) accepts the message in
+# one of two AST shapes only — a bare `raise SystemExit(<message>)`, or a `print(<message>)` call
+# node followed by a raise. A `write` is neither, so it is invisible to the detector and this file
+# reds the guard that pins the refusal's shape; the bare-raise shape is ruled out here because it
+# exits 1, and why 2 matters is the paragraph above. Mirrors `tools/gen_placement_table.py`.
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
-    sys.stderr.write(
+    print(
         f"tools/consent_key_check.py requires Python >= 3.12 (got "
         f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
-        f"`uv run python tools/consent_key_check.py`\n"
+        f"`uv run python tools/consent_key_check.py`",
+        file=sys.stderr,
     )
     raise SystemExit(2)
 
