@@ -76,7 +76,8 @@ links report ``UNVERIFIABLE-IN-CI``.  That ruling is about the INSTALL leg, not
 the seam's testability: the SAME token is used where the SERVER could not have
 asserted a link (an API build that serves no ``source`` field, and a session
 detail that records no extraction outcome), which is why the exit-2 summary
-says only that a link was NOT VERIFIED instead of naming a cause. Pi's handler logic is exercised hermetically by
+says only that a link was NOT VERIFIED instead of naming a cause.  Pi's
+handler logic is exercised hermetically by
 ``tortoise/pi-hooks/tortoise-capture.test.ts``, and the artifact AS INSTALLED
 is loaded and fired by the node probe in
 ``tests/test_pi_capture_hooks.py`` (into a temp ``HOME``); the residual (a real
