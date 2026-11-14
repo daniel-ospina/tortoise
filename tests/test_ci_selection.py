@@ -22197,15 +22197,19 @@ def test_the_health_honesty_suite_is_selected_on_BOTH_halves_of_its_module_pair(
     (an EXACT `api` SOURCE_PATTERNS match that REPLACES the `core` fallback) and the
     liveness readers in `tortoise/monitoring.py` (which falls through to `core`). It is
     therefore registered in `surfaces.api` AND `surfaces.core`, and the manifest's own
-    comments say so — but until this pin, NOTHING under `tests/` mentioned the file at
-    all, so a registration that lost one half was silent.
+    comments say so — but until this pin, nothing under `tests/` ASSERTED the
+    registration: naming the file in prose is not reading its surface rows. So a
+    registration that lost one half was silent.
 
-    That is not hypothetical: `config/ci-surfaces.yml` carries `merge=union`
-    (`.gitattributes`), and a plain `git rebase` of #12645 onto `main`'s
-    `d05688df5990` — which had ALREADY de-duplicated the file and carries both rows —
-    kept BOTH `api` rows and DROPPED the `core` row with no conflict reported. The
-    post-rebase tree (`f2ec5ec092`) selected this suite on a `hosted_api.py` diff and
-    NOT on a `monitoring.py` one; the base itself selects on both.
+    That is not hypothetical, and the mechanism is NOT the `merge=union` driver
+    (`.gitattributes`) — `union` keeps both sides of a conflicting hunk and deletes
+    nothing, which the manifest's own note says and `duplicate_entries()`' measurement
+    retracts. The base `d05688df5990` had ALREADY de-duplicated the file, carried both
+    rows, and selects on BOTH diffs. What a plain `git rebase` of #12645 onto it
+    replayed was an ordinary edit that REMOVED the `core` block and appended a second
+    `api` row, so the post-rebase tree (`f2ec5ec092`, whose parent is `d05688df5990`)
+    selected this suite on a `hosted_api.py` diff and NOT on a `monitoring.py` one —
+    with no conflict reported, the rebase printing "Successfully rebased".
 
     `integrity()` is not a substitute for this pin, and that is the point: it answers ONE
     question — is every `tests/**/test_*.py` classified SOMEWHERE — so a file that keeps
