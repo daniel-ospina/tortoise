@@ -2357,6 +2357,8 @@ surfaces:
   # it through the FULL matrix a SHARED_MODULES path forces, not through this row.
   - test_12455_text_filters_dropped.py
   - test_candidate_recall_11901.py
+  - test_journal_segments.py
+  - test_journal_segments_falsifier.py
   # #12298 M3 (the measurement PR #12349): the brief's tables must equal the
   # committed `artifact.json`, and the brief's DEFECT claim must still match the
   # shipped tokenizer. The guarded production module is `tortoise/sparse.py`
