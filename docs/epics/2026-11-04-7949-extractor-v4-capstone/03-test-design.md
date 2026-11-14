@@ -79,7 +79,7 @@ to 98.0 s**, so the erratum is not "new tests arrived" — the row was wrong whe
 | **the pinned registration** (`preregistration.json` + checker) | State / config | Read + Write (amended) | `capstone-preregistration/v1`; `criteria[].id`, `denominator_floors`, `below_floor`, `corpus`, `amendments`; the A-rows enter as a **versioned amendment** quoting superseded text |
 | **the verdict gate enum** (`capstone_verdict_check.py:162`) | State (closed vocabulary) | Read | `capstone-verdict-v1`; a **closed** `CRITERIA` tuple that refuses any id outside `RECOGNISED_CRITERIA` (`= (*CRITERIA, *E6_CRITERIA, *A_CRITERIA)`, `:191`; refused at `:970-976` — so A1–A5 and `E6` are accepted) — two schemas move, not one |
 | **the corpus pin** (fixture + A-corpus) | State | Read + Write | **three shapes already exist** (`fixtures_hash` in the record; `corpus.sha256`/`items` demanded by `capstone_run.py`'s G1 — the fail-closed read is `if not frozen.get("sha256")`, `:1186`; a derived `e1e2_corpus.json`) — the A-corpus must **unify the contract**, not add a fourth |
-| **the A-corpus capture** (`POST /v1/sessions`) | External service | Out → graph | request = curated payloads; response = receipt; **402 quota** at `hosted_api.py:18494` (`if count + est > max_points`) / `:18519` (`quota_refusal_payload`); harness resolution `#3681` |
+| **the A-corpus capture** (`POST /v1/sessions`) | External service | Out → graph | request = curated payloads; response = receipt; **402 quota** at `hosted_api.py:18503` (`if count + est > max_points`) / `:18528` (`quota_refusal_payload`); harness resolution `#3681` |
 | **the graph the A-rows read** (hosted `live-v4` / per-run graph) | DB | Read | `:Object`/`:Event`/`:Point`/`:Subject` shapes; `hasPart` Object→Object (ONTOLOGY §3.7); `batch_id` on `RelationUpsert.attrs` |
 | **the pack declaration → write path** (`semantics`/`hierarchies`) | State | Read | `relation_write_verdict` returns `writable`; **unread legs**: `semantics` (surfaced at `pack_registry.py:472-484`), `hierarchies` (validated only, `:2489-2503`) |
 | **the declared-mechanism registry** (`config/v4-mechanisms.yml`) | Config | Read | 14 rows (13 when this map was written; `#11717` added `mention_record`); `state`/`code:`/`tests:`/`symbols:`/`pins:`/`preconditions:`; guard `tests/test_v4_declared_mechanisms.py` |
@@ -233,7 +233,7 @@ Otherwise it is a Tier E test, and it must **name the tier in its docstring** so
 **Read every `file:line` here as a STAMP, not as an address** — the **symbol** is authoritative. ⛔ **Two
 classes of `file:line` cite live in this file, and neither is "the" right one:** the rows whose cites were
 re-measured resolve at the head that measurement was taken at, while the **stamp-bound** rows carry the head
-they were read at, `a577d0e25c`. `:82`'s `hosted_api.py:18494` and `:147`'s `hosted_api.py:18205` are the
+they were read at, `a577d0e25c`. `:82`'s `hosted_api.py:18503` and `:147`'s `hosted_api.py:18205` are the
 **same guard** (`if count + est > max_points`) read at two heads hundreds of commits apart — not a
 contradiction to fix. (A *count* or a *duration* is a third class: those carry their own heads inline, §4's
 `900d4aafc6` and line 31's `durations_captured_at`, because a count is re-taken where a cite is not

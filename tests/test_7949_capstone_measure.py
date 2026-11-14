@@ -5419,9 +5419,9 @@ def test_the_bare_continuation_cites_name_what_they_say():
             ("15277", "if vet_enabled and complete_list:"),
             ("15278", "complete_list, vet_union_stats, _w, _ = _run_vet_pass("),
         )),
-        # the VET block's start; its lines of keys (13526-13528) close on
-        # line 13529 — DERIVED by content, not by arithmetic: `result["vet"] = {`
-        # opens at 13525 and the block's `}` is 13529. ⚠️ A conflict resolution
+        # the VET block's start; its lines of keys (15622-15624) close on
+        # line 15625 — DERIVED by content, not by arithmetic: `result["vet"] = {`
+        # opens at 15621 and the block's `}` is 15625. ⚠️ A conflict resolution
         # here once kept main's numerals (13256/13257-13259/13260 — correct on
         # main, but in THIS tree 13256 is the `"hold"` key and 13257-13260 is
         # the whole `chain_enforcer` block) next to the branch's post-refactor
@@ -5471,10 +5471,10 @@ def test_the_bare_continuation_cites_name_what_they_say():
             ("15162", "except Exception as e:  # never block capture (P1)"),
             ("15313", "except Exception as e:  # never block capture (P1)"),
         )),
-        # ⛔ #10988's `:10441` (A4's attribution). The cite is a BARE continuation —
-        # `extractor_v2.py:10447-10450`; `:10441` is the EMPTY-kind default only — so
+        # ⛔ #10988's `:11314` (A4's attribution). The cite is a BARE continuation —
+        # `extractor_v2.py:11320-11323`; `:11314` is the EMPTY-kind default only — so
         # `_BUNDLE_CITE`, which requires a cite to NAME ITS FILE, cannot see it. Without
-        # this row the sentence's `:10441` half has no reader at all, and the claim it
+        # this row the sentence's `:11314` half has no reader at all, and the claim it
         # makes (that an empty `pointKind` — not the vocabulary repair — is what the
         # `or "statement"` default serves) is exactly the half a re-derivation would move.
         ("probes/capstone_measure.py", "`:11314` is the", (
@@ -5510,7 +5510,7 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # (#11517 review, finding 3). It said the flag-OFF surfaces live at
         # `:13515-13523`, which is the CLASSIFY block plus the two VET comment
         # lines — it does not contain `result["vet"]` at all, because the two
-        # blocks are 13515-13521 and 13525-13529. The row above pins the VET
+        # blocks are 15611-15617 and 15621-15625. The row above pins the VET
         # bounds for a DIFFERENT sentence, so this sentence's own copy of the
         # block bounds had no reader: a bare `:N`-range names no file, which is
         # the drift the whole `_PIN_ROWS` leg exists to stop. Non-vacuity: on
@@ -5519,8 +5519,8 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # the wrong range it was added for.
         #
         # ⛔ AND BOTH BLOCK BOUNDS, not a subset: the corrected sentence names
-        # `:13515-13521, :13525-13529`, so `13525`/`13529` are its OWN copy of
-        # the VET bounds and need the same reader. The `13525`/`13529` row on
+        # `:15611-15617, :15621-15625`, so `15621`/`15625` are its OWN copy of
+        # the VET bounds and need the same reader. The `15621`/`15625` row on
         # `probes/capstone_run.py` scopes to THAT document's line; it cannot see
         # this sentence, and a row that pinned 4 of a sentence's 6 numbers would
         # leave the fix's own new cite as the one this leg still cannot see.
@@ -5804,6 +5804,13 @@ _EPIC_CITE_DOCS = {
 _EPIC_CITE_SOURCES = {
     "sdk": _REPO / "tortoise/sdk.py",
     "search_engine": _REPO / "tortoise/search_engine.py",
+    # `00-align.md`'s A-d row cites the fleet's real capture transport OUTSIDE every
+    # sweep `_BUNDLE_CITE` can see (it resolves `sdk|edges|extractor_v2` only), so its
+    # two `.ts` numbers had no reader at all and were stale: the row named `:948`/`:938`
+    # for the plain `postCapture` and its `install-probe` sibling while the tree carries
+    # those two `def`s at `:955`/`:947`. Registered because a repaired cite that nothing
+    # pins is a repair the next move of the symbol undoes silently.
+    "pi_hooks": _REPO / "tortoise/pi-hooks/tortoise-capture.ts",
     # ⛔ `03-test-design.md:82` cites the 402 quota guard and its refusal payload by
     # NUMBER, and that row was in NO pin: #12369 re-pointed a CORRECT
     # `hosted_api.py:18494`/`:18519` to `:18493`/`:18518` (both comments) while
@@ -5900,13 +5907,13 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # tree (`grep -nF 'relation_write = apply_relation_edges(' tortoise/sdk.py`),
             # never carried forward from either side. The anchors are unchanged —
             # that is the point of keying a row on the symbol.
-            ("19009", "relation_write = apply_relation_edges("),
+            ("19012", "relation_write = apply_relation_edges("),
         ), "sdk"),
         ("RECONCILE-A1-A2-A5.md", "is the line above it, `:", (
-            ("19008", "from tortoise.relation_write import apply_relation_edges"),
+            ("19011", "from tortoise.relation_write import apply_relation_edges"),
         ), "sdk"),
         ("RECONCILE-A1-A2-A5.md", "`relation_write.py:7`, `sdk.py:", (
-            ("18996", "# `#10999` made the channel TRANSPORT ONLY"),
+            ("18999", "# `#10999` made the channel TRANSPORT ONLY"),
         ), "sdk"),
         # `subject_binding_available`'s DEFINITION and its CONSUME pair, in both
         # documents that state them — a row per document, because a row scopes to
@@ -5932,7 +5939,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # The A5 binder's CALL SITE (its `def` is in `subject_binding.py`; the plan
         # names the call), keyed by the quoted form the sentence prints.
         ("00-plan.md", "point-creation path at", (
-            ("18656", "bind_point_subjects(proj, self, point_id=pid,"),
+            ("18659", "bind_point_subjects(proj, self, point_id=pid,"),
         ), "sdk"),
         # The two cites this forward merge re-pointed in the documents no row read —
         # each is a RANGE, pinned at BOTH endpoints, because a range that moves by a
@@ -5971,11 +5978,27 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("2503", 'errors.append("hierarchies: entry missing \'type\' field")'),
         ), "pack_registry"),
         ("00-align.md", "`llm:deepseek-direct` is what", (
-            ("16455", "The v2 path reports"),
-            ("16456", '"extraction_mode": "llm:<route>"'),
+            ("16458", "The v2 path reports"),
+            ("16459", '"extraction_mode": "llm:<route>"'),
         ), "sdk"),
+        # ...and THAT sentence names a second file, so its `.ts` pair takes its
+        # own row: a row carries ONE source key. Both anchors are the FUNCTIONS
+        # the row's prose names (`postCapture` and its `install-probe` sibling),
+        # never a bare offset. The row named `:948`/`:938`; the tree carries those
+        # two `def`s at `:955`/`:947`, which are **always 8 apart** across all 27
+        # revisions of the file — so nothing "rotted" and there is no offset to
+        # reuse: `:938` was `clearTimeout(timer);` and `:948` was
+        # `cfg: CaptureConfig,`, i.e. the pair was WRONG, not shifted (the file did
+        # not move in this wave at all). A reader who takes an offset from it
+        # re-derives `948` → `957`, which lands on `postCapture`'s parameter list
+        # (`payload: Record<string, unknown>,`) instead of its `def`, so the row
+        # reds on content rather than silently resolving.
+        ("00-align.md", "`llm:deepseek-direct` is what", (
+            ("1007", "export function postCapture("),
+            ("999", "export function postInstallProbe("),
+        ), "pi_hooks"),
         ("04-plan.md", "operator / label path", (
-            ("25393", "declared = declared_relation_predicates()"),
+            ("25396", "declared = declared_relation_predicates()"),
         ), "sdk"),
         # ⛔ THE 402 QUOTA GUARD, `03-test-design.md`'s A-corpus capture row (#12369
         # review, P2). This row is the one that would have caught #12369's own
@@ -5985,8 +6008,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # exact failure the deleted "Provenance of the numbers" section named. Held by
         # CONTENT, so a number that lands on a comment cannot satisfy it.
         ("03-test-design.md", "the A-corpus capture", (
-            ("18494", "if count + est > max_points:"),
-            ("18519", "detail=quota_refusal_payload("),
+            ("18503", "if count + est > max_points:"),
+            ("18528", "detail=quota_refusal_payload("),
         ), "hosted_api"),
         # ⛔ NOT A ROW ANY MORE — the `carve_out:` claim below the rows is checked
         # against the BLOCK (`_section_entries`) and not against a line number: the
@@ -14020,23 +14043,23 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         n for n, line in enumerate(ext, 1) if 'result["relations"]' in line)
     assert f"`extractor_v2.py:{_relations_cite}`" in text, (
         "the record must cite the comment that says nothing consumes the channel")
-    # The SAME line is cited a SECOND time as a bare `:11524`, inside the
+    # The SAME line is cited a SECOND time as a bare `:12397`, inside the
     # reproduction block's comment. A bare cite carries no file token, so the
     # prefixed arm above cannot see it: measured by re-staling it to `:10815` in
     # place, which left every arm True before this assert existed.
     # ⛔ Pinned as the BARE occurrence of the NUMBER, not as the sentence around it (#10891
     # is the claim; "the comment at" is one way of saying it). A literal needle redded on
-    # `the comment on :11524` and on `` the comment at `:11517` `` — both correct, both
+    # `the comment on :12397` and on `` the comment at `:11517` `` — both correct, both
     # sending the reader to the live line (measured) — the same false-block this leg removed
     # for `both now read`, the `# §0/§2` heading and `MENTIONS`. The prose above carries the
-    # PREFIXED form `extractor_v2.py:11524`; this is the only statement without a file token,
+    # PREFIXED form `extractor_v2.py:12397`; this is the only statement without a file token,
     # so exactly one bare occurrence is the claim.
     assert re.findall(rf"(?<!extractor_v2\.py):{_relations_cite}", text) == [f":{_relations_cite}"], (
-        "the reproduction block must state the live number `:11524` exactly once as a BARE "
+        f"the reproduction block must state the live number `:{_relations_cite}` exactly once as a BARE "
         "cite — re-stale it and this record's only reproduction path points at a dead line")
     # ⛔ DIRECTION FLIPPED with the correction this arm forced. The comment at this line used to
     # read "nothing in this tree consumes `result[\"relations\"]`" — a claim that was FALSE from the
-    # moment `#11548` landed the consumer (this record's own §5 names it at `sdk.py:17416`), so the
+    # moment `#11548` landed the consumer (this record's own §5 names it at `sdk.py:19012`), so the
     # arm was pinning a falsehood into the live tree. It now asserts the corrected sentence AT THE
     # SAME LINE (the block's line count was held at 13 so every cite below keeps its number) and that
     # the retracted sentence is gone from the file entirely.
@@ -14058,7 +14081,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         "\"nothing consumes it\" reading is what this arm replaced")
     assert "nothing in this tree consumes" not in "\n".join(ext), (
         "the retracted sentence is back in the live file — it was false while this record's own §5 "
-        "cited `sdk.py:17416` as the consumer, so no arm may require it again")
+        "cited `sdk.py:19012` as the consumer, so no arm may require it again")
 
     # A1's environment block: the reproduction that states A1's producer claim — the
     # bare-token grep whose four `create_operator` mentions ARE its evidence that the

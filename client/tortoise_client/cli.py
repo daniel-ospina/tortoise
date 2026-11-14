@@ -54,6 +54,7 @@ from tortoise.mcp_client import (
     describe_failure,
     endpoint_declared,
     list_tools,
+    refusal_message,
     status,
 )
 
@@ -178,10 +179,35 @@ def _cmd_call(args: argparse.Namespace) -> int:
     try:
         result = call_tool(args.tool, arguments)
     except Exception as exc:  # noqa: BLE001, RUF100
-        print(f"call failed: {describe_failure(exc)}", file=sys.stderr)
+        # A REFUSAL is not a crash (#11153). The driver's client raises on a
+        # tool-level failure (`raise_on_error=True`), so a designed refusal — the
+        # server's `{"error": …}` envelope, or the transport wait-bound prose —
+        # arrives HERE, not as a returned `is_error` result. Reporting it under the
+        # documented refusal shape keeps the two distinguishable for a scripted
+        # caller: rc is 1 either way, but stdout carries the refusal and stderr
+        # carries nothing, while a genuine failure stays on stderr with rc 1.
+        refusal = refusal_message(exc)
+        if refusal is not None:
+            # ⛔ `describe_failure`, not the raw text: the standing rule three
+            # functions up ("#10605: the server may echo the credential it rejected;
+            # print evidence, never the VALUE") applies here too — fastmcp carries
+            # the server's JSON-RPC text into the exception, so a refusal that echoes
+            # a credential would land verbatim on stdout, where scripted callers log
+            # it. The CLASSIFICATION above already ran on the raw text, so redaction
+            # cannot change which branch this is.
+            print(json.dumps({"is_error": True, "result": describe_failure(exc)},
+                             indent=2))
+        else:
+            print(f"call failed: {describe_failure(exc)}", file=sys.stderr)
         return _EXIT_ERR
     if getattr(result, "is_error", None):
-        print(json.dumps({"is_error": True, "result": str(result)}, indent=2))
+        # Defence in depth: reachable only for a client built with
+        # `raise_on_error=False` (the default is True), where an error result is
+        # RETURNED instead of raised. Kept so the documented shape holds for both
+        # client configurations rather than only the one this module builds.
+        # Redacted for the same #10605 reason as the arm above.
+        print(json.dumps({"is_error": True, "result": describe_failure(result)},
+                         indent=2))
         return _EXIT_ERR
     # The PAYLOAD is `content[0]`, and extra blocks are appended LAST by the
     # dispatch seam (a retired-name warning, the #10084 graph disclosure). Joining
