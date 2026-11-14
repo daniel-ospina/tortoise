@@ -111,9 +111,11 @@ The bundle's headline lists **7 files** under `docs/epics/2026-11-04-7949-extrac
 spot named `docs/00_index.md`, `tools/ci_selection.py` and `tests/test_ci_selection.py`,
 and **none of the three was in the diff at the head that note was written** — they were
 absorbed by the forward merges exactly like the rows below, so that table was itself an
-instance of the thing this document is about. ⛔ **`docs/00_index.md` was BACK in the diff at `30c9e7c4d3` (an earlier base of this branch — at `c1db6f3df28e`, the head this merges into, it is out of the diff again)**: resolving `main` moved the meta fold under
-that bundle-registering row's `sdk.py:19054` cite, so the row re-points to `:19111` — the
-same row, with a number this merge moved. `tools/ci_selection.py` and
+instance of the thing this document is about. ⛔ **`docs/00_index.md` was BACK in the diff at `30c9e7c4d3` (an earlier base of this branch — at `c1db6f3df28e`, the head this merges into, it is out of the diff again)**: that bundle-registering row's `sdk.py:19054` cite now reads
+`:19111`, which is where the meta fold sits at BOTH heads — `tortoise/sdk.py` is byte-identical
+at `30c9e7c4d3` and `c1db6f3df28e` (blob `978312359e`), so `#12521` (`8e4e335b05`) had already
+moved the fold before `30c9e7c4d3` and the row was stale there, which `#12569` (`5e31405809`)
+re-pointed — the same row, with a number main moved before this merge. `tools/ci_selection.py` and
 `tests/test_ci_selection.py` remain absorbed; read the set from the command, never from
 this sentence either. The paragraph above already says where the set comes from;
 measured at **`a36c93a1`** it is **eight
@@ -138,7 +140,7 @@ which is the per-row marking this section promises.):
 | `tortoise/hosted_api.py` | the same census's `179 tracked files`/`449 distinct targets` figures, re-taken to `185`/`456` | none — comment text |
 | `.github/workflows/main-health-nightly.yml` | the `census-drift` job's **comment block**, removing the restated figures the `--refresh` verb cannot verify | none — no job, trigger, permission or step changes |
 | `tests/test_demo_session_read_exclusion_8290.py` | the census verb's arm 1 stops asserting the **shipped** figures — that arm is what redded this docs PR — and instead forces a degrade→refresh→read-back round trip on a throwaway copy; arm 2's degraded figure is derived, not the `**434**` literal | **CI effect: a guard MOVED, it was not added** — and the merge that absorbed it took `main`'s side, so this head carries neither the move nor its cost |
-| `docs/00_index.md` | one row registering the new bundle directory | index only — ⚠️ **the FILE was back in the diff at `30c9e7c4d3`; at `c1db6f3df28e` it is out of the diff again**: the row's `sdk.py:19054` cite re-points to `:19111` because resolving `main` moved the meta fold (both numbers resolve at both heads). The change this table describes was absorbed; the re-point is new (see the note above) |
+| `docs/00_index.md` | one row registering the new bundle directory | index only — ⚠️ **the FILE was back in the diff at `30c9e7c4d3`; at `c1db6f3df28e` it is out of the diff again**: the row's `sdk.py:19054` cite now reads `:19111`, where the meta fold sits at BOTH heads — `sdk.py` is identical at each (`978312359e`), so `:19054` named it at neither, the stale number was `main`'s own, and `#12569` (`5e31405809`) re-pointed it after `#12521` (`8e4e335b05`) had already moved the fold. The change this table describes was absorbed; the re-point is new (see the note above) |
 | `tools/ci_selection.py` | `CONTRIBUTING.md` leaves `NON_CODE_DOC_PATHS` — `tests/test_surface_manifest.py:5542` reads that file's TEXT, so the exemption would have dropped a guard from the PR editing the file it guards | **CI effect: a `CONTRIBUTING.md`-only PR now runs the full matrix instead of tier-1 smoke.** This is deliberate and it FIXES a red on `main` (`test_non_code_doc_paths_have_no_content_reader`) |
 | `tests/test_ci_selection.py` | the arms over that list | none beyond the row above |
 
