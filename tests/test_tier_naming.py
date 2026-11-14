@@ -314,6 +314,14 @@ class TestEverySurfaceAgreesWithTheDeclaration:
 #:         the RETRACTION that makes these sentences records (all three end in a
 #:         `_RETRACTION_CUES` member) — a weaker resume test re-opens the class above, which
 #:         is measured. No `docs/` sentence is affected (corpus sweep: 0 verdict diffs);
+#:       * an UNLISTED DEMONSTRATIVE HEAD after a leading pair — **OPEN, measured in the
+#:         round-9 cycle-3 review**: the resume test rejects `that` followed by a MEASURED
+#:         list of heads (`is`, `was`, `were`, `'s`, `means`, `proves`, `would`, `has`,
+#:         `makes`), so `-- the page was never fixed -- that SHOWS / EXPLAINS / SUGGESTS
+#:         there is no Builder plan.` is EXEMPT here and FLAGGED at `origin/main`. The set is
+#:         an enumeration against an open class; the alternative (an allowlist of the
+#:         reported clause's own subjects) is the wider question this rule does not take.
+#:         No `docs/` sentence is affected (corpus sweep: 0 verdict diffs);
 #:       * an ANAPHORIC re-assertion after a quoted record (`Previously the doc read
 #:         "there is no Builder plan"; there is no such plan anymore.` / `…; that plan
 #:         does not exist.`): :func:`_asserts_a_denial_outside_the_quotes` asks whether
@@ -1075,12 +1083,18 @@ _REPORTED_CLAUSE_END = re.compile(
 _YET_AGAIN = re.compile(r"^\s*yet\s+again\s*", re.I)
 #: ⛔ THE `that` MUST BE THE COMPLEMENTIZER, NOT A DEMONSTRATIVE PRONOUN (round-9 review,
 #: P1, measured): `-- the page was never fixed -- that IS WHY there is no Builder plan.`
-#: resumes on a bare `^…that\b`, so the rule exempted a live denial one word away from the
-#: pinned shape while `origin/main` FLAGS it (ditto `that means`, `that proves`, `that's`).
-#: A demonstrative `that` is followed by a copula or a verb of evidence; the complementizer
-#: is followed by the reported clause's own subject.
+#: resumed on a bare `^…that\b`, so the rule exempted a live denial one word away from the
+#: pinned shape while `origin/main` FLAGS it.
+#: ⚠️ THIS IS AN ENUMERATION, NOT A CLOSED CLASS (round-9 review cycle 3, measured): it
+#: lists the heads that have been MEASURED (`is`, `was`, `were`, `'s`/`’s`, `means`,
+#: `proves`, `would`, `has`, `makes`), and an unlisted demonstrative head still exempts —
+#: `that shows …`, `that explains …`, `that suggests …`, `that clearly is …` are EXEMPT
+#: here and FLAGGED at `origin/main`. Listed as an OPEN residual in the class docstring
+#: rather than replaced by a different vocabulary test (an allowlist of the reported
+#: clause's own subjects is the only other candidate and it is a wider question this file
+#: does not answer here); every listed head is pinned.
 _RESUMES_WITH_THAT = re.compile(
-    r"^[\s,]*(?:yet\s+again\s+)?that\b(?!\s*(?:is|was|were|'s|means|proves|would|has|makes)\b)",
+    r"^[\s,]*(?:yet\s+again\s+)?that\b(?!\s*(?:is|was|were|['\u2019]s|means|proves|would|has|makes)\b)",
     re.I)
 #: ⛔ THE INNER SET IS NARROW **AND** THE PAIR'S INNER CAN NEVER HOLD A DASH (round-9
 #: review, measured): the closer is the FIRST marker of any side, so the extracted inner text
@@ -2170,6 +2184,24 @@ class TestNoDocDeniesABuilderPlanExists:
                 "is no Builder plan.\n",
                 "Until #12444 the doc said -- the page was never fixed -- that proves there "
                 "is no Builder plan.\n",
+                # ⛔ EVERY MEASURED HEAD OF THE EXCLUSION IS PINNED (round-9 review cycle 3,
+                # P2, measured): six of its eight members could be deleted with the suite at
+                # `19 passed` while each deletion turned a FLAGGED denial exempt — the same
+                # one-for-one rule this commit applied to `:` and to `so`/`yet`. The set is
+                # an ENUMERATION of measured heads, not a closed class; that is stated at
+                # the constant and listed as an OPEN residual above.
+                "Until #12444 the doc said -- the page was never fixed -- that was why "
+                "there is no Builder plan.\n",
+                "Until #12444 the doc said -- the page was never fixed -- that means there "
+                "is no Builder plan.\n",
+                "Until #12444 the doc said -- the page was never fixed -- that would mean "
+                "there is no Builder plan.\n",
+                "Until #12444 the doc said -- the page was never fixed -- that makes it "
+                "plain there is no Builder plan.\n",
+                "Until #12444 the doc said -- the page was never fixed -- that has "
+                "established there is no Builder plan.\n",
+                "Until #12444 the doc said -- the page was never fixed -- that\u2019s why "
+                "there is no Builder plan.\n",
                 # ⛔ `:` IS A MEMBER OF `_ASIDE_INNER_BREAK` AND IS LOAD-BEARING (round-9
                 # review cycle 2, P2, measured): deleting it left the suite at `19 passed`
                 # while turning this FLAGGED denial into an exempt one, so the "pinned one
