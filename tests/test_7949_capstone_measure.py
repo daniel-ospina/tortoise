@@ -6092,9 +6092,9 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # re-staled for exactly the reason the `pi_hooks` key above exists — so it takes
         # its own row, on its own source key.
         # ⚠️ BOTH routes are pinned, because the row distinguishes them and the number
-        # alone had stopped doing so: `:18743` is `POST /v1/sessions` — the capture door
+        # alone had stopped doing so: `:18744` is `POST /v1/sessions` — the capture door
         # the sentence is about, whose handler holds the quota 402 at `:19448` — and
-        # `:21298` is the `install-probe` sibling the row names as NOT that door (auth,
+        # `:21299` is the `install-probe` sibling the row names as NOT that door (auth,
         # no quota gate). ⚠️ THESE ARE THIS HEAD'S NUMBERS. The same three at `6916a6cd89`
         # (an earlier round's base) were `:17799`/`:18503`/`:20354`, and the merge that
         # moved `hosted_api.py` by +842 re-derived the ROW and the DOCUMENT while leaving
