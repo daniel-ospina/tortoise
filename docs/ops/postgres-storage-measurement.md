@@ -11,6 +11,7 @@ updated: 2026-10-15
 ---
 
 # Postgres storage footprint + per-org analytics row growth (#4492)
+# — and per-org bytes from what we WRITE (#12762)
 
 > **This is a MEASUREMENT, not a policy.** It answers two questions the B7
 > cost-structure audit found unanswerable: *how large is the control plane's
@@ -84,18 +85,113 @@ measured `0` and `{}` — never an absent key.
 
 ## The attribution boundary — read this before quoting a per-org byte figure
 
+> ### ⚠️ PARTLY OVERRIDDEN by #12762 — read the next section first
+>
+> **OVERRIDES:** the position that *"Per-org BYTES would be an ALLOCATION, not a
+> measurement"* — replaced by a **write-time measurement of stored bytes**
+> (`sum(pg_column_size(row))` over the org's own journal rows,
+> `tortoise/postgres_bytes.py`), because a byte written for an org and measured
+> as stored is that org's own byte. What survives of the old position is exactly
+> its original target: apportioning the database **total** by a proxy is still
+> an allocation, and index / dead-tuple / page-slack / TOAST-chunk-header bytes
+> are still **not** attributable per org — they are published as a labelled
+> residual and never folded into a per-org figure.
+
 | dimension | grain | how it is attributed |
 |---|---|---|
-| storage **bytes** | database / table | **not per-org** |
+| storage **bytes** — the database footprint | database / table | not per-org (unchanged, #4492) |
+| storage **bytes** — what an org WROTE | per org | **measured** at write time (#12762, below) |
 | analytics **rows** | per org | `rows_by_org` from the growth function |
 
-**Postgres records no per-org byte ownership.** A per-org byte split is
-therefore an **ALLOCATION**, not a measurement — a policy applied to a stated
-total. This doc publishes none, and neither does the code: inventing one here
-would be exactly the mistake the #5045 substrate exists to prevent. If an
-allocation is ever wanted, it belongs in the substrate's declared dimensions
-(`docs/ops/cost-allocation.md` is the precedent for how an allocation is
-declared and named as one), not silently inside a byte counter.
+**Postgres records no per-org byte ownership** — the *server* does not, and that
+is still true. What the server cannot do, the **writer** can: the org that wrote
+a row is known at the write, so the bytes of the row it stored are its own. That
+is a measurement of the account's own stored content, not a share of a total.
+
+## Per-org bytes from what we WRITE (#12762)
+
+### The TOAST question, settled by measurement — and the issue's premise is FALSE
+
+#12762 was filed on the premise that `sum(pg_column_size(...))` reports the
+**18-byte TOAST pointer** for a value moved out of line, a ~100× undercount.
+Two sources were said to disagree, so this was measured rather than cited.
+
+**Setup:** containers `postgres:17.12` and `postgres:16.9`, plus the repo's
+PGlite harness (`18.3`), a table shaped exactly like `public.journal_event`
+(`org_id`, `graph_id`, `seq`, `event_type`, `payload jsonb`). Three engines, same
+answer.
+
+| payload | JSON text | `pg_column_size(payload)` | out-of-line chunks | chunk_data bytes | `pg_column_size(row)` |
+|---|---|---|---|---|---|
+| small | 47 | 59 | 0 | 0 | 118 |
+| 4 KB repetitive text | 4,045 | **114** | 0 | 0 | 174 |
+| 1,536-float vector | 15,428 | **7,177** | 4 | 7,177 | 7,241 |
+| 19 KB incompressible | 19,245 | **19,256** | 10 | 19,256 | 19,320 |
+
+1. ⛔ **`pg_column_size` does NOT report the pointer.** The 19 KB row is out of
+   line (10 chunks, `pg_column_toast_chunk_id` non-NULL) and reports **19,256** —
+   its chunk sum exactly. The disagreeing sources resolve to *full stored size*.
+2. **It reports the COMPRESSED stored size** where compression applies —
+   15,428 → 7,177 out of line, and 4,045 → **114** compressed *inline* (the only
+   real “shock undercount”, and it is simply the physical truth).
+3. ⇒ **`pg_column_size(row)` is already a per-row, per-org, stored-byte
+   measurement**, and no TOAST pointer can fool it.
+
+### The trap that IS live: double counting
+
+`pg_column_size(row)` **already contains** an out-of-line value's bytes. Adding
+the TOAST chunk bytes double counts — measured 7,241 + 7,177 = **14,418** for a
+row that occupies 7,241. `chunk_bytes` is therefore returned by both functions
+**for disclosure only** and is never added to a per-org total; both parsers
+refuse a reply where `chunk_bytes > row_bytes` (the shape that double count
+produces).
+
+### The naive write-time measure over-counts (the falsifier's target)
+
+`INSERT … RETURNING pg_column_size(payload)` sees the datum **before** the row is
+stored — pre-TOAST, pre-compression, and for `jsonb` in its uncompressed binary
+form. For our own record shape it reports **24,606** bytes for a payload that
+occupies **7,177**: a 3.4× **over**-count, in the direction that over-bills. The
+meter therefore reads the row BACK (one indexed read per write segment, in the
+caller's transaction) instead of taking the free-looking `RETURNING` value.
+
+⚠️ The gap is **shape-dependent**: on the 19 KB incompressible payload
+`RETURNING` gives 19,260 against 19,236 stored — a 1.001× difference. The
+falsifier in `supabase/tests/20261114000001_per_org_postgres_bytes.sql` uses the
+**vector** shape and additionally asserts the gap is at least 2×, so the pin
+cannot silently become toothless.
+
+### The two halves, and the residual
+
+| piece | what it is | where |
+|---|---|---|
+| **meter** | `sum(pg_column_size(row))` over the journal rows a write segment just wrote, in the caller's transaction | `journal_event_bytes_for_rows(org, graph, seqs)` → `postgres_bytes.measure_written_rows` → `metering.record_postgres_bytes_written` |
+| **audit** | the same figure for the whole table, per org, later and independently | `postgres_per_org_bytes()` → `postgres_bytes.per_org_bytes` |
+| **residual** | heap page slack, dead tuples, the PK index, TOAST chunk tuple headers | `postgres_per_org_bytes()` → `residual` (**never** folded in) |
+
+**Residual, measured** on a mixed 404-row / 3-org set: Σ`pg_column_size(row)` =
+2,940,364 B; chunk_data = 2,917,583 B in 1,614 chunk rows; TOAST relation
+3,309,568 B; heap 32,768 B; index 40,960 B; total 3,506,176 B → **attributed
+83.9%**, un-attributable **16.1%**.
+
+**Reconciliation direction.** `postgres_bytes.reconcile` compares the
+accumulated counter with the audit and names which way they disagree:
+
+- counter **below** the audit → `unmetered_bytes`, disclosed, **not an error**
+  (rows written before the meter existed, or a write that bypassed the seam);
+- counter **above** the audit by more than 1% → **not ok**: the two sum the same
+  per-row figure, so an excess is the double count or a fabricated number, and
+  the reading says so rather than quietly under-billing.
+
+**What the meter does not do.** It measures rows written from the day it lands.
+It does not backfill, does not prune, and does **not** arm `allowance_gate` —
+arming `postgres_storage` needs the `free`/`anon` included amounts decided first
+(#12762 is measurement only; `product/pricing.json` and the tier boundaries are
+untouched).
+
+**Retention.** `#3843`/`#3853` (“no retention window of any length”) bind
+`analytics_events` (migration 0004's immutable trigger). They say nothing about
+`journal_event` bytes, and this change adds no prune to either.
 
 ## Precision — what is exact and what is an estimate
 
@@ -144,12 +240,18 @@ readings that **carry their caveats** (`ATTRIBUTION_NOTE`, `PRECISION_NOTE`,
 `RETENTION_FINDING`) so a figure cannot be quoted without them:
 
 ```python
-from tortoise import postgres_storage
+from tortoise import postgres_bytes, postgres_storage
 
 reading = postgres_storage.measure_postgres_storage(control_plane)   # bytes
 growth = postgres_storage.read_analytics_row_growth(                  # rows
     control_plane, since="2026-05-01T00:00:00+00:00")
 growth.for_org("org_abc123")
+
+# #12762 — the per-org half. The meter runs on the record write path; these are
+# the two reads, and the reconciliation that puts them side by side.
+audit = postgres_bytes.per_org_bytes(control_plane)          # per-org + residual
+audit.for_org("org_abc123")
+postgres_bytes.reconcile("org_abc123", metered_bytes=..., audited_bytes=...)
 ```
 
 Both callers are **fail-soft**: a dead control plane or a malformed reply returns
@@ -183,8 +285,20 @@ cd supabase/tests/pglite && npm ci --no-audit --no-fund && npm run validate
 
 # The wrapper + the SQL↔Python contract (hermetic):
 TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_postgres_storage.py -q
+
+# #12762 — the per-org meter, the audit and the falsifier (needs the DB lane):
+uv run python tools/test_lane.py run -- tests/test_postgres_bytes.py -q
 ```
+
+The **falsifier** — a multi-KB TOASTed payload must be counted at its full
+stored size — is `supabase/tests/20261114000001_per_org_postgres_bytes.sql`
+(§3–§5): it proves the pointer claim is false *with its numbers*, then proves
+the naive `RETURNING` write-time measure is 3.4× the stored size on the shape we
+actually write, and that both the row+chunks double count and a pre-TOAST
+payload are **refused**. It goes red if the meter is ever rebuilt on either
+naive method.
 
 Linked: parent substrate **#5045**; sibling dimension lanes **#4488** (embedding
 encode), **#4489** (retrieval), **#4490** (machine time), **#4491** (egress),
-**#4493** (shared-SaaS allocation); unit ruling and graph meter **#5331**.
+**#4493** (shared-SaaS allocation); unit ruling and graph meter **#5331**;
+per-org write-time bytes **#12762** (reopens the #4492 grain position above).

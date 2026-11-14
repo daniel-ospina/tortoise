@@ -455,26 +455,69 @@ DIMENSIONS: tuple[Dimension, ...] = (
     Dimension(
         name="postgres_storage",
         kind="storage",
-        unit="bytes (database total, plus per-table total / heap / index bytes)",
+        unit=("bytes (PER-ORG stored bytes on the record write path, plus the "
+              "database/table footprint and a labelled, un-attributed residual)"),
         attribution=(
-            "DATABASE grain — no per-org figure exists, and none is invented. "
-            "Per-org BYTES would be an ALLOCATION, not a measurement"),
+            "org_id, MEASURED at write time: the stored size of the rows the "
+            "org writes (sum(pg_column_size(row)) over its own journal rows). "
+            "Indexes / dead tuples / page slack / TOAST chunk headers are "
+            "DATABASE grain and are published as a stated residual, never "
+            "folded into a per-org figure. "
+            "OVERRIDES: the #4492 position — \"DATABASE grain — no per-org "
+            "figure exists, and none is invented. Per-org BYTES would be an "
+            "ALLOCATION, not a measurement\" — that sentence was right about "
+            "apportioning the database TOTAL by a proxy and wrong about every "
+            "possible method: a byte written for an org, measured as stored, "
+            "is that org's own byte, not a share of anything (#12762)."),
         state=MEASURED,
-        note="#4492. The Supabase tier we must buy could only be sized on guesswork before this.",
+        note=(
+            "#4492 sized the Supabase tier on the database total. #12762 adds "
+            "the per-org half the storage dimension needed to be armable, "
+            "measured from what we WRITE — and deliberately does NOT arm it: "
+            "the free/anon included amounts are still undecided."),
         bindings=(
             Binding("tortoise.postgres_storage", "measure_postgres_storage", READER),
+            # #12762 — the per-org half. The WRITER is reached from the record
+            # write seam (`record_writer.RecordWriter.write`), so it is a
+            # production call site and not a dead hook; the READER pair is the
+            # meter's own measurement and the audit it is checked against.
+            Binding("tortoise.metering", "record_postgres_bytes_written", WRITER),
+            Binding("tortoise.postgres_bytes", "measure_written_rows", READER),
+            Binding("tortoise.postgres_bytes", "per_org_bytes", READER),
+            Binding("tortoise.postgres_bytes", "reconcile", READER),
         ),
-        rpcs=("postgres_storage_footprint",),
+        columns=("postgres_bytes_written", "postgres_bytes_records"),
+        rpcs=(
+            "postgres_storage_footprint",
+            "journal_event_bytes_for_rows",
+            "postgres_per_org_bytes",
+            "metering_increment_postgres_bytes",
+        ),
         unscheduled_reason=(
-            "The read path IS the SQL function (``select "
-            "postgres_storage_footprint();``): the module is a consumable, "
-            "testable wrapper with no periodic caller by design. A scheduled "
-            "caller is a separate decision, not a missing hook."),
+            "The DATABASE-grain reader is the SQL function (``select "
+            "postgres_storage_footprint();``) with no periodic caller by "
+            "design — a scheduled footprint sweep is a separate decision, not "
+            "a missing hook. The PER-ORG meter is NOT in this class: it runs on "
+            "the record write path (``RecordWriter.write``), one indexed read "
+            "per write segment."),
         limits=(
             "``live_rows`` is a PLANNER STATISTIC (``n_live_tup``) that can lag "
             "the truth; the exact per-org count comes from the row-growth row.",
-            "No per-org byte split: Postgres records no per-org byte ownership, "
-            "so a split would be a policy dressed as a measurement.",
+            "The per-org figure is ``sum(pg_column_size(row))``: the COMPRESSED "
+            "stored size where compression applies, and it follows the TOAST "
+            "pointer (measured PG 16.9/17.12/18.3 — a 19,245 B out-of-line "
+            "payload reports 19,256, never an 18 B pointer). ``INSERT … "
+            "RETURNING pg_column_size(payload)`` is NOT the stored size (3.4x "
+            "over for a vector payload) and must not be used as one.",
+            "Index bytes, dead tuples, heap page slack and TOAST chunk headers "
+            "are NOT attributable per org without an allocation — they are "
+            "reported separately as a residual (~16% measured on a mixed 404-row "
+            "set) and are never folded in.",
+            "It measures rows written from the day the meter lands. Rows from "
+            "before it are unmetered by construction, and ``reconcile`` "
+            "discloses them (``unmetered_bytes``) instead of quietly "
+            "under-billing; only a counter ABOVE the audit (the double-count "
+            "direction) makes the reading not-ok.",
         ),
     ),
     Dimension(

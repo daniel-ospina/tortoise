@@ -212,7 +212,7 @@ from enum import StrEnum
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
-from . import record_projection, status_vocabulary
+from . import postgres_bytes, record_projection, status_vocabulary
 from .env_truthy import env_flag
 
 _logger = logging.getLogger(__name__)
@@ -1654,6 +1654,20 @@ class RecordWriter:
                 f"({type(exc).__name__}: {_bounded_cause(exc)})"
             ) from exc
 
+        # #12762: measure what this write actually STORED, for the org that
+        # wrote it, and accumulate it on the meter's ledger. Deliberately AFTER
+        # the projection succeeded and BEFORE the return: the reading is of
+        # rows that now exist, and a failure here is swallowed (it must never
+        # change the write's outcome).
+        _meter_written_bytes(
+            target,
+            org_id=org_id,
+            graph_id=graph_id,
+            first_seq=first_seq,
+            n_records=len(records),
+            position=position,
+        )
+
         return RecordWrite(
             outcome=RecordWriteOutcome.APPLIED,
             events=report.events,
@@ -1662,6 +1676,60 @@ class RecordWriter:
             last_seq=first_seq + len(records) - 1,
             connection=opened,
         )
+
+
+def _meter_written_bytes(
+    conn: Any,
+    *,
+    org_id: str,
+    graph_id: str,
+    first_seq: int,
+    n_records: int,
+    position: bool,
+) -> None:
+    """Accumulate the STORED bytes of the rows this write just created (#12762).
+
+    The meter is :func:`tortoise.postgres_bytes.measure_written_rows` — one
+    indexed read of ``public.journal_event`` for the positions this segment
+    wrote, in the caller's own transaction, summing ``pg_column_size(row)``
+    (the compressed stored size where compression applies; measured to follow
+    the TOAST pointer, so a moved-out payload counts at its full stored size).
+    Then :func:`tortoise.metering.record_postgres_bytes_written` adds it to the
+    per-(org, window) ledger every other dimension writes through.
+
+    ⛔ ``position=False`` IS SKIPPED, and that is a correctness gate, not an
+    optimisation: a replay re-materialises rows that were ALREADY metered when
+    they first landed, so metering it again would double the org's figure on
+    every rebuild. The positions are only the rows this call wrote, so a
+    duplicate-suppressed insert (``ON CONFLICT DO NOTHING``) contributes 0 —
+    the reading is of stored rows, not of attempts.
+
+    ⛔ TOTAL — every failure is logged at DEBUG and dropped. A meter must never
+    fail, delay past its one read, or change the outcome of a record write.
+    """
+    if not position or n_records <= 0:
+        return
+    try:
+        written = postgres_bytes.measure_written_rows(
+            conn,
+            org_id=org_id,
+            graph_id=graph_id,
+            seqs=range(first_seq, first_seq + n_records),
+        )
+        if written is None or written.rows == 0:
+            # None = the measurement failed (already logged); rows == 0 = the
+            # rows were not stored under this org (a suppressed conflict).
+            # Neither is a zero-byte record, so neither is recorded as one.
+            return
+        from . import metering  # local: keep the write path's imports thin
+
+        metering.record_postgres_bytes_written(
+            org_id, n_bytes=written.row_bytes, n_records=written.rows)
+    except Exception:  # noqa: BLE001 - never fail a write for a meter
+        _logger.debug(
+            "postgres byte metering skipped for org=%s graph=%s "
+            "first_seq=%s (non-fatal)", org_id, graph_id, first_seq,
+            exc_info=True)
 
 
 def write_records(

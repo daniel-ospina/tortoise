@@ -2829,3 +2829,143 @@ def get_graph_storage_reading(org_id: str) -> dict:
             "team=%s period=%s error=%s", org_id, period.label, e,
         )
         return _zero_view(period.label, period)
+
+
+# ── Postgres bytes lane: per-org STORED bytes from what we write (#12762) ────
+#
+# WHY. #11758 made stored data a purchasable dimension ($0.30/GB-month), but the
+# meter did not exist, so ``allowance_gate``'s ``postgres_storage`` dimension was
+# unarmable. #4492 had published the figure at DATABASE grain and recorded that a
+# per-org BYTE number "would be an ALLOCATION, not a measurement" — right about
+# apportioning the database total, wrong about every possible method: the rows
+# are keyed by ``org_id``, so the bytes THEY occupy are attributable to the org
+# that wrote them. ``tortoise/postgres_bytes.py`` MEASURES that (the stored size
+# of the rows just written); this writer accumulates it on the SAME
+# per-(org, window) ledger every other lane uses — no new store, no new reader
+# convention.
+#
+# AN INCREMENT, NOT A GAUGE. Every journal segment adds the stored bytes of the
+# rows it wrote; nothing is overwritten, so the window's figure is what landed
+# in it. That is the opposite of the graph-storage lane beside it, which is a
+# current-state gauge: summing two READINGS of the same graph would double count,
+# while summing two WRITES of different records is exactly right.
+#
+# ⛔ MEASUREMENT ONLY. Nothing here prices, caps, throttles or refuses, and
+# ``get_cohort_spend_usd`` reads only ``ask_cost_usd``/``capture_cost_usd``, so a
+# spend ceiling cannot see these columns by construction. Arming the dimension
+# needs the ``free``/``anon`` included amounts decided first — a separate,
+# owner-gated change (#12762).
+#
+# ⛔ A NEGATIVE INCREMENT IS REFUSED, not clamped: a counter that can go
+# backwards is corruption (the ``measure_write_ops`` rule), and the SQL RPC
+# refuses it too, so both halves agree.
+
+
+def record_postgres_bytes_written(org_id: str | None, *, n_bytes: int,
+                                  n_records: int = 0,
+                                  _selfhost_transport: bool = False
+                                  ) -> dict | None:
+    """ACCUMULATE the org's stored journal bytes in the current window (#12762).
+
+    ``n_bytes`` is the measured stored size of the rows just written —
+    ``postgres_bytes.measure_written_rows(...).row_bytes``, which is
+    ``sum(pg_column_size(row))`` over those rows (the compressed stored size
+    where compression applies, and it follows the TOAST pointer). It is NOT the
+    logical payload length and NOT ``RETURNING pg_column_size`` (measured 3.4x
+    over). ``n_records`` is how many rows that figure covers.
+
+    Returns the accumulated view on success, ``None`` when nothing was written
+    (no org, the self-host transport, or a failed write — logged at WARNING).
+    The increment write is non-fatal by contract: the caller on the record path
+    is a write seam, and a meter must never fail a write.
+
+    Raises:
+        ValueError: ``n_bytes``/``n_records`` is not a non-negative integer — a
+            corrupt count is refused rather than absorbed (and the SQL RPC
+            refuses it independently).
+        QuotaCheckError: the org's metering window is unresolvable (#3981: a
+            signal, not enforcement). The record-path caller absorbs it.
+    """
+    if not org_id or _selfhost_transport or _selfhost_transport_active():
+        return None
+    if isinstance(n_bytes, bool) or not isinstance(n_bytes, int) or n_bytes < 0:
+        raise ValueError(f"postgres bytes must be a non-negative int, got {n_bytes!r}")
+    if isinstance(n_records, bool) or not isinstance(n_records, int) or n_records < 0:
+        raise ValueError(f"postgres records must be a non-negative int, got {n_records!r}")
+    if n_bytes == 0 and n_records == 0:
+        # Nothing was stored: do not mint an empty ledger row (and do not claim
+        # a zero reading on an org that has none).
+        return None
+    period = _require_period(org_id, "postgres byte metering")
+    now_iso = datetime.now(timezone.utc).isoformat()  # noqa: UP017
+    with _ask_meter_lock(org_id):
+        try:
+            if _supabase_mode():
+                from tortoise.supabase_control import (  # noqa: I001
+                    get_control_plane, metering_increment_postgres_bytes,
+                )
+                metering_increment_postgres_bytes(
+                    get_control_plane(), org_id, period.start_iso,
+                    period.end_iso, n_bytes, n_records)
+            else:
+                sdk = _reg_sdk()
+                reg = sdk._get_registry()
+                reg.query(
+                    "MERGE (m:MeteringRecord {org_id: $tid, "
+                    "period_start: $pstart}) "
+                    "SET m.period = $label, m.period_end = $pend, "
+                    "    m.postgres_bytes_written = "
+                    "        coalesce(m.postgres_bytes_written, 0) + $nb, "
+                    "    m.postgres_bytes_records = "
+                    "        coalesce(m.postgres_bytes_records, 0) + $nr, "
+                    "    m.updated_at = $now",
+                    params={"tid": org_id, "pstart": period.start_iso,
+                            "pend": period.end_iso, "label": period.label,
+                            "nb": n_bytes, "nr": n_records, "now": now_iso},
+                )
+        except Exception as e:
+            # The shared #3824 residual: a failed ledger write is logged and
+            # dropped, never retried here. It is WARNING (not silent) because a
+            # dropped increment is a figure that will read low.
+            _logger.warning(
+                "postgres byte metering write failed (non-fatal): team=%s "
+                "period=%s bytes=%s error=%s", org_id, period.label, n_bytes, e)
+            return None
+    return {
+        "period": period.label,
+        "period_start": period.start_iso,
+        "period_end": period.end_iso,
+        "postgres_bytes_written": n_bytes,
+        "postgres_bytes_records": n_records,
+    }
+
+
+def get_postgres_bytes_written(org_id: str) -> int:
+    """The org's stored journal bytes accumulated in the CURRENT window.
+
+    ZERO when the window has no row yet (the increment only creates the row on
+    the first write, so "no row" is a measured zero here — unlike a per-org
+    bytes SPLIT, nothing was written in this window). A read failure raises,
+    so a caller cannot mistake an unreadable ledger for a zero.
+
+    ⛔ This is the ADDEND of the window, not the org's total stored footprint:
+    the audit (``postgres_bytes.per_org_bytes``) is the ground truth, and it
+    covers rows written BEFORE this meter existed. ``reconcile`` compares them.
+    """
+    period = _current_period(org_id)
+    if _supabase_mode():
+        from tortoise.supabase_control import get_control_plane
+        cp = get_control_plane()
+        rows = cp.query(
+            "metering_records",
+            select=["postgres_bytes_written"],
+            filters=[("org_id", "eq", org_id),
+                     ("period_start", "eq", period.start_iso)],
+        )
+        return int(rows[0]["postgres_bytes_written"] or 0) if rows else 0
+    rows = _reg_sdk()._get_registry().query(
+        "MATCH (m:MeteringRecord {org_id: $tid, period_start: $pstart}) "
+        "RETURN m.postgres_bytes_written",
+        params={"tid": org_id, "pstart": period.start_iso},
+    ).result_set
+    return int(rows[0][0] or 0) if rows else 0
