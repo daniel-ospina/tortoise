@@ -447,8 +447,8 @@ def _stray_writes(src: str) -> list[tuple[int, str]]:
         )
         if name not in _WRITE_ATTRS:
             continue
-        # A zero-argument `open` CALL cannot write: a builtin `open()` raises TypeError (no `file`)
-        # and `Path(p).open()` defaults to 'r'. ⛔ `not node.args` alone is a HOLE:
+        # A zero-argument builtin `open()` / `Path.open()` cannot write: the builtin raises TypeError
+        # (no `file`) and `Path.open()` defaults to 'r'. ⛔ `not node.args` alone is a HOLE:
         # `open(file=p, mode="w")` and `Path(p).open(mode="w")` are real writes with empty `args`
         # (measured green on that version), so a keyword-only call must be caught too.
         if name == "open" and not node.args and not node.keywords:
