@@ -847,9 +847,10 @@ def _no_ambient_dead_heartbeat_ticker():
 
     So any test that starts and stops a REAL hosted server (``test_dr_endpoints``,
     ``test_hosted_api``) hands every later wedge test a 200 where it demands 503.
-    A leg of ``test_monitoring`` itself is never such a source — that file starts
-    only the ``/healthz`` listener, which touches no ticker — which is why its own
-    ticker-arming classes reset the seam themselves.
+    A leg of ``test_monitoring`` itself is never such a source: the only legs
+    there that record a ticker are in ``TestStallWatchdog``, whose class-local
+    autouse fixture resets the seam on both sides (and its one ``_stop_liveness``
+    leg arms no task to cancel).
 
     MEASURED in this branch's worktree (base ``origin/main`` ``8dc4f06ba5``; the
     issue reported the same profile at ``30c9e7c4d3``), one pytest process each:
