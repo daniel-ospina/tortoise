@@ -2037,7 +2037,7 @@ _HEALTH_PROBE_START_FAILED = False
 #: startup has finished, by which point the refresher has had many intervals.
 #: ⛔ THE NAME IS DELIBERATELY NOT `_PROCESS_STARTED_AT`: that global already
 #: exists 6,000 lines below as the ISO STRING `_build_identity()` publishes
-#: (`:8062`), and it is assigned AFTER this one at import — so a float under that
+#: (`:8294`), and it is assigned AFTER this one at import — so a float under that
 #: name was silently replaced by the string and every read raised `TypeError`,
 #: which the verdict reader turns into `failed` (`http` 503) in exactly the state
 #: that must be `unknown` (measured: the real listener answering
@@ -2104,8 +2104,11 @@ def _reset_probe_state() -> None:
 
     Order is load-bearing (see `_lifespan`): the epoch is written FIRST, so a
     `/healthz` poll landing between the two statements reads a fresh epoch over
-    the PREVIOUS result (`healthy` only if that result was fresh and ok, `failed`
-    if stale or not-ok) rather than a fresh coordinator over a blown bound.
+    the PREVIOUS result — `healthy` only if that result was fresh and ok,
+    `failed` if it was stale, not-ok or in flight past the window, and `unknown`
+    if that coordinator had no result at all (the #12630 shape, where epoch-first
+    is the difference between `unknown` and `failed`) — rather than a fresh
+    coordinator over a blown bound.
 
     `tortoise/selfhost.py` is deliberately NOT routed through here: it resets its
     own coordinator and never reads this epoch (the never-produced bound is
