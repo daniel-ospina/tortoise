@@ -245,12 +245,17 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # refuses to do for its own file.
     # ⛔ ONE key, not three. `origin/main` carried TWO rows for this file and this
     # branch's first commit added a third: `#12588` (the `#12523` triage) added the
-    # first, then `#12555` re-declared the same file from a base that PREDATED
-    # `#12588` (`git merge-base --is-ancestor 0f7f21c342 a808f9f8ba` → yes, so its
-    # "MAINLINE TRIAGE, not a site this PR added" row was a stale-base duplicate, and
-    # `#12422`'s canary had in fact merged at 01:32:47Z, hours BEFORE the triage at
-    # 05:13:00Z — not after it). A later literal key SILENTLY REPLACES an earlier one
-    # at runtime, so the rows looked additive and were not. `ruff`'s F601 reads the
+    # first, then `#12555` re-declared the same file from a base that PREDATED it —
+    # `git show a808f9f8ba:tests/test_uri_env_mutations_declared.py | grep -c
+    # '"test_published_artifact_canary.py":'` → **2**, i.e. the `#12588` row and the
+    # "MAINLINE TRIAGE, not a site this PR added" row in ONE tree, and `#12555`'s own
+    # head `ee1942914a` (05:11:37Z) does not contain `#12588`'s squash `0f7f21c342`
+    # (05:13:00Z). ⛔ Do NOT cite `merge-base --is-ancestor 0f7f21c342 a808f9f8ba`
+    # here: it returns yes because a SQUASH commit carries its parent's tree, which
+    # says nothing about what the PR's branch saw. And `#12422`'s canary had in fact
+    # merged at 01:32:47Z, hours BEFORE the triage at 05:13:00Z — not after it.
+    # A later literal key SILENTLY REPLACES an earlier one at runtime, so the rows
+    # looked additive and were not. `ruff`'s F601 reads the
     # repeat as a lint error, which is what surfaced it. The three rows carried this
     # same regex, so consolidating loses no coverage; the prose each carried, kept:
     # the site is `test_install_and_run_strips_ambient_tortoise_env`, which PLANTS an
