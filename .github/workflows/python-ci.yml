@@ -1036,19 +1036,14 @@ jobs:
       # pre-phase + 27 m emitted worst shard watchdog + 6 m embedder + 3.03 m
       # `Set up job` + 4.23 m of uncapped pre-suite + 0.38 m last-failed save — so
       # <= 9.36 m is available; this shape takes 8 (1 m prune + 7 m save), SUM 58.64,
-      # x 1.5 = 87.96 against the 90 m cap.
-      # (The watchdog read 32 m at `fast_shards: 9` on the 2026-11-09 map; #11602
-      # raised it to 10, which re-packed the worst shard to 28 m, and #11576 raised
-      # it to 11, which re-packs it to 27 m. ⛔ EVERY NUMERAL ABOVE IS A SNAPSHOT,
-      # not a derivation: this paragraph has now read 52.6, 51.6 and 50.64 for the
-      # same sub-total as the map was re-packed, each time a human noticing by hand
-      # (#11602 review P2, then #11290). Re-derive from the emission before quoting
-      # the headroom; two numbers, two owners: the emission is
-      # `tools/ci_selection.py --emit-push-matrix`'s, and §2's own copy in
-      # `docs/ops/ci-wall-clock.md` is held to it by
-      # `tests/test_ci_selection.py::test_the_test_job_carries_no_unbounded_cache_post_step`
-      # (that pin parses §2's phrase `the emitted <N> m per-shard watchdog`). THIS
-      # paragraph is NOT pin-read.)
+      # x 1.5 = 87.96. ⛔ EVERY NUMERAL ABOVE IS A SNAPSHOT, not a derivation: this
+      # paragraph has read 52.6, 51.6 and 50.64 for the same sub-total as the map was
+      # re-packed, each time a human noticing by hand (#11602 review P2, then #11290).
+      # Two numbers, two owners: the emission is `tools/ci_selection.py
+      # --emit-push-matrix`'s, and §2's copy in `docs/ops/ci-wall-clock.md` is held to
+      # it by `tests/test_ci_selection.py::test_the_test_job_carries_no_unbounded_cache_post_step`
+      # (parsing §2's `the emitted <N> m per-shard watchdog`) — THIS paragraph is NOT
+      # pin-read. (History: 32 m at `fast_shards: 9`; #11602 → 10 → 28 m; #11576 → 11 → 27 m.)
       #
       # WHY SPLIT RATHER THAN JUST BOUND 3.88 GB, at its real size: the degraded
       # uplink this run measured is 0.9 MB/s sustained (3,019,898,880 B in 3,412 s),
@@ -1057,7 +1052,7 @@ jobs:
       # 127280762096: `Sent 3616385308 of 3616385308 (100.0%), 7.1 MBs/sec` at
       # 14:42:50Z — the action's own rate, 4.9 MB/s across the whole 12 m 21 s post
       # step), so the honest cost of 3.88 GB is ~13 m healthy and ~57 m+ degraded
-      # against the ~8.4 m of room: over the bound either way, but by ~1.6x rather
+      # against the ~9.36 m of room: over the bound either way, but by ~1.4x rather
       # than 8x. Splitting the payload is what brings it inside — not an assumption
       # that this pool cannot write it.
       #
@@ -2052,7 +2047,7 @@ jobs:
       # bigger archive for a still-bounded save, and an aborted save leaves a
       # MISS. Neither can red this leg, and neither withholds a required check —
       # which is the whole defect (#11063/#5219). 1 + 7 = 8 m is what arm 2 has
-      # room for (SUM 49.6 -> 57.6, x 1.5 = 86.5 against the 90 m cap). The cache-LOCK wait is bounded to 10 s INLINE (`UV_LOCK_TIMEOUT`), because `uv`'s default is 300 s — longer than this step may live, so the 1 m bound would be inert.
+      # room for (SUM 50.64 -> 58.64, x 1.5 = 87.96 against the 90 m cap; re-derive, #11290). The cache-LOCK wait is bounded to 10 s INLINE (`UV_LOCK_TIMEOUT`), because `uv`'s default is 300 s — longer than this step may live, so the 1 m bound would be inert.
       - name: Prune the uv cache before saving it (#11063)
         if: always()
         continue-on-error: true

@@ -269,7 +269,7 @@ not fit — but on the measured rates, not on an assumption: this run's degraded
 sustained (3,019,898,880 B in 3,412 s, cancelled at 77.8% of the payload), while the same runner
 class completed a cold 3,616,385,308 B save in 12 m 21 s four hours later (PR 11036, job 127280762096,
 `Sent 3616385308 of 3616385308 (100.0%), 7.1 MBs/sec` ≈ 4.9 MB/s end to end) — i.e. ~13 m healthy and
-~57 m+ degraded against the ~8.4 m of room the SUM leaves. Splitting the payload is what brings it
+~57 m+ degraded against the ~9.36 m of room the SUM leaves. Splitting the payload is what brings it
 inside. `tests/test_ci_selection.py::test_the_test_job_carries_no_unbounded_cache_post_step` pins
 that shape (one bounded writer ON `~/.cache/uv`, no implicit post step — and no OTHER unbounded cache write anywhere in the job except the admitted `Save pytest last-failed state (#6142)`), and the watchdog comes from
 `uv run python tools/ci_selection.py --emit-push-matrix`, never from `WATCHDOG_FLOOR_MIN`: 19 is the

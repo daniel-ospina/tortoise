@@ -15517,7 +15517,7 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     #   (a) a `cache:`-family input on a `setup-*` action installs that action's own
     #       post step — `actions/setup-python@v5` + `cache: 'pip'` saves `~/.cache/pip`,
     #       the 3.6 GB half, in a post step with no timeout. It is used one job away
-    #       (`python-ci.yml:3232-3235`, `test-track-b` — the ONLY `cache:`-family input in
+    #       (`python-ci.yml:3227-3230`, `test-track-b` — the ONLY `cache:`-family input in
     #       this workflow), so this is a live shape, not a hypothetical;
     #   (b) a LOCAL composite action is a second `uses:` indirection whose body can
     #       call `actions/cache`, arm a `cache:` input, or use a cache-capable setup
