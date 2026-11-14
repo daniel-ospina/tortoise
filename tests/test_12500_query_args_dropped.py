@@ -1287,8 +1287,9 @@ def test_every_alternative_of_a_paged_text_route_terminates(stub) -> None:
     assert ". Also drop offset=/page=" in order_only, order_only
     # The alternatives must be NAMED by the message this test says it follows.
     # Without this the executions below are unbound literals: deleting the
-    # alternative from the route (keeping only `order_by='relevance'`, which fixes
-    # the ordering for no type at all) left this FILE green (round-25 P2, measured:
+    # alternative from the route (keeping only `order_by='relevance'` — a
+    # terminating alternative in its own right, applied to every type, so nothing
+    # noticed its twin disappearing) left this FILE green (round-25 P2, measured:
     # 87 passed here; the five-file gate set was 250 passed / 16 skipped — the count
     # is quoted per population because round-29 found it mislabelled as the set).
     assert "pass entity_type='point'" in order_only, order_only
