@@ -3277,9 +3277,11 @@ class TestHealthzListener:
     def test_a_dead_ticker_is_stale_but_never_wedged(self):
         """#2850: a ticker that cannot tick is NOT a wedge — the ``/healthz`` rule.
 
-        Every other test in this class now runs with the ticker CLEARED (#12601's
-        isolation, above), because ``None`` means "nothing instrumented" and that
-        is the state most of them measure. That leaves the guard's
+        Every other test in this class now runs with the ticker CLEARED (the
+        fixture's ``_reset_heartbeat_task()`` on both arms, above — landed by
+        `#12482`, which is where the note at the top of this class lives), because
+        ``None`` means "nothing instrumented" and that is the state most of them
+        measure. That leaves the guard's
         ``not heartbeat_task_is_dead()`` conjunct unreachable from this whole
         class: delete the conjunct and every other test here still passes, while
         a process whose ticker died would begin answering 503 and fail its own
