@@ -5861,7 +5861,7 @@ _EPIC_CITE_SOURCES = {
     # those two `def`s at `:955`/`:947`. Registered because a repaired cite that nothing
     # pins is a repair the next move of the symbol undoes silently. ⛔ AND IT ALREADY
     # HAS: measured at `6916a6cd89` — an EARLIER round's base, NOT the `origin/main` head
-    # this merges into, which is `d05688df5990` — those two `def`s are at `:1007`/`:999`
+    # this merges into today (`4dd97bacc2`); at `d05688df5990` those two `def`s are `:1007`/`:999`
     # (`#12507` landed above them) while both the row and the document still said
     # `:955`/`:947`. ⚠️ The head is named because the measurement was taken there, and the
     # pair happens to hold at both heads; nothing else here is claimed about either head. It
@@ -6073,7 +6073,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # contain it — so that pair arrived ALREADY stale at its own landing commit,
         # and `main` was red for this row at `6916a6cd89`. The pair is
         # **`:1023`/`:1015`** at the head this merges into (`origin/main`
-        # `5843fdf234`): `#12695` (`3893603b07`, the Pi leg's unrecorded-outcome
+        # `4dd97bacc2`): `#12695` (`3893603b07`, the Pi leg's unrecorded-outcome
         # stamp) inserted sixteen lines in `tortoise-capture.ts` above both `def`s
         # and re-derived no cite, so `main` went red for this row again — measured
         # here (`grep -nF 'export function postCapture(' …`), and repaired at this
