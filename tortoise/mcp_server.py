@@ -3948,15 +3948,14 @@ def tortoise_query(kind: str | None = None,
       are applied on the text= arm, but each on a different condition:
       `min_confidence` only for `entity_type="point"` (the fts leg gates the
       floor on the literal `entity_type == "point"`, sdk.py:43206), and
-      `order_by` for every type except a `confidence` ordering on
-      `document`/`source` (both map to the `Source` label, which the ranker's
-      belief sweep never reads, so a confidence sort there would leave the RRF
-      order untouched — `event`, `subject`, `object` and `operator` all carry a
-      belief and honour it, and `order_by="graph"`/`"relevance"` are applied to
-      every type including those two).
-      A floor on any other `entity_type`, and a confidence ordering on those two,
-      are REFUSED rather than dropped; structural filtering by confidence is
-      Phase 2 in the hybrid-search plan, not a shipped feature.
+      `order_by="confidence"`/`"graph"` for every type except `document` and
+      `source` (both map to the `Source` label: it is outside the ranker's
+      belief sweep and their hit dicts carry no timestamp, so BOTH orderings
+      compute the same key for every row and return the relevance order
+      unchanged — `order_by="relevance"` is applied to every type).
+      A floor on any other `entity_type`, and a confidence or graph ordering on
+      those two, are REFUSED rather than dropped; structural filtering by
+      confidence is Phase 2 in the hybrid-search plan, not a shipped feature.
     - tag=<name>: filter Points by TAGGED edge (previously
       tortoise_query_points_by_tag). Tag mode takes precedence over text and
       REFUSES kind/min_confidence/order_by and `filters=` (see the tag= bullet
@@ -4183,7 +4182,7 @@ def tortoise_query(kind: str | None = None,
                 f"'point'` gate, and this read's entity_type={entity_type!r} does "
                 f"not satisfy it"))
 
-        if order_by == "confidence" and entity_type in ("document", "source"):
+        if order_by in ("confidence", "graph") and entity_type in ("document", "source"):
             # Round-4 P2, measured live: `order_by="confidence"` sorts on the
             # persisted EP belief that `GraphRanker._fetch_signals` reads for
             # EPISTEMIC_LABELS = ("Point", "Subject", "Object", "Event")
@@ -4194,11 +4193,28 @@ def tortoise_query(kind: str | None = None,
             # (`annotate_belief_order` labels only rows carrying an `ep` dict).
             # `event`/`subject`/`object`/`operator` DO honour it — measured — so
             # this is not a blanket non-Point refusal.
+            # Round-7: `graph` is the SAME defect one step further out —
+            # measured live on a `:Source` corpus, `order_by="graph"` returned the
+            # exact relevance order for every input, because BOTH of its
+            # non-similarity terms are constant on those rows: `graph_boost`
+            # needs an EPISTEMIC_LABELS read and `Source` is not one of them, and
+            # `recency_boost` needs `createdAt`/`startedAt`, which a
+            # `document`/`source` hit dict does not carry (`ranking.py` returns
+            # 1.0 for an unknown age). The sort key is therefore monotone in the
+            # same RRF score, so the caller gets a relevance page labelled as a
+            # graph ordering — accepted and not applied, the class this guard
+            # exists for. `relevance` IS applied to every type.
             _unapplied.append((
                 "order_by",
-                f"`order_by='confidence'` sorts on an EP belief and the ranker "
-                f"reads that belief for the four epistemic labels only, so no "
-                f"entity_type={entity_type!r} row carries one"))
+                (f"`order_by='confidence'` sorts on an EP belief and the ranker "
+                 f"reads that belief for the four epistemic labels only, so no "
+                 f"entity_type={entity_type!r} row carries one")
+                if order_by == "confidence" else
+                (f"`order_by='graph'` adds an EP belief and a recency term to the "
+                 f"similarity score, and an entity_type={entity_type!r} row "
+                 f"carries neither (its label is outside the belief sweep and its "
+                 f"hit dict carries no timestamp), so every row's key is the same "
+                 f"and the order comes back unchanged")))
 
     if _unapplied:
         _names = [name for name, _ in _unapplied]
@@ -4244,7 +4260,8 @@ def tortoise_query(kind: str | None = None,
                           "leaving the floor refused")
             elif "order_by" in _names:
                 _route = (f"To use {_them}, pass entity_type='point' (whose rows "
-                          f"carry a belief) or order_by='relevance'")
+                          f"carry the signals these orderings read) or "
+                          f"order_by='relevance'")
             else:
                 _route = "To have the floor applied, pass entity_type='point'"
         else:

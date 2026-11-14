@@ -502,10 +502,15 @@ def test_the_tag_arm_still_refuses_when_text_is_also_passed(stub, kwargs) -> Non
     )
 
 
+@pytest.mark.parametrize("order_by", ["confidence", "graph"])
 @pytest.mark.parametrize("entity_type", ["document", "source"])
-def test_the_confidence_ordering_is_refused_where_no_row_carries_a_belief(
-        stub, entity_type) -> None:
-    """`order_by="confidence"` sorts on an EP belief neither type has (r4 P2 2).
+def test_a_ranking_ordering_is_refused_where_every_key_is_constant(
+        stub, entity_type, order_by) -> None:
+    """A ranking ordering whose every key is constant is not applied (r4 P2 2, r7).
+
+    `confidence` sorts on an EP belief neither type has; `graph` adds an EP belief
+    AND a recency term, and a document/source row carries neither — so BOTH
+    return the relevance order, unchanged and unmarked.
 
     `GraphRanker._fetch_signals` reads EPISTEMIC_LABELS = ("Point", "Subject",
     "Object", "Event") and BOTH `document` and `source` map to the `Source`
@@ -516,12 +521,11 @@ def test_the_confidence_ordering_is_refused_where_no_row_carries_a_belief(
     """
     from tortoise.mcp_server import tortoise_query
 
-    result = tortoise_query(text="x", entity_type=entity_type,
-                            order_by="confidence")
+    result = tortoise_query(text="x", entity_type=entity_type, order_by=order_by)
 
     assert _is_refusal(result), (
-        f"served order_by='confidence' for entity_type={entity_type!r}, which has "
-        f"no belief to sort on"
+        f"served order_by={order_by!r} for entity_type={entity_type!r}, where "
+        f"every row's sort key is identical so the order comes back unchanged"
     )
     assert "order_by" in result["error"], result["error"]
 
@@ -589,9 +593,8 @@ def test_the_refusal_never_repeats_its_route_or_says_a_entity_type(stub) -> None
 
 
 @pytest.mark.parametrize("entity_type", ["document", "source"])
-@pytest.mark.parametrize("order_by", ["relevance", "graph"])
-def test_a_non_confidence_ordering_is_served_for_every_type(
-        stub, entity_type, order_by) -> None:
+def test_the_relevance_ordering_is_served_for_every_type(
+        stub, entity_type) -> None:
     """The refusal is keyed on `order_by == "confidence"`, not on the TYPE (#12500 r5).
 
     Mutating the condition to `if order_by and entity_type in (…, "source")` left
@@ -601,14 +604,14 @@ def test_a_non_confidence_ordering_is_served_for_every_type(
     """
     from tortoise.mcp_server import tortoise_query
 
-    result = tortoise_query(text="x", entity_type=entity_type, order_by=order_by)
+    result = tortoise_query(text="x", entity_type=entity_type, order_by="relevance")
 
     assert not _is_refusal(result), (
-        f"refused order_by={order_by!r} for entity_type={entity_type!r}: the arm "
-        f"applies any value other than 'confidence'"
+        f"refused order_by='relevance' for entity_type={entity_type!r}: that IS "
+        f"the order those rows already have, so it is always applied"
     )
     fts = [c for c in stub.calls if c[0] == "tortoise_fts_query"]
-    assert fts and fts[-1][3]["order_by"] == order_by
+    assert fts and fts[-1][3]["order_by"] == "relevance"
 
 
 def test_a_refused_floor_and_ordering_do_not_share_one_route(stub) -> None:
@@ -654,7 +657,10 @@ _DOCSTRING_FALSE = (
     # round-5: order_by is applied for every type but document/source, and
     # `event`/`subject`/`object`/`operator` DO carry a belief (measured live).
     "only a Point carries one",
-    'applied on the text= arm for `entity_type="point"`',
+    # Scoped to `order_by`: the same sentence about `min_confidence` is TRUE
+    # (measured live — a 0.9 floor on a 0.05-belief point returns []), so banning
+    # the bare phrase forbade a correct edit, the round-6 defect mirrored.
+    '`order_by` is applied on the text= arm for `entity_type="point"`',
     # round-6: only a CONFIDENCE ordering is refused there — `graph` and
     # `relevance` really do reorder document/source reads. This sentence was
     # mandated as TRUE by this very test for one round, which is how a pin turns
@@ -681,7 +687,7 @@ def test_the_served_docstring_never_restates_a_falsified_claim() -> None:
             f"the docstring restates a falsified claim: {claim!r}"
         )
     # …and the TRUE statement is present, so the pin is not satisfied by silence.
-    assert "except a `confidence` ordering on `document`/`source`" in flat, flat[:400]
+    assert "except `document` and `source`" in flat, flat[:600]
 
 
 def test_each_refused_argument_gets_its_own_reason(stub) -> None:
@@ -700,3 +706,44 @@ def test_each_refused_argument_gets_its_own_reason(stub) -> None:
 
     assert "takes no confidence floor" in message, message
     assert "takes no ordering" in message, message
+
+
+@pytest.mark.parametrize("entity_type", ["point", "event", "subject", "object",
+                                         "operator"])
+def test_the_graph_ordering_is_served_where_a_signal_exists(
+        stub, entity_type) -> None:
+    """The round-7 refusal must stay narrow: these rows DO carry graph signals.
+
+    Fails if `graph` is refused on the whole non-Point set — `event`/`subject`/
+    `object`/`operator` all have a belief and/or a timestamp, so their graph
+    ordering is real (measured live: each reordered a contradictory-belief
+    corpus). Only `document`/`source` reduce to the relevance order.
+    """
+    from tortoise.mcp_server import tortoise_query
+
+    result = tortoise_query(text="x", entity_type=entity_type,
+                            order_by="graph")
+
+    assert not _is_refusal(result), (
+        f"refused order_by='graph' for entity_type={entity_type!r}, whose rows "
+        f"carry the signals the ordering reads: {result}"
+    )
+
+
+def test_a_graph_ordering_with_no_signal_is_refused_not_silently_reordered(
+        stub) -> None:
+    """`graph` on document/source reordered NOTHING, and said nothing (round 7).
+
+    Measured live on a `:Source` corpus: `order_by="graph"` returned exactly the
+    relevance order for every input, with `graph_ranking={graph_boost: 0.0,
+    recency_boost: 1.0}` on every row — the class this guard exists for, on the
+    sentence that recommends an alternative. Fails if only `confidence` is
+    refused there.
+    """
+    from tortoise.mcp_server import tortoise_query
+
+    message = tortoise_query(text="x", entity_type="document",
+                             order_by="graph")["error"]
+
+    assert "graph" in message, message
+    assert "relevance" in message, message
