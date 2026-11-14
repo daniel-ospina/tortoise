@@ -403,9 +403,12 @@ _WRITE_ATTRS = frozenset({"write_text", "write_bytes", "open"})
 def _stray_writes(src: str) -> list[tuple[int, str]]:
     """Every `_WRITE_ATTRS` call in `src` outside a function named `_write` — except `open()`.
 
-    The exception is a zero-argument `open()` (`open()`, `open ()`): no argument and no keyword means
-    prose, not a call, so it cannot write (#12688 review round 33, P3 — the carve-out was documented
-    only in a body comment while the summary promised every call).
+    The exception is a zero-argument `open` CALL: a builtin `open()` raises `TypeError` (no `file`)
+    and `Path(p).open()` defaults to `'r'`, so neither can write. The test is on the NAME, so an
+    attribute receiver is exempt too — a custom `x.open()` that writes would be invisible here, which
+    sits with the same member-list residual as `os.replace` below.
+    (#12688 review round 34, P3: the previous wording said "prose, not a call", but prose is an
+    `ast.Constant` and never reaches this walk, so that was never the reason.)
 
     ⛔ NOT "every file write". Three names are not a class: `os.replace(tmp, out)`, `shutil.copyfile`
     and a bare `os.rename` are file writes the scan cannot see, and the atomic-publish idiom this
@@ -444,10 +447,10 @@ def _stray_writes(src: str) -> list[tuple[int, str]]:
         )
         if name not in _WRITE_ATTRS:
             continue
-        # `open()` with NO arguments at all is prose, not a call; every real one passes an
-        # argument OR a keyword. ⛔ `not node.args` alone is a HOLE: `open(file=p, mode="w")` and
-        # `Path(p).open(mode="w")` are real writes with empty `args` (measured green on that
-        # version), so a keyword-only call must be caught too.
+        # A zero-argument `open` CALL cannot write: a builtin `open()` raises TypeError (no `file`)
+        # and `Path(p).open()` defaults to 'r'. ⛔ `not node.args` alone is a HOLE:
+        # `open(file=p, mode="w")` and `Path(p).open(mode="w")` are real writes with empty `args`
+        # (measured green on that version), so a keyword-only call must be caught too.
         if name == "open" and not node.args and not node.keywords:
             continue
         writes.append(node)
