@@ -1308,6 +1308,11 @@ _HEADLINE_ROWS: tuple[tuple[str, tuple[str, str] | None], ...] = (
 #: duplicated here ON PURPOSE — the brief's number and the code's real number are the
 #: two halves this pin compares, so sharing one source would make the comparison
 #: vacuous.
+#:
+#: A row that reds here means the CODE moved, not that this pin is wrong: the
+#: failure message is explicit (`update the brief's locator, do not relax this
+#: pin`) and both halves — this tuple and the cite the brief carries — are the
+#: two independently written numbers this test exists to compare.
 _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
     ("tortoise/sparse.py", 505, "def build_or_query(",
      "`tortoise/sparse.py:505`"),
@@ -1320,15 +1325,21 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
     # cited 505 (the function header) for a statement 85 lines below it.
     ("tortoise/sparse.py", 590, "return escape_redisearch_literal(query)",
      "`sparse.py:590`"),
-    ("tortoise/search_engine.py", 2800, "def run_fts_query(",
-     "`tortoise/search_engine.py:2800`"),
-    ("tortoise/search_engine.py", 2986, "CALL db.idx.fulltext.queryNodes",
-     "`:2986-2998`"),
-    ("tortoise/search_engine.py", 2642, "def recency_tie_clause(",
-     "`search_engine.py:2642`"),
-    ("tortoise/search_engine.py", 4492,
+    # ⛔ The four `search_engine.py` rows below moved +30 TOGETHER: `adb6800c1e`
+    # (#12536) inserted net +30 lines in three hunks, ALL THREE above this group
+    # (hunk starts 2507 / 2546 / 2566; the last one's body reaches 2584), and it
+    # re-derived neither this pin nor any of the brief's cites. Re-derive a row
+    # by SYMBOL (`grep -nF`), never by adding a number to the old one — the next
+    # insertion above this group is not +30.
+    ("tortoise/search_engine.py", 2830, "def run_fts_query(",
+     "`tortoise/search_engine.py:2830`"),
+    ("tortoise/search_engine.py", 3016, "CALL db.idx.fulltext.queryNodes",
+     "`:3016-3028`"),
+    ("tortoise/search_engine.py", 2672, "def recency_tie_clause(",
+     "`search_engine.py:2672`"),
+    ("tortoise/search_engine.py", 4522,
      "for rank, (pid, _score) in enumerate(ranked):",
-     "`tortoise/search_engine.py:4492`"),
+     "`tortoise/search_engine.py:4522`"),
     ("tortoise/projection/__init__.py", 20346, '("Object", "name", "FULLTEXT")',
      "`tortoise/projection/__init__.py:20346`"),
     ("tortoise/projection/__init__.py", 20774, "def _create_fulltext_index(",
@@ -1451,11 +1462,22 @@ def test_section_1_locators_still_point_at_the_code_they_name(brief: str) -> Non
     line 590. Nothing read the numbers, so all of it was prose.
 
     The pin is (file, line the brief cites, text that line must hold). `line`
-    is here only so a DELETED citation is caught; the code side is resolved
+    is the number the brief is expected to carry; the code side is resolved
     from the file at test time, so a `main` that moves the code reds this and
     the brief gets updated rather than silently dating. `cited` is the form the
     brief must still carry — a bare `:N` for a row that continues the previous
     row's path (`:58`, `:20774`), the full `path:N` otherwise.
+
+    ⛔ THE CITATION'S NUMBER IS READ, NOT MERELY LOOKED FOR (#12604 review):
+    asserting `cited in table` alone is a PRESENCE check, so a repair that
+    moved the tuple's `line` and the code together but left the brief citing
+    the old number passed GREEN over a document pointing at a line that holds
+    something else. The cite's number is therefore parsed and asserted EQUAL to
+    `line`, which binds the three copies (tuple line, tuple cite, brief cite)
+    into one claim. A range cite (`` `:3016-3028` ``) is checked at its START —
+    the row's symbol is what the number names — plus `end > start`, so a
+    degenerate or inverted range cannot pass; the END's content is still prose,
+    and that residual is stated rather than implied.
 
     ⛔ Do NOT reintroduce a declared HEAD here (#12349 review round 2, P2): the
     table used to name one, nothing read it, and reverting it to the stale
@@ -1490,6 +1512,23 @@ def test_section_1_locators_still_point_at_the_code_they_name(brief: str) -> Non
         assert line == actual, (
             f"§1 cites {rel}:{line} for {symbol!r}, but that text is at line "
             f"{actual} — update the brief's locator, do not relax this pin")
+        # ⛔ The brief's OWN number must be the same one. Presence is not
+        # agreement: without this, editing only the tuple (and the tree it
+        # pins) leaves the document citing a line that holds something else,
+        # and every check above still passes (#12604 review reproduction).
+        m = re.search(r":(\d+)(?:-(\d+))?`", cited)
+        assert m, (
+            f"§1's citation {cited!r} names no line number — a citation that "
+            "carries no line is not the locator this row pins")
+        assert int(m.group(1)) == line, (
+            f"§1's citation {cited!r} names line {m.group(1)}, but this pin "
+            f"holds {line} for {symbol!r} in {rel} — the brief and the pin must "
+            "name the SAME line, or a repair that updates one of them reports "
+            "GREEN over a document citing a line that holds something else")
+        if m.group(2) is not None:
+            assert int(m.group(2)) > int(m.group(1)), (
+                f"§1's citation {cited!r} is an empty or inverted range — the "
+                "row names a span, so its end must sit after its start")
 
 
 def test_the_scorer_control_is_a_tie_and_the_rule_says_fail(artifact, brief_text) -> None:
