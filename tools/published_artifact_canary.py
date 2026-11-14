@@ -525,11 +525,17 @@ def latest_version(index_doc: dict[str, Any]) -> str:
     return version if isinstance(version, str) else ""
 
 
-#: The ``releases`` key is ABSENT from a document that still carries ``info``. PyPI
-#: documents ``releases`` as deprecated and REMOVABLE — "In the future, each of these keys
-#: may be removed entirely from this API response" (docs.pypi.org/api/json) — so an absent
-#: key is the absence of an ANSWER about installable files, not an answer that there are
-#: none (#12525).
+#: The ``releases`` map could not be READ: the key is absent, present as explicit JSON
+#: ``null``, or present-but-wrong-typed (``[]``, ``"…"``, ``0``). PyPI documents ``releases``
+#: as deprecated and REMOVABLE — "In the future, each of these keys may be removed entirely from
+#: this API response" (docs.pypi.org/api/json) — so a missing key is the absence of an ANSWER
+#: about installable files, not an answer that there are none (#12525).
+#:
+#: ⛔ THE NAME IS NARROWER THAN THE TOKEN'S USE, and the alert renders the token VERBATIM into a
+#: filed issue: an operator reading ``(releases-absent)`` over ``"releases": []`` who is pointed
+#: at PyPI's deprecation is being pointed AWAY from the shape actually served. This comment is
+#: the definition the token is read against, so it names every shape that produces it (#12590
+#: review note, fixed here rather than left to drift).
 RELEASES_ABSENT = "releases-absent"
 
 
@@ -560,8 +566,12 @@ def releases_map(index_doc: dict[str, Any]) -> dict[str, Any] | None:
     return releases
 
 
-#: A release map this client cannot read a FILE LISTING from — a version value that is not a
-#: list, or a list holding an entry that is not an object (#12589).
+#: A release map this client cannot read an INSTALLABLE-FILE reading from: a version value that
+#: is not a list, a list holding an entry that is not an object, or a file entry whose `yanked`
+#: flag or `filename` is missing / not of the documented type (#12589). One constant, ONE
+#: enumeration of its causes — the client arm's UNKNOWN detail, the OK-branch NOTE and the
+#: `resolvable_releases` docstring all name the same three, because an operator reads them against
+#: each other (#12589 review round 4, P3).
 RELEASES_UNREADABLE = "releases-unreadable"
 
 
@@ -600,7 +610,8 @@ def resolvable_releases(index_doc: dict[str, Any]) -> tuple[list[str], str]:
       A PARTLY readable value counts too — the entries this client read can witness OK.
     * ``reason`` — ``""`` when every value and every entry was read, else the shape that was not:
       ``RELEASES_ABSENT`` (the map is absent / null / not an object) or ``RELEASES_UNREADABLE``
-      (a value that is not a list, or a list holding a non-object).
+      (a value that is not a list, an entry that is not an object, or a file entry with no boolean
+      ``yanked`` / no ``filename``).
 
     ⛔ AND THE FAIL CLAIM IS UNIVERSAL, WHICH IS WHY ``reason`` EXISTS (#12589). "The index lists
     NO installable file in ANY release" is only TRUE once every value has been read. Emitting it
@@ -625,15 +636,27 @@ def resolvable_releases(index_doc: dict[str, Any]) -> tuple[list[str], str]:
             # Not readable (in whole or in part): it can neither establish nor withdraw the
             # existential OK claim by itself, but the entries that WERE read still can.
             reason = RELEASES_UNREADABLE
-        # ⛔ AN ENTRY IS NOT CONSULTED UNTIL ITS `yanked` FIELD IS A BOOLEAN (#12589 review round 3,
-        # P2). Reading it straight off `dict.get` made the FLAG part of the shape this issue
-        # exists to refuse: an entry with no `yanked` at all (`{}`) read as "not yanked" and
-        # GREENS the arm on a value nothing was read from, and a mirror emitting `"yanked":
-        # "false"` (a truthy STRING) read as yanked and reported "NO installable file in ANY
-        # release" — FAIL, exit 1, the release order. PyPI documents the field as a boolean, so
-        # anything else is a shape outside the contract: drop the entry and mark the reading
-        # PARTIAL, which lets it neither green nor red the arm by itself.
-        judged = [entry for entry in entries if isinstance(entry.get("yanked"), bool)]
+        # ⛔ AN ENTRY IS NOT CONSULTED UNTIL IT CARRIES WHAT MAKES IT A FILE (#12589 review
+        # rounds 3 and 4). Round 3 caught the FLAG and round 4 caught the OTHER field, which had
+        # never been read at all:
+        #   * an entry with no `yanked` at all (`{}`) read as "not yanked" and GREENED the arm on
+        #     a value nothing was read FROM;
+        #   * a mirror emitting `"yanked": "false"` (a truthy STRING) read as yanked and reported
+        #     "NO installable file in ANY release" — FAIL, exit 1, the release order;
+        #   * `{"yanked": False}` with NO `filename` was called installable — a false PASS off an
+        #     object that is not a file record.
+        # PyPI documents each entry as a file object carrying `filename` + a boolean `yanked`,
+        # so anything else is a shape outside the contract: drop the entry and mark the reading
+        # PARTIAL, which lets it neither green nor red the arm by itself. NOTE this is the ONE
+        # place that needs either field — `release_files`/`upload_time` enumerate and timestamp,
+        # and neither activity consults `yanked` or needs a filename.
+        judged = [
+            entry
+            for entry in entries
+            if isinstance(entry.get("yanked"), bool)
+            and isinstance(entry.get("filename"), str)
+            and entry["filename"]
+        ]
         if len(judged) != len(entries):
             reason = RELEASES_UNREADABLE
         if any(not entry.get("yanked") for entry in judged):
@@ -677,12 +700,18 @@ def release_files(index_doc: dict[str, Any], version: str) -> list[dict[str, Any
     """One version's file objects, ``[]`` when absent, ``None`` when the listing is unreadable.
 
     The STRICT reader: any drop (an unreadable map, an unreadable value, a non-object entry) is
-    ``None``, because its callers report this as an ENUMERATION — a count, a timestamp — and a
-    count nobody read is exactly the class #12589 removed. The verdict itself does NOT come from
-    here: the client arm reads ``resolvable_releases``, which applies the existential/universal
-    polarity. Its one VERDICT-path use is the gated FAIL arm's FILE COUNT, and that call site
-    treats a ``None`` as an invariant failure that raises (fail-closed to exit 2) rather than
-    printing a count it did not read.
+    ``None``, because a caller reporting this as an ENUMERATION — the gated FAIL arm's count —
+    must not print a count nobody read. The verdict itself does NOT come from here: the client arm
+    reads ``resolvable_releases``, which applies the existential/universal polarity. That one
+    VERDICT-path call site treats a ``None`` as an invariant failure that raises (fail-closed to
+    exit 2) rather than printing a count it did not read.
+
+    ⛔ AND IT IS NOT THE READER FOR A PARTIAL-TOLERANT ACTIVITY (#12589 review round 4, P3).
+    ``upload_time`` wants timestamps, which need neither ``yanked`` nor ``filename`` — so it reads
+    through ``readable_entries`` directly. This docstring previously said "its callers report this
+    as an enumumeration, a count, a timestamp", which was wrong in the direction that cost a
+    reading: the timestamps in a partly-readable listing WERE read, and this reader would have
+    dropped them ("uploaded unknown ago").
 
     One source of truth for what an absent key means, so the two arms cannot disagree about one
     response (#12525) — and, since #12589, one source of truth for what an UNREADABLE map or value
@@ -706,10 +735,18 @@ def upload_time(index_doc: dict[str, Any], version: str) -> datetime | None:
     what users get".
     """
     stamps = []
-    # `or []`: the caller is the INFORMATIONAL `release-age` row, which must not crash a run that
-    # has nothing to report — an unreadable listing contributes no timestamp, rather than a zero
-    # count. Verdicts never come through here (#12589).
-    for entry in release_files(index_doc, version) or []:
+    # ⛔ PARTIAL-TOLERANT, ON PURPOSE (#12589 review round 4, P3): a timestamp needs neither
+    # `yanked` nor `filename`, so an entry this client could not judge as INSTALLABLE can still
+    # tell us when the release first existed. Reading through the strict `release_files` would
+    # drop a timestamp it had read and print "uploaded unknown ago" for a release whose listing
+    # was readable in part. `None` from `releases_map` (no usable map) is the only total
+    # non-reading here, and it means no timestamp — this row is informational and must never
+    # crash or gate a run.
+    releases = releases_map(index_doc)
+    if releases is None or version not in releases:
+        return None
+    entries, _partial = readable_entries(releases[version])
+    for entry in entries:
         raw = entry.get("upload_time_iso_8601") or entry.get("upload_time")
         if not isinstance(raw, str) or not raw:
             continue
@@ -922,25 +959,27 @@ def build_report(
                     if not unreadable
                     else f"; NOTE {unreadable}: part of this release map could not be read "
                     f"(a value that is not an array, an entry that is not an object, or a "
-                    f"missing/non-boolean `yanked` flag), so this list is the READABLE subset"
+                    f"file entry with no boolean `yanked` / no `filename`), so this list is "
+                    f"the READABLE subset"
                 )
-                # ⛔ THE ARROW NAMES WHAT PIP RESOLVES TO, SO IT MAY ONLY BE PRINTED WHEN THE
-                # CODE ESTABLISHED IT (#12589 review round 3, P3). `info.version` is what the
-                # index ADVERTISES, not what an unpinned requirement resolves to — and on the
-                # partial path this PR newly reaches, the advertised version can be the very
-                # one whose listing was not read. ``unpinned → 0.3.0; installable: 0.2.0`` read
-                # as an assertion about 0.3.0 that nothing in the document supports.
-                target = (
-                    f"unpinned → {client_version}"
+                # ⛔ THE DETAIL NAMES WHAT WAS READ, NOT WHAT PIP RESOLVES TO (#12589 review
+                # rounds 3 and 4). `info.version` is what the index ADVERTISES; an unpinned
+                # requirement resolves to the HIGHEST installable release, which membership in
+                # `resolvable` does not establish (0.2.0 advertised + 0.3.0 also installable →
+                # pip takes 0.3.0). Printing `unpinned → 0.2.0` there asserted a resolution the
+                # reading never computed, and on the partial path it asserted one about the very
+                # version whose listing was not read. So the arrow is gone: the arm states the
+                # existential claim it can prove, and names the set it proved it from.
+                advertised = (
+                    f"advertised latest {client_version} is installable"
                     if client_version in resolvable
-                    else f"the {client_version} the index advertises latest is not "
-                    f"installable/readable here"
+                    else f"advertised latest {client_version} is not installable/readable here"
                 )
                 report.add(
                     Arm(
                         "client-published",
                         OK,
-                        f"{CLIENT_PACKAGE} resolves on the index ({target}; installable: "
+                        f"{CLIENT_PACKAGE} resolves on the index ({advertised}; installable: "
                         f"{', '.join(sorted(resolvable))}){partial}",
                     )
                 )
@@ -970,12 +1009,12 @@ def build_report(
                         "client-published",
                         UNKNOWN,
                         f"could not read a file listing out of the {CLIENT_PACKAGE} release "
-                        f"map ({unreadable}) — a version value that is not a list, or a list "
-                        f"holding an entry that is not an object. PyPI documents each "
-                        f"version's value as an ARRAY of file objects, so this is a shape "
-                        f"this client cannot parse, and whether `pip install "
-                        f"{CLIENT_PACKAGE}` resolves is UNKNOWN, not false. This is NOT "
-                        f"evidence the artifact is broken and is NOT a reason to cut a "
+                        f"map ({unreadable}) — a version value that is not an array, an entry "
+                        f"that is not an object, or a file entry with no boolean `yanked` / no "
+                        f"`filename`. PyPI documents each version's value as an ARRAY of file "
+                        f"objects, so this is a shape this client cannot parse, and whether "
+                        f"`pip install {CLIENT_PACKAGE}` resolves is UNKNOWN, not false. This "
+                        f"is NOT evidence the artifact is broken and is NOT a reason to cut a "
                         f"release",
                     )
                 )
@@ -1088,9 +1127,14 @@ def render_summary(report: Report) -> str:
     elif report.verdict == UNKNOWN:
         lines += [
             "",
-            "The canary could not read the index or could not exercise the "
-            "artifact. Reported as RED on purpose: a detector that cannot run "
-            "must never look like a pass.",
+            "The canary could not READ something it needs, or could not exercise the "
+            "artifact: the row marked CANNOT RUN names which. Reported as RED on purpose: "
+            "a detector that cannot run must never look like a pass.",
+            "",
+            "⛔ This is NOT an unreadable index when every index row above reads OK — on that "
+            "shape the non-reading is a SHAPE the canary refuses (an absent `releases` map, a "
+            "release value or `yanked` flag it cannot parse, a non-string version), and the "
+            "reason is in the row, not in the transport.",
         ]
     return "\n".join(lines) + "\n"
 

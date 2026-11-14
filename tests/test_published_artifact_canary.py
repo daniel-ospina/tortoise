@@ -3795,11 +3795,16 @@ def test_a_NON_BOOLEAN_yanked_flag_is_the_same_class_one_grain_further_in():
     """
     doc = {"info": {"version": "0.3.0"}}
     for unreadable_flag in (
-        {},
-        {"yanked": "false"},
+        {},  # no `yanked` and no `filename` at all
+        {"yanked": "false"},  # a truthy STRING read as "yanked" -> the release order
         {"yanked": "true"},
-        {"yanked": 0},
+        {"yanked": 0},  # an int is not the documented boolean
         {"yanked": 1},
+        # ⛔ AND THE OTHER FIELD (#12589 review round 4, P2): `yanked: False` with no usable
+        # `filename` is not a file record, yet it used to count as an INSTALLABLE file — a false
+        # PASS off an object that is not a file.
+        {"filename": ""},
+        {"filename": None},
     ):
         entry = {**_CLIENT_GOOD, **unreadable_flag} if unreadable_flag else {}
         versions, reason = canary.resolvable_releases({**doc, "releases": {"0.3.0": [entry]}})
@@ -3846,15 +3851,79 @@ def test_the_OK_detail_does_not_claim_a_RESOLUTION_the_reading_did_not_establish
         }
     )
     detail = report.get("client-published").detail
-    assert "unpinned → 0.3.0" not in detail, detail
-    assert "the 0.3.0 the index advertises latest is not installable/readable here" in detail, (
-        detail
-    )
+    assert "unpinned →" not in detail, detail
+    assert "advertised latest 0.3.0 is not installable/readable here" in detail, detail
     assert "installable: 0.2.0" in detail, detail
 
-    # When the advertised version IS installable, the arrow is earned and stays.
+    # When the advertised version IS installable, say so — and still do not claim pip's target.
     report = _client_report({"info": {"version": "0.3.0"}, "releases": {"0.3.0": [_CLIENT_GOOD]}})
-    assert "unpinned → 0.3.0" in report.get("client-published").detail
+    detail = report.get("client-published").detail
+    assert "advertised latest 0.3.0 is installable" in detail, detail
+    assert "unpinned →" not in detail, detail
+
+    # ⛔ MEMBERSHIP IS NOT MAXIMALITY (#12589 review round 4, P3): with 0.2.0 advertised AND
+    # installable while 0.3.0 is also installable, an UNPINNED requirement resolves to 0.3.0 —
+    # which the reading never computed. The old `unpinned → {info.version}` printed 0.2.0 here,
+    # i.e. a resolution target the code did not establish. The detail now names only what it read.
+    report = _client_report(
+        {
+            "info": {"version": "0.2.0"},
+            "releases": {
+                "0.2.0": [_CLIENT_GOOD],
+                "0.3.0": [{**_CLIENT_GOOD, "filename": "tortoise_client-0.3.0-py3-none-any.whl"}],
+            },
+        }
+    )
+    detail = report.get("client-published").detail
+    assert "unpinned →" not in detail, detail
+    assert "advertised latest 0.2.0 is installable" in detail, detail
+    assert "installable: 0.2.0, 0.3.0" in detail, detail
+
+
+def test_the_UNREADABLE_reason_names_every_cause_the_code_can_produce():
+    """One constant, one enumeration — round 3 added a cause and only two of four sites said so.
+
+    (#12589 review round 4, P3.) An operator reads the arm's detail, the run summary and the filed
+    alert issue against each other, so a cause that exists in the code but not in the text points
+    them at the wrong shape. This pin fails if any site drifts back to the two-cause wording.
+    """
+    for releases in (
+        {"0.3.0": {}},
+        {"0.3.0": [{}]},
+        {"0.3.0": [{**_CLIENT_GOOD, "yanked": "false"}]},
+        {"0.3.0": [{"yanked": False}]},
+    ):
+        arm = _client_report({"info": {"version": "0.3.0"}, "releases": releases}).get(
+            "client-published"
+        )
+        assert "yanked" in arm.detail, (releases, arm.detail)
+        assert "filename" in arm.detail, (releases, arm.detail)
+
+    summary = canary.render_summary(
+        _client_report({"info": {"version": "0.3.0"}, "releases": {"0.3.0": {}}})
+    )
+    # ⛔ The UNKNOWN tail must not blame the TRANSPORT for a SHAPE refusal: on this report every
+    # index row above reads OK and the non-reading is a shape the canary refuses (#12589 round 4).
+    assert "could not READ something it needs" in summary, summary
+    assert "NOT an unreadable index" in summary, summary
+
+    # ⛔ AND THE INFORMATIONAL ROW MUST NOT LOSE A TIMESTAMP IT DID READ (#12589 round 4, P3):
+    # a timestamp needs neither `yanked` nor `filename`, so a partly-readable listing still says
+    # when the release first existed. "uploaded unknown ago" for a stamp that was read is a lie,
+    # and it is the same "the whole value was dropped" defect the helper change removed.
+    engine = {"info": {"version": "0.2.0"}, "releases": {"0.2.0": [_CLIENT_GOOD, "junk"]}}
+    assert canary.upload_time(engine, "0.2.0") is not None
+    report = canary.build_report(
+        engine_doc=engine,
+        client_doc={"info": {"version": "0.3.0"}, "releases": {"0.3.0": [_CLIENT_GOOD]}},
+        tree_version="0.2.0",
+        init_arm=_ok_init_arm(),
+        now=NOW,
+    )
+    rendered = canary.render_summary(report)
+    assert "uploaded unknown" not in rendered, rendered
+    # NOW is 2026-11-13 and the fixture's only readable stamp is 2026-08-08 -> 97d.
+    assert "97d" in rendered, rendered
 
 
 def test_a_non_STRING_version_is_the_same_class_one_key_further_in():
