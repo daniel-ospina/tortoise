@@ -22,7 +22,7 @@ Every pool-eligible job in this repo asks for a **label**, never an architecture
 
 | `runs-on:` | count | who claims it |
 | --- | --- | --- |
-| `ubuntu-latest` | 79 | GitHub-hosted **and** (while the fallback is engaged) the self-hosted pool — was 78 until the `consent-key-drift` scheduled job (#12464) landed |
+| `ubuntu-latest` | 79 | GitHub-hosted **and** (while the fallback is engaged) the self-hosted pool — was 76 until `release-artifact-canary` added its `canary` + `report` jobs (#12422, which did not re-derive this row: 78) and this PR added the `consent-key-drift` scheduled job (#12464) |
 | `ubuntu-24.04` | 10 | **GitHub-hosted, plus — as a temporary mitigation since 2026-10-29 — the self-hosted pool.** Pinned to hosted on purpose (#6897/#7867); the pin deadlocks while hosted is unavailable, so the pool now claims it too (see the label contract). |
 
 Counts are JOBS (not files), re-measured 2026-11-14 at this head (`yaml.safe_load` each workflow,
