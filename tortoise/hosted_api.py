@@ -2037,7 +2037,7 @@ _HEALTH_PROBE_START_FAILED = False
 #: startup has finished, by which point the refresher has had many intervals.
 #: ⛔ THE NAME IS DELIBERATELY NOT `_PROCESS_STARTED_AT`: that global already
 #: exists 6,000 lines below as the ISO STRING `_build_identity()` publishes
-#: (`:8294`), and it is assigned AFTER this one at import — so a float under that
+#: (`:8297`), and it is assigned AFTER this one at import — so a float under that
 #: name was silently replaced by the string and every read raised `TypeError`,
 #: which the verdict reader turns into `failed` (`http` 503) in exactly the state
 #: that must be `unknown` (measured: the real listener answering
