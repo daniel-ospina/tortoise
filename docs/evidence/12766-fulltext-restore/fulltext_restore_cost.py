@@ -78,11 +78,7 @@ INDEX_READY_BOUND_S = 1800.0
 #: LIST-valued ``search_keys`` is NOT indexed by FalkorDB's fulltext index, so writing a
 #: list would produce an index populated with half the text and a run that understates
 #: the thing it claims to measure.
-_WORDS = (
-    "the river audit found three discrepancies in the ledger and the custodian agreed "
-    "to reconcile them before the quarter closed while the board reviewed the schedule "
-    "of payments and the auditor noted that the evidence was consistent with the claim"
-).split()
+_WORDS = ["the", "river", "audit", "found", "three", "discrepancies", "in", "the", "ledger", "and", "the", "custodian", "agreed", "to", "reconcile", "them", "before", "the", "quarter", "closed", "while", "the", "board", "reviewed", "the", "schedule", "of", "payments", "and", "the", "auditor", "noted", "that", "the", "evidence", "was", "consistent", "with", "the", "claim"]
 SEARCH_KEY_TOKENS = 4
 BATCH = 500
 
@@ -233,7 +229,7 @@ def create_index(client, graph, kind):
         try:
             _rows(client, graph, form)
             return form
-        except Exception as exc:  # noqa: BLE001 — the fallback IS the point
+        except Exception as exc:
             errors.append(f"{form}: {exc}")
     raise RuntimeError(f"no supported {kind} index creation form: " + "; ".join(errors))
 
@@ -461,6 +457,7 @@ def engine_header(client):
             tokens = list(zip(
                 [module[i] for i in range(0, len(module), 2)],
                 [module[i] for i in range(1, len(module), 2)],
+                strict=False,
             ))
         flat = {_text(key): _text(value) for key, value in tokens}
         if flat.get("name") == "graph":
@@ -586,7 +583,7 @@ def _summary(results, nodes):
             f"{arm:18s} {r['dump_s']:7.3f}s {r['del_s']:6.3f}s {r['restore_s']:8.3f}s "
             f"{r.get('recreate_s', 0.0):8.3f}s {r.get('ready_wait_s', 0.0):7.2f}s "
             f"{r['cycle_s']:8.3f}s {r['bystander_worst_ping_ms']:10.1f}ms "
-            f"{str(r.get('index_documents_after', '-')):>11s} {str(hits):>6s}"
+            f"{r.get('index_documents_after', '-')!s:>11s} {hits!s:>6s}"
         )
     print()
     for arm in ("fulltext-kept", "fulltext-dropped", "range-kept", "range-dropped"):

@@ -2397,6 +2397,7 @@ surfaces:
   # it guards span `tortoise/` — a battery-only or sdk-only change must run it.
   - test_vector_write_seam_4520.py
   core:
+  - test_10371_nonpoint_lifecycle_guard.py
   # #10749: DUAL-REGISTERED with `api` — see the `api` row for the measurement and
   # WHY both halves are load-bearing (`hosted_api.py` is an exact `api` SOURCE_PATTERN
   # that REPLACES the `core` fallback; `tortoise/monitoring.py` only falls through to
@@ -2413,6 +2414,7 @@ surfaces:
   # matrix run. Hermetic apart from the throwaway EMBEDDED engine the SDK-door
   # cases build under `tmp_path`: no docker, no Postgres, no network, no model.
   - test_11892_health_quota.py
+  - test_postgres_bytes.py
   # #12444: the tier-NAMING pin — `pro` is the identifier, Builder is the display
   # name (#4336). `core` is the classifying surface because `tortoise/pricing.py`
   # (where `TIER_DISPLAY_NAMES` now lives) is a `core` source. The `tier1` row is
