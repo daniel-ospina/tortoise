@@ -468,6 +468,32 @@ BEGIN
             'columns (found %)', v_cols;
     END IF;
 
+    -- ⛔ THE ROLE THAT CALLS IT MUST BE ABLE TO. The record write path
+    -- connects as `tortoise_record_app` (NOBYPASSRLS; `_apply_tenant_scope`
+    -- refuses an owner/superuser/BYPASSRLS role), so a grant to `service_role`
+    -- alone leaves every live write at `permission denied for function` — a
+    -- silent no-op behind the fail-soft wrapper. Where the role exists in this
+    -- cluster, assert it can EXECUTE and that the meter is INVOKER-rights (so
+    -- the org's own tenant policy applies to the read).
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'tortoise_record_app') THEN
+        IF NOT has_function_privilege(
+                'tortoise_record_app',
+                'public.journal_event_bytes_for_rows(text, text, bigint[])',
+                'EXECUTE') THEN
+            RAISE EXCEPTION '#12762: tortoise_record_app CANNOT execute the '
+                'meter — every live write would meter nothing and the failure '
+                'would be swallowed by the fail-soft wrapper';
+        END IF;
+        IF (SELECT p.prosecdef FROM pg_catalog.pg_proc p
+             WHERE p.oid =
+                   'public.journal_event_bytes_for_rows(text, text, bigint[])'::regprocedure)
+           IS NOT FALSE THEN
+            RAISE EXCEPTION '#12762: the meter must be SECURITY INVOKER — a '
+                'DEFINER function lets the tenancy role read another org''s '
+                'byte aggregate past its own RLS policy';
+        END IF;
+    END IF;
+
     -- The included-amount / cap columns this lane must NOT have written.
     IF EXISTS (SELECT 1 FROM information_schema.columns
                 WHERE table_schema = 'public'

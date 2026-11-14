@@ -35,6 +35,7 @@ from datetime import UTC, datetime
 
 from tortoise import metering
 from tortoise import postgres_bytes as pb
+from tortoise import record_projection as rp
 from tortoise.postgres_bytes import (
     AUDIT_RPC,
     DEFAULT_EXCESS_BAND,
@@ -585,3 +586,133 @@ def test_record_write_carries_the_measurement_fields():
 
     w = rw.RecordWrite(outcome=rw.RecordWriteOutcome.APPLIED)
     assert w.written_bytes == 0 and w.written_rows == 0
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 8. END TO END through the live door: measured in the transaction, recorded
+#    only after the commit — and NOT AT ALL when the commit fails.
+#
+# The source-order pin in §7 is necessary but not sufficient (a call can be
+# present and unreachable). This drives `write_live_record` itself.
+# ══════════════════════════════════════════════════════════════════════════
+
+
+class _LiveConn:
+    """A DB-API connection whose COMMIT can be made to fail.
+
+    Records the ORDER of the two events that matter — the commit and the
+    ledger write — so a future refactor cannot quietly reverse them.
+    """
+
+    def __init__(self, timeline: list[str], *, commit_raises: bool = False):
+        self.timeline = timeline
+        self.commit_raises = commit_raises
+        self.executed: list[tuple[str, object]] = []
+        self.closed = 0
+        self.guc: Any = None
+
+    def cursor(self):
+        return _LiveCursor(self)
+
+    def commit(self):
+        if self.commit_raises:
+            raise RuntimeError("commit refused")
+        self.timeline.append("commit")
+
+    def rollback(self):
+        self.timeline.append("rollback")
+
+    def close(self):
+        self.closed += 1
+
+
+class _LiveCursor:
+    def __init__(self, conn: _LiveConn):
+        self.conn = conn
+
+    def execute(self, sql, params=None):
+        self.conn.executed.append((sql, params))
+        self._sql = sql
+        if sql == rp.TENANT_GUC_SQL:
+            self.conn.guc = params[0] if params else None
+
+    def fetchone(self):
+        # The meter's read: report the stored size the write produced.
+        if "journal_event_bytes_for_rows" in getattr(self, "_sql", ""):
+            return ({"org_id": "org_live", "graph_id": "g_live", "rows": 1,
+                     "row_bytes": 7_241, "payload_bytes": 7_177,
+                     "chunk_bytes": 7_177, "chunk_detail": True,
+                     "captured_at": ""},)
+        # `replay()` reads the tenant GUC back (#9600) and, on the same
+        # statement, the connecting role's posture: this fake keeps its
+        # transaction-local set and runs as a NON-bypass role.
+        if getattr(self, "_sql", "") == rp.TENANT_SCOPE_SQL:
+            return (self.conn.guc, False)
+        return (self.conn.guc,)
+
+    def fetchall(self):
+        return []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def _live_door(monkeypatch, conn: _LiveConn, timeline: list[str]):
+    """Arm the live door against *conn* and record the ledger write in *timeline*."""
+    from tortoise import record_writer as rw
+
+    monkeypatch.setenv(rw.RECORD_DSN_ENV, "postgresql://record/db")
+    monkeypatch.setattr(rw, "_live_write_verdict",
+                        lambda **k: (None, ("org_live", "g_live"), None))
+    monkeypatch.setattr(rw, "_default_connect", lambda _dsn: conn)
+    monkeypatch.setattr(rw, "_close_live_breaker", lambda: None)
+    monkeypatch.setattr(rw, "_count_write_applied", lambda: None)
+    monkeypatch.setattr(rw, "_note_unproven_position", lambda rec: None)
+
+    def ledger(org_id, *, n_bytes, n_records=0, **kw):
+        timeline.append(f"ledger:{org_id}:{n_bytes}:{n_records}")
+        return {"postgres_bytes_written": n_bytes}
+
+    monkeypatch.setattr(metering, "record_postgres_bytes_written", ledger)
+    return rw
+
+
+#: A record the projection ACCEPTS (the shape the seam tests use): a
+#: `PointAdded` that carries its own snapshot is materializable; one without it
+#: is refused before a single statement, which would make this test prove
+#: nothing about the meter.
+RECORD = {"type": "PointAdded", "ts": "2026-11-14T00:00:00Z", "id": "p1",
+          "point": {"id": "p1", "content": "a claim", "pointKind": "claim",
+                    "ep_alpha": 1.0, "ep_beta": 1.0}}
+
+
+def test_the_live_door_records_AFTER_the_commit(monkeypatch):
+    timeline: list[str] = []
+    conn = _LiveConn(timeline)
+    rw = _live_door(monkeypatch, conn, timeline)
+
+    write = rw.write_live_record(RECORD, seq=1)
+
+    assert write is not None and write.applied
+    assert timeline[-2:] == ["commit", "ledger:org_live:7241:1"], (
+        "the ledger must be written AFTER the commit, and with the MEASURED "
+        f"bytes — got {timeline!r}")
+    assert write.written_bytes == 7_241 and write.written_rows == 1
+
+
+def test_a_FAILED_commit_leaves_the_ledger_UNTOUCHED(monkeypatch):
+    timeline: list[str] = []
+    conn = _LiveConn(timeline, commit_raises=True)
+    rw = _live_door(monkeypatch, conn, timeline)
+
+    write = rw.write_live_record(RECORD, seq=1)
+
+    # The door refuses rather than raising (the write is derived; the journal
+    # already holds the record) — and crucially it does not bill for it.
+    assert write is not None and not write.applied
+    assert not [t for t in timeline if t.startswith("ledger:")], (
+        "a rolled-back write must not charge the org: "
+        f"timeline={timeline!r}")

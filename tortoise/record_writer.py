@@ -1717,8 +1717,13 @@ def _measure_written_bytes(
     they first landed, so metering it again would double the org's figure on
     every rebuild.
 
-    ⛔ TOTAL — every failure is logged at DEBUG and returns ``None``. A meter
-    must never fail, or change the outcome of, a record write.
+    ⛔ TOTAL — never raises, never changes a record write's outcome. A FAILURE
+    returns ``None`` and logs at WARNING (a meter that cannot read is an
+    operator-visible fault: with the grant/RLS mistakes this path has already
+    had, DEBUG silence would make the whole dimension a no-op that the registry
+    still advertises as live). ``None`` (failed) and a ``WrittenRows`` with
+    ``rows == 0`` (every position lost its collision — nothing was stored) are
+    DISTINCT, and only the first is a fault.
 
     ⛔ IT DOES NOT WRITE THE LEDGER. The measurement is reported on
     :attr:`RecordWrite.written_bytes`; the increment happens where the COMMIT
@@ -1735,10 +1740,11 @@ def _measure_written_bytes(
             seqs=range(first_seq, first_seq + n_records),
         )
     except Exception:  # noqa: BLE001 - never fail a write for a meter
-        _logger.debug(
-            "postgres byte measurement skipped for org=%s graph=%s "
-            "first_seq=%s (non-fatal)", org_id, graph_id, first_seq,
-            exc_info=True)
+        _logger.warning(
+            "postgres byte measurement FAILED for org=%s graph=%s "
+            "first_seq=%s (non-fatal to the write; the window's figure will "
+            "read short and reconcile reports it as unmetered)",
+            org_id, graph_id, first_seq, exc_info=True)
         return None
 
 
@@ -1763,10 +1769,17 @@ def _record_written_bytes(org_id: str, written: "RecordWrite") -> None:
         metering.record_postgres_bytes_written(
             org_id, n_bytes=written.written_bytes,
             n_records=written.written_rows)
-    except Exception:  # noqa: BLE001 - never fail a write for a meter
-        _logger.debug(
-            "postgres byte metering skipped for org=%s bytes=%s (non-fatal)",
-            org_id, written.written_bytes, exc_info=True)
+    except Exception as e:  # noqa: BLE001 - never fail a write for a meter
+        # ⛔ WARNING, not DEBUG: the write is already committed, so this is the
+        # only trace that the org's figure is now short. It is NOT a
+        # `metering_unmetered_increments` row (the shared #3824 residual, and
+        # the same choice `metering.record_graph_storage_reading` makes for its
+        # own dropped write) — `postgres_bytes.reconcile` turns the shortfall
+        # into a named `unmetered_bytes` figure against the audit.
+        _logger.warning(
+            "postgres byte metering write FAILED after a committed record "
+            "write: org=%s bytes=%s (non-fatal; the audit will report it as "
+            "unmetered): %s", org_id, written.written_bytes, e)
 
 
 def write_records(

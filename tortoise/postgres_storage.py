@@ -23,13 +23,19 @@ control-plane RPC seam:
    until)``: an EXACT per-org ``count(*)`` for ``analytics_events`` in a
    half-open window — an org's analytics row growth.
 
-⛔ **THE ATTRIBUTION BOUNDARY — bytes are DATABASE-grain, rows are per-org.**
-Postgres records no per-org byte ownership, so a per-org BYTE figure would be
-an ALLOCATION mislabelled as a measurement. This module therefore publishes
-exactly two things, each named for what it is: a DATABASE/TABLE-grain byte
-footprint, and a PER-ORG ROW count. The parent substrate (#5045) is where an
-allocation rule would be declared, if one is ever wanted; nothing here
-invents one.
+⛔ **THE ATTRIBUTION BOUNDARY — this module's bytes are DATABASE-grain, rows
+are per-org.** Apportioning the database total by a proxy would be an
+ALLOCATION mislabelled as a measurement, and this module publishes exactly two
+things, each named for what it is: a DATABASE/TABLE-grain byte footprint, and a
+PER-ORG ROW count.
+
+**OVERRIDES** the blanket form of that claim ("no per-org BYTE figure can
+exist"): since #12762 a per-org byte **measurement** does exist, in
+:mod:`tortoise.postgres_bytes` — `sum(pg_column_size(row))` over the org's OWN
+journal rows, which is that org's byte rather than a share of anything, with
+index/dead-tuple/page-slack/TOAST-chunk overhead published as a labelled
+residual. It is a different figure from this database total; do not read one as
+the other.
 
 ⛔ **PRECISION.** ``total_bytes``/``heap_bytes``/``index_bytes`` are EXACT
 on-disk figures. ``live_rows`` is ``pg_stat_user_tables.n_live_tup`` — a
@@ -128,10 +134,15 @@ PRECISION_NOTE = (
 #: per org. This is the property that keeps the number from being read as a
 #: per-org cost.
 ATTRIBUTION_NOTE = (
-    "DISTRIBUTION: the byte footprint is DATABASE/TABLE-grain — Postgres "
-    "records no per-org byte ownership, so a per-org byte split would be an "
-    "ALLOCATION, not a measurement, and is not offered here. Per-org "
-    "attribution exists for ROW GROWTH "
+    "DISTRIBUTION: THIS table-grain footprint is DATABASE/TABLE-grain, and "
+    "apportioning that total by a proxy would be an ALLOCATION. "
+    "OVERRIDES the earlier blanket claim that no per-org byte figure can "
+    "exist: a per-org MEASUREMENT does exist since #12762 "
+    "(tortoise.postgres_bytes — sum(pg_column_size(row)) over the org's own "
+    "journal rows, with index/dead-tuple/page-slack/TOAST-chunk overhead "
+    "published as a labelled residual). It is a different figure from this "
+    "one; do not read this database total as a per-org number. Per-org "
+    "attribution also exists for ROW GROWTH "
     "(read_analytics_row_growth → analytics_events_rows_by_org)."
 )
 

@@ -126,7 +126,13 @@ CREATE OR REPLACE FUNCTION public.journal_event_bytes_for_rows(
 RETURNS jsonb
 LANGUAGE plpgsql
 STABLE
-SECURITY DEFINER
+-- ⛔ SECURITY **INVOKER**, deliberately, unlike its audit sibling. This runs on
+-- the RECORD's own connection — `tortoise_record_app`, a NOBYPASSRLS role whose
+-- tenancy is the `app.current_org_id` GUC the write path sets on that same
+-- transaction — so `journal_event`'s tenant policy applies to the read and an
+-- org impersonated in `p_org_id` still returns nothing. A SECURITY DEFINER
+-- function here would let that role read another org's byte aggregate, and it
+-- is not needed: the role already holds SELECT on the table (20261025000001).
 SET search_path = ''
 AS $$
 DECLARE
@@ -156,7 +162,16 @@ BEGIN
        AND t.seq = ANY (p_seqs)
        -- See the header: only rows THIS transaction inserted. A suppressed
        -- ON CONFLICT leaves the older row in place and it is not our byte.
-       AND t.xmin::text = pg_catalog.pg_current_xact_id()::text;
+       -- ⛔ `xmin` is a 32-bit `xid`; `pg_current_xact_id()` is an
+       -- EPOC-extended `xid8` (epoch*2^32 + xid). Their ::text renders are
+       -- equal only while the cluster's epoch is 0, so the comparison is done
+       -- on the 32-bit part explicitly: a cluster that has burnt through 2^32
+       -- xids (or was restored from such a base backup) would otherwise have
+       -- printed 4294979641 against xmin = 12345 and silently metered 0 rows
+       -- on every write, forever.
+       AND t.xmin::text::bigint
+           = pg_catalog.mod(pg_catalog.pg_current_xact_id()::text::bigint,
+                            4294967296);
 
     -- Chunk detail needs PG17+, and the *function* (not the server version) is
     -- the honest test: a 16.x server has no pg_column_toast_chunk_id (measured)
@@ -176,7 +191,12 @@ BEGIN
                FROM public.journal_event t
                JOIN %s ch ON ch.chunk_id = pg_catalog.pg_column_toast_chunk_id(t.payload)
               WHERE t.org_id = $1 AND t.graph_id = $2 AND t.seq = ANY ($3)
-                AND t.xmin::text = pg_catalog.pg_current_xact_id()::text',
+                -- mod(), not the modulo OPERATOR: this string is a format()
+                -- template, where a bare percent sign starts a specifier.
+                AND t.xmin::text::bigint
+                      = pg_catalog.mod(
+                            pg_catalog.pg_current_xact_id()::text::bigint,
+                            4294967296)',
             v_toast_rel)
           INTO v_chunk
           USING p_org_id, p_graph_id, p_seqs;
@@ -200,6 +220,22 @@ REVOKE ALL ON FUNCTION public.journal_event_bytes_for_rows(text, text, bigint[])
     FROM public, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.journal_event_bytes_for_rows(text, text, bigint[])
     TO service_role;
+-- ⛔ AND THE ROLE THAT ACTUALLY CALLS IT. The record write path connects as
+-- `tortoise_record_app` (NOBYPASSRLS — `.env.example`, and
+-- `record_projection._apply_tenant_scope` REFUSES an owner/superuser/BYPASSRLS
+-- role), so a grant to `service_role` alone left every live write at
+-- `permission denied for function` — swallowed by the fail-soft wrapper, i.e.
+-- the meter would have been a silent no-op in production that the dimension
+-- registry still advertised as a live writer. GUARDED on the role's existence
+-- (the pattern 20261023000001 uses): the record-tenancy role is created by an
+-- earlier migration, and where it is absent there is nothing to grant.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'tortoise_record_app') THEN
+        GRANT EXECUTE ON FUNCTION public.journal_event_bytes_for_rows(
+            text, text, bigint[]) TO tortoise_record_app;
+    END IF;
+END $$;
 
 -- ============================================================================
 -- 3. The AUDIT: per-org stored bytes for the whole table + the residual.

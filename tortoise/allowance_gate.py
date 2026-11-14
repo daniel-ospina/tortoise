@@ -489,13 +489,22 @@ DIMENSIONS: tuple[AllowanceDimension, ...] = (
         "postgres_storage", ALLOWANCE_KEYS["postgres_storage"],
         meter=None,
         blocked_reason=(
-            "no per-org byte meter: ``postgres_storage`` measures at DATABASE "
-            "grain (``measure_postgres_storage``; its cost-dimension "
-            "``attribution`` states that a per-org byte split would be an "
-            "ALLOCATION, not a measurement, because Postgres records no per-org "
-            "byte ownership). BLOCKED until a per-org attribution exists — a "
-            "gate that charged this org for the whole database's bytes would "
-            "over-charge every tenant"),
+            # ⛔ OVERRIDES the previous text ("no per-org byte meter … a per-org
+            # byte split would be an ALLOCATION, not a measurement"). That was
+            # true of apportioning the database TOTAL and stopped being the
+            # blocker on 2026-11-14: #12762 added a per-org MEASUREMENT of
+            # stored bytes (``postgres_bytes`` — the org's own journal rows,
+            # ``sum(pg_column_size(row))``, with the database-grain residual
+            # published separately). The REAL blocker is now the one that was
+            # always second in the queue: the ``free``/``anon`` INCLUDED
+            # AMOUNTS are undecided, so there is nothing to compare a measured
+            # figure against. Naming the missing meter would send the next
+            # reader to build a thing that already exists.
+            "the included amounts for ``free``/``anon`` are undecided: the "
+            "per-org byte METER exists (``postgres_bytes``, #12762 — a "
+            "measured figure per org, not an allocation), but ``pricing.json`` "
+            "carries no ``postgres_storage`` included amount to compare it "
+            "against, so arming would refuse on a threshold nobody set"),
     ),
     _dimension(
         "capture_extraction", ALLOWANCE_KEYS["capture_extraction"],

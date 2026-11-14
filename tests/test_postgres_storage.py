@@ -168,7 +168,14 @@ def test_the_caveats_travel_with_the_reading_and_through_as_dict():
     assert d["postgres_precision_note"] == PRECISION_NOTE
     assert d["postgres_attribution_note"] == ATTRIBUTION_NOTE
     assert d["postgres_live_rows_are_estimates"] is True
-    assert "per-org byte split would be an ALLOCATION" in d["postgres_attribution_note"]
+    # #12762 reversed the BLANKET form of this claim; the surviving half (this
+    # table-grain total cannot be split per org) is what the note must still
+    # carry, together with the OVERRIDES pointer so a reader cannot restore
+    # "no per-org byte figure exists" as if the new method were an accident.
+    assert "apportioning that total by a proxy would be an ALLOCATION" in (
+        d["postgres_attribution_note"])
+    assert "OVERRIDES" in d["postgres_attribution_note"]
+    assert "postgres_bytes" in d["postgres_attribution_note"]
     # and the whole reading serialises (a NaN/inf would raise here)
     json.dumps(d, allow_nan=False)
 

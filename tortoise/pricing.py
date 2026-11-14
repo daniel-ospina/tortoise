@@ -153,8 +153,10 @@ def storage_limits(tier: str) -> dict:
     allowance gate arms on *presence* — ``allowance_gate.enforce_allowances``
     does ``if dim.limit_key not in limits: continue``
     (``allowance_gate.py``:823). Both storage dimensions are currently
-    **BLOCKED** there (``postgres_storage`` has no per-org byte meter — a
-    per-org split would be an ALLOCATION, not a measurement; ``graph_storage``'s
+    **BLOCKED** there (``postgres_storage``'s per-org byte METER now exists
+    (``postgres_bytes``, #12762) but its ``free``/``anon`` included amounts are
+    undecided, so there is nothing to compare a measured figure against — see
+    ``allowance_gate.ALLOWANCE_DIMENSIONS``; ``graph_storage``'s
     own contract forbids capping on the ledger figure because the HNSW index is
     under-reported 8.5x-21.7x). Putting either key into the dict every caller
     treats as "the limits" is therefore one ``{**tier_limits(t), ...}`` away

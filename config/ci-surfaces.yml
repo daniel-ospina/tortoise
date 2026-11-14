@@ -1675,6 +1675,12 @@ surfaces:
   # SQL↔Python contract (the RPC/param names) — the #2938/#3154 silent-drop
   # class. See the `core` entry for the other half.
   - test_postgres_storage.py
+  # #12762: the per-org Postgres byte meter — the SQL↔Python contract for the
+  # three RPCs (the meter, the audit, the ledger increment) and the write-seam
+  # wiring. Dual-registered with `core` for the #4492/#5331 reason: the ledger
+  # and the control-plane seam are `api` SOURCE_PATTERNS, while the new
+  # `tortoise/postgres_bytes.py` matches no pattern and falls to `core`.
+  - test_postgres_bytes.py
   - test_oauth_mcp.py
   # #2853: the `oauth_clients` row count that ruling C made part of the decision.
   # Registered on `api` because the ONLY file it guards, `tortoise/hosted_api.py`,
@@ -4133,6 +4139,14 @@ surfaces:
   # NON_PYTHON_PREFIX and takes the tier-1 smoke return. Only the CORE_ALSO
   # paths below select `core`; #8744 review P2.)
   - test_postgres_storage.py
+  # #12762: the per-org Postgres byte meter + TOAST-aware audit
+  # (tortoise/postgres_bytes.py, the record write seam in
+  # tortoise/record_writer.py). Dual-registered with `api`; `core` is the
+  # surface that MUST run it on its own source's diff, because the new module
+  # matches no named SOURCE_PATTERN. The SQL↔Python contract half reads the
+  # migration text, so the migration is in `tools/ci_selection.py::CORE_ALSO`
+  # and selects `core` on its own diff.
+  - test_postgres_bytes.py
   # #3634: guards the graph-name ownership vocabulary (the prefix sets that
   # authorise a sweep) — the register, the deny-safe residue predicate, and the
   # AST pin keeping the opt-in legacy sweep out of every default path.
@@ -12808,6 +12822,7 @@ durations:
   # CI pays once for the whole shard and which other hermetic rows in this map
   # (e.g. test_cypher_regex_guard_3595.py: 0.2) likewise exclude. Refresh from
   # the first post-merge run that includes it.
+  test_postgres_bytes.py: 1.1  # hermetic (no container): 29 cases in ~4.5s measured 2026-11-14; set to the same weight as test_postgres_storage.py until a junit census carries it
   test_postgres_storage.py: 1.1  # carried forward (not a full-file CI measurement) — ci-timing junit-census+top-15 2026-11-09 (run 42546828652): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (0.1s) is a LOWER bound; kept 1.1
   test_heavy_import_guard.py: 11.6  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 12.0
   test_hook_run_observation.py: 8.2  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 7.9

@@ -210,20 +210,24 @@ def test_ruled_dimension_three_extraction_tokens():
 
 
 def test_ruled_dimension_one_postgres_bytes_is_BLOCKED_and_refuses():
-    """Unit 1 of #5331 — Postgres bytes — has NO per-org meter.
+    """Unit 1 of #5331 — Postgres bytes — refuses, and names the REAL blocker.
 
-    ``postgres_storage`` measures at DATABASE grain and its declared
-    ``attribution`` says a per-org split would be an ALLOCATION, not a
-    measurement. So configuring the key must REFUSE (fail closed, naming the
-    block) rather than pass on a figure nobody measured, and rather than charge
-    one tenant for the whole database.
+    The blocker is NOT a missing meter: #12762 added a per-org MEASUREMENT of
+    stored bytes (``tortoise.postgres_bytes``), so the old ``blocked_reason``
+    ("no per-org byte meter … an ALLOCATION") named a thing that now exists and
+    sent the next reader to build it. The blocker is the ``free``/``anon``
+    INCLUDED AMOUNTS, still undecided (#12762 is measurement only). Configured
+    ⇒ REFUSE, fail-closed, naming that.
     """
     limits = _limits(max_postgres_storage_bytes=10 ** 9)
     with pytest.raises(QuotaCheckError) as caught:
         enforce_allowances(limits)
     message = str(caught.value)
     assert "postgres_storage" in message
-    assert "no per-org byte meter" in message
+    assert "included amounts" in message
+    # The stale claim must be gone: naming a meter that exists is how this
+    # gate's operator-facing text would send a reader to rebuild it.
+    assert "no per-org byte meter" not in message
 
 
 # ── the gate is ONE gate, on the declared registry ─────────────────────────

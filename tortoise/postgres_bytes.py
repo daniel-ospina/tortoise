@@ -115,18 +115,24 @@ AUDIT_RPC = "postgres_per_org_bytes"
 #: without it.
 METHOD_NOTE = (
     "A MEASUREMENT of stored bytes, per org: sum(pg_column_size(row)) over the "
-    "org's own journal rows. It is the compressed stored size where "
+    "org's own JOURNAL rows. It is the compressed stored size where "
     "compression applies, and it follows the TOAST pointer (measured — a "
     "19,245 B out-of-line payload reports 19,256, not an 18 B pointer). It is "
-    "NOT an allocation of the database total, and it is NOT invoice-grade: the "
-    "vendor bill is measured by the platform."
+    "NOT an allocation of the database total. ⛔ SCOPE: journal rows ONLY — the "
+    "record fold's node/relation/narrative rows are a different table set and "
+    "are NOT covered by this figure or by the residual, so this is a lower "
+    "bound on an org's stored bytes, not its whole footprint. NOT "
+    "invoice-grade: the vendor bill is measured by the platform."
 )
 
 #: What the figure deliberately excludes, on every reading.
 RESIDUAL_NOTE = (
     "EXCLUDES (database-grain, published separately and never folded in): heap "
-    "page slack and dead tuples, the primary-key index, and TOAST chunk tuple "
-    "headers. Attributing those to an org would be an ALLOCATION."
+    "page slack and dead tuples, the primary-key index, the TOAST relation's "
+    "own index and FSM/VM, and TOAST chunk tuple headers. Attributing those to "
+    "an org would be an ALLOCATION. ⛔ The residual covers the journal table "
+    "ONLY: the record fold's other per-org tables (node / relation / narrative) "
+    "are in neither figure."
 )
 
 #: How far the accumulated counter may sit ABOVE the audit before the reading

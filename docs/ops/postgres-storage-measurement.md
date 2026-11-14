@@ -165,9 +165,15 @@ cannot silently become toothless.
 
 | piece | what it is | where |
 |---|---|---|
-| **meter** | `sum(pg_column_size(row))` over the journal rows a write segment just wrote, in the caller's transaction | `journal_event_bytes_for_rows(org, graph, seqs)` → `postgres_bytes.measure_written_rows` → `metering.record_postgres_bytes_written` |
+| **meter** | `sum(pg_column_size(row))` over the journal rows a write segment just wrote, in the caller's transaction — and only the rows THIS transaction inserted | `journal_event_bytes_for_rows(org, graph, seqs)` → `postgres_bytes.measure_written_rows` → (after the commit) `metering.record_postgres_bytes_written` |
 | **audit** | the same figure for the whole table, per org, later and independently | `postgres_per_org_bytes()` → `postgres_bytes.per_org_bytes` |
-| **residual** | heap page slack, dead tuples, the PK index, TOAST chunk tuple headers | `postgres_per_org_bytes()` → `residual` (**never** folded in) |
+| **residual** | heap page slack, dead tuples, the PK index, the TOAST relation's index and FSM/VM, TOAST chunk tuple headers | `postgres_per_org_bytes()` → `residual` (**never** folded in) |
+
+⛔ **Scope, stated so the figure is not read as complete:** both halves cover
+`public.journal_event` **only**. The record fold's other per-org tables
+(`node`/`relation`/`session_narrative`, written by `record_projection.replay`)
+are in **neither** figure, so the per-org number is a lower bound on an org's
+stored bytes, not its whole footprint.
 
 **Residual, measured** on a mixed 404-row / 3-org set: Σ`pg_column_size(row)` =
 2,940,364 B; chunk_data = 2,917,583 B in 1,614 chunk rows; TOAST relation
@@ -307,8 +313,9 @@ cd supabase/tests/pglite && npm ci --no-audit --no-fund && npm run validate
 # The wrapper + the SQL↔Python contract (hermetic):
 TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_postgres_storage.py -q
 
-# #12762 — the per-org meter, the audit and the falsifier (needs the DB lane):
-uv run python tools/test_lane.py run -- tests/test_postgres_bytes.py -q
+# #12762 — the per-org meter, the audit and the falsifier (HERMETIC: no
+# container, no network — the SQL half runs in the PGlite suite above):
+TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_postgres_bytes.py -q
 ```
 
 The **falsifier** — a multi-KB TOASTed payload must be counted at its full

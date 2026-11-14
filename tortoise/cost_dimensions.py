@@ -497,12 +497,14 @@ DIMENSIONS: tuple[Dimension, ...] = (
             "The DATABASE-grain reader is the SQL function (``select "
             "postgres_storage_footprint();``) with no periodic caller by "
             "design — a scheduled footprint sweep is a separate decision, not "
-            "a missing hook. The PER-ORG meter is NOT in this class: it runs on "
-            "the record write path, as TWO statements (the row sum plus the "
-            "TOAST-chunk disclosure) plus the ledger writer's window lookup and "
-            "increment RPC — so FOUR extra round trips per write segment, "
-            "inside the caller's open transaction. It is measured there and "
-            "RECORDED only after the caller commits."),
+            "a missing hook. The PER-ORG meter is NOT in this class: one SQL "
+            "statement runs inside the write's transaction (the function sums "
+            "the rows and discloses the TOAST chunks in one call), and after "
+            "the commit the ledger writer takes a window lookup plus an "
+            "increment RPC on the CONTROL PLANE — a synchronous remote round "
+            "trip per write segment, taken after the commit but while the "
+            "pooled record connection is still held (it is released in the "
+            "door's finally block)."),
         limits=(
             "``live_rows`` is a PLANNER STATISTIC (``n_live_tup``) that can lag "
             "the truth; the exact per-org count comes from the row-growth row.",
