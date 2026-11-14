@@ -7,6 +7,7 @@ import contextvars
 import inspect
 import json
 import logging
+import math
 import os
 import sys
 import threading
@@ -707,6 +708,34 @@ _PROBE_TIMEOUT_FALLBACK_S = 1.5
 _GRAPH_SIZE_TIMEOUT_FALLBACK_S = 1.5
 
 
+def _phase_timeout(value: object, fallback: float) -> float:
+    """``value`` as a phase timeout in seconds, or ``fallback`` when it cannot be one.
+
+    ⛔ FINITE AND NON-NEGATIVE, not merely convertible (#12482 cycle-5 review, P2 — measured).
+    ``float()`` ADMITS ``nan`` and ``inf``, so a corrupted ``monitoring.PROBE_TIMEOUT = float('nan')``
+    passed the conversion guard untouched and made ``_health_tail_reserve()`` ``nan``; then
+    ``min(knob, remaining - nan)`` returned the KNOB (every ``nan`` comparison is False), so at
+    ``remaining`` 10.0 the allowance came back **20.0** with no clamp marker — #10749's defect
+    restored, through the helper built to make the arithmetic safe. It also FALSIFIED the
+    fallback's own premise ("over-reserving only shortens the allowance and can never widen the
+    tail"): ``nan`` widens the allowance back to the FULL unclamped knob — 20.0 at the shipped
+    default — with no clamp marker, so the report claims a deep probe it cannot deliver. (Bounded
+    by the knob, not by infinity: its ceiling is ``probe_setup_timeout()``'s 300.0. The ``inf``
+    arm is the opposite extreme — a reserve of ``inf`` floors the allowance at 0.0.) A negative
+    constant points the same way at the reserve (a smaller reserve widens the allowance) and is
+    not a duration at the budget site, so both are rejected here rather than at each call site.
+
+    ⛔ Only the DOMAIN is judged; the numeric arms still come from the constant or its documented
+    fallback, exactly as before. ``except Exception`` is retained deliberately: this is a planning
+    read on the health path, and a broken module can raise anything from ``__float__``.
+    """
+    try:
+        seconds = float(value)  # type: ignore[arg-type]
+    except Exception:  # a planning read must never turn the health answer into an error
+        return fallback
+    return seconds if math.isfinite(seconds) and seconds >= 0.0 else fallback
+
+
 def _monitoring_timeout(attribute: str, fallback: float) -> float:
     """``monitoring.<attribute>`` as a float, or ``fallback`` when the module cannot supply it.
 
@@ -720,11 +749,19 @@ def _monitoring_timeout(attribute: str, fallback: float) -> float:
     missing those classes too has the ``ImportError`` ESCAPE the tool entirely, because ``_safe``'s
     own handler imports them unguarded (#12647). Same class of harm, different last mile.
     Guarding the quota read alone closed ONE of the two modules this arithmetic depends on.
+
+    ⛔ The VALUE is judged by ``_phase_timeout``, not merely converted: a name that exists and
+    converts but is not a usable duration (``nan``/``inf``/negative) falls back too. This is the
+    helper the cycle-5 review measured the hole ON (``PROBE_TIMEOUT`` is read only here) — its twin
+    ``_quota_state_timeout`` already carried a non-numeric pin for the ``None``/``'3.0s'`` shapes,
+    which is why the delta closed that class on one side and left ``float()``'s non-finite arm open
+    on this one.
     """
     try:
-        return float(getattr(monitoring, attribute))
+        value = getattr(monitoring, attribute)
     except Exception:  # a planning read must never turn the health answer into an error
         return fallback
+    return _phase_timeout(value, fallback)
 
 
 def _quota_state_timeout() -> float:
@@ -763,13 +800,18 @@ def _quota_state_timeout() -> float:
     which shortens the allowance. At the BUDGET site (``_health_quota_budget``) the same value is
     handed to the quota phase as its SPEND, so it is exact rather than conservative — benign only
     because the two are pinned equal by ``test_the_quota_timeout_fallback_is_the_documented_constant``.
+
+    ⛔ The same DOMAIN rule applies at this site too (cycle-5 review, P2), though the review
+    measured the hole on ``_monitoring_timeout`` rather than here: at the BUDGET site a ``nan``
+    constant came back out of ``min(nan, remaining - margin)`` as ``nan`` — every comparison with
+    it is False — so the quota phase was handed a budget that is not a duration. Sharing
+    ``_phase_timeout`` is what keeps the two readers from drifting apart.
     """
     try:
         from tortoise.quota import QUOTA_STATE_TIMEOUT
-
-        return float(QUOTA_STATE_TIMEOUT)
     except Exception:  # a planning read must never turn the health answer into an error
         return _QUOTA_STATE_TIMEOUT_FALLBACK_S
+    return _phase_timeout(QUOTA_STATE_TIMEOUT, _QUOTA_STATE_TIMEOUT_FALLBACK_S)
 
 
 def _health_tail_reserve() -> float:

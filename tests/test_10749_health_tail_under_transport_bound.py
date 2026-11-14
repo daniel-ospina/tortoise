@@ -30,6 +30,7 @@ falsy ``0.0`` — so a clamped (unobserved) probe cannot be misread as a broken 
 """
 from __future__ import annotations
 
+import math
 import time
 from unittest.mock import MagicMock
 
@@ -739,6 +740,78 @@ def test_a_stale_monitoring_module_cannot_cost_the_reserve_its_phase_constants(m
     assert isinstance(report, dict) and "status" in report, (
         "a stale `tortoise.monitoring` cost the health answer its `status` key — the reserve's "
         f"phase constants are read unguarded: {report!r}")
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf"), -1.0],
+                         ids=["nan", "inf", "-inf", "negative"])
+def test_a_non_finite_phase_constant_cannot_defeat_the_clamp(monkeypatch, bad):
+    """``float()`` admits ``nan``/``inf``, so conversion alone is not a usable-duration check.
+
+    Measured on the previous head (#12482 cycle-5 review, P2, independently reproduced): with
+    ``monitoring.PROBE_TIMEOUT = float('nan')`` the reserve came back ``nan``, ``min(knob, remaining
+    - nan)`` returned the KNOB because every ``nan`` comparison is False, and
+    ``_health_setup_allowance(10.0)`` answered **20.0** with no clamp marker — i.e. the whole
+    #10749 defect (a 20.0 s probe inside a 10.0 s bound) restored through the guard added to
+    prevent it, and the docstring's "over-reserving can never widen the tail" falsified.
+
+    The property pinned here is the one the clamp exists to hold — ``allowance + reserve <=
+    remaining`` — because that is what a caller inside the transport bound actually relies on; a
+    per-helper assertion alone would not catch a future caller that forgets to use the helper.
+    """
+    monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", bad)
+
+    assert mcp_server._monitoring_timeout(
+        "PROBE_TIMEOUT", mcp_server._PROBE_TIMEOUT_FALLBACK_S
+    ) == pytest.approx(mcp_server._PROBE_TIMEOUT_FALLBACK_S), (
+        f"PROBE_TIMEOUT={bad!r} was accepted as a phase duration; only a finite, non-negative "
+        "number is one, and the documented fallback is the conservative answer for anything else")
+
+    token = mcp_server._WAIT_BOUND_DEADLINE.set(time.monotonic() + _BOUND)
+    try:
+        remaining = mcp_server._mcp_remaining_wait_bound()
+        allowance = mcp_server._health_setup_allowance(remaining)
+        reserve = mcp_server._health_tail_reserve()
+    finally:
+        mcp_server._WAIT_BOUND_DEADLINE.reset(token)
+
+    assert allowance + reserve <= remaining + 1e-9, (
+        f"PROBE_TIMEOUT={bad!r} made the planned tail `{allowance!r} + {reserve!r}` exceed the "
+        f"{remaining!r} s left of the deadline — the clamp returned the unclamped knob, so the "
+        "call is refused with the transport's -32009 exactly as before #10749")
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), -1.0], ids=["nan", "inf", "negative"])
+def test_a_non_finite_quota_constant_cannot_become_a_budget(monkeypatch, bad):
+    """The same domain check at the BUDGET site, where the value is a SPEND rather than a reserve.
+
+    ``_health_quota_budget`` returns ``min(_quota_state_timeout(), remaining - margin)``, so a
+    ``nan`` constant survived the conversion, survived ``min`` (every comparison with ``nan`` is
+    False, so ``min`` keeps its first argument) and was handed to the quota phase as its timeout —
+    a budget that is not a duration (#12482 cycle-5 review, P2). The reserve arm alone would not
+    pin this: the two sites read the same constant through different arithmetic.
+    """
+    import sys
+    import types
+
+    stale = types.ModuleType("tortoise.quota")
+    stale.QUOTA_STATE_TIMEOUT = bad
+    stale.run_bounded_quota_state = quota.run_bounded_quota_state
+    monkeypatch.setitem(sys.modules, "tortoise.quota", stale)
+
+    assert mcp_server._quota_state_timeout() == pytest.approx(
+        mcp_server._QUOTA_STATE_TIMEOUT_FALLBACK_S
+    ), f"a non-finite quota constant {bad!r} was accepted as a duration"
+
+    token = mcp_server._WAIT_BOUND_DEADLINE.set(time.monotonic() + _BOUND)
+    try:
+        budget = mcp_server._health_quota_budget()
+    finally:
+        mcp_server._WAIT_BOUND_DEADLINE.reset(token)
+
+    assert budget is not None and math.isfinite(budget) and 0.0 <= budget <= (
+        mcp_server._QUOTA_STATE_TIMEOUT_FALLBACK_S), (
+        f"a non-finite quota constant {bad!r} produced the budget {budget!r}; the phase must be "
+        "handed a duration inside its documented bound")
 
 
 def test_the_quota_timeout_fallback_is_the_documented_constant():
