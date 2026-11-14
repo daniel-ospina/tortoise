@@ -175,12 +175,18 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # and auto-restored, so no lane flip can leak into a later module.
     "test_10015_organisation_account.py": [
         # Pinned to the literal those sites spell (`raising=False` at `:49` and at
-        # `:257`) rather than to a bare `delenv("TORTOISE_DB_URI"` arm: this row
-        # must not authorize a FUTURE bare `delenv` in the same file. It is the same
-        # rule the `test_candidate_recall_11901.py` row BELOW states for its own file
-        # — a future site is a DIFFERENT site and must be triaged, not authorized by
-        # this entry — applied to the `delenv` construct, which no other arm in this
-        # table constrains: every other `delenv` arm here stops at the variable name.
+        # `:257`) rather than to a bare `delenv("TORTOISE_DB_URI"` arm, so a FUTURE
+        # BARE `delenv` in the same file is not authorized. ⛔ Do not claim more than
+        # that: this row does NOT inherit the "a future site is a DIFFERENT site and
+        # must be triaged" guarantee the `test_candidate_recall_11901.py` row BELOW
+        # gets. That row earns it from a line LAYOUT — its setenv arm requires the
+        # line-wrapped `…"TORTOISE_DB_URI",` at end of line, so the one-line form is
+        # a different site. A `delenv` has no such distinguishing tail to pin here:
+        # `raising=False` is the DOMINANT spelling (`rg` → 239 sites in 82 files
+        # under `tests/`, against 7 key-only), so a future site repeating this exact
+        # literal is SILENCED by this arm and must be triaged BY HAND. The narrowing
+        # still earns its place, and no other arm in this table does it: every other
+        # `delenv` arm here stops at the variable name.
         # No count is stated on purpose — the number changes with the counting rule,
         # and a cardinal nobody can state twice is how "Two sites" went stale here.
         # (Every count above is scoped to the LITERAL form: the module also spells a
