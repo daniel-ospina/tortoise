@@ -652,6 +652,19 @@ def test_a_SPLIT_never_borrows_the_ROTATION_remedy(monkeypatch, capsys) -> None:
     assert "tortoise-dashboard" in hint and "REDEPLOY Pages" in hint, (
         f"the app-dark hint must name the Pages home and its redeploy: {hint!r}"
     )
+    # ⛔ AND IT MUST NAME WHAT TO COPY AND WHERE THE LIVE COPY COMES FROM. A commit that added the
+    # MISMATCH consequence dropped the clause "value the LIVE half (`api`) already holds on the" and
+    # left "Set the SAME `tortoise-dashboard` Pages project" — a sentence with no object in the
+    # PUBLIC issue body's `fix` field, for the ORDINARY orientation (Pages env var unset), whose later
+    # "if that live value cannot be OBTAINED" then had no antecedent. Naming the TARGET (`Pages`) is
+    # not naming the REPAIR; this is the arm whose whole point was "name the write target AND the
+    # route".
+    assert "Set the SAME value the LIVE half (`api`)" in hint, (
+        f"the app-dark hint no longer says WHICH value to copy or which half it lives on: {hint!r}"
+    )
+    assert "already holds on the" in hint, (
+        f"the app-dark hint's copy instruction is not a complete sentence: {hint!r}"
+    )
     for forbidden in ("THREE steps", "gh secret set"):
         assert forbidden not in hint, (
             f"the SPLIT hint carries MISMATCH's rotation remedy ({forbidden!r}), which CREATES the "
@@ -755,6 +768,44 @@ def test_every_published_reason_code_is_accepted(monkeypatch, capsys) -> None:
         "`VALUE_FAULT_REASONS` (the rotation), so an unclassified absence code sends an operator to "
         "rotate a key a one-sided copy would have fixed"
     )
+
+
+def test_an_UNSTATED_reason_takes_the_rotation_because_a_copy_may_not_repair_it(
+    monkeypatch, capsys
+) -> None:
+    """⛔ A HALF MAY SAY `configured: false` AND NAME NO REASON, and that is not an absence state.
+
+    `parse_reading` accepts that payload (`reason=None`, `problem=None` — `reason` is documented as
+    legitimate to omit), so it reaches `compare` as a SPLIT. Branching on `reasons & VALUE_FAULT_REASONS`
+    put it in the COPY arm, because `{None}` intersects nothing — i.e. the most UNKNOWN state the field
+    can carry was told "nothing is there, copy the live value", which is exactly what may reproduce a
+    refusal this tool cannot see. Measured before the fix: the hint was the app-dark copy remedy.
+
+    It also inverted the fail-closed direction the same file states: an UNLISTED code inherits the
+    rotation (the repair that always works), while an UNSTATED one inherited the copy. The test is now
+    `not reasons <= ABSENCE_REASONS`, so the copy arm is taken only when every dark reason is a KNOWN
+    absence code and everything else — a value fault, or silence — gets the rotation.
+    """
+    # api dark, and it says nothing about why.
+    _serve(monkeypatch, _health(None, configured=False), _pages(_fp(_KEY_A)))
+    assert CKC.main(["--json"]) == 1
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed["verdict"] == "SPLIT", "an unstated reason must still be a SPLIT, not UNVERIFIABLE"
+    hint = parsed["fix"]
+    assert "TWO-SIDED rotation" in hint, (
+        f"a half that names no fault must get the repair that always works, not a copy: {hint!r}"
+    )
+    assert "do NOT rotate" not in hint, (
+        f"the absence copy remedy was chosen for a half that named no absence reason: {hint!r}"
+    )
+
+    # …and the two KNOWN absence codes must still take the copy arm, so the guard above cannot be
+    # satisfied by simply sending everything to the rotation.
+    for reason in ("not_set", "unreadable"):
+        _serve(monkeypatch, _health(None, configured=False, reason=reason), _pages(_fp(_KEY_A)))
+        assert CKC.main(["--json"]) == 1, reason
+        hint = json.loads(capsys.readouterr().out)["fix"]
+        assert "do NOT rotate" in hint, f"`{reason}` lost its copy repair: {hint!r}"
 
 
 def test_a_value_fault_SPLIT_never_tells_the_operator_to_copy_the_working_value(
@@ -917,9 +968,22 @@ def test_the_workflow_prose_branches_the_SPLIT_remedy_the_same_way() -> None:
     # ⛔ The opening sentence must not contradict the value-fault bullet three lines below it: the
     # first cut said "rotating a key would not fix it" UNCONDITIONALLY, and the same body then
     # prescribed a rotation — three mutually exclusive instructions in one public issue.
-    assert "a ONE-sided rotation would not fix it" in body, (
+    assert "ONE-sided rotation would not fix it" in body, (
         "the SPLIT opening must forbid the ONE-SIDED rotation specifically; an unconditional "
         "\"rotating a key would not fix it\" contradicts the value-fault remedy below it"
+    )
+    # ⛔ AND THE OPENING MUST NOT CLAIM THE DARK HALF HOLDS NO KEY AT ALL. It does for four of the six
+    # codes (`padded`/`too_short`/`not_utf8`/`reused_credential`) — the tool's own comment states that
+    # case explicitly ("Fly holds \" key\\n\" as `padded` while Pages holds the clean `key`") — so
+    # "there is no second key" was false in the same body that tells the reader the dark half holds a
+    # refused value, and an operator could read the opening as "not a key disagreement, skip the
+    # rotation story" while the bullet below prescribes one. Qualified to what is actually true.
+    assert "no USABLE second key" in body, (
+        "the SPLIT opening must say the dark half publishes no USABLE key — saying it holds no key at "
+        "all is false for the four value-fault codes it is printed beside"
+    )
+    assert "no second key for the working half" not in body, (
+        "the unqualified \"no second key\" claim is back — it contradicts the value-fault bullet"
     )
 
 

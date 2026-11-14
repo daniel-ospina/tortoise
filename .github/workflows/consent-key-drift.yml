@@ -220,8 +220,10 @@ jobs:
                 echo '## The consent bridge is only HALF configured'
                 echo
                 echo 'One half has NO usable `CONSENT_TOKEN_SECRET` and the other does, so no grant can'
-                echo 'complete. ⛔ **This is NOT "the two halves hold different keys"** — there is no second'
-                echo 'key for the working half to differ from, and a ONE-sided rotation would not fix it.'
+                echo 'complete. ⛔ **This is NOT "the two halves hold different keys"** in the MISMATCH'
+                echo 'sense — the dark half publishes no fingerprint, so there is no USABLE second key for the'
+                echo 'working half to confirm against. A ONE-sided rotation would not fix it; the remedies'
+                echo 'below say which one is correct for this half and reason.'
                 echo
                 echo 'The fenced reading below names WHICH half is dark and its `reason`, and both decide'
                 echo 'the remedy — these are NOT the same repair:'

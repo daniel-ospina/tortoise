@@ -494,11 +494,19 @@ def _fix_hint(verdict: Verdict) -> str:
         #       reverted: they clear the alert, the next deploy re-stages the stale repo value, and
         #       the monitor re-reds as MISMATCH for a fault that was `not_set`.
         #
-        # An unmapped `reason` never reaches here — it is UNVERIFIABLE, never SPLIT (the closed-set
-        # gate is upstream), so the `else` below is the two absence codes.
+        # ⛔ AN UNMAPPED `reason` IS UNVERIFIABLE, never SPLIT (the closed-set gate is upstream) — but
+        # a half that publishes `configured: false` with **NO reason at all** is NOT unmapped: it is
+        # accepted by `parse_reading` (`reason=None`, `problem=None`), reaches here as SPLIT, and the
+        # `else` would hand it the copy arm. That is the most UNKNOWN state the field can carry — the
+        # half says "I am unconfigured" and names no fault — and a copy is exactly what may reproduce
+        # a refusal this tool cannot see. It also inverted the fail-closed direction stated above: an
+        # UNLISTED code inherits the rotation, while an UNSTATED one inherited the copy. So the test
+        # is `not reasons <= ABSENCE_REASONS`: the copy arm is taken only when EVERY dark reason is a
+        # known absence code, and anything else — a value fault, or no reason at all — gets the
+        # repair that always works.
         reasons = {r.reason for r in verdict.readings if not r.configured}
         dark_halves = sorted(r.half for r in verdict.readings if not r.configured)
-        if reasons & VALUE_FAULT_REASONS:
+        if not reasons <= ABSENCE_REASONS:
             return (
                 f"fix: the reliable repair is a TWO-SIDED rotation. The dark half "
                 f"({'/'.join(dark_halves)}) reports a `reason` that means the value it HOLDS is "
@@ -523,7 +531,7 @@ def _fix_hint(verdict: Verdict) -> str:
                 "fix: do NOT rotate a SINGLE side — the dark half (`app`) holds no usable key, so "
                 "there is nothing to reconcile, and a one-sided rotation would leave the two halves "
                 "holding DIFFERENT keys (a MISMATCH — the 2026-11-01 incident), not create another "
-                "split. Set the SAME "
+                "split. Set the SAME value the LIVE half (`api`) already holds on the "
                 "`tortoise-dashboard` Pages project (Cloudflare dashboard → Settings → Environment "
                 "variables — it is not CI-written), then REDEPLOY Pages: Pages bakes env at deploy "
                 "time, so a corrected dashboard value does NOT reach an already-deployed Function. "
