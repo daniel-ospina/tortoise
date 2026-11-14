@@ -247,7 +247,12 @@ pool, and **32 m** at 9 shards on that refreshed map — re-packing into 10 shar
 **28 m** (59.6 m, x 1.5 = 89.5), because one more file in `fast_pool()` re-packs the worst
 shard across a whole minute, and this paragraph restates that emission rather than owning it:
 `tools/ci_selection.py --emit-push-matrix` is the authority, and `tests/test_ci_selection.py`
-reds the moment the two disagree again. ⛔ **#11576 then re-broke it the same way, one merge
+reds the moment **the emitted term** and the emission disagree again — that pin compares the
+per-shard minute and nothing else (measured: reverting this SUM to `57.6 m` leaves the suite
+fully green, `510 passed`). ⛔ **So the SUM, the x 1.5 and the headroom above are re-added by
+hand on every re-cut and are NOT pinned**: the arm-2 assertion recomputes its own total from file
+facts, so a stale SUM here cannot produce a false PASS on the cap — it can only mislead the
+next reader, which is exactly how this one was found. ⛔ **#11576 then re-broke it the same way, one merge
 later**: main's `test_embed_decision_step_11086.py` and that branch's
 `test_demo_session_read_exclusion_8290.py` land in `fast_pool()` together, the union
 packs the worst shard at **840.2 s** (either parent alone packed 840.0 s), `ceil(840.2/60 x 2)`
