@@ -1029,7 +1029,18 @@ def test_guard_missing_source_node_reds_memory(hosted, setup):
 def test_guard_source_field_absent_is_unverifiable(hosted, setup):
     """Mutation: the API build predates the ``source`` field — the memory link
     reports UNVERIFIABLE-IN-CI (the source could not be observed), NEVER a
-    fabricated PROVEN."""
+    fabricated PROVEN.
+
+    ⛔ AND THE SOURCE-ABSENT ARM OUTRANKS THE PAIR ARM (#12730 review round 4,
+    P2). The first half below serves a count, so it can never reach the arm
+    #12497 added; the chain's FOURTH ordering was therefore pinned by nothing,
+    and two mutants survived the whole file: gating the source-absent arm on the
+    pair (``if source == "<absent>" and (extracted_ok or ... is not False)``)
+    fell through to ``elif not source_ok`` and reported **FAIL / exit 1** for a
+    pre-#3520 build — a BROKEN install the code cannot observe — while hoisting
+    the pair arm above it kept the exit code but printed *"appears as a Source"*
+    about an API build that never exposed a Source. The second half reaches both
+    mutants at once: no ``source`` field, an unrecorded outcome, and no count."""
     home, _bindir, _fake = setup
     root = _install(home, "claude")
     graph, _url = hosted
@@ -1039,6 +1050,17 @@ def test_guard_source_field_absent_is_unverifiable(hosted, setup):
     assert "does not expose the session Source" in \
         report["links"]["memory"]["detail"]
     assert report["exit_code"] == EXIT_UNVERIFIABLE
+
+    # The pair arm is ALSO reachable here — no count, and an outcome the server
+    # never recorded — and it must not take precedence.
+    graph.zero_extracted = True
+    graph.extraction = False          # outcome_known: false
+    report = _verify(hosted, home, "claude", root)
+    memory = report["links"]["memory"]
+    assert memory["status"] == "UNVERIFIABLE-IN-CI", memory
+    assert "does not expose the session Source" in memory["detail"], memory["detail"]
+    assert "appears as a Source" not in memory["detail"], memory["detail"]
+    assert report["exit_code"] == EXIT_UNVERIFIABLE, report["exit_code"]
 
 
 def test_guard_zero_extraction_reds_memory(hosted, setup):
