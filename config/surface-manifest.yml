@@ -1086,7 +1086,9 @@ rows:
   # this cell), because `cut` is owner-gated ("ask Daniel FIRST, before the re-cut",
   # tools/surface_manifest.py) and this change adds/removes/renames NO tool or method.
   # A full `cut` was measured on this box and DELIBERATELY NOT committed: with `skills/`
-  # dangling it drops `skill-docs` from 38 SDK `used_by` cells, and it DROPS every body
+  # dangling it dropped `skill-docs` from 38 SDK `used_by` cells — a cost THIS BRANCH HAS
+  # REMOVED (`CARRIED_SDK_ROW_KEYS` now carries `used_by`, so a re-cut re-derives zero
+  # skill-docs evidence and erases none) — and it DROPS every body
   # rationale comment (`cut` re-emits only `MANIFEST_HEADER` verbatim, so the header
   # survives and this note does not — no head-specific count belongs here, it moves with
   # every line anyone adds). Both kinds are `NON_DERIVABLE` evidence a digest refresh
@@ -1293,9 +1295,11 @@ rows:
 # `recommendation` / `basis` / `reason` / `exemption` forward from the committed
 # manifest, and a cut reproduces this tool row byte-for-byte). The costs it does
 # have: (1) `cut --commit` must be handed a DEFAULT-BRANCH sha (#11057 review F1)
-# — cut at a lane head, `provenance_report` reds — and (2) a cut re-derives EVERY
-# `sdk:` row's `used_by` cell (125 rows, all 125 carrying one; `CARRIED_SDK_ROW_KEYS`
-# is just `exemption`), churning a diff this change has nothing to do with.
+# — cut at a lane head, `provenance_report` reds — and (2) `cut` re-emits only
+# `MANIFEST_HEADER`, so every body comment in this file (this note included) is
+# lost. The `used_by` cells a cut once re-derived are now CARRIED forward —
+# `CARRIED_SDK_ROW_KEYS` gained `used_by` on this branch — so that churn is no
+# longer a cost, and neither is the `skill-docs` label. `cut` is also owner-gated.
 # ⛔ That 125 is re-derivable from this file: `rows` whose `name` starts `sdk:`.
 # So exactly one derived cell moves, to the value `check` itself derives from the
 # declaration (`_code_digest`; verified `aae4bf5f5ceffe7c` for the tool body as it

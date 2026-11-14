@@ -8747,7 +8747,7 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
         """Hide HTTP-excluded tools from tools/list (D4) + optional curation
         group scoping (#523).
 
-        The excluded tools (org_create/backfill_v25/ingest_corpus) remain
+        The excluded tools (org_create/ingest_corpus) remain
         registered on the shared module-level mcp instance for stdio, but are
         filtered out of the HTTP tool listing so tenants can't discover them.
         When tool_group is set, only that group's tools are listed — role-

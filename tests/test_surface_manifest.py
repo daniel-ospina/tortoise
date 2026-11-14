@@ -328,9 +328,10 @@ def test_the_owner_facing_docs_present_tense_counts_are_the_derived_ones():
         )
 
     # 4. The vision doc's SDK count, in EVERY phrasing it states it. One narrow pattern is not a
-    #    fix: the round that rewrote this file left `the SDK **125 methods**` correct while three
-    #    sibling sentences still said 124 — including one that cites `tools/surface-guard.py`,
-    #    which prints 125. A guard matching only the first phrasing certifies green over a
+    #    fix: at the head that added the first arm, FOUR sibling sentences each still stated 124
+    #    while `counts.sdk_public_methods` derived 125 — one of them citing
+    #    `tools/surface-guard.py`, which prints 125 — and the suite was green because no arm read
+    #    that sentence. A guard matching only one phrasing certifies green over a
     #    self-contradicting artifact. Requiring each sentence to EXIST keeps every arm
     #    non-vacuous: deleting a claim must not be a way to pass.
     sdk = _manifest()["counts"]["sdk_public_methods"]
