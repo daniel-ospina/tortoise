@@ -1051,6 +1051,27 @@ def test_query_verb_exit_codes_distinguish_the_three_answers():
     assert run("egres") == 2
 
 
+def test_the_corpus_exclusion_is_exactly_archive_and_nothing_wider():
+    """The archive is the ONLY thing outside the corpus (#11609 batch 1).
+
+    `archive/` records hold verbatim indented fragments and are deliberately
+    unparseable, so they are excluded from both corpus scans. That exclusion is a
+    population change, and a population change is how a scan goes blind — so pin its
+    boundary: the prefix must not swallow a production module whose name merely starts
+    with "archive", and it must be the literal directory segment.
+    """
+    from tools.cost_coverage_audit import _in_corpus
+
+    assert _in_corpus("archive/mcp-tools/b1/x.py") is False
+    assert _in_corpus("archive/modules/pre-mechanism-legacy-search/t/x.py") is False
+    for kept in ("archive_utils.py", "archive.py", "archived/x.py",
+                 "tortoise/archive_helpers.py", "tools/archive_surface.py",
+                 "tortoise/monitoring.py"):
+        assert _in_corpus(kept) is True, kept
+    # Non-Python is not a corpus member either, whatever directory it lives in.
+    assert _in_corpus("archive/README.md") is False
+
+
 def test_the_matrix_verb_reports_no_drift_on_this_tree(capsys):
     """The operator verb, end to end: exit code 0 and every check reported."""
     assert audit.main(["matrix"]) == 0
