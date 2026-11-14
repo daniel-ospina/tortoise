@@ -233,7 +233,7 @@ Otherwise it is a Tier E test, and it must **name the tier in its docstring** so
 **Read every `file:line` here as a STAMP, not as an address** — the **symbol** is authoritative. ⛔ **Two
 classes of `file:line` cite live in this file, and neither is "the" right one:** the rows whose cites were
 re-measured resolve at the head that measurement was taken at, while the **stamp-bound** rows carry the head
-they were read at, `a577d0e25c`. `:82`'s `hosted_api.py:19345` and `:147`'s `hosted_api.py:18205` are the
+they were read at, `a577d0e25c`. `:82`'s `hosted_api.py:19345` (re-measured at `8af85315e`) and `:147`'s `hosted_api.py:18205` are the
 **same guard** (`if count + est > max_points`) read at two heads hundreds of commits apart — not a
 contradiction to fix. (A *count* or a *duration* is a third class: those carry their own heads inline, §4's
 `900d4aafc6` and line 31's `durations_captured_at`, because a count is re-taken where a cite is not

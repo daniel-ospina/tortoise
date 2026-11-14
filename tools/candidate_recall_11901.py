@@ -24,10 +24,14 @@ right existing entity is not in it, no adjudicator downstream can pick it
 (``docs/research/2026-09-24-2730-entity-attachment/research-brief.md`` §6.2, X1).
 
 The window is only half of the pipeline. ``resolve_entities`` phase 1 attaches a
-mention with ``_find_existing_entity``, which is **exact normalised-name
+mention with ``_find_existing_entity``, whose exact arms are **normalised-name
 equality** (``_norm`` = whitespace collapse + lowercase, nothing else) plus a
-kind-compatibility check. So a candidate can be *inside* the window and still be
-unusable, and the two failures have different fixes:
+kind-compatibility check. Since `#12295` it also tries the comparison-side FOLD
+(`entity_blocking.attach_matches`) after those arms miss, which is why the arm
+reports `attached_norm_only` — a frozen copy of the pre-`#12295` matcher — beside
+`attached`, so the before/after is one run and not two artifacts. So a candidate
+can be *inside* the window and still be unusable, and the two failures have
+different fixes:
 
   * RETRIEVAL failure — the right node never entered the window.
     Widening ``limit`` is the response, and it costs adjudication quality
@@ -46,9 +50,35 @@ fixes:
                        in the window at each k? (widening can help)
   ARM 2  MATCHING      a mention that is a real surface VARIANT of the stored
                        name — how often does phase 1 bind it? This arm ALSO
-                       measures `attached_folded`, what a candidate punctuation
-                       fold would recover, and that fix is NOT shipped here: the
-                       point of #11901 is to decide on evidence, not to patch.
+                       measures `attached_folded`, which is the SHIPPED matcher
+                       run on a SEPARATOR-NORMALISED input: the surface and the
+                       rows are passed through `_fold_punct` (case + whitespace +
+                       `[-_./]` → space) BEFORE `_find_existing_entity` sees them.
+                       ⚠️ It is therefore NOT a second, article-preserving fold:
+                       the matcher inside is the live one, so the article-dropping
+                       rung still fires — the class moves because the MENTION was
+                       separator-normalised first (`the-plan-doc` → `the plan doc`,
+                       which the stored `the plan doc` folds onto). Its 386 = the
+                       article-drop class (175) + the separator class (179) + two
+                       classes the shipped matcher already binds, so it is NOT
+                       comparable with `#11901`'s `attached_folded` field — and the
+                       114 → 386 movement is BOTH terms, never either alone:
+                       386 = 114 + 186 CODE + 86 INPUT — the two terms measured
+                       as the DIFFERENCE against #11901's per-class field. The CODE
+                       186 is the classes the arm could not bind AT ALL there
+                       (`article-drop` `attached_folded` 0 → 175, `hash-dropped`
+                       0 → 11); the INPUT 86 is the separator classes, 100
+                       %-of-in-window in BOTH runs (`space-to-hyphen` 101/101 →
+                       179/179, `hyphen-to-space` 13/13 → 21/21). ⛔ attached_folded
+                       <= in_window by construction — the gate is
+                       `cand2.get("id") == row["id"]` with `cand2` chosen only from
+                       `rows`, which IS the window — and #11901's k=3 in_window is
+                       260, so a code-only re-run of that corpus caps at 260 and
+                       can never reach 386. ⚠️ The ARM itself never changed:
+                       `origin/main` already folds each row's NAME and the surface
+                       separately (`folded = [dict(r, name=_fold_punct(r["name"]))
+                       for r in rows]`) before calling `_find_existing_entity`;
+                       what changed is the MATCHER's body.
   ARM 3  THE UNION     how large is the candidate set a capture actually hands
                        `resolve_entities`? (not `limit` — see below)
 
@@ -136,6 +166,7 @@ EXIT CODES: 0 ok · 2 usage · 3 no reachable graph (never a silent skip)
 """
 from __future__ import annotations
 
+import subprocess
 import sys
 
 # #5128 (the repo's entry-point contract): refuse a <3.12 interpreter HERE, before the rest of the
@@ -383,11 +414,23 @@ def _mode_note(has_embedder: bool, legs_seen: dict[str, bool]) -> str:
 def _fold_punct(text: str) -> str:
     """The candidate fix, measured but NOT shipped: fold the separator class.
 
+    ⛔ Read what the ``attached_folded`` arm does with it: this is applied to the
+    surface AND the rows and then the SHIPPED matcher runs — so it is a lever on
+    the matcher's INPUT, not a replacement for the shipped fold, and the
+    article-dropping rung still fires inside it (see the ARM-2 bullet in the
+    module docstring).
+
     Deliberately only the separator class (``-``/``_``/``.``/``/``) plus case and
     whitespace. It is not a general normaliser and it does not touch word order
-    or morphology, so it cannot merge two genuinely different names by itself —
-    which is the asymmetric-error rule this repo already carries (#1370: a false
-    merge is invisible and a false split is cheap, so be conservative).
+    or morphology, ⛔ but it is NOT merge-free: the normalised mention is then
+    folded by a rung that drops a LEADING ARTICLE, so ``_fold_punct("a-b")`` is
+    ``"a b"`` and ``key_of("a b") == "b"``: an ``a-b`` mention binds a
+    stored ``b`` (the binding #12047 round-4 finding 5 forbids, pinned on the
+    shipped path by ``test_the_article_anchor_decision_is_not_reversed``);
+    using it as a comparison key therefore needs a guard for that class plus a
+    false-merge measurement this tool does not carry. That is the
+    asymmetric-error rule this repo already carries (#1370: a false merge is
+    invisible and a false split is cheap, so be conservative).
     """
     t = re.sub(r"[-_./]+", " ", (text or "").strip().lower())
     return re.sub(r"\s+", " ", t).strip()
@@ -1043,6 +1086,25 @@ def _pooled_coverage(sample_size: int, captures: int, budget: int) -> dict:
     }
 
 
+def _git_head() -> str | None:
+    """The commit the measurement ran on — an artifact with no head cannot be
+    reproduced against a tree.
+
+    ⛔ ``cwd`` is pinned to THIS repo: a bare ``git rev-parse HEAD`` answers for
+    the process's working directory, so a run started from another checkout (or
+    any directory inside a different repo — ``tortoise`` is importable as an
+    installed package) would write THAT repo's sha into ``code_head``, and the
+    artifact would claim a provenance the measurement never had.
+    """
+    try:
+        out = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True,
+                             text=True, timeout=10,
+                             cwd=Path(__file__).resolve().parent.parent)
+        return (out.stdout.strip() or None) if out.returncode == 0 else None
+    except Exception:
+        return None
+
+
 def _allocate_shares(sample: int, pop: list[dict]) -> dict[str, int]:
     """Largest-remainder allocation of ``sample`` across the harvested classes.
 
@@ -1061,6 +1123,74 @@ def _allocate_shares(sample: int, pop: list[dict]) -> dict[str, int]:
     for c in order[:max(0, rem)]:
         base[c] += 1
     return base
+
+
+def _blocked_pair_set(index, rows) -> set[frozenset[str]]:
+    """Every pair the multi-key blocker proposes over ``rows`` — the COST numerator.
+
+    ``rows`` must be the population the published denominator names, not the
+    variant SAMPLE: the ratio is reported over ``C(population, 2)``, so a
+    numerator taken over a 300-row sample of a 1000-row population publishes a
+    figure ~3x cheaper than the quantity its own definition names (`#12295`
+    round-2 B3). Extracted from ``run()`` so a test can pin which population the
+    numerator is computed over without running the graph-backed measurement.
+
+    A mention's own self-hit is excluded: the index always proposes the member
+    to itself (it blocks on its own keys), and a self-pair is not a candidate.
+    """
+    pairs: set[frozenset[str]] = set()
+    for row in rows:
+        for cid in index.candidates(row["name"], label="Object"):
+            if cid != row["id"]:
+                pairs.add(frozenset((row["id"], cid)))
+    return pairs
+
+
+def _norm_only_match(rows: list[dict], surface: str, kind: str):
+    """Pre-#12295 phase 1, frozen — the control the AFTER is measured against.
+
+    Verbatim the body `_find_existing_entity` had before the folded rung
+    (`extractor_v2.py`, pre-#12295): ``_norm`` equality, exact kind then
+    bare kind, ambiguous when the bare form collides. Frozen ON PURPOSE:
+    importing the live function would move the "before" every time the
+    "after" changes, and a before/after measured against a moving before
+    is not a measurement.
+
+    ⛔ Extracted from ``run()`` to module scope so a test can call the control
+    DIRECTLY. While it was nested, the only thing pinning it was the arm's own
+    ``attached_norm_only == 0`` — a value the harness invariant already entails
+    (every generated variant surface is ``_norm``-different from its stored
+    name), so replacing the whole body with ``return None`` left the suite green
+    and an inert arm was observationally identical to the frozen control. The
+    deferred ``extractor_v2`` import is kept INSIDE the function for the same
+    reason ``run()`` imports it there: this module must stay importable without
+    the graph stack (``tests/test_candidate_recall_11901.py`` loads it directly).
+    """
+    from tortoise.extractor_v2 import _norm, _norm_kind
+
+    n = _norm(surface)
+    kind_folded = str(kind).strip().lower()
+    exact = [r for r in rows
+             if _norm(r.get("name", "")) == n
+             and str(r.get("kind", "")).strip().lower() == kind_folded]
+    if exact:
+        return exact[0]
+    bare = _norm_kind(kind)
+    m = [r for r in rows
+         if _norm(r.get("name", "")) == n
+         and _norm_kind(r.get("kind", "")) == bare]
+    return m[0] if len(m) == 1 else None
+
+
+def _in_block(index, member_id, surface, label: str = "Object") -> bool:
+    """Does the blocker propose ``member_id`` as a candidate for ``surface``?
+
+    The ARM-2/ARM-4 pair-completeness numerator, by definition: the true node is
+    REACHABLE when the multi-key union names it. ``label`` is explicit because the
+    population is Object rows, and a ``label=None`` query answers over every label
+    the index holds — a different (wider) question than the one this arm asks.
+    """
+    return member_id in set(index.candidates(surface, label=label))
 
 
 def _interleave(by_cls: dict[str, list[dict]], shares: dict[str, int]) -> list[dict]:
@@ -1112,6 +1242,7 @@ def run(args: argparse.Namespace) -> int:
               file=sys.stderr)
         return 3
 
+    from tortoise.entity_blocking import BlockIndex, reduction_ratio
     from tortoise.extractor_v2 import _find_existing_entity, _sanitise_query_text
     from tortoise.sdk import TortoiseSDK
 
@@ -1171,6 +1302,15 @@ def run(args: argparse.Namespace) -> int:
         sdk.tortoise_fts_query("warm", entity_type="object", limit=1,
                                include_terminal=True, _record_reads=False,
                                _valid_time_rerank=False)
+
+        # ── THE MULTI-KEY BLOCKER (#12295). Built once over the SAME population the
+        # window searches, so "did the true duplicate land in at least one block"
+        # is asked of one corpus under two candidate generators. Graph-free: the
+        # blocker is a pure function of the names, so every k shares its answer —
+        # which is itself the finding (a blocker is not a window).
+        index = BlockIndex.from_rows(
+            [{"id": row["id"], "name": row["name"], "label": "Object"}
+             for row in pop])
 
         #: Which legs the fused read actually submitted. An FTS-only run is a
         #: DIFFERENT measurement from a hybrid one — the capture prior is the
@@ -1448,12 +1588,41 @@ def run(args: argparse.Namespace) -> int:
         # The stored node exists; the capture says it a different (real) way, so
         # the question is whether the shipped matcher can bind it — which is the
         # question "does this capture mint a duplicate".
+        #
+        # ⛔ FOUR FIELDS PER CLASS, because #12295 added a rung and the BEFORE has
+        # to stay measurable after the code moves:
+        #   ``attached``          the SHIPPED matcher, whatever it is at this head
+        #                         (it now includes the comparison-side fold)
+        #   ``attached_norm_only`` a FROZEN COPY of pre-#12295 phase 1 (`_norm`
+        #                         equality + kind, nothing else) — module-scope
+        #                         `_norm_only_match`, so a test can pin what it
+        #                         BINDS as well as what it abstains from.
+        #                         Recomputed here, never read back from the old
+        #                         artifact, so the before/after is one run on one
+        #                         corpus.
+        #   ``attached_folded``   the SHIPPED matcher on a SEPARATOR-NORMALISED input
+        #                         (`_fold_punct` applied to the surface AND the rows
+        #                         first). ⛔ NOT an article-preserving fold and NOT
+        #                         comparable with #11901's field of the same name: the
+        #                         live matcher still drops the article, so this arm
+        #                         moves the mention across the separator, not the
+        #                         article anchor. 386 = 175 (article-drop) + 179
+        #                         (space-to-hyphen, separator-normalised) + 21 + 11.
+        #   ``in_multikey_block`` the pair completeness of the multi-key blocker:
+        #                         is the canonical id in the union of the keys the
+        #                         mention blocks on? (the metric `#12295` names)
         var = {k: {"pairs": 0, "in_window": 0, "attached": 0,
-                   "attached_folded": 0, "in_window_not_attached": 0}
+                   "attached_folded": 0, "in_window_not_attached": 0,
+                   "attached_norm_only": 0, "in_multikey_block": 0}
                for k in KS}
         by_class: dict[str, dict[str, dict[str, int]]] = collections.defaultdict(
             lambda: {str(k): {"pairs": 0, "in_window": 0, "attached": 0,
-                              "attached_folded": 0} for k in KS})
+                              "attached_folded": 0, "attached_norm_only": 0,
+                              "in_multikey_block": 0} for k in KS})
+        #: How many candidates the multi-key blocker proposes per mention — the
+        #: COST side of pair completeness (a blocker can reach 1.0 by proposing
+        #: everything, which is the number a lone recall figure hides).
+        blocked_sizes: dict[int, list[int]] = {k: [] for k in KS}
         #: #12294, variant arm: what the gate removes from the pair population.
         #: ``gated_pairs`` counts the gated MENTIONS in this arm, at
         #: ``_GATE_KS[0]`` only (the denominator is ``pairs`` at the SAME window,
@@ -1476,6 +1645,23 @@ def run(args: argparse.Namespace) -> int:
             name = row["name"]
             for vclass, surface in variants(name, row["cls"]):
                 folded_surface = _fold_punct(surface)
+                # The multi-key blockers are graph-free, so they are computed ONCE
+                # per (row, surface) and reported at every k — the window does not
+                # change what the blocker proposes.
+                blocked_ids = set(index.candidates(surface, label="Object"))
+                in_mk_block = _in_block(index, row["id"], surface)
+                #: ⛔ THE DENOMINATOR IS NOT THE ONE `reduction_ratio` USES, and that
+                #: is a DECLARED difference rather than an accident: the index always
+                #: self-hits (a member blocks on its own keys), so this count
+                #: INCLUDES the mention itself while `_mk_pairs` below excludes it
+                #: (`if _cid != _row["id"]`). It is kept because the artifact of
+                #: record was measured with it and the bias is CONSERVATIVE — it
+                #: inflates the blocker's own cost by one per mention, which is the
+                #: direction that cannot flatter the change under test. Read
+                #: `candidates_mean_per_mention` / `candidates_max` as
+                #: "candidates INCLUDING the mention itself"; nothing else in the
+                #: artifact uses that denominator.
+                mk_len = len(blocked_ids)
                 # #12294: the gate evaluates the MENTION — a capture derives its
                 # query from the surface form it extracted, never from the stored
                 # name, which it does not know yet.
@@ -1489,6 +1675,10 @@ def run(args: argparse.Namespace) -> int:
                 for k in KS:
                     var[k]["pairs"] += 1
                     by_class[vclass][str(k)]["pairs"] += 1
+                    blocked_sizes[k].append(mk_len)
+                    if in_mk_block:
+                        var[k]["in_multikey_block"] += 1
+                        by_class[vclass][str(k)]["in_multikey_block"] += 1
                     if k == _GATE_KS[0]:
                         for _p, _g in _v_gated.items():
                             vgate[_p]["pairs"] += 1
@@ -1499,6 +1689,10 @@ def run(args: argparse.Namespace) -> int:
                     if in_win:
                         var[k]["in_window"] += 1
                         by_class[vclass][str(k)]["in_window"] += 1
+                    legacy = _norm_only_match(rows, surface, "core:other")
+                    if legacy is not None and legacy.get("id") == row["id"]:
+                        var[k]["attached_norm_only"] += 1
+                        by_class[vclass][str(k)]["attached_norm_only"] += 1
                     # the MENTION is the surface form, exactly as a capture's
                     # derived query would carry it — never the stored name
                     cand, _m = _find_existing_entity(rows, surface, "core:other")
@@ -1533,6 +1727,92 @@ def run(args: argparse.Namespace) -> int:
         arms["variant"] = var
         arms["variant_by_class"] = {c: dict(v) for c, v in sorted(by_class.items())}
         arms["gate_variant"] = vgate
+
+        # ── ARM 4: PAIR COMPLETENESS — the metric `#12295` names, before vs after.
+        #
+        # Pair completeness = the fraction of true duplicate pairs that land in at
+        # least one block (`arXiv:1905.06167`; the ER field's own floor for "the
+        # scoring step is not capped before it starts" is 0.95). Here the true
+        # pairs are `#11901`'s variant pairs and the block is the CANDIDATE SET.
+        # Two generators are measured on the same corpus, in one run:
+        #   fts_only   the shipped window   (block = the k rows a capture sees)
+        #   multikey   the #12295 blocker   (block = the union over the key set)
+        # ⛔ The multikey figure is k-INDEPENDENT and that is not a rounding
+        # artifact: a blocker is a function of the names, so a window width cannot
+        # move it. Reporting it per k would imply a width can buy blocking recall.
+        _pairs = var[KS[0]]["pairs"]
+        _mk = var[KS[0]]["in_multikey_block"]
+        _sizes = blocked_sizes[KS[0]] or [0]
+        _mk_mean = sum(_sizes) / len(_sizes)
+        #: The blocker's proposals MATERIALISED as pairs, so `reduction_ratio` is
+        #: computed by the one helper that defines it (mean-candidates / all-pairs
+        #: is the same quantity only while every mention proposes a fixed count —
+        #: two definitions under one name is how a published ratio stops meaning
+        #: anything).
+        #: ⛔ OVER THE SAME POPULATION ON BOTH SIDES: the denominator is
+        #: `C(1000, 2)`, so the numerator must be the pairs proposed BY all 1000
+        #: names — not the pairs proposed by the 300-row sample (which published a
+        #: ratio ~3x cheaper than the quantity its own definition names, #12295
+        #: round-2 B3). The per-mention mean stays over the variant sample, where
+        #: the cost of a DUPLICATE-LOOKING mention is what matters.
+        _mk_pairs = _blocked_pair_set(index, pop)
+        arms["blocking"] = {
+            "pairs": _pairs,
+            "population": len(pop),
+            "multikey": {
+                "in_block": _mk,
+                "pair_completeness": (round(_mk / _pairs, 4) if _pairs else None),
+                # COST, and the ONLY comparable cost figure: candidates proposed
+                # PER MENTION. The pooled FTS number is per CAPTURE (a union over
+                # ~15 mentions), so comparing the two directly is an apples-to-
+                # oranges claim — the per-mention column is what a reader must use.
+                "candidates_mean_per_mention": round(_mk_mean, 2),
+                "candidates_max": max(_sizes),
+                #: ⛔ The helper answers ``None`` when there is nothing to measure
+                #: (population < 2) so a degenerate run cannot be read as a figure.
+                #: `or 0.0` here collapsed that into "the blocker proposed zero
+                #: pairs" — a flattering-half reading, and exactly the false label
+                #: `entity_blocking.reduction_ratio` refuses to print.
+                "reduction_ratio": (
+                    None if (rr := reduction_ratio(_mk_pairs, len(pop))) is None
+                    else round(rr, 4)),
+                "k_independent": True,
+            },
+            "fts_only": {
+                "in_window": {str(k): var[k]["in_window"] for k in KS},
+                "pair_completeness": {
+                    str(k): (round(var[k]["in_window"] / _pairs, 4) if _pairs else None)
+                    for k in KS},
+                # A window's cost IS its width, per mention.
+                "candidates_mean_per_mention": {str(k): k for k in KS},
+            },
+            "index_stats": index.stats(),
+        }
+
+        # ── ARM 5: THE DUPLICATE RATE, per configuration, on the same pairs.
+        # "Mints a duplicate" = the mention does not attach onto its own canonical.
+        # At the PRODUCTION WINDOW (k=3, `_derive_queries` -> `_fts_rows`), because
+        # a rate quoted at another width is not a rate the product pays.
+        _k = KS[0]
+        _v = var[_k]
+
+        def _rate(attached: int) -> dict:
+            minted = _pairs - attached
+            return {"attached": attached, "minted": minted,
+                    "rate": (round(minted / _pairs, 4) if _pairs else None)}
+
+        arms["duplicate_rate"] = {
+            "window_k": _k,
+            "pairs": _pairs,
+            # DEFINITION, not a measurement: with no prior there is no candidate
+            # set at all, so every mention mints. Kept because it is the baseline
+            # the other two rows are read against.
+            "prior_off": {"attached": 0, "minted": _pairs,
+                          "rate": (1.0 if _pairs else None),
+                          "definition": "no prior: every mention mints (not measured)"},
+            "prior_on_norm_only": _rate(_v["attached_norm_only"]),
+            "prior_on_shipped_folded": _rate(_v["attached"]),
+        }
 
         # ── ARM 3: what a capture actually hands ``resolve_entities``.
         # ``search_graph`` accumulates every query's rows into ONE id-keyed dict,
@@ -1636,6 +1916,36 @@ def run(args: argparse.Namespace) -> int:
         arms["pooled_gate"] = pooled_gate
         arms["pooled"] = pooled
 
+        # The COST of the FTS candidate set, on the same denominators as the
+        # multi-key blocker's, so "better completeness at lower cost" is a
+        # comparison of two numbers in the artifact and not a sentence in a brief.
+        # The FTS candidate set a capture sees is the POOLED union over its
+        # derived queries (`search_graph`, `extractor_v2.py`: the accumulation
+        # `results[bucket[entity_type]][rid] = row`), not `limit`. Cited by SYMBOL
+        # and not by line — a `file.py:<line>` cite rots on any insertion above it.
+        _pool3 = arms["pooled"][KS[0]]
+        #: ⛔ A run with ZERO capture groups measured no pooled set, so publishing
+        #: ``0.0`` would read as "a capture sees zero candidates" — the same false
+        #: label the `reduction_ratio` arm refuses 80 lines above. `None` is the
+        #: honest value, and it propagates to the per-mention derivation below.
+        _pool_mean = (_pool3["set_sum"] / _pool3["captures"]
+                      if _pool3["captures"] else None)
+        #: PER CAPTURE — a union over ~15 mentions, NOT a per-mention cost. Kept
+        #: beside its per-mention derivation because the two were once compared
+        #: to each other as if they were one quantity.
+        arms["blocking"]["fts_only"]["pooled_candidates_per_capture"] = (
+            None if _pool_mean is None else round(_pool_mean, 2))
+        #: `budget` is the production `max_queries` (15) the pooled groups are
+        #: built at, so dividing by it is the per-mention derivation of the
+        #: per-capture union. ⛔ DIVIDE BY `budget`, never by the literal: the
+        #: groups above are built at `budget`, so a literal would publish a
+        #: per-mention derivation of a different quantity the day it moves.
+        arms["blocking"]["fts_only"]["pooled_candidates_per_mention"] = (
+            None if _pool_mean is None else round(_pool_mean / budget, 2))
+        arms["blocking"]["fts_only"]["candidate_set"] = (
+            "pooled union over a capture's derived queries (max_queries=15); "
+            "the per-query window is `k` candidates per mention")
+
         # ── ARM 5 (#12297): the cross-encoder rerank over the SAME candidates.
         #
         # ⛔ A reranker REORDERS what retrieval returned; it cannot surface a row
@@ -1727,7 +2037,12 @@ def run(args: argparse.Namespace) -> int:
             # Only a fake/stub harvest that reported no count reaches this.
             _harvest_files = len(list(sessions.glob("*.jsonl")))
         report = {
+            # The harness is #11901's and its schema stays #11901's; THIS run is
+            # #12295's evidence, and says so (a measurement labelled with
+            # another issue's number cannot be tied to the change it measured).
             "issue": 11901,
+            "measured_for": 12295,
+            "code_head": _git_head(),
             "measured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             #: Whether the read's own rerank gate was armed during this run. False
             #: is the only shape whose "before" is the fused baseline; True is

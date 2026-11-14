@@ -71,10 +71,39 @@ Blocking, not all-pairs
 Pairwise comparison is `n(n-1)/2`: 872 Subjects is ~380k comparisons per scan,
 and naive transitive closure compounds a single false positive across a whole
 cluster (the #2730 brief's named production failures). Candidate generation is
-therefore **blocked** on ``(label, first 3 folded characters)`` — the standard
-record-linkage reduction. Equal folded names always share a block, so the exact
-rung can never be missed by blocking; the bound is that a pair whose folded names
-share no 3-character prefix is never scored.
+therefore **blocked** — the standard record-linkage reduction — on the MULTI-KEY
+union :func:`tortoise.entity_blocking.block_keys` yields, partitioned per
+``(label, key)``: ``E`` the folded name, ``B`` a path basename, ``P`` the
+``MIN_BLOCK_CHARS`` prefix, one ``T`` per word-prefix, and 8 ``S`` minhash bands.
+Equal folded names always share ``E``, so the exact rung can never be missed by
+blocking. ⛔ The bound the prefix ALONE imposed is gone for names whose tokens clear the `T`
+key's own floor (#12295): a pair whose folded names share no 3-character prefix is no longer
+excluded by that fact — the ``T`` (word order / transposition) and ``S`` (typo and separator
+classes) keys reach it. ⚠️ That is a relief, NOT a universal: ``T`` is emitted per token matched
+by ``_WORD = re.compile(r"[a-z0-9']+")`` that is also at least ``MIN_BLOCK_CHARS`` (3)
+characters long, so (i) a transposition whose tokens are shorter than 3 characters shares no
+``T`` key (``'ab cd'`` / ``'cd ab'`` share NOTHING), and (ii) ``T`` is ASCII-gated, so a
+non-ASCII transposition is reached only where an ``S`` band happens to collide — measured:
+``'привет клиент'`` / ``'клиент привет'`` share ``S:(20,…)``, while the shorter
+``'привет мир'`` / ``'мир привет'`` share NOTHING. ``_WORD`` is the reach limit, not
+non-ASCII: do NOT read this arm as "non-ASCII transpositions are never compared".
+``test_every_key_namespace_in_the_union_is_pinned_by_a_pair_that_REQUIRES_it``
+pins each of ``P``/``T``/``S`` with a pair whose own namespace its arm REQUIRES (not
+"shares alone" — measured, only the ``P`` witness shares ``P`` by itself; the ``T``
+witness shares ``T`` and ``S``, the ``S`` witness all three). ⚠️ And the arms do NOT all
+assert the same shape, which is the point: the ``P`` arm asserts set EQUALITY (its
+intersection is exactly ``{"P:ab "}``, so it is the exclusive pin), while the ``T`` and
+``S`` arms assert MEMBERSHIP of their own namespace in an intersection that also holds
+others.
+⚠️ The
+transposition test (`test_the_scan_finds_a_transposition_the_single_prefix_key_could_not`)
+does NOT pin the namespace: its pair shares ``T`` *and* ``S``, so deleting either
+generator leaves it green. ``E`` is always present; ``P`` is added only where the fold is at least
+``MIN_BLOCK_CHARS`` long, and there it is byte-identical to the pre-#12295 single
+key, so the block
+set is a strict superset of `main`'s. The scan applies NO size cap
+(:data:`tortoise.entity_blocking.MAX_BLOCK_SIZE` bounds one QUERY's candidate list
+only, and an oversized block is skipped and REPORTED there).
 """
 from __future__ import annotations
 
@@ -96,10 +125,19 @@ AUTO_MERGE_THRESHOLD = 0.92
 #: Folding: a leading article carries no identity ("the owner" IS "owner").
 _ARTICLES = frozenset({"the", "a", "an"})
 
-#: Blocking width. ``MIN_BLOCK_CHARS`` folded characters is the shortest key that
-#: keeps pair completeness for the damage classes measured on #12047 while still
-#: cutting the 872-Subject scan by ~3 orders of magnitude.
+#: Blocking width for the ``P:`` key. ``MIN_BLOCK_CHARS`` folded characters is the
+#: shortest PREFIX that keeps pair completeness for the damage classes measured on
+#: #12047; since #12295 it is ONE key among the multi-key union
+#: (:func:`tortoise.entity_blocking.block_keys`) rather than the whole scan's
+#: blocking rule, so the reduction it provides is additive — it is no longer the
+#: bound on which pairs are scored. The ~3-orders-of-magnitude figure was measured
+#: for the prefix key against all-pairs, not as the scan's own cost.
 MIN_BLOCK_CHARS = 3
+
+#: The block-size at which the SCAN reports its largest block. Not a cap: the
+#: scan compares every block (a cap would drop pairs a smaller graph showed), and
+#: an emerging giant block is the over-merge signal the report exists for.
+LARGE_BLOCK_WARN = 200
 
 #: The two labels an entity identity lives on (``entity_identity._IDENTITY_LABELS``).
 ENTITY_LABELS = ("Object", "Subject")
@@ -297,11 +335,15 @@ def _semantic_matrix(entities: list[dict], encode_fn) -> dict:
 
     The rung is not a second identity authority: it only proposes pairs the
     deterministic + fuzzy rungs could not see. ⚠️ It is scoped by the SAME block
-    as every other rung — a semantically-close pair whose folded names share no
-    3-character prefix is not proposed. That is deliberate: cross-block
-    all-pairs is the pair explosion the ladder forbids, and a bounded rung that
-    says so is better than an unbounded one. (The semantic test therefore places
-    its pair inside one block.) ⛔ It is NOT scoped by any other rung's arithmetic:
+    SET as every other rung — since #12295 that is the multi-key union, not one
+    prefix — so a pair that shares NO block with this mention is not proposed.
+    (It is NOT scoped by a 3-character prefix: a semantically-close pair whose
+    folded names share no prefix is compared whenever any key of the union — a
+    token, a shingle band — puts them in one block, and the union is a superset of
+    the old prefix key, so the semantic pool is WIDER than it was.) That is
+    deliberate: cross-block all-pairs is the pair explosion the ladder forbids,
+    and a bounded rung that says so is better than an unbounded one. (The semantic
+    test therefore places its pair inside one block.) ⛔ It is NOT scoped by any other rung's arithmetic:
     the fuzzy rung's length prune is a LEXICAL bound, so `entity_candidates` only
     applies it to a pair the vectors cannot answer for (#12047 round-3 P2) — a
     lexical omission must never cap the vector pool's recall. The threshold it
@@ -387,11 +429,78 @@ def entity_candidates(graph, *, limit: int | None = 50,
         entities = scan_entities(graph, labels=labels)
         if not entities:
             return []
-        blocks: dict[tuple, list[dict]] = {}
-        for ent in entities:
-            if not ent["folded"]:
-                continue
-            blocks.setdefault((ent["label"], block_key(ent["folded"])), []).append(ent)
+        # ⛔ #12295 — MULTI-KEY BLOCKING. This used to group on ONE key,
+        # ``block_key(folded)`` = the first ``MIN_BLOCK_CHARS`` folded
+        # characters, so ``the project alpha`` and ``alpha project`` — a
+        # transposition, and one of the classes `#11901` measured at a 0.0 %
+        # attach rate — landed in different blocks and the pair was never
+        # compared, at ANY similarity. The block set is now the union of the
+        # folded key, the folded prefix (KEPT: it is the key main blocked on, so
+        # keeping it preserves main's pairing set), per-token prefixes and LSH
+        # shingle bands (``entity_blocking``, Zep's shape,
+        # ``dedup_helpers.py``). Candidate generation only: every rung below
+        # still decides, and nothing here can auto-merge on a similarity.
+        # ⛔ NO SIZE CAP on this path. A cap would drop pairs main compared, which
+        # is a behaviour change disguised as a bound; the block-size distribution
+        # is reported instead, because an emerging giant block is the over-merge
+        # signal a cap would merely hide.
+        from .entity_blocking import BlockIndex
+
+        index = BlockIndex.from_rows(entities)
+        blocks = index.blocks()
+        _stats = index.stats()
+        if _stats["max_block_size"] >= LARGE_BLOCK_WARN:
+            _logger.warning(
+                "entity blocking: largest block holds %d of %d %s entities "
+                "(%d blocks) — an emerging giant block is the over-merge signal "
+                "(#12295); the scan compared it in full rather than dropping it",
+                _stats["max_block_size"], _stats["members"],
+                "/".join(sorted({e["label"] for e in entities})),
+                _stats["blocks"])
+        by_id = {str(ent["id"]): ent for ent in entities}
+        #: Pairs already compared. A union of keys puts one PAIR in several blocks
+        #: (up to ~12: ``E``, ``B``, ``P``, one ``T`` per token, 8 ``S`` bands), and
+        #: a pair's ROW is identical in every one of them — `fuzzy_sim`, `sem_sim`,
+        #: `kind_mismatch` and the survivor/candidate assignment are pure functions
+        #: of the pair. So the row is unchanged; the SET of rows is not quite, and
+        #: the difference is deliberate: ``settled`` is per block, so a pair emitted
+        #: in one block no longer re-populates a later block's ``settled``, and a
+        #: candidate that is an exact twin of two carriers can surface as
+        #: ``ambiguous``/``tied_with`` where the old order hid it. That is
+        #: fail-CLOSED — ``approve_merge`` refuses an ``ambiguous`` row rather than
+        #: merging it. ⛔ The one arm that is NOT purely additive is the per-candidate
+        #: reduction below (``best``: ONE row per candidate, sorted by
+        #: ``-similarity``): when the extra blocks hand a candidate a
+        #: HIGHER-scoring survivor, that better pair displaces the one ``main``
+        #: offered instead of being emitted beside it, and the read surface
+        #: re-derives its own best from the rows it is given. So do not read this
+        #: key as a strict superset of ``main``'s PAIRS — it is a superset of the
+        #: blocks (nothing is blocked less), and its reduction shows a strictly
+        #: better match where it differs.
+        #: ⛔ AND ONE ARM CAN MAKE A ROW UNMERGEABLE, not merely undecided. The
+        #: ``settled`` skip below is PER BLOCK, so a pair one block suppressed is
+        #: re-compared in a later block that the union adds. With three or more
+        #: spellings of ONE entity (``plan_doc`` / ``plan-doc`` / ``the plan doc``,
+        #: all folding to ``plan doc``) the newest candidate can gain a second 1.0
+        #: row against a SIBLING DUPLICATE, become ``ambiguous``/``tied_with``, and
+        #: ``entity_pair_for`` then raises on it — so ``approve_merge`` can never
+        #: merge it, where ``main`` merged it cleanly, and the queue reports
+        #: "matches 2 survivors" when both survivors are the same entity. The
+        #: mechanism is determined by the code above (``settled`` is per block, and
+        #: the ``best`` reduction keys on the candidate), NOT by a rate quoted here:
+        #: a count that no committed artifact or test holds cannot be re-run, and
+        #: this one is the sole evidence for a decision to leave the scan alone.
+        #: It bites on populations that carry several spellings of ONE entity.
+        #: That is deliberate and it is the SAFE direction (#2730 §6.7: a false
+        #: merge is invisible, a false split is cheap), but it is a real loss of
+        #: mergeability on duplicate-heavy data, so it is stated rather than
+        #: implied by the word "fail-CLOSED".
+        #: ⛔ The dedupe is checked at the TOP of the pair loop, before the vector
+        #: lookup, the length prune and ``similarity``: a dedupe placed after them
+        #: skips only the append, and the repeated comparison it was added to avoid
+        #: still happens (a pair in 6 blocks measured 6 ``similarity`` calls, and a
+        #: never-emitted transposition 3 — #12295 round-2 B4).
+        emitted: set[tuple[str, str]] = set()
 
         sem: dict = {}
         if include_semantic and len(entities) <= SEMANTIC_MAX_ENTITIES:
@@ -407,7 +516,8 @@ def entity_candidates(graph, *, limit: int | None = 50,
             _SEM_FLOOR = 1.0
 
         pairs: list[dict] = []
-        for (_label, _key), members in sorted(blocks.items(), key=lambda kv: kv[0]):
+        for member_ids in blocks:
+            members = [by_id[i] for i in member_ids if i in by_id]
             if len(members) < 2:
                 continue
             members.sort(key=lambda e: (str(e["createdAt"] or ""), e["id"]))
@@ -416,6 +526,17 @@ def entity_candidates(graph, *, limit: int | None = 50,
                 for right in members[i + 1:]:
                     if right["id"] in settled:
                         continue
+                    # Already COMPARED from another block this pair shares — the
+                    # verdict, not just the row, is a pure function of the pair,
+                    # so it is recorded here rather than at the emit path. (At the
+                    # emit path a pair that is NOT emitted — a transposition whose
+                    # similarity stays under the review floor — was recorded
+                    # nowhere and re-compared once per shared block: measured 3
+                    # `similarity` calls for one pair, #12295 round-2 B4.)
+                    _pair_key = (left["id"], right["id"])
+                    if _pair_key in emitted:
+                        continue
+                    emitted.add(_pair_key)
                     # ⛔ TWO rungs, TWO candidate pools (#12047 round-3 P2). The
                     # length bound below is a LEXICAL one: difflib's ratio is
                     # <= 2*min/(sum), so a pair that cannot reach the review

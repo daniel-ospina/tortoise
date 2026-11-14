@@ -68,7 +68,7 @@ landing from a branch. **So: an ancestry `1` and a `--all` grep both fail to ans
 no longer prints its base number.** `#11205` (S5 Job 1, `316a572ce2`, 2026-11-06T22:40:32Z) added an
 **entity↔entity `relations` channel** to the extractor contract, whose predicate allowlist includes
 `hasPart` (`tortoise/extractor_v2.py:1773`). It does **not** discharge A1: it is **transport only** —
-nothing in `tortoise/` consumes `result["relations"]` (`extractor_v2.py:12397`, and
+nothing in `tortoise/` consumes `result["relations"]` (`extractor_v2.py:12487`, and
 `git grep -n 'result\["relations"\]' -- tortoise/` prints that comment and no consumer at all), and
 materialising them as Object→Object edges is **`#11237`** (OPEN). ⛔ **FALSE in this record's merged
 tree — see the fifth-landing amendment below:** the consumer landed as **`#11548`**, and that grep now
@@ -100,7 +100,7 @@ binding below is the result), fed **only** by
 the typed record (`out["relations"]`) and never by the story text (`#10000`). Two measurements, both
 taken on this merge:
 
-- `git grep -n 'result\["relations"\]' -- tortoise/` → **3** lines (`extractor_v2.py:12397`,
+- `git grep -n 'result\["relations"\]' -- tortoise/` → **3** lines (`extractor_v2.py:12487`,
   `relation_write.py:7`, `sdk.py:19056`), against the *"that comment and no consumer at all"* this
   record was written with.
 - `git grep -n 'plan_hierarchy_edges' -- tortoise/` → **8** lines, four of them in `relation_write.py`
@@ -684,7 +684,7 @@ for s in aa414b4d5 8e49ae909 80c912244 d69faaf38; do echo "== $s"; \
 git show 80c912244:tortoise/extractor_v2.py | grep -c 'create_operator'   # 0
 git show de72cfd45:tortoise/extractor_v2.py | grep -n 'create_operator'  # :8892 :8910 :8917 :9231
 # the previous base printed :8938 :8956 :8963 :9343 (`62248db88`); `91dbc9a888` (#11449) moved all four +68
-git grep -n 'create_operator' -- tortoise/extractor_v2.py                 # :10360 :10378 :10385 :10765
+git grep -n 'create_operator' -- tortoise/extractor_v2.py                 # :10449 :10467 :10474 :10854
 
 # A1 (§1) — the declaration reads, and a production caller outside its own module now writes it
 # ⛔ This header read "…and nothing production writes it" until #11548/#11237 landed
@@ -733,19 +733,19 @@ git grep -nE '(^|[^[:alnum:]_])(create_edge|create_about_edge|create_operator)[[
                                                           # sdk.create_operator) and 0 at this base — a
                                                           # count is only as good as the base it was taken at
 # ⛔ THREE hits in this record's merged tree since #11548 landed the consumer (#11237):
-# extractor_v2.py:12397 (the comment that WAS stale, corrected in place by #11001's lane),
+# extractor_v2.py:12487 (the comment that WAS stale, corrected in place by #11001's lane),
 # relation_write.py:7, sdk.py:19056.
 # ⛔ AND THE CONCLUSION THIS ROW WAS WRITTEN WITH IS NOW FALSE — `relation_write.py` IS that
 # consumer. Its own docstring says so ("#10999 built the `relations` channel as transport only …
 # and nothing consumed it. … This module is that consumer"), and `_extract_session_v2` calls it at
 # sdk.py:19069 (`_capture_session` reaches it at `sdk.py:16971`). Of the three hits only ONE was still prose-about-absence (the stale comment at
-# `extractor_v2.py:12397`); the other two are the consumer announcing itself. Read §0's amendment
+# `extractor_v2.py:12487`); the other two are the consumer announcing itself. Read §0's amendment
 # above, never "nothing consumes it".
-# ⛔ AND AS OF `#11001`'s LANE NONE OF THE THREE IS: the comment at `extractor_v2.py:12397` was
+# ⛔ AND AS OF `#11001`'s LANE NONE OF THE THREE IS: the comment at `extractor_v2.py:12487` was
 # corrected IN PLACE — same line, and its block's line count was held at 13 so every cite in this
 # record keeps its number — to state the consumer (`apply_relation_edges`, called from
 # `_extract_session_v2`) and to leave only the EMISSION leg unmeasured. Its number then was
-# `:11524`; this tree carries the same comment at `extractor_v2.py:12397`. So the A1 paragraph's quote
+# `:11524`; this tree carries the same comment at `extractor_v2.py:12487`. So the A1 paragraph's quote
 # is now history only, and the ONE prose-about-absence hit this row counted is gone.
 # ⛔ Both sides of the #11534 × #8290 forward-merge printed a different number, and neither matched
 # the other: the branch printed 10906 / :7 / 17181 at its own tip, main printed 11119 / :7 / 17188
@@ -755,7 +755,7 @@ git grep -nE '(^|[^[:alnum:]_])(create_edge|create_about_edge|create_operator)[[
 # this record's base: ONE hit" was itself stale — that base predates #11205, whose comment is the
 # hit.) Re-measured at the merge.
 git grep -n 'result\["relations"\]' -- tortoise/        # at this record's merged tree: THREE hits —
-                                                          # :12397 (was the stale "nothing
+                                                          # :12487 (was the stale "nothing
                                                           # consumes it" comment; CORRECTED in
                                                           # place — see the note above),
                                                           # relation_write.py:7 (the
@@ -766,17 +766,18 @@ git grep -n 'result\["relations"\]' -- tortoise/        # at this record's merge
                                                           # the claim: unscoped it also matches the
                                                           # reader below)
 git grep -c 'result\["relations"\]' -- tests/          # tree-wide MATCHES — THREE files on this merge,
-                                                          # 62 LINES (`-c` counts lines per file; re-measured
-                                                          # at `ba7f759`, where the two finder lines below
+                                                          # 63 LINES (`-c` counts lines per file; re-measured
+                                                          # on the merged tree, where the two finder lines below
                                                           # add their own matches):
                                                           # tests/test_10999_batch_story_relations.py —
                                                           # 56 — assertions on the channel; tests/eval/
                                                           # write_path/test_write_path_relation_lane.py
                                                           # — 3 — and tests/test_7949_capstone_measure.py
-                                                          # — 3 — SOURCE-TEXT scans, not consumers: one is
-                                                          # the `extractor_v2.py` scan (`:14417`) that derives
-                                                          # the doc's cite, and the two the finder itself needs
-                                                          # to re-derive that number (#12569)
+                                                          # — 4 — SOURCE-TEXT scans and one prose comment, not
+                                                          # consumers: one is the `extractor_v2.py` scan
+                                                          # (`:14435`) that derives the doc's cite, two are the
+                                                          # finder's own conditions (#12569), and the fourth is
+                                                          # a prose line about `#11001`'s in-place correction
 # ⛔⛔ THIS GREP COUNTS LINES, NOT READERS — do not read the per-file numbers as "who consumes the
 # channel". Two of the three files are NOT what their matched lines look like:
 #   • `test_write_path_relation_lane.py`: its 3 matched lines are all DOCSTRING prose (`:6`, `:22`,
@@ -796,7 +797,7 @@ git grep -c 'result\["relations"\]' -- tests/          # tree-wide MATCHES — T
 # ⚠️ The third file was added after this record was written, so the earlier "TWO files … 59"
 # was true of the head this block was first measured on (`e49788706a`, which reads 2 files /
 # 59 lines / 62 occurrences) and is re-measured here rather than left stale.
-git grep -o 'result\["relations"\]' -- tests/ | wc -l    # 65 OCCURRENCES on this merge (62 lines + the 3
+git grep -o 'result\["relations"\]' -- tests/ | wc -l    # 66 OCCURRENCES on this merge (63 lines + the 3
                                                           # doubly-named ones below). ⛔ A count is only
                                                           # as good as the BASE it was taken at, and the
                                                           # earlier text's pair belonged to a different
