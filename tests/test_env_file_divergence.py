@@ -2588,8 +2588,11 @@ def test_a_keyless_rejection_is_reported_as_unknown_origin(
     # ⛔ ARM 2 must forbid the sentence ITS OWN bug printed. This branch is the
     # OVERLAY one, and the "value is the one this `.env` supplied" suffix is built
     # only in the NON-overlay branch — so that clause can never appear here and
-    # asserting it absent pinned nothing (review, P2, measured: with the overlay
-    # branch reverted to `env` this arm passed). What `env` renders is "the
+    # asserting it absent pinned nothing (review, P2; measured: with the overlay
+    # branch reverted to `env`, the CLAUSE assertion passed — the arm itself still
+    # failed on the source assertion above, which is why an earlier version of
+    # this comment's "this arm passed" was false and is not what this says).
+    # What `env` renders is "the
     # ENVIRONMENT's own value does not resolve; this file did not supply it",
     # which is false of a keyless rejection: there is no environment value.
     assert "the ENVIRONMENT's own value does not resolve" not in _rendered()
