@@ -136,7 +136,16 @@ _CITE_CANDIDATE_RE = r"[[:alnum:]_.-]*hosted_api\.py:[0-9]+"
 #: `tests/test_demo_session_read_exclusion_8290.py` asserts it equals the site —
 #: and that pin is what reds when a forward merge grows the module, which is the
 #: remedy this constant relies on rather than a hand sweep.
-DEFAULT_PIVOT = 23667
+#: ⛔ THE FALLBACK PIVOT, re-derived with the notes (#12616). It has now moved
+#: TWICE under this constant: `9ccc8ed940` (#12466) took it 23667 -> 23676 (+9),
+#: and `main` then took it 23676 -> 24518 (+842, `ea5d476e9b8a` +860 and
+#: `3ecd345bb940` +16 in `hosted_api.py`) before #12607 could land — the same
+#: defect class this PR exists to fix, reintroduced by the rebase. Every number
+#: here was OPENED at the rebased head (`grep -nF 'query(LIFETIME_MEMORY_QUERY)'
+#: tortoise/hosted_api.py` -> 24518), never offset. The pin in
+#: `tests/test_demo_session_read_exclusion_8290.py` asserts `lifetime_query_sites()[0]
+#: == DEFAULT_PIVOT`, so the two can only disagree while nobody runs `--check`.
+DEFAULT_PIVOT = 24518
 
 _SCORECARD = "tortoise/activation_scorecard.py"
 _HOSTED = "tortoise/hosted_api.py"
