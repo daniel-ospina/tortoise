@@ -276,11 +276,15 @@ class TestEverySurfaceAgreesWithTheDeclaration:
 #:         clause exempts the live one beside it (cycle 8).
 #:
 #: A sentence recording the RETRACTION is exempt — but only when it QUOTES what it
-#: retracts (:data:`_RETRACTION_ATTRIBUTION`). A cue word alone was a bypass: it let
+#: retracts (:func:`_quotes_the_denial`). A cue word alone was a bypass: it let
 #: `The docs are stale: there is no Builder plan.` escape (cycle 2); a cue plus a bare
 #: `#\d+` was the same bypass one word longer (cycle 6, measured — `The docs are stale
 #: per #12444: there is no Builder plan.` was exempt).
-_BUILDER_PLAN = r"['\"`\u201c\u201d\u2018\u2019]?builder['\"`\u201c\u201d\u2018\u2019]?\s+(?:plans?|tiers?)"
+#: A quotation mark may sit on EITHER side of the noun too: `There is no "Builder
+#: plan".` and `no plan called "Builder".` were both invisible (cycle-9 P2, measured),
+#: because the quote could only wrap the WORD `builder`.
+_BUILDER_PLAN = (r"['\"`\u201c\u201d\u2018\u2019]?builder['\"`\u201c\u201d\u2018\u2019]?\s+"
+                 r"['\"`\u201c\u201d\u2018\u2019]?(?:plans?|tiers?)")
 
 #: The assertion must END its clause. Without this the patterns match the HEAD of a
 #: qualified true statement ("there is no Builder plan cheaper than Solo"), which is
@@ -319,7 +323,8 @@ _IDENTIFIER_RESTATEMENT = (
 #: lookahead so a restatement is a restatement whichever mark introduces it.
 _RESTATEMENT_TAIL = (r"\s*(?:[—–;,]|--)?\s*(?:" + _IDENTIFIER_RESTATEMENT + r")")
 _CLAUSE_END = (r"(?!" + _RESTATEMENT_TAIL + r")"
-               r"(?=\s*(?:$|[.;)]|—|–|--|;|,|\(\s*#\d+\s*\)))")
+               r"(?=\s*['\"\u201d\u2019]?\s*"
+               r"(?:$|[.;)]|—|–|--|;|,|\(\s*#\d+\s*\)))")
 
 #: A denial is often qualified by a trailing intensifier rather than nothing at all
 #: (`… anymore`, `… at all`). Measured false NEGATIVES before this existed: "There is
@@ -339,7 +344,7 @@ _INTENSIFIER = r"(?:\s+(?:any\s?more|anymore|at\s+all|available|for\s+sale))?"
 #: citation — and NOT a comma, dash or semicolon, whose cost is stated as a false
 #: NEGATIVE in the class docstring above rather than paid for with a false block.
 _CLAUSE_END_STRICT = (r"(?!" + _RESTATEMENT_TAIL + r")"
-                      r"(?=\s*(?:$|[.;)]|\(\s*#\d+\s*\)))")
+                      r"(?=\s*['\"\u201d\u2019]?\s*(?:$|[.;)]|\(\s*#\d+\s*\)))")
 
 #: Markdown down to prose, applied BEFORE matching. The drift has to be caught in the
 #: style the DOC ITSELF uses: this repo renders the tier as ``**Builder**`` and the
@@ -486,14 +491,17 @@ _QUOTED_NEGATION = re.compile(r"\b(?:no|not|never)\b|n['\u2019]t\b", re.I)
 _BUILDER_PHRASE = re.compile(_BUILDER_PLAN, re.I)
 
 
-def _quoted_spans(text: str) -> list[str]:
-    """Every quoted span in ``text``, as its INNER text.
+def _quoted_spans(text: str) -> list[tuple[str, bool]]:
+    """Every quoted span in ``text`` as ``(inner, closed)``.
 
     Matched pairs, plus the asymmetric typographic pairs; a single ``'`` is a quotation
     only when it is not inside a word, so ``isn't`` cannot open one. An unclosed pair
-    runs to the end of the fragment — the splitter's own output.
+    runs to the end of the fragment — the splitter's output when the claim's own period
+    ends the sentence — and is reported as NOT closed so the caller can require that it
+    still OPENS with the claim (cycle-9 P2, measured: a cue plus one stray `"` before a
+    live denial exempted it, because the denial was "inside" a span that never closed).
     """
-    spans: list[str] = []
+    spans: list[tuple[str, bool]] = []
     for open_mark, close_mark in _QUOTE_PAIRS:
         i = 0
         while True:
@@ -502,9 +510,9 @@ def _quoted_spans(text: str) -> list[str]:
                 break
             end = text.find(close_mark, start + len(open_mark))
             if end < 0:
-                spans.append(text[start + len(open_mark):])
+                spans.append((text[start + len(open_mark):], False))
                 break
-            spans.append(text[start + len(open_mark):end])
+            spans.append((text[start + len(open_mark):end], True))
             i = end + len(close_mark)
     i = 0
     while i < len(text):
@@ -520,7 +528,7 @@ def _quoted_spans(text: str) -> list[str]:
                             close = j
                             break
                     j += 1
-                spans.append(text[i + 1:close if close >= 0 else len(text)])
+                spans.append((text[i + 1:close if close >= 0 else len(text)], close >= 0))
                 i = (close + 1) if close >= 0 else len(text)
                 continue
         i += 1
@@ -528,9 +536,18 @@ def _quoted_spans(text: str) -> list[str]:
 
 
 def _quotes_the_denial(sentence: str) -> bool:
-    """Is the DENIAL itself the quoted matter — a Builder phrase AND a negation in ONE span?"""
-    for span in _quoted_spans(sentence):
-        if _BUILDER_PHRASE.search(span) and _QUOTED_NEGATION.search(span):
+    """Is the DENIAL itself the quoted matter — a Builder phrase AND a negation in ONE span?
+
+    ⛔ An UNCLOSED span counts only when the Builder phrase OPENS it (allowing for the
+    opening mark itself), i.e. the span is the claim. A stray unmatched `"` earlier in
+    the sentence must not make everything after it "quoted" (cycle-9 P2, measured).
+    """
+    for span, closed in _quoted_spans(sentence):
+        plain_span = _plain(span)
+        phrase = _BUILDER_PHRASE.search(plain_span)
+        if phrase is None or not _QUOTED_NEGATION.search(plain_span):
+            continue
+        if closed or phrase.start() <= 2:
             return True
     return False
 
@@ -551,7 +568,7 @@ def _quotes_a_retracted_claim(sentence: str) -> bool:
     """
     return bool(_RETRACTION_CUES.search(sentence)
                 and (_quotes_the_denial(sentence)
-                     or _REPORTED_CLAIM.search(sentence)))
+                     or _REPORTED_CLAIM.search(_plain(sentence))))
 
 
 def _is_a_correction_record(fragment: str) -> bool:
@@ -717,6 +734,15 @@ class TestNoDocDeniesABuilderPlanExists:
             "... read \"There is no Builder plan.\"; #12444 corrected it.",
             "Previously the doc read \u201cThere is no Builder plan.\u201d; #12444 "
             "corrected it.",
+            # …and a record quoting the claim in THIS repo's markdown dialect (cycle 9:
+            # the span was compared RAW, so `**Builder**` defeated it — a false block on
+            # the same dialect `_plain` exists for).
+            "The doc previously read \"There is no **Builder** plan.\"; #12444 "
+            "corrected it.",
+            "The doc previously read \"There is no [Builder](https://x.test) plan.\"; "
+            "#12444 corrected it.",
+            # A quoted TRUE statement stays green (cycle-9 P2's other direction).
+            "There is no \"Builder plan\" cheaper than Solo.",
             # The #4336 restatement in its most natural form: a comma followed by the
             # IDENTIFIER restatement qualifies the claim instead of ending it (cycles
             # 4 and 5 — `only|just` alone exempted the drift, so the noun is required).
@@ -838,6 +864,11 @@ class TestNoDocDeniesABuilderPlanExists:
                 # NAMES the tier is not a record of its absence.
                 'The doc previously said "the Builder plan is unlimited"; there is no '
                 'Builder plan.\n',
+                # Cycle-9 P2: an UNCLOSED quotation earlier in the sentence made
+                # everything after it "quoted", so a live denial merely FOLLOWING one
+                # was exempt. An unclosed span now counts only if the claim OPENS it.
+                'Previously the wording read "pro and team are the only paid tiers, so '
+                'there is no Builder plan.\n',
         ):
             assert _denials_in_document(live), (
                 f"a live denial was exempted by a following fragment that is not a "
@@ -881,6 +912,13 @@ class TestNoDocDeniesABuilderPlanExists:
             "Builder isn\u2019t a plan.",
             "There aren\u2019t any Builder plans.",
             "There are not Builder plans.",
+            # Cycle-9 P2: a closing quotation mark may follow the phrase, which the
+            # clause ends did not accept even though `_BUILDER_PLAN` was widened to
+            # typographic quotes in cycle 6 for exactly this family.
+            'There is no "Builder plan".',
+            "There is no \u201cBuilder plan\u201d.",
+            'There is no plan called "Builder".',
+            'We do not offer a "Builder plan".',
             "The Builder tier doesn't exist.",
             "We don't offer a Builder plan.",
             "Builder is not available as a plan.",
