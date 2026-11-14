@@ -834,7 +834,7 @@ surfaces:
   # #10612: the offload seam must not re-enter a stored contextvars.Context.
   # Same dual registration as the offload guard above and for the same reason:
   # tortoise/hosted_api.py is an exact `api` SOURCE_PATTERN that REPLACES the
-  # `core` fallback, so this file also has an `api` row above; the other file it
+  # `core` fallback, so this file also has an `api` row (this one); the other file it
   # guards, tortoise/monitoring.py, selects `core`, so the `core` row is what
   # delivers the guard for a monitoring.py-only diff.
   - test_context_confinement.py
@@ -1001,11 +1001,23 @@ surfaces:
   # no guard. Registered in BOTH lists, like `test_11892_health_quota.py`.
   #
   # ⛔ ONE row per list, deliberately: this entry had been emitted TWICE in `.surfaces.api`
-  # and twice in `.surfaces.core` by the `merge=union` driver (.gitattributes) when two
-  # racing merges each added it — exactly the duplicate the `registry_integrity.py` step
-  # exists to catch (#5373), and undetected on `main` because `manifest-integrity` had not
-  # yet run on the sha that carried it. The redundant copies are deleted, not merged: both
-  # carried the same classification.
+  # and twice in `.surfaces.core` when two independent fixes for this same registration
+  # landed 69 s apart in TWO merges — #12640 and #12464, with #12569 between them — and
+  # each appended the row at its OWN anchor, so one row per merge survived into `main`.
+  # That is why this note and the `core` one come from different commits. ⛔ It is also NOT
+  # evidence of the `merge=union` driver (.gitattributes): an earlier cut of this note
+  # attributed it to that driver, and `duplicate_entries()`' own measurement retracts it —
+  # the SAME row appended at two different POSITIONS survives as TWO rows, with the
+  # attribute set and unset alike, because nothing reconciles independent appends. The
+  # entry is still exactly the duplicate `duplicate_entries()` exists to catch (#5373): it
+  # reaches `--integrity` through `_manifest_contract_issues`, the step the
+  # `manifest-integrity` job runs, and that job's `registry_integrity` step reports it too,
+  # in its own form — `duplicate entry '…' at .surfaces.api[] (lines a, b)` — where
+  # `duplicate_entries()` reports `api: …`. What does NOT catch it is `integrity()` the
+  # FUNCTION — it returns only the unclassified files, which a duplicated row is not — and
+  # selection cannot see a same-surface repeat either. One row per surface is what
+  # `duplicate_entries()` requires. The redundant copies are deleted, not merged: both
+  # carried the same classification, and the second copy is gone.
   - test_12477_health_honesty.py
   - test_agent_signup.py
   - test_agent_signup_idempotency.py
@@ -1550,8 +1562,10 @@ surfaces:
   # tortoise/mcp_auth.py` selects this surface and did NOT include any of the
   # three, so a transport-context regression (the flag that decides whether
   # `_get_org_sdk` is the accessor those pins stub) ran them zero times. The same
-  # measurement the `test_wait_bound_write_ack.py` row above records, and why
-  # these sit beside `test_mcp_server.py` rather than under `core` alone.
+  # measurement the `test_wait_bound_write_ack.py` row BELOW records (below, not
+  # above: this sentence was copied from the `#11892` note later in this list,
+  # where the sibling really is above the row it annotates), and why these sit beside
+  # `test_mcp_server.py` rather than under `core` alone.
   - test_12500_query_args_dropped.py
   - test_12455_text_filters_dropped.py
   - test_12372_entity_type_dropped.py
@@ -2438,8 +2452,10 @@ surfaces:
   # and every `test_integrity_covers_all_test_files`-shaped pin in
   # `tests/test_ci_selection.py` redded, which would have failed `test-slow`
   # BEFORE the merge could happen). Its only SELECTION effect is on a diff to the
-  # test file itself, which selects `core` (measured: `--changed-files
-  # tests/test_12372_entity_type_dropped.py` -> `surfaces=['core']`); an
+  # test file itself, which selects `core` beside the `api` row this file later
+  # gained, so that row reaches it too (re-derived after that row landed:
+  # `--changed-files tests/test_12372_entity_type_dropped.py` -> `surfaces=['api',
+  # 'core']`; it was `['core']` alone when this note was first written); an
   # `mcp_server.py` diff reaches every test file through the FULL matrix that a
   # SHARED_MODULES path forces (`--changed-files tortoise/mcp_server.py` ->
   # `full: true, test_files: ALL`), not through this row.
@@ -2469,7 +2485,8 @@ surfaces:
   # leg completed AFTER the merge ("The gate is correct — it simply reported after
   # the tree was already on `main`"); here it completed FAILURE 47 minutes BEFORE
   # it, so the leg does not GATE the merge either. Registered here so
-  # the recovery travels with the next PR that touches this file.
+  # the recovery travels with the next PR that touches this file. DUAL: the `api`
+  # row is what reaches a `hosted_api.py`-only diff (see it for the module pair).
   - test_12477_health_honesty.py
   - test_candidate_recall_11901.py
   - test_journal_segments.py
@@ -3033,11 +3050,11 @@ surfaces:
   # trap the #9964 row above records). It drives the real SDK doors against a
   # throwaway embedded graph, so it takes no `carve_out` slot.
   - test_kind_guards_12060.py
-  # #9494: registered ONCE, in the `core` block below beside `test_monitoring.py`
-  # (its consumers' siblings), with the `durations:` row the surface entry does
-  # not cover. Two lanes appended this file here and there while both fixed the
-  # same review finding, and a same-surface duplicate reds `duplicate_entries()`
-  # (#5373) — so this line is deliberately absent.
+  # #9494: registered ONCE, in this `core` block (its sibling `test_monitoring.py`
+  # is registered further down this list, not beside it), with the `durations:` row
+  # the surface entry does not cover. Two lanes appended this file here and there
+  # while both fixed the same review finding, and a same-surface duplicate reds
+  # `duplicate_entries()` (#5373) — so this line is deliberately absent.
   - test_kind_vocabulary_consistency.py
   # #9123 (§17.1's THIRD lane): the `:EpMeta` epoch declaration. BOTH its
   # subjects — `tortoise/projection/__init__.py` (the new
@@ -4428,7 +4445,7 @@ surfaces:
   # SOURCE_PATTERNS row, so a TOOL-ONLY diff would select NO surface and fall back
   # to tier-1 smoke, which does not carry this file — the neighbouring `CORE_ALSO`
   # entry for the tool closes that half (same #1349/#3332/#3616 class as
-  # `test_work_claim.py` above). Pinned by
+  # `test_work_claim.py` below). Pinned by
   # `tests/test_ci_selection.py::test_worktree_report_tool_change_selects_core_not_tier1`.
   - test_worktree_report.py
   # `tools/gh_write_preflight.py` — the "can this credential WRITE repository contents here?"
@@ -4529,7 +4546,7 @@ surfaces:
   # `tortoise/sdk.py` and `tortoise/projection/__init__.py` are SHARED_MODULES
   # (already the full matrix), so 2 of the 3 changed modules need no separate
   # arm. **Deliberately NOT dual-registered with `eval`** (contrast
-  # `test_journal_embedding_5004.py` above): this file pins no embedding path,
+  # `test_journal_embedding_5004.py` below): this file pins no embedding path,
   # so an `embeddings.py`-only PR cannot leave a guard here unrun. The
   # fail-before/pass-after evidence: 12 of the original 21 fail on the unfixed
   # base and all pass here; the 9 review-round-6 pins (P1-A competing write,
@@ -5441,7 +5458,7 @@ surfaces:
   # only that a port answered, so the file was green there on the PRE-fix
   # statements, which is the false evidence #8870 survived on. A green now means
   # the assertions ran on an engine that can produce a red; the skip is the
-  # honest signal elsewhere, and `test_source_version_set_order_7362.py` below
+  # honest signal elsewhere, and `test_source_version_set_order_7362.py` above
   # guards the defect in every lane regardless. The engine-free gate tests in
   # this file (the probe/skip-reason/URI tests) run in EVERY lane.
   - test_8870_version_anchor_write_order.py
@@ -6164,7 +6181,7 @@ surfaces:
   # `tortoise/incident_kinds.py` (no named surface → this `core` arm is the
   # fallback) AND the alert-plane emitters, including `tortoise/hosted_api.py` and
   # `tortoise/email_notify.py`, which are exact `api` SOURCE_PATTERNS — so the
-  # `api` arm below is load-bearing for an api-file-only diff (a named-surface
+  # `api` arm above is load-bearing for an api-file-only diff (a named-surface
   # match REPLACES the `core` fallback, #2938 convention). Registered in this
   # position to keep the list's alphabetical grouping.
   - test_incident_kinds.py
