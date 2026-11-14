@@ -2199,12 +2199,12 @@ class TestNoDocDeniesABuilderPlanExists:
                 # exempt here and FLAGGED at `origin/main`. What discriminates is the
                 # ENUMERATION of measured heads at `_RESUMES_WITH_THAT` **plus the word
                 # boundary after it** — without the `\b`, `is`/`was`/`has`/`makes` match the
-                # PREFIX of a real clause subject (`that issues …`, `that wasted …`,
-                # `that haste …`, `that makeshift …`), the resume test rejects a legitimate
-                # complement, and two correct records are BLOCKED. Both halves are pinned
-                # below (the boundary by `… -- that issues with the old wording mean …`) and
-                # in the false-positive half. Nothing wider has been measured, so nothing
-                # wider is claimed.
+                # PREFIX of a word that merely begins with the head (`that issues …`,
+                # `that wasted …`, `that haste …`), the resume test rejects a legitimate
+                # complement, and two correct records are BLOCKED. Both halves are pinned:
+                # the enumeration by the nine rows BELOW, the boundary in the
+                # FALSE-POSITIVE half (`… -- that issues with the old wording mean …`, `:1829`).
+                # Nothing wider has been measured, so nothing wider is claimed.
                 "Until #12444 the doc said -- the page was never fixed -- that is why there "
                 "is no Builder plan.\n",
                 "Until #12444 the doc said -- the page was never fixed -- that proves there "
