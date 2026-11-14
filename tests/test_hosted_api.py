@@ -1165,6 +1165,120 @@ class TestLivenessDecouple:
             payload = r.read()
         assert b"\"status\": \"ok\"" in payload or b'"status":"ok"' in payload
 
+    def test_a_RE_ENTERED_lifespan_does_not_inherit_the_process_age(self, monkeypatch):
+        """#12630: the never-produced bound dates THIS instance's probe, not the
+        process's age — so a lifespan entered minutes into the process answers 200.
+
+        `_HEALTH_PROBE.reset()` runs on every lifespan entry and starts a new
+        "has a result been produced yet" waiting period, but the bound that
+        judges that period read `_HEALTH_PROBE_EPOCH_MONOTONIC` (then named
+        `_PROCESS_BOOT_MONOTONIC`), which was set once at
+        module import and never re-based. A second lifespan (an in-process app
+        instance, a `TestClient` reuse, a re-entered lifespan) therefore had the
+        PROCESS's age as its window age, so the 120 s bound was already blown the
+        moment it was evaluated: `probe-never-produced-a-result` -> `failed` ->
+        `503 data-plane-failed` through a perfectly healthy boot.
+
+        That is not hypothetical — it is a REQUIRED red. `test-slow` is in
+        `python-ci-gate`'s `needs:`, and `test_hosted_api.py` runs late enough in
+        a slow shard that the process has long crossed 120 s by the time this
+        file's listener is polled, so the shard reds on a tree that is fine
+        (measured: PR #12732's run 43620217070, job `test-slow (c)`, 1 failed /
+        844 passed — this test's sibling above, and nothing from the diff).
+
+        THE MUTANT is the aging below: age the epoch past the bound and enter a
+        fresh lifespan. Nothing else is needed to reproduce the 503, so removing
+        the re-base in `_lifespan` turns this test RED.
+
+        ⛔ THE PROBE IS BLOCKED ON PURPOSE, and the no-result REASON is asserted
+        (review P2). Leaving the real probe running made the guard a ~40 ms race:
+        when the request beat the refresher's first probe the verdict rode the
+        epoch arm, but when the probe landed `ok: true` first the verdict was
+        `healthy` and the test passed **with or without** the re-base — a green
+        for the wrong reason. The blocked probe returns only when the test
+        releases it, so inside the sub-second assertion window the verdict can
+        only be `unknown` / `no-probe-result-yet`, and the epoch bound is the term
+        that answers. Nothing here depends on the 30 s stale window, which is what
+        would otherwise hand the verdict a completed result.
+        """
+        import json
+        import urllib.error
+        import urllib.request
+
+        from fastapi import FastAPI
+
+        import tortoise.hosted_api as ha_mod
+        import tortoise.monitoring as monitoring
+
+        def _get(port: int) -> tuple[int, dict]:
+            """Read /healthz, keeping the BODY on a 503.
+
+            `urlopen` raises for 5xx, so the status assert alone would leave the
+            reason the test exists to report unprinted (review P2: the mutant's
+            output was a bare `HTTPError` traceback with no diagnostic).
+            """
+            try:
+                with urllib.request.urlopen(
+                        f"http://127.0.0.1:{port}/healthz", timeout=5) as r:
+                    return r.status, json.loads(r.read())
+            except urllib.error.HTTPError as exc:
+                return exc.code, json.loads(exc.read())
+
+        release = threading.Event()
+
+        def _blocked_probe() -> dict:
+            # Returns only when THIS TEST releases it, so no result can exist while
+            # the assertions run. Without this the request can beat the refresher's
+            # first probe by ~40 ms and the test would pass with or without the
+            # re-base — the vacuity this pin exists to remove. (`HealthProbe.run()`
+            # is hard-bounded, so nothing waits on this thread; it is a daemon and
+            # the `finally` below releases it.)
+            release.wait(300)
+            return {"ok": True, "observed": True, "latency_ms": 0.0,
+                    "error": None}
+
+        # Keep the boot cheap and deterministic: the sweeps are not this test's
+        # subject, and the in-process stall self-kill must never fire here.
+        monkeypatch.setattr(ha_mod, "_sweep_events", lambda: None)
+        monkeypatch.setattr(ha_mod, "_purge_deleted_orgs", lambda: None)
+        monkeypatch.setenv("TORTOISE_LOOP_STALL_EXIT_S", "0")
+        monkeypatch.setenv("TORTOISE_HEALTHZ_PORT", str(_free_tcp_port()))
+
+        app_under_test = FastAPI(lifespan=ha_mod._lifespan)
+        try:
+            with _verdict_client(app_under_test):
+                pass  # the first lifespan: the app instance the process boots with
+
+            # Now make the PROCESS look old — a `test-slow` shard that reaches
+            # this file ~6 minutes in. `_HEALTH_PROBE_EPOCH_MONOTONIC` is the
+            # datum the bound reads, so aging it IS the state the shard produces;
+            # the re-base in the re-entered lifespan is what must discard it.
+            monkeypatch.setattr(
+                ha_mod, "_HEALTH_PROBE_EPOCH_MONOTONIC",
+                time.monotonic() - (ha_mod._health_probe_never_produced_bound_s()
+                                    + 280.0))
+            monkeypatch.setattr(ha_mod, "_probe_db", _blocked_probe)
+
+            with _verdict_client(app_under_test):  # the RE-ENTERED lifespan
+                server = getattr(app_under_test.state, "_healthz_server", None)
+                assert server is not None, (
+                    "lifespan did not start the /healthz listener")
+                status, body = _get(server.server_address[1])
+                # Assert the REASON, not just the status: a `healthy` verdict
+                # would mean the probe answered and this test proved nothing.
+                assert body["dataplane"]["state"] == "unknown", body
+                assert body["dataplane"]["detail"]["reason"] == \
+                    "no-probe-result-yet", body
+                assert status == 200, (
+                    f"a re-entered lifespan answered {status} on a healthy boot — "
+                    f"the never-produced bound inherited the PROCESS's age "
+                    f"instead of this instance's probe reset: {body}")
+                assert body["status"] == "ok", body
+        finally:
+            release.set()
+            monitoring.stop_health_listener(
+                getattr(app_under_test.state, "_healthz_server", None))
+
 
 class TestBootOrder:
     """#2953: uvicorn binds the listening socket only AFTER

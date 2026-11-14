@@ -59,9 +59,16 @@ reason*, so the matrix names it instead of showing a blank.
 
 An **allocation** is a policy applied to a stated total (`fixed_shared_saas`: even /
 proportional to measured write ops, recomputed each refresh). It must never be read as "we
-measured this org's share". Postgres **bytes** have no per-org split for the same reason —
-a per-org byte figure would be an allocation wearing a measurement's name, so the row
-declares the limit instead of inventing one.
+measured this org's share".
+
+> **OVERRIDES:** ~~Postgres **bytes** have no per-org split — a per-org byte figure would be
+> an allocation wearing a measurement's name~~ — replaced by a **write-time measurement of
+> stored bytes** (`#12762`, `postgres_storage`): an org's own journal rows are keyed by
+> `org_id`, so `sum(pg_column_size(row))` over THEM is that org's byte, not a share of a
+> total. What is still an allocation, and is therefore still refused: apportioning the
+> database **total** (index bytes, dead tuples, page slack, TOAST chunk headers) — those
+> ride a labelled residual in `postgres_per_org_bytes()`. See
+> `docs/ops/postgres-storage-measurement.md`.
 
 ## What the audit enforces
 
