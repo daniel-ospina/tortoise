@@ -77,11 +77,13 @@ from tortoise.sdk import (
 
 __all__ = [
     "FILED",
+    "PENDING",
     "TURNS_MISSING",
     "UNEXTRACTED",
     "UNKNOWN",
     "confirm_capture",
     "expected_turns",
+    "extraction_outcome_known",
     "raw_windowed_turns",
     "session_extracted",
     "turn_point_id",
@@ -94,7 +96,28 @@ FILED = "filed"
 #: enough to stop retrying (its contract is turn durability); for the local
 #: IMPORT receipt it is NOT — that receipt asserts a completed import, and
 #: #4188 forbids writing it for a keyless capture whose extraction never ran.
+#:
+#: ⛔ This verdict ASSERTS an absence, so it may only be returned when the
+#: server says the outcome is KNOWN (:func:`extraction_outcome_known` is not
+#: ``False``). The hosted detail distinguishes "not processed" from "not known
+#: yet" with the ``outcome_known`` qualifier beside the status
+#: (``tortoise/session_projection.py``: "a consumer must therefore read the
+#: PAIR"), and the abandoned handler behind a transport 504 is exactly the
+#: unknown case: the turns are durable BEFORE extraction starts, so
+#: ``extracted == 0`` at that instant is not evidence that nothing will be.
+#: Reading the count alone made every >wait-bound capture report "no memory
+#: points were extracted" for a session that extracted seconds later (#12362).
 UNEXTRACTED = "unextracted"
+#: Durable turns, and the server has NOT recorded an extraction outcome yet
+#: (``outcome_known`` is ``False``): the capture that answered our 504 is still
+#: running, or never reached its outcome write. This is a THIRD state, not a
+#: failure and not a success — nothing is claimed about memory points.
+#:
+#: The SPOOL may terminalise on it (its contract is TURN DURABILITY, #4675, and
+#: the turns ARE durable), but no caller may render it as "no memory points
+#: were extracted", file it as a saved-backlog deferral, or mint an import
+#: receipt (#4188) — all three assert a known negative this state cannot carry.
+PENDING = "pending"
 #: The posted rows cannot be established (404 / read refusal / transport). The
 #: caller must DEFER: never terminalise, never discard.
 UNKNOWN = "unknown"
@@ -208,6 +231,45 @@ def session_extracted(detail: Any) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         return 0
     return max(0, value)
+
+
+def extraction_outcome_known(detail: Any) -> bool | None:
+    """The server's ``extraction.outcome_known`` qualifier, or ``None``.
+
+    ``GET /v1/sessions/<id>`` serves ``extraction: {status, extractor,
+    outcome_known}`` (``tortoise/session_projection.py``), where
+    ``outcome_known`` is ``capture_ok IS NOT NULL``: ``True`` when the server
+    recorded whether extraction ran, ``False`` when it has recorded NOTHING yet
+    (the abandoned handler behind a transport 504, a commit-created session, a
+    demo seed), and ``None`` here when the field is absent entirely — a
+    pre-#3520 server, or a fake that never served the block.
+
+    Only an explicit boolean is returned. A malformed block reads as ``None``
+    on purpose: an invented ``False`` would turn garbage into the PENDING state
+    and a made-up ``True`` would let garbage open the ``UNEXTRACTED`` verdict
+    that asserts an absence.
+    """
+    if not isinstance(detail, dict):
+        return None
+    block = detail.get("extraction")
+    if not isinstance(block, dict):
+        return None
+    value = block.get("outcome_known")
+    return value if isinstance(value, bool) else None
+
+
+def _extraction_verdict(detail: Any) -> str:
+    """FILED / PENDING / UNEXTRACTED for a detail whose turns we have proved.
+
+    ONE definition, called from both arms of :func:`confirm_capture` (the exact
+    comparison and the redaction-skew one) so the two cannot disagree about
+    what a durable capture's extraction state means.
+    """
+    if session_extracted(detail) >= 1:
+        return FILED
+    if extraction_outcome_known(detail) is False:
+        return PENDING
+    return UNEXTRACTED
 
 
 def raw_windowed_turns(session_id: str,
@@ -356,8 +418,10 @@ def confirm_capture(
     session detail dict, ``None`` on 404, and raise on every other refusal
     (``session_verify.session_detail`` is that reader).
 
-    Returns one of :data:`FILED`, :data:`UNEXTRACTED`, :data:`UNKNOWN`,
-    :data:`TURNS_MISSING`. Any outcome other than the first two must DEFER.
+    Returns one of :data:`FILED`, :data:`PENDING`, :data:`UNEXTRACTED`,
+    :data:`UNKNOWN`, :data:`TURNS_MISSING`. Any outcome other than the first
+    three must DEFER; :data:`PENDING` is terminal for TURN durability only (see
+    its own note — it asserts nothing about extraction).
     """
     rows = list(turns)
     if not session_id or not rows:
@@ -384,7 +448,7 @@ def confirm_capture(
         if detail is not None:
             have = turn_points(detail)
             if have == want:
-                return FILED if session_extracted(detail) >= 1 else UNEXTRACTED
+                return _extraction_verdict(detail)
             if have:
                 # #5394: the client's expectation is built from the client's
                 # OWN ``_SECRET_SHAPES``; the server stored text scrubbed by
@@ -396,8 +460,7 @@ def confirm_capture(
                 if raw is None:
                     raw = raw_windowed_turns(session_id, rows)
                 if _turns_survive_redaction_skew(have, raw):
-                    return (FILED if session_extracted(detail) >= 1
-                            else UNEXTRACTED)
+                    return _extraction_verdict(detail)
                 # The server holds turns for this session but not these — a
                 # partial write, or a concurrent capture that grew / re-windowed
                 # the transcript. Not ours to call filed.

@@ -360,6 +360,7 @@ ROW_CITE_LITERAL: dict[str, tuple[str, str]] = {
     'get_entity': ('get_entity', "`beta-sdk-surface.md` — “> **Every name here is a target, not a description of today.** Only **four** of the 40 exist in the > current SDK (`create_entity`, `get_entity`, `approve_merge`, `close`). The MCP column names the *target* tool. None of the **27** target tools exists verbatim — every registered MCP tool carries a `tortoise_` prefix — and only **5** (`create_entity`, `get_entity`, `approve_merge`, `graph_set_recording`, `manage_sources`) have a prefixed equivalent. The other **22** have neither — no target name matches a served name verbatim. > The old→new mapping is a **Phase 0.3b deliverable and does not exist yet** — do not look for it. Until it lands, the only per-tool mapping is `docs/product/bridge-table.md`, which maps every *current* tool to its destination but does not name the target's replacing name.”"),
     'get_events': ('get_entity', '`beta-sdk-surface.md` — “\\| narrow readers (`get_session`, `get_events`, `get_owned_entities`, `get_provenance_chain`, …) \\| ~8 \\| → `get_entity`, except where a genuinely different shape is returned. \\|”'),
     'get_historical_knowledge': ('get_historical_knowledge', '`beta-sdk-surface.md` — “\\| `restore_point_at` \\| → row 7 **`get_historical_knowledge`**. A **read**, not a write — it returns the version of a claim valid on a date and mutates nothing. \\|”'),
+    'get_organisation_account': ('get_organisation_account', '`beta-sdk-surface.md` — “\\| 28 \\| `get_organisation_account` \\| Read the account and the plan it is on \\| — \\| admin \\|”'),
     'get_owned_entities': ('get_entity', '`beta-sdk-surface.md` — “\\| narrow readers (`get_session`, `get_events`, `get_owned_entities`, `get_provenance_chain`, …) \\| ~8 \\| → `get_entity`, except where a genuinely different shape is returned. \\|”'),
     'get_point': ('get_entity', '`canonical-sdk-methods.md` — “\\| R4 \\| `get_entity` \\| #4 \\| `get_point`, `get_entity`, `get_session`, `get_events`, `resolve_id` \\| keep, collapse \\|”'),
     'get_session': ('get_entity', '`beta-sdk-surface.md` — “\\| narrow readers (`get_session`, `get_events`, `get_owned_entities`, `get_provenance_chain`, …) \\| ~8 \\| → `get_entity`, except where a genuinely different shape is returned. \\|”'),
@@ -712,8 +713,8 @@ def test_check_mode_detects_a_drifted_copy(tmp_path: Path) -> None:
 
     drifted = tmp_path / "sdk-rename-table.md"
     text = DOC.read_text(encoding="utf-8")
-    assert "124 public methods" in text
-    drifted.write_text(text.replace("124 public methods", "129 public methods"),
+    assert "125 public methods" in text
+    drifted.write_text(text.replace("125 public methods", "129 public methods"),
                        encoding="utf-8")
 
     rc = sdk_rename_table.main(["--check", "--out", str(drifted)])
@@ -772,6 +773,7 @@ TARGETS_LITERAL: dict[str, str] = {
     'get_entity': 'get_entity',
     'get_events': 'get_entity',
     'get_historical_knowledge': 'get_historical_knowledge',
+    'get_organisation_account': 'get_organisation_account',
     'get_owned_entities': 'get_entity',
     'get_point': 'get_entity',
     'get_session': 'get_entity',
@@ -900,6 +902,7 @@ AXES_LITERAL: dict[str, tuple[str, str, str, str]] = {
     'get_entity': ('stable', 'public', 'stated', 'retain'),
     'get_events': ('deprecated', 'public', 'stated', 'retain'),
     'get_historical_knowledge': ('stable', 'public', 'stated', 'retain'),
+    'get_organisation_account': ('stable', 'public', 'stated', 'retain'),
     'get_owned_entities': ('deprecated', 'public', 'stated', 'retain'),
     'get_point': ('deprecated', 'public', 'stated', 'retain'),
     'get_session': ('deprecated', 'public', 'stated', 'retain'),
@@ -1157,7 +1160,7 @@ def test_structural_counts_and_the_summary_sentence_are_read() -> None:
     # attributing 23 to C1. `list_members` and `remove_member` are never-a-destination
     # only since #4282: the `membership_list` / `membership_delete` rows that reached
     # them were deleted with the methods.
-    assert c1_total == 28, f"Part C1 lists {c1_total} Phase-2 methods, expected 28"
+    assert c1_total == 27, f"Part C1 lists {c1_total} Phase-2 methods, expected 27"
     assert c1_total == no_def + 5, (
         f"C1's {c1_total} and the summary's {no_def} destinations should differ by exactly "
         f"the 5 never-a-destination targets"
@@ -1166,21 +1169,22 @@ def test_structural_counts_and_the_summary_sentence_are_read() -> None:
         f"the summary's parts ({no_def}+{exists}+{non_target}) do not sum to its "
         f"distinct-destination count ({distinct})"
     )
-    # Each part is pinned, not just the sum. `exists` is 12, not 2, because an UNCHANGED
+    # Each part is pinned, not just the sum. `exists` is 13, not 2, because an UNCHANGED
     # row's Target is the method's own name (`create_entity`, `get_entity`,
     # `approve_merge`, `close`, `poll_events`, `get_historical_knowledge`,
-    # `list_memory_graphs`, `restore_memory_graph`, `update_memory_graph`, and — since
-    # #4282 Phase 2.2 — `link_entities`, `update_knowledge`, `delete_knowledge`) rather
+    # `list_memory_graphs`, `restore_memory_graph`, `update_memory_graph`, — since
+    # #4282 Phase 2.2 — `link_entities`, `update_knowledge`, `delete_knowledge`, and
+    # since #10015 — `get_organisation_account`) rather
     # than the old `UNCHANGED` token.
-    assert (distinct, no_def, exists, non_target) == (38, 23, 12, 3), (
+    assert (distinct, no_def, exists, non_target) == (38, 22, 13, 3), (
         "the destination summary moved: "
         f"{distinct} destinations = {no_def} no-def + {exists} existing + {non_target} other"
     )
-    assert "**32 groups** over **123** named members" in doc, (
+    assert "**32 groups** over **124** named members" in doc, (
         "the structural note's canonical-group counts are gone"
     )
-    assert "124 = the 124-method surface" in doc, (
-        "the structural note no longer reconciles its members to the 124-method surface"
+    assert "125 = the 125-method surface" in doc, (
+        "the structural note no longer reconciles its members to the 125-method surface"
     )
     # C6 sits between C5 and the structural notes; terminate the C5 slice at C6 so a
     # `W11` mention in the contested section cannot leak into the group set.
@@ -1251,7 +1255,7 @@ def test_part_a_covers_exactly_the_public_surface() -> None:
     """
     rows = part_a_rows()
     names = [r["name"] for r in rows]
-    assert len(rows) == 124, f"Part A has {len(rows)} rows, expected the 124-method surface"
+    assert len(rows) == 125, f"Part A has {len(rows)} rows, expected the 125-method surface"
     assert len(set(names)) == len(names), (
         "Part A lists a method twice — `--check` cannot see a duplicated row because the "
         "duplicate is in the constant too"
@@ -1260,7 +1264,7 @@ def test_part_a_covers_exactly_the_public_surface() -> None:
 
 
 def test_the_whole_mapping_is_pinned() -> None:
-    """Every one of the 124 `method → destination` pairs equals the pinned literal.
+    """Every one of the 125 `method → destination` pairs equals the pinned literal.
 
     The representative-pin test guards group defaults; this guards the exceptions.
     Without it a row can be reassigned to a different target while its citation
@@ -1582,18 +1586,18 @@ def test_prose_counts_are_the_literals_the_doc_claims() -> None:
     # Digit-BOUNDED, not substring: `"124 public methods" in text` also passes when the
     # render produces `1124 public methods`, so the pin did not hold the number.
     for pattern in (
-        r"(?<![\d])124 public methods",
+        r"(?<![\d])125 public methods",
         r"(?<![\d])40 target methods",
-        r"(?<![\d])95 of the 124 are renames",
-        r"\*\*12\*\* are already targets \(unchanged\)",
+        r"(?<![\d])95 of the 125 are renames",
+        r"\*\*13\*\* are already targets \(unchanged\)",
         r"\*\*14\*\* are discarded with a rationale \(lifecycle `removed` · "
         r"visibility `internal` · delete `delete`\)",
         r"\*\*0\*\* are live but \*\*unlisted\*\* \(visibility `unlisted` — NOT deleted\)",
         r"\*\*1\*\* is \*\*relocated\*\* out of the product SDK \(visibility `internal`\)",
         r"\*\*0\*\* are \*\*contested\*\* \(the docs name conflicting destinations\)",
         r"\*\*2\*\* have no destination",
-        r"only \*\*12\*\* of them exist on `TortoiseSDK` today",
-        r"\*\*28\*\* are Phase 2 work",
+        r"only \*\*13\*\* of them exist on `TortoiseSDK` today",
+        r"\*\*27\*\* are Phase 2 work",
     ):
         assert re.search(pattern, text), f"the headline no longer says {pattern!r}"
 
@@ -1610,11 +1614,11 @@ def test_the_unread_cells_and_the_row_ordinals_are_pinned() -> None:
     text = DOC.read_text(encoding="utf-8")
     part_a = text.split("## Part A")[1].split("## Part B")[0]
     ordinals = [int(m) for m in re.findall(r"^\| (\d+) \|", part_a, re.M)]
-    assert ordinals == list(range(1, 125)), (
-        f"Part A's row ordinals are {ordinals[:5]}…{ordinals[-2:]}, expected 1..124"
+    assert ordinals == list(range(1, 126)), (
+        f"Part A's row ordinals are {ordinals[:5]}…{ordinals[-2:]}, expected 1..125"
     )
     c1 = text.split("### C1")[1].split("### C2")[0]
-    assert c1.count("| no `def` on `TortoiseSDK` today |") == 28, (
+    assert c1.count("| no `def` on `TortoiseSDK` today |") == 27, (
         "C1's status column no longer repeats its one true statement on all 28 rows"
     )
     c4 = text.split("### C4")[1].split("### C5")[0]
@@ -1632,9 +1636,9 @@ def test_the_unread_cells_and_the_row_ordinals_are_pinned() -> None:
 
     rows = part_a_rows()
     # The old flat enum is gone: a row is now classified by its AXES, so these counts are
-    # read off lifecycle/visibility/delete rather than a single token. The six UNCHANGED
+    # read off lifecycle/visibility/delete rather than a single token. The UNCHANGED
     # rows carry their own name as the target (they are already on the target surface).
-    assert sum(1 for r in rows if r["target"] == r["name"]) == 12
+    assert sum(1 for r in rows if r["target"] == r["name"]) == 13
     assert sum(1 for r in rows if r["lifecycle"] == "removed"
                and r["delete"] == "delete") == 14
     assert sum(1 for r in rows if r["visibility"] == "unlisted") == 0
@@ -1693,7 +1697,7 @@ def test_group_column_matches_the_canonical_inventory() -> None:
 
 
 def test_part_b_counts_match_the_rows_they_list() -> None:
-    """Part B's counts must equal the members it lists, and the total must be 124."""
+    """Part B's counts must equal the members it lists, and the total must be 125."""
     rows = []
     total = None
     for line in _section("Part B — destination counts").splitlines():
@@ -1711,10 +1715,10 @@ def test_part_b_counts_match_the_rows_they_list() -> None:
         rows.append((dest.strip("`"), re.findall(r"`([a-z_][a-z0-9_]*)`", names),
                      int(count)))
     assert rows, "parsed no Part B rows"
-    assert total == 124, f"Part B's total row says {total}, expected 124"
+    assert total == 125, f"Part B's total row says {total}, expected 125"
     bad = [(d, len(ms), c) for d, ms, c in rows if len(ms) != c]
     assert not bad, f"Part B counts disagree with the members listed: {bad}"
-    assert sum(c for _, _, c in rows) == 124
+    assert sum(c for _, _, c in rows) == 125
 
     by_target: dict[str, set[str]] = {}
     for r in part_a_rows():
@@ -1754,7 +1758,7 @@ def test_part_c1_lists_exactly_the_targets_with_no_def() -> None:
     Expected values are recomputed here from the beta doc + a fresh AST walk.
     """
     expected = set(targets_independently()) - set(public_methods_independently())
-    assert len(expected) == 28
+    assert len(expected) == 27
     listed = set(_first_column(_section("C1 — target methods with no `def` on `TortoiseSDK`")))
     assert listed == expected, (
         "Part C1 does not list exactly the target methods with no `def`.\n"
@@ -2509,9 +2513,9 @@ def test_legend_structural_prose_and_reproduce_block_are_read() -> None:
             "drift") in doc
     # The structural reconciliation must name its 32 groups and 123 members, and say
     # how `backfill_v25` (the Archived-table member) reconciles to the 124-method surface.
-    assert "partitions the surface into **32 groups** over **123** named members" in doc
+    assert "partitions the surface into **32 groups** over **124** named members" in doc
     assert "`backfill_v25` is in its Archived table instead" in doc
-    assert "124 = the 124-method surface" in doc
+    assert "125 = the 125-method surface" in doc
 
 
 def test_table_header_rows_are_read() -> None:

@@ -164,6 +164,8 @@ from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
     event_retention_interval,
     graph_offload_timeout_s,
     heartbeat_record,
+    load_persisted_loop_block,  # #12477: the wedge's evidence outlives the exit
+    loop_block_report,
     loop_heartbeat_info,
     loop_heartbeat_task,
     note_heartbeat_task,
@@ -174,7 +176,11 @@ from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
     record_telemetry_drop,  # #4095 allowlist-drop counter (the /metrics seam)
     run_control_plane_call,
     run_on_daemon_worker,
+    set_cold_start_source,  # #12477: the warming-machine carve-out, both arms
+    set_dataplane_verdict_source,  # #12477: the 9090 check's data-plane term
+    set_served_progress_source,  # #12477: …and its served-request counter
     start_health_listener,
+    start_loop_block_sampler,
     start_stall_watchdog,
     workload_enter,
     workload_exit,
@@ -2003,6 +2009,240 @@ async def _first_contact_prewarm() -> None:
         _logger.warning("control plane: pre-warm not run: %s", exc)
 
 
+def _health_probe_stale_after_s() -> float:
+    """The liveness probe's own staleness window (seconds).
+
+    Read off the coordinator rather than restated, so the verdict flips exactly
+    when ``GET /health`` would start reporting ``probe result stale`` — one
+    number, two surfaces.
+    """
+    return float(getattr(_HEALTH_PROBE, "_stale_after", 30.0))
+
+
+#: #12477 (review round 11): the DB-probe REFRESHER never started. Recorded
+#: where the failure happens (`_lifespan`'s `except`), because the verdict reader
+#: cannot otherwise tell "boot, nothing yet" from "the task that keeps this
+#: evidence fresh does not exist" — and the second must not report green forever.
+_HEALTH_PROBE_START_FAILED = False
+
+#: #12477 (review round 12): how long a process may be up with NO probe result
+#: before "nothing yet" becomes "nothing is ever coming". A LIFESPAN that fails,
+#: a task cancelled by a re-entered lifespan, or a probe that never gets its
+#: turn all leave `in_flight: False, result_age_s: None`, which the `in_flight`
+#: arm above cannot see and the start-failure flag does not cover — measured: a
+#: reset coordinator beside a FRESH heartbeat reads `unknown` -> `200 reasons=[]`
+#: FOREVER, i.e. one of the three claimed terms silently inert.
+#: The floor is the stale window times four, itself floored at 120 s: a cold start
+#: must never red the deploy gate, and this listener is only reachable once
+#: startup has finished, by which point the refresher has had many intervals.
+#: ⛔ THE NAME IS DELIBERATELY NOT `_PROCESS_STARTED_AT`: that global already
+#: exists 6,000 lines below as the ISO STRING `_build_identity()` publishes
+#: (`:8062`), and it is assigned AFTER this one at import — so a float under that
+#: name was silently replaced by the string and every read raised `TypeError`,
+#: which the verdict reader turns into `failed` (`http` 503) in exactly the state
+#: that must be `unknown` (measured: the real listener answering
+#: `503 data-plane-failed` over a healthy, freshly booted process). A second name
+#: cannot collide, and `test_the_boot_clock_is_a_float_and_not_the_identity_string`
+#: pins the type so a future rename cannot bring the collision back.
+_PROCESS_BOOT_MONOTONIC = time.monotonic()
+
+
+def _health_probe_never_produced_bound_s() -> float:
+    """The uptime past which "no probe result yet" is a FAILURE (seconds)."""
+    try:
+        return max(120.0, 4.0 * _health_probe_stale_after_s())
+    except Exception:  # a resolver must never raise into a verdict
+        return 120.0
+
+
+
+def _arm_health_probe_refresher(app) -> None:
+    """Arm the DB-probe refresher, recording whether it started (#12477).
+
+    A helper (rather than inlined in `_lifespan`) so the flag's LIFECYCLE is
+    testable without booting the whole app: a lifespan may legally run more than
+    once in one process, so a failure latched on one attempt must be CLEARED by
+    a later success — otherwise a single transient `create_task` failure pins
+    `data-plane-failed` for the life of the process, with no in-process recovery.
+    The same rule `_stop_liveness` applies to the three registered readers.
+    """
+    global _HEALTH_PROBE_START_FAILED
+    try:
+        app.state._health_probe_task = asyncio.get_event_loop().create_task(
+            _health_probe_loop())
+        _HEALTH_PROBE_START_FAILED = False
+    except Exception as exc:
+        _logger.warning("health probe refresher not started: %s", exc)
+        _HEALTH_PROBE_START_FAILED = True
+
+
+def _liveness_dataplane_verdict() -> dict:
+    """The 9090 check's data-plane term, read from MEMORY only (#12477).
+
+    Registered with ``monitoring.set_dataplane_verdict_source`` at startup so
+    the ``/healthz`` listener can report whether the data plane answers without
+    importing this module, opening a socket, or touching the event loop — it may
+    be called from the listener's own thread while the app is wedged, which is
+    precisely when any of those would make the liveness signal a second victim.
+
+    The three states, and why they differ:
+
+    * ``healthy`` — a COMPLETED probe result, younger than its stale window,
+      says the DB answers. The age check is what makes this honest: the
+      coordinator's last-known-good is served for ``stale_after`` after the
+      plane dies, and a verdict that cannot tell "answers now" from "answered
+      before the outage" is the fossil this whole issue is about.
+    * ``failed`` — a fresh result that says NOT ok (the #1381/#2850 shape: a
+      stopped FalkorDB), or a result that is stale because the refresher itself
+      stopped. "Unknown for too long" is a failure of the DATA PLANE as far as
+      the door is concerned, and it is the shape a 600s wedge produces: the
+      refresher task is on the loop, so a blocked loop stops refreshing. Two
+      never-produced shapes are failures for the same reason: a probe that is
+      IN FLIGHT and has been for longer than the stale window, and a refresher
+      task that never STARTED at all (`probe-refresher-never-started`).
+    * ``unknown`` — no result at all yet, and a live probe is the reason (a few
+      seconds after boot). NOT a failure: a check that is red during every cold
+      start teaches operators to ignore it, and the loop-stale term already
+      covers a boot that never gets going. This state is only reachable while
+      something is actually running that can produce the missing result, or
+      within ``_health_probe_never_produced_bound_s()`` of process start —
+      past that bound, nothing-produced is a FAILURE.
+    """
+    try:
+        # ⛔ ``peek()``, NOT ``snapshot()`` (#12477): snapshot() self-heals by
+        # starting a probe when the last result is stale, and this reader is
+        # called BY the platform check every 15 s. Using it here would let the
+        # check refresh its own evidence — a wedged loop would read ``healthy``
+        # precisely because the check kept asking, which is the circularity
+        # #10892 recorded as an OVERRIDES decision against this shape.
+        snap = _HEALTH_PROBE.peek()
+        meta = _HEALTH_PROBE.info()
+    except Exception as exc:
+        return {"state": "failed",
+                "detail": {"reason": "probe-state-unreadable"},
+                "error": f"{type(exc).__name__}: {exc}"[:200]}
+    age = meta.get("result_age_s")
+    in_flight = bool(meta.get("in_flight"))
+    in_flight_s = meta.get("in_flight_s")
+    if age is None:
+        # "no result YET" is honest for a few seconds after boot and a FAILURE
+        # forever after: a probe that never completes must not leave the check
+        # green indefinitely (the `in_flight`-true-forever fail-open). The bound
+        # is the same stale window the fresh-result path uses.
+        #
+        # ⛔ AND THE SAME APPLIES WHEN NO PROBE IS RUNNING AT ALL (#12477 review
+        # round 11): the refresher task is what keeps this evidence fresh, and its
+        # creation is wrapped in a `try/except` that logs and continues. Without
+        # this branch, a process whose refresher never started reads `unknown`
+        # (green) FOREVER — one of the three terms the check claims to fail on
+        # would be silently inert, which is the defect class this PR exists for.
+        # The flag is set at the point of failure, so this is evidence rather than
+        # a boot-timing guess.
+        if _HEALTH_PROBE_START_FAILED:
+            return {"state": "failed",
+                    "detail": {"reason": "probe-refresher-never-started",
+                               "in_flight": in_flight},
+                    "error": None}
+        if in_flight and in_flight_s is not None and \
+                float(in_flight_s) > _health_probe_stale_after_s():
+            return {"state": "failed",
+                    "detail": {"reason": "probe-never-produced-a-result",
+                               "in_flight_s": in_flight_s},
+                    "error": None}
+        # ⛔ AND NOTHING-IS-RUNNING IS THE THIRD NEVER-PRODUCED SHAPE (round 12).
+        # `in_flight: False` with no result is what a failed/cancelled/never-
+        # scheduled refresher looks like, and without an uptime bound it is
+        # indistinguishable from "boot, a few seconds in" — forever. Measured: a
+        # reset coordinator beside a FRESH heartbeat answered 200 with
+        # `reasons: []`, one of the three claimed terms silently inert. The
+        # bound is generous on purpose (four stale windows, floored at 120 s) so
+        # a genuine cold start never reds the deploy gate.
+        uptime_s = max(0.0, time.monotonic() - float(_PROCESS_BOOT_MONOTONIC))
+        if uptime_s > _health_probe_never_produced_bound_s():
+            return {"state": "failed",
+                    "detail": {"reason": "probe-never-produced-a-result",
+                               "in_flight": False,
+                               "in_flight_s": None,
+                               "uptime_s": round(uptime_s, 1)},
+                    "error": None}
+        return {"state": "unknown",
+                "detail": {"reason": "no-probe-result-yet",
+                           "in_flight": in_flight,
+                           "in_flight_s": in_flight_s}, "error": None}
+    if age > _health_probe_stale_after_s():
+        return {"state": "failed",
+                "detail": {"reason": "probe-result-stale",
+                           "result_age_s": age,
+                           "in_flight": in_flight,
+                           "last_error": (snap or {}).get("error")},
+                "error": None}
+    if snap.get("ok") is not True:
+        return {"state": "failed",
+                "detail": {"reason": "probe-reports-not-ok",
+                           "result_age_s": age,
+                           "latency_ms": (snap or {}).get("latency_ms"),
+                           "last_error": (snap or {}).get("error")},
+                "error": None}
+    return {"state": "healthy",
+            "detail": {"result_age_s": age,
+                       "latency_ms": snap.get("latency_ms")},
+            "error": None}
+
+
+def _last_plane_serve_age_s() -> float | None:
+    """Age of the last data-plane request this process ANSWERED (#12477).
+
+    ``None`` means "this process has answered no such request yet" — a fact the
+    verdict treats as NO EVIDENCE OF PROGRESS, never as health. Zero I/O, no
+    lock (one float store, one float read; a torn read is impossible for a
+    CPython float attribute and the value is only ever compared against a
+    bound), so it is safe on the liveness listener's thread while the app is
+    wedged.
+    """
+    at = _LAST_PLANE_SERVED_AT
+    if at is None:
+        return None
+    try:
+        age = time.monotonic() - at
+    except Exception:
+        return None
+    return round(max(0.0, age), 3) if math.isfinite(age) else None
+
+
+def _liveness_served_progress() -> dict:
+    """The `/liveness` served-request counter, for the 9090 check (#12477).
+
+    #10892 recorded that a liveness answer must be evidence that the loop RAN,
+    not a gauge the loop writes — and its instrument for that is the
+    served-request counter below. The Fly check reads the same counter here so
+    the two arms cannot disagree, and so the wedge term can require a missing
+    SERVE rather than trusting a missing tick on its own.
+
+    Zero I/O, and the lock is acquired with a short timeout: this runs on the
+    liveness listener's thread while the app may be wedged, and a listener that
+    blocks on the app's lock has become a second victim of the outage it exists
+    to report. A lock we cannot take inside 50 ms is reported as UNMEASURED
+    (``last_served_age_s: None``), which the verdict treats as no evidence of
+    progress — never as health.
+    """
+    got = _LIVENESS_SERVED_LOCK.acquire(timeout=0.05)
+    try:
+        if not got:
+            return {"last_served_age_s": None,
+                    "last_plane_serve_age_s": _last_plane_serve_age_s(),
+                    "served": None,
+                    "error": "served counter lock busy"}
+        last = _LIVENESS_LAST_SERVED_AT
+        served = _LIVENESS_SERVED_COUNT
+    finally:
+        if got:
+            _LIVENESS_SERVED_LOCK.release()
+    return {"last_served_age_s": (None if last is None
+                                  else round(max(0.0, time.monotonic() - last), 3)),
+            "last_plane_serve_age_s": _last_plane_serve_age_s(),
+            "served": served, "error": None}
+
+
 async def _health_probe_loop() -> None:
     """Keep ``_HEALTH_PROBE`` warm, entirely off the request path (#2850).
 
@@ -2169,7 +2409,7 @@ def _sweep_expired_invitations() -> None:
     ``invitation_mint`` now retires the (org, email) row it is about to replace
     (#8089), which fixes the BLOCKING path on its own. This sweep is the other
     half: it materialises the terminal state for every other reader (the owner
-    pending list, the Pro seat count, the accepted/expired split) and it keeps
+    pending list, the Builder seat count, the accepted/expired split) and it keeps
     the terminal-state backlog from growing, which is the operator-visible
     indicator. Scheduled, not operator-run — the same seam as the sibling
     sweeps: armed by ``_run_boot_sweeps`` at boot and by
@@ -2514,6 +2754,14 @@ def _start_liveness(app) -> None:
     prev_stop = getattr(app.state, "_loop_watchdog_stop", None)
     if prev_stop is not None:
         prev_stop.set()
+    # #12477 review: the loop-block sampler is disarmed the same way. Without
+    # this the attribute is overwritten and the OLD sampler polls forever — two
+    # samplers after one in-process restart, so every wedge is captured twice
+    # (duplicate episodes, duplicate log lines, duplicate record appends) plus a
+    # leaked daemon thread per restart.
+    prev_block_stop = getattr(app.state, "_loop_block_sampler_stop", None)
+    if prev_block_stop is not None:
+        prev_block_stop.set()
     for attr in _LIVENESS_TASK_ATTRS:
         prev = getattr(app.state, attr, None)
         if prev is not None:
@@ -2545,6 +2793,51 @@ def _start_liveness(app) -> None:
     # (policy `on-failure`) to turn the non-zero exit into a RESTART.
     app.state._loop_watchdog = start_stall_watchdog(
         stop_event=app.state._loop_watchdog_stop)
+    # ── #12477: the loop-block EVIDENCE channel ────────────────────────────
+    # Armed here, AFTER the ceiling, and deliberately independent of it: the
+    # ceiling's job is to END a wedge (and it takes the stack with it), while
+    # this one's job is to say WHAT blocked the loop and leave a record that
+    # outlives the `os._exit`. Two threads because they answer two questions;
+    # folding the capture into the watchdog would mean the evidence exists only
+    # on deployments that armed a destructive ceiling.
+    #
+    # `loop_thread_ident` defaults to THIS thread's ident and this function runs
+    # ON the loop (called from the startup half of `_lifespan`), so the sampler
+    # observes the right thread without the loop having to be queried — which
+    # would be impossible precisely when it is blocked.
+    #
+    # The persisted record is loaded FIRST so `/health` reports the episode that
+    # killed the PREVIOUS process: measured 2026-11-13 (tortoise#12477), a 600s
+    # wedge was replaced by the ceiling and left no artifact at all, so the cause
+    # was unobtainable from outside.
+    with suppress(Exception):
+        load_persisted_loop_block()
+    app.state._loop_block_sampler_stop = threading.Event()
+    app.state._loop_block_sampler = start_loop_block_sampler(
+        loop_thread_ident=threading.get_ident(),
+        stop_event=app.state._loop_block_sampler_stop)
+    # ── #12477: the data-plane verdict the 9090 listener reports ───────────
+    # `/healthz` runs on its OWN thread and must not import this module, so the
+    # app registers a zero-I/O reader here. It reads the SAME coordinator
+    # `GET /health` reads (`_HEALTH_PROBE`), so the two surfaces cannot disagree
+    # about whether the data plane is answering.
+    set_dataplane_verdict_source(_liveness_dataplane_verdict)
+    # #12477: …and the SERVED-REQUEST counter, so the wedge term requires a
+    # missing SERVE and not merely a missing tick (#10892's instrument, read by
+    # both arms).
+    set_served_progress_source(_liveness_served_progress)
+    # #12477: …and the COLD-START predicate, so a warming machine's refusals stay
+    # out of the verdict on BOTH arms. Registered here (not called from
+    # `mcp_server`) because the MCP dispatch seam stamps its breach through
+    # `monitoring.record_wait_bound_breach`, which consults this — round 9
+    # measured the MCP arm red on a healthy warming box while the REST arm was
+    # green at the same instant.
+    set_cold_start_source(_embedder_load_in_flight)
+    # …and `_stop_liveness` CLEARS all three. Without that they survive every
+    # TestClient restart inside one pytest process: measured (#12477 review round
+    # 10), after a boot+shutdown all three readers were still registered, so a
+    # later test that records a breach while the embedder lock is held had it
+    # silently dropped — the "green by ordering luck" class again.
 
 
 async def _stop_liveness(app) -> None:
@@ -2564,9 +2857,25 @@ async def _stop_liveness(app) -> None:
     wait is prompt — cancellation is thrown into the awaiting coroutine at its
     ``await`` point, so it does not wait for an in-flight ``to_thread`` worker.
     """
+    # ⛔ THE REGISTERED READERS DIE WITH THE APP. `_start_liveness` registers three
+    # zero-I/O readers on `monitoring`; leaving them behind means the NEXT boot in
+    # the same process (every TestClient restart) inherits the previous app's
+    # closures — measured (#12477 review round 10): after boot+shutdown all three
+    # were still registered, and a test that recorded a breach while the embedder
+    # lock was held had it silently DROPPED by the stale cold-start predicate.
+    for _clear in (set_cold_start_source, set_dataplane_verdict_source,
+                   set_served_progress_source):
+        with contextlib.suppress(Exception):
+            _clear(None)
     stop = getattr(app.state, "_loop_watchdog_stop", None)
     if stop is not None:
         stop.set()
+    # #12477: the loop-block sampler must stop with the heartbeat it watches —
+    # shutdown makes the heartbeat legitimately stale, and a sampler left armed
+    # would file a "blocked loop" capture for a clean drain.
+    block_stop = getattr(app.state, "_loop_block_sampler_stop", None)
+    if block_stop is not None:
+        block_stop.set()
     pending = [t for t in (getattr(app.state, attr, None)
                            for attr in _LIVENESS_TASK_ATTRS) if t is not None]
     for task in pending:
@@ -3076,11 +3385,7 @@ async def _lifespan(app):
 
         # ── #2850: the DB probe refresher — keeps /health's ``db`` field
         # honest without the request path doing any I/O at all.
-        try:
-            app.state._health_probe_task = asyncio.get_event_loop().create_task(
-                _health_probe_loop())
-        except Exception as exc:
-            _logger.warning("health probe refresher not started: %s", exc)
+        _arm_health_probe_refresher(app)
         yield
 
         # ── shutdown: disarm the watchdog before the heartbeat task is
@@ -5218,6 +5523,417 @@ _pending_wait_bound_telemetry: set = set()
 #: the latency this unit exists to bound.
 
 
+#: #12477 review round 4: routes whose refusal is NOT evidence, split in two.
+#:
+#: The refusal SHARE needs a denominator of traffic that is *supposed* to be
+#: answered inside the transport bound. Two classes of request are not, and both
+#: were measured corrupting the verdict in opposite directions before this
+#: partition existed:
+#:
+#:   * CONTROL-plane polls (`/health`, `/liveness`, `/metrics`, …). These are the
+#:     INSTRUMENT's own traffic, and a dashboard or operator can drive far more of
+#:     them than data requests. Measured end-to-end: 12 served `/health` polls +
+#:     10 refused `POST /v1/search` gave `share 0.455 -> 200` while EVERY data
+#:     request was refused — a fail-open, in the exact class this issue is about.
+#:   * DOCUMENTED LONG routes — handlers that deliberately await a WHOLE
+#:     restore / dump / rebuild, so exceeding a 10 s bound is normal and the
+#:     bound's own refusal is the product working: import (64 MiB),
+#:     `sessions/commit` (8 MiB), `packs/manifests`, the stripe webhook,
+#:     `organizations/{id}/export` (a whole graph snapshot), the backup
+#:     create/restore pair, `dream`, `graphs/{id}/promote`, and the
+#:     `/internal/{demo,starter-seed}` builders. Measured: five legitimate
+#:     imports + five other requests in a window gave `share 0.5 -> 503`, i.e. a
+#:     healthy deployment failing its own deploy gate.
+#:
+#: ⛔ THE `long` LIST IS NOT THE BODY-CAP LIST, and an earlier draft of this
+#: comment claimed it was. `_APP_BODY_CAP_EXEMPT_REGEXES` is a *size* exemption
+#: list (13 of its 17 entries are small, fast routes) and does not contain
+#: export/backup/restore AT ALL — so "same shapes as the body caps" made an
+#: incomplete list look derived, and export/backup refusals then redded the gate
+#: (round 5 measured it). The list below is the union of the two enumerable
+#: facts: whole-artifact transfers and whole-graph operations.
+#:
+#: So the term is computed ONLY from requests that are neither. Everything else
+#: is stamped — an allowlist would UNDERCOUNT the denominator on a route it does
+#: not know, and an undercount inflates the share, which is the fail-closed
+#: direction for a false red but the wrong one here: a gate that reds a healthy
+#: deploy for an admin route it has never heard of is the failure this repo has
+#: recorded twice.
+_WAIT_BOUND_CONTROL_PREFIXES = (
+    "/health", "/liveness", "/livez", "/readyz", "/healthz", "/metrics",
+    "/v1/version", "/v1/build", "/v1/status", "/openapi.json", "/docs",
+    "/redoc", "/favicon.ico",
+)
+
+#: ⛔ THE CONTROL PREFIXES MATCH BY PREFIX, AND TWO OF THOSE ROUTES DO I/O.
+#: `/health/ready` runs `_READY_PROBE` AND `_CONTROL_PLANE_PROBE` (a DB round
+#: trip) and `/health/security` does its own store read — so a merely SLOW store
+#: red'd the check through an arm whose entire justification is "a healthy box
+#: cannot fail to run a no-I/O poll in 10 s", and independently of
+#: `data-plane-failed`'s own staleness window (#12477 review round 6). They are
+#: DATA-plane evidence and are classified as such; the control arm is limited to
+#: the polls that touch nothing outside the process.
+_WAIT_BOUND_CONTROL_WITH_IO = frozenset({"/health/ready", "/health/security"})
+#: Compiled at import: the refusal path is on every request, so the test has to
+#: be cheap. See the note above for why this is NOT the body-cap list.
+_WAIT_BOUND_LONG_ROUTES = (
+    # whole-artifact transfers (bounded only by a body cap, so the handler
+    # awaits the whole restore/commit)
+    re.compile(r"^/v1/organizations/[^/]+/import/?$"),
+    re.compile(r"^/v1/sessions/commit/?$"),
+    re.compile(r"^/v1/packs/manifests/?$"),
+    re.compile(r"^/webhooks/stripe/?$"),
+    # whole-graph operations (a full dump, or a whole-graph rebuild)
+    re.compile(r"^/v1/organizations/[^/]+/export/?$"),
+    re.compile(r"^/(v1/)?backups(/restore)?/?$"),
+    re.compile(r"^/v1/dream/?$"),
+    re.compile(r"^/v1/graphs/[^/]+/promote/?$"),
+    # operator surfaces that publish their own patience and are NOT in
+    # `_TRANSPORT_WAIT_BOUND_EXEMPT_PREFIX` (which names `/v1/internal/` only)
+    # a restore that waits up to 300 s on the per-org sweep lock BY DESIGN
+    # (`restore_trash_graph`: `lock.acquire(True, 300)`), whose own answer is
+    # `503 Retry-After: 300` — the product telling the caller to retry, not the
+    # plane failing
+    re.compile(r"^/v1/graphs/trash/[^/]+/restore/?$"),
+    re.compile(r"^/internal/(demo|starter-seed)/?$"),
+    # ⛔ ROUTES WHOSE OWN OUTBOUND TIMEOUT EXCEEDS THE BOUND: their refusal is a
+    # statement about a THIRD PARTY, not about the data plane (signup/claim wait
+    # up to 15 s on Supabase, the identity resend on the mailer, the webhook on
+    # GitHub). A slow upstream must not fail an unrelated deploy, and the
+    # data-plane verdict is the only thing this check may speak about.
+    re.compile(r"^/v1/(agent/)?(signup|recover)/?$"),
+    re.compile(r"^/v1/signup/email/?$"),
+    re.compile(r"^/v1/claim(/email)?/?$"),
+    re.compile(r"^/v1/user/identity(/[^/]+)?/?$"),
+    # ⛔ THE WHOLE IDENTITY FAMILY IS THE SAME CLASS (#12477 review round 15).
+    # All five routes go through `_identity_admin_user` → `_gotrue_admin_get_user`
+    # (`timeout=15.0`): `/v1/user/identity`, `/link-intent`, `/link-commit`,
+    # `/unlink`, `/resend-confirmation`. Only two were listed, so a refused
+    # `GET /v1/user/identity` counted as DATA-plane evidence — measured: five
+    # refused reads gave `share 1.0 -> refusing True` and the real listener
+    # answered `503 ['requests-refused']` over a healthy plane. Listed as a
+    # FAMILY so the next member cannot be forgotten one route at a time.
+    # ⛔ `/v1/session/login` IS THE SAME CLASS, and it was the one that got
+    # missed (#12477 review round 14). `_session_login_exchange` awaits THREE
+    # GoTrue calls — `_gotrue_admin_get_user` and `_gotrue_admin_mint_session`,
+    # each `timeout=15.0` — so up to ~45 s of third-party waiting sits inside a
+    # 10 s seam bound, and the route is in `SKIP_AUTH`, so ANY caller reaches it
+    # with no credential. Measured: five refused logins gave
+    # `share 1.0 -> refusing True` and the real 9090 listener answered
+    # `503 ['requests-refused']` — a healthy deploy failing its own gate because
+    # GoTrue was slow. Its siblings `/v1/signup/email`, `/v1/claim` and the
+    # identity routes were already here; this is the fourth member of one family.
+    re.compile(r"^/v1/session/login/?$"),
+    # `GitHubIndexer._get_client` is `httpx.AsyncClient(timeout=20)` with bounded
+    # retry-with-backoff — a designed ceiling above the bound at a moderate
+    # upstream hiccup, for the same reason `/webhooks/github` is above
+    re.compile(r"^/v1/onboarding/github/(repos|branches|status|callback|disconnect)/?$"),
+    # whole-repository indexing walks, the same class as `import`/`export`
+    re.compile(r"^/v1/index/github(/re-poll)?/?$"),
+    # ⛔ THE OAUTH CONTROL PLANE IS NOT THE DATA PLANE, and its waits are a THIRD
+    # PARTY's: the grant is deliberately awaited WITHOUT a seam bound
+    # (`_oauth_token` — "its own httpx phase timeouts bound it"), and those
+    # phase timeouts SUM above the transport bound (`cimd.FETCH_MAX_S = 6.0`,
+    # `supabase_control` 5 s per phase). Five refused `/oauth/token` measured
+    # `share 1.0 -> 503` with no other traffic (#12477 review round 9). Its
+    # SERVING is already excluded from the denominator, so leaving the refusal in
+    # the numerator was one-sided.
+    re.compile(r"^/oauth/(token|authorize|consent|revoke|register)/?.*$"),
+    re.compile(r"^/register/?$"),
+    # ⛔ A THIRD PARTY'S ROUTE, AND UNAUTHENTICATED. On the hosted deployment
+    # `/v1/invites/info` reads PostgREST (`_hosted_invite`), not the graph, so its
+    # refusal is not a data-plane statement — and it is reachable without a
+    # credential, which is what makes it matter: 6 requests per 120 s turned a
+    # fully refusing plane into `share 0.4545 -> 200` (#12477 review round 10),
+    # one IP, no key. Out of BOTH sides (a serving-only exclusion would leave the
+    # one-sidedness round 9 fixed for `/oauth/*`). ⚠️ Recorded trade: on SELFHOST
+    # this route reads the FalkorDB registry, so this exclusion gives up a little
+    # evidence there; 6 unauthenticated requests defeating the check is the worse
+    # of the two, and `data-plane-failed` still covers a dead store.
+    re.compile(r"^/v1/invites/info/?$"),
+    re.compile(r"^/webhooks/stripe/?$"),
+)
+
+
+#: Statuses that prove the DATA PLANE never answered, so the request is not
+#: demand the share should divide by: auth/rate-limit gates reject before any
+#: data work, and 405/412 are client errors about the route. ⚠️ 404 is NOT here:
+#: "point not found" IS the plane answering.
+_WAIT_BOUND_NON_DATA_STATUSES = frozenset({401, 403, 405, 407, 412, 422, 429})
+
+
+def _embedder_load_in_flight() -> bool:
+    """True while a one-time embedder load (foreground OR pre-warm) is running.
+
+    ⛔ THE COLD-START CARVE-OUT IS NOT POLITENESS, IT IS A DEPLOY GATE. The
+    background pre-warm (``_prewarm_embeddings``, on by default) holds
+    ``EmbeddingModel._lock`` for the whole load (~57 s measured, 300 s cap), so
+    every concurrent request that needs the embedder is refused by a bound it was
+    never given a chance to meet — 1 attempt AND 1 breach each, and five in a
+    window is ``share 1.0`` ⇒ red on a machine that is merely warming. Fly's
+    ``grace_period`` is 180 s, the load can exceed it, and the red then stays for
+    the 120 s the window takes to age out — crossing the 5 min deploy allowance.
+    """
+    try:
+        from tortoise.embeddings import EmbeddingModel
+    except Exception:  # never a new failure mode
+        return False
+    try:
+        if EmbeddingModel.one_time_setup_in_progress():
+            return True
+        # ⛔ THE LOCK IS WHAT BLOCKS, so it is what to read. The hosted pre-warm
+        # runs `get()` inside `background_load()`, which deliberately SUPPRESSES
+        # the in-progress Event and never sets `_warm_up_thread` (only
+        # `start_warm_up` sets that) — so the two probes above worked only
+        # because `TortoiseSDK._get_proj()` happens to call `start_warm_up()`, an
+        # unrelated side effect. Measured on a real background load: predicate
+        # False while `_lock` WAS held and requests WERE blocking (#12477 review
+        # round 6). `_lock` is held for exactly the load, which is the window
+        # this carve-out exists for.
+        lock = getattr(EmbeddingModel, "_lock", None)
+        if lock is not None and getattr(lock, "locked", None) and lock.locked():
+            return True
+        thread = getattr(EmbeddingModel, "_warm_up_thread", None)
+        return bool(thread is not None and thread.is_alive())
+    except Exception:  # a state probe must never raise into the refusal path
+        return False
+
+
+def _windowed_breach(traffic_class: str) -> bool:
+    """Is THIS refusal evidence the plane is failing (#12477, rounds 4-5)?
+
+    ``data`` → yes, UNLESS the process is inside a one-time embedder load (see
+    :func:`_embedder_load_in_flight` — otherwise a cold start fails its own
+    deploy). ``long`` → no: the bound firing on a whole-graph operation is the
+    product working. ``control`` → no for the SHARE (its denominator is data
+    traffic), but the caller records it on its own arm, because a refused no-I/O
+    health poll cannot be produced by a healthy box.
+    """
+    if traffic_class != "data":
+        return False
+    return not _embedder_load_in_flight()
+
+
+#: Routes the app can SERVE WITHOUT THE PLANE, so a served request on one is not
+#: data-plane demand.
+#:
+#: ⛔ THIS IS NOT AN EXCLUSION LIST FOR THE REFUSAL SIDE. A refusal here is still
+#: evidence when the handler does reach the plane (`/health/ready` and
+#: `/health/security` are in the `data` class for exactly that reason), so the
+#: two predicates are independent: `_wait_bound_traffic_class` decides what a
+#: REFUSAL means, this decides whether a SERVING proves anything.
+#:
+#: Why the denominator needs it at all: counting every served request on a
+#: matched route let a client hold the check green over a fully refusing plane by
+#: fetching RFC 8414/9728 discovery metadata eight times (`share 0.467 -> 200`,
+#: measured on the real app) — with no attacker at all, since a platform polls
+#: `/health/ready` continuously. The first attempt to fix that (a LATENCY floor —
+#: count only served requests that spent >=10% of the bound in the app) was
+#: measured WRONG in round 8 and removed: because a refusal always stamps its own
+#: attempt, the share degenerated to `refusals / (refusals + slow_served)`, which
+#: reds a HEALTHY box at 5 refusals in 120 s — a design rate of ~2.1% reaches
+#: that on any busy minute — and left every MCP call (SSE starts before the tool
+#: dispatches, so it is served in ~12 ms) as a numerator with no denominator.
+#: The population rule that survives both measurements: a served request is
+#: demand when its route COULD have needed the plane.
+_WAIT_BOUND_NO_PLANE_PREFIXES = (
+    "/.well-known/",          # RFC 8414 / 9728 discovery — static by construction
+    "/oauth/",                # authorize + consent pages
+)
+
+#: Same idea, exact paths / shapes rather than prefixes.
+_WAIT_BOUND_NO_PLANE_ROUTES = (
+    re.compile(r"^/health/ready/?$"),           # a probe: served from the last probe result
+    re.compile(r"^/health/security/?$"),
+    # in-process only: `capability_catalog()` never touches the graph, and an
+    # index-job status is read out of the `_INDEX_JOBS` dict
+    re.compile(r"^/v1/capabilities/?$"),
+    re.compile(r"^/v1/index/[^/]+/[^/]+/?$"),
+)
+
+#: Path shapes whose SERVING proves nothing for ONE method only. `/mcp` is the
+#: case that matters: the metadata GET is answered from memory, while a POST
+#: there is a tool call (served through SSE, which starts before the tool
+#: dispatches — so it must count as demand or MCP refusals have no denominator).
+_WAIT_BOUND_NO_PLANE_METHODS_GET = frozenset({"/mcp"})
+
+#: `DELETE /mcp` ends a Streamable-HTTP SESSION: the vendored handler calls
+#: `terminate()` on its in-memory stream store. No store access, so no demand.
+_WAIT_BOUND_NO_PLANE_METHODS_DELETE = frozenset({"/mcp"})
+
+
+def _route_is_served_without_the_plane(route_path: str,
+                                       method: str | None = None) -> bool:
+    """True when a SERVED response on this path proves nothing about the plane.
+
+    Independent of `_wait_bound_traffic_class`: `control` and `long` are already
+    out of both sides, and this only narrows the SERVING side further.
+    """
+    path = route_path or ""
+    verb = (method or "GET").upper()
+    # ⛔ A CORS PREFLIGHT IS NEVER DEMAND, on any path. `CORSMiddleware` answers
+    # `OPTIONS` from configuration — before auth, before routing, no body,
+    # microseconds — and it is the cheapest request a browser can be made to send.
+    # Measured (#12477 review round 9): 8 x `OPTIONS /mcp` beside 7 refused
+    # `/v1/search` gave `attempts 15, share 0.4667`, and the real 9090 listener
+    # answered 200 with `reasons: []` over a fully refusing plane.
+    if verb == "OPTIONS":
+        return True
+    if verb == "GET" and "/" + path.strip("/") in _WAIT_BOUND_NO_PLANE_METHODS_GET:
+        return True
+    if verb == "DELETE" and "/" + path.strip("/") in _WAIT_BOUND_NO_PLANE_METHODS_DELETE:
+        return True
+    # a sub-path of the MCP mount that is not a POST to the root is not a tool
+    # call: `POST /mcp/<junk>` is a 404 from the sub-app
+    if verb == "POST" and path.startswith("/mcp") and "/" + path.strip("/") != "/mcp":
+        return True
+    if path.startswith(_WAIT_BOUND_NO_PLANE_PREFIXES):
+        return True
+    return any(pattern.search(path) for pattern in _WAIT_BOUND_NO_PLANE_ROUTES)
+
+
+def _exchange_reached_a_route(scope) -> bool:
+    """Did a ROUTE of this app handle the exchange?
+
+    A 404 from a path no route matched is a ROUTER miss, not the plane
+    answering, and counting it lets an unauthenticated scanner hold the verdict
+    green (#12477 review round 6). Starlette sets ``scope["endpoint"]`` once a
+    route matches — a mounted sub-app included — and leaves it unset on a miss,
+    so it is read AFTER the exchange.
+
+    An app that declares no routes at all (a synthetic ASGI callable, every test
+    double) cannot miss one, so the exchange counts: the gate's failure mode is
+    then "counts more demand", which lowers the share and keeps a real plane
+    refusal visible rather than hiding it.
+    """
+    if scope.get("endpoint") is not None:
+        return True
+    # ⛔ `/mcp` NEVER SHOWS AN ENDPOINT HERE, and not because nothing matched it:
+    # `McpPathCanonicalizerMiddleware` COPIES the scope (`scope = dict(scope)`)
+    # before rewriting it to `/mcp/`, so the router writes `endpoint` onto a dict
+    # this outermost layer never sees. Measured: `GET /mcp` -> 200 with
+    # `endpoint=None`, `GET /mcp/` -> 200 with an endpoint. `/mcp` is the
+    # canonical connector URL clients are given, so every real MCP call was
+    # invisible to the denominator while the dispatch seam counted its breaches —
+    # a healthy MCP-heavy deployment therefore read `share 1.0` and failed its
+    # own Fly check (#12477 review round 7). The mount always matches this
+    # surface; `_is_jsonrpc_surface` excludes the `/mcpfoo` sibling.
+    # ⛔ BUT ONLY A `POST` TO THE MOUNT ROOT IS A TOOL CALL. The first version of
+    # this escape returned True for EVERY method and every sub-path, so
+    # `OPTIONS /mcp` (CORS preflight), `DELETE /mcp` (in-memory session teardown)
+    # and `POST /mcp/<junk>` (a 404 from the sub-app) all became "demand" — the
+    # round-9 P0-1, measured as 8 free preflights turning 7 refusals into
+    # `share 0.4667 -> 200`. The `OPTIONS` / `DELETE` rules in
+    # `_route_is_served_without_the_plane` and this narrowing are three halves of
+    # one fix.
+    mcp_path = str(scope.get("path") or "")
+    if (_is_jsonrpc_surface(mcp_path)
+            and str(scope.get("method") or "").upper() == "POST"
+            and "/" + mcp_path.strip("/") == "/mcp"):
+        return True
+    return not getattr(scope.get("app"), "routes", None)
+
+
+#: #12477 (review round 11): monotonic instant this process last ANSWERED a
+#: request that had to reach the PLANE. Stamped at exactly the seam that decides
+#: an exchange is data-plane demand (`_count_wait_bound_attempt_if_served`), so a
+#: poll of a route the app answers from memory cannot refresh it.
+#:
+#: ⛔ WHY `_LIVENESS_LAST_SERVED_AT` IS NOT ENOUGH FOR THE WEDGE TERM, MEASURED:
+#: that stamp is written ONLY by the `/liveness` handler, so its age measures WHO
+#: POLLS `/liveness`, never whether the app is serving. The only production
+#: poller is `.github/scripts/availability-watchdog.sh` (`*/5` cron, header
+#: records ~15 min measured delivery), so the age exceeds `LOOP_STALE_AFTER`
+#: (90 s) almost always: the serve veto the runbook promises could not fire, and
+#: one unauthenticated `GET /liveness` per 89 s would have held it permanently
+#: open — a client-drivable gate, the class #12477 is about. A data-plane request
+#: this process ANSWERED is the evidence the docs claim.
+_LAST_PLANE_SERVED_AT: float | None = None
+
+
+def _count_wait_bound_attempt_if_served(traffic_class: str, surface: str,
+                                        status: int | None,
+                                        reached_route: bool = True,
+                                        demand_route: bool = True) -> None:
+    """Count ONE attempt when the exchange shows the plane was actually asked.
+
+    ⛔ THE DENOMINATOR IS DEMAND THAT REACHED THE PLANE, not "a socket accepted an
+    HTTP request". Stamping on the way IN lets any unauthenticated client hold the
+    check green: 40 fast 401s to `/v1/points` beside 7 refused `/v1/search`
+    measured ``share 0.149 -> 200`` over a refusing plane, and a public API is
+    scanned continuously, so that dilution is ordinary background noise rather
+    than a contrived attack (#12477 review round 5).
+    """
+    if traffic_class != "data" or status in _WAIT_BOUND_NON_DATA_STATUSES:
+        return
+    # ⛔ A ROUTER MISS IS NOT DEMAND THE PLANE SAW. A 404 from a path no route
+    # matched is indistinguishable BY STATUS from a route-level "point not
+    # found", and counting it lets an unauthenticated scanner hold the check
+    # green: 40 stray `GET /wp-login-*.php` beside 7 refused `/v1/search`
+    # measured `share 0.149 -> 200` over a fully refusing plane — the same
+    # fail-open the 401 filter closed, reached with no credential at all, and at
+    # no cost, since the bound itself rate-limits the refused calls (#12477
+    # review round 6).
+    if not reached_route:
+        return
+    # ⛔ AND ONLY A ROUTE THAT NEEDS THE PLANE IS DEMAND. A served `200` from a
+    # route the app answers from memory proves nothing about the plane, and
+    # counting it lets credential-less cheap traffic hold the check green over a
+    # fully refusing plane: 8 served `GET /.well-known/oauth-authorization-server`
+    # beside 7 refusals measured `share 0.467 -> 200` (#12477 review round 7).
+    # See `_WAIT_BOUND_NO_PLANE_ROUTES`.
+    if not demand_route:
+        return
+    # The SERVE stamp and the attempt counter are the same population by
+    # construction: both sit below every gate above, so neither can count a poll
+    # of a route that never needed the plane, a router miss, or a 401.
+    global _LAST_PLANE_SERVED_AT
+    _LAST_PLANE_SERVED_AT = time.monotonic()
+    try:
+        _monitoring.record_wait_bound_attempt(surface)
+    except Exception:  # measurement must never be a new failure mode
+        _logger.debug("wait-bound attempt count failed", exc_info=True)
+
+
+#: Control-plane routes that do **NO I/O**: `/health` (in-memory reads only),
+#: `/liveness` (one loop yield), `/v1/version`, `/v1/build`. Only THESE can feed
+#: the `control-refused` arm, because the arm's whole claim is "a healthy process
+#: cannot fail to run a handler this cheap". `/health/ready` and
+#: `/health/security` are deliberately NOT here — they perform a DB round trip by
+#: design, so their refusal is a data/DB signal (already covered by
+#: `data-plane-failed`) and counting it as a control refusal would red the check
+#: on a slow store, which is exactly the #338/#2850 false-red class.
+_WAIT_BOUND_CONTROL_NO_IO = (
+    "/liveness", "/healthz", "/livez", "/readyz", "/v1/version", "/v1/build",
+)
+
+
+def _control_refusal_proves_the_process_failed(route_path: str) -> bool:
+    """May a refusal of THIS control route feed the `control-refused` arm?"""
+    path = route_path or ""
+    if path == "/health" or path == "/health/":      # exact, NOT startswith
+        return True
+    return path.rstrip("/") in _WAIT_BOUND_CONTROL_NO_IO
+
+
+def _wait_bound_traffic_class(route_path: str) -> str:
+    """``"control"``, ``"long"`` or ``"data"`` — what a refusal here MEANS.
+
+    ``data`` is the only class whose refusal is evidence that the plane is
+    failing, so it is the only class in the refusal share's numerator or
+    denominator (#12477 review round 4).
+    """
+    path = route_path or ""
+    if path.rstrip("/") in _WAIT_BOUND_CONTROL_WITH_IO:
+        return "data"
+    if path.startswith(_WAIT_BOUND_CONTROL_PREFIXES):
+        return "control"
+    for pattern in _WAIT_BOUND_LONG_ROUTES:
+        if pattern.search(path):
+            return "long"
+    return "data"
+
+
 def _is_jsonrpc_surface(route_path: str) -> bool:
     """True for the mounted MCP app's route path: `/mcp` and every `/mcp/…`
     subpath (the app is mounted there). This agrees with the path canonicalizer
@@ -5439,9 +6155,36 @@ class WaitBoundMiddleware:
 
         response_started = False
         refused = False
+        attempt_counted = False
+
+        def _count_attempt_once() -> None:
+            """Count this request as demand exactly once.
+
+            Stamped at the TWO deterministic points where the exchange's fate is
+            known — the first `http.response.start` (the plane answered) and the
+            refusal (it did not) — never at a coroutine EXIT. An exit-path count
+            was measured wrong twice over (#12477 review rounds 5-6): it missed
+            four of the exits that reach the plane (a `task.done()` at the
+            deadline, a raising handler, a client cancellation, an already-
+            started stream), which inflated the share; and once those were
+            counted it DOUBLE-counted against the refusal path and could land
+            LATE (a cancellation delivered after the request ended), leaking one
+            sample into the next minute's window. `http.response.start` is
+            exactly once per exchange by ASGI contract, which is why it is the
+            seam.
+            """
+            nonlocal attempt_counted
+            if attempt_counted:
+                return
+            attempt_counted = True
+            _count_wait_bound_attempt_if_served(
+                traffic_class, surface, status_seen,
+                _exchange_reached_a_route(scope),
+                not _route_is_served_without_the_plane(route_path,
+                                                        scope.get("method")))
 
         async def _guarded_send(message):
-            nonlocal response_started
+            nonlocal response_started, status_seen
             if refused:
                 # The caller already has the refusal. An ASGI send after
                 # response.end is a protocol violation, so the abandoned
@@ -5449,9 +6192,32 @@ class WaitBoundMiddleware:
                 return
             if message.get("type") == "http.response.start":
                 response_started = True
+                status_seen = message.get("status")
+                _count_attempt_once()
             await send(message)
 
         t0 = time.monotonic()
+        # #12477: count the OFFERED TRAFFIC this bound applies to. The refusal
+        # verdict is a SHARE (refusals / attempts), and without a denominator it
+        # is a function of volume instead of a failure rate — which is how two
+        # earlier versions of that term were measured wrong (blind at 3.5
+        # refusals/min here, red on a HEALTHY box at 3.3 req/s there). Stamped at
+        # the same seam that decides the refusal, so numerator and denominator
+        # describe the same population: exempt routes returned above and are
+        # never counted on either side.
+        # ⛔ ONLY `data` TRAFFIC IS IN THE SHARE'S DENOMINATOR (round 4): the
+        # instrument's own polls and the documented long routes are not traffic
+        # whose refusal says the plane is failing — see
+        # `_wait_bound_traffic_class` for what each class did to the verdict
+        # when it was counted.
+        traffic_class = _wait_bound_traffic_class(route_path)
+        surface = (_monitoring.WAIT_BOUND_SURFACE_MCP
+                   if _is_jsonrpc_surface(route_path)
+                   else _monitoring.WAIT_BOUND_SURFACE_REST)
+        # The attempt is stamped on the way OUT (once the exchange has produced a
+        # status) and on the refusal path — never here on the way in: see
+        # `_count_wait_bound_attempt_if_served`.
+        status_seen: int | None = None
         # #3834 F1: stamp the TRANSPORT arrival so the MCP dispatch seam —
         # ``mcp_server._await_under_mcp_wait_bound``, which is what actually
         # bounds a tool call because Streamable-HTTP starts the SSE response
@@ -5494,9 +6260,10 @@ class WaitBoundMiddleware:
             # the MCP seam share ONE implementation — including the one-time
             # embedder-setup exemption (the bound times the WAITING, not the
             # SETTING UP).
-            return await _mcp_auth.await_under_wait_bound(
+            result = await _mcp_auth.await_under_wait_bound(
                 task, _mcp_auth._TRANSPORT_WAIT_BOUND_S, reference=t0,
                 owner=owner)
+            return result
         except asyncio.CancelledError:
             # The caller was cancelled (client disconnect, server shutdown).
             # Propagate the cancellation INTO the handler and await it: the
@@ -5598,10 +6365,21 @@ class WaitBoundMiddleware:
             state[_WAIT_BOUND_COUNTED_STATE] = True
         if counted_now:
             try:
+                # The CUMMULATIVE counter always counts (it is a lifetime
+                # observation, and `/metrics` republishes it); the WINDOW — the
+                # only thing a verdict is derived from — counts `data` traffic
+                # alone, so its numerator and denominator describe one
+                # population.
                 _monitoring.record_wait_bound_breach(
-                    _monitoring.WAIT_BOUND_SURFACE_MCP
-                    if _is_jsonrpc_surface(route_path)
-                    else _monitoring.WAIT_BOUND_SURFACE_REST)
+                    surface, windowed=_windowed_breach(traffic_class))
+                if traffic_class == "control" and (
+                        _control_refusal_proves_the_process_failed(route_path)):
+                    # Its own arm (#12477 round 5): out of the data share's
+                    # denominator, but a refused NO-I/O poll is evidence a
+                    # healthy box cannot produce. An I/O-coupled control route
+                    # (`/health/ready`) does NOT feed it — a slow store must not
+                    # be reported as a process that cannot run its own handler.
+                    _monitoring.record_wait_bound_control_breach()
             except Exception:
                 _logger.debug("wait-bound count failed", exc_info=True)
         # ⛔ THE COUNT IS EXACTLY-ONCE; THIS EMIT IS NOT, IN THE REVERSE ORDER.
@@ -5615,6 +6393,17 @@ class WaitBoundMiddleware:
         _emit_wait_bound_breach(org_id or "", safe_route_path,
                                 scope.get("method", ""),
                                 int((time.monotonic() - t0) * 1000))
+        # A refused request is demand that reached the plane — it belongs in the
+        # denominator of the share it is also the numerator of, or the ratio
+        # divides by a population that excludes its own failures.
+        # The refusal IS demand: count it once, on the same seam.
+        if not attempt_counted:
+            attempt_counted = True
+            try:
+                if traffic_class == "data":
+                    _monitoring.record_wait_bound_attempt(surface)
+            except Exception:  # measurement must never be a new failure mode
+                _logger.debug("wait-bound attempt count failed", exc_info=True)
         _logger.warning(
             "transport wait bound (%.0fs) exceeded: %s %s — refusing legibly",
             _mcp_auth._TRANSPORT_WAIT_BOUND_S, scope.get("method"), safe_route_path)
@@ -7116,9 +7905,62 @@ async def health():
         loop_age_ms = None
     watcher = _backup_watcher_health()
     record = _record_health()
+    try:
+        breaches = _monitoring.wait_bound_breach_counts()
+    except Exception as exc:  # a monitoring read must never 5xx
+        # SAME KEYS as the success arm — an error shape that carries a key the
+        # success shape does not is how a consumer binds to a field that only
+        # exists on the bad path (and here it would be the REMOVED `recent`).
+        breaches = {"total": None, "by_surface": None,
+                    "error": f"wait_bound_breaches unreadable: {type(exc).__name__}"}
+    # ── #12477: a REFUSED request is a failure observable NOW ─────────────
+    # The cumulative counter above is deliberately not folded into `status`
+    # (#10185/#10620: a total that never resets would pin a deployment degraded
+    # for the life of the process). A WINDOW is the distinction that makes the
+    # reading usable: a request the transport wait bound refused inside the
+    # recent window means the door is refusing clients at this moment.
+    #
+    # Measured 2026-11-13 (this issue): `wait_bound_breaches.total` at 8 with a
+    # live 504 on `POST /v1/agent/signup`, while this handler answered
+    # `status: "ok"` and the platform reported `2/2 checks passing` over 30-45s
+    # timeouts on every data request. That is the whole defect: green while the
+    # data plane is unusable.
+    # ⚠️ `status` IS NOT DERIVED FROM THIS. `#10185`/`#10620` recorded that a
+    # refusal counter must never pin the deployment degraded, and a pre-existing
+    # test pins `status: "ok"` with breaches present
+    # (`test_10602_wait_bound_breach_visible`). #12477 reports the WINDOW
+    # (a separate, additive block) and leaves the verdict where the decision put
+    # it — the liveness listener is where a refusal becomes a verdict, because a
+    # deploy gate is allowed to say "not now" while `/health` is not.
+    try:
+        refusals = _monitoring.wait_bound_breach_window()
+    except Exception as exc:  # a monitoring read must never 5xx
+        # ⛔ THE FULL SHAPE, from the resolver's own error constructor. Twice
+        # measured wrong: an ad-hoc `{"error", "refusing"}` dict is 2 of 13 keys,
+        # so a dashboard reading `refusals["share"]`/`["attempts"]` — both
+        # documented as present on EVERY return — gets a `KeyError` on exactly the
+        # degraded path where it is looking for an answer. This is the rule the
+        # neighbouring `wait_bound_breaches` arm states five lines above.
+        refusals = _monitoring._wait_bound_error(
+            f"wait_bound window unreadable: {type(exc).__name__}", window=None)
+    try:
+        loop_blocks = loop_block_report()
+    except Exception:  # a monitoring read must never 5xx
+        loop_blocks = None
     return {"status": "ok" if (db.get("ok") and watcher["ok"] and record["ok"])
             else "degraded",
+            # ⛔ Its OWN key, not `degraded_reasons` — that name is taken by
+            # `record.degraded_reasons` (a documented six-value vocabulary,
+            # `docs/infra-runbook.md`, pinned by `test_record_searchkeys_10620`).
+            # Two schemas under one name is how a consumer reads the wrong one.
+            "refusals": refusals,
             "db": db, "probe": probe_meta, "loop_stale_ms": loop_age_ms,
+            # #12477: the loop-block EVIDENCE (in-memory episodes + the last
+            # captured stack, loaded from the persisted record at boot when the
+            # previous process died of a wedge). `status` is NOT derived from it:
+            # an episode that already cleared is history, and a live one makes
+            # this endpoint unreachable anyway.
+            "loop_blocks": loop_blocks,
             "backup_watcher": watcher, "change_feed": _change_feed_health(),
             # #10602: the transport wait bound's own breach count. This is the
             # surface an operator curls FIRST, and on 2026-11-02T15:44Z it read
@@ -7129,7 +7971,7 @@ async def health():
             # tied to a failure that is observable NOW — which on THIS body
             # means `db.ok`, `backup_watcher.ok` and `record.ok` (the three
             # terms in the `status` expression above), not the counter.
-            "wait_bound_breaches": _monitoring.wait_bound_breach_counts(),
+            "wait_bound_breaches": breaches,
             "record": record, "build": _build_identity()}
 
 
@@ -11742,11 +12584,20 @@ def _sensitive_op_budget(op: str, bucket_key: Hashable) -> dict | None:
     max_per_hour = _SENSITIVE_OP_LIMITS.get(op)
     if max_per_hour is None:
         return None
+    # The DETAIL is this refusal's own identity: `mcp_client.refusal_message`
+    # classifies a designed prose refusal by the LEAD in this constant, so a copy
+    # of the sentence here would silently turn the MCP arm's 429 into a "crash" at
+    # every caller (rc 1 instead of rc 3, `call failed:` instead of the refusal
+    # payload) — #11153 review round 9, measured. ⛔ Read through the module alias
+    # this file already imports at module level (`from tortoise import mcp_auth as
+    # _mcp_auth`): an earlier version imported it lazily "because mcp_auth imports
+    # fastmcp at module level", which was FALSE here — this module had already
+    # imported mcp_auth, fastmcp and all, before this line ran.
     return {
         "buckets": _SENSITIVE_BUCKETS, "lock": _SENSITIVE_LOCK,
         "limit": max_per_hour, "window_s": 3600,
         "key": bucket_key,
-        "detail": f"Rate limit exceeded for {op}. Please try again later.",
+        "detail": f"{_mcp_auth._REFUSAL_RATE_LIMIT_LEAD}{op}. Please try again later.",
         "retry_after_s": 3600,
     }
 
@@ -26037,7 +26888,8 @@ async def _create_org_registry_lane(sdk, name: str, user: dict) -> dict:
 # Tier gate: only tiers whose default graph FILLS the quota are blocked
 # (free=1, anon=1 — the default occupies slot 1; anon addition recorded in
 # the plan D2 note, free-pin unchanged). Solo=2 passes and gets exactly 1
-# custom; pro/org are unlimited (Gate #2 decision). 402 is the
+# custom; Builder (tier `pro`, #4336) and Team are unlimited (Gate #2 decision).
+# 402 is the
 # upgrade-CTA response, checked AFTER the suspension check (#1853: a
 # suspended FREE org must 403 SUSPENDED, never 402) and BEFORE the
 # quota gate per W1 ordering (E2E-3 pin — never any-4xx for a tier
@@ -26067,7 +26919,7 @@ async def _graph_quota_gate(org: dict) -> None:
     """Quota gate — 409 + X-Graph-Quota when at cap (distinct from the
     402 tier gate; D2/D3). Fail-closed: counting errors raise 500, never
     a silent pass (#686). No 80% warn band in v1 (Gate #2 — unreachable
-    at free=1/solo=2, dormant until a finite pro/org cap exists).
+    at free=1/solo=2, dormant until a finite Builder (tier `pro`) cap exists).
 
     Known mode divergence (review #2b arch, recorded): sdk._graph_count's
     Supabase branch drift-swallows to 1 (default-only) on ANY read error
@@ -26082,7 +26934,7 @@ async def _graph_quota_gate(org: dict) -> None:
     limits = _org_limits_from_node(org)
     max_graphs = limits.get("max_graphs")
     if max_graphs is None:
-        return  # unlimited (pro/org)
+        return  # unlimited (Builder = tier `pro`, #4336; and Team)
     try:
         count = _make_sdk(namespace="registry")._graph_count(org["id"])
     except Exception as e:
@@ -28732,7 +29584,7 @@ async def list_graphs(org_id: str, user: dict = Depends(get_current_user_graph_l
 
 # ── E3/E4/E8: invites + RBAC (Team tier, D7 #574) ──
 # Token-only accept in v1 (decision 1e); owner is NOT invitable (single-owner
-# model — invitable roles: admin, member). Free/Solo/Pro: invites disabled
+# model — invitable roles: admin, member). Free/Solo/Builder: invites disabled
 # (max_users=1 or invite path deferred to billing).
 
 async def _membership_role(user_id: str, org_id: str) -> str | None:
@@ -29032,10 +29884,10 @@ def _utc_now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
-# #1965: per-org in-process asyncio locks serializing the Pro capacity
+# #1965: per-org in-process asyncio locks serializing the Builder capacity
 # check + mint (invite side) and the capacity pre-check + consume (accept
 # side). Closes the count-then-mint TOCTOU from #1875 — concurrent
-# POST /v1/invites on a Pro org could both read active+pending < 2 and
+# POST /v1/invites on a Builder org could both read active+pending < 2 and
 # both mint, exceeding max_users. The lock makes the check-and-mint a
 # serialized critical section per org, so a losing concurrent request
 # re-reads the count AFTER the winner's mint and hits the gate.
@@ -29104,7 +29956,7 @@ async def invite_to_org(body: dict, user: dict = Depends(get_current_user)):  # 
             if org is None:
                 raise HTTPException(status_code=404, detail="Unknown organization")
             # #1875: tier gate matches pricing (free=1, solo=1, pro=2,
-            # org=∞). Pro capacity = active members + PENDING invitations
+            # team=∞). Builder capacity = active members + PENDING invitations
             # (the authoritative invitations source — never
             # org_memberships(status='invited'), which supabase never
             # writes).
@@ -29131,7 +29983,7 @@ async def invite_to_org(body: dict, user: dict = Depends(get_current_user)):  # 
                         op="pending_invitations")
                     pending = [i for i in _pending_rows
                                if not i.get("expires_at") or i["expires_at"] > now]
-                    if len(active) + len(pending) >= 2:  # Pro max_users=2
+                    if len(active) + len(pending) >= 2:  # Builder max_users=2
                         raise HTTPException(status_code=402,
                                             detail=with_limit_contact("Member limit reached — upgrade to invite more"))
                 inv = await _cp_offload(
@@ -29184,11 +30036,11 @@ async def invite_to_org(body: dict, user: dict = Depends(get_current_user)):  # 
             raise HTTPException(status_code=404, detail="Unknown organization")
         org_node = org_row[0][0]
         tier = org_node.get("tier", "free")
-        # #1875: tier gate matches pricing. Free/Solo → upgrade gate; Pro →
+        # #1875: tier gate matches pricing. Free/Solo → upgrade gate; Builder →
         # capacity = active members + PENDING invitations (authoritative
         # Invitation nodes — not the fake invite-{iid} membership rows, which
-        # are never cleaned); Org → unlimited (None-skip). Replaces the old
-        # active-only `_check_org_limit(limits, "users")` for Pro (cycle-2 P2:
+        # are never cleaned); Team → unlimited (None-skip). Replaces the old
+        # active-only `_check_org_limit(limits, "users")` for Builder (cycle-2 P2:
         # active-only under-counted pending seats).
         if tier in ("free", "solo"):
             raise HTTPException(status_code=402,
@@ -29206,7 +30058,7 @@ async def invite_to_org(body: dict, user: dict = Depends(get_current_user)):  # 
                 "AND (i.expires_at IS NULL OR i.expires_at > $now) RETURN count(i)",
                 params={"tid": org_id, "now": now},
             ).result_set[0][0]
-            if active + pending >= 2:  # Pro max_users=2
+            if active + pending >= 2:  # Builder max_users=2
                 raise HTTPException(status_code=402,
                                     detail=with_limit_contact("Member limit reached — upgrade to invite more"))
 
@@ -29220,7 +30072,7 @@ async def invite_to_org(body: dict, user: dict = Depends(get_current_user)):  # 
         # 'expired', so an invite whose ``expires_at`` has passed still counted
         # as a pending duplicate and 409'd every re-invite FOREVER.
         # ``expires_at`` is the authority here, exactly as the accept paths,
-        # the Pro capacity read and ``cleanup_expired_invitations`` already
+        # the Builder capacity read and ``cleanup_expired_invitations`` already
         # treat it.
         now = datetime.now(UTC).isoformat()
         dup = reg.query(
@@ -34921,7 +35773,13 @@ _ORG_MINT_LOCKS_GUARD = threading.Lock()
 #: pytest-timeout bound (300s, faulthandler dumping at 280s) and then spent its
 #: whole 20m watchdog, was killed at 20.2m with 366 nodeids unrun, and reported
 #: INCOMPLETE — a 23.5m job that owned `ci_crit_med` on main.
-_ORG_MINT_LOCK_TIMEOUT_S = 10.0
+#: ⛔ MUST STAY BELOW `mcp_auth._TRANSPORT_WAIT_BOUND_S` (10 s). The lock's own
+#: answer is a `503 Retry-After: 5` — "busy, not an outage" — and the transport
+#: bound measures the SAME request from arrival, so at 10 s the two deadlines
+#: collide and the designed 503 can essentially never be delivered: the caller
+#: gets a 504 refusal instead, and a concurrent mint (normal traffic) is counted
+#: as a data-plane breach (#12477 review round 8). 8 s leaves room to answer.
+_ORG_MINT_LOCK_TIMEOUT_S = 8.0
 
 #: Re-poll interval while the lock is held by someone else. Small enough that a
 #: contended mint is imperceptible, large enough that a 10s wait is ~2000 cheap
@@ -46789,7 +47647,7 @@ async def webhooks_stripe(request: Request):
 # The webhook above is the ONLY writer of the stored ``tier``, and the stored
 # tier IS the entitlement (``billing.effective_tier`` never derives upward).
 # One missed/failed delivery therefore capped a paying org at the lower tier
-# permanently — measured 2026-10-17 on the fleet's own org: billed on the Pro
+# permanently — measured 2026-10-17 on the fleet's own org: billed on the Builder
 # price, enforced at Solo's 25 000-node cap, every hosted write refused with
 # "upgrade your plan", reads still working so nothing looked broken.
 #

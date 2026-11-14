@@ -232,13 +232,13 @@ SUM. `test` cleared it with room to spare until the 2026-11-09 refresh — the r
 map took it over, and #11602 bought the room back by raising `fast_shards` 9 → 10; #11576 then
 raised it 10 → 11 for the same reason one merge later (the history is at the end of this
 parenthetical). At **`fast_shards: 11`** — the shipped shape — the row reads: 10 m
-last-failed pre-phase + the emitted **26 m** per-shard
+last-failed pre-phase + the emitted **27 m** per-shard
 watchdog + 6 m embedder + **~7.3 m of MEASURED startup, not the ~1 m an earlier revision restated**
 (`Set up job` 182 s = 3 m 02 s, 10:21:30 → 10:24:32, plus 4 m 14 s of uncapped setup steps to the
 suite's first line — the 10:24:32 → 10:28:58 window of 266 s MINUS the embedder's own measured 12 s,
 whose 6 m cap is already a term above; run 42000057137, job `test (d)`, `actions/jobs/127165076497`)
-plus **an 8 m cache-write term (1 m prune + 7 m save)** and ~0.4 m last-failed save = **57.6 m against
-90, x 1.5 = 86.5** — 3.5 m of headroom, where the refreshed map at 9 shards stood at
+plus **an 8 m cache-write term (1 m prune + 7 m save)** and ~0.4 m last-failed save = **58.6 m against
+90, x 1.5 = 88.0** — 2.0 m of headroom, where the refreshed map at 9 shards stood at
 **63.6 m, x 1.5 = 95.5** and reded
 `test_the_test_job_carries_no_unbounded_cache_post_step`. The term that moved is
 the watchdog: it read **26 m** until #10999 registered its own fast suite
@@ -247,13 +247,18 @@ pool, and **32 m** at 9 shards on that refreshed map — re-packing into 10 shar
 **28 m** (59.6 m, x 1.5 = 89.5), because one more file in `fast_pool()` re-packs the worst
 shard across a whole minute, and this paragraph restates that emission rather than owning it:
 `tools/ci_selection.py --emit-push-matrix` is the authority, and `tests/test_ci_selection.py`
-reds the moment the two disagree again. ⛔ **#11576 then re-broke it the same way, one merge
+reds the moment **the emitted term** and the emission disagree again — that pin compares the
+per-shard minute and nothing else (measured: reverting this SUM to `57.6 m` leaves the suite
+fully green, `510 passed`). ⛔ **So the SUM, the x 1.5 and the headroom above are re-added by
+hand on every re-cut and are NOT pinned**: the arm-2 assertion recomputes its own total from file
+facts, so a stale SUM here cannot produce a false PASS on the cap — it can only mislead the
+next reader, which is exactly how this one was found. ⛔ **#11576 then re-broke it the same way, one merge
 later**: main's `test_embed_decision_step_11086.py` and that branch's
 `test_demo_session_read_exclusion_8290.py` land in `fast_pool()` together, the union
 packs the worst shard at **840.2 s** (either parent alone packed 840.0 s), `ceil(840.2/60 x 2)`
 rounds up to **29 m**, and the arm-2 SUM became **60.64 m, x 1.5 = 90.96 m against the 90 m cap**
-— RED where both parents pass. `fast_shards: 11` packs the same map to 763.8 s → 26 m, i.e. the
-57.6 m above: 3.5 m of real headroom instead of the 0.5 m S=10 had been clearing by. The cap was
+— RED where both parents pass. `fast_shards: 11` packs the same map to 780.2 s → 27 m, i.e. the
+58.6 m above: 2.0 m of real headroom instead of the 0.5 m S=10 had been clearing by. The cap was
 NOT moved — `#3239`'s stale-head exposure is what raising it re-opens, and the SUM rose from the
 POOL, not from the pre-suite terms.) The write term fits because #11063 split this job's cache by payload: `~/.cache/pip`
 (3,616,385,308 B in a PR scope, the torch wheel set, 93% of the 3.88 GB payload the defect uploaded)
@@ -264,7 +269,7 @@ not fit — but on the measured rates, not on an assumption: this run's degraded
 sustained (3,019,898,880 B in 3,412 s, cancelled at 77.8% of the payload), while the same runner
 class completed a cold 3,616,385,308 B save in 12 m 21 s four hours later (PR 11036, job 127280762096,
 `Sent 3616385308 of 3616385308 (100.0%), 7.1 MBs/sec` ≈ 4.9 MB/s end to end) — i.e. ~13 m healthy and
-~57 m+ degraded against the ~8.4 m of room the SUM leaves. Splitting the payload is what brings it
+~57 m+ degraded against the ~9.36 m of room the SUM leaves. Splitting the payload is what brings it
 inside. `tests/test_ci_selection.py::test_the_test_job_carries_no_unbounded_cache_post_step` pins
 that shape (one bounded writer ON `~/.cache/uv`, no implicit post step — and no OTHER unbounded cache write anywhere in the job except the admitted `Save pytest last-failed state (#6142)`), and the watchdog comes from
 `uv run python tools/ci_selection.py --emit-push-matrix`, never from `WATCHDOG_FLOOR_MIN`: 19 is the

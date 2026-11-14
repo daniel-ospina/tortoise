@@ -697,6 +697,30 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # leak into a later module. DELIBERATE_URI.
     "test_projection.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
                            r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
+    # #12422's canary landed this site AFTER the #12523 triage merged, which
+    # re-red the register (`undeclared TORTOISE_DB_URI mutation(s)` naming
+    # `test_published_artifact_canary.py:2107`).
+    # `test_install_and_run_strips_ambient_tortoise_env` PLANTS an ambient
+    # `TORTOISE_DB_URI` precisely so it can be shown to be STRIPPED before the
+    # canary measures the default path a new user gets — an ambient URI inherited
+    # from the runner would point the command somewhere else and turn a broken
+    # artifact green. So the value IS the test input, and nothing dials it: every
+    # probe drives `_Runner`, which records argv and returns scripted
+    # `CompletedProcess` results (no subprocess, no server), and the hand-rolled
+    # `_Capture` subclasses it only to read the env mapping it was called with.
+    # Function-scoped `monkeypatch` is auto-undone by pytest at teardown, so no
+    # lane flip can leak into a later module. DELIBERATE_URI — and the value is
+    # PINNED, because this module holds exactly ONE site. The table's precedent
+    # for a PINNED value: `test_7949_capstone_measure.py` (one site, like this
+    # one) and `test_11070_source_prose_repair.py` (THREE sites, all the same
+    # literal); `test_rerank_calibration_12297.py` pins its URI setenv and rides
+    # that row's KEY-ONLY `delenv` arm for its two `delenv` calls. A bare
+    # `setenv\(\s*"TORTOISE_DB_URI"` arm would auto-authorize a FUTURE,
+    # differently-intentioned URI setenv in a module whose whole design is
+    # "nothing here touches PyPI"; with the literal pinned, such a site reds
+    # and forces its own triage.
+    "test_published_artifact_canary.py": [
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*"docker://:x@localhost:6379/other"'],
     # #8939/#8870: the lane-gate unit pins for the version-anchor live file. The
     # setenv is DELIBERATE_URI — a CONFIGURED docker URI is the test input, and
     # the assertion is that `_live_uri()` uses it AS-IS instead of probing a
@@ -964,6 +988,147 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # redded on `core` while the PR's own evidence ran only its two suites.
     "test_worker_topology.py": [
         r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
+    # #12523: `test_rerank_pool.py` (#12297's wiring suite) landed without this
+    # row, which reds this gate on `main`. The `sdk` fixture deletes the URI and
+    # pins `TORTOISE_DB_PATH` to a tmp_path db, so a REAL embedded store is
+    # constructed and the read path's own composition (pool fetch, permutation,
+    # the disclosed cap) is what is under test — a URI redirect would fold those
+    # measurements onto a shared server graph whose pool contents this suite does
+    # not control. DELIBERATE_EMBEDDED_LANE: the embedded store IS the measurement
+    # (the #8447 pattern the fixture's own docstring cites) and nothing here
+    # claims a docker-half green. Function-scoped `monkeypatch`, auto-undone at
+    # teardown, so no lane flip reaches a later test.
+    "test_rerank_pool.py": [
+        r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
+    # #12523: `test_rerank_calibration_12297.py` (#12297's calibration harness)
+    # landed without this row. Three sites, each the TEST'S INPUT rather than a
+    # claimed docker-half measurement:
+    #   :317  the `drive` fixture's shared `_go()` pins a DELIBERATELY
+    #         UNREACHABLE docker DSN (`127.0.0.1:1` — the identical class as
+    #         `test_7949_capstone_measure.py` above), so the run path's store
+    #         presence check is satisfied while `sdk_mod.TortoiseSDK` is replaced
+    #         by `_FakeSDK`. NOTHING dials the value, and a run whose refusal
+    #         failed to fire still cannot fall back to an embedded graph on the
+    #         shared default path. DELIBERATE_URI.
+    #   :582  DELIBERATE_EMBEDDED_LANE: the URI is UNSET so the STORE refusal is
+    #         AVAILABLE, and the assertion (`"TORTOISE_DB_URI" not in err`) proves
+    #         the RERANK gate fired FIRST. The delenv is the discriminating control;
+    #         `cal.run()` refuses at rc 3 BEFORE any store is built, so no graph is
+    #         ever reached (the `test_work_claim.py` convention: a delenv that
+    #         exercises an UNSET-STORE REFUSAL is the embedded bucket, never the
+    #         docker one).
+    #   :594  the mirror half: with `--allow-reranked-baseline` the rerank gate
+    #         stands down, so the URI must be absent for the STORE refusal to be
+    #         the one that fires (`"TORTOISE_DB_URI" in err`). Same control, same
+    #         bucket — a `delenv` removes the docker lane; it never forces it.
+    # Neither refusal test constructs a store and the fake is never dialled, so
+    # nothing here claims a docker-half green. Function-scoped `monkeypatch`,
+    # auto-undone at teardown. The delenv arm is key-only, so read what it
+    # AUTHORIZES: any `delenv("TORTOISE_DB_URI"…)` whose KEY is on the same
+    # physical line — including one whose `raising=` kwarg wraps. A merely
+    # line-wrapped KEY is still censused (the census runs `_MUTATION_RE` over the
+    # whole source and `\s*` crosses newlines) and REDS at the
+    # `monkeypatch.delenv(` line, which no declaration can match. What escapes the
+    # census is a NON-WHITESPACE separator before the key (a comment, verified
+    # no-match) or an indirect call — a census limit, not this row's.
+    "test_rerank_calibration_12297.py": [
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*"docker://:@127\.0\.0\.1:1/',
+        r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
+    # #12523 (second population): `test_env_file_divergence.py` landed AFTER the
+    # issue was measured — it does not exist at `1f4b0bc277`, so the census the
+    # issue was measured on was EXACT ("four sites in two files") and the
+    # population has GROWN since. Measured at `c2e579e629`: this module alone
+    # carries NINETEEN undeclared sites and NO row, and the
+    # gate is all-or-nothing, so triaging only the four `#12297` sites would leave
+    # `main` just as red.
+    #
+    # This module is a REPORTER, and every one of its 19 sites is the test's INPUT:
+    # the value is fed to `config show`/`doctor`'s disclosure and attribution arms,
+    # never to a store the site picks of its own — `:196/:682/:1083` run `config
+    # show` only; `:1255/:1498/:1647/:1703/:1723/:1893` are REJECTED values (a
+    # relative value never resolves); `:2042` is a scheme-less ABSOLUTE path that
+    # DOES resolve (`daemon_db_target` -> `resolve_db_path(uri)`, rung `file-uri`),
+    # i.e. the embedded-FILE lane — `config show` never dials it, which is why
+    # nothing is graded; `:782/:1905` are redaction
+    # subjects; `:1946` asserts a REFUTED wording. None is the #942 vacuity vector:
+    # NO declared site claims a docker-half green.
+    #
+    # ⛔ Do NOT read that as "this module is DB-free" — it is NOT, and the
+    # difference is load-bearing if you are triaging a NEW site here. `:1548`'s
+    # `doctor` run DOES grade the docker lane (its DSN is deliberately unreachable,
+    # which is why that site is DELIBERATE_URI rather than inert); doctor's Step 3
+    # constructs a `TortoiseSDK`; any test that runs `doctor`/`config show` with no
+    # URI falls through `resolve_db_path` to the import-time `DEFAULT_DB_PATH`
+    # (`tortoise/config.py:31`, returned at its step 4 — resolved BEFORE the
+    # `_isolated` fixture patches `HOME`); and
+    # `tests/test_env_file_divergence.py:841` calls `mcp_server._get_sdk()`. So the
+    # module IS store-touching. What makes its declared sites safe is the PER-SITE
+    # intent above, never a DB-free premise.
+    #
+    # Its tortoise surfaces are `__main__`, `dotenv_file`, `config` and `mcp_server`
+    # (whose `_load_dotenv` and `_get_sdk` are imported function-locally in the
+    # tests), so a future site's class must be judged against what it REACHES.
+    #
+    # ⚠️ Read what this row AUTHORIZES, because it is a value-CLASS row and not a
+    # line-exact one: the value shapes below (`DOCKER_URI`, `""`, whitespace-only,
+    # `relative…`, `/tmp/…`, `alice:…`, `uri`/`str(target)`, and a bare delenv) are
+    # auto-authorized for this file — INCLUDING a future site that reuses one of
+    # those shapes. That is the point of a class pattern, and it is how PR #12537's
+    # added `"   "` site is already covered. A value shape OUTSIDE them, or a
+    # line-wrapped call whose captured line is the lvalue alone, reds and must be
+    # triaged on its own.
+    "test_env_file_divergence.py": [
+        # the docker-lane-shaped value used as the file/env subject (:196 the
+        # absent-key fill, :682 the shadowed-key attribution, :1083 the inert
+        # file key) — DELIBERATE_URI, and NOTHING dials it.
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*DOCKER_URI',
+        # an exported EMPTY value (:1469 the ladder's truthiness skip, :1570 the
+        # side-attribution row, :1815 the blank-export blocker) — present but
+        # inert, which is the state under test.
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*""\)',
+        # a WHITESPACE-ONLY value (:2119 the lhs tests TRUTHINESS, the attribution
+        # used to test `.strip()`, added by PR #12528). This class ALSO covers the
+        # SEPARATE whitespace site that open PR #12537 adds in a new test in this
+        # module — so #12537 needs no row of its own.
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*"\s+"\)',
+        # a RELATIVE (scheme-less) target — the refusal/not-resolvable arm
+        # (:1255 env side broken, :1498/:1647/:1723 attribution, :1703 the
+        # shadowed shell value, :1893 the rejected-path legibility).
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*"relative',
+        # an ABSOLUTE non-URI path (:1345 the provider-only-file case).
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*"/tmp/',
+        # a credential-bearing value — the REDACTION subject (:782 the env value
+        # leaking through the same arm, :1905 the credential-shaped rejected
+        # path). The secret IS the input; nothing is dialled.
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*"alice:',
+        # a local `uri` the test owns — and the TWO sites in this arm are NOT the
+        # same case: :1548 pins a DELIBERATELY-UNREACHABLE docker DSN (a credential
+        # carrying `#` makes the port cast fail), so `doctor` resolves it and grades
+        # the DOCKER lane plus the redaction of its error row — DELIBERATE_URI;
+        # :2042 is `str(target)` — a scheme-less ABSOLUTE path that DOES resolve
+        # (`resolve_db_path` rung `file-uri`, the embedded-file lane); `config show`
+        # never dials it, and its SHADOWING is what that row asserts.
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*(?:\buri\b|str\(target\))',
+        # the URI UNSET at :1946 so a file-supplied bad value is attributed to the
+        # FILE that supplied it, and the "cannot be loaded at all" wording this
+        # test exists to REFUTE stays out of the report.
+        r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"',
+        # a docker-shaped URI used ONLY to drive the ladder to its `uri` rung in the
+        # rung-table completeness pin (:2420) — `daemon_db_target()` RETURNS the
+        # value, and neither that test nor any arm of this module dials it.
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*"docker://:pw@localhost:6379/g"',
+    ],
+    # ⛔ MAINLINE TRIAGE, not a site this PR added: `test_published_artifact_canary.py`
+    # landed with no register row, so `test_uri_env_mutations_declared` was RED on
+    # `origin/main` for every branch (an undeclared mutation reds until triaged),
+    # not just on this one — both this register and that module are byte-identical
+    # to main here, and the undeclared site is reported with them alone. Declared
+    # so main and every branch stop being red. The value is the AMBIENT env the
+    # canary exists to prove it STRIPS: the mutation is the INPUT, and the canary's
+    # own child process is what may resolve it.
+    "test_published_artifact_canary.py": [
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*"docker://:x@localhost:6379/other"',
+    ],
 }
 
 # Carve-out TEST-MODULE stems (Task 5 wires these into TEST_NO_REDIRECT_STEMS;
@@ -988,10 +1153,32 @@ _EXEMPT_FROM_ENV_MUTATION_GUARD = frozenset() | {
     "test_markers.py",
 }
 
+#: ⛔ `_MUTATION_RE` is applied to WHOLE MODULE SOURCE (`finditer` over `src`
+#: in `_uri_mutation_sites`), never to one stripped line — so a `$` in an arm
+#: anchors to end-of-string, not end-of-line, unless the pattern also carries
+#: `re.MULTILINE` … and MULTILINE here is the *worse* of the two errors:
+#: `monkeypatch\.setenv\(\s*$` has no URI specificity at all, so it matches
+#: ANY line-wrapped `setenv(` call. #12561 measured both directions on the
+#: 1356-module scanned population: as written that arm matched **0** sites
+#: (inert, while reading as the arm that catches a wrapped `setenv(`), and
+#: with MULTILINE it matched **21** — the 11 URI sites were already censused
+#: by the arm above at the same offset (`\s*` crosses newlines), and the
+#: other 10 set `TORTOISE_BACKUP_KEY`/`BILLING_SUCCESS_URL`/`SUPABASE_URL`/
+#: `TORTOISE_IMPORT_RECEIPT_DIR`. Those 10 are false URI mutations: NINE of
+#: them would go undeclared and red (23 → 32 measured), and the tenth
+#: (`test_hosted_api.py:6165`) is already covered — that file's declaration
+#: arm `monkeypatch\.setenv\(\s*$` matches the census line
+#: `monkeypatch.setenv(`, because DECLARATIONS are matched per stripped line
+#: where `$` correctly means end-of-line. So the repair does not merely
+#: over-report: it silently censuses a non-URI `setenv(` as a URI mutation,
+#: which is the #11083 hazard (a declaration authorizing more than it names)
+#: in its silent form, with no red to surface it.
+#: The arm is therefore DELETED, not repaired: its intended coverage is the
+#: arm above. `test_the_census_regex_carries_no_end_of_input_anchor` and
+#: `test_declaration_regex_census_surface` pin both halves.
 _MUTATION_RE = re.compile(
     r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'
     r'|monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'
-    r'|monkeypatch\.setenv\(\s*$'
     # `=(?!=)` — an ASSIGNMENT, never the comparison `==`. Without the
     # lookahead this arm censused reads as mutations: a test that pins the
     # value it just set (`assert os.environ["TORTOISE_DB_URI"] == "…"`)
@@ -2655,18 +2842,67 @@ def test_restoration_patterns_green():
         assert not violations, f"{label} must stay green: {violations}"
 
 
+def test_the_census_regex_carries_no_end_of_input_anchor():
+    r"""#12561: `_MUTATION_RE` is applied to WHOLE MODULE SOURCE, so an
+    end-of-line anchor in an arm can only mean end-of-STRING (inert) or —
+    with `re.MULTILINE` — end-of-ANY-line (no URI specificity). Neither is
+    coverage, so the regex carries no end anchor, in any of Python's
+    spellings: `$`, `\Z` and (3.14+) `\z`.
+
+    Why a structural pin: an INERT arm cannot be caught behaviourally. The
+    arm this test was written against (`monkeypatch\.setenv\(\s*$`) matched
+    0 of the 1356 scanned modules, so every behavioural assertion about
+    real forms kept passing while it sat there reading as the arm that
+    catches a wrapped `setenv(` — and the test that claimed to pin "the
+    multiline continuation form" passed *through* it, on a truncated string
+    (`'monkeypatch.setenv('`) that has no continuation at all.
+
+    Pinning the SPELLING is not enough — `$` alone left `\Z` free to
+    re-introduce the same inert arm (verified: an appended
+    `monkeypatch\.setenv\(\s*\Z` alternative passes a `"$" not in pattern`
+    check). This asserts on every end-anchor spelling Python's `re` accepts.
+    Residual, stated rather than chased: an exotic zero-width construction
+    (`(?!\S*[\s\S])` and friends) can express end-of-input without any of
+    them; enumerating arbitrary regex constructions is not a gate this file
+    should own.
+
+    DELIBERATE_URI_MUTATIONS patterns are a DIFFERENT string: `_is_declared`
+    matches them with `re.search` against ONE stripped line, where `$` does
+    mean end-of-line. Several use `\s*$` and are correct — this pin is
+    scoped to the census regex for exactly that reason.
+    """
+    pattern = _MUTATION_RE.pattern
+    anchors = sorted(a for a in ("$", "\\Z", "\\z") if a in pattern)
+    assert not anchors, (
+        "_MUTATION_RE is matched against whole module source, where an "
+        f"end anchor {anchors} means end-of-STRING (inert: it can only "
+        "fire on a file whose tail is the fragment) or, with re.MULTILINE, "
+        "end-of-any-line with NO URI specificity (measured: 21 matches, 10 "
+        "of them non-URI setenv calls — false mutations; nine red, and the "
+        "tenth silently censused through an existing declaration). Keep "
+        "`$` for DELIBERATE_URI_MUTATIONS patterns, which are matched per "
+        "stripped line. (#12561)")
+
+
 def test_declaration_regex_census_surface():
-    """#2084 review pin: the declaration census's _MUTATION_RE must match
+    r"""#2084 review pin: the declaration census's _MUTATION_RE must match
     every mutation form it claims to census — pop, delenv, setenv (incl.
     the multiline continuation form), direct assignment, and del. A
     regression that narrows the regex (e.g. dropping the pop alternative)
     would silently blind the declaration guard while the repo census stays
-    green — this pins the regex surface directly."""
+    green — this pins the regex surface directly.
+
+    The multiline form below is a REAL continuation (`setenv(` newline
+    `"TORTOISE_DB_URI"`), which the setenv arm censuses because `\s*`
+    crosses newlines (#12561). It used to be spelled `'monkeypatch.setenv('`
+    — a truncated string with no continuation, matched only by an
+    end-of-string `$` arm that fired on nothing in the repo, so this
+    docstring's claim was pinned by the arm that could never work."""
     forms = [
         'os.environ.pop("TORTOISE_DB_URI", None)',
         'monkeypatch.delenv("TORTOISE_DB_URI", raising=False)',
         'monkeypatch.setenv("TORTOISE_DB_URI", uri)',
-        'monkeypatch.setenv(',
+        'monkeypatch.setenv(\n    "TORTOISE_DB_URI",\n    uri,\n)',
         'os.environ["TORTOISE_DB_URI"] = _uri',
         'del os.environ["TORTOISE_DB_URI"]',
         # _os alias: the declaration regex matches it via substring
@@ -2693,6 +2929,20 @@ def test_declaration_regex_census_surface():
             f"_MUTATION_RE must not census the READ form {read_form!r} — a "
             "comparison is not a mutation (a declaration for it would "
             "authorize a real assignment in the same file)")
+    # …and the setenv arm is URI-SPECIFIC: a wrapped `setenv(` of any other
+    # variable is not a TORTOISE_DB_URI mutation. This is what forbids the
+    # tempting repair of a dead end-of-line arm (`re.MULTILINE`), which
+    # #12561 measured matching 10 such calls across the scanned population
+    # — each a false mutation whose green remedy is a file declaration that
+    # would then authorize a real URI mutation in that file.
+    for non_uri in (
+            'monkeypatch.setenv(\n    "TORTOISE_BACKUP_KEY",\n    key,\n)',
+            'monkeypatch.setenv(\n    "BILLING_SUCCESS_URL",\n    url,\n)',
+            'monkeypatch.setenv('):
+        assert not _MUTATION_RE.search(non_uri), (
+            f"_MUTATION_RE must not census the non-URI setenv form "
+            f"{non_uri!r} — the census is URI-specific, and a fragment "
+            "with no continuation is not a mutation of anything (#12561)")
     # the assignment arm must still catch the assignment it is for, including
     # the augmented-looking neighbourhood (`_os` alias, keyword value).
     for assign_form in ('os.environ["TORTOISE_DB_URI"] = "docker://h:6379/g"',

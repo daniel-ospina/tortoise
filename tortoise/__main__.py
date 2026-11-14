@@ -3632,7 +3632,7 @@ def _cmd_config(args) -> int:
     import shlex as _shlex
     import sys as _sys
 
-    from tortoise.config import is_db_uri, looks_like_uri_userinfo
+    from tortoise.config import is_db_uri, looks_like_uri_userinfo, rung_deciding_key
 
     json_mode = bool(getattr(args, "json", False))
     payload: dict = {"status": "ok", "credential": {}, "graph_store": {},
@@ -4501,19 +4501,66 @@ def _cmd_config(args) -> int:
                     # nothing and the sentence below credited it with the
                     # agreement (#12428 review: "the file's TORTOISE_DB_PATH
                     # resolves to it for the daemon too" — it never ran).
-                    _carried = (env_file.get("env_graph_keys")
-                                or [*(env_file.get("shadowed_graph_keys") or ()),
-                                    *(env_file.get("applied_graph_keys") or ())])
-                    _deciding = next(
-                        (key for key in _DB_LADDER_KEYS
-                         if key in env_file["graph_keys"] or key in _carried),
-                        None)
-                    if _deciding and _deciding not in env_file["graph_keys"]:
+                    # ⛔ The RESOLVER's answer, not a walk of `_DB_LADDER_KEYS`
+                    # (#12441 items 1 and 5): the rung this payload already
+                    # carries is `config.daemon_db_target`'s own output, so it
+                    # names the key the ladder CONSUMED. The walk this replaced
+                    # was presence-based while the ladder is truthiness-based, so
+                    # a BLANK `TORTOISE_DB_URI` in the file was named as the
+                    # reason the two targets agree while the ladder had skipped
+                    # it and the ENVIRONMENT's `TORTOISE_DB_PATH` decided.
+                    # `None` here means the rung is unmapped — see
+                    # `config.RUNG_DECIDING_KEY`, which a test keeps complete.
+                    _deciding = rung_deciding_key(env_file.get("daemon_rung"))
+                    # ⛔ TWO ways the "the ENVIRONMENT's <key> decides it"
+                    # sentence can be FALSE, and they need different answers —
+                    # which is why the test is the RUNG, not set membership
+                    # (review round 3):
+                    #
+                    # * `embedded-allowed` consumed NO ladder key: the
+                    #   `TORTOISE_ALLOW_EMBEDDED` hatch selected the canonical
+                    #   embedded path. `rung_deciding_key` still names DB_PATH
+                    #   (the key whose emptiness produced the rung), so naming
+                    #   it would invent a decider — and falling through to the
+                    #   file sentence instead would credit the file, which is the
+                    #   exact false-credit this whole change removes. So this
+                    #   rung gets its OWN sentence.
+                    # * Every other rung DID consume a ladder key that was
+                    #   TRUTHY in `os.environ` — which a WHITESPACE-ONLY value is
+                    #   (`if os.environ.get(key):`), even though
+                    #   `env_graph_keys` excludes it (it filters `.strip()`).
+                    #   Gating on `env_graph_keys` therefore classified a key the
+                    #   ladder had just consumed as "not an environment key" and
+                    #   fell through to the file sentence — measured regression
+                    #   of the round-2 fix.
+                    if env_file.get("daemon_rung") == "embedded-allowed":
+                        print("  →  the same graph target as above: the canonical")
+                        print("     EMBEDDED default, selected by")
+                        print("     TORTOISE_ALLOW_EMBEDDED=1 — no ladder key, from")
+                        print("     this file or the environment, chose it")
+                    elif _deciding and _deciding not in env_file["graph_keys"]:
+                        # ⛔ One more distinction INSIDE this sentence: a DECIDING
+                        # key whose value is BLANK. The ladder accepted it (raw
+                        # truthiness: `'   '` is truthy) and `resolve_db_path` then
+                        # THREW IT AWAY for the canonical default — so "decides it"
+                        # alone reads as "your value is in use", inches below a row
+                        # that says "nothing is configured — this is the resolved
+                        # default" (review round 4, P3). The key still DECIDED, so
+                        # it is named; what it produced is said separately.
+                        _blank_decider = _deciding in (
+                            (env_file.get("blank_graph_keys") or {}).get("env") or ())
                         print("  →  the same graph target as above: the ENVIRONMENT's")
                         print(f"     {_printable(_deciding)} decides it for the daemon,")
-                        print("     so the file's "
-                              f"{_printable(', '.join(env_file['graph_keys']))}"
-                              " cannot change the target")
+                        if _blank_decider:
+                            print("     but its value is BLANK — that resolves to the")
+                            print("     canonical EMBEDDED default, not to a store it")
+                            print("     names, so the file's "
+                                  f"{_printable(', '.join(env_file['graph_keys']))}"
+                                  " cannot change the target")
+                        else:
+                            print("     so the file's "
+                                  f"{_printable(', '.join(env_file['graph_keys']))}"
+                                  " cannot change the target")
                     else:
                         print("  →  the same graph target as above: the file's "
                               f"{_printable(', '.join(env_file['graph_keys']))}")
@@ -4538,11 +4585,18 @@ def _cmd_config(args) -> int:
                               f"{_from_file}")
                         print("     — the target above is the one it selects")
                     elif _from_file and _from_env:
-                        # The MIXED state. WHICH key decides is an ordering fact,
-                        # so ask the ladder rather than assume either side.
-                        _top = next(key for key in _DB_LADDER_KEYS
-                                    if key in env_file["applied_graph_keys"]
-                                    or key in env_file["shadowed_graph_keys"])
+                        # The MIXED state. WHICH key decides is an ORDERING fact,
+                        # ⛔ and it is the RESOLVER's to state (#12441 item 1):
+                        # the rung the payload carries names the key it consumed.
+                        # ⛔ STRUCTURAL ONLY, and stated as such: `applied` and
+                        # `shadowed` are both built from `env_graph_keys`, which
+                        # is already non-blank filtered, so the walk this replaced
+                        # COINCIDED with the rung here — no input distinguishes
+                        # them (measured: restoring it leaves the suite green). It
+                        # is gone because it re-spelt the ORDER, which a new rung
+                        # would desync; the completeness test on
+                        # `RUNG_DECIDING_KEY` is its pin.
+                        _top = rung_deciding_key(env_file.get("daemon_rung"))
                         if _top in env_file["applied_graph_keys"]:
                             print("  →  the same graph target as above: this process")
                             print("     applied this file, so the environment now sets "
@@ -8450,7 +8504,11 @@ def _session_post(api_key: str, api_url: str):
     from urllib.error import HTTPError, URLError
     from urllib.request import Request, urlopen
 
-    from tortoise.capture_spool import PostOutcome
+    from tortoise.capture_spool import (
+        UNRECORDED_OUTCOME_KEY,
+        UNRECORDED_OUTCOME_VALUE,
+        PostOutcome,
+    )
 
     def handle(payload: dict) -> PostOutcome:
         def _refused(outcome: PostOutcome) -> PostOutcome:
@@ -8485,6 +8543,7 @@ def _session_post(api_key: str, api_url: str):
                 return outcome
             from tortoise.session_confirm import (
                 FILED,
+                PENDING,
                 UNEXTRACTED,
                 confirm_capture,
             )
@@ -8494,19 +8553,34 @@ def _session_post(api_key: str, api_url: str):
                 session_detail, api_url, api_key,
                 str(payload.get("session_id") or ""),
                 payload.get("conversation") or [])
-            if verdict in (FILED, UNEXTRACTED):
+            if verdict in (FILED, PENDING, UNEXTRACTED):
                 # The spool's contract is TURN DURABILITY, so a confirmed
-                # capture terminalises on either verdict — `_flush_one` stamps
-                # `filed_key` through its own compare-and-swap.
+                # capture terminalises on any of these three verdicts —
+                # `_flush_one` stamps `filed_key` through its own
+                # compare-and-swap.
                 #
                 # An UNEXTRACTED confirmation carries the keyless-mode marker
                 # so `session capture`'s existing #4188 disclosure fires: the
                 # caller must not print an unqualified success for a capture
                 # whose memory points were never minted.
+                #
+                # A PENDING confirmation carries NO extraction_mode on purpose
+                # (#12362): the server has not recorded an outcome, so there is
+                # no cause to name. Labelling it keyless made the CLI print
+                # "no memory points were extracted" — measured FALSE on
+                # captures that extracted 2-7 points seconds later — and
+                # recorded a priced saved-backlog entry for work already done.
                 body: dict = {"confirmed": verdict}
                 if verdict == UNEXTRACTED:
                     from tortoise.sdk import _CAPTURE_NO_PROVIDER_MODE
                     body["extraction_mode"] = _CAPTURE_NO_PROVIDER_MODE
+                elif verdict == PENDING:
+                    # ⛔ The WIRE SPELLING comes from `capture_spool`'s one
+                    # definition (#12362): this body is read back by the drain
+                    # and the day-file writer through `outcome_unrecorded`, so a
+                    # literal here would be a second definition of the same
+                    # contract that could drift without any test noticing.
+                    body[UNRECORDED_OUTCOME_KEY] = UNRECORDED_OUTCOME_VALUE
                 return PostOutcome(
                     ok=True, status=200,
                     detail=f"{outcome.status} after commit — confirmed {verdict}",
@@ -8777,6 +8851,7 @@ def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
         DISCARD_SPOOL_SATURATED,
         _terminal_marker,
         flush_spool,
+        outcome_unrecorded,
         read_spool_meta,
     )
     if not capture_consent_enabled():
@@ -8934,6 +9009,35 @@ def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
     # "memory points were not extracted" for it would be a false statement
     # about the session.
     #
+    # ⛔ #12362: an UNKNOWN extraction outcome is not a store-only capture and
+    # must not be rendered as one. The confirmation can prove the posted turns
+    # while the capture handler the wait bound abandoned is STILL EXTRACTING,
+    # in which case `GET /v1/sessions/<id>` reports `extracted: 0` beside
+    # `extraction.outcome_known: false` — the server saying "not recorded yet",
+    # not "nothing was extracted". Measured on the hosted deployment: three
+    # captures printed the sentence below and were read back holding 7, 2 and 5
+    # memory points seconds later. Nothing is asserted here (neither success nor
+    # failure) and NO backlog deferral is written: a deferral is a priced offer
+    # to re-extract, and offering it for work already done is how the false
+    # negative became actionable.
+    if outcome_unrecorded(body):
+        # ⛔ #12362 review: name NO cause as fact and assert no outcome. The
+        # state is reached by two different histories — the abandoned handler
+        # still extracting, and one that stopped before writing its outcome
+        # (a SIGKILL, a failed `capture_ok` write) — and the client cannot tell
+        # them apart. It also names no REMEDY: "re-capture this transcript" is
+        # inert here — the spool entry is terminal with this session id, and a
+        # re-POST of a session whose recorded outcome is NULL replays rather
+        # than re-extracting (`retry_failed_capture` requires
+        # `prior_capture_ok is False`) — so an imperative would be a false
+        # instruction. Name the surface that CAN answer instead.
+        print("  Extraction: outcome not recorded yet — the turns are STORED; "
+              "the server has not recorded whether extraction ran (it may "
+              "still be running, or it may have stopped before recording). "
+              "No saved-backlog deferral was recorded for this capture; "
+              "'tortoise session view <id>' reports the server's state later.",
+              file=_sys.stderr)
+    #
     # #3971 merge resolution: main's hunk (#4188) is kept for its INTENT, but
     # RETARGETED to this branch's variables + #4258's mode set. Main binds
     # `result` only in its own direct-POST version of this function; here the
@@ -8973,11 +9077,21 @@ def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
             reason=(_CAPTURE_NO_PROVIDER_MODE
                     if _capture_mode == _CAPTURE_NO_PROVIDER_MODE
                     else _CAPTURE_EXTRACTION_DISABLED_MODE))
-    else:
+    elif not outcome_unrecorded(body):
         # #4197: extraction ran for this session — if it had been deferred
         # before, its backlog entry is now retired. No offer here (see
         # `_flush_backlog_offer`): this path is the hook's, and it runs on
         # every capture.
+        #
+        # ⛔ #12362: NOT for an UNRECORDED outcome. `_flush_backlog_offer`
+        # retires the entry through `capture_backlog.mark_processed` — its own
+        # contract says "Call it ONLY where extraction provably ran" — and the
+        # PENDING state above is precisely the case where the server has NOT
+        # said that extraction ran. Retiring on it would mark a session
+        # `processed` (overwriting the record: nothing restores it, `--forget`
+        # only drops) on the one shape this issue says may still FAIL. So the
+        # ledger is left exactly as it was: a session already deferred stays
+        # deferred, and one never deferred gains no entry either way.
         _flush_backlog_offer(session_id=session_id,
                              server_session_id=server_session, offer=False)
     if body.get("warnings"):
@@ -9244,7 +9358,14 @@ def _record_drain_deferrals(root, summary) -> None:
                 continue
             _reason = _deferral_reason(outcome.body)
             if not _reason:
-                # Extraction ran — this entry is not a deferral.
+                # No re-attempt to offer. That is NOT the same as "extraction
+                # ran": since #12362 a body may be `pending` — the turns are
+                # stored and the server has not RECORDED whether extraction ran
+                # (`extraction_outcome: unknown`) — and it correctly records no
+                # priced deferral, because pricing a session that may have
+                # extracted is the bug #12362 fixed. The resulting trace gap is
+                # a separate decision, owned by #12379 (a non-priced trace),
+                # NOT by this writer.
                 continue
             _meta = read_spool_meta(root, sid) or {}
             _turns = read_spool_turns(root, sid)
@@ -10176,7 +10297,11 @@ def _print_backlog_offer() -> int:
 def _degraded_extraction(body) -> str | None:
     """The deferral reason when a 2xx STORED the turns and extracted NOTHING.
 
-    ``None`` when extraction ran. The rule lives here, once, because THREE call
+    ``None`` when this body carries no degraded marker — which is NOT proof that
+    extraction ran: since #12362 a body may be ``pending`` (the server has not
+    RECORDED whether extraction ran), and it correctly yields ``None`` here
+    because pricing a session that may have extracted is the bug #12362 fixed.
+    The rule lives here, once, because THREE call
     sites observe the same response body — ``sessions import``, ``session
     capture`` and ``session drain`` — and when they disagreed the hook path lost
     the case the whole feature exists for: the server stored the session and
@@ -10194,7 +10319,13 @@ def _degraded_extraction(body) -> str | None:
 
 
 def _deferral_reason(body) -> str | None:
-    """WHY a 2xx stored the session without extracting — ``None`` if extraction ran.
+    """WHY a 2xx stored the session without extracting — ``None`` if no KNOWN reason.
+
+    ⛔ ``None`` does NOT assert that extraction ran (that was the #12362 bug in
+    another form): a ``pending`` body — durable turns, extraction outcome not
+    recorded — also yields ``None``, deliberately, because a PRICED deferral
+    for a session that may have extracted is the bug #12362 fixed. ``None``
+    means "no re-attempt to offer from this body", nothing more.
 
     THE single definition of "this capture still needs a re-attempt", used by all
     three writers (`sessions import`, `session capture`, `session drain`) so they
@@ -11506,27 +11637,28 @@ def _db_value_source(key: str | None) -> str:
     return ("file" if _dotenv_file.applied_value(key, _path) == value else "env")
 
 
-def _ladder_deciding_key() -> str | None:
-    """The ladder key `config.daemon_db_target` reads FIRST — by ITS OWN test.
+def _daemon_error_label(exc: BaseException) -> str:
+    """The type name the USER sees for a daemon-target rejection.
 
-    TRUTHINESS, not `.strip()`: the ladder is written `if uri:` /
-    `if os.environ.get("TORTOISE_DB_PATH"):`, so a WHITESPACE-ONLY value is a
-    DECIDING rung carrying a value it then REJECTS (a relative path), not an
-    unset one. A `.strip()` scan went blind to exactly those values, fell
-    through to the file's healthy key, and reported "the value is the one this
-    `.env` supplied" about a value the SHELL supplied — while the same payload's
-    `blank_graph_keys["env"]` named the environment (#12441). Where the blank is
-    a `TORTOISE_DB_PATH`, `resolve_db_path` strips it itself and falls through to
-    the canonical default, so `env_graph_keys`' non-blank filter stays right:
-    that one answers which key a RESOLVED target came from, not which rung the
-    ladder was ON when it raised.
+    ⛔ This string is user-facing, not internal: `config show` prints
+    `env_file["daemon_error"]` verbatim and `doctor`'s ❌ row truncates it at 90
+    chars, so the leading token is what a runbook or an operator grep keys on.
+    `DaemonTargetError` exists to carry the rung INTERNALLY, and rendering its
+    class name would have silently changed that token from the stable
+    `ValueError` every earlier run printed — a change nothing would have caught
+    (review, P3, #12441 item 5).
+
+    So the label is the BASE class for the subclass, and the real class name for
+    anything else — an `else` branch that is DEFENSIVE today, not live: both
+    call sites sit inside an `except ValueError` wrapping `daemon_db_target()`,
+    and neither wrapped rung can raise anything but `DaemonTargetError`. A
+    `ValueError` from the overlay itself (a value `os.environ` refuses) is raised
+    in `_environ_overlay.__enter__`, i.e. OUTSIDE those blocks, and is rendered
+    by the surrounding handler with its own `type(exc).__name__` — never here.
     """
-    import os
+    from tortoise.config import DaemonTargetError
 
-    for key in _DB_LADDER_KEYS:
-        if os.environ.get(key):
-            return key
-    return None
+    return "ValueError" if isinstance(exc, DaemonTargetError) else type(exc).__name__
 
 
 def _dotenv_already_applied() -> bool:
@@ -11824,7 +11956,7 @@ def _dotenv_divergence(graded_target: str | None = None, *,
                     # at all" and "the value it rejects is the one this `.env`
                     # supplied" in the same breath (#12428 review).
                     daemon_error = _redact_db_value(
-                        f"{type(exc).__name__}: {exc}",
+                        f"{_daemon_error_label(exc)}: {exc}",
                         os.environ.get("TORTOISE_DB_URI"),
                         os.environ.get("TORTOISE_DB_PATH"),
                     )
@@ -11834,13 +11966,39 @@ def _dotenv_divergence(graded_target: str | None = None, *,
                         # (the file sets a healthy `TORTOISE_DB_PATH`, the shell
                         # exports a broken `TORTOISE_DB_URI`) makes the file a
                         # bystander, not a second cause (#12428 review).
-                        # ⛔ The ladder's OWN test (truthiness), via the one
-                        # helper — a whitespace-only key is DECIDING and
-                        # rejected, so it is the file's cause only when the FILE
-                        # supplied that key. See `_ladder_deciding_key`.
-                        _overlay_key = _ladder_deciding_key()
-                        payload["daemon_error_source"] = (
-                            "both" if _overlay_key in effective else "env")
+                        # ⛔ The ladder's OWN answer, not a second walk of
+                        # `DAEMON_DB_KEYS`: the resolver attaches the key it was
+                        # reading when it raised (`DaemonTargetError.key`), so a
+                        # whitespace-only key is DECIDING and rejected — and the
+                        # file is its cause only when the FILE supplied that key.
+                        # A re-spelled "first truthy key" scan could desync from
+                        # the ladder silently (#12441 item 5).
+                        _overlay_key = getattr(exc, "key", None)
+                        if _overlay_key is None:
+                            # ⛔ A KEYLESS rejection is reachable: the
+                            # `embedded-allowed` rung calls `resolve_db_path()`
+                            # unwrapped, and a relative `DEFAULT_DB_PATH` (a uid
+                            # with no passwd entry and no `HOME`) rejects with no
+                            # rung to name (measured). `None in effective` is
+                            # False, so the expression below called that `env` —
+                            # blaming an environment value that does not exist.
+                            # No file and no key can be its cause: `unknown` is
+                            # the only true answer, and `_db_value_source(None)`
+                            # already says exactly that on the other arm.
+                            payload["daemon_error_source"] = "unknown"
+                        else:
+                            payload["daemon_error_source"] = (
+                                "both" if _overlay_key in effective else "env")
+                    elif getattr(exc, "key", None) is None:
+                        # ⛔ KEYLESS here as well (measured). The FILE can be why a
+                        # rung was TAKEN — `.env` carrying
+                        # `TORTOISE_ALLOW_EMBEDDED=1` — without having supplied the
+                        # value that FAILED: the relative embedded default is the
+                        # PROCESS's own. Calling that `file` renders "the value it
+                        # rejects is the one this `.env` supplied" about a value
+                        # the file never carried; it supplied the hatch, not the
+                        # path.
+                        payload["daemon_error_source"] = "unknown"
                     else:
                         payload["daemon_error_source"] = "file"
         except ValueError as exc:
@@ -11884,10 +12042,23 @@ def _dotenv_divergence(graded_target: str | None = None, *,
             # FILE put it there, or because the user exported it themselves —
             # and only the record can tell (#12428 review).
             daemon_target = None
-            _key = _ladder_deciding_key()
+            # ⛔ The key the LADDER says it was on (`DaemonTargetError.key`) —
+            # never a second walk over `DAEMON_DB_KEYS`. ⛔ ``None`` IS
+            # reachable here, and an earlier version of this comment called it
+            # unreachable "verified by review": the ``embedded-allowed`` rung
+            # calls `resolve_db_path()` UNWRAPPED, so a relative
+            # `DEFAULT_DB_PATH` (no passwd entry, no `HOME`) raises a PLAIN
+            # ``ValueError`` with no key at all. That state degrades to
+            # ``unknown`` origin — which is the correct answer, not a fallback
+            # for a future rung — and is pinned by the THIRD arm of
+            # `test_a_keyless_rejection_is_reported_as_unknown_origin` (the
+            # `effective`-empty arm; the other two are the overlay branches, so
+            # before that arm existed a `file` here left all three suites green
+            # — review, P2, measured).
+            _key = getattr(exc, "key", None)
             _source = _db_value_source(_key)
             daemon_error = _redact_db_value(
-                f"{type(exc).__name__}: {exc}"
+                f"{_daemon_error_label(exc)}: {exc}"
                 + (" — the value is the one this `.env` supplied"
                    if _source == "file" else ""),
                 os.environ.get("TORTOISE_DB_URI"),
@@ -11966,6 +12137,8 @@ def _dotenv_rows(env_file: dict) -> list[tuple[str, str, str]]:
     adds could be erased or forged. The sibling `config show` prose already
     escaped (that is what `_printable` exists for); this row builder did not.
     """
+    from tortoise.config import rung_deciding_key
+
     rows: list[tuple[str, str, str]] = []
     for other in env_file.get("unread_env_files") or ():
         if other.get("state") == "unreadable":
@@ -12185,19 +12358,39 @@ def _dotenv_rows(env_file: dict) -> list[tuple[str, str, str]]:
     # the file's key — both credited the file with selecting a target it never
     # touched (#12428 review).
     if env_file.get("graph_keys"):
-        _carried = (env_file.get("env_graph_keys")
-                    or [*(env_file.get("shadowed_graph_keys") or ()),
-                        *(env_file.get("applied_graph_keys") or ())])
-        _deciding = next(
-            (key for key in _DB_LADDER_KEYS
-             if key in env_file["graph_keys"] or key in _carried),
-            None)
-        if _deciding and _deciding not in env_file["graph_keys"]:
+        # ⛔ The RESOLVER's answer, not a walk of `_DB_LADDER_KEYS` (#12441 item
+        # 1) — see the twin site in `_cmd_config` for the blank-value state the
+        # walk mis-attributed, AND for why the discriminator here is the RUNG and
+        # not "is the key in `env_graph_keys`" (that filter is `.strip()`-based,
+        # so it excludes a whitespace-only value the LADDER consumed; and
+        # `embedded-allowed` consumed no ladder key at all — the hatch did).
+        _deciding = rung_deciding_key(env_file.get("daemon_rung"))
+        if env_file.get("daemon_rung") == "embedded-allowed":
+            detail = (f"{path} sets "
+                      f"{_printable(', '.join(env_file['graph_keys']))} — "
+                      f"{_read_clause}; the target the rows below grade "
+                      f"({_printable(str(graded))}) is the canonical EMBEDDED "
+                      f"default, selected by TORTOISE_ALLOW_EMBEDDED=1 — no ladder "
+                      f"key, from this file or the environment, chose it")
+        elif _deciding and _deciding not in env_file["graph_keys"]:
+            # ⛔ The value being BLANK is stated, not implied: the key DECIDED (the
+            # ladder accepted it on raw truthiness) and `resolve_db_path` then threw
+            # it away for the canonical default, so "decides it" alone reads as
+            # "your value is in use" (review round 4, P3 — the twin of the
+            # `embedded-allowed` sentence, one state over).
+            _blank_decider = _deciding in (
+                (env_file.get("blank_graph_keys") or {}).get("env") or ())
             detail = (f"{path} sets "
                       f"{_printable(', '.join(env_file['graph_keys']))} — "
                       f"{_read_clause}; the ENVIRONMENT's {_printable(_deciding)} "
-                      f"decides it for the daemon, so the file's key cannot change "
-                      f"the target the rows below grade ({_printable(str(graded))})")
+                      f"decides it for the daemon"
+                      + (", but its value is BLANK — that resolves to the canonical "
+                         "EMBEDDED default, not to a store it names, so the "
+                         "file's key cannot change it"
+                         if _blank_decider else
+                         ", so the file's key cannot change "
+                         "the target the rows below grade "
+                         f"({_printable(str(graded))})"))
         else:
             detail = (f"{path} sets "
                       f"{_printable(', '.join(env_file['graph_keys']))} — "
@@ -12224,10 +12417,12 @@ def _dotenv_rows(env_file: dict) -> list[tuple[str, str, str]]:
         elif _from_file and _from_env:
             # MIXED: the shell supplied one ladder key and the file the other.
             # Whichever the ladder ranks FIRST decides, so name it rather than
-            # assume either side.
-            _top = next(key for key in _DB_LADDER_KEYS
-                        if key in env_file["applied_graph_keys"]
-                        or key in env_file["shadowed_graph_keys"])
+            # assume either side — ⛔ by asking the RESOLVER (#12441 item 1): the
+            # rung names the key the ladder actually CONSUMED.
+            # ⛔ STRUCTURAL ONLY (see the twin site in `_cmd_config`): both sets
+            # here are non-blank filtered, so the walk this replaces coincided
+            # with the rung and no input distinguishes them.
+            _top = rung_deciding_key(env_file.get("daemon_rung"))
             if _top in env_file["applied_graph_keys"]:
                 detail = (f"{_sets}; this process applied it at import, so the "
                           f"environment now sets {_from_file}, which the daemon "
