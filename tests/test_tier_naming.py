@@ -277,10 +277,14 @@ class TestEverySurfaceAgreesWithTheDeclaration:
 #:         (`There is no plan called Builder in Tortoise.`): that arm pays `_CLAUSE_END`
 #:         because its scoped twin (`… called Builder on the self-hosted install.`) is
 #:         indistinguishable here and is a TRUE statement (cycle 8);
-#:       * a sentence that REPORTS an old denial and then re-asserts one
-#:         (`Previously the page stated there is no Builder plan; today there is no
-#:         Builder plan either.`): the exemption is per SENTENCE, so the reported
-#:         clause exempts the live one beside it (cycle 8).
+#:       * a sentence that REPORTS an old denial and then re-asserts one in a SINGLE
+#:         clause (`Previously the page stated there is no Builder plan, and today
+#:         there is no Builder plan either.`): the exemption is per SENTENCE and per
+#:         quoted/reported span, so a reported clause and a live one sharing one
+#:         sentence are not separated here. (The `;`-split twin of this shape WAS an
+#:         escape and is now CAUGHT — the reported-clause arm requires a citation since
+#:         cycle 12, so `…; today there is no Builder plan either.` is flagged and pinned
+#:         in the live tuple. The bullet is stated for the comma form, which is not.)
 #:       * a COLON-closed denial (`There is no Builder plan: it never existed.`): `:`
 #:         is not in either clause end, so neither the arm nor the exemption fires. True
 #:         on `origin/main` too — pre-existing, and listed here because the list is
@@ -370,8 +374,12 @@ _CLAUSE_END = (r"(?!" + _RESTATEMENT_TAIL + r")"
 #: no Builder plan anymore." and "There is no Builder plan any more." both read as
 #: ordinary prose and both escaped the guard entirely (cycle-4 review). Kept to a
 #: CLOSED set so it cannot become a wildcard that swallows the next qualifier.
+#: ⛔ `whatsoever` and `of any kind` were missing from a list whose own note proves the
+#: class is real (cycle-13 P2, measured: `There is no Builder plan whatsoever.` and
+#: `There is no Builder plan of any kind.` both read as ordinary prose).
 _INTENSIFIER = (r"(?:\s*['\"\u201d\u2019]?\s+"
-                r"(?:any\s?more|anymore|at\s+all|available|for\s+sale))?")
+                r"(?:any\s?more|anymore|at\s+all|available|for\s+sale|whatsoever|"
+                r"of\s+any\s+(?:kind|sort)))?")
 
 #: …and AFTER an intensifier only TERMINAL punctuation may end the assertion
 #: (cycle-5 review, measured). `_CLAUSE_END`'s comma arm re-entered through the new
@@ -434,8 +442,16 @@ _DENIAL_PATTERNS = (
     # "no 'builder' plan exists" (with an explicit non-existence predicate)
     re.compile(r"\bno\s+(?:such\s+(?:thing\s+as\s+(?:a\s+)?)?)?" + _BUILDER_PLAN +
                r"\s+exists\b", re.I),
-    # "no such thing as a builder tier"
-    re.compile(r"\bno\s+such\s+(?:thing\s+as\s+(?:a\s+)?)?" + _BUILDER_PLAN, re.I),
+    # "no such thing as a builder tier" — and this arm needs `_CLAUSE_END` like every
+    # other existential arm (cycle-13 P2, measured): without it, three extra words
+    # defeated the qualified-statement protection `_CLAUSE_END` exists for, so
+    # `There is no such thing as a Builder plan cheaper than Solo.` and `… , only the
+    # `pro` identifier (#4336).` were both RED. The `-end` cannot rescue the second —
+    # the restatement exemption is a lookahead on a clause end this arm did not use.
+    re.compile(r"\bno\s+such\s+(?:thing\s+as\s+(?:a\s+)?)?" + _BUILDER_PLAN +
+               _CLAUSE_END, re.I),
+    re.compile(r"\bno\s+such\s+(?:thing\s+as\s+(?:a\s+)?)?" + _BUILDER_PLAN +
+               _INTENSIFIER + _CLAUSE_END_STRICT, re.I),
     # "the builder plan does not exist" — INCLUDING its contracted spelling. `isn't` was
     # added in cycle 4 for exactly this class and its sibling verb was missed then
     # (cycle-6 P2, measured: "The Builder tier doesn't exist." escaped).
@@ -496,11 +512,16 @@ _DENIAL_PATTERNS = (
 #: the superseded claim and cite the issue — was RED, because the closing-quote
 #: tolerance in `_CLAUSE_END` now reaches the claim and no cue matched. `git grep -niE
 #: 'until #|prior to #|through #' -- 'docs/*.md'` is 30+ files, so this is the house
-#: phrasing, not an edge case.
+#: phrasing, not an edge case. ⛔ …and `until\s+then` was hoisted INSIDE the
+#: citation-requiring group, where it could only match the nonsense `until then #12444`,
+#: so `Until then the page said "there is no Builder plan".` — 52 `docs/` files write
+#: `until then` — stayed RED (cycle-13 P2, measured). The bare temporal cues are their
+#: own alternation now.
 _RETRACTION_CUES = re.compile(
     r"\b(?:previously|formerly|used\s+to|no\s+longer|retract\w*|stale\w*|"
     r"corrected|corrects|outdated|supersed\w*|"
-    r"(?:before|until|until\s+then|through|prior\s+to|up\s+to)\s+#\d+)\b", re.I)
+    r"(?:before|until|through|prior\s+to|up\s+to)\s+#\d+|"
+    r"(?:until|before)\s+then)\b", re.I)
 
 #: …but a cue word alone is not a record — it is a bypass: it exempted
 #: `The docs are stale: there is no Builder plan.`, a live denial (cycle 2). The
@@ -875,6 +896,10 @@ class TestNoDocDeniesABuilderPlanExists:
             # these true statements were RED — the very class `_CLAUSE_END` exists for.
             "There is no plan called Builder on the self-hosted install.",
             "There is no such plan as Builder for end-customers, only graphs.",
+            # …and the SAME qualified-statement protection for the `no such thing as`
+            # arm, which had no clause end at all (cycle-13 P2, measured).
+            "There is no such thing as a Builder plan cheaper than Solo.",
+            "There is no such thing as a Builder plan, only the `pro` identifier (#4336).",
             # A RECORD written without quotation marks (cycle 7): a reported clause is
             # the same record, and rejecting it was a false positive.
             "Previously this doc asserted there is no Builder plan; #12444 corrected it.",
@@ -900,13 +925,18 @@ class TestNoDocDeniesABuilderPlanExists:
             "docs/product/beta-sdk-surface.md previously read 'there is no "
             "\"builder\" plan'; #12444 corrected it.",
             "The denial is no longer present since 2026-09-21.",
-            # ⚠️ Neither case above NEEDS the exemption — their plain text raises no
-            # `_DENIAL_PATTERNS` hit at all, so deleting `_quotes_a_retracted_claim`
-            # wholesale left both green (measured, review). THIS case is the one the
-            # pattern DOES match, and only the documented exemption rescues it — it
-            # pins the SENTENCE-level path, while
+            # ⚠️ Of the three cases here, `The denial is no longer present since
+            # 2026-09-21.` raises no `_DENIAL_PATTERNS` hit at all, so IT needs nothing.
+            # ⛔ The other TWO both MATCH and are green ONLY because of the exemption
+            # (cycle-13 P2, measured: the earlier revision of this comment said the
+            # first case matched nothing — true on `origin/main`, invalidated by the
+            # closing-quote tolerance THIS PR gave `_CLAUSE_END`, which now reaches
+            # `…'there is no "builder" plan';…`). A maintainer who trusted that would
+            # reshape the exemption without touching the case that depends on it.
+            # THIS case pins the SENTENCE-level path, while
             # `test_a_retraction_record_split_across_blocks_is_exempt` pins the
             # across-fragments one.
+            'Until then the page said "there is no Builder plan".',
             'The doc previously read "There is no Builder plan."; #12444 corrected it.',
         )
         for sentence in correct:
@@ -965,6 +995,12 @@ class TestNoDocDeniesABuilderPlanExists:
                 # exempt_a_denial` says it must.
                 "The docs are stale: the page says there is no Builder plan.\n",
                 "The stale `org` wording says there is no Builder plan.\n",
+                # …and the report-then-re-assert shape the class docstring used to list as
+                # an escape: the citation requirement added in cycle 12 closed it, so it
+                # is a live denial now and belongs HERE, not on the miss list
+                # (cycle-13 P2, measured).
+                "Previously the page stated there is no Builder plan; today there is no "
+                "Builder plan either.\n",
                 # Cycle-7 P2: a speech verb plus SOME quote satisfied the attribution,
                 # so an unrelated quotation exempted a live denial.
                 'The doc previously said "pro"; there is no Builder plan.\n',
@@ -1062,6 +1098,11 @@ class TestNoDocDeniesABuilderPlanExists:
             'There is no "builder" plan — Builder is the name for the `pro` tier.',
             "There is no Builder plan — Builder is the tier you cannot buy.",
             "There is no Builder plan — Builder is the name of a plan.",
+            "There is no such thing as a Builder plan.",
+            # The closed intensifier set was missing the two most common siblings
+            # (cycle-13 P2, measured).
+            "There is no Builder plan whatsoever.",
+            "There is no Builder plan of any kind.",
             # ⛔ The three arms added in cycles 6/7 were born WITHOUT the intensifier
             # twin the older arms learned for in cycle 4 — one trailing qualifier
             # defeated all three (cycle-11 P2, measured).
@@ -1178,6 +1219,15 @@ class TestNoDocDeniesABuilderPlanExists:
             "_CITATION",
             "_RESTATEMENT_TAIL",
             "_RETRACTION_TIE",
+            # …and the four that compose straight into `_DENIAL_PATTERNS`, which the
+            # comment above claimed to have covered and had not (cycle-13 P2, measured:
+            # injected tests pinning `_INTENSIFIER`, `_CLAUSE_END` and
+            # `_IDENTIFIER_RESTATEMENT` all ran green — and `_IDENTIFIER_RESTATEMENT` is
+            # the exact constant the cycle-12 fix edited).
+            "_INTENSIFIER",
+            "_CLAUSE_END",
+            "_CLAUSE_END_STRICT",
+            "_IDENTIFIER_RESTATEMENT",
         }
         offenders: list[str] = []
         for node in cls.body:
