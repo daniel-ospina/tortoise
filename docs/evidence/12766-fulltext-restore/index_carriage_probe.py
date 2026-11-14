@@ -108,6 +108,12 @@ def _carriage(client, kind, nodes):
             # nothing is H3 (the index data did not survive) — the exact failure this whole
             # probe exists to be able to report. Registration alone would mint
             # CARRIED-BY-THE-GRAPH-KEY over an empty index, i.e. a false PASS.
+            # ⚠️ This is UNCONDITIONAL for FULLTEXT. For RANGE it is best-effort: `range_hits`
+            # is a predicate count, and whether the planner consults the range index or answers
+            # the predicate with a label scan is the engine's choice (README §6), so a
+            # registered-but-empty RANGE index whose query fell to a scan would still pass.
+            # #12768 is what that gap looks like from the other side, and it is disclosed
+            # rather than papered over.
             and (result["target"].get("hits", result["target"].get("rows")) or 0) > 0
             else "NOT-CARRIED (the same-name arm was registry retention)"
         )

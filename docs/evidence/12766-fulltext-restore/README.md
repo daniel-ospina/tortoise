@@ -89,6 +89,7 @@ The payload is **equal in size at the log's resolution** whether or not an index
 granularity is ~10.5 KB rather than a byte count. Yet the restored index reports **exactly** the
 pre-restore `numDocuments`, `numTerms` **and** `invertedSize` (2 230 000 → 2 230 000 at 20 000 nodes;
 10 035 000 → 10 035 000 at 90 000).
+
 **`invertedSize` is a byte count** — established from the probe rather than assumed: the value-0 case
 loses two postings and `invertedSize` drops **9 → 5**, i.e. 2 bytes per posting, and the same 2-byte
 loss per entry holds at scale (79 526 → 79 524; 383 265 → 383 263). At 20 000 nodes the fulltext index
@@ -140,8 +141,11 @@ This settled the three hypotheses the plan named, and it is worth recording whic
 **H3 was the one that would have changed the verdict from "costs money" to "the kept index is not
 actually kept", so it was tested rather than assumed:** every run asks the restored index a live
 query, not just whether a catalogue row exists (`fts_hits_after` 5 000 at 20 000 nodes, 22 500 at
-90 000; `numDocuments` equal to the node count in all four index arms), and a restored index that
-answered nothing would now **refuse the run** rather than print a table (exit 2; §6).
+90 000; `numDocuments` equal to the node count in all four index arms), and a restored **fulltext**
+index that answered nothing would now **refuse the run** rather than print a table (exit 2; §6). ⚠️
+The post-restore refusal is FULLTEXT-only: the range arms refuse on the restored node count and on
+`numDocuments` via `await_index`, but not on a live range query, because that query's planner
+selection is the engine's choice (§6).
 
 ### "The definition travels in the payload" — established separately, because the harness cannot do it
 
@@ -411,9 +415,10 @@ objective exists in this record (point 0).**
    came from a **2.955 s** / **2 899.4 ms** restore at 20 000 nodes and a restore that outlived a 10 s
    read bound at 90 000. This record measures **0.405 s / 358.9 ms** and **1.585 s / 1 535.2 ms** at the
    same node counts. ⚠️ The two sides differ in engine **and** payload size (see the ⚠️ under the
-   verdict table), so the "~7×" / "~33×" multipliers **overstate the index-type difference**; the
-   defensible statement is that a fulltext rebuild is **substantially cheaper** than a vector one at the
-   same node count, and the same-engine 5 000-node datapoint (2.25 s vector vs 0.405 s fulltext at
+   verdict table), so the 7.30× / 8.08× figures and the ≥33× floor describe **the difference between
+   those two named runs** and would be **wrong if read as an index-type multiplier**; the defensible
+   statement is that a fulltext rebuild is **substantially cheaper** than a vector one at the same node
+   count, and the same-engine 5 000-node datapoint (2.25 s vector vs 0.405 s fulltext at
    20 000) supports that direction without a clean ratio.
 3. **Avoidable if the pause is judged too long.** Dropping the fulltext index before the `DUMP` costs
    **nothing** in total time (cycle 0.536 s vs 0.422 s at 20 000; 1.603 s vs 1.654 s at 90 000) and
