@@ -1055,7 +1055,8 @@ def test_the_corpus_exclusion_is_exactly_archive_and_nothing_wider():
     """The archive is the ONLY thing outside the corpus (#11609 batch 1).
 
     `archive/` records hold verbatim indented fragments and are deliberately
-    unparseable, so they are excluded from both corpus scans. That exclusion is a
+    unparseable, so they are excluded from every scan that walks the shared corpus
+    (`production_call_sites`, `unparseable_corpus_findings`, `foreign_metric_findings`). That exclusion is a
     population change, and a population change is how a scan goes blind — so pin its
     boundary: the prefix must not swallow a production module whose name merely starts
     with "archive", and it must be the literal directory segment.
@@ -1068,7 +1069,11 @@ def test_the_corpus_exclusion_is_exactly_archive_and_nothing_wider():
                  "tortoise/archive_helpers.py", "tools/archive_surface.py",
                  "tortoise/monitoring.py"):
         assert _in_corpus(kept) is True, kept
-    # Non-Python is not a corpus member either, whatever directory it lives in.
+    # The `.py` half of the predicate, pinned where it can FAIL: a non-Python file
+    # OUTSIDE `archive/` is out of the corpus because of the extension, not the
+    # prefix. (`archive/README.md` cannot discriminate — both conditions exclude it.)
+    assert _in_corpus("tortoise/README.md") is False
+    assert _in_corpus("docs/00_index.md") is False
     assert _in_corpus("archive/README.md") is False
 
 
