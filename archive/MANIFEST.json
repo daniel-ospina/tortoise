@@ -2,6 +2,106 @@
   "schema": 1,
   "entries": [
     {
+      "kind": "mcp-tool",
+      "symbol": "tortoise_analyze",
+      "batch": "b1-removed-no-destination",
+      "reason": "no destination in the approved 27-tool surface; no replacement (owner ruling, #11609)",
+      "file": "archive/mcp-tools/b1-removed-no-destination/tortoise_analyze.py",
+      "archived_from": "tortoise/tool_registry.py",
+      "archived_at": "b85194d6bcb15b80a8cc07d2e6a076d7e8af8456",
+      "sources": [
+        "tortoise/mcp_server.py",
+        "tortoise/tool_registry.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/tool_registry.py",
+          "node": "ToolDefinition:tortoise_analyze",
+          "sha256": "0a049251ae92072b49c88f22fa33e4e0f8eb1ba8ebdac169bd349e1e5f3b222d"
+        },
+        {
+          "path": "tortoise/mcp_server.py",
+          "node": "FunctionDef:tortoise_analyze",
+          "sha256": "277ebd5840b462b320cee081b1813b77e5c3526b3b1130baaed3923103ab16f4"
+        }
+      ]
+    },
+    {
+      "kind": "mcp-tool",
+      "symbol": "tortoise_backfill_v25",
+      "batch": "b1-removed-no-destination",
+      "reason": "no destination in the approved 27-tool surface; no replacement (owner ruling, #11609)",
+      "file": "archive/mcp-tools/b1-removed-no-destination/tortoise_backfill_v25.py",
+      "archived_from": "tortoise/tool_registry.py",
+      "archived_at": "73c479ce405b3561b5e3abd321d910a5fccb9622",
+      "sources": [
+        "tortoise/tool_registry.py",
+        "tortoise/mcp_server.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/tool_registry.py",
+          "node": "ToolDefinition:tortoise_backfill_v25",
+          "sha256": "e2c7cb98df357295353c4c3c22c77c99fde113760d8d437e0517fddeaf730fd7"
+        },
+        {
+          "path": "tortoise/mcp_server.py",
+          "node": "FunctionDef:tortoise_backfill_v25",
+          "sha256": "4f5bb427eb4cfc9bebb8e7cbcea33eaa8590e65cc45de07d1936f0431347b5b4"
+        }
+      ]
+    },
+    {
+      "kind": "mcp-tool",
+      "symbol": "tortoise_pack_install",
+      "batch": "b1-removed-no-destination",
+      "reason": "no destination in the approved 27-tool surface; no replacement (owner ruling, #11609)",
+      "file": "archive/mcp-tools/b1-removed-no-destination/tortoise_pack_install.py",
+      "archived_from": "tortoise/tool_registry.py",
+      "archived_at": "73c479ce405b3561b5e3abd321d910a5fccb9622",
+      "sources": [
+        "tortoise/tool_registry.py",
+        "tortoise/mcp_server.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/tool_registry.py",
+          "node": "ToolDefinition:tortoise_pack_install",
+          "sha256": "cdf5ab2eb7a55a1743a3ae638f9be8d17c9308c35842777713910291957e1408"
+        },
+        {
+          "path": "tortoise/mcp_server.py",
+          "node": "FunctionDef:tortoise_pack_install",
+          "sha256": "e9a381c7ce04bc65b7a1eeccb5a9f4b809f952e52c1b94ea733afde35a7b669e"
+        }
+      ]
+    },
+    {
+      "kind": "mcp-tool",
+      "symbol": "tortoise_packs_list",
+      "batch": "b1-removed-no-destination",
+      "reason": "no destination in the approved 27-tool surface; no replacement (owner ruling, #11609)",
+      "file": "archive/mcp-tools/b1-removed-no-destination/tortoise_packs_list.py",
+      "archived_from": "tortoise/tool_registry.py",
+      "archived_at": "73c479ce405b3561b5e3abd321d910a5fccb9622",
+      "sources": [
+        "tortoise/tool_registry.py",
+        "tortoise/mcp_server.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/tool_registry.py",
+          "node": "ToolDefinition:tortoise_packs_list",
+          "sha256": "f5a0581b093e1d0d13590e41cc8095d98ca9b762d49d6e1d2b354bdbfe41854b"
+        },
+        {
+          "path": "tortoise/mcp_server.py",
+          "node": "FunctionDef:tortoise_packs_list",
+          "sha256": "8d8b36d571a46d2b7c107ed929c833c0c7f5add745e0f29fb095c13576329733"
+        }
+      ]
+    },
+    {
       "kind": "module",
       "symbol": "tortoise.archived.search_legacy",
       "batch": "pre-mechanism-legacy-search",

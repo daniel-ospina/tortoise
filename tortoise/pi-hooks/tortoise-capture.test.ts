@@ -684,13 +684,14 @@ test("a Pi filing that reports a RECORDED outcome CLEARS the marker (#12460)", a
 
 test("a Pi filing that reports the UNEXTRACTED verdict also clears the marker (#12460)", async () => {
   // The other verdict in the allow-list: `confirmed: unextracted`. It rests on the
-  // confirmation READ matching the posted turns, NOT on the server having recorded
-  // an extraction outcome — on this tree that read does not consult
-  // `extraction.outcome_known`, so the verdict is exactly as strong as the read
-  // (#12374's PENDING branch qualifies it). It stays in the allow-list because
-  // #12379's accepted decision is that a keyless session must stop being reported
-  // as unresolved forever, and Python's `outcome_recorded` accepts it too — this
-  // leg must answer identically or one shared meta flips against the other.
+  // confirmation READ matching the posted turns, and that read DOES consult
+  // `extraction.outcome_known` since #12374 (`session_confirm._extraction_verdict`
+  // returns `PENDING` on an explicit `false`), so the verdict is as strong as the
+  // read; the surviving residual is a served detail with NO `extraction` block at
+  // all. It stays in the allow-list because #12379's accepted decision is that a
+  // keyless session must stop being reported as unresolved forever, and Python's
+  // `outcome_recorded` accepts it too — this leg must answer identically or one
+  // shared meta flips against the other.
   //
   // MUTATIONS THAT RED THIS: narrow the allow-list to `filed` alone.
   const spool = tmpSpool();
@@ -705,13 +706,13 @@ test("a Pi filing that reports the UNEXTRACTED verdict also clears the marker (#
 });
 
 test("a Pi filing that reports an UNRECORDED outcome STAMPS the marker (#12460)", async () => {
-  // The stamp half, pinned on a **#12374-shaped** body — one NO producer emits on
-  // this tree. `_refused` builds only `{"confirmed": verdict}` and
-  // `session_confirm` has no `pending` verdict; `hosted_api`'s receipt has no
-  // `extraction_outcome` at all. So this is not production evidence for any leg:
-  // it pins that the predicate pair is SYMMETRIC, so the stamp branch cannot be
-  // dropped without the clear being dropped with it (see the `SpoolMeta` note).
-  // The LIVE clear on this leg is `extracted >= 1`, pinned by the receipt test.
+  // The stamp half, pinned on a **#12374-shaped** body: `{"confirmed": "pending",
+  // "extraction_outcome": "unknown"}`, the body `__main__._session_post._refused`
+  // synthesises. That body reaches the PYTHON drain, not this leg (which posts to
+  // `/v1/sessions` itself) — this leg's own producer of the marker is the
+  // confirm-on-refusal READ, pinned by the `#12603` family below. Kept because it
+  // pins the predicate pair as SYMMETRIC: the stamp branch cannot be dropped
+  // without the clear being dropped with it (see the `SpoolMeta` note).
   //
   // MUTATIONS THAT RED THIS: port only the CLEAR (then the trace is written by
   // one leg and only when the other leg's POST happened to be the one that saw
@@ -827,8 +828,9 @@ test("a STORE-ONLY receipt mode does NOT clear the marker (#12460)", async () =>
   //
   // This leg cannot resolve a store-only capture AT ALL: it sees only a receipt,
   // and the receipt's mode says what this request skipped, not what the server
-  // recorded. (The Python leg is not authoritative here either — `confirm_capture`
-  // does not yet consult `extraction.outcome_known`; #12374 qualifies it.)
+  // recorded. (On the Python leg the confirmation read DOES consult
+  // `extraction.outcome_known` since #12374; what no leg's `unextracted` verdict
+  // distinguishes is a detail with no `extraction` block at all.)
   //
   // MUTATIONS THAT RED THIS: add a store-only `extraction_mode` clause to
   // `outcomeRecorded` (the shape PR #12507 first shipped).
@@ -883,6 +885,840 @@ test("an AMBIGUOUS receipt (extracted 0, normal mode) leaves the marker standing
     "a zero extraction count in a normal mode does not say whether the outcome " +
       "was ever recorded — it must never resolve the marker",
   );
+});
+
+// ── #12603: the confirm-on-refusal READ — the marker's only seller on this leg ──
+
+/**
+ * A server that REFUSES the capture POST and then answers the confirm-on-refusal
+ * read (`GET /v1/sessions/<id>`) with `detail()` (#12603).
+ *
+ * `postStatus` absent models the #12374 shape exactly: an `AbortError` (the
+ * `REQUEST_TIMEOUT_MS` bound), NOT an HTTP status — the transport bound ABANDONS
+ * its handler rather than cancelling it, so the session may already be stored.
+ * `postStatus` present models an HTTP refusal of the retryable class.
+ *
+ * The two methods are told apart on purpose: the assertion that matters is that
+ * a PERMANENT refusal and a 2xx filing never issue the read at all.
+ */
+function refusedThenDetail(
+  detail: () => Record<string, unknown>,
+  opts: { postStatus?: number; getStatus?: number } = {},
+) {
+  const calls: Array<{ method: string; url: string }> = [];
+  const fetchImpl = async (url: string, init?: Record<string, unknown>) => {
+    const method = String(init?.method ?? "GET").toUpperCase();
+    calls.push({ method, url });
+    if (method === "POST" && /\/v1\/sessions$/.test(url)) {
+      if (opts.postStatus !== undefined) {
+        return {
+          ok: false,
+          status: opts.postStatus,
+          json: async () => ({ detail: "refused" }),
+        };
+      }
+      const err = new Error("This operation was aborted") as Error & {
+        name: string;
+      };
+      err.name = "AbortError";
+      throw err;
+    }
+    const getStatus = opts.getStatus ?? 200;
+    return {
+      ok: getStatus >= 200 && getStatus < 300,
+      status: getStatus,
+      json: async () => detail(),
+    };
+  };
+  return {
+    fetchImpl: fetchImpl as never,
+    calls,
+    posts: () => calls.filter((c) => c.method === "POST").length,
+    gets: () => calls.filter((c) => c.method === "GET"),
+  };
+}
+
+/** A `GET /v1/sessions/<id>` body in the shape `hosted_api.get_session_detail`
+ * serves (`tortoise/hosted_api.py` — `turn_points` rows carry `id`, `role`, and
+ * the content with the `[role] ` prefix STRIPPED). */
+function servedDetail(
+  sessionId: string,
+  turns: Array<{ role: string; content: string }>,
+  extra: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    id: sessionId,
+    turns: turns.length,
+    extracted: 0,
+    extraction: { status: "stored", outcome_known: false },
+    turn_points: turns.map((t, i) => ({
+      id: `${sessionId}_t${i}`,
+      role: t.role,
+      content: t.content,
+    })),
+    ...extra,
+  };
+}
+
+test("a RETRYABLE refusal reads the session back and STAMPS the marker (#12603)", async () => {
+  // The defect this closes: the marker's only producer was Python-CLI's
+  // `__main__._session_post._refused`. The Pi leg POSTs `/v1/sessions` itself and
+  // read no session back on a refusal, so on a Pi box the stamp branch had NO
+  // live input and `session health` reported nothing for a session in exactly
+  // the #12374 state (504 after the server committed, `outcome_known: false`).
+  //
+  // MUTATIONS THAT RED THIS: delete the confirm-on-refusal read; read it but
+  // only stamp when `res.ok`; drop the `outcome_known === false` clause; or read
+  // the session WITHOUT matching the turns.
+  const spool = tmpSpool();
+  const sid = "sess-refused-unrecorded";
+  const turns = [
+    { role: "user" as const, content: "how do I rotate a key" },
+    { role: "assistant" as const, content: "use the rotate command" },
+  ];
+  writeSpoolEntry(spool, snapshot(sid, turns));
+
+  const server = refusedThenDetail(() => servedDetail(sid, turns));
+  const summary = await flushSpool(TEST_CFG, {
+    dir: spool, fetchImpl: server.fetchImpl, now: 1,
+  });
+
+  assert.equal(summary.attempted, 1, "the capture must still be POSTed");
+  assert.equal(summary.deferred, 1, "a refusal still defers — nothing became filed");
+  assert.deepEqual(
+    server.gets().map((c) => c.url),
+    [`https://h/v1/sessions/${sid}`],
+    "the confirmation read must hit the detail route the server actually serves",
+  );
+  assert.equal(
+    readSpoolEntry(spool, sid)?.extraction_outcome,
+    "unknown",
+    "the server read back with `outcome_known: false` — without the marker this " +
+      "session leaves no trace on `session health`, which is the silence #12379 " +
+      "exists to end",
+  );
+  assert.equal(
+    readSpoolEntry(spool, sid)?.filed_key,
+    undefined,
+    "the read is EVIDENCE, not a filing: the entry keeps retrying",
+  );
+});
+
+test("the confirm read must MATCH the posted turns — another transcript stamps nothing (#12603)", async () => {
+  // `session_confirm.confirm_capture` requires the served turn ids AND their
+  // stored text to be the ones just POSTed (`expected_turns`), because the id is
+  // deterministic (`{session_id}_t{i}`) and only the TEXT distinguishes a
+  // concurrent capture of a grown/re-windowed transcript. A stamped marker over
+  // someone else's turns reports a state this session is not in.
+  //
+  // MUTATIONS THAT RED THIS: stamp on `turn_points` being merely PRESENT, or on a
+  // turn-id set comparison alone.
+  const spool = tmpSpool();
+  const sid = "sess-refused-other-turns";
+  writeSpoolEntry(spool, snapshot(sid, [{ role: "user" as const, content: "mine" }]));
+
+  const notMine = refusedThenDetail(() =>
+    servedDetail(sid, [{ role: "user", content: "someone else's turn" }]),
+  );
+  const grown = refusedThenDetail(() =>
+    servedDetail(sid, [
+      { role: "user", content: "mine" },
+      { role: "assistant", content: "a later capture appended this" },
+    ]),
+  );
+  const shifted = refusedThenDetail(() =>
+    servedDetail(sid, [
+      { role: "user", content: "an earlier turn" },
+      { role: "user", content: "mine" },
+    ]),
+  );
+
+  for (const [label, server] of [
+    ["different text", notMine],
+    ["a grown turn set", grown],
+    ["a re-indexed turn set", shifted],
+  ] as const) {    const each = tmpSpool();
+    writeSpoolEntry(each, snapshot(sid, [{ role: "user" as const, content: "mine" }]));
+    const summary = await flushSpool(TEST_CFG, {
+      dir: each, fetchImpl: server.fetchImpl, now: 1,
+    });
+    assert.equal(summary.deferred, 1, `${label}: still a deferral`);
+    assert.equal(
+      readSpoolEntry(each, sid)?.extraction_outcome,
+      undefined,
+      `${label}: the served session does not hold THIS transcript — the read is ` +
+        "not evidence about this capture and must stamp nothing",
+    );
+  }
+});
+
+test("a confirm read showing a RECORDED outcome stamps nothing (#12603)", async () => {
+  // Only an explicit `false` opens the marker: `extracted >= 1` means extraction
+  // RAN, so "never recorded" is false and a stamp here would be a false alarm
+  // rather than a duplicate verdict. The CLEAR those bodies trigger is a separate
+  // test (`a confirm read showing outcome_known TRUE CLEARS a standing marker`),
+  // because this one writes a FRESH entry per body and a clear is invisible on an
+  // entry that carries nothing.
+  //
+  // MUTATIONS THAT RED THIS: read `outcome_known` for truthiness (`!outcome_known`
+  // is true for `undefined`), or stamp whenever `extracted === 0`.
+  const spool = tmpSpool();
+  const sid = "sess-refused-recorded";
+  const turns = [{ role: "user" as const, content: "hi" }];
+  writeSpoolEntry(spool, snapshot(sid, turns));
+
+  for (const extra of [
+    { extracted: 3, extraction: { status: "stored-and-processed", outcome_known: true } },
+    { extracted: 0, extraction: { status: "stored-and-processed", outcome_known: true } },
+    { extraction: { status: "stored" } },
+    { extraction: null },
+    { extraction: { status: "stored", outcome_known: "false" } },
+  ]) {
+    const each = tmpSpool();
+    writeSpoolEntry(each, snapshot(sid, turns));
+    const server = refusedThenDetail(() => servedDetail(sid, turns, extra));
+    await flushSpool(TEST_CFG, { dir: each, fetchImpl: server.fetchImpl, now: 1 });
+    assert.equal(
+      readSpoolEntry(each, sid)?.extraction_outcome,
+      undefined,
+      `only an explicit boolean false opens the marker; got ${JSON.stringify(extra)}`,
+    );
+  }
+});
+
+test("a confirm read that cannot be completed stamps nothing (#12603)", async () => {
+  // A read we could not complete, or a served body with no `turn_points` block,
+  // is evidence in neither direction (`session_confirm.UNKNOWN`). The issue's
+  // constraint: "an inconclusive read (transport error, mismatch, absent block)
+  // stamps nothing".
+  //
+  // MUTATIONS THAT RED THIS: treat a failed/!ok read as `unrecorded`; or stamp on
+  // the absence of a body.
+  const spool = tmpSpool();
+  const sid = "sess-refused-inconclusive";
+  const turns = [{ role: "user" as const, content: "hi" }];
+
+  const unreadable = refusedThenDetail(() => ({}), { getStatus: 503 });
+  writeSpoolEntry(spool, snapshot(sid, turns));
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: unreadable.fetchImpl, now: 1 });
+  assert.equal(
+    readSpoolEntry(spool, sid)?.extraction_outcome,
+    undefined,
+    "a 503 on the read is a non-reading, never an `unrecorded` verdict",
+  );
+
+  for (const body of [{}, { turn_points: [] }, { turn_points: null }, { turns: 1 }]) {
+    const each = tmpSpool();
+    writeSpoolEntry(each, snapshot(sid, turns));
+    const server = refusedThenDetail(() => body);
+    await flushSpool(TEST_CFG, { dir: each, fetchImpl: server.fetchImpl, now: 1 });
+    assert.equal(
+      readSpoolEntry(each, sid)?.extraction_outcome,
+      undefined,
+      `a body with no usable turn set is inconclusive — got ${JSON.stringify(body)}`,
+    );
+  }
+
+  const throwing = async (url: string, init?: Record<string, unknown>) => {
+    if (String(init?.method ?? "GET").toUpperCase() === "POST") {
+      const err = new Error("boom");
+      throw err;
+    }
+    throw new Error("ECONNREFUSED");
+  };
+  const each = tmpSpool();
+  writeSpoolEntry(each, snapshot(sid, turns));
+  await flushSpool(TEST_CFG, { dir: each, fetchImpl: throwing as never, now: 1 });
+  assert.equal(
+    readSpoolEntry(each, sid)?.extraction_outcome,
+    undefined,
+    "a transport error on the read must never become a verdict",
+  );
+});
+
+test("a refusal in the recorded refusal set never issues the confirm read (#12603)", async () => {
+  // 402/403/503 are `capture_receipts.REFUSAL_STATUSES`: the Python leg's
+  // `_refused` excludes them BY NAME before confirming, because the server has
+  // said the SESSION is the problem (quota / credential / service), not that its
+  // bytes were dropped. Reading there can only miss, and on a quota-blocked box
+  // the read would be paid once per pass.
+  //
+  // MUTATIONS THAT RED THIS: drop the `NO_CONFIRM_READ_STATUSES` guard (the read
+  // is then issued for a quota refusal), or replace it with a `>= 500` test
+  // (which would read 5xx but not 402).
+  const sid = "sess-recorded-refusal";
+  const turns = [{ role: "user" as const, content: "hi" }];
+  for (const status of [402, 403, 503]) {
+    const spool = tmpSpool();
+    writeSpoolEntry(spool, snapshot(sid, turns));
+    const server = refusedThenDetail(() => servedDetail(sid, turns), { postStatus: status });
+    const summary = await flushSpool(TEST_CFG, {
+      dir: spool, fetchImpl: server.fetchImpl, now: 1,
+    });
+    assert.equal(summary.deferred, 1, `${status}: still retryable — kept`);
+    assert.equal(
+      server.gets().length,
+      0,
+      `${status} is in the recorded refusal set — the Python leg does not ` +
+        "confirm it, so neither may this leg",
+    );
+    assert.equal(readSpoolEntry(spool, sid)?.extraction_outcome, undefined);
+  }
+});
+
+test("a 5xx refusal IS confirmed — 504 is the #12374 shape (#12603)", async () => {
+  // The other half of the same table: `capture_outcome` puts 503 in the refusal
+  // set but 500/502/504 in plain `retryable`, and 504 is EXACTLY the measured
+  // post-commit-timeout shape this issue exists for. A guard written as
+  // "skip every 5xx" would keep the trace dark on the one status that matters.
+  //
+  // MUTATIONS THAT RED THIS: `if (status >= 500) return false`.
+  const spool = tmpSpool();
+  const sid = "sess-504-unrecorded";
+  const turns = [{ role: "user" as const, content: "hi" }];
+  writeSpoolEntry(spool, snapshot(sid, turns));
+
+  const server = refusedThenDetail(() => servedDetail(sid, turns), { postStatus: 504 });
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: server.fetchImpl, now: 1 });
+
+  assert.equal(server.gets().length, 1, "a 504 is confirmable — the abandon'd handler may have committed");
+  assert.equal(readSpoolEntry(spool, sid)?.extraction_outcome, "unknown");
+});
+
+test("a turn whose ROLE differs is not our capture — no stamp (#12603)", async () => {
+  // The role is part of the stored frame (`[<role>] <body>`) and part of what
+  // `session_confirm.turn_points` compares. A body that matches with the wrong
+  // speaker is the shape a re-windowed / regenerated transcript produces, and
+  // the marker would then describe a turn sequence this capture never posted.
+  //
+  // MUTATION THAT REDS THIS: compare only `content` and skip the role check.
+  const spool = tmpSpool();
+  const sid = "sess-refused-role-mismatch";
+  const turns = [
+    { role: "user" as const, content: "hi" },
+    { role: "assistant" as const, content: "hello" },
+  ];
+  writeSpoolEntry(spool, snapshot(sid, turns));
+
+  const server = refusedThenDetail(() =>
+    servedDetail(sid, [
+      { role: "assistant", content: "hi" },
+      { role: "user", content: "hello" },
+    ]),
+  );
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: server.fetchImpl, now: 1 });
+
+  assert.equal(
+    readSpoolEntry(spool, sid)?.extraction_outcome,
+    undefined,
+    "the speakers are swapped — this is not the transcript that was posted",
+  );
+});
+
+test("a session id that needs escaping is read as ONE path segment (#12603)", async () => {
+  // `localSessionId` (#9599) anchors an id to the transcript PATH, so a
+  // slash-bearing id is reachable. Splicing it raw into the path (the Python
+  // leg's `f"/v1/sessions/{session_id}"`) would let the route resolve to a
+  // DIFFERENT, truncated id — i.e. read some other session's detail as if it were
+  // ours. Encoding it makes the route a miss, which is the fail-safe direction.
+  //
+  // MUTATION THAT REDS THIS: interpolate the id raw.
+  const spool = tmpSpool();
+  const sid = "/tmp/sessions/weird#id?.jsonl";
+  const turns = [{ role: "user" as const, content: "hi" }];
+  writeSpoolEntry(spool, snapshot(sid, turns));
+
+  const server = refusedThenDetail(() => servedDetail(sid, turns));
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: server.fetchImpl, now: 1 });
+
+  assert.deepEqual(
+    server.gets().map((c) => c.url),
+    [`https://h/v1/sessions/${encodeURIComponent(sid)}`],
+    "an unescaped id would truncate the path at `#` and read the wrong thing",
+  );
+});
+
+test("a read showing extracted points CLEARS the marker, even with outcome_known false (#12603)", async () => {
+  // `session_confirm._extraction_verdict` has PRECEDENCE: `extracted >= 1` is
+  // `FILED` **before** the `outcome_known` qualifier is consulted. Points already
+  // stored prove extraction RAN — `outcome_known` is `capture_ok IS NOT NULL` and
+  // the points are written BEFORE that SET (`sdk.py`), so `extracted > 0` with
+  // `outcome_known: false` is a mid-extraction or failed-commit capture that DID
+  // extract, not an unknown outcome.
+  //
+  // ⛔ AND IT CLEARS, not merely declines to stamp (round 4 of this change's
+  // review measured both halves). Python turns that same detail into
+  // `confirmed: filed`, and `capture_spool._flush_one` CLEARS on it, so if this
+  // leg only declined to stamp, one shared meta would hold a marker the other leg
+  // had already disproved — and nothing would ever clear it, because the eventual
+  // filing of a stamped entry is a REPLAY (`extracted: 0`), which the clear
+  // correctly refuses. That is a PERMANENT false alarm on the exact #12374 shape:
+  // 504 → stamp on pass 1 → extraction finishes → pass 2's refusal read shows
+  // points.
+  //
+  // MUTATIONS THAT RED THIS: drop the `extracted >= 1` arm (read only
+  // `outcome_known`, which stamps here instead of clearing); or return a boolean
+  // so `"recorded"` cannot be told from `"inconclusive"` and the clear is lost.
+  const spool = tmpSpool();
+  const sid = "sess-refused-extracted-but-unknown";
+  const turns = [{ role: "user" as const, content: "hi" }];
+  writeSpoolEntry(spool, snapshot(sid, turns));
+
+  // Pass 1: the #12374 shape — the refusal read shows no outcome recorded, so the
+  // marker is stamped.
+  const first = refusedThenDetail(() => servedDetail(sid, turns));
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: first.fetchImpl, now: 1 });
+  assert.equal(
+    readSpoolEntry(spool, sid)?.extraction_outcome,
+    "unknown",
+    "pass 1 did not stamp — the rest of this test would prove nothing",
+  );
+
+  // Pass 2, past the backoff window: still refused, but the read now shows the
+  // extraction this session eventually ran.
+  const second = refusedThenDetail(() =>
+    servedDetail(sid, turns, {
+      extracted: 3,
+      extraction: { status: "stored", outcome_known: false },
+    }),
+  );
+  await flushSpool(TEST_CFG, {
+    dir: spool, fetchImpl: second.fetchImpl, now: 1 + RETRY_MAX_MS,
+  });
+
+  assert.equal(second.gets().length, 1, "the read must still have happened");
+  assert.equal(
+    readSpoolEntry(spool, sid)?.extraction_outcome,
+    undefined,
+    "points exist on the server — extraction ran, so the standing marker is a " +
+      "false alarm and the Python leg clears the SAME read",
+  );
+});
+
+test("a confirm read showing outcome_known TRUE CLEARS a standing marker (#12603)", async () => {
+  // The `UNEXTRACTED` half of the tri-state, and the one arm a `.ts` reviewer
+  // cannot see without it: a turn-matched detail with `extracted: 0` and an
+  // explicit `outcome_known: true` is Python's `UNEXTRACTED`, which `_refused`
+  // turns into `{"confirmed": "unextracted"}` and `_flush_one` CLEARS on. It is
+  // reachable in production in two shapes `sdk.py` writes: a keyed capture whose
+  // extraction recorded `ok=True` with zero points, and the keyless
+  // `capture_ok=False`+"none" shape (both serve `outcome_known: true,
+  // extracted: 0`).
+  //
+  // MUTATION THAT REDS THIS: delete `if (known === true) return "recorded";` so
+  // this detail falls through to `"inconclusive"` — measured: everything else in
+  // this file stays green, so without this test the arm is unpinned.
+  const spool = tmpSpool();
+  const sid = "sess-refused-known-true";
+  const turns = [{ role: "user" as const, content: "hi" }];
+  writeSpoolEntry(spool, snapshot(sid, turns));
+
+  // Pass 1: the #12374 shape stamps the marker.
+  const first = refusedThenDetail(() => servedDetail(sid, turns));
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: first.fetchImpl, now: 1 });
+  assert.equal(readSpoolEntry(spool, sid)?.extraction_outcome, "unknown");
+
+  // Pass 2, past the backoff: the same session, now recording an outcome with no
+  // points to show for it.
+  const second = refusedThenDetail(() =>
+    servedDetail(sid, turns, {
+      extracted: 0,
+      extraction: { status: "stored-and-processed", outcome_known: true },
+    }),
+  );
+  await flushSpool(TEST_CFG, {
+    dir: spool, fetchImpl: second.fetchImpl, now: 1 + RETRY_MAX_MS,
+  });
+
+  assert.equal(second.gets().length, 1, "the read must still have happened");
+  assert.equal(
+    readSpoolEntry(spool, sid)?.extraction_outcome,
+    undefined,
+    "an explicit `outcome_known: true` IS a recorded outcome — Python's " +
+      "`UNEXTRACTED` clears the same read, and leaving it standing is a " +
+      "permanent false alarm",
+  );
+});
+
+test("an INCONCLUSIVE read leaves a standing marker alone (#12603)", async () => {
+  // The narrowing `refusalOutcomeVerdict` documents: a served body that says
+  // nothing about extraction is evidence about NOTHING, so it neither stamps nor
+  // clears. Python's `_extraction_verdict` reads such a body as `UNEXTRACTED` and
+  // clears (that is #12379's recorded residual for the FILING legs); this leg does
+  // not extend an accepted residual to a second write path, because the marker it
+  // would delete was placed by an OBSERVED `false` and the condition may still
+  // hold. The divergence is one-sided: a marker left standing where Python would
+  // drop it — a false alarm, never a lost trace.
+  //
+  // MUTATION THAT REDS THIS: treat a missing block / non-boolean `outcome_known`
+  // as `"recorded"` (clear), which silently deletes the trace on any malformed
+  // detail a proxy or a downgrade serves.
+  const spool = tmpSpool();
+  const sid = "sess-refused-inconclusive";
+  const turns = [{ role: "user" as const, content: "hi" }];
+  writeSpoolEntry(spool, snapshot(sid, turns));
+
+  const first = refusedThenDetail(() => servedDetail(sid, turns));
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: first.fetchImpl, now: 1 });
+  assert.equal(readSpoolEntry(spool, sid)?.extraction_outcome, "unknown");
+
+  for (const extra of [
+    { extracted: 0, extraction: { status: "stored" } },
+    { extracted: 0, extraction: { status: "stored", outcome_known: "false" } },
+    { extracted: 0, extraction: null },
+  ]) {
+    const each = tmpSpool();
+    writeSpoolEntry(each, snapshot(sid, turns));
+    await flushSpool(TEST_CFG, { dir: each, fetchImpl: first.fetchImpl, now: 1 });
+    const next = refusedThenDetail(() => servedDetail(sid, turns, extra));
+    await flushSpool(TEST_CFG, {
+      dir: each, fetchImpl: next.fetchImpl, now: 1 + RETRY_MAX_MS,
+    });
+    assert.equal(
+      readSpoolEntry(each, sid)?.extraction_outcome,
+      "unknown",
+      `an inconclusive read must not delete the trace; got ${JSON.stringify(extra)}`,
+    );
+  }
+});
+
+test("a ROLE longer than the window is capped in CODE POINTS, like Python (#12603)", async () => {
+  // `sdk._capture_turn_window` caps the role with
+  // `_normalize_turn_role(role)[:TURN_MAX_CHARS]` — CODE POINTS. A `.slice()`
+  // counts UTF-16 units, so a role of astral characters would be capped at half
+  // the length Python allows; this is an EQUALITY test, so the expectation comes
+  // out short and the row never matches. Fail-safe (no stamp) — which is exactly
+  // why it would never be noticed: no alarm, the trace just goes inert for that
+  // capture.
+  //
+  // MUTATION THAT REDS THIS: `.slice(0, TURN_MAX_CHARS)` on the raw string (the
+  // first cut of this change) instead of `Array.from(...).slice(...).join("")`.
+  const spool = tmpSpool();
+  const sid = "sess-astral-role";
+  const role = "😀".repeat(6000);
+  const turns = [{ role: role as never, content: "hi" }];
+  writeSpoolEntry(spool, snapshot(sid, turns));
+
+  // What the server stores: the POSTED role capped the way Python caps it — 5000
+  // code points, i.e. 10 000 UTF-16 units.
+  const servedRole = Array.from(role).slice(0, TURN_MAX_CHARS).join("");
+  assert.equal(servedRole.length, TURN_MAX_CHARS * 2, "the fixture lost its width");
+  const server = refusedThenDetail(() =>
+    servedDetail(sid, [{ role: servedRole, content: "hi" }]),
+  );
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: server.fetchImpl, now: 1 });
+
+  assert.equal(server.gets().length, 1, "the read must still have happened");
+  assert.equal(
+    readSpoolEntry(spool, sid)?.extraction_outcome,
+    "unknown",
+    "a code-point cap matches the server's own window; a UTF-16 cap silently " +
+      "never matches, so this capture would leave no trace at all",
+  );
+});
+
+test("a POLICY refusal (401/407) never issues the confirm read (#12603)", async () => {
+  // The Python gate is `capture_receipts.may_mint_local_receipt`: the refusal must
+  // be of the RETRYABLE **class** AND outside `REFUSAL_STATUSES`. A rotated key or
+  // a suspended org (401/407 — `policy`) is not a post-commit timeout, so Python
+  // does not confirm it; excluding only the three names would leave this leg
+  // reading where the other never does, while the comment promises uniformity.
+  //
+  // MUTATION THAT REDS THIS: the name-list-only guard (the first cut).
+  const sid = "sess-policy-refusal";
+  const turns = [{ role: "user" as const, content: "hi" }];
+  for (const status of [401, 407]) {
+    const spool = tmpSpool();
+    writeSpoolEntry(spool, snapshot(sid, turns));
+    const server = refusedThenDetail(() => servedDetail(sid, turns), { postStatus: status });
+    const summary = await flushSpool(TEST_CFG, {
+      dir: spool, fetchImpl: server.fetchImpl, now: 1,
+    });
+    assert.equal(summary.deferred, 1, `${status}: a policy refusal is KEPT, not terminal`);
+    assert.equal(
+      server.gets().length,
+      0,
+      `${status} is \`policy\`, not \`retry\` — the Python leg does not confirm it, ` +
+        "so neither may this leg",
+    );
+    assert.equal(readSpoolEntry(spool, sid)?.extraction_outcome, undefined);
+  }
+});
+
+test("a turn the SERVER clipped still matches — the posted turns are windowed first (#12603)", async () => {
+  // `session_confirm.expected_turns` applies `sdk._capture_turn_window` BEFORE it
+  // compares, because that is the text the server stores. An entry spooled by the
+  // PYTHON leg (which does not clip at spool time) or one written before #4897
+  // taught this leg to clip carries an over-cap turn; comparing the RAW text there
+  // never matches, so the fix would be silently inert for exactly those captures —
+  // the failure mode being "no marker, no signal".
+  //
+  // MUTATION THAT REDS THIS: compare `turns[i].content` raw (the first cut).
+  const spool = tmpSpool();
+  const sid = "sess-refused-clipped";
+  const long = "x".repeat(TURN_MAX_CHARS + 4000);
+  const turns = [{ role: "user" as const, content: long }];
+  writeSpoolEntry(spool, snapshot(sid, turns));
+
+  // What the server stores: the same text through the SAME clipper.
+  const server = refusedThenDetail(() =>
+    servedDetail(sid, [{ role: "user", content: clipTurnContent(long) }]),
+  );
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: server.fetchImpl, now: 1 });
+
+  assert.equal(
+    readSpoolEntry(spool, sid)?.extraction_outcome,
+    "unknown",
+    "the served row is our turn after the shared window — it matches",
+  );
+});
+
+test("a turn whose content starts with whitespace still matches — the frame inverse (#12603)", async () => {
+  // `sdk._capture_turn_role_text` matches the role prefix followed by a GREEDY
+  // `\\s*`, so the body the server serves has its leading blanks stripped — and
+  // `session_confirm.expected_turns` builds its expectation through that same
+  // inverse, so Python compares a LSTRIPPED body. An entry spooled by the OTHER
+  // leg (`capture_spool.write_spool_entry` does not trim) reaches this shape, and
+  // a port comparing raw text would never match it: the trace would go silently
+  // inert for exactly the captures #12603 exists to reveal, with `tortoise
+  // session drain` stamping the same shared entry and this leg not.
+  //
+  // MUTATION THAT REDS THIS: compare `clipTurnContent(content)` without
+  // `servedFrameInverse` (the round-2 shape).
+  const spool = tmpSpool();
+  const sid = "sess-refused-leading-blank";
+  const turns = [
+    { role: "user" as const, content: "\n\n   look at this:\n\n  hi" },
+    { role: "assistant" as const, content: " done" },
+  ];
+  writeSpoolEntry(spool, snapshot(sid, turns));
+
+  // What the server serves: our text through the reader's inverse — Python's
+  // `re \s` set EXACTLY, which is NOT JS `\s` (that one includes U+FEFF, which
+  // Python's inverse leaves in place). A fake using JS `\s` would model a door
+  // that does not exist and would hide the divergence for a body starting with
+  // FEFF, so the set is spelled out here and the FEFF case is added below.
+  const pythonWs = /^[\t\n\x0b\x0c\r\x1c-\x1f \x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+/;
+  const lstrip = (s: string) => s.replace(pythonWs, "");
+  const server = refusedThenDetail(() =>
+    servedDetail(sid, [
+      { role: "user", content: lstrip(turns[0].content) },
+      { role: "assistant", content: lstrip(turns[1].content) },
+    ]),
+  );
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: server.fetchImpl, now: 1 });
+
+  assert.equal(
+    readSpoolEntry(spool, sid)?.extraction_outcome,
+    "unknown",
+    "the served row is our turn after the frame's inverse — it matches",
+  );
+});
+
+test("a body starting with U+FEFF still matches — the inverse does not strip it (#12603)", async () => {
+  // The frame inverse consumes Python's `re \\s` run, and U+FEFF is NOT in that
+  // set even though it IS in `BLANK_CHARS` (the union with JS `trim()`'s). Using
+  // the union here would strip a character the server KEEPS, making our
+  // expectation shorter than the served body — and in an equality test
+  // over-stripping is UNDER-matching, so the trace would go silently inert for a
+  // turn the PYTHON leg spooled (Python's `str.strip()` keeps U+FEFF; JS `trim()`
+  // removes it, which is exactly why the union exists for the CLIPPER).
+  //
+  // MUTATION THAT REDS THIS: strip `BLANK_CHARS` instead of
+  // `FRAME_INVERSE_BLANKS` (the round-3 shape), or reduce the inverse to `trim()`.
+  const spool = tmpSpool();
+  const sid = "sess-refused-feff";
+  const turns = [
+    { role: "user" as const, content: "\uFEFFhello" },
+    // A control separator the JS `trim()` alone would NOT strip: the other half
+    // of the same set, so a `trim()` implementation reds here too.
+    { role: "assistant" as const, content: "\u001cfine" },
+  ];
+  writeSpoolEntry(spool, snapshot(sid, turns));
+
+  const server = refusedThenDetail(() =>
+    servedDetail(sid, [
+      // The server keeps the FEFF and strips the U+001C.
+      { role: "user", content: "\uFEFFhello" },
+      { role: "assistant", content: "fine" },
+    ]),
+  );
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: server.fetchImpl, now: 1 });
+
+  assert.equal(
+    readSpoolEntry(spool, sid)?.extraction_outcome,
+    "unknown",
+    "FEFF is not in Python's inverse set, and U+001C is — both rows match",
+  );
+});
+
+test("a filing that lands DURING the confirm read is not clobbered (#12603)", async () => {
+  // The read is a network `await`. If it sat between the `entryFiled(pending)`
+  // guard and `writeMeta`, the write would apply a snapshot taken BEFORE the
+  // await — so a cross-process drain (a second Pi lane, `tortoise session drain`)
+  // that filed this entry during the read would have its `filed_key` erased and a
+  // marker stamped over a session whose receipt already recorded the outcome. The
+  // next pass then re-POSTs, the server REPLAYS (`extracted: 0`, which
+  // `outcomeRecorded` rightly refuses), and a FALSE marker stands permanently.
+  //
+  // This test performs that race deterministically: the GET handler itself files
+  // the entry (a nested flush with a healthy server) before answering.
+  //
+  // MUTATION THAT REDS THIS: put the `await` between the re-read and `writeMeta`
+  // (the first cut) — the marker comes back and `filed_key` disappears.
+  const spool = tmpSpool();
+  const sid = "sess-refused-race";
+  const turns = [{ role: "user" as const, content: "hi" }];
+  writeSpoolEntry(spool, snapshot(sid, turns));
+
+  const healthy = async () => ({ ok: true, status: 200, json: async () => ({ extracted: 2 }) });
+  let filedDuringRead = false;
+  const racing = async (url: string, init?: Record<string, unknown>) => {
+    const method = String(init?.method ?? "GET").toUpperCase();
+    if (method === "POST") {
+      const err = new Error("This operation was aborted") as Error & { name: string };
+      err.name = "AbortError";
+      throw err;
+    }
+    // A peer process files the SAME entry while our read is in flight.
+    if (!filedDuringRead) {
+      filedDuringRead = true;
+      await flushSpool(TEST_CFG, { dir: spool, fetchImpl: healthy as never, now: 5 });
+    }
+    return { ok: true, status: 200, json: async () => servedDetail(sid, turns) };
+  };
+
+  const summary = await flushSpool(TEST_CFG, { dir: spool, fetchImpl: racing as never, now: 1 });
+  assert.equal(summary.deferred, 0, "the peer's filing must win: nothing left to defer");
+  assert.equal(summary.skipped, 1, "our attempt must read as 'a concurrent flush filed it'");
+
+  const after = readSpoolEntry(spool, sid);
+  assert.ok(after?.filed_key, "the peer's filing stamp must survive our write-back");
+  assert.equal(
+    after?.extraction_outcome,
+    undefined,
+    "the peer filed with `extracted: 2` — a marker here would be a permanent lie",
+  );
+});
+
+test("a PERMANENT refusal never issues the confirm read (#12603)", async () => {
+  // The read asks "did this refusal actually commit?" — a question only a
+  // RETRYABLE refusal raises. A 422 is unrecoverable and the entry is
+  // quarantined; reading the session there would add a round trip to a path that
+  // has already decided.
+  //
+  // MUTATIONS THAT RED THIS: move the read above the `mayKeepEntry` branch.
+  const spool = tmpSpool();
+  const sid = "sess-permanent-refusal";
+  const turns = [{ role: "user" as const, content: "hi" }];
+  writeSpoolEntry(spool, snapshot(sid, turns));
+
+  const server = refusedThenDetail(() => servedDetail(sid, turns), { postStatus: 422 });
+  const summary = await flushSpool(TEST_CFG, {
+    dir: spool, fetchImpl: server.fetchImpl, now: 1,
+  });
+
+  assert.equal(summary.discarded.length, 1, "a 422 is terminal, not retryable");
+  assert.equal(
+    server.gets().length,
+    0,
+    "a permanent refusal already decided — no confirmation read belongs on it",
+  );
+  assert.equal(readSpoolEntry(spool, sid)?.extraction_outcome, undefined);
+});
+
+test("a 2xx filing never issues the confirm read (#12603)", async () => {
+  // The read is the REFUSAL path's evidence. A filing has its own receipt in the
+  // 2xx body (#12460), and adding a second read there would spend a round trip
+  // per capture on the hot path.
+  //
+  // MUTATIONS THAT RED THIS: hoist the read out of the refusal branch.
+  const spool = tmpSpool();
+  const sid = "sess-filed-no-read";
+  const turns = [{ role: "user" as const, content: "hi" }];
+  writeSpoolEntry(spool, snapshot(sid, turns));
+
+  const calls: string[] = [];
+  const fetchImpl = async (url: string, init?: Record<string, unknown>) => {
+    calls.push(String(init?.method ?? "GET").toUpperCase());
+    return { ok: true, status: 200, json: async () => ({ extracted: 2 }) };
+  };
+  const summary = await flushSpool(TEST_CFG, {
+    dir: spool, fetchImpl: fetchImpl as never, now: 1,
+  });
+
+  assert.equal(summary.filed, 1);
+  assert.deepEqual(calls, ["POST"], "a filed capture must not pay for a second read");
+});
+
+test("a server-scrubbed turn still matches — redaction skew does not lose the trace (#12603)", async () => {
+  // The server scrubs the text it stores with ITS OWN `_SECRET_SHAPES` table, and
+  // that table ships independently of this extension. Requiring byte identity
+  // would make every capture containing a secret read as "not ours" and lose the
+  // trace for exactly the sessions where a credential was in play (#5394's class).
+  // The version-independent property is the one asserted here: the served body is
+  // the posted text with spans replaced by redaction markers, and the LITERAL
+  // text outside those spans must still match in order.
+  //
+  // MUTATIONS THAT RED THIS: require `served.content === posted.content`.
+  const spool = tmpSpool();
+  const sid = "sess-refused-redacted";
+  const turns = [
+    { role: "user" as const, content: "my token is sk-live-abcdef123 and it leaks" },
+    { role: "assistant" as const, content: "rotate it now" },
+  ];
+  writeSpoolEntry(spool, snapshot(sid, turns));
+
+  const served = [
+    { role: "user", content: "my token is [REDACTED:api_key] and it leaks" },
+    { role: "assistant", content: "rotate it now" },
+  ];
+  const server = refusedThenDetail(() => servedDetail(sid, served));
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: server.fetchImpl, now: 1 });
+
+  assert.equal(
+    readSpoolEntry(spool, sid)?.extraction_outcome,
+    "unknown",
+    "the served text is our text with a redaction marker — the turn matches, so " +
+      "the unrecorded trace must still be written",
+  );
+});
+
+test("the stamp/clear pair stays coherent across a refusal then a filing (#12603)", async () => {
+  // End to end on one entry: a refusal stamps the marker, then a pass whose 2xx
+  // receipt RECORDS the ending (`extracted: 2` — a retried failed capture
+  // re-extracts) clears it through `outcomeRecorded`. So the pair is coherent in
+  // both directions, and a marker can never be written into a field the clear
+  // does not read.
+  //
+  // ⚠️ What this does NOT prove — deliberately, because it is not true — is that
+  // every stamped entry clearing eventually. The filing a stamped entry normally
+  // gets is a REPLAY (`extracted: 0`, `extraction_mode: "replayed"`), which
+  // records nothing and therefore clears nothing: the marker then stands until
+  // eviction. That residual is recorded at `refusalOutcomeVerdict`.
+  //
+  // MUTATIONS THAT RED THIS: stamp on a refusal but drop the 2xx clear, or write
+  // the marker into a field the filing path does not read.
+  const spool = tmpSpool();
+  const sid = "sess-refused-then-filed";
+  const turns = [{ role: "user" as const, content: "hi" }];
+  writeSpoolEntry(spool, snapshot(sid, turns));
+
+  const refused = refusedThenDetail(() => servedDetail(sid, turns));
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: refused.fetchImpl, now: 1 });
+  assert.equal(readSpoolEntry(spool, sid)?.extraction_outcome, "unknown");
+
+  // The same entry, past its backoff window, filed by a healthy server.
+  const filed = async () => ({ ok: true, status: 200, json: async () => ({ extracted: 2 }) });
+  await flushSpool(TEST_CFG, {
+    dir: spool, fetchImpl: filed as never, now: 1 + RETRY_MAX_MS,
+  });
+  assert.equal(
+    readSpoolEntry(spool, sid)?.extraction_outcome,
+    undefined,
+    "the receipt says extraction ran — the marker must be cleared by the filing",
+  );
+  assert.ok(readSpoolEntry(spool, sid)?.filed_key);
 });
 
 test("a refused STORED instant does not repost forever (skip + CAS normalise)", async () => {

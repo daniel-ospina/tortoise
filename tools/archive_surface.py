@@ -7,7 +7,7 @@ THE RULE THIS IMPLEMENTS
                           recoverable and inspectable (kept in the repo, NOT importable
                           FROM THE SHIPPED PACKAGE, NOT exposed)
 
-Owner ruling, 2026-11-17 verbatim in substance (comment `6831894340` on #11609):
+Owner ruling, 2026-11-12 verbatim in substance (comment `6831894340` on #11609):
 *"we simply ended with the target ones and nothing more. anything outside the target gets
 removed (archived code so not available, we archive it in case we made a mistake and want
 to check what we had but ultimately outside the product because we don't want it)."*
@@ -43,7 +43,8 @@ HOW THIS COMPOSES WITH THE TWO EXISTING RETIREMENT MECHANISMS — AND WHAT IT RE
         accounted for — enforced below. The archive adds the code; the map keeps the
         failure.
     The existing 23 `RETIRED_USE_INSTEAD` entries are therefore NOT in this archive's
-    scope. They are off the *advertised* count (72) already, and
+    scope. They are off the *advertised* count (68 — it was 72 before #11609 batch 1,
+    which is the number this note was written against) already, and
     `docs/product/canonical-mcp-tools.md` records (2026-10-27 amendment) that removing
     the forward entries "is a separate decision" — so archiving them here would be a
     different ruling, not this one.

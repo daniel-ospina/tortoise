@@ -3,9 +3,11 @@ from __future__ import annotations  # noqa: I001
 
 import asyncio
 import contextlib
+import contextvars
 import inspect
 import json
 import logging
+import math
 import os
 import sys
 import threading
@@ -38,8 +40,17 @@ from tortoise.live import EPISTEMIC_LABELS
 from tortoise.mcp_auth import (_current_org_id, _current_org_limits,
                                _current_scopes, _current_legacy_full_access,
                                _current_graph_id, _transport_mode, _tool_group,
-                               _get_org_sdk, HTTP_ALLOWED, ERR_UNAUTHORIZED,
+                               _get_org_sdk, HTTP_ALLOWED,
                                ERR_EXCLUDED, ERR_TIMEOUT, SELFHOST_ORG_ID)
+# ⛔ `ERR_UNAUTHORIZED` is KEPT although no live handler uses it (#11609 batch 1 review
+# P2): the frozen `tortoise_packs_list` handler in
+# `archive/mcp-tools/b1-removed-no-destination/tortoise_packs_list.py` raises it on its
+# fail-closed path, and that record's restore recipe is "copy each block back into the
+# file named in ITS OWN banner" — dropping the name makes a restore `NameError` on its
+# first unauthenticated call while `archive_surface.py verify-anchors` stays green (it
+# proves byte-identity only). It is the archived tool's runtime dependency, not the
+# tool, so `dir(tortoise.mcp_server)` carrying it is the intended state.
+from tortoise.mcp_auth import ERR_UNAUTHORIZED  # noqa: F401  (archived-handler dependency)
 # #3834: the transport wait-bound vocabulary is read as a MODULE attribute
 # (``tortoise.mcp_auth`` is its single home), so the fast path pays no
 # ``hosted_api`` import — that import is ~1.7 s and builds the whole hosted
@@ -632,6 +643,333 @@ def _wait_bound_arrival() -> float | None:
     return None
 
 
+#: #10749: the ABSOLUTE deadline (``time.monotonic()`` + the seam's ``remaining``) the wait-bound
+#: seam will enforce for this dispatch, as a ContextVar.
+#:
+#: ⛔ It is the FIRST/initial deadline, not a hard cap on everything the seam may spend. On the
+#: #4055 one-time cold-setup exemption the seam DRAINS the load and RE-ARMS
+#: (``mcp_auth.await_under_wait_bound``: ``remaining = max(0.0, float(timeout))``), so it can
+#: enforce up to 2x the original bound while the handler clamps under the EARLIER deadline — a
+#: health call that takes the exemption can therefore report an avoidable ``status="unknown"``.
+#: The direction is SAFE (over-clamped, never under), which is why the clamp keeps using this value
+#: rather than tracking the re-arm; it is recorded so a future reader does not take the
+#: ``unknown`` on that path for a store fault.
+#:
+#: ``_wait_bound_arrival()`` is None on stdio and on the self-hosted apps (only
+#: ``hosted_api.WaitBoundMiddleware`` writes that stamp) — but the seam still enforces the FULL
+#: ``_TRANSPORT_WAIT_BOUND_S`` there (``remaining = float(_mcp_auth._TRANSPORT_WAIT_BOUND_S)  #
+#: stdio / no HTTP request``), so "no stamp" is NOT "no deadline": re-deriving the deadline from
+#: the stamp alone read that arm as unbounded and left the tool's 26.0 s tail inside a 10.0 s
+#: bound, which is #10749's defect preserved on stdio and self-hosted HTTP.
+#:
+#: ⛔ A DEADLINE, not the DURATION the seam happens to have left when it bound this. A duration is
+#: frozen at bind time, and the seam's own ``wait_for(shield(task), remaining)`` clock started THEN
+#: — so anything the dispatch spends before the handler clamps (graph resolution, `_get_org_sdk()`)
+#: would be silently un-deducted, and the handler would claim an allowance it no longer has. Measured
+#: with a 4.0 s in-dispatch spend: the duration shape granted the full ``bound − reserve`` and the
+#: worst case became 13.5 s inside a 10.0 s bound, i.e. the -32009 refusal this change removes.
+#: Reading the deadline back at the point of use is what makes the reserve arithmetic true where it
+#: is enforced.
+#: `None` therefore means "the seam never ran" — a direct in-process call (a unit test,
+#: ``_original_call_tool`` reached unwrapped) — the only state where #3143's unclamped allowance is
+#: still the right answer.
+_WAIT_BOUND_DEADLINE: contextvars.ContextVar[float | None] = contextvars.ContextVar(
+    "tortoise_wait_bound_deadline", default=None)
+
+
+#: #10749: the margin kept back from the transport deadline AFTER the health tool's other three
+#: bounded phases, so a clamped report still has time to be serialised and delivered before the
+#: caller's own deadline expires. Nothing waits on it — it is a reserve, not a timeout.
+_HEALTH_TAIL_MARGIN_S = 0.5
+
+
+def _mcp_remaining_wait_bound() -> float | None:
+    """Seconds left of the deadline the seam bound for THIS dispatch, or None if it never ran.
+
+    Prefers the ContextVar deadline (it covers stdio and the self-hosted apps, where no arrival
+    stamp exists but the bound is still enforced) and SUBTRACTS the time already spent in this
+    dispatch, so the number returned is the deadline's remaining life NOW, not when the seam
+    started. Falls back to the arrival stamp for a call that reached the tool body without the seam
+    binding — the stamp is still a real deadline, and it too is read as of now.
+    """
+    deadline = _WAIT_BOUND_DEADLINE.get()
+    if deadline is not None:
+        return max(0.0, float(deadline) - _time.monotonic())
+    arrival = _wait_bound_arrival()
+    if arrival is None:
+        return None
+    return max(0.0, float(_mcp_auth._TRANSPORT_WAIT_BOUND_S)
+               - (_time.monotonic() - arrival))
+
+
+#: The documented per-phase bound for the ``quota`` block (``quota.QUOTA_STATE_TIMEOUT``).
+#: ⛔ A FALLBACK, never a second source of truth — ``_quota_state_timeout`` reads the real constant
+#: whenever the module can supply it, and ``tests/test_10749_health_tail_under_transport_bound.py``
+#: pins this figure equal to ``quota.QUOTA_STATE_TIMEOUT`` so the two cannot drift apart silently.
+_QUOTA_STATE_TIMEOUT_FALLBACK_S = 3.0
+
+#: Documented defaults for the two ``monitoring`` phase constants, used only when a stale or
+#: partially written module cannot supply them (#12482 fresh review, P3). Over-reserving only
+#: SHORTENS the allowance and can never widen the tail, so the documented value is the safe
+#: fallback. ``test_the_quota_timeout_fallback_is_the_documented_constant`` pins all three, so a
+#: constant that moves cannot leave its fallback behind.
+_PROBE_TIMEOUT_FALLBACK_S = 1.5
+_GRAPH_SIZE_TIMEOUT_FALLBACK_S = 1.5
+
+
+def _phase_timeout(value: object, fallback: float) -> float:
+    """``value`` as a phase timeout in seconds, or ``fallback`` when it cannot be one.
+
+    ⛔ FINITE AND NON-NEGATIVE, not merely convertible (#12482 cycle-5 review, P2 — measured).
+    ``float()`` ADMITS ``nan`` and ``inf``, so a corrupted ``monitoring.PROBE_TIMEOUT = float('nan')``
+    passed the conversion guard untouched and made ``_health_tail_reserve()`` ``nan``; then
+    ``min(knob, remaining - nan)`` returned the KNOB (every ``nan`` comparison is False), so at
+    ``remaining`` 10.0 the allowance came back **20.0** with no clamp marker — #10749's defect
+    restored, through the helper built to make the arithmetic safe. It also FALSIFIED the
+    fallback's own premise ("over-reserving only shortens the allowance and can never widen the
+    tail"): ``nan`` widens the allowance back to the FULL unclamped knob — 20.0 at the shipped
+    default — with no clamp marker, so the report claims a deep probe it cannot deliver. (Bounded
+    by the knob, not by infinity: its ceiling is ``probe_setup_timeout()``'s 300.0. The ``inf``
+    arm is the opposite extreme — a reserve of ``inf`` floors the allowance at 0.0.) A negative
+    constant points the same way at the reserve (a smaller reserve widens the allowance) and is
+    not a duration at the budget site, so both are rejected here rather than at each call site.
+
+    ⛔ Only the DOMAIN is judged; the numeric arms still come from the constant or its documented
+    fallback, exactly as before. ``except Exception`` is retained deliberately: this is a planning
+    read on the health path, and a broken module can raise anything from ``__float__``.
+    """
+    try:
+        seconds = float(value)  # type: ignore[arg-type]
+    except Exception:  # a planning read must never turn the health answer into an error
+        return fallback
+    return seconds if math.isfinite(seconds) and seconds >= 0.0 else fallback
+
+
+def _monitoring_timeout(attribute: str, fallback: float) -> float:
+    """``monitoring.<attribute>`` as a float, or ``fallback`` when the module cannot supply it.
+
+    ⛔ NEVER RAISES, for the same reason ``_quota_state_timeout`` does not: ``_health_tail_reserve``
+    is a PLANNING site outside any ``try`` in ``tortoise_health``'s tail, so an ``AttributeError``
+    here reached ``_safe`` and REPLACED the health answer with ``{'error': ...}`` — a payload with
+    no ``status`` key at all (measured on the pre-fix tree, ``monitoring.PROBE_TIMEOUT`` deleted and
+    ``quota`` intact: ``keys ['error']``). That is a different observable from the stale-QUOTA case
+    below, where the last mile depends on how stale the module is: a module that still carries
+    ``QuotaCheckError``/``QuotaExceededError`` gets the same ``{'error': ...}`` shape, while one
+    missing those classes too has the ``ImportError`` ESCAPE the tool entirely, because ``_safe``'s
+    own handler imports them unguarded (#12647). Same class of harm, different last mile.
+    Guarding the quota read alone closed ONE of the two modules this arithmetic depends on.
+
+    ⛔ The VALUE is judged by ``_phase_timeout``, not merely converted: a name that exists and
+    converts but is not a usable duration (``nan``/``inf``/negative) falls back too. This is the
+    helper the cycle-5 review measured the hole ON (``PROBE_TIMEOUT`` is read only here) — its twin
+    ``_quota_state_timeout`` already carried a non-numeric pin for the ``None``/``'3.0s'`` shapes,
+    which is why the delta closed that class on one side and left ``float()``'s non-finite arm open
+    on this one.
+    """
+    try:
+        value = getattr(monitoring, attribute)
+    except Exception:  # a planning read must never turn the health answer into an error
+        return fallback
+    return _phase_timeout(value, fallback)
+
+
+def _quota_state_timeout() -> float:
+    """``quota.QUOTA_STATE_TIMEOUT``, or its documented default when the module cannot supply it.
+
+    ⛔ NEVER RAISES, and that is the whole point (#12482 fresh review, P3). Both callers are
+    PLANNING sites in ``tortoise_health``'s tail, reached outside any ``try``: a bare ``from
+    tortoise.quota import QUOTA_STATE_TIMEOUT`` at a stale or partially-written module raised
+    ``ImportError``, and the last mile then depended on HOW stale the module was — measured: a
+    module that still carries ``QuotaCheckError``/``QuotaExceededError`` is caught by ``_safe`` and
+    answers ``{'error': ...}`` with no ``status`` key, while one missing those classes too leaves the
+    tool ENTIRELY, because ``_safe``'s OWN handler imports them from ``tortoise.quota`` unguarded
+    (#12647). Either way the clamp's own safety arithmetic took down the
+    instrument that reports whether the product is up, on a box where ``/health`` on main answered
+    normally. The ``#11892`` block below imports ``tortoise.quota`` INSIDE its own ``try`` for
+    exactly this reason; this helper is that rule applied to the two planning sites that run BEFORE
+    it.
+
+    ⛔ The coercion is inside the guard too: a partially written module can supply the NAME and not
+    a number (``QUOTA_STATE_TIMEOUT = None``), and ``float()`` outside the ``try`` raised
+    ``TypeError`` out of the same planning site (measured, fresh review P2) — the identical last
+    mile as the absent-name arm above, through the helper built to prevent it.
+
+    Over-reserving only shortens the allowance and can never widen the tail, so the fallback is the
+    constant's own documented value rather than ``0.0``: a phase whose bound cannot be read is
+    still planned for, conservatively.
+
+    ⛔ THE CONVERSION IS INSIDE THE GUARD TOO (cycle-4 review, P3). An importable module carrying a
+    non-numeric constant raised ``TypeError``/``ValueError`` from ``float()`` OUTSIDE the ``try``,
+    while the first paragraph claimed the helper never raises. Measured on the previous head: a
+    ``None`` constant raised ``TypeError`` and ``'3.0s'`` raised ``ValueError``. The observable is
+    the stale-quota one recorded in the first paragraph above, in whichever of its two shapes
+    applies — the ``{'error': ...}`` payload when the module still carries the exception classes
+    ``_safe`` needs, the escaped ``ImportError`` when it does not (#12647) — and NOT unconditionally
+    the escape.
+
+    ⛔ CONSERVATIVE ONLY AT THE RESERVE (cycle-4 review, P3): there the fallback merely over-reserves,
+    which shortens the allowance. At the BUDGET site (``_health_quota_budget``) the same value is
+    handed to the quota phase as its SPEND, so it is exact rather than conservative — benign only
+    because the two are pinned equal by ``test_the_quota_timeout_fallback_is_the_documented_constant``.
+
+    ⛔ The same DOMAIN rule applies at this site too (cycle-5 review, P2), though the review
+    measured the hole on ``_monitoring_timeout`` rather than here: at the BUDGET site a ``nan``
+    constant came back out of ``min(nan, remaining - margin)`` as ``nan`` — every comparison with
+    it is False — so the quota phase was handed a budget that is not a duration. Sharing
+    ``_phase_timeout`` is what keeps the two readers from drifting apart.
+    """
+    try:
+        from tortoise.quota import QUOTA_STATE_TIMEOUT
+    except Exception:  # a planning read must never turn the health answer into an error
+        return _QUOTA_STATE_TIMEOUT_FALLBACK_S
+    return _phase_timeout(QUOTA_STATE_TIMEOUT, _QUOTA_STATE_TIMEOUT_FALLBACK_S)
+
+
+def _health_tail_reserve() -> float:
+    """Everything ``tortoise_health`` spends AFTER its cold-start allowance (#10749).
+
+    ``monitoring.probe_db`` charges an explicit ``setup_timeout`` ONE deadline of
+    ``setup_timeout + PROBE_TIMEOUT``; ``metrics`` then spends up to ``GRAPH_SIZE_TIMEOUT`` on its
+    own worker; and the ``quota`` block spends up to ``quota.QUOTA_STATE_TIMEOUT`` on its own daemon
+    worker (#11892 option (3)).
+
+    ⛔ This is the PLANNING budget — what the allowance must leave room for — not the enforcement
+    mechanism. The two later phases are handed what is left in DIFFERENT ways, and the difference
+    is deliberate (#12482 fresh review, P3): the COUNT (`metrics`' `graph_size_timeout=`) is planned
+    at handler START off the probe's CEILING (`allowance + PROBE_TIMEOUT`), because a reserve can
+    only plan — so on a call whose probe ran long the count receives less than the deadline
+    actually had left. Only the QUOTA block (`_health_quota_budget`) measures its budget at its
+    own start, which is what makes the total `remaining - margin` however slowly the earlier
+    phases ran. If the deadline is shorter than this figure the allowance floors at 0.0 and the
+    later phases would otherwise still spend their full constants.
+    """
+    return (_monitoring_timeout("PROBE_TIMEOUT", _PROBE_TIMEOUT_FALLBACK_S)
+            + _monitoring_timeout("GRAPH_SIZE_TIMEOUT", _GRAPH_SIZE_TIMEOUT_FALLBACK_S)
+            + _quota_state_timeout() + _HEALTH_TAIL_MARGIN_S)
+
+
+def _health_setup_allowance(remaining: float) -> float:
+    """The cold-start allowance ``tortoise_health`` may spend inside ``remaining`` (#10749).
+
+    Unclamped, this tool's bounded tail is ``probe_setup_timeout() + PROBE_TIMEOUT +
+    GRAPH_SIZE_TIMEOUT + QUOTA_STATE_TIMEOUT`` — **26.0 s** at the shipped defaults — inside a
+    **10.0 s** transport bound that ``_await_under_mcp_wait_bound`` applies to EVERY tool, with
+    no allowlist and no exemption. A reachable store is therefore refused with the transport's
+    own vocabulary (*"the server's wait budget for this request was exceeded"*), which reads as
+    "the queue is busy" and says nothing about the tool's budget.
+
+    Measured 2026-11-13 on the deployed process (#10749): the tool answered **2 of 27** attempts,
+    and the one timed success spent **6.96 s** of its **10.77 s** round trip in the DB probe —
+    i.e. ~3.8 s of the bound is gone before the probe's first byte, so the refusal becomes
+    certain once ``db.latency_ms`` exceeds ~6.2 s.
+
+    The clamp only ever REDUCES, so #3143's cold-start allowance is preserved wherever it fits —
+    but the docstring has to say where it actually fits, rather than leave a conditional that reads
+    as "usually unaffected": surviving requires ``remaining - reserve >= 20.0``, i.e.
+    ``remaining >= 26.5 s``, while every seam-served dispatch has
+    ``remaining <= _TRANSPORT_WAIT_BOUND_S`` (10.0 s). At a FULL bound the allowance is **3.5 s** —
+    an 82 % cut on every seam-served call — so #3143's deep probe is now reachable only by a store
+    that finishes its projection cold-start inside ~3.5 s. A slower one reports an UNOBSERVED
+    result, ``metrics`` maps that to ``ok=None`` / ``status="unknown"`` (#3683), and the report
+    carries ``setup_timeout_clamped_s`` — so the caller can tell "the allowance was clamped" from
+    "the store is broken". A direct in-process call (a unit test, ``_original_call_tool`` reached
+    unwrapped — ``remaining is None``) keeps the unclamped allowance.
+
+    ⛔ BELOW THE CEILING THE KNOB IS THE SPEND — ON A DISPATCH WHOSE DEADLINE STILL LEAVES
+    ``knob + reserve`` (fresh review, final round P3: the earlier wording scoped this to the
+    CONFIGURATION and was false for a legal low knob). Configured under ``bound − reserve`` (the
+    documented minimum is 1.5 s, well under 3.5 s) such a call receives the knob verbatim, no clamp
+    marker fires, and raising the knob widens the window by that much. But the SAME configuration
+    on a dispatch that has already burned ~3 s of its bound spends only ~0.5 s for knob 1.5, 2.0,
+    3.0 or 3.4 alike, and ``setup_timeout_clamped`` IS set — so there, raising the knob widens
+    nothing. The knob sets the CEILING; the deadline decides what is left under it.
+
+    ⛔ THIS DOES NOT RESTORE THE DEEP REPORT — tracked in **#12481**, whose candidate shapes include
+    serving the deep probe from a background refresher (the shape ``/health`` already uses), which may
+    need no MCP-surface change at all; read that issue rather than assuming this is owner-gated code.
+    Reading this docstring as "the deep probe still works" would be the same class of false claim as
+    the counter docstring that said it answered a degradation rate: state the number, and route the
+    remedy.
+
+    ⛔ THE RESIDUAL IS AN ARITHMETIC BOUND, NOT A WINDOW THE TOOL REACHES (#12482 cycle 5,
+    round 2). ``max(0.0, …)`` floors the allowance, and on the first version of this change the
+    other three bounded phases still spent their own timeouts below the reserve, so a dispatch with
+    ``remaining < reserve`` (~6.5 s) overran the deadline and was served the SAME ``-32009`` this
+    change exists to remove. Both later phases are bounded too, in DIFFERENT ways — stated in full
+    above, in ``_health_tail_reserve``'s docstring — because an earlier wording here said "each
+    bounded by what is LEFT of the deadline", which is FALSE of the count:
+    ``metrics(graph_size_timeout=…)`` is planned at handler start off the probe's CEILING (so it is
+    the full constant on a fresh bound, and only shrinks when the reserve ate the deadline), while
+    ``_health_quota_budget`` measures at its OWN start and is capped at its own constant as well.
+    Together they bound the whole tail at ``remaining − margin`` however slowly the earlier phases
+    ran. ⛔ The arithmetic still RESERVES ``PROBE_TIMEOUT`` for the probe
+    even at a 0.0 allowance, and that reservation only makes the tail TIGHTER — it can never widen
+    it, so the bound above is not eroded by it. ⛔ **The figures below are a PLANNING bound, not a
+    measured spend** (fresh review of the final head, P3 — an earlier cut called them "spent"), and
+    they hold only AT OR ABOVE the reserve (verified: at 3.00 s of remaining the allowance is a hard
+    0.0, so the planned sum's four TERMS — that allowance plus ``PROBE_TIMEOUT +
+    GRAPH_SIZE_TIMEOUT + QUOTA_STATE_TIMEOUT`` — reach 6.00 s, which is not ``<= 2.50``; ⛔ an
+    earlier wording said "the four constants sum to 6.00 s" and mislabelled them, because the
+    RESERVE's four terms are 6.50 s and only these four, the 0.0 allowance included, are 6.00 —
+    fresh review of the final head, P3): the property the tests pin is
+    ``allowance + PROBE_TIMEOUT + GRAPH_SIZE_TIMEOUT + QUOTA_STATE_TIMEOUT <= remaining − margin`` at
+    ``remaining`` 10.00 and 6.50, i.e. 9.50 and 6.00. (An earlier cut of this paragraph read the
+    reservation BACKWARDS and claimed the tail could come out up to 1.5 s short OF THE MARGIN; the
+    direction is the other way — over-reserving the probe shrinks the phases after it.)
+    ⛔ **And BELOW the reserve the allowance is a hard step, not a gradient** (above it, each second
+    of remaining buys a second of allowance until the knob caps it): it is ``max(0.0, min(knob, remaining −
+    6.5))``, so at ``remaining <= 6.5`` it is exactly **0.0**. In that band the probe is submitted and
+    abandoned before its reachability query, so ``metrics`` skips the ``graph_size`` count (that
+    branch is reached only when the probe was OBSERVED) and the 1.5 s planned for the count is spent
+    on nothing; what the tool then spends is the ``quota`` phase's ``min(3.0, remaining − margin)`` —
+    exactly ``remaining − margin`` at or below 3.5 s, at most 3.0 s above that. The over-reserve is
+    conservative (it can only shorten the tail); 6.5 s is simply where the observable flips, so a
+    store answering in milliseconds still reads ``status="unknown"`` on a dispatch whose pre-handler
+    cost exceeded ~3.5 s — the shape #10749 measured, whose remedy is the deep report in #12481
+    (candidate shapes, one of which needs no surface change), not a bigger knob. With a warm
+    projection the tool RESPONDS WITHOUT A REFUSAL at ``remaining`` 2.5 /
+    1.5 / 0.6 s (``status="unknown"`` wherever the allowance is 0.0). Read the figure as an upper
+    bound the arithmetic permits, never as a refusal an operator should expect.
+    ⛔ TWO TESTS, TWO DIFFERENT FACTS (fresh review of the final head, P2 — an earlier wording said
+    both pin "the realised bound … not the constants", and the FIRST one does not):
+    ``test_the_planned_phases_fit_the_bound_when_the_reserve_fits`` pins the **planning** bound — it
+    sums ``allowance + PROBE_TIMEOUT + GRAPH_SIZE_TIMEOUT + QUOTA_STATE_TIMEOUT`` from the module
+    constants and never enters the handler, which is exactly the arithmetic the paragraph above
+    states, and it is that paragraph's pin — while
+    ``test_the_quota_budget_shrinks_by_what_the_earlier_phases_actually_spent`` pins the
+    **realised** budgets the handler actually hands each phase.
+    """
+    return max(0.0, min(monitoring.probe_setup_timeout(),
+                       remaining - _health_tail_reserve()))
+
+
+def _health_quota_budget() -> float | None:
+    """The ``quota`` phase's budget: whatever is LEFT of the transport deadline (#10749).
+
+    ``None`` means the seam never ran, so nothing is enforcing a bound and the phase keeps its own
+    ``quota.QUOTA_STATE_TIMEOUT``.
+
+    This is the phase that makes the whole tail bounded, and it is measured HERE rather than
+    planned up front on purpose: it runs LAST, so its budget can be the deadline's remaining life
+    without starving the phases before it, and no earlier phase's overrun can hide inside it.
+    Measured before it existed: a dispatch with 2.0 s left spent 3.00 s in this phase alone and was
+    refused inside the window where the runbook claimed a clamped probe never breaches the bound.
+
+    ⛔ CAPPED at the phase's own constant, not at the deadline (#12482 cycle 5, round 2): a fast
+    probe and count leave almost the whole bound here (~9 s of the 10.0 s — the exact figure moves
+    with how fast those two return, so read it as "the deadline allows about nine"), and handing
+    this phase all of it made a hung `resolve_org_limits`/count hold the SINGLE quota worker slot
+    for that long on a health read whose documented per-phase bound is
+    ``quota.QUOTA_STATE_TIMEOUT``. ``min(QUOTA_STATE_TIMEOUT, …)``
+    keeps both properties: the total still fits (this is the last phase, so a smaller budget can
+    only shorten it) and the documented 3.0 s stays true.
+    """
+    remaining = _mcp_remaining_wait_bound()
+    if remaining is None:
+        return None
+    return min(_quota_state_timeout(), max(0.0, remaining - _HEALTH_TAIL_MARGIN_S))
+
+
 def _wait_bound_refused() -> bool:
     """True when the transport already refused this request (#3834 F-2).
 
@@ -1023,11 +1361,15 @@ def _arguments_say_preview(name: str, arguments) -> bool:
     if not isinstance(arguments, dict):
         return False
     if name in _dry_run_tool_names():
-        # ⛔ The DEFAULT is the preview for at least one tool: the served handler
-        # of `tortoise_backfill_v25` is `dry_run: bool = True`, so the no-argument
-        # call (its most common invocation, a read-only schema inspection) writes
-        # nothing — while `arguments.get("dry_run") is True` never fires for it.
-        # Read the DECLARED default instead of assuming "explicit True".
+        # ⛔ The DEFAULT can itself be the preview: the (`#11609` batch-1 ARCHIVED)
+        # handler of `tortoise_backfill_v25` was `dry_run: bool = True`, so the
+        # no-argument call (its most common invocation, a read-only schema
+        # inspection) wrote nothing — while `arguments.get("dry_run") is True`
+        # never fired for it. No LIVE `dry_run` tool defaults to True today; the arm
+        # stays because a restore of that handler hits it again, and it is pinned by
+        # `tests/test_wait_bound_write_ack.py::test_a_tool_whose_DECLARED_default_is_the_preview_is_recognised`
+        # (a probe, for exactly that reason). Read the DECLARED default instead of
+        # assuming "explicit True".
         if _coerces_to_true(arguments.get("dry_run")):
             return True
         if "dry_run" not in arguments and _declared_dry_run_default(name) is True:
@@ -1365,7 +1707,38 @@ async def _await_under_mcp_wait_bound(name: str, arguments, *, version,
             task_meta=task_meta) if graph_ref is None else
             _scoped_dispatch(name, arguments, graph_ref, version=version,
                              task_meta=task_meta))
-        task = asyncio.ensure_future(dispatch)
+        # #10749: bind the DEADLINE THIS seam is about to enforce, so a handler that
+        # owns its own bounded phases (tortoise_health) can clamp them under it
+        # instead of re-deriving a deadline from the arrival stamp — which does not
+        # exist on stdio or the self-hosted apps even though the bound still applies.
+        # An absolute deadline rather than the `remaining` duration on purpose: the
+        # seam's `wait_for` clock starts HERE, so the handler must deduct whatever this
+        # dispatch spends before it clamps (measured: a 4.0 s graph-resolution spend made
+        # the duration shape grant an allowance whose worst case was 13.5 s inside 10.0 s).
+        # Set BEFORE the task is created so the task's copied context carries it; the
+        # reset below touches only this frame's binding, never the task's copy.
+        #
+        # ⚠️ THE THREAD HOP IS PART OF THE CONTRACT (cycle-6 review, P3). The tool bodies are
+        # SYNC callables, and fastmcp runs a sync callable via `anyio.to_thread.run_sync` with
+        # the default `abandon_on_cancel=False` — which is what propagates this ContextVar onto
+        # the worker thread (fastmcp/utilities/async_utils.py: "properly propagates
+        # contextvars"). A dispatch change to a bare `loop.run_in_executor` would NOT copy the
+        # context (cpython#78195 — the reason `hosted_api.py:460` and `tortoise/quota.py:2376`
+        # already say so), the body would read `None`, and #10749's unclamped tail would return
+        # SILENTLY. `test_the_REAL_hop_hands_the_tool_body_a_clamped_allowance` is the guard for
+        # exactly that class, and it is the ONLY one: it awaits the real chain and asserts the body
+        # ran on a different thread. ⛔ DO NOT restate a case count here (cycle-4 review, P3 — and a
+        # fresh review of the final head, P2, because that first correction left the counts in): this
+        # comment has carried a count before and it went stale on every review round that added a
+        # pin, which is BY DESIGN — the counts move, the RATIO does not. The ratio is the fact:
+        # mutating this seam to a bare `run_in_executor` leaves that ONE case red, while losing the
+        # deadline reds MANY. Keep that one case if this seam changes; the same dependency is
+        # relied on at ``tortoise_session_capture``'s cancellation note.
+        bound_token = _WAIT_BOUND_DEADLINE.set(_time.monotonic() + remaining)
+        try:
+            task = asyncio.ensure_future(dispatch)
+        finally:
+            _WAIT_BOUND_DEADLINE.reset(bound_token)
     try:
         # ``wait_for`` + ``shield`` rather than ``asyncio.wait`` — the same
         # primitive choice as ``hosted_api.WaitBoundMiddleware.__call__``. The
@@ -1514,23 +1887,29 @@ def _reject_graph_bound_mcp_org_surface(surface: str) -> None:
 #: dispatch point below, NEVER inside a handler: a handler that charges its own
 #: limit is the second implementation of one budget that this seam exists to
 #: prevent, and it is the entry point the REST twin cannot see.
-_MCP_BUDGETED_OPS: dict[str, str] = {
-    # tortoise_pack_install reaches pack_manifest_store.upsert_tenant_manifest
-    # directly (no HTTP), so #2038's per-IP budget on the REST twin
-    # POST /v1/packs/manifests never applied to it.
-    "tortoise_pack_install": "pack_manifest",
-}
+#:
+#: ⛔ EMPTY since #11609 batch 1 removed `tortoise_pack_install` (owner ruling
+#: comment 6831894340 — no destination in the approved 27-tool target), which was
+#: this map's only member: `upsert_tenant_manifest` is unreachable from the MCP
+#: without it, so `pack_manifest` (REST twin `POST /v1/packs/manifests`) has no
+#: in-process MCP caller left. The SEAM stays — the dispatch point below is the one
+#: funnel every client tool call passes through, so the next budgeted op belongs in
+#: this map rather than in a second implementation inside its own handler.
+_MCP_BUDGETED_OPS: dict[str, str] = {}
 
 
 async def _check_mcp_op_budget(name: str, org_id: str) -> None:
     """#2050: charge the sensitive-op budget for an MCP tool, or refuse.
 
-    `tortoise_pack_install` is the cheapest path to the same expensive
-    operation the REST surface bounds: it calls `upsert_tenant_manifest`
-    in-process, consuming no `pack_manifest` budget at all and bounded only by
-    the generic 100/min per-key middleware — a ~1200x looser bound than the
-    REST twin's 5/hr. The dispatch point is the ONE funnel every client tool
-    call passes through on every transport, so the budget is applied HERE.
+    `tortoise_pack_install` WAS the cheapest path to the same expensive operation
+    the REST surface bounds: it called `upsert_tenant_manifest` in-process,
+    consuming no `pack_manifest` budget at all and bounded only by the generic
+    100/min per-key middleware — a ~1200x looser bound than the REST twin's 5/hr.
+    That tool is REMOVED (#11609 batch 1), so `_MCP_BUDGETED_OPS` is empty and this
+    function returns on its first line; the seam is kept for the next budgeted op
+    (see the map's own note). The dispatch point is the ONE funnel every client
+    tool call passes through on every transport, so a budget applied HERE is
+    applied everywhere.
 
     Team scope, not IP: the caller is an authenticated agent server, and a
     per-IP frame would be both wrong (shared egress addresses) and unavailable
@@ -1587,7 +1966,8 @@ async def _check_mcp_op_budget(name: str, org_id: str) -> None:
 # payload nobody can read. That is the whole of #8482: a failure delivered in
 # the success channel. It is NOT "the tool returns a list" — the four sibling
 # tools the issue could not separate (`tortoise_check_structure`,
-# `tortoise_packs_list`, `tortoise_list_batches`, `tortoise_list_namespaces`)
+# `tortoise_list_batches`, `tortoise_list_namespaces` — and `tortoise_packs_list`,
+# which #11609 batch 1 later archived)
 # carry the SAME envelope and work, because their SDK calls succeed. The
 # discriminator is the RAISE.
 #
@@ -2375,16 +2755,17 @@ def _excluded_writer_writes_the_default_graph(
     `GRAPH_ARGUMENT_EXCLUDED` answers "does this tool take the routing
     argument?" — NOT "does it touch a graph". The seam used to read the second
     answer out of the first, and that is false for
-    `GRAPH_ARGUMENT_EXCLUDED_DEFAULT_TARGET`: `tortoise_pack_install`,
-    `tortoise_onboarding_github_index` and `tortoise_manage_sources` each write
-    graph data into the org's DEFAULT graph, and each REJECTS a graph-bound key
+    `GRAPH_ARGUMENT_EXCLUDED_DEFAULT_TARGET`: `tortoise_onboarding_github_index`
+    and `tortoise_manage_sources` each write graph data into the org's DEFAULT
+    graph, and each REJECTS a graph-bound key
     (`_reject_graph_bound_mcp_org_surface`), so `workspace-default` is the only
     arm they can be on. Leaving them undisclosed left the #10084 defect in place
     on every tool except the one the issue measured (review P2).
 
     (#4282 Phase 3.2 removed `tortoise_onboarding_demo_create` and
     `tortoise_onboarding_seed` from that frozenset along with the tools
-    themselves, so they are no longer members here.)
+    themselves, and #11609 batch 1 archived `tortoise_pack_install` — the third
+    member then — so both are no longer members here.)
 
     `tortoise_manage_sources` is CONDITIONAL on its own ARGUMENTS, because only
     one branch writes graph data; see
@@ -2794,8 +3175,9 @@ async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None,
         if failure is not None and failure.startswith("Authentication required"):
             status = "auth_error"
             # The prefix is shared by producers that are NOT the #236 gate:
-            # `tortoise_packs_list`'s HTTP no-tenant refusal and `_safe`'s
-            # unset-transport refusal both open with it. Stamping
+            # `_safe`'s unset-transport refusal (`_transport_mode is None`) opens
+            # with it too, and so did `tortoise_packs_list`'s HTTP no-tenant
+            # refusal before #11609 batch 1 archived that tool. Stamping
             # `stdio_auth_gate` on those would make the metric's documented
             # meaning false and fold hosted tenant refusals into it, so the
             # KIND follows the transport that actually refused. The STATUS is
@@ -3083,8 +3465,24 @@ def _dry_run_tool_names() -> frozenset[str]:
     return _DRY_RUN_TOOLS
 
 
-# #329: per-org per-minute LLM-call budget for tortoise_analyze (operator LLM
-# keys back outbound calls; the rate limiter alone is not the bound).
+# #329: per-org per-minute LLM-call budget for the ARCHIVED `tortoise_analyze` tool.
+# ⛔ KEPT, not deleted with the tool (#11609 batch 1 review P2): the frozen handler in
+# `archive/mcp-tools/b1-removed-no-destination/tortoise_analyze.py` calls this and
+# `_scrub_analyze_answer` below, and that file's restore path is "copy each block back" —
+# so deleting them would make a restore `NameError` on its first call while
+# `archive_surface.py verify-anchors` stayed green. They are the tool's runtime
+# dependencies, not the tool: no live registry row reaches them. What keeps them alive is
+# two guards, and they are different guards — `_ANALYZE_LLM_BUDGET` /
+# `_analyze_llm_budget_available` is driven by
+# `tests/test_mcp_server.py::TestAnalyzeLlmBudget::test_budget_exhausted_disables_llm`
+# (which also asserts the frozen handler still CALLS it), while `_scrub_analyze_answer` had
+# no guard at all until
+# `tests/test_archive.py::TestRestoreDependenciesResolve` — a DERIVED arm that walks each
+# frozen handler's AST and asserts every free name resolves in the module its `verbatim
+# from` banner names. (Correction of a correction: this note first claimed "ruff sees them
+# as used because the module still defines them" — ruff has no unused-function check —
+# and the replacement named `tests/test_archive.py` for coverage it did not have at the
+# time. The arm exists now.)
 _ANALYZE_LLM_BUDGET: dict[str, list[float]] = {}
 
 
@@ -3473,7 +3871,9 @@ def _scrub_analyze_answer(answer: str) -> str:
     """#329: boundary scrub for analyze() answers — strip common internals.
 
     analyze() already redacts its own error paths; this is defense-in-depth
-    against future regressions (paths, hostnames, credentials).
+    against future regressions (paths, hostnames, credentials). KEPT with the
+    archived `tortoise_analyze` handler (#11609 batch 1 review P2) — see the note
+    above `_ANALYZE_LLM_BUDGET`.
     """
     import re
     answer = re.sub(r"://[^@\s]*@", "://***@", answer)
@@ -3685,8 +4085,8 @@ def _reject_server_managed_props(props: dict | None) -> str | None:
 def _http_excluded_error() -> dict:
     """#236: JSON-RPC error for tools excluded from the tenant HTTP surface (D4).
 
-    #9084: an `_SafeError`, not a plain dict — this is ONE funnel feeding eight
-    tool bodies (five live, three retired-but-served), each of which returns it
+    #9084: an `_SafeError`, not a plain dict — this is ONE funnel feeding seven
+    tool bodies (four live, three retired-but-served), each of which returns it
     verbatim, so the dispatch used to be recorded ``status="ok"``. The wire
     payload is unchanged (`_SafeError` is a ``dict`` subclass); the seam matches
     it by value. Its ``error`` is a MAPPING, so the seam's text arm cannot see
@@ -4106,8 +4506,12 @@ def tortoise_query(kind: str | None = None,
     # finding 4, measured with `mcp.list_tools()`; recorded on #12500). Both
     # structural arms call `sdk.paginated_query(kind, skip, limit,
     # include_retracted, **filters)`, which declares NEITHER parameter
-    # (sdk.py:26642-26645), and the tag arm calls `query_points_by_tag(tag)`,
-    # which takes the tag and nothing else. Measured: `kind="statement",
+    # (sdk.py:26642-26645), and the tag arm calls
+    # `query_points_by_tag(tag, _record_reads=False)` (sdk.py:26964), which declares
+    # no floor and no ordering either. ⛔ The served bullet ABOVE still says
+    # "takes the tag and nothing else" ON PURPOSE: it is a `co_consts` member, so
+    # fixing it moves `served_from` — an owner-gated surface change (#4282).
+    # Measured: `kind="statement",
     # min_confidence=0.9` reaches the accessor as
     # `paginated_query(kind='statement', skip=0, limit=100,
     # include_retracted=False)` — the floor is simply gone and rows below 0.9
@@ -4690,71 +5094,6 @@ def tortoise_list_batch(batch_id: str) -> dict:
 def tortoise_list_batches(limit: int = 20) -> list[dict]:
     """Batch discovery — recent distinct ingest batch_ids (epic #902 A13)."""
     return _safe(_get_org_sdk().list_batches, limit=limit)
-
-
-def tortoise_packs_list() -> list[dict]:
-    """List this org's ACTIVE packs (#318 — multi-tenant pack isolation).
-
-    Shared pack catalog + the tenant graph's PackInstall activation records
-    (ensure-then-read core shared with REST GET /v1/packs — no REST/MCP
-    divergence). Auth-only scoping via the _current_org_id contextvar seam:
-    cross-tenant access is structurally impossible. D6 masking: empty result
-    when nothing is installed (never an error); the only error surface is
-    auth/transport failure.
-    """
-    # Fail-closed (#318): in HTTP/tenant mode a missing org context must
-    # NEVER fall back to the base (default-namespace) SDK for pack
-    # introspection — pack state is per-tenant. (stdio/selfhost keeps the
-    # base SDK: single-tenant, the base graph IS the tenant.)
-    if _current_org_id.get() is None and _transport_mode.get() == "http":
-        return _SafeError({"error": "Authentication required. No team context.",
-                           "code": ERR_UNAUTHORIZED})
-    from tortoise.pack_state import get_tenant_packs
-    return _safe(lambda: get_tenant_packs(_get_org_sdk()))
-
-
-def tortoise_pack_install(manifest_yaml: str) -> dict:
-    """#1935: install a custom expansion pack on the HOSTED surface.
-
-    Validates against the shared registry validator (schema + cross-pack)
-    plus the tenant policy (reserved starter namespace + ontology-only v1),
-    stores the manifest graph-natively in the tenant's graph
-    (``:PackManifest``) and activates it (idempotent).
-
-    DEPLOYMENT-GATED (#1935 R10): on SELF-HOST this tool is an actionable
-    stub — self-host configures packs via the filesystem packs dir
-    (``TORTOISE_PACKS_DIR``) + the ``tortoise pack`` CLI instead. The gate
-    is the serving app: ``tortoise.hosted_api`` is only imported in the
-    hosted deployment.
-    """
-    # C5 #2114 (final-gate P2): packs are DEFAULT-graph org-level state —
-    # graph-bound keys rejected (REST twin upload_pack_manifest parity; a
-    # per-graph install would orphan pack state list_packs never sees).
-    _reject_graph_bound_mcp_org_surface("pack install")
-    import sys as _sys
-
-    from tortoise.pack_manifest_store import upsert_tenant_manifest
-    if _sys.modules.get("tortoise.hosted_api") is None:
-        return _SafeError({
-                       "installed": False,
-                       "error": "tortoise_pack_install is HOSTED-only — on self-host add "
-                                 "custom packs via the filesystem packs dir "
-                                 "(TORTOISE_PACKS_DIR) + the 'tortoise pack' CLI.",
-                   })
-    if _transport_mode.get() != "http":
-        return _SafeError({"installed": False,
-                           "error": "pack install requires the HTTP transport."})
-    try:
-        record = upsert_tenant_manifest(_get_org_sdk(), manifest_yaml)
-    except ValueError as e:
-        # A REJECTED manifest is a refusal, even though it carries no `error`
-        # key (`validation_errors` names the reason). Left as a plain dict the
-        # seam recorded the dispatch `ok` (#9609 review): the exact-payload arm
-        # of `_returned_safe_failure` classifies it once it IS an `_SafeError`,
-        # and the wire shape does not move (dict subclass).
-        return _SafeError({"installed": False,
-                           "validation_errors": [str(e)]})
-    return {"installed": True, **record}
 
 
 def tortoise_list_tags() -> list[dict]:
@@ -5640,7 +5979,7 @@ def tortoise_status() -> dict:
     return _safe(_get_org_sdk().status)
 
 
-def _org_quota_block(sdk=None) -> dict:
+def _org_quota_block(sdk=None, timeout: float | None = None) -> dict:
     """The ``health.quota`` block: the ENFORCED boundary, from the gate's numbers.
 
     #11892 option (3). ``health`` reported ``graph_size`` and nothing about the
@@ -5673,6 +6012,14 @@ def _org_quota_block(sdk=None) -> dict:
     it forever — the rule ``hosted_api.health``'s docstring already states for
     ``change_feed``, ``record``, ``build`` and ``wait_bound_breaches``, and the
     same reason ``record``'s cumulative counters do not degrade it (#10185).
+
+    ``timeout`` (#10749) is this phase's budget, defaulting to
+    ``quota.QUOTA_STATE_TIMEOUT``. ``tortoise_health`` passes what is LEFT of its
+    transport deadline, and that is load-bearing rather than decorative: this is the
+    LAST bounded phase of the tail, so bounding it by the deadline at its own start
+    is what makes the WHOLE tail bounded — every earlier phase's spend is already
+    water under the bridge by then, and a budget measured at that moment can only be
+    spent if the deadline still has it.
     """
     try:
         # ⛔ INSIDE the try (fresh review of #12426, P2): every other import here
@@ -5731,7 +6078,7 @@ def _org_quota_block(sdk=None) -> dict:
             return org_quota_state(limits, "points", sdk=sdk,
                                    count_runner=count_resource_now)
 
-        return run_bounded_quota_state(_compute)
+        return run_bounded_quota_state(_compute, timeout=timeout)
     except Exception as exc:  # noqa: BLE001, RUF100 — health must answer, always
         # Same shape as every other unmeasurable arm: `unknown` + None values +
         # a reason. NOT `open` and NOT zeros — see org_quota_state's docstring.
@@ -5800,7 +6147,27 @@ def tortoise_health() -> dict:
     ``probe_setup_timeout() + PROBE_TIMEOUT + GRAPH_SIZE_TIMEOUT +
     QUOTA_STATE_TIMEOUT`` — still a bounded tail, never "as long as the server
     stalls". The block never changes ``status`` (a full graph is not a degraded
-    process — see ``_org_quota_block``) and never raises."""
+    process — see ``_org_quota_block``) and never raises.
+
+    #10749 (health-honest): that 26.0 s tail is a budget this tool was never ALLOWED
+    to spend. ``_await_under_mcp_wait_bound`` serves EVERY tool under
+    ``mcp_auth._TRANSPORT_WAIT_BOUND_S`` (10.0 s) — no allowlist, no exemption — so the
+    handler was arithmetically guaranteed to be refused on a reachable store once its
+    probe ran slower than ~6.2 s. Measured 2026-11-13 on the deployed process: **2 of 27**
+    attempts answered, the one timed success spending 6.96 s of a 10.77 s round trip in the
+    DB probe. The allowance is therefore CLAMPED to
+    ``remaining − (PROBE_TIMEOUT + GRAPH_SIZE_TIMEOUT + QUOTA_STATE_TIMEOUT + margin)``
+    (``_health_setup_allowance``) under the deadline the seam itself bound into
+    ``_WAIT_BOUND_DEADLINE`` — NOT re-derived from the arrival stamp, which does not exist on
+    stdio or the self-hosted apps even though the bound still applies there. The clamp only
+    REDUCES, so #3143's allowance stands wherever it fits; where it does not, the probe is
+    unobserved and ``status="unknown"`` (#3683) carries the truth, and ``setup_timeout_clamped``
+    (a boolean — the duration beside it can be a falsy 0.0) names the clamp so an unknown is
+    never read as a broken store. The clamp is a SAFETY NET, not the shape: where it bites, this
+    tool can no longer report a truthful deep state for a cold-but-reachable store at all — and at
+    or below the reserve it cannot for ANY store, because the allowance there is a hard 0.0 s (see
+    ``_health_setup_allowance``). Restoring the deep report is #12481, whose candidate shapes include
+    a background refresher that may need no MCP-surface change."""
     # #236: route through _safe() so every tool is gated (defense-in-depth;
     # reachable only post-auth over HTTP).
     # #3143: pass the cold-start allowance (call-time resolved) so a reachable
@@ -5810,14 +6177,87 @@ def tortoise_health() -> dict:
     # block's count is measured on the SAME handle this report uses — "count on
     # the SAME org SDK the tool writes to" is the gate's own rule
     # (quota.enforce_org_limit); a second handle could open another graph.
+    # #10749: the allowance is CLAMPED under the transport deadline the tool is served under.
+    # Unclamped, this handler's tail (26.0 s) is 2.6x the 10.0 s bound, so a reachable store was
+    # refused with the transport's "wait budget exceeded" text. The clamp only reduces, and the
+    # report says when it did, so `status="unknown"` is never mistaken for a broken store.
     def _report() -> dict:
         sdk = _get_org_sdk()
-        report = monitoring.metrics(
-            sdk=sdk,
-            setup_timeout=monitoring.probe_setup_timeout(),
-        )
+        remaining = _mcp_remaining_wait_bound()
+        allowance = (monitoring.probe_setup_timeout() if remaining is None
+                     else _health_setup_allowance(remaining))
+        # #10749 (fresh review, cycle 5, round 2; CORRECTED by a later fresh review, P2): the
+        # allowance bounds only the FIRST phase. The two phases after it are bounded in DIFFERENT
+        # ways, and that difference is deliberate — it is stated in full in
+        # `_health_setup_allowance`'s docstring:
+        #   * the COUNT is planned HERE, at handler start, off the probe's CEILING. Its budget is
+        #     ``remaining − (allowance + PROBE_TIMEOUT) − margin``, i.e. it subtracts the phase
+        #     BEFORE it. On a fresh 10.0 s bound that is ``10 − 5.0 − 0.5 = 4.5``, which SATURATES
+        #     at ``GRAPH_SIZE_TIMEOUT`` — so it is the full constant unless the probe's reserve ate
+        #     the deadline. ⛔ An earlier wording said "each is handed what is actually LEFT" and
+        #     "rather than its full constant"; both are FALSE of this phase, because a reserve can
+        #     only PLAN — it cannot know what the probe went on to spend.
+        #   * the QUOTA block is the LAST phase, so its budget IS measured at its own start, and that
+        #     is what makes the TOTAL ``remaining − margin`` however slowly the earlier ones ran.
+        # Measured before this: a dispatch with 2.0 s left spent 3.00 s in the quota phase alone and
+        # was refused inside the window where the runbook claimed a clamped probe never breaches the
+        # bound.
+        probe_ceiling = allowance + _monitoring_timeout(
+            "PROBE_TIMEOUT", _PROBE_TIMEOUT_FALLBACK_S)
+        graph_budget = None
+        if remaining is not None:
+            graph_budget = max(0.0, min(
+                _monitoring_timeout("GRAPH_SIZE_TIMEOUT", _GRAPH_SIZE_TIMEOUT_FALLBACK_S),
+                remaining - probe_ceiling - _HEALTH_TAIL_MARGIN_S))
+        metrics_kwargs: dict = {"sdk": sdk, "setup_timeout": allowance}
+        if graph_budget is not None:
+            # Only under a live deadline: an ABSENT kwarg is what every other caller and every test
+            # stub already sees, and `metrics`' own default is the full constant.
+            metrics_kwargs["graph_size_timeout"] = graph_budget
+        report = monitoring.metrics(**metrics_kwargs)
         if isinstance(report, dict):
-            report["quota"] = _org_quota_block(sdk)
+            if allowance < monitoring.probe_setup_timeout():
+                # #10749 review: TWO views of one decision, because either alone is misread.
+                # The BOOLEAN is the discriminator — the duration can legitimately be `0.0`
+                # (a spent deadline), which is falsy, so `if report.get("setup_timeout_clamped_s")`
+                # would read the most severe clamp as "not clamped" (the repo's `graph_size_error
+                # is None` / `db.ok is None` convention: a marker must never be falsy when it
+                # fires).
+                report["setup_timeout_clamped"] = True
+                # ⛔ THE VALUE IS THE ALLOWANCE IN EFFECT, not the reduction. A caller reading
+                # `3.49` could take it either as "3.49 s granted" or "3.49 s clamped away"; it is
+                # the former (`0.0` on a spent deadline means NOTHING was granted). The reduction
+                # is `monitoring.probe_setup_timeout() - this`.
+                report["setup_timeout_clamped_s"] = allowance
+                # #10749 cycle-5 review (P2): the COUNT must count the FACT its justification
+                # names — this call came back UNOBSERVED, so the caller got `status="unknown"` —
+                # NOT "a clamp was applied". The clamp is applied on essentially EVERY
+                # seam-served call (while the seam enforces the bound `remaining <= 10.0 s`, and
+                # an unclamped 20.0 s allowance needs `remaining > 26.5 s`), so counting the
+                # APPLICATION made this key an MCP-health-call counter: a healthy store
+                # answering `ok` in 50 ms incremented it, and a real degradation still moved
+                # nothing — the blindness the counter exists to remove, reintroduced one layer
+                # down. `observed is False` is #3683's own bit for "never reached the
+                # reachability query", which is precisely the answer the clamp costs.
+                # #10749 cycle-6 review (P2): unobserved ALONE is not "the clamp cost the answer".
+                # `observed=False` is ALSO returned when the single-slot worker REFUSED the
+                # submission (a saturated `_WorkerBacklogFull` backlog,
+                # monitoring._probe_once's backlog arm) — there the store may be perfectly fast and
+                # the SAME call would be `unknown` under the unclamped 20.0 s allowance too, so the
+                # counter would rise while the clamp cost nothing and an operator reading the
+                # runbook would narrow the allowance instead of adding probe capacity.
+                #
+                # So the gate requires the SPELLING the clamp actually produces, not just the
+                # observation bit: the setup-timeout message covers BOTH arms a smaller allowance
+                # genuinely worsens — the cold-start that overran it, and the submission that was
+                # queued and never ran for its whole budget — and excludes the backlog refusal,
+                # which carries the worker's own message.
+                db = report.get("db")
+                if isinstance(db, dict) and db.get("observed", True) is False:
+                    err = str(db.get("error") or "")
+                    if err.startswith(monitoring._PROBE_SETUP_TIMEOUT_MSG):
+                        monitoring.record_health_setup_clamp()
+            report["quota"] = _org_quota_block(sdk, timeout=_health_quota_budget())
         return report
 
     return _safe(_report)
@@ -5899,98 +6339,6 @@ def tortoise_topic_summarize(topic: str,
     return _safe(_get_org_sdk().topic_summarize, topic,
                  max_seeds=max_seeds, max_hops=max_hops,
                  include_relationships=include_relationships)
-
-
-# ── Graph Analysis ──────────────────────────────────────────────
-
-def tortoise_analyze(question: str,
-                    entityId: str | None = None,
-                    anchor_ids: Any = None,
-                    max_hops: int = 1,
-                    rel_filter: str = "IMPL|NAND",
-                    direction: str = "both") -> dict:
-    """Answer natural language questions about the Tortoise epistemic graph.
-
-    Ask things like: "where is the disagreement?" "what supports claim X?"
-    "what are we most uncertain about?" "show me the evidence chain for Y."
-
-    Optional entityId scopes the analysis to a specific entity's subgraph.
-    Optional anchor_ids (list of Point IDs) scopes via BFS subgraph selection.
-    max_hops: BFS depth from anchors (default 1).
-    rel_filter: edge types — "IMPL", "NAND", or "IMPL|NAND" (default).
-    direction: IMPL traversal — "incoming", "outgoing", or "both" (default).
-    Returns {"answer": "...", "raw": [...], "pattern": "...", "query": "..."}
-    — plus, with the W4 enrichment flag ON (epic #2080), an additive ``why``
-    array of canonical why-blocks (support_chain/ep/conflicts/supersession/
-    assessment/tradeoffs/dig_deeper) for the ids surfaced in ``raw`` (zero-LLM,
-    bounded batch reads; absent with the flag OFF — byte-identical). #11928:
-    the anchors are the four epistemic labels, not ``:Point`` only — a goal
-    (``:Object``) or a reading (``:Event``) gets a block, and ``assessment``
-    names the derived judgement that decided its belief.
-    """
-    from tortoise.analyze import analyze
-    from tortoise.navigation import entityProfile
-
-    anchor_ids = _parse(anchor_ids)
-
-    entity_subgraph_ids = None
-    if entityId:
-        try:
-            proj = _get_org_sdk()._get_proj()
-            # #236: HTTP mode must use the org graph, NOT the hardcoded
-            # "tortoise" graph — that hardcode bypasses org isolation via
-            # db.select_graph() (cross-tenant read). Stdio keeps "tortoise".
-            # #9340: the SELECTED graph wins over the workspace default, or
-            # the anchors come from a different graph than the analysis runs on.
-            gname = (_dispatch_graph_name()
-                     if _transport_mode.get() == "http" else "tortoise")
-            profile = entityProfile(proj.db, gname, entityId, hops=2)
-            ids = {entityId}
-            for category in profile.get("connected", {}).values():
-                for node in category:
-                    if node.get("id"):
-                        ids.add(node["id"])
-            entity_subgraph_ids = ids
-        except Exception:
-            pass  # fall back to full-graph analysis
-
-    # #329: bound paid outbound LLM calls per org per minute — beyond budget
-    # the tool degrades to keyword-only classification.
-    use_llm = _analyze_llm_budget_available()
-    result = _safe(analyze, question, _get_org_sdk()._get_proj(),
-                   entity_subgraph_ids=entity_subgraph_ids,
-                   anchor_ids=anchor_ids,
-                   max_hops=max_hops,
-                   rel_filter=rel_filter,
-                   direction=direction,
-                   use_llm=use_llm)
-    # #329 defense-in-depth: analyze() self-redacts, but scrub the answer at the
-    # boundary too in case a future error path leaks internals.
-    if isinstance(result, dict) and isinstance(result.get("answer"), str):
-        result["answer"] = _scrub_analyze_answer(result["answer"])
-    # W4 (#2101): additive why-layer enrichment — the additive keys ride the
-    # ``why`` entries for the epistemic ids surfaced in ``raw`` (flag-gated;
-    # absent with the flag OFF — the response stays byte-identical). #11928:
-    # the anchors are the four labels, not ``:Point`` only — do NOT narrow them
-    # back to "the Point ids", which is the #7927 partial-widening shape.
-    # Zero-LLM, bounded batch reads, fail-open (no key on assembly error).
-    if isinstance(result, dict) and result.get("raw"):
-        try:
-            from tortoise.why import (  # noqa: I001
-                assemble_why_blocks, point_ids_in_raw, w4_enrichment_enabled,
-            )
-            if not w4_enrichment_enabled():
-                return result
-            _proj = _get_org_sdk()._get_proj()
-            _ids = point_ids_in_raw(result["raw"])[:20]
-            if _ids:
-                _blocks = assemble_why_blocks(_proj, _ids)
-                result["why"] = [b for pid, b in _blocks.items()
-                                  if pid in _ids]
-        except Exception as e:  # noqa: BLE001, RUF100 — fail-open, never break the turn
-            _log.warning("W4 why-layer enrichment failed (analyze): %s", e)
-            pass
-    return result
 
 
 # ── P1-3: Staleness Detection ─────────────────────────────────
@@ -6944,16 +7292,6 @@ def tortoise_get(id: str, type: str | None = None,
         return tortoise_get_governance(id)
     return _SafeError({"error": f"get: unknown type {type!r}. "
                                 f"Valid types: {', '.join(_GET_TYPES)}"})
-
-
-def tortoise_backfill_v25(dry_run: bool = True) -> dict:
-    """Backfill database to ONTOLOGY v2.5 schema.
-
-    #236: EXCLUDED from tenant HTTP — schema-level migration (operator-only).
-    """
-    if _transport_mode.get() == "http":
-        return _http_excluded_error()
-    return _safe(_get_org_sdk().backfill_v25, dry_run=dry_run)
 
 
 # ── Phase-4 mining/promotion/dedup/timeline surface (#787, DE2E-7) ──
@@ -8874,7 +9212,9 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
         """Hide HTTP-excluded tools from tools/list (D4) + optional curation
         group scoping (#523).
 
-        The excluded tools (org_create/backfill_v25/ingest_corpus) remain
+        The HTTP-excluded tools — every registry entry whose `http_policy` is False
+        (`org_create`, `index_files`, `dream`, `expand_relationships`,
+        `mine_conversations`) plus the retired shims — remain
         registered on the shared module-level mcp instance for stdio, but are
         filtered out of the HTTP tool listing so tenants can't discover them.
         When tool_group is set, only that group's tools are listed — role-

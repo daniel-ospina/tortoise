@@ -1320,8 +1320,37 @@ _SOURCE_INDEX_ENTRIES = (
 )
 
 
+#: #12368: the characters the INDEX's own tokeniser treats as separators —
+#: ASCII punctuation and space, but NOT ``_`` and NOT anything non-ASCII.
+#:
+#: ⛔ Both halves are measured, and both directions are load-bearing:
+#:
+#: * ``_`` is a WORD character to RediSearch (every ``snake_case`` name is one
+#:   term), so this must not be :data:`_indexed_term_runs`' ``[\W_]+`` class — that
+#:   splits on ``_`` too, which is what makes the READ's terms and the INDEX's
+#:   terms differ for exactly that character.
+#: * every NON-ASCII character stays INSIDE the word as well — the eight-shape
+#:   probe in :func:`tortoise.sparse._continues_a_word` shows ASCII space as the
+#:   only separator AMONG ITS EIGHT ROWS (the other seven are non-ASCII
+#:   characters, none separating), and the rest of the class is measured
+#:   elsewhere: a one-row probe at `#12368` (a record named ``ab<x>``, queried as
+#:   ``ab``) found ``.``, ``!``, ``?``, ``/``, ``,`` and ``-`` separating while
+#:   ``_`` and ``NBSP`` do not, and ``NBSP``/U+3000/CJK are in that eight-row
+#:   table. ⛔ Do not over-attribute the table again (P2, `#12368` review): it has
+#:   no ``.`` or ``-`` row, so the punctuation half of this class comes from the
+#:   one-row probe, not from it.
+#:
+#: Used by :func:`probe_phrase_rejection` to ask its length bound the only
+#: question that matters: can the read address ANY index term at all?
+_INDEX_WORD_RUN_SPLIT_RE = re.compile(r"[^A-Za-z0-9_\x80-\U0010ffff]+")
+
+
 def _indexed_term_runs(text: str) -> list[str]:
-    """The RAW alphanumeric runs of *text*, in the INDEX's own sense.
+    """The RAW alphanumeric runs of *text*, as the READ splits them.
+
+    For every character except one this IS the index's own sense; ``_`` is that
+    exception, and it is why this line no longer claims the index outright — see
+    the ``_`` paragraph at the end of this docstring.
 
     ⛔ NOT :func:`~tortoise.sparse.tokenize_sparse_query` (#11536 review round 8,
     P1/P2). That function is the QUERY parser: it DROPS stopwords,
@@ -1340,6 +1369,18 @@ def _indexed_term_runs(text: str) -> list[str]:
     accent as a separator, which false-blocked ``résumé``/``naïve`` with a
     reason that was factually wrong while letting ``café`` through only because
     its accent happened to be trailing.
+
+    ⚠️ ``_`` IS SPLIT HERE, and that is NOT the index's sense of it — the index
+    treats it as a WORD character (MEASURED, #12360: `queryNodes('Object',
+    'café_menu')` returns a record named ``café_menu`` as ONE term). Splitting it
+    is still right for THIS function, whose question is *"what text does the read
+    send as terms?"* — and since #12360 an inner ``_`` makes the read emit MORE
+    than the composite (``web_search`` -> ``search|web|web_search``). ⚠️ But NOT
+    always: where at most one segment survives the tokeniser (``a_bc``) the read
+    sends ``a_bc`` alone, so ``_`` cannot be refused by run count and
+    :func:`probe_phrase_rejection` defers it to the read's own output. So the runs
+    are the QUERY's runs, not the index's, for this one character; the refusal
+    message says which of the two reasons fired.
     """
     return [part for part in re.split(r"[\W_]+", text.lower()) if part]
 
@@ -1404,16 +1445,6 @@ def probe_phrase_rejection(phrase: str) -> str | None:
     # acceptance and the shape guard ask this same question (one predicate per
     # question).
     runs = _indexed_term_runs(token)
-    if len(runs) == 1 and runs[0].isdigit() and token.lower() == runs[0]:
-        # A bare number — the TOKEN is the run, with no punctuation around it.
-        # ⛔ ``token.lower() == runs[0]`` IS THE GUARD, not a formality (#11536
-        # review round 9, P0): a digit RUN proves nothing about the TOKEN, so
-        # ``'4820,'``, ``'50%'``, ``'-4820'`` and ``'(4820)'`` all have one digit
-        # run while the read would send ``4820\,``, ``50\%``, ``\-4820`` and
-        # ``\(4820\)`` — escaped literals the index does not hold, i.e. the
-        # round-7 P0 re-opened by this very branch. MEASURED before the fix:
-        # every one returned None (ACCEPTED) and built an escaped literal.
-        return None
     # Lazy: `sparse` pulls the tokenizer + identifier machinery, and this module
     # is imported by every whole-journal replay engine's trailing sweep.
     from tortoise.sparse import SPARSE_STOPWORDS, build_or_query, tokenize_sparse_query
@@ -1430,12 +1461,215 @@ def probe_phrase_rejection(phrase: str) -> str | None:
     # way is a SEARCH STOPWORD, which is refused by NAME instead — ``the``/``of``
     # are common words, so they match almost every node and can evidence nothing.
     single_run = len(runs) == 1
+    # ⚠️ A `_`-ONLY TOKEN IS DEFERRED TO THE READ *HERE*, before the term count,
+    # and the reason is measured (#12360 review round 7, P3). The deferral has to
+    # cover the ZERO-term case too: `build_or_query('a_b') == 'a_b'`,
+    # `'x__y' -> 'x__y'`, `'a_b_c' -> 'a_b_c'` — one term, the index's own, because
+    # `_` is a word character — yet `tokenize_sparse_query` yields NO term for them,
+    # so the count branch below refused them with "the FTS read OR-joins multi-term
+    # input, so the probe would match on any one of them", which is false: there
+    # are no OR terms. Round 6 fixed only the ≥2-segment case and its own prose
+    # over-claimed as a result.
+    # ⛔ AND IT NOW COVERS EVERY `_`-CARRYING TOKEN, PUNCTUATED OR NOT (#12368
+    # review, P1 — a FALSE BLOCK, MEASURED with the production Cypher and a DECOY).
+    # The old predicate was "has `_` AND no other separator", so `a_bc.` fell to the
+    # run-count branch and was refused with "a token carrying any other separator
+    # cannot address ONE indexed term at all" — while `build_or_query('a_bc.')` is
+    # `a_bc.|a_bc` and BOTH alternatives address the single index term `a_bc`.
+    # MEASURED, one `:Object` per shape in its own graph, the emitted string issued
+    # through the production `queryNodes` Cypher (`_fts_cypher`, which does NOT
+    # re-build — `run_fts_query` does, and feeding it an already-emitted string is
+    # what produced a false "over-match" reading during this round): `a_bc.`,
+    # `x_axis.`, `2_a.` and `a_b.` return ONLY their own record, while a decoy
+    # carrying the bare words is proven reachable by its own query. So the refusal
+    # was a false block, and the deferral now sends them to the index-term
+    # comparison below, which is the component that can answer the question.
+    # ⛔ NOT a licence for a multi-term token: `snake_case,` and `web_search.` reach
+    # that comparison and are REFUSED there (their alternatives address `snake`,
+    # `case` and `snake_case`) — the widening moves the decision, it does not relax
+    # it.
+    deferred = "_" in token
+    # ⛔ THE QUESTION IS THE TOKEN'S **INDEX RUNS**, NOT ITS CHARACTERS (#12368
+    # review round 17, P1 — a FALSE PASS, and the round-9 repair of it was itself
+    # too narrow). ``deferred`` admits every ``_``-carrying token, so every
+    # refusal below it has to ask the question in the INDEX's sense; keying one
+    # of them on the bare string ``token == "_"`` answers a different question
+    # and only happens to agree for the one shape with no punctuation in it.
+    #
+    # What the read can address is the token's maximal word runs under
+    # :data:`_INDEX_WORD_RUN_SPLIT_RE` (``_`` stays INSIDE the run). A shape whose
+    # every such run is the bare ``_`` denotes a term the index does not answer,
+    # because ``_`` alone is unaddressable while ``__`` is not.
+    #
+    # MEASURED (one ``:Object`` per shape written through the real projection, the
+    # background index cycle awaited so a present name cannot book as a miss, then
+    # each shape queried BY ITS OWN NAME through the real ``run_fts_query`` on a
+    # live FalkorDB lane — the ten shapes below, index reporting 10 documents):
+    #
+    #     '_'  UNREACHABLE   '!_'  UNREACHABLE   '_.'  UNREACHABLE
+    #     '._' UNREACHABLE   '_!'  UNREACHABLE
+    #     '!__' REACHABLE    '__'  REACHABLE     '_a'  REACHABLE
+    #     'a_'  REACHABLE    '0_'  REACHABLE
+    #
+    # and the earlier twelve-shape run agrees on the reachable side (``___``,
+    # ``____``, ``_____``, ``_1``, ``1_``, ``_a_``, ``a__b`` each return their own
+    # record). And the term really is in the index: ``queryNodes('Object','\\_')``
+    # returns the record named ``_`` where ``queryNodes('Object','_')`` returns
+    # nothing. So a token whose ONLY index run is ``_`` addresses no term, and
+    # accepting it certifies ``ran=True, leaked=[]`` over a still-present
+    # sentence — the class this bound work exists to close.
+    word_runs = [r for r in _INDEX_WORD_RUN_SPLIT_RE.split(token) if r]
+    # ⚠️ ``origin/main`` REFUSED all five of the unreachable shapes, but by
+    # ACCIDENT and for a FALSE reason — "it tokenises to 0 term(s) []; the FTS
+    # read OR-joins multi-term input", where there are no OR terms. The deferral
+    # above exists to stop exactly that misattribution, so this refusal is not a
+    # revert: it states the measured reason. And it is scoped to the shapes
+    # measured unreachable — refusing ``__``/``!__``/``_a``/``a_`` on the same
+    # story would be a false block of the class review round 7 repaired, so the
+    # polarity is pinned in both directions by
+    # ``test_a_LONE_UNDERSCORE_probe_is_REFUSED``.
+    if word_runs and all(run == "_" for run in word_runs):
+        return ("every word in it is a single `_`, and the index answers that "
+                "query with ZERO rows even when a record is literally named "
+                "`_` (#12368 review round 17, MEASURED on a live index: `_`, "
+                "`!_`, `_.`, `._` and `_!` are each UNREACHABLE by their own "
+                "indexed name, while `__`, `!__`, `_a`, `a_` and `0_` return "
+                "their record; and `queryNodes('Object','\\_')` finds the "
+                "record named `_` where `queryNodes('Object','_')` finds "
+                "nothing) — a probe the read cannot answer certifies 'the "
+                "pre-fix prose is gone' over a still-present sentence, so pass "
+                "a token with a WORD in it")
+    # ⛔ …BUT NOT PAST THE COMPOSITE BOUND (#12360 review round 8, P3). Deferring
+    # EVERY `_`-only token accepted `'a'*129 + '_b'`: the composites are dropped
+    # above that bound, so the read sends the whole 131-char string as ONE escaped
+    # literal — and MEASURED on the lane, `queryNodes('Object', <129/131/200-char
+    # term>)` returns 0 rows while a 128-char term is returned, i.e. the index
+    # truncates. A probe that cannot match anything is a FALSE PASS: the guard
+    # would certify "the pre-fix prose is gone" over a still-present sentence.
+    from tortoise.sparse import MAX_COMPOSITE_RUN_LEN
+
+    # ⛔ MEASURE THE COMPOSITE, NOT A SEGMENT (#12360 review round 9, P2). The
+    # bound is on the maximal ``[A-Za-z0-9_]`` run, while ``runs`` splits ON ``_``,
+    # so ``max(len(r) …)`` is strictly smaller and let through every input whose
+    # length comes from `_` separation rather than from one long segment. MEASURED
+    # before this: `'a'*128 + '_b'` (130) and `'a_'*70 + 'b'` (141) were ACCEPTED,
+    # and against the lane their own names return ZERO rows from
+    # `run_fts_query`/`queryNodes` while a 128-char name returns one — the same
+    # false PASS this branch exists to prevent.
+    #
+    # ⚠️ The quantity compared below is ``len(token)``, which is a deliberate
+    # CONSERVATIVE UPPER BOUND on that run, NOT the run itself (#12368 review). A
+    # ``[A-Za-z0-9_]`` run can never be longer than the token that contains it, so
+    # `len(token) > MAX_COMPOSITE_RUN_LEN` refuses a few tokens whose run is
+    # actually under the bound — and it must, because the INDEX's word characters
+    # are Unicode while the run class is ASCII: ``'ñ'*130 + '_b'`` has a 2-char
+    # ASCII run but a 132-char INDEX term, which the index truncates, so the probe
+    # really would match nothing. Refusing it is correct; the earlier revision of
+    # this comment claimed the run "IS the whole token (no other separator)",
+    # which is false for exactly that shape, so the refusal below names the TOKEN
+    # rather than a run length it did not measure.
+    #
+    # ⚠️ The MEASURED CAUSE LEADS the refusal (#12368 review round 13): the index
+    # does not hold a term this long — that is the failure, and the composite's
+    # absence from the query is one of two ways it shows up, not the cause. For
+    # `'a'*129 + '_b'` and `'ñ'*130 + '_b'` the read sends ONE alternative (the
+    # escaped literal, == the token), while for `('ab_'*43)[:129]` it sends
+    # twelve; the earlier wording narrated the first as if it were the second.
+    #
+    # ⛔ THE BOUND IS ON A REACHABLE INDEX TERM, IN **BYTES** — not on the token
+    # and not in characters (#12368 independent reviews, two P2s, both measured).
+    #
+    # Round 1 found the gate was ``deferred and len(token) > …``. ``deferred``
+    # requires a ``_``, so every SEPARATOR-FREE token past the bound was accepted
+    # (``probe_phrase_rejection('a' * 129) is None``) while the index holds nothing
+    # above the bound — a FALSE PASS: the guard certified "the pre-fix prose is
+    # gone" over a still-present sentence, which is the failure the paragraph
+    # above says it exists to prevent.
+    #
+    # Round 2 then falsified BOTH of the obvious repairs, which is why this is not
+    # simply ``len(token) > bound``:
+    #
+    # 1. CHARACTERS ARE THE WRONG UNIT. RediSearch's length limit is in UTF-8
+    #    BYTES, so ``'é' * 65`` (65 chars, 130 bytes) sailed through a
+    #    character-counted bound and still addressed nothing: MEASURED 64 chars /
+    #    128 bytes -> rows, 65 chars / 130 bytes -> none.
+    # 2. THE WHOLE TOKEN IS THE WRONG QUANTITY. ``'a' * 120 + '!' * 9`` is 129
+    #    chars but the read sends it as ONE literal that the index then splits at
+    #    ``!`` — so it really does reach the 120-byte term ``'a' * 120`` and returns
+    #    rows. Refusing it was a NEW FALSE BLOCK introduced by the character-count
+    #    repair (the class this branch had already repaired three times).
+    #
+    # So the question is the one the guard actually cares about: can the read
+    # address ANY index term this long? The terms a literal can reach are its
+    # maximal word runs, and per the eight-shape probe above the index's word
+    # characters are ``[A-Za-z0-9_]`` PLUS every non-ASCII character — only ASCII
+    # punctuation and space separate. Refuse only when EVERY such run is over the
+    # bound in bytes, i.e. when no alternative the read can send addresses
+    # anything.
+    # ⛔ ``word_runs`` IS COMPUTED ONCE, above the lone-`_` refusal, and reused
+    # here — this file's rule is that two predicates for one question is the bug,
+    # and the two refusals ask the same question about the same runs. One `if`
+    # rather than a nested pair for the same reason (a nested pair whose only
+    # sibling is a comment reds ruff SIM102).
+    if (len(token.encode("utf-8")) > MAX_COMPOSITE_RUN_LEN
+            and all(len(r.encode("utf-8")) > MAX_COMPOSITE_RUN_LEN
+                    for r in word_runs)):
+        # ⛔ THE CONSEQUENCE CLAUSE IS NOT ONE THING (#12360 review round 11, P3).
+        # It used to assert "so the query is ONE literal term the index cannot
+        # hold and the probe would match NOTHING", which is FALSE for any
+        # over-bound token that still has segments the tokeniser keeps: MEASURED
+        # ``('ab_'*43)[:129]`` builds ``ab|ab|...`` (twelve alternatives of one
+        # SHORT term) — the OPPOSITE failure from a literal that matches nothing.
+        # The refusal and the advice are right either way; only the reason had to
+        # describe what the read actually does.
+        return (f"it is longer than {MAX_COMPOSITE_RUN_LEN} bytes, and every "
+                f"word in it is too — the index does not hold a term that "
+                f"long (#12360: MEASURED — a 128-byte name returns rows, "
+                f"129/131/200-byte names return NONE), so the term this "
+                f"token DENOTES is not one the index holds: it cannot find "
+                f"its own name however the read spells the query — pass a "
+                f"SHORTER token")
+    # ⛔ THE BARE-NUMBER ACCEPTANCE COMES *AFTER* THE BOUND (#12368 review round
+    # 16, P2 — a FALSE PASS this ORDERING left open). It used to precede the
+    # bound, so every SEPARATOR-FREE ALL-DIGIT token past the bound was accepted
+    # while every non-digit one was refused. MEASURED at `d0595175`:
+    # `probe_phrase_rejection('1' * 129) is None` and `('1' * 200) is None`, while
+    # `'a' * 129` was refused. The read sends the 129-byte literal, the index
+    # truncates, `queryNodes` returns 0 rows, and the fold certifies "the pre-fix
+    # prose is gone" over a still-present sentence — the same failure class the
+    # bound exists to prevent, reached through the one branch that returns early.
+    # ORDER is the fix; the acceptance itself is right (#11536 round 8) for every
+    # number the index can hold.
+    #
+    # ⚠️ AND AFTER THE MOVE THIS BRANCH IS A **BACKSTOP**, NOT THE FIX (#12368
+    # review round 4, P3 — a claim correction, no behaviour change). The move made
+    # it DECISION-EQUIVALENT TO DELETING IT: a differential over 154,678 shapes
+    # (exhaustive length 1-4 over `[0-9]`, `[0-9_]`, `[0-9,.-%()]`, `[0-9ab_]`,
+    # `[0-9٤٨]`, plus 4,000 random lengths 1-200) against the same module with these
+    # ten lines deleted found **0 decision differences**, and deleting them leaves
+    # 185 tests green. Everything that reaches here is either under the bound (so
+    # the later `build_or_query` backstop accepts it anyway) or is a shape the
+    # escape set refuses. It is kept because the `#11536` round-9 P0 it was written
+    # for must not be able to re-open silently: it is the explicit statement of
+    # "a bare number is probe-able", and the next edit to the branches above it is
+    # what decides whether it is live again. ⛔ Do not read it as the active guard —
+    # `escape_redisearch_literal` and the `build_or_query` backstop below are.
+    if len(runs) == 1 and runs[0].isdigit() and token.lower() == runs[0]:
+        # A bare number — the TOKEN is the run, with no punctuation around it.
+        # ⛔ ``token.lower() == runs[0]`` IS THE GUARD, not a formality (#11536
+        # review round 9, P0): a digit RUN proves nothing about the TOKEN, so
+        # ``'4820,'``, ``'50%'``, ``'-4820'`` and ``'(4820)'`` all have one digit
+        # run while the read would send ``4820\,``, ``50\%``, ``\-4820`` and
+        # ``\(4820\)`` — escaped literals the index does not hold, i.e. the
+        # round-7 P0 re-opened by this very branch. MEASURED before the fix:
+        # every one returned None (ACCEPTED) and built an escaped literal.
+        return None
     if (single_run and token.lower() == runs[0]
             and token.lower() in SPARSE_STOPWORDS):
         return ("it is a search stopword; a probe must be a RARE token that "
                 "appears only in the pre-fix prose")
 
-    if not single_run:
+    if not single_run and not deferred:
         tokens = tokenize_sparse_query(token)
         if len(tokens) != 1:
             return (f"it tokenises to {len(tokens)} term(s) {tokens!r}; the FTS "
@@ -1465,11 +1699,35 @@ def probe_phrase_rejection(phrase: str) -> str | None:
     # run cannot be ONE indexed term, whatever the switch says. ``runs`` is
     # :func:`_indexed_term_runs`' unicode-aware split, so an accented letter is
     # not counted as a separator.
-    if len(runs) > 1:
+    # ⚠️ `_` IS NOT COVERED BY THIS GUARD, and the reason is measured (#12360
+    # review round 6, P3). The premise of the check below — "more than one
+    # alphanumeric run cannot be ONE indexed term" — is FALSE for `_`, because the
+    # index treats `_` as a word character. For a `_`-only token the read sends
+    # exactly one term and that term IS the index's own, in both arms:
+    # MEASURED ``build_or_query('a_bc') == 'a_bc'`` (the segment that survives is
+    # too short to stand alone, so the degenerate branch sends the literal) and
+    # ``build_or_query('web_search') == 'search|web|web_search'``. Refusing the
+    # first shape on this branch was a FALSE BLOCK — `a_bc`, `x_axis`, `a_web` are
+    # probes that work — and the round-5 attempt to justify it ("cannot be a
+    # ONE-TERM probe") was false for exactly those shapes. So a `_`-only token is
+    # deferred to the read's OWN answer, :func:`tortoise.sparse.build_or_query`,
+    # in the backstop below (which refuses it when the read emits several terms).
+    # ⛔ Not a licence for other separators: for `-`, `,`, `:` … the index really
+    # does split, so no single-term probe exists and this branch still refuses.
+    # ⛔ THE PREDICATE IS NOT RE-DERIVED HERE (#12368 review, P2). This branch
+    # used to rebuild it inline (``has_us and not other_sep``) with a comment
+    # admitting it was ``== `not deferred` `` — and this file's own rule, stated
+    # 200 lines below, is that TWO PREDICATES FOR ONE QUESTION IS THE BUG: an edit
+    # to ``deferred`` (the lone-`_` refusal above, or a future separator) would
+    # have left this copy stale and split the guard into two answers. Reading
+    # ``deferred`` is byte-identical today and makes the next edit propagate.
+    if len(runs) > 1 and not deferred:
         return (f"it splits into {len(runs)} alphanumeric runs {runs!r}; the "
-                f"FTS index splits on every non-alphanumeric character, so "
-                f"this cannot address ONE indexed term — pass a SINGLE RARE "
-                f"token (no digits, dashes or punctuation inside it)")
+                f"FTS index splits on every non-alphanumeric character EXCEPT "
+                f"`_` (which it treats as a word character, #12360), so a token "
+                f"carrying any other separator cannot address ONE indexed term "
+                f"at all — pass a SINGLE RARE token (no separators other than "
+                f"`_` inside it)")
     # ⛔ AND A TOKEN THE READ WILL **ESCAPE** IS NOT A PROBE (#11536 review
     # round 7, P0). `build_or_query`'s degenerate single-token branch sends the
     # token through :func:`tortoise.sparse.escape_redisearch_literal`, which
@@ -1494,10 +1752,77 @@ def probe_phrase_rejection(phrase: str) -> str | None:
                 f"UNDER-match and a still-findable sentence would read as "
                 f"absent — pass the bare word, without punctuation")
     built = build_or_query(token)
-    if len(built.split("|")) != 1:
-        return (f"the read expands it into several terms ({built!r}) — either "
-                f"the identifier mechanism (a digit/dash run) or the ASCII "
-                f"tokeniser splitting an accented word; pass the plain token")
+    # ⚠️ CASED COMPARISON, because RediSearch LOWERCASES (#12360 review round 8,
+    # P3): a case-variant of one term is not an OR over-match — MEASURED,
+    # ``queryNodes('Object','A_B')`` and ``…'a_b'`` both return the record named
+    # ``a_b`` — so refusing it was a false block with a false reason. It is kept
+    # as BELT-AND-BRACES: since the same review's builder fix (below, round 10)
+    # a capitalised `_` token no longer emits the duplicate at all
+    # (``build_or_query('A_B') == 'A_B'``), but this comparison is what makes the
+    # guard independent of the builder's dedupe staying case-aware.
+    # ⛔ ONE DISTINCT ALTERNATIVE IS NOT ENOUGH — IT MUST BE **THE TOKEN ITSELF**
+    # (review round 12, P2, MEASURED). ``len(alternatives) != 1`` accepts any token
+    # whose read OR-joins into alternatives that merely COINCIDE — and a doubled
+    # accented fragment does exactly that while addressing a term the index does
+    # not hold: ``build_or_query('cafécafé') == 'caf|caf'`` (one distinct
+    # alternative, ``caf``) while the index holds ``cafécafé`` as ONE term, so
+    # ``queryNodes('Source','cafécafé')`` returns the node and ``'caf|caf'``
+    # returns NOTHING. Accepting it certified ``ran=True, leaked=[]`` over a
+    # still-present sentence — the FALSE PASS this guard exists to prevent, in
+    # the fail-open direction, and it was introduced by the round-8 narrowing
+    # (``origin/main`` REFUSED ``cafécafé``; verified by loading the base
+    # module). Same shape: ``überüber`` -> ``ber|ber``, ``testétest`` ->
+    # ``test|test``. So the requirement is the strict one: the emitted set must
+    # BE the token, case-folded. That still accepts every shape the file pins
+    # (``a_bc``, ``x_axis``, ``A_B``, ``año``, ``résumé``, ``friday.`` — the read
+    # sends the token itself) and still refuses ``web_search`` (three distinct
+    # terms) and the doubled-fragment class.
+    alternatives = {t.lower() for t in built.split("|")}
+    if alternatives != {token.lower()}:
+        # ⛔ A RAW-STRING COMPARISON IS NOT AN INDEX-TERM COMPARISON (#12368 review,
+        # P2 — a false BLOCK, MEASURED on a live lane). The index splits every
+        # alternative on its own separators, so two alternatives can address the
+        # SAME term: ``build_or_query('a_.') == 'a_.|a_'``, and both alternatives
+        # reduce to the term ``a_``. MEASURED — one ``:Object`` per shape written
+        # through the real projection, index cycle awaited, then queried by its own
+        # name through ``run_fts_query``: ``a_.``, ``a_!``, ``.a_``, ``_a.`` and
+        # ``a_..`` EACH return their own record. Refusing them was a false block of
+        # the class this guard has repaired three times, and the refusal's own
+        # reason ("the read expands it into several terms") is false about INDEX
+        # terms: there is ONE.
+        #
+        # ⛔ COMPARE IN THE **INDEX'S** SENSE (``_INDEX_WORD_RUN_SPLIT_RE`` keeps
+        # ``_`` inside the run), NOT ``_indexed_term_runs``' (which splits on it),
+        # found by the #12368 review, P1. ``_indexed_term_runs('test_test')`` is
+        # ``['test','test']`` — so it maps BOTH the token and its alternative
+        # ``test`` to ``{'test'}`` and the guard ACCEPTED ``test_test``, whose read
+        # is ``test|test|test_test``: ``test`` and ``test_test`` are two distinct
+        # INDEX terms, so a probe on it returns rows for the common word alone.
+        # That is the over-match this block exists to refuse, and ``origin/main``
+        # refused it (``runs`` was ``['test','test']``, two runs) — so the read's
+        # splitter was a REOPENING of a closed class, not a widening of it.
+        # ``a_.`` is unaffected: both its alternatives are one index run, ``a_``.
+        #
+        # ⛔ AND ONE SHAPE THIS COMPARISON CANNOT SEE, tracked as #12535: a token
+        # that ends ``_`` AFTER a separator (``ab._``) is ACCEPTED here, while the
+        # read's query addresses the bare ``ab`` — MEASURED with a decoy record
+        # (``qq ab zz`` returned beside the target), i.e. an over-match. Neither
+        # guard above can catch it: ``build_or_query('ab._') == 'ab._'`` is ONE
+        # alternative (so this block is skipped entirely) and its index run is
+        # ``ab_`` (ONE run). Dropping the ``alternatives != {token.lower()}`` guard
+        # does NOT fix it — both sides still compare ``ab_`` to itself — so the fix
+        # needs the QUERY parser's term, not the index splitter.
+        token_terms = {r.lower() for r in _INDEX_WORD_RUN_SPLIT_RE.split(token) if r}
+        alternative_terms: set[str] = set()
+        for alternative in alternatives:
+            alternative_terms |= {r.lower() for r in
+                                  _INDEX_WORD_RUN_SPLIT_RE.split(alternative) if r}
+        if not (len(token_terms) == 1 and alternative_terms == token_terms):
+            return (f"the read expands it into several terms ({built!r}) — either "
+                    f"the identifier mechanism (a digit/dash run), the #12360 "
+                    f"`_`-composite tail (`TORTOISE_UNDERSCORE_TERMS`), or the "
+                    f"ASCII tokeniser splitting an accented word; pass the plain "
+                    f"token")
     return None
 
 

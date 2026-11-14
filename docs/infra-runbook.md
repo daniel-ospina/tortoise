@@ -853,6 +853,119 @@ non-zero `total` with a healthy `db.ok` means the store is too slow for the
 bound, not unreachable: the refusal is legible, the work may still complete, and
 the fix is capacity or a narrower query, never a retry loop.
 
+### 4.1.1a The pair that moves when this one goes flat — `health_setup_clamped` (#10749)
+
+**Read both fields together.** `#10749` stopped `tortoise_health` from being *refused* by the
+transport bound: its cold-start allowance is clamped under the deadline it is served under, the
+`quota` block is handed what is left of that deadline at **its own** phase, and the `graph_size`
+count is bounded by what the probe's ceiling leaves — so a slow probe returns `status: "unknown"`
+**inside** the bound instead of a `-32009` refusal. That is the right behaviour and it makes the
+counter above go **flat by design** — a clamped probe does not breach the bound. ⛔ **The one
+qualifier, stated because it is real:** the arithmetic still RESERVES `PROBE_TIMEOUT` (1.5 s) for the
+probe even at a 0.0 allowance, and that reservation only makes the tail **tighter** — it can never
+widen it. ⛔ **The figure is a PLANNING bound, not a measured spend, and it only holds AT OR ABOVE the
+reserve:** with `allowance + PROBE_TIMEOUT + GRAPH_SIZE_TIMEOUT + QUOTA_STATE_TIMEOUT <= remaining −
+the 0.5 s margin` (9.50 s at a 10.00 s bound and 6.00 s at 6.50 s — the two points
+`test_the_planned_phases_fit_the_bound_when_the_reserve_fits` iterates). Below 6.5 s the RESERVE's
+four terms (`PROBE_TIMEOUT + GRAPH_SIZE_TIMEOUT + QUOTA_STATE_TIMEOUT + the 0.5 s margin` — 6.50 s)
+no longer fit inside a `remaining` that is itself under 6.5 s, so the `allowance` term of the formula
+above is pinned at 0.0 and cannot buy back the difference, which
+is why what bounds the tail there is the QUOTA phase's own deadline read — the count cannot run in that
+band at all — not the constant sum.
+⛔ **Below the reserve two of those terms are also unreachable, and the allowance is a hard step,
+not a gradient:** it is `max(0.0, min(knob, remaining − 6.5))`, so at `remaining <= 6.5 s` it is
+exactly **0.0** — the probe is submitted and abandoned before its reachability query, `metrics` skips
+the `graph_size` count (that branch is reached only when the probe was OBSERVED), and the 1.5 s
+planned for that count is spent on nothing. What the tool then spends is the `quota` phase's
+`min(3.0, remaining − the 0.5 s margin)` — i.e. exactly `remaining − margin` at or below 3.5 s of
+remaining, and at most 3.0 s above that. The over-reserve is conservative (it can only shorten the
+tail) and 6.5 s is where the observable flips. (An earlier revision of this note read the
+reservation **backwards** and claimed the worst case was "up to 1.5 s short of the margin" — the
+direction is the other way.)
+With a warm projection the tool **responds without a refusal** at 2.5 / 1.5 / 0.6 s of remaining
+deadline — with `status: "unknown"` and `setup_timeout_clamped: true` wherever the allowance is 0.0,
+so "answers" there means "answers honestly that it could not measure", not "answers truthfully".
+Without the pair, a fleet-wide "health is degraded to unknown" would move no counter at all (`errors`
+covers a `graph_size` overrun of its OWN FULL budget, the standalone `serve_health` handler's 500
+path, and any tool exception through `mcp_server._safe` — none of the three is a clamped-unknown —
+and the `mcp_tool_call` telemetry row now reads `ok`). ⛔ **One shape is counted by NOTHING, and it is
+worth knowing when you read these keys:** a `graph_size` count starved by a deadline-**reduced**
+budget moves neither `errors` nor `health_setup_clamped` — the count is only reached when the probe
+was OBSERVED (`ok is True`), and the clamp counter by construction requires an UNOBSERVED probe. Its
+only signal is the per-call `graph_size_error` string, whose actual text is `graph_size not measured:
+graph_size count exceeded its <N>s budget` — match on `count exceeded its`, because there is no bare
+`graph_size exceeded` anywhere in the payload. The aggregate gap itself is tracked as **#12600**, so
+it is a known hole rather than an oversight.
+
+```bash
+curl -sS https://api.premiselabs.co/health | jq '{breaches: .wait_bound_breaches.total, clamped: .health_setup_clamped}'
+```
+
+- `health_setup_clamped` is cumulative since process start, an `int | null`, and is **reported,
+  never folded into `status`** — the same rule as the counter above (a cumulative counter must never
+  pin the deployment degraded for the life of the process).
+- **It counts the clamp COSTING AN OBSERVATION, not the clamp being applied.** While the seam
+  enforces the bound, `remaining <= 10.0 s`, so the clamped allowance is always below the unclamped
+  20.0 s and the clamp is active on essentially **every** MCP health call — a healthy store
+  answering in 50 ms included. Counting that would make this key an MCP-health-call counter (100 %
+  on a healthy process) and would leave a real degradation moving nothing, so the increment is gated
+  on the probe coming back **unobserved** (it never reached the reachability query, #3683) **with the
+  setup-timeout spelling**. ⛔ Both halves of that gate are load-bearing: a saturated worker backlog
+  also reports unobserved, but there the store may be fast and the same call would be `unknown`
+  under the unclamped allowance too — the clamp cost nothing — so counting it would send you to the
+  wrong remedy. It is
+  therefore the **three-term** gate — `setup_timeout_clamped: true` **and** the probe unobserved
+  **and** the setup-timeout spelling — and it is NOT the per-call pair: a backlog refusal satisfies
+  the pair and is deliberately excluded (see the bullet above). ⛔ **FOUR causes spell identically and
+  it cannot separate them, so never read a rise as "the store is slow":** (1) a clamped allowance
+  that the cold start overran; (2) a store too cold for even the **unclamped** 20.0 s (remedy: the
+  store); (3) **the probe was granted a hard 0.0 s** — the dispatch had already spent more than
+  `bound − reserve` before the handler, so a store answering in milliseconds comes back unobserved and
+  moves this key (remedy: the dispatch's pre-handler latency, or #12481); (4) **the single probe slot
+  was occupied**, so this dispatch spent its allowance waiting and never contacted the store (remedy:
+  **probe capacity** — the #2850 single slot — which is exactly the remedy the backlog exclusion
+  exists to protect). Cause (3) is **not** rare: it is the shape #10749 measured on the deployed
+  process (~3.8 s of the 10.0 s bound gone before the probe's first byte ⇒ `remaining ≈ 6.2 s` ⇒
+  allowance 0.0). It also means this key does **not** read `0` on every process whose stores are
+  answering. ⛔ **And `/health` cannot tell you which cause it was:** the discriminating
+  `setup_timeout_clamped_s` (`0.0` = the zero-grant arm) is on the **per-call `tortoise_health`
+  response only** — the aggregate body carries this counter and no discriminating clamp marker — so
+  from `/health` a rise
+  is a rise, and attributing it needs the per-call payload: the logs carry nothing about this clamp
+  (`record_health_setup_clamp` only increments the counter), and the `mcp_tool_call` row carries the
+  tool name, its status, its latency, an error kind and a result count — never the payload.
+- The hosted body carries it because it builds its own JSON (`tortoise/hosted_api.py`'s `health()`);
+  `monitoring.serve_health`'s **`/health`** carries the same key from `monitoring.metrics()`. A `0`
+  here is a measured zero (an unlabelled counter is exported from registration); `null` means the
+  counter could not be READ — the same unread-versus-zero distinction as the `record` counters on
+  this body, so `0` is never fabricated for a failed read.
+- ⛔ **`TORTOISE_PROBE_SETUP_TIMEOUT` is a CEILING for this tool, not its spend.** The tool spends
+  `max(0.0, min(knob, remaining − 6.5))`, i.e. at most ~3.5 s on a fresh dispatch and `0.0` once
+  ~3.5 s of the dispatch is gone, so raising the knob past `bound − reserve` cannot widen this
+  tool's window (it still governs the off-request-path selfhost refresher at full range). ⛔ **Below
+  that ceiling the knob IS the spend, and raising it helps — on a dispatch whose deadline still
+  leaves `knob + reserve`**: configured under 3.5 s (the documented minimum is 1.5 s) such a call
+  receives it verbatim, no clamp marker fires, and the cold-start window is what you configured.
+  The same configuration on a dispatch that has already burned seconds of its bound still clamps to
+  `0.0` and marks it; the deadline decides what is left under the ceiling. A cold start that needs longer than the ceiling gets `status: "unknown"` with the marker,
+  and making that reportable again is #12481.
+  `probe_setup_timeout()`'s own docstring states the ceiling where the knob is documented.
+- ⛔ A clamped probe's `graph_size_error` reads **"probe not observed (allowance clamped)"**, not
+  "db probe failed": the probe was never given time, which is not a failed store. The parenthetical
+  names which of **four** situations applied, and each routes to a different remedy:
+  **"no allowance on this surface"** (`serve_health`'s own `/health`, where nothing is clamped),
+  **"probe worker refused the submission"** (a saturated single-slot worker — `_WorkerBacklogFull`;
+  a CAPACITY problem, and no allowance would have changed it), **"allowance clamped"** (the seam
+  took budget away → #12481), and **"allowance not clamped"** (this call had its FULL budget and
+  the probe still never reached the query — a cold store). The refusal arm is checked **before**
+  the clamp comparison deliberately: a clamp is applied on essentially every seam-served call, so
+  ordering it the other way labelled a saturated worker "allowance clamped" and sent an operator
+  to #12481 for capacity — contradicting `health_setup_clamped`, which correctly does not count
+  that refusal. A genuinely observed failure keeps the old message.
+- ⛔ `serve_health`'s **`/metrics`** does **not** carry this JSON key: that endpoint is the Prometheus
+  exposition (`generate_latest`), so the scrapable form is the family
+  `tortoise_health_setup_clamped_total` (see the same warning for `wait_bound_breaches` above).
+
 ### 4.2 Billing mirror drift — verify and repair an under-delivered plan (#8878)
 
 **Symptom.** A customer pays for a higher tier and is enforced at a lower one.
