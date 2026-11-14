@@ -893,8 +893,12 @@ def _health_setup_allowance(remaining: float) -> float:
     even at a 0.0 allowance, and that reservation only makes the tail TIGHTER — it can never widen
     it, so the bound above is not eroded by it. ⛔ **The figures below are a PLANNING bound, not a
     measured spend** (fresh review of the final head, P3 — an earlier cut called them "spent"), and
-    they hold only AT OR ABOVE the reserve (verified: at 3.00 s of remaining the four constants sum
-    to 6.00 s, which is not ``<= 2.50``): the property the tests pin is
+    they hold only AT OR ABOVE the reserve (verified: at 3.00 s of remaining the allowance is a hard
+    0.0, so the planned sum's four TERMS — that allowance plus ``PROBE_TIMEOUT +
+    GRAPH_SIZE_TIMEOUT + QUOTA_STATE_TIMEOUT`` — reach 6.00 s, which is not ``<= 2.50``; ⛔ an
+    earlier wording said "the four constants sum to 6.00 s" and mislabelled them, because the
+    RESERVE's four terms are 6.50 s and only these four, the 0.0 allowance included, are 6.00 —
+    fresh review of the final head, P3): the property the tests pin is
     ``allowance + PROBE_TIMEOUT + GRAPH_SIZE_TIMEOUT + QUOTA_STATE_TIMEOUT <= remaining − margin`` at
     ``remaining`` 10.00 and 6.50, i.e. 9.50 and 6.00. (An earlier cut of this paragraph read the
     reservation BACKWARDS and claimed the tail could come out up to 1.5 s short OF THE MARGIN; the
@@ -913,9 +917,14 @@ def _health_setup_allowance(remaining: float) -> float:
     projection the tool RESPONDS WITHOUT A REFUSAL at ``remaining`` 2.5 /
     1.5 / 0.6 s (``status="unknown"`` wherever the allowance is 0.0). Read the figure as an upper
     bound the arithmetic permits, never as a refusal an operator should expect.
-    ``test_the_planned_phases_fit_the_bound_when_the_reserve_fits`` and
-    ``test_the_quota_budget_shrinks_by_what_the_earlier_phases_actually_spent`` pin the realised
-    bound (the budgets the handler actually hands each phase), not the constants.
+    ⛔ TWO TESTS, TWO DIFFERENT FACTS (fresh review of the final head, P2 — an earlier wording said
+    both pin "the realised bound … not the constants", and the FIRST one does not):
+    ``test_the_planned_phases_fit_the_bound_when_the_reserve_fits`` pins the **planning** bound — it
+    sums ``allowance + PROBE_TIMEOUT + GRAPH_SIZE_TIMEOUT + QUOTA_STATE_TIMEOUT`` from the module
+    constants and never enters the handler, which is exactly the arithmetic the paragraph above
+    states, and it is that paragraph's pin — while
+    ``test_the_quota_budget_shrinks_by_what_the_earlier_phases_actually_spent`` pins the
+    **realised** budgets the handler actually hands each phase.
     """
     return max(0.0, min(monitoring.probe_setup_timeout(),
                        remaining - _health_tail_reserve()))
@@ -1701,15 +1710,13 @@ async def _await_under_mcp_wait_bound(name: str, arguments, *, version,
         # already say so), the body would read `None`, and #10749's unclamped tail would return
         # SILENTLY. `test_the_REAL_hop_hands_the_tool_body_a_clamped_allowance` is the guard for
         # exactly that class, and it is the ONLY one: it awaits the real chain and asserts the body
-        # ran on a different thread (measured at that head's 40-case file — under a bare
-        # `run_in_executor` it is the sole red, 1 failed / 39 passed, while a lost deadline reds 20
-        # of 40). ⛔ DO NOT restate a case count here (cycle-4 review, P3): this line said "the file
-        # has 45 cases now, so a re-run reads 1/44 and 20+/45" and was already stale — the file
-        # collected 48 the moment the review round that read this added its pins. The counts move by
-        # design; the RATIO ("one red" vs "many reds") is what this comment is about. Keep that case if
-        # this seam
-        # changes; the same dependency is relied on at ``tortoise_session_capture``'s cancellation
-        # note.
+        # ran on a different thread. ⛔ DO NOT restate a case count here (cycle-4 review, P3 — and a
+        # fresh review of the final head, P2, because that first correction left the counts in): this
+        # comment has carried a count before and it went stale on every review round that added a
+        # pin, which is BY DESIGN — the counts move, the RATIO does not. The ratio is the fact:
+        # mutating this seam to a bare `run_in_executor` leaves that ONE case red, while losing the
+        # deadline reds MANY. Keep that one case if this seam changes; the same dependency is
+        # relied on at ``tortoise_session_capture``'s cancellation note.
         bound_token = _WAIT_BOUND_DEADLINE.set(_time.monotonic() + remaining)
         try:
             task = asyncio.ensure_future(dispatch)
