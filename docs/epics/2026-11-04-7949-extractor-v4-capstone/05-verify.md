@@ -107,13 +107,16 @@ twin **builders** for 9 and 10 are the two gaps.
 
 The bundle's headline lists **7 files** under `docs/epics/2026-11-04-7949-extractor-v4-capstone/`, and a reader can mistake that for the branch. It is the bundle, not the diff. ⛔ **The PR's own file count is NOT typed here — it is `git diff --name-only origin/main...HEAD` at the head being merged**, because a count typed into prose goes stale on the next rebase, which is D5's whole rule one table up — and this paragraph is its own evidence: it read **18** at `4848786bbc`, and **17** one forward merge later, when `04-plan.md` left the diff. A number below is headed HISTORY, never a claim about the tree you are reading. ⚠️ An earlier revision of this paragraph said *"the PR touches **13** files at this head"* and reconciled it as `7 + 6`. That was true of the branch at an earlier base and is FALSE at this one: the forward merges absorbed five of the six rows below, so at this head only `docs/00_index.md` survives, while `tools/ci_selection.py` and `tests/test_ci_selection.py` — a CI-selection semantics change no merger should meet for the first time at the merge button — are **in** the diff and were **not** in that table. The rows are kept as history and each is marked with whether it is still in the diff: the table is what the branch once carried, not what it carries now. ⚠️ `tests/test_9397_about_edge_properties.py` is **not** in any count: this branch restored the `the exemption` declaration at `d04b1449d0`, and `main` restored the same key independently at `70b5a9aa9d`, so the forward merge absorbed the branch's copy — the file is byte-identical to `main` here, the restore is **inherited, not contributed**, and no leg is red on `main` for this PR to turn green.
 
-**In the diff at this head:**
+**Read the set; do not trust a table here.** ⛔ The list that used to sit at this
+spot named `docs/00_index.md`, `tools/ci_selection.py` and `tests/test_ci_selection.py`,
+and **none of the three is in the diff any more** — they were absorbed by the forward
+merges exactly like the rows below, so that table was itself an instance of the thing
+this document is about. The paragraph above already says where the set comes from;
+measured at **`e28d5a04`** it is **seven files**, all under `docs/` plus one test file
+(`MEMORY.md`, `00-align.md`, `00-plan.md`, `03-test-design.md`, `04-plan.md`,
+`05-verify.md`, `tests/test_7949_capstone_measure.py`) — re-read it at the head you
+merge, because a typed list of paths rots exactly the way a typed line number does.
 
-| file | what changes | effect |
-|---|---|---|
-| `docs/00_index.md` | one row registering the new bundle directory | index only |
-| `tools/ci_selection.py` | `CONTRIBUTING.md` leaves `NON_CODE_DOC_PATHS` — `tests/test_surface_manifest.py:5538` reads that file's TEXT, so the exemption would have dropped a guard from the PR editing the file it guards | **CI effect: a `CONTRIBUTING.md`-only PR now runs the full matrix instead of tier-1 smoke.** This is deliberate and it FIXES a red on `main` (`test_non_code_doc_paths_have_no_content_reader`) |
-| `tests/test_ci_selection.py` | the arms over that list | none beyond the row above |
 
 **No longer in the diff — absorbed by the forward merges, kept as history:**
 
@@ -124,6 +127,9 @@ The bundle's headline lists **7 files** under `docs/epics/2026-11-04-7949-extrac
 | `tortoise/hosted_api.py` | the same census's `179 tracked files`/`449 distinct targets` figures, re-taken to `185`/`456` | none — comment text |
 | `.github/workflows/main-health-nightly.yml` | the `census-drift` job's **comment block**, removing the restated figures the `--refresh` verb cannot verify | none — no job, trigger, permission or step changes |
 | `tests/test_demo_session_read_exclusion_8290.py` | the census verb's arm 1 stops asserting the **shipped** figures — that arm is what redded this docs PR — and instead forces a degrade→refresh→read-back round trip on a throwaway copy; arm 2's degraded figure is derived, not the `**434**` literal | **CI effect: a guard MOVED, it was not added** — and the merge that absorbed it took `main`'s side, so this head carries neither the move nor its cost |
+| `docs/00_index.md` | one row registering the new bundle directory | index only |
+| `tools/ci_selection.py` | `CONTRIBUTING.md` leaves `NON_CODE_DOC_PATHS` — `tests/test_surface_manifest.py:5538` reads that file's TEXT, so the exemption would have dropped a guard from the PR editing the file it guards | **CI effect: a `CONTRIBUTING.md`-only PR now runs the full matrix instead of tier-1 smoke.** This is deliberate and it FIXES a red on `main` (`test_non_code_doc_paths_have_no_content_reader`) |
+| `tests/test_ci_selection.py` | the arms over that list | none beyond the row above |
 
 So the PR body's *"no runtime behaviour change"* holds — every module edit is comment text — while its shorter *"no code"* does not, and the one consequence a merger should weigh is the `tools/ci_selection.py` row: a `CONTRIBUTING.md`-only PR stops taking the tier-1 shortcut.
 

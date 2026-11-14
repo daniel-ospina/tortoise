@@ -772,7 +772,7 @@ git grep -c 'result\["relations"\]' -- tests/          # tree-wide MATCHES — T
                                                           # write_path/test_write_path_relation_lane.py
                                                           # — 3 — and tests/test_7949_capstone_measure.py
                                                           # — 1 — a SOURCE-TEXT scan of `extractor_v2.py`'s
-                                                          # lines (`:14043`) that derives the doc's cite
+                                                          # lines (`:14208`) that derives the doc's cite
 # ⛔⛔ THIS GREP COUNTS LINES, NOT READERS — do not read the per-file numbers as "who consumes the
 # channel". Two of the three files are NOT what their matched lines look like:
 #   • `test_write_path_relation_lane.py`: its 3 matched lines are all DOCSTRING prose (`:6`, `:22`,

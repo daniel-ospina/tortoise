@@ -6072,21 +6072,14 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # right — the round-2 shape, one number short).
             ("19012", "relation_write = apply_relation_edges("),
         ), "sdk"),
-        # ⛔ THIS HIT IS STATED **THREE** TIMES IN THE DOCUMENT, NOT TWO (#12462 review
-        # round 5), and §0's own copy is the one that had no reader of its own: two rows
-        # here and one above bound the appendix's summary line and its reproduction
-        # block, while `:104` — §0's sentence, the one a reader hits FIRST — was scoped by
-        # none of those phrases. A row per statement, because a row binds ONE line: three
-        # statements of one hit with two readers is exactly how "one document asserts two
-        # numbers for one `git grep` hit" comes back. Two rows, not one, because the same
-        # §0 line cites two FILES (`relation_write.py:7`, `sdk.py:18999`) and a row
-        # carries ONE source key.
+        # ⛔ THIS HIT IS STATED **THREE** TIMES IN THE DOCUMENT, and the row that reads
+        # §0 (`:104`) embeds its number in its own PHRASE — `relation_write.py:7,
+        # sdk.py:` — so it binds §0's `sdk.py` half only *incidentally*, and NOTHING read
+        # §0's `relation_write.py:7`. A row per statement, and a row per FILE, because a
+        # row binds ONE line and carries ONE source key.
         ("RECONCILE-A1-A2-A5.md", 'against the *"that comment and no consumer at all"* this', (
             ("7", "extractor_v2._assemble_relations"),
         ), "relation_write"),
-        ("RECONCILE-A1-A2-A5.md", 'against the *"that comment and no consumer at all"* this', (
-            ("18999", "# `#10999` made the channel TRANSPORT ONLY"),
-        ), "sdk"),
         ("RECONCILE-A1-A2-A5.md", "relation_write.py:7, sdk.py:", (
             ("18999", "# `#10999` made the channel TRANSPORT ONLY"),
         ), "sdk"),
@@ -6098,7 +6091,13 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # reader, is how "one document asserts two numbers" comes back.
         ("RECONCILE-A1-A2-A5.md", "CONSUMER's docstring) and sdk.py:", (
             ("18999", "# `#10999` made the channel TRANSPORT ONLY"),
+            # …and that block's `relation_write.py:7` half, keyed on ITS OWN source (#12569
+            # review round 6: `:7` → `:9` here stayed GREEN — the two rows for this block
+            # are both `sdk`-keyed, because a row carries ONE source key).
         ), "sdk"),
+        ("RECONCILE-A1-A2-A5.md", "relation_write.py:7 (the", (
+            ("7", "extractor_v2._assemble_relations"),
+        ), "relation_write"),
         # ⛔ THE 402 QUOTA GUARD, `03-test-design.md`'s A-corpus capture row (#12369
         # review, P2). This row is the one that would have caught #12369's own
         # regression: the sentence was CORRECT on `main` and on the merge-base, the
@@ -6131,6 +6130,11 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         ), "hosted_api"),
         ("05-verify.md", "Measured at `6916a6cd89`", (
             ("10037", "_registry_cache = PackRegistry(packs_dir)"),
+            # …and the `subject_binding_available` consume pair on the SAME line, which the
+            # registration above left unread (#12569 review round 6: `:10064`/`:10117` →
+            # `:10063`/`:10116` stayed GREEN).
+            ("10064", "subject_binding_available,"),
+            ("10117", "and not subject_binding_available(graph):"),
         ), "sdk"),
         ("05-verify.md", "Measured at `6916a6cd89`", (
             ("1186", '"sha256": sha, "turns": None'),
@@ -14204,6 +14208,23 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         n for n, line in enumerate(ext, 1) if 'result["relations"]' in line)
     assert f"`extractor_v2.py:{_relations_cite}`" in text, (
         "the record must cite the comment that says nothing consumes the channel")
+    # ⛔ AND THE RECORD CITES **THIS FILE'S OWN LINE** — the scan below that DERIVES
+    # `_relations_cite` — which is the one number its own diff moves: every row added
+    # above it shifts it, and #12569's rows moved it `14043` → `14139` while the record
+    # kept the old value. Derived, never typed, for the same reason `_relations_cite` is:
+    # a record about citations cannot carry a hand-kept citation to its own checker.
+    _self_scan_line = next(
+        n for n, line in enumerate(
+            Path(__file__).read_text(encoding="utf-8").splitlines(), 1)
+        # ⛔ BOTH conditions are needed: the same two tokens appear on THIS finder's own
+        # line (`if "enumerate(ext, 1)" in line and 'result["relations"]' in line`), so a
+        # token-only match would be ambiguous — the `startswith` pins the generator.
+        if line.strip().startswith("n for n, line in enumerate(ext, 1)")
+        and 'result["relations"]' in line)
+    assert f"(`:{_self_scan_line}`)" in text, (
+        f"the record must cite the scan that derives `_relations_cite` at `:{_self_scan_line}` — "
+        "it is the number this file's OWN diff moves, so a typed value re-stales the moment "
+        "a row is added above it (#12569: 14043 -> 14139)")
     # The SAME line is cited a SECOND time as a bare `:12397`, inside the
     # reproduction block's comment. A bare cite carries no file token, so the
     # prefixed arm above cannot see it: measured by re-staling it to `:10815` in
