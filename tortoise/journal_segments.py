@@ -7,8 +7,8 @@ The hosted lane writes one JSONL rebuild journal per graph
 bound, and ``#9025`` prices three ways to bound it: keep it all, compact it
 behind a genesis snapshot, or archive the prefix to cheaper media. Picking one
 is **an owner decision** — the journal is the rebuild source
-(``derived = replay(journal)``), so a bound is a durability-posture change
-before it is a disk change.
+(``derived = replay(journal)``), so bounding it changes the durability posture
+before it changes the disk (``docs/durability-posture.md``).
 
 What a lane MAY build without that decision is the machinery every option needs
 and none of them can do without: a way to say **which segments exist**, **what

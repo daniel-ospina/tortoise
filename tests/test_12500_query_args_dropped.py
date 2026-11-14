@@ -6,7 +6,8 @@ presents them as general arguments — but only the ``text=`` arm consumes them
 (forwarded into ``sdk.tortoise_fts_query``). Both structural arms call
 ``sdk.paginated_query(kind, skip, limit, include_retracted, **filters)``, whose
 signature has **neither** parameter (``tortoise/sdk.py:26642-26645``), and the tag
-arm calls ``query_points_by_tag(tag)``, which takes the tag and nothing else.
+arm calls ``query_points_by_tag(tag, _record_reads=False)``, which takes the tag and that
+private flag and nothing else.
 
 Measured: ``tortoise_query(kind="statement", min_confidence=0.9)`` reaches the
 accessor as ``paginated_query(kind='statement', skip=0, limit=100,
@@ -50,10 +51,15 @@ _LOW_CONFIDENCE = 0.01
 class _StubSDK:
     """Records what each accessor was asked for; applies no floor and no order.
 
-    The two structural accessors mirror the REAL signatures — ``paginated_query``
-    and ``query`` take ``(kind, …, **filters)`` and have no ``min_confidence`` or
-    ``order_by`` — so a test cannot pass by inventing a knobs path the product
-    does not have. ``query_points_by_tag`` takes the tag and nothing else.
+    The structural accessor mirrors the REAL signature — ``paginated_query``
+    takes ``(kind, …, **filters)`` and has no ``min_confidence`` or ``order_by``
+    — so a test cannot pass by inventing a knobs path the product does not have.
+    ``query_points_by_tag`` takes the tag and its own ``_record_reads`` flag — no
+    floor, no ordering, no kind. There is deliberately no ``query`` method: BOTH
+    structural arms read ``paginated_query`` (`mcp_server.py:4933`, `:4960` — the
+    un-paginated path goes through it too, precisely to apply ``limit``), so a
+    ``query`` stub was a call the tool cannot make (measured round 34: zero calls
+    across this file, while the docstring claimed it mirrored a real signature).
     """
 
     def __init__(self, n=3):
@@ -97,10 +103,6 @@ class _StubSDK:
         total = len(self.rows)
         return {"results": self.rows[skip:skip + limit], "total": total,
                 "hasMore": skip + limit < total}
-
-    def query(self, kind=None, **kwargs):
-        self.calls.append(("query", kind, kwargs))
-        return self.rows
 
     def query_points_by_tag(self, tag, *, _record_reads=True):
         self.calls.append(("query_points_by_tag", tag, _record_reads))
@@ -1144,12 +1146,23 @@ def test_a_graph_ordering_with_no_signal_is_refused_not_silently_reordered(
 #: "two of the claims" sit inside the spans — three do.)
 #: The POSITIVE behaviour sentences in the same bullets — the ones a route reader
 #: acts on, and the ones this PR spent rounds re-pointing citations FOR. Each was
-#: measured unpinned at round 33: inverted in turn, the whole five-file gate set
-#: stayed green (262 passed, 16 skipped), because nothing else anywhere asserts
+#: measured unpinned — the five at round 33, the two additions at round 34 — by
+#: inverting it in turn: the whole five-file gate set stayed green (261 passed,
+#: 16 skipped at round 33 — dated, not claimed for this head), because nothing else
+#: anywhere asserts
 #: on `tortoise_query.__doc__` (`grep -rln 'tortoise_query.__doc__' tests/` finds
 #: only this file). They are presence checks, wrap-insensitive, like
 #: `_REFUSAL_CLAIMS` — they cannot re-red a true sentence.
 _DOCSTRING_BEHAVIOUR_CLAIMS = (
+    # The LIMIT bound on the plain structural list (inverted: "**unbounded**" —
+    # measured green at round 34), and the universal ordering the refusal routes
+    # send callers TO (inverted: "is not applied to every type" — also measured
+    # green). Both are in the STRUCTURAL bullet, where three of the five entries
+    # below also sit; the other two are in the `tag=` bullet. That is why the
+    # tuple is described as covering THESE SENTENCES and not a bullet or a pair of
+    # them: the next behaviour sentence added anywhere is not automatically held.
+    "property-filter query, **bounded to `limit`**",
+    '`order_by="relevance"` is applied to every type',
     # which arm applies the floor at all (inverted: "for every type")
     '`min_confidence` only for `entity_type="point"`',
     # why an accepted structural value was discarded (inverted: "declares both")
@@ -1360,9 +1373,11 @@ def test_every_alternative_of_a_paged_text_route_terminates(stub) -> None:
     # Without this the executions below are unbound literals: deleting the
     # alternative from the route (keeping only `order_by='relevance'` — a
     # terminating alternative in its own right, applied to every type, so nothing
-    # noticed its twin disappearing) left this FILE green (round-25 P2, measured:
-    # 87 passed here; the five-file gate set was 251 passed / 16 skipped — the count
-    # is quoted per population because round-29 found it mislabelled as the set).
+    # noticed its twin disappearing) left this FILE green (round-25 P2, measured AT
+    # ROUND 25: 87 passed here; the five-file gate set was 251 passed / 16 skipped —
+    # both figures are dated to round 25 and neither is claimed for this head, where
+    # this file alone collects 98. The count is quoted per population because
+    # round-29 found it mislabelled as the set).
     assert "pass entity_type='point'" in order_only, order_only
     assert "or order_by='relevance'" in order_only, order_only
 

@@ -3342,6 +3342,21 @@ def test_the_wheel_tail_reads_the_PRODUCERS_OWN_text_end_to_end(tmp_path):
     ) in foreign_summary, foreign_summary
 
 
+def test_the_unknown_tail_only_names_GATED_rows():
+    """⛔ THE TAIL'S POINTER MUST NAME A ROW THE TABLE MARKS (#12589 review round 25, P3).
+
+    `marked` reads `rendered_status`, which renders a non-gated row as `—`. Reading the raw
+    `arm.status` instead kept 104 green and made the tail name a row the table shows as `—` —
+    telling an operator to look for a CANNOT RUN mark that is not on that row.
+    """
+    report = canary.Report()
+    report.add(canary.Arm("engine-init", canary.UNKNOWN, "the install could not run"))
+    report.add(canary.Arm("release-age", canary.UNKNOWN, "uploaded unknown ago", gated=False))
+    summary = canary.render_summary(report)
+    assert "the row marked CANNOT RUN names which (`engine-init`)" in summary, summary
+    assert "`release-age`" not in summary.split("The canary could not READ")[1], summary
+
+
 def test_the_wheel_tail_only_reads_GATED_arms():
     """⛔ A NON-GATED ROW MAY NOT DECIDE THE WHEEL'S TAIL (#12589 review round 19, P3).
 
@@ -3512,7 +3527,7 @@ def test_the_answered_NO_VERSION_details_name_the_right_distribution():
 
     `missing_version_arm` builds one sentence per arm from `package`. Nothing pinned the literals,
     so `index metadata for {ENGINE_PACKAGE}` could be swapped for `{CLIENT_PACKAGE}` — a FAIL about
-    the wrong distribution, on the shape (`{{"info": {{}}}}`) this PR refers out to #12636.
+    the wrong distribution, on the shape (`{"info": {}}`) this PR refers out to #12636.
     """
     engine_side = canary.build_report(
         engine_doc={"info": {}},
@@ -4816,18 +4831,28 @@ def test_a_non_object_info_is_a_LEGIBLE_NON_READING_on_BOTH_arms():
 
       * a TRUTHY non-object (`"x"`) raised `AttributeError`, and `main()`'s backstop turned that
         into exit 2 — the right CODE by the wrong ROUTE (a traceback as the recorded reason);
-      * the FALSY ones (`[]`, `0`, `null`) were swallowed by `or {}` into "", took the FAIL arm,
+      * the FALSY ones (`[]`, `0`, `0.0`, `null`, `""`, `false`) were swallowed by `or {}` into "", took the FAIL arm,
         and reported exit 1 — the "cut a release" text — off an `info` this client never parsed.
         Those documents carry no version at all, so "carries no latest version" was literally true
         of them; what was wrong was issuing a VERDICT off an unparsed field. (The sibling
-        `version_unreadable` case is the one where the old sentence was false: `{"version": 0.3}`
-        does carry a version.)
+        `version_unreadable` case is the one where the old sentence was false:
+        `{"info": {"version": 0.3}}` does carry a version — measured, pre-diff `latest_version`
+        returned `""` for it and the FAIL arm said "carries no latest version".)
 
     So the fix MOVES the exit code (1 → 2) for the falsy shapes, deliberately and fail-closed. The
     invariance that actually matters is the one a naive "don't raise" fix would break: a
     non-reading must never become an exit 1, on EITHER arm. That is pinned here, at both arms.
     """
-    for index_doc in ({"info": "x"}, {"info": []}, {"info": 0}, {"info": None}):
+    falsy_or_unreadable = (
+        {"info": "x"},
+        {"info": []},
+        {"info": 0},
+        {"info": 0.0},
+        {"info": None},
+        {"info": ""},
+        {"info": False},
+    )
+    for index_doc in falsy_or_unreadable:
         assert canary.latest_version(index_doc) == "", index_doc
         assert canary.info_unreadable(index_doc) is True, index_doc
 
@@ -4836,7 +4861,7 @@ def test_a_non_object_info_is_a_LEGIBLE_NON_READING_on_BOTH_arms():
         assert canary.info_unreadable(answered) is False, answered
         assert canary.latest_version(answered) == "", answered
 
-    for doc in ({"info": "x"}, {"info": []}, {"info": 0}, {"info": None}):
+    for doc in falsy_or_unreadable:
         # client arm
         report = _client_report({**doc, "releases": {"0.3.0": [_CLIENT_GOOD]}})
         arm = report.get("client-published")

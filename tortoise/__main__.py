@@ -9311,12 +9311,36 @@ def _print_unrecorded_captures(health=None) -> None:
     # own meta, so this line is the pointer to it.
     named = ", ".join(found[:3]) + (f" +{len(found) - 3} more"
                                    if len(found) > 3 else "")
+    # "were filed" was true while the Python drain was the marker's only
+    # producer. Since #12603 the Pi leg also stamps on a RETRYABLE REFUSAL — the
+    # entry is still queued behind its backoff — and a stamped entry can later be
+    # quarantined (terminal), so the state list is THREE, not two. Do NOT hedge
+    # the storage: both producers reach this marker only through a read that
+    # matched the posted turns (`confirm_capture` / `servedTurnsAreOurCapture`),
+    # so "the turns are stored" is the one thing the trace proves. And keep "at
+    # the time": the marker can outlive its own resolution (a stamped entry's
+    # eventual filing is a REPLAY, which records nothing and clears nothing), so a
+    # present-tense claim would cry wolf for a session the server has since
+    # resolved.
+    #
+    # ⛔ Name the STATE, never a cause. A terminal entry is not necessarily a
+    # REFUSED one: `quarantineEntry` preserves the marker for
+    # `DISCARD_ENTRY_TOO_LARGE` and `DISCARD_TRANSCRIPT_TORN` too, and
+    # `unrecorded_captures` filters on the marker key alone, so this line names
+    # those entries as well — and `--retry-terminal` provably cannot re-file a
+    # torn one (it clears the flag, the next pass re-quarantines with the same
+    # reason). Printing "refused PERMANENTLY" for them sends the user to a verb
+    # that cannot fix the state it was told it had.
     print(
-        f"capture: {len(found)} session(s) were filed with NO recorded "
-        f"extraction outcome at the time ({named}) — the turns are stored, it "
-        f"is not known whether extraction ran, and no re-extraction is offered "
-        f"for them (`tortoise session view <id>` reports the server's state; a "
-        f"later capture verdict that records how it ended clears this)",
+        f"capture: {len(found)} session(s) have NO recorded extraction outcome "
+        f"at the time ({named}) — the turns are stored; it is not known whether "
+        f"extraction ran, and no re-extraction is offered. The capture is still "
+        f"queued behind its backoff, was filed, or is TERMINAL (a permanent "
+        f"refusal re-files with `tortoise session drain --retry-terminal`; one "
+        f"whose turn log is damaged or oversized cannot be re-filed). "
+        f"`tortoise session view <id>` reports the server's state; a later "
+        f"capture verdict that records how it ended clears this — a replayed one "
+        f"never does",
         file=_sys.stderr,
     )
 

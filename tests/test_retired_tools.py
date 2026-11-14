@@ -68,6 +68,11 @@ class TestDeclaration:
         declared surface change". Note that `beta-sdk-surface.md` says of itself, in its
         own header: "This document is a PROPOSAL, and it is NOT the authority for the
         MCP target" — where it and `canonical-mcp-tools.md` differ, canonical governs.
+        #12521 (`8e4e335b05`) gave it its `def`, approved by daniel-ospina on 2026-11-14
+        and recorded at `#10015` comment `6863608333`; `config/surface-manifest.yml`'s
+        `counts.sdk_public_methods` is already `125`, so this assertion was the one place
+        still pinned to the pre-delivery number. Re-derive it from `len(public)` at the
+        head; never type a number ahead of the manifest.
 
         ⛔ This assertion is defence-in-depth, NOT the approval gate. What refuses an
         UNAPPROVED addition is `tools/surface-guard.py` **step 1** — an SDK method or
