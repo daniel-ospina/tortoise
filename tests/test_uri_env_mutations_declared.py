@@ -150,7 +150,8 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # undeclared mutation in the tree).
     "test_9664_capstone_connector_to_record.py": [
         r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
-    # #12521: `test_10015_organisation_account.py` landed two `delenv` sites with no
+    # #12521: `test_10015_organisation_account.py` landed two
+    # `delenv("TORTOISE_DB_URI")` sites with no
     # register row, which reds this gate on `main` — the same "module landed without
     # its entry" shape as #9664 above and #12275 below. Both are the embedded-lane
     # control, and they point the resolver in OPPOSITE ways, so one sentence does not
@@ -173,7 +174,7 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # The `delenv` IS the point at both, and the monkeypatch is fixture/function-scoped
     # and auto-restored, so no lane flip can leak into a later module.
     "test_10015_organisation_account.py": [
-        # Pinned to the literal both sites spell (`raising=False` at `:49` and at
+        # Pinned to the literal those sites spell (`raising=False` at `:49` and at
         # `:257`) rather than to a bare `delenv("TORTOISE_DB_URI"` arm: this row
         # must not authorize a FUTURE bare `delenv` in the same file. It is the same
         # rule the `test_candidate_recall_11901.py` row BELOW states for its own file
@@ -182,6 +183,8 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
         # table constrains: every other `delenv` arm here stops at the variable name.
         # No count is stated on purpose — the number changes with the counting rule,
         # and a cardinal nobody can state twice is how "Two sites" went stale here.
+        # (Every count above is scoped to the LITERAL form: the module also spells a
+        # variable-name `delenv(var, …)` at `:287`, which no arm here can match.)
         # ⛔ The in-flight #12601 carries this SAME key with this SAME arm. A second
         # identical row is still a duplicate dict key (ruff F601, and the later key
         # silently shadows the earlier) — so whichever of the two lands second must
@@ -739,8 +742,8 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # leak into a later module. DELIBERATE_URI.
     "test_projection.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
                            r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
-    # ⛔ MAINLINE TRIAGE, not a site a feature PR added: #12422's canary landed this
-    # site with NO register row, so `test_uri_env_mutations_declared` was RED on
+    # ⛔ MAINLINE TRIAGE, not the feature PR that landed the site: #12422's canary
+    # landed this site with NO register row, so `test_uri_env_mutations_declared` was RED on
     # `origin/main` for every branch (an undeclared mutation reds until triaged).
     # #12588 triaged it FIRST (`0f7f21c342`, the row kept here) and #12555 added a
     # SECOND row for the same module 3.5 minutes later (`a808f9f8ba`, the row this
@@ -3061,6 +3064,19 @@ def test_declaration_path_rejects_undeclared():
         "sub/test_config.py", 'monkeypatch.delenv("TORTOISE_DB_URI")')
     assert not _is_declared(
         "e2e/test_config.py", 'monkeypatch.delenv("TORTOISE_DB_URI")')
+    # #12521: the `test_10015_organisation_account.py` row's arm is pinned to the
+    # literal both real sites spell (`,\s*raising=False`), and that narrowing is a
+    # CLAIM the row's own comment makes — so it is enforced here, not just written.
+    # Scoped to the SAME declared file on purpose (the `test_unknown.py` lesson
+    # above): a negative taken against an undeclared file answers False against ANY
+    # pattern and pins nothing. With this pair, loosening the arm to a bare
+    # `delenv\(\s*"TORTOISE_DB_URI"` reds the second assert.
+    assert _is_declared(
+        "test_10015_organisation_account.py",
+        'monkeypatch.delenv("TORTOISE_DB_URI", raising=False)')
+    assert not _is_declared(
+        "test_10015_organisation_account.py",
+        'monkeypatch.delenv("TORTOISE_DB_URI")')
 
 
 def test_restoration_exemption_boundary():
