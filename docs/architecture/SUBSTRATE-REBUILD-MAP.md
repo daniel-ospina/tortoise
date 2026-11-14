@@ -287,7 +287,7 @@ count, being a new file), #8447's ingest door (`tortoise/ingest.py`, the
 carrying no `:Document` mention at `4f68a2aa7`, whose served-label bound added
 the pre-D10 dump/restore refusal and repair prose — #11682's BM25 corpus-join
 comment (`tortoise/search_engine.py:3367` — the counted `:Document` line; the block opens at
-`:3366`, one added line in an existing file, re-measured at this head because the
+`:3365`, one added line in an existing file, re-measured at this head because the
 `:2107`/`:2109` this sentence used to carry was true only at `d06c001ff9` and had
 drifted since) — #12015's edge-vector prose, which added three lines to that same
 `hosted_backup.py` bound and one to `tortoise/cache_projection.py` (a file the
@@ -298,10 +298,12 @@ the two files this population had never reached: the KIND and STATUS rules that
 now say which layers carry a `status` family, and name the retired label where
 they say what does NOT (`live.KIND_PROPERTIES`' scope note, `kind_expression`'s
 docstring, and `_entity_label`'s record of why the local copy of the canonical
-map had to go). That move is the same kind as the five before it — prose that
+map had to go). That move is the same kind as the six before them — prose that
 names the retired label in order to explain a rule about it — and it is the first
 one whose point is a WIDENING rather than a retirement.
-All six are the point rather than an
+— #12434's `:Document` retirement prose in `tortoise/mcp_server.py:3873`, whose point is a
+retirement and which is the seventh.
+All seven are the point rather than an
 accident: this population grows for good reasons, so the figure tracks the tree
 and not a past commit.
 `tests/test_substrate_map.py` re-derives both numbers over the **same**
