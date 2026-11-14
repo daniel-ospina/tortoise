@@ -14052,16 +14052,16 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         n for n, line in enumerate(ext, 1) if 'result["relations"]' in line)
     assert f"`extractor_v2.py:{_relations_cite}`" in text, (
         "the record must cite the comment that says nothing consumes the channel")
-    # The SAME line is cited a SECOND time as a bare `:12397`, inside the
+    # The SAME line is cited a SECOND time as a bare `:12487`, inside the
     # reproduction block's comment. A bare cite carries no file token, so the
     # prefixed arm above cannot see it: measured by re-staling it to `:10815` in
     # place, which left every arm True before this assert existed.
     # ⛔ Pinned as the BARE occurrence of the NUMBER, not as the sentence around it (#10891
     # is the claim; "the comment at" is one way of saying it). A literal needle redded on
-    # `the comment on :12397` and on `` the comment at `:11517` `` — both correct, both
+    # `the comment on :12397` (the number this record carried before the merge moved it) and on `` the comment at `:11517` `` — both correct, both
     # sending the reader to the live line (measured) — the same false-block this leg removed
     # for `both now read`, the `# §0/§2` heading and `MENTIONS`. The prose above carries the
-    # PREFIXED form `extractor_v2.py:12397`; this is the only statement without a file token,
+    # PREFIXED form `extractor_v2.py:12487`; this is the only statement without a file token,
     # so exactly one bare occurrence is the claim.
     assert re.findall(rf"(?<!extractor_v2\.py):{_relations_cite}", text) == [f":{_relations_cite}"], (
         f"the reproduction block must state the live number `:{_relations_cite}` exactly once as a BARE "
