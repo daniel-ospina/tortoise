@@ -148,10 +148,12 @@ REASON_CODES = frozenset(
 )
 
 #: ⛔ THE SPLIT REMEDY IS NOT ONE SENTENCE, and this set is what decides which one is true. A SPLIT
-#: means one half is dark, but it does NOT mean that half is EMPTY. Five of the six `reason` codes
+#: means one half is dark, but it does NOT mean that half is EMPTY. Four of the six `reason` codes
 #: describe a value the dark half already HOLDS and finds unusable — `padded`, `reused_credential`,
 #: `too_short`, `not_utf8` — and for those "copy the live half's value onto the dark half" is
-#: exactly the advice that cannot work, because the same value reproduces the same refusal.
+#: at best a guess: the reading compares fingerprints only, so it cannot tell whether the live value
+#: itself clears the dark half's refusal. One fresh key on BOTH halves is the only repair that always
+#: works.
 #:
 #: REACHABLE, not theoretical (measured at this head): the Pages half has NO length floor
 #: (`consent-bridge.ts::consentKeyFingerprint` guards only `if (!secret)`), while `consent_token.py`
@@ -161,10 +163,19 @@ REASON_CODES = frozenset(
 #: `too_short` for as long as they keep following it.
 #:
 #: The two absence codes are the ones where copying IS the repair: nothing is there to copy from.
-#: ⛔ FOUR value-fault codes, TWO absence codes — the counts are asserted in the suite, and an earlier
-#: cut of this comment said "five of the six" beside a list of four.
-#: ⛔ Derived from `REASON_CODES` by subtraction (asserted in the suite), so a seventh code added on
-#: the publishing side cannot silently inherit the wrong remedy.
+#: ⛔ FOUR value-fault codes, TWO absence codes — the counts are asserted in the suite. (An earlier cut
+#: of this comment said "five of the six" beside a list of four; the sentence, not only the note
+#: about it, is what the next reader acts on.)
+#: ⛔ THE DERIVED SET IS `VALUE_FAULT_REASONS`, and that is the fail-closed direction: `ABSENCE_REASONS`
+#: is the explicit literal and `VALUE_FAULT_REASONS` is `REASON_CODES` minus it, so a SEVENTH code
+#: added on the publishing side lands in the ROTATION arm — the repair that always works — without
+#: anyone having to edit this split. That is the whole reason the derivation is on this side rather
+#: than on the absence side.
+#: ⚠️ DECLARED RESIDUAL: a seventh code that is an ABSENCE fault would therefore be handed the
+#: rotation, which it does not need. Nothing here can infer "absence" from a string, so the guard is
+#: the suite's count pin on `ABSENCE_REASONS` — adding an absence code means editing the literal, and
+#: that reds until the addition is deliberate. (The set-algebra assertions beside it are true by
+#: construction and cannot catch an omission; the count pin is what can.)
 ABSENCE_REASONS = frozenset({"not_set", "unreadable"})
 VALUE_FAULT_REASONS = REASON_CODES - ABSENCE_REASONS
 

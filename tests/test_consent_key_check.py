@@ -701,12 +701,24 @@ def test_every_published_reason_code_is_accepted(monkeypatch, capsys) -> None:
         assert CKC.main([]) == 0, code
         assert f"reason={code}" in capsys.readouterr().out
 
-    # ⛔ The remedy split is DERIVED, so a seventh code cannot silently inherit one. The two absence
-    # codes are the ones where "copy the working value" is the repair; every OTHER code describes a
-    # value the dark half already HOLDS and refuses.
+    # ⛔ The remedy split is DERIVED, for the VALUE-FAULT side only: `VALUE_FAULT_REASONS` is
+    # `REASON_CODES` minus the absence literal, so a seventh code the halves start publishing lands in
+    # the ROTATION arm — the repair that always works — with nobody editing this split. That is the
+    # fail-closed direction, and it is why the derivation sits on this side.
+    # ⚠️ DECLARED RESIDUAL, and the reason for the count pin below: a seventh code that is an ABSENCE
+    # fault would be given the rotation, which it does not need. Nothing here can infer "absence" from
+    # a string, so the count pin is the guard — the two set-algebra assertions are true by construction
+    # (VALUE is *defined* as REASON minus ABSENCE, so a new code joins it automatically) and can
+    # therefore never catch an omission. MEASURED, not assumed: adding a seventh code to
+    # `REASON_CODES` without touching either set leaves every line but the count pin green.
     assert CKC.ABSENCE_REASONS | CKC.VALUE_FAULT_REASONS == CKC.REASON_CODES
     assert not (CKC.ABSENCE_REASONS & CKC.VALUE_FAULT_REASONS)
     assert {"not_set", "unreadable"} == CKC.ABSENCE_REASONS
+    assert len(CKC.ABSENCE_REASONS) == 2, (
+        "a third ABSENCE code was added — classify it here deliberately. An absence fault is repaired "
+        "by copying the working half's value; every unlisted code is given the ROTATION instead, so an "
+        "unclassified absence code sends an operator to rotate a key that a copy would have fixed"
+    )
 
 
 def test_a_value_fault_SPLIT_never_tells_the_operator_to_copy_the_working_value(
@@ -771,7 +783,7 @@ def test_the_workflow_prose_branches_the_SPLIT_remedy_the_same_way() -> None:
         assert len(starts) == 1, f"expected exactly one `{marker}` bullet, found {len(starts)}"
         out: list[str] = []
         for line in lines[starts[0] :]:
-            if out and ("echo '- **" in line or "Never set only ONE half" in line):
+            if out and ("echo '- **" in line or "Never set one half to a NEW value" in line):
                 break
             out.append(line)
         return "\n".join(out)
@@ -801,8 +813,17 @@ def test_the_workflow_prose_branches_the_SPLIT_remedy_the_same_way() -> None:
         assert code in fault, f"the value-fault arm no longer names `{code}`"
 
     body = "\n".join(s.get("run") or "" for s in _steps())
-    assert "Never set only ONE half" in body, (
+    assert "Never set one half to a NEW value" in body, (
         "the SPLIT alert lost its one-sided-rotation prohibition"
+    )
+    # ⛔ AND IT MUST NOT FORBID THE REPAIR IT PRESCRIBES. The first cut said "Never set only ONE half,
+    # from either state", six lines under a bullet telling the operator to set the working half's
+    # value on the empty one — a remedy and an absolute prohibition of that remedy, in the same public
+    # issue. The prohibition that is TRUE is about setting one half to a NEW value; copying an
+    # EXISTING value onto an empty half is the opposite move and must stay permitted.
+    assert "Never set only ONE half" not in body, (
+        "the SPLIT alert forbids setting one half outright — which is exactly what its own absence "
+        "bullet prescribes for a `not_set`/`unreadable` half; scope the prohibition to a NEW value"
     )
     # ⛔ The opening sentence must not contradict the value-fault bullet three lines below it: the
     # first cut said "rotating a key would not fix it" UNCONDITIONALLY, and the same body then
@@ -856,6 +877,30 @@ def _workflow() -> dict:
 
 def _steps() -> list[dict]:
     return _workflow()["jobs"]["check"]["steps"]
+
+
+def _case_arm_title_vars(body: str) -> dict[str, str]:
+    r"""Map each `case` arm label to the title VARIABLE its body binds, from the shell text.
+
+    The workflow's filing step is a `case` over the verdict, and the arm -> title binding is what
+    decides which standing issue a finding lands on. A regex over `\w+_title=` cannot see it: the
+    arm's binding is `title="$split_title"`, whose left-hand side is `title`, so such a pattern
+    matches only the three literal CONSTANTS and asserts that three distinct strings are distinct —
+    true by construction, and GREEN with the SPLIT arm re-pointed at another arm's title (measured).
+    Walking the lines is what mirrors the shell: an arm label line opens a scope, and the FIRST
+    `title="$variable"` inside it is that arm's binding.
+    """
+    arm_vars: dict[str, str] = {}
+    current: str | None = None
+    for line in body.splitlines():
+        arm = re.match(r"\s+([A-Za-z*][\w*]*)\)\s*$", line)
+        if arm:
+            current = arm.group(1)
+            continue
+        bind = re.search(r'title="\$(\w+)"', line)
+        if bind and current is not None and current not in arm_vars:
+            arm_vars[current] = bind.group(1)
+    return arm_vars
 
 
 def test_the_workflow_files_the_drift_ON_A_FAILING_READING() -> None:
@@ -1584,28 +1629,44 @@ def test_the_THREE_dedupe_TITLES_are_stable_constants() -> None:
         "body asserts a rotation the fault does not need"
     )
     assert unknown in body, "the unknown title changed — that abandons the standing issue"
-    # ⛔ THE DISTINCTNESS MUST BE READ OFF THE WORKFLOW, not off the three literals above: this line
-    # used to be `len({drift, split, unknown}) == 3`, which is true by construction (three distinct
-    # string constants assigned eight lines earlier) and therefore asserted nothing — the exact
-    # dead-assertion class this PR has already shipped twice. What actually matters is that the
-    # workflow binds each pinned title to a DIFFERENT variable, because the dedupe key is the value the
-    # filing step sends, so two arms sharing one assignment is the defect. Parsed from the `run:` body,
-    # so deleting or re-pointing an assignment reds here.
-    assigned = {name: title for name, _q, title in re.findall(r"(\w+_title)=([\"'])(.+?)\2", body)}
-    assert set(assigned) == {"drift_title", "split_title", "unknown_title"}, (
-        f"the three arms no longer assign three distinct title variables: {sorted(assigned)}"
+    # ⛔ THE DISTINCTNESS MUST BE READ OFF THE WORKFLOW's CASE ARMS, not off the three title
+    # CONSTANTS. The form this replaced matched `(\w+_title)=(["'])(.+?)\2`, which occurs ONLY on the
+    # three literal assignments (`drift_title="…"`, eight lines up) — so it re-asserted that three
+    # distinct constants are distinct (true by construction) and never saw `title="$split_title"`,
+    # the binding that actually decides WHICH ISSUE a finding files under. MEASURED, not reasoned: with
+    # the SPLIT arm re-pointed at `$drift_title` that form stayed GREEN, i.e. it could not fail for the
+    # exact defect its own message named — the dead-assertion class this PR has now shipped three
+    # times. What is parsed here is arm -> title VARIABLE -> pinned title, end to end.
+    arm_vars = _case_arm_title_vars(body)
+    assert arm_vars == {"MISMATCH": "drift_title", "SPLIT": "split_title", "*": "unknown_title"}, (
+        f"the case arms no longer bind the three title variables they are meant to: {arm_vars}"
     )
-    assert len(set(assigned.values())) == 3, (
-        f"two arms would file under the SAME dedupe title, merging two findings into one issue: {assigned}"
+    constants = {
+        name: title for name, _q, title in re.findall(r"(\w+_title)=([\"'])(.+?)\2", body)
+    }
+    assert set(constants) == {"drift_title", "split_title", "unknown_title"}, (
+        f"the three pinned titles are no longer assigned: {sorted(constants)}"
     )
-    assert set(assigned.values()) == {drift, split, unknown}, (
-        f"an arm's title is not one of the three pinned findings: {assigned}"
+    assert len(set(constants.values())) == 3, (
+        f"two arms would file under the SAME dedupe title, merging two findings into one issue: {constants}"
     )
-    assert assigned["drift_title"] == drift and assigned["split_title"] == split, (
-        "a title variable was re-pointed at another arm's title — the SPLIT arm must not file under "
-        "the mismatch title, whose body asserts a rotation the fault does not need"
+    assert set(constants.values()) == {drift, split, unknown}, (
+        f"an arm's title is not one of the three pinned findings: {constants}"
     )
-    assert assigned["unknown_title"] == unknown
+    # ⛔ THE WHOLE PATH, so a re-pointed ARM reds too (the previous form's blind spot) and not only a
+    # re-pointed constant: each case label must resolve, through its own binding, to its own finding.
+    assert constants[arm_vars["MISMATCH"]] == drift, (
+        "the MISMATCH arm does not file under the drift title — a measured disagreement would file "
+        "under a title whose body says the halves are only half configured"
+    )
+    assert constants[arm_vars["SPLIT"]] == split, (
+        "the SPLIT arm does not file under the split title — a half-configured bridge would file under "
+        "a title whose body asserts a different fault, and an operator is sent to the wrong repair"
+    )
+    assert constants[arm_vars["*"]] == unknown, (
+        "the default arm does not file under the unknown title — an unreadable reading would file as "
+        "a measured fault it never measured"
+    )
 
 
 def test_the_workflow_steps_are_all_syntactically_valid_shell() -> None:

@@ -237,7 +237,9 @@ jobs:
                 echo '  only repair that always works. Run the FULL rotation in §2.5 (repo secret, then'
                 echo '  the Pages value, then REDEPLOY Pages).'
                 echo
-                echo '⛔ Never set only ONE half, from either state — that CREATES this split.'
+                echo '⛔ Never set one half to a NEW value while the other keeps the old one — that CREATES'
+                echo 'this split. (The absence repair above is the opposite move: it puts the working half'"'"'s'
+                echo 'EXISTING value on an EMPTY half, so afterwards the two are the same.)'
                 ;;
               *)
                 title="$unknown_title"
