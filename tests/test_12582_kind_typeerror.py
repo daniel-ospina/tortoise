@@ -18,7 +18,10 @@ match, all measured on a live lane:
 - a truthy non-ITERABLE non-str (`True`, `1`, `5`) raised at `":" not in kind`,
   and once the tail learned to tolerate a non-str the STRUCTURAL arm served it as
   `[]` — a true-looking "this kind has no rows". (Non-iterability, not non-str-ness,
-  is what raised: a tuple `kind` never raised and was served `[]` all along. The
+  is what raised: a tuple `kind` never raised — a tuple read matches no row, so it
+  was served `[]`, or a suggestion envelope when the tuple is a near-miss
+  (measured with the guard removed: `("a",)` -> "kind '('a',)' not found. Did you
+  mean: 'api', …"). The
   fts arm was never part of this: it answers through `tortoise_fts_query` and
   returns above the tail, so `text=..., kind=True` was `[]` both before and after
   the tail change — which is exactly why the refusal, not the tail, is what makes

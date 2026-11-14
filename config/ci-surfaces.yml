@@ -2472,9 +2472,11 @@ surfaces:
   # `tortoise/query_suggestions.py` — the module holding the `compute_suggestion`
   # half of this fix — matches no SOURCE_PATTERN, so its own diffs take the `core`
   # fallback. Measured: `--changed-files tortoise/query_suggestions.py` selects
-  # `core`, and with this row removed the file is ABSENT from that selection's
-  # `test_files` — i.e. the `compute_suggestion` change would land with no test
-  # running on the diff that changes it (the #2938 silent-drop class).
+  # `core`, and with this row removed THIS file is absent from that selection's
+  # `test_files` (863 vs 864) — i.e. the NEW test would not run on the diff that
+  # changes `compute_suggestion`. The module's own `test_query_suggestions.py`
+  # does run there (it is a `core` row too) and calls `compute_suggestion`, but
+  # through string inputs only, so it cannot see this half of the fix.
   - test_12582_kind_typeerror.py
   # #12477: the health surfaces must not read green over a failing data plane
   # (the `/health` body's verdict and the 9090 listener's registration). Landed in
