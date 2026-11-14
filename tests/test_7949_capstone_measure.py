@@ -5861,10 +5861,10 @@ _EPIC_CITE_SOURCES = {
     # those two `def`s at `:955`/`:947`. Registered because a repaired cite that nothing
     # pins is a repair the next move of the symbol undoes silently. ⛔ AND IT ALREADY
     # HAS: measured at `6916a6cd89` — an EARLIER round's base, NOT the `origin/main` head
-    # this merges into today (`4dd97bacc2`); at `d05688df5990` those two `def`s are `:1007`/`:999`
+    # this merges into today (`4dd97bacc2`) — those two `def`s are at `:1007`/`:999`
     # (`#12507` landed above them) while both the row and the document still said
     # `:955`/`:947`. ⚠️ The head is named because the measurement was taken there, and the
-    # pair happens to hold at both heads; nothing else here is claimed about either head. It
+    # pair holds at `d05688df5990` too; nothing else here is claimed about any head. It
     # moved ONCE MORE since: `#12695` (`3893603b07`) took the pair to `:1023`/`:1015` at
     # `origin/main` `5843fdf234` and re-derived no cite, so `main` was red for this row
     # until that number was re-measured in the tree this head merges. That is this source key's case in one

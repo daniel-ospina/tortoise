@@ -1514,7 +1514,7 @@ def test_section_1_locators_still_point_at_the_code_they_name(brief: str) -> Non
     DECLARED RESIDUAL: a range cite is checked at its START (the line the row's
     symbol names) plus `end > start` — the END's content stays prose, because
     the brief names the span and not the text at its end.
-    ⛔ Name NO line number for that end here: this sentence was restored
+    ⛔ Name NO CURRENT line number for that end here: this sentence was restored
     from the version `#12368` deleted, whose span was `:3016-3028`, so
     it said "the text on 3028" — a number `#12368` had already invalidated by
     re-deriving the span to `:3038-3047` (#12731 review cycle 2, P3). A prose
