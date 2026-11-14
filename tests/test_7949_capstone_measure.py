@@ -6001,15 +6001,17 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # it was **WRONG, not shifted**: `:938` was `clearTimeout(timer);` and
         # `:948` was `cfg: CaptureConfig,`. `#12545` re-derived it to
         # `:955`/`:947`, which WAS right in the tree it measured (`5bacb44e0b`) —
-        # but `#12507` (`54193b722e`, `266 insertions / 29 deletions`) landed four
+        # but `#12507` (`54193b722e`, `266 insertions / 29 deletions` **in
+        # `tortoise-capture.ts`** — the COMMIT is `8 files / 1068+ / 88-`) landed four
         # minutes BEFORE it (2026-11-13T19:30:00 vs 19:34:09) and is an ancestor of
         # `#12545`'s commit, while `#12545` measured at `5bacb44e0b` which does NOT
         # contain it — so that pair arrived ALREADY stale at its own landing commit,
         # and `main` was red for this row at `6916a6cd89`. The pair is
         # **`:1007`/`:999`** at the head this merges into. The two `def`s are always
         # **8 apart** in this file, and that is exactly the trap: an offset read off
-        # a stale pair re-derives `948` → `957` and lands on `postCapture`'s parameter
-        # list (`payload: Record<string, unknown>,`) instead of its `def`. Re-open the
+        # a stale pair re-derives `948` → `957`, which WAS `postCapture`'s parameter
+        # list (`payload: Record<string, unknown>,`) at `5bacb44e0b` — at
+        # `6916a6cd89` `:957` is a comment and that list is at `:1009`. Re-open the
         # line; the row is held by CONTENT, so a wrong pair reds rather than
         # silently resolving.
         ("00-align.md", "`llm:deepseek-direct` is what", (
