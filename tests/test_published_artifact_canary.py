@@ -3955,6 +3955,36 @@ def test_the_UNREADABLE_reason_names_every_cause_the_code_can_produce():
     # the reader had to guess which row was the non-reader.
     # The HEADER must declare the column too, or the rows are not a table at all.
     assert "| arm | gated | status | reading |" in summary, summary
+
+    # ⛔ AN INFORMATIONAL ROW HAS NO VERDICT (#12589 review round 9, P3). `release-age` is built
+    # with status OK even when its own text says "uploaded unknown ago" — the arm read a value it
+    # did not obtain — and stamping PASS beside that is the non-reading-as-a-verdict class this
+    # issue removes, one row over. Rendered: `| \`release-age\` | no | — | …`.
+    unknown_age = canary.build_report(
+        engine_doc={"info": {"version": "0.2.0"}},  # no usable `releases` map -> no timestamp
+        client_doc={"info": {"version": "0.3.0"}, "releases": {"0.3.0": [_CLIENT_GOOD]}},
+        tree_version="0.2.0",
+        init_arm=_ok_init_arm(),
+        now=NOW,
+    )
+    rendered_age = canary.render_summary(unknown_age)
+    assert "uploaded unknown ago" in rendered_age, rendered_age
+    age_row = next(ln for ln in rendered_age.splitlines() if "`release-age`" in ln)
+    assert "| no | — |" in age_row, age_row
+    assert "PASS" not in age_row, age_row
+
+    # ⛔ AND THE POINTER TO "the row marked CANNOT RUN" MUST POINT AT A ROW THAT EXISTS (#12589
+    # review round 9, P3): an empty report, or one whose only arms are informational, renders no
+    # such row — and the tail used to send the operator looking for it anyway.
+    for bare in (canary.Report(),):
+        rendered_bare = canary.render_summary(bare)
+        assert "the row marked CANNOT RUN names which" not in rendered_bare, rendered_bare
+        assert "defect in the canary itself" in rendered_bare, rendered_bare
+    only_info = canary.Report()
+    only_info.add(canary.Arm("release-age", canary.OK, "uploaded unknown ago", gated=False))
+    rendered_info = canary.render_summary(only_info)
+    assert "the row marked CANNOT RUN names which" not in rendered_info, rendered_info
+    assert "defect in the canary itself" in rendered_info, rendered_info
     table_lines = [ln for ln in summary.splitlines() if ln.startswith("| `")]
     assert table_lines, summary
     for row in table_lines:

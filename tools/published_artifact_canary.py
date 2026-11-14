@@ -1032,13 +1032,18 @@ def build_report(
                 #     resolvable for an UNPINNED install here", which is what this arm tests. NOT
                 #     "not installable": a yanked release installs fine under a `==` pin (PEP 592
                 #     is what makes an unpinned requirement skip it).
-                if client_version in resolvable:
+                # ⛔ THE THREE STATES ARE BRANCHED ON, not folded (#12589 review round 9, P3).
+                # The round-7 version asked `client_version in resolvable` FIRST and then
+                # `installability(...) != NOT_INSTALLABLE`, i.e. it collapsed the enum back to two
+                # states and relied on the membership test happening to be equivalent. The
+                # three-state contract of `installability` is now visible in the code, and the
+                # third state (UNKNOWN) names itself instead of arriving through a negation —
+                # one definition of "read", `judged_value` behind `installability`, never
+                # `release_files` (which cannot see a field-level drop; round 7, P2).
+                state = installability(client_doc, client_version)
+                if state == INSTALLABLE:
                     advertised = f"advertised latest {client_version} is installable"
-                elif installability(client_doc, client_version) != NOT_INSTALLABLE:
-                    # ONE definition of "read" — `installability`, not `release_files` (#12589
-                    # review round 7, P2): a value whose entries were dropped for an unreadable
-                    # `yanked`/`filename` is UNREADABLE here too, and must not be reported as the
-                    # decisive negative.
+                elif state == INSTALLABILITY_UNKNOWN:
                     advertised = f"advertised latest {client_version} could not be READ here"
                 else:
                     advertised = (
@@ -1171,7 +1176,12 @@ def render_summary(report: Report) -> str:
     ]
     for arm in report.arms:
         detail = arm.detail.replace("|", "\\|")
-        status = glyph.get(arm.status, glyph[UNKNOWN])
+        # ⛔ AN INFORMATIONAL ROW HAS NO VERDICT, so it must not be stamped with one (#12589 review
+        # round 9, P3). `release-age` is built with status OK even when its own text says "uploaded
+        # unknown ago" — the arm reads a value it did not obtain — and rendering `PASS` beside that
+        # is the non-reading-as-a-verdict class this issue removes, one row over. The verdict
+        # property ignores non-gated arms, so this changes the TABLE only.
+        status = glyph.get(arm.status, glyph[UNKNOWN]) if arm.gated else "—"
         lines.append(f"| `{arm.name}` | {'yes' if arm.gated else 'no'} | {status} | {detail} |")
     if report.verdict == FAIL:
         if report.wheel_mode:
@@ -1213,11 +1223,28 @@ def render_summary(report: Report) -> str:
         # wheel mode both index rows read "not consulted" with status OK, so the paragraph denied
         # the transport on the two shapes where the transport IS the story. Do not reintroduce a
         # per-mechanism claim here without a condition that can actually see the arm.
+        # ⛔ THE POINTER MUST POINT AT A ROW THAT EXISTS (#12589 review round 9, P3). A `Report`
+        # with no arms, or with only informational ones, renders no CANNOT RUN row — and the
+        # sentence still told the operator to read one. When nothing is marked, say so: a
+        # verdict of CANNOT RUN with no unreadable arm is a CANARY defect, not an artifact one.
+        marked = [
+            arm.name
+            for arm in report.arms
+            if (glyph.get(arm.status, glyph[UNKNOWN]) if arm.gated else "") == glyph[UNKNOWN]
+        ]
+        where = (
+            "the row marked CANNOT RUN names which ("
+            + ", ".join(f"`{name}`" for name in marked)
+            + ")"
+            if marked
+            else "NO row is marked CANNOT RUN, which is a defect in the canary itself rather "
+            "than in the artifact — report it, do not cut a release"
+        )
         lines += [
             "",
             "The canary could not READ something it needs, or could not exercise the "
-            "artifact: the row marked CANNOT RUN names which. Reported as RED on purpose: "
-            "a detector that cannot run must never look like a pass.",
+            f"artifact: {where}. Reported as RED on purpose: a detector that cannot run "
+            "must never look like a pass.",
         ]
     return "\n".join(lines) + "\n"
 
