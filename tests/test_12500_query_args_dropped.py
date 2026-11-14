@@ -693,6 +693,14 @@ def test_the_message_agrees_in_number_with_the_arguments_it_names(stub) -> None:
     # and singular-for-plural kept the gate set green (round-30 P2 2, measured —
     # the same class as the round-3 aux verb above).
     assert "They used to be dropped silently" in two["error"], two["error"]
+    # …and THREE names render with list punctuation, matching the harm clause beside
+    # them: a bare " and " chain shipped "min_confidence and order_by and kind", one
+    # sentence after the same three were spelled "A, B and C" (round-31 P2 2).
+    three = tortoise_query(tag="pricing", kind="statement",
+                          min_confidence=_CONFIDENCE_FLOOR, order_by="confidence")
+    assert "min_confidence, order_by and kind are not applied" in three["error"], (
+        three["error"]
+    )
     assert "It used to be dropped silently" in one["error"], one["error"]
     assert "It used to be dropped silently" not in two["error"], two["error"]
     # BOTH reasons, not just both names — a join that keeps only the first
@@ -865,7 +873,11 @@ def test_the_refusal_never_repeats_its_route_or_says_a_entity_type(stub) -> None
 @pytest.mark.parametrize("entity_type", ["document", "source"])
 def test_the_relevance_ordering_is_served_for_every_type(
         stub, entity_type) -> None:
-    """The refusal is keyed on `order_by == "confidence"`, not on the TYPE (#12500 r5).
+    """The refusal is keyed on `order_by` in {"confidence", "graph"}, not on the TYPE.
+
+    (#12500 r5: the set form is what round 7 made it — `graph` was added to the same
+    condition, and a `== "confidence"` mutant now reds four tests, so the sentence
+    must state the set, not the singleton.)
 
     Mutating the condition to `if order_by and entity_type in (…, "source")` left
     the whole suite green while false-blocking `entity_type="document",

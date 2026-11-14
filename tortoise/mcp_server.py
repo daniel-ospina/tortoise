@@ -4266,7 +4266,13 @@ def tortoise_query(kind: str | None = None,
 
     if _unapplied:
         _names = [name for name, _ in _unapplied]
-        _named = " and ".join(_names)
+        # List punctuation, the way `_loss` is built below: a bare " and " chain
+        # rendered a three-argument tag refusal as "min_confidence and order_by and
+        # kind", one sentence after the harm clause spelled the same three as
+        # "A, B and C" (round-31 P2 2, measured). Byte-identical for one or two
+        # names, so no existing pin moves.
+        _named = (", ".join(_names[:-1])
+                  + (" and " if len(_names) > 1 else "") + _names[-1])
         # Agreement in number: two named arguments shipped as "min_confidence and
         # order_by IS not applied" (round-3 P2, measured on a real call).
         _verb = "are" if len(_names) > 1 else "is"
