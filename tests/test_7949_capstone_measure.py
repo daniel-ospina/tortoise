@@ -5791,6 +5791,16 @@ _EPIC_CITE_DOCS = {
         _REPO / "docs/epics/2026-11-04-7949-extractor-v4-capstone/00-align.md",
     "04-plan.md":
         _REPO / "docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md",
+    # ⛔ Registered by `#12587`'s round-3 review, for the rule the block above states:
+    # "A document this bundle EDITS is a document this bundle reads". This PR edits
+    # BOTH of these and neither had a single reader, so its own repairs were as
+    # fragile as the rot they fixed — measured: reverting the `_honours` repair in
+    # `02-scope.md` or the `pkind.lower()` repair in `A4-PER-LAYER.md` left the whole
+    # file green (776 passed).
+    "02-scope.md":
+        _REPO / "docs/epics/2026-11-04-7949-extractor-v4-capstone/02-scope.md",
+    "A4-PER-LAYER.md":
+        _REPO / "docs/evidence/7949-capstone/A4-PER-LAYER.md",
     # `docs/evidence/11083/README.md` cites the SAME `relation_write.py` call the
     # RECONCILE row below pins, and was read by nothing at all until #12112. The
     # cite was CORRECT on main (`:631` WAS the call at `aebf91352bfd`, the parent of
@@ -5804,6 +5814,12 @@ _EPIC_CITE_DOCS = {
 _EPIC_CITE_SOURCES = {
     "sdk": _REPO / "tortoise/sdk.py",
     "search_engine": _REPO / "tortoise/search_engine.py",
+    # ⛔ Registered by `#12587`'s round-3 review: the two `extractor_v2` repairs this
+    # PR makes (`A4-PER-LAYER.md:146`, `00-plan.md:179`) had no way to be pinned at
+    # ALL, because a row's `sources[source_key]` lookup KeyErrors on an unregistered
+    # key and every row in this table names its source explicitly. Measured before
+    # adding it: reverting either repair left the whole file green (776 passed).
+    "extractor_v2": _REPO / "tortoise/extractor_v2.py",
     # `00-align.md`'s A-d row cites the fleet's real capture transport OUTSIDE every
     # sweep `_BUNDLE_CITE` can see (it resolves `sdk|edges|extractor_v2` only), so its
     # two `.ts` numbers had no reader at all and were stale: the row named `:948`/`:938`
@@ -6014,6 +6030,26 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         ("00-align.md", "`llm:deepseek-direct` is what", (
             ("20354", 'app.post("/v1/sessions/install-probe")'),
         ), "hosted_api"),
+        # ⛔ The four repairs `#12587` round 2 made, each given the reader it lacked.
+        # Every one was measured UNPINNED first (revert -> 776 passed), which is the
+        # exact condition the `pi_hooks` comment above calls out by name.
+        #
+        # `hosted_api._capture_lane()` — the door R6 turns on. Phrase is on the SAME
+        # LINE as the cite (`_pin_row_failures` scopes to one line, not a paragraph),
+        # so it is the clause after the number, not the heading above it.
+        ("00-plan.md", 'returns `"v2"` **unless**', (
+            ("17936", "def _capture_lane() -> str:"),
+        ), "hosted_api"),
+        ("00-plan.md", "**default-ON**: `TORTOISE_S4_DELTA`", (
+            ("1174", 'env_flag("TORTOISE_S4_DELTA", True)'),
+        ), "extractor_v2"),
+        ("02-scope.md", "per-door `_honours` set", (
+            ("19803", "_honours: dict[str, frozenset[str]] = {"),
+        ), "sdk"),
+        ("A4-PER-LAYER.md", "compares `pkind.lower()` against", (
+            ("11320", 'elif pkind.lower() not in {k.lower() for k in master["points"]}:'),
+            ("11596", '"pointKind": pkind,'),
+        ), "extractor_v2"),
         ("04-plan.md", "operator / label path", (
             ("25396", "declared = declared_relation_predicates()"),
         ), "sdk"),
@@ -6031,9 +6067,11 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # (cohort spend-cap) arm at `:18590`.
         #
         # The anchor is `quota_refusal_payload(QuotaExceededError(`, not the bare
-        # `quota_refusal_payload(`, because the bare form occurs at THREE lines
-        # (`:9632`, `:18528`, `:18590`): a `(document, pin)` pair moved together onto
-        # `:18590` would satisfy the content arm and stay green on the WRONG refusal.
+        # `quota_refusal_payload(`, because the OLD anchor's `detail=quota_refusal_payload(`
+        # form occurs at THREE lines (`:9632`, `:18528`, `:18590`) — and the bare
+        # call occurs at four (`:9214` is `return quota_refusal_payload(`): a
+        # `(document, pin)` pair moved together onto `:18590` would satisfy the
+        # content arm and stay green on the WRONG refusal.
         # The hardened form occurs exactly once in the file, so a re-point onto a
         # sibling arm now reds.
         ("03-test-design.md", "the A-corpus capture", (
