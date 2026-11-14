@@ -443,6 +443,40 @@ def test_the_text_arm_still_applies_the_floor_to_POINTS(stub) -> None:
         assert fts and fts[-1][3]["min_confidence"] == _CONFIDENCE_FLOOR
 
 
+def test_the_single_argument_ordering_reason_is_the_arms_own(stub) -> None:
+    """Each arm's `order_by` reason has a SINGLE-argument variant, and it is the one served.
+
+    Every assertion in `test_the_message_agrees_in_number_…` passes `min_confidence`
+    too, so `… if min_confidence else …` always selected the OTHER branch and this
+    string was never read by any test — both arms stayed green with a false
+    replacement (round-19 P2 1, measured):
+
+    * structural `order_by` alone → "the accessor DOES apply the ordering to
+      paginated reads", which is false: `paginated_query` declares no ordering at
+      all (sdk.py:26585-26588);
+    * tag `order_by` alone → "the accessor applies the tag ordering, not this
+      guard", which is false: `query_points_by_tag` orders `p.createdAt DESC` and
+      never applies the caller's ordering (sdk.py:26920) — the exact sentence the
+      number-agreement test's docstring says it pins, on the arm it does not reach.
+
+    Fails if either single-argument reason is replaced, or if the two messages stop
+    being about their own arm.
+    """
+    from tortoise.mcp_server import tortoise_query
+
+    structural_only = tortoise_query(kind="statement", order_by="confidence")
+    tag_only = tortoise_query(tag="pricing", order_by="confidence")
+
+    assert _is_refusal(structural_only) and _is_refusal(tag_only)
+    # One name, so the verb is singular — and the reason is the accessor's.
+    assert "order_by is not applied" in structural_only["error"], structural_only["error"]
+    assert "paginated_query" in structural_only["error"], structural_only["error"]
+    assert "takes no ordering" in structural_only["error"], structural_only["error"]
+    assert ("tag mode reads a tag and nothing else"
+            in tag_only["error"]), tag_only["error"]
+    assert "cannot apply an ordering" in tag_only["error"], tag_only["error"]
+
+
 def test_the_message_agrees_in_number_with_the_arguments_it_names(stub) -> None:
     """Two named arguments must not ship "min_confidence and order_by IS" (r3 P2).
 
@@ -458,7 +492,13 @@ def test_the_message_agrees_in_number_with_the_arguments_it_names(stub) -> None:
     one = tortoise_query(tag="pricing", min_confidence=_CONFIDENCE_FLOOR)
 
     assert _is_refusal(two) and _is_refusal(one)
-    assert " and " in two["error"], two["error"]
+    # BOTH NAMES, not a bare " and " — the harm clause supplies one of those
+    # ("rows they excluded and an order they did not ask for"), so a join that
+    # kept only `_names[0]` shipped "min_confidence are not applied … or drop
+    # min_confidence for this read" and stayed green (round-19 P2 2, measured:
+    # 84/84 in file, 247/247 across the gate set), leaving `order_by` refused one
+    # call later — the ping-pong class this guard exists to close.
+    assert "min_confidence and order_by are not applied" in two["error"], two["error"]
     assert " are not applied" in two["error"], two["error"]
     assert " is not applied" in one["error"], one["error"]
     # BOTH reasons, not just both names — a join that keeps only the first
@@ -837,12 +877,14 @@ def test_a_graph_ordering_with_no_signal_is_refused_not_silently_reordered(
 #: The REFUSAL half of the contract, verbatim — one entry per SHIPPED sentence.
 #: A bullet carries more than one `REFUS…` clause, so a presence check on the
 #: word alone stayed green while one of them was flipped to "SERVED"
-#: (round-15, measured at four sites); and one of these lives in the SECOND `tag=`
-#: bullet, outside the spans the falsy check splits on, so they are matched
-#: against the whole docstring rather than per bullet. (The count was "two" and is
-#: corrected here: two of the claims sit in the FIRST two bullets, which those
-#: spans already cover — round-18, measured on the flattened docstring, so the
-#: reason for matching whole-docstring rests on a number that holds.)
+#: (round-15, measured at four sites). Three of these sit inside the spans the
+#: falsy check splits on — claims 1 and 2 in the structural bullet, claim 3 in the
+#: FIRST `tag=` bullet — and one, claim 4, is in the SECOND `tag=` bullet, outside
+#: both spans. That one is why they are matched against the whole docstring rather
+#: than per bullet. (The counts in this paragraph were wrong twice and are now
+#: measured on the flattened docstring: round 18 said "two of these live in the
+#: SECOND bullet" — one does; round 19 caught the follow-up sentence still saying
+#: "two of the claims" sit inside the spans — three do.)
 _REFUSAL_CLAIMS = (
     "`min_confidence` and `order_by` are REFUSED on this arm rather than dropped",
     "A floor on any other `entity_type`, and a confidence or graph ordering on "
