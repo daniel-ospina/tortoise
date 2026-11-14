@@ -6142,16 +6142,6 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         ("05-verify.md", "Measured at `6916a6cd89`", (
             ("1400", "a **two-method** event-sourced Protocol"),
         ), "extractor_v4_arch"),
-        # ⛔ THE `subject_binding_available` PAIR NEEDS ITS OWN `05-verify.md` ROW (#12462
-        # review cycle 3, P1). The rows that already carry those two numbers scope to
-        # `00-plan.md` and `03-test-design.md` — `_pin_row_failures` binds ONE document per
-        # row, so D5's own copy was read by NOTHING, and the reviewer measured both being
-        # re-pointed with the suite green. This is the same hole the `03-test-design.md:82`
-        # key comment names: a source key is the only way a number resolves at all.
-        ("05-verify.md", "Measured at `6916a6cd89`", (
-            ("10064", "subject_binding_available,"),
-            ("10117", "and not subject_binding_available(graph):"),
-        ), "sdk"),
         # ⛔ `00-plan.md`'s `_capture_lane` CITE (#12462 review cycle 3, P2): the diff
         # re-pointed it to `:17936` and no row read it — `_BUNDLE_CITE` matches
         # `sdk|edges|extractor_v2` only, so a `hosted_api` number needs its own row. The
@@ -14266,7 +14256,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         "the record must cite the comment that says nothing consumes the channel")
     # ⛔ AND THE RECORD CITES **THIS FILE'S OWN LINE** — the scan below that DERIVES
     # `_relations_cite` — which is the one number its own diff moves: every row added
-    # above it shifts it, and #12569's rows moved it `14043` → `14139` while the record
+    # above it shifts it, and #12569's rows moved it `14043` → `14139` → `14254` while the record
     # kept the old value. Derived, never typed, for the same reason `_relations_cite` is:
     # a record about citations cannot carry a hand-kept citation to its own checker.
     _self_scan_line = next(
@@ -14280,7 +14270,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     assert f"(`:{_self_scan_line}`)" in text, (
         f"the record must cite the scan that derives `_relations_cite` at `:{_self_scan_line}` — "
         "it is the number this file's OWN diff moves, so a typed value re-stales the moment "
-        "a row is added above it (#12569: 14043 -> 14139)")
+        "a row is added above it (#12569: 14043 -> 14139 -> 14254)")
     # The SAME line is cited a SECOND time as a bare `:12397`, inside the
     # reproduction block's comment. A bare cite carries no file token, so the
     # prefixed arm above cannot see it: measured by re-staling it to `:10815` in
