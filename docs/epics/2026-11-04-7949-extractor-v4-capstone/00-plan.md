@@ -167,7 +167,7 @@ closed on a cycle or an `implemented` row on an unbuilt precondition. Four rows 
 (#5087). ⇒ **none of the owner's five assertions has a row.** That is the gap stated as an artifact.
 
 **R6 · The DOOR is the v2 lane, and that corrects the brief.** `hosted_api._capture_lane()`
-(`tortoise/hosted_api.py:17927`) returns `"v2"` **unless** `TORTOISE_SESSION_EXTRACTOR == "m2"`, so
+(`tortoise/hosted_api.py:17936`) returns `"v2"` **unless** `TORTOISE_SESSION_EXTRACTOR == "m2"`, so
 fleet captures land in `_extract_session_v2` → `extract_session_v2` (`tortoise/extractor_v2.py`) — the
 **LLM v2 lane**, not `extractor.py`'s rule extractor (that is the opt-in `m2` lane,
 `_extract_session_llm`). ⚠️ **The brief's premise — "today the fleet writes through the legacy rule
@@ -176,7 +176,7 @@ extractor" — is false at this head.**
 
 - genuinely **default-off**: `TORTOISE_VET`, `TORTOISE_CLASSIFY_LATER`, `TORTOISE_S2_DECISION_SEAM`,
   `TORTOISE_VALUE_GATE`;
-- ⚠️ **default-ON**: `TORTOISE_S4_DELTA` (`extractor_v2.py:1172` is
+- ⚠️ **default-ON**: `TORTOISE_S4_DELTA` (`extractor_v2.py:1174` is
   `env_flag("TORTOISE_S4_DELTA", True)`, and the module says *"GARBAGE → the default (True) … the
   INVERTED default"*). It selects S4's OUTPUT contract, not whether S4 runs;
 - ⚠️ **not a behaviour seam**: `TORTOISE_LABEL_ORDER` is a render diagnostic.

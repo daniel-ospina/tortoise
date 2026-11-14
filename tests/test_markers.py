@@ -73,6 +73,22 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     # `test_namespace_literals_guard_passing_or_routed` on the `test-slow (e)`
     # shard, which is how it was found (the module landed in `516af8e42`).
     "test_10180_promote_default_graph.py": {"registry": "prod-coupled"},
+    # #10015 row 28: the account-read fixtures build a REAL embedded registry
+    # (`TortoiseSDK(db_path=..., namespace="registry")`) because the behaviour
+    # under test is `quota.resolve_org_limits`' REGISTRY resolution — the
+    # resolver calls `_make_sdk(namespace="registry")` (TORTOISE_DB_URI /
+    # TORTOISE_DB_PATH), never the caller's handle, so the test points the
+    # resolver and its own SDK at ONE store and uses that same namespace. The
+    # literal IS the namespace PROD code resolves: a `test_*` rename would seed
+    # a graph the resolver never reads and the test would pass over nothing —
+    # the `prod-coupled` class exactly like test_10180 / test_github_connect /
+    # test_9664_capstone_connector_to_record above. The db_path is
+    # tmp_path-bound (`TORTOISE_DB_PATH` per test), so the shared-graph hazard
+    # is closed by the redirect's per-path derivation, not by a rename.
+    # MEASURED: without this row the four literals red
+    # `test_namespace_literals_guard_passing_or_routed` on the `test-slow (a)`
+    # shard at lines 41/50/249/258, which is how it was found.
+    "test_10015_organisation_account.py": {"registry": "prod-coupled"},
     # The seed helper does `_make_sdk(namespace="registry")._get_registry()
     # .query(CREATE :Team ...)` — i.e. it seeds a Team through the CANONICAL
     # namespace PROD code resolves, the same `prod-coupled` class as the
