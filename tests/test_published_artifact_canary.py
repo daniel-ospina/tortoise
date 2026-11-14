@@ -2671,6 +2671,54 @@ def test_wheel_mode_fail_names_a_build_defect_not_a_release():
     assert "wheel-mode wiring problem" in foreign_summary, foreign_summary
 
 
+def test_the_wheel_tail_names_the_CONSOLE_SCRIPT_case_separately():
+    """⛔ "DOES NOT INSTALL" IS FALSE FOR A WHEEL THAT INSTALLED CLEANLY (#12589 review round 14,
+    P3).
+
+    #12363 rounds 5 and 6 fixed exactly this (a substring test rendered the console-script case as
+    "does not install"), but nothing pinned the branch on the RENDERED summary: mutating its text
+    back to "does not install", or dropping its `named_it = True`, left 88 tests green — the arm's
+    own detail is pinned, the sentence it produces was not.
+    """
+    report = canary.build_report(
+        engine_doc=None,
+        client_doc=None,
+        tree_version="0.2.0",
+        init_arm=canary.Arm(
+            "engine-init",
+            canary.FAIL,
+            "the installed artifact provides no `tortoise` console script at "
+            "/usr/local/bin/tortoise",
+        ),
+        now=NOW,
+        wheel_path=Path("dist/tortoise_graph-0.2.0-py3-none-any.whl"),
+    )
+    # ⛔ AND THE INSTALL-FAILURE SIBLING (found by this lane's own mutation sweep, #12589 round
+    # 14): `named_it = True` on the "does not install" branch was droppable — the summary would
+    # then print "is NOT judged by this summary" about a wheel the canary watched fail to install.
+    install_fail = canary.build_report(
+        engine_doc=None,
+        client_doc=None,
+        tree_version="0.2.0",
+        init_arm=canary.Arm(
+            "engine-init", canary.FAIL, "the BUILT wheel failed to install: `pip` exits 1"
+        ),
+        now=NOW,
+        wheel_path=Path("dist/tortoise_graph-0.2.0-py3-none-any.whl"),
+    )
+    install_summary = canary.render_summary(install_fail)
+    assert "BUILT wheel does not install" in install_summary, install_summary
+    assert "re-dispatch this publish" in install_summary, install_summary
+    assert "NOT judged by this summary" not in install_summary, install_summary
+
+    summary = canary.render_summary(report)
+    assert "BUILT wheel installs but ships no `tortoise` console script" in summary, summary
+    assert "does not install" not in summary, summary
+    # The classification belongs to this branch too — it DID establish that the wheel is at fault.
+    assert "re-dispatch this publish" in summary, summary
+    assert "wheel-mode wiring problem" not in summary, summary
+
+
 def test_an_EMPTY_wheel_argument_is_refused_not_downgraded_to_index_mode(monkeypatch, capsys):
     """`pwsh`/bash do not abort on a failing `$(...)` INSIDE an argument, so
     `--wheel ""` reached the tool and collapsed to index mode: the pre-publish gate
@@ -3923,8 +3971,10 @@ def test_the_non_reading_tokens_are_pinned_by_their_PUBLISHED_TEXT():
     Every assertion elsewhere reads `assert canary.INFO_UNREADABLE in arm.detail`, which holds for
     ANY value of the constant — including `""`. Mutating each constant to `""` (or renaming
     `RELEASES_UNREADABLE`) left all 87 tests green, so the four tokens an operator actually SEES —
-    in the summary and in the alert's `$why` — were never verified. One literal assertion per token
-    closes that; the constant-form assertions stay as the mechanism check.
+    in the step summary and the `--json` payload, NOT in the alert issue's body (that body is a
+    fixed `$why` sentence plus `tail -n 40` of the TRANSCRIPT, so it carries no token) — were never
+    verified. One literal assertion per token closes that; the constant-form assertions stay as the
+    mechanism check.
     """
     assert canary.INFO_UNREADABLE == "info-unreadable"
     assert canary.VERSION_UNREADABLE == "version-unreadable"
@@ -3964,6 +4014,10 @@ def test_a_non_object_info_is_a_LEGIBLE_NON_READING_on_BOTH_arms():
         assert arm.status == canary.UNKNOWN, (doc, arm.status, arm.detail)
         assert canary.INFO_UNREADABLE in arm.detail, arm.detail
         assert "not a reason to cut a release" in arm.detail.lower(), arm.detail
+        # ⛔ THE CLASS LABEL IS PINNED TOO (this lane's own mutation sweep, #12589 round 14): the
+        # clause naming the shape a NON-READING was droppable while the closing sentence survived,
+        # so the operator lost the words that say the reading never happened.
+        assert "NON-READING" in arm.detail, arm.detail
         # ⛔ THE NEGATIVE ASSERTION BELONGS ON BOTH ARMS, AND IN THE GENERAL FORM (#12589 review
         # round 13, P3). The client arm's phrase-specific check let a shared UNKNOWN detail that
         # re-asserts the artifact claim ("… carries no latest version — the document's `info` is
@@ -4119,9 +4173,16 @@ def test_the_UNREADABLE_reason_names_every_cause_the_code_can_produce():
         {"0.3.0": [{**_CLIENT_GOOD, "yanked": "false"}]},
         {"0.3.0": [{"yanked": False}]},
     ):
-        arm = _client_report({"info": {"version": "0.3.0"}, "releases": releases}).get(
-            "client-published"
-        )
+        report = _client_report({"info": {"version": "0.3.0"}, "releases": releases})
+        arm = report.get("client-published")
+        # ⛔ THE TAIL'S POSITIVE POINTER IS PINNED HERE (#12589 review round 14, P3). The only
+        # pins before this were the NEGATIVE branch (an empty / informational-only report), so
+        # hard-coding `marked = []` — which makes the summary call a real non-reading "a defect in
+        # the canary itself" — passed 88/88. On a shape that DOES mark a row, the pointer must name
+        # it and must not fall back to the defect sentence.
+        rendered = canary.render_summary(report)
+        assert "the row marked CANNOT RUN names which (`client-published`)" in rendered, rendered
+        assert "defect in the canary itself" not in rendered, rendered
         assert "no boolean `yanked`" in arm.detail, (releases, arm.detail)
         # ⛔ NOT "no filename": the filter also drops a filename that is PRESENT and unusable
         # (empty / wrong type), and the constant's own comment says "not of the documented type".
@@ -4260,6 +4321,19 @@ def test_installability_is_ONE_definition_of_the_installable_question():
     assert canary.installability({**doc, "releases": {"0.3.0": [good]}}, "0.3.0") == (
         canary.INSTALLABLE
     )
+    # ⛔ AND THE ORDERING IS LOAD-BEARING (#12589 review round 14, P3). An installable entry
+    # OUTRANKS an unreadable sibling: `installable` is checked before `unreadable`, so a value
+    # holding one good file and one unreadable one is INSTALLABLE. Swapping the two checks left
+    # 88 tests green AND rendered the self-contradictory "advertised latest 0.3.0 could not be READ
+    # here; installable: 0.3.0" — a sentence about a listing the arm had just resolved.
+    mixed = {**doc, "releases": {"0.3.0": [good, {}]}}
+    assert canary.installability(mixed, "0.3.0") == canary.INSTALLABLE
+    mixed_arm = _client_report(mixed).get("client-published")
+    assert mixed_arm.status == canary.OK, (mixed_arm.status, mixed_arm.detail)
+    assert "advertised latest 0.3.0 is installable" in mixed_arm.detail, mixed_arm.detail
+    assert "could not be READ here" not in mixed_arm.detail, mixed_arm.detail
+    # ...the partial read is still DISCLOSED, so the green does not imply a complete parse.
+    assert canary.RELEASES_UNREADABLE in mixed_arm.detail, mixed_arm.detail
     # ANSWERS.
     for answered in ({"0.3.0": []}, {"0.3.0": [yanked]}, {}):
         assert canary.installability({**doc, "releases": answered}, "0.3.0") == (

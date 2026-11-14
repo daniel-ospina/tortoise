@@ -793,9 +793,16 @@ def missing_version_arm(
 def release_files(index_doc: dict[str, Any], version: str) -> list[dict[str, Any]] | None:
     """One version's file objects, ``[]`` when absent, ``None`` when the listing is unreadable.
 
-    The STRICT reader: any drop (an unreadable map, an unreadable value, a non-object entry) is
-    ``None``, because a caller reporting this as an ENUMERATION — the gated FAIL arm's count —
-    must not print a count nobody read. The verdict itself does NOT come from here: the client arm
+    The STRICT reader for STRUCTURAL drops: an unreadable map, an unreadable value, or a
+    non-object entry is ``None``, because a caller reporting this as an ENUMERATION — the gated
+    FAIL arm's count — must not print a count nobody read.
+
+    ⛔ BUT "ANY DROP" WOULD BE FALSE, and this docstring said it until #12589 review round 14 (P3):
+    a FIELD-LEVEL drop (an entry with no boolean ``yanked`` / no non-empty string ``filename``) is
+    returned here as a usable entry, because those two fields are only consulted by
+    ``judged_value``. That asymmetry is deliberate — ``upload_time`` needs neither field — and it is
+    exactly why the FAIL count is reached only on the branch where ``unreadable == ""``: the VERDICT
+    path never infers "no installable file" from this reader's output alone. The verdict itself does NOT come from here: the client arm
     reads ``resolvable_releases``, which applies the existential/universal polarity. That one
     VERDICT-path call site treats a ``None`` as an invariant failure that raises (fail-closed to
     exit 2) rather than printing a count it did not read.
