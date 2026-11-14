@@ -5800,6 +5800,14 @@ _EPIC_CITE_DOCS = {
     # right when it was written, and a change moved the symbol out from under it.
     "11083/README.md":
         _REPO / "docs/evidence/11083/README.md",
+    # ⛔ REGISTERED BY THE REVIEW THAT FOUND IT UNPINNED (#12462). `05-verify.md` D5 states
+    # four `file:line` measurements of THIS head, and the reviewer measured that reverting
+    # all of them left the suite GREEN — so the sentence whose whole subject is "numbers
+    # rot" was itself the one block in this PR nothing read. A document this bundle EDITS
+    # is a document this bundle reads (#12138's convention); registering it is what makes
+    # the next insertion red instead of silent.
+    "05-verify.md":
+        _REPO / "docs/epics/2026-11-04-7949-extractor-v4-capstone/05-verify.md",
 }
 _EPIC_CITE_SOURCES = {
     "sdk": _REPO / "tortoise/sdk.py",
@@ -6054,6 +6062,26 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("18503", "if count + est > max_points:"),
             ("18528", "detail=quota_refusal_payload("),
         ), "hosted_api"),
+        # ⛔ THE LINE THAT *QUOTES* :82's NUMBER (#12462 review). `03-test-design.md:236`
+        # re-states `hosted_api.py:18503` as the same guard read at an older head, so it is
+        # a second statement of one hit — and the paragraph it sits in INSTRUCTS the next
+        # merger to re-point line 82, which is exactly how 236 comes to assert the old
+        # number while 82 moves. Unpinned until the review reverted it green. Only the
+        # current-head number is pinned: the `:18205` beside it is a STAMP read at
+        # `a577d0e25c` and does NOT resolve here, so pinning it would red a true record.
+        ("03-test-design.md", "`:82`'s `hosted_api.py:", (
+            ("18503", "if count + est > max_points:"),
+        ), "hosted_api"),
+        # ⛔ `05-verify.md` D5's own "Measured at" sentence (#12462 review): the row whose
+        # SUBJECT is that line numbers rot carried four of them and no reader at all.
+        # Two rows because a row carries ONE source key; the phrase is unique in the file.
+        ("05-verify.md", "Measured at `6916a6cd89`", (
+            ("18396", "``body.harness`` only ever introduces a harness on a session the server"),
+            ("18503", "if count + est > max_points:"),
+        ), "hosted_api"),
+        ("05-verify.md", "Measured at `6916a6cd89`", (
+            ("10037", "_registry_cache = PackRegistry(packs_dir)"),
+        ), "sdk"),
         # ⛔ NOT A ROW ANY MORE — the `carve_out:` claim below the rows is checked
         # against the BLOCK (`_section_entries`) and not against a line number: the
         # entry sits BELOW the `surfaces:` blocks `tools/ci_selection.py::register_tests`
