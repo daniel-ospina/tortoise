@@ -6072,17 +6072,21 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # cites by arithmetic onto two comment lines instead of two statements — the
         # exact failure the deleted "Provenance of the numbers" section named. Held by
         # CONTENT, so a number that lands on a comment cannot satisfy it.
-        # ⛔ RE-DERIVED at `#12545`'s squash-merge base (`7ce0d65fa0`): both moved
-        # `+9` (`:18494`/`:18519` → `:18503`/`:18528`) when the capture path above
-        # them grew. Opened, not offset — and `:18528` is the `QuotaExceededError`
-        # refusal of the gate at `:18503`, not the `CohortCostCapExceeded`
-        # (cohort spend-cap) arm at `:18590`.
+        # ⛔ RE-DERIVED TWICE, and the second one is why every number in this
+        # comment was re-read rather than carried: `#12545`'s squash-merge base
+        # (`7ce0d65fa0`) moved both `+9` (`:18494`/`:18519` → `:18503`/`:18528`)
+        # when the capture path above them grew, and then `ea5d476e9b8` (#12488)
+        # moved the whole block `+842` before #12607 could land, so they are
+        # `:19345`/`:19370` now. Opened, not offset — and `:19370` is the
+        # `QuotaExceededError` refusal of the gate at `:19345`, NOT the
+        # `CohortCostCapExceeded` (cohort spend-cap) arm, whose `except` is at
+        # `:19412` and whose own refusal is `:19432`.
         #
         # The anchor is `quota_refusal_payload(QuotaExceededError(`, not the bare
         # `quota_refusal_payload(`, because the OLD anchor's `detail=quota_refusal_payload(`
-        # form occurs at THREE lines (`:9632`, `:18528`, `:18590`) — and the bare
-        # call occurs at four (`:9214` is `return quota_refusal_payload(`): a
-        # `(document, pin)` pair moved together onto `:18590` would satisfy the
+        # form occurs at THREE lines (`:10474`, `:19370`, `:19432`) — and the bare
+        # call occurs at four (`:10056` is `return quota_refusal_payload(`): a
+        # `(document, pin)` pair moved together onto `:19432` would satisfy the
         # content arm and stay green on the WRONG refusal.
         # The hardened form occurs exactly once in the file, so a re-point onto a
         # sibling arm now reds.
@@ -14145,7 +14149,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         "cite — re-stale it and this record's only reproduction path points at a dead line")
     # ⛔ DIRECTION FLIPPED with the correction this arm forced. The comment at this line used to
     # read "nothing in this tree consumes `result[\"relations\"]`" — a claim that was FALSE from the
-    # moment `#11548` landed the consumer (this record's own §5 names it at `sdk.py:19012`), so the
+    # moment `#11548` landed the consumer (this record's own §5 names it at `sdk.py:19069`), so the
     # arm was pinning a falsehood into the live tree. It now asserts the corrected sentence AT THE
     # SAME LINE (the block's line count was held at 13 so every cite below keeps its number) and that
     # the retracted sentence is gone from the file entirely.
@@ -14167,7 +14171,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         "\"nothing consumes it\" reading is what this arm replaced")
     assert "nothing in this tree consumes" not in "\n".join(ext), (
         "the retracted sentence is back in the live file — it was false while this record's own §5 "
-        "cited `sdk.py:19012` as the consumer, so no arm may require it again")
+        "cited `sdk.py:19069` as the consumer, so no arm may require it again")
 
     # A1's environment block: the reproduction that states A1's producer claim — the
     # bare-token grep whose four `create_operator` mentions ARE its evidence that the
