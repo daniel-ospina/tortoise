@@ -55,14 +55,21 @@ class TestDeclaration:
         (#10053) implemented three approved-but-absent names, so the count
         moves by design and this test is the pin on where it lands. A retirement or
         an approved name gaining a `def` is an OWNER-APPROVED row in
-        `docs/product/beta-sdk-surface.md` (gated by
-        `tests/test_sdk_retirement.py`), never this assertion. The 150 → 124 move is
+        `docs/product/beta-sdk-surface.md`, never this assertion. The 150 → 124 move is
         #4282's owner-ruled deletion of the 26 surplus methods nothing called
-        (2026-10-27, PR #10187); the 124 → 125 move is row 28 of
-        `docs/product/beta-sdk-surface.md` (`get_organisation_account`), an
-        owner-approved ADDITION whose manifest row is in `config/surface-manifest.yml`
-        and whose approval is gated by `tests/test_sdk_retirement.py` — never by
-        this assertion.
+        (2026-10-27, PR #10187); the 124 → 125 move is an owner-approved
+        **implementation** of an already-approved row — row 28,
+        `get_organisation_account`, which the canonical doc says "already **is** the
+        name, so this delivers it rather than **adding to it**" (the approved 40 did
+        not grow), with its manifest row in `config/surface-manifest.yml`.
+
+        ⛔ This assertion is defence-in-depth, NOT the approval gate. What refuses an
+        UNAPPROVED addition is `tools/surface-guard.py` step 7 against the
+        BASE-REF-pinned `high_water_counts` (still 150) plus `tests/test_sdk_surface.py`
+        (`DECLARED_COUNT` / declaration-vs-baseline) — measured: adding a stray public
+        method to `TortoiseSDK` leaves `tests/test_sdk_retirement.py` green (14 passed;
+        it is a FLOOR, so growth cannot red it) and reds `surface-guard.py` and
+        `test_sdk_surface.py`. Do not read this count as approval.
         """
         from tortoise.sdk import TortoiseSDK
 
