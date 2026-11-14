@@ -5732,3 +5732,80 @@ class TestRefusalThresholdEnv:
     def test_an_unknown_surface_is_refused(self):
         with pytest.raises(ValueError):
             monitoring.record_wait_bound_breach_recent("third-surface")
+
+
+def test_share_never_exceeds_one():
+    """A ratio of refused demand to demand cannot be 5.0 — and it is published.
+
+    Measured (#12477 review round 10): five MCP seam breaches (which own their
+    count off-HTTP) plus one served attempt gave `share=5.0`, which `/health`'s
+    additive `refusals` block republishes; a dashboard rendering `share*100`
+    printed 500%. The verdict is unaffected (it needs >= 0.5).
+    """
+    monitoring.reset_wait_bound_breach_window()
+    for _ in range(5):
+        monitoring.record_wait_bound_breach(monitoring.WAIT_BOUND_SURFACE_MCP)
+    monitoring.record_wait_bound_attempt(monitoring.WAIT_BOUND_SURFACE_MCP)
+    window = monitoring.wait_bound_breach_window()
+    assert window["total"] == 5 and window["attempts"] == 1
+    assert window["share"] == 1.0, (
+        "all of the demand in this window was refused — never 5.0", window)
+
+
+def test_a_raise_in_the_heartbeat_read_answers_503_instead_of_going_dark(monkeypatch):
+    """The listener's contract is that it ALWAYS answers (#2850).
+
+    Measured before this fix: `loop_heartbeat_info` raising produced NO HTTP
+    RESPONSE AT ALL (`RemoteDisconnected: Remote end closed connection without
+    response`) because that read sat outside the guard — the liveness signal going
+    dark, which is the one outcome the class docstring says must never happen.
+    """
+    import socket
+    import time
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("heartbeat store unreadable")
+
+    monkeypatch.setattr(monitoring, "loop_heartbeat_info", _boom)
+    server = monitoring.start_health_listener(port=0, bind="127.0.0.1")
+    port = server.server_address[1]
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+        sock.sendall(b"GET /healthz HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        chunks = []
+        while True:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    raw = b"".join(chunks).decode("latin-1")
+    assert raw.startswith("HTTP/1."), f"the listener went DARK instead of answering: {raw!r}"
+    assert " 503 " in raw.split("\r\n", 1)[0], raw.split("\r\n", 1)[0]
+    assert "verdict-unreadable" in raw
+
+
+def test_stopping_the_app_clears_every_registered_reader():
+    """A registered reader must not outlive the app that registered it.
+
+    Measured (#12477 review round 10): after boot+shutdown all three were still
+    registered, so a later test in the same process that recorded a breach while
+    the embedder lock was held had it silently DROPPED by the stale cold-start
+    predicate — the "green by ordering luck" class again.
+    """
+    import asyncio
+
+    from tortoise import hosted_api
+
+    class _App:
+        class state:  # noqa: N801 - minimal stand-in
+            pass
+
+    app = _App()
+    hosted_api.set_cold_start_source(lambda: True)
+    hosted_api.set_dataplane_verdict_source(lambda: {"state": "healthy"})
+    hosted_api.set_served_progress_source(lambda: {"last_served_age_s": 0.0})
+    asyncio.run(hosted_api._stop_liveness(app))
+    monitoring.record_wait_bound_attempt(monitoring.WAIT_BOUND_SURFACE_MCP)
+    monitoring.record_wait_bound_breach(monitoring.WAIT_BOUND_SURFACE_MCP)
+    window = monitoring.wait_bound_breach_window()
+    assert window["total"] == 1, (
+        "a stale cold-start predicate survived the app and dropped the breach", window)

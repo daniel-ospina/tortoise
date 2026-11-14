@@ -2716,6 +2716,11 @@ def _start_liveness(app) -> None:
     # measured the MCP arm red on a healthy warming box while the REST arm was
     # green at the same instant.
     set_cold_start_source(_embedder_load_in_flight)
+    # …and `_stop_liveness` CLEARS all three. Without that they survive every
+    # TestClient restart inside one pytest process: measured (#12477 review round
+    # 10), after a boot+shutdown all three readers were still registered, so a
+    # later test that records a breach while the embedder lock is held had it
+    # silently dropped — the "green by ordering luck" class again.
 
 
 async def _stop_liveness(app) -> None:
@@ -2735,6 +2740,18 @@ async def _stop_liveness(app) -> None:
     wait is prompt — cancellation is thrown into the awaiting coroutine at its
     ``await`` point, so it does not wait for an in-flight ``to_thread`` worker.
     """
+    # ⛔ THE REGISTERED READERS DIE WITH THE APP. `_start_liveness` registers three
+    # zero-I/O readers on `monitoring`; leaving them behind means the NEXT boot in
+    # the same process (every TestClient restart) inherits the previous app's
+    # closures — measured (#12477 review round 10): after boot+shutdown all three
+    # were still registered, and a test that recorded a breach while the embedder
+    # lock was held had it silently DROPPED by the stale cold-start predicate.
+    for _clear in (set_cold_start_source, set_dataplane_verdict_source,
+                   set_served_progress_source):
+        try:
+            _clear(None)
+        except Exception:  # noqa: BLE001 - teardown must not raise
+            pass
     stop = getattr(app.state, "_loop_watchdog_stop", None)
     if stop is not None:
         stop.set()
@@ -5493,6 +5510,17 @@ _WAIT_BOUND_LONG_ROUTES = (
     # the numerator was one-sided.
     re.compile(r"^/oauth/(token|authorize|consent|revoke|register)/?.*$"),
     re.compile(r"^/register/?$"),
+    # ⛔ A THIRD PARTY'S ROUTE, AND UNAUTHENTICATED. On the hosted deployment
+    # `/v1/invites/info` reads PostgREST (`_hosted_invite`), not the graph, so its
+    # refusal is not a data-plane statement — and it is reachable without a
+    # credential, which is what makes it matter: 6 requests per 120 s turned a
+    # fully refusing plane into `share 0.4545 -> 200` (#12477 review round 10),
+    # one IP, no key. Out of BOTH sides (a serving-only exclusion would leave the
+    # one-sidedness round 9 fixed for `/oauth/*`). ⚠️ Recorded trade: on SELFHOST
+    # this route reads the FalkorDB registry, so this exclusion gives up a little
+    # evidence there; 6 unauthenticated requests defeating the check is the worse
+    # of the two, and `data-plane-failed` still covers a dead store.
+    re.compile(r"^/v1/invites/info/?$"),
     re.compile(r"^/webhooks/stripe/?$"),
 )
 
@@ -5501,7 +5529,7 @@ _WAIT_BOUND_LONG_ROUTES = (
 #: demand the share should divide by: auth/rate-limit gates reject before any
 #: data work, and 405/412 are client errors about the route. ⚠️ 404 is NOT here:
 #: "point not found" IS the plane answering.
-_WAIT_BOUND_NON_DATA_STATUSES = frozenset({401, 403, 405, 407, 412, 429})
+_WAIT_BOUND_NON_DATA_STATUSES = frozenset({401, 403, 405, 407, 412, 422, 429})
 
 
 def _embedder_load_in_flight() -> bool:

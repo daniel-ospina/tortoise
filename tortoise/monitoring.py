@@ -1246,7 +1246,15 @@ def wait_bound_breach_window(window_s: float | None = None) -> dict:
     total = sum(by_surface.values())
     min_share = wait_bound_health_min_share()
     min_attempts = wait_bound_health_min_attempts()
-    share = (total / attempts) if attempts else None
+    # ⛔ A SHARE CANNOT EXCEED 1. The numerator can outrun the denominator only
+    # through an OFF-HTTP breach (an MCP call whose dispatch seam owns its count
+    # with no middleware attempt beside it), and publishing `5.0` on `/health`
+    # makes every dashboard that renders `share*100` print 500% (#12477 review
+    # round 10: 5 seam breaches + 1 served attempt measured `share=5.0`). The
+    # verdict is unaffected (it needs >= 0.5), so this is a published-value
+    # contract, and the clamp is the truthful statement of "all of the demand in
+    # this window was refused".
+    share = (min(1.0, total / attempts)) if attempts else None
     # ``None`` while below the sample floor: a share of 1/1 is not a measurement.
     if share is None or attempts < min_attempts:
         refusing = None
@@ -5836,8 +5844,14 @@ class _HealthzHandler(BaseHTTPRequestHandler):
         if self.path.split("?", 1)[0] != "/healthz":
             self._send(404, {"status": "not-found"})
             return
-        info = loop_heartbeat_info()
-        stale = bool(info["loop_stale"])
+        # ⛔ THE HEARTBEAT READ IS INSIDE THE GUARD TOO (round 10). It used to sit
+        # above it, and a raise there produced NO HTTP RESPONSE AT ALL — the
+        # docstring's "always answers" contract broken in its worst direction:
+        # measured `loop_heartbeat_info` raising -> `RemoteDisconnected: Remote end
+        # closed connection without response`, while the same raise one line lower
+        # gave the legible `503 verdict-unreadable`. `info` is bound below with a
+        # default so the arms that use it still have a dict.
+        info: dict = {}
         # ── #12477: the verdict is STALE **OR** A FAILED DEPENDENCY. ────────
         #
         # The `stale AND idle` conjunct this replaces could not see the wedge it
@@ -5867,6 +5881,8 @@ class _HealthzHandler(BaseHTTPRequestHandler):
         # Fail-CLOSED on a broken read, because a verdict nobody can compute is
         # not evidence of health (#4034).
         try:
+            info = loop_heartbeat_info()
+            stale = bool(info["loop_stale"])
             idle = workload_is_idle()
             plane = dataplane_verdict()
             recent = wait_bound_breach_window()

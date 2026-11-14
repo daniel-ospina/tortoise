@@ -2653,3 +2653,44 @@ def test_the_org_mint_lock_answers_before_the_transport_bound():
     assert ha._ORG_MINT_LOCK_TIMEOUT_S < _ma._TRANSPORT_WAIT_BOUND_S, (
         "the mint lock must answer before the transport bound does, or its own "
         "503 is undeliverable and a concurrent mint is scored as a plane breach")
+
+
+@pytest.mark.asyncio
+async def test_a_validation_422_is_not_demand(fast_bound, refusal_window):
+    """A `422` never reached the plane: FastAPI validation fails before the handler.
+
+    Measured (#12477 review round 10): 6 unauthenticated `GET /v1/invites/info`
+    (no token → `422`) beside 5 refused requests gave
+    `attempts 11, share 0.4545` → the real listener answered **200** with
+    `reasons: []` over a fully refusing plane. 422 joins the auth/rate-limit
+    gates in `_WAIT_BOUND_NON_DATA_STATUSES`.
+    """
+    # ⚠️ a DATA route with a bad body (`POST /v1/points {}`), not the invite
+    # preview — that one is excluded on its own (see the test above), which would
+    # make this vacuous and let the mutant through (it did, first attempt)
+    invalid = ha.WaitBoundMiddleware(_slow_app(0.001, status=422))
+    hanging = ha.WaitBoundMiddleware(_slow_app(10.0))
+    for _ in range(6):
+        rec = await _drive(invalid, _scope("/v1/points", method="POST"))
+        assert rec.status == 422
+    for _ in range(5):
+        await _breach(hanging, "/v1/search")
+    window = refusal_window.wait_bound_breach_window()
+    assert window["attempts"] == 5, ("a validation error is not demand", window)
+    assert window["refusing"] is True
+
+
+@pytest.mark.asyncio
+async def test_the_invite_preview_is_out_of_the_share_on_BOTH_sides(
+        fast_bound, refusal_window):
+    """It reads PostgREST, not the graph — and it needs no credential.
+
+    A serving-only exclusion (round 9's shape for `/v1/invites/info`) would leave
+    its refusal in the numerator, the one-sidedness round 9 fixed for `/oauth/*`.
+    """
+    for path, verb in (("/v1/invites/info", "GET"), ("/v1/invites/info", "POST")):
+        for _ in range(6):
+            await _breach(ha.WaitBoundMiddleware(_slow_app(10.0)), path, method=verb)
+    window = refusal_window.wait_bound_breach_window()
+    assert window["total"] == 0 and window["attempts"] == 0
+    assert window["refusing"] is None

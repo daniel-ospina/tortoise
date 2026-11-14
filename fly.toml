@@ -173,7 +173,9 @@ kill_timeout = 30
 #       no-I/O poll that cannot run inside the bound is evidence a healthy box
 #       cannot produce (`/health/ready` and `/health/security` do I/O, so they
 #       stay DATA-plane evidence, and a 404 from a path no route matched never
-#       counts as demand). Who may be COUNTED as demand (the serving side) is a
+#       counts as demand; 422 joins the pre-plane status filters, because a
+#       validation error never ran the handler). Who may be COUNTED as demand
+#       (the serving side) is a
 #       separate rule from what a refusal MEANS: a route the app answers without
 #       the plane (`/.well-known/*` discovery, the readiness/security probes,
 #       `/v1/capabilities`, an index-job status, the `/mcp` metadata GET and its
