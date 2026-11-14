@@ -5,7 +5,7 @@ The tool's signature takes ``min_confidence`` and ``order_by``, and its docstrin
 presents them as general arguments — but only the ``text=`` arm consumes them
 (forwarded into ``sdk.tortoise_fts_query``). Both structural arms call
 ``sdk.paginated_query(kind, skip, limit, include_retracted, **filters)``, whose
-signature has **neither** parameter (``tortoise/sdk.py:26585-26588``), and the tag
+signature has **neither** parameter (``tortoise/sdk.py:26642-26645``), and the tag
 arm calls ``query_points_by_tag(tag)``, which takes the tag and nothing else.
 
 Measured: ``tortoise_query(kind="statement", min_confidence=0.9)`` reaches the
@@ -388,7 +388,7 @@ def test_the_text_arm_REFUSES_a_floor_it_cannot_apply(stub, entity_type) -> None
     """`text=` applies the floor to POINT rows only (#12500 round-3 P1).
 
     The fts leg compares `min_confidence` against EP belief under
-    `entity_type == "point"` (`sdk.py:43288` — `ep` is `None` for every other
+    `entity_type == "point"` (`sdk.py:43377` — `ep` is `None` for every other
     type, and the branch is gated on it), so a non-Point read passed the floor
     straight through: measured at the tool boundary,
     `text="…", entity_type="document", min_confidence=0.9` returned the
@@ -448,7 +448,7 @@ def test_an_unusable_floor_is_left_to_the_sdk_to_refuse(stub) -> None:
     That paragraph's reason ("the fts leg applies its floor under a literal
     `entity_type == 'point'` gate"), its harm ("rows they excluded came back") and
     its route ("pass entity_type='point'") are all false of a floor the SDK
-    rejects outright: `sdk.py:41133-41134` range-checks `min_confidence` BEFORE
+    rejects outright: `sdk.py:41222-41223` range-checks `min_confidence` BEFORE
     any retrieval, so `min_confidence=1.5` here used to RAISE — it never returned
     the rows the message apologised for — and the offered route lands on that same
     range error. Following a terminating route into a second error is the class
@@ -527,10 +527,10 @@ def test_the_single_argument_ordering_reason_is_the_arms_own(stub) -> None:
 
     * structural `order_by` alone → "the accessor DOES apply the ordering to
       paginated reads", which is false: `paginated_query` declares no ordering at
-      all (sdk.py:26585-26588);
+      all (sdk.py:26642-26645);
     * tag `order_by` alone → "the accessor applies the tag ordering, not this
       guard", which is false: `query_points_by_tag` orders `p.createdAt DESC` and
-      never applies the caller's ordering (sdk.py:26920) — the exact sentence the
+      never applies the caller's ordering (sdk.py:26977) — the exact sentence the
       number-agreement test's docstring says it pins, on the arm it does not reach.
 
     Fails if either single-argument reason is replaced, or if the two messages stop
@@ -582,7 +582,7 @@ def test_the_message_agrees_in_number_with_the_arguments_it_names(stub) -> None:
     # …and the REASONS, not just the words. Unpinned, "the tag ordering is applied
     # by the accessor, not here" shipped green — false: `query_points_by_tag`
     # orders `p.createdAt DESC` and never applies the caller's ordering
-    # (sdk.py:26920), while the test's bare "ordering" substring still matched.
+    # (sdk.py:26977), while the test's bare "ordering" substring still matched.
     assert "tag mode reads a tag and nothing else" in two["error"], two["error"]
     assert "cannot apply an ordering" in two["error"], two["error"]
 
@@ -611,12 +611,19 @@ def test_a_floor_and_a_property_filter_have_no_common_arm(stub) -> None:
     {"tag": "pricing", "text": "x", "order_by": "confidence"},
 ])
 def test_the_tag_arm_still_refuses_when_text_is_also_passed(stub, kwargs) -> None:
-    """`tag=` wins, and the guard's `tag is not None` disjunct must survive (r4 P2 6).
+    """`tag=` wins, so a tag+text caller is refused on the TAG arm (r4 P2 6).
 
-    Without that disjunct the condition is `not text`, so `tag="t", text="x"`
-    skipped the guard entirely and the TAG arm answered (`query_points_by_tag`)
-    with the floor dropped — the exact defect this PR closes, reopened by a
-    one-word refactor, with the whole suite green before this test existed.
+    This is the `#12372` guard's precedence shape, still live here because the
+    `#12500` guard sits ABOVE the tag branch and must describe the arm that
+    actually answers. Fails if `_arm` stops preferring `tag=` (`_arm = "text=" if
+    text else …` reds BOTH params, measured).
+
+    NOT a pin on the `#12372` disjunct, though an earlier version of this
+    docstring claimed it was: deleting `tag is not None` there leaves this test
+    GREEN, because `_unapplied` is arm-driven now and the tag+text+floor shape is
+    still refused (round-24 P2 4, measured: `2 passed`). That disjunct is pinned
+    by `tests/test_12372_entity_type_dropped.py::test_tag_takes_precedence_over_text_so_it_must_still_refuse`,
+    which reds when it is removed.
     """
     from tortoise.mcp_server import tortoise_query
 
@@ -1006,7 +1013,7 @@ def test_the_tool_docstring_states_the_falsy_exception() -> None:
             f"the {_label} bullet must say the falsy value is SERVED, not refused: "
             f"{_bullet}"
         )
-    # No file-wide ban on "refused": `sdk.py:41138` DOES refuse an unknown
+    # No file-wide ban on "refused": `sdk.py:41228` DOES refuse an unknown
     # `order_by` outright, so banning those words reded a true sentence elsewhere
     # in the docstring (round-12 P2 1c). The PER-BULLET "stays served" assertion
     # above is what catches an inverted falsy clause — measured: replacing the
@@ -1133,7 +1140,7 @@ def test_every_alternative_of_a_paged_text_route_terminates(stub) -> None:
     The paging parenthetical appended at the END of a route read as qualifying only
     the last alternative, and `text=`+`offset=` is refused whatever `entity_type`
     says (`if paginated:` → "offset/page not supported with text",
-    mcp_server.py:4444-4446) — so following the FIRST alternative, "pass
+    mcp_server.py:4450-4452) — so following the FIRST alternative, "pass
     entity_type='point'", landed on "offset/page not supported with text"
     (round-21 P2 2, measured verbatim on both two-alternative routes). The routes
     now state the drop as its own sentence, for the whole route, and this test

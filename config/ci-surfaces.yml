@@ -2388,10 +2388,13 @@ surfaces:
   - test_12500_query_args_dropped.py
   # #12477: the health surfaces must not read green over a failing data plane
   # (the `/health` body's verdict and the 9090 listener's registration). Landed in
-  # `main` UNREGISTERED — `manifest-integrity` runs after the merge, so `main` was
-  # red on `integrity()` and every PR's merge ref inherited it (the class recorded
-  # on #11978). Registered here so the recovery travels with the next PR that
-  # touches this file.
+  # `main` UNREGISTERED — so `main` was red on `integrity()` and every PR's merge
+  # ref inherited it. The mechanism, measured on that PR (#12488): the leg is NOT
+  # blind before the merge — `manifest-integrity` runs on every event and completed
+  # FAILURE at 04:28:39Z, and the PR merged at 05:15:26Z anyway (enforce_admins:
+  # false, owner merge). That is the class #11978 records: a required leg that does
+  # not GATE the merge, not a gate that cannot see the commit. Registered here so
+  # the recovery travels with the next PR that touches this file.
   - test_12477_health_honesty.py
   - test_candidate_recall_11901.py
   - test_journal_segments.py

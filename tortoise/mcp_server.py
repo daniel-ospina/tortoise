@@ -3952,7 +3952,7 @@ def tortoise_query(kind: str | None = None,
       by the accessor's own. They
       are applied on the text= arm, but each on a different condition:
       `min_confidence` only for `entity_type="point"` (the fts leg gates the
-      floor on the literal `entity_type == "point"`, sdk.py:43288), and
+      floor on the literal `entity_type == "point"`, sdk.py:43377), and
       `order_by="confidence"`/`"graph"` for every type except `document` and
       `source` (both map to the `Source` label: it is outside the ranker's
       belief sweep, so the graph boost is 0 on every row, and neither hit dict
@@ -4052,14 +4052,14 @@ def tortoise_query(kind: str | None = None,
         # missing key hands us `None`, and `""` is the same caller intent. The
         # structural arms used to serve both as Points while the `text=` arm
         # passed the RAW value to the SDK, whose `tortoise_fts_query` refuses it
-        # (`ValueError`, sdk.py:41127) — one argument value answering two
+        # (`ValueError`, sdk.py:41216-41217) — one argument value answering two
         # different ways depending on which arm a caller happened to use.
         # Resolved HERE, above every arm, so all of them see one value.
         entity_type = "point"
     # The vocabulary refusal is the OWNER's (tortoise/security.py), and it is
     # asked ONCE, above every arm — a per-arm copy is how one invalid value ends
     # up with two different messages (`text=` used to surface the SDK's own
-    # re-typed copy from sdk.py:41128 while the structural arms surfaced this
+    # re-typed copy from sdk.py:41217 while the structural arms surfaced this
     # one), and a second copy of the message is what drifts. `point` is a
     # member, so the served path cannot be blocked here.
     from tortoise.security import validate_entity_type
@@ -4106,7 +4106,7 @@ def tortoise_query(kind: str | None = None,
     # finding 4, measured with `mcp.list_tools()`; recorded on #12500). Both
     # structural arms call `sdk.paginated_query(kind, skip, limit,
     # include_retracted, **filters)`, which declares NEITHER parameter
-    # (sdk.py:26585-26588), and the tag arm calls `query_points_by_tag(tag)`,
+    # (sdk.py:26642-26645), and the tag arm calls `query_points_by_tag(tag)`,
     # which takes the tag and nothing else. Measured: `kind="statement",
     # min_confidence=0.9` reaches the accessor as
     # `paginated_query(kind='statement', skip=0, limit=100,
@@ -4195,8 +4195,8 @@ def tortoise_query(kind: str | None = None,
                 and isinstance(min_confidence, (int, float))
                 and 0.0 <= min_confidence <= 1.0):
             # The fts leg compares the floor against EP belief under a literal
-            # `entity_type == "point"` gate (sdk.py:43288; `ep` is None for
-            # every other type at sdk.py:43273), so any other
+            # `entity_type == "point"` gate (sdk.py:43377; `ep` is None for
+            # every other type at sdk.py:43362), so any other
             # entity_type passed the floor straight through. Round-3 P1,
             # measured at the tool boundary: `text="…", entity_type="document",
             # min_confidence=0.9` returned the 0.1-belief rows, and the same read
@@ -4206,18 +4206,18 @@ def tortoise_query(kind: str | None = None,
             #
             # A USABLE floor only (round-20 P2 3, measured): this branch's reason,
             # its harm ("rows they excluded came back") and its route are all
-            # false of a value the SDK itself rejects — `sdk.py:41133-41134`
+            # false of a value the SDK itself rejects — `sdk.py:41222-41223`
             # range-checks `min_confidence` BEFORE any retrieval, so
             # `min_confidence=1.5` here used to raise, never return rows, and the
             # offered `entity_type='point'` route lands on that same range error.
             # Out-of-range and non-numeric floors are therefore left to the SDK,
-            # the way `order_by="garbage"` already is (`sdk.py:41138`). The
+            # the way `order_by="garbage"` already is (`sdk.py:41228`). The
             # `isinstance` test is load-bearing: a non-numeric floor makes the
             # SDK's own `not (0.0 <= …)` raise `TypeError`, and this guard must
             # not turn that into a scoping paragraph. A `bool` is NOT excluded
             # (round-21 P2 1, measured): `0.0 <= True <= 1.0` holds, so the SDK
             # does not reject it, and the fts leg then skips the floor on a
-            # non-Point read (sdk.py:43288) — `min_confidence=True` came back with
+            # non-Point read (sdk.py:43377) — `min_confidence=True` came back with
             # the 0.01 rows, while `1` and `1.0` were refused. One floor must not
             # answer two ways depending on its Python spelling. `False` is still
             # served: it is falsy, so the first conjunct already excludes it.
@@ -4337,7 +4337,7 @@ def tortoise_query(kind: str | None = None,
             # Its own SENTENCE, not a trailing parenthetical (round-21 P2 2,
             # measured): appended at the end of a route with two alternatives it
             # read as qualifying only the last one, and `text=`+`offset=` is
-            # refused whatever `entity_type` says (mcp_server.py:4444-4446) — so
+            # refused whatever `entity_type` says (mcp_server.py:4450-4452) — so
             # following the FIRST alternative ("pass entity_type='point'") landed
             # on "offset/page not supported with text". The drop is required for
             # EVERY alternative, so it is stated once, for the route.
@@ -4369,7 +4369,7 @@ def tortoise_query(kind: str | None = None,
     # promoted from `include_retracted` — never a property filter) into
     # `sdk.tortoise_fts_query`, whose knobs are named (`exclude_status`,
     # `claim_class`, `exclude_turn_echo_session`, `relationship_filter`, …) and
-    # which has NO property-filter parameter (sdk.py:40637-40710). `tag=` reads
+    # which has NO property-filter parameter (sdk.py:40729-40909). `tag=` reads
     # `query_points_by_tag(tag)`, which has no filter parameter either. So a dict
     # a caller passed on EITHER arm was never looked at, and the answer was the
     # unfiltered population with `total`/ordering computed over it — the #6146
