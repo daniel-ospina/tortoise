@@ -760,22 +760,31 @@ git grep -n 'result\["relations"\]' -- tortoise/        # at this record's merge
                                                           # (§0 above). (⚠️ the `-- tortoise/` scope is
                                                           # the claim: unscoped it also matches the
                                                           # reader below)
-git grep -c 'result\["relations"\]' -- tests/          # tree-wide READERS — THREE files on this merge:
-                                                          # tests/test_10999_batch_story_relations.py — 56
-                                                          # LINES — tests/eval/write_path/
-                                                          # test_write_path_relation_lane.py — 3 — and the
-                                                          # capstone pin itself, tests/
-                                                          # test_7949_capstone_measure.py — 1 — so 60
-                                                          # LINES in total (`-c` counts lines per file);
-                                                          # contract pins, not producers
-# ⚠️ the THIRD file is a contract pin that READS the channel like the other two — it was
-# added after this record was written, so the earlier "TWO files … 59" was true of the
-# head this block was first measured on and is re-measured here rather than left stale.
+git grep -c 'result\["relations"\]' -- tests/          # tree-wide MATCHES — THREE files on this merge,
+                                                          # but only ONE of them reads the channel as
+                                                          # data: tests/test_10999_batch_story_relations.py
+                                                          # — 56 LINES; then tests/eval/write_path/
+                                                          # test_write_path_relation_lane.py — 3 — all
+                                                          # three DOCSTRING prose (`:6`, `:22`, `:424`),
+                                                          # not assertions; and the capstone pin itself,
+                                                          # tests/test_7949_capstone_measure.py — 1 — a
+                                                          # SOURCE-TEXT scan of `extractor_v2.py`'s lines
+                                                          # (`:14043`) that derives the cite, so it is a
+                                                          # citation pin, not a consumer. 60 LINES in
+                                                          # total (`-c` counts lines per file)
+# ⚠️ The third file was added after this record was written, so the earlier "TWO files … 59"
+# was true of the head this block was first measured on (`e49788706a`, which reads 2 files /
+# 59 lines / 62 occurrences) and is re-measured here rather than left stale.
 git grep -o 'result\["relations"\]' -- tests/ | wc -l    # 63 OCCURRENCES on this merge (60 lines + the 3
-                                                          # doubly-named ones below). The 59 occurrences
-                                                          # the earlier text printed were `origin/main`'s
-                                                          # at `62248db88`, BEFORE the second reader file
-                                                          # existed — so that half is stale here too
+                                                          # doubly-named ones below). ⛔ A count is only
+                                                          # as good as the BASE it was taken at, and the
+                                                          # earlier text's pair belonged to a different
+                                                          # base than the sentence it sat on claimed: its
+                                                          # "59" was a LINE count and its occurrence count
+                                                          # was "62", BOTH true at `e49788706a`. At
+                                                          # `62248db88` — the base §0 names — `-c` reads
+                                                          # ONE file / 56 lines and `-o | wc -l` reads 59
+                                                          # OCCURRENCES, a different quantity from 62
 git grep -n -o 'result\["relations"\]' -- tests/ \
   | cut -d: -f2 | sort | uniq -d                          # the 3 extra: the doubly-named :1551, :1579, :161
 grep -c '^  - id:' config/v4-mechanisms.yml                 # 15 — and ONE for the hierarchy mechanism
