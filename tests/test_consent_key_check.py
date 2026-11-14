@@ -787,7 +787,7 @@ def test_the_check_step_exits_with_the_code_the_checker_returned(tmp_path) -> No
     # write and its verdict extraction. A pre-existing `/tmp/consent-key.json` (an operator's real
     # reading) was also overwritten and then deleted. An exclusive lock on a companion path serialises
     # the copies without touching the shipped body, which is the thing under test.
-    lock = Path("/tmp/consent-key.json.lock").open("a+")
+    lock = Path("/tmp/consent-key.json.lock").open("a+")  # noqa: SIM115 — the flock handle must OUTLIVE a block scope, or closing it releases the lock; it is released explicitly in `finally`
     fcntl.flock(lock, fcntl.LOCK_EX)
     pre_existing = {p: p.read_bytes() for p in (reading, err) if p.exists()}
     try:
@@ -840,7 +840,7 @@ def test_the_check_step_exits_with_the_code_the_checker_returned(tmp_path) -> No
         "exit 2\n"
     )
     gh_out.write_text("")
-    lock2 = Path("/tmp/consent-key.json.lock").open("a+")
+    lock2 = Path("/tmp/consent-key.json.lock").open("a+")  # noqa: SIM115 — the flock handle must OUTLIVE a block scope, or closing it releases the lock; it is released explicitly in `finally`
     fcntl.flock(lock2, fcntl.LOCK_EX)
     keep = {p: p.read_bytes() for p in (reading, err) if p.exists()}
     try:
@@ -886,7 +886,7 @@ def test_the_SCRIPT_exits_non_zero_on_a_measured_split(tmp_path) -> None:
     app_payload = json.dumps(_pages(_fp(_KEY_B))).encode()
 
     class Handler(BaseHTTPRequestHandler):
-        def do_GET(self):  # noqa: N802 — http.server's contract
+        def do_GET(self):  # http.server's contract (N802 is not in the repo's select)
             body = api_payload if self.path.startswith(CKC.API_PATH) else app_payload
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -929,7 +929,7 @@ def test_the_SCRIPT_exits_zero_on_agreement_and_two_when_nothing_was_measured() 
     app_same = json.dumps(_pages(_fp(_KEY_A))).encode()
 
     class Handler(BaseHTTPRequestHandler):
-        def do_GET(self):  # noqa: N802
+        def do_GET(self):  # http.server's contract
             body = same if self.path.startswith(CKC.API_PATH) else app_same
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -1005,7 +1005,7 @@ def clean_reading():
     import fcntl
 
     reading = Path("/tmp/consent-key.json")
-    lock = Path("/tmp/consent-key.json.lock").open("a+")
+    lock = Path("/tmp/consent-key.json.lock").open("a+")  # noqa: SIM115 — the flock handle must OUTLIVE a block scope, or closing it releases the lock; it is released explicitly in `finally`
     fcntl.flock(lock, fcntl.LOCK_EX)
     pre_existing = reading.read_bytes() if reading.exists() else None
     reading.unlink(missing_ok=True)
@@ -1236,7 +1236,7 @@ def test_a_ZERO_BYTE_reading_never_renders_an_EMPTY_fence(tmp_path) -> None:
     # Same parallel-safety contract as `test_the_check_step_exits_with_the_code_the_checker_returned`:
     # the body's paths are LITERAL, so an exclusive lock serialises copies and only bytes THIS test
     # wrote are removed — an operator's real reading is restored, never deleted.
-    lock = Path("/tmp/consent-key.json.lock").open("a+")
+    lock = Path("/tmp/consent-key.json.lock").open("a+")  # noqa: SIM115 — the flock handle must OUTLIVE a block scope, or closing it releases the lock; it is released explicitly in `finally`
     fcntl.flock(lock, fcntl.LOCK_EX)
     pre_existing = reading.read_bytes() if reading.exists() else None
     try:
@@ -1313,7 +1313,9 @@ def test_the_step_outputs_are_WIRED_from_the_check_step_and_the_dispatch_inputs(
         "the filing step must read the verdict the check step extracted, or every run alerts as if a "
         "disagreement was measured"
     )
-    check_env = [s for s in _steps() if (s.get("run") or "").rstrip().endswith('exit "$rc"')][0]["env"]
+    check_env = next(
+        s for s in _steps() if (s.get("run") or "").rstrip().endswith('exit "$rc"')
+    )["env"]
     assert "github.event.inputs.api_url" in check_env["API_URL"], (
         f"the dispatch's `api_url` input must reach the checker, got {check_env['API_URL']!r}"
     )

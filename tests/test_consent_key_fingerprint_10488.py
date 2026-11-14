@@ -140,7 +140,15 @@ def test_the_fingerprint_leaks_no_key_material() -> None:
     fp = consent_token.consent_key_fingerprint(_KEY_A)
     assert fp is not None
     full = hashlib.sha256(_KEY_A.encode()).hexdigest()
-    assert _KEY_A not in fp
+    # ⛔ NOT `assert _KEY_A not in fp`. The key is 46 bytes and `fp` is 12, so a 46-byte string can
+    # never be a substring of a 12-byte one: that arm was UNSATISFIABLE BY CONSTRUCTION and could
+    # never red (a review finding, and the reason it is recorded here rather than silently deleted —
+    # it reads exactly like a real disclosure assert). What this file CAN state is the POSITIVE claim
+    # the docstring makes: the published value is a prefix of the KEY'S DIGEST, never a truncation of
+    # the key itself. That one can fail.
+    assert full.startswith(fp), (
+        "the fingerprint is not a prefix of sha256(key) — it is not a digest of the key at all"
+    )
     assert fp not in _KEY_A
     assert fp != full
     # Every 8+ character window of the key must be absent — a truncation of the KEY (rather than of
