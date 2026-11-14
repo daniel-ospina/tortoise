@@ -1011,13 +1011,13 @@ surfaces:
   # attribute set and unset alike, because nothing reconciles independent appends. The
   # entry is still exactly the duplicate `duplicate_entries()` exists to catch (#5373): it
   # reaches `--integrity` through `_manifest_contract_issues`, the step the
-  # `manifest-integrity` job runs, and that job's `registry_integrity` step reports the raw
-  # duplicate-entry form as well — `duplicate_entries()` being the reader that names the
-  # offending SURFACE. What does NOT catch it is `integrity()` the FUNCTION — it returns
-  # only the unclassified files, which a duplicated row is not — and selection cannot see a
-  # same-surface repeat either. One row per surface is what `duplicate_entries()` requires.
-  # The redundant copies are deleted, not merged: both carried the same classification, and
-  # the second copy is gone.
+  # `manifest-integrity` job runs, and that job's `registry_integrity` step reports it too,
+  # in its own form — `duplicate entry '…' at .surfaces.api[] (lines a, b)` — where
+  # `duplicate_entries()` reports `api: …`. What does NOT catch it is `integrity()` the
+  # FUNCTION — it returns only the unclassified files, which a duplicated row is not — and
+  # selection cannot see a same-surface repeat either. One row per surface is what
+  # `duplicate_entries()` requires. The redundant copies are deleted, not merged: both
+  # carried the same classification, and the second copy is gone.
   - test_12477_health_honesty.py
   - test_agent_signup.py
   - test_agent_signup_idempotency.py
@@ -3051,7 +3051,7 @@ surfaces:
   # throwaway embedded graph, so it takes no `carve_out` slot.
   - test_kind_guards_12060.py
   # #9494: registered ONCE, in this `core` block (its sibling `test_monitoring.py`
-  # sits at its own alphabetical position further down), with the `durations:` row
+  # is registered further down this list, not beside it), with the `durations:` row
   # the surface entry does not cover. Two lanes appended this file here and there
   # while both fixed the same review finding, and a same-surface duplicate reds
   # `duplicate_entries()` (#5373) — so this line is deliberately absent.
