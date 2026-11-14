@@ -3632,7 +3632,7 @@ def _cmd_config(args) -> int:
     import shlex as _shlex
     import sys as _sys
 
-    from tortoise.config import is_db_uri, looks_like_uri_userinfo
+    from tortoise.config import is_db_uri, looks_like_uri_userinfo, rung_deciding_key
 
     json_mode = bool(getattr(args, "json", False))
     payload: dict = {"status": "ok", "credential": {}, "graph_store": {},
@@ -4501,13 +4501,17 @@ def _cmd_config(args) -> int:
                     # nothing and the sentence below credited it with the
                     # agreement (#12428 review: "the file's TORTOISE_DB_PATH
                     # resolves to it for the daemon too" — it never ran).
-                    _carried = (env_file.get("env_graph_keys")
-                                or [*(env_file.get("shadowed_graph_keys") or ()),
-                                    *(env_file.get("applied_graph_keys") or ())])
-                    _deciding = next(
-                        (key for key in _DB_LADDER_KEYS
-                         if key in env_file["graph_keys"] or key in _carried),
-                        None)
+                    # ⛔ The RESOLVER's answer, not a walk of `_DB_LADDER_KEYS`
+                    # (#12441 items 1 and 5): the rung this payload already
+                    # carries is `config.daemon_db_target`'s own output, so it
+                    # names the key the ladder CONSUMED. The walk this replaced
+                    # was presence-based while the ladder is truthiness-based, so
+                    # a BLANK `TORTOISE_DB_URI` in the file was named as the
+                    # reason the two targets agree while the ladder had skipped
+                    # it and the ENVIRONMENT's `TORTOISE_DB_PATH` decided.
+                    # `None` here means the rung is unmapped — see
+                    # `config.RUNG_DECIDING_KEY`, which a test keeps complete.
+                    _deciding = rung_deciding_key(env_file.get("daemon_rung"))
                     if _deciding and _deciding not in env_file["graph_keys"]:
                         print("  →  the same graph target as above: the ENVIRONMENT's")
                         print(f"     {_printable(_deciding)} decides it for the daemon,")
@@ -4539,10 +4543,12 @@ def _cmd_config(args) -> int:
                         print("     — the target above is the one it selects")
                     elif _from_file and _from_env:
                         # The MIXED state. WHICH key decides is an ordering fact,
-                        # so ask the ladder rather than assume either side.
-                        _top = next(key for key in _DB_LADDER_KEYS
-                                    if key in env_file["applied_graph_keys"]
-                                    or key in env_file["shadowed_graph_keys"])
+                        # ⛔ and it is the RESOLVER's to state (#12441 item 1):
+                        # the rung the payload carries names the key it consumed.
+                        # A `next(key for key in _DB_LADDER_KEYS if present)` walk
+                        # re-spelled the ORDER and ignored TRUTHINESS, so a BLANK
+                        # file key was credited as the deciding rung.
+                        _top = rung_deciding_key(env_file.get("daemon_rung"))
                         if _top in env_file["applied_graph_keys"]:
                             print("  →  the same graph target as above: this process")
                             print("     applied this file, so the environment now sets "
@@ -11594,9 +11600,13 @@ def _daemon_error_label(exc: BaseException) -> str:
     `ValueError` every earlier run printed — a change nothing would have caught
     (review, P3, #12441 item 5).
 
-    So the label is the BASE class for the subclass and the real class name for
-    everything else (a `ValueError` from the overlay itself, e.g. a value
-    `os.environ` refuses, keeps rendering as `ValueError`, as it always did).
+    So the label is the BASE class for the subclass, and the real class name for
+    anything else — an `else` branch that is DEFENSIVE today, not live: both
+    call sites sit inside an `except ValueError` wrapping `daemon_db_target()`,
+    and neither wrapped rung can raise anything but `DaemonTargetError`. A
+    `ValueError` from the overlay itself (a value `os.environ` refuses) is raised
+    in `_environ_overlay.__enter__`, i.e. OUTSIDE those blocks, and is rendered
+    by the surrounding handler with its own `type(exc).__name__` — never here.
     """
     from tortoise.config import DaemonTargetError
 
@@ -12052,6 +12062,8 @@ def _dotenv_rows(env_file: dict) -> list[tuple[str, str, str]]:
     adds could be erased or forged. The sibling `config show` prose already
     escaped (that is what `_printable` exists for); this row builder did not.
     """
+    from tortoise.config import rung_deciding_key
+
     rows: list[tuple[str, str, str]] = []
     for other in env_file.get("unread_env_files") or ():
         if other.get("state") == "unreadable":
@@ -12271,13 +12283,10 @@ def _dotenv_rows(env_file: dict) -> list[tuple[str, str, str]]:
     # the file's key — both credited the file with selecting a target it never
     # touched (#12428 review).
     if env_file.get("graph_keys"):
-        _carried = (env_file.get("env_graph_keys")
-                    or [*(env_file.get("shadowed_graph_keys") or ()),
-                        *(env_file.get("applied_graph_keys") or ())])
-        _deciding = next(
-            (key for key in _DB_LADDER_KEYS
-             if key in env_file["graph_keys"] or key in _carried),
-            None)
+        # ⛔ The RESOLVER's answer, not a walk of `_DB_LADDER_KEYS` (#12441 item
+        # 1) — see the twin site in `_cmd_config` for the blank-value state the
+        # walk mis-attributed.
+        _deciding = rung_deciding_key(env_file.get("daemon_rung"))
         if _deciding and _deciding not in env_file["graph_keys"]:
             detail = (f"{path} sets "
                       f"{_printable(', '.join(env_file['graph_keys']))} — "
@@ -12310,10 +12319,10 @@ def _dotenv_rows(env_file: dict) -> list[tuple[str, str, str]]:
         elif _from_file and _from_env:
             # MIXED: the shell supplied one ladder key and the file the other.
             # Whichever the ladder ranks FIRST decides, so name it rather than
-            # assume either side.
-            _top = next(key for key in _DB_LADDER_KEYS
-                        if key in env_file["applied_graph_keys"]
-                        or key in env_file["shadowed_graph_keys"])
+            # assume either side — ⛔ by asking the RESOLVER (#12441 item 1): the
+            # rung names the key the ladder actually CONSUMED, where the walk
+            # this replaces re-spelled the ORDER and ignored TRUTHINESS.
+            _top = rung_deciding_key(env_file.get("daemon_rung"))
             if _top in env_file["applied_graph_keys"]:
                 detail = (f"{_sets}; this process applied it at import, so the "
                           f"environment now sets {_from_file}, which the daemon "

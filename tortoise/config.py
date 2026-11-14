@@ -561,6 +561,46 @@ class DaemonTargetError(ValueError):
         self.key = key
 
 
+#: Which :data:`DAEMON_DB_KEYS` entry each rung of :func:`daemon_db_target`
+#: CONSUMES — the rung is the resolver's own answer, so the report cannot spell
+#: the ladder's rule a second time (#12441 items 1 and 5).
+#:
+#: ⛔ WHY THIS TABLE EXISTS. The disclosure asks "which key decided the daemon's
+#: target" in four places, and each answered it by walking ``DAEMON_DB_KEYS``
+#: itself and restating the ladder as "the first key present". That was faithful
+#: about ORDER and wrong about TRUTHINESS, which is the test the ladder actually
+#: applies (``if uri:``): a `.env` carrying a BLANK ``TORTOISE_DB_URI`` beside a
+#: shell ``TORTOISE_DB_PATH=/tmp/env-path.db`` resolved to the shell's path on
+#: the ``path`` rung, and the row still said *"the file's TORTOISE_DB_URI
+#: resolves to it for the daemon too"* — naming a value the ladder never read, in
+#: the surface whose whole purpose is truthful disclosure (#12441 item 1).
+#:
+#: ⛔ ``embedded-allowed`` maps to ``TORTOISE_DB_PATH`` deliberately: that rung is
+#: reached only AFTER ``TORTOISE_DB_PATH`` was read and found falsy, so DB_PATH is
+#: the ladder key the rung answers for. ``refuses`` consumed NEITHER key, and
+#: ``None`` is not a rung at all (a caller that did not grade the daemon).
+RUNG_DECIDING_KEY: dict[str, str | None] = {
+    "uri": "TORTOISE_DB_URI",
+    "file-uri": "TORTOISE_DB_URI",
+    "path": "TORTOISE_DB_PATH",
+    "embedded-allowed": "TORTOISE_DB_PATH",
+    "refuses": None,
+}
+
+
+def rung_deciding_key(rung: str | None) -> str | None:
+    """The ``DAEMON_DB_KEYS`` entry the rung CONSUMED — ``None`` when it consumed none.
+
+    ⛔ NOT a second spelling of the ladder: the rung is :func:`daemon_db_target`'s
+    own OUTPUT, so this cannot drift from the ladder — it can only be
+    INCOMPLETE, and incompleteness is what
+    ``test_every_rung_the_ladder_can_return_has_a_deciding_key`` fails on. An
+    unmapped rung therefore degrades to "unknown origin" (``None``) instead of
+    silently naming a key that did not run.
+    """
+    return RUNG_DECIDING_KEY.get(rung)
+
+
 def daemon_db_target() -> tuple[str | None, str]:
     """The MCP daemon's DB target — ONE implementation, TWO consumers (#12407).
 
