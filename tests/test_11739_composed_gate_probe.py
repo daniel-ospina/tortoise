@@ -453,10 +453,17 @@ def _innermost_enclosing_function(tree, node):
 
     ⚠️ It is a LEXICAL-ancestor rule, not Python's enclosing-SCOPE rule: a write inside a nested
     `def`'s decorator, default value or annotation is attributed to that nested `def`, although
-    Python evaluates it in `_write` (#12688 review round 28, P3). The divergence only ever
-    NARROWS — it can report a write as stray that the old breadth-first rule credited, never the
-    reverse — so it fails closed. Every other shape measured (module level, class body, lambda,
-    comprehension, `if`/`try` blocks, `async def`) attributes identically to the old rule.
+    Python evaluates it in `_write` (#12688 review round 28, P3).
+
+    ⚠️ Do NOT state the divergence as "narrows only" (#12688 review round 30, P3 — it was written
+    that way and it is false). The property that IS true, and was measured on every shape tried:
+    this rule credits a write ONLY when it is lexically inside a function named `_write`, and the
+    one shape where it credits what the breadth-first rule flagged is a `_write` that is ITSELF
+    nested inside another function — the old rule found the outer function first and called that
+    write stray. Both directions of divergence therefore exist, and the safety property does not
+    rest on direction: it rests on the fact that neither rule credits a write that is outside every
+    `_write`. Measured identical to the old rule for module level, class body, lambda,
+    comprehension, `if`/`try` blocks and `async def`.
     """
     import ast
 
