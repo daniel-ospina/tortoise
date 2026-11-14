@@ -1,4 +1,4 @@
-// tortoise-hook-version: 22
+// tortoise-hook-version: 23
 // tortoise-capture — the in-repo Pi capture extension (#3575, #1727 T1).
 //
 // The `tortoise-hook-version` marker above is the install-contract generation
@@ -53,6 +53,22 @@
 // ("reinstall"), never as `modified-artifact` ("local edit"). Both halves of the
 // Pi seam move together — `contract_version_for("pi")` grades them as ONE
 // contract.
+// Generation 23 (#12603): the REFUSAL path reads the session back. The
+// unrecorded-outcome marker (#12379) had exactly one producer and it was
+// Python-CLI's `__main__._session_post._refused`; a 2xx receipt carries no
+// `outcome_known` and a refusal carries no body at all, so this leg's stamp
+// branch had NO live input and `session health` on a Pi box reported nothing for
+// a session in the measured #12374 state (a 504 after the server committed:
+// `extracted: 0`, `outcome_known: false`). A RETRYABLE refusal is now followed by
+// `GET /v1/sessions/<id>` — the same read `session verify` makes, no new
+// surface — the served turns are windowed and matched against what was just
+// POSTed (`expected_turns`), and `_extraction_verdict`'s precedence decides:
+// `extracted >= 1` means extraction ran, else an explicit `outcome_known: false`
+// stamps the marker in the same write as the retry backoff. The defer itself is
+// unchanged, and the read is bounded by `CONFIRM_READ_TIMEOUT_MS`. BEHAVIOUR
+// MOVED on shipped bytes, so a generation-22 install must read STALE
+// ("reinstall"), never `modified-artifact` ("local edit"). Both halves of the Pi
+// seam move together — `contract_version_for("pi")` grades them as ONE contract.
 // Generation 22 (#12460): the filing path READS the 2xx body. `post()` returned
 // only `{ok, status, detail}`, so `flushSpool` could not see what the server said
 // about the capture — a synthesised confirmation body's `confirmed`, or (the
@@ -1226,21 +1242,27 @@ export interface SpoolMeta {
    *  never recorded (`extraction_outcome: "unknown"`) — the durable trace
    *  `session health` counts. Both legs run the same predicate pair (`flushSpool`
    *  stamps via `outcomeUnrecorded`, clears via `outcomeRecorded`; the drain does
-   *  the same in `capture_spool._flush_one`), so this leg DOES stamp — ⚠️ but the
-   *  key has no producer on this tree: `__main__._session_post._refused` builds
-   *  only `{"confirmed": verdict}` (the `extraction_outcome` half is #12374's
-   *  PENDING branch), and `hosted_api`'s receipt carries no such field, so nothing
-   *  this leg can receive says `"unknown"` today. The stamp branch is therefore
-   *  live code with no live input — kept so the pair stays symmetric (and so the
-   *  predicate cannot be trimmed to "clear only" without the trim being visible).
-   *  ⚠️ It does NOT become live when #12374 lands: that producer is Python-CLI's
-   *  `_session_post`, which this leg never calls; only a `hosted_api` receipt that
-   *  grew the field could make it fire. It is also CARRIED across snapshots,
-   *  because a growing session rewrites the meta on every turn and a new turn does
-   *  not resolve the state (a NULL-outcome session replays instead of
-   *  re-extracting). Without the carry a stamped entry loses its only durable
-   *  trace the next time the Pi leg re-snapshots it — the two legs share this
-   *  directory. */
+   *  the same in `capture_spool._flush_one`).
+   *
+   *  ⛔ HOW THIS LEG PRODUCES IT (#12603): not from a POST body — a 2xx receipt
+   *  (`{session_id, turns, extracted, …}`) carries no `outcome_known`, and a
+   *  refusal carries no body at all — but from the CONFIRM-ON-REFUSAL READ
+   *  (`refusalOutcomeVerdict`): a retryable refusal is followed by
+   *  `GET /v1/sessions/<id>`, the served turns are matched against what was just
+   *  posted (`expected_turns`), and the served outcome decides — an explicit
+   *  `extraction.outcome_known: false` stamps this key, while a recorded outcome
+   *  (`extracted >= 1`, or `outcome_known: true`) CLEARS it. That is the same
+   *  question `__main__._session_post._refused` asks on the Python leg, asked from
+   *  the one read this leg is allowed to make.
+   *  Before #12603 this key had NO producer here (the branch was live code with
+   *  no live input, and a Pi box reported nothing for a session in the measured
+   *  #12374 state). See `outcomeUnrecorded` for the predicate.
+   *
+   *  It is CARRIED across snapshots, because a growing session rewrites the meta
+   *  on every turn and a new turn does not resolve the state (a NULL-outcome
+   *  session replays instead of re-extracting). Without the carry a stamped entry
+   *  loses its only durable trace the next time the Pi leg re-snapshots it — the
+   *  two legs share this directory. */
   extraction_outcome?: string;
   /** #7708: set when a PERMANENT HTTP refusal was recorded. The entry is KEPT
    *  but `flushSpool` skips it — terminal, never destructive. Cleared when a
@@ -2311,19 +2333,22 @@ export function writeSpoolEntry(
     next_attempt_at_ms: carriedWindow(prior?.next_attempt_at_ms),
     // #12379: the "extraction outcome was never recorded" marker is CARRIED by
     // a snapshot, not rebuilt — the turn path cannot decide it either way. The
-    // DECISIONS belong to the two FILING legs: the drain's CAS
-    // (`capture_spool._flush_one`) and, since #12460, this leg's own
-    // `flushSpool` CAS — each running the SAME predicate pair, pinned equal across
-    // the two files: clear on `confirmed` in `{filed, unextracted}` OR on an
-    // integer `extracted >= 1`, nothing else. The PREDICATES are identical; the
-    // BODIES are not, so one shape can still be decided differently: Python also
-    // receives a synthesised `{"confirmed": "unextracted"}` for a refused POST that
-    // a confirm-on-refusal GET found committed, and this leg has no such path — so
-    // on a Pi-filing box a keyless session resolved that way keeps the marker until
-    // eviction. Fail-SAFE in the sense that matters: this leg can only clear on
-    // bodies it actually receives, and every one of those is a body the Python leg
-    // would clear on too. The health line's historical wording survives only the
-    // case neither leg can resolve (no later filing at all).
+    // STAMP decision runs on this leg's REFUSAL path
+    // (`refusalOutcomeVerdict`, #12603) and in the two FILING legs: the
+    // drain's CAS (`capture_spool._flush_one`) and this leg's own `flushSpool`
+    // CAS. The CLEAR decision runs on the same three, each running the SAME
+    // predicate pair, pinned equal across the two files: clear on `confirmed` in
+    // `{filed, unextracted}` OR on an integer `extracted >= 1`, nothing else.
+    // Since #12603 the refusal path clears too, on a turn-matched read whose
+    // `_extraction_verdict` is `FILED` or `UNEXTRACTED` — the same detail Python
+    // turns into `confirmed`, so the two legs no longer disagree about one shared
+    // meta. The PREDICATES are still not byte-identical, and the one narrowing is
+    // stated where it lives (`refusalOutcomeVerdict`: a detail with NO
+    // `extraction` block is `"inconclusive"` here and `UNEXTRACTED` there), which
+    // can only leave a marker standing that Python would drop. The health line's
+    // historical wording survives exactly the case neither leg can resolve: a
+    // later filing that does NOT record the ending — a REPLAY (see
+    // `refusalOutcomeVerdict`'s residual note).
     //
     // The carry itself matters because the two legs share this directory: a
     // growing session rewrites the meta on EVERY turn, so a fresh meta literal
@@ -3022,10 +3047,11 @@ const UNRECORDED_OUTCOME_VALUE = "unknown";
  * a grown set returns `TURNS_MISSING`, an absent one `UNKNOWN` — both defer), not
  * only on a store-only capture.
  * ⚠️ `unextracted` rests on the confirmation READ matching the posted
- * turns, NOT on the server having recorded an outcome — on this tree that read
- * does not consult `extraction.outcome_known` (see the ⚠️ RESIDUAL below), so it
- * is exactly as strong as the read, and #12374's PENDING branch is what qualifies
- * it. Everything else — `pending` (still unknown), `replayed` (already captured,
+ * turns, NOT on the server having recorded an outcome — that read DOES consult
+ * `extraction.outcome_known` since #12374 (`session_confirm._extraction_verdict`
+ * returns `PENDING` on an explicit `false`), so it is as strong as the read; the
+ * surviving residual is a served detail with NO `extraction` block at all, and
+ * #12374's PENDING branch is what qualifies the read. Everything else — `pending` (still unknown), `replayed` (already captured,
  * says nothing about extraction), an absent verdict, a malformed body — leaves
  * the marker alone.
  */
@@ -3114,14 +3140,15 @@ function outcomeUnrecorded(body: unknown): boolean {
  * of PR #12507, verified against `hosted_api.py`).
  *
  * ⚠️ RESIDUAL, and it is NOT closed by the Python leg either: `confirm_capture`
- * matches the posted turns and reads `extracted`, but does NOT consult
- * `extraction.outcome_known` on this tree (`session_confirm.py`), so its
- * `unextracted` verdict cannot distinguish a store-only re-capture from a
- * resolved store-only outcome — a `confirmed: "unextracted"` body can therefore
- * still clear this marker over an unrecorded outcome. That is pre-existing
- * (#12379's accepted decision) and #12374's PENDING branch is what qualifies it;
- * it is stated here so this paragraph's own reasoning is not read as "the other
- * leg is authoritative".
+ * matches the posted turns and reads `extracted`, and it DOES consult
+ * `extraction.outcome_known` through `_extraction_verdict` (since #12374) — so its
+ * `unextracted` verdict is qualified for a served detail that carries the block.
+ * What no leg's `unextracted` verdict can distinguish is a served detail with NO
+ * `extraction` block at all (a pre-#3520 server, a fake): `outcome_known` reads
+ * `None`, and a `confirmed: "unextracted"` body can therefore still clear this
+ * marker over an unrecorded outcome. That is pre-existing (#12379's accepted
+ * decision) and is stated here so this paragraph's own reasoning is not read as
+ * "the other leg is authoritative".
  */
 function outcomeRecorded(body: unknown): boolean {
   if (!body || typeof body !== "object" || Array.isArray(body)) return false;
@@ -3134,16 +3161,29 @@ function outcomeRecorded(body: unknown): boolean {
   ) {
     return true;
   }
-  // `extracted >= 1` — the clause mirrors `session_confirm.session_extracted`:
-  // a bool, a string or a non-numeric reads as 0, so an odd count can never
-  // satisfy it. ⚠️ Not identical to the Python predicate on one input: JSON has
-  // no float/integer distinction here (`JSON.parse('{"extracted": 4.0}')` gives
-  // `4`, and `Number.isInteger(4)` is true) while Python's `isinstance(4.0, int)`
-  // is false — so a float-spelled count WOULD clear on this leg and not on the
-  // other. Unreachable in practice: the only producer is
-  // `hosted_api`'s `"extracted": len(extracted)`, an integer token.
-  const extracted = receipt.extracted;
-  return typeof extracted === "number" && Number.isInteger(extracted) && extracted >= 1;
+  return extractionObserved(receipt.extracted);
+}
+
+/**
+ * Did the server report that extraction RAN — `session_confirm.session_extracted`
+ * plus its `>= 1` test?
+ *
+ * ONE definition, read by BOTH directions: the CLEAR (`outcomeRecorded`) and the
+ * confirm-on-refusal read's `_extraction_verdict` precedence
+ * (`refusalOutcomeVerdict`). Two spellings of the same clause is how the
+ * two directions come apart: the round-2 review of #12603 caught the precedence
+ * arm re-spelling it with a comment claiming a parity it did not have.
+ *
+ * A bool, a string or a non-numeric reads as 0, so an odd count can never
+ * satisfy it. ⚠️ NOT identical to the Python predicate on one input: JSON has no
+ * float/integer distinction here (`JSON.parse('{"extracted": 4.0}')` gives `4`,
+ * and `Number.isInteger(4)` is true) while Python's `isinstance(4.0, int)` is
+ * false — so a float-spelled count counts as observed on this leg and not on the
+ * other. Unreachable in practice, because the only producer is
+ * `hosted_api`'s `"extracted": len(extracted)`, an integer token.
+ */
+function extractionObserved(value: unknown): boolean {
+  return typeof value === "number" && Number.isInteger(value) && value >= 1;
 }
 
 /**
@@ -3168,6 +3208,447 @@ function entryFiled(meta: SpoolMeta): boolean {
       normaliseLane(meta.filed_lane) === normaliseLane(meta.capture_lane) &&
       (meta.filed_stamp ?? undefined) === finiteInstant(meta.client_captured_at),
   );
+}
+
+/**
+ * Bounded allowance for the confirm-on-refusal READ (#12603), in ms.
+ *
+ * ⛔ NOT `REQUEST_TIMEOUT_MS` (10 s). This read runs inside `session_shutdown`
+ * (and every background flush) on the REFUSAL path, i.e. exactly where the
+ * transport bound has already been spent once; a second 10 s wait would double
+ * the stall. `PROBE_TIMEOUT_MS`'s 2 s is the precedent — the read is a single
+ * indexed GET that the #12374 measurement answered in ~0.5 s.
+ *
+ * Worst case added to ONE pass: `FLUSH_MAX_ATTEMPTS` (8) refusals × 2 s = 16 s
+ * on top of the pass's POST budget. Every read is per-ENTRY (once, after that
+ * entry's refusal), never per-turn, and the pass budget is still checked
+ * BETWEEN entries.
+ */
+export const CONFIRM_READ_TIMEOUT_MS = 2_000;
+
+/**
+ * The refusal statuses whose session can NEVER be confirmed — MIRRORED from
+ * `capture_receipts.REFUSAL_STATUSES` (402/403/503), the family the Python leg's
+ * `_session_post._refused` excludes BY NAME before it confirms.
+ *
+ * #4675's recorded 2xx-only rule: a `retryable` refusal is not proof that
+ * nothing committed, EXCEPT for these three, where the server has said the
+ * session itself is the problem (quota / credential / service). Reading there
+ * would be a round trip that can only answer 404, and on a quota-blocked box it
+ * would be one per pass — while the two legs would then disagree about whether a
+ * 402 confirms. Uniformity is deliberate: a reviewer must not have to work out
+ * why one leg confirms a 402 and the other does not.
+ * `tests/test_pi_capture_hooks.py` pins this list against the Python table.
+ */
+const NO_CONFIRM_READ_STATUSES: readonly number[] = [402, 403, 503];
+
+/** The served-body redaction marker (``tortoise.security._REDACTION_VALUE``).
+ * A body is never delimiter-neutralized, so this square form is the only marker
+ * a BODY can carry. */
+const SERVED_BODY_REDACTION_MARKER = /\[REDACTED:[^\[\]]*\]/;
+/** The served-ROLE redaction marker: `_capture_turn_frame` neutralizes the
+ * framing delimiters in the role (#5445), so a redacted role is served as
+ * `(REDACTED:<kind>)`. Recognising the square form in a role would treat a role
+ * the user LITERALLY typed as `(REDACTED:foo)` as a wildcard. */
+const SERVED_ROLE_REDACTION_MARKER = /\(REDACTED:[^()]*\)/;
+
+/**
+ * `GET /v1/sessions/<id>` — the ONE read `session verify` already makes
+ * (`session_verify._session_detail`), and the only new call this leg makes.
+ *
+ * TOTAL: every failure mode (`no key`, non-2xx, no body, unparseable body,
+ * transport error, abort) returns `undefined` — never a throw and never a
+ * fabricated body. The caller's safe direction is "inconclusive = stamp
+ * nothing", so a read that cannot answer must be indistinguishable from one
+ * that was never asked.
+ *
+ * ⚠️ ONE attempt. `session_confirm.confirm_capture` (the Python leg's read)
+ * makes `DEFAULT_ATTEMPTS` = 2 attempts `DEFAULT_DELAY_S` = 1.0 s apart with a
+ * `DEFAULT_READ_TIMEOUT_S` = 5 s bound each; this is a single 2 s read, because
+ * it runs inside `session_shutdown`'s budget. The asymmetry can only LOSE a
+ * trace, never fabricate one: a read that 503s (`graph_unavailable`) or 404s once
+ * and would answer on Python's second attempt stamps nothing here, and the next
+ * pass re-POSTs the entry, gets a REPLAY receipt, and (correctly) clears nothing.
+ * Stated here rather than closed because retrying would add up to 4 s per refused
+ * entry to a hook path.
+ *
+ * ⚠️ The id is PERCENT-ENCODED rather than spliced raw into the path (the
+ * Python leg's `f"/v1/sessions/{session_id}"`). Pi session ids are usually
+ * opaque, but `localSessionId` (#9599) anchors an id to the transcript PATH, so
+ * a slash-bearing id is reachable: raw splicing would read a DIFFERENT path (a
+ * truncated id) and could return some other session's detail as if it were ours,
+ * while encoding it makes the route a miss — which is the fail-safe direction
+ * here. Neither leg can address such a session by id; this one just cannot be
+ * confused about it.
+ */
+async function getSessionDetail(
+  cfg: CaptureConfig,
+  sessionId: string,
+  fetchImpl: FetchLike,
+  timeoutMs: number = CONFIRM_READ_TIMEOUT_MS,
+): Promise<unknown> {
+  if (!cfg.apiKey || !sessionId) return undefined;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetchImpl(
+      `${cfg.apiUrl}/v1/sessions/${encodeURIComponent(sessionId)}`,
+      {
+        method: "GET",
+        headers: { Authorization: `Bearer ${cfg.apiKey}` },
+        signal: controller.signal,
+      },
+    );
+    if (!res.ok) return undefined;
+    try {
+      return await res.json();
+    } catch {
+      // a 2xx with no readable JSON body carries no verdict
+      return undefined;
+    }
+  } catch {
+    return undefined;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** The deterministic per-turn id — MIRRORED from
+ * `session_confirm.turn_point_id` / `sdk._capture_turn_id` (`{session_id}_t{i}`),
+ * the server's idempotency contract for a capture's turns. Pinned cross-language
+ * by `tests/test_pi_capture_hooks.py::test_the_pi_turn_id_matches_session_confirm`
+ * — the extension cannot import Python, so the literal needs a pin or the match
+ * goes silently inert when the server's derivation moves. */
+function turnPointId(sessionId: string, index: number): string {
+  return `${sessionId}_t${index}`;
+}
+
+/**
+ * The served `turn_points` as `{id: [role, content]}`, or `undefined` when the
+ * block is absent/unusable.
+ *
+ * MIRRORS `session_confirm.turn_points`: a row that is not a mapping with a
+ * non-empty string `id` is SKIPPED, a non-string `content` becomes a sentinel
+ * that can never equal a real body, and a missing/odd `role` becomes `""` —
+ * never the expected role. Total over a malformed payload, because this runs
+ * inside a failure path whose contract is "never replace the honest error with
+ * a traceback".
+ */
+function servedTurnPoints(detail: unknown): Map<string, [string, string]> | undefined {
+  if (!detail || typeof detail !== "object" || Array.isArray(detail)) {
+    return undefined;
+  }
+  const rows = (detail as Record<string, unknown>).turn_points;
+  if (!Array.isArray(rows)) return undefined;
+  const out = new Map<string, [string, string]>();
+  for (const row of rows) {
+    if (!row || typeof row !== "object" || Array.isArray(row)) continue;
+    const r = row as Record<string, unknown>;
+    const id = r.id;
+    if (typeof id !== "string" || !id) continue;
+    const content = r.content;
+    out.set(id, [
+      typeof r.role === "string" ? r.role : "",
+      typeof content === "string"
+        ? content
+        : "\u0000<no content on the returned row>",
+    ]);
+  }
+  return out;
+}
+
+/**
+ * True when `stored` is `raw` with zero or more spans replaced by a redaction
+ * marker.
+ *
+ * MIRRORS `session_confirm._stored_is_raw_with_markers` (#5394). The server
+ * scrubs the text it stores with ITS `_SECRET_SHAPES` table, deployed
+ * independently of this extension, so requiring byte identity makes every
+ * capture containing a secret read as "not ours" — and the deferred entry never
+ * terminalises. The literal (non-marker) spans must still match byte-for-byte,
+ * in order, and each marker stands for at least one character: a missing turn,
+ * a truncated body, or any difference OUTSIDE a marker still fails, which is
+ * what keeps this a MATCH and not a wildcard.
+ */
+function storedIsRawWithMarkers(
+  raw: string,
+  stored: string,
+  marker: RegExp,
+): boolean {
+  if (raw === stored) return true;
+  const span = new RegExp(marker.source, "g");
+  if (!span.test(stored)) return false;
+  span.lastIndex = 0;
+  const segments: Array<{ isMarker: boolean; text: string }> = [];
+  let last = 0;
+  for (let m = span.exec(stored); m !== null; m = span.exec(stored)) {
+    segments.push({ isMarker: false, text: stored.slice(last, m.index) });
+    segments.push({ isMarker: true, text: "" });
+    last = m.index + m[0].length;
+    if (m[0].length === 0) {
+      // Defensive: neither marker can match empty, but a future pattern that
+      // could must not spin this loop.
+      span.lastIndex += 1;
+    }
+  }
+  segments.push({ isMarker: false, text: stored.slice(last) });
+  let pos = 0;
+  const end = raw.length;
+  const final = segments.length - 1;
+  for (let i = 0; i < segments.length; i += 1) {
+    const seg = segments[i];
+    if (seg.isMarker) {
+      // Each marker stands for at least one raw character.
+      if (pos >= end) return false;
+      pos += 1;
+      continue;
+    }
+    if (i === 0) {
+      if (!raw.startsWith(seg.text, pos)) return false;
+      pos += seg.text.length;
+    } else if (i === final) {
+      // fullmatch: the trailing literal must END the raw string.
+      return end - seg.text.length >= pos && raw.endsWith(seg.text);
+    } else {
+      // Leftmost leaves the most room for a sequence with no upper bound but
+      // the final literal, so it is optimal — the same reading the Python leg
+      // documents and checks against the direct transcription.
+      const idx = raw.indexOf(seg.text, pos);
+      if (idx < 0) return false;
+      pos = idx + seg.text.length;
+    }
+  }
+  return true;
+}
+
+/**
+ * The exact set the READER's inverse can consume at the start of a body: the
+ * reader is `sdk._capture_turn_role_text`, whose pattern is the role prefix
+ * followed by a GREEDY `\s*`, so the served body has its leading run of
+ * Python-`\s` characters STRIPPED.
+ *
+ * ⛔ It is NOT `BLANK_CHARS`. That constant is the union of Python's
+ * `str.strip()` set and JS `trim()`'s (see its note), and the union's one extra
+ * member is **U+FEFF**, which Python's `re \s` does NOT match — so stripping it
+ * would make our expectation SHORTER than the body the server serves, and the
+ * row would never match. Over-stripping is UNDER-matching in an equality test:
+ * the safe direction is Python's set exactly, which is why this is derived from
+ * `BLANK_CHARS` by removing that one member rather than by re-spelling the list
+ * (and why `tests/test_pi_capture_hooks.py` pins that U+FEFF is the only
+ * member of Python's `_CAPTURE_BLANK_CHARS` that its `re \s` refuses).
+ */
+const FRAME_INVERSE_BLANKS = BLANK_CHARS.replace("\uFEFF", "");
+
+/**
+ * The READER's inverse of the stored frame, applied to our own text: the server
+ * serves a body with its leading Python-`\s` run stripped (`_capture_turn_role_text`),
+ * and `session_confirm.expected_turns` builds its expectation through that same
+ * inverse — so the Python leg compares a lstripped body. A port that compares
+ * the raw text never matches a turn whose content begins with whitespace, and
+ * the whole trace goes silently inert for those captures (round-2 review of
+ * #12603 measured exactly that).
+ */
+function servedFrameInverse(body: string): string {
+  let start = 0;
+  while (start < body.length && FRAME_INVERSE_BLANKS.includes(body[start])) {
+    start += 1;
+  }
+  return body.slice(start);
+}
+
+/**
+ * Does the served detail hold EXACTLY the turns we just POSTed?
+ *
+ * The `expected_turns` model (`session_confirm.py`): the KEY SETS must be
+ * identical — a missing, extra, grown or re-windowed turn is a different
+ * transcript — and each row's role and body must be our own text, tolerating
+ * server-side redaction only (`storedIsRawWithMarkers`).
+ *
+ * ⛔ THE POSTED TURNS ARE WINDOWED FIRST (`clipTurnContent` + a role slice,
+ * mirroring `sdk._capture_turn_window`), because that is the text the server
+ * stores and `expected_turns` applies the window before comparing. An entry
+ * spooled by the PYTHON leg, or one written before #4897 taught this leg to clip,
+ * can carry an over-cap turn; comparing the RAW text there never matches, so the
+ * fix would be silently inert for exactly those captures. The client clipper is
+ * idempotent (`clipTurnContent(clipTurnContent(x)) === clipTurnContent(x)`) and
+ * byte-pinned to the Python one, so windowing an already-clipped turn is a no-op.
+ *
+ * ⛔ This is what makes the read EVIDENCE about OUR capture rather than about
+ * the session id. The id is `{session_id}_t{i}` — deterministic — so only the
+ * text distinguishes a concurrent capture that grew the transcript.
+ */
+function servedTurnsAreOurCapture(
+  detail: unknown,
+  sessionId: string,
+  turns: Turn[],
+): boolean {
+  const have = servedTurnPoints(detail);
+  if (!have || have.size === 0) return false;
+  if (have.size !== turns.length) return false;
+  for (let i = 0; i < turns.length; i += 1) {
+    const row = have.get(turnPointId(sessionId, i));
+    if (!row) return false;
+    const [servedRole, servedBody] = row;
+    // The writer frames the stored text `[<role>] <body>` and neutralizes the
+    // framing delimiters IN THE ROLE only (#5445). The READER's inverse then
+    // strips the frame's leading whitespace run, so the body is compared through
+    // that inverse (`servedFrameInverse(clipTurnContent(...))`), not raw. The
+    // role is capped before the brackets are rewritten, the order the writer
+    // applies.
+    //
+    // ⛔ CAP IN CODE POINTS, not UTF-16 units: Python caps with
+    // `_normalize_turn_role(role)[:cap]`, which counts CODE POINTS. A `.slice()`
+    // counts code units, so a role carrying astral characters (an emoji-only
+    // role, say) would be capped at half the length Python allows — and this is
+    // an EQUALITY test, so the expectation comes out short and the row never
+    // matches. That direction is fail-safe (no stamp), which is precisely why it
+    // would never be noticed: no red, no alarm, the trace just goes inert for
+    // that capture. `clipTurnContent` is code-point safe on purpose for the same
+    // reason.
+    const wantRole = Array.from(
+      typeof turns[i].role === "string" ? turns[i].role : "unknown",
+    )
+      .slice(0, TURN_MAX_CHARS)
+      .join("")
+      .replace(/\[/g, "(")
+      .replace(/\]/g, ")");
+    if (!storedIsRawWithMarkers(wantRole, servedRole, SERVED_ROLE_REDACTION_MARKER)) {
+      return false;
+    }
+    if (!storedIsRawWithMarkers(servedFrameInverse(clipTurnContent(turns[i].content)),
+                                servedBody, SERVED_BODY_REDACTION_MARKER)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** #12603: the confirm-on-refusal read's three answers. See
+ *  `refusalOutcomeVerdict`. */
+export type RefusalOutcomeVerdict = "unrecorded" | "recorded" | "inconclusive";
+
+/**
+ * #12603: after a RETRYABLE refusal, what did the server RECORD about extraction
+ * for the capture we just posted? Three-valued, and both directions read it:
+ *
+ * - `"unrecorded"` — an explicit `extraction.outcome_known === false` over a
+ *   turn-matched read. STAMPS.
+ * - `"recorded"` — a turn-matched read that proves an outcome exists: an
+ *   integer `extracted >= 1` (`_extraction_verdict`'s `FILED`), or an explicit
+ *   `outcome_known === true` (its `UNEXTRACTED`). CLEARS.
+ * - `"inconclusive"` — anything else (no/unreadable body, turn mismatch,
+ *   missing or non-boolean `outcome_known`). Decides NOTHING.
+ *
+ * ⛔ THE CLEAR DIRECTION IS NOT OPTIONAL, and round 4 of this change's review
+ * measured why. `_extraction_verdict` answering `FILED` makes the Python leg's
+ * `_refused` synthesise `{"confirmed": "filed"}`, which `capture_spool._flush_one`
+ * CLEARS on. If this leg read the same detail and only declined to stamp, one
+ * shared meta would hold a marker the other leg had already disproved — a
+ * standing false alarm on exactly the #12374 shape (504 → stamp on pass 1 →
+ * extraction finishes → pass 2's refusal read shows points), and nothing later
+ * clears it, because a stamped entry's eventual filing is a REPLAY (`extracted:
+ * 0`), which `outcomeRecorded` correctly refuses. Both legs now clear on the
+ * same read, for the same reason.
+ *
+ * ⛔ THE MARKER'S ONLY PRODUCER ON THIS LEG. Before this, the key's sole producer
+ * was Python-CLI's `__main__._session_post._refused`, which this leg never calls:
+ * `flushSpool`'s `res.body` can only be a 2xx receipt (`{session_id, turns,
+ * extracted, …}` — no `outcome_known`, no `extraction_outcome`) or a refusal with
+ * no body at all. So on a Pi box the stamp branch was an inert enforcer and
+ * `session health` reported nothing for a session in exactly the state #12374
+ * measured (the transport bound abandons the handler, which keeps extracting:
+ * `extracted: 0` + `outcome_known: false` on the immediate read, points present
+ * seconds later).
+ *
+ * The DEFER itself is unchanged — this is the Python leg's `_refused` QUESTION
+ * ("did the refusal actually commit, and how did extraction end?") answered for
+ * the one fact this leg needs to make the state visible. The entry keeps
+ * retrying.
+ *
+ * ⚠️ THE STAMP CAN OUTLIVE ITS OWN RESOLUTION, and that is the accepted residual
+ * (the Python leg records it too: `tests/test_12379_unrecorded_trace.py`
+ * `test_the_unrecorded_marker_is_STICKY_across_a_replay_filing`). Clearing takes a body
+ * that RECORDS the ending (`extractionObserved`, or `confirmed` in
+ * `{filed, unextracted}`), and the filing a STAMPED entry eventually gets is a
+ * REPLAY — its session already exists, so `hosted_api` skips extraction and
+ * reports `extracted: 0`, `extraction_mode: "replayed"`, which `outcomeRecorded`
+ * correctly refuses. A session that resolves after the stamp therefore keeps
+ * reading as "no recorded extraction outcome at the time" until the entry is
+ * evicted, unless a later capture RETRIES a failed one and re-extracts. The
+ * health line's "at the time" wording is what keeps that honest; it is not a
+ * state a client-side predicate can close.
+ *
+ * FAIL-SAFE: an unreadable body, a non-2xx, a transport error, a turn mismatch,
+ * an absent `extraction` block, or any non-boolean `outcome_known` is
+ * `"inconclusive"` — it neither stamps nor clears. Over-reporting an unknown
+ * state costs a false alarm; stamping on an inconclusive read would assert a
+ * server state nobody observed, and clearing on one would delete the only trace
+ * of a condition that may still hold.
+ *
+ * ⚠️ ONE DELIBERATE NARROWING vs `_extraction_verdict`, stated so it is not
+ * mistaken for an oversight: a detail with NO `extraction` block reads
+ * `None` there, which is not `False`, so Python's `UNEXTRACTED` arm fires and it
+ * CLEARS. That is #12379's recorded residual for the FILING legs (a pre-#3520
+ * server and a malformed body are indistinguishable from a keyless session on
+ * that side). This leg does not extend it to a second write path: a body that
+ * says nothing about extraction is evidence about nothing, and the marker this
+ * read would delete was placed by an OBSERVED `false`. Consequence, one-sided
+ * and safe: on a Pi-filing box such an entry keeps the marker where a Python
+ * filing of the same body would drop it — a false alarm, never a lost trace.
+ *
+ * ⛔ It also mirrors `_extraction_verdict`'s PRECEDENCE, not only its PENDING
+ * arm: `extracted >= 1` is `FILED` **before** the qualifier is consulted.
+ * Points already stored prove extraction RAN — `outcome_known` is
+ * `capture_ok IS NOT NULL` and the points are written before that SET
+ * (`sdk.py`), so `extracted > 0` with `outcome_known: false` is a **mid- or
+ * failed-commit of a capture that DID extract**, not an unknown outcome. Without
+ * this clause the two legs would render OPPOSITE verdicts over one shared meta:
+ * Python confirms `filed` and CLEARS, this leg would STAMP.
+ */
+async function refusalOutcomeVerdict(
+  cfg: CaptureConfig,
+  sessionId: string,
+  turns: Turn[],
+  fetchImpl: FetchLike,
+  status?: number,
+): Promise<RefusalOutcomeVerdict> {
+  // The Python gate this mirrors is `capture_receipts.may_mint_local_receipt`:
+  // the refusal must be of the RETRYABLE **class** (so a `policy` 401/407 is
+  // excluded — a rotated key or a suspended org is not a post-commit timeout)
+  // AND outside the recorded refusal set `NO_CONFIRM_READ_STATUSES`
+  // (402/403/503). Both halves, or the two legs disagree about which refusals
+  // may be confirmed.
+  if (status !== undefined && (
+    classifyFailure(status) !== "retry" ||
+    NO_CONFIRM_READ_STATUSES.includes(status)
+  )) {
+    return "inconclusive";
+  }
+  // The WIRE id, not the raw disk value: the payload carried
+  // `normaliseSessionId(...)`, so that is the id the server keyed the session
+  // and its deterministic turn ids on.
+  const wireId = normaliseSessionId(sessionId);
+  if (!wireId || turns.length === 0) return "inconclusive";
+  const detail = await getSessionDetail(cfg, wireId, fetchImpl);
+  if (!servedTurnsAreOurCapture(detail, wireId, turns)) return "inconclusive";
+  // `_extraction_verdict`'s FIRST arm — see the precedence note above. The clause
+  // is `extractionObserved`, the SAME definition the CLEAR uses, so the two
+  // directions cannot drift; its one documented divergence from
+  // `session_extracted` (a float-spelled count) is stated where it lives.
+  if (extractionObserved((detail as Record<string, unknown>).extracted)) {
+    return "recorded";
+  }
+  const block = (detail as Record<string, unknown>).extraction;
+  if (!block || typeof block !== "object" || Array.isArray(block)) {
+    return "inconclusive";
+  }
+  // ONLY an explicit boolean decides either way. `_extraction_verdict` makes the
+  // same choice for the same reason: an invented `false` would turn garbage into
+  // the PENDING state that the whole trace rests on.
+  const known = (block as Record<string, unknown>).outcome_known;
+  if (known === false) return "unrecorded";
+  if (known === true) return "recorded";
+  return "inconclusive";
 }
 
 /**
@@ -3459,6 +3940,31 @@ export async function flushSpool(
         );
         continue;
       }
+      // #12603: THE MARKER DIRECTION, on the refusal path. A retryable refusal is
+      // not proof that nothing committed (#4675) — the transport bound ABANDONS
+      // its handler rather than cancelling it — so this asks the ONE question the
+      // Python drain's `_refused` asks: are OUR turns stored, and what did the
+      // server record about extraction? Both answers are acted on below — stamp
+      // on `"unrecorded"`, clear on `"recorded"` — because the Python leg acts on
+      // the same read.
+      //
+      // ⛔ THE READ HAPPENS **BEFORE** THE RE-READ, and that ordering is
+      // load-bearing (both reviewers of this change measured the other order as a
+      // P1). This is a network `await` of up to `CONFIRM_READ_TIMEOUT_MS`; placing
+      // it between the `entryFiled(pending)` guard and `writeMeta` would write
+      // back a snapshot taken BEFORE the await, so a cross-process drain that
+      // filed the entry — or a `turn_end` that appended to it — during the read
+      // would have that write CLOBBERED. The next pass then re-POSTs a session
+      // the server replays as `extracted: 0`, which `outcomeRecorded` correctly
+      // refuses to clear, so a false marker would stand permanently. Fetching
+      // first keeps the read→guard→write pair synchronous, as the pre-#12603
+      // code was.
+      //
+      // ⛔ Only on the RETRYABLE branch (the `mayKeepEntry` guard above): a
+      // permanent refusal and a 2xx filing never pay for this read. ⛔ Bounded by
+      // `CONFIRM_READ_TIMEOUT_MS`.
+      const verdict = await refusalOutcomeVerdict(
+        cfg, meta.session_id, turns, doFetch, res.status);
       // Re-read before the backoff write-back for the same reason as the CAS
       // above: never clobber newer turns written while the POST was in flight.
       const pending = readSpoolEntry(dir, meta.session_id) ?? meta;
@@ -3475,6 +3981,21 @@ export async function flushSpool(
       }
       pending.attempts = clampAttempts(meta.attempts) + 1;
       pending.next_attempt_at_ms = nowMs + backoffDelay(pending.attempts);
+      // The marker rides the SAME write as the backoff, so a stamped entry can
+      // never be left with an unarmed window. The reverse — an armed window with
+      // no marker — is the ordinary refusal and stays reachable by design.
+      //
+      // Both directions, on the SAME verdict: `"recorded"` CLEARS, because the
+      // Python leg's `_refused` turns that same detail into `confirmed: filed`
+      // and `capture_spool._flush_one` clears on it. Leaving the marker standing
+      // here would make one shared meta hold two verdicts at once, and nothing
+      // later would clear it (a stamped entry's eventual filing is a REPLAY,
+      // which records nothing).
+      if (verdict === "unrecorded") {
+        pending[UNRECORDED_OUTCOME_KEY] = UNRECORDED_OUTCOME_VALUE;
+      } else if (verdict === "recorded") {
+        delete pending[UNRECORDED_OUTCOME_KEY];
+      }
       writeMeta(dir, pending);
       summary.deferred += 1;
       // #2100: name the quota refusal (reporting only — the deferral above is
