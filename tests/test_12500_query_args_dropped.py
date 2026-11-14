@@ -265,11 +265,14 @@ def test_legitimate_calls_are_untouched(stub, kwargs) -> None:
     """The hot paths of all three arms must not be perturbed.
 
     Falsified by a guard whose condition reaches these calls at all — e.g. one
-    keyed on the presence of ``filters``, or one that refuses every structural
-    read. It does NOT falsify `is not None` (these cases pass no such argument,
-    so the value is `None`); that mutant is caught by
+    that refuses every structural read. NOT by a `filters`-keyed condition: none
+    of these cases passes `filters`, so that mutant cannot reach them (round-11
+    P2 5 — the previous wording claimed a discriminating power this test does not
+    have, the same defect round 2 removed elsewhere in this file). It does not
+    falsify `is not None` either (these cases pass no such argument, so the value
+    is `None`); that mutant is caught by
     ``test_falsy_values_are_no_ops_and_never_refused``, which is stated here
-    rather than claimed away (round-2 finding 2).
+    rather than claimed away.
     """
     from tortoise.mcp_server import tortoise_query
 
@@ -375,7 +378,7 @@ def test_the_text_arm_REFUSES_a_floor_it_cannot_apply(stub, entity_type) -> None
     """`text=` applies the floor to POINT rows only (#12500 round-3 P1).
 
     The fts leg compares `min_confidence` against EP belief under
-    `entity_type == "point"` (`sdk.py:43206` — `ep` is `None` for every other
+    `entity_type == "point"` (`sdk.py:43288` — `ep` is `None` for every other
     type, and the branch is gated on it), so a non-Point read passed the floor
     straight through: measured at the tool boundary,
     `text="…", entity_type="document", min_confidence=0.9` returned the
@@ -667,10 +670,11 @@ _DOCSTRING_FALSE = (
     # The EXCLUSIVE form: `order_by` IS applied for `entity_type="point"` (and
     # for event/subject/object/operator), so banning the bare phrase forbade a
     # correct edit — the round-6 defect mirrored, and rounds 7/8 hit its scoped
-    # variants too. What was false is the "only" — that is what is pinned here.
+    # variants too. What was false is the "only" — the entry below, and the ONLY
+    # one pinned: `min_confidence` AND `order_by` really are both applied on the
+    # text= arm for `entity_type="point"`, so banning the joint non-exclusive
+    # form forbade a true sentence (round-11 P2 3, measured).
     '`order_by` is applied on the text= arm for `entity_type="point"` only',
-    '`min_confidence` and `order_by` are applied on the text= arm for '
-    '`entity_type="point"`',
     # round-6/7: BOTH ranking orderings (`confidence` and `graph`) are refused on
     # document/source — each computes the same key for every row — while
     # `order_by="relevance"` IS applied there. So the UNQUALIFIED form is false
@@ -787,9 +791,21 @@ def test_the_tool_docstring_states_the_falsy_exception() -> None:
 
     flat = " ".join((tortoise_query.__doc__ or "").split())
 
-    assert flat.count("FALSY") >= 2, (
-        "both the structural and the tag bullet must state the falsy exception: "
-        + flat[flat.find("Structural path"):][:600]
+    # Split on the bullet headers and check the MEANING in each. A count of the
+    # token "FALSY" was satisfied by any two occurrences — including a bullet
+    # stating the OPPOSITE of shipped behaviour, which flipped the contract to
+    # false with the suite green (round-11 P2 4, measured).
+    _struct = flat[flat.find("Structural path"):flat.find("- tag=<name>")]
+    _tag = flat[flat.find("- tag=<name>"):flat.find("- Pagination")]
+    assert _struct and _tag, flat[:400]
+    for _label, _bullet in (("structural", _struct), ("tag", _tag)):
+        assert "FALSY" in _bullet, f"the {_label} bullet omits the falsy case: {_bullet}"
+        assert "stays served" in _bullet, (
+            f"the {_label} bullet must say the falsy value is SERVED, not refused: "
+            f"{_bullet}"
+        )
+    assert "refused outright" not in flat, (
+        "a falsy value is served on every arm — the contract must not say otherwise"
     )
     assert "serialises its own defaults" in flat, flat[:600]
 
@@ -918,3 +934,45 @@ def test_a_paged_kind_only_refusal_does_not_advise_dropping_paging(
 
     assert "pass kind= to the structural arm" in message, message
     assert "drop offset=/page=" not in message, message
+
+
+@pytest.mark.parametrize("kwargs,expects", [
+    # no text=: dropping tag= reaches the structural arm in one call
+    ({"tag": "t", "kind": "statement"}, "drop tag= and pass kind="),
+    # text= ALSO set: "drop tag=" alone would land on the text= arm, not the
+    # structural arm the route promises, so the route must name text= too
+    ({"tag": "t", "text": "x", "kind": "statement"},
+     "drop tag= and text=, then pass kind="),
+])
+def test_the_kind_route_names_every_argument_that_must_be_dropped(
+        stub, kwargs, expects) -> None:
+    """`tag=` wins over `text=`, so the route must account for both (#12500 r11).
+
+    Measured: with `text=` also set, "drop tag= and pass kind= to the structural
+    arm" landed on the FTS leg (which is what answers once `tag=` goes) — an arm
+    the sentence does not name — and a paged caller then hit "offset/page not
+    supported with text" one call later. Fails if the `text=` clause is dropped
+    from the route.
+    """
+    from tortoise.mcp_server import tortoise_query
+
+    message = tortoise_query(**kwargs)["error"]
+
+    assert expects in message, message
+    assert "pass kind= to the structural arm" in message, message
+
+
+def test_following_the_kind_route_from_tag_and_text_terminates(stub) -> None:
+    """The route's own instruction, executed, must be served (#12500 r11 P2 1).
+
+    Fails if the route says only "drop tag=": the retry keeps `text=`, the fts
+    leg answers, and with `offset=` set it refuses instead — a dead end the round
+    10 exemption assumed impossible on this route.
+    """
+    from tortoise.mcp_server import tortoise_query
+
+    tortoise_query(tag="t", text="x", kind="statement", offset=0)  # refusal
+    # …and the destination the route names, reached as instructed:
+    retry = tortoise_query(kind="statement", offset=0)
+
+    assert not _is_refusal(retry), retry

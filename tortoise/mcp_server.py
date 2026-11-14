@@ -3952,7 +3952,7 @@ def tortoise_query(kind: str | None = None,
       by the accessor's own. They
       are applied on the text= arm, but each on a different condition:
       `min_confidence` only for `entity_type="point"` (the fts leg gates the
-      floor on the literal `entity_type == "point"`, sdk.py:43206), and
+      floor on the literal `entity_type == "point"`, sdk.py:43288), and
       `order_by="confidence"`/`"graph"` for every type except `document` and
       `source` (both map to the `Source` label: it is outside the ranker's
       belief sweep and their hit dicts carry no timestamp, so BOTH orderings
@@ -4182,8 +4182,8 @@ def tortoise_query(kind: str | None = None,
         # belief, so these two are narrower than the arm itself.
         if min_confidence and entity_type != "point":
             # The fts leg compares the floor against EP belief under a literal
-            # `entity_type == "point"` gate (sdk.py:43206 — `ep` is None for
-            # every other type and the branch is gated on it), so any other
+            # `entity_type == "point"` gate (sdk.py:43288; `ep` is None for
+            # every other type at sdk.py:43277), so any other
             # entity_type passed the floor straight through. Round-3 P1,
             # measured at the tool boundary: `text="…", entity_type="document",
             # min_confidence=0.9` returned the 0.1-belief rows, and the same read
@@ -4258,8 +4258,17 @@ def tortoise_query(kind: str | None = None,
         # between two messages that each undo the other (round-4 P1).
         if _arm == "tag=":
             if _names == ["kind"]:
-                _route = ("To narrow by kind, drop tag= and pass kind= to the "
-                          "structural arm, which applies it")
+                # `tag=` wins over `text=`, so with BOTH set, "drop tag=" alone
+                # lands on the text= arm — not the structural arm this route
+                # promises, and a PAGED caller then hits "offset/page not
+                # supported with text" (round-11 P2, measured). Name every
+                # argument that has to go for the destination to be reachable.
+                _route = (
+                    "To narrow by kind, drop tag= and text=, then pass kind= to "
+                    "the structural arm, which applies it"
+                    if text else
+                    "To narrow by kind, drop tag= and pass kind= to the "
+                    "structural arm, which applies it")
             else:
                 _route = (f"To use {_them}, drop tag= and pass text= — tag= takes "
                           f"precedence, so keeping it re-reads this same arm")
