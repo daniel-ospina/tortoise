@@ -1165,6 +1165,74 @@ class TestLivenessDecouple:
             payload = r.read()
         assert b"\"status\": \"ok\"" in payload or b'"status":"ok"' in payload
 
+    def test_a_RE_ENTERED_lifespan_does_not_inherit_the_process_age(self, monkeypatch):
+        """#12630: the never-produced bound dates THIS instance's probe, not the
+        process's age — so a lifespan entered minutes into the process answers 200.
+
+        `_HEALTH_PROBE.reset()` runs on every lifespan entry and starts a new
+        "has a result been produced yet" waiting period, but the bound that
+        judges that period read `_PROCESS_BOOT_MONOTONIC`, which was set once at
+        module import and never re-based. A second lifespan (an in-process app
+        instance, a `TestClient` reuse, a re-entered lifespan) therefore had the
+        PROCESS's age as its window age, so the 120 s bound was already blown the
+        moment it was evaluated: `probe-never-produced-a-result` -> `failed` ->
+        `503 data-plane-failed` through a perfectly healthy boot.
+
+        That is not hypothetical — it is a REQUIRED red. `test-slow` is in
+        `python-ci-gate`'s `needs:`, and `test_hosted_api.py` runs late enough in
+        a slow shard that the process has long crossed 120 s by the time this
+        file's listener is polled, so the shard reds on a tree that is fine
+        (measured: PR #12732's run 43620217070, job `test-slow (c)`, 1 failed /
+        844 passed — this test's sibling above, and nothing from the diff).
+
+        THE MUTANT is the aging below: age the clock past the bound and enter a
+        fresh lifespan. Nothing else is needed to reproduce the 503, so removing
+        the re-base in `_lifespan` turns this test RED.
+        """
+        import urllib.request
+
+        from fastapi import FastAPI
+
+        import tortoise.hosted_api as ha_mod
+        import tortoise.monitoring as monitoring
+
+        # Keep the boot cheap and deterministic: the sweeps are not this test's
+        # subject, and the in-process stall self-kill must never fire here.
+        monkeypatch.setattr(ha_mod, "_sweep_events", lambda: None)
+        monkeypatch.setattr(ha_mod, "_purge_deleted_orgs", lambda: None)
+        monkeypatch.setenv("TORTOISE_LOOP_STALL_EXIT_S", "0")
+        monkeypatch.setenv("TORTOISE_HEALTHZ_PORT", str(_free_tcp_port()))
+
+        app_under_test = FastAPI(lifespan=ha_mod._lifespan)
+        try:
+            with _verdict_client(app_under_test):
+                pass  # the first lifespan: the app instance the process boots with
+
+            # Now make the PROCESS look old — a `test-slow` shard that reaches
+            # this file ~6 minutes in. `_PROCESS_BOOT_MONOTONIC` is the datum the
+            # bound reads, so this is exactly the state the shard produces.
+            monkeypatch.setattr(
+                ha_mod, "_PROCESS_BOOT_MONOTONIC",
+                time.monotonic() - (ha_mod._health_probe_never_produced_bound_s()
+                                    + 280.0))
+
+            with _verdict_client(app_under_test):  # the RE-ENTERED lifespan
+                server = getattr(app_under_test.state, "_healthz_server", None)
+                assert server is not None, (
+                    "lifespan did not start the /healthz listener")
+                port = server.server_address[1]
+                with urllib.request.urlopen(
+                        f"http://127.0.0.1:{port}/healthz", timeout=5) as r:
+                    assert r.status == 200, (
+                        "a re-entered lifespan answered 503 on a healthy boot — "
+                        "the never-produced bound inherited the PROCESS's age "
+                        "instead of this instance's probe reset")
+                    payload = r.read()
+            assert b"\"status\": \"ok\"" in payload or b'"status":"ok"' in payload
+        finally:
+            monitoring.stop_health_listener(
+                getattr(app_under_test.state, "_healthz_server", None))
+
 
 class TestBootOrder:
     """#2953: uvicorn binds the listening socket only AFTER
