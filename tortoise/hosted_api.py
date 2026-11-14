@@ -29114,7 +29114,7 @@ async def invite_to_org(body: dict, user: dict = Depends(get_current_user)):  # 
             if org is None:
                 raise HTTPException(status_code=404, detail="Unknown organization")
             # #1875: tier gate matches pricing (free=1, solo=1, pro=2,
-            # org=∞). Builder capacity = active members + PENDING invitations
+            # team=∞). Builder capacity = active members + PENDING invitations
             # (the authoritative invitations source — never
             # org_memberships(status='invited'), which supabase never
             # writes).
@@ -29197,7 +29197,7 @@ async def invite_to_org(body: dict, user: dict = Depends(get_current_user)):  # 
         # #1875: tier gate matches pricing. Free/Solo → upgrade gate; Builder →
         # capacity = active members + PENDING invitations (authoritative
         # Invitation nodes — not the fake invite-{iid} membership rows, which
-        # are never cleaned); Org → unlimited (None-skip). Replaces the old
+        # are never cleaned); Team → unlimited (None-skip). Replaces the old
         # active-only `_check_org_limit(limits, "users")` for Builder (cycle-2 P2:
         # active-only under-counted pending seats).
         if tier in ("free", "solo"):

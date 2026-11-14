@@ -100,13 +100,25 @@ class TestTheAliasIsDeclaredInCode:
         for tier in ("free", "solo", "team"):
             assert tier_display_name(tier) == tier.capitalize()
 
-    def test_every_declared_tier_has_a_display_name(self):
-        """No tier may reach a rendered surface without one.
+    def test_no_tier_renders_its_raw_identifier_as_its_name(self):
+        """No tier may reach a rendered surface named by its raw identifier.
 
         The failure this prevents is a caller falling back to the identifier, so
         ``pro`` ships to a customer who was sold ``Builder``.
+
+        ⛔ THIS REPLACED A PIN THAT COULD NOT FAIL (cycle-4 review, measured). It read
+        ``set(tier_display_names()) == set(all_tiers())`` — TRUE BY CONSTRUCTION, since
+        ``tier_display_names()`` BUILDS its dict from ``all_tiers()``; it could only
+        fail by raising, which ``test_an_unlabelled_tier_raises_…`` already pins. So it
+        tested neither this docstring's property nor anything else. A pin that cannot
+        fail is worse than none: it reads as coverage. This arm reds on the shape the
+        property is about — a map entry that hands a tier back its own identifier.
         """
-        assert set(tier_display_names()) == set(all_tiers())
+        for tier, name in tier_display_names().items():
+            assert name, f"tier {tier!r} has an empty display name"
+            assert name != tier, (
+                f"tier {tier!r} renders its RAW IDENTIFIER as its display name — the "
+                f"drift #4336/#12444 exist to prevent: capitalise it or alias it")
 
     def test_no_phantom_names(self):
         """The map may not carry a tier the artifact does not declare — a stale
@@ -230,7 +242,23 @@ _BUILDER_PLAN = r"['\"`]?builder['\"`]?\s+(?:plan|tier)"
 #: The assertion must END its clause. Without this the patterns match the HEAD of a
 #: qualified true statement ("there is no Builder plan cheaper than Solo"), which is
 #: the cycle-2 false block.
-_CLAUSE_END = r"(?=\s*(?:$|[.;,)]|—|–|--|;))"
+#:
+#: ⛔ A COMMA IS NOT ALWAYS A CLAUSE END (cycle-4 review, measured). "There is no
+#: Builder plan, **only the `pro` identifier** (#4336)" is the #4336 restatement in
+#: its most natural form — and a bare `,` in this set flagged it, which is the
+#: EXPENSIVE half of the trade (a lint that blocks correct prose is worse than the
+#: drift it guards). A comma followed by a RESTRICTIVE marker (`only`, `just`) opens
+#: a qualification, so it does not end the clause; a comma followed by anything else
+#: still does (`…, so a builder buys pro`), so the measured denial's comma variant
+#: stays caught instead of being traded away for the fix.
+_CLAUSE_END = r"(?=\s*(?:$|[.;)]|—|–|--|;|,(?!\s*(?:only|just)\b)))"
+
+#: A denial is often qualified by a trailing intensifier rather than nothing at all
+#: (`… anymore`, `… at all`). Measured false NEGATIVES before this existed: "There is
+#: no Builder plan anymore." and "There is no Builder plan any more." both read as
+#: ordinary prose and both escaped the guard entirely (cycle-4 review). Kept to a
+#: CLOSED set so it cannot become a wildcard that swallows the next qualifier.
+_INTENSIFIER = r"(?:\s+(?:any\s?more|anymore|at\s+all|available|for\s+sale))?"
 
 #: Markdown down to prose, applied BEFORE matching. The drift has to be caught in the
 #: style the DOC ITSELF uses: this repo renders the tier as ``**Builder**`` and the
@@ -249,7 +277,12 @@ def _plain(sentence: str) -> str:
 
 _DENIAL_PATTERNS = (
     # "there is no 'builder' plan" — asserted, unqualified absence.
-    re.compile(r"\bthere(?:'s| is| are)\s+no\s+" + _BUILDER_PLAN + _CLAUSE_END, re.I),
+    re.compile(r"\bthere(?:'s| is| are)\s+no\s+" + _BUILDER_PLAN + _INTENSIFIER +
+               _CLAUSE_END, re.I),
+    # "Tortoise has no Builder plan" / "we offer no Builder tier" — the same asserted
+    # absence with the vendor as the subject. Measured false negative (cycle 4).
+    re.compile(r"\b(?:has|have|offer|offers|sell|sells)\s+no\s+" + _BUILDER_PLAN +
+               _INTENSIFIER + _CLAUSE_END, re.I),
     # "no 'builder' plan exists" (with an explicit non-existence predicate)
     re.compile(r"\bno\s+(?:such\s+(?:thing\s+as\s+(?:a\s+)?)?)?" + _BUILDER_PLAN +
                r"\s+exists\b", re.I),
@@ -260,7 +293,10 @@ _DENIAL_PATTERNS = (
     # "Builder is not a plan/tier" — predicate nominative, clause-final, so a plan
     # name used as an OBJECT ("the Builder tier is not a tier you can downgrade
     # to") does not match.
-    re.compile(r"\bbuilder\s+(?:plan\s+|tier\s+)?(?:is|are)\s+not\s+(?:a\s+)?"
+    # `isn't` counts: "Builder isn't a plan." is the same predicate nominative and was
+    # a measured false negative (cycle 4). It stays clause-final, so a plan name used
+    # as an OBJECT ("the Builder tier isn't a tier you can downgrade to") is unmoved.
+    re.compile(r"\bbuilder\s+(?:plan\s+|tier\s+)?(?:is|are)(?:n't|\s+not)\s+(?:a\s+)?"
                r"(?:plan|tier)" + _CLAUSE_END, re.I),
     # the measured sentence's own tail: "a builder buys pro or team"
     re.compile(r"\bbuilder\s+buys\s+(?:the\s+)?(?:pro|team|builder)\b", re.I),
@@ -365,6 +401,46 @@ def _doc_sentences(text: str) -> list[tuple[int, str]]:
     return out
 
 
+def _denials_in_document(text: str) -> list[tuple[int, str]]:
+    """Every ``(line, sentence)`` in ``text`` that ASSERTS the plan does not exist.
+
+    ⛔ THE SINGLE SCAN — :meth:`TestNoDocDeniesABuilderPlanExists
+    .test_no_doc_asserts_a_builder_plan_does_not_exist` and the tests ABOUT the scan
+    all call THIS, so a test can never describe a scan the guard does not perform
+    (the cycle-2 defect, restated at document granularity).
+
+    The exemption's window is the sentence PLUS its immediately following fragment,
+    because :func:`_doc_sentences` starts a new fragment at every block start — a
+    fenced block, a blockquote, a list item — so a genuine retraction record routinely
+    lands in two pieces: the quoted claim, then the sentence that corrects it.
+    MEASURED before this window existed (cycle-4 review): all three shapes of the
+    convention this module documents were flagged — ```` ```\nthere is no "builder"
+    plan\n``` ````, a `>` blockquote, and an in-line quotation of the superseded claim
+    whose split strands the cue in the next fragment. The lint was punishing the very
+    behaviour its own exemption was written to protect.
+
+    The window is FORWARD ONLY and is not a concatenation of the window's text: the
+    following fragment must ITSELF carry a cue AND evidence
+    (:func:`_quotes_a_retracted_claim`), so `The docs are stale: <denial>` cannot buy
+    an exemption by borrowing a cue from the next sentence.
+    """
+    sentences = _doc_sentences(text)
+    out: list[tuple[int, str]] = []
+    for i, (lineno, sentence) in enumerate(sentences):
+        low = sentence.lower()
+        if "builder" not in low:
+            continue
+        if "plan" not in low and "tier" not in low and "buys" not in low:
+            continue  # "buys" covers the "a builder buys pro or team" shape
+        if not _denial_in(sentence):
+            continue
+        following = sentences[i + 1][1] if i + 1 < len(sentences) else ""
+        if _quotes_a_retracted_claim(following):
+            continue   # the retraction record's SECOND half
+        out.append((lineno, sentence))
+    return out
+
+
 class TestNoDocDeniesABuilderPlanExists:
     def test_the_lint_does_not_flag_correct_prose(self):
         """The false-positive half, pinned — because a lint that blocks correct
@@ -390,6 +466,17 @@ class TestNoDocDeniesABuilderPlanExists:
             "The **Builder** and **Team** plans are both unlimited.",
             "**Builder *is* the `pro` tier** — the identifier is `pro`.",
             "The **Builder** plan exists and is called `pro`.",
+            # The #4336 restatement in its most natural form: a comma followed by a
+            # RESTRICTIVE marker qualifies the claim instead of ending it (cycle 4).
+            "There is no Builder plan, only the `pro` identifier (#4336).",
+            # ⚠️ DOCUMENTED RESIDUAL (false positive, cycle 4): a comma-SCOPE qualifier
+            # still ends the clause, so "There is no Builder plan, and no Team plan
+            # either, in the OSS install." is flagged. Tolerated on purpose — every
+            # further comma shape that would exempt it (`and no`, `nor`) trades this
+            # block for a false NEGATIVE on a live compound denial, and the class that
+            # provoked the exception above is the restrictive `only`/`just` restatement,
+            # which is measured. The message names the fix ("keep the substance"), so a
+            # docs author who hits it is redirected, not blocked by silence.
             # A doc recording the retraction — cue AND evidence (#12444 cited).
             "docs/product/beta-sdk-surface.md previously read 'there is no "
             "\"builder\" plan'; #12444 corrected it.",
@@ -398,6 +485,40 @@ class TestNoDocDeniesABuilderPlanExists:
         for sentence in correct:
             assert not _denial_in(sentence), (
                 f"the lint false-blocks correct prose: {sentence!r}")
+
+    def test_a_retraction_record_split_across_blocks_is_exempt(self):
+        """The retraction CONVENTION the exemption exists for, through the REAL scan.
+
+        ⛔ MEASURED DEFECT (cycle-4 review): the false-positive pin called
+        ``_denial_in(sentence)`` on whole sentences, while the guard calls
+        :func:`_doc_sentences` FIRST — which starts a new fragment at every block
+        start. So the split was invisible to the pin and the three shapes below were
+        all flagged, i.e. the lint reddened the documented convention of recording a
+        supersession. This test runs :func:`_denials_in_document`, the guard's own
+        path, so the pin and the scan cannot disagree again.
+        """
+        # Retraction record — all three shapes of it.
+        for record in (
+                "Before #12444 this document read:\n\n```\nthere is no \"builder\" plan\n"
+                "```\n\n#12444 corrected it.\n",
+                "Previously:\n\n> there is no \"builder\" plan.\n\n#12444 corrected it.\n",
+                "`docs/product/beta-sdk-surface.md` said \"there is no builder plan.\" "
+                "#12444 corrected it.\n",
+        ):
+            assert not _denials_in_document(record), (
+                f"the lint false-blocks a retraction RECORD — the convention this "
+                f"module documents — through the guard's own scan: {record!r}")
+
+        # …and the forward window is not a bypass: the SECOND fragment must carry both
+        # the cue and the evidence, so a live denial cannot borrow either one.
+        for live in (
+                "There is no Builder plan.\n\n#12444 tracks the naming.\n",
+                "There is no Builder plan.\n\nThat statement was corrected.\n",
+                "There is no Builder plan.\n\nThis is stale.\n",
+        ):
+            assert _denials_in_document(live), (
+                f"a live denial was exempted by a following fragment that is not a "
+                f"retraction record (cue AND evidence required): {live!r}")
 
     def test_the_lint_does_flag_the_real_denial(self):
         """The true-positive half, pinned so the false-positive fix cannot have
@@ -410,6 +531,13 @@ class TestNoDocDeniesABuilderPlanExists:
             "No builder plan exists.",
             "The builder tier does not exist.",
             "Builder is not a plan.",
+            # Intensifier-qualified and vendor-subject denials — measured false
+            # NEGATIVES before the arms were widened (cycle-4 review).
+            "There is no Builder plan anymore.",
+            "There is no Builder plan any more.",
+            "Tortoise has no Builder plan.",
+            "We offer no Builder tier at all.",
+            "Builder isn't a plan.",
             # The drift re-written in this repo's own markdown emphasis style — the
             # style the corrected doc itself uses, so the likeliest re-edit form, and
             # the one the first cut could not see at all (cycle-3 review).
@@ -512,16 +640,9 @@ class TestNoDocDeniesABuilderPlanExists:
             text = doc.read_text(encoding="utf-8", errors="replace")
             if "builder" not in text.lower():
                 continue
-            for lineno, sentence in _doc_sentences(text):
-                low = sentence.lower()
-                if "builder" not in low:
-                    continue
-                if "plan" not in low and "tier" not in low and "buys" not in low:
-                    continue  # "buys" covers the "a builder buys pro or team" shape
-                if _denial_in(sentence):
-                    offenders.append(
-                        f"{doc.relative_to(REPO_ROOT)}:{lineno}: "
-                        f"{sentence.strip()}")
+            for lineno, sentence in _denials_in_document(text):
+                offenders.append(
+                    f"{doc.relative_to(REPO_ROOT)}:{lineno}: {sentence.strip()}")
         assert not offenders, (
             "doc(s) assert that a Builder plan does not exist, contradicting #4336 "
             "(Builder IS the `pro` tier) and #12444:\n  "
