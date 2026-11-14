@@ -330,7 +330,9 @@ def _fix_hint(verdict: Verdict) -> str:
     if verdict.verdict in ("MISMATCH", "SPLIT"):
         return (
             "fix: a rotation is THREE steps, because Pages bakes env at deploy time — "
-            "(1) `fly secrets set CONSENT_TOKEN_SECRET=…` (or the deploy-hosted workflow), "
+            "(1) `gh secret set CONSENT_TOKEN_SECRET` (the GitHub repo secret is the SOURCE OF TRUTH: "
+            "`fly secrets set` alone is silently reverted by the next deploy-hosted run, because "
+            "`.github/scripts/fly-managed-secrets.txt` declares it `gh-secret:` and re-stages it), "
             "(2) set the same value on the `tortoise-dashboard` Pages project, "
             "(3) REDEPLOY Pages (a corrected value does NOT reach an already-deployed Function). "
             "Correcting the dashboard alone leaves the deployed Function signing with the old key — "

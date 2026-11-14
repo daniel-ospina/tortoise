@@ -148,6 +148,17 @@ def test_two_different_keys_are_a_MISMATCH_with_no_key_material(monkeypatch, cap
     # The remedy is THREE steps and the output says so: correcting the dashboard alone leaves the
     # deployed Function signing with the old key (measured 2026-11-01).
     assert "REDEPLOY Pages" in out
+    # ⛔ AND STEP 1 IS THE REPO SECRET. This hint used to open with `fly secrets set …`, while §2.5,
+    # runbook §4.4 and the workflow's own alert body all say the GitHub repo secret is the source of
+    # truth and that a hand-set Fly value is silently reverted by the next `deploy-hosted` run — and
+    # those docs send the operator to THIS tool to confirm. An operator following it would rotate Fly,
+    # see AGREE, and watch the next deploy revert it: the drift returns silently.
+    assert "gh secret set CONSENT_TOKEN_SECRET" in out, (
+        "the checker's remedy no longer starts from the GitHub repo secret (the durable source)"
+    )
+    assert "(1) `fly secrets set" not in out, (
+        "the checker's step 1 is `fly secrets set` again — that half is reverted by the next deploy"
+    )
 
 
 def test_one_configured_half_is_a_SPLIT_not_agreement(monkeypatch, capsys) -> None:
@@ -528,10 +539,18 @@ def test_the_check_step_exits_with_the_code_the_checker_returned(tmp_path) -> No
     # write and its verdict extraction. A pre-existing `/tmp/consent-key.json` (an operator's real
     # reading) was also overwritten and then deleted. An exclusive lock on a companion path serialises
     # the copies without touching the shipped body, which is the thing under test.
-    pre_existing = {p: p.read_bytes() for p in (reading, err) if p.exists()}
     lock = Path("/tmp/consent-key.json.lock").open("a+")
     fcntl.flock(lock, fcntl.LOCK_EX)
+    pre_existing = {p: p.read_bytes() for p in (reading, err) if p.exists()}
     try:
+        # ⛔ NEUTRALISE BEFORE THE RUN, inside the lock. Otherwise a stale reading from any earlier run
+        # (or a concurrent copy's in-flight output) is read by this pin as if it were the step's own:
+        # measured, with `{"verdict":"MISMATCH"}` already at the path, `--json > /dev/null` — a step
+        # that writes NO reading — stayed 27/27 GREEN, and the same arm without a stale file was RED.
+        # And capturing the snapshot OUTSIDE the lock made a concurrent run "restore" a peer's stub
+        # output over an operator's real file, i.e. it destroyed the bytes this pin promises to keep.
+        for stale in (reading, err):
+            stale.unlink(missing_ok=True)
         # `bash -e`, because Actions runs `run:` bodies as `bash -e {0}` — that is WHY the body carries
         # `set +e`. Under `bash -c` a deleted `set +e` was invisible (measured GREEN); under `-e` it
         # reds, which is what the real runner would do: abort at the checker before `$GITHUB_OUTPUT`.
@@ -559,6 +578,42 @@ def test_the_check_step_exits_with_the_code_the_checker_returned(tmp_path) -> No
     )
     assert "verdict=MISMATCH" in written, (
         f"the verdict extracted from the reading must reach `$GITHUB_OUTPUT`, got {written!r}"
+    )
+
+    # ⛔ AND AN UNREADABLE READING MUST DEFAULT TO `UNKNOWN`, NEVER TO A DISAGREEMENT. Cycle 5 measured
+    # `|| echo UNKNOWN` -> `|| echo MISMATCH` GREEN, because the pin above only ever tested a VALID
+    # stub reading. A run that measured nothing (the checker OOM-killed, the runner's 10-minute
+    # timeout, `python3` dying before the JSON landed) would then file "the two halves hold DIFFERENT
+    # keys" and send the operator to rotate a production secret — and an operator who rotates one half
+    # CREATES the split, which is the 2026-11-01 incident this PR exists to catch.
+    (bindir / "python3").write_text(
+        "#!/usr/bin/env bash\n"
+        f'if [ "$1" = "-c" ]; then exec {sys.executable!r} "$@"; fi\n'
+        "exit 2\n"
+    )
+    gh_out.write_text("")
+    lock2 = Path("/tmp/consent-key.json.lock").open("a+")
+    fcntl.flock(lock2, fcntl.LOCK_EX)
+    keep = {p: p.read_bytes() for p in (reading, err) if p.exists()}
+    try:
+        for stale in (reading, err):
+            stale.unlink(missing_ok=True)
+        proc = subprocess.run(
+            ["bash", "-e", "-c", failing[0]["run"]], env=env, capture_output=True, text=True, timeout=120
+        )
+        written = gh_out.read_text()
+    finally:
+        for leftover in (reading, err):
+            if leftover in keep:
+                leftover.write_bytes(keep[leftover])  # restored here too: this arm must not eat it either
+            else:
+                leftover.unlink(missing_ok=True)
+        fcntl.flock(lock2, fcntl.LOCK_UN)
+        lock2.close()
+    assert proc.returncode == 2, proc.stderr[-300:]
+    assert "verdict=UNKNOWN" in written, (
+        "an UNREADABLE reading must default to UNKNOWN — a fallback to a disagreement files a rotation "
+        f"alert for a run that measured nothing: {written!r}"
     )
 
 
@@ -606,20 +661,37 @@ def test_the_filing_step_files_the_RIGHT_finding_and_never_resolves_a_split(tmp_
     (root / ".github" / "scripts").mkdir(parents=True)
     record = tmp_path / "calls.txt"
     stub = root / ".github" / "scripts" / "auto-file-issue.sh"
-    stub.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> "$REC"\n')
+    # Contract-faithful: the real `af_file_or_comment` refuses a `file` with no readable `--body-file`
+    # (`[ -f "$body_file" ] || af_err "body file not found"; return 2`). A stub that records argv and
+    # models nothing let `--body-file "$body"` be DELETED with 40/40 green — an alert the substrate
+    # refuses, i.e. no issue, no recurrence comment, no ledger entry, while every test passed.
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        "printf '%s\\n' \"$*\" >> \"$REC\"\n"
+        'case "$1" in\n'
+        "  file)\n"
+        "    bf=\"\"\n"
+        "    while [ $# -gt 0 ]; do [ \"$1\" = '--body-file' ] && bf=\"$2\"; shift; done\n"
+        "    if [ -z \"$bf\" ] || [ ! -f \"$bf\" ]; then echo 'BODY-FILE-MISSING' >> \"$REC\"; exit 2; fi\n"
+        "    cp \"$bf\" \"$REC.body\"\n"
+        "    ;;\n"
+        "esac\n"
+        "exit 0\n"
+    )
     stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
 
-    def run(rc: str, verdict: str) -> subprocess.CompletedProcess:
+    def run(rc: str, verdict: str | None) -> subprocess.CompletedProcess:
         record.write_text("")
         env = {
             **os.environ,
             "REC": str(record),
             "RC": rc,
-            "VERDICT": verdict,
             "GITHUB_SERVER_URL": "https://gh.example.test",
             "GITHUB_REPOSITORY": "o/r",
             "GITHUB_RUN_ID": "1",
         }
+        if verdict is not None:
+            env["VERDICT"] = verdict
         return subprocess.run(
             ["bash", "-e", "-c", filing[0]["run"]],
             cwd=root, env=env, capture_output=True, text=True, timeout=120,
@@ -656,6 +728,27 @@ def test_the_filing_step_files_the_RIGHT_finding_and_never_resolves_a_split(tmp_
         assert unknown in calls[0] and drift not in calls[0], (
             f"{verdict} measured neither half, so it must NOT assert a disagreement: {calls}"
         )
+
+    # ⛔ AND WITH `VERDICT` ABSENT ENTIRELY — the state a body aborted by `bash -e` before
+    # `$GITHUB_OUTPUT` leaves behind. Cycle 5 measured `case "${VERDICT:-UNKNOWN}"` ->
+    # `case "${VERDICT:-MISMATCH}"` GREEN, because every arm above SET the variable. The default must
+    # be UNKNOWN: a runner fault is not a measured key disagreement.
+    proc = run("2", None)
+    calls = [c for c in record.read_text().splitlines() if c.strip()]
+    assert len(calls) == 1 and calls[0].startswith("file"), calls
+    assert unknown in calls[0] and drift not in calls[0], (
+        "with no VERDICT at all the alert must say the key could NOT be verified, not that the halves "
+        f"differ: {calls}"
+    )
+
+    # The filed BODY carries the dedupe marker and the step with no reminder — both unpinned before.
+    filed = Path(str(record) + ".body")
+    assert filed.exists(), "the stub never received a readable --body-file — the alert could not be filed"
+    body = filed.read_text()
+    assert "<!-- consent-key-drift-alert -->" in body, "the dedupe marker is gone from the alert body"
+    assert "REDEPLOY Pages" in body and "fly secrets set" in body, (
+        "the alert body lost the rotation steps an operator acts on"
+    )
 
 
 def test_the_step_outputs_are_WIRED_from_the_check_step_and_the_dispatch_inputs() -> None:
