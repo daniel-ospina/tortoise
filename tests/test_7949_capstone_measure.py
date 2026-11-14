@@ -6142,6 +6142,34 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         ("05-verify.md", "Measured at `6916a6cd89`", (
             ("1400", "a **two-method** event-sourced Protocol"),
         ), "extractor_v4_arch"),
+        # ⛔ THE `subject_binding_available` PAIR NEEDS ITS OWN `05-verify.md` ROW (#12462
+        # review cycle 3, P1). The rows that already carry those two numbers scope to
+        # `00-plan.md` and `03-test-design.md` — `_pin_row_failures` binds ONE document per
+        # row, so D5's own copy was read by NOTHING, and the reviewer measured both being
+        # re-pointed with the suite green. This is the same hole the `03-test-design.md:82`
+        # key comment names: a source key is the only way a number resolves at all.
+        ("05-verify.md", "Measured at `6916a6cd89`", (
+            ("10064", "subject_binding_available,"),
+            ("10117", "and not subject_binding_available(graph):"),
+        ), "sdk"),
+        # ⛔ `00-plan.md`'s `_capture_lane` CITE (#12462 review cycle 3, P2): the diff
+        # re-pointed it to `:17936` and no row read it — `_BUNDLE_CITE` matches
+        # `sdk|edges|extractor_v2` only, so a `hosted_api` number needs its own row. The
+        # reviewer mutated `:17936` -> `:17937` and measured 413 green. The scoping phrase is
+        # the text on the SAME line as the number (the sentence names the call on the line
+        # ABOVE it, and a phrase that binds the wrong line is the failure `_pin_row_failures`
+        # reports rather than hides).
+        ("00-plan.md", "returns `\"v2\"`", (
+            ("17936", "def _capture_lane() -> str:"),
+        ), "hosted_api"),
+        # ⛔ `04-plan.md` I7's `org_info` RANGE (#12462 review cycle 3, P2): re-pointed to
+        # `:13521-13598` and unread, so both endpoints could move silently. Only the START
+        # is a row: the range's END is a blank line (`13598`), which no anchor can hold —
+        # so the range is checked by CONTENT below as well, and this row reds if the block
+        # starts elsewhere.
+        ("04-plan.md", "**point budget - a POINTER, not a snapshot**", (
+            ("13521", "point_count = await asyncio.to_thread("),
+        ), "hosted_api"),
         # ⛔ `:1186` IS NOT PINNED BY A ROW, and the reason is measured rather than
         # stylistic: it is stated TWICE on ONE doc line ("is STAMP-bound (`:1186` is the
         # `corpus` line here" and "`capstone_run.py:1186` is the `corpus` line here"), and
@@ -6251,12 +6279,40 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     for _spelling in (
         "is STAMP-bound (`:1186` is the `corpus = {…}` line here",
         "`capstone_run.py:1186` is the `corpus = {…}` line here",
+        # ⛔ AND THE SAME TREATMENT FOR THE TWO OTHER HITS D5 STATES TWICE (#12462 review
+        # cycle 3): `:1400` occurs as the current-tense `Projection` cite AND as the historical
+        # "D6" cite, so a row that merely finds the number passes on the twin when the
+        # current-tense one is re-pointed wrongly (measured: 413 passed). `:10064`/`:10117`
+        # are stated twice, both "at this head", so a partial move leaves one stale.
+        "`EXTRACTOR-V4-ARCHITECTURE.md:1400` is a **`Projection`** row here",
+        "`sdk.py:10064`/`:10117` at this head",
+        "(`:10064`/`:10117` at this head)",
     ):
         assert _d5.count(_spelling) == 1, (
-            f"05-verify.md states `:1186` twice and this spelling now occurs "
+            f"05-verify.md D5 states one hit twice and this spelling now occurs "
             f"{_d5.count(_spelling)} time(s): {_spelling!r}. Both halves are the same hit \u2014 "
-            "if the line moved, re-derive BOTH, and keep each spelled with its own filename "
-            "so a reader can tell the STAMP-bound clause from the measured one")
+            "if the line moved, re-derive EVERY statement of it, because a half-done move "
+            "leaves the document asserting two numbers for one `git grep` hit")
+
+    # ⛔ `04-plan.md` I7's `org_info` RANGE (#12462 review cycle 3). The sentence cites
+    # `hosted_api.py:13521-13598`, and the END of that range is a BLANK line — so the row
+    # above can only anchor the start, and a range that drifts by a line still "contains"
+    # the number the doc names (the reason this file pins ranges at both endpoints where it
+    # can). Both boundaries are pinned here BY CONTENT instead of by a second anchor: the
+    # block must still open at `point_count` and still contain exactly one `nodes_used`
+    # read and one `max_nodes` derivation inside the stated span.
+    _i7 = _EPIC_CITE_DOCS["04-plan.md"].read_text(encoding="utf-8")
+    assert _i7.count("`hosted_api.py:13521-13598`") == 1, (
+        "04-plan.md I7's range cite moved or was re-spelled — re-derive BOTH endpoints from "
+        "`hosted_api.py` and keep the `:START-END` form, which is what this guard parses")
+    _org_info = _EPIC_CITE_SOURCES["hosted_api"].read_text(encoding="utf-8").splitlines()
+    _span = _org_info[13521 - 1:13598]
+    for _needle, _what in (("nodes_used = await asyncio.to_thread(", "the nodes_used read"),
+                          ('max_nodes = org.get("max_points")', "the max_nodes derivation")):
+        assert sum(_needle in _l for _l in _span) == 1, (
+            f"04-plan.md I7 says `:13521-13598` publishes `nodes_used` / `max_nodes`, but "
+            f"{_what} occurs {sum(_needle in _l for _l in _span)} time(s) in that span — the "
+            "range has moved, so re-derive it (start AND end) rather than bumping one end")
 
     # ⛔ THE BLOCK ARM — the claim `03-test-design.md` actually makes, checked
     # against the structure instead of a number that a tool rewrites under it.
