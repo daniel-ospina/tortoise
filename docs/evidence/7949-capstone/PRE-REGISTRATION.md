@@ -2845,4 +2845,3 @@ to answer.
 >
 > **This entry is LIVE for the merged tree** — it has no successor, so it must not carry a
 > supersede marker.
-
