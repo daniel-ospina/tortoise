@@ -2855,6 +2855,41 @@ GOLDEN_VERSION_UNREADABLE_DETAIL = (
 )
 
 
+def test_the_ENGINE_side_non_reading_details_name_the_engine_package():
+    """⛔ THE SAME SENTENCE ON THE OTHER ARM (#12589 review round 20, P3).
+
+    Both non-reading details interpolate `{package}`, and the verbatim pins above cover the CLIENT
+    text only; the engine side was checked by token alone. Replacing `{package}` with
+    `{CLIENT_PACKAGE}` there made an `engine-index` CANNOT RUN say "could not read the index
+    metadata for tortoise-client" — with the suite green.
+    """
+    info_side = canary.build_report(
+        engine_doc={"info": 0},
+        client_doc=_client_doc(),
+        tree_version="0.2.0",
+        init_arm=_ok_init_arm(),
+        now=NOW,
+    ).get("engine-index")
+    assert info_side.status == canary.UNKNOWN, info_side.detail
+    assert (
+        "could not read the index metadata for tortoise-graph — the document's `info` is PRESENT"
+    ) in info_side.detail, info_side.detail
+    assert "tortoise-client" not in info_side.detail, info_side.detail
+
+    version_side = canary.build_report(
+        engine_doc={"info": {"version": 3}},
+        client_doc=_client_doc(),
+        tree_version="0.2.0",
+        init_arm=_ok_init_arm(),
+        now=NOW,
+    ).get("engine-index")
+    assert version_side.status == canary.UNKNOWN, version_side.detail
+    assert (
+        "could not read the version the index serves for tortoise-graph — `info.version` is PRESENT"
+    ) in version_side.detail, version_side.detail
+    assert "tortoise-client" not in version_side.detail, version_side.detail
+
+
 def test_the_two_info_and_version_non_reading_details_are_PINNED_VERBATIM():
     """⛔ A NON-READING'S SCRAP OF TEXT IS WHERE A NEGATIVE FINDING SNEAKS IN (#12589 round 18, P2).
 
@@ -3755,6 +3790,10 @@ def test_the_tree_version_row_implicates_only_the_arm_that_failed():
     )
     ahead_row = next(a for a in ahead.arms if a.name == "tree-version")
     assert "(a release is owed or in flight)" in ahead_row.detail, ahead_row.detail
+    # ⛔ AND ITS ORIENTATION (#12589 review round 20, P3): every golden renders this row with
+    # tree_version == published, which is degenerate in both directions, so swapping the two slots
+    # was invisible — and the row would then say the opposite of which version is published.
+    assert "pyproject.toml version 0.3.0 vs published 0.2.0" in ahead_row.detail, ahead_row.detail
 
     # ...and the engine FAIL at the same version keeps the sentence it earned.
     engine_fail = canary.build_report(

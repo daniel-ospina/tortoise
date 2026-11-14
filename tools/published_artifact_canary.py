@@ -1307,12 +1307,15 @@ def render_summary(report: Report) -> str:
                 # 12 and 13). Round 12 made this branch name the arm, but left the shared tail
                 # sentence "fix the tree … a code defect, not a release-owed finding" attached to
                 # it — a CLASSIFICATION this branch has just said it cannot establish. The arm
-                # label below degrades to "no arm reported" rather than taking a dead `elif step
-                # is None:` branch: `Report.verdict == FAIL` implies a gated red arm exists, so
-                # that branch could never run and no test can reach it (round 13).
+                # `step` is provably non-None here: `report.verdict == FAIL` implies a gated red
+                # arm exists, which is the same predicate that produced `step`. The earlier
+                # `else 'no arm reported'` survived that proof as an unreachable literal — a claim
+                # no arm supports, kept in the OUTPUT (#12589 review round 20, P3). Do not
+                # reintroduce a rendered fallback for a state the invariant excludes; if a guard
+                # is ever wanted, make it an assert, not text.
                 what = (
                     f"is NOT judged by this summary: the failing arm is "
-                    f"`{step.name if step is not None else 'no arm reported'}` "
+                    f"`{step.name}` "
                     f"({detail or 'no detail'}) — read it, because that arm does not establish "
                     f"that the built wheel fails its documented command"
                 )
