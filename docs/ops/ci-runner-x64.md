@@ -22,11 +22,11 @@ Every pool-eligible job in this repo asks for a **label**, never an architecture
 
 | `runs-on:` | count | who claims it |
 | --- | --- | --- |
-| `ubuntu-latest` | 76 | GitHub-hosted **and** (while the fallback is engaged) the self-hosted pool |
+| `ubuntu-latest` | 78 | GitHub-hosted **and** (while the fallback is engaged) the self-hosted pool |
 | `ubuntu-24.04` | 10 | **GitHub-hosted, plus — as a temporary mitigation since 2026-10-29 — the self-hosted pool.** Pinned to hosted on purpose (#6897/#7867); the pin deadlocks while hosted is unavailable, so the pool now claims it too (see the label contract). |
 
-Counts are JOBS (not files), re-measured 2026-11-12 at this head (`yaml.safe_load` each workflow,
-count each job's `runs-on`): **76 / 10** — the label classes `--status`'s `label-coverage` block
+Counts are JOBS (not files), re-measured 2026-11-14 at this head (`yaml.safe_load` each workflow,
+count each job's `runs-on`): **78 / 10** — the label classes `--status`'s `label-coverage` block
 measures, though that block reports RUNNER counts per label, not job counts: measured on the live
 pool on 2026-10-29 it printed `ubuntu-24.04 = 7 of 7
 online runner(s)` (a bare version pin is measured against the x64 sub-pool, its own denominator,
