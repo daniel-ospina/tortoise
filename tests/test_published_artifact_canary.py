@@ -4831,7 +4831,7 @@ def test_a_non_object_info_is_a_LEGIBLE_NON_READING_on_BOTH_arms():
 
       * a TRUTHY non-object (`"x"`) raised `AttributeError`, and `main()`'s backstop turned that
         into exit 2 — the right CODE by the wrong ROUTE (a traceback as the recorded reason);
-      * the FALSY ones (`[]`, `0`, `null`, `""`, `false`) were swallowed by `or {}` into "", took the FAIL arm,
+      * the FALSY ones (`[]`, `0`, `0.0`, `null`, `""`, `false`) were swallowed by `or {}` into "", took the FAIL arm,
         and reported exit 1 — the "cut a release" text — off an `info` this client never parsed.
         Those documents carry no version at all, so "carries no latest version" was literally true
         of them; what was wrong was issuing a VERDICT off an unparsed field. (The sibling
@@ -4843,7 +4843,16 @@ def test_a_non_object_info_is_a_LEGIBLE_NON_READING_on_BOTH_arms():
     invariance that actually matters is the one a naive "don't raise" fix would break: a
     non-reading must never become an exit 1, on EITHER arm. That is pinned here, at both arms.
     """
-    for index_doc in ({"info": "x"}, {"info": []}, {"info": 0}, {"info": None}):
+    falsy_or_unreadable = (
+        {"info": "x"},
+        {"info": []},
+        {"info": 0},
+        {"info": 0.0},
+        {"info": None},
+        {"info": ""},
+        {"info": False},
+    )
+    for index_doc in falsy_or_unreadable:
         assert canary.latest_version(index_doc) == "", index_doc
         assert canary.info_unreadable(index_doc) is True, index_doc
 
@@ -4852,7 +4861,7 @@ def test_a_non_object_info_is_a_LEGIBLE_NON_READING_on_BOTH_arms():
         assert canary.info_unreadable(answered) is False, answered
         assert canary.latest_version(answered) == "", answered
 
-    for doc in ({"info": "x"}, {"info": []}, {"info": 0}, {"info": None}):
+    for doc in falsy_or_unreadable:
         # client arm
         report = _client_report({**doc, "releases": {"0.3.0": [_CLIENT_GOOD]}})
         arm = report.get("client-published")

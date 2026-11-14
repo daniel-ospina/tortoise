@@ -481,8 +481,8 @@ class Report:
         return {OK: 0, FAIL: 1, UNKNOWN: 2}[self.verdict]
 
 
-#: ``info`` is PRESENT but is not an object (``"x"``, ``[]``, ``0``, ``null``) — the version
-#: metadata could not be read at all (#12589).
+#: ``info`` is PRESENT but is not an object (``"x"``, ``[]``, ``0``, ``0.0``, ``null``, ``""``,
+#: ``false``) — the version metadata could not be read at all (#12589).
 INFO_UNREADABLE = "info-unreadable"
 
 
@@ -499,7 +499,7 @@ def info_unreadable(index_doc: dict[str, Any]) -> bool:
     expression was ``(index_doc.get("info") or {}).get("version")``: on ``{"info": "x"}`` that
     is an ``AttributeError``, which ``main()``'s exception backstop turned into exit 2 with a
     traceback as the recorded reason — the right CODE by the wrong ROUTE. The FALSY non-objects
-    (``[]``, ``0``, ``null``, ``""``, ``false``) were swallowed by ``or {}`` into "" and reached the
+    (``[]``, ``0``, ``0.0``, ``null``, ``""``, ``false``) were swallowed by ``or {}`` into "" and reached the
     FAIL arm, i.e.
     exit 1 and the "cut a release" text — a release order issued off an ``info`` this client never
     parsed. So this predicate fixes two different defects at once, and the second one MOVES an exit
@@ -780,7 +780,7 @@ def missing_version_arm(
         return Arm(
             name,
             UNKNOWN,
-            # ⛔ NOT "the version it serves": `info` may be `[]`/`null`/`0`, which carries no
+            # ⛔ NOT "the version it serves": `info` may be `[]`/`null`/`0`/`0.0`/`""`/`false`, which carries no
             # version at all — naming one would be the non-reading-as-property class this issue
             # removes, in the form the parallel `version_unreadable` arm already words correctly
             # (#12589 review round 8, P3).
@@ -961,7 +961,7 @@ def build_report(
             # FAIL when the document ANSWERED (no version in a readable `info`) and UNKNOWN when
             # it did not (#12589). The exit code did NOT move for a TRUTHY non-object `info` —
             # that already raised into main()'s exit-2 backstop. It DID move (1 → 2) for the
-            # falsy ones (`[]`, `0`, `null`, `""`, `false`), which `or {}` swallowed into the FAIL arm: a
+            # falsy ones (`[]`, `0`, `0.0`, `null`, `""`, `false`), which `or {}` swallowed into the FAIL arm: a
             # deliberate fail-closed move, NOT a correction of a false sentence — those documents
             # carry no version at all, so "carries no latest version" was literally true of them;
             # what was wrong was issuing a VERDICT off an `info` this client never parsed. (See

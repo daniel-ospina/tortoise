@@ -397,6 +397,54 @@ def test_the_readme_wilson_bands_are_the_outward_ones():
             "the inward spelling cannot both be in a document whose value is declaration honesty")
 
 
+def _innermost_enclosing_function(tree, node):
+    """The NEAREST FunctionDef/AsyncFunctionDef ancestor of `node`, or None.
+
+    ⛔ Not "the first FunctionDef `ast.walk` yields that contains the node": that walk is
+    breadth-first, so its first hit is the OUTERMOST enclosing function — a write inside a
+    nested `def` inside `_write` would be credited to `_write` and pass the stray-write guard
+    (measured on a synthetic tree, #12589 review round 27). Walking UP the parent chain cannot
+    skip an enclosing function. Pinned by
+    `test_the_stray_write_guard_uses_the_INNERMOST_enclosing_function`.
+    """
+    import ast
+
+    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+    parent = parents.get(node)
+    while parent is not None and not isinstance(
+        parent, (ast.FunctionDef, ast.AsyncFunctionDef)
+    ):
+        parent = parents.get(parent)
+    return parent
+
+
+def test_the_stray_write_guard_uses_the_INNERMOST_enclosing_function():
+    """⛔ THE GUARD MUST NOT CREDIT A NESTED WRITE TO ITS OUTER FUNCTION (#12589 review round 27).
+
+    A breadth-first search for "a FunctionDef containing the node" returns `_write` for a write
+    inside `def nested()` inside `_write`, so the stray-write guard would pass that write. Measured
+    on the synthetic tree below: BFS-first -> `_write`, innermost -> `nested`. Today's probe has no
+    nested write, which is exactly why this needs a pin rather than a passing suite.
+    """
+    import ast
+
+    tree = ast.parse(
+        "def _write(p):\n"
+        "    def nested():\n"
+        "        open(p, 'w')\n"
+        "    return nested\n"
+    )
+    write = next(n for n in ast.walk(tree) if isinstance(n, ast.Call))
+    assert _innermost_enclosing_function(tree, write).name == "nested"
+    # and the outermost rule the bug used is exactly what this refuses
+    bfs_first = next(
+        fn for fn in ast.walk(tree)
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and any(child is write for child in ast.walk(fn))
+    )
+    assert bfs_first.name == "_write"
+
+
 def _first_hex_after(text: str, label: str) -> str:
     """The first 64-hex token after `label` — the digest that label presents."""
     tail = text.split(label, 1)[1]
@@ -810,12 +858,11 @@ def test_gate3s_measurement_writes_all_route_through_the_one_guard():
         writes.append(node)
 
     def enclosing_ok(node) -> bool:
-        # Walk the tree once more for the innermost FunctionDef containing `node`.
-        for fn in ast.walk(tree):
-            if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) and any(
-                    child is node for child in ast.walk(fn)):
-                return fn.name == "_write"
-        return False
+        # The INNERMOST enclosing FunctionDef decides — see `_innermost_enclosing_function`, which is
+        # pinned on a synthetic nested tree. A breadth-first "first containing FunctionDef" would
+        # credit a write inside a nested `def` inside `_write` to `_write` (#12589 round 27).
+        fn = _innermost_enclosing_function(tree, node)
+        return fn is not None and fn.name == "_write"
 
     stray = [(w.lineno, getattr(w.func, "id", getattr(w.func, "attr", "")))
              for w in writes if not enclosing_ok(w)]
