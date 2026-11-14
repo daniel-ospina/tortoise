@@ -569,7 +569,9 @@ _LEDGER_LITERAL_OWNERS: dict[str, tuple[int, str]] = {
 #: irreversible journal-blind DETACH DELETE + GRAPH.DELETE of a cohort the journal
 #: cannot attribute; the other THREE arm a path nobody chose — one journal WRITE
 #: (`TORTOISE_JOURNAL_SEGMENTS`) and two REPORTING surfaces
-#: (`TORTOISE_11070_CENSUS_DEDUPE_DISABLED`, `TORTOISE_ALLOW_EMBEDDED`) — and each is
+#: (`TORTOISE_11070_CENSUS_DEDUPE_DISABLED`, and `tortoise/config.py`'s
+#: `TORTOISE_ALLOW_EMBEDDED` rung read — the `mcp_server.py` entry under the same
+#: name is a RUN gate, not a report, and is not one of these five) — and each is
 #: exactly the fail-open surface the ledger exists to freeze, so narrowing is the safe
 #: policy. The #3634 entry is recorded on issue #3634 and in
 #: the epic CI-Fix Changelog, and pinned by
