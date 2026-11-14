@@ -74,15 +74,20 @@ class TestDeclaration:
         `test_the_clean_run_reports_all_three_views` arms) and reds THIS pin too —
         five failures across the two files, not five in `test_sdk_surface.py` alone.
 
-        Two guards, and the path decides which one you meet: WITHOUT a re-cut the
-        addition is refused by `surface-guard.py` **step 1** ("is not in the frozen
-        baseline"); WITH a re-cut — which would write the new method's own baseline row
-        and green step 1 — it is refused by the `high_water_counts` CEILING (still 150),
-        which `cut` CARRIES rather than re-derives, so a re-cut cannot raise it. That
-        second layer is the "enforced INDEPENDENTLY of the re-cut" one, and it is why
-        this header's owner-approved-row rule holds even against a regenerate-and-push.
-        Measured: +1 stray method (live 126) → step 1, exactly one violation; +26 (live
-        151) → step 7, "live 151 > pin 150". Do not read this count as approval.
+        Two guards, and the path decides which one you meet — and there is a band
+        between them. WITHOUT a re-cut the addition is refused by `surface-guard.py`
+        **step 1** ("is not in the frozen baseline"). WITH a re-cut — which writes the new
+        method's own baseline row and so GREENS step 1 — the only layer left is the
+        `high_water_counts` CEILING (still 150), which `cut` CARRIES rather than
+        re-derives, so a re-cut cannot RAISE it. But the ceiling is an EXCEEDS check
+        (`live_n > high_water`), so it speaks only once the live count passes 150:
+        measured, +1 re-cut addition (live 126) → **exit 0, no guard fires**; +26 (live
+        151) → step 7, "public SDK methods live 151 > pin 150". So for a one- or
+        two-method regenerate-and-push the owner-approved-row rule is enforced in
+        REVIEW, not by the ceiling — 126…150 is headroom no gate covers. That band is
+        the growth half of the bypass recorded on #12327.
+
+        Do not read this count as approval.
         """
         from tortoise.sdk import TortoiseSDK
 
