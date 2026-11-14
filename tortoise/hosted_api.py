@@ -2046,7 +2046,8 @@ _HEALTH_PROBE_START_FAILED = False
 #: pins the type so a future rename cannot bring the collision back.
 #:
 #: ⛔ IT IS THE EPOCH OF THE CURRENT PROBE STATE, RE-BASED ON EVERY LIFESPAN
-#: ENTRY (`_lifespan`, beside `_HEALTH_PROBE.reset()`) — NOT the process's age
+#: ENTRY (`_lifespan` -> `_reset_probe_state()`, which writes it beside the three
+#: coordinator resets) — NOT the process's age
 #: (#12630), which is why it is named for the probe epoch and no longer for a
 #: process boot. The bound above asks "has THIS probe coordinator been waiting
 #: past a cold start", and `reset()` starts a new waiting period, so a
@@ -2061,10 +2062,15 @@ _HEALTH_PROBE_START_FAILED = False
 #: global to -400 s WITH the re-base in `_lifespan` removed — at this head the
 #: re-base discards the aged value before any verdict reads it, which is the fix
 #: working, so aging it alone now reproduces GREEN.
-#: Re-basing HERE rather than adding a second clock is deliberate: one epoch has
-#: one writer, so it cannot drift from the reset it describes, and a second
-#: module global would make the read depend on which file's fixture ran last
-#: (the #12666 leak class).
+#: Re-basing HERE rather than adding a second clock is deliberate: this epoch has
+#: exactly one ADVANCING writer in the module (`_reset_probe_state()`, beside the
+#: coordinator it dates — the module-scope initialiser runs once, at import), so
+#: it cannot acquire a rival value to drift against, and a second module global
+#: would make the read depend on which file's fixture ran last (the #12666 leak
+#: class). It is NOT a claim that every `_HEALTH_PROBE.reset()` in the tree moves
+#: it — a DIRECT reset (the probe-reset suites do this deliberately) restarts the
+#: waiting period while this stamp keeps the previous one, which is why the pairing
+#: is enforced by the single writer rather than assumed of every caller.
 _HEALTH_PROBE_EPOCH_MONOTONIC = time.monotonic()
 
 
@@ -2087,10 +2093,14 @@ def _reset_probe_state() -> None:
     yet" waiting period that `_HEALTH_PROBE.reset()` starts, so the two MUST move
     together (#12630). Pairing them here, rather than leaving two adjacent
     statements in `_lifespan`, makes that invariant mechanical: `reset()` is a
-    supported escape hatch (`monitoring`, tests, an ops-recovery seam), and a
-    reset that left the epoch behind would answer `probe-never-produced-a-result`
-    on a perfectly healthy instance — the fail-closed twin of the defect this
-    epoch exists to fix, with no pin to catch it.
+    supported escape hatch — the probe-reset suites call it directly against this
+    module (`tests/test_probe_reset_inflight_4608.py`) — and a reset that left the
+    epoch behind would answer `probe-never-produced-a-result` on a perfectly
+    healthy instance, the fail-closed twin of the defect this epoch exists to fix.
+    ⛔ It is NOT claimed that every caller in the tree routes through here: a
+    direct reset is legal and leaves the epoch stale, deliberately, because the
+    alternative (a global reset hook) would be a bigger, less testable seam. What
+    is guaranteed is narrower and mechanical: THIS module has exactly one writer.
 
     Order is load-bearing (see `_lifespan`): the epoch is written FIRST, so a
     `/healthz` poll landing between the two statements reads a fresh epoch over
@@ -2205,7 +2215,7 @@ def _liveness_dataplane_verdict() -> dict:
                     "error": None}
         # ⛔ AND NOTHING-IS-RUNNING IS THE THIRD NEVER-PRODUCED SHAPE (round 12).
         # `in_flight: False` with no result is what a failed/cancelled/never-
-        # scheduled refresher looks like, and without an uptime bound it is
+        # scheduled refresher looks like, and without a probe-epoch bound it is
         # indistinguishable from "boot, a few seconds in" — forever. Measured: a
         # reset coordinator beside a FRESH heartbeat answered 200 with
         # `reasons: []`, one of the three claimed terms silently inert. The
