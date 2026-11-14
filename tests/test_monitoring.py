@@ -3274,6 +3274,59 @@ class TestHealthzListener:
         assert payload["reasons"] == ["loop-not-serving"]
         assert "counter gone" in (payload["served"]["error"] or "")
 
+    def test_a_dead_ticker_is_stale_but_never_wedged(self):
+        """#2850: a ticker that cannot tick is NOT a wedge — the ``/healthz`` rule.
+
+        Every other test in this class now runs with the ticker CLEARED (#12601's
+        isolation, above), because ``None`` means "nothing instrumented" and that
+        is the state most of them measure. That leaves the guard's
+        ``not heartbeat_task_is_dead()`` conjunct unreachable from this whole
+        class: delete the conjunct and every other test here still passes, while
+        a process whose ticker died would begin answering 503 and fail its own
+        deploy health wait.
+
+        So this test arranges the disarmed state ON PURPOSE: the same stale tick,
+        the same demand and the same unserved registered reader as
+        ``test_the_wedge_term_fires_when_nothing_has_been_served_either`` — plus a
+        DEAD ticker, which alone flips 503 to 200. Staleness is still REPORTED
+        (``loop_stale``), which is exactly the shape #2850 asked for: describe the
+        state, never act on a ticker that cannot produce another tick.
+        """
+        import time
+
+        class _DeadTicker:
+            """The three methods ``heartbeat_task_is_dead`` reads, plus the
+            callback ``note_heartbeat_task`` registers."""
+
+            def cancelled(self):
+                return True
+
+            def done(self):
+                return True
+
+            def add_done_callback(self, cb):
+                self.cb = cb
+
+        server = monitoring.start_health_listener(port=0, bind="127.0.0.1")
+        monitoring.heartbeat_record(
+            at=time.monotonic() - (monitoring.LOOP_STALE_AFTER + 2.0))
+        monitoring.workload_enter()
+        monitoring.set_served_progress_source(
+            lambda: {"last_served_age_s": monitoring.LOOP_STALE_AFTER + 30.0,
+                     "served": 7})
+        monitoring.note_heartbeat_task(_DeadTicker())
+        try:
+            status, body = _http_get(server.server_address[1])
+        finally:
+            monitoring.set_served_progress_source(None)
+            monitoring._reset_heartbeat_task()
+            monitoring.workload_exit()
+        assert status == 200, body
+        payload = json.loads(body)
+        assert payload["status"] == "ok"
+        assert payload["reasons"] == []
+        assert payload["loop_stale"] is True   # REPORTED, never acted on
+
     def test_a_failed_data_plane_reports_503_while_the_loop_is_fine(self):
         """#12477 acceptance (2): the check fails when the DATA PLANE fails.
 
