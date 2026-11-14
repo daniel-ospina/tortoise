@@ -1226,6 +1226,37 @@ def test_guard_a_bool_count_is_not_a_count(hosted, setup):
     assert report["exit_code"] == EXIT_BROKEN, report["exit_code"]
 
 
+@pytest.mark.parametrize("served_raw,rendered", [
+    (False, "served False"),
+    (0.0, "served 0.0"),
+    ("0", "served '0'"),
+    (-3, "served -3"),
+])
+def test_guard_a_rejected_count_is_always_disclosed(hosted, setup, served_raw,
+                                                    rendered):
+    """#12730 review round 3, P2: EVERY shape the canonical reader rejects as a
+    count is DISCLOSED on the line, not only the ones whose value differs from it.
+
+    The first shape the round-1 fix disclosed was a served ``true``. ``False`` and
+    ``0.0`` are VALUE-EQUAL to the canonical count 0 (``False == 0`` and
+    ``0.0 == 0`` are both true in Python), so a value comparison silently dropped
+    the note and rendered the line exactly as if the server had served the
+    integer ``0`` — the same defect the round fixed for ``true``, one type over.
+
+    Mutation: compare by value (``extracted != counted``) and the ``False`` and
+    ``0.0`` rows below lose their ``served`` note and red here."""
+    home, _bindir, _fake = setup
+    root = _install(home, "claude")
+    graph, _url = hosted
+    graph.extracted_override = served_raw
+    graph.extraction = False          # the unrecorded-outcome arm
+    report = _verify(hosted, home, "claude", root)
+    memory = report["links"]["memory"]
+    assert memory["status"] == "UNVERIFIABLE-IN-CI", memory
+    assert "(extracted=0, " + rendered in memory["detail"], memory["detail"]
+    assert report["exit_code"] == EXIT_UNVERIFIABLE, report["exit_code"]
+
+
 def test_guard_the_count_is_the_canonical_reader_too(hosted, setup,
                                                      monkeypatch):
     """#12497 review round 4: the pair's delegation is pinned behaviourally,
@@ -1251,6 +1282,16 @@ def test_guard_the_count_is_the_canonical_reader_too(hosted, setup,
     assert report["links"]["memory"]["status"] == "PROVEN", \
         report["links"]["memory"]
     assert report["exit_code"] == EXIT_OK
+    # ⛔ AND THE PROVEN LINE NAMES THE COUNT THE VERDICT USED (#12730 review
+    # round 3, P2). Swapping ``{counted}`` for ``{extracted}`` on that line
+    # survived the whole file, and THIS is the state that exposes it: the reader
+    # says five, the server served zero, so the swapped line would print
+    # "and 0 memory Point(s) were extracted" beside a PROVEN verdict — the
+    # message contradicting its own line, exactly the class of the two prior
+    # rounds.
+    detail = report["links"]["memory"]["detail"]
+    assert "and 5 memory Point(s) were extracted" in detail, detail
+    assert "and 0 memory" not in detail, detail
 
     # (b) the mirror image: a served count the canonical reader rejects as 0.
     monkeypatch.setattr(sc, "session_extracted", lambda _detail: 0)

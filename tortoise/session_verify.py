@@ -1018,12 +1018,22 @@ def verify_session_capture(harness: str,
             extracted_ok = counted >= 1
             # The SERVED value, named only when it DISAGREES with the count this
             # verdict used.  ``session_extracted`` reads a JSON ``true``/``false``,
-            # a string and a negative as 0, so interpolating the raw field beside
-            # "neither observed nor ruled out" would print ``extracted=True`` for a
-            # value the line above has just rejected as a count (#12730 review P2).
-            # Absent a disagreement this is empty, so every message keeps the
-            # exact shape it already had for the ordinary ``extracted: 0`` state.
-            served = (f", served {extracted!r}" if extracted != counted else "")
+            # a float, a string and a negative as 0, so interpolating the raw field
+            # beside "neither observed nor ruled out" would print
+            # ``extracted=True`` for a value the line above has just rejected as a
+            # count (#12730 review P2).
+            #
+            # ⛔ THE TEST IS PROVENANCE, NOT VALUE (#12730 review round 3, P2).  A
+            # value comparison (``extracted != counted``) silently omitted the note
+            # for exactly two of the shapes this exists for: ``False == 0`` and
+            # ``0.0 == 0`` are TRUE in Python, so a served ``false`` or ``0.0``
+            # rendered as if the server had served the integer ``0`` — the same
+            # defect, one type over.  Only a real ``int`` that equals the count is
+            # the counted value; everything else is disclosed with ``!r``, which
+            # also keeps ``0``, ``0.0``, ``'0'``, ``False`` and ``None``
+            # distinguishable to the operator reading the line.
+            served = ("" if type(extracted) is int and extracted == counted
+                      else f", served {extracted!r}")
             if source == "<absent>":
                 report["links"]["memory"] = _link(
                     STATUS_UNVERIFIABLE,
