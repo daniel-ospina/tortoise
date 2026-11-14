@@ -2169,7 +2169,11 @@ class TestNoDocDeniesABuilderPlanExists:
                 # `_ASIDE_INNER_BREAK` left the suite at `19 passed`, because a
                 # NON-resuming pair fails the resume test whatever the inner set says.
                 # This row resumes with `that`, so only the inner test can decide, and
-                # deleting `but` turns a FLAGGED denial EXEMPT (`origin/main` flags it).
+                # deleting `but` turns a FLAGGED denial EXEMPT. ⛔ NOT a regression
+                # against `origin/main`: THIS row reads EXEMPT there (`4dd97bacc2`,
+                # measured — its cue-word exemption swallows it), so what the pin
+                # guards is a false PASS the strip would open HERE. The SIBLING row
+                # below is the one `origin/main` also flags.
                 "Until #12444 the doc said -- but the page is stale -- that there is no "
                 "Builder plan.\n",
                 "Until #12444 the doc said -- but nobody fixed it -- there is no Builder "
@@ -2227,7 +2231,7 @@ class TestNoDocDeniesABuilderPlanExists:
                 # by the nine alternatives' rows BELOW — TEN rows, because `'s`/`’s` is
                 # one alternative in two spellings — and the boundary in
                 # `test_the_lint_does_not_flag_correct_prose`
-                # (`… -- that issues with the old wording mean …`, `:1829`). Nothing
+                # (`… -- that issues with the old wording mean …`, `:1841`). Nothing
                 # wider has been measured, so nothing wider is claimed.
                 "Until #12444 the doc said -- the page was never fixed -- that is why there "
                 "is no Builder plan.\n",
@@ -2599,7 +2603,8 @@ class TestNoDocDeniesABuilderPlanExists:
             "_CITATION",
             "_RESTATEMENT_TAIL",
             "_RETRACTION_TIE",
-            # …and the four that compose straight into `_DENIAL_PATTERNS`, which the
+            # …and four ingredients that compose into `_DENIAL_PATTERNS` (three
+            # directly, `_IDENTIFIER_RESTATEMENT` transitively), which the
             # comment above claimed to have covered and had not (cycle-13 P2, measured:
             # injected tests pinning `_INTENSIFIER`, `_CLAUSE_END` and
             # `_IDENTIFIER_RESTATEMENT` all ran green — and `_IDENTIFIER_RESTATEMENT` is
@@ -2608,11 +2613,15 @@ class TestNoDocDeniesABuilderPlanExists:
             "_CLAUSE_END",
             "_CLAUSE_END_STRICT",
             "_IDENTIFIER_RESTATEMENT",
-            # ⛔ …and TWO MORE that compose straight into the decision (round-9 review
-            # cycle 8, measured): an injected test pinning `_BUILDER_PLAN` or
+            # ⛔ …and TWO MORE the guard was still silent on (round-9 review cycle 9,
+            # MEASURED): an injected test pinning `_BUILDER_PLAN` or
             # `_INTENSIFIER_WORDS` ran GREEN, so the guard was silent on the noun the
-            # whole lint is about and on the qualifier set four pins depend on. The
-            # "four that compose" count three lines up was wrong; it is six.
+            # whole lint is about and on the set `_INTENSIFIER` is built from. The
+            # comment above gets the COUNT right (four) and the SET wrong:
+            # `_BUILDER_PLAN`, `_INTENSIFIER`, `_CLAUSE_END` and `_CLAUSE_END_STRICT`
+            # are the four DIRECT refs of `_DENIAL_PATTERNS`, and
+            # `_IDENTIFIER_RESTATEMENT` (named there) is transitive — AST closure over
+            # this module's assignments, measured at this head.
             "_BUILDER_PLAN",
             "_INTENSIFIER_WORDS",
         }
