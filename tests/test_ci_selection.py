@@ -22201,15 +22201,21 @@ def test_the_health_honesty_suite_is_selected_on_BOTH_halves_of_its_module_pair(
     registration: naming the file in prose is not reading its surface rows. So a
     registration that lost one half was silent.
 
-    That is not hypothetical, and the mechanism is NOT the `merge=union` driver
-    (`.gitattributes`) — `union` keeps both sides of a conflicting hunk and deletes
-    nothing, which the manifest's own note says and `duplicate_entries()`' measurement
-    retracts. The base `d05688df5990` had ALREADY de-duplicated the file, carried both
-    rows, and selects on BOTH diffs. What a plain `git rebase` of #12645 onto it
-    replayed was an ordinary edit that REMOVED the `core` block and appended a second
-    `api` row, so the post-rebase tree (`f2ec5ec092`, whose parent is `d05688df5990`)
-    selected this suite on a `hosted_api.py` diff and NOT on a `monitoring.py` one —
-    with no conflict reported, the rebase printing "Successfully rebased".
+    That is not hypothetical, and the wrong root cause buys the wrong defence: the lost
+    arm came from `config/ci-surfaces.yml`'s `merge=union` (`.gitattributes:21`) applied
+    to a REBASE, not from any edit that removed a block. Measured per revision: the
+    pre-#12482 base `c1db6f3df` carried TWO `api` and TWO `core` rows; #12482's
+    `d05688df5990` deleted one of each; #12645's pre-rebase original `9122a08a72` (parent
+    `c1db6f3df`) deleted the other of each and was CORRECT. Replaying that onto
+    `d05688df5990` is a three-way merge in which both `core` deletions apply cleanly — the
+    arm goes in EITHER mode — while both `api` regions are delete-vs-keep conflicts that
+    `union` resolves by KEEPING BOTH SIDES, which is why nothing conflicted. So the
+    post-rebase tree (`f2ec5ec092`, whose parent is `d05688df5990`) carries two `api` rows
+    and NO `core` row, selects this suite on a `hosted_api.py` diff and NOT on a
+    `monitoring.py` one, and the rebase printed "Successfully rebased". Reproduce rather
+    than trust: `git merge-file -p --union` over those three revisions is BYTE-IDENTICAL
+    to `f2ec5ec092:config/ci-surfaces.yml`
+    (`sha256 50d1b19d74a40a52d84ea6d68234913175bd0bba4e1f54608c2a1f6b72a241da`).
 
     `integrity()` is not a substitute for this pin, and that is the point: it answers ONE
     question — is every `tests/**/test_*.py` classified SOMEWHERE — so a file that keeps
