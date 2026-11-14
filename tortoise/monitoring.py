@@ -2319,7 +2319,7 @@ def record_health_setup_clamp() -> None:
 
       1. the clamped allowance was too small for a cold start that DID run — remedy: a warmer store,
          or #12481's truthful deep report;
-      2. the store was too cold for even the UNCLLAMPED 20.0 s knob — remedy: the store, not #12481;
+      2. the store was too cold for even the UNCLAMPED 20.0 s knob — remedy: the store, not #12481;
       3. the probe was granted a hard **0.0 s** because the dispatch had already spent more than
          ``bound − reserve`` — remedy: the dispatch's pre-handler latency, or #12481;
       4. the single probe slot was occupied by another dispatch, so this one spent its allowance

@@ -886,7 +886,7 @@ def test_the_quota_budget_shrinks_by_what_the_earlier_phases_actually_spent(monk
     phase legitimately sees `min(QUOTA_STATE_TIMEOUT, remaining − margin)` — **3.0 s of a 4.0 s
     deadline**, because its own constant binds before the deadline does — so the four figures are
     `0.0 + 1.5 + 1.5 + 3.0 = 6.0 s`, a sum that can never be SPENT, because the phase that would
-    spend it starts earlier, when the earlier spend has already happened. ⛔ An earlier wording said
+    spend it starts LATER, when the earlier spend has already happened. ⛔ An earlier wording said
     the quota sees "~3.5 s" here; that is the UNCAPPED figure, and it would put the four terms at
     6.5 s, which contradicts the 6.0 s the same sentence states (fresh review of the final head,
     P2). This drives the real relationship: make the
@@ -1355,7 +1355,7 @@ def test_a_low_knob_IS_the_spend_and_says_so(monkeypatch):
         "would conclude the bound is the constraint when the knob is")
 
 
-def test_an_UNCLLAMPED_allowance_is_not_labelled_clamped_either(monkeypatch):
+def test_an_UNCLAMPED_allowance_is_not_labelled_clamped_either(monkeypatch):
     """The third arm: an allowance was passed, but no clamp was applied (#12482 cycle 5, round 3 P2).
 
     ⛔ The round-2 fix keyed the wording on the ARGUMENT BEING PRESENT, which is true for every
