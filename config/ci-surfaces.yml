@@ -1490,6 +1490,19 @@ surfaces:
   - test_mcp_route_challenge.py  # #2864: RFC 9728 challenge on /mcp 401s + /mcp route canonicalization (docker lane)
   - test_mcp_server.py
   - test_mcp_server_auth_modes.py
+  # The #12500/#12455/#12372 refusal pins all drive `mcp_server.tortoise_query`
+  # through an http-transport fixture that SETS `tortoise/mcp_auth.py`'s
+  # contextvars (`_transport_mode`, `_current_org_id`, `_current_org_limits`) —
+  # and `mcp_auth.py` is an exact `api` SOURCE_PATTERN, not a SHARED_MODULE, so a
+  # named match REPLACES the `core` fallback. Measured: `--changed-files
+  # tortoise/mcp_auth.py` selects this surface and did NOT include any of the
+  # three, so a transport-context regression (the flag that decides whether
+  # `_get_org_sdk` is the accessor those pins stub) ran them zero times. The same
+  # measurement the `test_wait_bound_write_ack.py` row above records, and why
+  # these sit beside `test_mcp_server.py` rather than under `core` alone.
+  - test_12500_query_args_dropped.py
+  - test_12455_text_filters_dropped.py
+  - test_12372_entity_type_dropped.py
   # #10849 (found by the fold's own `ci_selection.py --integrity`, NOT by CI — the gate
   # cannot see an unregistered file, only its absence): #10856 adds this file and registered
   # no surface, so `manifest-integrity` (a required `python-ci-gate.needs` leg) reddened by
@@ -1642,6 +1655,14 @@ surfaces:
   # are `api` for the same reason. Measured after the fix: `select(
   # ['tortoise/quota.py'])` → this file selected.
   - test_11892_health_quota.py
+  # #12477: the same silent-drop trap on the DIRECT sibling — this test drives
+  # `hosted_api._start_liveness` / `_HEALTH_PROBE` / `_LAST_PLANE_SERVED_AT` as well
+  # as `tortoise/monitoring.py`, and `hosted_api.py` selects `['api','onboarding']`
+  # only. Measured with the `core` row alone:
+  # `select(['tortoise/hosted_api.py'])` did NOT include this file, so a
+  # `hosted_api.py`-only regression of the `/health` verdict — #12477 itself —
+  # carried no guard. Registered in BOTH lists, like `test_11892_health_quota.py`.
+  - test_12477_health_honesty.py
   - test_quota.py
   # #8906: the points gate must count the graph the request WRITES. Every pin
   # lives in `tortoise/hosted_api.py` (`_check_org_limit`'s `sdk` threading + the
@@ -2386,6 +2407,18 @@ surfaces:
   # `test_ci_selection.py` pins in `test-slow`), and a diff to this file must
   # select `core`, where it runs.
   - test_12500_query_args_dropped.py
+  # #12477: the health surfaces must not read green over a failing data plane
+  # (the `/health` body's verdict and the 9090 listener's registration). Landed in
+  # `main` UNREGISTERED — so `main` was red on `integrity()` and every PR's merge
+  # ref inherited it. The mechanism, measured on that PR (#12488): the leg is NOT
+  # blind before the merge — `manifest-integrity` runs on every event and completed
+  # FAILURE at 04:28:39Z, and the PR merged at 05:15:26Z anyway (enforce_admins:
+  # false, owner merge). That is a STRONGER instance than #11978 records: there the
+  # leg completed AFTER the merge ("The gate is correct — it simply reported after
+  # the tree was already on `main`"); here it completed FAILURE 47 minutes BEFORE
+  # it, so the leg does not GATE the merge either. Registered here so
+  # the recovery travels with the next PR that touches this file.
+  - test_12477_health_honesty.py
   - test_candidate_recall_11901.py
   - test_journal_segments.py
   - test_journal_segments_falsifier.py
