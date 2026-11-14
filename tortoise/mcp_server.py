@@ -3955,9 +3955,12 @@ def tortoise_query(kind: str | None = None,
       floor on the literal `entity_type == "point"`, sdk.py:43288), and
       `order_by="confidence"`/`"graph"` for every type except `document` and
       `source` (both map to the `Source` label: it is outside the ranker's
-      belief sweep and their hit dicts carry no timestamp, so BOTH orderings
-      compute the same key for every row and return the relevance order
-      unchanged — `order_by="relevance"` is applied to every type).
+      belief sweep, so the graph boost is 0 on every row, and neither hit dict
+      carries the timestamp the recency term reads — rounded out, a confidence
+      ordering collapses to ONE key for every row, while a graph ordering keeps
+      keys that differ only by an identical offset, i.e. monotone in the
+      relevance score, so the order it returns is the one the caller already
+      had. `order_by="relevance"` is applied to every type).
       A floor on any other `entity_type`, and a confidence or graph ordering on
       those two, are REFUSED rather than dropped; structural filtering by
       confidence is Phase 2 in the hybrid-search plan, not a shipped feature.
@@ -4227,8 +4230,9 @@ def tortoise_query(kind: str | None = None,
                 (f"`order_by='graph'` adds an EP belief and a recency term to the "
                  f"similarity score, and an entity_type={entity_type!r} row "
                  f"carries neither (its label is outside the belief sweep and its "
-                 f"hit dict carries no timestamp), so every row's key is the same "
-                 f"and the order comes back unchanged")))
+                 f"hit dict carries no timestamp the ranker reads), so both extra "
+                 f"terms are IDENTICAL on every row and the key is monotone in "
+                 f"the relevance score — the order comes back unchanged")))
 
     if _unapplied:
         _names = [name for name, _ in _unapplied]

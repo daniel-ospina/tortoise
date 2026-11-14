@@ -521,9 +521,12 @@ def test_a_ranking_ordering_is_refused_where_every_key_is_constant(
 
     `GraphRanker._fetch_signals` reads EPISTEMIC_LABELS = ("Point", "Subject",
     "Object", "Event") and BOTH `document` and `source` map to the `Source`
-    label, so the sweep answers `{}`, every key falls to `(1, 0.0)`, and the
-    stable sort leaves the RRF order — unmarked, so the caller cannot tell the
-    order was never applied. Fails if the branch is missing (`_is_refusal` false)
+    label, so the sweep answers `{}` and neither extra term varies: `confidence`
+    collapses to ONE key per row (`(1, 0.0)`), while `graph` keeps distinct keys
+    that differ by an identical offset (measured: `final_score` 0.65 / 0.3722 /
+    0.15 against similarity 0.10 / 0.05 / 0.01) — monotone in the relevance
+    score, so the ORDER is the one the caller already had. Unmarked either way,
+    so the caller cannot tell the ordering was never applied. Fails if the branch is missing (`_is_refusal` false)
     or widened to the types that DO honour it (next test).
     """
     from tortoise.mcp_server import tortoise_query
@@ -692,12 +695,19 @@ _DOCSTRING_FALSE = (
     # (round 10: the previous comment still argued the refuted round-6 premise —
     # "only a CONFIDENCE ordering is refused there" — while the ban itself stands
     # on the measurement above).
-    # Round-12: the bare form is also too broad — "a confidence or graph
-    # `order_by` for every type EXCEPT `document`/`source` is applied" is TRUE.
-    # Pinned as the shipped clause instead: the unqualified sentence continued
-    # with the claim that both orderings were applied "to every type including
-    # those two".
-    "`order_by` for every type EXCEPT `document`/`source` (both map to the",
+    # Round-13: the previous entry ("…EXCEPT `document`/`source` (both map to the")
+    # was both too broad and too narrow — it reded the TRUE value-qualified form
+    # and let "applied to every type including those two" through. Pinned is the
+    # FALSE half itself, which is exactly what the claim got wrong.
+    #
+    # RECORDED RESIDUAL, not papered over: the bare summary "`order_by` for every
+    # type EXCEPT `document`/`source`" is ALSO false (it drops the value, and
+    # `relevance` IS applied there) but is deliberately NOT banned — no decidable
+    # check separates it from the true value-qualified form, and three rounds of
+    # trying produced more over-block than protection. The positive assertion
+    # below holds the qualified truth in the document; catching a lossy summary is
+    # a review question, not a pin.
+    "applied to every type including those two",
     # round-8: the harm clause was lumped, so it claimed an ORDERING let rows
     # through — an ordering excludes nothing; it only re-decides their sequence.
     "an accepted value was discarded and rows the caller excluded came back",
@@ -718,10 +728,14 @@ def test_the_tool_docstring_never_restates_a_falsified_claim() -> None:
     """
     from tortoise.mcp_server import tortoise_query
 
-    flat = " ".join((tortoise_query.__doc__ or "").split())
+    # CASEFOLDED on both sides (round-13 P2 3): the bans were case-sensitive, so
+    # the round-8 lumped-harm claim came back green with a capital A, and the
+    # round-5 sentence came back green with a lowercase "except" — a casing change
+    # is not a fix to a false claim.
+    flat = " ".join((tortoise_query.__doc__ or "").split()).casefold()
 
     for claim in _DOCSTRING_FALSE:
-        assert " ".join(claim.split()) not in flat, (
+        assert " ".join(claim.split()).casefold() not in flat, (
             f"the docstring restates a falsified claim: {claim!r}"
         )
     # …and the TRUE statement is present, so the pin is not satisfied by silence.
@@ -774,8 +788,9 @@ def test_a_graph_ordering_with_no_signal_is_refused_not_silently_reordered(
 
     Measured live on a `:Source` corpus: `order_by="graph"` returned exactly the
     relevance order for every input, with `graph_ranking={graph_boost: 0.0,
-    recency_boost: 1.0}` on every row — the class this guard exists for, on the
-    sentence that recommends an alternative. Fails if only `confidence` is
+    recency_boost: 1.0}` on every row — both extra terms identical, so the key is
+    monotone in the relevance score and reorders nothing. The class this guard
+    exists for, on the sentence that recommends an alternative. Fails if only `confidence` is
     refused there.
     """
     from tortoise.mcp_server import tortoise_query
