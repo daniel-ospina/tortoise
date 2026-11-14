@@ -610,8 +610,13 @@ _RETRACTION_TIE = re.compile(
 #: record writes it there. An UNCLOSED pair runs to the end of the fragment, which is
 #: exactly what the splitter leaves when the claim's own period ends the sentence.
 _QUOTE_PAIRS = (('"', '"'), ('`', '`'), ('\u201c', '\u201d'), ('\u2018', '\u2019'))
-_QUOTED_NEGATION = re.compile(r"\b(?:no|not|never)\b|n['\u2019]t\b", re.I)
-_BUILDER_PHRASE = re.compile(_BUILDER_PLAN, re.I)
+#: ⛔ `_QUOTED_NEGATION` and `_BUILDER_PHRASE` lived here and are GONE (cycle-17 P1,
+#: measured). Both became dead when `_quotes_the_denial` moved its gate from "the span
+#: holds a Builder phrase and a negation" to "the span IS a denial, by `_DENIAL_PATTERNS`"
+#: — the narrower pair refused to recognise the predicate-nominative and
+#: noun-before-name denials the lint itself flags, and blocked 13 of this file's own
+#: quoted records. A dead term left behind reads as protection it does not provide;
+#: removing it is this file's own cycle-16 rule for `before then`.
 
 
 def _quoted_spans(text: str) -> list[tuple[str, bool]]:
@@ -659,34 +664,69 @@ def _quoted_spans(text: str) -> list[tuple[str, bool]]:
 
 
 def _quotes_the_denial(sentence: str) -> bool:
-    """Is the DENIAL itself the quoted matter — a Builder phrase AND a negation in ONE span?
+    """Is the DENIAL itself the quoted matter? Recognised by THIS MODULE'S OWN DENIAL SET.
 
-    ⛔ An UNCLOSED span counts only when the Builder phrase OPENS it (allowing for the
-    opening mark itself), i.e. the span is the claim. A stray unmatched `"` earlier in
-    the sentence must not make everything after it "quoted" (cycle-9 P2, measured).
+    ⛔ THE GATE IS `_DENIAL_PATTERNS`, NOT `_BUILDER_PHRASE` (cycle-17 P1, measured).
+    Gating on the phrase (which requires `builder` IMMEDIATELY followed by `plan`/`tier`)
+    was narrower than the lint itself: `Builder is not a plan.`, `There is no plan called
+    Builder` and every other predicate-nominative / noun-before-name claim IS a denial
+    here, so a record that quoted one was BLOCKED — 13 of 52 of this file's own quoted
+    records, none of them flagged by `origin/main`. A lint whose stated expensive half is
+    the false block cannot refuse to recognise the very shapes it calls denials.
+
+    ⛔ An UNCLOSED span counts only when the denial OPENS it (allowing for the opening
+    mark itself), i.e. the span is the claim. A stray unmatched `"` earlier in the
+    sentence must not make everything after it "quoted" (cycle-9 P2, measured).
+
+    ⛔ "A NEGATION SOMEWHERE IN THE SPAN" IS NOT "THE DENIAL IS QUOTED" (cycle-11 P2,
+    measured): `no downtime is guaranteed; the Builder plan is unlimited` asserted the
+    tier EXISTS while carrying a `no`, so an unrelated negation exempted the live denial
+    beside it. Requiring a `_DENIAL_PATTERNS` match in the span is what keeps that
+    closed — it is the whole protection, and it does not need a second gate.
     """
     for span, closed in _quoted_spans(sentence):
         plain_span = _plain(span)
-        phrase = _BUILDER_PHRASE.search(plain_span)
-        # ⛔ "A NEGATION SOMEWHERE IN THE SPAN" IS NOT "THE DENIAL IS QUOTED" (cycle-11
-        # P2, measured). `no downtime is guaranteed; the Builder plan is unlimited`
-        # satisfied both halves while asserting the tier EXISTS, so a quotation carrying
-        # an unrelated negation exempted the live denial beside it — the cycle-8 class one
-        # level deeper. The span must itself BE a denial, by this module's own patterns.
-        if phrase is None or not _QUOTED_NEGATION.search(plain_span):
+        denial = next((m for m in map(lambda p: p.search(plain_span), _DENIAL_PATTERNS)
+                       if m is not None), None)
+        if denial is None:
             continue
-        if not any(pattern.search(plain_span) for pattern in _DENIAL_PATTERNS):
-            continue
-        if closed or phrase.start() <= 2:
+        if closed or denial.start() <= 2:
             return True
     return False
 
 
+#: The SPEECH-VERB half only. What it introduces is decided by `_DENIAL_PATTERNS`
+#: (:func:`_reports_a_denial`), never by a hand-rolled shape.
 _REPORTED_CLAIM = re.compile(
     r"\b(?:read|said|says|claimed|asserted|asserts|stated|wrote|worded)\b\s+"
-    r"(?:that\s+)?(?:there\s+(?:is|was|are)\s+no|no)\s+"
-    r"['\"\u201c\u201d\u2018\u2019`]?builder",
+    r"(?:that\s+)?",
     re.I)
+
+
+#: How far into the reported clause a denial may begin and still count as the thing the
+#: verb introduces. Small on purpose: `said "pro" and there is no Builder plan` must NOT
+#: count, and its denial begins well past this bound.
+_REPORTED_DENIAL_OFFSET = 6
+
+
+def _reports_a_denial(sentence: str) -> bool:
+    """Does a SPEECH VERB introduce a denial — recognised by `_DENIAL_PATTERNS`?
+
+    ⛔ THE TAIL WAS A HAND-ROLLED SHAPE (cycle-17 P1, measured): it required
+    `there is|was|are no` or `no` + `builder`, so 23 of 52 of this file's own UNQUOTED
+    reported records were BLOCKED — `said there's no Builder plan`, `said there isn't a
+    Builder plan`, `said the Builder tier does not exist`, `said no plan called Builder`,
+    none flagged by `origin/main`. Reusing the denial set makes the exemption's
+    recognition the SAME set as the lint's, which is the only way the two cannot drift.
+    """
+    plain = _plain(sentence)
+    for verb in _REPORTED_CLAIM.finditer(plain):
+        rest = plain[verb.end():]
+        for pattern in _DENIAL_PATTERNS:
+            match = pattern.search(rest)
+            if match is not None and match.start() <= _REPORTED_DENIAL_OFFSET:
+                return True
+    return False
 
 
 def _quotes_a_retracted_claim(sentence: str) -> bool:
@@ -706,7 +746,7 @@ def _quotes_a_retracted_claim(sentence: str) -> bool:
                      # half is required here too, which is what the block comment above
                      # this module's cue list always claimed.
                      or (_RETRACTION_EVIDENCE.search(sentence)
-                         and _REPORTED_CLAIM.search(_plain(sentence)))))
+                         and _reports_a_denial(sentence))))
 
 
 def _is_a_correction_record(fragment: str) -> bool:
@@ -989,6 +1029,18 @@ class TestNoDocDeniesABuilderPlanExists:
             # `test_a_retraction_record_split_across_blocks_is_exempt` pins the
             # across-fragments one.
             'Until then the page said "there is no Builder plan".',
+            # ⛔ THE EXEMPTION NOW RECOGNISES WHAT THE LINT RECOGNISES (cycle-17 P1,
+            # measured). Gating the quoted span on `_BUILDER_PHRASE` and the reported
+            # clause on a hand-rolled `there is no … builder` tail refused to recognise
+            # the predicate-nominative, noun-before-name and contracted shapes THIS LINT
+            # calls denials — so 13 of 52 quoted records and 23 of 52 unquoted reported
+            # records were BLOCKED, none of them by `origin/main`. Two pins per arm.
+            'Previously the doc read "Builder is not a plan."; #12444 corrected it.',
+            'Until #12444 the page read "Builder is not a plan".',
+            'Previously the page read "There is no plan called Builder".',
+            "Previously the doc said there's no Builder plan; #12444 corrected it.",
+            "Previously the doc said there isn't a Builder plan; #12444 corrected it.",
+            "Previously the doc said the Builder tier does not exist; #12444 corrected it.",
             'The doc previously read "There is no Builder plan."; #12444 corrected it.',
         )
         for sentence in correct:
@@ -1281,11 +1333,12 @@ class TestNoDocDeniesABuilderPlanExists:
             "_is_a_correction_record",
             "_quotes_the_denial",
             "_REPORTED_CLAIM",
+            "_reports_a_denial",
             # …and the rest of the composition surface the same review left reachable
             # (cycle-12 P2, measured: an injected test pinning `_BUILDER_PHRASE` ran
             # green, so the guard was silent on an ingredient added by this commit).
-            "_BUILDER_PHRASE",
-            "_QUOTED_NEGATION",
+            # ⛔ `_BUILDER_PHRASE` and `_QUOTED_NEGATION` were DELETED in cycle 17 and are
+            # no longer banned — banning a name that does not exist is not a guard.
             "_quoted_spans",
             "_CITATION",
             "_RESTATEMENT_TAIL",
