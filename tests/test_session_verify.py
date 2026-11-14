@@ -62,6 +62,10 @@ class _Graph:
         self.fail_post = False
         self.fail_delete = False
         self.fail_get_session = False
+        #: The receipt read (`/v1/onboarding/state`) fails: the API is a
+        #: PRECONDITION, so nothing is exercised and every link is
+        #: UNVERIFIABLE (exit 2) — the fourth exit-2 cause.
+        self.fail_state_read = False
         self.hide_session_on_get = False
         self.no_source = False
         self.omit_source_field = False
@@ -170,6 +174,9 @@ def _make_handlers(graph: _Graph):
         def do_GET(self):
             if self.path == "/v1/onboarding/state":
                 graph.state_reads += 1
+                if graph.fail_state_read:
+                    self._send(500, {"detail": "state refused (test)"})
+                    return
                 if (graph.receipt_on_state_read is not None
                         and graph.state_reads >= graph.receipt_on_state_read
                         and "session_capture_receipt_claude"
@@ -1172,11 +1179,17 @@ def test_guard_a_recorded_count_outranks_the_unknown_qualifier(hosted, setup):
 
 def test_guard_a_bool_count_is_not_a_count(hosted, setup):
     """#12497 review round 3: the count must come from the canonical reader,
-    which reads a JSON ``true``/``false`` as 0 (``session_confirm.py``:
-    "an unknown extraction count must never satisfy the extraction-observed
-    test"). Python considers a bool an ``int``, so a local ``isinstance(\n    extracted, int)`` check proves the leg from garbage.
+    which reads a JSON ``true``/``false`` as 0. Its docstring states the
+    contract verbatim: "an unknown extraction count must never satisfy the
+    'extraction observed' test that gates the import receipt"
+    (``session_confirm.py:224-228``).
 
-    Mutation: restore ``extracted_ok = isinstance(extracted, int) and\n    extracted >= 1`` and a served ``extracted: true`` beside\n    ``outcome_known: false`` reports PROVEN / exit 0."""
+    Python considers a bool an ``int``, so a local
+    ``isinstance(extracted, int)`` check proves the leg from garbage.
+
+    Mutation: restore ``extracted_ok = isinstance(extracted, int) and
+    extracted >= 1`` and a served ``extracted: true`` beside
+    ``outcome_known: false`` reports PROVEN / exit 0."""
     home, _bindir, _fake = setup
     root = _install(home, "claude")
     graph, _url = hosted
@@ -1186,6 +1199,42 @@ def test_guard_a_bool_count_is_not_a_count(hosted, setup):
     memory = report["links"]["memory"]
     assert memory["status"] == "UNVERIFIABLE-IN-CI", memory
     assert report["exit_code"] == EXIT_UNVERIFIABLE
+
+
+def test_guard_the_count_is_the_canonical_reader_too(hosted, setup,
+                                                     monkeypatch):
+    """#12497 review round 4: the pair's delegation is pinned behaviourally,
+    the COUNT's was not — a bool-aware local re-implementation
+    (``isinstance(extracted, int) and not isinstance(extracted, bool) and
+    extracted >= 1``, the shape ``capture_spool.py`` already mirrors) kept the
+    whole file green. Both directions are pinned here, because a count can be
+    too high as well as too low.
+
+    Mutation: replace ``_session_extracted(detail)`` with any local count
+    re-implementation and neither patch below is observed."""
+    import tortoise.session_confirm as sc
+
+    home, _bindir, _fake = setup
+    root = _install(home, "claude")
+    graph, _url = hosted
+
+    # (a) the server serves ZERO points, the canonical reader says five.
+    graph.zero_extracted = True
+    graph.extraction = False          # unrecorded, so only the count decides
+    monkeypatch.setattr(sc, "session_extracted", lambda _detail: 5)
+    report = _verify(hosted, home, "claude", root)
+    assert report["links"]["memory"]["status"] == "PROVEN", \
+        report["links"]["memory"]
+    assert report["exit_code"] == EXIT_OK
+
+    # (b) the mirror image: a served count the canonical reader rejects as 0.
+    monkeypatch.setattr(sc, "session_extracted", lambda _detail: 0)
+    graph.zero_extracted = False
+    graph.extraction = None           # absent block: the FAIL arm must run
+    report = _verify(hosted, home, "claude", root)
+    assert report["links"]["memory"]["status"] == "FAIL", \
+        report["links"]["memory"]
+    assert report["exit_code"] == EXIT_BROKEN
 
 
 def test_guard_the_arm_reads_the_canonical_predicate(hosted, setup,
@@ -1222,9 +1271,9 @@ def test_importing_session_verify_does_not_pull_the_sdk():
     """#12497 review P2: `tortoise/__main__.py` imports this module at the top
     of ``main()``, so a module-scope import of ``session_confirm`` put the
     whole SDK (and ``prometheus_client``) on the CLI's import path for EVERY
-    subcommand — measured 0.043 s → 0.24 s, and a bare interpreter without
-    the optional stack would fail to run any command. The reader is imported
-    lazily instead.
+    subcommand — measured on this box at 0.043 s → 0.24 s to import this
+    module, with ``tortoise.sdk`` newly in ``sys.modules``. The readers are
+    imported lazily instead, so the cost lands only on ``session verify``.
 
     Mutation: move ``from tortoise.session_confirm import
     extraction_outcome_known`` back to module scope, OR add such an import to
@@ -1252,12 +1301,33 @@ def test_importing_session_verify_does_not_pull_the_sdk():
             cmd, proc.stdout[-400:])
 
 
+def test_guard_an_unreadable_api_is_unverifiable_not_broken(hosted, setup):
+    """#12497 review round 4: the receipt read failing BEFORE the fire is the
+    fourth exit-2 cause — the API is a PRECONDITION, so nothing was
+    exercised and no link may claim PROVEN or BROKEN. It had no test at all,
+    so its exit code could change invisibly.
+
+    Mutation: return `EXIT_BROKEN` from that arm (or set one link FAIL) and
+    this reds."""
+    home, _bindir, _fake = setup
+    root = _install(home, "claude")
+    graph, _url = hosted
+    graph.fail_state_read = True
+    report = _verify(hosted, home, "claude", root)
+    assert report["exit_code"] == EXIT_UNVERIFIABLE, report["exit_code"]
+    for link in ("installed", "captured", "memory"):
+        assert report["links"][link]["status"] == "UNVERIFIABLE-IN-CI", \
+            report["links"][link]
+    assert graph.posts == [], "the seam must not be fired off an unreadable API"
+
+
 def test_the_exit_two_summary_does_not_invent_a_cause():
-    """#12497 review P2: exit 2 has THREE causes — a harness this command
-    cannot fire, an API build that serves no ``source`` field, and a server
-    that recorded no extraction outcome. The report's summary line must not
-    assert the first one for the other two, because that points the operator
-    at the wrong remedy (the link's own line already names the real reason).
+    """#12497 review P2: exit 2 has FOUR causes — a harness this command
+    cannot fire, an API unreadable before the fire, an API build that serves
+    no ``source`` field, and a server that recorded no extraction outcome.
+    The report's summary line must not name any one of them for the others,
+    because that points the operator at the wrong remedy (the link's own line
+    already names the real reason).
 
     Mutation: restore the fixed "a link could not be exercised in this
     environment" sentence and the ``not in`` assertion below fails."""
