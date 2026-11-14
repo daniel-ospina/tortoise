@@ -15510,8 +15510,11 @@ class TortoiseSDK:
         #    (`"embedding" in props`: that vector describes the caller's own
         #    text) and never when the embedder was unavailable (nothing then
         #    describes the composed text, and a later `backfill_embeddings`
-        #    re-encode is from `content`). Attaching it anyway is exactly the
-        #    #4194 lie `update_point`'s content arm clears.
+        #    re-encode USED TO be from `content` — since #12489 it reads
+        #    `embeddingText or content`, so the backfill is no longer a reason
+        #    this rule is safe; it stands on the #4194 identity alone). Attaching
+        #    it anyway is exactly the #4194 lie `update_point`'s content arm
+        #    clears.
         # ⛔ THE NEIGHBOUR HALF IS DELIBERATELY NOT WIRED HERE, and the reason is
         # measured rather than assumed (#11739 review round 4): a Point has NO
         # resolved neighbours at its own creation. `create_point` mints NO
@@ -48405,12 +48408,12 @@ class TortoiseSDK:
                 # is not in the map) defers, so a legacy point that never got a
                 # status can still be given one (the CLI backfill's own route to
                 # `live`), and an identical status is not a transition at all.
-                # ⚠️ The #2498 residual ONTOLOGY §5 records — a flag-dead point
-                # (`outdated=true` with a NULL status) given `status='live'` — is
-                # NOT carried over to this door: the guard above runs first and it
-                # reads the legacy flag, so that shape is REFUSED here (pinned by
-                # `test_the_legacy_outdated_flag_alone_makes_the_point_dead`). The
-                # residual stays where §5 puts it, on `update_point`'s promote arm.
+                # ⚠️ The #2498 residual — a flag-dead point (`outdated=true`, NULL
+                # status) given `status='live'` — is NOT carried over: the guard
+                # above reads the legacy flag, so that shape is REFUSED here
+                # (pinned by `test_the_legacy_outdated_flag_alone_makes_the_point_dead`).
+                # It is still live on `update_point`'s promote arm, recorded as a code
+                # lag in ONTOLOGY-CHANGELOG v3.35, not in the model file.
                 # The TERMINAL half is already answered above by the shared guard,
                 # which also covers what the map cannot (`deprecated`, the legacy
                 # `outdated=true` flag, an operator fan-out) — that is why this

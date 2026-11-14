@@ -1,0 +1,321 @@
+# release-artifact-canary (#12363) — the missing reading on the PUBLISHED PyPI artifact.
+#
+# WHY THIS EXISTS
+# ---------------
+# 2026-11-13: `pip install tortoise-graph` (0.2.0, uploaded 2026-08-08) followed by the
+# documented first command `tortoise init` exits 1 on a clean machine, and
+# `pip install tortoise-client` — documented in README.md — 404s. Neither fact was
+# visible to any instrument in this repo, so the artifact stayed broken for 97 days.
+#
+# Every existing check reads the TREE or the wheel it just BUILT:
+#   - `ci.yml` → `packaging-smoke` builds a wheel and asserts pack content + imports;
+#   - `publish-pypi.yml` → `build` smoke-tests the freshly built wheel (packs + `--help`);
+#   - nothing ever runs a DOCUMENTED COMMAND, and nothing reads what the index serves
+#     weeks later.
+# A wheel that is broken at upload time therefore stays broken silently, forever. Same
+# class as deploy-staleness (#10109): a thing that never attempted to run cannot be
+# caught by a DECLINE channel.
+#
+# WHAT IT READS: `tools/published_artifact_canary.py` installs the LATEST PUBLISHED
+# `tortoise-graph` from PyPI into a fresh venv with a fresh `HOME` and runs `tortoise
+# init` (exit 0 AND the DB file exists), asserts `tortoise-client` resolves, and reports
+# the published version + upload age. It exits 1 when the artifact is broken and 2 when
+# it could not be evaluated — a detector that cannot run is RED, never a pass.
+#
+# WHY IT CANNOT BE STARVED INTO SILENCE (the load-bearing property, #10109):
+#   1. its OWN `schedule` + `workflow_dispatch` — no `push: main`, so no merge creates or
+#      cancels its run. (It is NOT exempt from the runner pool: `ubuntu-latest` is the same
+#      label ci.yml uses, so a saturated pool delays the tick. A delayed run is not a lost
+#      run — the artifact is in a steady state, so the next tick reads the same thing — but
+#      do not restate this as "never queues behind the CI backlog".);
+#   2. its OWN concurrency group with `cancel-in-progress: false`, so a run is never
+#      superseded mid-flight;
+#   3. it detects a STEADY STATE (the published artifact stays broken until someone
+#      releases), so a GitHub-dropped or delayed scheduled fire is not a loss — the next
+#      tick re-fires the same red;
+#   4. it fails closed: an unreadable index, a failed install, or an unevaluated arm is a
+#      RED, never a green.
+#   Residual (stated, not hidden): a GitHub Actions outage takes the schedule down with
+#   it, so the canary's own absence is the one thing it cannot observe — the same
+#   residual availability-liveness (#4573) names for the pager. Closing it needs a
+#   scheduler outside GitHub, which is an owner decision.
+#
+# THIS IS NOT A MERGE GATE. It is deliberately absent from `.mergify.yml` and from the
+# required-check set: a broken PUBLISHED artifact is not fixed by any PR, so blocking
+# merges on it would stop the fleet without moving the release. It is an alert channel
+# whose red names the one action that clears it (a release, #12363).
+name: release-artifact-canary
+
+on:
+  schedule:
+    # Daily. The state under test changes only when a release lands, so a faster tick
+    # buys nothing; a red persists until the release, so no tick is a lost alert.
+    - cron: '41 6 * * *'
+  workflow_dispatch:
+
+# Never cancel: the reading is the point, and a superseded run is a reading nobody got.
+concurrency:
+  group: release-artifact-canary
+  cancel-in-progress: false
+
+# contents: read for actions/checkout (the tool reads pyproject.toml for the tree
+# version); issues: write for the alert issue — the sibling detectors this workflow is
+# modelled on (deploy-staleness #10109, availability-watchdog) FILE an issue and close it
+# on recovery. A step summary alone lives inside ONE run: a 97-day broken artifact can go
+# on being broken while every summary says so, which is the "invisible because nobody
+# opened it" class this workflow exists to end (#12363 round 5).
+#
+# ⛔ A line that used to sit here read "No write scope: this workflow alerts by FAILING; it
+# does not comment" — the pre-round-5 design, and the OPPOSITE of the declaration below.
+# It is removed rather than kept beside the correction because it is the sentence a
+# permissions audit would act on, and acting on it (dropping `issues: write`) is exactly
+# what de-fangs the detector: `open_issue` would die in
+# `.github/scripts/published-artifact-alert.sh` while the run still reads green.
+# `test_the_canary_files_a_durable_alert_and_reads_its_own_exit_code` is what keeps the
+# two in step.
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    # A cold install of the published artifact (numpy/scipy/fastapi/falkordb) plus a
+    # `tortoise init` boot is ~90 s measured; 20 min leaves room for a slow index without
+    # letting a wedged pip hold a runner for hours.
+    timeout-minutes: 20
+    # The report job below reads this: it is the only severity signal the alert has.
+    outputs:
+      exit_code: ${{ steps.canary.outputs.exit_code }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # No `uv`, no project install: the tool is stdlib-only on purpose, so this job
+      # measures the PUBLISHED dependency graph and never the repo's own environment.
+      - name: Smoke the published artifact (documented first command, clean HOME)
+        id: canary
+        run: |
+          set -o pipefail
+          rc=0
+          mkdir -p "$RUNNER_TEMP/canary"
+          # BUDGET ARITHMETIC — and what it does NOT cover, stated because this comment
+          # has already been wrong once (#12363 review B3, cycle 2, round 3):
+          #   commands: 3 x `--timeout` (venv, pip, `tortoise init`) = 3 x 300 = 900 s,
+          #             genuinely bounded by subprocess.run's timeout;
+          #   fetches:  3 x `--fetch-timeout` = 3 x 30 = 90 s NOMINAL — the engine and
+          #             client reads PLUS the absence-confirmation probe after a failed
+          #             install, which is a third index fetch and is bounded by the same
+          #             budget. The fetch timeout is PER SOCKET OPERATION, not a
+          #             wall-clock budget, so a slow-drip response or redirect hops can
+          #             exceed it; that residual is bounded only by this job's
+          #             `timeout-minutes`.
+          #   total:    990 s nominal against 1200 s.
+          # Because the fetch phase is not truly wall-bounded, the transcript is written
+          # INCREMENTALLY by the tool (not at the end) and uploaded with `if: always()`,
+          # so even a cancelled job leaves the evidence this step exists to keep.
+          python tools/published_artifact_canary.py \
+            --timeout 300 \
+            --fetch-timeout 30 \
+            --json > "$RUNNER_TEMP/canary/verdict.json" \
+            --summary-file "$GITHUB_STEP_SUMMARY" \
+            --transcript-dir "$RUNNER_TEMP/canary" || rc=$?
+          # ⛔ exit 1 means "the published artifact is broken — cut a release", and BOTH
+          # consumers act on it: the run summary tells a human to cut an irreversible
+          # upload and the alert files that instruction on an issue. An INTERPRETER-level
+          # failure exits 1 too — a SyntaxError at import, an uncaught exception outside
+          # `main()`'s backstop, a third-party import this job has no install step for —
+          # so 1 is published ONLY when the tool's own report says FAIL. Anything else
+          # that reaches here as 1 is a DETECTOR fault and must read as exit 2, which is
+          # the code both consumers treat as "the canary could not answer" (#12363 round
+          # 18). Without this, adding one non-stdlib import to the tool orders an upload.
+          #
+          # ⛔ PARSED, NOT GREPPED (#12422 review cycle 5, P1, MEASURED). The first cut read
+          # `grep -q '"verdict": "FAIL"'`, which is keyed to `json.dumps(indent=2)`'s `": "`
+          # separator — a cosmetic "make the payload compact" tidy
+          # (`separators=(",", ":")`) leaves every pin green and turns a genuine FAIL into
+          # exit 2, i.e. it tells a human "the canary could not answer, do NOT cut a release"
+          # about a broken, uninstallable published artifact. Measured on this step's own
+          # block: `{ "verdict": "FAIL" }` -> exit_code=1, `{"verdict":"FAIL"}` -> exit_code=2.
+          # The verdict is a VALUE, so read the value.
+          published_fail=0
+          python -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1])).get("verdict")=="FAIL" else 1)' "$RUNNER_TEMP/canary/verdict.json" 2>/dev/null && published_fail=1
+          if [ "$rc" = "1" ] && [ "$published_fail" = "0" ]; then
+            echo "::warning::published-artifact-canary exited 1 WITHOUT publishing a FAIL verdict — classifying as a DETECTOR fault (exit 2), not a release call"
+            rc=2
+          fi
+          echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
+          exit "$rc"
+      # `always()` — not `failure()` — so this step is still considered when the JOB is
+      # cancelled (its `if` is re-evaluated during the cancellation grace window) and when
+      # an earlier step fails. It gives the upload a CHANCE, not a guarantee: a job killed
+      # before the grace window, or a run cancelled while this job is queued, can end with
+      # no upload at all — that residual is why the report job treats a missing artifact as
+      # a state to report rather than an error (#12363 round 9).
+      - name: Keep the install/run transcript (every terminal state)
+        # `always()` — not `failure()`: a job CANCELLED at its timeout boundary does not
+        # run `failure()` steps, and that is exactly when the incremental log is the only
+        # diagnosis left (#12363 review round 3).
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: published-artifact-canary-log
+          path: ${{ runner.temp }}/canary/
+          if-no-files-found: warn
+
+  # ⛔ THE REPORT RUNS IN ITS OWN JOB, and this is not stylistic. `if: failure()` is
+  # JOB-scoped, so a step's own condition cannot rescue it; and an in-job gate is a gate
+  # INSIDE the job whose failure is the reading, which is the wrong place for the thing
+  # that reports it. The round-7 gate was worse than useless on top of that:
+  # `!cancelled() && contains(…, 'cancelled')` is self-contradictory, because a `cancelled`
+  # step outcome implies `cancelled()` is true, so it could never fire. A downstream job
+  # with `needs:` and `always()` is scheduled whenever the canary job ENDS — failed,
+  # timed out, or cancelled — and reads the conclusion from `needs.canary.result`
+  # (#12363 rounds 8 and 9).
+  #
+  # ⛔ STATED RESIDUAL, not an absolute claim: a downstream job is not immune to a RUN-level
+  # cancellation. If the whole run is cancelled while `report` is still queued, `report` is
+  # cancelled and never runs, so nothing files. That case is accepted — a human who cancels
+  # a run has said they are looking at it — and it is written down here so the next reader
+  # does not read this design as a guarantee about cancellation in general.
+  #
+  # ⚠️ The claim this comment used to make — that a job killed at its own `timeout-minutes`
+  # runs NONE of its remaining steps, `always()` included — is NOT what the documentation
+  # says, so do not reinstate it as the justification. `jobs.<job_id>.timeout-minutes` is
+  # "GitHub automatically cancels it", and the cancellation reference has the server
+  # RE-EVALUATE the `if` conditions of the unfinished steps, running the ones that evaluate
+  # true (`actions/runner`'s `StepsRunner` re-checks each remaining step on job
+  # cancellation). So an in-job `always()` step does get a chance inside the grace window —
+  # which is how the transcript upload above can work at all. Nothing here is measured on a
+  # live timed-out run; the architecture is chosen because it does not depend on that
+  # window, not because the window is closed.
+  report:
+    needs: canary
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      # ⛔ The `gh` requirement belongs to THIS job, not to `canary`: the alert legs
+      # (`published-artifact-alert.sh` → `auto-file-issue.sh`) are the only `gh` users in
+      # the workflow, and they run here. A pool runner without `gh` would fail the alert
+      # step with 127 and the durable record this workflow exists to leave would never be
+      # filed (#9018, #12363 round 8).
+      # ⛔ NOT `continue-on-error`: the runner-tool contract suite forbids it on this step
+      # (a provisioning failure must be loud — #9018). The steps that FOLLOW still run when
+      # it fails, because each carries `!cancelled()` instead of the implicit `success()`:
+      # the alarm needs no `gh`, and the alert step fails NAMING the missing tool rather than
+      # filing nothing while the run reads green.
+      - name: Runner tool contract — provide gh (#9018)
+        run: bash .github/scripts/runner-tools.sh ensure gh
+      # ⛔ THE TRANSCRIPT LIVES ON THE OTHER VM. `report` runs on its own runner, so without
+      # this the alert body would always say "(no transcript was written)" and the TAIL —
+      # the whole reason round 6 made the log incremental — would never reach the issue.
+      # Best-effort: a job killed before the upload has no artifact, and that is a fact the
+      # body states rather than a reason to fail the report.
+      - name: Fetch the canary transcript
+        # `!cancelled()`, like the three gate steps below: the gate is stated, not inherited
+        # from the implicit `success()` that would skip the fetch whenever an earlier report
+        # step failed. (The two SETUP steps above carry no `if:` on purpose — a checkout or a
+        # tool-provisioning step running on a cancelled job would be worse, not better.) A
+        # missing transcript is already harmless (`continue-on-error: true`), so this is about
+        # an explicit contract rather than a newly reachable state (#12363 round 12). Pinned
+        # by `test_the_canary_files_a_durable_alert_and_reads_its_own_exit_code`.
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: published-artifact-canary-log
+          path: ${{ runner.temp }}/canary
+      # A red here is NOT a code defect in the merged tree: it is the published artifact
+      # being broken or missing, and only a release clears it. Say which, in the job
+      # summary, so the next reader does not go looking for a PR to fix.
+      # ⛔ THREE branches, and the predicates are NOT interchangeable:
+      #   exit 1     → a RELEASE finding (the artifact itself failed)
+      #   exit 0     → a RUNNER fault: the canary REACHED a verdict and a later step failed
+      #                (the transcript upload, most often) — nothing is owed
+      #   anything else (2, empty for a cancelled/timed-out canary) → a DETECTOR outage
+      # Only an explicit 1 may tell a human to cut an irreversible release (#12363 r8–r10).
+      - name: What a red here means
+        if: ${{ !cancelled() && needs.canary.result != 'success' }}
+        env:
+          EXIT_CODE: ${{ needs.canary.outputs.exit_code }}
+        run: |
+          {
+            if [ "${EXIT_CODE:-}" = "0" ]; then
+              echo "### This red is a RUNNER fault, not a finding"
+              echo
+              echo "The canary REACHED a verdict (exit code 0: the published artifact passed"
+              echo "its documented checks) and a later step in the job failed — the"
+              echo "transcript upload, most often. Nothing is owed: no release, no alert"
+              echo "issue. Check the failed step on this run. See #12363."
+            elif [ "${EXIT_CODE:-}" != "1" ]; then
+              echo "### This is a DETECTOR outage, not a release finding"
+              echo
+              echo "The canary could not evaluate the published artifact (canary result:"
+              echo "${{ needs.canary.result }}, exit code: ${EXIT_CODE:-none}). Nothing here"
+              echo "says the artifact is broken — do NOT cut a release on this run. The"
+              echo "detector is the thing to check; a transient index failure clears on the"
+              echo "next run."
+            else
+              echo "### This is a RELEASE finding, not a tree finding"
+              echo
+              echo "The published PyPI artifact failed the documented steps. No change in"
+              echo "this repo fixes it: it clears when a release lands (version bump → tag →"
+              echo "`publish-pypi.yml`) and `tortoise-client` is published. See #12363."
+            fi
+            echo
+            echo "canary result=${{ needs.canary.result }} exit_code=${EXIT_CODE:-none}"
+          } >> "$GITHUB_STEP_SUMMARY"
+      # THE DURABLE RECORD. The sibling detectors this workflow is modelled on file an
+      # issue and close it on recovery; a step summary is visible only to whoever opens
+      # the run, so a red that opens no issue is a red nobody sees — and a 97-day broken
+      # artifact can go on being broken while every summary says so (#12363 round 5).
+      - name: File or refresh the alert issue
+        # `exit_code == '0'` means the canary DID reach a verdict: a later step failing
+        # (the transcript upload, say) is the runner's fault, so filing an issue for it would
+        # assert "could not evaluate" about a run that evaluated fine. The record would also
+        # be wrong in its TEXT, not merely redundant — and the close step below resolves BOTH
+        # ledgers on exactly this run (`exit_code == '0'`), so a wrongly filed issue would
+        # arrive as a duplicate-then-resolution pair on someone's ledger rather than as
+        # anything anyone could act on. (An earlier version of this comment justified the gate
+        # by "an exit-1 filing is what resolves the outage ledger" — true until round 10 moved
+        # the close gate onto the READING, and false here; #12363 final review, P3.) The run
+        # page still gets the explanation, via the alarm's runner-fault branch ABOVE
+        # (#12363 rounds 10 and 12).
+        if: ${{ !cancelled() && needs.canary.result != 'success' && needs.canary.outputs.exit_code != '0' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EXIT_CODE: ${{ needs.canary.outputs.exit_code }}
+        run: bash .github/scripts/published-artifact-alert.sh open
+      # Recovery closes it, so the next red opens a fresh issue instead of hiding in a
+      # stale thread (the sibling detectors' close-on-green rule).
+      # ⛔ Gated on the READING (exit code 0), not on the job result. A post-reading
+      # runner failure (`result: failure`, `exit_code: 0` — e.g. the transcript upload)
+      # would otherwise file nothing, close nothing, and leave a stale release-owed issue
+      # open while the artifact is green: the "ledger must not outlive its state" contract
+      # this whole path cites. (#12363 round 10)
+      - name: Close the alert issue on a green run
+        # ⛔ `exit_code == '0'` ALONE. The `needs.canary.result == 'success'` disjunct was a
+        # FALSE CLOSE: the canary step reads success whenever its last command succeeded, so
+        # a lost `exit "$rc"` (or a lost `$GITHUB_OUTPUT` write) made `result: success` true
+        # while the tool had exited 1 — and this gate then resolved the release-owed ledger
+        # over a broken artifact (#12363 round 12).
+        # The residual this leaves, stated rather than hidden: an ABSENT reading closes
+        # nothing, and it does not need to — a canary cancelled or killed before it published
+        # any verdict has not measured the artifact, so a stale open issue is the cheaper and
+        # the correct state. `outputs.exit_code` is pinned to the CANARY STEP's own output in
+        # `test_the_canary_files_a_durable_alert_and_reads_its_own_exit_code`, because it is
+        # now the gate's only input.
+        if: ${{ !cancelled() && needs.canary.outputs.exit_code == '0' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash .github/scripts/published-artifact-alert.sh close

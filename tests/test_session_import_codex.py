@@ -563,7 +563,8 @@ class _Resp(io.BytesIO):
 def _post_refused_get_serves(session_id: str, turns: list[dict], *,
                             extracted: int = 2, body: str =
                             '{"detail":"The server\'s wait budget was exceeded"}',
-                            get_404: bool = False, post_exc=None):
+                            get_404: bool = False, post_exc=None,
+                            extraction: dict | None = None):
     """A transport where the POST is refused and the confirming READ answers
     with the session the abandoned handler went on to write.
 
@@ -573,6 +574,9 @@ def _post_refused_get_serves(session_id: str, turns: list[dict], *,
     `"[role] text"` string — a fake that echoes the writer hides a
     format-mismatched comparison, which is how this confirmation was inert on
     its first attempt while these tests stayed green.
+
+    `extraction` adds the #3520 `{status, extractor, outcome_known}` block the
+    hosted detail serves; absent by default (the pre-#3520 shape).
     """
 
     def _open(req, timeout=None):
@@ -591,6 +595,8 @@ def _post_refused_get_serves(session_id: str, turns: list[dict], *,
                             for i in range(len(turns))],
             "source": {"url": f"session:{session_id}"},
         }
+        if extraction is not None:
+            detail["extraction"] = extraction
         return _Resp(json.dumps(detail).encode("utf-8"))
     return _open
 
@@ -660,6 +666,50 @@ def test_a_post_commit_504_without_extraction_still_spools(
     assert not list((tmp_path / "receipts").glob("*.json")), (
         "a capture whose extraction never ran must stay re-importable")
     assert read_spool_meta(spool, "sid-keyless") is not None, (
+        "the turns must survive for the next drain")
+
+
+def test_a_504_with_an_UNRECORDED_outcome_writes_no_receipt(
+        tmp_path, monkeypatch, codex_jsonl, capsys):
+    """#12362 review R4: an UNRECORDED extraction outcome must never mint a
+    local 'imported' receipt.
+
+    `outcome_known: false` means the server has not recorded whether extraction
+    ran (the abandoned handler is still working, or it stopped before writing
+    its outcome). A receipt asserts a COMPLETED import and makes every later
+    explicit re-import a no-op, so minting one here would lock a session that
+    may still gain (or still need) its memory points into the #4188 class.
+
+    The behaviour was already correct (`!= FILED`); nothing pinned it. Every
+    other fake in this suite serves a detail with NO `extraction` block, so it
+    only ever exercised the legacy UNEXTRACTED reading.
+
+    MUTATION THAT REDS THIS: accept PENDING in `_confirm_already_captured`
+    (`verdict in (FILED, PENDING)`) — a receipt appears for a session whose
+    extraction outcome is unrecorded, and the suite is otherwise green.
+    """
+    from tortoise.__main__ import _cmd_sessions_import
+    from tortoise.capture_spool import read_spool_meta
+
+    spool = _import_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        _post_refused_get_serves(
+            "sid-unrecorded", _EXPECTED_TURNS, extracted=0,
+            extraction={"status": "stored", "extractor": None,
+                        "outcome_known": False}))
+
+    rc = _cmd_sessions_import(SimpleNamespace(
+        file=str(codex_jsonl), harness="codex", session_id="sid-unrecorded"))
+
+    # The receipt is folded in with the exit code (agent-infra#3442 rule 2):
+    # `_confirm_already_captured` only writes a receipt on the path that then
+    # returns 0, so `rc == 1` alone always fires first and this row — whose name
+    # claims the RECEIPT, the #4188 property — would report an exit code instead.
+    assert (rc, [p.name for p in (tmp_path / "receipts").glob("*.json")]) == (1, []), (
+        "an unrecorded outcome is not a completed import — a receipt here "
+        "makes every later re-import a no-op (#4188)")
+    assert read_spool_meta(spool, "sid-unrecorded") is not None, (
         "the turns must survive for the next drain")
 
 

@@ -210,7 +210,7 @@ Every number below is a `wc -lc` / `head -1` reading, not an inference:**
 
 | Copy | Path | Size / lines | Marker |
 |---|---|---|---|
-| Repo (canonical source) | `tortoise/pi-hooks/tortoise-capture.ts` | 206,890 B / 4,219 | `// tortoise-hook-version: 21` |
+| Repo (canonical source) | `tortoise/pi-hooks/tortoise-capture.ts` | 221,118 B / 4,456 | `// tortoise-hook-version: 22` |
 | Fleet deployed | `~/.pi/agent/extensions/tortoise-capture.ts` | 190,157 B / 3,935 | `// tortoise-hook-version: 18` |
 | Other repo | `agent-infra/extensions/tortoise-capture/index.ts` | 33,983 B / 827 | not the same artifact |
 
@@ -228,8 +228,14 @@ reads. The deployed copy measured here is **generation 18**, while the base `ori
 same for `tortoise-volunteer.ts`) — the doc's first draft read the highest *changelog* block in
 `tortoise-capture.ts` (generation 19's note; main carried no generation-20 note at all) instead of the
 marker, which is the number the installer and its drift detector actually read. So the fleet was **two
-generations behind**, and this change moves the repo copy to **generation 21**, leaving an
-un-reinstalled seam three behind. Consequence stated plainly: **patching the repo does not fix the
+generations behind**, and this change moved the repo copy to **generation 21** — since bumped to
+**generation 22** (#12460, which touched the same artifact after #12479 took 21), leaving an
+un-reinstalled seam four behind. ⚠️ Only the REPO row above moves with every commit that touches this artifact (it was
+re-measured at generation 22, so a generation-23 edit makes it stale again); the fleet row changes
+only when the seam is re-installed, and the agent-infra row only on agent-infra commits — those two
+are the readings taken at the time stated, not re-verified here.
+
+Consequence stated plainly: **patching the repo does not fix the
 running fleet until `tortoise install pi` is re-run.** That is the installer's contract, not a gap this lane may paper
 over by hand-editing `~/.pi/agent/extensions/`; the lane reports it and the fix ships in the
 artifact the installer distributes.
