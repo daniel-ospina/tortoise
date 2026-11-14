@@ -6068,8 +6068,9 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # minutes BEFORE it (2026-11-13T19:30:00 vs 19:34:09) and is an ancestor of
         # `#12545`'s commit, while `#12545` measured at `5bacb44e0b` which does NOT
         # contain it — so that pair arrived ALREADY stale at its own landing commit,
-        # and `main` was red for this row at `6916a6cd89`. The pair is
-        # **`:1023`/`:1015`** at THIS head (`4dd97bac`; second forward merge, #12478). The two `def`s are always
+        # and `main` was red for this row at `6916a6cd89`. `#12695` (`3893603b07`) then added
+        # 16 lines above both, so the pair is **`:1023`/`:1015`** at THIS head
+        # (`4dd97bac`; second forward merge, #12478). The two `def`s are always
         # **8 apart** in this file, and that is exactly the trap: an offset read off
         # a stale pair re-derives `948` → `957`, which WAS `postCapture`'s parameter
         # list (`payload: Record<string, unknown>,`) at `5bacb44e0b` — at
