@@ -767,11 +767,23 @@ def test_the_named_arm_reports_the_ref_as_given_not_a_canonical_id():
 
 @pytest.mark.asyncio
 async def test_a_safe_answered_failure_is_not_disclosed(monkeypatch):
-    """The seam's `status == "ok"` gate is what stops a `_safe`-answered failure
-    (a plain `ToolResult` with `is_error=False`) from being disclosed — NOT the
-    helper, which cannot tell one apart. Without this case the gate can be
-    replaced by `if True:` and the suite stays green (measured), which is exactly
-    a check that cannot fail."""
+    """A `_safe`-answered failure is NOT stamped with the graph it "targeted".
+
+    ⚠️ WHICH GUARD FIRES, stated after a review round measured it (this change
+    moves the attribution, not the behaviour): the seam's ``if status == "ok":``
+    gate is the guard that RUNS — a refused write is classified
+    ``exec_error``/``safe_error`` before that line, so
+    ``_disclose_graph_resolution`` is never entered for it. Since #11153 the
+    helper's own ``is_error`` check would ALSO return the result untouched, so it
+    is a second layer, not the first.
+
+    Consequence, said plainly rather than implied: this test no longer kills the
+    mutant that deletes the seam gate (with it replaced by ``if True:`` the
+    helper's ``is_error`` check still returns early and this test stays green). It
+    pins the OUTCOME (no disclosure on a refusal) and the seam gate is pinned by
+    reading the code, not by this test. Do not delete either guard on the strength
+    of this test.
+    """
     monkeypatch.setattr(ms, "WRITE_TOOL_NAMES", frozenset({PROBE}))
 
     def _failing() -> dict:
@@ -791,7 +803,10 @@ async def test_a_safe_answered_failure_is_not_disclosed(monkeypatch):
         with contextlib.suppress(Exception):
             ms.mcp.local_provider.remove_tool(PROBE)
 
-    assert result.is_error is False, "a `_safe` failure is NOT an error result"
+    assert result.is_error is True, (
+        "#11153: a `_safe` failure IS an error result; the seam's `status == \"ok\"` "
+        "gate is what keeps the graph disclosure off it (the helper's own `is_error` "
+        "check is the second layer), and this line used to assert the opposite verdict")
     assert "boom" in _text(result), _text(result)
     assert (result.meta or {}).get("tortoise") is None, (
         "a failed write was stamped with the graph it 'targeted'")

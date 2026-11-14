@@ -1119,12 +1119,113 @@ def list_tools() -> list[str]:
     return _run_guarded(_list(), provider)
 
 
+def refusal_message(error: BaseException | str) -> str | None:
+    """The message, when `error` is one of the surface's DESIGNED refusals.
+
+    Since #11153 the server flags a refused tool call with `isError: true`, and a
+    fastmcp `Client` is built with `raise_on_error=True` by default — so a refusal
+    reaches a caller as a raised `ToolError` BEFORE any payload can be inspected.
+    A caller that must keep a refusal distinct from a CRASH therefore needs the
+    classification at the boundary that raises, which is here: this module owns
+    `call_tool`, and two callers (`client/tortoise_client/cli.py`,
+    `tools/curate_graph.py`) each needed it. One owner, no second copy.
+
+    TWO designed refusal SHAPES arrive as a `ToolError`.
+
+    * a `_safe` / `_quota_gated` refusal ships a JSON error envelope
+      (`{"error": "Team points limit reached …", "code": -32006}`), matched by
+      parsing the text;
+    * a PROSE refusal, with no envelope at all: the transport wait-bound pair
+      (`-32009`) and its WRITE arm — three texts that say OPPOSITE things about
+      whether a write can be in flight, so the text itself is handed back for the
+      caller to branch on — plus the graph-lookup MARGIN arm and the sensitive-op
+      rate-limit (429).
+
+    `tortoise.mcp_auth.REFUSAL_PROSE_MESSAGES` is the ONE list of the prose ones, so
+    a reworded message cannot silently re-open the crash bucket. ⛔ HOW each family is
+    kept in sync differs, and the difference is stated rather than implied: the
+    wait-bound, margin, rate-limit and AUTHZ producers write the named CONSTANT, and
+    their pins DRIVE the producer (measured: reverting one to inline prose reds the
+    suite); the graph-target family is prose written literally in `mcp_auth`
+    (`_retarget_refusal`, the resolver), so its pin asserts against that module's own
+    functions where they exist and against the registered lead otherwise — a reword
+    there is a maintenance task, not a silent regression, because the lead and the
+    sentence live in the same file. ⛔ Naming each wait-bound arm explicitly (rather
+    than leaning on their shared 60-char opening) is a PIN, not a fix: they agree today
+    only by prefix coincidence (pinned by
+    `test_every_wait_bound_prose_arm_is_a_designed_refusal`).
+
+    A server-side CRASH's text is prose too (`Error calling tool: TypeError: …`)
+    and matches neither arm — returns None, so a driver that pages on "the run
+    crashed" is not silenced by a refusal verdict (#11153 review round 3, P2).
+    """
+    text = error if isinstance(error, str) else str(error)
+    if not text:
+        return None
+    # Imported LAZILY: `tortoise.mcp_auth` imports fastmcp at module level, and
+    # this module stays importable without fastmcp (script callers degrade
+    # gracefully). The prose lives there — one source, not copied here.
+    try:
+        from tortoise.mcp_auth import REFUSAL_PROSE_MESSAGES, REFUSAL_PROSE_PHRASES
+    except Exception:  # fastmcp absent; there is no client here to refuse anything
+        pass
+    else:
+        for prose in REFUSAL_PROSE_MESSAGES:
+            # `startswith` and not equality: a wrapped message keeps its prefix,
+            # and the refusal prose itself is the leading sentence either way.
+            # Every entry is prose with a STABLE lead (the rate-limit lead is a
+            # lead by construction), so the prefix is the message's identity.
+            if text.startswith(prose[:60]):
+                return text
+        for phrase in REFUSAL_PROSE_PHRASES:
+            # The arms whose VARIABLE comes first (`No graph {ref!r} is reachable …`):
+            # their identity is interior, and a lead that stopped at the variable
+            # would match neighbours — the measured false-positive class that removed
+            # the bare `"Graph "` lead. `in`, not `startswith`, for exactly those.
+            if phrase in text:
+                return text
+    try:
+        payload = json.loads(text)
+    except (TypeError, ValueError):
+        return None
+    if isinstance(payload, dict) and isinstance(payload.get("error"), (str, dict)):
+        return text
+    return None
+
+
 def call_tool(name: str, arguments: dict[str, Any] | None = None) -> Any:
     """Call an MCP tool (e.g. tortoise_create_point) and return its result.
 
-    Raises on transport/auth failure — callers that want graceful behavior
-    should check `available()` first (or catch exceptions). An auth rejection
-    with no credential resolved raises `MCPKeyEmptyError`.
+    ⛔ Raises `fastmcp.exceptions.ToolError` for ANY tool-level ERROR RESULT, not only for
+    transport/auth failure (#11153). The hosted surface flags a refused call with
+    `isError: true` — a quota refusal (`-32006`), a `_safe` validation refusal, a
+    wait-bound expiry (`-32009`), an auth rejection — and fastmcp's client is built with
+    `raise_on_error=True` by default, so that refusal arrives as a RAISED `ToolError` and
+    never reaches the caller as a payload. `normalise_tool_result` therefore cannot see it.
+    `refusal_message()` in this module is the ONE classifier for "is this text a DESIGNED
+    refusal or a crash?", so a consumer distinguishes the two the same way this module's
+    other callers do instead of re-deriving the shapes a fourth time.
+
+    ⚠️ **`ToolError` carries `result.content[0].text` ONLY** (measured:
+    `fastmcp/client/mixins/tools.py`, `if result.isError and raise_on_error: msg =
+    result.content[0].text` → `raise ToolError(msg)`). So how much of the refusal survives
+    depends on its shape:
+
+    * a `_safe` refusal puts the whole JSON error dict in `content[0].text`
+      (`{'error': …, 'code': -32006}`), so catch `ToolError` and hand its text to
+      `refusal_message()`;
+    * a **wait-bound** refusal (`-32009`) puts digit-free PROSE there
+      (`mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE`) and the machine-readable half in
+      `structured_content`/`meta` — so `code`, `data.retry_after`, `retry_safe` and
+      `committed` are **discarded** by `raise_on_error=True`. A caller that needs those
+      must go through `get_client()` and call `client.call_tool(..., raise_on_error=False)`.
+
+    Also raises on transport failure, and `MCPKeyEmptyError` when an auth rejection leaves
+    no credential resolved. A PROTOCOL-level failure (arguments that violate the tool's
+    schema) raises `McpError`, not `ToolError` — that is a different path.
+
+    ⚠️ `available()` answers REACHABILITY only — it cannot pre-empt a tool-level refusal, so
+    "call `available()` first" is not a substitute for handling `ToolError`.
     """
     provider = _BearerProvider(resolve_connection().url)
 

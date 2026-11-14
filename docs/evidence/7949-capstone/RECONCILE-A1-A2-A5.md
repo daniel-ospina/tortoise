@@ -343,8 +343,13 @@ mechanical half now defaults ON — the composition is the `vet_enabled = (vet_a
 _vet_enabled() or _value_gate_enabled())` assignment (`extractor_v2.py:11731-11732` at `80c912244`;
 **`:12302-12303` at `d69faaf38`**), and the default-ON itself lives at `tortoise/value_gate.py:81`
 (`is_truthy(os.environ.get(ENV_FLAG, "1"))`).
-`extractor_v2.py:1185` is the **`TORTOISE_VET` toggle**, still OFF by default — cite it for that and
-nothing else. ⚠️ **A line cite is pinned to a base, and cites drift SITE BY SITE.** Three points, each
+`extractor_v2.py:1185` is the **`TORTOISE_VET` toggle** on this tree
+(`return is_truthy(os.environ.get("TORTOISE_VET")) or _s2_seam_armed()`, `def _vet_enabled` at
+`:1177`), still OFF by default — cite it for that and nothing else. ⚠️ It was `:1183` only on the
+2026-11-09→11-13 commits — through `576524d0c0`, its last mainline carrier, and `#12348`'s
+`42409813a7` is the commit that moved it to `:1185` — and a blank line on every sha this paragraph
+names below — which is the
+trap this very sentence is about: an unbased toggle number is safe at one head and wrong at the next. ⚠️ **A line cite is pinned to a base, and cites drift SITE BY SITE.** Three points, each
 named by the sha it is true at, so every delta has a reproducible operand: `:11351-11352` / `:1153` at
 **`aa414b4d5`** (the `#11211` landing — ⚠️ the immediate parent of the next point, `80c912244^`, holds
 `:11358`, i.e. **+373**, so the delta depends on which pre-merge base you pick) → `:11731-11732` / `:1154`
@@ -739,7 +744,8 @@ git grep -nE '(^|[^[:alnum:]_])(create_edge|create_about_edge|create_operator)[[
 # ⛔ AND AS OF `#11001`'s LANE NONE OF THE THREE IS: the comment at `extractor_v2.py:12487` was
 # corrected IN PLACE — same line, and its block's line count was held at 13 so every cite in this
 # record keeps its number — to state the consumer (`apply_relation_edges`, called from
-# `_extract_session_v2`) and to leave only the EMISSION leg unmeasured. So the A1 paragraph's quote
+# `_extract_session_v2`) and to leave only the EMISSION leg unmeasured. Its number then was
+# `:11524`; this tree carries the same comment at `extractor_v2.py:12397`. So the A1 paragraph's quote
 # is now history only, and the ONE prose-about-absence hit this row counted is gone.
 # ⛔ Both sides of the #11534 × #8290 forward-merge printed a different number, and neither matched
 # the other: the branch printed 10906 / :7 / 17181 at its own tip, main printed 11119 / :7 / 17188
@@ -759,25 +765,68 @@ git grep -n 'result\["relations"\]' -- tortoise/        # at this record's merge
                                                           # (§0 above). (⚠️ the `-- tortoise/` scope is
                                                           # the claim: unscoped it also matches the
                                                           # reader below)
-git grep -c 'result\["relations"\]' -- tests/          # tree-wide READERS — TWO files on this merge:
-                                                          # tests/test_10999_batch_story_relations.py — 56
-                                                          # LINES — and tests/eval/write_path/
-                                                          # test_write_path_relation_lane.py — 3 — so 59
-                                                          # LINES in total (`-c` counts lines per file);
-                                                          # contract pins, not producers
-git grep -o 'result\["relations"\]' -- tests/ | wc -l    # 62 OCCURRENCES on this merge (59 lines + the 3
-                                                          # doubly-named ones below). The 59 occurrences
-                                                          # the earlier text printed were `origin/main`'s
-                                                          # at `62248db88`, BEFORE the second reader file
-                                                          # existed — so that half is stale here too
+git grep -c 'result\["relations"\]' -- tests/          # tree-wide MATCHES — THREE files on this merge,
+                                                          # 60 LINES (`-c` counts lines per file):
+                                                          # tests/test_10999_batch_story_relations.py —
+                                                          # 56 — assertions on the channel; tests/eval/
+                                                          # write_path/test_write_path_relation_lane.py
+                                                          # — 3 — and tests/test_7949_capstone_measure.py
+                                                          # — 1 — a SOURCE-TEXT scan of `extractor_v2.py`'s
+                                                          # lines (`:14043`) that derives the doc's cite
+# ⛔⛔ THIS GREP COUNTS LINES, NOT READERS — do not read the per-file numbers as "who consumes the
+# channel". Two of the three files are NOT what their matched lines look like:
+#   • `test_write_path_relation_lane.py`: its 3 matched lines are all DOCSTRING prose (`:6`, `:22`,
+#     `:424`), but the FILE is the strongest reader in the tree — it rebinds the result
+#     (`folded = ev2.execute_embed(...)`, `:439`) and asserts on `folded["relations"]` at `:441`,
+#     then drives it through the REAL commit leg (`_capture`, `:443`) and asserts
+#     `cap["relation_write"]["written"] == 2` plus both edges present in the graph (`:444-448`,
+#     the file's last line).
+#     A literal `result\["relations"\]` grep is blind to a REBIND — that is this block's own
+#     lesson (see the `-- tortoise/` scope note above), applied to itself.
+#   • `test_7949_capstone_measure.py`: the hit is a scan of `extractor_v2.py`'s source lines used to
+#     DERIVE the cite — a citation pin, not a consumer.
+# So: 1 file reads the channel through the literal name (`test_10999`), 1 reads it through a rebind
+# (`write_path_relation_lane`), and 1 does not read it at all (the pin). `"relations"` is a
+# RESULT-level key (`extractor_v2.py:12649`, `"relations": payload_relations`), which is why both
+# readers can see it at all.
+# ⚠️ The third file was added after this record was written, so the earlier "TWO files … 59"
+# was true of the head this block was first measured on (`e49788706a`, which reads 2 files /
+# 59 lines / 62 occurrences) and is re-measured here rather than left stale.
+git grep -o 'result\["relations"\]' -- tests/ | wc -l    # 63 OCCURRENCES on this merge (60 lines + the 3
+                                                          # doubly-named ones below). ⛔ A count is only
+                                                          # as good as the BASE it was taken at, and the
+                                                          # earlier text's pair belonged to a different
+                                                          # base than the sentence it sat on claimed: its
+                                                          # "59" was a LINE count and its occurrence count
+                                                          # was "62", BOTH true at `e49788706a`. At
+                                                          # `62248db88` — the base §0 names — `-c` reads
+                                                          # ONE file / 56 lines and `-o | wc -l` reads 59
+                                                          # OCCURRENCES, a different quantity from 62
 git grep -n -o 'result\["relations"\]' -- tests/ \
   | cut -d: -f2 | sort | uniq -d                          # the 3 extra: the doubly-named :1551, :1579, :161
-grep -c '^  - id:' config/v4-mechanisms.yml                 # 13 — and none for the hierarchy mechanism
+grep -c '^  - id:' config/v4-mechanisms.yml                 # 15 — and ONE for the hierarchy mechanism
+                                                          # (DM5, `:1695`, landed by `#11001` AFTER this
+                                                          # record was written; `13`/"none" was true of
+                                                          # the head it measured). Read it before adding
+                                                          # a second row: `declared_hierarchy` is already
+                                                          # registered there
 tools/who-is-on.sh 10984 --repo .                           # exit 0 = complete answer; exit 2 = a
                                                           # surface could not be queried — never read
                                                           # either as "nobody"
 uv run python tools/collision_preflight.py 10984 --repo .    # the dispatch-time gate (exit 0 = clear)
-grep -n -i -E 'hierarch|hasPart|part-whole|11001|10984' config/v4-mechanisms.yml      # no output
+grep -n -i -E 'hierarch|hasPart|part-whole|11001|10984' config/v4-mechanisms.yml      # 13 lines on this
+                                                          # merge — DM5 at `:1695` names
+                                                          # `pack_hierarchy.py`, `relation_write.py`,
+                                                          # `declared_hierarchy`, `apply_relation_edges`
+                                                          # and `tests/test_pack_hierarchy_11001.py`; it
+                                                          # was empty when this record was written
+# ⛔ So the registry DOES declare the hierarchies surface **and** registers its producer: DM5's
+# `code:` is `tortoise/pack_hierarchy.py` + `tortoise/relation_write.py`, its `symbols:` include
+# `apply_relation_edges`, and its note says that symbol is "the PRODUCTION consumer, called from
+# `sdk.py`'s capture commit path on `out["relations"]`" (`config/v4-mechanisms.yml:1700-1701,`
+# `:1709, :1722-1724`). ⛔ Do NOT re-argue A1 from "nothing production calls the planner" — §0's
+# fifth-landing amendment already retired that basis. A1's remaining basis is the one §0 states:
+# *the writer landed, the corpus was not re-measured* (and no rollup query exists, §1).
 # …and the structural edges that DO exist on the capture path, which is why the claim above is scoped:
 sed -n '275,283p' docs/evidence/7949-capstone/probes/capstone_measure.py   # `references`, via link_source_to_event
 sed -n '19452p' tortoise/sdk.py                             # the call (`references`'s writer)
