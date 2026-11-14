@@ -22201,9 +22201,10 @@ def test_the_health_honesty_suite_is_selected_on_BOTH_halves_of_its_module_pair(
     registration: naming the file in prose is not reading its surface rows. So a
     registration that lost one half was silent.
 
-    That is not hypothetical, and the wrong root cause buys the wrong defence: the lost
-    arm came from `config/ci-surfaces.yml`'s `merge=union` (`.gitattributes:21`) applied
-    to a REBASE, not from any edit that removed a block. Measured per revision: the
+    That is not hypothetical, and the wrong root cause buys the wrong defence: the arm was
+    lost in a REPLAY that git resolved under `config/ci-surfaces.yml`'s `merge=union`
+    (`.gitattributes:21`), not by any edit that removed a block — and the attribute is why
+    the DUPLICATE survived silently, NOT why the arm went. Measured per revision: the
     pre-#12482 base `c1db6f3df` carried TWO `api` and TWO `core` rows; #12482's
     `d05688df5990` deleted one of each; #12645's pre-rebase original `9122a08a72` (parent
     `c1db6f3df`) deleted the other of each and was CORRECT. Replaying that onto
