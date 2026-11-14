@@ -106,8 +106,51 @@ MUTANTS = (
         needle=("        if seg.on_disk and seg.recorded_bytes is not None \\"
                 "\n"
                 "                and seg.bytes != seg.recorded_bytes:"),
-        replacement="""        if False:  # MUTANT: a rewritten sealed segment is accepted""",
-        kills="test_ANCHOR2_a_truncated_sealed_segment_is_REFUSED",
+        replacement="""        if False:  # MUTANT: the size anchor no longer diagnoses a rewrite""",
+        # ⛔ NOT a lie-exposing mutant, and it must not claim to be: after cycle 3
+        # the IDENTITY anchor catches a size change too, so removing this one
+        # leaves the refusal standing (with a different message). What it kills is
+        # the test that pins the DIAGNOSIS. Claiming "full reconstruction becomes
+        # reachable" here was vacuous — measured, and corrected.
+        kills="test_ANCHOR2c_a_size_change_that_KEEPS_the_line_count_is_still_REFUSED",
+    ),
+    Mutant(
+        # ANCHOR 5: the identity anchor. Remove it and two equal-length sealed
+        # segments can be SWAPPED — size and line count both survive, so nothing
+        # else sees it, and the replay order inverts with the claim still "full".
+        name="recorded-identity-anchor",
+        needle=("        if seg.on_disk and seg.recorded_sha256 \\"
+                "\n"
+                "                and seg.sha256 != seg.recorded_sha256:"),
+        replacement="""        if False:  # MUTANT: a same-size rewrite is accepted""",
+        kills="test_ANCHOR5_two_sealed_segments_SWAPPED_is_REFUSED",
+    ),
+    Mutant(
+        # REQUIRED ANCHOR FIELDS: dropping `bytes`/`lines` from a row used to
+        # switch the anchor off, because its guard read `is not None`.
+        name="anchor-fields-optional",
+        needle="""        for field in ("bytes", "lines"):
+            if not isinstance(row.get(field), int) or isinstance(row.get(field), bool):""",
+        replacement="""        for field in ():  # MUTANT: an anchor field may be omitted
+            if not isinstance(row.get(field), int) or isinstance(row.get(field), bool):""",
+        kills="test_a_manifest_row_that_OMITS_an_anchor_field_is_REFUSED",
+    ),
+    Mutant(
+        # ANCHOR 3: `active` must be ON DISK. Without the check, a departed row
+        # with no index stands in for the live tail and a deleted tail reads as
+        # present.
+        name="active-must-be-on-disk",
+        needle="""            if not seg.sealed and seg.on_disk:""",
+        replacement="""            if not seg.sealed:  # MUTANT: a departed row counts as the tail""",
+        kills="test_a_DELETED_live_tail_is_caught_even_if_a_row_claims_it_is_archived",
+    ),
+    Mutant(
+        # `complete_from` after the FIRST gap rather than the LAST one overstates
+        # what is reproducible when there are two holes.
+        name="complete-from-after-last-gap",
+        needle="""    last_gone = sorted(gone, key=lambda s: s.name)[-1]""",
+        replacement="""    last_gone = missing  # MUTANT: the first gap, not the last""",
+        kills="test_complete_from_starts_after_the_LAST_gap_not_the_first",
     ),
     Mutant(
         # ANCHOR 1: a `*.jsonl` the sequence cannot place. `rebuild_all` replays
@@ -116,6 +159,23 @@ MUTANTS = (
         needle="""    if unplaceable:""",
         replacement="""    if False:  # MUTANT: a file the replay folds is silently ignored""",
         kills="test_ANCHOR1_an_unplaceable_jsonl_is_REFUSED_not_ignored",
+    ),
+    Mutant(
+        # `adopt_crashed_seal`'s index check. Without it the repair verb becomes
+        # a way to record a LOSS as "present": a missing segment behind the
+        # boundary is a hole in the middle of the sequence, not a crashed seal.
+        name="adopt-index-must-be-next",
+        needle="""        if index != highest + 1:""",
+        replacement="""        if False:  # MUTANT: a loss behind the boundary is adopted as present""",
+        kills="test_adopt_refuses_when_the_missing_segment_is_behind_the_boundary",
+    ),
+    Mutant(
+        # The crash signature's third limb: `seal_active` creates the tail right
+        # after the rename, so a present tail means this is NOT that crash.
+        name="adopt-tail-must-be-absent",
+        needle="""        if (directory / ACTIVE_NAME).exists():""",
+        replacement="""        if False:  # MUTANT: any unrecorded sealed segment is adopted""",
+        kills="test_adopt_refuses_when_the_live_tail_is_still_there",
     ),
     Mutant(
         # The switch. Removing it arms sealing for every deployment that never
@@ -141,7 +201,12 @@ def load_mutant(tmp_path: Path, mutants: Mutant | tuple[Mutant, ...]):
         mutated = mutated.replace(mutant.needle, mutant.replacement, 1)
 
     label = "-and-".join(m.name for m in picks)
-    path = tmp_path / f"{label.replace('-', '_')}.py"
+    # ⛔ A SHORT digest, not the joined label: with twelve guards removed the
+    # label exceeded NAME_MAX and the combined falsifier died on `OSError`
+    # instead of running (measured at 12 mutants).
+    import hashlib
+    tag = hashlib.sha1(label.encode("utf-8")).hexdigest()[:12]
+    path = tmp_path / f"mutant_{tag}.py"
     path.write_text(mutated, encoding="utf-8")
     spec = importlib.util.spec_from_file_location(f"mutant_{label}", path)
     assert spec and spec.loader
@@ -279,17 +344,25 @@ def _real_lines(path: Path) -> int:
     return len([line for line in path.read_bytes().split(b"\n") if line.strip()])
 
 
+def _real_sha(path: Path) -> str:
+    """The manifest's `sha256` must be the real digest — it is the identity anchor."""
+    import hashlib
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def _manifest_for(graph: Path, names: list[str]) -> None:
     """A valid manifest for a hand-built directory (the mutant's own format)."""
     import json
     rows = [{"name": n, "index": int(n.split(".")[1]), "bytes": 1, "lines": 1,
-             "disposition": "present", "recorded_at": "2026-11-13T00:00:00+00:00"}
+             "sha256": "x", "disposition": "present",
+             "recorded_at": "2026-11-13T00:00:00+00:00"}
             for n in names]
     for row in rows:                                  # sizes must match, or ANCHOR 2 fires
         row["bytes"] = (graph / row["name"]).stat().st_size
         row["lines"] = _real_lines(graph / row["name"])
+        row["sha256"] = _real_sha(graph / row["name"])
     (graph / "journal-manifest.json").write_text(json.dumps({
-        "version": 1, "graph_dir": str(graph), "segments": rows,
+        "version": 2, "graph_dir": str(graph), "segments": rows,
         "boundary": {"recorded_at": "2026-11-13T00:00:00+00:00",
                      "through_index": max(r["index"] for r in rows),
                      "first_missing": None}}, indent=2, sort_keys=True) + "\n",
@@ -388,3 +461,249 @@ def test_every_mutant_needle_is_present_in_the_shipped_source():
         assert f"def {mutant.kills}(" in shipped, (
             f"mutant {mutant.name!r} names {mutant.kills!r}, which is not in "
             f"tests/test_journal_segments.py")
+
+
+# ---------------------------------------------------------------------------
+# cycle-3 mutants — RED direction, one guard at a time
+# ---------------------------------------------------------------------------
+
+
+def _rewrite_same_size(graph: Path) -> None:
+    """Change a sealed segment's CONTENT without changing its length."""
+    segment = graph / "events.0000.jsonl"
+    original = segment.read_bytes()
+    segment.write_bytes(original.replace(b'"a0"', b'"z0"'))
+
+
+def _swap_equal_length_segments(graph: Path) -> None:
+    first = graph / "events.0000.jsonl"
+    second = graph / "events.0001.jsonl"
+    assert first.stat().st_size == second.stat().st_size
+    a, b = first.read_bytes(), second.read_bytes()
+    first.write_bytes(b)
+    second.write_bytes(a)
+
+
+def _two_sealable_segments(tmp_path: Path, module) -> Path:
+    graph = tmp_path / "graph"
+    graph.mkdir()
+    _journal(graph, module, ["a0", "a1"])
+    module.seal_active(graph)
+    _journal(graph, module, ["b0", "b1"])
+    module.seal_active(graph)
+    return graph
+
+
+def test_mutant_identity_anchor_lets_a_same_size_rewrite_through(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Kills ``test_ANCHOR5b_a_SAME_LENGTH_substitution_is_REFUSED``.
+
+    ⛔ THE LIE: with the identity anchor gone, a segment whose records were
+    replaced in place — same bytes, same line count — still certifies
+    `full=True, anchored=True`, so a restore replays content the journal never
+    sealed and reports success.
+    """
+    monkeypatch.setenv(real.ENV_FLAG, "1")
+    graph = _two_sealable_segments(tmp_path, real)
+    mutant = load_mutant(tmp_path, _by_name("recorded-identity-anchor"))
+    _rewrite_same_size(graph)
+
+    with pytest.raises(real.SegmentModifiedError):        # the shipped module
+        real.verify(real.discover(graph))
+
+    layout = mutant.discover(graph)
+    mutant.verify(layout)                                 # ⛔ no refusal
+    assert mutant.reconstruction_scope(layout).full is True
+
+
+def test_mutant_identity_anchor_lets_two_segments_SWAP(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Kills ``test_ANCHOR5_two_sealed_segments_SWAPPED_is_REFUSED``.
+
+    Size and line count are both preserved by the swap, so with the identity
+    anchor removed nothing sees it and the replay order inverts silently.
+    """
+    monkeypatch.setenv(real.ENV_FLAG, "1")
+    graph = _two_sealable_segments(tmp_path, real)
+    mutant = load_mutant(tmp_path, _by_name("recorded-identity-anchor"))
+    _swap_equal_length_segments(graph)
+
+    with pytest.raises(real.SegmentModifiedError):
+        real.verify(real.discover(graph))
+
+    layout = mutant.discover(graph)
+    mutant.verify(layout)                                  # ⛔ no refusal
+    ids = [r["id"] for r in call_quietly(mutant.read_all_segments, graph)]
+    assert ids[:2] == ["b0", "b1"]                         # replay order inverted
+
+
+def test_mutant_size_anchor_still_refuses_but_loses_the_DIAGNOSIS(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Kills ``test_ANCHOR2c_a_size_change_that_KEEPS_the_line_count_is_still_REFUSED``.
+
+    ⛔ NOT a lie-exposing mutant — the identity anchor is the second line of
+    defence here, and it still refuses. What is lost is the message that says
+    WHERE to look ("rewritten in place"), which is the whole operational value of
+    the size anchor once identity exists.
+    """
+    monkeypatch.setenv(real.ENV_FLAG, "1")
+    graph = _two_sealable_segments(tmp_path, real)
+    segment = graph / "events.0000.jsonl"
+    lines = [ln for ln in segment.read_bytes().split(b"\n") if ln.strip()]
+    lines[0] = b'{"id":"a0"}'
+    segment.write_bytes(b"\n".join(lines) + b"\n")
+
+    mutant = load_mutant(tmp_path, _by_name("recorded-size-anchor"))
+    with pytest.raises(mutant.SegmentModifiedError) as exc:
+        mutant.verify(mutant.discover(graph))
+    assert "rewritten in place" not in str(exc.value)      # ⛔ the diagnosis
+    assert "does not hash" in str(exc.value)               # identity caught it
+
+
+def test_mutant_anchor_fields_optional_lets_a_truncated_segment_certify_full(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Kills ``test_a_manifest_row_that_OMITS_an_anchor_field_is_REFUSED``.
+
+    ⛔ THE LIE, measured before the fix: a row without `bytes` made anchor 2 skip
+    itself, so a segment truncated to zero bytes still certified full.
+
+    At this head, removing the field validation ALONE is no longer enough — the
+    identity anchor catches the truncation (empty content hashes differently), so
+    the lie needs BOTH this mutant and the identity one. That layering is the fix
+    working, and it is asserted here rather than assumed.
+    """
+    import json
+    monkeypatch.setenv(real.ENV_FLAG, "1")
+    graph = tmp_path / "graph"
+    graph.mkdir()
+    _journal(graph, real, ["a0", "a1"])
+    real.seal_active(graph)
+    (graph / "events.0000.jsonl").write_bytes(b"")
+    payload = json.loads((graph / "journal-manifest.json").read_text())
+    del payload["segments"][0]["bytes"]
+    del payload["segments"][0]["lines"]
+    (graph / "journal-manifest.json").write_text(json.dumps(payload))
+
+    with pytest.raises(real.JournalLayoutError):
+        real.verify(real.discover(graph))
+
+    # one guard removed: the identity anchor still refuses
+    alone = load_mutant(tmp_path, _by_name("anchor-fields-optional"))
+    with pytest.raises(alone.SegmentModifiedError):
+        alone.verify(alone.discover(graph))
+
+    # BOTH removed: nothing is left, and the lie is reachable
+    mutant = load_mutant(tmp_path, (_by_name("anchor-fields-optional"),
+                                    _by_name("recorded-identity-anchor")))
+    layout = mutant.discover(graph)
+    mutant.verify(layout)                                  # ⛔ no refusal
+    assert mutant.reconstruction_scope(layout).full is True
+
+
+def test_mutant_active_not_on_disk_reads_a_deleted_tail_as_present(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Kills ``test_a_DELETED_live_tail_is_caught_even_if_a_row_claims_it_is_archived``."""
+    import json
+    monkeypatch.setenv(real.ENV_FLAG, "1")
+    graph = tmp_path / "graph"
+    graph.mkdir()
+    _journal(graph, real, ["a0"])
+    real.seal_active(graph)
+    _journal(graph, real, ["tail"])
+    payload = json.loads((graph / "journal-manifest.json").read_text())
+    payload["segments"].append({"name": "events.jsonl", "index": None,
+                               "bytes": 10, "lines": 1, "sha256": "z" * 64,
+                               "disposition": "archived",
+                               "recorded_at": "2026-11-13T00:00:00+00:00"})
+    payload["boundary"]["first_missing"] = "events.jsonl"
+    (graph / "journal-manifest.json").write_text(json.dumps(payload))
+    (graph / "events.jsonl").unlink()
+
+    with pytest.raises(real.SegmentSequenceError):
+        real.verify(real.discover(graph))
+
+    mutant = load_mutant(tmp_path, _by_name("active-must-be-on-disk"))
+    layout = mutant.discover(graph)
+    assert layout.active is not None                       # ⛔ a departed row
+    mutant.verify(layout)                                  # ⛔ anchor 3 bypassed
+
+
+def test_mutant_complete_from_names_a_segment_followed_by_a_hole(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Kills ``test_complete_from_starts_after_the_LAST_gap_not_the_first``."""
+    import json
+    monkeypatch.setenv(real.ENV_FLAG, "1")
+    graph = tmp_path / "graph"
+    graph.mkdir()
+    for i in range(4):
+        _journal(graph, real, [f"s{i}"])
+        real.seal_active(graph)
+    _journal(graph, real, ["live"])
+    (graph / "events.0001.jsonl").unlink()
+    (graph / "events.0003.jsonl").unlink()
+    payload = json.loads((graph / "journal-manifest.json").read_text())
+    for row in payload["segments"]:
+        if row["name"] in ("events.0001.jsonl", "events.0003.jsonl"):
+            row["disposition"] = "archived"
+    payload["boundary"]["first_missing"] = "events.0001.jsonl"
+    (graph / "journal-manifest.json").write_text(json.dumps(payload))
+
+    scope = real.reconstruction_scope(real.discover(graph))
+    assert scope.complete_from == "events.jsonl"
+
+    mutant = load_mutant(tmp_path, _by_name("complete-from-after-last-gap"))
+    mutated = mutant.reconstruction_scope(mutant.discover(graph))
+    assert mutated.complete_from == "events.0002.jsonl"    # ⛔ a segment, then a hole
+
+
+def test_mutant_adopt_index_check_launders_a_LOSS_as_present(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Kills ``test_adopt_refuses_when_the_missing_segment_is_behind_the_boundary``.
+
+    ⛔ THE LIE: the repair verb is the one place that can turn "a segment is
+    missing" into "present" without the bytes. With the index check removed it
+    adopts ANY unrecorded sealed segment, so a hole in the middle becomes a
+    complete sequence.
+    """
+    monkeypatch.setenv(real.ENV_FLAG, "1")
+    graph = tmp_path / "graph"
+    graph.mkdir()
+    _journal(graph, real, ["a0"])
+    real.seal_active(graph)
+    _journal(graph, real, ["b0"])
+    real.seal_active(graph)
+    (graph / "events.jsonl").write_bytes(b'{"type":"PointRevised","id":"x"}\n')
+    (graph / "events.jsonl").rename(graph / "events.0007.jsonl")
+
+    with pytest.raises(real.SegmentSequenceError):
+        real.adopt_crashed_seal(graph)
+
+    mutant = load_mutant(tmp_path, _by_name("adopt-index-must-be-next"))
+    mutant.adopt_crashed_seal(graph)
+    names = [row["name"] for row in
+             __import__("json").loads((graph / "journal-manifest.json").read_text())
+             ["segments"]]
+    assert "events.0007.jsonl" in names                  # ⛔ a hole adopted as present
+
+
+def test_mutant_adopt_tail_check_adopts_a_segment_mid_seal(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Kills ``test_adopt_refuses_when_the_live_tail_is_still_there``.
+
+    A present tail means the writer got PAST the rename — the directory is
+    mid-operation, not crashed, and adopting it records a seal that may be about
+    to be recorded again.
+    """
+    monkeypatch.setenv(real.ENV_FLAG, "1")
+    graph = tmp_path / "graph"
+    graph.mkdir()
+    _journal(graph, real, ["a0"])
+    real.seal_active(graph)
+    (graph / "events.jsonl").write_bytes(b'{"type":"PointRevised","id":"x"}\n')
+    (graph / "events.0001.jsonl").write_bytes((graph / "events.jsonl").read_bytes())
+
+    with pytest.raises(real.SegmentSequenceError):
+        real.adopt_crashed_seal(graph)
+
+    mutant = load_mutant(tmp_path, _by_name("adopt-tail-must-be-absent"))
+    mutant.adopt_crashed_seal(graph)                     # ⛔ adopted mid-seal
