@@ -409,6 +409,17 @@ def test_a_client_version_with_no_INSTALLABLE_file_in_ANY_release_is_red():
         assert report.exit_code == 1, (why, report.exit_code)
         assert "any release" in arm.detail.lower(), (why, arm.detail)
 
+    # ⛔ AND THE SENTENCE THE ALERT RENDERS IS PINNED IN FULL (#12589 review round 16, P3). The
+    # bare `"any release"` substring above let the whole body drift: dropping the count, bumping it
+    # by one, or dropping the version pointer all stayed green — and this is the text an operator
+    # reads as **"cut a release"**.
+    two_yanked = _report({"0.3.0": [yanked, {**yanked, "filename": "tortoise_client-0.3.0-2.whl"}]})
+    detail = two_yanked.get("client-published").detail
+    assert "(2 file(s) on 0.3.0, none usable)" in detail, detail
+    assert "README.md documents `pip install tortoise-client`, which cannot resolve" in detail, (
+        detail
+    )
+
     # GREEN: the latest release is yanked but an older one is installable — pip resolves, so
     # the arm must NOT claim the documented install cannot resolve (round 15's false FAIL).
     report = _report({"0.3.0": [yanked], "0.2.0": [good]})
@@ -2648,6 +2659,10 @@ def test_wheel_mode_fail_names_a_build_defect_not_a_release():
     # says it could not attribute the failure. A wrong `named_it` must not be able to hide here.
     assert "re-dispatch this publish" in summary, summary
     assert "wheel-mode wiring problem" not in summary, summary
+    # ⛔ AND THE CLAUSE THAT KEEPS A PRE-PUBLISH RED FROM READING AS A RELEASE EVENT (#12589 review
+    # round 16, P3): deleting "Nothing has been uploaded." left the suite green, and that sentence
+    # is the only thing distinguishing this tail from the index-mode "cut a release" tail.
+    assert "Nothing has been uploaded." in summary, summary
 
     # ⛔ AND A GATED ARM THAT IS NOT THE WHEEL'S COMMAND MAY NOT INHERIT THE CLAIM (#12589 review
     # round 12, P3). The pre-fix tail published "fails its documented first command" on `else:`,
@@ -2697,6 +2712,147 @@ def test_the_FAIL_arm_refuses_to_print_a_count_it_could_not_read(monkeypatch):
         _client_report({"info": {"version": "0.3.0"}, "releases": {"0.3.0": []}})
 
 
+GOLDEN_GREEN = """## Published-artifact canary (#12363)
+
+**Verdict: PASS**
+
+| arm | gated | status | reading |
+|---|---|---|---|
+| `engine-index` | yes | PASS | tortoise-graph latest on the index: 0.2.0 |
+| `engine-init` | yes | PASS | tortoise init succeeds |
+| `client-published` | yes | PASS | tortoise-client resolves on the index (advertised latest 0.3.0 is installable; installable: 0.3.0) |
+| `release-age` | no | — | tortoise-graph 0.2.0 uploaded 97d ago |
+| `tree-version` | no | — | pyproject.toml version 0.2.0 vs published 0.2.0 — the tree's version (no bump pending) |
+"""
+
+GOLDEN_INDEX_FAIL = """## Published-artifact canary (#12363)
+
+**Verdict: FAIL**
+
+| arm | gated | status | reading |
+|---|---|---|---|
+| `engine-index` | yes | PASS | tortoise-graph latest on the index: 0.2.0 |
+| `engine-init` | yes | PASS | tortoise init succeeds |
+| `client-published` | yes | FAIL | the tortoise-client index lists NO installable file in ANY release (0 file(s) on 0.3.0, none usable) — README.md documents `pip install tortoise-client`, which cannot resolve |
+| `release-age` | no | — | tortoise-graph 0.2.0 uploaded 97d ago |
+| `tree-version` | no | — | pyproject.toml version 0.2.0 vs published 0.2.0 — the tree carries the same version — the failing arm above is NOT the engine build, so this version's engine artifact is not implicated; read the failing row before deciding what a bump would fix |
+
+The artifact on the index is broken for the documented steps. This is **not** fixed by a code change in this repo: it needs a release (version bump → tag → `publish-pypi.yml`) by whoever holds the PyPI credentials. See #12363.
+"""
+
+GOLDEN_WHEEL_FAIL = """## Published-artifact canary (#12363)
+
+**Verdict: FAIL**
+
+| arm | gated | status | reading |
+|---|---|---|---|
+| `engine-index` | no | — | not consulted (wheel mode: testing the locally built w.whl) |
+| `client-published` | no | — | not consulted (wheel mode) |
+| `engine-init` | yes | FAIL | `tortoise init` exits 1 |
+
+The BUILT wheel fails its documented first command. Nothing has been uploaded. Fix the tree and re-dispatch this publish: this is a code defect, not a release-owed finding. See #12363.
+"""
+
+GOLDEN_UNKNOWN = """## Published-artifact canary (#12363)
+
+**Verdict: CANNOT RUN**
+
+| arm | gated | status | reading |
+|---|---|---|---|
+| `engine-index` | yes | PASS | tortoise-graph latest on the index: 0.2.0 |
+| `engine-init` | yes | PASS | tortoise init succeeds |
+| `client-published` | yes | CANNOT RUN | could not read a file listing out of the tortoise-client release map (releases-unreadable) — a version value that is not an array, an entry that is not an object, or a file entry with no boolean `yanked` / no non-empty string `filename`. PyPI documents each version's value as an ARRAY of file objects, so this is a shape this client cannot parse, and whether `pip install tortoise-client` resolves is UNKNOWN, not false. This is NOT evidence the artifact is broken and is NOT a reason to cut a release |
+| `release-age` | no | — | tortoise-graph 0.2.0 uploaded 97d ago |
+| `tree-version` | no | — | pyproject.toml version 0.2.0 vs published 0.2.0 — the tree's version (no bump pending) |
+
+The canary could not READ something it needs, or could not exercise the artifact: the row marked CANNOT RUN names which (`client-published`). Reported as RED on purpose: a detector that cannot run must never look like a pass.
+"""
+
+
+def _GOLDEN_ENGINE():
+    return {
+        "info": {"version": "0.2.0"},
+        "releases": {
+            "0.2.0": [
+                {
+                    "filename": "tortoise_graph-0.2.0-py3-none-any.whl",
+                    "yanked": False,
+                    "upload_time_iso_8601": "2026-08-08T00:30:10.719404Z",
+                }
+            ]
+        },
+    }
+
+
+_GOLDEN_CLIENT_GOOD = {
+    "filename": "tortoise_client-0.3.0-py3-none-any.whl",
+    "yanked": False,
+    "upload_time_iso_8601": "2026-08-08T00:30:10.719404Z",
+}
+
+
+def _GREEN_REPORT():
+    return canary.build_report(
+        engine_doc=_GOLDEN_ENGINE(),
+        client_doc={"info": {"version": "0.3.0"}, "releases": {"0.3.0": [_GOLDEN_CLIENT_GOOD]}},
+        tree_version="0.2.0",
+        init_arm=canary.Arm("engine-init", canary.OK, "tortoise init succeeds"),
+        now=NOW,
+    )
+
+
+def _INDEX_FAIL_REPORT():
+    return canary.build_report(
+        engine_doc=_GOLDEN_ENGINE(),
+        client_doc={"info": {"version": "0.3.0"}, "releases": {"0.3.0": []}},
+        tree_version="0.2.0",
+        init_arm=canary.Arm("engine-init", canary.OK, "tortoise init succeeds"),
+        now=NOW,
+    )
+
+
+def _WHEEL_FAIL_REPORT():
+    return canary.build_report(
+        engine_doc=None,
+        client_doc=None,
+        tree_version="0.2.0",
+        init_arm=canary.Arm("engine-init", canary.FAIL, "`tortoise init` exits 1"),
+        now=NOW,
+        wheel_path=Path("dist/w.whl"),
+    )
+
+
+def _UNKNOWN_REPORT():
+    return canary.build_report(
+        engine_doc=_GOLDEN_ENGINE(),
+        client_doc={"info": {"version": "0.3.0"}, "releases": {"0.3.0": {}}},
+        tree_version="0.2.0",
+        init_arm=canary.Arm("engine-init", canary.OK, "tortoise init succeeds"),
+        now=NOW,
+    )
+
+
+def test_the_RENDERED_summaries_are_PINNED_VERBATIM():
+    """⛔ THIS IS THE CLASS-CLOSING PIN FOR EVERY RENDERED LITERAL (#12589 review rounds 13-16).
+
+    Six consecutive review rounds found the same defect shape: an operator-facing literal that no
+    test could redden. Asserting one phrase at a time let the next clause drift, and the round-16
+    round found the count, the version pointer, "Nothing has been uploaded.", the green
+    same-version clause, the heading glyph, and the UNKNOWN tail's second mechanism all mutable in
+    silence.
+
+    A single verbatim expectation per TAIL closes the class instead of the instance: any change to
+    any word, table cell, glyph or blank line in these four outputs fails here, so a text edit has
+    to be made DELIBERATELY, with this expectation updated in the same commit. The four shapes are
+    one per verdict path plus the wheel (pre-publish) path, which is every branch `render_summary`
+    can take.
+    """
+    assert canary.render_summary(_GREEN_REPORT()) == GOLDEN_GREEN
+    assert canary.render_summary(_INDEX_FAIL_REPORT()) == GOLDEN_INDEX_FAIL
+    assert canary.render_summary(_WHEEL_FAIL_REPORT()) == GOLDEN_WHEEL_FAIL
+    assert canary.render_summary(_UNKNOWN_REPORT()) == GOLDEN_UNKNOWN
+
+
 def test_the_summary_heading_publishes_the_GLYPH_not_the_internal_status():
     """⛔ THE HEADING IS THE FIRST THING A HUMAN READS (#12589 review round 15, P3).
 
@@ -2705,6 +2861,18 @@ def test_the_summary_heading_publishes_the_GLYPH_not_the_internal_status():
     FAIL` is identical either way, and `CANNOT RUN` still appeared from the UNKNOWN tail's "NO row is
     marked CANNOT RUN".
     """
+    # ⛔ BOTH MECHANISMS (#12589 review round 16, P3): the tail names "could not READ" AND "could
+    # not exercise". Round 4's defect was naming ONE for every CANNOT RUN, and deleting the second
+    # clause — which then tells an operator whose `engine-init` FAILED TO RUN that the canary could
+    # not read something — stayed green, because the only pins were the READ phrase and the
+    # absence of a three-word substring.
+    exercised = canary.Report()
+    exercised.add(canary.Arm("engine-index", canary.OK, "reads"))
+    exercised.add(canary.Arm("engine-init", canary.UNKNOWN, "the install could not run"))
+    tail = canary.render_summary(exercised)
+    assert "could not READ something it needs" in tail, tail
+    assert "could not exercise the artifact" in tail, tail
+
     green = canary.Report()
     green.add(canary.Arm("engine-index", canary.OK, "reads"))
     assert "**Verdict: PASS**" in canary.render_summary(green)
@@ -3056,6 +3224,25 @@ def test_the_cli_writes_the_summary_file_and_the_json_shape(tmp_path, monkeypatc
     # obtained ("uploaded unknown ago"); the table renders `—` there, so `--json` must not stamp
     # "OK". One rendering of one fact, or the two surfaces disagree about whether a non-reading is
     # a verdict.
+    # ⛔ THE `verdict` FIELD'S VOCABULARY IS PINNED (#12589 review round 16, P3): `verdict` is the
+    # INTERNAL enum (`OK`/`FAIL`/`UNKNOWN`) and `status` the rendered glyph — a deliberate split,
+    # because the workflow keys on `== "FAIL"`. Nothing pinned OK or UNKNOWN, so rendering the
+    # verdict field too stayed green.
+    assert payload["verdict"] == canary.FAIL
+
+    def _stub_report(verdict):
+        probe = canary.Report()
+        probe.add(canary.Arm("engine-index", verdict, "reads"))
+        return lambda **kwargs: probe
+
+    for verdict in (canary.OK, canary.UNKNOWN):
+        monkeypatch.setattr(canary, "build_report", _stub_report(verdict))
+        canary.main(["--json"])
+        got = json.loads(capsys.readouterr().out)
+        assert got["verdict"] == verdict, got
+        assert got["exit_code"] == {canary.OK: 0, canary.UNKNOWN: 2}[verdict], got
+    monkeypatch.undo()
+
     age = next(a for a in payload["arms"] if a["name"] == "release-age")
     assert age["gated"] is False, payload
     assert age["status"] == "—", age
@@ -3162,6 +3349,21 @@ def test_the_tree_version_row_implicates_only_the_arm_that_failed():
     ungated = canary.Report()
     ungated.add(canary.Arm("engine-index", canary.FAIL, "red", gated=False))
     assert canary.engine_build_implicated(ungated) is False
+
+    # ⛔ AND THE GREEN SAME-VERSION CLAUSE (#12589 review round 16, P3): the only report that
+    # reaches "no bump pending" is all-OK at one version, and nothing pinned it — warning "a bump
+    # IS required" on a wholly green report stayed green.
+    clean = canary.build_report(
+        engine_doc=_engine_doc(),
+        client_doc=_client_doc(),
+        tree_version="0.2.0",
+        init_arm=_ok_init_arm(),
+        now=NOW,
+    )
+    assert clean.verdict == canary.OK, [a.name for a in clean.arms if a.status != canary.OK]
+    clean_row = next(a for a in clean.arms if a.name == "tree-version")
+    assert "the tree's version (no bump pending)" in clean_row.detail, clean_row.detail
+    assert "predates the fix" not in clean_row.detail, clean_row.detail
 
     # ⛔ AND THE "differs" HEDGE IS PINNED (#12589 review round 15, P3): stripping it to a flat
     # "a release is owed" is FALSE whenever the tree is AHEAD of the published version, and no test
