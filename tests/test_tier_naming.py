@@ -273,8 +273,9 @@ class TestEverySurfaceAgreesWithTheDeclaration:
 #:       * a TEMPORAL qualifier FOLLOWED BY A CLAUSE BREAK (`… no Builder plan today,
 #:         and the roadmap is unaffected`). ⛔ A clause-FINAL `yet`/`today`/`currently`
 #:         is CAUGHT, not missed, and a cycle-19 revision of this bullet said the
-#:         opposite: all three sit in `_INTENSIFIER_WORDS` beside `anymore`, whose
-#:         behaviour they share (measured cycle 20: `There is no Builder plan today.`
+#:         opposite: all three sit in `_INTENSIFIER_WORDS` beside the `any\s?more`
+#:         alternative, whose behaviour they share (measured cycle 20: `There is no
+#:         Builder plan today.`
 #:         and `… anymore.` both flag, while `… today, and the roadmap…` and
 #:         `… on the roadmap.` both escape). So what is left here is the SAME
 #:         clause-break miss as the bullet above, plus the no-break scope spelling
@@ -430,8 +431,15 @@ class TestEverySurfaceAgreesWithTheDeclaration:
 #:         a false block on the class this list exists to protect.
 #:
 #: A sentence recording the RETRACTION is exempt — but only when it QUOTES what it
-#: retracts (:func:`_quotes_the_denial`) or introduces a REPORTED CLAIM *and cites it*
-#: (:data:`_REPORTED_CLAIM` + :data:`_RETRACTION_EVIDENCE`). A cue word alone was a
+#: retracts (:func:`_quotes_the_denial`) or introduces a REPORTED CLAIM through one of
+#: the NINE speech verbs :data:`_REPORTED_CLAIM` enumerates — `read`, `said`, `says`,
+#: `claimed`, `asserted`, `asserts`, `stated`, `wrote`, `worded` — *and cites it*
+#: (:data:`_RETRACTION_EVIDENCE`). ⛔ The verb set is an ENUMERATION, not "any speech
+#: verb": a retraction record whose verb is outside it (`The page used to say …; #12444
+#: corrected it.`, `… noted …`, `… used to state …`) is BLOCKED here while `origin/main`
+#: and the pre-cycle-1 head EXEMPT it — a false block on correct prose, measured in
+#: review cycle 8 (4 shapes) and listed here rather than fixed, because broadening the
+#: set is a behaviour change that deserves its own pins. A cue word alone was a
 #: bypass: it let `The docs are stale: there is no Builder plan.` escape (cycle 2); a cue
 #: plus a bare `#\d+` was the same bypass one word longer (cycle 6, measured — `The docs
 #: are stale per #12444: there is no Builder plan.` was exempt); and a cue plus a SPEECH
@@ -550,7 +558,11 @@ _CLAUSE_END = (r"(?!" + _RESTATEMENT_TAIL + r")"
 #: belongs in this set and not in `_CLAUSE_END`. Residual: `… either, only the `pro`
 #: identifier (#4336).` stays green, because a comma after an intensifier is a scope
 #: qualifier — the same trade the rest of the class makes.
-_INTENSIFIER_WORDS = (r"(?:any\s?more|anymore|at\s+all|available|for\s+sale|whatsoever|"
+#: ⛔ `anymore` is NOT a separate alternative (round-9 review cycle 8, measured): the
+#: `any\s?more` alternative already matches the closed spelling (`any` + no space +
+#: `more`), so the duplicate could be deleted with the suite at `19 passed` and 0 verdict
+#: changes — dead surface this file deletes rather than pins.
+_INTENSIFIER_WORDS = (r"(?:any\s?more|at\s+all|available|for\s+sale|whatsoever|"
                      r"either|yet|today|currently|of\s+any\s+(?:kind|sort))")
 #: ONE definition of the closed intensifier set, so the two places that need it cannot
 #: drift: the denial arms below WRAP it, and :func:`_quotes_the_whole_denial` validates a
@@ -2152,6 +2164,14 @@ class TestNoDocDeniesABuilderPlanExists:
                 # rows: the inner break is :data:`_ASIDE_INNER_BREAK` and the pair sides
                 # are :data:`_DASH_MARKERS`, so the `;`/`:` rows pin the first and the
                 # en-dash / mixed rows pin the second.
+                # ⛔ `but` NEEDS A ROW THAT RESUMES (round-9 review cycle 8, measured):
+                # the rows around this one do NOT pin it — deleting `but` from
+                # `_ASIDE_INNER_BREAK` left the suite at `19 passed`, because a
+                # NON-resuming pair fails the resume test whatever the inner set says.
+                # This row resumes with `that`, so only the inner test can decide, and
+                # deleting `but` turns a FLAGGED denial EXEMPT (`origin/main` flags it).
+                "Until #12444 the doc said -- but the page is stale -- that there is no "
+                "Builder plan.\n",
                 "Until #12444 the doc said -- but nobody fixed it -- there is no Builder "
                 "plan.\n",
                 "Until #12444 the doc said -- so nobody fixed it -- there is no Builder "
@@ -2202,11 +2222,13 @@ class TestNoDocDeniesABuilderPlanExists:
                 # PREFIX of a word that merely begins with the head (`that issues …`,
                 # `that wasted …`, `that haste …`, `that makeshift …`), the resume test
                 # rejects a legitimate complement, and two correct records are BLOCKED.
-                # Both COMPONENTS are pinned: the enumeration by the nine
-                # alternatives' rows BELOW — TEN rows, because `'s`/`’s` is one alternative in
-                # two spellings — and the boundary in the false-positive test
-                # (`… -- that issues with the old wording mean …`, `:1829`). Nothing wider
-                # has been measured, so nothing wider is claimed.
+                # Both COMPONENTS are pinned — and they live in DIFFERENT tests, so
+                # neither pointer tells a reader where the other one is: the enumeration
+                # by the nine alternatives' rows BELOW — TEN rows, because `'s`/`’s` is
+                # one alternative in two spellings — and the boundary in
+                # `test_the_lint_does_not_flag_correct_prose`
+                # (`… -- that issues with the old wording mean …`, `:1829`). Nothing
+                # wider has been measured, so nothing wider is claimed.
                 "Until #12444 the doc said -- the page was never fixed -- that is why there "
                 "is no Builder plan.\n",
                 "Until #12444 the doc said -- the page was never fixed -- that proves there "
@@ -2297,6 +2319,15 @@ class TestNoDocDeniesABuilderPlanExists:
             # NEGATIVES before the arms were widened (cycle-4 review).
             "There is no Builder plan anymore.",
             "There is no Builder plan any more.",
+            # ⛔ THE TEMPORAL/AVAILABILITY QUALIFIERS ARE LOAD-BEARING AND WERE UNPINNED
+            # (round-9 review cycle 8, measured): deleting `today`, `currently`, `yet` or
+            # `for\s+sale` from `_INTENSIFIER_WORDS` left the suite at `19 passed` while
+            # each turned its own clause-final denial EXEMPT — the same one-for-one rule
+            # this file applies to every other member of the set.
+            "There is no Builder plan today.",
+            "There is no Builder plan currently.",
+            "There is no Builder plan yet.",
+            "There is no Builder plan for sale.",
             "Tortoise has no Builder plan.",
             "We offer no Builder tier at all.",
             "Builder isn't a plan.",
@@ -2577,6 +2608,13 @@ class TestNoDocDeniesABuilderPlanExists:
             "_CLAUSE_END",
             "_CLAUSE_END_STRICT",
             "_IDENTIFIER_RESTATEMENT",
+            # ⛔ …and TWO MORE that compose straight into the decision (round-9 review
+            # cycle 8, measured): an injected test pinning `_BUILDER_PLAN` or
+            # `_INTENSIFIER_WORDS` ran GREEN, so the guard was silent on the noun the
+            # whole lint is about and on the qualifier set four pins depend on. The
+            # "four that compose" count three lines up was wrong; it is six.
+            "_BUILDER_PLAN",
+            "_INTENSIFIER_WORDS",
         }
         offenders: list[str] = []
         for node in cls.body:
