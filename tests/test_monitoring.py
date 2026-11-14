@@ -3078,11 +3078,36 @@ class TestHealthzListener:
         failed on COLLECTION ORDER alone. The same isolation the rest of this file
         already has for the refusal window, for the three inputs the verdict now
         also reads.
+
+        ⛔ FOUR INPUTS, NOT THREE (#12482 measured). The wedge term ALSO reads
+        ``heartbeat_task_is_dead()``, which follows the process-global task
+        ``note_heartbeat_task`` records — and that global is the fourth input, which
+        this fixture did not reset. `hosted_api._start_liveness` records the real
+        ticker and `_stop_liveness` CANCELS it without clearing the global, so any
+        earlier test that boots the app through a ``TestClient`` leaves a
+        **cancelled** ticker recorded; a cancelled ticker correctly means "cannot
+        tick", so ``heartbeat_task_is_dead()`` is True and the wedge term is
+        DISARMED for the rest of the process. Measured: `tests/test_dr_endpoints.py`
+        followed by this file fails
+        `test_the_wedge_term_fires_when_nothing_has_been_served_either` and
+        `test_a_raising_served_reader_is_unevidenced_not_healthy` — both answer 200
+        with ``"loop_stale": true, "reasons": []`` instead of 503 /
+        ``["loop-not-serving"]`` — while this file ALONE passes 219/219 and the pair
+        with the reset restored passes 341/341. That is the exact COLLECTION-ORDER
+        class the paragraph above records, one input further on.
+        `TestStallWatchdog._isolated_ticker` below already resets this global for the
+        same reason and its docstring PREDICTED this failure ("a hosted-API test
+        leaving a cancelled one behind would disarm the ceiling in a later test");
+        the listener class needs it too. Reset on the way IN and OUT, like every
+        other input here — a fake or cancelled ticker must leak in neither
+        direction.
         """
+        monitoring._reset_heartbeat_task()
         monitoring.set_served_progress_source(None)
         monitoring.set_dataplane_verdict_source(None)
         monitoring.reset_wait_bound_breach_window()
         yield
+        monitoring._reset_heartbeat_task()
         monitoring.set_served_progress_source(None)
         monitoring.set_dataplane_verdict_source(None)
         monitoring.reset_wait_bound_breach_window()
