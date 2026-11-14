@@ -277,14 +277,16 @@ class TestEverySurfaceAgreesWithTheDeclaration:
 #:         (`There is no plan called Builder in Tortoise.`): that arm pays `_CLAUSE_END`
 #:         because its scoped twin (`… called Builder on the self-hosted install.`) is
 #:         indistinguishable here and is a TRUE statement (cycle 8);
-#:       * a sentence that REPORTS an old denial and then re-asserts one in a SINGLE
-#:         clause (`Previously the page stated there is no Builder plan, and today
-#:         there is no Builder plan either.`): the exemption is per SENTENCE and per
-#:         quoted/reported span, so a reported clause and a live one sharing one
-#:         sentence are not separated here. (The `;`-split twin of this shape WAS an
-#:         escape and is now CAUGHT — the reported-clause arm requires a citation since
-#:         cycle 12, so `…; today there is no Builder plan either.` is flagged and pinned
-#:         in the live tuple. The bullet is stated for the comma form, which is not.)
+#:       * a sentence that REPORTS an old denial and then re-asserts one WITHIN THE SAME
+#:         CITED sentence (`Previously the page stated there is no Builder plan per
+#:         #12444, and today there is no Builder plan either.`): the exemption is per
+#:         SENTENCE, so a reported clause and a live one sharing one sentence are not
+#:         separated here. ⛔ THE COST IS THE CITATION, NOT THE SEPARATOR (cycle-14 P2,
+#:         measured): the `;`-split twin behaves IDENTICALLY — both are FLAGGED while
+#:         uncited and both are EXEMPT once the sentence cites, so a maintainer told the
+#:         `;` form were already closed would look for a punctuation rule that does not
+#:         exist and leave the real miss (report + re-assert inside one cited sentence)
+#:         unaddressed. The uncited `;` form is pinned in the live tuple.
 #:       * a COLON-closed denial (`There is no Builder plan: it never existed.`): `:`
 #:         is not in either clause end, so neither the arm nor the exemption fires. True
 #:         on `origin/main` too — pre-existing, and listed here because the list is
@@ -514,14 +516,19 @@ _DENIAL_PATTERNS = (
 #: 'until #|prior to #|through #' -- 'docs/*.md'` is 30+ files, so this is the house
 #: phrasing, not an edge case. ⛔ …and `until\s+then` was hoisted INSIDE the
 #: citation-requiring group, where it could only match the nonsense `until then #12444`,
-#: so `Until then the page said "there is no Builder plan".` — 52 `docs/` files write
-#: `until then` — stayed RED (cycle-13 P2, measured). The bare temporal cues are their
-#: own alternation now.
+#: so `Until then the page said "there is no Builder plan".` — 52 matching lines across
+#: 47 `docs/` files (`git grep -ci 'until then' -- docs | awk -F: '{s+=$2} END{print
+#: s}'`) — stayed RED (cycle-13 P2, measured). The bare temporal cue is its own
+#: alternation now. ⛔ `before then` was added with it and REMOVED again (cycle-14 P2,
+#: measured): `git grep -li 'before then' -- docs` is 0 files, and a cue is the WEAKER
+#: half of an exemption, so an unpinned cue with no corpus behind it is new false-pass
+#: surface for nothing — `Before then the page said "there is no Builder plan".` was
+#: exempt.
 _RETRACTION_CUES = re.compile(
     r"\b(?:previously|formerly|used\s+to|no\s+longer|retract\w*|stale\w*|"
     r"corrected|corrects|outdated|supersed\w*|"
     r"(?:before|until|through|prior\s+to|up\s+to)\s+#\d+|"
-    r"(?:until|before)\s+then)\b", re.I)
+    r"until\s+then)\b", re.I)
 
 #: …but a cue word alone is not a record — it is a bypass: it exempted
 #: `The docs are stale: there is no Builder plan.`, a live denial (cycle 2). The
