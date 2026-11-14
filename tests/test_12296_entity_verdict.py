@@ -523,7 +523,7 @@ class TestTheBandVocabulary:
         assert "link" not in verdict.BANDS
         # The pointer exists (`aliases[]` on the survivor) but a pointer is not a
         # verdict, and writing `dedup_reviewed='link'` dequeues the row from
-        # content review (`sdk.py:24507`) — so it is deliberately absent.
+        # content review (`sdk.py:24856`) — so it is deliberately absent.
         assert not any(b == "link" for b in verdict.BANDS)
 
     def test_a_clean_pair_is_a_merge(self):

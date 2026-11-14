@@ -5500,7 +5500,9 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # pinned HERE at `:14787` (the `follows at` row five lines above pins a
         # DIFFERENT statement — `edus = _edus_from_conversation(conversation)` — at
         # `:14786`; an earlier cut of this comment claimed that row pinned the `if` at
-        # `:14697`, which no row in this file ever pinned). One claim, two numbers in one
+        # `:14697`, which the `follows at` row above never did — its own history pins
+        # `:14696`/`:14786` for the `edus =` statement, so the two numbers named one
+        # claim in two places). One claim, two numbers in one
         # function, and only one of them had a reader — the bare continuation here sat
         # in no row, so `grep -c '14649'` over this file's tests was `0`.
         ("probes/capstone_measure.py", "emits literally", (

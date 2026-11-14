@@ -43,7 +43,7 @@ verdict value here:
 * **⛔ writing `dedup_reviewed='link'` is worse than inert — it silently
   DEQUEUES.** The write is one call (`sdk.update_entity` → `_update_entity`'s
   `SET n += $props`), but the content review queue filters `dedup_reviewed IS
-  NULL` (`sdk.py:24507`), so ANY non-NULL value removes the row from review with
+  NULL` (`sdk.py:24856`), so ANY non-NULL value removes the row from review with
   no verdict applied. A band that wrote `'link'` today would delete a review
   nobody counts.
 
