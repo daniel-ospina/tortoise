@@ -137,7 +137,15 @@ def test_absent_client_distribution_is_red_not_absent_ok():
     assert report.get("client-published").gated is True
     assert report.get("client-published").status == canary.FAIL
     assert report.verdict == canary.FAIL
-    assert "HTTP 404" in report.get("client-published").detail
+    # ⛔ "HTTP 404" ALONE IS NOT A PIN (#12422 round-23 review P2): the PRE-fix text
+    # ("could not read the tortoise-client index metadata: HTTP 404 from …") contains
+    # that substring too, so restoring the 404-versus-timeout conflation on this branch
+    # left the assertion green. Pin the branch's OWN sentence, which only the finding
+    # spells.
+    assert "is not resolvable on the index" in report.get("client-published").detail, (
+        report.get("client-published").detail
+    )
+    assert "could not read the" not in report.get("client-published").detail
 
 
 def test_an_unreadable_index_is_unknown_and_exits_nonzero():
@@ -238,6 +246,15 @@ def test_a_MISSING_engine_project_is_red_and_an_UNREADABLE_index_is_unknown():
     )
     assert absent.get("engine-index").status == canary.FAIL
     assert absent.verdict == canary.FAIL
+    # ⛔ THE ARM'S OWN SENTENCE, NOT JUST ITS STATUS (#12422 round-23 review P2). The
+    # FAIL/UNKNOWN split was corrected by prose alone and verified BY HAND — so a revert
+    # of the two-branch detail restored "could not read the … index metadata: HTTP 404"
+    # over a FINDING and all 72 tests stayed green. That is the "nothing reds on them"
+    # disease this PR documents; a hand check is not a pin.
+    assert "is not on the index" in absent.get("engine-index").detail, (
+        absent.get("engine-index").detail
+    )
+    assert "could not read the" not in absent.get("engine-index").detail
 
     unreadable = canary.build_report(
         engine_doc=None,
@@ -251,6 +268,11 @@ def test_a_MISSING_engine_project_is_red_and_an_UNREADABLE_index_is_unknown():
     assert unreadable.get("engine-index").status == canary.UNKNOWN
     assert unreadable.verdict == canary.UNKNOWN
     assert unreadable.exit_code == 2
+    # and the no-answer side says so, in its own words — the same pin in the other
+    # direction, so neither branch can be swapped for the other silently.
+    assert "UNKNOWN, not absent" in unreadable.get("engine-index").detail, (
+        unreadable.get("engine-index").detail
+    )
 
 
 def test_an_unreadable_CLIENT_index_is_unknown_not_absent():
