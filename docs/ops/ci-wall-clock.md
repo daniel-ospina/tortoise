@@ -232,18 +232,18 @@ SUM. `test` cleared it with room to spare until the 2026-11-09 refresh — the r
 map took it over, and #11602 bought the room back by raising `fast_shards` 9 → 10; #11576 then
 raised it 10 → 11 for the same reason one merge later (the history is at the end of this
 parenthetical). At **`fast_shards: 11`** — the shipped shape — the row reads: 10 m
-last-failed pre-phase + the emitted **27 m** per-shard
+last-failed pre-phase + the emitted **26 m** per-shard
 watchdog + 6 m embedder + **~7.3 m of MEASURED startup, not the ~1 m an earlier revision restated**
 (`Set up job` 182 s = 3 m 02 s, 10:21:30 → 10:24:32, plus 4 m 14 s of uncapped setup steps to the
 suite's first line — the 10:24:32 → 10:28:58 window of 266 s MINUS the embedder's own measured 12 s,
 whose 6 m cap is already a term above; run 42000057137, job `test (d)`, `actions/jobs/127165076497`)
-plus **an 8 m cache-write term (1 m prune + 7 m save)** and ~0.4 m last-failed save = **58.6 m against
-90, x 1.5 = 87.9** — 2.1 m of headroom, where the refreshed map at 9 shards stood at
+plus **an 8 m cache-write term (1 m prune + 7 m save)** and ~0.4 m last-failed save = **57.6 m against
+90, x 1.5 = 86.5** — 3.5 m of headroom, where the refreshed map at 9 shards stood at
 **63.6 m, x 1.5 = 95.5** and reded
 `test_the_test_job_carries_no_unbounded_cache_post_step`. The term that moved is
 the watchdog: it read **26 m** until #10999 registered its own fast suite
 (`tests/test_10999_batch_story_relations.py`), **27 m** until the 2026-11-09 sweep re-weighted the fast
-pool, **32 m** at 9 shards on that refreshed map — re-packing into 10 shards took it to
+pool, and **32 m** at 9 shards on that refreshed map — re-packing into 10 shards took it to
 **28 m** (59.6 m, x 1.5 = 89.5), because one more file in `fast_pool()` re-packs the worst
 shard across a whole minute, and this paragraph restates that emission rather than owning it:
 `tools/ci_selection.py --emit-push-matrix` is the authority, and `tests/test_ci_selection.py`
@@ -252,10 +252,8 @@ later**: main's `test_embed_decision_step_11086.py` and that branch's
 `test_demo_session_read_exclusion_8290.py` land in `fast_pool()` together, the union
 packs the worst shard at **840.2 s** (either parent alone packed 840.0 s), `ceil(840.2/60 x 2)`
 rounds up to **29 m**, and the arm-2 SUM became **60.64 m, x 1.5 = 90.96 m against the 90 m cap**
-— RED where both parents pass. `fast_shards: 11` packs the same map to 763.8 s → 26 m at that merge,
-i.e. the 57.6 m above: 3.5 m of real headroom instead of the 0.5 m S=10 had been clearing by; on
-2026-11-14 the `#10015` durations row (`test_10015_organisation_account.py: 2.0`) moved the worst
-shard across a whole minute and the row now reads the **27 m / 58.6 m / 2.1 m** above. The cap was
+— RED where both parents pass. `fast_shards: 11` packs the same map to 763.8 s → 26 m, i.e. the
+57.6 m above: 3.5 m of real headroom instead of the 0.5 m S=10 had been clearing by. The cap was
 NOT moved — `#3239`'s stale-head exposure is what raising it re-opens, and the SUM rose from the
 POOL, not from the pre-suite terms.) The write term fits because #11063 split this job's cache by payload: `~/.cache/pip`
 (3,616,385,308 B in a PR scope, the torch wheel set, 93% of the 3.88 GB payload the defect uploaded)
