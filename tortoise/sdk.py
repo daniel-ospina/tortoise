@@ -61,6 +61,7 @@ from .commit_ops import OBJECT_TERMINAL_STATUSES as _OBJECT_TERMINAL_STATUSES
 # used by the Subject `status` write guards in `create_entity` and
 # `_update_entity`. Imported so neither surface re-literals the vocabulary.
 from .commit_ops import SUBJECT_STATUS_VALUES as _SUBJECT_STATUS_VALUES
+from .commit_ops import SUBJECT_TERMINAL_STATUSES as _SUBJECT_TERMINAL_STATUSES
 from .env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
 # #12297: the fused-candidate rerank, imported at module scope because the read
 # path evaluates its gate on EVERY search. `rerank` is a light module (stdlib +
@@ -48788,16 +48789,206 @@ class TortoiseSDK:
                 props = {k: v for k, v in props.items()
                          if id(k) not in _status_key_ids}
 
-        # #1423 (review P1): the `status` guard above is POINT-gated (its
-        # predicate is `MATCH (n:Point {id:$id})`), so a `:Subject` `status`
-        # travelled the unvalidated non-Point branch (`SET n += $p`), was
-        # STORED, and was then served on all four retrieval legs — reproduced
-        # for `status="retracted"` AND for any undeclared value (e.g.
-        # `"dead"`). The Subject read vocabulary cannot cover that: it is a
-        # denylist of KNOWN terminal states, so an unknown one reads as
-        # CURRENT. Validate against ONTOLOGY §4.2's declared Subject lifecycle
-        # and REFUSE anything outside it BEFORE any write — the Point guard's
-        # shape, applied to the Subject family (`SUBJECT_STATUS_VALUES`).
+        # ── #10371: a NON-POINT row cannot be resurrected by a prop edit ──
+        # Measured on `main` at `6916a6cd89` (2026-11-13), embedded engine,
+        # throwaway nodes, deleted after:
+        #
+        #     update_entity(<archived Object>,  status='live') -> ACCEPTED
+        #     update_entity(<archived Subject>, status='live') -> ACCEPTED
+        #
+        # Both rows came back CURRENT. That is the #9649 defect class on two
+        # more labels: #12325 closed `update_entity`'s POINT arm, and
+        # `_assert_lifecycle_guard` is `:Point`-hardcoded (`point_id`,
+        # `MATCH (n:Point …)`), so the Object and Subject arms never reached it.
+        #
+        # ⛔ ONE RULE, AND IT IS NOT A VOCABULARY. A closed
+        # `OBJECT_STATUS_VALUES` was considered and REJECTED: ONTOLOGY §4.3 says
+        # *"pack-declared kinds validate against their own declared words"*, and
+        # this repo's packs exercise it — `packs/venture/manifest.yaml` declares
+        # `active`, `prospective`, `invested`, `written-off`, `prioritized`,
+        # `paused`, `deprioritized`, `prospect`, `applied`, `awarded`, `closed`
+        # for its Object kinds, and the connector vocabulary adds
+        # `open`/`closed`/`active`/`pending`. A shared set refuses every one of
+        # them, which is a door narrowed to close a different hole. The guard
+        # therefore asks the TRANSITION question only — and that is the question
+        # that stops a resurrection. Note what it does NOT consult: whether the
+        # TARGET word is declared. It keys on the family's DEAD set, so any
+        # non-dead target is refused from a dead row (`archived` -> `active` is
+        # refused too, and `active` is a pack word this guard never inspects).
+        # The resurrection it stops is the one every read surface acts on:
+        # `live` — and any other word the family's read vocabulary does not treat
+        # as dead — reads as CURRENT. (It is NOT true that `live` is declared by
+        # every kind: a pack Object kind declares only its own words.)
+        #
+        # ⛔ THE DEAD SET IS THE FAMILY'S OWN RECORDED ONE
+        # (`commit_ops.OBJECT_TERMINAL_STATUSES` / `SUBJECT_TERMINAL_STATUSES`,
+        # the recall/read exclusion), never a literal here.
+        #
+        # ⛔ DEAD -> DEAD STAYS LEGAL, and that is a PER-FAMILY DELTA from Points.
+        # §5 declares every terminal POINT with an empty outgoing set
+        # (`_ALLOWED_TRANSITIONS`): a dead claim is answered only by minting a
+        # successor. An Object's dead words are bookkeeping. `main` moves them —
+        # `tests/test_11826_object_supersession_instrument.py` takes a
+        # `superseded` Object to `archived` inside its test body (the supersede at
+        # `:245`, the archived write at `:290`, the assertion it justifies from
+        # `:291`) — and that module reds if this refuses it. Note what that
+        # assertion actually says: archiving SILENCES the
+        # `superseded_object_active_edges` finding without clearing the deficit
+        # (`tortoise/audit.py` says so in its own docstring), so it is not
+        # offered as a repair anywhere.
+        #
+        # ⛔ THE WRITE IS THE ROW SET, so the READ is too. The per-label loop
+        # below binds `MATCH (n:<label> {match_prop:$id}) SET n += $props` — every node
+        # carrying the id — so `row[0]` here would let a live sibling authorise a
+        # write that also lands on the terminal one (#7822's fan-out rule is not
+        # Point-specific).
+        #
+        # ⛔ AN ENTAILED STATUS IS NOT A TRANSITION (#9649 review F4-2). A
+        # generic tenant PUT is a read-modify-write: it fetches the row and sends
+        # it back unchanged beside the fields it edited, so
+        # `update_entity(archived, status='archived', name=…)` must stay legal or
+        # this refusal contradicts the "content and metadata revisions are still
+        # accepted" sentence it ends on.
+        #
+        # ⛔ THE ONE LEGAL DEAD -> CURRENT IS THE RECORD-CARRIED UN-SUPERSEDE, and
+        # it is a RECORDED CAPABILITY, not a convenience
+        # (`tortoise/cache_projection.py`'s "NOT MONOTONE — the carriers CAN be
+        # cleared" bullet): `update_entity(row, status='live',
+        # supersededBy=None, supersededAt=None)` journals the null carriers, so
+        # the record and a rebuild agree that nothing replaced this row. Refusing
+        # it broke `tests/test_status_projection.py::
+        # test_clearing_a_supersession_is_still_writable` — measured red on the
+        # first cut of this guard, and missed because that suite was not in the
+        # batch.
+        #
+        # ⛔ AND IT IS SCOPED PER ROW: EVERY DEAD ROW THE WRITE WOULD RESURRECT
+        # MUST HOLD A CARRIER OF ITS OWN (`dead_carrierless == 0`). Two more
+        # measurements shaped this, both from that exemption's first widening:
+        # (a) an unscoped "both carriers cleared" test let `archived -> active`,
+        # `deprecated -> live` and `retracted -> live` through with two no-op
+        # kwargs — a bare resurrection wearing the un-supersede shape, on rows
+        # holding no carrier to clear; and (b) the SNAKE spelling does NOT clear
+        # the carrier: `superseded_by=None` writes `n.superseded_by`, a DIFFERENT
+        # graph property from the `n.supersededBy` the supersession instruments
+        # read (`audit.py`, `commit_ops.py`, `assembly.py`), so accepting it as an
+        # un-supersede stored `status='live'` beside an INTACT `supersededBy` —
+        # the incoherent pair this guard exists to stop. (`derived_invalidation`
+        # falls back to the snake spelling, so the property is not unread — it is
+        # read by exactly one reader, which is what makes the pair incoherent
+        # rather than merely stale.)
+        # The exemption therefore requires: EVERY DEAD ROW among the bound rows
+        # holds a carrier (`supersededBy`/`supersededAt` non-null on that row),
+        # and BOTH are cleared in this call under the CAMEL spelling — the
+        # spelling that clears the columns the supersession instruments read.
+        # "Every", not "anywhere in the set": the write binds every node with the
+        # id, so a carrier on ONE row must not authorise reviving another row that
+        # has nothing to clear. (That the two spellings write different properties
+        # is a PRE-EXISTING defect; it is recorded on #12745 rather than fixed
+        # here.)
+        #
+        # ⛔ AND THE TARGET MAY BE ABSENT OR NON-STRING, WHICH IS STILL A
+        # TRANSITION. A first cut skipped the check for any non-`str` target
+        # ("a non-string cannot be a dead WORD") — which let a dead row go
+        # CURRENT by REMOVING its status: `update_entity(<superseded Object>,
+        # status=None)` strips the property, §4.3's "an Object created without a
+        # status stores none and reads as `live`" takes over, and every read
+        # surface serves the row as current while `supersededBy` still names a
+        # successor (measured). `status=123` / `status=True` stored as-is and read
+        # current the same way. So the test is not "is the target a dead word" —
+        # it is "is the target in the dead set", and everything else on a dead row
+        # is a resurrection. The other two families were already safe here because
+        # their guards are presence-based, not string-based.
+        #
+        # The remedy is deliberately NOT `supersede()`: that door routes to
+        # `supersede_point`/`invalidate_point`, which are `:Point`-only and raise
+        # `No point <id>` for an Object or a Subject, so naming it here would be
+        # an unperformable prescription (the AX-rule-2 defect #10183 records).
+        # What exists today is the record path (`commit_ops.apply_supersessions`
+        # / the `ObjectSuperseded` fold); the SDK gap is #12592.
+        # The CALL asks to clear both carriers: `None` under the CAMEL spelling,
+        # which is the spelling that writes the columns every reader reads.
+        _np_carriers_cleared = all(
+            k in props and props[k] is None
+            for k in ("supersededBy", "supersededAt"))
+        _nonpoint_status = lifecycle_props_by_rendering(props, {"status"})
+        if _nonpoint_status:
+            _np_status = _nonpoint_status["status"]
+            for _np_label, _np_terminal, _np_section in (
+                ("Subject", _SUBJECT_TERMINAL_STATUSES, "§4.2"),
+                ("Object", _OBJECT_TERMINAL_STATUSES, "§4.3"),
+            ):
+                _np_row = proj.g.query(
+                    f"MATCH (n:{_np_label} {{id:$id}}) "
+                    "RETURN count(n) AS hits, "
+                    "collect(DISTINCT n.status) AS statuses, "
+                    # rows this write could resurrect that hold NOTHING to clear
+                    "sum(CASE WHEN n.status IN $terminal "
+                    "AND n.supersededBy IS NULL AND n.supersededAt IS NULL "
+                    "THEN 1 ELSE 0 END) AS dead_carrierless",
+                    params={"id": id_val,
+                            "terminal": sorted(_np_terminal)},
+                ).result_set[0]
+                if not _np_row or not _np_row[0]:
+                    continue
+                # `collect` DROPS NULLs, so an empty list means every bound row
+                # holds no status — the legacy shape, which reads as live and is
+                # the backfill's business, not this guard's.
+                _np_stored = tuple(_np_row[1] or ())
+                if not _np_stored:
+                    continue
+                if all(s == _np_status for s in _np_stored):
+                    continue            # entailed: no transition asked for
+                _np_dead = sorted(s for s in _np_stored if s in _np_terminal)
+                if not _np_dead:
+                    continue            # nothing dead to resurrect
+                # `isinstance` first: a list/dict status is unhashable, and
+                # `_np_status in _np_terminal` raised `TypeError` for it instead
+                # of the guard's actionable refusal (measured: `status=['live']`
+                # and `status={'a': 1}` on an archived Object). Direction was
+                # never wrong — base let both through — but the caller got a
+                # traceback instead of the AX three-part message.
+                if (isinstance(_np_status, str)
+                        and _np_status in _np_terminal):
+                    continue            # dead->dead is legal for these families
+                # The record-carried un-supersede: the call clears both carriers
+                # AND EVERY row it would resurrect really holds one. Scoping this
+                # to "the row set holds a carrier" measured a hole: a carrierless
+                # `archived` row sharing an id with a `superseded` sibling that
+                # DID hold one was resurrected by the sibling's carrier — the
+                # write binds both rows. `dead_carrierless` is 0 only when every
+                # dead row has something to clear, so the exemption cannot travel
+                # from one row to another.
+                if _np_carriers_cleared and not _np_row[2]:
+                    continue
+                raise ValueError(
+                    f"update_entity refused the status transition "
+                    f"{_np_dead[0]!r} -> {_np_status!r} on {_np_label} "
+                    f"{id_val!r}: {_np_dead[0]!r} is TERMINAL for a "
+                    f":{_np_label} (ONTOLOGY {_np_section}), so this row cannot be "
+                    f"made current again. ⛔ A dead {_np_label} is not resurrected "
+                    f"by a prop edit — a {_np_label} that came back is a NEW "
+                    f"entity, not an edit to the dead one. Mint it with the "
+                    f"create door for that label and record the replacement "
+                    f"through the supersession path "
+                    f"(`commit_ops.apply_supersessions` / the "
+                    f"`ObjectSuperseded` fold); this door has no SDK "
+                    f"supersede verb for an Object or a Subject yet (#12592). "
+                    f"Content and metadata revisions are still accepted on the "
+                    f"dead row (this refusal is the `status` field only)."
+                )
+
+        # ── #1423 (unchanged by #10371): the Subject VOCABULARY guard ──
+        # ⛔ THIS IS A DIFFERENT QUESTION from the transition guard above, and the
+        # #10371 change must not absorb it. The transition guard asks "may this
+        # ROW leave a dead state?"; this one asks "is this WORD declared for the
+        # family?". An undeclared word (`"dead"`, `"retracted"`) is not dead — it
+        # is unknown, and the Subject read vocabulary is a denylist of KNOWN
+        # terminal states, so an unknown one reads as CURRENT. Refusing it at the
+        # door is the only place it can be refused. (A first cut of #10371
+        # replaced this block instead of extending it and silently reopened the
+        # hole; `tests/test_subject_supersession_1423.py` and
+        # `tests/test_9649_*.py::test_a_rendered_status_key_is_validated_against_*
+        # the_SUBJECT_vocabulary` caught it.)
         #
         # A node carrying BOTH `:Point` and `:Subject` cannot reach this block
         # with a status: the Point arm above already validated it against the

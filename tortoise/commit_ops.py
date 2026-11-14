@@ -39,12 +39,24 @@ _logger = logging.getLogger(__name__)
 # #3301 — THE canonical OBJECT terminal vocabulary for the SEARCH/RECALL
 # read surfaces. ONE declaration; nothing on those surfaces re-literals it
 # (``TortoiseSDK.recall_state`` and the four search legs both consume THIS
-# object). The OBJECT family is NOT the Point family: an Object
-# has no ``outdated`` concept (no writer sets ``outdated`` on an Object) and no
-# ``draft`` state, so this set is the recall/read-surface tuple and it is
-# deliberately narrower than ``live.TERMINAL_EXCLUDED_STATUSES`` (which adds
-# ``outdated``). A retracted/superseded/deprecated/archived Object is a dead
-# Object — no current state to report.
+# object). The OBJECT family is NOT the Point family, so this set is the
+# recall/read-surface tuple and it is deliberately narrower than
+# ``live.TERMINAL_EXCLUDED_STATUSES`` (which adds ``outdated``). A
+# retracted/superseded/deprecated/archived Object is a dead Object — no current
+# state to report. (§4.3 is where a family's declared words live: it accepts
+# ``draft``, ``live``, ``superseded``, ``deprecated``, ``archived``,
+# ``in_progress``, ``completed``. An earlier cut of this comment claimed the
+# Object family had "no ``draft`` state", which is false — `create_object(
+# status='draft')` is accepted, and the object fold seeds `draft` for a
+# birth-record carrier — so the claim was deleted rather than reworded.)
+#
+# ⛔ "No ``outdated`` concept" is NOT "nothing writes it": ``update_entity``
+# accepts ``status='outdated'`` on an Object today, and
+# ``tests/test_11926_derived_invalidation.py`` pins it — the test BODY writes
+# ``update_entity(<Object>, status='outdated')`` and reads it back, not its
+# ``_world`` fixture (which creates three status-less Objects). This paragraph
+# used to claim *"no writer sets ``outdated`` on an Object"*, which is false; the
+# exclusion above is a READ decision, and it is stated as one now.
 #
 # DELIBERATELY NOT the whole story: the render-time successor-existence probe
 # in assembly.py keeps its OWN wider set (``assembly._RECALL_OBJECT_EXCLUDED_STATUSES``
@@ -99,9 +111,15 @@ SUBJECT_TERMINAL_STATUSES = frozenset(
 # undeclared value (``"dead"``) can no longer be STORED and leak on every
 # read leg — the general hole the ``retracted`` observation is one instance
 # of. Points carry the same guard (``sdk.POINT_STATUS_VALUES``). The OBJECT
-# family has no write-side guard yet: ``update_entity(<object>, status=...)``
-# is still unvalidated, which is a PRE-EXISTING hole outside this lane's
-# scope (#1423 is the Subject family).
+# family STILL has no write-side vocabulary guard, and that is now a RECORDED
+# constraint rather than a to-do: ONTOLOGY §4.3 (Object) says *"pack-declared kinds
+# validate against their own declared words"*, and `packs/venture` exercises it
+# (`active`, `prospective`, `invested`, `prioritized`, `paused`, …), so a single
+# shared `OBJECT_STATUS_VALUES` would refuse real words and narrow the door.
+# Closing the vocabulary hole needs per-kind resolution; a shared set is
+# foreclosed. (#10371 keeps the vocabulary half open for that reason;
+# `tests/test_10371_nonpoint_lifecycle_guard.py` pins that the transition guard
+# does NOT become a vocabulary.)
 SUBJECT_STATUS_VALUES = frozenset(
     {"draft", "live", "superseded", "deprecated", "archived"})
 
