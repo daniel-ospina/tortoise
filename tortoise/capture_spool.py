@@ -345,12 +345,13 @@ class PostOutcome:
 #: explicitly ``False`` — #12374, landed as ``5e5845b141`` — and copied onto the
 #: spool entry by ``_flush_one`` so the state outlives the run.
 #:
-#: ⚠️ That producer is the only one, and it is Python-CLI-only: the Pi leg posts
-#: to ``/v1/sessions`` itself and never receives a body carrying this key, so its
-#: stamp branch has no live input and ``session health`` on a Pi box reports
-#: nothing for a session in this state (#12603, which also carries the three
-#: statements in the Pi seam and three more in its ``.test.ts`` that still assert
-#: the pre-#12374 tree).
+#: ⚠️ TWO producers write this key into ONE shared meta, one per leg: the
+#: Python-CLI ``_session_post._refused`` above, and — since **#12603** — the Pi
+#: leg's confirm-on-refusal READ (``tortoise-capture.ts``
+#: ``refusalOutcomeVerdict``: a retryable refusal → ``GET
+#: /v1/sessions/<id>`` → turn match → explicit ``extraction.outcome_known:
+#: False``). Before #12603 the Pi stamp branch had no live input and ``session
+#: health`` on a Pi box reported nothing for a session in exactly this state.
 #:
 #: ⛔ TWO body shapes reach this vocabulary, and conflating them is how the Pi leg's
 #: port went dead (measured in #12460's lane):
@@ -442,8 +443,7 @@ def outcome_recorded(body) -> bool:
     the routine resume/clear/compact replay path (see ``_flush_one``'s comment).
 
     ⚠️ RESIDUAL, the counterpart of ``outcomeRecorded`` in
-    ``tortoise/pi-hooks/tortoise-capture.ts`` (whose prose still carries the
-    pre-#12374 wording — #12603): ``unextracted`` is not POSITIVE
+    ``tortoise/pi-hooks/tortoise-capture.ts``: ``unextracted`` is not POSITIVE
     proof that the server recorded an extraction outcome. #12374's
     ``_extraction_verdict`` answers ``PENDING`` for an explicit
     ``outcome_known: False``, so the verdict cannot fire on the measured
@@ -2730,8 +2730,12 @@ def unrecorded_captures(root: Path) -> list[str] | None:
     The DURABLE half of #12379's trace. A drain's counter lives in one run's
     console line, and the hook that produces most captures throws that stderr
     away (``claude-hooks/session-end.sh`` → ``2>/dev/null``), so the state is
-    also stamped onto the spool entry when it is filed (:func:`_flush_one`) and
-    listed here by the surface that survives the redirect, ``session health``.
+    also stamped onto the spool entry — when a filing's body says so
+    (:func:`_flush_one`), and, on the Pi leg, when a RETRYABLE refusal's
+    confirm-on-refusal read does (``tortoise-capture.ts``
+    ``refusalOutcomeVerdict``, #12603; that entry is still DEFERRED, so an
+    unfiled entry can carry the marker too) — and listed here by the surface that
+    survives the redirect, ``session health``.
 
     Ids, not a bare count: a number a user cannot resolve to a session is a
     fact they cannot act on, and the entry is the only thing left that names it.
@@ -3511,8 +3515,8 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
             # evicted. So the marker is CLEARED by a settled verdict and only by
             # one (:func:`outcome_recorded`). What remains after that is the case
             # nothing on the client can resolve — no later filing at all — which
-            # is why the health line states it HISTORICALLY ("filed with no
-            # recorded outcome at the time") rather than as a live claim.
+            # is why the health line states it HISTORICALLY ("have NO recorded
+            # extraction outcome at the time") rather than as a live claim.
             #
             # A CAS miss leaves the entry unfiled and unstamped: its content was
             # not what this POST carried, so the next pass re-posts it and that
