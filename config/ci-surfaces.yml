@@ -1001,23 +1001,20 @@ surfaces:
   # no guard. Registered in BOTH lists, like `test_11892_health_quota.py`.
   #
   # ⛔ ONE row per list, deliberately: this entry had been emitted TWICE in `.surfaces.api`
-  # and twice in `.surfaces.core` by the `merge=union` driver (.gitattributes) when two
-  # racing merges each added it — exactly the duplicate the `registry_integrity.py` step
-  # exists to catch (#5373), and undetected on `main` because `manifest-integrity` had not
-  # yet run on the sha that carried it. The redundant copies are deleted, not merged: both
-  # carried the same classification.
-  # one-surface registration drops this file on the other half's own diff. MEASURED, with the
-  # `core` row alone: `--changed-files tortoise/hosted_api.py` did NOT select this file, so a
-  # `hosted_api.py`-only regression of the `/health` verdict — #12477 itself — carried no
-  # guard. (Two independent fixes for this registration landed 69 s apart in TWO merges
-  # — #12640 and #12464, with #12569 between them — and each appended at its own anchor,
-  # so both lists held the row TWICE: one row per merge survived into `main`, which is why
-  # this note and the `core` one come from different commits, and `--integrity` reported
-  # the duplicate on `main`.) That is the mechanism `duplicate_entries()` documents: the
-  # SAME row appended at two different positions survives as TWO rows, so a duplicate is
-  # NOT evidence of a union merge. One row per surface is what `duplicate_entries()`
-  # requires — `integrity()` only asks "is it classified?", which a duplicated row
-  # satisfies; the second copy is gone.
+  # and twice in `.surfaces.core` when two independent fixes for this same registration
+  # landed 69 s apart in TWO merges — #12640 and #12464, with #12569 between them — and
+  # each appended the row at its OWN anchor, so one row per merge survived into `main`.
+  # That is why this note and the `core` one come from different commits. ⛔ It is also NOT
+  # evidence of the `merge=union` driver (.gitattributes): an earlier cut of this note
+  # attributed it to that driver, and `duplicate_entries()`' own measurement retracts it —
+  # the SAME row appended at two different POSITIONS survives as TWO rows, with the
+  # attribute set and unset alike, because nothing reconciles independent appends. The
+  # entry is still exactly the duplicate `duplicate_entries()` exists to catch (#5373, and
+  # carried by the `manifest-integrity` check rather than by `--integrity`): a same-surface
+  # repeat is invisible to selection AND to `integrity()`, which only asks "is it
+  # classified?" — a duplicated row satisfies that. The redundant copies are deleted, not
+  # merged: both carried the same classification. One row per surface is what
+  # `duplicate_entries()` requires, and the second copy is gone.
   - test_12477_health_honesty.py
   - test_agent_signup.py
   - test_agent_signup_idempotency.py
