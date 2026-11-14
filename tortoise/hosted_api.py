@@ -2117,7 +2117,7 @@ def _liveness_dataplane_verdict() -> dict:
         # #10892 recorded as an OVERRIDES decision against this shape.
         snap = _HEALTH_PROBE.peek()
         meta = _HEALTH_PROBE.info()
-    except Exception as exc:  # noqa: BLE001 - a verdict must never raise
+    except Exception as exc:
         return {"state": "failed",
                 "detail": {"reason": "probe-state-unreadable"},
                 "error": f"{type(exc).__name__}: {exc}"[:200]}
@@ -2865,10 +2865,8 @@ async def _stop_liveness(app) -> None:
     # lock was held had it silently DROPPED by the stale cold-start predicate.
     for _clear in (set_cold_start_source, set_dataplane_verdict_source,
                    set_served_progress_source):
-        try:
+        with contextlib.suppress(Exception):
             _clear(None)
-        except Exception:  # noqa: BLE001 - teardown must not raise
-            pass
     stop = getattr(app.state, "_loop_watchdog_stop", None)
     if stop is not None:
         stop.set()
@@ -5606,7 +5604,15 @@ _WAIT_BOUND_LONG_ROUTES = (
     re.compile(r"^/v1/(agent/)?(signup|recover)/?$"),
     re.compile(r"^/v1/signup/email/?$"),
     re.compile(r"^/v1/claim(/email)?/?$"),
-    re.compile(r"^/v1/user/identity/(resend-confirmation|unlink)/?$"),
+    re.compile(r"^/v1/user/identity(/[^/]+)?/?$"),
+    # ⛔ THE WHOLE IDENTITY FAMILY IS THE SAME CLASS (#12477 review round 15).
+    # All five routes go through `_identity_admin_user` → `_gotrue_admin_get_user`
+    # (`timeout=15.0`): `/v1/user/identity`, `/link-intent`, `/link-commit`,
+    # `/unlink`, `/resend-confirmation`. Only two were listed, so a refused
+    # `GET /v1/user/identity` counted as DATA-plane evidence — measured: five
+    # refused reads gave `share 1.0 -> refusing True` and the real listener
+    # answered `503 ['requests-refused']` over a healthy plane. Listed as a
+    # FAMILY so the next member cannot be forgotten one route at a time.
     # ⛔ `/v1/session/login` IS THE SAME CLASS, and it was the one that got
     # missed (#12477 review round 14). `_session_login_exchange` awaits THREE
     # GoTrue calls — `_gotrue_admin_get_user` and `_gotrue_admin_mint_session`,
@@ -5783,10 +5789,7 @@ def _route_is_served_without_the_plane(route_path: str,
         return True
     if path.startswith(_WAIT_BOUND_NO_PLANE_PREFIXES):
         return True
-    for pattern in _WAIT_BOUND_NO_PLANE_ROUTES:
-        if pattern.search(path):
-            return True
-    return False
+    return any(pattern.search(path) for pattern in _WAIT_BOUND_NO_PLANE_ROUTES)
 
 
 def _exchange_reached_a_route(scope) -> bool:

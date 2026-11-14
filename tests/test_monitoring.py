@@ -5572,7 +5572,7 @@ class TestWaitBoundBreachWindow:
         """
         for attempts in (200, 2000):
             monitoring.reset_wait_bound_breach_window()
-            breaches = max(1, int(round(attempts * 0.021)))
+            breaches = max(1, round(attempts * 0.021))
             for _ in range(attempts):
                 monitoring.record_wait_bound_attempt("rest")
             for _ in range(breaches):
@@ -5761,7 +5761,6 @@ def test_a_raise_in_the_heartbeat_read_answers_503_instead_of_going_dark(monkeyp
     dark, which is the one outcome the class docstring says must never happen.
     """
     import socket
-    import time
 
     def _boom(*_a, **_k):
         raise RuntimeError("heartbeat store unreadable")
@@ -5800,6 +5799,34 @@ def test_a_raise_in_the_heartbeat_read_answers_503_instead_of_going_dark(monkeyp
         "carry the same key as UNMEASURED rather than omitting it (round 14)")
 
 
+def test_an_unserialisable_reader_value_still_gets_an_ANSWER():
+    """A payload this module does not own must not cost the whole response.
+
+    `dataplane_verdict` puts the registered reader's WHOLE dict into `detail` when
+    the state is unrecognised, and `_send` serialised without a fallback — so a
+    value this module does not own made `json.dumps` raise inside `_send` and the
+    listener answered NOTHING (`RemoteDisconnected`). Measured (#12477 review
+    round 15): that is the DARK class round 10 fixed one field of, reintroduced
+    one layer below it. `default=str` keeps the answer; a coerced value is a worse
+    diagnostic and a far better answer than no response.
+    """
+
+    server = monitoring.start_health_listener(port=0, bind="127.0.0.1")
+    monitoring.heartbeat_record()
+    monitoring.set_dataplane_verdict_source(
+        lambda: {"state": "OK", "detail": {"x": {1, 2, 3}}})  # a set: not JSON
+    try:
+        status, body = _http_get(server.server_address[1])
+    finally:
+        monitoring.set_dataplane_verdict_source(None)
+        monitoring.stop_health_listener()
+    assert status in (200, 503), body
+    payload = json.loads(body)
+    assert payload["dataplane"]["error"].startswith("unrecognised verdict state")
+    assert "{1, 2, 3}" in str(payload["dataplane"]["detail"]), (
+        "the value is COERCED, not dropped: the operator still sees what it was")
+
+
 def test_stopping_the_app_clears_every_registered_reader():
     """A registered reader must not outlive the app that registered it.
 
@@ -5813,7 +5840,7 @@ def test_stopping_the_app_clears_every_registered_reader():
     from tortoise import hosted_api
 
     class _App:
-        class state:  # noqa: N801 - minimal stand-in
+        class state:
             pass
 
     app = _App()

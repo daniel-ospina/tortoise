@@ -1087,7 +1087,7 @@ def record_wait_bound_control_breach(at: float | None = None) -> None:
 
 #: #12477: registered by the APP (`hosted_api._start_liveness`) so this module
 #: never imports it. Returns True while a one-time cold-start load is in flight.
-_COLD_START_SOURCE: "callable | None" = None
+_COLD_START_SOURCE: callable | None = None
 
 
 def set_cold_start_source(source) -> None:
@@ -1108,7 +1108,7 @@ def _cold_start_in_flight() -> bool:
         return False
     try:
         return bool(source())
-    except Exception:  # noqa: BLE001 — a state probe must not replace a refusal
+    except Exception:
         return False
 
 
@@ -1143,7 +1143,7 @@ def _prune_wait_bound_buckets(surface: str, newest_index: int) -> None:
     try:
         keep = int(wait_bound_health_window_s()
                    // max(1.0, WAIT_BOUND_HEALTH_BUCKET_S)) + 2
-    except Exception:  # noqa: BLE001 - the refusal path must not raise
+    except Exception:
         keep = 14
     buckets = _WAIT_BOUND_BUCKETS[surface]
     if len(buckets) > keep:
@@ -1188,7 +1188,7 @@ def wait_bound_breach_window(window_s: float | None = None) -> dict:
     """
     try:
         window = wait_bound_health_window_s() if window_s is None else float(window_s)
-    except Exception as exc:  # noqa: BLE001 - a monitoring read must not raise
+    except Exception as exc:
         return _wait_bound_error(f"wait_bound window unreadable: "
                                  f"{type(exc).__name__}", window=None)
     if not math.isfinite(window) or window <= 0:
@@ -1239,7 +1239,7 @@ def wait_bound_breach_window(window_s: float | None = None) -> dict:
                     surface_newest = max(kept)
                     newest = (surface_newest if newest is None
                               else max(newest, surface_newest))
-    except Exception as exc:  # noqa: BLE001 - a monitoring read must not raise
+    except Exception as exc:
         logger.warning("#12477: wait-bound window unreadable: %r", exc)
         return _wait_bound_error(f"wait_bound window unreadable: "
                                  f"{type(exc).__name__}", window=window)
@@ -2202,7 +2202,7 @@ def record_wait_bound_breach(surface: str, *, windowed: bool = True) -> None:
         return
     try:
         record_wait_bound_breach_recent(surface)
-    except Exception:  # noqa: BLE001 - observation must never replace the refusal
+    except Exception:
         logger.warning(
             "#12477: wait-bound breach stamp failed for %s", surface,
             exc_info=True)
@@ -5239,7 +5239,7 @@ def _format_frames(frames, limit: int = LOOP_BLOCK_FRAME_LIMIT) -> list[str]:
     rendered: list[str] = []
     try:
         stack = traceback.extract_stack(frames)
-    except Exception:  # noqa: BLE001 - diagnostics must never raise
+    except Exception:
         return rendered
     for entry in stack[-limit:]:
         rendered.append(f"{os.path.basename(entry.filename)}:{entry.lineno} "
@@ -5289,7 +5289,7 @@ def _persist_loop_block(event: dict, path: str) -> None:
             pass
         if _LOOP_BLOCK_PERSIST_ERROR is not None:
             _LOOP_BLOCK_PERSIST_ERROR = None
-    except Exception as exc:  # noqa: BLE001 - never let persistence kill the sampler
+    except Exception as exc:
         _LOOP_BLOCK_PERSIST_ERROR = f"{type(exc).__name__}: {exc}"[:200]
         logger.warning("#12477: loop-block record write failed (%s): %s",
                        path, _LOOP_BLOCK_PERSIST_ERROR)
@@ -5311,7 +5311,7 @@ def record_loop_block(*, age_s: float, frames=None, thread_ident=None) -> dict:
     frame = sys._current_frames().get(ident) if frames is None else frames
     rendered = _format_frames(frame) if frame is not None else []
     event = {
-        "at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "at": datetime.datetime.now(datetime.UTC).isoformat(),
         "loop_age_s": round(float(age_s), 3),
         "loop_ticks": heartbeat_read()[1],
         "workload_in_flight": workload_in_flight(),
@@ -5384,7 +5384,7 @@ def load_persisted_loop_block() -> dict | None:
             return None
     except FileNotFoundError:
         return None
-    except Exception as exc:  # noqa: BLE001 - a diagnostic read must not break boot
+    except Exception as exc:
         logger.warning("#12477: persisted loop-block record unreadable: %r", exc)
         return None
     if _LOOP_BLOCK_LAST is None:
@@ -5462,7 +5462,7 @@ def start_loop_block_sampler(*, loop_thread_ident: int | None = None,
             next_capture_at = max(age * 10.0, threshold_s)
             try:
                 record_loop_block(age_s=age, thread_ident=ident)
-            except Exception:  # noqa: BLE001 - a sampler must never die
+            except Exception:
                 logger.warning("#12477: loop-block capture failed", exc_info=True)
 
     thread = threading.Thread(target=_sample, name="tortoise-loop-block-sampler",
@@ -5534,7 +5534,7 @@ def served_progress() -> dict:
                 "served": None, "error": None}
     try:
         result = reader()
-    except Exception as exc:  # noqa: BLE001 - liveness must still answer
+    except Exception as exc:
         return {"registered": True, "last_served_age_s": None,
                 "last_plane_serve_age_s": None,
                 "served": None,
@@ -5609,7 +5609,7 @@ def dataplane_verdict() -> dict:
                 "error": None}
     try:
         result = reader()
-    except Exception as exc:  # noqa: BLE001 - liveness must still answer
+    except Exception as exc:
         return {"state": "failed", "registered": True, "detail": None,
                 "error": f"verdict reader raised: {type(exc).__name__}: {exc}"[:200]}
     if not isinstance(result, dict):
@@ -5840,7 +5840,15 @@ class _HealthzHandler(BaseHTTPRequestHandler):
             super().handle_one_request()
 
     def _send(self, status: int, payload: dict) -> None:
-        body = json.dumps(payload).encode()
+        # ⛔ ``default=str`` (#12477 review round 15): the payload carries values
+        # this module does not own — most recently the data-plane reader's whole
+        # ``detail`` dict — and an unserialisable one made `json.dumps` raise
+        # INSIDE `_send`, so the listener answered NOTHING (`RemoteDisconnected`)
+        # instead of a legible 503. That is the one outcome this class exists to
+        # prevent, one layer below the guard that was moved inward for it. A
+        # coerced value is a worse diagnostic than the object, and a far better
+        # answer than no response at all.
+        body = json.dumps(payload, default=str).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -5929,11 +5937,10 @@ class _HealthzHandler(BaseHTTPRequestHandler):
             recent = wait_bound_breach_window()
             served = served_progress()
             episodes = loop_block_report()["episodes"]
-            recent_total = recent.get("total")
             recent_refusing = recent.get("refusing")
             recent_error = recent.get("error")
             control_refusing = recent.get("control_refusing")
-        except Exception as exc:  # noqa: BLE001 - answer, never vanish
+        except Exception as exc:
             # SAME SHAPE as the success arm (round 5): an operator or dashboard
             # reading `recent_breaches.share` — the field added so exactly this
             # degraded case is diagnosable — must not get a `KeyError` on the one
@@ -5966,18 +5973,16 @@ class _HealthzHandler(BaseHTTPRequestHandler):
         # shape: a listener answering 200 with `recent_breaches: {total: null}`).
         # ``/health`` reports the same ``None`` and does NOT turn its ``status``
         # red — a deploy gate may say "not now", a health page may not.
-        if recent_refusing is None:
-            # ⛔ ``None`` IS TWO DIFFERENT FACTS and they must not be collapsed:
-            #   * an UNREADABLE window (``error`` set) — the #3253 rule applies,
-            #     so the liveness verdict is fail-closed: a channel the
-            #     instrument cannot read is not evidence of health;
-            #   * a window with NOTHING TO DECIDE (no traffic to divide by, a
-            #     sample under the floor, or the term disabled) — an idle plane
-            #     refuses nobody, and pricing that as a failure would red every
-            #     quiet box and fail every deploy.
-            refusing = bool(recent_error)
-        else:
-            refusing = bool(recent_refusing)
+        # ⛔ ``None`` IS TWO DIFFERENT FACTS and they must not be collapsed:
+        #   * an UNREADABLE window (``error`` set) — the #3253 rule applies, so
+        #     the liveness verdict is fail-closed: a channel the instrument cannot
+        #     read is not evidence of health;
+        #   * a window with NOTHING TO DECIDE (no traffic to divide by, a sample
+        #     under the floor, or the term disabled) — an idle plane refuses
+        #     nobody, and pricing that as a failure would red every quiet box and
+        #     fail every deploy.
+        refusing = (bool(recent_error) if recent_refusing is None
+                    else bool(recent_refusing))
         plane_failed = plane.get("state") == "failed"
         # A refused NO-I/O poll is its own failure (#12477 round 5) — and an
         # UNREADABLE window is fail-closed here too (round 4's decision).
