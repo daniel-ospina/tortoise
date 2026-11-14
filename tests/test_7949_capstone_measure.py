@@ -6186,7 +6186,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `+9` (`:18494`/`:18519` → `:18503`/`:18528`) when the capture path above
         # them grew. Opened, not offset — and `:18528` is the `QuotaExceededError`
         # refusal of the gate at `:18503`, not the `CohortCostCapExceeded`
-        # (cohort spend-cap) arm at `:19412`.
+        # (cohort spend-cap) arm at `:18570` at this paragraph's head.
         #
         # The anchor is `quota_refusal_payload(QuotaExceededError(`, not the bare
         # `quota_refusal_payload(`, because the OLD anchor's `detail=quota_refusal_payload(`
@@ -6440,7 +6440,9 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # the number the doc names (the reason this file pins ranges at both endpoints where it
     # can). ⛔ THE SPAN LOOP BELOW DOES NOT PIN THE END, and an earlier version of this
     # comment claimed it did: it asserts each needle occurs once INSIDE the window, which is
-    # true for every end from `:13560` to `:13700`. The end is therefore pinned by the
+    # true for any end at or beyond `:14402` (both needles are the file's only occurrences,
+    # so a later end cannot change the sum; every end before it gives an EMPTY window and
+    # the assert fails outright). The end is therefore pinned by the
     # structural assertion at `_i7_end_ok` — the stated last line must still be the blank
     # line immediately before `return OrgInfoResponse(`.
     _i7 = _EPIC_CITE_DOCS["04-plan.md"].read_text(encoding="utf-8")
