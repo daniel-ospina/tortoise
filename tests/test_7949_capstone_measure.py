@@ -5477,6 +5477,9 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # this row the sentence's `:11404` half has no reader at all, and the claim it
         # makes (that an empty `pointKind` — not the vocabulary repair — is what the
         # `or "statement"` default serves) is exactly the half a re-derivation would move.
+        # (The phrase is the probe's OWN words, so it moved with the probe's re-derived
+        # numbers: `main`'s copy of this row still scoped on `:11314`, which the merged
+        # probe no longer contains.)
         ("probes/capstone_measure.py", "`extractor_v2.py:11410-11413`; `:11404` is the", (
             ("11404", 'pkind = str(p.get("pointKind", "")).strip() or "statement"'),
         )),
@@ -5494,12 +5497,10 @@ def test_the_bare_continuation_cites_name_what_they_say():
         )),
         # ⛔ The `_IDLE_CITES` docstring's OWN early-return cite (#12369 review, P3):
         # it said `:14649`, the PRE-merge value, while the `follows at` row five lines
-        # above already pinned the same `if not edus:` statement. One claim, two
-        # numbers in one function, and only one of them had a reader — the bare
-        # continuation here sat in no row, so `grep -c '14649'` over this file's
-        # tests was `0`. (main ADDED this row; kept here, with its number re-derived
-        # onto THIS tree — the branch's extractor_v2 shift of +90 puts the early
-        # return at `:14787`, the same line the `follows at` row five lines above pins.)
+        # above already pinned `:14697` for the same `if not edus:` statement. One
+        # claim, two numbers in one function, and only one of them had a reader — the
+        # bare continuation here sat in no row, so `grep -c '14649'` over this file's
+        # tests was `0`.
         ("probes/capstone_measure.py", "emits literally", (
             ("14787", "if not edus:"),
         )),
@@ -5615,8 +5616,6 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # could not see them — the document contradicted its own table by 48 lines and
         # nothing red-ed. Held by CONTENT on the block's opening and closing line, so a
         # re-derivation that lands mid-comment reds instead of drifting.
-        # (main ADDED these four rows; kept here, with their numbers re-derived onto
-        # THIS tree — the branch's extractor_v2 shift of +90.)
         ("README.md", '`result["classify_later"]` block at', (
             ("15701", 'result["classify_later"] = {'),
             ("15707", ("exact", "}")),
@@ -13885,7 +13884,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         "a base in parentheses is still a BASE — the false block main's shape produced")
     assert _cite_qualifiers("`:12929` at\n**`a1dff7cec8`**") == [("12929", "a1dff7cec8")], (
         "§2's own spelling wraps the base in a newline and bold — typography, not the claim")
-    assert _cite_qualifiers("the comment at :11410 and 40 lines") == [], (
+    assert _cite_qualifiers("the comment at :11362 and 40 lines") == [], (
         "a BARE cite has no qualifier — it is the grammar gap stated beside the arm, not a hit")
     assert _cite_qualifiers(":9021 (see the note above)") == [], (
         "an ordinary PARENTHESISED ASIDE after a cite is not a qualifier — only a CLOSED,"
@@ -13975,12 +13974,9 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # ⛔ RE-DERIVED for `#11002`'s rebase, not offset by hand: this branch inserts
     # above BOTH anchors (the G5 record at the module head and the `run_s1`
     # emphasis seam), so the schema line moved `:1720` → `:1764` and the comment
-    # `:10891` → `:11410` — the same **+15** §10.15 records for the collector.
+    # `:10891` → `:11362` — the same **+15** §10.15 records for the collector.
     # Measured off the MERGED tree (`grep -n 'hasPart' tortoise/extractor_v2.py`
-    # → `:1773`; the `nothing in this tree consumes` sentence itself was CORRECTED
-    # in place by `#11001` — it now says the channel IS consumed — on the line
-    # carrying `result["relations"]` → `:12487`, which is the line `_relations_cite`
-    # derives below).
+    # → `:1764`, `grep -n 'nothing in this tree consumes'` → `:11362`).
     # ⛔ DERIVED, not typed: the relations schema line is the one line carrying both the
     # `hasPart` spelling and the predicate allowance, so a merge that moves it moves the
     # cite too. (Typed `:1771` here was correct at one head and two lines stale at the next.)
@@ -14488,7 +14484,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         # not a base ([])" — naming the OPPOSITE defect — because its lookahead excludes only a
         # base that STARTS WITH A DIGIT.
         # ⚠️ Still not seen here: a cite with NO qualifier at all (`:13011` alone) — the block as
-        # shipped carries `:11410` that way (a live cite, correctly), so a no-bare-number rule
+        # shipped carries `:11362` that way (a live cite, correctly), so a no-bare-number rule
         # would false-block on the record itself. That is the same grammar gap as §2, one line up.
         if _is_repro_block:
             _quals = _cite_qualifiers(_region)

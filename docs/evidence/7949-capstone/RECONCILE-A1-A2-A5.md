@@ -745,7 +745,7 @@ git grep -nE '(^|[^[:alnum:]_])(create_edge|create_about_edge|create_operator)[[
 # corrected IN PLACE — same line, and its block's line count was held at 13 so every cite in this
 # record keeps its number — to state the consumer (`apply_relation_edges`, called from
 # `_extract_session_v2`) and to leave only the EMISSION leg unmeasured. Its number then was
-# `:11524`; this tree carries the same comment at `extractor_v2.py:12397`. So the A1 paragraph's quote
+# `:11524`; this tree carries the same comment at `extractor_v2.py:12487`. So the A1 paragraph's quote
 # is now history only, and the ONE prose-about-absence hit this row counted is gone.
 # ⛔ Both sides of the #11534 × #8290 forward-merge printed a different number, and neither matched
 # the other: the branch printed 10906 / :7 / 17181 at its own tip, main printed 11119 / :7 / 17188
