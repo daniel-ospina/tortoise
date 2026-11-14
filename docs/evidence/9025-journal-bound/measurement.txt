@@ -34,9 +34,9 @@ turn text: 1000 chars (MODELLED — see the probe docstring)
    (journal bytes are never deleted today, so the cumulative total
     at month N is N × the monthly rate)
   who                                   per month       1 year      3 years
-  a light user (30 captures/mo) · S     4,277,010   51,324,120  153,972,360
-  a light user (30 captures/mo) · M    19,288,560  231,462,720  694,388,160
-  a light user (30 captures/mo) · L    22,028,070  264,336,840  793,010,520
+  a light user (100 captures/mo) · S   14,256,700  171,080,400  513,241,200
+  a light user (100 captures/mo) · M   64,295,200  771,542,400 2,314,627,200
+  a light user (100 captures/mo) · L   73,426,900  881,122,800 2,643,368,400
   a power user (390 captures/mo) · S   55,601,130  667,213,560 2,001,640,680
   a power user (390 captures/mo) · M  250,751,280 3,009,015,360 9,027,046,080
   a power user (390 captures/mo) · L  286,364,910 3,436,378,920 10,309,136,760
@@ -44,9 +44,9 @@ turn text: 1000 chars (MODELLED — see the probe docstring)
 == the bill for ONE user's journal — steady state at month 36
    (storage is charged on the CUMULATIVE bytes, every month)
   who · scenario                       GB   $0.125/GB  Glacier IR  Deep Arch
-  a light user · S                   0.15      0.0192      0.0006     0.0002
-  a light user · M                   0.69      0.0868      0.0028     0.0007
-  a light user · L                   0.79      0.0991      0.0032     0.0008
+  a light user · S                   0.51      0.0642      0.0021     0.0005
+  a light user · M                   2.31      0.2893      0.0093     0.0023
+  a light user · L                   2.64      0.3304      0.0106     0.0026
   a power user · S                   2.00      0.2502      0.0080     0.0020
   a power user · M                   9.03      1.1284      0.0361     0.0089
   a power user · L                  10.31      1.2886      0.0412     0.0102

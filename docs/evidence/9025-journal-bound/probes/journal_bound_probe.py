@@ -192,7 +192,7 @@ def write_journal(path: Path, records: list[tuple[str, dict]]) -> int:
     return path.stat().st_size
 
 
-def reproduced_pin() -> int:
+def reproduced_pin(tmp: Path) -> int:
     """The `#11821` P0 `PointAdded` pin, reproduced through the landed writer.
 
     The corpus' richest `PointAdded`, its placeholder vector replaced with the
@@ -200,15 +200,25 @@ def reproduced_pin() -> int:
     so this number is comparable to the published 5,423 B and a drift in the
     writer the decision rests on shows up as a mismatch rather than as a quiet
     re-baseline.
+
+    ⛔ AND THE BYTES ARE THE WRITER'S, NOT A COPY OF THEM (cycle-6 review,
+    measured). The previous version hand-built the record with
+    `json.dumps(..., separators=(",", ":"))` + 1 — the shape today's writer
+    HAPPENS to emit. That caught the bug it was written for (a vector that
+    skipped `stamp_journal_embedding`; the 8,525 B case) but not a serialization
+    change inside `tortoise/log.py`, which would move every per-record and
+    per-capture figure below it while this pin stayed green — exactly the quiet
+    re-baseline the paragraph above promises to prevent. The record is now
+    appended through the same `write_journal`/`EventLog.scratch` path the rest
+    of this probe uses, so the pin MEASURES the writer instead of duplicating
+    it.
     """
     rec = richest(corpus_records(), "PointAdded")
     payload = dict(rec["point"])
     payload["embedding"] = unit_vector(5612)
-    return len(json.dumps({"type": "PointAdded", **{k: v for k, v in rec.items()
-                                                    if k != "point"},
-                           "point": stamp_journal_embedding(payload, creating=True)},
-                          ensure_ascii=False,
-                          separators=(",", ":")).encode("utf-8")) + 1
+    body = {k: v for k, v in rec.items() if k != "point"}
+    body["point"] = stamp_journal_embedding(payload, creating=True)
+    return write_journal(tmp / "pin.jsonl", [("PointAdded", body)])
 
 
 def richest(recs: list[dict], rtype: str) -> dict:
@@ -249,7 +259,7 @@ def main() -> int:
     print(f"  PointAdded (with vector)     {point_bytes:,} B"
           f"   [pinned #11821 P0: {PINNED_POINT_ADDED:,} B]")
 
-    pin = reproduced_pin()
+    pin = reproduced_pin(tmp)
     print(f"  PointAdded, #11821 pin      {pin:,} B"
           f"   [published: {PINNED_POINT_ADDED:,} B]")
 
@@ -342,9 +352,13 @@ def main() -> int:
 
     # ---- 5. the multi-year projection -------------------------------------
     # Write rate: `docs/drafts/2026-08-09-economics-guardrails.md` §F3 records
-    # the power user at 390 captures/month (13/day); `#4899` and the state/
-    # epistemic doc bracket the extraction yield used above.
-    rates = [("a light user (30 captures/mo)", 30),
+    # the power user at 390 captures/month (13/day); the LIGHT user's ~100/mo is
+    # the same document's §4 ("only reachable by light users (~100/mo)"), which
+    # is the only light-user rate it states. ⛔ The first version of this probe
+    # used 30/mo and attributed it to §F3, which states no light-user rate at
+    # all — so the light rows were the one figure in the bundle a reader could
+    # not derive from the cited artifact (cycle-6 review, measured).
+    rates = [("a light user (100 captures/mo)", 100),
              ("a power user (390 captures/mo)", 390)]
     print("== multi-year projection — bytes on the persistent volume")
     print("   (journal bytes are never deleted today, so the cumulative total")

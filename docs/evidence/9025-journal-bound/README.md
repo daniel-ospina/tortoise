@@ -48,11 +48,12 @@ $ env -u TORTOISE_DB_URI uv run python \
 | **a heavy capture** (98 turns, 25 points) | **734,269 B** |
 
 **Three years**, at the repo's own write rate (`docs/drafts/2026-08-09-economics-guardrails.md`
-§F3: a power user is 390 captures/month; a light user ~30):
+§F3 records the power user at 390 captures/month; the light user's **~100/mo** is the
+same document's §4 — the only light-user rate it states):
 
 | who · capture size | per month | 1 year | 3 years | $/month at month 36 ($0.125/GB) |
 |---|---|---|---|---|
-| light · typical | 19.3 MB | 231 MB | 694 MB | $0.09 |
+| light · typical | 64.3 MB | 772 MB | 2.31 GB | $0.29 |
 | power · typical | 250.8 MB | 3.01 GB | 9.03 GB | $1.13 |
 | power · heavy | 286.4 MB | 3.44 GB | 10.31 GB | $1.29 |
 
@@ -85,12 +86,20 @@ rotates, compacts, archives and deletes nothing.
 ## Why the measurement is believable: it reproduces the landed pin
 
 The probe re-stamps the corpus' richest `PointAdded` through
-`stamp_journal_embedding` and **exits 2** unless it reproduces the published
-**5,423 B** `#11821` P0 pin. This is not decoration: the first run of this probe
-skipped the seam, wrote the vector at float64's 17-digit repr, and measured
-**8,525 B** — a number no deployment stores, and one that would have re-baselined
-every projection built on it. The pin check is what caught it (recorded in
-`MEMORY.md` as `[journal-probe-must-stamp]`).
+`stamp_journal_embedding`, appends it **through `EventLog.append`** (the same
+`write_journal` path the rest of the probe uses, not a local copy of its
+serialization), and **exits 2** unless it reproduces the published **5,423 B**
+`#11821` P0 pin. This is not decoration: the first run of this probe skipped the
+seam, wrote the vector at float64's 17-digit repr, and measured **8,525 B** — a
+number no deployment stores, and one that would have re-baselined every
+projection built on it. The pin check is what caught it (folded into `MEMORY.md`'s
+`[pin-defensive-claim]` row, which is where pin-quality lessons live). The append
+is what makes it catch the *other*
+class as well: the pin used to be hand-serialized with `json.dumps(...)` +
+`"\n"`, so a serialization change inside `tortoise/log.py` moved every figure
+below it while the pin stayed green — the quiet re-baseline it exists to
+prevent. Measured: switching `log.py`'s writer to default separators moves the
+pin to **5,860 B** and the probe exits 2.
 
 ## The mechanism this bundle sits beside
 

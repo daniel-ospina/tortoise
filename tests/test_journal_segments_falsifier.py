@@ -182,8 +182,13 @@ MUTANTS = (
         # settle a tail that already has bytes. Removing it is only dangerous
         # together with the check above — and that layering is asserted in the
         # test rather than assumed.
+        # ⛔ The needle carries the `refuse_non_empty and` conjunct because the
+        # SEAL caller passes `refuse_non_empty=False` (cycle 6: the repair verb's
+        # size arm must not be applied to a post-rename tail — refusing it wedged
+        # a first seal with no manifest). Dropping the conjunct from the needle
+        # would make this mutant vacuous, so it is re-derived with the guard.
         name="tail-settle-must-be-empty",
-        needle="""        if path.stat().st_size:""",
+        needle="""        if refuse_non_empty and path.stat().st_size:""",
         replacement="""        if False:  # MUTANT: a live tail is settled as a fresh one""",
         kills="test_adopt_refuses_when_the_live_tail_is_still_there",
     ),

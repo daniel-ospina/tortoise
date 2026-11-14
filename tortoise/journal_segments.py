@@ -556,6 +556,25 @@ def discover(graph_dir: str | Path) -> Layout:
         # (`endswith('.jsonl')`), so a DIRECTORY or FIFO called `sub.jsonl` is
         # something the replay will try to open — and a claim over a journal
         # whose replay raises `IsADirectoryError` is not a claim about anything.
+        # ⛔ AND NEVER THROUGH A SYMLINK. `is_file()` FOLLOWS links, so
+        # `events.jsonl -> ../other-graph/events.jsonl` was discovered, SEALED
+        # (a rename moves the LINK, it does not follow it) and certified
+        # `full=True, anchored=True` over bytes this graph does not hold
+        # (cycle 6, measured: `summarise` returned `total_bytes: 37` — the
+        # foreign file's whole length — for a directory holding none of them;
+        # `verified/full_reconstruction/anchored` all `True`). The row then
+        # became a PERMANENT
+        # `SegmentModifiedError` as soon as the foreign graph appended, and its
+        # repair — "restore the segment's bytes" — is impossible here, because
+        # the bytes are another graph's. Where a segment's NAME points is part
+        # of what the manifest describes, so REFUSE rather than resolve.
+        if path.is_symlink():
+            raise SegmentSequenceError(
+                f"{path.name} in {directory} is a SYMLINK — a segment's name "
+                f"must point at this graph's own bytes, not another file's. "
+                f"Sealing it would move the link into the sequence and record "
+                f"another journal's bytes as this one's, so nothing here is "
+                f"described until the name is a regular file again.")
         if (path.name == ACTIVE_NAME or SEALED_RE.match(path.name)) \
                 and path.is_file():
             journalled[path.name] = path
@@ -1162,12 +1181,38 @@ def seal_active(graph_dir: str | Path) -> Path:
         # ⛔ ONE read, one anchor set, under the journal's own append lock — see
         # `_measure`. This used to be `stat()` + a separate `_digest()`, which a
         # concurrent appender could split into an unsatisfiable row.
+        # ⛔ AND THE ACTIVE NAME MUST STILL BE THIS GRAPH'S OWN FILE, re-checked
+        # HERE and not only in `discover`: a link planted between discovery and
+        # this line is measured THROUGH it (`_measure` opens the path) and then
+        # MOVED into the sequence, because a rename moves a link instead of
+        # following it. Cycle 6 measured the end-to-end shape that produced —
+        # `full=True, anchored=True` over a directory holding none of the bytes,
+        # followed by an unrepairable `SegmentModifiedError` once the foreign
+        # journal appended. The same `lstat`/`S_ISREG` test `adopt_crashed_seal`
+        # already uses, on the write path.
+        if source.is_symlink() or not stat.S_ISREG(source.lstat().st_mode):
+            raise SegmentSequenceError(
+                f"{source} is not a regular file owned by this graph — refusing "
+                f"to seal it: the rename would move the link into the sequence, "
+                f"and the anchors recorded here would describe bytes this graph "
+                f"does not hold")
+
         sealed_bytes, sealed_lines, sealed_sha = _measure(
             source, lock=True, strict=True)
 
         source.rename(target)
         # ANCHOR 3: the live tail exists from the moment the journal is sealed.
-        (directory / ACTIVE_NAME).touch()
+        # ⛔ NOT `touch()`: it FOLLOWS a link, so a dangling
+        # `events.jsonl -> /tmp/outside` planted in this rename→touch window
+        # created the file OUTSIDE the graph directory — the exact shape
+        # `_open_tail_exclusively` was written for (cycle 4, measured on the
+        # repair verb). The repair verb was moved onto that primitive then; the
+        # WRITE path was the last place still calling the unsafe one, so the
+        # seal mints the shape its own repair refuses. `refuse_non_empty=False`
+        # keeps the seal's other arm exactly as it was: records an appender put
+        # at the tail's name after the rename are live-journal traffic, not a
+        # reason to wedge the seal with no manifest written (see the docstring).
+        _open_tail_exclusively(directory / ACTIVE_NAME, refuse_non_empty=False)
 
         rows = _rows(layout)
         rows.append({"name": sealed_name, "index": next_index,
@@ -1371,12 +1416,32 @@ def _assert_adoptable_records(path: Path) -> None:
                 f"to adopt a segment whose bytes cannot be replayed") from exc
 
 
-def _open_tail_exclusively(path: Path) -> None:
+def _open_tail_exclusively(path: Path, *, refuse_non_empty: bool = True) -> None:
     """Create the empty tail, REFUSING a symlink at that name.
 
     `Path.touch()` follows a symlink and would create the file wherever it
     points — outside the graph directory — while this module promises to write
     nothing but the manifest (cycle 4, measured with a dangling link).
+
+    ``refuse_non_empty`` is the REPAIR verb's arm, and it is the default because
+    adoption is where a non-empty tail means "a live journal, not a crashed
+    seal". The SEAL path passes ``False``: it has ALREADY renamed the active
+    segment, so anything now sitting at the tail's name was appended AFTER that
+    rename — ordinary live-journal traffic that the replay folds, not evidence
+    against a fresh tail. Refusing it there (cycle 6, measured) left a first seal
+    with a renamed segment and NO manifest, a directory no verb can repair —
+    `adopt_crashed_seal` needs a manifest to have been mid-write. The link
+    refusal is unconditional in both callers; only the size arm differs.
+
+    ⛔ THE SEAL'S ``False`` IS NARROWER THAN "a non-empty tail is always fine",
+    and the difference is a KNOWN, PRE-EXISTING dead end worth naming here: a
+    raced record left at the tail by a SECOND seal (`touch()` tolerated the same
+    shape) leaves a manifest plus an unrecorded sealed segment plus a non-empty
+    tail, and `adopt_crashed_seal` reads that same non-empty tail as
+    DISQUALIFYING evidence ("not the crash signature"), so no verb repairs it.
+    This call refuses the LINK only; it does not license the benign reading of
+    a raced record on the adoption path, which is a residue tracked separately
+    rather than a property of this primitive.
     """
     try:
         os.close(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644))
@@ -1385,7 +1450,7 @@ def _open_tail_exclusively(path: Path) -> None:
             raise SegmentSequenceError(
                 f"{path} is a symlink — refusing to treat it as the live tail"
             ) from None
-        if path.stat().st_size:
+        if refuse_non_empty and path.stat().st_size:
             raise SegmentSequenceError(
                 f"{path} is not empty — refusing to settle it as a fresh tail"
             ) from None

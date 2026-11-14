@@ -1655,3 +1655,127 @@ def test_a_boundary_BEYOND_every_row_is_REFUSED(graph_dir: Path):
     with pytest.raises(SegmentSequenceError) as exc:
         verify(discover(graph_dir))
     assert "went further than the rows" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# cycle-6 review findings (PR #12551 review, head 5a0d801692)
+# ---------------------------------------------------------------------------
+
+
+def test_a_SYMLINKED_active_segment_is_REFUSED_not_sealed_into_the_sequence(
+        graph_dir: Path, monkeypatch, tmp_path: Path):
+    """A rename MOVES a link, and `_measure` reads THROUGH it.
+
+    Cycle-6 (P1), measured at `5a0d801692`: `events.jsonl ->
+    ../other-graph/events.jsonl` was discovered (`is_file()` follows links),
+    sealed (the rename moved the LINK into the sequence) and `summarise` then
+    returned `verified/full_reconstruction/anchored = True` with `total_bytes:
+    37` — the foreign file's whole length — for a graph directory holding none
+    of those bytes (reproduced at `047a5ec873` with this test's own fixture:
+    `foreign_bytes` below is 37 bytes, so the number in this docstring is the
+    one this test's artifact produces). Worse, the row was
+    unsatisfiable the moment the foreign graph appended — a permanent
+    `SegmentModifiedError` whose repair ("restore the segment's bytes") is
+    impossible here, because the bytes are another graph's.
+
+    The module already held the opposite posture in `adopt_crashed_seal`
+    (`lstat`/`S_ISREG`) and in `_open_tail_exclusively`; discovery and the write
+    path were the two places still resolving the link.
+    """
+    monkeypatch.setenv(ENV_FLAG, "1")
+    other = tmp_path / "other-graph"
+    other.mkdir()
+    foreign = other / ACTIVE_NAME
+    foreign_bytes = b'{"type":"PointAdded","id":"foreign"}\n'
+    foreign.write_bytes(foreign_bytes)
+    (graph_dir / ACTIVE_NAME).symlink_to(foreign)
+
+    with pytest.raises(SegmentSequenceError) as exc:
+        discover(graph_dir)
+    assert "SYMLINK" in str(exc.value)
+
+    with pytest.raises(SegmentSequenceError) as exc:
+        seal_active(graph_dir)
+    assert "SYMLINK" in str(exc.value)
+
+    # the refusal is complete: no sealed segment, no manifest, and the foreign
+    # journal is byte-identical to what it was
+    assert not (graph_dir / "events.0000.jsonl").exists()
+    assert not (graph_dir / MANIFEST_NAME).exists()
+    assert foreign.read_bytes() == foreign_bytes
+
+    report = summarise(graph_dir)
+    assert report["verified"] is False
+    assert report["full_reconstruction"] is False
+    assert report["anchored"] is False
+    assert "SYMLINK" in report["reason"]
+
+
+def test_the_seal_creates_the_tail_EXCLUSIVELY_so_a_planted_link_is_refused(
+        graph_dir: Path, monkeypatch, tmp_path: Path):
+    """`Path.touch()` follows a link; `_open_tail_exclusively` does not.
+
+    Cycle-6 (P1): cycle 4 moved the REPAIR verb onto the exclusive primitive
+    after a dangling `events.jsonl` made adoption create a file outside the graph
+    — but the WRITE path still called `touch()`, so the same link planted in the
+    rename→touch window made `seal_active` create the file outside the directory
+    it promises to stay inside.
+    """
+    monkeypatch.setenv(ENV_FLAG, "1")
+    write_journal(graph_dir, records(1, "a"))
+    outside = tmp_path / "outside.txt"
+    real_rename = Path.rename
+
+    def rename_then_plant(self, target):
+        renamed = real_rename(self, target)
+        if self.name == ACTIVE_NAME:          # the rename→touch window
+            (graph_dir / ACTIVE_NAME).symlink_to(outside)
+        return renamed
+
+    # planted BETWEEN the rename and the tail creation, which is the window the
+    # `_open_tail_exclusively` docstring names: the source file is gone by then,
+    # so the link can be created at the free name.
+    monkeypatch.setattr(Path, "rename", rename_then_plant)
+
+    with pytest.raises(SegmentSequenceError) as exc:
+        seal_active(graph_dir)
+    assert "symlink" in str(exc.value).lower()
+    assert not outside.exists()
+
+
+def test_a_tail_an_appender_created_in_the_seal_window_still_SEALS(
+        graph_dir: Path, monkeypatch):
+    """A racing appender must not wedge the seal — only a LINK is refused.
+
+    ⚠️ This test PASSES on the pre-change tree too, and it is kept deliberately:
+    it is not proof of the symlink fix, it is the pin on that fix's BLAST RADIUS.
+    Routing the tail creation through the exclusive primitive could have narrowed
+    the seal path, and did: refusing a non-empty tail (the REPAIR verb's arm)
+    left a first seal with a renamed segment and NO manifest — a directory
+    `adopt_crashed_seal` cannot repair, because it needs a manifest to have been
+    mid-write (cycle 6, measured). Records at the tail's name after the rename
+    are ordinary live-journal traffic that the replay folds.
+    """
+    monkeypatch.setenv(ENV_FLAG, "1")
+    write_journal(graph_dir, records(1, "a"))
+    real_rename = Path.rename
+
+    def rename_then_append(self, target):
+        renamed = real_rename(self, target)
+        if self.name == ACTIVE_NAME:          # the rename→touch window
+            EventLog(graph_dir / ACTIVE_NAME).append(
+                {"type": "PointAdded", "id": "raced"})
+        return renamed
+
+    monkeypatch.setattr(Path, "rename", rename_then_append)
+
+    seal_active(graph_dir)
+
+    tail = (graph_dir / ACTIVE_NAME).read_bytes()
+    assert b'"id":"raced"' in tail, tail
+    report = summarise(graph_dir)
+    assert report["verified"] is True, report["reason"]
+    assert report["full_reconstruction"] is True
+    # the raced record replays AFTER the sealed segment, in journal order
+    names = [r["id"] for r in read_all_segments(graph_dir) if "id" in r]
+    assert names[-1] == "raced", names
