@@ -4364,8 +4364,11 @@ def tortoise_query(kind: str | None = None,
             # tag route this clause lands straight after "…keeping it re-reads this
             # same arm", so "That arm" bound by proximity to the arm the same
             # message has just said CANNOT apply a floor — self-contradictory in
-            # adjacent sentences. And `{_them}`, not "it", so the sentence agrees in
-            # number with the arguments the same message names (round-27 P2 3b).
+            # adjacent sentences. And the subject is `_domain_names` — only the
+            # arguments actually out of domain — so an in-domain value is never
+            # "corrected" and `kind` is never folded into a floor/ordering domain
+            # (round-28 P2 1; the earlier `{_them}` counted every refused argument,
+            # and restoring it reds nine params of the route test).
             _route += (f". The text= arm applies "
                        f"{' and '.join(_domain_names)} only as: {_accepted}")
         if paginated and not (_arm == "tag=" and _names == ["kind"]):

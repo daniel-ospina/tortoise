@@ -483,6 +483,13 @@ def test_the_text_arm_floor_message_offers_a_route_that_terminates(stub) -> None
      "order_by", "an order in {'relevance', 'confidence', 'graph'}"),
     ({"tag": "pricing", "kind": "statement", "min_confidence": 1.5},
      "min_confidence", "a floor of 0.0-1.0"),
+    # A BOOL floor is IN domain — `0.0 <= True <= 1.0` holds, which is why round 21
+    # had to stop treating `True` as unusable (sdk.py:41222). Excluding bools here
+    # again would "correct" a valid floor with the suite green (round-29 P2 3,
+    # measured), so the clause must be withheld and only the out-of-domain argument
+    # named.
+    ({"kind": "statement", "min_confidence": True, "order_by": "garbage"},
+     "order_by", "an order in {'relevance', 'confidence', 'graph'}"),
 ])
 def test_a_route_to_pass_text_names_the_values_that_arm_accepts(
         stub, kwargs, subject, domain) -> None:
@@ -515,6 +522,11 @@ def test_a_route_to_pass_text_names_the_values_that_arm_accepts(
     message = result["error"]
     assert "The text= arm applies" in message, message
     assert f"The text= arm applies {subject} only as: {domain}" in message, message
+    # …and it must not end in a full stop: the template appends ", or drop …", so a
+    # stop here ships "…a floor of 0.0-1.0., or drop min_confidence for this read" —
+    # the junction defect round 22 removed from the paging note, pinned twice there
+    # (round-29 P2 2, measured: one added character, whole gate set green).
+    assert f"{domain}.," not in message, message
     # …and the corrected call, with a value from the domain it names, IS served on
     # the arm the route points at.
     corrected = {k: v for k, v in kwargs.items()
@@ -1260,8 +1272,9 @@ def test_every_alternative_of_a_paged_text_route_terminates(stub) -> None:
     # The alternatives must be NAMED by the message this test says it follows.
     # Without this the executions below are unbound literals: deleting the
     # alternative from the route (keeping only `order_by='relevance'`, which fixes
-    # the ordering for no type at all) left the whole gate set green (round-25 P2,
-    # measured: 87 passed).
+    # the ordering for no type at all) left this FILE green (round-25 P2, measured:
+    # 87 passed here; the five-file gate set was 250 passed / 16 skipped — the count
+    # is quoted per population because round-29 found it mislabelled as the set).
     assert "pass entity_type='point'" in order_only, order_only
     assert "or order_by='relevance'" in order_only, order_only
 
