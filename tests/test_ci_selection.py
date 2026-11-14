@@ -22188,3 +22188,67 @@ def test_the_consent_key_runbook_pin_runs_on_a_runbook_only_diff():
     # what makes the pin unconditional rather than surface-dependent.
     for src in ("tools/consent_key_check.py", "tortoise/consent_token.py"):
         assert "test_consent_key_runbook_10488.py" in _sel([src])["test_files"], src
+
+
+def test_the_health_honesty_suite_is_selected_on_BOTH_halves_of_its_module_pair():
+    """#12645: pin the DUAL registration, not the row.
+
+    `tests/test_12477_health_honesty.py` drives two modules: `tortoise/hosted_api.py`
+    (an EXACT `api` SOURCE_PATTERNS match that REPLACES the `core` fallback) and the
+    liveness readers in `tortoise/monitoring.py` (which falls through to `core`). It is
+    therefore registered in `surfaces.api` AND `surfaces.core`, and the manifest's own
+    comments say so — but until this pin, NOTHING under `tests/` mentioned the file at
+    all, so a registration that lost one half was silent.
+
+    That is not hypothetical: `config/ci-surfaces.yml` carries `merge=union`
+    (`.gitattributes`), and a plain `git rebase` of #12645 onto a `main` that had
+    already de-duplicated the file kept BOTH `api` rows and DROPPED the `core` row
+    with no conflict reported. Measured at `d05688df5990`: the rebase printed
+    "Successfully rebased", and the resulting tree selected this suite on a
+    `hosted_api.py` diff and NOT on a `monitoring.py` one.
+
+    `integrity()` is not a substitute for this pin, and that is the point. It flags a
+    duplicate row (`duplicate_entries()` was the `main` red this PR removed) and an
+    UNCLASSIFIED file, but a file that keeps one surface's row while losing another's
+    is reported CLEAN. Measured with the `core` row deleted:
+    `integrity(load_manifest()) == []` — so nothing but this pin notices.
+    """
+    pin = "test_12477_health_honesty.py"
+
+    api_arm = _sel(["tortoise/hosted_api.py"])
+    assert api_arm["surfaces"] == ["api", "onboarding"], api_arm["surfaces"]
+    assert pin in api_arm["test_files"], (
+        "a `hosted_api.py`-only regression of the `/health` verdict (#12477 itself) "
+        "must run this suite — the `api` row is what carries that arm"
+    )
+
+    core_arm = _sel(["tortoise/monitoring.py"])
+    assert core_arm["surfaces"] == ["core"], core_arm["surfaces"]
+    assert pin in core_arm["test_files"], (
+        "the liveness readers this suite pins (`start_health_listener`, "
+        "`set_dataplane_verdict_source`, `set_served_progress_source`) live in "
+        "`tortoise/monitoring.py`, which selects `core` alone — losing this row leaves "
+        "the guard asleep on the diff class that owns half its subject, and "
+        "`integrity()` still reports clean (measured)"
+    )
+
+    # NON-VACUITY: the `core` row — not `tier1`, not another surface — is what carries the
+    # `monitoring.py` arm. `tier1` is unioned into EVERY PR selection, so a pin that did
+    # not delete the row could pass on a manifest that had lost it (#9778 review P2).
+    without_core = copy.deepcopy(load_manifest())
+    assert pin not in without_core["tier1"], (
+        "if this file joins `tier1` the `core` arm stops being load-bearing, and this "
+        "pin must be re-derived rather than assumed"
+    )
+    without_core["surfaces"]["core"] = [
+        t for t in without_core["surfaces"]["core"] if t != pin]
+    assert pin not in without_core["surfaces"]["core"]
+    assert pin not in select(["tortoise/monitoring.py"], "pull_request",
+                             without_core)["test_files"], (
+        "the `core` row is what selects this suite on a `monitoring.py` diff"
+    )
+    # …and the two halves are independent: dropping `core` must leave the `hosted_api.py`
+    # arm intact, which is the evidence that both rows are load-bearing rather than one
+    # covering for the other.
+    assert pin in select(["tortoise/hosted_api.py"], "pull_request",
+                         without_core)["test_files"]
