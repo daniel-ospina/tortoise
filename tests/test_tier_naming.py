@@ -1795,10 +1795,11 @@ class TestNoDocDeniesABuilderPlanExists:
             'Previously the doc said yet again that there is no Builder plan; #12444 '
             'corrected it.',
             # ⛔ THE DASH TWIN MUST STAY EXEMPT (cycle-20 round 5, measured): the round-4
-            # CUE gate blocked these while `origin/main` exempts them, and a later
-            # revision of the register claimed the class was pre-existing when it
-            # was introduced here. Position — a pair that LEADS the reported material — is
-            # what makes them asides.
+            # CUE gate blocked these while `origin/main` exempts them. Position — a pair
+            # that LEADS the reported material — is what makes them asides. (An earlier
+            # revision of this comment also claimed the register had called the class
+            # pre-existing; re-measured across every commit of this branch, no register
+            # bullet ever did, so that attribution is dropped rather than re-pointed.)
             'Previously the doc claimed — wrongly — that there is no Builder plan; '
             '#12444 corrected it.',
             'Previously the doc said -- flatly -- that there is no Builder plan; #12444 '
@@ -1818,6 +1819,17 @@ class TestNoDocDeniesABuilderPlanExists:
             'no Builder plan.',
             'Previously the doc said -- while the page was stale -- that there is no '
             'Builder plan; #12444 corrected it.',
+            # ⛔ THE WORD BOUNDARY AFTER THE HEAD ENUMERATION IS LOAD-BEARING (round-9
+            # review cycle 5, P2, measured): deleting the `\b` at the end of the
+            # exclusion's lookahead left the suite at `19 passed` while turning these two
+            # correct records into BLOCKS — `issues`/`wasted` match `is`/`was` as a PREFIX,
+            # so the resume test rejects a real complement clause. Both read EXEMPT at
+            # this head and FLAGGED at `origin/main`; without the boundary they are
+            # blocked everywhere.
+            'Until #12444 the doc said -- the page was never fixed -- that issues with '
+            'the old wording mean there is no Builder plan.',
+            'Until #12444 the doc said -- the page was never fixed -- that wasted space '
+            'in the grid means there is no Builder plan.',
             'Previously the doc said — wrongly, as #12444 established — that there is no '
             'Builder plan.',
             "Previously the doc said the Builder tier does not exist; #12444 corrected it.",
@@ -2185,8 +2197,14 @@ class TestNoDocDeniesABuilderPlanExists:
                 # a copula or a verb of evidence" — and it is FALSE for `that SHOWS …`,
                 # `that EXPLAINS …`, `that SUGGESTS …`, `that CLEARLY IS …`, which are
                 # exempt here and FLAGGED at `origin/main`. What discriminates is the
-                # ENUMERATION of measured heads at `_RESUMES_WITH_THAT`; nothing wider has
-                # been measured, so nothing wider is claimed.
+                # ENUMERATION of measured heads at `_RESUMES_WITH_THAT` **plus the word
+                # boundary after it** — without the `\b`, `is`/`was`/`has`/`makes` match the
+                # PREFIX of a real clause subject (`that issues …`, `that wasted …`,
+                # `that haste …`, `that makeshift …`), the resume test rejects a legitimate
+                # complement, and two correct records are BLOCKED. Both halves are pinned
+                # below (the boundary by `… -- that issues with the old wording mean …`) and
+                # in the false-positive half. Nothing wider has been measured, so nothing
+                # wider is claimed.
                 "Until #12444 the doc said -- the page was never fixed -- that is why there "
                 "is no Builder plan.\n",
                 "Until #12444 the doc said -- the page was never fixed -- that proves there "
