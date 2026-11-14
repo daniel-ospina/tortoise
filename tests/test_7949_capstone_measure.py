@@ -6155,6 +6155,11 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         ), "capstone_run"),
         ("05-verify.md", "Measured at `6916a6cd89`", (
             ("1400", "a **two-method** event-sourced Protocol"),
+            # ⛔ AND THE EIGHTH THIS-HEAD NUMBER IN THAT SENTENCE (#12569 review round 4):
+            # "D6 sits at `:1418`" is present tense and this-head, and mutating it to
+            # `:1419` left 413 GREEN — so the exact failure this registration exists to
+            # close survived one instance, in the count that certified the closure.
+            ("1418", "| **D6** | **Two distinct connection sets**"),
         ), "extractor_v4_arch"),
         # ⛔ THE TWO THIS-HEAD NUMBERS THE EARLIER CUTS LEFT UNREAD (#12569 review): D5 states
         # NINE, not seven — `:1194` ("the frozen literal is at") and `:1418` ("D6 sits at")
