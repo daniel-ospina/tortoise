@@ -562,10 +562,13 @@ def main() -> int:
         "unknown version": f"b64:2:f32:{len(vec)}:{body}",
         "non-base64 character REPLACING alphabet chars":
             f"b64:1:f32:{len(vec)}:{'*' * 8 + body[8:]}",
-        # ⛔ The case above is refused by the COUNT, not by `validate=True`: it
-        # replaces 8 alphabet chars, so the body is no longer quantum-aligned and
-        # the decoded length is wrong. The shape ONLY `validate=True` catches is
-        # an INSERTION — still 1,536 B decoded, hence count-clean:
+        # ⛔ The case above keeps its LENGTH: 8 alphabet chars are replaced by 8
+        # others, so the body is still 2,048 chars and still quantum-ALIGNED
+        # (alignment is a length property). `validate=True` therefore refuses it
+        # outright (`binascii.Error: Only base64 data is allowed`); it is the
+        # DEFAULT decoder that needs the count, because discarding the 8 `*`
+        # leaves 1,530 B (`%4==2`, 382.5 floats). The shape only `validate=True`
+        # catches AT ALL is an INSERTION — still 1,536 B decoded, hence count-clean:
         "non-base64 chars INSERTED (count-clean, validate-only)":
             f"b64:1:f32:{len(vec)}:{body[:8] + '****' + body[8:]}",
     }

@@ -95,7 +95,7 @@ of framing (14 B prefix + 2 B of JSON quotes) = **2,064 B**.
 | one element short, count unchanged | refused (1,532 B) |
 | **packed `f64` under a declared `f32`** | refused (3,072 B decoded against a declared 1,536 B) |
 | unknown frame version | refused |
-| non-base64 character **replacing** alphabet chars | refused — by the **count**, not `validate=True`: replacing 8 chars breaks quantum alignment |
+| non-base64 character **replacing** alphabet chars | refused — by the decoder under `validate=True` (`binascii.Error`); the body's **length** is unchanged (2,048 chars, `%4==0`), so alignment is not what breaks — the **count** catches this one only under the *default* decoder, which discards the 8 `*` and leaves 1,530 B (`%4==2`) |
 | non-base64 chars **inserted** (count-clean) | refused, by `validate=True` only — the default `False` discards them and decodes to the *correct* vector silently |
 
 The **element count is load-bearing**, measured: `b64decode` *refuses* a cut that is not a multiple of 4

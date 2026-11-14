@@ -354,8 +354,15 @@ argued: the probe's `== the default decoder vs validate=True` section prints, fo
 `default decode 1,536 B  len%4==0 True  bits == the packed payload True  validate=True raises True`. Until
 that arm existed the claim rested on the case's LABEL, and every other call in the probe passes
 `validate=True`, so nothing measured the default decoder at all. That is
-why the probe has **two** character cases, not one: a *replacement* is caught by the count, and only an
-*insertion* is caught by `validate`. The probe asserts both halves: every multiple-of-4 cut decodes silently,
+why the probe has **two** character cases, not one — and why `validate=True` is not optional on either.
+The two cases are refused by DIFFERENT checks, and only one of them is the count: a *replacement* keeps the
+body's **length** (8 alphabet chars swapped for 8 others still leaves 2,048 chars, `%4==0`), so quantum
+alignment — a length property — is untouched, and `validate=True` refuses it outright with
+`binascii.Error: Only base64 data is allowed`; it is the DEFAULT (discarding) decoder that needs the count,
+because discarding the 8 `*` leaves 1,530 B (`%4==2`, 382.5 floats). An *insertion* is the shape only
+`validate=True` catches at all: 2,052 chars, still `%4==0`, and the default decoder returns 1,536 B —
+count-clean and bit-identical to the payload. Both are the `REFUSED (Error)` rows the probe prints under
+`validate=True`; neither is the count's `ValueError`. The probe asserts both halves: every multiple-of-4 cut decodes silently,
 and — *of the cuts measured (−1…−20)* — `−16` is the only one whose decoded length passes a `%4` check
 (`−32` would also pass: `m = 8`, 1,512 B = 378 floats; it is outside the sweep).
 
@@ -642,8 +649,9 @@ Named here so the implementation cannot choose a weaker one:
   6. **every refusal of §2.2 and §2.4 each red**: truncated body (−16 chars, the measured silent case),
      short array with the count unchanged, **packed `f64` under a declared `f32`** (3,072 B decoded against
      a declared 1,536 B — §6's rollback row depends on this one), unknown version, **both** character cases —
-     the REPLACING one (refused by the count) **and** the count-clean INSERTION, which only `validate=True`
-     refuses (§2.2 is explicit that these are two cases, not one, and the insertion is the fail-open one: a
+     the REPLACING one (`validate=True` refuses it with `binascii.Error`; the *count* catches it only under
+     the default decoder, which leaves 1,530 B, `%4==2`) **and** the count-clean INSERTION, which only
+     `validate=True` refuses (§2.2 is explicit that these are two cases, not one, and the insertion is the fail-open one: a
      reader with the default decoder accepts a corrupted body and decodes the right vector),
      **and the two §2.4 cross-checks**: a frame whose declared width *disagrees* with the payload's
      `embedding_width` must raise, and a frame on a record carrying **no** `embedding_width` must raise.
