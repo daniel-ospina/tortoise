@@ -5864,7 +5864,10 @@ _EPIC_CITE_SOURCES = {
     # this merges into, which is `d05688df5990` — those two `def`s are at `:1007`/`:999`
     # (`#12507` landed above them) while both the row and the document still said
     # `:955`/`:947`. ⚠️ The head is named because the measurement was taken there, and the
-    # pair happens to hold at both heads; nothing else here is claimed about either head. That is this source key's case in one
+    # pair happens to hold at both heads; nothing else here is claimed about either head. It
+    # moved ONCE MORE since: `#12695` (`3893603b07`) took the pair to `:1023`/`:1015` at
+    # `origin/main` `5843fdf234` and re-derived no cite, so `main` was red for this row
+    # until that number was re-measured in the tree this head merges. That is this source key's case in one
     # line: the pin is what turned an invisible re-stale into a red; a name is pinned,
     # its line is re-opened.
     "pi_hooks": _REPO / "tortoise/pi-hooks/tortoise-capture.ts",
@@ -6069,7 +6072,13 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `#12545`'s commit, while `#12545` measured at `5bacb44e0b` which does NOT
         # contain it — so that pair arrived ALREADY stale at its own landing commit,
         # and `main` was red for this row at `6916a6cd89`. The pair is
-        # **`:1007`/`:999`** at the head this merges into. The two `def`s are always
+        # **`:1023`/`:1015`** at the head this merges into (`origin/main`
+        # `5843fdf234`): `#12695` (`3893603b07`, the Pi leg's unrecorded-outcome
+        # stamp) inserted sixteen lines in `tortoise-capture.ts` above both `def`s
+        # and re-derived no cite, so `main` went red for this row again — measured
+        # here (`grep -nF 'export function postCapture(' …`), and repaired at this
+        # head rather than carried, because a red on `main` blocks every head. The
+        # two `def`s are always
         # **8 apart** in this file, and that is exactly the trap: an offset read off
         # a stale pair re-derives `948` → `957`, which WAS `postCapture`'s parameter
         # list (`payload: Record<string, unknown>,`) at `5bacb44e0b` — at
@@ -6077,8 +6086,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # line; the row is held by CONTENT, so a wrong pair reds rather than
         # silently resolving.
         ("00-align.md", "`llm:deepseek-direct` is what", (
-            ("1007", "export function postCapture("),
-            ("999", "export function postInstallProbe("),
+            ("1023", "export function postCapture("),
+            ("1015", "export function postInstallProbe("),
         ), "pi_hooks"),
         # ⛔ THE SENTENCE'S THIRD FILE (`hosted_api.py`) HAD NO READER EITHER (#12462
         # review round 5), in the very row this PR re-points the other two cites of:
