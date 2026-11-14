@@ -697,6 +697,30 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # leak into a later module. DELIBERATE_URI.
     "test_projection.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
                            r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
+    # #12422's canary landed this site AFTER the #12523 triage merged, which
+    # re-red the register (`undeclared TORTOISE_DB_URI mutation(s)` naming
+    # `test_published_artifact_canary.py:2107`).
+    # `test_install_and_run_strips_ambient_tortoise_env` PLANTS an ambient
+    # `TORTOISE_DB_URI` precisely so it can be shown to be STRIPPED before the
+    # canary measures the default path a new user gets — an ambient URI inherited
+    # from the runner would point the command somewhere else and turn a broken
+    # artifact green. So the value IS the test input, and nothing dials it: every
+    # probe drives `_Runner`, which records argv and returns scripted
+    # `CompletedProcess` results (no subprocess, no server), and the hand-rolled
+    # `_Capture` subclasses it only to read the env mapping it was called with.
+    # Function-scoped `monkeypatch` is auto-undone by pytest at teardown, so no
+    # lane flip can leak into a later module. DELIBERATE_URI — and the value is
+    # PINNED, because this module holds exactly ONE site. The table's precedent
+    # for a PINNED value: `test_7949_capstone_measure.py` (one site, like this
+    # one) and `test_11070_source_prose_repair.py` (THREE sites, all the same
+    # literal); `test_rerank_calibration_12297.py` pins its URI setenv and rides
+    # that row's KEY-ONLY `delenv` arm for its two `delenv` calls. A bare
+    # `setenv\(\s*"TORTOISE_DB_URI"` arm would auto-authorize a FUTURE,
+    # differently-intentioned URI setenv in a module whose whole design is
+    # "nothing here touches PyPI"; with the literal pinned, such a site reds
+    # and forces its own triage.
+    "test_published_artifact_canary.py": [
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*"docker://:x@localhost:6379/other"'],
     # #8939/#8870: the lane-gate unit pins for the version-anchor live file. The
     # setenv is DELIBERATE_URI — a CONFIGURED docker URI is the test input, and
     # the assertion is that `_live_uri()` uses it AS-IS instead of probing a
