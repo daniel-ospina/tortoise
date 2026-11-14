@@ -132,11 +132,14 @@ PYPI_SIMPLE = "https://pypi.org/simple"
 #:
 #: ⛔ THE SECOND ALTERNATIVE IS `Failed to build '<name>' when <step>`, AND ONLY THE STEPS
 #: THAT RUN THIS ARTIFACT'S OWN BUILD BACKEND (#12422 round-21 delta review, P1, MEASURED).
-#: pip raises one wrapper for every way a candidate can fail to prepare —
-#: `FailedToPrepareCandidate` in `pip/_internal/exceptions.py` and the raise site in
-#: `pip/_internal/resolution/resolvelib/candidates.py::_prepare` — and its
-#: `package_name` is **the candidate being prepared**, i.e. always OUR name whatever the
-#: cause was. The cause is printed ABOVE that line, not in it.
+#: `FailedToPrepareCandidate` (`pip/_internal/exceptions.py`) is raised at ONE site —
+#: `pip/_internal/resolution/resolvelib/candidates.py::_prepare` — and that site wraps ONE
+#: exception class. ⚠️ NOT "every way a candidate can fail to prepare": `_prepare` re-raises
+#: `HashError` BARE, and `MetadataGenerationFailed`, `MetadataInconsistent`,
+#: `MetadataInvalid` and `BackendUnavailable` propagate unwrapped. What the wrapper does
+#: guarantee is that its `package_name` is **the candidate being prepared** — always OUR
+#: name, whatever the cause — with the cause printed ABOVE the line, not in it. That is the
+#: property that makes this alternative dangerous, and the allow-list below the answer to it.
 #:
 #: ⛔ SO THE STEP NAMES IN THIS TUPLE ARE AN ALLOW-LIST ON PURPOSE, AND IT HOLDS ONE ENTRY
 #: ON PURPOSE TOO (#12422 round-30 review, P1/P2, MEASURED). The wrapper is raised from ONE
@@ -151,24 +154,27 @@ PYPI_SIMPLE = "https://pypi.org/simple"
 #: * `building wheel for <name>` — `operations/build/wheel.py` catches bare `Exception`,
 #:   logs, and returns `None`; nothing propagates to the wrapper.
 #: Listing either one was a claim that pip prints a line it does not print. Both are the
-#: FAIL this tool wants, and both read UNKNOWN today — recorded, not papered over, in
-#: `_install_failure_is_absence`'s residuals and tracked by #12530.
+#: FAIL this tool wants, and both read UNKNOWN today — recorded as residual 3 in
+#: `_install_failure_is_absence` and tracked by #12584 (index mode).
 #:
-#: ⛔ `installing build dependencies` IS DELIBERATELY ABSENT, and a deny-list would not
-#: have caught it. Its step description embeds our name too —
-#: `f"installing {kind}{identify_requirement}"` with `f" for {for_req.name}"`
-#: (`build_env/installer.py`) — but the subprocess it runs installs OTHER distributions,
-#: so its failure says nothing about ours. Measured, pip 26.2.1, index serving our page
-#: and our sdist 200 and a transient 503 only on the build dependency's page:
+#: ⛔ BOTH BUILD-DEPENDENCY STEPS ARE DELIBERATELY ABSENT — there are TWO, not one, and a
+#: deny-list would have caught neither. `distributions/sdist.py` installs the static
+#: `build-system.requires` as `kind="build dependencies"` and then the backend's DYNAMIC
+#: requirements as `kind="backend dependencies"`; `build_env/installer.py` turns each into
+#: `f"installing {kind}{identify_requirement}"` with `f" for {for_req.name}"`, so BOTH step
+#: descriptions embed our name while the subprocess installs OTHER distributions. Their
+#: failure says nothing about ours. Measured, pip 26.2.1, index serving our page and our
+#: sdist 200 and a transient failure only on the build dependency's page:
 #:     ERROR: Could not find a version that satisfies the requirement not-a-real-build-backend>=1
 #:     ERROR: No matching distribution found for not-a-real-build-backend>=1
 #:     ERROR: Failed to build 'tortoise-graph' when installing build dependencies for tortoise-graph
-#: Attributing that to the artifact orders an IRREVERSIBLE release that a retry would
-#: have made unnecessary — the exact failure this module's own docstrings forbid. It is
-#: also byte-indistinguishable from a genuinely unsatisfiable `build-system.requires` in
-#: OUR pyproject (pip names the dependency there too), so the step is UNKNOWN by
-#: construction — fail-closed, and consistent with the `Requires-Dist` residual stated in
-#: `_install_failure_is_absence`.
+#: and the same wrapper with `installing backend dependencies for tortoise-graph` when the
+#: failure is in the DYNAMIC requirements. Attributing either to the artifact orders an
+#: IRREVERSIBLE release that a retry would have made unnecessary — the exact failure this
+#: module's own docstrings forbid. Both are also byte-indistinguishable from a genuinely
+#: unsatisfiable requirement in OUR pyproject (pip names the dependency there too), so both
+#: steps are UNKNOWN by construction — fail-closed, and consistent with the `Requires-Dist`
+#: residual stated in `_install_failure_is_absence`.
 #:
 #: ⛔ AND AT THE PIP THIS CANARY ACTUALLY RUNS, THIS WHOLE ALTERNATIVE IS INERT — stated
 #: here because a detector that cannot run must never look like a pass. The wrapper does
@@ -176,7 +182,7 @@ PYPI_SIMPLE = "https://pypi.org/simple"
 #: in 25.3, 26.0, 26.2.1), while `install_and_run` builds its venv with
 #: `sys.executable -m venv` and never upgrades pip, so it inherits ensurepip's bundle
 #: (measured 24.0). Under the shipped configuration this alternative matches nothing and an
-#: unbuildable sdist reads UNKNOWN. #12530 tracks closing that, either by reading pip's
+#: unbuildable sdist reads UNKNOWN. #12584 tracks closing that, either by reading pip's
 #: ACTUAL per-step text or by pinning the pip the venv gets; until then the honest
 #: description of what this predicate buys in production is "nothing yet", not "a fix".
 #: ⚠️ An unrecognised step falls to UNKNOWN, never to FAIL: that is what an allow-list
@@ -253,14 +259,16 @@ def _install_failure_is_absence(
 
     1. A release whose OWN declared dependency is unsatisfiable (`Requires-Dist:
        falkordblite>=999`). Attributing it needs the release's own `requires_dist`.
-    2. A release whose OWN `build-system.requires` is unsatisfiable, which pip reports as
-       `Failed to build '<us>' when installing build dependencies for <us>` — the step is
-       excluded above because the same bytes are produced by a transient failure of
-       SOMEONE ELSE'S build dependency, and the two cannot be told apart from stderr.
+    2. A release whose OWN build requirements are unsatisfiable, which pip reports as
+       `Failed to build '<us>' when installing build dependencies for <us>` — or as
+       `… when installing backend dependencies for <us>` for the DYNAMIC requirements. Both
+       steps are excluded above because the same bytes are produced by a transient failure
+       of SOMEONE ELSE'S distribution, and the two cannot be told apart from stderr.
     3. An artifact whose OWN metadata generation or wheel build fails, which IS a
        release-owed defect and which this predicate cannot see: pip converts those
        failures before they reach the wrapper (see `_ABSENCE_OWN_BUILD_STEPS`), and on the
-       pip this canary's venv gets the wrapper does not exist at all. Tracked by #12530.
+       pip this canary's venv gets the wrapper does not exist at all. Tracked by #12584
+       (index mode); #12530 is the `--wheel`-mode sibling and does NOT close this.
 
     The narrower claim this function now makes is exactly: a failure that names no package,
     names a different one, or names us only as the candidate whose build could not be

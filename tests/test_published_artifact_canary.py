@@ -838,13 +838,13 @@ def test_an_install_failure_is_only_RED_when_the_INDEX_confirms_the_absence(tmp_
     )
 
     # ⛔ AND THE TWO STEPS THAT DO **NOT** REACH THE WRAPPER ARE PINNED AS THE BLIND SPOT
-    # THEY ARE, not as defects they are not (#12422 round-30 review, P1; #12530). These are
+    # THEY ARE, not as defects they are not (#12422 round-30 review, P1; #12584). These are
     # the shapes pip actually prints for our own metadata/wheel build failing — the
     # `throw`/`logger.error` sites in `operations/build/metadata.py` and
     # `operations/build/wheel.py`, plus pip's `«<step>» did not run successfully.` framing
     # (`exceptions.py`) — and today they read UNKNOWN. ⚠️ If a future change makes either
     # one a FAIL, this assertion REDS ON PURPOSE: the residual has closed, and the next lane
-    # must update #12530 rather than assume the blind spot still exists.
+    # must update #12584 rather than assume the blind spot still exists.
     for blind_step, marks in (
         (
             "preparing metadata",
@@ -868,7 +868,7 @@ def test_an_install_failure_is_only_RED_when_the_INDEX_confirms_the_absence(tmp_
         assert blind_arm.status == canary.UNKNOWN, (
             f"`{blind_step}` is a release-owed defect this predicate CANNOT see (pip "
             f"converts or swallows it before the wrapper), so it must stay UNKNOWN rather "
-            f"than pretend — if this now reads FAIL the blind spot has closed and #12530 "
+            f"than pretend — if this now reads FAIL the blind spot has closed and #12584 "
             f"must be updated (got {blind_arm.status}: {blind_arm.detail})"
         )
 
@@ -896,6 +896,36 @@ def test_an_install_failure_is_only_RED_when_the_INDEX_confirms_the_absence(tmp_
         f"a step this predicate does not know must fall to UNKNOWN, never to a release "
         f"call (got {unknown_step_arm.status}: {unknown_step_arm.detail})"
     )
+    # ⛔ AND THE SECOND BUILD-DEPENDENCY STEP IS EXCLUDED TOO, not just the first
+    # (#12422 round-31 review, P3). `distributions/sdist.py` installs the static
+    # `build-system.requires` as kind="build dependencies" and the backend's DYNAMIC
+    # requirements as kind="backend dependencies", and `build_env/installer.py` embeds OUR
+    # name in both step descriptions while the subprocess installs OTHER distributions.
+    # Same fail-closed reasoning, same verdict — pinned so a future widening has to notice.
+    backend_deps_arm = canary.install_and_run(
+        package="tortoise-graph",
+        version="0.2.0",
+        workdir=tmp_path,
+        timeout=10,
+        runner=_Runner(
+            {
+                "pip": _completed(
+                    ["pip", "install"],
+                    1,
+                    "",
+                    "ERROR: Failed to build 'tortoise-graph' when installing backend "
+                    "dependencies for tortoise-graph",
+                )
+            }
+        ),
+        absent_probe=lambda package: canary.INDEX_OK,
+    )[0]
+    assert backend_deps_arm.status == canary.UNKNOWN, (
+        f"a BACKEND dependency's fetch failure names us in the step description and still "
+        f"says nothing about our own absence, so it must not order a release (got "
+        f"{backend_deps_arm.status}: {backend_deps_arm.detail})"
+    )
+
     # …and the SAME sentence naming a DEPENDENCY's build is still not ours.
     dep_build_arm = canary.install_and_run(
         package="tortoise-graph",
