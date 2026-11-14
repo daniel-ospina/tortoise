@@ -112,9 +112,12 @@ spot named `docs/00_index.md`, `tools/ci_selection.py` and `tests/test_ci_select
 and **none of the three is in the diff any more** — they were absorbed by the forward
 merges exactly like the rows below, so that table was itself an instance of the thing
 this document is about. The paragraph above already says where the set comes from;
-measured at **`e28d5a04`** it is **seven files**, all under `docs/` plus one test file
-(`MEMORY.md`, `00-align.md`, `00-plan.md`, `03-test-design.md`, `04-plan.md`,
-`05-verify.md`, `tests/test_7949_capstone_measure.py`) — re-read it at the head you
+measured at **`e28d5a04`** it is **seven files** — `MEMORY.md` at the repo root, five
+documents under `docs/epics/2026-11-04-7949-extractor-v4-capstone/` (`00-align.md`,
+`00-plan.md`, `03-test-design.md`, `04-plan.md`, `05-verify.md`) and one test file
+(`tests/test_7949_capstone_measure.py`) — and it was **eight** at this paragraph's last
+reading (`ba7f7593fb`), where `docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md` had
+joined the diff; re-read it at the head you
 merge, because a typed list of paths rots exactly the way a typed line number does.
 
 
