@@ -5472,8 +5472,10 @@ _WAIT_BOUND_LONG_ROUTES = (
     # `GitHubIndexer._get_client` is `httpx.AsyncClient(timeout=20)` with bounded
     # retry-with-backoff — a designed ceiling above the bound at a moderate
     # upstream hiccup, for the same reason `/webhooks/github` is above
-    re.compile(r"^/v1/onboarding/github/(repos|branches)/?$"),
-    re.compile(r"^/webhooks/(github|stripe)/?$"),
+    re.compile(r"^/v1/onboarding/github/(repos|branches|status|callback|disconnect)/?$"),
+    # whole-repository indexing walks, the same class as `import`/`export`
+    re.compile(r"^/v1/index/github(/re-poll)?/?$"),
+    re.compile(r"^/webhooks/stripe/?$"),
 )
 
 
@@ -5536,33 +5538,66 @@ def _windowed_breach(traffic_class: str) -> bool:
     return not _embedder_load_in_flight()
 
 
-#: How much of the wait bound a SERVED request must have spent inside the app
-#: for its serving to count as data-plane demand.
+#: Routes the app can SERVE WITHOUT THE PLANE, so a served request on one is not
+#: data-plane demand.
 #:
-#: ⛔ THE DENOMINATOR IS NOT "REQUESTS THAT MATCHED A ROUTE" — that was round 6's
-#: fix, and round 7 measured the hole it leaves. A request can be served from
-#: memory in microseconds, so counting its serving as evidence the plane works
-#: lets ANY credential-less client neutralize a fully refusing plane: 7 refusals
-#: (the incident shape) + 8 served `GET /.well-known/oauth-authorization-server`
-#: measured `attempts 15, share 0.467 -> 200` — dilution with no attacker at all,
-#: since a platform polls `/health/ready` continuously and RFC 8414/9728
-#: discovery is public BY CONSTRUCTION. The share only reds while refused
-#: requests outnumber served cheap ones, so that is a permanent ceiling on the
-#: term, not a marginal attack.
+#: ⛔ THIS IS NOT AN EXCLUSION LIST FOR THE REFUSAL SIDE. A refusal here is still
+#: evidence when the handler does reach the plane (`/health/ready` and
+#: `/health/security` are in the `data` class for exactly that reason), so the
+#: two predicates are independent: `_wait_bound_traffic_class` decides what a
+#: REFUSAL means, this decides whether a SERVING proves anything.
 #:
-#: What separates the two populations is not AUTHENTICATION (the session-JWT lane
-#: resolves an org without publishing it, and an MCP call's org lives in a
-#: ContextVar this layer does not own, so an auth test would undercount those
-#: lanes and inflate the share). It is LATENCY: a request the plane can answer
-#: without being asked to do work returns immediately, while a request that
-#: waited on the plane — served or refused — spends a measurable share of the
-#: bound inside the app. A floor expressed as a FRACTION OF THE BOUND keeps the
-#: property under a test's shortened bound (see `fast_bound`).
-#:
-#: Diluting now costs what the failure costs: to inflate the denominator an
-#: attacker must make real requests sit here, which is the very condition the
-#: gate reports.
-_WAIT_BOUND_ATTEMPT_MIN_FRACTION = 0.1
+#: Why the denominator needs it at all: counting every served request on a
+#: matched route let a client hold the check green over a fully refusing plane by
+#: fetching RFC 8414/9728 discovery metadata eight times (`share 0.467 -> 200`,
+#: measured on the real app) — with no attacker at all, since a platform polls
+#: `/health/ready` continuously. The first attempt to fix that (a LATENCY floor —
+#: count only served requests that spent >=10% of the bound in the app) was
+#: measured WRONG in round 8 and removed: because a refusal always stamps its own
+#: attempt, the share degenerated to `refusals / (refusals + slow_served)`, which
+#: reds a HEALTHY box at 5 refusals in 120 s — a design rate of ~2.1% reaches
+#: that on any busy minute — and left every MCP call (SSE starts before the tool
+#: dispatches, so it is served in ~12 ms) as a numerator with no denominator.
+#: The population rule that survives both measurements: a served request is
+#: demand when its route COULD have needed the plane.
+_WAIT_BOUND_NO_PLANE_PREFIXES = (
+    "/.well-known/",          # RFC 8414 / 9728 discovery — static by construction
+    "/oauth/",                # authorize + consent pages
+)
+
+#: Same idea, exact paths / shapes rather than prefixes.
+_WAIT_BOUND_NO_PLANE_ROUTES = (
+    re.compile(r"^/v1/invites/info/?$"),        # invite preview: an unauthenticated lookup
+    re.compile(r"^/health/ready/?$"),           # a probe: served from the last probe result
+    re.compile(r"^/health/security/?$"),
+    re.compile(r"^/v1/version/?$"),
+    re.compile(r"^/v1/build/?$"),
+)
+
+#: Path shapes whose SERVING proves nothing for ONE method only. `/mcp` is the
+#: case that matters: the metadata GET is answered from memory, while a POST
+#: there is a tool call (served through SSE, which starts before the tool
+#: dispatches — so it must count as demand or MCP refusals have no denominator).
+_WAIT_BOUND_NO_PLANE_METHODS_GET = frozenset({"/mcp"})
+
+
+def _route_is_served_without_the_plane(route_path: str,
+                                       method: str | None = None) -> bool:
+    """True when a SERVED response on this path proves nothing about the plane.
+
+    Independent of `_wait_bound_traffic_class`: `control` and `long` are already
+    out of both sides, and this only narrows the SERVING side further.
+    """
+    path = route_path or ""
+    if (method or "GET").upper() == "GET":
+        if "/" + path.strip("/") in _WAIT_BOUND_NO_PLANE_METHODS_GET:
+            return True
+    if path.startswith(_WAIT_BOUND_NO_PLANE_PREFIXES):
+        return True
+    for pattern in _WAIT_BOUND_NO_PLANE_ROUTES:
+        if pattern.search(path):
+            return True
+    return False
 
 
 def _exchange_reached_a_route(scope) -> bool:
@@ -5599,7 +5634,7 @@ def _exchange_reached_a_route(scope) -> bool:
 def _count_wait_bound_attempt_if_served(traffic_class: str, surface: str,
                                         status: int | None,
                                         reached_route: bool = True,
-                                        waited_s: float | None = None) -> None:
+                                        demand_route: bool = True) -> None:
     """Count ONE attempt when the exchange shows the plane was actually asked.
 
     ⛔ THE DENOMINATOR IS DEMAND THAT REACHED THE PLANE, not "a socket accepted an
@@ -5621,17 +5656,14 @@ def _count_wait_bound_attempt_if_served(traffic_class: str, surface: str,
     # review round 6).
     if not reached_route:
         return
-    # ⛔ AND A SERVED REQUEST ONLY COUNTS IF IT WAITED ON THE PLANE. See
-    # `_WAIT_BOUND_ATTEMPT_MIN_FRACTION`: an instant 200 proves nothing about the
-    # data plane, and counting it lets credential-less cheap traffic hold the
-    # check green over a fully refusing plane. `waited_s is None` is the refusal
-    # path — the request was refused BY this bound, so it is demand by
-    # construction — and is never latency-filtered.
-    if waited_s is not None:
-        floor = (_mcp_auth._TRANSPORT_WAIT_BOUND_S
-                 * _WAIT_BOUND_ATTEMPT_MIN_FRACTION)
-        if waited_s < floor:
-            return
+    # ⛔ AND ONLY A ROUTE THAT NEEDS THE PLANE IS DEMAND. A served `200` from a
+    # route the app answers from memory proves nothing about the plane, and
+    # counting it lets credential-less cheap traffic hold the check green over a
+    # fully refusing plane: 8 served `GET /.well-known/oauth-authorization-server`
+    # beside 7 refusals measured `share 0.467 -> 200` (#12477 review round 7).
+    # See `_WAIT_BOUND_NO_PLANE_ROUTES`.
+    if not demand_route:
+        return
     try:
         _monitoring.record_wait_bound_attempt(surface)
     except Exception:  # measurement must never be a new failure mode
@@ -5923,7 +5955,8 @@ class WaitBoundMiddleware:
             _count_wait_bound_attempt_if_served(
                 traffic_class, surface, status_seen,
                 _exchange_reached_a_route(scope),
-                time.monotonic() - t0)
+                not _route_is_served_without_the_plane(route_path,
+                                                        scope.get("method")))
 
         async def _guarded_send(message):
             nonlocal response_started, status_seen
@@ -35163,7 +35196,13 @@ _ORG_MINT_LOCKS_GUARD = threading.Lock()
 #: pytest-timeout bound (300s, faulthandler dumping at 280s) and then spent its
 #: whole 20m watchdog, was killed at 20.2m with 366 nodeids unrun, and reported
 #: INCOMPLETE — a 23.5m job that owned `ci_crit_med` on main.
-_ORG_MINT_LOCK_TIMEOUT_S = 10.0
+#: ⛔ MUST STAY BELOW `mcp_auth._TRANSPORT_WAIT_BOUND_S` (10 s). The lock's own
+#: answer is a `503 Retry-After: 5` — "busy, not an outage" — and the transport
+#: bound measures the SAME request from arrival, so at 10 s the two deadlines
+#: collide and the designed 503 can essentially never be delivered: the caller
+#: gets a 504 refusal instead, and a concurrent mint (normal traffic) is counted
+#: as a data-plane breach (#12477 review round 8). 8 s leaves room to answer.
+_ORG_MINT_LOCK_TIMEOUT_S = 8.0
 
 #: Re-poll interval while the lock is held by someone else. Small enough that a
 #: contended mint is imperceptible, large enough that a 10s wait is ~2000 cheap

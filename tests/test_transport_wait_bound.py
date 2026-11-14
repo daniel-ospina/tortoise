@@ -2162,9 +2162,7 @@ async def test_a_documented_long_route_is_not_a_refusal_of_the_plane(
         "an import refusal is the bound working, not the plane failing", window)
     assert window["refusing"] is None
     # …and mixing them in must not let imports carry the share over the bar
-    # 20 ms: a served request counts as demand only if it spent >= 10% of the
-    # bound inside the app (see `_WAIT_BOUND_ATTEMPT_MIN_FRACTION`)
-    ok = ha.WaitBoundMiddleware(_slow_app(0.02))
+    ok = ha.WaitBoundMiddleware(_slow_app(0.002))
     hanging = ha.WaitBoundMiddleware(_slow_app(10.0))
     for _ in range(5):
         await _drive(ok, _scope("/v1/search"))
@@ -2278,9 +2276,6 @@ async def test_a_404_IS_counted_because_the_plane_answered(
         fast_bound, refusal_window):
     """The negative control for the test above: a plane's "not found" is demand."""
     async def not_found(scope, receive, send):
-        # a real "point not found" is a store lookup that ANSWERED: it waited on
-        # the plane, which is what makes it demand rather than noise
-        await asyncio.sleep(0.02)
         await send({"type": "http.response.start", "status": 404,
                     "headers": [(b"content-type", b"application/json")]})
         await send({"type": "http.response.body", "body": b'{"detail":"nope"}'})
@@ -2357,12 +2352,10 @@ async def test_a_router_miss_is_not_demand_the_plane_saw(monkeypatch, refusal_wi
     assert refusal_window.wait_bound_breach_window()["attempts"] == 0, (
         "router misses never reached the plane, so they are not demand")
 
-    # the control: an INSTANT matched 404 still does not count, because serving
-    # it proves nothing about the plane (round 7's `_WAIT_BOUND_ATTEMPT_MIN_FRACTION`).
-    # The matched-and-waited case is pinned by
-    # `test_a_404_IS_counted_because_the_plane_answered`.
+    # the control: a MATCHED route answering 404 IS the plane answering, whether
+    # or not it was slow — a route that can miss a point needed the plane
     assert client.get("/v1/points/p1").status_code == 404
-    assert refusal_window.wait_bound_breach_window()["attempts"] == 0
+    assert refusal_window.wait_bound_breach_window()["attempts"] == 1
 
 
 @pytest.mark.asyncio
@@ -2384,7 +2377,8 @@ async def test_a_long_route_whose_own_timeout_exceeds_the_bound_is_not_the_gate(
         ("/v1/user/identity/resend-confirmation", "POST"),
         ("/v1/user/identity/unlink", "POST"),
         ("/v1/onboarding/github/repos", "GET"),
-        ("/webhooks/github", "POST"),
+        ("/v1/onboarding/github/status", "GET"),
+        ("/v1/index/github", "POST"),
     ):
         for _ in range(6):
             await _breach(hanging, path, method=method)
@@ -2449,39 +2443,91 @@ async def test_a_refused_health_ready_probe_is_NOT_a_control_refusal(
 
 
 @pytest.mark.asyncio
-async def test_served_cheap_traffic_does_not_dilute_a_refusing_plane(
-        fast_bound, refusal_window):
-    """The round-7 P0: an instant 200 proves nothing about the data plane.
+@pytest.mark.parametrize("path", [
+    "/.well-known/oauth-authorization-server",
+    "/.well-known/mcp/oauth-protected-resource",
+    "/oauth/authorize",
+    "/v1/invites/info",
+    "/health/ready",
+    "/health/security",
+    "/v1/version",
+    "/mcp",                      # the metadata GET only; a POST there is a tool call
+])
+async def test_a_lane_free_route_is_not_data_plane_demand(
+        path, fast_bound, refusal_window):
+    """The round-7 P0: a served 200 on a route that never needs the plane is not demand.
 
     Measured on the real app before this gate: 7 refusals (the incident shape)
     beside 8 served `GET /.well-known/oauth-authorization-server` gave
     `attempts 15, share 0.467 -> 200` over a fully refusing plane — and RFC
     8414/9728 discovery is public BY CONSTRUCTION, so that dilution needs no
-    credential and no attacker at all (a platform polls `/health/ready`
-    continuously). The denominator now admits only served requests that spent a
-    measurable share of the bound inside the app.
+    credential and no attacker at all.
+
+    ⛔ The FIRST fix for this was a LATENCY floor (count a served request only if
+    it spent >=10% of the bound in the app) and round 8 measured it wrong in the
+    opposite direction, which is why this is a ROUTE rule and not a timing rule:
+    since a refusal always stamps its own attempt, the floor degenerated to
+    `refusals / (refusals + slow_served)`, so five refusals in 120 s — the
+    designed ~2.1% rate reaches that on any busy minute — made a HEALTHY box red,
+    and every MCP call (served in ~12 ms, SSE starts before the tool dispatches)
+    became a numerator with no denominator. See `_WAIT_BOUND_NO_PLANE_ROUTES`.
     """
-    cheap = ha.WaitBoundMiddleware(_slow_app(0.001))    # ~2% of the bound
+    served = ha.WaitBoundMiddleware(_slow_app(0.001))
     hanging = ha.WaitBoundMiddleware(_slow_app(10.0))
-    for _ in range(8):
-        assert (await _drive(cheap, _scope("/.well-known/oauth-authorization-server"))).status == 200
+    for _ in range(12):
+        assert (await _drive(served, _scope(path))).status == 200
     for _ in range(7):
         await _breach(hanging, "/v1/search")
-
     window = refusal_window.wait_bound_breach_window()
     assert window["attempts"] == 7, (
-        "cheap served traffic is not data-plane demand", window)
+        "a route the app serves without the plane is not data-plane demand", window)
+    assert window["share"] == 1.0
     assert window["refusing"] is True
 
 
 @pytest.mark.asyncio
-async def test_a_SLOW_served_request_IS_demand(fast_bound, refusal_window):
-    """The other half: a request that waited on the plane and was answered."""
-    ok = ha.WaitBoundMiddleware(_slow_app(0.02))        # 40% of the bound
-    for _ in range(6):
+async def test_a_FAST_served_data_request_is_still_demand(fast_bound, refusal_window):
+    """The other half, and the reason a latency floor was the wrong fix.
+
+    A healthy box serves most data requests in milliseconds. If only slow serves
+    counted, the share would be `refusals / (refusals + slow_served)` and any
+    minute with five refusals — the designed ~2.1% rate — would red it.
+    """
+    ok = ha.WaitBoundMiddleware(_slow_app(0.001))
+    hanging = ha.WaitBoundMiddleware(_slow_app(10.0))
+    for _ in range(200):
         assert (await _drive(ok, _scope("/v1/search"))).status == 200
+    for _ in range(5):
+        await _breach(hanging, "/v1/search")
     window = refusal_window.wait_bound_breach_window()
-    assert window["attempts"] == 6
+    assert window["attempts"] == 205, window
+    assert window["share"] == pytest.approx(5 / 205)
+    assert window["refusing"] is False, (
+        "a healthy box at the designed breach rate must stay green", window)
+
+
+@pytest.mark.asyncio
+async def test_a_SERVED_mcp_call_enters_the_denominator(fast_bound, refusal_window):
+    """Round 8 P0-2: MCP refusals had a numerator and no denominator.
+
+    Streamable-HTTP starts the SSE response BEFORE it dispatches the tool
+    (vendored `mcp/server/streamable_http.py`: "Start the SSE response (this will
+    send headers immediately)"), so an MCP exchange is SERVED in ~12 ms while the
+    dispatch seam counts its breach. With the (removed) latency floor, 500
+    refused MCP calls measured `attempts 0, total 500, share None` — `/healthz`
+    200 over a door refusing everything, the exact defect #12477 is about.
+    """
+    served = ha.WaitBoundMiddleware(_slow_app(0.001))
+    for _ in range(20):
+        # `scope["path"]` is what the outermost layer sees: the canonicalizer
+        # COPIES the scope before rewriting `/mcp` -> `/mcp/`
+        rec = await _drive(served, _scope("/mcp", method="POST"))
+        assert rec.status == 200
+    for _ in range(6):
+        await _breach(ha.WaitBoundMiddleware(_slow_app(10.0)), "/v1/search")
+    window = refusal_window.wait_bound_breach_window()
+    assert window["attempts"] == 26, (
+        "an MCP call that was served is data-plane demand", window)
     assert window["refusing"] is False
 
 

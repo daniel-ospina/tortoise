@@ -173,7 +173,13 @@ kill_timeout = 30
 #       no-I/O poll that cannot run inside the bound is evidence a healthy box
 #       cannot produce (`/health/ready` and `/health/security` do I/O, so they
 #       stay DATA-plane evidence, and a 404 from a path no route matched never
-#       counts as demand). A SHARE, because
+#       counts as demand). Who may be COUNTED as demand (the serving side) is a
+#       separate rule from what a refusal MEANS: a route the app answers without
+#       the plane (`/.well-known/*` discovery, `/oauth/*`, `/v1/invites/info`,
+#       the readiness/security probes, `/v1/version`, `/v1/build`, the `/mcp`
+#       metadata GET) is not demand when it is SERVED — 8 served discovery
+#       requests beside 7 refusals measured `share 0.467 -> 200` over a refusing
+#       plane — while a POST to `/mcp` is a tool call and always counts. A SHARE, because
 #       the bound is breached BY DESIGN for ~2.1% of calls: a count is blind on a
 #       quiet box (the two measured traces ran at 3.5/min and 17/min) and a
 #       bucket-density reds a HEALTHY box as traffic rises (measured: 92% of
@@ -181,13 +187,19 @@ kill_timeout = 30
 #       every volume while a failing plane refuses most of what it is offered.
 #       The attempts denominator is stamped at the transport seam itself, so
 #       numerator and denominator describe the same population. That population
-#       EXCLUDES two traffic classes whose refusal is not evidence (measured, both
+#       EXCLUDES traffic whose refusal is not evidence (measured, both
 #       directions): the instrument's own polls (`/health`, `/liveness`,
 #       `/metrics` — 12 served polls beside 10 refused data requests read
-#       share 0.455 -> 200, a fail-open) and documented long routes
+#       share 0.455 -> 200, a fail-open), documented long routes
 #       (`/v1/organizations/{id}/import`, `/v1/sessions/commit`,
-#       `/v1/packs/manifests`, `/webhooks/stripe` — 5 imports beside 5 requests
-#       read share 1.0 -> 503, a healthy deploy failing its own gate).
+#       `/v1/packs/manifests`, `/webhooks/stripe`, the trash restore, the GitHub
+#       onboarding/index jobs — 5 imports beside 5 requests read share 1.0 ->
+#       503, a healthy deploy failing its own gate), and routes the app serves
+#       WITHOUT the plane (see above). A LATENCY floor was tried instead and
+#       measured wrong: because a refusal stamps its own attempt, it degenerated
+#       to `refusals / (refusals + slow_served)` and red a healthy box at five
+#       refusals in a window, and it left every MCP call (served in ~12 ms, SSE
+#       before dispatch) as a numerator with no denominator.
 # `workload_idle` and `loop_stale` stay in the payload as DIAGNOSTICS. A red here
 # is what a wedged or refusing deployment is supposed to look like.
 #
