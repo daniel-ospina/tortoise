@@ -1044,8 +1044,9 @@ def test_guard_unrecorded_outcome_is_not_a_memory_FAIL(hosted, setup):
     server saying "no extraction outcome recorded" — the verifier must NOT
     report it as a FAIL, because that asserts an absence it cannot observe.
 
-    Mutation: read ``extracted`` alone (drop the qualifier) and this test's
-    status/exit assertions fail with ``FAIL``/exit 1."""
+    Mutation: remove the pair read entirely (keep the old count-only
+    ``elif not extracted_ok`` FAIL path) and this test's status/exit
+    assertions fail with ``FAIL``/exit 1."""
     home, _bindir, _fake = setup
     root = _install(home, "claude")
     graph, _url = hosted
@@ -1107,6 +1108,9 @@ def test_guard_malformed_outcome_known_keeps_the_FAIL(hosted, setup):
     graph.extraction = {"status": "stored", "outcome_known": "false"}
     report = _verify(hosted, home, "claude", root)
     assert report["links"]["memory"]["status"] == "FAIL"
+    # The GENUINE extraction FAIL, not the "never captured" FAIL — without this
+    # the test passes for the wrong reason on a box whose capture leg is dead.
+    assert "no memory Point" in report["links"]["memory"]["detail"]
     assert report["exit_code"] == EXIT_BROKEN
 
 
@@ -1135,9 +1139,11 @@ def test_guard_the_arm_reads_the_canonical_predicate(hosted, setup,
     pair logic that could drift from it.
 
     Mutation: replace the call with an inline
-    ``detail.get("extraction", {}).get("outcome_known") is False`` and this
-    stays UNVERIFIABLE while the assertion below expects FAIL."""
-    import tortoise.session_verify as sv
+    ``detail.get("extraction", {}).get("outcome_known") is False`` — or with a
+    same-named local copy of the reader, which a module-attribute patch would
+    not reach — and this stays UNVERIFIABLE while the assertion below expects
+    FAIL."""
+    import tortoise.session_confirm as sc
 
     home, _bindir, _fake = setup
     root = _install(home, "claude")
@@ -1146,11 +1152,33 @@ def test_guard_the_arm_reads_the_canonical_predicate(hosted, setup,
     graph.extraction = False          # the server says "not recorded"
     # Force the CANONICAL reader's own "no usable block" arm. If the link
     # consults it, the qualifier is unavailable and the old FAIL stands; a
-    # second, inline copy would not notice this at all.
-    monkeypatch.setattr(sv, "extraction_outcome_known", lambda _detail: None)
+    # second, inline copy — or a local same-named copy — would not notice this.
+    monkeypatch.setattr(sc, "extraction_outcome_known", lambda _detail: None)
     report = _verify(hosted, home, "claude", root)
     assert report["links"]["memory"]["status"] == "FAIL"
+    # The GENUINE extraction FAIL, not the "never captured" FAIL.
+    assert "no memory Point" in report["links"]["memory"]["detail"]
     assert report["exit_code"] == EXIT_BROKEN
+
+
+def test_importing_session_verify_does_not_pull_the_sdk():
+    """#12497 review P2: `tortoise/__main__.py` imports this module at the top
+    of ``main()``, so a module-scope import of ``session_confirm`` put the
+    whole SDK (and ``prometheus_client``) on the CLI's import path for EVERY
+    subcommand — measured 0.043 s → 0.24 s, and a bare interpreter without
+    the optional stack would fail to run any command. The reader is imported
+    lazily instead.
+
+    Mutation: move ``from tortoise.session_confirm import
+    extraction_outcome_known`` back to module scope and this subprocess
+    reports ``True``."""
+    proc = subprocess.run(
+        [sys.executable, "-c",
+         "import sys, tortoise.session_verify; "
+         "print('tortoise.sdk' in sys.modules)"],
+        cwd=str(_REPO_ROOT), capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "False", proc.stdout
 
 
 def test_the_exit_two_summary_does_not_invent_a_cause():

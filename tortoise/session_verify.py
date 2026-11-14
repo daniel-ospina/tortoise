@@ -108,7 +108,6 @@ from urllib.error import HTTPError, URLError
 from tortoise import capture_install, hook_install
 from tortoise.capture_receipts import capture_receipt_key
 from tortoise.hook_install import KIND_INSTALL_INERT
-from tortoise.session_confirm import extraction_outcome_known
 
 __all__ = [
     "EXIT_BROKEN",
@@ -686,6 +685,29 @@ session_detail = _session_detail
 # ── the chain ─────────────────────────────────────────────────────────────
 
 
+def _extraction_outcome_known(detail: Any) -> bool | None:
+    """The canonical ``outcome_known`` qualifier, imported LAZILY.
+
+    ``tortoise.session_confirm`` imports ``tortoise.sdk``, which imports
+    ``tortoise.monitoring``/``prometheus_client`` — so a module-scope import
+    here put the whole SDK on the CLI's import path: ``tortoise/__main__.py``
+    does ``from tortoise.session_verify import HARNESSES`` at the top of
+    ``main()``, which meant EVERY subcommand paid it (measured: 0.043 s →
+    0.24 s to import this module, with ``tortoise.sdk`` newly in
+    ``sys.modules``).  Deferring the import keeps the cost on ``session
+    verify``, which is the only command that reads the pair.
+
+    Still ONE definition: this delegates to ``session_confirm``'s reader, and
+    the import is performed at CALL time, so patching
+    ``session_confirm.extraction_outcome_known`` is observable here (a local
+    copy of the predicate would not be — the pin in
+    ``tests/test_session_verify.py`` relies on exactly that).
+    """
+    from tortoise.session_confirm import extraction_outcome_known
+
+    return extraction_outcome_known(detail)
+
+
 def _link(status: str, detail: str, **extra: Any) -> dict[str, Any]:
     return {"status": status, "detail": detail, **extra}
 
@@ -987,7 +1009,7 @@ def verify_session_capture(harness: str,
                     f"(url session:{probe_id})",
                     extracted=extracted, source=source)
             elif (not extracted_ok
-                  and extraction_outcome_known(detail) is False):
+                  and _extraction_outcome_known(detail) is False):
                 # #12497: the server published ``extracted: 0`` WITHOUT having
                 # recorded whether extraction ran (``outcome_known: false`` —
                 # the state behind an abandoned 504 handler, a commit-created
