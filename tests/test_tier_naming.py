@@ -297,14 +297,17 @@ _BUILDER_PLAN = r"['\"`\u201c\u201d\u2018\u2019]?builder['\"`\u201c\u201d\u2018\
 _IDENTIFIER_RESTATEMENT = (
     r"(?:only|just)\s+(?:the\s+)?(?:pro|builder)\s+"
     r"(?:identifier|key|name|spelling|tier)\b"
-    r"|it\s+is\s+(?:just\s+)?(?:the\s+)?(?:pro|builder)\s+"
+    r"|it\s*(?:is|['\u2019]s)\s+(?:just\s+)?(?:the\s+)?(?:pro|builder)\s+"
     r"(?:identifier|key|name|spelling|tier)\b"
 )
 #: …and the exemption is NOT a property of the comma (cycle-6 P1, measured). Bolted onto
 #: the comma arm only, it protected the restatement in ONE punctuation style while the
 #: repo's dominant style false-blocked: `There is no Builder plan — only the `pro`
-#: identifier (#4336).` was RED for `—`, `–` and `;` — `grep -rl ' — ' docs/` counts 944
-#: files, and the paragraph this PR rewrote uses a dash itself. Hoisted into its own
+#: identifier (#4336).` was RED for `—`, `–` and `;` — `git grep -l ' — ' -- docs`
+#: counts **948** at this head (re-measured with that command; an earlier revision said
+#: 944, a figure no command reproduces, and a number stated as a measurement has to be
+#: runnable), and the paragraph this PR rewrote uses a dash itself. Hoisted into its own
+#: lookahead so a restatement is a restatement whichever mark introduces it.
 #: lookahead so a restatement is a restatement whichever mark introduces it.
 _RESTATEMENT_TAIL = (r"\s*(?:[—–;,]|--)?\s*(?:" + _IDENTIFIER_RESTATEMENT + r")")
 _CLAUSE_END = (r"(?!" + _RESTATEMENT_TAIL + r")"
@@ -363,9 +366,9 @@ _DENIAL_PATTERNS = (
     # no` arm cannot reach it. Measured as a false NEGATIVE (review); `not` alone is
     # not a match, the subject must still be bare `there`. Both clause-end forms,
     # matching the convention above: the intensifier variant is TERMINAL-only.
-    re.compile(r"\bthere\s+(?:isn't|aren't|is\s+not|are\s+not)\s+an?\s+" +
+    re.compile(r"\bthere\s+(?:is(?:n['\u2019]t)?|are(?:n['\u2019]t)?|is\s+not|are\s+not)\s+(?:an?|any)\s+" +
                _BUILDER_PLAN + _CLAUSE_END, re.I),
-    re.compile(r"\bthere\s+(?:isn't|aren't|is\s+not|are\s+not)\s+an?\s+" +
+    re.compile(r"\bthere\s+(?:is(?:n['\u2019]t)?|are(?:n['\u2019]t)?|is\s+not|are\s+not)\s+(?:an?|any)\s+" +
                _BUILDER_PLAN + _INTENSIFIER + _CLAUSE_END_STRICT, re.I),
     # "there exists no builder plan"
     re.compile(r"\bthere\s+exists?\s+no\s+" + _BUILDER_PLAN + _CLAUSE_END, re.I),
@@ -395,7 +398,7 @@ _DENIAL_PATTERNS = (
     # "there is no plan called Builder" / "no such plan as Builder" — the noun BEFORE
     # the name. Measured escaping (cycle-6 P2).
     re.compile(r"\bno\s+(?:such\s+)?plan\s+(?:called|named|as)\s+"
-               r"['\"`\u201c\u2018]?builder\b",
+               r"['\"`\u201c\u2018]?builder\b" + _CLAUSE_END,
                re.I),
     # "Builder is not a plan/tier" — predicate nominative, clause-final, so a plan
     # name used as an OBJECT ("the Builder tier is not a tier you can downgrade
@@ -403,7 +406,7 @@ _DENIAL_PATTERNS = (
     # `isn't` counts: "Builder isn't a plan." is the same predicate nominative and was
     # a measured false negative (cycle 4). It stays clause-final, so a plan name used
     # as an OBJECT ("the Builder tier isn't a tier you can downgrade to") is unmoved.
-    re.compile(r"\bbuilder\s+(?:plan\s+|tier\s+)?(?:is|are)(?:n't|\s+not)\s+(?:a\s+)?"
+    re.compile(r"\bbuilder\s+(?:plan\s+|tier\s+)?(?:is|are)(?:n['\u2019]t|\s+not)\s+(?:a\s+)?"
                r"(?:plan|tier)" + _CLAUSE_END, re.I),
     # the measured sentence's own tail: "a builder buys pro or team"
     re.compile(r"\bbuilder\s+buys\s+(?:the\s+)?(?:pro|team|builder)\b", re.I),
@@ -418,15 +421,14 @@ _RETRACTION_CUES = re.compile(
     r"corrected|corrects|outdated|supersed\w*|before\s+#\d+)\b", re.I)
 
 #: …but a cue word alone is not a record — it is a bypass: it exempted
-#: `The docs are stale: there is no Builder plan.`, a live denial (cycle 2). Exemption
-#: requires ONE piece of evidence that the sentence CITES what it retracts: an issue/
-#: PR, a date, or an attribution verb introducing a quotation. A quoted single word is
-#: NOT enough — the denial's own subject is usually quoted (`"builder"`).
+#: `The docs are stale: there is no Builder plan.`, a live denial (cycle 2). The
+#: same-sentence path therefore needs an ATTRIBUTION (:data:`_RETRACTION_ATTRIBUTION`
+#: or :data:`_REPORTED_CLAIM`); the forward-window path needs this CITATION half plus a
+#: tie. A quoted single word is NOT evidence — the denial's own subject is usually
+#: quoted (`"builder"`).
 _RETRACTION_EVIDENCE = re.compile(
     r"#\d+"                                                   # cites the retraction
-    r"|\b(?:19|20)\d\d-\d\d-\d\d\b"                         # dates the record
-    r"|\b(?:read|said|says|claimed|asserted|stated|wrote|worded)\b[^.]{0,40}"
-    r"['\"“”`]",                                            # quotes it AS a claim
+    r"|\b(?:19|20)\d\d-\d\d-\d\d\b",                        # dates the record
     re.I)
 
 #: …AND the record must TIE BACK to the denied claim (cycle-5 review, measured). A
@@ -448,26 +450,51 @@ _RETRACTION_TIE = re.compile(
     re.I)
 
 
-#: The ATTRIBUTION half: a verb introducing a QUOTATION. Cycle-6 review measured why
-#: the same-sentence exemption cannot accept a bare citation: a cue plus a `#\d+` was
-#: enough, so `The docs are stale per #12444: there is no Builder plan.` and `The doc
-#: was outdated until 2026-09-21; there is no Builder plan.` — the cycle-2 dressed
-#: denial, now with a citation bolted on — were both exempt. A sentence that ASSERTS
-#: the denial while citing an issue is not a record OF it; a record QUOTES it.
+#: The ATTRIBUTION half. Cycle-6 review measured why the same-sentence exemption
+#: cannot accept a bare citation: a cue plus `#\d+` was enough, so `The docs are stale
+#: per #12444: there is no Builder plan.` and its dated variant — the cycle-2 dressed
+#: denial with a citation bolted on — were both exempt. A sentence that ASSERTS the
+#: denial while citing an issue is not a record OF it.
+#:
+#: ⛔ TWO shapes count, and cycle-7 review measured why BOTH are needed:
+#:   * a QUOTATION **about the claim** — a speech verb plus a quoted span that itself
+#:     names `builder`. "A speech verb and some quote" was a bypass: `The doc previously
+#:     said "pro"; there is no Builder plan.` was exempt, because `said "pro"`
+#:     satisfied it.
+#:   * a REPORTED CLAUSE — a speech verb immediately introducing the denial itself
+#:     (`previously this doc ASSERTED THERE IS NO Builder plan; #12444 corrected it.`),
+#:     the same record written without quotation marks. Rejecting that form was a false
+#:     POSITIVE, so it is accepted rather than traded away.
 _RETRACTION_ATTRIBUTION = re.compile(
-    r"\b(?:read|said|says|claimed|asserted|stated|wrote|worded)\b[^.]{0,40}"
-    r"['\"\u201c\u201d\u2018\u2019`]",
+    # LAZY, so the quote captured is the one the record OPENS with — greedy backtracking
+    # locked onto the CLOSING mark of `"pro"` and then found `builder` in the denial
+    # after it (cycle-7 review, measured: the two `said "pro"` sentences were exempt).
+    r"\b(?:read|said|says|claimed|asserted|stated|wrote|worded|asserts?)\b[^.]{0,40}?"
+    # `builder` must sit INSIDE the quotation itself. A tempered pattern rather than a
+    # character class, because the quote the record opens is usually the OUTER one and
+    # the claim inside may carry its own: `read 'there is no "builder" plan'` must match,
+    # while `said "pro"; there is no Builder plan` and `said "pro" and there is no
+    # Builder plan` must not (cycle-7 review measured both as exemptions).
+    r"(?P<q>['\"\u201c\u201d\u2018\u2019`])(?:(?!(?P=q)).){0,120}?builder"
+    r"(?:(?!(?P=q)).){0,120}?(?P=q)",
+    re.I)
+_REPORTED_CLAIM = re.compile(
+    r"\b(?:read|said|says|claimed|asserted|asserts|stated|wrote|worded)\b\s+"
+    r"(?:that\s+)?(?:there\s+(?:is|was|are)\s+no|no)\s+"
+    r"['\"\u201c\u201d\u2018\u2019`]?builder",
     re.I)
 
 
 def _quotes_a_retracted_claim(sentence: str) -> bool:
     """Is this sentence itself a QUOTED record of the retraction?
 
-    Requires the cue AND an ATTRIBUTION (a verb introducing a quotation) — see
-    :data:`_RETRACTION_ATTRIBUTION` for the measured bypass a bare citation allowed.
+    Requires the cue AND an attribution ABOUT THE CLAIM — a QUOTATION that names it, or
+    a REPORTED CLAUSE introducing it. See :data:`_RETRACTION_ATTRIBUTION` for the two
+    measured bypasses a looser rule allowed.
     """
     return bool(_RETRACTION_CUES.search(sentence)
-                and _RETRACTION_ATTRIBUTION.search(sentence))
+                and (_RETRACTION_ATTRIBUTION.search(sentence)
+                     or _REPORTED_CLAIM.search(sentence)))
 
 
 def _is_a_correction_record(fragment: str) -> bool:
@@ -613,8 +640,8 @@ class TestNoDocDeniesABuilderPlanExists:
             "The Builder tier is not a tier you can downgrade to.",
             # The AFFIRMATIVE — the sentence a correct doc must be able to write
             # (cycle 2: an optional `no` made the denial regex match this).
-            "The Builder plan exists and is called `pro`.",
-            "A Builder tier exists for teams that outgrow Solo.",
+            # false-blocked the restatement and the scope qualifier alike — `git grep -l
+            # ' — ' -- docs` counts 948 files).
             "The Builder plan and the Team plan are both unlimited.",
             # The doc's OWN rendering style, which the lint must not punish.
             "The **Builder** and **Team** plans are both unlimited.",
@@ -639,6 +666,18 @@ class TestNoDocDeniesABuilderPlanExists:
             "There is no Builder plan – only the `pro` identifier (#4336).",
             "There is no Builder plan; only the `pro` identifier (#4336).",
             "Builder isn't a plan — it is the `pro` identifier.",
+            # CONTRASTED spelling (cycle 7): the contraction a doc that writes `isn't`
+            # naturally continues with — this was RED before the tail accepted it.
+            "Builder isn't a plan, it's the `pro` identifier.",
+            "Builder isn't a plan, it\u2019s the `pro` identifier.",
+            # SCOPED noun-before-the-name (cycle 7): the new arm had NO clause end, so
+            # these true statements were RED — the very class `_CLAUSE_END` exists for.
+            "There is no plan called Builder on the self-hosted install.",
+            "There is no such plan as Builder for end-customers, only graphs.",
+            # A RECORD written without quotation marks (cycle 7): a reported clause is
+            # the same record, and rejecting it was a false positive.
+            "Previously this doc asserted there is no Builder plan; #12444 corrected it.",
+            "Before 2026-09-21 the doc read there is no Builder plan; #12444 corrected it.",
             # A SCOPED, true statement with the displacing adjective (cycle 6).
             "The Builder tier is not available in your region.",
             # ⚠️ DOCUMENTED RESIDUAL (false positive, cycle 4): a comma-SCOPE qualifier
@@ -712,6 +751,11 @@ class TestNoDocDeniesABuilderPlanExists:
                 # `#\d+` bolted onto it (cycle 6).
                 "The docs are stale per #12444: there is no Builder plan.\n",
                 "The doc was outdated until 2026-09-21; there is no Builder plan.\n",
+                # Cycle-7 P2: a speech verb plus SOME quote satisfied the attribution,
+                # so an unrelated quotation exempted a live denial.
+                'The doc previously said "pro"; there is no Builder plan.\n',
+                'Per #12444 the doc previously said "pro" and there is no Builder '
+                'plan.\n',
         ):
             assert _denials_in_document(live), (
                 f"a live denial was exempted by a following fragment that is not a "
@@ -748,6 +792,12 @@ class TestNoDocDeniesABuilderPlanExists:
             # the sibling verb of `isn't`, verb-carried negation, the displaced
             # predicate, the noun-before-the-name shape, and a bare issue citation.
             "There is no \u201cbuilder\u201d plan.",
+            # Typographic APOSTROPHE, in every arm that spells a contraction (cycle 7:
+            # only the `doesn\u2019t exist` arm carried it, so these three escaped).
+            "The Builder tier doesn\u2019t exist.",
+            "There isn\u2019t a Builder plan.",
+            "Builder isn\u2019t a plan.",
+            "There aren\u2019t any Builder plans.",
             "The Builder tier doesn't exist.",
             "We don't offer a Builder plan.",
             "Builder is not available as a plan.",
