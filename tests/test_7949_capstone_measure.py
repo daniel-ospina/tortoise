@@ -5861,10 +5861,10 @@ _EPIC_CITE_SOURCES = {
     # those two `def`s at `:955`/`:947`. Registered because a repaired cite that nothing
     # pins is a repair the next move of the symbol undoes silently. ⛔ AND IT ALREADY
     # HAS: measured at `6916a6cd89` — an EARLIER round's base, NOT the `origin/main` head
-    # the round that wrote this merged into, which was `30c9e7c4d3` — those two `def`s are at `:1007`/`:999`
+    # this file merges into — those two `def`s are at `:1007`/`:999` here
     # (`#12507` landed above them) while both the row and the document still said
-    # `:955`/`:947`. ⚠️ The head is named because the measurement was taken there, and the
-    # pair happens to hold at both heads; nothing else here is claimed about `30c9e7c4d3`. That is this source key's case in one
+    # `:955`/`:947`. ⚠️ No merge head is claimed for that earlier round: `30c9e7c4d3` is
+    # named only because the pair was also read there, and it holds at every head. That is this source key's case in one
     # line: the pin is what turned an invisible re-stale into a red; a name is pinned,
     # its line is re-opened.
     "pi_hooks": _REPO / "tortoise/pi-hooks/tortoise-capture.ts",
