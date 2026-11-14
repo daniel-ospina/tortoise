@@ -173,7 +173,11 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # The `delenv` IS the point at both, and the monkeypatch is fixture/function-scoped
     # and auto-restored, so no lane flip can leak into a later module.
     "test_10015_organisation_account.py": [
-        r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
+        # Pinned to the literal both sites spell (`raising=False` at `:49` and at
+        # `:257`) rather than to a bare `delenv("TORTOISE_DB_URI"` arm: this row
+        # must not authorize a FUTURE bare `delenv` in the same file, which is the
+        # narrowest-arm rule the `test_candidate_recall_11901.py` row above applies.
+        r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI",\s*raising=False'],
     # #12275: `test_candidate_recall_11901.py` (#12159) landed with three
     # untriaged URI mutations, which reds this gate on `main` in `test (d)` —
     # the same "module landed without its entry" shape as #9664 above. None of
@@ -644,8 +648,12 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
         r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*\w+\)'],
     # #11070: the operator-CLI arms are driven against a deliberately UNREACHABLE
     # docker URI — `open_projection` is faked where an arm would reach it, and the
-    # arms that do not are refused at the boundary before any door is opened — so
-    # the value is a placeholder that is never dialled, not a lane choice.
+    # two arms that do not are refused BEFORE a connection, though not both at the
+    # boundary: `--graph ""` exits 2 at the boundary, while the census arm's
+    # non-Postgres `TORTOISE_RECORD_DSN` is refused INSIDE `open_record`, by
+    # `record_dsn`, before any connection is attempted — that test's own docstring
+    # says so plainly ("The real door is used here (no fake)"). So the value is a
+    # placeholder that is never dialled, not a lane choice.
     # Three sites, one intent. DELIBERATE_URI.
     "test_11070_source_prose_repair.py": [
         r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*"docker://:x@127\.0\.0\.1:1/none"\)'],
