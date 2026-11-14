@@ -625,7 +625,18 @@ def resolvable_releases(index_doc: dict[str, Any]) -> tuple[list[str], str]:
             # Not readable (in whole or in part): it can neither establish nor withdraw the
             # existential OK claim by itself, but the entries that WERE read still can.
             reason = RELEASES_UNREADABLE
-        if any(not entry.get("yanked") for entry in entries):
+        # ⛔ AN ENTRY IS NOT CONSULTED UNTIL ITS `yanked` FIELD IS A BOOLEAN (#12589 review round 3,
+        # P2). Reading it straight off `dict.get` made the FLAG part of the shape this issue
+        # exists to refuse: an entry with no `yanked` at all (`{}`) read as "not yanked" and
+        # GREENS the arm on a value nothing was read from, and a mirror emitting `"yanked":
+        # "false"` (a truthy STRING) read as yanked and reported "NO installable file in ANY
+        # release" — FAIL, exit 1, the release order. PyPI documents the field as a boolean, so
+        # anything else is a shape outside the contract: drop the entry and mark the reading
+        # PARTIAL, which lets it neither green nor red the arm by itself.
+        judged = [entry for entry in entries if isinstance(entry.get("yanked"), bool)]
+        if len(judged) != len(entries):
+            reason = RELEASES_UNREADABLE
+        if any(not entry.get("yanked") for entry in judged):
             resolvable.append(version)
     return resolvable, reason
 
@@ -667,8 +678,11 @@ def release_files(index_doc: dict[str, Any], version: str) -> list[dict[str, Any
 
     The STRICT reader: any drop (an unreadable map, an unreadable value, a non-object entry) is
     ``None``, because its callers report this as an ENUMERATION — a count, a timestamp — and a
-    count nobody read is exactly the class #12589 removed. Verdicts do NOT go through it: the
-    client arm reads ``resolvable_releases``, which applies the existential/universal polarity.
+    count nobody read is exactly the class #12589 removed. The verdict itself does NOT come from
+    here: the client arm reads ``resolvable_releases``, which applies the existential/universal
+    polarity. Its one VERDICT-path use is the gated FAIL arm's FILE COUNT, and that call site
+    treats a ``None`` as an invariant failure that raises (fail-closed to exit 2) rather than
+    printing a count it did not read.
 
     One source of truth for what an absent key means, so the two arms cannot disagree about one
     response (#12525) — and, since #12589, one source of truth for what an UNREADABLE map or value
@@ -907,16 +921,27 @@ def build_report(
                     ""
                     if not unreadable
                     else f"; NOTE {unreadable}: part of this release map could not be read "
-                    f"(a value that is not an array, or an entry that is not an object), so "
-                    f"this list is the READABLE subset"
+                    f"(a value that is not an array, an entry that is not an object, or a "
+                    f"missing/non-boolean `yanked` flag), so this list is the READABLE subset"
+                )
+                # ⛔ THE ARROW NAMES WHAT PIP RESOLVES TO, SO IT MAY ONLY BE PRINTED WHEN THE
+                # CODE ESTABLISHED IT (#12589 review round 3, P3). `info.version` is what the
+                # index ADVERTISES, not what an unpinned requirement resolves to — and on the
+                # partial path this PR newly reaches, the advertised version can be the very
+                # one whose listing was not read. ``unpinned → 0.3.0; installable: 0.2.0`` read
+                # as an assertion about 0.3.0 that nothing in the document supports.
+                target = (
+                    f"unpinned → {client_version}"
+                    if client_version in resolvable
+                    else f"the {client_version} the index advertises latest is not "
+                    f"installable/readable here"
                 )
                 report.add(
                     Arm(
                         "client-published",
                         OK,
-                        f"{CLIENT_PACKAGE} resolves on the index (unpinned → "
-                        f"{client_version}; installable: {', '.join(sorted(resolvable))})"
-                        f"{partial}",
+                        f"{CLIENT_PACKAGE} resolves on the index ({target}; installable: "
+                        f"{', '.join(sorted(resolvable))}){partial}",
                     )
                 )
             elif unreadable == RELEASES_ABSENT:

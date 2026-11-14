@@ -3778,6 +3778,85 @@ def test_a_non_object_info_is_a_LEGIBLE_NON_READING_on_BOTH_arms():
         assert report.exit_code == 2, (doc, report.exit_code)
 
 
+def test_a_NON_BOOLEAN_yanked_flag_is_the_same_class_one_grain_further_in():
+    """An entry is not consulted until its `yanked` field is a BOOLEAN (#12589 review round 3, P2).
+
+    Reading the flag straight off `dict.get` put the FLAG outside the shape this issue exists to
+    refuse, in both directions:
+
+      * `{"0.3.0": [{}]}` — an entry a mirror stripped of `yanked` — read as "not yanked", so a
+        value nothing was read FROM GREENS the arm (`OK`/exit 0, "installable: 0.3.0");
+      * `{"0.3.0": [{"yanked": "false"}]}` — a truthy STRING — read as yanked, so the arm printed
+        "lists NO installable file in ANY release" → `FAIL`/exit 1 → **"cut a release"**.
+
+    PyPI documents `yanked` as a boolean, so anything else is a shape outside the contract: the
+    entry is dropped and the reading is marked PARTIAL, which can neither green nor red the arm by
+    itself.
+    """
+    doc = {"info": {"version": "0.3.0"}}
+    for unreadable_flag in (
+        {},
+        {"yanked": "false"},
+        {"yanked": "true"},
+        {"yanked": 0},
+        {"yanked": 1},
+    ):
+        entry = {**_CLIENT_GOOD, **unreadable_flag} if unreadable_flag else {}
+        versions, reason = canary.resolvable_releases({**doc, "releases": {"0.3.0": [entry]}})
+        assert (versions, reason) == ([], canary.RELEASES_UNREADABLE), unreadable_flag
+
+        report = _client_report({**doc, "releases": {"0.3.0": [entry]}})
+        arm = report.get("client-published")
+        # ⛔ NEVER `exit 1`: the flag was not read, so the arm has nothing to say about whether the
+        # documented install resolves.
+        assert arm.status == canary.UNKNOWN, (unreadable_flag, arm.status, arm.detail)
+        assert report.exit_code == 2, (unreadable_flag, report.exit_code)
+        assert "any release" not in arm.detail.lower(), arm.detail
+        assert "cannot resolve" not in arm.detail.lower(), arm.detail
+        assert canary.RELEASES_UNREADABLE in arm.detail, arm.detail
+
+    # A BOOLEAN flag is what the contract says, and it keeps both of its meanings.
+    assert canary.resolvable_releases(
+        {**doc, "releases": {"0.3.0": [{**_CLIENT_GOOD, "yanked": False}]}}
+    ) == (["0.3.0"], "")
+    assert canary.resolvable_releases(
+        {**doc, "releases": {"0.3.0": [{**_CLIENT_GOOD, "yanked": True}]}}
+    ) == ([], "")
+
+    # MIXED at entry grain: one readable installable entry still settles the EXISTENTIAL claim,
+    # and the drop is disclosed (the same rule as a junk entry, one field over).
+    report = _client_report({**doc, "releases": {"0.3.0": [{**_CLIENT_GOOD, "yanked": False}, {}]}})
+    arm = report.get("client-published")
+    assert arm.status == canary.OK, (arm.status, arm.detail)
+    assert report.exit_code == 0
+    assert "READABLE subset" in arm.detail, arm.detail
+
+
+def test_the_OK_detail_does_not_claim_a_RESOLUTION_the_reading_did_not_establish():
+    """`unpinned → X` is a claim about pip; `info.version` is only what the index ADVERTISES (#12589 round 3, P3).
+
+    On the partial path this PR newly reaches, the advertised version can be the very one whose
+    listing was not read — and the detail used to print `unpinned → 0.3.0; installable: 0.2.0` in
+    one breath, asserting a resolution to a version the same line said it could not read.
+    """
+    report = _client_report(
+        {
+            "info": {"version": "0.3.0"},
+            "releases": {"0.2.0": [_CLIENT_GOOD], "0.3.0": {}},
+        }
+    )
+    detail = report.get("client-published").detail
+    assert "unpinned → 0.3.0" not in detail, detail
+    assert "the 0.3.0 the index advertises latest is not installable/readable here" in detail, (
+        detail
+    )
+    assert "installable: 0.2.0" in detail, detail
+
+    # When the advertised version IS installable, the arrow is earned and stays.
+    report = _client_report({"info": {"version": "0.3.0"}, "releases": {"0.3.0": [_CLIENT_GOOD]}})
+    assert "unpinned → 0.3.0" in report.get("client-published").detail
+
+
 def test_a_non_STRING_version_is_the_same_class_one_key_further_in():
     """`{"info": {"version": 0.3}}` must not be a release order while `{"releases": {"0.3.0": {}}}` is not.
 
