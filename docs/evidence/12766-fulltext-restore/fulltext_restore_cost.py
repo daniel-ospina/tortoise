@@ -63,7 +63,7 @@ import redis
 #: a client timeout anything near that would convert a measurement into a socket error.
 CLIENT_TIMEOUT_S = 1800.0
 
-#: Above any block this harness is likely to see, per README §3a: one probe, one number.
+#: Above any block this harness is likely to see, per README §4: one probe, one number.
 BYSTANDER_TIMEOUT_S = 1800.0
 
 #: The index build is a full pass over the restored graph. The #7846 record's re-create
@@ -402,6 +402,22 @@ def cycle(client, graph, arm, kind, nodes, ready_docs):
         result["fts_hits_after"] = fts_hits(client, graph)
     elif kind == "RANGE":
         result["range_rows_after"] = range_hits(client, graph, nodes)
+
+    # ⛔ POST-RESTORE REFUSAL, because a missing reading is a REFUSAL and not a proceed.
+    # Without this, an H3 run (index data lost across the restore) or a node-losing restore
+    # exited 0 and printed a table, leaving "the index is still populated after" to be
+    # enforced by whoever reads the row. The committed runs all carry the full node count and
+    # non-zero hits; this closes the vacuous path rather than changing a published number.
+    if result["nodes_after"] != nodes:
+        _invalid_harness(
+            f"arm {arm!r} restored {result['nodes_after']} nodes of {nodes} — the payload "
+            f"did not come back whole, so the timings above are not about an index rebuild"
+        )
+    if kind == "FULLTEXT" and result["fts_hits_after"] == 0:
+        _invalid_harness(
+            f"arm {arm!r} restored a fulltext index that answers NO hits — the index data "
+            f"did not survive, so this run is H3, not an index-bearing restore"
+        )
     return result
 
 
@@ -531,12 +547,10 @@ def main(argv):
                 index_ddl = create_index(client, graph, kind)
                 label = "Doc" if kind == "FULLTEXT" else "Num"
                 row, ready_s = await_index(client, graph, label, kind, nodes)
-                # ⛔ THE GATE (#7846 §1): an empty index measures nothing.
-                if (row["numDocuments"] or 0) < nodes:
-                    _invalid_harness(
-                        f"the {kind} index on :{label} is not POPULATED "
-                        f"({row['numDocuments']} documents of {nodes})"
-                    )
+                # ⛔ THE GATE (#7846 §1): an empty index measures nothing. `await_index`
+                # already refuses unless `numDocuments >= nodes`, so a second comparison here
+                # would be a gate that can never fire — deliberately not duplicated. The
+                # FULLTEXT live-query refusal below is the one `await_index` cannot make.
                 if kind == "FULLTEXT" and fts_hits(client, graph) == 0:
                     _invalid_harness(
                         "the fulltext index answers no hits BEFORE the restore — "
