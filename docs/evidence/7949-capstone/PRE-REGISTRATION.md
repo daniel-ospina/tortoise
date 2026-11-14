@@ -3036,10 +3036,14 @@ to answer.
 
 - **Why it exists.** `#12304` went `CONFLICTING` after `main` landed `#12545`
   (`6916a6cd89d7`), which re-derived the SAME capstone-bundle cites this branch had already
-  re-derived for its own delta. Each parent's numbers are correct for ITS tree — `main` does not
-  carry this branch's `+90` in `tortoise/extractor_v2.py`, and this branch does not carry `main`'s
-  `+3` in `tortoise/sdk.py` or its `+52` in `tortoise/pi-hooks/tortoise-capture.ts` — so taking
-  either side would have published a number measured on a tree this one is not.
+  re-derived for its own delta. Each parent's numbers are correct for ITS tree, and the two trees
+  differ in exactly two places: `main` does not carry this branch's `+90` in
+  `tortoise/extractor_v2.py`, and this branch does not carry `main`'s `+52` in
+  `tortoise/pi-hooks/tortoise-capture.ts`. (`tortoise/sdk.py` is NOT a difference: this branch's
+  pre-merge tip `6e9ef2caae0c` already carries `#12492`'s `+3` — `git merge-base --is-ancestor
+  cca42fa599 6e9ef2caae0c` exits 0 and `_extract_session_v2` is at `18025` there — which is why the
+  `sdk.py` carriers below need no re-derivation at all.) So taking either side wholesale would have
+  published a number measured on a tree this one is not.
 - **`tortoise/extractor_v2.py` did NOT move, so §10.36's numbers are the live ones.** The MERGED
   file is byte-identical to this branch's pre-merge tree at `6e9ef2caae0c` (`git hash-object` on both
   sides: `c8f83ed4e77b…`), because `main` never touched that file between this branch's base
@@ -3062,10 +3066,13 @@ to answer.
   `tortoise/pi-hooks/tortoise-capture.ts:948` (the plain `postCapture`) and `:938` (its
   `install-probe` sibling). `#12460` moved BOTH `def`s by exactly **`+52`** — `947`→`999` and
   `955`→`1007`, measured across `65700b9a11a0`→`54193b722e8e` by opening each side, which is the
-  wave the file's `+266/-29` total belongs to — and `#12545`'s re-derivation wrote `:955`/`:947`,
-  whose order is wrong as well as stale: on this tree `:955` is the `#12460` comment and `:947` is
-  `headers: {`. Neither is a function, let alone the one the sentence names. MEASURED here by
-  opening the line:
+  wave the file's `+266/-29` total belongs to — and `#12545`'s re-derivation wrote `:955`/`:947`.
+  ⛔ That pair is STALE, not inverted: at `65700b9a11a0` (and at `070d97360c`) `:947` is
+  `export function postInstallProbe(` and `:955` is `export function postCapture(`, i.e. the same
+  order the A-d row has always claimed — those two numbers simply do not move with the file, which
+  is how they came to survive `#12460` while the functions did not. On THIS tree `:955` is the
+  `#12460` comment and `:947` is `headers: {`: neither is a function, let alone the one the sentence
+  names. MEASURED here by opening the line:
   `export function postCapture(` at **`:1007`** and `export function postInstallProbe(` at
   **`:999`**. ⛔ **That makes `#12545`'s sentence in §10.31 — that `955`/`947` "still open on the
   content they claim" — false on the tree that carries it.** This entry cannot repair a landed
