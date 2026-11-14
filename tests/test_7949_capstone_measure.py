@@ -6047,7 +6047,16 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # here, because `#12466` (`9ccc8ed940`) pushed it to `:20354`. Unpinned, it
         # re-staled for exactly the reason the `pi_hooks` key above exists — so it takes
         # its own row, on its own source key.
+        # ⚠️ BOTH routes are pinned, because the row distinguishes them and the number
+        # alone had stopped doing so: `:17799` is `POST /v1/sessions` — the capture door
+        # the sentence is about, whose handler holds the quota 402 at `:18503` — and
+        # `:20354` is the `install-probe` sibling the row names as NOT that door (auth,
+        # no quota gate). The cite read `:17761` when #11685 first wrote it, and
+        # `git show 3676689b2e:tortoise/hosted_api.py | sed -n '17761p'` reads
+        # `@app.post("/v1/sessions")`: successive re-points walked the number forward onto
+        # the sibling, so the capture route is now cited by hand and pinned exactly.
         ("00-align.md", "`llm:deepseek-direct` is what", (
+            ("17799", ("exact", '@app.post("/v1/sessions")')),
             ("20354", '@app.post("/v1/sessions/install-probe")'),
         ), "hosted_api"),
         ("04-plan.md", "operator / label path", (
