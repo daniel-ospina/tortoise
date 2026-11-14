@@ -4340,14 +4340,23 @@ def tortoise_query(kind: str | None = None,
             _domain.append("a floor of 0.0-1.0")
         if ("order_by" in _names
                 and order_by not in ("relevance", "confidence", "graph")):
-            _domain.append("an order of 'relevance', 'confidence' or 'graph'")
+            # Rendered with braces, not "'a', 'b' or 'c'": the trailing `or` landed
+            # immediately before the template's own ", or drop …" (round-27 P2 3c).
+            _domain.append("an order in {'relevance', 'confidence', 'graph'}")
         if _domain:
             _accepted = (_domain[0] if len(_domain) == 1
                          else ", ".join(_domain[:-1]) + " and " + _domain[-1])
             # No trailing stop: the template appends ", or drop …" to the route,
             # and a full stop here produced "…0.0-1.0., or drop" — the same
             # junction defect round 22 removed from the paging note.
-            _route += f". That arm applies it only as {_accepted}"
+            #
+            # The arm is NAMED, not "That arm" (round-27 P2 3a, measured): on the
+            # tag route this clause lands straight after "…keeping it re-reads this
+            # same arm", so "That arm" bound by proximity to the arm the same
+            # message has just said CANNOT apply a floor — self-contradictory in
+            # adjacent sentences. And `{_them}`, not "it", so the sentence agrees in
+            # number with the arguments the same message names (round-27 P2 3b).
+            _route += f". The text= arm applies {_them} only as: {_accepted}"
         if paginated and not (_arm == "tag=" and _names == ["kind"]):
             # `text=` takes no offset/page (measured: following the route with
             # offset= kept answers "offset/page not supported with text"), so a
@@ -4360,7 +4369,10 @@ def tortoise_query(kind: str | None = None,
             # Its own SENTENCE, not a trailing parenthetical (round-21 P2 2,
             # measured): appended at the end of a route with two alternatives it
             # read as qualifying only the last one, and `text=`+`offset=` is
-            # refused whatever `entity_type` says (mcp_server.py:4450-4452) — so
+            # refused whatever `entity_type` says (the `text=` arm's `if paginated:`
+            # → "offset/page not supported with text" — cited by that string, not
+            # by a line number, because a count INSIDE this file drifts with every
+            # edit above it; four rounds have now re-pointed this one, 2026-11) — so
             # following the FIRST alternative ("pass entity_type='point'") landed
             # on "offset/page not supported with text". The drop is required for
             # EVERY alternative, so it is stated once, for the route.

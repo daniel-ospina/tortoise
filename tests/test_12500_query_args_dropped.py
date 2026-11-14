@@ -459,10 +459,16 @@ def test_the_text_arm_floor_message_offers_a_route_that_terminates(stub) -> None
 @pytest.mark.parametrize("kwargs, domain", [
     ({"kind": "statement", "min_confidence": 1.5}, "a floor of 0.0-1.0"),
     ({"kind": "statement", "order_by": "garbage"},
-     "an order of 'relevance', 'confidence' or 'graph'"),
+     "an order in {'relevance', 'confidence', 'graph'}"),
     ({"tag": "pricing", "min_confidence": 1.5}, "a floor of 0.0-1.0"),
     ({"tag": "pricing", "order_by": "garbage"},
-     "an order of 'relevance', 'confidence' or 'graph'"),
+     "an order in {'relevance', 'confidence', 'graph'}"),
+    # …and BOTH refused at once, which is where the sentence has to agree in number
+    # with the arguments the same message names (round-27 P2 3b: it shipped "applies
+    # IT only as" straight after "min_confidence and order_by are not applied", and
+    # nothing red — the `_verb`/`_them` machinery exists precisely to stop that).
+    ({"kind": "statement", "min_confidence": 1.5, "order_by": "garbage"},
+     "a floor of 0.0-1.0 and an order in {'relevance', 'confidence', 'graph'}"),
 ])
 def test_a_route_to_pass_text_names_the_values_that_arm_accepts(stub, kwargs, domain) -> None:
     """An unusable value must not be promised to an arm that rejects it (r26 P2 1).
@@ -486,6 +492,13 @@ def test_a_route_to_pass_text_names_the_values_that_arm_accepts(stub, kwargs, do
     assert _is_refusal(result), f"no refusal to read a message off: {result}"
     message = result["error"]
     assert domain in message, message
+    # The destination arm is NAMED. "That arm" bound by proximity to the TAG arm on
+    # the tag route, which the same message has just said CANNOT apply a floor —
+    # self-contradictory in adjacent sentences (round-27 P2 3a, measured green).
+    assert "The text= arm applies" in message, message
+    # …and it agrees in number with the arguments the message names.
+    assert ("applies them only as" if len(kwargs) == 3 and "tag" not in kwargs
+            else "applies it only as") in message, message
     # …and the corrected call, with a value from the domain it names, IS served on
     # the arm the route points at.
     corrected = {k: v for k, v in kwargs.items()
@@ -500,6 +513,32 @@ def test_a_route_to_pass_text_names_the_values_that_arm_accepts(stub, kwargs, do
     assert not _is_refusal(followed), (
         f"following the route with a value it names still refuses: {followed}"
     )
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"kind": "statement", "min_confidence": _CONFIDENCE_FLOOR},
+    {"tag": "pricing", "min_confidence": _CONFIDENCE_FLOOR},
+    {"kind": "statement", "order_by": "confidence"},
+    {"tag": "pricing", "order_by": "relevance"},
+])
+def test_the_domain_qualifier_is_withheld_when_the_value_is_inside_it(stub, kwargs) -> None:
+    """The qualifier is `only when` — never a correction of a value that is fine (r27 P2 2).
+
+    Dropping the usability test around it (so every refused argument gets the
+    clause) left the whole gate set green: the served text then told a caller who
+    passed the perfectly ordinary `min_confidence=0.9` that "The text= arm applies
+    it only as: a floor of 0.0-1.0" — a correction of a value already inside the
+    domain, and the value every other test in this file uses. Every parameter of
+    `test_a_route_to_pass_text_names_the_values_that_arm_accepts` is out of domain,
+    so only this test can see it.
+
+    Fails if the clause appears for an in-domain value.
+    """
+    from tortoise.mcp_server import tortoise_query
+
+    message = tortoise_query(**kwargs)["error"]
+
+    assert "only as:" not in message, message
 
 
 def test_an_unusable_floor_is_left_to_the_sdk_to_refuse(stub) -> None:
@@ -1211,8 +1250,9 @@ def test_every_alternative_of_a_paged_text_route_terminates(stub) -> None:
 
     The paging parenthetical appended at the END of a route read as qualifying only
     the last alternative, and `text=`+`offset=` is refused whatever `entity_type`
-    says (`if paginated:` → "offset/page not supported with text",
-    mcp_server.py:4450-4452) — so following the FIRST alternative, "pass
+    says (`if paginated:` → "offset/page not supported with text" — cited by that
+    string, not a line number, since a count inside `mcp_server.py` drifts with
+    every edit above it) — so following the FIRST alternative, "pass
     entity_type='point'", landed on "offset/page not supported with text"
     (round-21 P2 2, measured verbatim on both two-alternative routes). The routes
     now state the drop as its own sentence, for the whole route, and this test
