@@ -5805,19 +5805,27 @@ _EPIC_CITE_DOCS = {
     "11083/README.md":
         _REPO / "docs/evidence/11083/README.md",
     # ⛔ REGISTERED BY THE REVIEW THAT FOUND IT UNPINNED (#12462). `05-verify.md` D5 states
-    # NINE this-head `file:line` measurements in that paragraph, and the reviewer measured that
-    # reverting them left the suite GREEN — so the paragraph whose whole subject is "numbers
-    # rot" was itself the one block in this PR nothing read. ⛔ NINE IS A CELL COUNT, NOT A
-    # SENTENCE COUNT: eight are in the `Measured at` sentence and `:1194` is in the sentence
+    # NINE this-head `file:line` measurements in its `Measured at` sentence, and the reviewer
+    # measured that reverting them left the suite GREEN — so the paragraph whose whole subject
+    # is "numbers rot" was itself the one block in this PR nothing read. ⛔ NINE IS A CELL
+    # COUNT, NOT A SENTENCE COUNT: eight are in the `Measured at` sentence and `:1194` is in the sentence
     # BEFORE it on the same markdown line ("…is STAMP-bound (`:1186` is the `corpus = {…}`
     # line here; the frozen literal is at `:1194`)"). Three are pinned on the two rows
     # below (`18396`/`18503` here, `sdk.py:10037` on its own row because a row carries ONE
-    # source key), `10064`/`10117` by the `subject_binding_available` rows that already exist,
+    # source key), `10064`/`10117` on their OWN `05-verify.md` row (round 6 — NOT by the
+    # `subject_binding_available` rows that predate this PR: those scope `00-plan.md` and
+    # `03-test-design.md`, and a row resolves only against the `doc_label` it names, so they
+    # cannot read this document — citing them as coverage is how a dropped row goes unseen),
     # and the last four (`capstone_run.py:1186`, `:1194`, `EXTRACTOR-V4-ARCHITECTURE.md:1400`,
     # `:1418`) on the two source keys registered just below. ⛔ THE POPULATION IS NINE, NOT
     # SEVEN: the first two cuts each miscounted it, and the two numbers they left out were
     # exactly the shape this PR exists to close (mutating `:1194` or `:1418` alone left 420
-    # GREEN until they were pinned). A document this bundle EDITS is a document this
+    # GREEN until they were pinned). ⛔ AND NINE WAS STILL NOT THE WHOLE PARAGRAPH (round 7,
+    # P1): D5 also states three more this-head numbers, in the composition clauses EARLIER on
+    # the same markdown line — `:191`, `:4201-4208`, `:4209-4230` — in two files that no row
+    # and no source key named at all. MEASURED: mutating all three at once left this file 413
+    # GREEN. They are pinned on the three rows below; the nine above are the `Measured at`
+    # population and the whole paragraph states twelve. A document this bundle EDITS is a document this
     # bundle READS — the convention the `_EPIC_CITE_DOCS` comment above states; registering the
     # file is what makes the next insertion red instead of silent.
     "05-verify.md":
@@ -5899,6 +5907,12 @@ _EPIC_CITE_SOURCES = {
     # the same error one layer up, so the row binds the SYMBOL, never a remembered
     # offset.
     "relation_write": _REPO / "tortoise/relation_write.py",
+    # ⛔ THE TWO `tools/` SOURCES D5 CITES BY NUMBER (#12569 review round 7, P1). Neither is
+    # reachable through `_BUNDLE_TOOL_SOURCES`' phrase arm: that arm reads the `_BUNDLE_DOCS`
+    # population, which does not contain `05-verify.md` at all — so a `tools/` number stated in
+    # THIS paragraph had no reader of any kind, which is what the round-7 mutation measured.
+    "capstone_verdict_check": _REPO / "tools/capstone_verdict_check.py",
+    "capstone_preregistration": _REPO / "tools/capstone_preregistration_check.py",
 }
 
 
@@ -6177,6 +6191,30 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         ("05-verify.md", "Measured at `6916a6cd89`", (
             ("1194", 'if not frozen.get("sha256"):'),
         ), "capstone_run"),
+        # ⛔ THE THREE THIS-HEAD CITES IN THAT SAME PARAGRAPH THAT STILL HAD NO READER
+        # (#12569 review round 7, P1). D5 does not only state the `Measured at` sentence's
+        # numbers: in present tense it also states the compositions `#11673` landed —
+        # `capstone_verdict_check.py`'s `RECOGNISED_CRITERIA` at `:191`, and
+        # `capstone_preregistration_check.py`'s two-sanctioned-sets refusal at `:4201-4208`
+        # with its reverse arm at `:4209-4230`. No source key and no row existed for either
+        # file, and `_BUNDLE_TOOL_SOURCES`' phrase arm cannot reach this document. MEASURED:
+        # mutating all three at once left `tests/test_7949_capstone_measure.py` 413 GREEN.
+        # A row scopes to ONE line and every number below occurs exactly ONCE on it, so no
+        # twin-spelling content pin is needed (the `:1186` shape above).
+        ("05-verify.md", "became the three-tuple", (
+            ("191", "RECOGNISED_CRITERIA = (*CRITERIA, *E6_CRITERIA, *A_CRITERIA)"),
+        ), "capstone_verdict_check"),
+        ("05-verify.md", "with a TWO-sanctioned-sets refusal", (
+            ("4201", "sanctioned = [list(CORE_REQUIRED_CRITERIA), list(REQUIRED_CRITERIA)]"),
+            ("4208", "elif declared != list(REQUIRED_CRITERIA) and rows is not None:"),
+        ), "capstone_preregistration"),
+        ("05-verify.md", "plus a reverse arm", (
+            ("4209", "# …and the reverse direction: a bundle that DEFINES a required id"),
+        ), "capstone_preregistration"),
+        # ⚠️ `:4230` — the END of the second range — is deliberately NOT a cell, and the
+        # reason is the rule this file applies everywhere else: it is a BARE `)`, so an
+        # anchor any line satisfies would look like coverage while catching nothing. The
+        # range's START is pinned, and its other endpoint `:4208` carries text and is pinned.
         # ⛔ `00-plan.md`'s `_capture_lane` CITE (#12462 review cycle 3, P2): the diff
         # re-pointed it to `:17936` and no row read it — `_BUNDLE_CITE` matches
         # `sdk|edges|extractor_v2` only, so a `hosted_api` number needs its own row. The
