@@ -332,9 +332,13 @@ def ensure_embed_threads() -> None:
 #: ``embedding_revision`` / ``embedding_text_hash`` / ``embedding_preserved``:
 #: never a node property, never a record column, and refused from callers in
 #: every one of the homes those declarations live in
-#: (`projection.entities._POINT_HANDLED` — which is where
+#: (`projection.entities._POINT_HANDLED`, which is where
 #: `embedding_model`/`embedding_revision`/`embedding_text_hash` and
-#: `embedding_preserved` actually sit (`:2375`, `:2390`), NOT `_META_KEYS` —
+#: `embedding_preserved` are declared BY NAME — ⛔ cited by CONSTANT, never by
+#: line number: two integers (`:2375`, `:2390`) were carried here and went stale
+#: twice, once before the change that wrote them and once after (#11859).
+#: `_META_KEYS` is NOT one of those homes for the identity keys: it holds only
+#: `embedding_width` of this family. The rest —
 #: `projection.entities._META_KEYS`, `record_projection`'s record-meta set,
 #: `consistency._EXCLUSION_REASONS`, `mcp_server._SERVER_MANAGED_PROPS`,
 #: `sdk._sanitize_props`, `api.EventAPI.add_point`'s forged-key refusal, and
@@ -666,8 +670,9 @@ def _stamp_journal_vector_width(payload: dict) -> None:
     the store writes ``vecf32($embedding)`` for every non-verbatim vector
     (`stored_form.node_statement`), so a non-verbatim vector the writer hands
     over is ALREADY on the float32 grid — narrowing it keeps the float32 bits
-    the store holds AND shortens the text. Only the width's own declaration
-    moves.
+    the store holds AND shortens the text. The declaration is not, however, the
+    only thing that moves: the payload's float64 becomes the shortest decimal
+    for those bits, which is **not** a no-op on the value — see below.
 
     ⛔ IT IS NOT A NO-OP ON THE VALUE (#11835 review round 3, F1). The
     payload's float64 is REWRITTEN to the shortest decimal for those bits —
