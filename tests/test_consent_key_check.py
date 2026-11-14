@@ -518,16 +518,35 @@ def test_the_check_step_exits_with_the_code_the_checker_returned(tmp_path) -> No
         "API_URL": "https://api.example.test",
         "APP_URL": "https://app.example.test",
     }
+    import fcntl
+
     reading = Path("/tmp/consent-key.json")
     err = Path("/tmp/consent-key.err")
+    # ⛔ PARALLEL-SAFE, and it deletes only what IT created. The step body's paths are literal, so this
+    # test and another copy of itself write the same two files: measured, 4 concurrent copies x 5 rounds
+    # gave 12/20 RED (`verdict=UNKNOWN`), a peer's cleanup unlinking the reading between the step's
+    # write and its verdict extraction. A pre-existing `/tmp/consent-key.json` (an operator's real
+    # reading) was also overwritten and then deleted. An exclusive lock on a companion path serialises
+    # the copies without touching the shipped body, which is the thing under test.
+    pre_existing = {p: p.read_bytes() for p in (reading, err) if p.exists()}
+    lock = Path("/tmp/consent-key.json.lock").open("a+")
+    fcntl.flock(lock, fcntl.LOCK_EX)
     try:
+        # `bash -e`, because Actions runs `run:` bodies as `bash -e {0}` — that is WHY the body carries
+        # `set +e`. Under `bash -c` a deleted `set +e` was invisible (measured GREEN); under `-e` it
+        # reds, which is what the real runner would do: abort at the checker before `$GITHUB_OUTPUT`.
         proc = subprocess.run(
-            ["bash", "-c", failing[0]["run"]], env=env, capture_output=True, text=True, timeout=120
+            ["bash", "-e", "-c", failing[0]["run"]], env=env, capture_output=True, text=True, timeout=120
         )
         written = gh_out.read_text()
     finally:
         for leftover in (reading, err):
-            leftover.unlink(missing_ok=True)
+            if leftover in pre_existing:
+                leftover.write_bytes(pre_existing[leftover])  # an operator's real reading is not ours
+            else:
+                leftover.unlink(missing_ok=True)
+        fcntl.flock(lock, fcntl.LOCK_UN)
+        lock.close()
 
     assert proc.returncode == 1, (
         "the check step did not propagate the checker's exit code — a MISMATCH would be a GREEN run "
@@ -563,6 +582,106 @@ def test_the_filing_step_only_RESOLVES_the_ledger_on_a_MEASURED_AGREE() -> None:
     resolve = body.index("auto-file-issue.sh resolve")
     assert resolve > agree, (
         "`resolve` must sit INSIDE the RC == 0 branch, not before it: a split would clear the ledger"
+    )
+
+
+def test_the_filing_step_files_the_RIGHT_finding_and_never_resolves_a_split(tmp_path) -> None:
+    """EXECUTED, because the filing step's reading->ledger mapping was entirely unexercised.
+
+    Cycle 4 measured six one-token edits GREEN on the decision half of this workflow: `RC:` set to a
+    literal, `RC:` deleted, `VERDICT:` set to a literal, the verdict fallback flipped to MISMATCH, the
+    two findings' titles swapped, and the AGREE branch's `resolve` removed. Each produces a wrong
+    ledger: a split clearing both standing issues with "published the same key fingerprint (AGREE)"
+    (and releasing the dedupe key, so the next tick files a duplicate), or an unmeasured run alerting
+    "the two halves hold DIFFERENT keys", which is the claim the file's own comment forbids.
+
+    So the body runs against a stubbed `auto-file-issue.sh` that records its argv.
+    """
+    import os
+    import stat
+
+    filing = [s for s in _steps() if "Auto-file" in (s.get("name") or "")]
+    assert len(filing) == 1, "exactly one auto-file step"
+    root = tmp_path / "root"
+    (root / ".github" / "scripts").mkdir(parents=True)
+    record = tmp_path / "calls.txt"
+    stub = root / ".github" / "scripts" / "auto-file-issue.sh"
+    stub.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> "$REC"\n')
+    stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+
+    def run(rc: str, verdict: str) -> subprocess.CompletedProcess:
+        record.write_text("")
+        env = {
+            **os.environ,
+            "REC": str(record),
+            "RC": rc,
+            "VERDICT": verdict,
+            "GITHUB_SERVER_URL": "https://gh.example.test",
+            "GITHUB_REPOSITORY": "o/r",
+            "GITHUB_RUN_ID": "1",
+        }
+        return subprocess.run(
+            ["bash", "-e", "-c", filing[0]["run"]],
+            cwd=root, env=env, capture_output=True, text=True, timeout=120,
+        )
+
+    drift = "the consent bridge's two halves hold different keys"
+    unknown = "the consent bridge's key could not be verified"
+
+    # A GREEN reading resolves BOTH titles and files nothing.
+    proc = run("0", "AGREE")
+    calls = [c for c in record.read_text().splitlines() if c.strip()]
+    assert proc.returncode == 0, proc.stderr[-400:]
+    assert len(calls) == 2, f"AGREE must resolve both halves of the ledger, got {calls}"
+    assert all(c.startswith("resolve") for c in calls), calls
+    assert any(drift in c for c in calls) and any(unknown in c for c in calls), calls
+
+    # A MEASURED split files the DRIFT title, resolves nothing, and does not clear the ledger.
+    proc = run("1", "MISMATCH")
+    calls = [c for c in record.read_text().splitlines() if c.strip()]
+    assert proc.returncode == 0, proc.stderr[-400:]
+    assert len(calls) == 1 and calls[0].startswith("file"), calls
+    assert drift in calls[0] and unknown not in calls[0], (
+        f"a MISMATCH must file the DRIFT finding, got {calls}"
+    )
+    assert not any(c.startswith("resolve") for c in calls), (
+        "a split cleared the standing ledger — a false AGREE written into the public issue"
+    )
+
+    # An UNMEASURED run files the OTHER title: an unreadable reading is never a disagreement (§2.5).
+    for verdict in ("UNVERIFIABLE", "OFF", "UNKNOWN"):
+        proc = run("2", verdict)
+        calls = [c for c in record.read_text().splitlines() if c.strip()]
+        assert len(calls) == 1 and calls[0].startswith("file"), (verdict, calls)
+        assert unknown in calls[0] and drift not in calls[0], (
+            f"{verdict} measured neither half, so it must NOT assert a disagreement: {calls}"
+        )
+
+
+def test_the_step_outputs_are_WIRED_from_the_check_step_and_the_dispatch_inputs() -> None:
+    """The CONSUMER half of the C4 pin: what the filing step READS must be what the check step WRITES.
+
+    Cycle 4 measured `RC: ${{ steps.check.outputs.rc }}` -> `RC: '0'` GREEN, and deleting the line
+    GREEN too — the producer side was pinned, the wiring was not. Same for the dispatch inputs: with
+    `API_URL`/`APP_URL` hardcoded to production a `workflow_dispatch` with `api_url`/`app_url` — the
+    ad-hoc path §2.5 and runbook §4.4 send the operator to — silently reads PRODUCTION.
+    """
+    filing = [s for s in _steps() if "Auto-file" in (s.get("name") or "")]
+    assert len(filing) == 1
+    assert filing[0]["env"]["RC"] == "${{ steps.check.outputs.rc }}", (
+        "the filing step must read the check step's `rc`, not a literal — otherwise a split resolves "
+        "the ledger with a false AGREE"
+    )
+    assert filing[0]["env"]["VERDICT"] == "${{ steps.check.outputs.verdict }}", (
+        "the filing step must read the verdict the check step extracted, or every run alerts as if a "
+        "disagreement was measured"
+    )
+    check_env = [s for s in _steps() if (s.get("run") or "").rstrip().endswith('exit "$rc"')][0]["env"]
+    assert "github.event.inputs.api_url" in check_env["API_URL"], (
+        f"the dispatch's `api_url` input must reach the checker, got {check_env['API_URL']!r}"
+    )
+    assert "github.event.inputs.app_url" in check_env["APP_URL"], (
+        f"the dispatch's `app_url` input must reach the checker, got {check_env['APP_URL']!r}"
     )
 
 

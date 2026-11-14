@@ -391,8 +391,16 @@ def test_the_SPEC_section_2_5_still_states_the_contract_the_code_implements() ->
     # The rotation's SOURCE OF TRUTH. `fly secrets set` alone is reverted by the next deploy
     # (`fly-managed-secrets.txt` declares the name as `gh-secret:` and `deploy-hosted.yml` re-stages
     # it), so a runbook whose step 1 is the Fly command re-creates the split it exists to prevent.
-    assert "gh secret set CONSENT_TOKEN_SECRET" in section, (
+    # ⛔ THE FULL COMMAND, not a prefix: the doc said `gh secret set CONSENT_TOKEN_SECRET=…`, which
+    # `gh` reads as a secret whose NAME is `CONSENT_TOKEN_SECRET=…` (the `NAME=VALUE` form is
+    # `fly secrets set`'s, the verb this same section warns against). A prefix pin accepted it, so the
+    # runbook's own step 1 produced the split this PR exists to detect.
+    assert "`gh secret set CONSENT_TOKEN_SECRET`" in section, (
         "§2.5's rotation no longer starts from the GitHub repo secret — the durable source"
+    )
+    assert "CONSENT_TOKEN_SECRET=…`" not in section, (
+        "§2.5 is back to `gh secret set CONSENT_TOKEN_SECRET=…` — gh takes the name positionally, so "
+        "that creates a secret named `CONSENT_TOKEN_SECRET=…` and leaves the real one unrotated"
     )
     assert "fly secrets set" in section and "reverted by the next deploy" in section, (
         "§2.5 stopped warning that a hand-set Fly value is reverted by the next deploy"

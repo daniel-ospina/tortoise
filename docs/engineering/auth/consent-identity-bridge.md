@@ -431,7 +431,7 @@ deleted file takes the whole monitor with it. The same verb is documented for `a
 value was corrected, the **already-deployed** Function kept signing with the **old** key until a new
 deployment existed — Pages bakes env at deploy time. So:
 
-1. **Rotate the GitHub repo secret** — `gh secret set CONSENT_TOKEN_SECRET=…` — then land (or
+1. **Rotate the GitHub repo secret** — `gh secret set CONSENT_TOKEN_SECRET` (prompts; or `--body "$NEW"`) — then land (or
    `workflow_dispatch`) the `deploy-hosted` run so Fly picks it up.
    ⛔ **The repo secret is the source of truth, and `fly secrets set` ALONE IS NOT A ROTATION.**
    `.github/scripts/fly-managed-secrets.txt` declares `CONSENT_TOKEN_SECRET gh-secret:CONSENT_TOKEN_SECRET`
