@@ -18,11 +18,13 @@ import pytest
 
 from tortoise.session_confirm import (
     FILED,
+    PENDING,
     TURNS_MISSING,
     UNEXTRACTED,
     UNKNOWN,
     confirm_capture,
     expected_turns,
+    extraction_outcome_known,
     session_extracted,
     turn_point_id,
     turn_points,
@@ -38,7 +40,8 @@ SESSION = "s1"
 
 def _detail(turns: list[dict] = TURNS, extracted: int = 2, *,
             session_id: str = SESSION, contents: list[str] | None = None,
-            roles: list[str] | None = None) -> dict:
+            roles: list[str] | None = None,
+            extraction: dict | None = None) -> dict:
     """A ``GET /v1/sessions/<id>`` payload in the shape the SERVER RETURNS.
 
     The server serves the role as its own field and the content with the
@@ -49,7 +52,9 @@ def _detail(turns: list[dict] = TURNS, extracted: int = 2, *,
     matches — the defect this shape exists to catch.
 
     ``contents`` overrides the BODY (already stripped) and ``roles`` the role
-    field, for mismatch cases.
+    field, for mismatch cases. ``extraction`` adds the ``#3520``
+    ``{status, extractor, outcome_known}`` block the hosted detail serves and
+    leaves it ABSENT by default — the pre-#3520 shape every older fake carries.
     """
     bodies = (contents if contents is not None
               else [t["content"] for t in turns])
@@ -57,8 +62,11 @@ def _detail(turns: list[dict] = TURNS, extracted: int = 2, *,
                  else [t["role"] for t in turns])
     rows = [{"id": turn_point_id(session_id, i), "role": row_roles[i],
              "content": bodies[i]} for i in range(len(turns))]
-    return {"id": session_id, "turns": len(turns), "extracted": extracted,
-            "turn_points": rows}
+    detail = {"id": session_id, "turns": len(turns), "extracted": extracted,
+              "turn_points": rows}
+    if extraction is not None:
+        detail["extraction"] = extraction
+    return detail
 
 
 def _reader(responses):
@@ -89,10 +97,100 @@ def test_the_posted_rows_and_extraction_is_filed():
 
 
 def test_durable_turns_without_extraction_is_unextracted():
-    """Extraction runs AFTER the turn write, so the confirmation can prove the
-    turns while the extraction the bound abandoned is still running. The SPOOL
-    may terminalise on that; the import RECEIPT may not (#4188)."""
+    """The detail serves NO ``extraction`` block (a pre-#3520 server), so the
+    qualifier is unknown and the LEGACY reading applies (#12362 R2).
+
+    ⛔ Do NOT read this as "``extracted == 0`` alone justifies ``UNEXTRACTED``":
+    when the server DOES say the outcome is unrecorded (``outcome_known: False``)
+    the verdict is ``PENDING``, because "not recorded yet" is not "nothing was
+    extracted" — see ``test_unknown_extraction_outcome_is_PENDING_not_unextracted``.
+    """
     assert _confirm(_reader([_detail(extracted=0)])) == UNEXTRACTED
+
+
+def test_unknown_extraction_outcome_is_PENDING_not_unextracted():
+    """#12362 — the measured false negative this guards.
+
+    A transport 504 (the hosted wait bound, ~10 s) means the handler was
+    ABANDONED, not cancelled: it keeps extracting while the client confirms.
+    Read back in that window the detail is ``extracted: 0`` beside
+    ``extraction.outcome_known: False`` — the server's own word for "not
+    recorded YET". Returning UNEXTRACTED there made `tortoise session capture`
+    print "no memory points were extracted" and file a PAID saved-backlog entry
+    for captures that were read back holding 2-7 points seconds later.
+
+    The turns ARE durable, so the spool may still terminalise — under PENDING.
+    """
+    detail = _detail(extracted=0, extraction={
+        "status": "stored", "extractor": None, "outcome_known": False})
+    assert _confirm(_reader([detail])) == PENDING
+
+
+def test_known_store_only_outcome_is_still_unextracted():
+    """The #4188 direction must survive the #12362 fix.
+
+    A keyless capture (``extractor: none``) or a team with extraction switched
+    off (``disabled``) genuinely produced no memory points, and the server says
+    so with ``outcome_known: True``. That is a KNOWN negative, so it keeps the
+    verdict whose whole job is to disclose it.
+    """
+    for lane in ("none", "disabled"):
+        detail = _detail(extracted=0, extraction={
+            "status": "stored", "extractor": lane, "outcome_known": True})
+        assert _confirm(_reader([detail])) == UNEXTRACTED, lane
+
+
+def test_a_malformed_extraction_block_is_not_read_as_unknown():
+    """Only an explicit boolean may open PENDING, and only ``False`` at that.
+
+    An invented ``False`` would let garbage suppress a real #4188 disclosure;
+    an invented ``True`` would let garbage assert an absence. Absent / odd /
+    non-bool all fall back to the legacy UNEXTRACTED reading.
+    """
+    for block in ({}, {"outcome_known": None}, {"outcome_known": "false"},
+                  {"outcome_known": 0}, [], "stored", 7):
+        detail = _detail(extracted=0, extraction=block)
+        assert _confirm(_reader([detail])) == UNEXTRACTED, block
+        assert extraction_outcome_known(detail) is None, block
+
+
+def test_extraction_outcome_known_reads_the_qualifier_beside_the_status():
+    """The qualifier is read BESIDE the status, and the status ALONE cannot
+    produce PENDING (`stored` with no qualifier keeps the legacy UNEXTRACTED
+    reading). Reading the pair is what the server's own contract asks for
+    (`session_projection`: "a consumer must therefore read the PAIR"); this
+    helper is the qualifier half of it, deliberately status-independent because
+    the projection pins `outcome_known = capture_ok is not None`."""
+    assert extraction_outcome_known(
+        _detail(extraction={"status": "stored-and-processed",
+                            "extractor": "v2", "outcome_known": True})) is True
+    assert extraction_outcome_known(
+        _detail(extraction={"status": "stored", "extractor": None,
+                            "outcome_known": False})) is False
+    assert extraction_outcome_known(_detail()) is None
+    assert extraction_outcome_known(None) is None
+
+
+def test_the_status_does_not_decide_pending():
+    """`status` and the qualifier are independent inputs here.
+
+    A `stored` status with the qualifier absent is the LEGACY reading (no
+    PENDING, no claim), and `stored-and-processed` with `outcome_known: False`
+    (impossible server-side, possible from a broken or hostile server) must not
+    be read as FILED either — the qualifier is the only input.
+    """
+    assert extraction_outcome_known(_detail(extraction={"status": "stored"})) \
+        is None
+    assert extraction_outcome_known(
+        _detail(extraction={"status": "stored-and-processed",
+                            "outcome_known": False})) is False
+
+
+def test_extracted_points_win_over_an_unknown_outcome():
+    """A non-zero count is proof on its own — never PENDING over FILED."""
+    detail = _detail(extracted=3, extraction={
+        "status": "stored", "extractor": None, "outcome_known": False})
+    assert _confirm(_reader([detail])) == FILED
 
 
 def test_the_same_ids_with_DIFFERENT_TEXT_are_not_filed():
@@ -424,6 +522,35 @@ def test_an_older_client_against_an_upgraded_server_still_confirms(monkeypatch):
         ("user", f"key: {SECRET}")
     # ...and the confirmation still terminalises.
     assert _confirm(_reader([served]), turns=rows) == FILED
+
+
+def test_the_skew_arm_reaches_the_same_verdict_as_the_exact_arm(monkeypatch):
+    """R6 (#12362) — the redaction-skew arm must read the outcome qualifier too.
+
+    The skew arm is a SEPARATE return path, so a fix applied only to the exact
+    comparison leaves it reading ``extracted`` alone. The three other skew cases
+    that REACH a verdict (older client, upgraded client, redacted role) serve
+    ``extracted=2`` and assert ``FILED`` — which the pre-#12362 expression also
+    produces — while the marker cases below reject the pair before any verdict
+    is read. Without this case, re-splitting the arms restores the defect —
+    "no memory points were extracted" plus a PRICED backlog entry — in exactly
+    the version-skewed deployment the arm exists for (#5394), with CI green.
+
+    MUTATION THAT REDS THIS: revert ONLY the skew arm to
+    ``FILED if session_extracted(detail) >= 1 else UNEXTRACTED``.
+    """
+    import tortoise.sdk as sdk
+    monkeypatch.setattr(sdk, "redact_secrets", lambda text: (text, {}))
+    rows = [{"role": "user", "content": f"key: {SECRET}"}]
+    served = _detail(turns=rows, contents=["key: [REDACTED:openai_api_key]"],
+                     extracted=0,
+                     extraction={"status": "stored", "extractor": None,
+                                 "outcome_known": False})
+    # The skew really is live on this arm (the exact comparison fails)...
+    assert expected_turns(SESSION, rows)[f"{SESSION}_t0"] == \
+        ("user", f"key: {SECRET}")
+    # ...and the unrecorded outcome is still not reported as a failure.
+    assert _confirm(_reader([served]), turns=rows) == PENDING
 
 
 def test_an_upgraded_client_against_an_older_server_still_confirms(monkeypatch):

@@ -1982,6 +1982,15 @@ surfaces:
   # source match REPLACES the `core` fallback, so registering only `core` would
   # run this guard in no job at all on a `__main__.py`-only diff.
   - test_12379_unrecorded_trace.py
+  # #12362: the same #4675 confirmation must not read an UNRECORDED extraction
+  # outcome as "no memory points were extracted". Its sources are
+  # tortoise/session_confirm.py (the `PENDING` verdict — `core` via the
+  # `tortoise/` fallback) plus the `session capture` render/retirement path in
+  # tortoise/__main__.py, which selects `api`. Same dual registration as
+  # test_session_confirm.py: an exact `api` source match REPLACES the `core`
+  # fallback, so registering only `core` would run this guard in no job at all
+  # on a `__main__.py`-only diff.
+  - test_12362_capture_outcome_unknown.py
   # #3795/#3801: the `tortoise hooks` CLI surface lives in tortoise/__main__.py
   # (api-classified source) — dual-registered so a CLI-wiring regression runs
   # this guard. See the core entry for the mechanism half.
@@ -5237,6 +5246,12 @@ surfaces:
   # fallback); the CLI print paths are `tortoise/__main__.py`, which selects
   # `api`. See the api entry for the dual-registration mechanism.
   - test_12379_unrecorded_trace.py
+  # #12362: the `session capture` half of the same confirmation — the
+  # UNRECORDED-extraction-outcome verdict (`PENDING`), its honest render, and
+  # the three-way backlog tail. Its mechanism source is
+  # `tortoise/session_confirm.py` and its CLI source is `tortoise/__main__.py`
+  # (both halves exercised). See the core entry for the mechanism half.
+  - test_12362_capture_outcome_unknown.py
   # #3795/#3801: capture-hook install drift detection + in-place upgrade. Its
   # sources are `tortoise/hook_install.py` and `tortoise/claude-hooks/` — an
   # ENGINE path classified `core` (any unmatched `tortoise/` prefix). Dual-
