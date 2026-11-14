@@ -169,6 +169,26 @@ def test_a_generous_deadline_keeps_the_3143_allowance():
             == monitoring.probe_setup_timeout())
 
 
+def test_the_full_bound_figures_the_prose_quotes_are_the_measured_ones():
+    """Four comment blocks quote "3.5 s allowance" and "5.0 s probe phase"; pin them.
+
+    ``monitoring.py`` explains the probe's enforced total at three sites, and they
+    originally stated the MCP ``tortoise_health`` phase as ``setup_timeout + PROBE_TIMEOUT``
+    = **21.5 s** — the KNOB, which #10749 stops passing (cycle-5 review, P3). Nothing pinned
+    the corrected figures, so the same conflation could return silently while every behavioural
+    case stayed green: the allowance at a full bound is a pure function of two constants, and
+    only an assertion on its VALUE can notice a constant moving under prose that states it.
+
+    Re-derive the comments in the same commit that reds this.
+    """
+    allowance = mcp_server._health_setup_allowance(mcp_auth._TRANSPORT_WAIT_BOUND_S)
+    assert allowance == pytest.approx(3.5), (
+        f"the clamp now grants {allowance}s at a full {mcp_auth._TRANSPORT_WAIT_BOUND_S}s "
+        "bound; monitoring.py's three probe-total notes still quote 3.5 -> 5.0")
+    assert allowance + monitoring.PROBE_TIMEOUT == pytest.approx(5.0), (
+        "the probe phase's total over MCP is no longer the 5.0 s the comments state")
+
+
 def test_the_margin_is_a_real_reserve_not_zero():
     """A zero margin would make the issue's own target (`<= bound − margin`) vacuous.
 

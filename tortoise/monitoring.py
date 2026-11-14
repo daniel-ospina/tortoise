@@ -60,7 +60,10 @@ _sdk = None  # set by register()
 # ``acquire=`` caller (selfhost's refresher) pays
 # ``PROBE_SDK_ACQUISITION_BUDGET + setup_timeout + PROBE_TIMEOUT`` (23.5s at
 # the shipped defaults), while an ``sdk=`` caller (the MCP ``tortoise_health``
-# tool) pays only ``setup_timeout + PROBE_TIMEOUT`` (21.5s). NEITHER is bounded
+# tool) pays ``setup_timeout + PROBE_TIMEOUT`` — 21.5s UNCLAMPED, which is the
+# knob's CEILING and not the spend: #10749 clamps this caller's ``setup_timeout``
+# to ``mcp_server._health_setup_allowance(remaining)`` (3.5s at a full 10.0s
+# transport bound), so the phase is 3.5 + 1.5 = **5.0s** over MCP. NEITHER is bounded
 # by ``PROBE_HARD_TIMEOUT``. ``PROBE_DB_TOTAL_TIMEOUT`` (2 x this + the retry
 # delay) survives ONLY as the loose outer-alignment figure for the platform
 # plane — an over-estimate of this shape, not its exact total. Quoting the
@@ -285,8 +288,9 @@ PROBE_STALE_AFTER = 30.0
 #
 # ⛔ ``PROBE_HARD_TIMEOUT`` does NOT cover the #3143 EXPLICIT-ALLOWANCE shape
 # (``setup_timeout`` given). That shape's enforced total is
-# ``setup_timeout + PROBE_TIMEOUT`` (21.5s at the shipped defaults) for an
-# ``sdk=`` caller such as the MCP ``tortoise_health`` tool, and
+# ``setup_timeout + PROBE_TIMEOUT`` for an ``sdk=`` caller such as the MCP
+# ``tortoise_health`` tool — 21.5s as the unclamped ceiling, but **5.0s** on a
+# seam-served dispatch (3.5s clamped allowance + 1.5s, #10749) — and
 # ``PROBE_SDK_ACQUISITION_BUDGET +`` that (23.5s) for an ``acquire=`` caller
 # such as ``selfhost._probe_db`` — several times this constant either way. A
 # coordinator over the ``acquire=`` form must derive its OWN bound that way
@@ -4533,8 +4537,11 @@ def probe_db(sdk=None, setup_timeout=None, *, acquire=None) -> dict:
       outer-alignment figure a coordinator is sized above.
     * explicit ``setup_timeout`` (the MCP ``tortoise_health`` tool, which
       passes ``sdk=``): one deadline of ``setup_timeout + PROBE_TIMEOUT``
-      (21.5s at the shipped defaults) — the cold-start allowance plus one
-      reachability budget; the retry rides the remainder of THAT.
+      (21.5s at the shipped defaults UNCLAMPED) — the cold-start allowance plus
+      one reachability budget; the retry rides the remainder of THAT. ⛔ 21.5s is
+      the ceiling, not this caller's spend: #10749 clamps ``setup_timeout`` to
+      ``mcp_server._health_setup_allowance(remaining)``, i.e. 3.5 + 1.5 = **5.0s**
+      at a full 10.0s transport bound.
       ⛔ ``PROBE_HARD_TIMEOUT`` does NOT sit above this shape, nor above the
       ``acquire=`` + ``setup_timeout`` form ``selfhost._probe_db`` uses
       (``PROBE_SDK_ACQUISITION_BUDGET + setup_timeout + PROBE_TIMEOUT`` =
