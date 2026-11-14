@@ -1195,9 +1195,11 @@ class TestLivenessDecouple:
         when the request beat the refresher's first probe the verdict rode the
         epoch arm, but when the probe landed `ok: true` first the verdict was
         `healthy` and the test passed **with or without** the re-base — a green
-        for the wrong reason. A blocked probe means no result can ever exist, so
-        `unknown` / `no-probe-result-yet` is the only reachable state and the
-        epoch bound is the only term that can answer.
+        for the wrong reason. A blocked probe means no result can exist INSIDE
+        THIS TEST'S WINDOW, so the assertion sees `unknown` / `no-probe-result-yet`
+        and the epoch bound is the term that answers. The `in_flight_s` arm would
+        answer `failed` first at ~30 s — long after this test is done, which is
+        why the blocked probe cannot turn it into a flake.
         """
         import json
         import urllib.error
