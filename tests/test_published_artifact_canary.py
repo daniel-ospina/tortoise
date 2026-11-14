@@ -2664,11 +2664,75 @@ def test_wheel_mode_fail_names_a_build_defect_not_a_release():
     assert "fails its documented first command" not in foreign_summary, foreign_summary
     assert "documented-command" in foreign_summary, foreign_summary
     assert "is NOT judged by this summary" in foreign_summary, foreign_summary
+    # ⛔ THE FALLBACK'S OWN SENTENCE, not a substring the TABLE row already contains (#12589 review
+    # round 15, P3): `"documented-command" in summary` was satisfied by the table, so replacing the
+    # arm name in the sentence with "some arm" — or deleting the detail — stayed green.
+    assert (
+        "the failing arm is `documented-command` (the README example exits 1)"
+    ) in foreign_summary, foreign_summary
     # ...and the branch that could not attribute the failure may not CLASSIFY it either: no
     # "re-dispatch this publish" instruction (that sentence carries the code-defect verdict), and
     # the honest alternative instead.
     assert "re-dispatch this publish" not in foreign_summary, foreign_summary
     assert "wheel-mode wiring problem" in foreign_summary, foreign_summary
+
+
+def test_the_FAIL_arm_refuses_to_print_a_count_it_could_not_read(monkeypatch):
+    """⛔ THE GUARD'S FAIL-CLOSED DIRECTION WAS UNPINNED (#12589 review round 15, P3).
+
+    `release_files` cannot return `None` on the client FAIL branch, which is why the `RuntimeError`
+    is unreachable — but that is exactly why replacing the `raise` with `files = []` left all 89
+    tests green. That mutant makes the arm print "0 file(s) on 0.3.0, none usable" and exit 1:
+    a release order manufactured from a count nobody read, i.e. the defect this issue removes. The
+    seam is narrow and deliberate: a patched `release_files` stands in for the future refactor the
+    guard exists to survive.
+    """
+    import pytest
+
+    def _cannot_read(index_doc, version):
+        return None
+
+    monkeypatch.setattr(canary, "release_files", _cannot_read)
+    with pytest.raises(RuntimeError, match="COMPLETE reading"):
+        _client_report({"info": {"version": "0.3.0"}, "releases": {"0.3.0": []}})
+
+
+def test_the_summary_heading_publishes_the_GLYPH_not_the_internal_status():
+    """⛔ THE HEADING IS THE FIRST THING A HUMAN READS (#12589 review round 15, P3).
+
+    `glyph[report.verdict]` was unpinned: rendering the internal `report.verdict` instead publishes
+    `**Verdict: UNKNOWN**` / `**Verdict: OK**`, and both existing heading pins survived — `Verdict:
+    FAIL` is identical either way, and `CANNOT RUN` still appeared from the UNKNOWN tail's "NO row is
+    marked CANNOT RUN".
+    """
+    green = canary.Report()
+    green.add(canary.Arm("engine-index", canary.OK, "reads"))
+    assert "**Verdict: PASS**" in canary.render_summary(green)
+    assert "**Verdict: CANNOT RUN**" in canary.render_summary(canary.Report())
+
+
+def test_no_informational_rows_are_rendered_without_a_published_version():
+    """⛔ "uploaded unknown ago" ABOUT A VERSION NOBODY READ IS A FALSE ROW (#12589 review round
+    15, P3).
+
+    `if published:` guards both informational rows. Forcing it truthy renders
+    `| release-age | no | — | tortoise-graph  uploaded unknown ago |` and a `tree-version` row that
+    compares the tree against an EMPTY published version — and all 89 tests stayed green, because
+    nothing asserted the rows' ABSENCE on the shape where they cannot be true.
+    """
+    report = canary.build_report(
+        engine_doc=None,
+        client_doc=_client_doc(),
+        tree_version="0.2.0",
+        init_arm=_ok_init_arm(),
+        now=NOW,
+    )
+    assert report.get("release-age") is None, [a.name for a in report.arms]
+    assert report.get("tree-version") is None, [a.name for a in report.arms]
+    rendered = canary.render_summary(report)
+    assert "release-age" not in rendered, rendered
+    assert "tree-version" not in rendered, rendered
+    assert "uploaded  ago" not in rendered, rendered
 
 
 def test_the_wheel_tail_names_the_CONSOLE_SCRIPT_case_separately():
@@ -3098,6 +3162,19 @@ def test_the_tree_version_row_implicates_only_the_arm_that_failed():
     ungated = canary.Report()
     ungated.add(canary.Arm("engine-index", canary.FAIL, "red", gated=False))
     assert canary.engine_build_implicated(ungated) is False
+
+    # ⛔ AND THE "differs" HEDGE IS PINNED (#12589 review round 15, P3): stripping it to a flat
+    # "a release is owed" is FALSE whenever the tree is AHEAD of the published version, and no test
+    # asserted the hedge.
+    ahead = canary.build_report(
+        engine_doc=_engine_doc(),
+        client_doc=_client_doc(),
+        tree_version="0.3.0",
+        init_arm=_ok_init_arm(),
+        now=NOW,
+    )
+    ahead_row = next(a for a in ahead.arms if a.name == "tree-version")
+    assert "(a release is owed or in flight)" in ahead_row.detail, ahead_row.detail
 
     # ...and the engine FAIL at the same version keeps the sentence it earned.
     engine_fail = canary.build_report(
@@ -4328,6 +4405,19 @@ def test_installability_is_ONE_definition_of_the_installable_question():
     # here; installable: 0.3.0" — a sentence about a listing the arm had just resolved.
     mixed = {**doc, "releases": {"0.3.0": [good, {}]}}
     assert canary.installability(mixed, "0.3.0") == canary.INSTALLABLE
+    # ⛔ AND A RECOGNISED STATE MUST NOT RENDER AS UNRECOGNISED (#12589 review round 15, P3).
+    # Deleting the `INSTALLABILITY_UNKNOWN` branch fell through to the last `else:` and published
+    # "unrecognised installability 'unreadable'" — with 89 tests green, because both pins were
+    # substrings the fallback also contains. The `;` closes the recognised form's clause.
+    recognised = _client_report(
+        {
+            "info": {"version": "0.3.0"},
+            "releases": {"0.2.0": [good], "0.3.0": {}},
+        }
+    ).get("client-published")
+    assert "advertised latest 0.3.0 could not be READ here;" in recognised.detail, recognised.detail
+    assert "unrecognised" not in recognised.detail, recognised.detail
+
     mixed_arm = _client_report(mixed).get("client-published")
     assert mixed_arm.status == canary.OK, (mixed_arm.status, mixed_arm.detail)
     assert "advertised latest 0.3.0 is installable" in mixed_arm.detail, mixed_arm.detail

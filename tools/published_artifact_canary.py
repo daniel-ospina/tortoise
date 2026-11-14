@@ -1076,8 +1076,11 @@ def build_report(
                 #   * its listing could NOT be read → say THAT (`could not be READ here`), because
                 #     "not resolvable" would be an artifact claim manufactured from a non-reading,
                 #     and it would be byte-identical to the READABLE all-yanked case below;
-                #   * it was read and is not installable (yanked, empty, no usable file) → "not
-                #     resolvable for an UNPINNED install here", which is what this arm tests. NOT
+                #   * it was read and is not installable (yanked, empty, no usable file, or
+                #     ABSENT from a readable map — `installability` returns NOT_INSTALLABLE for a
+                #     missing version key too, and that path is reachable through `build_report`)
+                #     → "not resolvable for an UNPINNED install here", which is what this arm
+                #     tests. NOT
                 #     "not installable": a yanked release installs fine under a `==` pin (PEP 592
                 #     is what makes an unpinned requirement skip it).
                 # ⛔ THE THREE STATES ARE BRANCHED ON, not folded (#12589 review round 9, P3).
