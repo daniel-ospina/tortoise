@@ -345,7 +345,7 @@ def _fix_hint(verdict: Verdict) -> str:
         return (
             "fix: nothing is wrong with the CONFIGURATION — the bridge is simply not enabled on "
             "either half, so there is no drift to fix. If it is meant to be live, the three-step "
-            "rotation (set Fly, set Pages, REDEPLOY Pages) is in "
+            "rotation (rotate the GitHub repo secret, set Pages, REDEPLOY Pages) is in "
             "docs/engineering/auth/consent-identity-bridge.md §2.5."
         )
     return "fix: re-read both origins; a half that cannot be read is not a half that agrees."

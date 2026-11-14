@@ -180,6 +180,16 @@ def test_neither_configured_is_OFF_and_never_AGREE(monkeypatch, capsys) -> None:
     assert CKC.main([]) == 2
     out = capsys.readouterr().out
     assert "CONSENT-KEY: OFF" in out and "not enabled" in out
+    # ⛔ AND THE ENABLING PATH NAMES THE SAME SOURCE OF TRUTH AS THE MISMATCH ARM. Cycle 6 measured this
+    # arm still saying "(set Fly, set Pages, REDEPLOY Pages)" — the hand-set route the sibling arm
+    # labels silently reverted by the next `deploy-hosted` run. It is the advice an operator reads when
+    # they turn the bridge ON, so following it literally re-creates the 2026-11-01 split.
+    assert "rotate the GitHub repo secret" in out, (
+        "the OFF arm's enabling path no longer names the repo secret as the durable source"
+    )
+    assert "set Fly" not in out, (
+        "the OFF arm tells the operator to hand-set Fly, which the next deploy silently reverts"
+    )
 
 
 # ── "cannot see" is never "agrees" ────────────────────────────────────────
