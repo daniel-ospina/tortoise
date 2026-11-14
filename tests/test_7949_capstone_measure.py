@@ -6441,8 +6441,10 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # can). ⛔ THE SPAN LOOP BELOW DOES NOT PIN THE END, and an earlier version of this
     # comment claimed it did: it asserts each needle occurs once INSIDE the window, which is
     # true for any end at or beyond `:14402` (both needles are the file's only occurrences,
-    # so a later end cannot change the sum; every end before it gives an EMPTY window and
-    # the assert fails outright). The end is therefore pinned by the
+    # so a later end cannot change the sum; ends from `:14363` to `:14401` hold a non-empty
+    # window that still lacks the second needle, and every end below `:14363` gives an EMPTY
+    # window — in both cases the assert fails outright, but for two different reasons, and
+    # conflating them is how a mechanism claim goes false). The end is therefore pinned by the
     # structural assertion at `_i7_end_ok` — the stated last line must still be the blank
     # line immediately before `return OrgInfoResponse(`.
     _i7 = _EPIC_CITE_DOCS["04-plan.md"].read_text(encoding="utf-8")
