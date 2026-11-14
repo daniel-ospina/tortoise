@@ -300,15 +300,13 @@ they say what does NOT (`live.KIND_PROPERTIES`' scope note, `kind_expression`'s
 docstring, and `_entity_label`'s record of why the local copy of the canonical
 map had to go). That move is the same kind as the five before it — prose that
 names the retired label in order to explain a rule about it — and it is the first
-one whose point is a WIDENING rather than a retirement.
-#12434's served-page note in `tortoise/mcp_server.py` is the seventh: the
-description of what `limit` does has to say that a page of slices carries no
-total, and says it by naming the retired label (`D10 retires :Document`), one
-added prose line in a file the population already reached — the same shape as
-#11682's one-line move.
-All seven are the point rather than an
-accident: this population grows for good reasons, so the figure tracks the tree
-and not a past commit.
+one whose point is a WIDENING rather than a retirement. #12434's served-page
+note in `tortoise/mcp_server.py` is the seventh: the description of what `limit`
+does has to say that a page of slices carries no total, and says it by naming
+the retired label (`D10 retires :Document`), one added prose line in a file the
+population already reached — the same shape as #11682's one-line move. All
+seven are the point rather than an accident: this population grows for good
+reasons, so the figure tracks the tree and not a past commit.
 `tests/test_substrate_map.py` re-derives both numbers over the **same**
 population this sentence is stated in — every *tracked* file under `tortoise/`,
 any suffix, not a `.py` walk — so the figure cannot go stale silently. Every one
