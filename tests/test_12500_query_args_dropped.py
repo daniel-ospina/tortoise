@@ -676,17 +676,19 @@ _DOCSTRING_FALSE = (
     "compares the floor against EP belief, and only a Point carries one",
     "(the fts leg compares the floor against EP belief, and only a Point "
     "carries one",
-    # The EXCLUSIVE form: `order_by` IS applied for `entity_type="point"` (and
-    # for event/subject/object/operator), so banning the bare phrase forbade a
-    # correct edit — the round-6 defect mirrored, and rounds 7/8 hit its scoped
-    # variants too. What was false is the "only" — the entry below, and the ONLY
-    # one pinned: `min_confidence` AND `order_by` really are both applied on the
-    # text= arm for `entity_type="point"`, so banning the joint non-exclusive
-    # form forbade a true sentence (round-11 P2 3, measured).
-    '`order_by` is applied on the text= arm for `entity_type="point"` only',
-    # round-6/7: BOTH ranking orderings (`confidence` and `graph`) are refused on
-    # document/source — each computes the same key for every row — while
-    # `order_by="relevance"` IS applied there. So the UNQUALIFIED form is false
+    # RETIRED (round 14): the exclusive form "`order_by` is applied on the text=
+    # arm for `entity_type="point"` only" is false, but a sentence REJECTING it
+    # contains it verbatim, so the ban reded a correct edit — the same residual
+    # recorded above. `min_confidence` and `order_by` really are both applied on
+    # the text= arm for `entity_type="point"`, and the positive assertions in
+    # this module state that, which is what a decidable test can do.
+    # round-6/7/13: BOTH ranking orderings (`confidence` and `graph`) are refused
+    # on document/source, and each leaves the order unchanged for its OWN reason:
+    # `confidence` because every key collapses to `(1, 0.0)`, `graph` because its
+    # two extra terms are identical on every row, so the key is monotone in the
+    # relevance score. (It is NOT "the same key for every row" — measured: graph
+    # keys 0.65 / 0.3722 / 0.15, three distinct values.) `order_by="relevance"` IS
+    # applied there. So the UNQUALIFIED form is false
     # for a reason the qualified one is not: it drops the value and implies no
     # ordering works on those two types, which sends a caller away from a read
     # that works. Banned in that unqualified form only; the sentence that ships
@@ -700,14 +702,19 @@ _DOCSTRING_FALSE = (
     # and let "applied to every type including those two" through. Pinned is the
     # FALSE half itself, which is exactly what the claim got wrong.
     #
-    # RECORDED RESIDUAL, not papered over: the bare summary "`order_by` for every
-    # type EXCEPT `document`/`source`" is ALSO false (it drops the value, and
-    # `relevance` IS applied there) but is deliberately NOT banned — no decidable
-    # check separates it from the true value-qualified form, and three rounds of
-    # trying produced more over-block than protection. The positive assertion
-    # below holds the qualified truth in the document; catching a lossy summary is
-    # a review question, not a pin.
-    "applied to every type including those two",
+    # Value-AGNOSTIC: "`order_by` is applied to every type including those two"
+    # is the false claim. Naming the argument means a TRUE sentence that names a
+    # VALUE — `order_by="relevance"` IS applied to every type — no longer matches
+    # (round-14 P2 1: the round-13 entry dropped the argument name and reded it).
+    "`order_by` is applied to every type including those two",
+    #
+    # RECORDED RESIDUAL, not papered over: substring bans catch a RESTATEMENT of
+    # a claim, not a sentence REJECTING it ("it is not the case that …"), and they
+    # cannot separate a bare lossy summary ("`order_by` for every type EXCEPT
+    # `document`/`source`") from the true value-qualified form. Four rounds of
+    # widening these entries produced more over-block than protection, so the
+    # residual is stated instead: the POSITIVE assertions in this module hold the
+    # truth in the document, and catching a lossy summary is a review question.
     # round-8: the harm clause was lumped, so it claimed an ORDERING let rows
     # through — an ordering excludes nothing; it only re-decides their sequence.
     "an accepted value was discarded and rows the caller excluded came back",
@@ -800,6 +807,12 @@ def test_a_graph_ordering_with_no_signal_is_refused_not_silently_reordered(
 
     assert "graph" in message, message
     assert "relevance" in message, message
+    # …and the MECHANISM, which round 13 corrected: the keys are DISTINCT and
+    # merely monotone in the relevance score, so the refuted wording can no
+    # longer return silently (round-14 P2 3: it survived every assertion here).
+    assert "every row's key is the same" not in message, message
+    assert "IDENTICAL on every row" in message, message
+    assert "monotone in" in message, message
 
 
 def test_the_tool_docstring_states_the_falsy_exception() -> None:

@@ -4049,14 +4049,14 @@ def tortoise_query(kind: str | None = None,
         # missing key hands us `None`, and `""` is the same caller intent. The
         # structural arms used to serve both as Points while the `text=` arm
         # passed the RAW value to the SDK, whose `tortoise_fts_query` refuses it
-        # (`ValueError`, sdk.py:40829) — one argument value answering two
+        # (`ValueError`, sdk.py:41127) — one argument value answering two
         # different ways depending on which arm a caller happened to use.
         # Resolved HERE, above every arm, so all of them see one value.
         entity_type = "point"
     # The vocabulary refusal is the OWNER's (tortoise/security.py), and it is
     # asked ONCE, above every arm — a per-arm copy is how one invalid value ends
     # up with two different messages (`text=` used to surface the SDK's own
-    # re-typed copy from sdk.py:40830 while the structural arms surfaced this
+    # re-typed copy from sdk.py:41128 while the structural arms surfaced this
     # one), and a second copy of the message is what drifts. `point` is a
     # member, so the served path cannot be blocked here.
     from tortoise.security import validate_entity_type
