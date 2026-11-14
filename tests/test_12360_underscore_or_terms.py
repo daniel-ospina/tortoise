@@ -304,12 +304,20 @@ class TestAdditive:
         # NFD `_café` is `_cafe` + U+0301 and the splitter truncating at the mark
         # emitted `_cafe` — REFUSED on the ON arm, ACCEPTED on the OFF arm.
         # ⛔ The property is therefore "the switch cannot move NFD bytes OR the
-        # probe verdict", NOT "NFD is accepted": NFD `año_actual` is `an` + U+0303 +
-        # `o_actual`, and `probe_phrase_rejection` refuses it on BOTH arms through
-        # its ORDINARY run-count branch (U+0303 is not `_`, so `deferred` is False).
-        # That is a PRE-EXISTING refusal this PR neither causes nor repairs — out of
-        # scope here, and pinned as "same on both arms" so it cannot be mistaken for
-        # a control either. A separate issue should scope it.
+        # probe verdict", NOT "NFD is accepted": it is pinned as "same on both
+        # arms" so a verdict difference cannot be mistaken for a control.
+        # ⚠️ The MECHANISM this comment used to state was FALSE (#12368 fourth
+        # review, corrected by measurement) — and the assertions below could not
+        # see it, because they compare the two arms and never the verdict.
+        # NFD `año_actual` is `an` + U+0303 + `o_actual`, and the token CARRIES
+        # `_`, so `deferred` is True: the run-count branch this comment used to
+        # name is SKIPPED BY CONSTRUCTION, and the verdict is the read's own
+        # answer. MEASURED here: `probe_phrase_rejection` ACCEPTS NFD
+        # `año_actual`/`the_café`/`x_café` on both arms (one term), and still
+        # REFUSES NFD `dé_installer` on both because `build_or_query` expands it
+        # into two different terms ('installer|de'). On `origin/main` all four are
+        # refused through the run-count branch, so those three accepts are NOT
+        # pre-existing: this change cures them.
         for word in shapes:
             nfd = unicodedata.normalize("NFD", word)
             monkeypatch.setenv(UNDERSCORE_ENV, "0")

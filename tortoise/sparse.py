@@ -546,12 +546,16 @@ def underscore_run_terms(text: str) -> list[str]:
       alternatives, so the probe guard refused a valid probe (measured false block
       on ``año_actual``/``the_café``/``_café``/``dé_installer``/``x_café``, in the
       precomposed spelling).
-      ⚠️ NOT "both spellings" (#12368 review): the NFD spelling of a name whose
-      ASCII part PRECEDES the mark is still refused — by the probe guard's own
-      run/term tests (its separator/run-count test for ``año_actual``/``the_café``/
-      ``x_café``, its term-count test for ``dé_installer``) — and that refusal is
-      PRE-EXISTING: it reproduces identically at ``TORTOISE_UNDERSCORE_TERMS=0``,
-      so this change neither causes nor cures it. NFD ``_café`` IS accepted
+      ⚠️ NOT "both spellings", and the NFD half is NOT a pre-existing refusal
+      (#12368 fourth review — the earlier text here said both, and MEASUREMENT
+      refutes it): a ``_``-carrying token is ``deferred``, so the run-count
+      branch below does not run on it and the verdict is the READ's own answer,
+      compared in the INDEX's sense. MEASURED on this head — NFD ``año_actual``/
+      ``the_café``/``x_café`` are ACCEPTED on both arms (the read emits ONE term),
+      while NFD ``dé_installer`` is still REFUSED on both because
+      ``build_or_query`` expands it into two different terms (``'installer|de'``).
+      On ``origin/main`` all four are refused through the run-count branch, so
+      this change CURES three of the four. NFD ``_café`` is accepted on both
       because its mark follows the whole run.
       ⚠️ Scoped (#12368 second and third reviews): only THIS bullet is non-lossy.
       The two bounds below are both DECLARED LOSSY (``___``, and a run past
