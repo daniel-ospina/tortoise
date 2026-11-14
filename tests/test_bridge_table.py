@@ -831,28 +831,38 @@ def test_the_live_retirement_reasons_account_for_exactly_the_retired_rows() -> N
         f"unreasoned ({sorted(retired - set(REMOVALS))}) or the reason is stale "
         f"({sorted(set(REMOVALS) - retired)})"
     )
-    # FOUR remain: the two canonical "Removed entirely" entries and the two pack
-    # tools the owner settled as SDK/REST-post-beta. The set fell 9 -> 4: the other
-    # five — the dropped
-    # `run_onboarding` members — were DELETED from the served registry in #4282
-    # Phase 3.2, so no `REMOVED` row survives for them and no live reason may
-    # either; their reasons moved to the HISTORY map below, which is asserted too.
+    # ZERO remain: #11609 batch 1 removed the last four (the two canonical
+    # "Removed entirely" entries and the two pack tools the owner settled as
+    # SDK/REST-post-beta) from the served registry, so no `REMOVED` row survives for
+    # them and no live reason may either; their reasons moved to the BATCH 1 history
+    # map below, which is asserted too. The set fell 9 -> 4 -> 0: the first five — the
+    # dropped `run_onboarding` members — went in #4282 Phase 3.2.
     # A reason may not outlive the entry it reasons about (the validator's other
     # direction), but the reason must not be LOST with it.
-    assert len(retired) == 4, f"expected 4 retired tools after Phase 3.2, got {sorted(retired)}"
+    assert retired == set(), (
+        f"expected no REMOVED rows left after #11609 batch 1, got {sorted(retired)}")
 
-    from tools.bridge_table import REMOVED_IN_PHASE_3_2
+    from tools.bridge_table import REMOVED_IN_BATCH_1, REMOVED_IN_PHASE_3_2
+
+    assert set(REMOVED_IN_BATCH_1) == {
+        "tortoise_analyze", "tortoise_backfill_v25",
+        "tortoise_packs_list", "tortoise_pack_install",
+    }, (
+        "the batch 1 deletion history must account for exactly the four tools "
+        f"#11609 removed; got {sorted(REMOVED_IN_BATCH_1)}"
+    )
 
     assert len(REMOVED_IN_PHASE_3_2) == 5, (
         "the Phase 3.2 deletion history must account for exactly the five dropped "
         f"`run_onboarding` tools; got {sorted(REMOVED_IN_PHASE_3_2)}"
     )
     # A reason is only a PROOF if it names what authorises it — checked over the
-    # UNION of the live retirement map and the Phase 3.2 deletion history. The
-    # live four are the rows `_validate` actually reads (it requires *a* reason to
-    # exist, never that it names an authority), so leaving them out would let
-    # `REMOVALS["tortoise_analyze"] = "because I said so"` pass every gate green.
-    for name, reason in sorted({**REMOVALS, **REMOVED_IN_PHASE_3_2}.items()):
+    # UNION of the live retirement map and both deletion-history maps. The live map
+    # is what `_validate` actually reads (it requires *a* reason to exist, never that
+    # it names an authority), so checking only it would let
+    # `REMOVALS[name] = "because I said so"` pass every gate green.
+    for name, reason in sorted(
+            {**REMOVALS, **REMOVED_IN_BATCH_1, **REMOVED_IN_PHASE_3_2}.items()):
         assert reason.strip(), f"{name} carries an empty reason"
         assert "canonical" in reason or "settled" in reason, (
             f"{name}'s reason names no authority: {reason!r}"

@@ -14,7 +14,16 @@ OR-union + RediSearch's TFIDF scorer ranks docs by term-overlap, which is
 the BM25-style rank behavior the epic's scope prescribes (issue #1541 D1/D2).
 Single-token queries and stopword-only queries fall back to the raw string —
 byte-identical to the pre-R2 code path for inputs WITHOUT RediSearch-special
-characters (escaped via :func:`escape_redisearch_literal`, see below).
+characters (escaped via :func:`escape_redisearch_literal`, see below) — with one
+#12360 exception, stated precisely so this header is not the next stale claim (it
+said the wrong thing once, review round 11): a DEGENERATE input whose `_` run is
+NOT the whole input also emits that run's composite beside the literal
+(``a_b c_d`` -> ``a_b c_d|a_b|c_d``), which changes the fallback's bytes for a
+string carrying no RediSearch-special character at all. ⛔ Where the run IS the
+literal (``a_b``, ``a_``, ``__a``), or the run is alnum-free (``___``) or over
+:data:`MAX_COMPOSITE_RUN_LEN`, the composite is deduped away or never built and
+the bytes are UNCHANGED — see :func:`build_or_query`, which states the same thing
+in the same terms.
 
 Escaping is structural: tokens are alnum-only, so RediSearch reserved
 characters (``|`` included) cannot be injected into the OR-union path. The
@@ -212,10 +221,91 @@ MAX_IDENTIFIER_SEGMENTS = 6
 #: bare numeric noise (the ``19`` never becomes its own OR term).
 MIN_DIGIT_SEGMENT_LEN = 2
 
+#: #12360: how long a `_`-preserving COMPOSITE run may be before it is dropped.
+#:
+#: ⛔ NOT :data:`MAX_IDENTIFIER_LEN` (48), and the difference is MEASURED, not
+#: stylistic. The alias bound is about a NORMALISED concatenation; the composite
+#: is the index's own term, and RediSearch holds long ones: probing a live
+#: FalkorDB 4.20.6 with `:Object` names that ARE the run, the index returns the
+#: record by its own name at 52, 61, 64 and 128 characters and returns NOTHING at
+#: 256 and 600. So 48 would have dropped runs the index really holds — including
+#: this repo's own naming style
+#: (``test_the_12360_underscore_or_terms_preserve_the_composite_run``, 61 chars,
+#: measured reachable by its composite and dropped by a 48-char bound), which is
+#: the exact defect #12360 exists to repair. 128 is the largest measured-good
+#: length; above it a run is dropped and that loss is DECLARED, not silent.
+MAX_COMPOSITE_RUN_LEN = 128
+
 #: How many alias tokens ONE Point may carry (bounds index growth; the write
 #: path is idempotent, so this is a ceiling, never a churn).
 MAX_ALIASES_PER_POINT = 8
 
+
+#: #12360: the COMPOSITE-RUN switch. Same shape and same reason as
+#: :data:`IDENTIFIER_ENV` — the mechanism ships ON, and this is the fail-safe
+#: BISECT switch the #8933 ruling asked for, so a batch whose aggregate
+#: retrieval disappoints can be bisected without a revert. Resolved through
+#: :func:`tortoise.env_truthy.env_flag` (unset/blank/garbage -> the default),
+#: so a typo can never silently turn it on OR off.
+UNDERSCORE_ENV = "TORTOISE_UNDERSCORE_TERMS"
+
+#: The run alphabet: ``[A-Za-z0-9_]``. The ``_`` is the whole point — with it
+#: admitted a ``snake_case`` name stays ONE run where :data:`_SPLIT_RE` above
+#: breaks it into segments.
+#:
+#: ⛔ DELIBERATELY THE *POSITIVE* FORM, NOT A SPLITTER (#12368 review). A
+#: ``[^A-Za-z0-9_]+`` splitter yields the SAME runs as this regex for pure ASCII,
+#: but its runs are ASCII-ONLY while the index's word characters are Unicode: for
+#: ``año_actual`` it hands back ``o_actual``, a FRAGMENT of the index term that
+#: nothing holds, and emitting that is what made the capture guard refuse five
+#: valid probes. It also cannot report a run's OFFSETS, which is exactly what the
+#: abutment refusal in :func:`underscore_run_terms` needs. There was a
+#: ``_COMPOSITE_SPLIT_RE`` constant here doing the splitting; it was removed with
+#: the bug it caused — do not reintroduce it, and do not "simplify" this back
+#: into a splitter: the offsets are load-bearing.
+_COMPOSITE_RUN_RE = re.compile(r"[A-Za-z0-9_]+")
+
+
+def _continues_a_word(ch: str) -> bool:
+    """Is *ch* part of the same INDEX word as an abutting ASCII run?
+
+    Used by :func:`underscore_run_terms` to refuse a run that the ASCII run
+    class would report by TRUNCATING a longer Unicode word (#12368 review).
+
+    ⛔ MEASURED ANSWER: on FalkorDB 4.20.6 **every non-ASCII character stays
+    INSIDE the word** — none of them separates it. Probe (a lane graph, one
+    ``:Object`` per shape, the segment ``b_c`` queried against the ``Object``
+    FULLTEXT index, reported by WHICH document comes back):
+
+    ==================  ===========================  ==============
+    stored name          ``queryNodes(…,'b_c')``      split there?
+    ==================  ===========================  ==============
+    ``' b_c'`` (U+0020)  ``['o-ascii']``                **YES**
+    ``U+00A0 b_c``       ``['o-ascii']`` only            no
+    ``U+2009 b_c``       ``['o-ascii']`` only            no
+    ``U+3000 b_c``       ``['o-ascii']`` only            no
+    ``U+2028 b_c``       ``['o-ascii']`` only            no
+    ``U+202F b_c``       ``['o-ascii']`` only            no
+    ``🎉b_c``             ``['o-ascii']`` only            no
+    ``中b_c``             ``['o-ascii']`` only            no
+    ==================  ===========================  ==============
+
+    So the test is simply **non-ASCII**, and it covers the combining marks
+    (``U+0301`` and friends) as a SIDE EFFECT rather than as a special case: a
+    combining mark is not alphanumeric, so an ``isalnum()`` test left the
+    truncation in place for DECOMPOSED (NFD) text — measured: NFD ``_café`` built
+    the literal plus ``_cafe`` as a second alternative and the probe guard REFUSED
+    it, while the switch-OFF arm accepted it.
+
+    ⚠️ An earlier revision of this docstring claimed the opposite — that NBSP and
+    thin space "are non-ASCII SEPARATORS, so ``<NBSP>b_c`` genuinely holds ``b_c``"
+    — and used that to justify a NARROWER predicate. That claim was FALSE and the
+    probe above refutes it: ``b_c`` matches only the ASCII-space document. The
+    narrower predicate's residual is therefore an INERT term (one that matches
+    nothing), never a recovered one, which is why widening here is correct and
+    not a recall risk.
+    """
+    return not ch.isascii()
 
 def identifier_tokens_enabled() -> bool:
     """Is identifier preservation on for this process? (#8933)
@@ -224,6 +314,17 @@ def identifier_tokens_enabled() -> bool:
     the bisect switch, not the feature flag. See :data:`IDENTIFIER_ENV`.
     """
     return env_flag(IDENTIFIER_ENV, True)
+
+
+def underscore_terms_enabled() -> bool:
+    """Is the composite-run OR term on for this process? (#12360)
+
+    Default ON, bisect switch ``TORTOISE_UNDERSCORE_TERMS``; see
+    :data:`UNDERSCORE_ENV`. The switch exists so the before/after measurement
+    can run the SAME production path twice (the falsifier on #12360 is about
+    the real path, not about a harness arm).
+    """
+    return env_flag(UNDERSCORE_ENV, True)
 
 
 def _identifier_segments(span: str) -> list[str]:
@@ -365,6 +466,186 @@ def identifier_phrase_terms(text: str, *, space_separated: bool = True) -> list[
     return out
 
 
+def underscore_run_terms(text: str) -> list[str]:
+    """#12360: the ``_``-PRESERVING runs of a query, lowercased, in source order.
+
+    This is a **query/index CONTRACT repair**, not a tokenizer change, and the
+    measurement is the reason it lives here rather than in
+    :func:`tokenize_sparse_query`.
+
+    ⛔ The defect it repairs (MEASURED on #12298, artifact
+    ``docs/research/2026-11-13-12298-m3-fts-leg/`` — on PR **#12349**, branch
+    ``fix/12298-m3-splade``, which is where that directory lives; the issue is
+    closed and the artifact is NOT on ``main``, so the citation names the branch
+    rather than implying a repo path a reader can open): **RediSearch treats ``_``
+    as a word character and this module's tokenizer does not**
+    (:data:`_SPLIT_RE`). So for a stored ``web_search`` the index holds ONE
+    term, ``web_search``, while :func:`build_or_query` emits ``search|web`` —
+    two terms the index never contains — and the record is unretrievable BY
+    ITS OWN NAME. Probe on a live FalkorDB 4.20.6, verbatim::
+
+        'web_search'                       -> [['web_search', 8.0]]   # the index's term
+        'web'                              -> []                      # our first OR term
+        'selection'                        -> []
+        'test_7949_capstone_verdict_check' -> []                      # 4 segments, never a term
+
+    So a ``snake_case`` name is unretrievable by its own name THROUGH THE READ:
+    the query is well-formed and matches terms the index never holds. ⚠️ Not
+    literally "every" (#12368 review): the SAME committed artifact reports the
+    identifier class at recall@1 **0.2000** with the switch OFF — 18 of its 90
+    queries — while only 17 of those 90 carry no ``_`` (the ``#n`` shapes), so at
+    least one ``_``-carrying name IS found at rank 1. The universal is what this
+    repair reverses, not a distribution; and the counter-example is the ``a_bc``
+    shape this docstring already describes as retrievable (its segments leave ONE
+    surviving token, so the degenerate branch sends the whole token — found by
+    ITS OWN TERM, not by an incidental segment match, #12368 review round 13).
+    Measured on a pinned 300-name population (#11901's instrument, ``:Object`` label, the FTS leg in
+    isolation): candidate recall@3 **0.7133 -> 0.9633** (+25.00 pts, exact
+    two-sided McNemar p < 0.001) with **75 gains and ZERO losses**, and 21 empty
+    result sets -> 0. The identifier class goes 0.2000 -> 0.9444 and paths
+    0.6667 -> 0.9333.
+
+    ⚠️ Why the repair is ADDITIVE and lives in the QUERY:
+
+    * **Additive only** — this function's terms are appended as further OR
+      alternatives, so no term is ever removed and a query that matched before
+      still matches. That is what makes the zero-loss column structural rather
+      than lucky, and it is the same safety argument the #8933 alias tail
+      rides.
+    * **The stored side needs no change** — the index already holds the
+      composite (RediSearch tokenised the stored text that way), so this
+      reaches records written BEFORE this change existed. Changing
+      :func:`tokenize_sparse_query` to keep ``_`` was REJECTED: it would change
+      the fallback stacks' vocabularies and the pseudo-relevance-feedback
+      expansion path too, a much wider blast radius for the same recall.
+    * ⛔ **A composite is NOT an :func:`identifier_alias`** and must not be
+      minted by that normaliser: ``identifier_alias``'s contract is that the
+      SAME function runs on the write and read paths. The composite is the
+      index's own term, so nothing is written; running it through the alias
+      normaliser would produce ``websearch`` — a third term the index also does
+      not hold.
+
+    The run test is the measured arm's, verbatim (``tools/m3_fts_leg_recall.py``
+    ``recovery_terms`` — same branch, PR #12349): a maximal run of ``[A-Za-z0-9_]`` that still carries an
+    ``_`` and is at least 2 characters. A run WITHOUT ``_`` is already a term
+    the tokenizer emits, so re-sending it would only duplicate one (and
+    duplicates are the caller's problem — :func:`build_or_query` dedupes).
+
+    Two deliberate hardenings over the measurement arm, both declared rather
+    than silent — plus a third that is not a bound but a CORRECTNESS refusal
+    (#12368 review), also declared:
+
+    * **a run that ABUTS a NON-ASCII character is dropped, and it is NOT lossy**
+      — because the emitted term never existed. ``[A-Za-z0-9_]+`` is an ASCII
+      class while the index keeps every NON-ASCII character inside the word
+      (measured, eight shapes — see :func:`_continues_a_word`), so in
+      ``año_actual`` the ASCII splitter sees ``o_actual``: a fragment of the real
+      index term, which nothing holds. Dropping it keeps THIS DROP non-lossy (no
+      term removed that the index could match) and keeps a `_` token that is ONE
+      index term PROBE-ABLE — emitting the fragment made the read send two
+      alternatives, so the probe guard refused a valid probe (measured false block
+      on ``año_actual``/``the_café``/``_café``/``dé_installer``/``x_café``, in the
+      precomposed spelling).
+      ⚠️ NOT "both spellings" (#12368 fourth review, MEASURED). A ``_``-carrying
+      token is ``deferred``, so the run-count AND term-count branches are BOTH
+      skipped; ``build_or_query``'s alternative comparison decides. Per shape:
+      ``año_actual``/``the_café``/``x_café`` — 1 token each, ACCEPT here, REFUSED
+      on ``main`` (run count), so this CURES three; ``dé_installer`` — 2 tokens,
+      REFUSED on ``main`` (term count) and here, so UNCHANGED; ``_café`` —
+      1 token, ACCEPTED on ``main`` and here, so also UNCHANGED.
+      ⚠️ Scoped (#12368 second and third reviews): only THIS bullet is non-lossy.
+      The two bounds below are both DECLARED LOSSY (``___``, and a run past
+      ``MAX_COMPOSITE_RUN_LEN``), so an earlier "additive in the only sense that
+      matters" generalised past what the surrounding text supports.
+
+    * no alphanumeric character in the run -> dropped (``___``), and it is
+      **LOSSY TOO** — corrected by measurement (#12360 review round 8): the
+      index DOES hold ``___`` (``queryNodes('Object','___')`` returns a record
+      named exactly that, as do ``____``/``_____``), so in a multi-token query
+      (``'foo bar ___'`` -> ``foo|bar``) the alternative is dropped and that
+      record stops matching. (``'foo ___'`` is NOT the example: only one plain
+      token survives there, so the read sends the raw string as an implicit
+      AND.) What justifies the drop is SIGNAL, not safety: an
+      all-underscore run is punctuation, so keeping it spends OR budget on a
+      term nobody types as a search. A single-token ``___`` query is still
+      reachable through the degenerate literal;
+    * ``len(run) > MAX_COMPOSITE_RUN_LEN`` -> dropped, and this one is **LOSSY**:
+      the index holds composites far longer than that (:data:`MAX_COMPOSITE_RUN_LEN`
+      records the probe), so a run above the bound is unretrievable by its own
+      name. The bound exists because an unbounded run makes the query string
+      proportional to the input, and an over-limit query is recorded as an FTS
+      FAILURE — it degrades LATER searches. No run in the measured population
+      reaches it (longest 34, ``test_capstone_preregistration_9075``).
+
+    …plus the two bounds every other tail in :func:`build_or_query` already
+    carries, and which are NOT lossless: the dedupe, and
+    ``MAX_ALIASES_PER_POINT`` (8). A query with nine distinct ``_`` runs keeps
+    the first eight and silently loses the ninth — the OR budget has to stay a
+    bound (an over-limit query is recorded as an FTS FAILURE and degrades LATER
+    searches), so the trade is deliberate, and it is stated here rather than
+    left for the next lane comparing this function to the arm it came from.
+    """
+    if not text:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    # ⛔ THE RUN'S OFFSETS MATTER, so this walks :data:`_COMPOSITE_RUN_RE` rather
+    # than splitting on a negated run class (#12368 review). A `[^A-Za-z0-9_]+`
+    # splitter yields the same runs for pure ASCII, but it is ASCII-ONLY while the
+    # index's word characters are UNICODE: for `año_actual` it splits at the `ñ`
+    # and hands back
+    # `o_actual`, a FRAGMENT of the index term `año_actual` that NOTHING
+    # holds (the module comment below says so itself). Emitting it was not
+    # additive-but-harmless — it is what made
+    # `session_source_prose_migration.probe_phrase_rejection` REFUSE
+    # `año_actual`/`the_café`/`_café`/`dé_installer`/`x_café`, every one of which
+    # is a valid, reachable ONE-index-term probe the switch-OFF arm accepted: a
+    # FALSE BLOCK, measured on both arms. A run is therefore emitted only when
+    # nothing WORD-CONTINUING abuts it — where "word-continuing" means NON-ASCII,
+    # which is what the lane actually does (see :func:`_continues_a_word` for the
+    # eight-shape probe).
+    #
+    # ⚠️ Reaching that rule took TWO corrections (#12368 second and third
+    # reviews), and both wrong answers are recorded here because each one is the
+    # tempting shortcut:
+    #
+    # 1. ``isalnum()`` — too NARROW. A COMBINING MARK is not alphanumeric, so the
+    #    truncation survived for DECOMPOSED (NFD) text: the NFD spelling of
+    #    ``_café`` was REFUSED on the ON arm and accepted on the OFF arm.
+    # 2. ``isalnum() or combining()`` — closer, still narrow, and justified by a
+    #    FALSE premise. It was argued from "NBSP/thin space are non-ASCII
+    #    SEPARATORS, so skipping them would lose recall". MEASURED: they are NOT
+    #    separators — ``b_c`` matches only the ASCII-space document — so the
+    #    residual was an INERT term and no recall was at stake.
+    #
+    # The measured rule is plain non-ASCII, and it subsumes the combining-mark
+    # case rather than special-casing it.
+    for match in _COMPOSITE_RUN_RE.finditer(text):
+        run = match.group(0)
+        start, end = match.span()
+        if (start > 0 and _continues_a_word(text[start - 1])) or (
+                end < len(text) and _continues_a_word(text[end])):
+            continue
+        if len(run) < 2 or "_" not in run:
+            continue
+        if len(run) > MAX_COMPOSITE_RUN_LEN:
+            continue
+        if not any(c.isalnum() for c in run):
+            continue
+        term = run.lower()
+        # Capped for the same reason the alias/phrase tails are: the OR budget
+        # must stay a BOUND (a query with 3,000 underscore runs would otherwise
+        # mint 3,000 OR terms, and an over-limit query is recorded as an FTS
+        # FAILURE — ``_breaker_record("fts", False)`` — i.e. it degrades later
+        # searches instead of only failing this one).
+        if term not in seen:
+            seen.add(term)
+            out.append(term)
+            if len(out) >= MAX_ALIASES_PER_POINT:
+                break
+    return out
+
+
 def escape_redisearch_literal(term: str) -> str:
     """Backslash-escape RediSearch query-syntax special chars in ``term``.
 
@@ -463,8 +744,15 @@ def expansion_tokens(
     alias can never duplicate or displace an original token), deduped,
     sorted by length DESC (specificity — same rule as the OR-union cap), and
     bounded at ``max_terms`` (``DEFAULT_MAX_EXPANSION_TERMS`` = 8): the
-    second FTS pass's total OR budget is ``DEFAULT_MAX_OR_TERMS + 8`` at
-    most, and the original query's tokens ALWAYS keep their slots first.
+    expansion tail CONTRIBUTES at most 8 terms to the second FTS pass, and the
+    original query's tokens ALWAYS keep their slots first.
+    ⛔ Not the pass's TOTAL budget — that is ``DEFAULT_MAX_OR_TERMS`` (12)
+    originals + 8 expansion + the three additive tails the same pass carries
+    (#8933 aliases 8 + phrases 8, #12360 composite runs 8) = **44 measured**, and
+    :func:`build_or_query`'s own docstring is where that bound is stated. This
+    sentence said ``DEFAULT_MAX_OR_TERMS + 8`` ("20") until #12360's review,
+    already stale by #8933's two tails; two places in one module disagreeing
+    about the same bound is how a peer "repairs" the wrong one.
     Accepts a flat string, ``None``, or an iterable of strings (the extractor
     writes ``search_keys`` as a flat space-joined STRING after
     ``_flatten_search_keys_prop``; raw graph values may still be arrays).
@@ -520,7 +808,9 @@ def build_or_query(
     expansion — original query tokens are capped at ``max_terms`` FIRST
     (their slots are reserved), then the expansion tail fills ONLY the
     remaining budget up to ``DEFAULT_MAX_EXPANSION_TERMS`` extra terms
-    (bounded raise: 12 + 8 = 20 max). Option (i)+(ii) of the scoping
+    (bounded raise: 12 originals + 8 expansion — the pass's TOTAL bound, with
+    the three additive tails counted, is the 44 stated below). Option (i)+(ii)
+    of the scoping
     package: reserve-original-slots (a longer injected alias can NEVER
     displace a shorter ORIGINAL query token — the regression guard) + a
     bounded max-terms raise on the ask lane only (the search lane passes
@@ -559,8 +849,28 @@ def build_or_query(
     term, so a query that matched before still matches. The phrase is what
     makes the fix work on records written BEFORE the write-side alias existed.
     Each tail is capped at ``MAX_ALIASES_PER_POINT``, so the OR budget stays a
-    BOUND (originals ≤ ``max_terms`` + expansion ≤ 8 + 8 aliases + 8 phrases)
-    rather than growing with the query's input.
+    BOUND (originals ≤ ``max_terms`` + expansion ≤ 8 + 8 aliases + 8 phrases +
+    8 composite runs) rather than growing with the query's input.
+
+    #12360 (measured on #12298): a THIRD additive tail — the ``_``-PRESERVING
+    composite runs (:func:`underscore_run_terms`). RediSearch treats ``_`` as a
+    word character, so a stored ``web_search`` is ONE index term while the
+    tokenizer above split it into ``web``/``search``: the leg emitted two terms
+    the index never holds and the record was unretrievable by its own name.
+    Appending the composite as a further OR alternative recovers it with zero
+    regressions (candidate recall@3 0.7133 -> 0.9633 on a pinned 300-name
+    population, 75 gains / 0 losses, p < 0.001).
+
+    ⚠️ **Byte-identity holds for every query carrying NO ``_`` at all** — and that
+    is the only direction safe to state it in. A query WITH a `_` run MAY gain that
+    run's composite, and where it fires it is ADDITIVE (nothing that matched before
+    stops matching); the edge case does fire (``'foo_ bar'`` ->
+    ``'foo|bar|foo_'``). ⛔ But do NOT restate it as "any `_` query changes" — review
+    round 10 found four copies of that over-claim (here, ``run_fts_query``,
+    ``.env.example`` and the brief), which an auditor of the #2070 control reads as
+    "these queries are not control cases". They are: where the composite IS the
+    literal (``a_b``, ``x__y``, ``a_``) the bytes are unchanged, and an alnum-free
+    (``___``) or over-bound run gains nothing (both declared lossy above).
     """
     # #8933: the identifier terms are computed SEPARATELY from the capped
     # original set, so they can never consume one of its slots — the A4
@@ -586,8 +896,73 @@ def build_or_query(
     # the pre-#8933 degenerate behaviour exactly (`not aliases and not phrases`
     # makes it `len(tokens) <= 1`) while never taking the raw branch while an
     # identifier term exists.
-    if max_terms < 1 or (len(tokens) <= 1 and not aliases and not phrases):
+    # #12360: the ``_``-PRESERVING composite runs — computed from the RAW query
+    # for the same reason the identifiers are (an already-split term list cannot
+    # be un-split): the tokenizer above destroyed the very thing that must be
+    # emitted. See :func:`underscore_run_terms` for the measured defect and why
+    # this is a query-side repair rather than a tokenizer change.
+    #
+    # They do NOT enter the degenerate predicate below — `degenerate` stays
+    # `len(tokens) <= 1 and not aliases and not phrases`, and the two branches
+    # under it are what carry the composites (P2, #12368 review: an earlier
+    # wording here said they "count in the degenerate predicate", which is the
+    # opposite of the code — a maintainer aligning the predicate to that prose
+    # would delete the escaped-literal branch and reintroduce the round-3 P1
+    # below). Why they are handled there rather than folded in: a `_`-shaped
+    # input whose plain tokens all die (`a_`, `x__y`, `__a`) would otherwise
+    # fall only into the ESCAPED-RAW branch, and that branch sends the whole
+    # string as one literal — where the index's own term is the composite.
+    # `x__y` emission is the same BYTES either way, `10:00_u` is not (`00_u` vs
+    # `10\:00_u`), so the branches must see both.
+    composites = underscore_run_terms(query) if underscore_terms_enabled() else []
+    # #12360 review round 3 (P1): the branches below must NOT drop the escaped-raw
+    # literal that the degenerate arm used to send. A composite is the INDEX's term
+    # only while the run is pure ASCII (`[A-Za-z0-9_]`); the index treats every
+    # Unicode LETTER as a word character too, so an ASCII-only run class WOULD
+    # build a composite the index does not hold — `año_actual` would yield
+    # `o_actual`. MEASURED on the lane (`_upsert_object` + `run_fts_query`, switch
+    # OFF vs ON) before the abutment rule existed: `año_actual` (o0),
+    # `dé_installer` (o4), `x_café` (o2), `the_café` (o3) and `_café` (o1) were
+    # each returned by their own name with the switch OFF and returned ZERO rows
+    # with it ON — a recall regression inside the very class this issue repairs,
+    # on the default-ON path. ⛔ `underscore_run_terms` now DROPS such a run at the
+    # source (the abutment rule), so today `año_actual` is byte-identical either way
+    # (`underscore_run_terms('año_actual') == []`) and the example is the REASON the
+    # branch keeps the literal, not a live reproduction — a maintainer who checks
+    # that example and finds no composite will otherwise read the paragraph as stale
+    # and delete the arm that `10:00_u` still needs (P2, #12368 review).
+    #
+    # So when the pre-#12360 predicate would have been degenerate, the literal
+    # STAYS and the composites ride beside it: additive by construction, which
+    # is what the zero-loss column claims. `x__y` and `a_` are byte-identical
+    # through the dedupe below (`x__y|x__y` -> `x__y`), and `10:00_u` keeps its
+    # gain (`10\:00_u` + `00_u`) — that is the live reproduction.
+    degenerate = len(tokens) <= 1 and not aliases and not phrases
+    if max_terms < 1:
         return escape_redisearch_literal(query)
+    if degenerate and not composites:
+        return escape_redisearch_literal(query)
+    if degenerate:
+        literal = escape_redisearch_literal(query)
+        # ⛔ THE DEDUPE IS CASE-INSENSITIVE, because the INDEX is (review round 10,
+        # P2). ``underscore_run_terms`` lowercases its term while ``literal`` keeps
+        # the query's case, so a bare ``c != literal`` emitted the SAME RediSearch
+        # term twice for a capitalised `_` token: ``build_or_query('A_bc')`` was
+        # ``A_bc|a_bc`` where ``'a_bc'`` is ``a_bc``, MEASURED on a lane to return
+        # the record for either spelling (RediSearch folds case). ``literal.lower()``
+        # equals the composite exactly when the literal is unescaped and IS that run
+        # modulo case, so escaped literals (``10\:00_u``), multi-run literals and
+        # non-ASCII literals are untouched.
+        # ⚠️ NOT "precisely the duplicate case" (#12368 review): a WHITESPACE-PADDED
+        # token escapes the fold, so the same index term is still emitted twice —
+        # measured ``build_or_query('a_b ')`` -> ``'a_b |a_b'`` and
+        # ``build_or_query('  a_b')`` -> ``'  a_b|a_b'``; neither this function nor
+        # ``run_fts_query`` strips its input, so a search-box query with a leading
+        # or trailing space reaches this branch. No recall or ranking harm (both
+        # alternatives address the identical term), but it does spend one OR-budget
+        # slot — stated rather than silently covered by an over-claimed word.
+        tail = [c for c in composites if c != literal and c != literal.lower()]
+        return "|".join([literal, *tail])
     tokens.sort(key=len, reverse=True)  # stable — ties keep source order
     original = tokens[:max_terms]
     terms = list(original)
@@ -602,7 +977,7 @@ def build_or_query(
     # ADJACENT can match, so it raises the exact record's score on records
     # already indexed — a query that matched before still matches.
     present = set(terms)
-    for term in aliases + phrases:
+    for term in aliases + phrases + composites:
         if term not in present:
             present.add(term)
             terms.append(term)

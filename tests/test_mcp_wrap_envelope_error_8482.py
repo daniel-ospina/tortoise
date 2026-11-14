@@ -612,9 +612,11 @@ async def test_every_wrap_envelope_tool_cannot_satisfy_a_failed_payload():
     # Shrinkage is the dangerous direction — the sweep must keep measuring the
     # surface it was written for. Growth (a new envelope tool) is fine and is
     # covered by the loop itself.
-    assert typed >= 11 and unions >= 2, (
+    assert typed >= 10 and unions >= 2, (
         f"sweep found {typed} typed + {unions} union envelopes; measured at "
-        "11 + 2 when this guard was written")
+        "10 + 2 after #11609 batch 1 archived `tortoise_packs_list` (11 + 2 when "
+        "this guard was written). Shrinkage is what this floor guards, so it "
+        "follows a deliberate removal; growth is covered by the loop itself.")
 
 
 @pytest.mark.asyncio
@@ -747,35 +749,40 @@ async def test_the_auth_gate_is_classified_through_a_wrap_envelope(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_a_hosted_tenant_refusal_is_not_labelled_the_stdio_gate(monkeypatch):
+async def test_a_non_gate_auth_refusal_is_not_labelled_the_stdio_gate(monkeypatch):
     """The `auth_error` STATUS is right; the #236 KIND is not the producer.
 
-    `tortoise_packs_list` refuses on its OWN fail-closed branch when the HTTP
-    transport carries no tenant context — a hosted guard that never touches the
-    stdio gate (``tortoise/mcp_server.py``, the ``_current_org_id is None and
-    _transport_mode == "http"`` return). Its text shares the gate's
-    ``Authentication required`` prefix, so a prefix-only classifier claims it
-    for #236 and the metric no longer isolates the gate. The kind must follow
-    the TRANSPORT that refused.
+    The classifier stamps `stdio_auth_gate` only for the stdio gate's own
+    refusal. Other producers open with the same `Authentication required` prefix
+    — `_safe`'s unset-transport refusal (`tortoise/mcp_server.py`,
+    `_transport_mode is None`) is one — so a prefix-only classifier claims them
+    for #236 and the metric no longer isolates the gate. The kind must follow the
+    TRANSPORT that refused.
+
+    ⛔ The original subject (`tortoise_packs_list` with an HTTP tenant context,
+    mid-flight in #11609 batch 1's archive) was the only handler whose OWN text
+    carried the prefix. An earlier retarget of this test to
+    `tortoise_manage_sources` was VACUOUS and a reviewer proved it: that refusal
+    reads `No team context (HTTP mode required)`, so the branch this test is
+    about never ran and forcing `error_kind = "stdio_auth_gate"` inside it left
+    the test green. `_transport_mode = None` enters the branch for real.
     """
     events: list[dict] = []
     monkeypatch.setattr(
         ms, "_emit_mcp_tool_call_telemetry",
         lambda org, name, status, latency, kind, count=None:
         events.append({"status": status, "error_kind": kind}))
-    token = ms._transport_mode.set("http")
-    org = ms._current_org_id.set(None)
+    token = ms._transport_mode.set(None)
     try:
-        result = await ms.mcp.call_tool("tortoise_packs_list", {})
+        result = await ms.mcp.call_tool("tortoise_search", {"query": "q"})
     finally:
-        ms._current_org_id.reset(org)
         ms._transport_mode.reset(token)
 
     assert events and events[0]["status"] == "auth_error", events
     assert events[0]["error_kind"] is None, (
-        "an HTTP tenant-context refusal is not the #236 stdio gate: "
-        f"got {events[0]['error_kind']!r}")
-    # ...and the refusal is still legible to the client (the #8482 repair).
+        "a non-gate `Authentication required` refusal took the #236 stdio "
+        f"gate's kind: {events[0]['error_kind']!r}")
+    # ...and the refusal is still legible to the client.
     assert result.is_error is True
     assert result.structured_content is None
     assert "Authentication required" in _wire_payload(result)["text"]

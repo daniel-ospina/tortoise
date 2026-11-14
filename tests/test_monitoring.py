@@ -3078,11 +3078,36 @@ class TestHealthzListener:
         failed on COLLECTION ORDER alone. The same isolation the rest of this file
         already has for the refusal window, for the three inputs the verdict now
         also reads.
+
+        ⛔ FOUR INPUTS, NOT THREE (#12482 measured). The wedge term ALSO reads
+        ``heartbeat_task_is_dead()``, which follows the process-global task
+        ``note_heartbeat_task`` records — and that global is the fourth input, which
+        this fixture did not reset. `hosted_api._start_liveness` records the real
+        ticker and `_stop_liveness` CANCELS it without clearing the global, so any
+        earlier test that boots the app through a ``TestClient`` leaves a
+        **cancelled** ticker recorded; a cancelled ticker correctly means "cannot
+        tick", so ``heartbeat_task_is_dead()`` is True and the wedge term is
+        DISARMED for the rest of the process. Measured: `tests/test_dr_endpoints.py`
+        followed by this file fails
+        `test_the_wedge_term_fires_when_nothing_has_been_served_either` and
+        `test_a_raising_served_reader_is_unevidenced_not_healthy` — both answer 200
+        with ``"loop_stale": true, "reasons": []`` instead of 503 /
+        ``["loop-not-serving"]`` — while this file ALONE passes 219/219 and the pair
+        with the reset restored passes 341/341. That is the exact COLLECTION-ORDER
+        class the paragraph above records, one input further on.
+        `TestStallWatchdog._isolated_ticker` below already resets this global for the
+        same reason and its docstring PREDICTED this failure ("a hosted-API test
+        leaving a cancelled one behind would disarm the ceiling in a later test");
+        the listener class needs it too. Reset on the way IN and OUT, like every
+        other input here — a fake or cancelled ticker must leak in neither
+        direction.
         """
+        monitoring._reset_heartbeat_task()
         monitoring.set_served_progress_source(None)
         monitoring.set_dataplane_verdict_source(None)
         monitoring.reset_wait_bound_breach_window()
         yield
+        monitoring._reset_heartbeat_task()
         monitoring.set_served_progress_source(None)
         monitoring.set_dataplane_verdict_source(None)
         monitoring.reset_wait_bound_breach_window()
@@ -3248,6 +3273,62 @@ class TestHealthzListener:
         payload = json.loads(body)
         assert payload["reasons"] == ["loop-not-serving"]
         assert "counter gone" in (payload["served"]["error"] or "")
+
+    def test_a_dead_ticker_is_stale_but_never_wedged(self):
+        """#2850: a ticker that cannot tick is NOT a wedge — the ``/healthz`` rule.
+
+        Every other test in this class now runs with the ticker CLEARED (the
+        fixture's ``_reset_heartbeat_task()`` on both arms, above — landed by
+        `#12482`, which is where the note at the top of this class lives), because
+        ``None`` means "nothing instrumented" and that is the state most of them
+        measure. That leaves the guard's
+        ``not heartbeat_task_is_dead()`` conjunct unreachable from this whole
+        class: delete the conjunct and every other test here still passes, while
+        a process whose ticker died would begin answering 503 and fail its own
+        deploy health wait.
+
+        So this test arranges the disarmed state ON PURPOSE: the same stale tick,
+        the same demand and the same unserved registered reader as
+        ``test_the_wedge_term_fires_when_nothing_has_been_served_either`` — plus a
+        DEAD ticker, which alone flips 503 to 200. Staleness is still REPORTED
+        (``loop_stale``), which is exactly the shape #2850 asked for: describe the
+        state, never act on a ticker that cannot produce another tick.
+        """
+        import time
+
+        class _DeadTicker:
+            """The two methods ``heartbeat_task_is_dead`` reads
+            (``cancelled``, ``done``), plus the ``add_done_callback``
+            registration ``note_heartbeat_task`` performs."""
+
+            def cancelled(self):
+                return True
+
+            def done(self):
+                return True
+
+            def add_done_callback(self, cb):
+                self.cb = cb
+
+        server = monitoring.start_health_listener(port=0, bind="127.0.0.1")
+        monitoring.heartbeat_record(
+            at=time.monotonic() - (monitoring.LOOP_STALE_AFTER + 2.0))
+        monitoring.workload_enter()
+        monitoring.set_served_progress_source(
+            lambda: {"last_served_age_s": monitoring.LOOP_STALE_AFTER + 30.0,
+                     "served": 7})
+        monitoring.note_heartbeat_task(_DeadTicker())
+        try:
+            status, body = _http_get(server.server_address[1])
+        finally:
+            monitoring.set_served_progress_source(None)
+            monitoring._reset_heartbeat_task()
+            monitoring.workload_exit()
+        assert status == 200, body
+        payload = json.loads(body)
+        assert payload["status"] == "ok"
+        assert payload["reasons"] == []
+        assert payload["loop_stale"] is True   # REPORTED, never acted on
 
     def test_a_failed_data_plane_reports_503_while_the_loop_is_fine(self):
         """#12477 acceptance (2): the check fails when the DATA PLANE fails.

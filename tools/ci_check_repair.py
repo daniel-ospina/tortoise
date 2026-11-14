@@ -196,7 +196,7 @@ QUEUED_STATUSES = frozenset({"queued", "waiting", "requested", "pending"})
 #: `DEFAULT_MAX_PR_WAIT_SECONDS = 90 * 60.0` (grep the symbol if the line has moved —
 #: it is the identifier that is load-bearing, the number is only a shortcut); and
 #: `docs/ops/ci-wall-clock.md` §6
-#: (lines 439-441) records that derivation in its own words — *"The budget's default is
+#: (lines 444-446) records that derivation in its own words — *"The budget's default is
 #: derived from this document's own §1 measurement (max first-job wait 81.9 min →
 #: 90 min), so it fires past the measured-normal population rather than on it."* 5400 s
 #: sits on the same side of the same measurement: past the measured maximum, so a run

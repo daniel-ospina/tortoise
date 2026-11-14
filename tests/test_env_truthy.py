@@ -547,15 +547,36 @@ _LEDGER_LITERAL_OWNERS: dict[str, tuple[int, str]] = {
 #: destructive interlock. NO entry was deleted by #4128: deleting one means the read was
 #: widened, and no name's disposition was widen.
 #:
-#: THE DELIBERATE EXCEPTIONS — the ledger has GROWN twice, both under a recorded
-#: `OVERRIDES` (not by accident): the tenant-namespace opt-in pinned above
-#: (`TORTOISE_TEST_SWEEP_TEAM_STRAYS`; #1686/#1884) and `TORTOISE_TEST_SWEEP_LEGACY`
-#: (#3634 Task 3). Each read is the SOLE authorization for an irreversible
-#: journal-blind DETACH DELETE + GRAPH.DELETE of a cohort the journal cannot
-#: attribute — exactly the fail-open surface the ledger exists to freeze — so
-#: narrowing it is the safe policy. The #3634 entry is recorded on issue #3634 and in
+#: THE DELIBERATE EXCEPTIONS — five entries are called out here, and each carries
+#: a recorded `OVERRIDES` (as every entry in this ledger does, not by accident).
+#: THREE were added SINCE #4128 ruled the deferred set:
+#: `TORTOISE_11070_CENSUS_DEDUPE_DISABLED`
+#: (`tortoise/session_source_prose_migration.py`, #11453), `TORTOISE_JOURNAL_SEGMENTS`
+#: (`tortoise/journal_segments.py`, #12551), and `tortoise/config.py`'s
+#: `TORTOISE_ALLOW_EMBEDDED` (#12407/#12428; `#12555` re-shaped the rung attribution
+#: around it, not the read). The other TWO
+#: were already in the ledger when #4128 ruled, so they are not growths since it: the
+#: tenant-namespace opt-in pinned above (`TORTOISE_TEST_SWEEP_TEAM_STRAYS`, there since
+#: #4097) and `TORTOISE_TEST_SWEEP_LEGACY` (#3634 Task 3). ⛔ The COUNT is not
+#: load-bearing and nothing pins it — it read "GROWN twice" while three had been
+#: added AFTER #4128 (the whole dict measured at this head: 21 entries, 18 at #4128's
+#: commit `935a19ef12`, 19 at #12551's `76b25fcfd1`), which is exactly the rot the
+#: paragraph warns about for numeral-bearing prose. What IS load-bearing is the rule
+#: below; the list is kept so the next addendum has the precedent in front of it
+#: rather than a stale tally. ⛔ What each of the five AUTHORIZES differs, so do not
+#: read the sentence below as covering all five: TWO — `TORTOISE_TEST_SWEEP_TEAM_STRAYS`
+#: and `TORTOISE_TEST_SWEEP_LEGACY` — are each the sole authorization for an
+#: irreversible journal-blind DETACH DELETE + GRAPH.DELETE of a cohort the journal
+#: cannot attribute; the other THREE arm a path nobody chose — one journal WRITE
+#: (`TORTOISE_JOURNAL_SEGMENTS`) and two REPORTING surfaces
+#: (`TORTOISE_11070_CENSUS_DEDUPE_DISABLED`, and `tortoise/config.py`'s
+#: `TORTOISE_ALLOW_EMBEDDED` rung read — the `mcp_server.py` entry under the same
+#: name is a RUN gate, not a report, and is not one of these five) — and each is
+#: exactly the fail-open surface the ledger exists to freeze, so narrowing is the safe
+#: policy. The #3634 entry is recorded on issue #3634 and in
 #: the epic CI-Fix Changelog, and pinned by
-#: tests/test_wipe_server.py::test_legacy_sweep_gate_is_narrow_by_design. A future
+#: tests/test_wipe_server.py::test_legacy_sweep_gate_is_narrow_by_design; the two
+#: #12551-era additions carry CI-11/CI-12 in that same changelog. A future
 #: entry needs the same three: a recorded decision, an `OVERRIDES:` reason, and its
 #: changelog row.
 _KNOWN_NARROW_READS: dict[tuple[str, str], tuple[int, str]] = {
@@ -568,6 +589,12 @@ _KNOWN_NARROW_READS: dict[tuple[str, str], tuple[int, str]] = {
         (1, "OVERRIDES (#4128): #4097's truthy-set parsing — this is the SOLE override of "
             "the interlock that blocks DETACH DELETE on the production graph, so a `=true` "
             "written for legibility would authorise unrecoverable data loss"),
+    ("tortoise/config.py", "TORTOISE_ALLOW_EMBEDDED"):
+        (1, "OVERRIDES (#4128): #4097's truthy-set parsing — the same hatch read by "
+            "`daemon_db_target()` to REPORT which rung the daemon starts on; a "
+            "`=true` written for legibility would make the report claim "
+            "`embedded-allowed` for a daemon that `mcp_server.main()` exits 1 over, "
+            "so the divergence this function exists to disclose would be inverted"),
     ("tortoise/mcp_server.py", "TORTOISE_ALLOW_EMBEDDED"):
         (1, "OVERRIDES (#4128): #4097's truthy-set parsing — the truthy value replaces a "
             "hard `sys.exit(1)` on a missing DB target with a silently EMPTY embedded "
@@ -633,6 +660,29 @@ _KNOWN_NARROW_READS: dict[tuple[str, str], tuple[int, str]] = {
             "instrument that can serve a truncated transcript as COMPLETE and count one "
             "`:Source` twice; a `=true` written for legibility would silently report a "
             "census number taken by the wrong instrument"),
+    # #12551 landed this read without its ledger entry, which reds this gate on `main`
+    # (`test (d)`), so it is raised here with its reason rather than widened. The read is
+    # `journal_segments.enabled()` — `os.environ.get(ENV_FLAG, "") == "1"`, evaluated at
+    # CALL time inside that function (the module states why: "Read at call time, never
+    # cached at import: a fleet sets it per lane and a cached read would make the switch
+    # depend on which process imported first"), resolved through the module's own string
+    # constant — and it gates the three WRITERS (`seal_active`, `record_disposition`,
+    # `adopt_crashed_seal`), which RENAME a deployment's journal, RECORD a disposition and
+    # APPEND one repair row. A `=true` written for legibility would switch journal sealing
+    # on for a deployment that never opted in, against a graph whose bytes the journal
+    # describes — the same fail-open shape #4128 recorded for the entries above, in
+    # whichever surface that read governs (there: a delete, a trust grant, a silenced
+    # guard; here an unrequested WRITE). ⛔ Not "irreversible": the module's own docstring says everything
+    # it does today is "reversible and removes no byte" and the writers "delete nothing",
+    # so the objection is an unrequested WRITE surface, not data loss. The module's own
+    # docstring makes the asymmetry load-bearing: the flag gates WRITING and never
+    # REFUSING, so widening it cannot be buying honesty on the read side.
+    ("tortoise/journal_segments.py", "TORTOISE_JOURNAL_SEGMENTS"):
+        (1, "OVERRIDES (#4128): #4097's truthy-set parsing — the truthy value enables the "
+            "journal WRITERS (seal/record/adopt: rename, record, append one row) on a "
+            "deployment that never opted in; the module deliberately gates writing only, "
+            "never the verification reads, so widening adds a write surface and buys no "
+            "honesty"),
 }
 
 def _module_string_constants(tree: ast.Module) -> dict[str, str]:
