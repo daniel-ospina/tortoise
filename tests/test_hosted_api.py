@@ -1276,8 +1276,17 @@ class TestLivenessDecouple:
                 assert body["status"] == "ok", body
         finally:
             release.set()
-            monitoring.stop_health_listener(
-                getattr(app_under_test.state, "_healthz_server", None))
+            # ⛔ GUARDED, because `None` is not a no-op here: `stop_health_listener`
+            # documents `server=None` as "stop EVERY listener", and
+            # `start_health_listener` returns `None` on a bind failure
+            # (`monitoring.py::stop_health_listener`). Unguarded, this teardown
+            # would convert one test's bind failure into cross-test collateral —
+            # shutting down every healthz listener registered in the process,
+            # including another test's. The `assert server is not None` above is
+            # the failure report; the teardown must not widen it.
+            server = getattr(app_under_test.state, "_healthz_server", None)
+            if server is not None:
+                monitoring.stop_health_listener(server)
 
 
 class TestBootOrder:
