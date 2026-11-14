@@ -714,12 +714,18 @@ def _quota_state_timeout() -> float:
     Over-reserving only shortens the allowance and can never widen the tail, so the fallback is the
     constant's own documented value rather than ``0.0``: a phase whose bound cannot be read is
     still planned for, conservatively.
+
+    ⛔ THE CONVERSION IS INSIDE THE GUARD TOO (cycle-4 review, P3). An importable module carrying
+    a non-numeric constant raised ``TypeError``/``ValueError`` from ``float()`` OUTSIDE the ``try``
+    — the same ``_safe`` error payload with no ``status`` key that the guard exists to prevent,
+    while the paragraph above claimed the helper never raises. Measured on the previous head:
+    a ``None`` constant raised ``TypeError`` and ``'3.0s'`` raised ``ValueError``.
     """
     try:
         from tortoise.quota import QUOTA_STATE_TIMEOUT
+        return float(QUOTA_STATE_TIMEOUT)
     except Exception:  # a planning read must never turn the health answer into an error
         return _QUOTA_STATE_TIMEOUT_FALLBACK_S
-    return float(QUOTA_STATE_TIMEOUT)
 
 
 def _health_tail_reserve() -> float:
@@ -1608,7 +1614,10 @@ async def _await_under_mcp_wait_bound(name: str, arguments, *, version,
         # exactly that class, and it is the ONLY one: it awaits the real chain and asserts the body
         # ran on a different thread (measured at that head's 40-case file — under a bare
         # `run_in_executor` it is the sole red, 1 failed / 39 passed, while a lost deadline reds 20
-        # of 40; the file has 45 cases now, so a re-run reads 1/44 and 20+/45). Keep that case if
+        # of 40). ⛔ DO NOT restate a case count here (cycle-4 review, P3): this line said "the file
+        # has 45 cases now, so a re-run reads 1/44 and 20+/45" and was already stale — the file
+        # collected 48 the moment the review round that read this added its pins. The counts move by
+        # design; the RATIO ("one red" vs "many reds") is what this comment is about. Keep that case if
         # this seam
         # changes; the same dependency is relied on at ``tortoise_session_capture``'s cancellation
         # note.

@@ -654,6 +654,30 @@ def test_a_stale_quota_module_cannot_turn_the_health_answer_into_an_error(monkey
         f"planning imports are unguarded: {report!r}")
 
 
+@pytest.mark.parametrize("bad", [None, "3.0s", object()], ids=["none", "unit-suffix", "object"])
+def test_a_non_numeric_quota_constant_falls_back_instead_of_raising(monkeypatch, bad):
+    """The guard covers the CONVERSION, not just the import (cycle-4 review, P3).
+
+    ``float(QUOTA_STATE_TIMEOUT)`` originally sat OUTSIDE the ``try``, so an importable
+    ``tortoise.quota`` carrying a non-numeric constant raised ``TypeError`` from ``float(None)`` or
+    ``ValueError`` from ``float('3.0s')`` — measured: both escaped ``_quota_state_timeout()`` and
+    would reach ``_safe`` as an error payload with no ``status`` key, the exact fail-closed shape
+    the helper exists to prevent, while its own docstring claimed it "NEVER RAISES". The absent-name
+    arm above does not cover this: the module imports fine, the VALUE is wrong.
+    """
+    import sys
+    import types
+
+    stale = types.ModuleType("tortoise.quota")
+    stale.QUOTA_STATE_TIMEOUT = bad
+    stale.run_bounded_quota_state = quota.run_bounded_quota_state
+    monkeypatch.setitem(sys.modules, "tortoise.quota", stale)
+
+    assert mcp_server._quota_state_timeout() == pytest.approx(
+        mcp_server._QUOTA_STATE_TIMEOUT_FALLBACK_S
+    ), f"a non-numeric quota constant {bad!r} did not fall back to the documented default"
+
+
 def test_the_quota_timeout_fallback_is_the_documented_constant():
     """The fallback must not drift away from the value it stands in for.
 
