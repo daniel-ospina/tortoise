@@ -781,6 +781,36 @@ def test_an_install_failure_is_only_RED_when_the_INDEX_confirms_the_absence(tmp_
         f"mis-order this arm was narrowed to close"
     )
     assert "users cannot even install" not in sibling_arm.detail, sibling_arm.detail
+    # ⛔ …AND THE MIRROR (round-24 review P2). The case above pins `named` being LONGER
+    # than `wanted`, so a `.startswith(wanted)` regression reds. It does NOT pin `named`
+    # being SHORTER — i.e. pip naming a distribution that `wanted` CONTAINS — so the
+    # opposite one-token regression, `== wanted` → `named in wanted` (or
+    # `wanted.startswith(named)`), reproduces the round-21 defect with every other case
+    # still green: a missing dependency called `tortoise` would be graded as
+    # `tortoise-graph`'s absence and order an irreversible release for a defect that
+    # release cannot fix. That is not hypothetical — `tortoise` is exactly the kind of
+    # name a meta-package depends on. Measured: with `== wanted` relaxed to
+    # `named in wanted`, this case reds and the suite is otherwise unchanged.
+    shorter_marks = (
+        "ERROR: Could not find a version that satisfies the requirement "
+        "tortoise==0.9 (from versions: none)\n"
+        "ERROR: No matching distribution found for tortoise==0.9"
+    )
+    shorter_arm = canary.install_and_run(
+        package="tortoise-graph",
+        version="0.2.0",
+        workdir=tmp_path,
+        timeout=10,
+        runner=_Runner({"pip": _completed(["pip", "install"], 1, "", shorter_marks)}),
+        absent_probe=lambda package: canary.INDEX_OK,
+    )[0]
+    assert shorter_arm.status == canary.UNKNOWN, (
+        f"`tortoise` is a DIFFERENT distribution that `tortoise-graph`'s name merely "
+        f"contains — its absence must not order a release (got {shorter_arm.status}: "
+        f"{shorter_arm.detail}); a substring matcher in this direction re-opens the same "
+        f"mis-order the LONGER-name case closes"
+    )
+    assert "users cannot even install" not in shorter_arm.detail, shorter_arm.detail
     # and a failure pip does not attribute to a missing distribution is never a FAIL
     arm = canary.install_and_run(
         package="tortoise-graph",
