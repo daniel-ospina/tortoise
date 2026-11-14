@@ -266,6 +266,14 @@ class TestEverySurfaceAgreesWithTheDeclaration:
 #:         #N.` shape (pronoun + auxiliary): :data:`_RETRACTION_TIE` requires the pronoun
 #:         at a clause boundary, so a genuine record in that phrasing would be BLOCKED —
 #:         a false positive of the bounded kind, which is why it is written down here.
+#:       * a noun-before-the-name denial whose name is NOT clause-final
+#:         (`There is no plan called Builder in Tortoise.`): that arm pays `_CLAUSE_END`
+#:         because its scoped twin (`… called Builder on the self-hosted install.`) is
+#:         indistinguishable here and is a TRUE statement (cycle 8);
+#:       * a sentence that REPORTS an old denial and then re-asserts one
+#:         (`Previously the page stated there is no Builder plan; today there is no
+#:         Builder plan either.`): the exemption is per SENTENCE, so the reported
+#:         clause exempts the live one beside it (cycle 8).
 #:
 #: A sentence recording the RETRACTION is exempt — but only when it QUOTES what it
 #: retracts (:data:`_RETRACTION_ATTRIBUTION`). A cue word alone was a bypass: it let
@@ -366,9 +374,9 @@ _DENIAL_PATTERNS = (
     # no` arm cannot reach it. Measured as a false NEGATIVE (review); `not` alone is
     # not a match, the subject must still be bare `there`. Both clause-end forms,
     # matching the convention above: the intensifier variant is TERMINAL-only.
-    re.compile(r"\bthere\s+(?:is(?:n['\u2019]t)?|are(?:n['\u2019]t)?|is\s+not|are\s+not)\s+(?:an?|any)\s+" +
+    re.compile(r"\bthere\s+(?:isn['\u2019]t|aren['\u2019]t|is\s+not|are\s+not)\s+(?:(?:an?|any)\s+)?" +
                _BUILDER_PLAN + _CLAUSE_END, re.I),
-    re.compile(r"\bthere\s+(?:is(?:n['\u2019]t)?|are(?:n['\u2019]t)?|is\s+not|are\s+not)\s+(?:an?|any)\s+" +
+    re.compile(r"\bthere\s+(?:isn['\u2019]t|aren['\u2019]t|is\s+not|are\s+not)\s+(?:(?:an?|any)\s+)?" +
                _BUILDER_PLAN + _INTENSIFIER + _CLAUSE_END_STRICT, re.I),
     # "there exists no builder plan"
     re.compile(r"\bthere\s+exists?\s+no\s+" + _BUILDER_PLAN + _CLAUSE_END, re.I),
@@ -452,32 +460,81 @@ _RETRACTION_TIE = re.compile(
 
 #: The ATTRIBUTION half. Cycle-6 review measured why the same-sentence exemption
 #: cannot accept a bare citation: a cue plus `#\d+` was enough, so `The docs are stale
-#: per #12444: there is no Builder plan.` and its dated variant — the cycle-2 dressed
-#: denial with a citation bolted on — were both exempt. A sentence that ASSERTS the
-#: denial while citing an issue is not a record OF it.
+#: per #12444: there is no Builder plan.` — the cycle-2 dressed denial with a citation
+#: bolted on — was exempt. A sentence that ASSERTS the denial while citing an issue is
+#: not a record OF it.
 #:
-#: ⛔ TWO shapes count, and cycle-7 review measured why BOTH are needed:
-#:   * a QUOTATION **about the claim** — a speech verb plus a quoted span that itself
-#:     names `builder`. "A speech verb and some quote" was a bypass: `The doc previously
-#:     said "pro"; there is no Builder plan.` was exempt, because `said "pro"`
-#:     satisfied it.
-#:   * a REPORTED CLAUSE — a speech verb immediately introducing the denial itself
-#:     (`previously this doc ASSERTED THERE IS NO Builder plan; #12444 corrected it.`),
-#:     the same record written without quotation marks. Rejecting that form was a false
-#:     POSITIVE, so it is accepted rather than traded away.
-_RETRACTION_ATTRIBUTION = re.compile(
-    # LAZY, so the quote captured is the one the record OPENS with — greedy backtracking
-    # locked onto the CLOSING mark of `"pro"` and then found `builder` in the denial
-    # after it (cycle-7 review, measured: the two `said "pro"` sentences were exempt).
-    r"\b(?:read|said|says|claimed|asserted|stated|wrote|worded|asserts?)\b[^.]{0,40}?"
-    # `builder` must sit INSIDE the quotation itself. A tempered pattern rather than a
-    # character class, because the quote the record opens is usually the OUTER one and
-    # the claim inside may carry its own: `read 'there is no "builder" plan'` must match,
-    # while `said "pro"; there is no Builder plan` and `said "pro" and there is no
-    # Builder plan` must not (cycle-7 review measured both as exemptions).
-    r"(?P<q>['\"\u201c\u201d\u2018\u2019`])(?:(?!(?P=q)).){0,120}?builder"
-    r"(?:(?!(?P=q)).){0,120}?(?P=q)",
-    re.I)
+#: ⛔ THE SHAPE IS STRUCTURAL, AND THREE REGEX ATTEMPTS AT IT EACH BOUGHT A DEFECT
+#: (cycles 7 and 8, all measured). What makes a record a record is that THE DENIAL
+#: ITSELF IS THE QUOTED MATTER — not that some quotation appears near a speech verb:
+#:   * "a speech verb and some quote" exempted `The doc previously said "pro"; there is
+#:     no Builder plan.` — `said "pro"` satisfied it;
+#:   * a tempered backreference to the opening mark exempted `said "pro" and "builder
+#:     is a plan"; there is no Builder plan`, and let two CONTRACTIONS fence a
+#:     quotation (`stated there isn't a Builder plan and it doesn't exist`), while
+#:     blocking `read “There is no Builder plan.”` because `“` and `”` are different
+#:     characters and a backreference demands the same one;
+#:   * requiring the span to CLOSE blocked a record whose quoted claim ends in a
+#:     period, because the sentence splitter breaks INSIDE the quotation.
+#: So the rule is a scanner, not a regex: find the quoted spans (matched pairs,
+#: including the asymmetric typographic ones), and require ONE span carrying BOTH the
+#: Builder phrase and a negation. A drift sentence cannot put the denial in quotes; a
+#: record writes it there. An UNCLOSED pair runs to the end of the fragment, which is
+#: exactly what the splitter leaves when the claim's own period ends the sentence.
+_QUOTE_PAIRS = (('"', '"'), ('`', '`'), ('\u201c', '\u201d'), ('\u2018', '\u2019'))
+_QUOTED_NEGATION = re.compile(r"\b(?:no|not|never)\b|n['\u2019]t\b", re.I)
+_BUILDER_PHRASE = re.compile(_BUILDER_PLAN, re.I)
+
+
+def _quoted_spans(text: str) -> list[str]:
+    """Every quoted span in ``text``, as its INNER text.
+
+    Matched pairs, plus the asymmetric typographic pairs; a single ``'`` is a quotation
+    only when it is not inside a word, so ``isn't`` cannot open one. An unclosed pair
+    runs to the end of the fragment — the splitter's own output.
+    """
+    spans: list[str] = []
+    for open_mark, close_mark in _QUOTE_PAIRS:
+        i = 0
+        while True:
+            start = text.find(open_mark, i)
+            if start < 0:
+                break
+            end = text.find(close_mark, start + len(open_mark))
+            if end < 0:
+                spans.append(text[start + len(open_mark):])
+                break
+            spans.append(text[start + len(open_mark):end])
+            i = end + len(close_mark)
+    i = 0
+    while i < len(text):
+        if text[i] == "'":
+            before = text[i - 1] if i else " "
+            if not before.isalnum():                      # an opener, not `isn't`
+                j = i + 1
+                close = -1
+                while j < len(text):
+                    if text[j] == "'":
+                        after = text[j + 1] if j + 1 < len(text) else " "
+                        if not after.isalnum():           # a closer, not `don't`
+                            close = j
+                            break
+                    j += 1
+                spans.append(text[i + 1:close if close >= 0 else len(text)])
+                i = (close + 1) if close >= 0 else len(text)
+                continue
+        i += 1
+    return spans
+
+
+def _quotes_the_denial(sentence: str) -> bool:
+    """Is the DENIAL itself the quoted matter — a Builder phrase AND a negation in ONE span?"""
+    for span in _quoted_spans(sentence):
+        if _BUILDER_PHRASE.search(span) and _QUOTED_NEGATION.search(span):
+            return True
+    return False
+
+
 _REPORTED_CLAIM = re.compile(
     r"\b(?:read|said|says|claimed|asserted|asserts|stated|wrote|worded)\b\s+"
     r"(?:that\s+)?(?:there\s+(?:is|was|are)\s+no|no)\s+"
@@ -488,12 +545,12 @@ _REPORTED_CLAIM = re.compile(
 def _quotes_a_retracted_claim(sentence: str) -> bool:
     """Is this sentence itself a QUOTED record of the retraction?
 
-    Requires the cue AND an attribution ABOUT THE CLAIM — a QUOTATION that names it, or
-    a REPORTED CLAUSE introducing it. See :data:`_RETRACTION_ATTRIBUTION` for the two
-    measured bypasses a looser rule allowed.
+    Requires the cue AND either the DENIAL ITSELF being the quoted matter
+    (:func:`_quotes_the_denial`) or a REPORTED CLAUSE introducing it. The block comment
+    above records the three regex forms this replaced and the bypass each one allowed.
     """
     return bool(_RETRACTION_CUES.search(sentence)
-                and (_RETRACTION_ATTRIBUTION.search(sentence)
+                and (_quotes_the_denial(sentence)
                      or _REPORTED_CLAIM.search(sentence)))
 
 
@@ -647,6 +704,19 @@ class TestNoDocDeniesABuilderPlanExists:
             "The **Builder** and **Team** plans are both unlimited.",
             "**Builder *is* the `pro` tier** — the identifier is `pro`.",
             "The **Builder** plan exists and is called `pro`.",
+            # ⛔ THE AFFIRMATIVE IN BARE FORM (cycle-8 P1, measured): an OPTIONAL negation
+            # in the negated-auxiliary arm made `There is a Builder plan.` a denial — the
+            # exact sentence the class docstring says must stay writable.
+            "There is a Builder plan.",
+            "There is a Builder plan, and a Team plan.",
+            "There is a Builder tier, which is the `pro` tier.",
+            # RETRACTION RECORDS in the two shapes the repo writes them (cycle-8 P2):
+            # the typographic PAIR (`“…”` — a backreference demands the same mark and
+            # cannot see it), and a quoted claim whose own period ends the sentence, so
+            # the splitter hands the fragment an UNCLOSED quotation.
+            "... read \"There is no Builder plan.\"; #12444 corrected it.",
+            "Previously the doc read \u201cThere is no Builder plan.\u201d; #12444 "
+            "corrected it.",
             # The #4336 restatement in its most natural form: a comma followed by the
             # IDENTIFIER restatement qualifies the claim instead of ending it (cycles
             # 4 and 5 — `only|just` alone exempted the drift, so the noun is required).
@@ -756,6 +826,18 @@ class TestNoDocDeniesABuilderPlanExists:
                 'The doc previously said "pro"; there is no Builder plan.\n',
                 'Per #12444 the doc previously said "pro" and there is no Builder '
                 'plan.\n',
+                # Cycle-8 P2: the quoted span merely had to CONTAIN `builder`, so a
+                # second quotation, an apostrophe pair, or a bare `"builder"` satisfied
+                # it while the denial sat outside every quotation.
+                'The doc previously said "pro" and "builder is a plan"; there is no '
+                'Builder plan.\n',
+                "The doc previously stated there isn't a Builder plan and it "
+                "doesn't exist.\n",
+                'said "builder"; there is no Builder plan.\n',
+                # …and the span must carry a NEGATION too: a quotation that merely
+                # NAMES the tier is not a record of its absence.
+                'The doc previously said "the Builder plan is unlimited"; there is no '
+                'Builder plan.\n',
         ):
             assert _denials_in_document(live), (
                 f"a live denial was exempted by a following fragment that is not a "
@@ -798,6 +880,7 @@ class TestNoDocDeniesABuilderPlanExists:
             "There isn\u2019t a Builder plan.",
             "Builder isn\u2019t a plan.",
             "There aren\u2019t any Builder plans.",
+            "There are not Builder plans.",
             "The Builder tier doesn't exist.",
             "We don't offer a Builder plan.",
             "Builder is not available as a plan.",
