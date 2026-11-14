@@ -166,7 +166,6 @@ EXIT CODES: 0 ok · 2 usage · 3 no reachable graph (never a silent skip)
 """
 from __future__ import annotations
 
-import subprocess
 import sys
 
 # #5128 (the repo's entry-point contract): refuse a <3.12 interpreter HERE, before the rest of the
@@ -192,6 +191,7 @@ import json
 import math
 import os
 import re
+import subprocess
 import time
 from pathlib import Path
 
