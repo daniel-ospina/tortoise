@@ -3227,16 +3227,22 @@ def test_the_wheel_tail_only_reads_GATED_arms():
     """⛔ A NON-GATED ROW MAY NOT DECIDE THE WHEEL'S TAIL (#12589 review round 19, P3).
 
     `step` is the first GATED red arm. Dropping `arm.gated and` kept 97/97 green, and on a report
-    holding a non-gated `engine-init` FAIL plus a gated `wheel-smoke` FAIL the tail then rendered
-    the wheel's console-script claim for an arm that never decided the verdict.
+    holding a non-gated `engine-init` FAIL plus a gated `wheel-smoke` FAIL the tail then took the
+    non-gated row as `step`. `engine-init` is the arm that RUNS the built wheel, so it inherited the
+    wheel's own claim and the tail rendered "The BUILT wheel fails its documented first command"
+    for an arm that never decided the verdict. (Measured with the mutant: the console-script
+    sentence is the OTHER branch and never appears in this shape, so an assertion on it would be
+    inert — the assertion below pins the sentence this mutant actually renders.)
     """
     report = canary.Report(wheel_mode=True)
     report.add(canary.Arm("engine-init", canary.FAIL, "not consulted", gated=False))
     report.add(canary.Arm("wheel-smoke", canary.FAIL, "the built wheel is missing a README"))
     summary = canary.render_summary(report)
+    # The sentence the mutant actually renders — pinned first, because MIS-ATTRIBUTING the wheel's
+    # claim to a non-gated arm is the damage; "is NOT judged" is the fallback that replaced it.
+    assert "fails its documented first command" not in summary, summary
     assert "is NOT judged by this summary" in summary, summary
     assert "`wheel-smoke`" in summary, summary
-    assert "ships no `tortoise` console script" not in summary, summary
 
 
 def test_the_index_corroborated_FAIL_detail_orders_a_release():
@@ -3276,8 +3282,10 @@ def test_the_index_corroborated_FAIL_detail_orders_a_release():
             )
         return _Done()
 
-    # `install_and_run` needs a populated console script to reach the pip step; the index probe is
-    # what corroborates the absence, so stub it to the ABSENT verdict.
+    # The index probe is what corroborates the absence, so stub it to the ABSENT verdict.
+    # (Nothing needs to pre-exist under `workdir`: the venv is created first, `pip install` runs
+    # second, and only a SUCCESSFUL install ever reaches the console-script check — so an install
+    # failure here cannot be reached from, or changed by, a populated `venv/bin`.)
     def _probe(name):
         return canary.INDEX_ABSENT
 
@@ -3285,8 +3293,6 @@ def test_the_index_corroborated_FAIL_detail_orders_a_release():
 
     with tempfile.TemporaryDirectory() as tmp:
         workdir = Path(tmp)
-        (workdir / "venv" / "bin").mkdir(parents=True)
-        (workdir / "venv" / "bin" / "tortoise").write_text("#!/bin/sh\n")
         arm, _ = canary.install_and_run(
             package="tortoise-graph",
             version="0.2.0",
