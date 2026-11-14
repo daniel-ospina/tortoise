@@ -2042,7 +2042,7 @@ _HEALTH_PROBE_START_FAILED = False
 #: which the verdict reader turns into `failed` (`http` 503) in exactly the state
 #: that must be `unknown` (measured: the real listener answering
 #: `503 data-plane-failed` over a healthy, freshly booted process). A second name
-#: cannot collide, and `test_the_boot_clock_is_a_float_and_not_the_identity_string`
+#: cannot collide, and `test_the_probe_epoch_is_a_float_and_not_the_identity_string`
 #: pins the type so a future rename cannot bring the collision back.
 #:
 #: ⛔ IT IS THE EPOCH OF THE CURRENT PROBE STATE, RE-BASED ON EVERY LIFESPAN
@@ -2982,9 +2982,21 @@ async def _lifespan(app):
     # that reds `test-slow` in any shard whose process is that old, which is a
     # required check. One `global` write, at the same seam as the reset, so the
     # two can never disagree.
+    #
+    # ⛔ THE EPOCH IS WRITTEN BEFORE THE RESET, AND THE ORDER IS LOAD-BEARING
+    # (review P2, round 2). These are two statements with no lock spanning them,
+    # and the `/healthz` reader runs on the listener's OWN thread — which
+    # `_stop_liveness` deliberately keeps alive across lifespans. A poll landing
+    # between them saw a FRESH coordinator (reset done) against the OLD epoch, so
+    # it answered `failed` / `probe-never-produced-a-result` over a healthy boot:
+    # the microsecond-width version of the very 503 this change exists to remove.
+    # Epoch-first makes that window read a fresh epoch over the previous result —
+    # `healthy` only if that result was fresh AND ok, `failed` if it was stale or
+    # not-ok — which can never mask a real failure because the `age`, not-ok and
+    # `in_flight_s` arms do not read the epoch at all.
     global _HEALTH_PROBE_EPOCH_MONOTONIC
-    _HEALTH_PROBE.reset()
     _HEALTH_PROBE_EPOCH_MONOTONIC = time.monotonic()
+    _HEALTH_PROBE.reset()
     _READY_PROBE.reset()
     _CONTROL_PLANE_PROBE.reset()
     _probe_sdk_reset()
