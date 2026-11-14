@@ -162,7 +162,7 @@ payload carriage from registry retention** — the engine may simply have kept t
 its registry across the `DEL`. #7846 hit this exact confound and settled it with a **different-name**
 restore; so does this record, in `index_carriage_probe.py` → `index-carriage-42006.log`:
 
-```
+```text
 FULLTEXT: source OPERATIONAL (5000 docs, 25035 terms, 557500 inverted bytes) -> target OPERATIONAL (5000 docs, 25035 terms, 557500 bytes, answered 1250) under a DIFFERENT name; source graph gone (0)
 RANGE   : source OPERATIONAL (5000 docs, 0 terms, 19682 inverted bytes) -> target OPERATIONAL (5000 docs, 0 terms, 19680 bytes, answered 4999) under a DIFFERENT name; source graph gone (0)
 
