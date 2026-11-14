@@ -283,6 +283,24 @@ class TestEverySurfaceAgreesWithTheDeclaration:
 #:         backticks before the spans are taken, so the mention reads as an assertion —
 #:         true on `origin/main` too, and pre-existing; the double/typographic-quote
 #:         mentions ARE exempt as of cycle 19 (see :func:`_quotes_the_whole_denial`);
+#:       * an ATTRIBUTED quotation carrying NO retraction marker (`The docs say "there is
+#:         no Builder plan".`, `docs/product/beta-sdk-surface.md says "there is no Builder
+#:         plan".`): the cue-free mention exemption cannot tell a doc that QUOTES the
+#:         current page from one that quotes a superseded claim, so both are exempt. This
+#:         is the false-PASS cost of the cycle-19 exemption and it is written down here
+#:         because the list is claimed to be MEASURED (round-3 review). Of the five
+#:         mandated-green mention forms only this one lacks a marker (forbidden /
+#:         removed / correction / `before #N`), so requiring one would close it — at the
+#:         price of re-blocking an ordinary attribution, which is why the trade is named
+#:         rather than taken;
+#:       * a MIXED quotation pair (`The doc read “there is no Builder plan".`, one ASCII
+#:         and one typographic mark): :data:`_QUOTE_PAIRS` pairs same-direction marks
+#:         only, so no span exists and the mention is FLAGGED — a false POSITIVE, green at
+#:         `origin/main` only because main had no closing-quote tolerance at all;
+#:       * an APOSTROPHE-spanned denial is NOT one of these: it was a false PASS for one
+#:         round and is now closed (`Since the '90s there is no Builder plan, and the
+#:         customers' rows are wrong.` is flagged, with a pin), because
+#:         :func:`_quoted_span_offsets` takes `apostrophe=False` for the mention exemption;
 #:       * a following fragment that records a correction in a `That was corrected in
 #:         #N.` shape (pronoun + auxiliary): :data:`_RETRACTION_TIE` requires the pronoun
 #:         at a clause boundary, so a genuine record in that phrasing would be BLOCKED —
@@ -664,6 +682,20 @@ _RETRACTION_TIE = re.compile(
 #: record writes it there. An UNCLOSED pair runs to the end of the fragment, which is
 #: exactly what the splitter leaves when the claim's own period ends the sentence.
 _QUOTE_PAIRS = (('"', '"'), ('`', '`'), ('\u201c', '\u201d'), ('\u2018', '\u2019'))
+#: ⛔ MIXED MARKS ARE DELIBERATELY NOT PAIRS (round-3 review, measured, and REFUSED
+#: after trying it). Adding `('"', '\u201d')` / `('\u201c', '"')` fixes the real false
+#: block `The doc read “there is no Builder plan".` — RED here, `origin/main` green —
+#: BUT it makes the SCANNER emit a spurious UNCLOSED span for every ordinary quotation
+#: (opening `"` looks for a `”` that never comes, so the span runs to the end of the
+#: fragment). :func:`_asserts_a_denial_outside_the_quotes` masks every span, so that
+#: unclosed tail then swallowed a live denial and turned
+#: `Until then the doc said "no plan called Builder" and there is no Builder plan.`
+#: — a PINNED true positive — GREEN. A false block traded for a false PASS on the exact
+#: drift this file guards is the wrong trade, so the pairs stay same-direction and the
+#: mixed-mark mention is recorded as a measured false POSITIVE in the class docstring
+#: instead. Repairing it properly means a scanner that pairs an opening mark with the
+#: NEAREST mark from its own closer set, which is a change to `_quoted_span_offsets`'
+#: contract and belongs in its own cycle with its own pins, not bolted onto this one.
 #: ⛔ `_QUOTED_NEGATION` and `_BUILDER_PHRASE` lived here and are GONE (cycle-17 P1,
 #: measured). Both became dead when `_quotes_the_denial` moved its gate from "the span
 #: holds a Builder phrase and a negation" to "the span IS a denial, by `_DENIAL_PATTERNS`"
@@ -673,13 +705,28 @@ _QUOTE_PAIRS = (('"', '"'), ('`', '`'), ('\u201c', '\u201d'), ('\u2018', '\u2019
 #: removing it is this file's own cycle-16 rule for `before then`.
 
 
-def _quoted_span_offsets(text: str) -> list[tuple[int, int, bool]]:
+def _quoted_span_offsets(text: str, *, apostrophe: bool = True) -> list[tuple[int, int, bool]]:
     """Every quoted span as ``(inner_start, inner_end, closed)`` in ``text``.
 
     THE ONE implementation of "what is quoted here": :func:`_quoted_spans` reads it as
     strings, and :func:`_asserts_a_denial_outside_the_quotes` needs the same spans as
     OFFSETS so it can mask them. Two implementations of this rule would be two
     definitions of "quoted" — the failure this whole exemption exists to avoid.
+
+    ⛔ ``apostrophe=False`` EXISTS FOR ONE CALLER, AND IT CLOSES A MEASURED HOLE
+    (round-3 review, P1). The ``'`` pass opens at any `'` not preceded by an alphanumeric
+    and closes at the next one not followed by one, so an ELISION opens and a plural
+    POSSESSIVE closes — one CLOSED span wrapping an entire denial:
+
+        Since the '90s there is no Builder plan, and the customers' rows are wrong.
+        spans -> [(11, 58, True)]      # the "quotation" IS the denial
+        _denials_in_document(...) -> []   # the guard's real scan saw NOTHING
+
+    while `origin/main` FLAGS it. Two ordinary apostrophes made the #12444 drift
+    re-introducible verbatim. The apostrophe is right for the RECORD arm (a retraction
+    written `'there is no "builder" plan'` is a quotation), so it stays on by default;
+    it is wrong for the cue-free MENTION exemption, and that is the one caller that
+    turns it off.
     """
     spans: list[tuple[int, int, bool]] = []
     for open_mark, close_mark in _QUOTE_PAIRS:
@@ -695,7 +742,7 @@ def _quoted_span_offsets(text: str) -> list[tuple[int, int, bool]]:
             spans.append((start + len(open_mark), end, True))
             i = end + len(close_mark)
     i = 0
-    while i < len(text):
+    while apostrophe and i < len(text):
         if text[i] == "'":
             before = text[i - 1] if i else " "
             if not before.isalnum():                      # an opener, not `isn't`
@@ -922,23 +969,45 @@ def _quotes_the_whole_denial(sentence: str) -> bool:
     REGRESSION against `origin/main`, so the exemption cannot be gated on a cue word: a
     MENTION is a mention whatever verb introduces it.
 
-    The rule is structural, and it needs no cue. Every :data:`_DENIAL_PATTERNS` match
-    must sit inside a CLOSED span, and nothing outside the spans may assert a denial —
-    so `There is no "Builder plan".` stays RED (`_BUILDER_PLAN` matches from the OPENING
-    quote, which is outside its own span) and a live re-assertion beside a quoted
-    record stays RED (via :func:`_asserts_a_denial_outside_the_quotes`). Offsets are
-    taken from `_plain`, the same coordinate space as the matches: markdown stripping
-    (`**Never**`, `[Builder](url)`) moves them.
+    The rule is structural, and it needs no cue. The denial must START inside a CLOSED
+    quotation — its own assertion (the `there is no` lead-in) then sits OUTSIDE it — and
+    nothing outside the spans may assert a denial, so `There is no "Builder plan".`
+    stays RED (the match starts at `There`, before the opening mark) and a live
+    re-assertion beside a quoted record stays RED (via
+    :func:`_asserts_a_denial_outside_the_quotes`).
+
+    ⛔ `start`, NOT WHOLE-MATCH CONTAINMENT (round-3 review, P2). The intensifier arms
+    CONSUME the closing mark and the qualifier, so `match.end()` lands past the span end
+    and whole-match containment rejected a genuine mention — `Never write "there is no
+    Builder plan" either.` was RED here and GREEN at `origin/main`. Requiring only the
+    match's START to be inside the span is the same test applied to the part that carries
+    the assertion; anything the match reaches BEYOND the span is still governed by
+    :func:`_asserts_a_denial_outside_the_quotes`, which is why the relaxation cannot
+    become a licence (its pins stay red).
+
+    The spans come from `_plain` (the same coordinate space as the matches, so markdown
+    stripping cannot shift them) and EXCLUDE apostrophe spans (see
+    :func:`_quoted_span_offsets`).
+
+    ⛔ THE `all(...)` QUANTIFIER IS REDUNDANT WITH THE OUTSIDE RULE, AND IS KEPT BECAUSE
+    IT FAILS SAFE (round-3 review, measured, NOT a claim of protection). A round-3
+    finding reported the `all` → `any` widening as unpinned; re-measured, it is
+    UNOBSERVABLE: when any match starts outside every span, the outside rule below
+    already catches it, so loosening the quantifier changes **0** file-level verdicts
+    across the 104 `docs/` files that mention `builder`. It is left as `all` because the
+    stricter form is the side that yields FEWER exemptions (i.e. fewer false passes) if
+    the outside rule is ever narrowed — not because a test proves it.
     """
     plain = _plain(sentence)
-    spans = [(start, end) for start, end, closed in _quoted_span_offsets(plain) if closed]
+    spans = [(start, end) for start, end, closed
+             in _quoted_span_offsets(plain, apostrophe=False) if closed]
     if not spans:
         return False
     matches = [match for pattern in _DENIAL_PATTERNS for match in pattern.finditer(plain)]
     if not matches:
         return False
-    if not all(any(start <= match.start() and match.end() <= end
-                   for start, end in spans) for match in matches):
+    if not all(any(start <= match.start() <= end for start, end in spans)
+               for match in matches):
         return False
     return not _asserts_a_denial_outside_the_quotes(sentence)
 
@@ -1351,6 +1420,13 @@ class TestNoDocDeniesABuilderPlanExists:
             'The old wording, "there is no Builder plan", was removed in #12444.',
             'A doc must never say \u201cthere is no Builder plan\u201d.',
             'The phrase \u201cthere is no **Builder** plan\u201d is forbidden in this doc.',
+            # ⛔ …and a mention with an INTENSIFIER TRAILER (round-3 review, P2, measured):
+            # the intensifier arms CONSUME the closing mark and the qualifier, so
+            # whole-match containment pushed `match.end()` past the span and rejected a
+            # genuine mention — RED here, GREEN at `origin/main`. The exemption now
+            # requires only the match's START to be inside the span.
+            'Never write "there is no Builder plan" either.',
+            'Never write "there is no Builder plan" anymore.',
         )
         for sentence in correct:
             assert not _denial_in(sentence), (
@@ -1605,6 +1681,15 @@ class TestNoDocDeniesABuilderPlanExists:
             # the forbidden sentence and THEN asserts it is still a denial. Without these
             # the new exemption could be widened into a licence and no test would red.
             'Never write "there is no Builder plan"; there is no Builder plan.',
+            'The doc said "there is no Builder plan"; a builder buys pro or team.',
+            # ⛔ APOSTROPHES MUST NOT BRIDGE A DENIAL (round-3 review, P1, measured):
+            # an elision opened a "quotation" and a plural possessive closed it, so one
+            # CLOSED span wrapped the whole denial and `_denials_in_document` returned
+            # `[]` for the live drift — while `origin/main` FLAGS it. Two ordinary
+            # apostrophes made the drift re-introducible verbatim.
+            "Since the '90s there is no Builder plan, and the customers' rows are wrong.",
+            "In the '90s there is no Builder plan, and the builders' rows are wrong.",
+            "'Twas noted there is no Builder plan, and the docs' row is wrong.",
             'The doc says "there is no Builder plan" and there is no Builder plan.',
             # ⛔ THE TWO CLAUSE ENDS ARE REDUNDANTLY COVERED BY EVERY `There is no …
             # plan (…)` PIN (cycle-16 P2, measured): deleting `_CITATION` from EITHER
