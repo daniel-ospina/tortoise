@@ -4333,16 +4333,26 @@ def tortoise_query(kind: str | None = None,
         # SDK's range refusal, and `order_by="garbage"` on its vocabulary one, so
         # the route must name the domain that arm actually applies rather than
         # promising the value is applied (round-26 P2 1, measured on both arms).
+        # The clause's SUBJECT is the arguments it actually qualifies, not `_them`:
+        # `_them` counts every refused argument, so a mixed refusal (one value
+        # outside the domain, one inside it, or `kind`, which `text=` DOES apply)
+        # told the caller that the perfectly good value was wrong too — round-27's
+        # own P2 2 defect, reopened through round-27's pronoun fix (round-28 P2 1,
+        # measured: `min_confidence=0.9, order_by="garbage"` "corrected" 0.9, and a
+        # `kind` refusal was folded into an ordering domain).
         _domain = []
+        _domain_names = []
         if "min_confidence" in _names and not (
                 isinstance(min_confidence, (int, float))
                 and 0.0 <= min_confidence <= 1.0):
             _domain.append("a floor of 0.0-1.0")
+            _domain_names.append("min_confidence")
         if ("order_by" in _names
                 and order_by not in ("relevance", "confidence", "graph")):
             # Rendered with braces, not "'a', 'b' or 'c'": the trailing `or` landed
             # immediately before the template's own ", or drop …" (round-27 P2 3c).
             _domain.append("an order in {'relevance', 'confidence', 'graph'}")
+            _domain_names.append("order_by")
         if _domain:
             _accepted = (_domain[0] if len(_domain) == 1
                          else ", ".join(_domain[:-1]) + " and " + _domain[-1])
@@ -4356,7 +4366,8 @@ def tortoise_query(kind: str | None = None,
             # message has just said CANNOT apply a floor — self-contradictory in
             # adjacent sentences. And `{_them}`, not "it", so the sentence agrees in
             # number with the arguments the same message names (round-27 P2 3b).
-            _route += f". The text= arm applies {_them} only as: {_accepted}"
+            _route += (f". The text= arm applies "
+                       f"{' and '.join(_domain_names)} only as: {_accepted}")
         if paginated and not (_arm == "tag=" and _names == ["kind"]):
             # `text=` takes no offset/page (measured: following the route with
             # offset= kept answers "offset/page not supported with text"), so a

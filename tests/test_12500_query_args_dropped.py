@@ -456,21 +456,36 @@ def test_the_text_arm_floor_message_offers_a_route_that_terminates(stub) -> None
     assert "pass text=" not in message, message
 
 
-@pytest.mark.parametrize("kwargs, domain", [
-    ({"kind": "statement", "min_confidence": 1.5}, "a floor of 0.0-1.0"),
+@pytest.mark.parametrize("kwargs, subject, domain", [
+    ({"kind": "statement", "min_confidence": 1.5},
+     "min_confidence", "a floor of 0.0-1.0"),
     ({"kind": "statement", "order_by": "garbage"},
-     "an order in {'relevance', 'confidence', 'graph'}"),
-    ({"tag": "pricing", "min_confidence": 1.5}, "a floor of 0.0-1.0"),
+     "order_by", "an order in {'relevance', 'confidence', 'graph'}"),
+    ({"tag": "pricing", "min_confidence": 1.5},
+     "min_confidence", "a floor of 0.0-1.0"),
     ({"tag": "pricing", "order_by": "garbage"},
-     "an order in {'relevance', 'confidence', 'graph'}"),
-    # …and BOTH refused at once, which is where the sentence has to agree in number
-    # with the arguments the same message names (round-27 P2 3b: it shipped "applies
-    # IT only as" straight after "min_confidence and order_by are not applied", and
-    # nothing red — the `_verb`/`_them` machinery exists precisely to stop that).
+     "order_by", "an order in {'relevance', 'confidence', 'graph'}"),
     ({"kind": "statement", "min_confidence": 1.5, "order_by": "garbage"},
+     "min_confidence and order_by",
      "a floor of 0.0-1.0 and an order in {'relevance', 'confidence', 'graph'}"),
+    ({"tag": "pricing", "min_confidence": 1.5, "order_by": "garbage"},
+     "min_confidence and order_by",
+     "a floor of 0.0-1.0 and an order in {'relevance', 'confidence', 'graph'}"),
+    # MIXED: one value outside the domain, one inside it, and `kind`, which `text=`
+    # DOES apply. The clause must qualify only what is actually out of domain — an
+    # earlier version used the message's `_them` (every refused argument), so it
+    # "corrected" the perfectly ordinary `min_confidence=0.9` and folded `kind` into
+    # an ordering domain (round-28 P2 1, measured).
+    ({"kind": "statement", "min_confidence": 1.5, "order_by": "relevance"},
+     "min_confidence", "a floor of 0.0-1.0"),
+    ({"tag": "pricing", "kind": "statement", "min_confidence": 0.9,
+      "order_by": "garbage"},
+     "order_by", "an order in {'relevance', 'confidence', 'graph'}"),
+    ({"tag": "pricing", "kind": "statement", "min_confidence": 1.5},
+     "min_confidence", "a floor of 0.0-1.0"),
 ])
-def test_a_route_to_pass_text_names_the_values_that_arm_accepts(stub, kwargs, domain) -> None:
+def test_a_route_to_pass_text_names_the_values_that_arm_accepts(
+        stub, kwargs, subject, domain) -> None:
     """An unusable value must not be promised to an arm that rejects it (r26 P2 1).
 
     The structural and tag arms DROP every value, so the SDK never judges it —
@@ -481,9 +496,16 @@ def test_a_route_to_pass_text_names_the_values_that_arm_accepts(stub, kwargs, do
     error, on both arms (measured). The text-arm branch already avoids the
     paragraph for these values, so the same call answered two ways by arm.
 
-    Fails if the route stops naming the accepted domain, or if the instruction it
-    now gives does not terminate — the second half executes it, on the validating
-    stub, with a value from the domain it names.
+    Fails if the clause stops naming the destination arm (`The text= arm applies`,
+    never a bare "That arm", which bound by proximity to the TAG arm on the tag
+    route), stops naming the arguments it qualifies, stops naming the domain, or if
+    the instruction it gives does not terminate — the last part executes it, on the
+    validating stub, with a value from the domain it names.
+
+    The subject is asserted EXPLICITLY per parameter, not derived from the shape:
+    an earlier version computed it from `len(kwargs)`, so the tag-side twin of the
+    both-arguments case demanded a string the correct product does not emit — a
+    gate that would false-block a correct message (round-28 P2 2, measured).
     """
     from tortoise.mcp_server import tortoise_query
 
@@ -491,14 +513,8 @@ def test_a_route_to_pass_text_names_the_values_that_arm_accepts(stub, kwargs, do
 
     assert _is_refusal(result), f"no refusal to read a message off: {result}"
     message = result["error"]
-    assert domain in message, message
-    # The destination arm is NAMED. "That arm" bound by proximity to the TAG arm on
-    # the tag route, which the same message has just said CANNOT apply a floor —
-    # self-contradictory in adjacent sentences (round-27 P2 3a, measured green).
     assert "The text= arm applies" in message, message
-    # …and it agrees in number with the arguments the message names.
-    assert ("applies them only as" if len(kwargs) == 3 and "tag" not in kwargs
-            else "applies it only as") in message, message
+    assert f"The text= arm applies {subject} only as: {domain}" in message, message
     # …and the corrected call, with a value from the domain it names, IS served on
     # the arm the route points at.
     corrected = {k: v for k, v in kwargs.items()
@@ -513,32 +529,6 @@ def test_a_route_to_pass_text_names_the_values_that_arm_accepts(stub, kwargs, do
     assert not _is_refusal(followed), (
         f"following the route with a value it names still refuses: {followed}"
     )
-
-
-@pytest.mark.parametrize("kwargs", [
-    {"kind": "statement", "min_confidence": _CONFIDENCE_FLOOR},
-    {"tag": "pricing", "min_confidence": _CONFIDENCE_FLOOR},
-    {"kind": "statement", "order_by": "confidence"},
-    {"tag": "pricing", "order_by": "relevance"},
-])
-def test_the_domain_qualifier_is_withheld_when_the_value_is_inside_it(stub, kwargs) -> None:
-    """The qualifier is `only when` — never a correction of a value that is fine (r27 P2 2).
-
-    Dropping the usability test around it (so every refused argument gets the
-    clause) left the whole gate set green: the served text then told a caller who
-    passed the perfectly ordinary `min_confidence=0.9` that "The text= arm applies
-    it only as: a floor of 0.0-1.0" — a correction of a value already inside the
-    domain, and the value every other test in this file uses. Every parameter of
-    `test_a_route_to_pass_text_names_the_values_that_arm_accepts` is out of domain,
-    so only this test can see it.
-
-    Fails if the clause appears for an in-domain value.
-    """
-    from tortoise.mcp_server import tortoise_query
-
-    message = tortoise_query(**kwargs)["error"]
-
-    assert "only as:" not in message, message
 
 
 def test_an_unusable_floor_is_left_to_the_sdk_to_refuse(stub) -> None:
