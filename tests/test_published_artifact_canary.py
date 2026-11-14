@@ -3527,7 +3527,7 @@ def test_the_answered_NO_VERSION_details_name_the_right_distribution():
 
     `missing_version_arm` builds one sentence per arm from `package`. Nothing pinned the literals,
     so `index metadata for {ENGINE_PACKAGE}` could be swapped for `{CLIENT_PACKAGE}` — a FAIL about
-    the wrong distribution, on the shape (`{{"info": {{}}}}`) this PR refers out to #12636.
+    the wrong distribution, on the shape (`{"info": {}}`) this PR refers out to #12636.
     """
     engine_side = canary.build_report(
         engine_doc={"info": {}},
