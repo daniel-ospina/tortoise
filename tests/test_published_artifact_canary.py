@@ -146,6 +146,16 @@ def test_absent_client_distribution_is_red_not_absent_ok():
         report.get("client-published").detail
     )
     assert "could not read the" not in report.get("client-published").detail
+    # ⛔ AND THE EVIDENCE ITSELF STILL HAS TO REACH THE HUMAN (#12422 round-24 review P2).
+    # Replacing the old `assert "HTTP 404" in …` (too weak a conflation pin) silently
+    # dropped the ONLY assertion that `client_error` survives into the detail: measured,
+    # deleting `({client_error or 'no result'})` from both arms left all 72 green while
+    # the detail named the finding and withheld the URL that justifies it — and this is
+    # the sentence a human reads before an IRREVERSIBLE upload. The URL is the evidence,
+    # not the verdict word, so it is pinned by hand here rather than inferred.
+    assert "pypi.org/pypi/tortoise-client" in report.get("client-published").detail, (
+        report.get("client-published").detail
+    )
 
 
 def test_an_unreadable_index_is_unknown_and_exits_nonzero():
@@ -255,6 +265,12 @@ def test_a_MISSING_engine_project_is_red_and_an_UNREADABLE_index_is_unknown():
         absent.get("engine-index").detail
     )
     assert "could not read the" not in absent.get("engine-index").detail
+    # the underlying index error is the evidence for the finding, so it must survive
+    # into the detail — see the sibling note in
+    # `test_absent_client_distribution_is_red_not_absent_ok` (round-24 review P2).
+    assert "pypi.org/pypi/tortoise-graph" in absent.get("engine-index").detail, (
+        absent.get("engine-index").detail
+    )
 
     unreadable = canary.build_report(
         engine_doc=None,
@@ -270,7 +286,17 @@ def test_a_MISSING_engine_project_is_red_and_an_UNREADABLE_index_is_unknown():
     assert unreadable.exit_code == 2
     # and the no-answer side says so, in its own words — the same pin in the other
     # direction, so neither branch can be swapped for the other silently.
+    # ⛔ THE OTHER DIRECTION IS AN ABSENCE, NOT A SECOND PHRASE (#12422 round-24 review
+    # P2). Asserting only that "UNKNOWN, not absent" is PRESENT leaves the finding
+    # sentence free to appear on this side too: measured, an engine UNKNOWN detail of
+    # "tortoise-graph is not on the index (… ) — the distribution's presence is UNKNOWN,
+    # not absent" passed every one of the 72 tests while telling a reader the project was
+    # absent on a timeout. The finding phrase is therefore pinned ABSENT here, which is
+    # what makes the sentence above true.
     assert "UNKNOWN, not absent" in unreadable.get("engine-index").detail, (
+        unreadable.get("engine-index").detail
+    )
+    assert "is not on the index" not in unreadable.get("engine-index").detail, (
         unreadable.get("engine-index").detail
     )
 
@@ -291,6 +317,9 @@ def test_an_unreadable_CLIENT_index_is_unknown_not_absent():
     arm = report.get("client-published")
     assert arm.status == canary.UNKNOWN
     assert "UNKNOWN, not absent" in arm.detail
+    # the finding phrase must be ABSENT on the no-answer side — the mirror of the engine
+    # arm's round-24 pin, so this branch cannot silently start speaking the FAIL sentence.
+    assert "is not resolvable on the index" not in arm.detail, arm.detail
     assert report.verdict == canary.UNKNOWN
     assert report.exit_code == 2
 
