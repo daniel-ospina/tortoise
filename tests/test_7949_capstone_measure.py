@@ -5984,21 +5984,56 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # ...and THAT sentence names a second file, so its `.ts` pair takes its
         # own row: a row carries ONE source key. Both anchors are the FUNCTIONS
         # the row's prose names (`postCapture` and its `install-probe` sibling),
-        # never a bare offset. The row named `:948`/`:938`; the tree carries those
-        # two `def`s at `:955`/`:947`, which are **always 8 apart** across all 27
-        # revisions of the file — so nothing "rotted" and there is no offset to
-        # reuse: `:938` was `clearTimeout(timer);` and `:948` was
-        # `cfg: CaptureConfig,`, i.e. the pair was WRONG, not shifted (the file did
-        # not move in this wave at all). A reader who takes an offset from it
-        # re-derives `948` → `957`, which lands on `postCapture`'s parameter list
-        # (`payload: Record<string, unknown>,`) instead of its `def`, so the row
-        # reds on content rather than silently resolving.
+        # never a bare offset. The pair on `main` when `#12545` re-derived the rest
+        # of this bundle was `:948`/`:938`, and that pair was **WRONG, not
+        # shifted**: `:938` was `clearTimeout(timer);` and `:948` was
+        # `cfg: CaptureConfig,` — at that base the two `def`s sat at `:955`/`:947`,
+        # which `#12545` corrected. `#12507` then moved the file itself
+        # (`266 insertions / 29 deletions`), so the pair is **`:1007`/`:999`** at the
+        # head this merges into. The two are always **8 apart** in this file, and
+        # that is exactly the trap: an offset read off a stale pair re-derives
+        # `948` → `957` and lands on `postCapture`'s parameter list
+        # (`payload: Record<string, unknown>,`) instead of its `def`. Re-open the
+        # line; the row is held by CONTENT, so a wrong pair reds rather than
+        # silently resolving.
         ("00-align.md", "`llm:deepseek-direct` is what", (
-            ("955", "export function postCapture("),
-            ("947", "export function postInstallProbe("),
+            ("1007", "export function postCapture("),
+            ("999", "export function postInstallProbe("),
         ), "pi_hooks"),
         ("04-plan.md", "operator / label path", (
             ("25396", "declared = declared_relation_predicates()"),
+        ), "sdk"),
+        # ⛔ THE RECONCILE APPENDIX'S OWN REPRODUCTION BLOCK (#12462 review round 2).
+        # `RECONCILE-A1-A2-A5.md` is in NEITHER `_BUNDLE_DOCS` nor any sweep, so the
+        # comment block that prints this record's own `git grep` output had readers for
+        # NONE of its cites, and two of them silently re-staled while their §0 sibling
+        # was re-pointed — §0 said `sdk.py:18999` and the appendix said `:18996`, one
+        # document asserting two numbers for one hit.
+        # ⛔ The third is not an offset at all: the appendix read `:16911`, which is
+        # `extracted, meta = self._extract_session_llm(` — the **m1** entry point — while
+        # the sentence is about `_capture_session` reaching the **v2** fold. A reader
+        # re-deriving "does the v2 path reach the relation writer" from that cite lands
+        # on the other extractor and concludes the opposite of what §0 records, which is
+        # why it is pinned by its ANCHOR and not merely by a number.
+        ("RECONCILE-A1-A2-A5.md", "reaches it at", (
+            ("16914", "extracted, meta = self._extract_session_v2("),
+            # …and the CALL on the same line, so the appendix's second half of the
+            # sentence has a reader too (#12462 review round 3: `:19012` was corrected
+            # here and left unpinned, so it could re-stale silently while §0 stayed
+            # right — the round-2 shape, one number short).
+            ("19012", "relation_write = apply_relation_edges("),
+        ), "sdk"),
+        ("RECONCILE-A1-A2-A5.md", "relation_write.py:7, sdk.py:", (
+            ("18999", "# `#10999` made the channel TRANSPORT ONLY"),
+        ), "sdk"),
+        # ⛔ THE SAME HIT, IN THE REPRODUCTION BLOCK TWO SCREENS DOWN (#12462 review
+        # round 4). The row above binds the appendix's SUMMARY line; the block that
+        # prints the `git grep` output states the identical cite again, and it was the
+        # one changed number in this whole diff that a revert left GREEN — measured by
+        # reverting every changed block individually. Two statements of one hit, one
+        # reader, is how "one document asserts two numbers" comes back.
+        ("RECONCILE-A1-A2-A5.md", "CONSUMER's docstring) and sdk.py:", (
+            ("18999", "# `#10999` made the channel TRANSPORT ONLY"),
         ), "sdk"),
         # ⛔ THE 402 QUOTA GUARD, `03-test-design.md`'s A-corpus capture row (#12369
         # review, P2). This row is the one that would have caught #12369's own
@@ -6008,8 +6043,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # exact failure the deleted "Provenance of the numbers" section named. Held by
         # CONTENT, so a number that lands on a comment cannot satisfy it.
         ("03-test-design.md", "the A-corpus capture", (
-            ("18494", "if count + est > max_points:"),
-            ("18519", "detail=quota_refusal_payload("),
+            ("18503", "if count + est > max_points:"),
+            ("18528", "detail=quota_refusal_payload("),
         ), "hosted_api"),
         # ⛔ NOT A ROW ANY MORE — the `carve_out:` claim below the rows is checked
         # against the BLOCK (`_section_entries`) and not against a line number: the
