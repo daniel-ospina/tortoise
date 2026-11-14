@@ -1013,7 +1013,16 @@ def verify_session_capture(harness: str,
             extracted = detail.get("extracted")
             source_ok = (isinstance(source, dict)
                          and source.get("url") == f"session:{probe_id}")
-            extracted_ok = _session_extracted(detail) >= 1
+            counted = _session_extracted(detail)
+            extracted_ok = counted >= 1
+            # The SERVED value, named only when it DISAGREES with the count this
+            # verdict used.  ``session_extracted`` reads a JSON ``true``/``false``,
+            # a string and a negative as 0, so interpolating the raw field beside
+            # "neither observed nor ruled out" would print ``extracted=True`` for a
+            # value the line above has just rejected as a count (#12730 review P2).
+            # Absent a disagreement this is empty, so every message keeps the
+            # exact shape it already had for the ordinary ``extracted: 0`` state.
+            served = (f", served {extracted!r}" if extracted != counted else "")
             if source == "<absent>":
                 report["links"]["memory"] = _link(
                     STATUS_UNVERIFIABLE,
@@ -1042,20 +1051,20 @@ def verify_session_capture(harness: str,
                     STATUS_UNVERIFIABLE,
                     f"session {probe_id!r} appears as a Source, but the server "
                     f"has not recorded an extraction outcome for it "
-                    f"(extracted={extracted}, outcome_known=false) — memory "
-                    f"points were neither observed nor ruled out",
+                    f"(extracted={counted}{served}, outcome_known=false) — "
+                    f"memory points were neither observed nor ruled out",
                     extracted=extracted, source=source)
             elif not extracted_ok:
                 report["links"]["memory"] = _link(
                     STATUS_FAIL,
                     f"session {probe_id!r} appears as a Source but extraction "
-                    f"produced no memory Point (extracted={extracted})",
+                    f"produced no memory Point (extracted={counted}{served})",
                     extracted=extracted, source=source)
             else:
                 report["links"]["memory"] = _link(
                     STATUS_PROVEN,
                     f"session {probe_id!r} is the Source {source.get('url')!r} "
-                    f"and {extracted} memory Point(s) were extracted",
+                    f"and {counted} memory Point(s) were extracted",
                     extracted=extracted, source=source)
     except _ApiError as e:
         # The API read broke AFTER the seam fired: the chain is BROKEN, but

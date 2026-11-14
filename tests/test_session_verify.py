@@ -1199,6 +1199,15 @@ def test_guard_a_bool_count_is_not_a_count(hosted, setup):
     memory = report["links"]["memory"]
     assert memory["status"] == "UNVERIFIABLE-IN-CI", memory
     assert report["exit_code"] == EXIT_UNVERIFIABLE
+    # ⛔ AND THE LINE MAY NOT PARROT THE VALUE IT JUST REJECTED (#12730 review
+    # P2). The arm is reached only because the canonical count is 0, so a line
+    # interpolating the raw field read "(extracted=True, outcome_known=false) —
+    # memory points were neither observed nor ruled out": a count displayed by
+    # the very sentence that discarded it. The served value is named ONLY when
+    # it disagrees with the count, and it is labelled as the served one.
+    assert "(extracted=0, served True, outcome_known=false)" in memory["detail"], (
+        memory["detail"])
+    assert "extracted=True" not in memory["detail"], memory["detail"]
 
 
 def test_guard_the_count_is_the_canonical_reader_too(hosted, setup,
@@ -1265,6 +1274,17 @@ def test_guard_the_arm_reads_the_canonical_predicate(hosted, setup,
     # The GENUINE extraction FAIL, not the "never captured" FAIL.
     assert "no memory Point" in report["links"]["memory"]["detail"]
     assert report["exit_code"] == EXIT_BROKEN
+    # ⛔ THE OTHER DIRECTION (#12730 review P2). The arm above alone is GREEN on
+    # the UNFIXED tree — an unqualified `extracted: 0` gets the same FAIL without
+    # consulting anything — so it excludes an inline COPY of the reader but
+    # cannot tell "asks the canonical reader" from "asks nothing". Asking the
+    # reader for its ``False`` (the served, recorded-unknown state) must move the
+    # link to UNVERIFIABLE; on the pre-fix tree this assertion reds.
+    monkeypatch.setattr(sc, "extraction_outcome_known",
+                        lambda _detail: False)
+    report = _verify(hosted, home, "claude", root)
+    assert report["links"]["memory"]["status"] == "UNVERIFIABLE-IN-CI", report
+    assert report["exit_code"] == EXIT_UNVERIFIABLE
 
 
 def test_importing_session_verify_does_not_pull_the_sdk():
