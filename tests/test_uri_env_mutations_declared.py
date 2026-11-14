@@ -1113,10 +1113,32 @@ _EXEMPT_FROM_ENV_MUTATION_GUARD = frozenset() | {
     "test_markers.py",
 }
 
+#: ⛔ `_MUTATION_RE` is applied to WHOLE MODULE SOURCE (`finditer` over `src`
+#: in `_uri_mutation_sites`), never to one stripped line — so a `$` in an arm
+#: anchors to end-of-string, not end-of-line, unless the pattern also carries
+#: `re.MULTILINE` … and MULTILINE here is the *worse* of the two errors:
+#: `monkeypatch\.setenv\(\s*$` has no URI specificity at all, so it matches
+#: ANY line-wrapped `setenv(` call. #12561 measured both directions on the
+#: 1356-module scanned population: as written that arm matched **0** sites
+#: (inert, while reading as the arm that catches a wrapped `setenv(`), and
+#: with MULTILINE it matched **21** — the 11 URI sites were already censused
+#: by the arm above at the same offset (`\s*` crosses newlines), and the
+#: other 10 set `TORTOISE_BACKUP_KEY`/`BILLING_SUCCESS_URL`/`SUPABASE_URL`/
+#: `TORTOISE_IMPORT_RECEIPT_DIR`. Those 10 are false URI mutations: NINE of
+#: them would go undeclared and red (23 → 32 measured), and the tenth
+#: (`test_hosted_api.py:6165`) is already covered — that file's declaration
+#: arm `monkeypatch\.setenv\(\s*$` matches the census line
+#: `monkeypatch.setenv(`, because DECLARATIONS are matched per stripped line
+#: where `$` correctly means end-of-line. So the repair does not merely
+#: over-report: it silently censuses a non-URI `setenv(` as a URI mutation,
+#: which is the #11083 hazard (a declaration authorizing more than it names)
+#: in its silent form, with no red to surface it.
+#: The arm is therefore DELETED, not repaired: its intended coverage is the
+#: arm above. `test_the_census_regex_carries_no_end_of_input_anchor` and
+#: `test_declaration_regex_census_surface` pin both halves.
 _MUTATION_RE = re.compile(
     r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'
     r'|monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'
-    r'|monkeypatch\.setenv\(\s*$'
     # `=(?!=)` — an ASSIGNMENT, never the comparison `==`. Without the
     # lookahead this arm censused reads as mutations: a test that pins the
     # value it just set (`assert os.environ["TORTOISE_DB_URI"] == "…"`)
@@ -2780,18 +2802,67 @@ def test_restoration_patterns_green():
         assert not violations, f"{label} must stay green: {violations}"
 
 
+def test_the_census_regex_carries_no_end_of_input_anchor():
+    r"""#12561: `_MUTATION_RE` is applied to WHOLE MODULE SOURCE, so an
+    end-of-line anchor in an arm can only mean end-of-STRING (inert) or —
+    with `re.MULTILINE` — end-of-ANY-line (no URI specificity). Neither is
+    coverage, so the regex carries no end anchor, in any of Python's
+    spellings: `$`, `\Z` and (3.14+) `\z`.
+
+    Why a structural pin: an INERT arm cannot be caught behaviourally. The
+    arm this test was written against (`monkeypatch\.setenv\(\s*$`) matched
+    0 of the 1356 scanned modules, so every behavioural assertion about
+    real forms kept passing while it sat there reading as the arm that
+    catches a wrapped `setenv(` — and the test that claimed to pin "the
+    multiline continuation form" passed *through* it, on a truncated string
+    (`'monkeypatch.setenv('`) that has no continuation at all.
+
+    Pinning the SPELLING is not enough — `$` alone left `\Z` free to
+    re-introduce the same inert arm (verified: an appended
+    `monkeypatch\.setenv\(\s*\Z` alternative passes a `"$" not in pattern`
+    check). This asserts on every end-anchor spelling Python's `re` accepts.
+    Residual, stated rather than chased: an exotic zero-width construction
+    (`(?!\S*[\s\S])` and friends) can express end-of-input without any of
+    them; enumerating arbitrary regex constructions is not a gate this file
+    should own.
+
+    DELIBERATE_URI_MUTATIONS patterns are a DIFFERENT string: `_is_declared`
+    matches them with `re.search` against ONE stripped line, where `$` does
+    mean end-of-line. Several use `\s*$` and are correct — this pin is
+    scoped to the census regex for exactly that reason.
+    """
+    pattern = _MUTATION_RE.pattern
+    anchors = sorted(a for a in ("$", "\\Z", "\\z") if a in pattern)
+    assert not anchors, (
+        "_MUTATION_RE is matched against whole module source, where an "
+        f"end anchor {anchors} means end-of-STRING (inert: it can only "
+        "fire on a file whose tail is the fragment) or, with re.MULTILINE, "
+        "end-of-any-line with NO URI specificity (measured: 21 matches, 10 "
+        "of them non-URI setenv calls — false mutations; nine red, and the "
+        "tenth silently censused through an existing declaration). Keep "
+        "`$` for DELIBERATE_URI_MUTATIONS patterns, which are matched per "
+        "stripped line. (#12561)")
+
+
 def test_declaration_regex_census_surface():
-    """#2084 review pin: the declaration census's _MUTATION_RE must match
+    r"""#2084 review pin: the declaration census's _MUTATION_RE must match
     every mutation form it claims to census — pop, delenv, setenv (incl.
     the multiline continuation form), direct assignment, and del. A
     regression that narrows the regex (e.g. dropping the pop alternative)
     would silently blind the declaration guard while the repo census stays
-    green — this pins the regex surface directly."""
+    green — this pins the regex surface directly.
+
+    The multiline form below is a REAL continuation (`setenv(` newline
+    `"TORTOISE_DB_URI"`), which the setenv arm censuses because `\s*`
+    crosses newlines (#12561). It used to be spelled `'monkeypatch.setenv('`
+    — a truncated string with no continuation, matched only by an
+    end-of-string `$` arm that fired on nothing in the repo, so this
+    docstring's claim was pinned by the arm that could never work."""
     forms = [
         'os.environ.pop("TORTOISE_DB_URI", None)',
         'monkeypatch.delenv("TORTOISE_DB_URI", raising=False)',
         'monkeypatch.setenv("TORTOISE_DB_URI", uri)',
-        'monkeypatch.setenv(',
+        'monkeypatch.setenv(\n    "TORTOISE_DB_URI",\n    uri,\n)',
         'os.environ["TORTOISE_DB_URI"] = _uri',
         'del os.environ["TORTOISE_DB_URI"]',
         # _os alias: the declaration regex matches it via substring
@@ -2818,6 +2889,20 @@ def test_declaration_regex_census_surface():
             f"_MUTATION_RE must not census the READ form {read_form!r} — a "
             "comparison is not a mutation (a declaration for it would "
             "authorize a real assignment in the same file)")
+    # …and the setenv arm is URI-SPECIFIC: a wrapped `setenv(` of any other
+    # variable is not a TORTOISE_DB_URI mutation. This is what forbids the
+    # tempting repair of a dead end-of-line arm (`re.MULTILINE`), which
+    # #12561 measured matching 10 such calls across the scanned population
+    # — each a false mutation whose green remedy is a file declaration that
+    # would then authorize a real URI mutation in that file.
+    for non_uri in (
+            'monkeypatch.setenv(\n    "TORTOISE_BACKUP_KEY",\n    key,\n)',
+            'monkeypatch.setenv(\n    "BILLING_SUCCESS_URL",\n    url,\n)',
+            'monkeypatch.setenv('):
+        assert not _MUTATION_RE.search(non_uri), (
+            f"_MUTATION_RE must not census the non-URI setenv form "
+            f"{non_uri!r} — the census is URI-specific, and a fragment "
+            "with no continuation is not a mutation of anything (#12561)")
     # the assignment arm must still catch the assignment it is for, including
     # the augmented-looking neighbourhood (`_os` alias, keyword value).
     for assign_form in ('os.environ["TORTOISE_DB_URI"] = "docker://h:6379/g"',
