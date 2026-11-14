@@ -2462,12 +2462,62 @@ def test_the_embedded_hatch_is_not_described_as_an_environment_key(
     assert payload["daemon_rung"] == "embedded-allowed", payload
     assert payload["env_graph_keys"] == [], payload   # no ladder key is set
     assert payload["differs"] is False, payload
+    # ⛔ The PRECONDITION that puts the renderer in the arm under test: the file
+    # DOES hold a ladder key, so the `graph_keys` branch is the one that runs.
+    # Without this the absence assertions below would pass on a payload that
+    # never reached the arm at all (review round 3, P2).
+    assert payload["graph_keys"] == ["TORTOISE_DB_URI"], payload
 
+    # ⛔ POSITIVE, not merely absent: the state must be DESCRIBED, and described
+    # as the hatch. An absence-only pin passed with the whole branch deleted —
+    # it cannot tell "described correctly" from "not described at all", and it
+    # accepts the false file-credit sentence as readily as the false
+    # environment-credit one (review round 3, P2).
     out = _show_text(capsys)
+    assert "selected by" in out and "TORTOISE_ALLOW_EMBEDDED=1" in out, out
     assert "TORTOISE_DB_PATH decides it" not in out, (
         "the embedded hatch was described as the ENVIRONMENT's "
         "TORTOISE_DB_PATH deciding it, and TORTOISE_DB_PATH is unset here: " + out)
+    assert "resolves to it for the daemon too" not in out, (
+        "the file's BLANK TORTOISE_DB_URI was credited with choosing the "
+        "embedded default: " + out)
 
     assert _run(("doctor",)) in (0, 1)
     doc = capsys.readouterr().out
+    assert "TORTOISE_ALLOW_EMBEDDED=1" in doc and "canonical EMBEDDED" in doc, doc
     assert "TORTOISE_DB_PATH decides it" not in doc, doc
+    assert "it selects the same graph target the rows below grade" not in doc, doc
+
+
+def test_a_whitespace_only_env_key_is_still_the_ONE_THAT_DECIDED(
+        capsys, _isolated, monkeypatch):
+    """The other half of the same discriminator, and the trap in the obvious fix.
+
+    Gating the "the ENVIRONMENT's X decides it" sentence on `X in env_graph_keys`
+    looks right and is WRONG: `env_graph_keys` filters `.strip()`, while the
+    ladder's own test is raw truthiness (`if os.environ.get(key):`), so a
+    WHITESPACE-ONLY `TORTOISE_DB_PATH` is consumed by the `path` rung and then
+    excluded from the set. The row fell through to the FILE sentence — crediting
+    the file's blank `TORTOISE_DB_URI` with a decision the environment's
+    whitespace value made (measured regression, review round 3, P1).
+
+    So the discriminator is the RUNG, not set membership. This pins it.
+    """
+    _write_env(_isolated, "TORTOISE_DB_URI=\n")
+    monkeypatch.setenv("TORTOISE_DB_PATH", "   ")
+
+    payload = _show_json(capsys)["env_file"]
+    assert payload["daemon_rung"] == "path", payload
+    assert payload["env_graph_keys"] == [], payload        # the strip() filter
+    assert payload["blank_graph_keys"]["env"] == ["TORTOISE_DB_PATH"], payload
+    assert payload["differs"] is False, payload
+
+    out = _show_text(capsys)
+    assert "the ENVIRONMENT's" in out and "TORTOISE_DB_PATH decides it" in out, out
+    assert "resolves to it for the daemon too" not in out, (
+        "a whitespace-only TORTOISE_DB_PATH was consumed by the `path` rung, so "
+        "the file's blank key cannot be the decider: " + out)
+
+    assert _run(("doctor",)) in (0, 1)
+    doc = capsys.readouterr().out
+    assert "the ENVIRONMENT's TORTOISE_DB_PATH decides it for the daemon" in doc, doc

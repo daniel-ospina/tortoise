@@ -4517,14 +4517,33 @@ def _cmd_config(args) -> int:
                     # `rung_deciding_key` names the ladder key a rung answers
                     # FOR, and for `embedded-allowed` that is
                     # `TORTOISE_DB_PATH` — a value the ladder read and found
-                    # FALSY, i.e. a variable the user does not have (the rung was
-                    # selected by the `TORTOISE_ALLOW_EMBEDDED` hatch). Without
-                    # this gate the row named an UNSET variable as the decider —
-                    # the same false-mechanism class this whole change exists to
-                    # remove (review round 2, P1).
-                    _deciding_in_env = _deciding in (env_file.get("env_graph_keys") or ())
-                    if (_deciding and _deciding_in_env
-                            and _deciding not in env_file["graph_keys"]):
+                    # ⛔ TWO ways the "the ENVIRONMENT's <key> decides it"
+                    # sentence can be FALSE, and they need different answers —
+                    # which is why the test is the RUNG, not set membership
+                    # (review round 3):
+                    #
+                    # * `embedded-allowed` consumed NO ladder key: the
+                    #   `TORTOISE_ALLOW_EMBEDDED` hatch selected the canonical
+                    #   embedded path. `rung_deciding_key` still names DB_PATH
+                    #   (the key whose emptiness produced the rung), so naming
+                    #   it would invent a decider — and falling through to the
+                    #   file sentence instead would credit the file, which is the
+                    #   exact false-credit this whole change removes. So this
+                    #   rung gets its OWN sentence.
+                    # * Every other rung DID consume a ladder key that was
+                    #   TRUTHY in `os.environ` — which a WHITESPACE-ONLY value is
+                    #   (`if os.environ.get(key):`), even though
+                    #   `env_graph_keys` excludes it (it filters `.strip()`).
+                    #   Gating on `env_graph_keys` therefore classified a key the
+                    #   ladder had just consumed as "not an environment key" and
+                    #   fell through to the file sentence — measured regression
+                    #   of the round-2 fix.
+                    if env_file.get("daemon_rung") == "embedded-allowed":
+                        print("  →  the same graph target as above: the canonical")
+                        print("     EMBEDDED default, selected by")
+                        print("     TORTOISE_ALLOW_EMBEDDED=1 — no ladder key, from")
+                        print("     this file or the environment, chose it")
+                    elif _deciding and _deciding not in env_file["graph_keys"]:
                         print("  →  the same graph target as above: the ENVIRONMENT's")
                         print(f"     {_printable(_deciding)} decides it for the daemon,")
                         print("     so the file's "
@@ -12302,13 +12321,19 @@ def _dotenv_rows(env_file: dict) -> list[tuple[str, str, str]]:
     if env_file.get("graph_keys"):
         # ⛔ The RESOLVER's answer, not a walk of `_DB_LADDER_KEYS` (#12441 item
         # 1) — see the twin site in `_cmd_config` for the blank-value state the
-        # walk mis-attributed, AND for why the "the ENVIRONMENT's <key>" sentence
-        # also requires that key to be an environment key (`embedded-allowed`
-        # names `TORTOISE_DB_PATH`, which the hatch left UNSET).
+        # walk mis-attributed, AND for why the discriminator here is the RUNG and
+        # not "is the key in `env_graph_keys`" (that filter is `.strip()`-based,
+        # so it excludes a whitespace-only value the LADDER consumed; and
+        # `embedded-allowed` consumed no ladder key at all — the hatch did).
         _deciding = rung_deciding_key(env_file.get("daemon_rung"))
-        _deciding_in_env = _deciding in (env_file.get("env_graph_keys") or ())
-        if (_deciding and _deciding_in_env
-                and _deciding not in env_file["graph_keys"]):
+        if env_file.get("daemon_rung") == "embedded-allowed":
+            detail = (f"{path} sets "
+                      f"{_printable(', '.join(env_file['graph_keys']))} — "
+                      f"{_read_clause}; the target the rows below grade "
+                      f"({_printable(str(graded))}) is the canonical EMBEDDED "
+                      f"default, selected by TORTOISE_ALLOW_EMBEDDED=1 — no ladder "
+                      f"key, from this file or the environment, chose it")
+        elif _deciding and _deciding not in env_file["graph_keys"]:
             detail = (f"{path} sets "
                       f"{_printable(', '.join(env_file['graph_keys']))} — "
                       f"{_read_clause}; the ENVIRONMENT's {_printable(_deciding)} "

@@ -581,12 +581,14 @@ class DaemonTargetError(ValueError):
 #: belongs to the resolver.
 #:
 #: ⛔ ``embedded-allowed`` maps to ``TORTOISE_DB_PATH`` deliberately: that rung is
-#: reached only AFTER ``TORTOISE_DB_PATH`` was read and found falsy, so DB_PATH is
-#: the ladder key the rung answers for. It is NOT a claim that DB_PATH is SET — a
-#: renderer that says "the ENVIRONMENT's DB_PATH decides it" must still check
-#: that DB_PATH is an environment key, or it invents a variable the user does not
-#: have (the hatch selected the rung). ``refuses`` consumed NEITHER key, and
-#: ``None`` is not a rung at all (a caller that did not grade the daemon).
+#: reached only AFTER ``TORTOISE_DB_PATH`` was read and found FALSY — unset, or
+#: exported EMPTY, or whitespace-only. So DB_PATH did NOT decide; the hatch did.
+#: It is therefore the ladder key the rung ANSWERS FOR, never a claim that DB_PATH
+#: is set: a renderer that says "the ENVIRONMENT's DB_PATH decides it" must not use
+#: this row for `embedded-allowed` at all, or it invents a decider (and inventing
+#: the FILE as the decider instead is the false-credit this table exists to
+#: remove). ``refuses`` consumed NEITHER key, and ``None`` is not a rung at all (a
+#: caller that did not grade the daemon).
 RUNG_DECIDING_KEY: dict[str, str | None] = {
     "uri": "TORTOISE_DB_URI",
     "file-uri": "TORTOISE_DB_URI",
