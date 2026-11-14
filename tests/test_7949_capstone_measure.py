@@ -13980,7 +13980,8 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # → the schema row at `:1773`; `:1764` is the unrelated `#12067` comment).
     # ⛔ A later cut of THIS comment wrote `:1764` and a `:11362` for the retired
     # "nothing in this tree consumes" comment — which is GONE from `tortoise/` at this
-    # head (corrected in place, see RECONCILE-A1-A2-A5.md), so it has no line to cite.
+    # head: `#11001` corrected it in place onto the line carrying `result["relations"]`
+    # (`:12487`, the line `_relations_cite` derives below), so it has no stale line to cite.
     # A cite re-derived by ARITHMETIC is not a measurement: re-read it, never add.
     # ⛔ DERIVED, not typed: the relations schema line is the one line carrying both the
     # `hasPart` spelling and the predicate allowance, so a merge that moves it moves the

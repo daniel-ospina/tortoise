@@ -2778,6 +2778,11 @@ to answer.
 > `#12536`), which is why its cite moves `6607`→`6637` in this same PR — re-measured, not assumed:
 > `12730`, `15149`, `15277`, `15302`, `15611`, `15621`, `17804`, `6637` and `955`/`947` all still open
 > on the content they claim.
+> ⛔ **The `.ts` pair in that sentence does NOT hold on the tree this record ships with**, and the
+> marker is inline for the file's own reason — a reader meets this line, not the correction 280
+> lines below it. Measured: `955`/`947` opened on this tree are the `#12460` comment and
+> `headers: {`; the two `def`s the A-d row names are `:1007` (`postCapture`) and `:999`
+> (`postInstallProbe`). The entry is not re-pointed — §10.37 records the move.
 
 - **The move is uniform for THIS wave, which is why a mapping is legitimate here and was not at
   §10.30.** `+3` describes every one of the twelve carriers; the §10.30 wave was the one where an
@@ -3033,7 +3038,7 @@ to answer.
   (`6916a6cd89d7`), which re-derived the SAME capstone-bundle cites this branch had already
   re-derived for its own delta. Each parent's numbers are correct for ITS tree — `main` does not
   carry this branch's `+90` in `tortoise/extractor_v2.py`, and this branch does not carry `main`'s
-  `+3` in `tortoise/sdk.py` or its `+44` in `tortoise/pi-hooks/tortoise-capture.ts` — so taking
+  `+3` in `tortoise/sdk.py` or its `+52` in `tortoise/pi-hooks/tortoise-capture.ts` — so taking
   either side would have published a number measured on a tree this one is not.
 - **`tortoise/extractor_v2.py` did NOT move, so §10.36's numbers are the live ones.** The MERGED
   file is byte-identical to this branch's pre-merge tree at `6e9ef2caae0c` (`git hash-object` on both
@@ -3055,9 +3060,12 @@ to answer.
 - **What the merge DOES re-derive: the hosted-transport pair in the epic's align row.**
   `docs/epics/2026-11-04-7949-extractor-v4-capstone/00-align.md` cited
   `tortoise/pi-hooks/tortoise-capture.ts:948` (the plain `postCapture`) and `:938` (its
-  `install-probe` sibling). `#12460` inserted 44 lines above both, and `#12545`'s re-derivation wrote
-  `:955`/`:947`; on this tree those two lines are `headers: {` and the `#12460` comment — neither is
-  a function, let alone the one the sentence names. MEASURED here by opening the line:
+  `install-probe` sibling). `#12460` moved BOTH `def`s by exactly **`+52`** — `947`→`999` and
+  `955`→`1007`, measured across `65700b9a11a0`→`54193b722e8e` by opening each side, which is the
+  wave the file's `+266/-29` total belongs to — and `#12545`'s re-derivation wrote `:955`/`:947`,
+  whose order is wrong as well as stale: on this tree `:955` is the `#12460` comment and `:947` is
+  `headers: {`. Neither is a function, let alone the one the sentence names. MEASURED here by
+  opening the line:
   `export function postCapture(` at **`:1007`** and `export function postInstallProbe(` at
   **`:999`**. ⛔ **That makes `#12545`'s sentence in §10.31 — that `955`/`947` "still open on the
   content they claim" — false on the tree that carries it.** This entry cannot repair a landed

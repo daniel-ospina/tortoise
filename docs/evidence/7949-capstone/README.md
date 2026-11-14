@@ -136,7 +136,7 @@ the opposite.** The scored run at `9152448d7` (`# generated: 2026-11-02T12:16:06
 whose `document_sha256` was
 `sha256:5ff05906cf383f50a873dafeee12216d5eafc80b89ae9676c78a109f16714fbe` — what
 `PRE-REGISTRATION.md` hashed to *at that commit*. The record in this tree hashes to
-`sha256:7361a45623aa2ee4780971d36361994fa126471b207cf7584fec1dfe3aef0777`, and **do not trust
+`sha256:f7d515633ef06adfea23a318ed6666ac0b777b10a3e8a8e4c106eafe9be940d4`, and **do not trust
 this line without re-deriving it** (`sha256sum docs/evidence/7949-capstone/PRE-REGISTRATION.md`):
 §8's change-control rule re-cuts the digest on *every* edit to the document, so a present-tense
 digest here is only ever as fresh as the last commit that touched it. `8bc2fbed1`

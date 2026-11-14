@@ -185,7 +185,7 @@ still a dedup candidate. Two reasons it is not a verdict value here:
 2. ⛔ **Writing `dedup_reviewed='link'` is worse than inert — it silently
    DEQUEUES.** The write is one call (`sdk.update_entity` → `_update_entity`'s `SET n
    += $props`), but the content review queue filters `dedup_reviewed IS NULL`
-   (`sdk.py:24507`), so any non-NULL value removes the row from review with
+   (`sdk.py:24856`), so any non-NULL value removes the row from review with
    **no verdict applied**. A `link` band that shipped only its writer would delete
    a review nobody counts.
 
