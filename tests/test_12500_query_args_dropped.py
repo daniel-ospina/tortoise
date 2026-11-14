@@ -661,11 +661,19 @@ _DOCSTRING_FALSE = (
     # (measured live — a 0.9 floor on a 0.05-belief point returns []), so banning
     # the bare phrase forbade a correct edit, the round-6 defect mirrored.
     '`order_by` is applied on the text= arm for `entity_type="point"`',
-    # round-6: only a CONFIDENCE ordering is refused there — `graph` and
-    # `relevance` really do reorder document/source reads. This sentence was
-    # mandated as TRUE by this very test for one round, which is how a pin turns
-    # into a false-PASS generator.
-    "for every type EXCEPT `document`/`source`",
+    # round-6/7: BOTH ranking orderings (`confidence` and `graph`) are refused on
+    # document/source — each computes the same key for every row — while
+    # `relevance` is applied to every type. This sentence was mandated as TRUE by
+    # this very test for one round, which is how a pin turns into a false-PASS
+    # generator. SCOPED to `order_by`: the same words about a CONFIDENCE ordering
+    # are TRUE (it IS applied for the other five types), so an unscoped ban
+    # forbade a correct edit — the same defect, mirrored (measured: inserting the
+    # true `confidence` sentence reded the unscoped fragment while the
+    # order_by-scoped one stays green).
+    "`order_by` for every type EXCEPT `document`/`source`",
+    # round-8: the harm clause was lumped, so it claimed an ORDERING let rows
+    # through — an ordering excludes nothing; it only re-decides their sequence.
+    "an accepted value was discarded and rows the caller excluded came back",
     # round-4: operators are Points, so this reason was self-contradictory.
     "selects non-Point rows",
 )
@@ -747,3 +755,41 @@ def test_a_graph_ordering_with_no_signal_is_refused_not_silently_reordered(
 
     assert "graph" in message, message
     assert "relevance" in message, message
+
+
+def test_the_served_docstring_states_the_falsy_exception() -> None:
+    """The contract must not read as an unconditional refusal (#12500 round 8).
+
+    The guard keys on truthiness, so `min_confidence=0.0` / `order_by=""` /
+    `kind=""` are SERVED — pinned as required behaviour by
+    `test_falsy_values_are_no_ops_and_never_refused`, and justified in the guard
+    comment precisely because a client that serialises its own defaults must not
+    be refused. The served docstring said "are REFUSED" with no exception, so a
+    contract reader could not tell which behaviour applies to `min_confidence=0.0`.
+    Fails if the exception is dropped from either bullet.
+    """
+    from tortoise.mcp_server import tortoise_query
+
+    flat = " ".join((tortoise_query.__doc__ or "").split())
+
+    assert flat.count("FALSY") >= 2, (
+        "both the structural and the tag bullet must state the falsy exception: "
+        + flat[flat.find("Structural path"):][:600]
+    )
+    assert "serialises its own defaults" in flat, flat[:600]
+
+
+def test_the_served_docstring_states_the_harm_per_argument() -> None:
+    """A floor excludes rows; an ordering does not (#12500 round 8).
+
+    The bullet used to say a dropped value meant "rows the caller excluded came
+    back" — true of `min_confidence`, false of `order_by`, whose row SET is
+    identical and only the sequence differs. The refusal message gets this right
+    per argument; the served contract must too. Fails if the split is dropped
+    (the lumped sentence is pinned ABSENT above) or the ordering half is lost.
+    """
+    from tortoise.mcp_server import tortoise_query
+
+    flat = " ".join((tortoise_query.__doc__ or "").split())
+
+    assert "an ordering they asked for was replaced" in flat, flat[:800]

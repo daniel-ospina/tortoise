@@ -3942,9 +3942,14 @@ def tortoise_query(kind: str | None = None,
 
     - Structural path (text=None): property-filter query, **bounded to `limit`**
       (default 100 — see the #10602 note below). `min_confidence` and `order_by`
-      are REFUSED on this arm rather than dropped (#12500): both structural arms
+      are REFUSED on this arm rather than dropped (#12500) — except a FALSY value
+      (`0.0`, `0`, `False`, `""`), which is the shipped spelling of "absent" and
+      stays served so a client that serialises its own defaults is not refused
+      for asking for nothing; both structural arms
       read through sdk.paginated_query, which declares neither, so an accepted
-      value was discarded and rows the caller excluded came back. They
+      value was discarded: a floor the caller set was replaced by no floor, so
+      rows they excluded came back, and an ordering they asked for was replaced
+      by the accessor's own. They
       are applied on the text= arm, but each on a different condition:
       `min_confidence` only for `entity_type="point"` (the fts leg gates the
       floor on the literal `entity_type == "point"`, sdk.py:43206), and
@@ -3959,7 +3964,9 @@ def tortoise_query(kind: str | None = None,
     - tag=<name>: filter Points by TAGGED edge (previously
       tortoise_query_points_by_tag). Tag mode takes precedence over text and
       REFUSES kind/min_confidence/order_by and `filters=` (see the tag= bullet
-      below — all of them used to be ignored silently, #12455/#12500); a non-Point
+      below — all of them used to be ignored silently, #12455/#12500; a FALSY
+      `kind`/`min_confidence`/`order_by` is the spelling of "absent" and stays
+      served, as on the structural arms); a non-Point
       `entity_type` is REFUSED there (and on the structural arms) rather than
       dropped — those arms read the Point label only, and the refusal names the
       per-type enumerator to use instead (#12372).
