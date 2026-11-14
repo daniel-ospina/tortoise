@@ -1498,7 +1498,9 @@ surfaces:
   # tortoise/mcp_auth.py` selects this surface and did NOT include any of the
   # three, so a transport-context regression (the flag that decides whether
   # `_get_org_sdk` is the accessor those pins stub) ran them zero times. The same
-  # measurement the `test_wait_bound_write_ack.py` row above records, and why
+  # measurement the `test_wait_bound_write_ack.py` row BELOW records (below, not
+  # above: the sentence was copied from the #12477 row further down, where the
+  # sibling really is above), and why
   # these sit beside `test_mcp_server.py` rather than under `core` alone.
   - test_12500_query_args_dropped.py
   - test_12455_text_filters_dropped.py
@@ -2386,8 +2388,10 @@ surfaces:
   # and every `test_integrity_covers_all_test_files`-shaped pin in
   # `tests/test_ci_selection.py` redded, which would have failed `test-slow`
   # BEFORE the merge could happen). Its only SELECTION effect is on a diff to the
-  # test file itself, which selects `core` (measured: `--changed-files
-  # tests/test_12372_entity_type_dropped.py` -> `surfaces=['core']`); an
+  # test file itself, which selects `core` beside the `api` row this file later
+  # gained (measured after that row: `--changed-files
+  # tests/test_12372_entity_type_dropped.py` -> `surfaces=['api', 'core']`; it was
+  # `['core']` alone when this note was first written); an
   # `mcp_server.py` diff reaches every test file through the FULL matrix that a
   # SHARED_MODULES path forces (`--changed-files tortoise/mcp_server.py` ->
   # `full: true, test_files: ALL`), not through this row.

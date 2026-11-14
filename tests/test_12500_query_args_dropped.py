@@ -50,10 +50,14 @@ _LOW_CONFIDENCE = 0.01
 class _StubSDK:
     """Records what each accessor was asked for; applies no floor and no order.
 
-    The two structural accessors mirror the REAL signatures — ``paginated_query``
-    and ``query`` take ``(kind, …, **filters)`` and have no ``min_confidence`` or
-    ``order_by`` — so a test cannot pass by inventing a knobs path the product
-    does not have. ``query_points_by_tag`` takes the tag and nothing else.
+    The structural accessor mirrors the REAL signature — ``paginated_query``
+    takes ``(kind, …, **filters)`` and has no ``min_confidence`` or ``order_by``
+    — so a test cannot pass by inventing a knobs path the product does not have.
+    ``query_points_by_tag`` takes the tag and nothing else. There is deliberately
+    no ``query`` method: BOTH structural arms read ``paginated_query``
+    (`mcp_server.py:4569`, `:4596` — the un-paginated path goes through it too,
+    precisely to apply ``limit``), so a ``query`` stub would be a call the tool
+    cannot make (round-34 P2 2, measured: zero calls across the whole file).
     """
 
     def __init__(self, n=3):
@@ -67,24 +71,28 @@ class _StubSDK:
         self.calls.append(("tortoise_fts_query", query, kind, {
             "min_confidence": min_confidence, "order_by": order_by,
             "limit": limit, "include_terminal": include_terminal, **kwargs}))
-        # FIXTURE FIDELITY (round-26 P2 1): the real SDK JUDGES the floor before
-        # any retrieval (`sdk.py:41222-41223` range-check it), so a stub that
-        # merely records it cannot tell a route that terminates from one that
-        # dead-ends in the caller's next call — the exact blind spot that let the
+        # FIXTURE FIDELITY (round-26 P2 1): the real SDK JUDGES both knobs before
+        # any retrieval (`sdk.py:41222-41223` range-check `min_confidence`,
+        # `sdk.py:41228` vocabulary-checks `order_by`), so a stub that merely
+        # records them cannot tell a route that terminates from one that dead-ends
+        # in the caller's next call — the exact blind spot that let the
         # structural/tag routes promise `pass text=` for `min_confidence=1.5`.
-        # The floor half is the one the PRODUCT can reach: every arm refuses an
-        # out-of-domain floor rather than passing it on. The SDK's other
-        # pre-retrieval judgment, the `order_by` vocabulary check
-        # (`sdk.py:41228`), is deliberately NOT mirrored here — an out-of-domain
-        # `order_by` is refused on every arm too, so a check for it in this stub
-        # could never fire, and an unfireable check is a claim the fixture makes
-        # about itself that no case can hold (round-33 P2 3, measured: the branch
-        # was reported uncovered and deleting it left the file green).
+        # BOTH are reachable, and each is pinned by its own case: the text= arm
+        # FORWARDS a value outside either domain instead of refusing it
+        # (`test_an_unusable_floor_is_left_to_the_sdk_to_refuse`,
+        # `test_an_unusable_ordering_is_left_to_the_sdk_to_refuse`). Round 33
+        # deleted the `order_by` check believing no arm could ever pass one
+        # through — false, and the case written at round 34 is what now fires it
+        # (measured: `tortoise_query(text="x", order_by="garbage")` reaches the
+        # fts leg with `'garbage'`).
         if not isinstance(min_confidence, (int, float)):
             raise TypeError("'<=' not supported between 'float' and "
                             f"'{type(min_confidence).__name__}'")
         if not (0.0 <= min_confidence <= 1.0):
             raise ValueError(f"min_confidence must be 0.0-1.0, got {min_confidence}")
+        if order_by not in ("relevance", "confidence", "graph"):
+            raise ValueError("order_by must be 'relevance', 'confidence', or "
+                             f"'graph', got {order_by!r}")
         return self.rows
 
     def paginated_query(self, kind=None, skip=0, limit=20, **kwargs):
@@ -92,10 +100,6 @@ class _StubSDK:
         total = len(self.rows)
         return {"results": self.rows[skip:skip + limit], "total": total,
                 "hasMore": skip + limit < total}
-
-    def query(self, kind=None, **kwargs):
-        self.calls.append(("query", kind, kwargs))
-        return self.rows
 
     def query_points_by_tag(self, tag, *, _record_reads=True):
         self.calls.append(("query_points_by_tag", tag, _record_reads))
@@ -605,6 +609,40 @@ def test_an_unusable_floor_is_left_to_the_sdk_to_refuse(stub) -> None:
     )
 
 
+def test_an_unusable_ordering_is_left_to_the_sdk_to_refuse(stub) -> None:
+    """An out-of-vocabulary `order_by` is delegated, not answered here (round-34 P2 1).
+
+    The guard refuses the orderings it KNOWS it cannot apply — `confidence`/`graph`
+    on `document`/`source`, and any ordering on the tag/structural arms. A value
+    outside the SDK's own vocabulary is not one of those: `sdk.py:41228` refuses it
+    before any retrieval, so the honest answer is the SDK's, and a `#12500`
+    paragraph claiming an arm "does not apply" an ordering would be reasoning about
+    a value that is not an ordering at all. Pinned in BOTH halves, like the floor
+    case above: the value REACHES the accessor, and what comes back is the SDK's
+    own complaint rather than this guard's.
+
+    Fails if the text= arm starts intercepting an unknown ordering. It is also the
+    only case that fires the stub's mirrored vocabulary check: round 33 deleted
+    that check as unreachable, which is what this test disproves (measured:
+    `order_by="garbage"` on a `text=` read is served and forwarded).
+    """
+    from tortoise.mcp_server import tortoise_query
+
+    result = tortoise_query(text="x", order_by="garbage")
+
+    fts = [c for c in stub.calls if c[0] == "tortoise_fts_query"]
+    assert fts and fts[-1][3]["order_by"] == "garbage", (
+        f"the ordering never reached the accessor — this guard answered for a "
+        f"value it cannot judge: {result} / {fts}"
+    )
+    assert "#12500" not in str(result), (
+        f"an unknown ordering got the #12500 paragraph: {result}"
+    )
+    assert "order_by must be" in str(result), (
+        f"expected the SDK's own vocabulary refusal, got: {result}"
+    )
+
+
 def test_the_text_arm_still_applies_the_floor_to_POINTS(stub) -> None:
     """The control for the branch above: `entity_type="point"` is the default.
 
@@ -1103,13 +1141,22 @@ def test_a_graph_ordering_with_no_signal_is_refused_not_silently_reordered(
 #: SECOND bullet" — one does; round 19 caught the follow-up sentence still saying
 #: "two of the claims" sit inside the spans — three do.)
 #: The POSITIVE behaviour sentences in the same bullets — the ones a route reader
-#: acts on, and the ones this PR spent rounds re-pointing citations FOR. Each was
+#: acts on, and the ones this PR spent rounds re-pointing citations FOR. Five were
 #: measured unpinned at round 33: inverted in turn, the whole five-file gate set
 #: stayed green (260 passed, 16 skipped), because nothing else anywhere asserts
 #: on `tortoise_query.__doc__` (`grep -rln 'tortoise_query.__doc__' tests/` finds
-#: only this file). They are presence checks, wrap-insensitive, like
-#: `_REFUSAL_CLAIMS` — they cannot re-red a true sentence.
+#: only this file). Two more in the SAME bullet were found unpinned the same way
+#: at round 34 and added — the tuple covers these sentences, it does not cover
+#: the bullet, so the next one added there is not automatically held. They are
+#: presence checks, wrap-insensitive, like `_REFUSAL_CLAIMS` — they cannot re-red
+#: a true sentence.
 _DOCSTRING_BEHAVIOUR_CLAIMS = (
+    # the LIMIT bound on the plain structural list (inverted: "**unbounded**").
+    # Added round 34 after measuring it green under that inversion.
+    "property-filter query, **bounded to `limit`**",
+    # the universal ordering, which the refusals route callers TO (inverted:
+    # "is not applied"). Added round 34, same measurement.
+    '`order_by="relevance"` is applied to every type',
     # which arm applies the floor at all (inverted: "for every type")
     '`min_confidence` only for `entity_type="point"`',
     # why an accepted structural value was discarded (inverted: "declares both")
