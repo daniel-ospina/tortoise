@@ -180,7 +180,15 @@ def test_the_breach_channel_never_rewrites_the_status_verdict(baseline, monkeypa
     before = monitoring.metrics(sdk=object())["status"]
     assert before == "ok", "the fixture must reach a status a breach COULD flip"
 
-    monitoring.record_wait_bound_breach("mcp")
+    # ⛔ #12477 review: reach the state a fold COULD flip. One breach is below
+    # the refusal threshold, so with a single one this test would pass whether
+    # or not the verdict folds the window in — a tautology dressed as a gate.
+    for _ in range(10):
+        monitoring.record_wait_bound_attempt("mcp")
+        monitoring.record_wait_bound_breach("mcp")
+    assert monitoring.wait_bound_breach_window()["refusing"] is True, (
+        "the fixture must reach the refusing state, or `status: ok` is not "
+        "evidence that the fold is absent")
     after = monitoring.metrics(sdk=object())
 
     assert after["status"] == "ok", (
@@ -224,7 +232,13 @@ async def test_hosted_health_endpoint_carries_the_breach_channel(baseline, monke
         "below is a tautology")
     assert before["wait_bound_breaches"]["total"] == baseline["total"]
 
-    monitoring.record_wait_bound_breach("mcp")
+    # ⛔ Enough to cross the refusal threshold (see the sibling test): the
+    # decision this pins is "a REFUSING plane still reads `status: ok` here",
+    # and a single breach cannot express it.
+    for _ in range(10):
+        monitoring.record_wait_bound_attempt("mcp")
+        monitoring.record_wait_bound_breach("mcp")
+    assert monitoring.wait_bound_breach_window()["refusing"] is True
 
     body = await ha.health()
 
@@ -232,7 +246,7 @@ async def test_hosted_health_endpoint_carries_the_breach_channel(baseline, monke
         "the hosted /health body must carry the breach channel — it is the "
         "surface that reported a misleading `ok` during #10602")
     assert set(body["wait_bound_breaches"]["by_surface"]) == {"mcp", "rest"}
-    assert body["wait_bound_breaches"]["total"] - baseline["total"] == 1
+    assert body["wait_bound_breaches"]["total"] - baseline["total"] >= 10
     # Reported, never folded: a cumulative counter must not pin the deployment
     # degraded for the life of the process (the #10185 failure this forbids).
     assert body["status"] == "ok", (

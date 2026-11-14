@@ -1761,6 +1761,83 @@ outage run unattended.
 > exists for, and a gauge the loop itself writes is not evidence the loop ran.
 > The marker is repeated on #10892, where a lane adopts or replaces this design.
 
+### §6.4.3 What the Fly check now reports, and what it deliberately does not
+
+**#12477: `[checks.loop_liveness]` was the second arm that could not fail.** Its
+predicate was `503 if (stale AND idle) else 200`, and `workload_idle` is `False`
+for any box serving traffic — the same defect the OVERRIDES above records for
+this section's runner-side arm, on the arm that gates deploys. Measured twice
+with it live: 2026-11-02 (`#10585`: 97 min wedged, `2/2 checks passing`) and
+2026-11-13 (`#12477`: every data request 30–45 s or refused, `2/2 checks
+passing`, `wait_bound_breaches.rest` climbing from 0 to 18 while `/health`
+answered `status: "ok"`).
+
+The check now fails on any of three terms, each an in-memory read:
+
+| reason | when | why it is honest |
+|---|---|---|
+| `loop-not-serving` | heartbeat stale **and** work waiting **and** nothing SERVED for `LOOP_STALE_AFTER` (90 s) | the tick alone is not the verdict — #10892's instrument joins it, so a busy loop that is still serving stays green. ⛔ **Two served datums are read and EITHER defeats the term**: the age of the last DATA-PLANE request this process ANSWERED (stamped at the same seam that decides the refusal share, `_count_wait_bound_attempt_if_served` — the one that moves on real traffic) and the age of the last `/liveness` answer. Both are written only when a handler RAN, so neither can be stamped during a real wedge; the `/liveness` stamp ALONE is not enough because its only production poller is `.github/scripts/availability-watchdog.sh` on a `*/5` cron whose header records ~15 min measured delivery, i.e. LONGER than the 90 s window, and it is reachable unauthenticated (measured, #12477 review round 11). A ticker that CANNOT tick is not a wedge: `heartbeat_task_is_dead()` disarms this arm, exactly as #2850 ruled when it disarmed the hard exit |
+| `data-plane-failed` | the DB probe's last result is fresh and not ok, **or** too old to vouch for anything (30 s window), **or** no result at all while a probe is in flight past that window, **or** no result within `max(120 s, 4 x stale window)` of process start, **or** the REFRESHER TASK NEVER STARTED (`probe-refresher-never-started`) | the refresher task runs on the loop, so a wedge stops it refreshing — and the check reads it with `peek()`, never `snapshot()`, so the check cannot refresh its own evidence. The never-produced arms are what stop this term from being silently inert: the start-failure flag is recorded where the startup `try/except` logs it, and the uptime bound covers the shapes the flag cannot see (a lifespan that fails later, a task cancelled by a re-entered lifespan, a probe that never gets its turn) — all of which report `in_flight: False` and read `unknown`, which is GREEN, otherwise forever (#12477 review round 11-12). The bound is generous so a cold start never reds the deploy gate |
+| `requests-refused` | **SHARE**: ≥ `TORTOISE_WAIT_BOUND_HEALTH_MIN_SHARE` (0.5) of at least `TORTOISE_WAIT_BOUND_HEALTH_MIN_ATTEMPTS` (5) requests offered to the bound were refused inside `TORTOISE_WAIT_BOUND_HEALTH_WINDOW_S` (120 s) | the bound is breached BY DESIGN for ~2.1% of calls, so the verdict must be about the RATIO, not about volume. Both traffic-dependent forms were measured wrong: a count (10 per window) is blind to the first incident trace (3.5 refusals/min) and a bucket-density reds a HEALTHY box as traffic rises (20% of polls at 120 calls/min, 92% at 300, 100% at 600 — crossover ~3.3 req/s), which would fail every deploy. `~2.1%` is ~2.1% at 1 req/s and at 100 req/s, and a failing plane refuses most of what it is offered at any volume. `refusing: null` means NOT DECIDED (no traffic, too few attempts, or the term disabled by `MIN_SHARE=0`) — an idle plane refuses nobody. The cumulative total still never folds into a verdict (#10185/#10620), and `/health` reports the window as `refusals` without touching `status`. |
+
+Attempts are stamped at the same transport seam that decides a refusal, so the
+numerator and the denominator are the same population — and that population is
+**data traffic only**. Two separate questions decide membership, and conflating
+them was measured wrong twice:
+
+- **what a REFUSAL means** — the instrument's own polls (`/health`, `/liveness`, `/metrics`, `/v1/version`, …) and the documented long routes (`/v1/organizations/{id}/import`, `/v1/sessions/commit`, `/v1/packs/manifests`, `/webhooks/stripe`, `/v1/graphs/trash/{id}/restore`, `/v1/dream`, `/v1/backups*`, `/v1/graphs/{id}/promote`, the `/v1/onboarding/github/*` family and `/v1/index/github*`) are excluded from BOTH sides, because 12 served health polls beside 10 refused data requests measured `share 0.455 -> 200` (fail-open) and 5 legitimate imports beside 5 requests measured `share 1.0 -> 503` (a healthy deploy failing its own gate). A route whose own outbound timeout exceeds the bound (signup/claim on Supabase, the mailer, GitHub) belongs here too: a slow third party is not the data plane failing.
+- **what a SERVING proves** — a route the app answers WITHOUT the plane is not demand when it is served: `/.well-known/*` discovery (RFC 8414/9728, public by construction), `/health/ready`, `/health/security`, `/v1/capabilities`, an index-job status (`/v1/index/<x>/<job>`), the `GET`/`DELETE` of `/mcp`, and **every `OPTIONS` preflight** (answered by `CORSMiddleware` before auth and before routing — 8 of them beside 7 refusals measured `attempts 15, share 0.4667 -> 200`). Measured: 8 served discovery requests beside 7 refusals also gave `share 0.467 -> 200`. A **`POST` to the `/mcp` mount root is a tool call and always counts** — Streamable-HTTP starts the SSE response before it dispatches the tool, so the exchange looks "served in 12 ms" even though the work is the plane's. `/oauth/*` and `/register` are excluded from BOTH sides: a grant is awaited without a seam bound and its phase timeouts sum above it.
+- A **LATENCY floor** was tried instead of the route rule and measured WRONG in the opposite direction (#12477 review round 8): because a refusal always stamps its own attempt, counting only served requests that spent ≥10% of the bound degenerated to `refusals / (refusals + slow_served)`, which reds a HEALTHY box at five refusals in 120 s (the designed ~2.1% rate reaches that on any busy minute) and left every MCP call as a numerator with no denominator (`attempts 0, total 500, share None` → `/healthz` 200 over a door refusing everything). Do not reintroduce it. The cumulative `/metrics` counter still counts every refusal.
+- Two further terms, both added after measurement rather than by reasoning: `control-refused` (≥ 2 refused `/health`/`/liveness` polls in the window — a no-I/O handler that cannot run inside the bound is evidence a healthy box cannot produce, and it is OUT of the data share so it cannot dilute one), and a **cold-start carve-out** (a refusal while a one-time embedder load is in flight is counted but kept out of the window: the pre-warm holds the model lock for ~57 s, so a warming machine would otherwise fail its own deploy).
+
+What it deliberately does **not** do: it is still a **top-level** check, so Fly's
+proxy ignores it for routing and a red cannot de-register the machine — it fails
+a deploy's health wait and appears in `flyctl checks list`. It still cannot
+restart anything (that is `TORTOISE_LOOP_STALL_HARD_EXIT_S` + the
+`[[restart]]` policy). And it does not replace this section's runner-side
+prober: the two arms answer different questions ("is this instance healthy"
+vs "is the product serving"), and the OVERRIDES above is about the latter.
+
+**The wedge now leaves an artifact.** The same stall that used to end in an
+`os._exit` with no evidence — measured 2026-11-13, nothing was readable after
+the restart — is now captured: a sampler thread takes the LOOP THREAD's Python
+stack as soon as the heartbeat is 5 s stale (`TORTOISE_LOOP_BLOCK_SAMPLE_AFTER_S`),
+⚠️ **a capture is a CANDIDATE, not a verdict** — the threshold is deliberately
+below the largest *legitimate* on-loop operation (a 10 s socket read), so read
+the age beside it: `loop_age_s` of 2–10 s is a slow call, tens of seconds or more
+is a block. Episodes escalate 10× (5 s → 50 s → 500 s), so a long wedge yields a
+handful of captures rather than one per poll. The sampler reports the last one on
+`GET /health` under `loop_blocks`, and appends every one to
+`/data/loop-blocks.jsonl` (beside the journal, bounded to 200 lines / 512 KB)
+where it SURVIVES the restart. Read it after any wedge before restarting again:
+
+```bash
+curl -s https://api.premiselabs.co/health | jq '.loop_blocks, .refusals'
+# {"episodes": 1, "max_age_s": 612.4, "last": {"at": "…",
+#   "loop_age_s": 612.4, "loop_thread": "MainThread",
+#   "frames": ["hosted_api.py:… in …", …]},
+#  "persist_path": "/data/loop-blocks.jsonl", "enabled": true}
+# {"window_s": 120.0, "total": 70, "by_surface": {"mcp": 14, "rest": 56},
+#  "attempts": 78, "share": 0.897, "min_share": 0.5, "min_attempts": 5,
+#  "refusing": true, …}
+```
+
+⚠️ **Residual, stated not implied (#12477 review).** The `data-plane-failed` term
+is `probe_db`'s `RETURN 1` against the SDK's **default** projection, not the
+tenant graph a request would touch. So a deployment whose *tenant* graph is
+unusable while the default one answers (or a keyword-only boot, `#2985`) still
+reports `db.ok: true` and this term stays green. The class this closes is the
+one measured on 2026-11-13 — refusals and timeouts — not every possible
+"serving but wrong" shape.
+
+⚠️ **Residual, stated not implied (#12477 review round 11).** A dead heartbeat
+ticker disarms the `loop-not-serving` arm, because #2850 ruled that a ticker
+that cannot tick is not a wedge (it disarms the hard exit for the same reason).
+The other two terms do not depend on the tick, so the surface is not blind — but
+a dead ticker is an instrument fault that this check reports rather than fails
+on: it appears in the payload (`loop_ticks`, `loop_stale`) and in the watchdog's
+own `heartbeat_task_is_dead()` log line, not as a 503.
+
 ⚠️ **And, like the Pages auth arm, it never consults the egress control probe.**
 `control_ok()` runs only on the restartable path — the restart decision's own
 `if ! control_ok` guard, inside `if [ "$restart_mode" = "DOWN" ]` — because the
