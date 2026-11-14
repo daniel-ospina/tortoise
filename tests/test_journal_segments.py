@@ -42,6 +42,7 @@ from tortoise.journal_segments import (
     reconstruction_scope,
     record_disposition,
     seal_active,
+    segment_names,
     summarise,
     verify,
 )
@@ -1655,3 +1656,160 @@ def test_a_boundary_BEYOND_every_row_is_REFUSED(graph_dir: Path):
     with pytest.raises(SegmentSequenceError) as exc:
         verify(discover(graph_dir))
     assert "went further than the rows" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# cycle-6 findings
+# ---------------------------------------------------------------------------
+
+
+def test_an_EMPTY_row_set_does_not_exempt_the_boundary(graph_dir: Path,
+                                                       monkeypatch):
+    """Deleting every ROW *and* every segment certified "full, anchored".
+
+    Cycle-6's P1, measured: both boundary comparisons were guarded by
+    `and indices`, so with no sealed rows the datum the check exists for — sitting
+    in the same file — was never read. Worse, the next `seal_active` saw no
+    indices, re-based the journal at `events.0000.jsonl` with `through_index: 0`,
+    and made the loss indistinguishable from a pristine journal, permanently.
+    """
+    monkeypatch.setenv(ENV_FLAG, "1")
+    write_journal(graph_dir, records(2, "a"))
+    seal_active(graph_dir)
+
+    payload = json.loads((graph_dir / MANIFEST_NAME).read_text(encoding="utf-8"))
+    assert payload["boundary"]["through_index"] == 0
+    (graph_dir / "events.0000.jsonl").unlink()
+    payload["segments"] = []                          # the rows leave too
+    (graph_dir / MANIFEST_NAME).write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(SegmentSequenceError) as exc:
+        verify(discover(graph_dir))
+    assert "through_index" in str(exc.value)
+    assert summarise(graph_dir)["verified"] is False
+    # …and the writer cannot silently re-base the journal over the loss
+    with pytest.raises(SegmentSequenceError):
+        seal_active(graph_dir)
+
+
+@pytest.mark.parametrize("bad", [None, 5, True, "events", {"a": 1}])
+def test_a_non_LIST_segments_key_is_a_NAMED_refusal(graph_dir: Path, bad):
+    """`"segments": null` made 11 of 11 public verbs raise `TypeError`.
+
+    Cycle-6's second P1, measured: the key's PRESENCE was checked and its type was
+    not, so the `for row in data["segments"]` loop raised `TypeError` — which is
+    not a `JournalLayoutError`, so it escaped `summarise` too, defeating the one
+    verb that promises a report instead of a traceback.
+    """
+    write_journal(graph_dir, records(1))
+    write_manifest(graph_dir, ["events.0000.jsonl"])
+    payload = json.loads((graph_dir / MANIFEST_NAME).read_text(encoding="utf-8"))
+    payload["segments"] = bad
+    (graph_dir / MANIFEST_NAME).write_text(json.dumps(payload), encoding="utf-8")
+
+    report = summarise(graph_dir)                     # ⛔ must not raise
+    assert report["verified"] is False
+    assert "segments" in report["reason"]
+    for verb in (discover, lambda d: verify(discover(d)), segment_names,
+                 lambda d: read_all_segments(d), reconstruction_scope_and_assert):
+        with pytest.raises(JournalLayoutError):
+            verb(graph_dir)
+
+
+def reconstruction_scope_and_assert(directory: Path):
+    layout = discover(directory)
+    reconstruction_scope(layout)
+    assert_full_reconstruction(layout)
+
+
+def test_an_UNREADABLE_segment_is_a_NAMED_refusal_not_PermissionError(
+        graph_dir: Path):
+    """The manifest had an OSError guard; the segments did not.
+
+    Cycle-6 (P2-4), measured: `chmod 000` on a sealed segment made `summarise`
+    raise `PermissionError` — the manifest arm reported correctly, the segment arm
+    did not exist.
+    """
+    write_journal(graph_dir, records(1, "a"))
+    (graph_dir / "events.0000.jsonl").write_bytes(
+        (graph_dir / ACTIVE_NAME).read_bytes())
+    (graph_dir / ACTIVE_NAME).unlink()
+    (graph_dir / ACTIVE_NAME).touch()
+    write_manifest(graph_dir, ["events.0000.jsonl"])
+    (graph_dir / "events.0000.jsonl").chmod(0o000)
+    try:
+        report = summarise(graph_dir)                 # ⛔ must not raise
+        assert report["verified"] is False
+        assert "cannot read" in report["reason"]
+    finally:
+        (graph_dir / "events.0000.jsonl").chmod(0o644)
+
+
+def test_the_one_read_property_is_PINNED_by_forbidding_a_second_stat(
+        graph_dir: Path):
+    """Spy the SYSCALL, not the values.
+
+    Cycle-6 (P2-3): the first version of this test re-measured a quiet directory
+    and compared — which a split-read implementation satisfies identically, so
+    reverting the fix left every test green. `discover` must not call `stat()` on
+    a segment at all: the size comes from the same read as the digest.
+    """
+    write_journal(graph_dir, records(2, "a"))
+    real_stat = Path.stat
+    real_size = real_stat(graph_dir / ACTIVE_NAME).st_size
+
+    def lying_stat(self, *args, **kwargs):
+        """Report a size 1,000 B larger than the file really is.
+
+        If `bytes` came from a `stat()` — the pre-cycle-5 shape — the layout
+        would report `real_size + 1000`. Taking it from the read makes the lie
+        unobservable, which is the property.
+        """
+        st = real_stat(self, *args, **kwargs)
+        if self.name.endswith(".jsonl"):
+            return os.stat_result((*tuple(st)[:6], st.st_size + 1000,
+                                   *tuple(st)[7:]))
+        return st
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(Path, "stat", lying_stat)
+        layout = discover(graph_dir)
+    assert layout.segments[0].bytes == real_size
+
+
+def test_BOTH_writers_agree_on_whether_the_bytes_replay(graph_dir: Path,
+                                                       monkeypatch):
+    """A corrupt mid-file line: `seal_active` certified it, `adopt` refused it.
+
+    Cycle-6 (P2-5), measured: two writers, the same bytes, opposite verdicts. The
+    replay check now runs inside `_measure`'s single pass, for both.
+    """
+    monkeypatch.setenv(ENV_FLAG, "1")
+    write_journal(graph_dir, records(1, "a"))
+    with (graph_dir / ACTIVE_NAME).open("ab") as fh:
+        fh.write(b"this line is not a record\n")
+    write_journal(graph_dir, records(1, "b"))
+
+    with pytest.raises(JournalLayoutError) as exc:
+        seal_active(graph_dir)
+    assert "cannot be replayed" in str(exc.value)
+    # …and nothing was renamed on the way to the refusal
+    assert (graph_dir / ACTIVE_NAME).exists()
+    assert not (graph_dir / "events.0000.jsonl").exists()
+
+
+def test_a_TORN_tail_does_not_stop_a_seal(graph_dir: Path,
+                                          monkeypatch: pytest.MonkeyPatch):
+    """The replay check must keep `log.py`'s torn-vs-mid-file distinction."""
+    monkeypatch.setenv(ENV_FLAG, "1")
+    write_journal(graph_dir, records(2, "a"))
+    with (graph_dir / ACTIVE_NAME).open("ab") as fh:
+        fh.write(b'{"type": "PointRev')               # SIGKILL signature
+    seal_active(graph_dir)
+    assert (graph_dir / "events.0000.jsonl").exists()
+    row = read_manifest(graph_dir)["segments"][0]
+    # ⚠️ The fragment IS counted as a non-empty line — by the seal and by every
+    # later read, identically, so the anchor stays consistent. What it is NOT is
+    # validated as a record (that is the torn-vs-mid-file distinction).
+    assert row["lines"] == 3
+    assert row["bytes"] == (graph_dir / "events.0000.jsonl").stat().st_size

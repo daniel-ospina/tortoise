@@ -188,6 +188,15 @@ MUTANTS = (
         kills="test_adopt_refuses_when_the_live_tail_is_still_there",
     ),
     Mutant(
+        # `through_index` vs the rows. Removing it lets a manifest that lost rows
+        # (and their segments) certify `full` — including ALL of them, where the
+        # comparison used to be skipped for being empty.
+        name="through-index-must-match-rows",
+        needle="""            and (max(indices) if indices else -1) != layout.boundary.through_index:""",
+        replacement="""            and False:  # MUTANT: the boundary may go beyond the rows""",
+        kills="test_a_boundary_BEYOND_every_row_is_REFUSED",
+    ),
+    Mutant(
         # The switch. Removing it arms sealing for every deployment that never
         # opted in — the default path stops being what ships today.
         name="switch-defaults-on",
@@ -310,7 +319,11 @@ def test_mutant_discovery_dropped_segment_is_no_longer_seen(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Kills ``test_FALSIFIER_a_segment_dropped_without_a_boundary_REFUSES``."""
     monkeypatch.setenv(real.ENV_FLAG, "1")
-    mutant = load_mutant(tmp_path, _by_name("discovery-of-a-departed-segment"))
+    # ⛔ TWO guards overlap here: dropping the departed row makes the row set
+    # empty, which the `through_index` comparison now catches (cycle 6). Both are
+    # removed so the mutation's own effect is visible.
+    mutant = load_mutant(tmp_path, (_by_name("discovery-of-a-departed-segment"),
+                                    _by_name("through-index-must-match-rows")))
     graph = _seal_dropped(tmp_path, mutant)
 
     # ⛔ no SegmentMissingError, no ReconstructionClaimError — the journal reads

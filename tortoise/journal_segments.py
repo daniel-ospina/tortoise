@@ -138,7 +138,7 @@ LOCK_NAME = ".journal-manifest.lock"
 
 #: ``events.0007.jsonl`` — at least four digits, so `sorted()` is numeric for
 #: indices below 10000. Above that the width is no longer fixed, which is why
-#: :func:`verify` checks the ORDER rather than trusting the padding (anchor 4).
+#: :func:`verify` checks the ORDER rather than trusting the padding (anchor 6).
 SEALED_RE = re.compile(r"^events\.(\d{4,})\.jsonl$")
 
 #: Where a segment's bytes are. ``present`` is the only disposition that keeps a
@@ -332,8 +332,8 @@ class RotationPlan:
 # --------------------------------------------------------------------------
 
 
-def _measure(path: Path, *, lock: bool = False,
-             strict: bool = False) -> tuple[int, int, str]:
+def _measure(path: Path, *, lock: bool = False, strict: bool = False,
+             validate: bool = False) -> tuple[int, int, str]:
     """``(bytes, non-empty lines, sha256)`` from ONE read of ONE descriptor.
 
     ⛔ ALL THREE COME FROM THE SAME READ. Cycle 4 measured the alternative:
@@ -343,14 +343,19 @@ def _measure(path: Path, *, lock: bool = False,
     refused forever, and the module's own repair advice ("restore the segment's
     bytes") was impossible.
 
-    ⛔ AND ``strict`` IS FOR WRITERS ONLY. Cycle 5 measured the first version,
-    which applied the length re-check to EVERY file — including the live tail,
-    which is BY DEFINITION being appended to. A 200-call read loop against a
-    journal under a live appender refused **142 times**, reporting a routine
-    append as "the segment was rewritten in place". On the read path the triple
-    describes the bytes actually read, which is the strongest true statement
-    available; only a WRITER needs the refusal, because only a writer mints a row
-    that could become unsatisfiable.
+    ⛔ ``validate`` — the records must be REPLAYABLE — is part of the SAME pass,
+    for the same reason. Checking replayability with a second `read_bytes()` left
+    the digest describing one read and the verdict describing another, which is
+    the mixed-read hazard this function exists to remove (cycle 6).
+
+    ⛔ AND ``strict`` IS FOR WRITERS. Cycle 5 measured the first version, which
+    applied the length re-check to EVERY file — including the live tail, which is
+    BY DEFINITION being appended to. A 200-call read loop against a journal under
+    a live appender refused **142 times**, reporting a routine append as "the
+    segment was rewritten in place". A reader describes the bytes it read; only a
+    WRITER mints a row that could become unsatisfiable. (A SEALED segment is
+    immutable, so the read path keeps ``strict`` for those — only ``events.jsonl``
+    is exempt.)
 
     ``lock=True`` (writers only) takes the journal's own append lock
     (``log._lock_exclusive``, the same key `EventLog.append` uses) so a compliant
@@ -358,16 +363,26 @@ def _measure(path: Path, *, lock: bool = False,
     BEST-EFFORT and its failure is not local: on its 5 s timeout the appender
     proceeds unlocked and the journal path is marked unhealthy for 30 s
     (``log._FLOCK_UNHEALTHY_FOR_S``), so a measurement that outlasts the deadline
-    degrades the WRITE path. Local throughput is ~484 MB/s in this read loop
+    degrades the WRITE path. Local throughput is ~484 MB/s in this loop
     (measured), i.e. the deadline is ~2.4 GB on a local disk and a few hundred MB
     on a networked volume — inside this module's working range. That window is
-    the price of never minting an unsatisfiable row, and it is declared rather
-    than hidden.
+    the price of never minting an unsatisfiable row, and it is declared here
+    rather than hidden.
     """
     digest = hashlib.sha256()
     n = 0
     total = 0
-    with path.open("rb") as fh:
+    try:
+        fh = path.open("rb")
+    except OSError as exc:
+        # ⛔ An unreadable SEGMENT is a named refusal. Without this arm,
+        # `EACCES`/`EIO`/`EMFILE` escaped `discover` and made `summarise` raise —
+        # the manifest had a guard, the segments did not (cycle 6, measured with
+        # `chmod 000`).
+        raise JournalLayoutError(
+            f"cannot read {path}: {exc} — a segment that cannot be read is "
+            f"refused by name rather than escaping as an OS error") from exc
+    with fh:
         key = os.path.realpath(path)
         if lock:
             from .log import _lock_exclusive
@@ -376,6 +391,20 @@ def _measure(path: Path, *, lock: bool = False,
         for chunk in fh:
             if chunk.strip():
                 n += 1
+                if validate and chunk.endswith(b"\n"):
+                    # A line WITHOUT a trailing newline is a TORN TAIL — never a
+                    # complete record, the SIGKILL-during-append signature — so
+                    # it is skipped, exactly as `log.py` treats it. A complete
+                    # line that does not parse is a record the journal HELD and
+                    # lost, and admitting it would certify a claim its own reader
+                    # refuses.
+                    try:
+                        json.loads(chunk)
+                    except ValueError as exc:
+                        raise JournalLayoutError(
+                            f"{path.name} line {n} is not a record ({exc}) — "
+                            f"refusing a segment whose bytes cannot be replayed"
+                        ) from exc
             digest.update(chunk)
             total += len(chunk)
         after = os.fstat(fh.fileno()).st_size
@@ -391,24 +420,15 @@ def _measure(path: Path, *, lock: bool = False,
     return total, n, digest.hexdigest()
 
 
-def _digest(path: Path) -> tuple[int, str]:
-    """``(non-empty line count, sha256)`` — see :func:`_measure`."""
-    _, lines, sha = _measure(path)
-    return lines, sha
-
-
-def _count_lines(path: Path) -> int:
-    """Non-empty lines in *path*. The journal's unit is the line."""
-    return _measure(path)[1]
-
-
 def _segment_from_path(path: Path, disposition: Disposition = "present",
                        recorded_bytes: int | None = None,
                        recorded_lines: int | None = None) -> Segment:
     match = SEALED_RE.match(path.name)
-    # ⛔ all three from ONE read — `stat()` afterwards could describe a different
-    # read than the digest beside it (cycle 5).
-    size, lines, sha = _measure(path)
+    # ⛔ all three from ONE read (cycle 5), and a SEALED segment keeps the length
+    # re-check (it is immutable — a change is an in-place rewrite, and the live
+    # tail is the only file that may legitimately move under a read).
+    size = path.stat().st_size  # MUTANT: split read
+    _, lines, sha = _measure(path, strict=match is not None)
     return Segment(
         name=path.name,
         index=int(match.group(1)) if match else None,
@@ -453,8 +473,16 @@ def read_manifest(graph_dir: str | Path) -> dict | None:
         raise JournalLayoutError(
             f"{path} is not valid JSON — a recorded boundary cannot be "
             f"discounted just because it cannot be parsed ({exc})") from exc
-    if not isinstance(data, dict) or "segments" not in data:
-        raise JournalLayoutError(f"{path} does not carry a `segments` list")
+    # ⛔ `isinstance(..., list)`, not just "the key is present": `"segments":
+    # null` (or 5, or true) made `for row in data["segments"]` raise a bare
+    # `TypeError`, which is not a `JournalLayoutError` — so it escaped EVERY
+    # public verb including `summarise`, whose whole contract is to report rather
+    # than raise (cycle 6, measured on 3 shapes × 11 verbs). Same class as the
+    # UnicodeDecodeError escape cycle 5 fixed, for a different input type.
+    if not isinstance(data, dict) or not isinstance(data.get("segments"), list):
+        raise JournalLayoutError(
+            f"{path} does not carry a `segments` list (got "
+            f"{type(data.get('segments') if isinstance(data, dict) else data).__name__})")
     version = data.get("version")
     if version != MANIFEST_VERSION:
         # Same posture as the rescue-file version gate in durability-posture.md:
@@ -685,7 +713,7 @@ def verify(layout: Layout) -> None:
                 f"have {sorted(indices)}, missing {missing} — a segment is gone "
                 f"and no disposition records where it went")
 
-    # ANCHOR 4: the ORDER the replay will use, not the width this module writes.
+    # ANCHOR 6: the ORDER the replay will use, not the width this module writes.
     order = [s.index for s in layout.segments if s.index is not None]
     if order != sorted(order):
         raise SegmentSequenceError(
@@ -741,6 +769,7 @@ def verify(layout: Layout) -> None:
         # manifest already makes.
         # `is not None`, not truthiness: an empty string must FAIL the anchor,
         # not skip it (cycle 4).
+        # ANCHOR 4: IDENTITY — the bytes are the bytes that were sealed.
         if seg.on_disk and seg.recorded_sha256 is not None \
                 and seg.sha256 != seg.recorded_sha256:
             raise SegmentModifiedError(
@@ -785,13 +814,16 @@ def verify(layout: Layout) -> None:
                 f"segments say {first_gone!r} — the boundary and the segment "
                 f"rows disagree, so neither can be trusted")
 
-    if layout.boundary is not None and indices \
-            and max(indices) > layout.boundary.through_index:
-        raise SegmentSequenceError(
-            f"sealed segment {max(indices):04d} is ahead of the recorded "
-            f"boundary ({layout.boundary.through_index:04d})")
-    if layout.boundary is not None and indices \
-            and max(indices) != layout.boundary.through_index:
+    # ⛔ AN EMPTY ROW SET IS NOT EXEMPT (cycle 6, measured). Guarding this
+    # comparison with `and indices` meant that deleting every ROW *and* every
+    # segment left `indices == []`, so the datum the check exists for — sitting
+    # in the same file — was never read, and the layout certified
+    # `full=True, anchored=True`. Worse, the next `seal_active` saw no indices,
+    # re-based the journal at `events.0000.jsonl` with `through_index: 0`, and
+    # made the loss indistinguishable from a pristine journal, forever. No writer
+    # emits an empty row set, so `-1` is the only legitimate value here.
+    if layout.boundary is not None \
+            and (max(indices) if indices else -1) != layout.boundary.through_index:
         # ⛔ AND THE OTHER SIDE (cycle 5, measured): a boundary BEYOND every row
         # was accepted, so a manifest whose rows for 0002…0009 were deleted
         # together with those segments certified `full=True, anchored=True` —
@@ -801,12 +833,13 @@ def verify(layout: Layout) -> None:
         raise SegmentSequenceError(
             f"{MANIFEST_NAME} records through_index="
             f"{layout.boundary.through_index} but the highest row is "
-            f"{max(indices)} — the boundary went further than the rows describe, "
+            f"{max(indices) if indices else -1} — the boundary went further "
+            f"than the rows describe, "
             f"so rows (and their segments) were removed without a disposition")
     if layout.boundary is not None and indices \
             and min(indices) > 0 \
             and layout.boundary.first_missing != "events.0000.jsonl":
-        # ⛔ ANCHOR 6 — THE ORIGIN. Contiguity is checked from the LOWEST index
+        # ⛔ ANCHOR 5 — THE ORIGIN. Contiguity is checked from the LOWEST index
         # present, so deleting `events.0000.jsonl` AND its row left a sequence
         # that was contiguous, had `first_missing=None`, and certified
         # `full=True, anchored=True` (cycle 4, measured). Nothing recorded that
@@ -1020,7 +1053,7 @@ def _write_manifest(graph_dir: Path, payload: dict) -> Path:
 
 
 #: The largest index a FOUR-digit name can carry. Beyond it the name grows a
-#: digit and `sorted()` stops agreeing with the numeric order (anchor 4), so the
+#: digit and `sorted()` stops agreeing with the numeric order (anchor 6), so the
 #: WRITER must refuse rather than emit a layout its own verifier rejects.
 MAX_SEALABLE_INDEX = 9999
 
@@ -1162,8 +1195,13 @@ def seal_active(graph_dir: str | Path) -> Path:
         # ⛔ ONE read, one anchor set, under the journal's own append lock — see
         # `_measure`. This used to be `stat()` + a separate `_digest()`, which a
         # concurrent appender could split into an unsatisfiable row.
+        # ⛔ ...and the records must be REPLAYABLE, checked in the SAME pass.
+        # Cycle 6 measured the asymmetry: a segment with a corrupt mid-file line
+        # was refused by `adopt_crashed_seal` and certified "full" by
+        # `seal_active` — two writers, the same bytes, opposite verdicts. A
+        # torn trailing fragment stays fine (it is the append-path signature).
         sealed_bytes, sealed_lines, sealed_sha = _measure(
-            source, lock=True, strict=True)
+            source, lock=True, strict=True, validate=True)
 
         source.rename(target)
         # ANCHOR 3: the live tail exists from the moment the journal is sealed.
@@ -1322,8 +1360,7 @@ def adopt_crashed_seal(graph_dir: str | Path) -> Path:
         # REPLAYABLE: a segment of garbage adopted as `present` would pass
         # `verify` and certify `full=True` while `read_all_segments` refuses the
         # same layout (cycle 4, measured).
-        sealed_bytes, lines, sha = _measure(path, strict=True)
-        _assert_adoptable_records(path)
+        sealed_bytes, lines, sha = _measure(path, strict=True, validate=True)
         payload["segments"].append({
             "name": name, "index": index, "bytes": sealed_bytes,
             "lines": lines, "sha256": sha, "disposition": "present",
@@ -1347,28 +1384,6 @@ def adopt_crashed_seal(graph_dir: str | Path) -> Path:
         # the window this verb already handles.
         _open_tail_exclusively(directory / ACTIVE_NAME)
         return _write_manifest(directory, payload)
-
-
-def _assert_adoptable_records(path: Path) -> None:
-    """Refuse a segment whose records do not replay (a TORN tail stays fine).
-
-    `log.py` distinguishes a trailing fragment — never a complete record, the
-    SIGKILL-during-append signature — from a skipped MID-FILE line, which is a
-    record the journal held and lost. Adoption must make the same distinction:
-    admitting the second certifies a full claim over a layout its own reader
-    refuses.
-    """
-    data = path.read_bytes()
-    body = data if data.endswith(b"\n") else data[: data.rfind(b"\n") + 1]
-    for number, raw in enumerate(body.split(b"\n"), start=1):
-        if not raw.strip():
-            continue
-        try:
-            json.loads(raw)
-        except ValueError as exc:
-            raise JournalLayoutError(
-                f"{path.name} line {number} is not a record ({exc}) — refusing "
-                f"to adopt a segment whose bytes cannot be replayed") from exc
 
 
 def _open_tail_exclusively(path: Path) -> None:
