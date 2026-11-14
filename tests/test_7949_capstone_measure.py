@@ -5815,7 +5815,7 @@ _EPIC_CITE_DOCS = {
     "11083/README.md":
         _REPO / "docs/evidence/11083/README.md",
     # ⛔ REGISTERED BY THE REVIEW THAT FOUND IT UNPINNED (#12462). `05-verify.md` D5 states
-    # NINE this-head `file:line` measurements in its `Measured at` sentence, and the reviewer
+    # NINE this-head `file:line` measurements in that paragraph, and the reviewer
     # measured that reverting them left the suite GREEN — so the paragraph whose whole subject
     # is "numbers rot" was itself the one block in this PR nothing read. ⛔ NINE IS A CELL
     # COUNT, NOT A SENTENCE COUNT: eight are in the `Measured at` sentence and `:1194` is in the sentence
@@ -5829,15 +5829,16 @@ _EPIC_CITE_DOCS = {
     # and the last four (`capstone_run.py:1186`, `:1194`, `EXTRACTOR-V4-ARCHITECTURE.md:1400`,
     # `:1418`) on the two source keys registered just below. ⛔ THE POPULATION IS NINE, NOT
     # SEVEN: the first two cuts each miscounted it, and the two numbers they left out were
-    # exactly the shape this PR exists to close (mutating `:1194` or `:1418` alone left 420
-    # GREEN until they were pinned). ⛔ AND NINE WAS STILL NOT THE WHOLE PARAGRAPH (round 7,
+    # exactly the shape this PR exists to close (mutating `:1194` or `:1418` alone left the file
+    # GREEN until they were pinned — 420 collected at that round's head, 413 at `8e86c7e108`,
+    # and a count is only readable with the head it was taken at: D5's own rule). ⛔ AND NINE WAS STILL NOT THE WHOLE PARAGRAPH (round 7,
     # P1): D5 also states three more this-head numbers, in the composition clauses EARLIER on
     # the same markdown line — `:191`, `:4201-4208`, `:4209-4230` — in two files that no row
     # scoped to THIS document, and no `_EPIC_CITE_SOURCES` key, named at all (`capstone_verdict_check`
     # DID have a source key and rows — in `E1-E5-PROOFS.md` and `docs/00_index.md` — but
     # `_BUNDLE_TOOL_SOURCES`' phrase sweep reads `_BUNDLE_DOCS`, which does not contain
-    # this file, so none of them could read it). MEASURED: mutating all three at once left this file 413
-    # GREEN. They are pinned on the three rows below; the nine above are the `Measured at`
+    # this file, so none of them could read it). MEASURED at `8e86c7e108` (413 collected there): mutating all three at once left this file 413
+    # GREEN. They are pinned on the three rows below; the nine above are the nine-cell
     # population and the whole paragraph states twelve. A document this bundle EDITS is a document this
     # bundle READS — the convention the `_EPIC_CITE_DOCS` comment above states; registering the
     # file is what makes the next insertion red instead of silent.

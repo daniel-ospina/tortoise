@@ -774,7 +774,7 @@ git grep -c 'result\["relations"\]' -- tests/          # tree-wide MATCHES — T
                                                           # write_path/test_write_path_relation_lane.py
                                                           # — 3 — and tests/test_7949_capstone_measure.py
                                                           # — 3 — SOURCE-TEXT scans, not consumers: one is
-                                                          # the `extractor_v2.py` scan (`:14406`) that derives
+                                                          # the `extractor_v2.py` scan (`:14407`) that derives
                                                           # the doc's cite, and the two the finder itself needs
                                                           # to re-derive that number (#12569)
 # ⛔⛔ THIS GREP COUNTS LINES, NOT READERS — do not read the per-file numbers as "who consumes the
