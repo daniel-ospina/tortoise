@@ -7972,6 +7972,17 @@ async def health():
             # means `db.ok`, `backup_watcher.ok` and `record.ok` (the three
             # terms in the `status` expression above), not the counter.
             "wait_bound_breaches": breaches,
+            # #10749: the POSITIVE pair beside that count. The clamp publishes this counter on
+            # `monitoring.metrics()`, which reaches the standalone `/health` — JSON — and, as the
+            # Prometheus family `tortoise_health_setup_clamped_total`, `/metrics` (which is the
+            # exposition and carries NO JSON key) — but the hosted app builds its OWN body, so
+            # without this line the operator's first curl sees `wait_bound_breaches: 0` (which the
+            # clamp makes flat BY DESIGN) and nothing reporting that health came back unknown
+            # because the clamp cost the observation. Same rule as the block above: REPORTED,
+            # never folded into `status` (a cumulative counter must not pin the deployment degraded
+            # for the life of the process). `docs/infra-runbook.md` §4.1.1a is the operator
+            # contract.
+            "health_setup_clamped": _monitoring.health_setup_clamped_count(),
             "record": record, "build": _build_identity()}
 
 
@@ -49541,7 +49552,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 181 tracked files (445 distinct
+# ABSOLUTE line number from 183 tracked files (446 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason
