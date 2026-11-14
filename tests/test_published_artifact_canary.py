@@ -852,6 +852,11 @@ def test_an_install_failure_is_only_RED_when_the_INDEX_confirms_the_absence(tmp_
     boundary = (
         ("x-tortoise-graph", canary.UNKNOWN),  # suffix matcher
         ("foo-tortoise-graph", canary.UNKNOWN),  # suffix matcher, longer prefix
+        # ⛔ AND THE MIRROR SUFFIX (#12422 round-26 review P2): `graph` is a proper suffix of
+        # `tortoise-graph`, so `wanted.endswith(named)` accepts it — the last of the four
+        # one-token relaxations to stay green. Narrow exposure (only a capturable proper
+        # suffix reaches it) but the same verdict, so it is pinned with the rest.
+        ("graph", canary.UNKNOWN),  # named is a proper SUFFIX of wanted
         ("tortoise-graph[embeddings]", canary.FAIL),  # extras: the SAME project
     )
     for named, expected in boundary:
@@ -871,9 +876,9 @@ def test_an_install_failure_is_only_RED_when_the_INDEX_confirms_the_absence(tmp_
         assert boundary_arm.status == expected, (
             f"pip naming {named!r} must be {expected} against package 'tortoise-graph' "
             f"(got {boundary_arm.status}: {boundary_arm.detail}); the attribution is an "
-            f"EQUALITY on the PEP 503-normalised name — a prefix, substring or suffix "
-            f"matcher in ANY direction re-opens the release call this arm was narrowed "
-            f"to close"
+            f"EQUALITY on the PEP 503-normalised name — every neighbouring matcher "
+            f"(prefix, substring, prefix-suffix, proper-suffix) re-opens the release call "
+            f"this arm was narrowed to close"
         )
     # and a failure pip does not attribute to a missing distribution is never a FAIL
     arm = canary.install_and_run(
