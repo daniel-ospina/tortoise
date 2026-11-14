@@ -76,6 +76,10 @@
         "check"
       ],
       [
+        "consent-key-drift.yml",
+        "check"
+      ],
+      [
         "deploy-staleness.yml",
         "check"
       ],
@@ -547,7 +551,7 @@
       ]
     ]
   },
-  "gate_digest": "9a9e27bbb62407180dfdb74ba705577ae2f209d50e5de16f273de87f531e4d75",
+  "gate_digest": "416a60adeaa113431c55095b852d4d86c5f6032de2b18030524d0fbd384893b5",
   "live_checked_at": "2026-09-29T02:35:26Z",
   "live_observed_contexts": [
     "ai-review-gate",
@@ -571,5 +575,5 @@
     "test-isolation"
   ],
   "settings_home_consistent": false,
-  "verified_at": "2026-11-13T18:07:41Z"
+  "verified_at": "2026-11-14T01:49:06Z"
 }

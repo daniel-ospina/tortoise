@@ -57,6 +57,11 @@ def _engine_doc(version: str = "0.2.0", uploaded: str = "2026-08-08T00:30:10.719
             version: [
                 {
                     "filename": f"tortoise_graph-{version}-py3-none-any.whl",
+                    # ⛔ `yanked` IS PART OF A DOCUMENTED FILE RECORD (#12589 review round 12,
+                    # P3): without it the entry is an UNREADABLE value to `judged_value`, so this
+                    # "healthy" fixture was a shape the canary refuses to judge — and any future
+                    # test that handed it to a judging path would silently get UNKNOWN.
+                    "yanked": False,
                     "upload_time_iso_8601": uploaded,
                 }
             ]
@@ -369,7 +374,10 @@ def test_a_client_version_with_no_INSTALLABLE_file_in_ANY_release_is_red():
         resolves to the older release, and yanking is whole-release on PyPI.
 
     So: red only when NO release has a non-yanked file — the sole state where the sentence is
-    true — and green when any release does, naming which.
+    true — and green when any release does, naming which. ⛔ AND UNKNOWN when a release VALUE could
+    not be read: the FAIL sentence needs a COMPLETE parse, so an unreadable sibling withholds it
+    (that third state is `#12589`'s whole subject; this docstring stated a two-valued rule until
+    review round 18, contradicting the section header below).
     """
 
     def _report(releases: dict) -> object:
@@ -403,6 +411,17 @@ def test_a_client_version_with_no_INSTALLABLE_file_in_ANY_release_is_red():
         assert arm.status == canary.FAIL, (why, arm.status, arm.detail)
         assert report.exit_code == 1, (why, report.exit_code)
         assert "any release" in arm.detail.lower(), (why, arm.detail)
+
+    # ⛔ AND THE SENTENCE THE ALERT RENDERS IS PINNED IN FULL (#12589 review round 16, P3). The
+    # bare `"any release"` substring above let the whole body drift: dropping the count, bumping it
+    # by one, or dropping the version pointer all stayed green — and this is the text an operator
+    # reads as **"cut a release"**.
+    two_yanked = _report({"0.3.0": [yanked, {**yanked, "filename": "tortoise_client-0.3.0-2.whl"}]})
+    detail = two_yanked.get("client-published").detail
+    assert "(2 file(s) on 0.3.0, none usable)" in detail, detail
+    assert "README.md documents `pip install tortoise-client`, which cannot resolve" in detail, (
+        detail
+    )
 
     # GREEN: the latest release is yanked but an older one is installable — pip resolves, so
     # the arm must NOT claim the documented install cannot resolve (round 15's false FAIL).
@@ -494,7 +513,12 @@ def test_releases_map_separates_ABSENT_from_EMPTY():
     # The absent key must not raise on the informational path either (the `release-age` and
     # `tree-version` rows are gated=False, so a crash here would take down a run that has
     # nothing to report).
-    assert canary.release_files({"info": {"version": "0.2.0"}}, "0.2.0") == []
+    # ⛔ CHANGED by #12589 (review round 2, P3): this was `== []`, i.e. an ABSENT map was spelled
+    # as the ANSWER "no files listed" — the map-level version of the very class this issue removes,
+    # and a disagreement with `releases_map` (which returns `None` for the same document). `None`
+    # means "no usable listing"; `[]` is reserved for a READABLE map with no such version key.
+    assert canary.release_files({"info": {"version": "0.2.0"}}, "0.2.0") is None
+    assert canary.release_files({"releases": {}}, "0.2.0") == []
     assert canary.upload_time({"info": {"version": "0.2.0"}}, "0.2.0") is None
 
 
@@ -2633,6 +2657,504 @@ def test_wheel_mode_fail_names_a_build_defect_not_a_release():
     assert "BUILT wheel fails" in summary
     assert "re-dispatch this publish" in summary
     assert "needs a release" not in summary
+    # ⛔ AND THE TAIL'S CLASSIFICATION BELONGS TO THE ARM THAT ESTABLISHED THE CLAIM (#12589 review
+    # round 13, P3): "This is a code defect" was attached to every branch, including the one that
+    # says it could not attribute the failure. A wrong `named_it` must not be able to hide here.
+    assert "re-dispatch this publish" in summary, summary
+    assert "wheel-mode wiring problem" not in summary, summary
+    # ⛔ AND THE CLAUSE THAT KEEPS A PRE-PUBLISH RED FROM READING AS A RELEASE EVENT (#12589 review
+    # round 16, P3): deleting "Nothing has been uploaded." left the suite green, and that sentence
+    # is the only thing distinguishing this tail from the index-mode "cut a release" tail.
+    assert "Nothing has been uploaded." in summary, summary
+
+    # ⛔ AND A GATED ARM THAT IS NOT THE WHEEL'S COMMAND MAY NOT INHERIT THE CLAIM (#12589 review
+    # round 12, P3). The pre-fix tail published "fails its documented first command" on `else:`,
+    # so any arm added later would be described as the built wheel failing a command it never ran.
+    foreign = canary.build_report(
+        engine_doc=None,
+        client_doc=None,
+        tree_version="0.2.0",
+        init_arm=canary.Arm("documented-command", canary.FAIL, "the README example exits 1"),
+        now=NOW,
+        wheel_path=Path("dist/tortoise_graph-0.2.0-py3-none-any.whl"),
+    )
+    foreign_summary = canary.render_summary(foreign)
+    assert "fails its documented first command" not in foreign_summary, foreign_summary
+    assert "documented-command" in foreign_summary, foreign_summary
+    assert "is NOT judged by this summary" in foreign_summary, foreign_summary
+    # ⛔ THE FALLBACK'S OWN SENTENCE, not a substring the TABLE row already contains (#12589 review
+    # round 15, P3): `"documented-command" in summary` was satisfied by the table, so replacing the
+    # arm name in the sentence with "some arm" — or deleting the detail — stayed green.
+    assert (
+        "the failing arm is `documented-command` (the README example exits 1)"
+    ) in foreign_summary, foreign_summary
+    # ...and the clause that limits what that arm establishes: rewriting it to "failed to install"
+    # would put the wheel's claim back into a sentence built for a foreign arm (#12589 round 17).
+    assert (
+        "that arm does not establish that the built wheel fails its documented command"
+    ) in foreign_summary, foreign_summary
+    # ...and the branch that could not attribute the failure may not CLASSIFY it either: no
+    # "re-dispatch this publish" instruction (that sentence carries the code-defect verdict), and
+    # the honest alternative instead.
+    assert "re-dispatch this publish" not in foreign_summary, foreign_summary
+    assert "wheel-mode wiring problem" in foreign_summary, foreign_summary
+
+
+def test_the_FAIL_arm_refuses_to_print_a_count_it_could_not_read(monkeypatch):
+    """⛔ THE GUARD'S FAIL-CLOSED DIRECTION WAS UNPINNED (#12589 review round 15, P3).
+
+    `release_files` cannot return `None` on the client FAIL branch, which is why the `RuntimeError`
+    is unreachable — but that is exactly why replacing the `raise` with `files = []` left all 89
+    tests green. That mutant makes the arm print "0 file(s) on 0.3.0, none usable" and exit 1:
+    a release order manufactured from a count nobody read, i.e. the defect this issue removes. The
+    seam is narrow and deliberate: a patched `release_files` stands in for the future refactor the
+    guard exists to survive.
+    """
+    import pytest
+
+    def _cannot_read(index_doc, version):
+        return None
+
+    monkeypatch.setattr(canary, "release_files", _cannot_read)
+    with pytest.raises(RuntimeError, match="COMPLETE reading"):
+        _client_report({"info": {"version": "0.3.0"}, "releases": {"0.3.0": []}})
+
+
+GOLDEN_GREEN = """## Published-artifact canary (#12363)
+
+**Verdict: PASS**
+
+| arm | gated | status | reading |
+|---|---|---|---|
+| `engine-index` | yes | PASS | tortoise-graph latest on the index: 0.2.0 |
+| `engine-init` | yes | PASS | tortoise init succeeds |
+| `client-published` | yes | PASS | tortoise-client resolves on the index (advertised latest 0.3.0 is installable; installable: 0.3.0) |
+| `release-age` | no | — | tortoise-graph 0.2.0 uploaded 97d ago |
+| `tree-version` | no | — | pyproject.toml version 0.2.0 vs published 0.2.0 — the tree's version (no bump pending) |
+"""
+
+GOLDEN_INDEX_FAIL = """## Published-artifact canary (#12363)
+
+**Verdict: FAIL**
+
+| arm | gated | status | reading |
+|---|---|---|---|
+| `engine-index` | yes | PASS | tortoise-graph latest on the index: 0.2.0 |
+| `engine-init` | yes | PASS | tortoise init succeeds |
+| `client-published` | yes | FAIL | the tortoise-client index lists NO installable file in ANY release (0 file(s) on 0.3.0, none usable) — README.md documents `pip install tortoise-client`, which cannot resolve |
+| `release-age` | no | — | tortoise-graph 0.2.0 uploaded 97d ago |
+| `tree-version` | no | — | pyproject.toml version 0.2.0 vs published 0.2.0 — the tree carries the same version — the failing arm above is NOT the engine build, so this version's engine artifact is not implicated; read the failing row before deciding what a bump would fix |
+
+The artifact on the index is broken for the documented steps. This is **not** fixed by a code change in this repo: it needs a release (version bump → tag → `publish-pypi.yml`) by whoever holds the PyPI credentials. See #12363.
+"""
+
+GOLDEN_WHEEL_FAIL = """## Published-artifact canary (#12363)
+
+**Verdict: FAIL**
+
+| arm | gated | status | reading |
+|---|---|---|---|
+| `engine-index` | no | — | not consulted (wheel mode: testing the locally built w.whl) |
+| `client-published` | no | — | not consulted (wheel mode) |
+| `engine-init` | yes | FAIL | `tortoise init` exits 1 |
+
+The BUILT wheel fails its documented first command. Nothing has been uploaded. Fix the tree and re-dispatch this publish: this is a code defect, not a release-owed finding. See #12363.
+"""
+
+GOLDEN_UNKNOWN = """## Published-artifact canary (#12363)
+
+**Verdict: CANNOT RUN**
+
+| arm | gated | status | reading |
+|---|---|---|---|
+| `engine-index` | yes | PASS | tortoise-graph latest on the index: 0.2.0 |
+| `engine-init` | yes | PASS | tortoise init succeeds |
+| `client-published` | yes | CANNOT RUN | could not read a file listing out of the tortoise-client release map (releases-unreadable) — a version value that is not an array, an entry that is not an object, or a file entry with no boolean `yanked` / no non-empty string `filename`. PyPI documents each version's value as an ARRAY of file objects, so this is a shape this client cannot parse, and whether `pip install tortoise-client` resolves is UNKNOWN, not false. This is NOT evidence the artifact is broken and is NOT a reason to cut a release |
+| `release-age` | no | — | tortoise-graph 0.2.0 uploaded 97d ago |
+| `tree-version` | no | — | pyproject.toml version 0.2.0 vs published 0.2.0 — the tree's version (no bump pending) |
+
+The canary could not READ something it needs, or could not exercise the artifact: the row marked CANNOT RUN names which (`client-published`). Reported as RED on purpose: a detector that cannot run must never look like a pass.
+"""
+
+
+def _GOLDEN_ENGINE():
+    return {
+        "info": {"version": "0.2.0"},
+        "releases": {
+            "0.2.0": [
+                {
+                    "filename": "tortoise_graph-0.2.0-py3-none-any.whl",
+                    "yanked": False,
+                    "upload_time_iso_8601": "2026-08-08T00:30:10.719404Z",
+                }
+            ]
+        },
+    }
+
+
+_GOLDEN_CLIENT_GOOD = {
+    "filename": "tortoise_client-0.3.0-py3-none-any.whl",
+    "yanked": False,
+    "upload_time_iso_8601": "2026-08-08T00:30:10.719404Z",
+}
+
+
+def _GREEN_REPORT():
+    return canary.build_report(
+        engine_doc=_GOLDEN_ENGINE(),
+        client_doc={"info": {"version": "0.3.0"}, "releases": {"0.3.0": [_GOLDEN_CLIENT_GOOD]}},
+        tree_version="0.2.0",
+        init_arm=canary.Arm("engine-init", canary.OK, "tortoise init succeeds"),
+        now=NOW,
+    )
+
+
+def _INDEX_FAIL_REPORT():
+    return canary.build_report(
+        engine_doc=_GOLDEN_ENGINE(),
+        client_doc={"info": {"version": "0.3.0"}, "releases": {"0.3.0": []}},
+        tree_version="0.2.0",
+        init_arm=canary.Arm("engine-init", canary.OK, "tortoise init succeeds"),
+        now=NOW,
+    )
+
+
+def _WHEEL_FAIL_REPORT():
+    return canary.build_report(
+        engine_doc=None,
+        client_doc=None,
+        tree_version="0.2.0",
+        init_arm=canary.Arm("engine-init", canary.FAIL, "`tortoise init` exits 1"),
+        now=NOW,
+        wheel_path=Path("dist/w.whl"),
+    )
+
+
+def _UNKNOWN_REPORT():
+    return canary.build_report(
+        engine_doc=_GOLDEN_ENGINE(),
+        client_doc={"info": {"version": "0.3.0"}, "releases": {"0.3.0": {}}},
+        tree_version="0.2.0",
+        init_arm=canary.Arm("engine-init", canary.OK, "tortoise init succeeds"),
+        now=NOW,
+    )
+
+
+GOLDEN_INFO_UNREADABLE_DETAIL = (
+    "could not read the index metadata for tortoise-client — the document's `info` is PRESENT but "
+    "is not an object (info-unreadable), so the version metadata this arm reads is UNPARSEABLE "
+    "(any version the document may carry was never obtained). That is a NON-READING: it says "
+    "nothing about whether the distribution resolves, and it is NOT a reason to cut a release"
+)
+
+GOLDEN_VERSION_UNREADABLE_DETAIL = (
+    "could not read the version the index serves for tortoise-client — `info.version` is PRESENT "
+    "but is not a string (version-unreadable), so the metadata this arm reads is UNPARSEABLE. That "
+    "is a NON-READING: it says nothing about whether the distribution resolves, and it is NOT a "
+    "reason to cut a release"
+)
+
+
+def test_the_ENGINE_side_non_reading_details_name_the_engine_package():
+    """⛔ THE SAME SENTENCE ON THE OTHER ARM (#12589 review round 20, P3).
+
+    Both non-reading details interpolate `{package}`, and the verbatim pins above cover the CLIENT
+    text only; the engine side was checked by token alone. Replacing `{package}` with
+    `{CLIENT_PACKAGE}` there made an `engine-index` CANNOT RUN say "could not read the index
+    metadata for tortoise-client" — with the suite green.
+    """
+    info_side = canary.build_report(
+        engine_doc={"info": 0},
+        client_doc=_client_doc(),
+        tree_version="0.2.0",
+        init_arm=_ok_init_arm(),
+        now=NOW,
+    ).get("engine-index")
+    assert info_side.status == canary.UNKNOWN, info_side.detail
+    assert (
+        "could not read the index metadata for tortoise-graph — the document's `info` is PRESENT"
+    ) in info_side.detail, info_side.detail
+    assert "tortoise-client" not in info_side.detail, info_side.detail
+
+    version_side = canary.build_report(
+        engine_doc={"info": {"version": 3}},
+        client_doc=_client_doc(),
+        tree_version="0.2.0",
+        init_arm=_ok_init_arm(),
+        now=NOW,
+    ).get("engine-index")
+    assert version_side.status == canary.UNKNOWN, version_side.detail
+    assert (
+        "could not read the version the index serves for tortoise-graph — `info.version` is PRESENT"
+    ) in version_side.detail, version_side.detail
+    assert "tortoise-client" not in version_side.detail, version_side.detail
+
+
+def test_the_two_info_and_version_non_reading_details_are_PINNED_VERBATIM():
+    """⛔ A NON-READING'S SCRAP OF TEXT IS WHERE A NEGATIVE FINDING SNEAKS IN (#12589 round 18, P2).
+
+    These two arms were the last non-reading details guarded only by a PHRASE DENY-LIST
+    (`assert "carries no" not in detail`). A deny-list cannot stop a claim worded differently: on a
+    /tmp copy, appending ", so the documented install is not resolvable" after "That is a
+    NON-READING" — an artifact-negative claim made by a non-reading, and self-contradictory inside
+    one sentence — kept the suite green. Verbatim, as for their two siblings.
+    """
+    info_detail = (
+        _client_report({"info": "x", "releases": {"0.3.0": [_CLIENT_GOOD]}})
+        .get("client-published")
+        .detail
+    )
+    assert info_detail == GOLDEN_INFO_UNREADABLE_DETAIL, info_detail
+
+    version_detail = (
+        _client_report({"info": {"version": 3}, "releases": {"0.3.0": [_CLIENT_GOOD]}})
+        .get("client-published")
+        .detail
+    )
+    assert version_detail == GOLDEN_VERSION_UNREADABLE_DETAIL, version_detail
+
+
+GOLDEN_RELEASES_ABSENT_DETAIL = (
+    "could not read the tortoise-client release map — the index document carries no usable "
+    "`releases` map (the key is absent, null, or not an object). PyPI documents `releases` as "
+    "DEPRECATED and may remove it (releases-absent), so whether `pip install tortoise-client` "
+    "resolves is UNKNOWN, not false. This is NOT evidence the artifact is broken and is NOT a "
+    "reason to cut a release"
+)
+
+
+def test_the_releases_absent_detail_is_PINNED_VERBATIM():
+    """⛔ A NON-READING MAY NOT BE WORDED AS A NEGATIVE FINDING (#12589 review round 17, P2).
+
+    The `releases-absent` detail ends "… resolves is UNKNOWN, not false". Inverting that one word
+    to "FALSE" — a non-reading asserting non-resolution, the exact class this issue removes — left
+    all 93 tests green, because only the sibling `releases-unreadable` arm's sentence was pinned
+    (by GOLDEN_UNKNOWN). Same treatment for the other arm: the full sentence, verbatim.
+    """
+    detail = _client_report({"info": {"version": "0.3.0"}}).get("client-published").detail
+    assert detail == GOLDEN_RELEASES_ABSENT_DETAIL, detail
+
+
+def test_the_index_absent_client_detail_names_the_documented_install():
+    """⛔ THE README POINTER IS WHAT MAKES A 404 A FINDING (#12589 review round 17, P3).
+
+    The `client-published` arm reads FAIL on a 404 because README.md documents the install; the
+    sentence that says so was deletable with all 93 tests green. Without it the FAIL is just "a
+    package is not on the index".
+    """
+    report = canary.build_report(
+        engine_doc=_engine_doc(),
+        client_doc=None,
+        client_error="404 Not Found",
+        client_state=canary.INDEX_ABSENT,
+        tree_version="0.2.0",
+        init_arm=_ok_init_arm(),
+        now=NOW,
+    )
+    arm = report.get("client-published")
+    assert arm.status == canary.FAIL, (arm.status, arm.detail)
+    assert "tortoise-client is not resolvable on the index (404 Not Found)" in arm.detail, (
+        arm.detail
+    )
+    assert "README.md documents `pip install tortoise-client` as a supported install" in arm.detail
+
+
+def test_the_index_UNREADABLE_detail_names_the_shape_it_could_not_read():
+    """⛔ AND ITS SIBLING (#12589 review round 17, P3): the unreadable-index detail named the
+    distribution's presence in two clauses; both were deletable with the suite green (the token and
+    the trailing "NOT a reason to cut a release" were pinned, the body was not)."""
+    report = canary.build_report(
+        engine_doc=None,
+        engine_error="timed out",
+        engine_state=canary.INDEX_UNREADABLE,
+        client_doc=_client_doc(),
+        tree_version="0.2.0",
+        init_arm=_ok_init_arm(),
+        now=NOW,
+    )
+    arm = report.get("engine-index")
+    assert arm.status == canary.UNKNOWN, arm.detail
+    assert "could not read the tortoise-graph index metadata (timed out)" in arm.detail, arm.detail
+    assert "the distribution's presence is UNKNOWN, not absent" in arm.detail, arm.detail
+
+    # ...and the CLIENT arm's identical clause, which is a separate f-string (#12589 round 17).
+    client_side = canary.build_report(
+        engine_doc=_engine_doc(),
+        client_doc=None,
+        client_error="timed out",
+        client_state=canary.INDEX_UNREADABLE,
+        tree_version="0.2.0",
+        init_arm=_ok_init_arm(),
+        now=NOW,
+    )
+    client_arm = client_side.get("client-published")
+    assert client_arm.status == canary.UNKNOWN, client_arm.detail
+    assert "could not read the tortoise-client index metadata (timed out)" in client_arm.detail
+    assert "the distribution's presence is UNKNOWN, not absent" in client_arm.detail, (
+        client_arm.detail
+    )
+
+
+def test_the_RENDERED_summaries_are_PINNED_VERBATIM():
+    """⛔ THIS IS THE CLASS-CLOSING PIN FOR EVERY RENDERED LITERAL (#12589 review rounds 13-16).
+
+    Six consecutive review rounds found the same defect shape: an operator-facing literal that no
+    test could redden. Asserting one phrase at a time let the next clause drift, and the round-16
+    round found the count, the version pointer, "Nothing has been uploaded.", the green
+    same-version clause, the heading glyph, and the UNKNOWN tail's second mechanism all mutable in
+    silence.
+
+    A single verbatim expectation per TAIL closes the class instead of the instance: any change to
+    any word, table cell, glyph or blank line in these four outputs fails here, so a text edit has
+    to be made DELIBERATELY, with this expectation updated in the same commit. The four shapes are
+    one per verdict path plus the wheel (pre-publish) path. ⚠️ NOT every branch: the wheel
+    tail's other FOUR sub-branches (does-not-install, console-script, init-success-no-database, the
+    foreign-arm fallback — the other TWO (does-not-install, init-success-no-database) are pinned
+    end-to-end by `test_the_wheel_tail_reads_the_PRODUCERS_OWN_text_end_to_end`, the console-script
+    shape by `test_the_wheel_tail_names_the_CONSOLE_SCRIPT_case_separately`, and the foreign-arm
+    fallback on a hand-built `Report` from that same test) and
+    the UNKNOWN tail's EMPTY-`marked` variant are pinned by
+    `test_wheel_mode_fail_names_a_build_defect_not_a_release`,
+    `test_the_wheel_tail_names_the_CONSOLE_SCRIPT_case_separately` and
+    `test_the_UNREADABLE_reason_names_every_cause_the_code_can_produce` — this pin covers one
+    shape per tail; those cover the siblings.
+    """
+    assert canary.render_summary(_GREEN_REPORT()) == GOLDEN_GREEN
+    assert canary.render_summary(_INDEX_FAIL_REPORT()) == GOLDEN_INDEX_FAIL
+    assert canary.render_summary(_WHEEL_FAIL_REPORT()) == GOLDEN_WHEEL_FAIL
+    assert canary.render_summary(_UNKNOWN_REPORT()) == GOLDEN_UNKNOWN
+
+
+def test_the_summary_heading_publishes_the_GLYPH_not_the_internal_status():
+    """⛔ THE HEADING IS THE FIRST THING A HUMAN READS (#12589 review round 15, P3).
+
+    `glyph[report.verdict]` was unpinned: rendering the internal `report.verdict` instead publishes
+    `**Verdict: UNKNOWN**` / `**Verdict: OK**`, and both existing heading pins survived — `Verdict:
+    FAIL` is identical either way, and `CANNOT RUN` still appeared from the UNKNOWN tail's "NO row is
+    marked CANNOT RUN".
+    """
+    # ⛔ BOTH MECHANISMS (#12589 review round 16, P3): the tail names "could not READ" AND "could
+    # not exercise". Round 4's defect was naming ONE for every CANNOT RUN, and deleting the second
+    # clause — which then tells an operator whose `engine-init` FAILED TO RUN that the canary could
+    # not read something — stayed green, because the only pins were the READ phrase and the
+    # absence of a three-word substring.
+    exercised = canary.Report()
+    exercised.add(canary.Arm("engine-index", canary.OK, "reads"))
+    exercised.add(canary.Arm("engine-init", canary.UNKNOWN, "the install could not run"))
+    tail = canary.render_summary(exercised)
+    assert "could not READ something it needs" in tail, tail
+    assert "could not exercise the artifact" in tail, tail
+
+    green = canary.Report()
+    green.add(canary.Arm("engine-index", canary.OK, "reads"))
+    assert "**Verdict: PASS**" in canary.render_summary(green)
+    assert "**Verdict: CANNOT RUN**" in canary.render_summary(canary.Report())
+
+
+def test_no_informational_rows_are_rendered_without_a_published_version():
+    """⛔ "uploaded unknown ago" ABOUT A VERSION NOBODY READ IS A FALSE ROW (#12589 review round
+    15, P3).
+
+    `if published:` guards both informational rows. Forcing it truthy renders
+    `| release-age | no | — | tortoise-graph  uploaded unknown ago |` and a `tree-version` row that
+    compares the tree against an EMPTY published version — and all 89 tests stayed green, because
+    nothing asserted the rows' ABSENCE on the shape where they cannot be true.
+    """
+    report = canary.build_report(
+        engine_doc=None,
+        client_doc=_client_doc(),
+        tree_version="0.2.0",
+        init_arm=_ok_init_arm(),
+        now=NOW,
+    )
+    assert report.get("release-age") is None, [a.name for a in report.arms]
+    assert report.get("tree-version") is None, [a.name for a in report.arms]
+    rendered = canary.render_summary(report)
+    assert "release-age" not in rendered, rendered
+    assert "tree-version" not in rendered, rendered
+    assert "uploaded  ago" not in rendered, rendered
+
+
+def test_the_wheel_tail_names_the_CONSOLE_SCRIPT_case_separately():
+    """⛔ "DOES NOT INSTALL" IS FALSE FOR A WHEEL THAT INSTALLED CLEANLY (#12589 review round 14,
+    P3).
+
+    #12363 rounds 5 and 6 fixed exactly this (a substring test rendered the console-script case as
+    "does not install"), but nothing pinned the branch on the RENDERED summary: mutating its text
+    back to "does not install", or dropping its `named_it = True`, left 88 tests green — the arm's
+    own detail is pinned, the sentence it produces was not.
+    """
+    report = canary.build_report(
+        engine_doc=None,
+        client_doc=None,
+        tree_version="0.2.0",
+        init_arm=canary.Arm(
+            "engine-init",
+            canary.FAIL,
+            "the installed artifact provides no `tortoise` console script at "
+            "/usr/local/bin/tortoise",
+        ),
+        now=NOW,
+        wheel_path=Path("dist/tortoise_graph-0.2.0-py3-none-any.whl"),
+    )
+    # ⛔ AND THE INSTALL-FAILURE SIBLING (found by this lane's own mutation sweep, #12589 round
+    # 14): `named_it = True` on the "does not install" branch was droppable — the summary would
+    # then print "is NOT judged by this summary" about a wheel the canary watched fail to install.
+    install_fail = canary.build_report(
+        engine_doc=None,
+        client_doc=None,
+        tree_version="0.2.0",
+        init_arm=canary.Arm(
+            "engine-init", canary.FAIL, "the BUILT wheel failed to install: `pip` exits 1"
+        ),
+        now=NOW,
+        wheel_path=Path("dist/tortoise_graph-0.2.0-py3-none-any.whl"),
+    )
+    # ⛔ AND A FOREIGN ARM WHOSE DETAIL MERELY MENTIONS A CONSOLE SCRIPT (#12589 review round 17,
+    # P3): the substring branches keyed on the PROSE alone, so this report rendered "The BUILT wheel
+    # installs but ships no `tortoise` console script … this is a code defect" for an arm that never
+    # installed anything.
+    mentions = canary.build_report(
+        engine_doc=None,
+        client_doc=None,
+        tree_version="0.2.0",
+        init_arm=canary.Arm(
+            "docs-smoke", canary.FAIL, "the docs reference the tortoise console script"
+        ),
+        now=NOW,
+        wheel_path=Path("dist/tortoise_graph-0.2.0-py3-none-any.whl"),
+    )
+    # ...and the same for a foreign arm whose detail OPENS with the wheel's install vocabulary.
+    opens_with = canary.build_report(
+        engine_doc=None,
+        client_doc=None,
+        tree_version="0.2.0",
+        init_arm=canary.Arm(
+            "docs-smoke", canary.FAIL, "the BUILT wheel example in the docs failed to install"
+        ),
+        now=NOW,
+        wheel_path=Path("dist/tortoise_graph-0.2.0-py3-none-any.whl"),
+    )
+    opens_summary = canary.render_summary(opens_with)
+    assert "is NOT judged by this summary" in opens_summary, opens_summary
+    assert "does not install" not in opens_summary, opens_summary
+
+    mentions_summary = canary.render_summary(mentions)
+    assert "is NOT judged by this summary" in mentions_summary, mentions_summary
+    assert "ships no `tortoise` console script" not in mentions_summary, mentions_summary
+    assert "`docs-smoke`" in mentions_summary, mentions_summary
+
+    install_summary = canary.render_summary(install_fail)
+    assert "BUILT wheel does not install" in install_summary, install_summary
+    assert "re-dispatch this publish" in install_summary, install_summary
+    assert "NOT judged by this summary" not in install_summary, install_summary
+
+    summary = canary.render_summary(report)
+    assert "BUILT wheel installs but ships no `tortoise` console script" in summary, summary
+    assert "does not install" not in summary, summary
+    # The classification belongs to this branch too — it DID establish that the wheel is at fault.
+    assert "re-dispatch this publish" in summary, summary
+    assert "wheel-mode wiring problem" not in summary, summary
 
 
 def test_an_EMPTY_wheel_argument_is_refused_not_downgraded_to_index_mode(monkeypatch, capsys):
@@ -2703,6 +3225,338 @@ def test_summary_says_unknown_is_red_on_purpose():
     summary = canary.render_summary(canary.Report())
     assert "CANNOT RUN" in summary
     assert "never look like a pass" in summary
+
+
+def test_the_wheel_tail_reads_the_PRODUCERS_OWN_text_end_to_end(tmp_path):
+    """⛔ THE PRODUCER → RENDERER CONTRACT (#12589 review round 21, P2).
+
+    Every render pin before this fed a HAND-BUILT `Arm`, so the wheel tail's two prose-keyed branches
+    were never exercised against the strings `install_and_run` actually produces. Rewording the
+    producer silently reinstated the #12634/#12363 rounds 5/6 false claim: a wheel that installed
+    cleanly and then failed `tortoise init` rendered "does not install".
+
+    Driven through the `runner=` seam, one failing call per shape, then RENDERED — the detail and
+    the sentence it must produce, together.
+    """
+
+    class _Done:
+        def __init__(self, returncode=0, stdout="", stderr=""):
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    wheel = Path("dist/tortoise_graph-0.2.0-py3-none-any.whl")
+
+    def _report_for(runner, workdir):
+        (workdir / "venv" / "bin").mkdir(parents=True, exist_ok=True)
+        (workdir / "venv" / "bin" / "tortoise").write_text("#!/bin/sh\n")
+        arm, _ = canary.install_and_run(
+            package="tortoise-graph",
+            version="0.2.0",
+            workdir=workdir,
+            timeout=60,
+            runner=runner,
+            wheel=wheel,
+        )
+        assert arm.status == canary.FAIL, arm.detail
+        return canary.render_summary(
+            canary.build_report(
+                engine_doc=None,
+                client_doc=None,
+                tree_version="0.2.0",
+                init_arm=arm,
+                now=NOW,
+                wheel_path=wheel,
+            )
+        )
+
+    # (a) pip could not install the BUILT wheel.
+    def _install_fails(cmd, **kwargs):
+        if "install" in cmd:
+            return _Done(returncode=1, stderr=f"ERROR: {wheel.name} is not a valid wheel")
+        return _Done()
+
+    install_summary = _report_for(_install_fails, tmp_path / "a")
+    assert "The BUILT wheel does not install." in install_summary, install_summary
+    assert "fails its documented first command" not in install_summary, install_summary
+
+    # (b) it installed, and `tortoise init` exited non-zero.
+    (tmp_path / "b").mkdir()
+    (tmp_path / "b" / "venv" / "bin").mkdir(parents=True)
+    (tmp_path / "b" / "venv" / "bin" / "tortoise").write_text("#!/bin/sh\n")
+
+    def _init_fails(cmd, **kwargs):
+        if "init" in cmd:
+            return _Done(returncode=3)
+        return _Done()
+
+    init_summary = _report_for(_init_fails, tmp_path / "b")
+    assert "The BUILT wheel fails its documented first command." in init_summary, init_summary
+    assert "does not install" not in init_summary, init_summary
+
+    # (c) it installed and `tortoise init` exited 0 but created nothing — the command RAN, so the
+    # summary may not say it failed. (#12589 review round 21, P3: this shape rendered the false
+    # "fails its documented first command" until the positive branch was added.)
+    (tmp_path / "c").mkdir()
+    (tmp_path / "c" / "venv" / "bin").mkdir(parents=True)
+    (tmp_path / "c" / "venv" / "bin" / "tortoise").write_text("#!/bin/sh\n")
+
+    def _init_succeeds_silently(cmd, **kwargs):
+        return _Done(returncode=0)
+
+    silent_summary = _report_for(_init_succeeds_silently, tmp_path / "c")
+    # ⛔ THE SENTENCE VERBATIM, conclusion clause included (#12589 review round 22, P3): pinning
+    # "creates no database" plus two absent phrases let the CONCLUSION be inverted — "… which is the
+    # documented behaviour and needs no release" passed, because nothing asserted what the sentence
+    # concludes about it.
+    assert (
+        "The BUILT wheel runs its documented first command successfully but creates no database, "
+        "so the documented flow does not work. Nothing has been uploaded. Fix the tree and "
+        "re-dispatch this publish: this is a code defect, not a release-owed finding."
+    ) in silent_summary, silent_summary
+    assert "fails its documented first command" not in silent_summary, silent_summary
+    assert "does not install" not in silent_summary, silent_summary
+
+    # ⛔ AND THE BRANCH'S ARM GATE (#12589 review round 22, P3): dropping `runs_the_wheel` from it
+    # kept 104 green, and a gated foreign arm whose detail merely MENTIONS the phrase then
+    # published the wheel's own claim — the round-17 defect shape, on the new branch.
+    foreign = canary.Report(wheel_mode=True)
+    foreign.add(
+        canary.Arm(
+            "docs-smoke",
+            canary.FAIL,
+            "the docs note that `tortoise init` created no database on a Windows box",
+        )
+    )
+    foreign_summary = canary.render_summary(foreign)
+    assert "is NOT judged by this summary" in foreign_summary, foreign_summary
+    assert "creates no database, so the documented flow does not work" not in foreign_summary, (
+        foreign_summary
+    )
+    # ⛔ THE FALLBACK'S OWN ARM NAMING (#12589 review round 23, P3): a bare "`docs-smoke`" is
+    # satisfied by the TABLE row, so replacing the fallback's `{step.name}` with a placeholder
+    # stayed green. Assert the clause.
+    assert (
+        "the failing arm is `docs-smoke` (the docs note that `tortoise init` created no database "
+        "on a Windows box)"
+    ) in foreign_summary, foreign_summary
+
+
+def test_the_wheel_tail_only_reads_GATED_arms():
+    """⛔ A NON-GATED ROW MAY NOT DECIDE THE WHEEL'S TAIL (#12589 review round 19, P3).
+
+    `step` is the first GATED red arm. Dropping `arm.gated and` kept 97/97 green, and on a report
+    holding a non-gated `engine-init` FAIL plus a gated `wheel-smoke` FAIL the tail then took the
+    non-gated row as `step`. `engine-init` is the arm that RUNS the built wheel, so it inherited the
+    wheel's own claim and the tail rendered "The BUILT wheel fails its documented first command"
+    for an arm that never decided the verdict. (Measured with the mutant: the console-script
+    sentence is the OTHER branch and never appears in this shape, so an assertion on it would be
+    inert — the assertion below pins the sentence this mutant actually renders.)
+    """
+    report = canary.Report(wheel_mode=True)
+    report.add(canary.Arm("engine-init", canary.FAIL, "not consulted", gated=False))
+    report.add(canary.Arm("wheel-smoke", canary.FAIL, "the built wheel is missing a README"))
+    summary = canary.render_summary(report)
+    # The sentence the mutant actually renders — pinned first, because MIS-ATTRIBUTING the wheel's
+    # claim to a non-gated arm is the damage; "is NOT judged" is the fallback that replaced it.
+    assert "fails its documented first command" not in summary, summary
+    assert "is NOT judged by this summary" in summary, summary
+    assert "`wheel-smoke`" in summary, summary
+
+
+def test_the_index_corroborated_FAIL_detail_orders_a_release():
+    """⛔ THE ARM DETAIL IS WHAT THE ALERT QUOTES (#12589 review round 19, P3).
+
+    The renderer's clause is pinned by GOLDEN_INDEX_FAIL, the arm's own "; a release is owed" was
+    not — dropping it left the FAIL with no instruction on the one path where the index CONFIRMS
+    the absence, i.e. where a release genuinely is owed.
+    """
+    report = canary.build_report(
+        engine_doc=_engine_doc(),
+        client_doc=_client_doc(),
+        tree_version="0.2.0",
+        init_arm=canary.Arm("engine-init", canary.FAIL, "x"),
+        now=NOW,
+    )
+    assert report.get("engine-init").detail == "x"  # the arm is passed through verbatim
+
+    # The producer of the sentence is `install_and_run`; drive it through the runner seam.
+    class _Done:
+        def __init__(self, returncode=0, stdout="", stderr=""):
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    def _runner_install_fails(cmd, **kwargs):
+        if cmd[:2] == ["-m", "venv"] or "venv" in cmd:
+            return _Done()
+        if "install" in cmd:
+            return _Done(
+                returncode=1,
+                stderr=(
+                    "ERROR: Could not find a version that satisfies the requirement "
+                    "tortoise-graph==0.2.0 (from versions: none)\n"
+                    "ERROR: No matching distribution found for tortoise-graph==0.2.0"
+                ),
+            )
+        return _Done()
+
+    # The index probe is what corroborates the absence, so stub it to the ABSENT verdict.
+    # (Nothing needs to pre-exist under `workdir`: the venv is created first, `pip install` runs
+    # second, and only a SUCCESSFUL install ever reaches the console-script check — so an install
+    # failure here cannot be reached from, or changed by, a populated `venv/bin`.)
+    def _probe(name):
+        return canary.INDEX_ABSENT
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        workdir = Path(tmp)
+        arm, _ = canary.install_and_run(
+            package="tortoise-graph",
+            version="0.2.0",
+            workdir=workdir,
+            timeout=60,
+            runner=_runner_install_fails,
+            absent_probe=_probe,
+        )
+    assert arm.status == canary.FAIL, arm.detail
+    assert "a release is owed" in arm.detail, arm.detail
+
+
+def test_the_engine_init_non_reading_details_are_PINNED_VERBATIM(tmp_path):
+    """⛔ THE PRODUCER TEXTS, not just the renderer (#12589 review round 19, P3).
+
+    Rounds 16-18 pinned what `render_summary` PRINTS for hand-built arms; the details the tool
+    itself PRODUCES for a detector outage were still free. Each of these substitutions kept 97/97
+    green while wording a HARNESS fault as an artifact one:
+    "could not create the clean venv" → "the published artifact is not installable",
+    "timed out after {n}s" → "the documented command did not work",
+    "could not run: {exc}" → "the artifact could not run".
+
+    Driven through the `runner=` seam, one failing call per shape, so each sentence is produced by
+    the real code path rather than by a hand-built `Arm`.
+    """
+
+    class _Done:
+        def __init__(self, returncode=0):
+            self.returncode = returncode
+            self.stdout = ""
+            self.stderr = ""
+
+    def _runner_venv_fails(cmd, **kwargs):
+        return _Done(returncode=1)
+
+    arm, _ = canary.install_and_run(
+        package="tortoise-graph",
+        version="0.2.0",
+        workdir=tmp_path,
+        timeout=60,
+        runner=_runner_venv_fails,
+    )
+    assert arm.status == canary.UNKNOWN, arm.detail
+    assert arm.detail == "could not create the clean venv", arm.detail
+
+    # The console-script check runs BEFORE the first command, so the timeout and OSError shapes
+    # are only reachable once the venv looks populated.
+    (tmp_path / "venv" / "bin").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "venv" / "bin" / "tortoise").write_text("#!/bin/sh\n")
+
+    def _runner_init_times_out(cmd, **kwargs):
+        if "init" in cmd:
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=42)
+        return _Done()
+
+    arm, _ = canary.install_and_run(
+        package="tortoise-graph",
+        version="0.2.0",
+        workdir=tmp_path,
+        timeout=42,
+        runner=_runner_init_times_out,
+    )
+    assert arm.status == canary.UNKNOWN, arm.detail
+    assert arm.detail == "timed out after 42s", arm.detail
+
+    def _runner_init_unrunnable(cmd, **kwargs):
+        if "init" in cmd:
+            raise OSError("no such binary")
+        return _Done()
+
+    arm, _ = canary.install_and_run(
+        package="tortoise-graph",
+        version="0.2.0",
+        workdir=tmp_path,
+        timeout=42,
+        runner=_runner_init_unrunnable,
+    )
+    assert arm.status == canary.UNKNOWN, arm.detail
+    assert arm.detail == "could not run: no such binary", arm.detail
+
+    # ...and the arm `build_report` substitutes when no install was performed at all.
+    report = canary.build_report(
+        engine_doc=_engine_doc(),
+        client_doc=_client_doc(),
+        tree_version="0.2.0",
+        init_arm=None,
+        now=NOW,
+    )
+    assert report.get("engine-init").status == canary.UNKNOWN
+    assert (
+        report.get("engine-init").detail
+        == "the published artifact was not exercised (install could not run)"
+    ), report.get("engine-init").detail
+
+
+def test_the_answered_NO_VERSION_details_name_the_right_distribution():
+    """⛔ THE ENGINE ARM'S FAIL SENTENCE COULD NAME THE WRONG PACKAGE (#12589 review round 19, P3).
+
+    `missing_version_arm` builds one sentence per arm from `package`. Nothing pinned the literals,
+    so `index metadata for {ENGINE_PACKAGE}` could be swapped for `{CLIENT_PACKAGE}` — a FAIL about
+    the wrong distribution, on the shape (`{{"info": {{}}}}`) this PR refers out to #12636.
+    """
+    engine_side = canary.build_report(
+        engine_doc={"info": {}},
+        client_doc=_client_doc(),
+        tree_version="0.2.0",
+        init_arm=_ok_init_arm(),
+        now=NOW,
+    ).get("engine-index")
+    assert engine_side.status == canary.FAIL, engine_side.detail
+    assert engine_side.detail == "index metadata for tortoise-graph carries no latest version", (
+        engine_side.detail
+    )
+
+    client_side = _client_report({"info": {}}).get("client-published")
+    assert client_side.status == canary.FAIL, client_side.detail
+    assert (
+        client_side.detail == "the tortoise-client index document carries no published version"
+    ), client_side.detail
+
+
+def test_the_CLI_returns_the_verdicts_exit_code_not_a_coarser_one(monkeypatch, capsys):
+    """⛔ `main()`'s RETURN VALUE IS THE CONTRACT (#12589 review round 19, P2).
+
+    `.github/scripts/published-artifact-alert.sh` reads the process exit: 0 closes the alert ledger,
+    1 orders a release, 2 keeps it open. The suite pinned `report.exit_code` (the property) and the
+    EARLY returns, but never the verdict path — so replacing `return report.exit_code` with
+    `return 0 if report.verdict != FAIL else 1` made a CANNOT RUN exit **0** with all 97 tests
+    green, i.e. a non-reading published as a pass. Assert the call, not the property.
+    """
+    _stub_main(monkeypatch, canary.Arm("engine-init", canary.OK, "tortoise init succeeds"))
+
+    def _stub_report(verdict):
+        probe = canary.Report()
+        probe.add(canary.Arm("engine-index", verdict, "x"))
+        return lambda **kwargs: probe
+
+    for verdict, expected in (
+        (canary.OK, 0),
+        (canary.FAIL, 1),
+        (canary.UNKNOWN, 2),
+    ):
+        monkeypatch.setattr(canary, "build_report", _stub_report(verdict))
+        capsys.readouterr()
+        assert canary.main(["--json"]) == expected, verdict
 
 
 @pytest.mark.parametrize("rc,expected", [(0, canary.OK), (1, canary.FAIL), (2, canary.UNKNOWN)])
@@ -2854,6 +3708,21 @@ def _stub_main(monkeypatch, arm):
     monkeypatch.setattr(canary, "install_and_run", fake_install)
 
 
+def test_the_shared_engine_fixture_is_a_DOCUMENTED_file_record():
+    """⛔ THE "HEALTHY" FIXTURE MUST BE A SHAPE THE CANARY CAN JUDGE (#12589 review round 12, P3).
+
+    `_engine_doc()` is used as the healthy engine document throughout this module. Its only file
+    entry originally had `filename` + `upload_time_iso_8601` and NO `yanked`, which `judged_value`
+    classifies as an UNREADABLE value — so the healthy fixture was a record the canary refuses to
+    judge, and a future test handing it to a judging path would silently get UNKNOWN. This pins the
+    fixture itself: a documented record reads, and its release resolves.
+    """
+    # `judged_value` -> (any installable file, anything dropped as unreadable)
+    assert canary.judged_value(_engine_doc()["releases"]["0.2.0"]) == (True, False)
+    assert canary.installability(_engine_doc(), "0.2.0") == canary.INSTALLABLE
+    assert canary.resolvable_releases(_engine_doc()) == (["0.2.0"], "")
+
+
 def test_the_cli_writes_the_transcript_the_workflows_upload(tmp_path, monkeypatch, capsys):
     _stub_main(monkeypatch, canary.Arm("engine-init", canary.FAIL, "tortoise init exits 1"))
     logs = tmp_path / "canary"
@@ -2887,6 +3756,181 @@ def test_the_cli_writes_the_summary_file_and_the_json_shape(tmp_path, monkeypatc
     # healthy in this fixture, so a red may only come from `engine-init`.
     engine = next(a for a in payload["arms"] if a["name"] == "engine-init")
     assert engine["status"] == canary.FAIL, payload
+
+    # ⛔ THE MACHINE SURFACE MUST NOT CARRY A VERDICT THE TABLE REFUSES TO PRINT (#12589 review
+    # round 10, P3). `release-age` is informational and its own detail says the timestamp was not
+    # obtained ("uploaded unknown ago"); the table renders `—` there, so `--json` must not stamp
+    # "OK". One rendering of one fact, or the two surfaces disagree about whether a non-reading is
+    # a verdict.
+    # ⛔ THE `verdict` FIELD'S VOCABULARY IS PINNED (#12589 review round 16, P3): `verdict` is the
+    # INTERNAL enum (`OK`/`FAIL`/`UNKNOWN`) and `status` the rendered glyph — a deliberate split,
+    # because the workflow keys on `== "FAIL"`. Nothing pinned OK or UNKNOWN, so rendering the
+    # verdict field too stayed green.
+    assert payload["verdict"] == canary.FAIL
+
+    def _stub_report(verdict):
+        probe = canary.Report()
+        probe.add(canary.Arm("engine-index", verdict, "reads"))
+        return lambda **kwargs: probe
+
+    for verdict in (canary.OK, canary.UNKNOWN):
+        monkeypatch.setattr(canary, "build_report", _stub_report(verdict))
+        canary.main(["--json"])
+        got = json.loads(capsys.readouterr().out)
+        assert got["verdict"] == verdict, got
+        assert got["exit_code"] == {canary.OK: 0, canary.UNKNOWN: 2}[verdict], got
+    monkeypatch.undo()
+
+    age = next(a for a in payload["arms"] if a["name"] == "release-age")
+    assert age["gated"] is False, payload
+    assert age["status"] == "—", age
+
+
+def test_the_table_and_the_json_publish_the_SAME_status_for_every_arm(
+    tmp_path, monkeypatch, capsys
+):
+    """⛔ ONE RENDERING OF ONE STATUS, ON BOTH SURFACES (#12589 review round 11, P3).
+
+    Round 10 gave `--json` its own copy of the non-gated half of the rule, so the gated half kept
+    publishing a RAW status: an arm holding a status this module does not name read "CANNOT RUN" in
+    the table (`glyph.get(..., UNKNOWN)`) and that spelling in the payload. Both surfaces now call
+    `rendered_status`, so the pin is EQUALITY between them rather than a second copy of the rule.
+    """
+    import json
+
+    _stub_main(monkeypatch, canary.Arm("engine-init", canary.OK, "tortoise init succeeds"))
+    crafted = canary.Report()
+    # "PASS" is deliberately NOT one of the module's status constants: an unnamed status must render
+    # as the NON-READING, never as whatever spelling the arm happened to hold.
+    crafted.add(canary.Arm("engine-index", "PASS", "a status nothing in this module names"))
+    crafted.add(canary.Arm("release-age", canary.OK, "uploaded unknown ago", gated=False))
+    monkeypatch.setattr(canary, "build_report", lambda **kwargs: crafted)
+
+    canary.main(["--json"])
+    payload = json.loads(capsys.readouterr().out)
+    by_name = {arm["name"]: arm for arm in payload["arms"]}
+    assert by_name["engine-index"]["status"] == "CANNOT RUN", by_name
+    assert by_name["release-age"]["status"] == "—", by_name
+
+    # ...and the table agrees, because it goes through the same function.
+    rendered = canary.render_summary(crafted)
+    engine_row = next(ln for ln in rendered.splitlines() if "`engine-index`" in ln)
+    assert "| CANNOT RUN |" in engine_row, engine_row
+    assert "PASS" not in engine_row, engine_row
+
+
+def test_the_installability_sentence_is_an_ALLOW_list_not_a_deny_list(monkeypatch):
+    """⛔ A FOURTH STATE MUST NAME ITSELF, NOT INHERIT THE DECISIVE NEGATIVE (#12589 review round
+    11, P3). The round-9 code put "not resolvable for an unpinned install here" on `else:`, so a
+    future reader returning anything unnamed would be rendered as an ARTIFACT finding. An
+    allow-list cannot manufacture that claim.
+    """
+    seen: list[str] = []
+    real = canary.installability
+
+    def fourth_state(index_doc, version):
+        seen.append(version)
+        return "some-new-state"
+
+    monkeypatch.setattr(canary, "installability", fourth_state)
+    report = canary.build_report(
+        engine_doc=_engine_doc(),
+        client_doc={"info": {"version": "0.3.0"}, "releases": {"0.3.0": [_CLIENT_GOOD]}},
+        tree_version="0.2.0",
+        init_arm=_ok_init_arm(),
+        now=NOW,
+    )
+    monkeypatch.undo()
+    assert seen, "the OK arm must ask `installability` at all — otherwise this pin proves nothing"
+    detail = report.get("client-published").detail
+    assert "not resolvable" not in detail, detail
+    assert "could not be READ here" in detail, detail
+    assert "some-new-state" in detail, detail
+    assert real is canary.installability
+
+
+def test_the_tree_version_row_implicates_only_the_arm_that_failed():
+    """⛔ A `FAIL` ROW MAY NOT BLAME AN ARTIFACT THAT PASSED (#12589 review round 10, P3).
+
+    At the same version the pre-fix text said "the published build at this version predates the
+    fix" for ANY FAIL. When the failing arm is `client-published` (a `tortoise-client` 404 here)
+    while `engine-init` PASSes at that same version, that sentence claims the engine's published
+    artifact is stale — the opposite of the row directly above it. Two sentences, one per arm.
+    """
+    # The engine is healthy and installs; the CLIENT answers with an empty release, so
+    # `client-published` is the FAIL and `engine-init` is OK.
+    report = _client_report(
+        {"info": {"version": "0.2.0"}, "releases": {"0.2.0": []}},
+    )
+    assert report.verdict == canary.FAIL, [a.name for a in report.arms if a.status == canary.FAIL]
+    failing = [a.name for a in report.arms if a.gated and a.status == canary.FAIL]
+    assert failing == ["client-published"], failing
+    row = next(a for a in report.arms if a.name == "tree-version")
+    assert "predates the fix" not in row.detail, row.detail
+    assert "NOT the engine build" in row.detail, row.detail
+
+    # ⛔ AND A THIRD GATED ARM'S FAILURE DOES NOT IMPLICATE THE ENGINE EITHER (#12589 review round
+    # 11, P3). Round 10 keyed `engine_failed` on the ABSENCE of the name "client-published", so any
+    # new gated arm would inherit the engine-stale claim. This arm is deliberately NOT one of
+    # `ENGINE_ARMS`.
+    third_arm = canary.Report()
+    third_arm.add(canary.Arm("engine-index", canary.OK, "the index reads"))
+    third_arm.add(canary.Arm("documented-command", canary.FAIL, "the README command exits 1"))
+    assert third_arm.verdict == canary.FAIL
+    assert canary.engine_build_implicated(third_arm) is False, "a NON-engine arm's red"
+    # ...and the predicate still fires for the arms it names.
+    for name in sorted(canary.ENGINE_ARMS):
+        named = canary.Report()
+        named.add(canary.Arm(name, canary.FAIL, "red"))
+        assert canary.engine_build_implicated(named) is True, name
+    # A non-gated engine-named row must not count either — only gated arms carry the verdict.
+    ungated = canary.Report()
+    ungated.add(canary.Arm("engine-index", canary.FAIL, "red", gated=False))
+    assert canary.engine_build_implicated(ungated) is False
+
+    # ⛔ AND THE GREEN SAME-VERSION CLAUSE (#12589 review round 16, P3): the only report that
+    # reaches "no bump pending" is all-OK at one version, and nothing pinned it — warning "a bump
+    # IS required" on a wholly green report stayed green.
+    clean = canary.build_report(
+        engine_doc=_engine_doc(),
+        client_doc=_client_doc(),
+        tree_version="0.2.0",
+        init_arm=_ok_init_arm(),
+        now=NOW,
+    )
+    assert clean.verdict == canary.OK, [a.name for a in clean.arms if a.status != canary.OK]
+    clean_row = next(a for a in clean.arms if a.name == "tree-version")
+    assert "the tree's version (no bump pending)" in clean_row.detail, clean_row.detail
+    assert "predates the fix" not in clean_row.detail, clean_row.detail
+
+    # ⛔ AND THE "differs" HEDGE IS PINNED (#12589 review round 15, P3): stripping it to a flat
+    # "a release is owed" is FALSE whenever the tree is AHEAD of the published version, and no test
+    # asserted the hedge.
+    ahead = canary.build_report(
+        engine_doc=_engine_doc(),
+        client_doc=_client_doc(),
+        tree_version="0.3.0",
+        init_arm=_ok_init_arm(),
+        now=NOW,
+    )
+    ahead_row = next(a for a in ahead.arms if a.name == "tree-version")
+    assert "(a release is owed or in flight)" in ahead_row.detail, ahead_row.detail
+    # ⛔ AND ITS ORIENTATION (#12589 review round 20, P3): every golden renders this row with
+    # tree_version == published, which is degenerate in both directions, so swapping the two slots
+    # was invisible — and the row would then say the opposite of which version is published.
+    assert "pyproject.toml version 0.3.0 vs published 0.2.0" in ahead_row.detail, ahead_row.detail
+
+    # ...and the engine FAIL at the same version keeps the sentence it earned.
+    engine_fail = canary.build_report(
+        engine_doc={"info": {"version": "0.2.0"}, "releases": {"0.2.0": [_CLIENT_GOOD]}},
+        client_doc=_client_doc(),
+        tree_version="0.2.0",
+        init_arm=canary.Arm("engine-init", canary.FAIL, "tortoise init exits 1"),
+        now=NOW,
+    )
+    assert engine_fail.get("engine-init").status == canary.FAIL
+    row = next(a for a in engine_fail.arms if a.name == "tree-version")
+    assert "predates the fix" in row.detail, row.detail
 
 
 def test_a_wheel_that_installs_without_the_console_script_is_a_FAIL_not_UNKNOWN(tmp_path):
@@ -3508,3 +4552,705 @@ def test_the_index_read_ignores_the_ambient_proxy_the_child_strips(monkeypatch):
     assert state == canary.INDEX_OK, (reason, state)
     assert doc == {"info": {"version": "0.2.0"}}
     assert calls["hit"] and "pypi.org/pypi/tortoise-graph/json" in calls["hit"], calls
+
+
+# --------------------------------------------------------------------------
+# #12589 — the same class as #12525, one level DOWN
+#
+# #12525 split the `releases` MAP's type (absent/null/wrong-typed → UNKNOWN) from the ANSWER
+# "no releases" (`{}` → FAIL). Two shapes one level below survived that fix, and both turned an
+# UNPARSEABLE reading into a verdict:
+#
+#   1. a present, non-empty map whose VERSION VALUES are not arrays → every value failed
+#      `isinstance(files, list)`, `resolvable == []`, and the arm printed "the index lists NO
+#      installable file in ANY release … README.md documents `pip install …`, which cannot
+#      resolve" → FAIL → exit 1 → the text the alert renders as **"cut a release"**.
+#   2. a document whose `info` is not an object → `AttributeError` → `main()`'s backstop → exit
+#      2. The exit code was right; the REASON was a traceback.
+#
+# The rule these pin is one-directional (#12589 review round 10, P3 — the earlier wording here
+# said "read COMPLETELY or judge nothing", which the partial-read OK cases below deliberately
+# reject): **a FAIL** may only assert what a COMPLETE reading established, while the OK claim is
+# EXISTENTIAL — it may stand on a partial read, disclosed in its own detail.
+# --------------------------------------------------------------------------
+
+_CLIENT_GOOD = {
+    "filename": "tortoise_client-0.2.0-py3-none-any.whl",
+    "yanked": False,
+    "upload_time_iso_8601": "2026-08-08T00:30:10.719404Z",
+}
+_CLIENT_YANKED = {
+    "filename": "tortoise_client-0.3.0-py3-none-any.whl",
+    "yanked": True,
+    "upload_time_iso_8601": "2026-09-01T00:00:00Z",
+}
+
+
+def _client_report(client_doc: dict, engine_doc: dict | None = None):
+    return canary.build_report(
+        engine_doc=canary_engine_doc() if engine_doc is None else engine_doc,
+        client_doc=client_doc,
+        tree_version="0.2.0",
+        init_arm=_ok_init_arm(),
+        now=NOW,
+    )
+
+
+def canary_engine_doc() -> dict:
+    return _engine_doc()
+
+
+def test_resolvable_releases_reports_BOTH_facts_because_the_claims_differ_in_POLARITY():
+    """The truth table, at the one helper the client arm reads (#12589).
+
+    Two independent facts, and the polarity of the arm's two claims is what decides which of them
+    gates which verdict:
+
+      * the OK claim ("the unpinned requirement resolves") is EXISTENTIAL — one readable
+        installable release settles it, so a resolvable version is returned even when a sibling
+        value could not be read;
+      * the FAIL claim ("NO installable file in ANY release") is UNIVERSAL — it needs a complete
+        parse, so any unreadable value supplies a `reason` and the arm cannot say it.
+
+    Both halves are asserted because either alone is satisfiable by the wrong code: a helper that
+    always answers `([], something)` keeps the FAIL pins green, and one that never answers a
+    reason keeps the UNKNOWN pins green.
+    """
+    doc = {"info": {"version": "0.3.0"}}
+
+    # COMPLETE readings — the reason is empty even when the answer is "nothing".
+    assert canary.resolvable_releases({**doc, "releases": {"0.3.0": [_CLIENT_GOOD]}}) == (
+        ["0.3.0"],
+        "",
+    )
+    assert canary.resolvable_releases({**doc, "releases": {}}) == ([], "")
+    assert canary.resolvable_releases({**doc, "releases": {"0.3.0": []}}) == ([], "")
+    assert canary.resolvable_releases({**doc, "releases": {"0.3.0": [_CLIENT_YANKED]}}) == (
+        [],
+        "",
+    )
+    # Latest yanked, an older release installable — pip resolves, so this is a complete POSITIVE.
+    assert canary.resolvable_releases(
+        {**doc, "releases": {"0.3.0": [_CLIENT_YANKED], "0.2.0": [_CLIENT_GOOD]}}
+    ) == (["0.2.0"], "")
+
+    # NON-READINGS, each named. Map level (already fixed in #12525) and VALUE level (#12589).
+    assert canary.resolvable_releases(doc) == ([], canary.RELEASES_ABSENT)
+    assert canary.resolvable_releases({**doc, "releases": None}) == (
+        [],
+        canary.RELEASES_ABSENT,
+    )
+    # ⛔ `[]` is NOT in this loop: an empty ARRAY is a COMPLETE empty answer (`{"0.3.0": []}` is
+    # the pinned FAIL below). What is unreadable is a list of NON-OBJECTS, asserted separately.
+    for unparseable in ({}, "0.3.0", 0, ["a.whl"]):
+        versions, reason = canary.resolvable_releases({**doc, "releases": {"0.3.0": unparseable}})
+        assert (versions, reason) == ([], canary.RELEASES_UNREADABLE), unparseable
+
+    # ⛔ BOTH FACTS AT ONCE: a resolvable release is still reported when a sibling value is
+    # unreadable, WITH the reason. Returning `([], reason)` here would be the over-strict reading
+    # that loses a true PASS on a mirror quirk (the old code returned OK for this document);
+    # returning `(versions, "")` would let the arm claim "no installable file in ANY release"
+    # off a partial parse. The arm applies the polarity; this helper is not allowed to decide it.
+    assert canary.resolvable_releases(
+        {**doc, "releases": {"0.2.0": [_CLIENT_GOOD], "0.3.0": {}}}
+    ) == (["0.2.0"], canary.RELEASES_UNREADABLE)
+
+    # ⛔ ENTRY GRAIN, not just value grain (#12589 review round 2, P2). A list holding ONE
+    # non-object used to make the whole value unreadable, so `{"0.3.0": [good, "junk"]}` went from
+    # OK (before this change) to a permanent CANNOT-RUN — even though the readable wheel record
+    # alone settles the existential claim. The reading reports the drop; the arm still greens.
+    assert canary.readable_entries([_CLIENT_GOOD, "junk"]) == ([_CLIENT_GOOD], True)
+    assert canary.resolvable_releases({**doc, "releases": {"0.3.0": [_CLIENT_GOOD, "junk"]}}) == (
+        ["0.3.0"],
+        canary.RELEASES_UNREADABLE,
+    )
+
+    # And the STRICT reader, so a future arm cannot re-spell an unreadable listing as `[]` — at
+    # the VALUE level and at the MAP level (`releases: "x"` is #12525's non-reading, not a listing
+    # with no files).
+    assert canary.readable_entries([_CLIENT_GOOD]) == ([_CLIENT_GOOD], False)
+    assert canary.readable_entries([]) == ([], False)
+    assert canary.readable_entries({}) == ([], True)
+    assert canary.readable_entries(["a.whl"]) == ([], True)
+    for doc_unreadable in (
+        {"info": {"version": "0.3.0"}},
+        {"info": {"version": "0.3.0"}, "releases": None},
+        {"info": {"version": "0.3.0"}, "releases": "0.3.0"},
+    ):
+        assert canary.release_files(doc_unreadable, "0.3.0") is None, doc_unreadable
+    assert canary.release_files({"releases": {"0.3.0": {}}}, "0.3.0") is None
+    assert canary.release_files({"releases": {"0.3.0": ["a.whl"]}}, "0.3.0") is None
+    assert canary.release_files({"releases": {"0.3.0": [_CLIENT_GOOD, "junk"]}}, "0.3.0") is None
+    # absent MAP is a non-reading (`None`); absent VERSION in a readable map is an answer (`[]`)
+    assert canary.release_files({"info": {"version": "0.2.0"}}, "0.2.0") is None
+    assert canary.release_files({"releases": {}}, "0.2.0") == []
+
+
+def test_an_UNPARSEABLE_release_VALUE_is_UNKNOWN_and_never_orders_a_release():
+    """A version value that is not an array must not become the claim "no installable file" (#12589).
+
+    The FAIL sentence is the one `published-artifact-alert.sh` renders as "cut a release", so this
+    test asserts the sentence's ABSENCE, not merely a non-zero exit: exit 1 and exit 2 both stop
+    the ledger, and only one of them is allowed to say the artifact is broken.
+    """
+    for unparseable in (
+        {},  # a bare object — the shape the issue names
+        "0.3.0",  # a string
+        0,  # a number
+        {  # the file OBJECT at the wrong level — `[<object>]` is the right one
+            "filename": "tortoise_client-0.3.0-py3-none-any.whl"
+        },
+    ):
+        report = _client_report({"info": {"version": "0.3.0"}, "releases": {"0.3.0": unparseable}})
+        arm = report.get("client-published")
+        assert arm.status == canary.UNKNOWN, (unparseable, arm.status, arm.detail)
+        assert report.verdict == canary.UNKNOWN, (unparseable, report.verdict)
+        assert report.exit_code == 2, (unparseable, report.exit_code)
+        assert canary.RELEASES_UNREADABLE in arm.detail, arm.detail
+        assert "UNKNOWN, not false" in arm.detail, arm.detail
+        assert "not a reason to cut a release" in arm.detail.lower(), arm.detail
+        # The release-order clauses must be ABSENT.
+        assert "any release" not in arm.detail.lower(), arm.detail
+        assert "cannot resolve" not in arm.detail.lower(), arm.detail
+
+    # A list of non-objects is the same class, one level down.
+    report = _client_report({"info": {"version": "0.3.0"}, "releases": {"0.3.0": ["a.whl"]}})
+    assert report.get("client-published").status == canary.UNKNOWN
+    assert report.exit_code == 2
+
+    # AND the states that must NOT move: a document that ANSWERED stays FAIL/exit 1 — including
+    # the all-lists mixed case, whose reading is complete.
+    for answered in (
+        {},  # no releases at all
+        {"0.3.0": []},  # an empty file list
+        {"0.3.0": [_CLIENT_YANKED]},  # only-yanked
+        {"0.3.0": [], "0.4.0": [_CLIENT_YANKED]},  # every value IS a list; nothing installable
+    ):
+        report = _client_report({"info": {"version": "0.3.0"}, "releases": answered})
+        assert report.get("client-published").status == canary.FAIL, (answered, report.verdict)
+        assert report.exit_code == 1, (answered, report.exit_code)
+
+    # ⛔ AND THE DIRECTION A "COMPLETE-OR-NOTHING" RULE WOULD BREAK: a resolvable release settles
+    # the EXISTENTIAL OK claim even when a SIBLING value is unreadable — the old code returned OK
+    # for this document, and turning that into a permanent CANNOT-RUN red would trade a true PASS
+    # for detail completeness. The detail must DISCLOSE the partial parse, so the green does not
+    # imply it read the whole map.
+    report = _client_report(
+        {
+            "info": {"version": "0.3.0"},
+            "releases": {"0.2.0": [_CLIENT_GOOD], "0.3.0": {}},
+        }
+    )
+    arm = report.get("client-published")
+    assert arm.status == canary.OK, (arm.status, arm.detail)
+    assert report.exit_code == 0, report.exit_code
+    assert canary.RELEASES_UNREADABLE in arm.detail, arm.detail
+    assert "READABLE subset" in arm.detail, arm.detail
+    # ⛔ AND THE PREFIX THAT SAYS *PART* OF THE MAP WAS UNREAD (#12589 review round 18, P3): this
+    # sentence is the only disclosure that an OK stands on a PARTIAL read, and inverting it to "this
+    # ENTIRE release map could not be read" kept the arm OK/exit 0 with the suite green.
+    assert "part of this release map could not be read" in arm.detail, arm.detail
+    assert "ENTIRE" not in arm.detail, arm.detail
+    # ⛔ THE NOTE'S CAUSE ENUMERATION IS PINNED HERE, at the one place that prints it (#12589 review
+    # round 10, P3). Narrowing it to a single cause left all 83 tests green, so the invariant
+    # ("all four sites say the SAME words") had drifted to three. The wording names what the
+    # reader actually rejects, so the operator can tell which shape broke.
+    for phrase in (
+        "a value that is not an array",
+        "an entry that is not an object",
+        "no boolean `yanked`",
+        "no non-empty string `filename`",
+    ):
+        assert phrase in arm.detail, (phrase, arm.detail)
+    # ...and an UNREADABLE-only map still gets the disclosure-free UNKNOWN detail.
+    assert (
+        canary.RELEASES_UNREADABLE
+        in _client_report({"info": {"version": "0.3.0"}, "releases": {"0.3.0": {}}})
+        .get("client-published")
+        .detail
+    )
+
+    # ⛔ AND THE SAME AT ENTRY GRAIN (#12589 review round 2, P2): one junk entry inside an
+    # otherwise-readable release must not withdraw the OK — the code before this change returned OK
+    # here, and the reading must not trade that true PASS away. The drop is disclosed.
+    report = _client_report(
+        {"info": {"version": "0.3.0"}, "releases": {"0.3.0": [_CLIENT_GOOD, "junk"]}}
+    )
+    arm = report.get("client-published")
+    assert arm.status == canary.OK, (arm.status, arm.detail)
+    assert report.exit_code == 0, report.exit_code
+    assert canary.RELEASES_UNREADABLE in arm.detail, arm.detail
+    assert "READABLE subset" in arm.detail, arm.detail
+    # ...while a release whose ONLY entries are unreadable has no OK to stand on: UNKNOWN, and the
+    # FAIL sentence must stay absent.
+    report = _client_report({"info": {"version": "0.3.0"}, "releases": {"0.3.0": ["junk"]}})
+    arm = report.get("client-published")
+    assert arm.status == canary.UNKNOWN, (arm.status, arm.detail)
+    assert report.exit_code == 2
+    assert "any release" not in arm.detail.lower(), arm.detail
+
+
+def test_the_non_reading_tokens_are_pinned_by_their_PUBLISHED_TEXT():
+    """⛔ A TOKEN PINNED ONLY BY REFERENCE TO ITS OWN CONSTANT IS A TAUTOLOGY (#12589 review round
+    13, P3).
+
+    Every assertion elsewhere reads `assert canary.INFO_UNREADABLE in arm.detail`, which holds for
+    ANY value of the constant — including `""`. Mutating each constant to `""` (or renaming
+    `RELEASES_UNREADABLE`) left all 87 tests green, so the four tokens an operator actually SEES —
+    in the step summary and the `--json` payload, NOT in the alert issue's body (that body is a
+    fixed `$why` sentence plus `tail -n 40` of the TRANSCRIPT, so it carries no token) — were never
+    verified. One literal assertion per token closes that; the constant-form assertions stay as the
+    mechanism check.
+    """
+    assert canary.INFO_UNREADABLE == "info-unreadable"
+    assert canary.VERSION_UNREADABLE == "version-unreadable"
+    assert canary.RELEASES_UNREADABLE == "releases-unreadable"
+    assert canary.RELEASES_ABSENT == "releases-absent"
+
+
+def test_a_non_object_info_is_a_LEGIBLE_NON_READING_on_BOTH_arms():
+    """`info` present but not an object: no traceback, UNKNOWN — and the exit code SPLITS (#12589).
+
+    ⛔ TWO DEFECTS, TWO EXIT-CODES STORIES, and conflating them was a review finding on this very
+    test. Measured against the pre-diff expression `(index_doc.get("info") or {}).get("version")`:
+
+      * a TRUTHY non-object (`"x"`) raised `AttributeError`, and `main()`'s backstop turned that
+        into exit 2 — the right CODE by the wrong ROUTE (a traceback as the recorded reason);
+      * the FALSY ones (`[]`, `0`, `null`) were swallowed by `or {}` into "", took the FAIL arm,
+        and reported exit 1 — the "cut a release" text — off an `info` this client never parsed.
+        Those documents carry no version at all, so "carries no latest version" was literally true
+        of them; what was wrong was issuing a VERDICT off an unparsed field. (The sibling
+        `version_unreadable` case is the one where the old sentence was false: `{"version": 0.3}`
+        does carry a version.)
+
+    So the fix MOVES the exit code (1 → 2) for the falsy shapes, deliberately and fail-closed. The
+    invariance that actually matters is the one a naive "don't raise" fix would break: a
+    non-reading must never become an exit 1, on EITHER arm. That is pinned here, at both arms.
+    """
+    for index_doc in ({"info": "x"}, {"info": []}, {"info": 0}, {"info": None}):
+        assert canary.latest_version(index_doc) == "", index_doc
+        assert canary.info_unreadable(index_doc) is True, index_doc
+
+    # The absence pin stays a FAIL — an ABSENT `info` is an empty ANSWER, not a non-reading.
+    for answered in ({}, {"info": {}}, {"info": {"version": ""}}):
+        assert canary.info_unreadable(answered) is False, answered
+        assert canary.latest_version(answered) == "", answered
+
+    for doc in ({"info": "x"}, {"info": []}, {"info": 0}, {"info": None}):
+        # client arm
+        report = _client_report({**doc, "releases": {"0.3.0": [_CLIENT_GOOD]}})
+        arm = report.get("client-published")
+        assert arm.status == canary.UNKNOWN, (doc, arm.status, arm.detail)
+        assert canary.INFO_UNREADABLE in arm.detail, arm.detail
+        assert "not a reason to cut a release" in arm.detail.lower(), arm.detail
+        # ⛔ THE CLASS LABEL IS PINNED TOO (this lane's own mutation sweep, #12589 round 14): the
+        # clause naming the shape a NON-READING was droppable while the closing sentence survived,
+        # so the operator lost the words that say the reading never happened.
+        assert "NON-READING" in arm.detail, arm.detail
+        # ⛔ THE NEGATIVE ASSERTION BELONGS ON BOTH ARMS, AND IN THE GENERAL FORM (#12589 review
+        # round 13, P3). The client arm's phrase-specific check let a shared UNKNOWN detail that
+        # re-asserts the artifact claim ("… carries no latest version — the document's `info` is
+        # …") pass 87/87.
+        assert "carries no" not in arm.detail, arm.detail
+        assert "carries no published version" not in arm.detail, arm.detail
+        assert report.exit_code == 2, (doc, report.exit_code)
+        # engine arm — the one a naive fix would have flipped from exit 2 to exit 1
+        report = _client_report(
+            {"info": {"version": "0.3.0"}, "releases": {"0.3.0": [_CLIENT_GOOD]}},
+            engine_doc=doc,
+        )
+        arm = report.get("engine-index")
+        assert arm.status == canary.UNKNOWN, (doc, arm.status, arm.detail)
+        assert canary.INFO_UNREADABLE in arm.detail, arm.detail
+        assert "carries no" not in arm.detail, arm.detail
+        assert report.exit_code == 2, (doc, report.exit_code)
+
+
+def test_a_NON_BOOLEAN_yanked_flag_is_the_same_class_one_grain_further_in():
+    """An entry is not consulted until its `yanked` field is a BOOLEAN (#12589 review round 3, P2).
+
+    Reading the flag straight off `dict.get` put the FLAG outside the shape this issue exists to
+    refuse, in both directions:
+
+      * `{"0.3.0": [{}]}` — an entry a mirror stripped of `yanked` — read as "not yanked", so a
+        value nothing was read FROM GREENS the arm (`OK`/exit 0, "installable: 0.3.0");
+      * `{"0.3.0": [{"yanked": "false"}]}` — a truthy STRING — read as yanked, so the arm printed
+        "lists NO installable file in ANY release" → `FAIL`/exit 1 → **"cut a release"**.
+
+    PyPI documents `yanked` as a boolean, so anything else is a shape outside the contract: the
+    entry is dropped and the reading is marked PARTIAL, which can neither green nor red the arm by
+    itself.
+    """
+    doc = {"info": {"version": "0.3.0"}}
+    for unreadable_flag in (
+        {},  # no `yanked` and no `filename` at all
+        {"yanked": "false"},  # a truthy STRING read as "yanked" -> the release order
+        {"yanked": "true"},
+        {"yanked": 0},  # an int is not the documented boolean
+        {"yanked": 1},
+        # ⛔ AND THE OTHER FIELD (#12589 review round 4, P2): `yanked: False` with no usable
+        # `filename` is not a file record, yet it used to count as an INSTALLABLE file — a false
+        # PASS off an object that is not a file.
+        {"filename": ""},
+        {"filename": None},
+    ):
+        entry = {**_CLIENT_GOOD, **unreadable_flag} if unreadable_flag else {}
+        versions, reason = canary.resolvable_releases({**doc, "releases": {"0.3.0": [entry]}})
+        assert (versions, reason) == ([], canary.RELEASES_UNREADABLE), unreadable_flag
+
+        report = _client_report({**doc, "releases": {"0.3.0": [entry]}})
+        arm = report.get("client-published")
+        # ⛔ NEVER `exit 1`: the flag was not read, so the arm has nothing to say about whether the
+        # documented install resolves.
+        assert arm.status == canary.UNKNOWN, (unreadable_flag, arm.status, arm.detail)
+        assert report.exit_code == 2, (unreadable_flag, report.exit_code)
+        assert "any release" not in arm.detail.lower(), arm.detail
+        assert "cannot resolve" not in arm.detail.lower(), arm.detail
+        assert canary.RELEASES_UNREADABLE in arm.detail, arm.detail
+
+    # A BOOLEAN flag is what the contract says, and it keeps both of its meanings.
+    assert canary.resolvable_releases(
+        {**doc, "releases": {"0.3.0": [{**_CLIENT_GOOD, "yanked": False}]}}
+    ) == (["0.3.0"], "")
+    assert canary.resolvable_releases(
+        {**doc, "releases": {"0.3.0": [{**_CLIENT_GOOD, "yanked": True}]}}
+    ) == ([], "")
+
+    # MIXED at entry grain: one readable installable entry still settles the EXISTENTIAL claim,
+    # and the drop is disclosed (the same rule as a junk entry, one field over).
+    report = _client_report({**doc, "releases": {"0.3.0": [{**_CLIENT_GOOD, "yanked": False}, {}]}})
+    arm = report.get("client-published")
+    assert arm.status == canary.OK, (arm.status, arm.detail)
+    assert report.exit_code == 0
+    assert "READABLE subset" in arm.detail, arm.detail
+
+
+def test_the_OK_detail_does_not_claim_a_RESOLUTION_the_reading_did_not_establish():
+    """`unpinned → X` is a claim about pip; `info.version` is only what the index ADVERTISES (#12589 round 3, P3).
+
+    On the partial path this PR newly reaches, the advertised version can be the very one whose
+    listing was not read — and the detail used to print `unpinned → 0.3.0; installable: 0.2.0` in
+    one breath, asserting a resolution to a version the same line said it could not read.
+    """
+    report = _client_report(
+        {
+            "info": {"version": "0.3.0"},
+            "releases": {"0.2.0": [_CLIENT_GOOD], "0.3.0": {}},
+        }
+    )
+    detail = report.get("client-published").detail
+    assert "unpinned →" not in detail, detail
+    # ⛔ THE ADVERTISED VERSION'S LISTING WAS NOT READ HERE, SO THE CLAUSE MAY NOT CLAIM A PROPERTY
+    # OF IT (#12589 review round 6, P2). "not resolvable …" is an artifact claim manufactured from
+    # a non-reading, and it would be byte-identical to the READABLE all-yanked case below — the
+    # operator could not tell a shape refusal from a yanked release.
+    assert "advertised latest 0.3.0 could not be READ here" in detail, detail
+    assert "not resolvable for an unpinned install" not in detail, detail
+    assert "installable: 0.2.0" in detail, detail
+
+    # ⛔ AND THAT WORDING IS LOAD-BEARING ON THE CASE THAT MOTIVATED THE ARM (#12589 round 5, P3):
+    # an ADVERTISED-BUT-YANKED release IS installable under a `==` pin — PEP 592 is what makes an
+    # unpinned requirement skip it. Saying "not installable" about it would be false, not merely
+    # unproven, so the negative branch says "not resolvable for an unpinned install".
+    report = _client_report(
+        {
+            "info": {"version": "0.3.0"},
+            "releases": {"0.3.0": [_CLIENT_YANKED], "0.2.0": [_CLIENT_GOOD]},
+        }
+    )
+    arm = report.get("client-published")
+    assert arm.status == canary.OK, (arm.status, arm.detail)
+    assert "not installable" not in arm.detail, arm.detail
+    assert "not resolvable for an unpinned install" in arm.detail, arm.detail
+
+    # When the advertised version IS installable, say so — and still do not claim pip's target.
+    report = _client_report({"info": {"version": "0.3.0"}, "releases": {"0.3.0": [_CLIENT_GOOD]}})
+    detail = report.get("client-published").detail
+    assert "advertised latest 0.3.0 is installable" in detail, detail
+    assert "unpinned →" not in detail, detail
+
+    # ⛔ MEMBERSHIP IS NOT MAXIMALITY (#12589 review round 4, P3): with 0.2.0 advertised AND
+    # installable while 0.3.0 is also installable, an UNPINNED requirement resolves to 0.3.0 —
+    # which the reading never computed. The old `unpinned → {info.version}` printed 0.2.0 here,
+    # i.e. a resolution target the code did not establish. The detail now names only what it read.
+    report = _client_report(
+        {
+            "info": {"version": "0.2.0"},
+            "releases": {
+                "0.2.0": [_CLIENT_GOOD],
+                "0.3.0": [{**_CLIENT_GOOD, "filename": "tortoise_client-0.3.0-py3-none-any.whl"}],
+            },
+        }
+    )
+    detail = report.get("client-published").detail
+    assert "unpinned →" not in detail, detail
+    assert "advertised latest 0.2.0 is installable" in detail, detail
+    assert "installable: 0.2.0, 0.3.0" in detail, detail
+
+
+def test_the_UNREADABLE_reason_names_every_cause_the_code_can_produce():
+    """One constant, one enumeration — round 3 added a cause and only two of four sites said so.
+
+    (#12589 review round 4, P3.) An operator reads the arm's detail and the run summary against each
+    other, so a cause that exists in the code but not in the text points them at the wrong shape.
+    (⚠️ Not the filed alert issue: its body is `$why` + a transcript tail, and carries no token —
+    see the pin below.) This pin fails if any site drifts back to the two-cause wording.
+    """
+    for releases in (
+        {"0.3.0": {}},
+        {"0.3.0": [{}]},
+        {"0.3.0": [{**_CLIENT_GOOD, "yanked": "false"}]},
+        {"0.3.0": [{"yanked": False}]},
+    ):
+        report = _client_report({"info": {"version": "0.3.0"}, "releases": releases})
+        arm = report.get("client-published")
+        # ⛔ THE TAIL'S POSITIVE POINTER IS PINNED HERE (#12589 review round 14, P3). The only
+        # pins before this were the NEGATIVE branch (an empty / informational-only report), so
+        # hard-coding `marked = []` — which makes the summary call a real non-reading "a defect in
+        # the canary itself" — passed 88/88. On a shape that DOES mark a row, the pointer must name
+        # it and must not fall back to the defect sentence.
+        rendered = canary.render_summary(report)
+        assert "the row marked CANNOT RUN names which (`client-published`)" in rendered, rendered
+        assert "defect in the canary itself" not in rendered, rendered
+        assert "no boolean `yanked`" in arm.detail, (releases, arm.detail)
+        # ⛔ NOT "no filename": the filter also drops a filename that is PRESENT and unusable
+        # (empty / wrong type), and the constant's own comment says "not of the documented type".
+        # The two texts are read against each other, so they must agree (#12589 round 5, P3).
+        assert "no non-empty string `filename`" in arm.detail, (releases, arm.detail)
+
+    # ⛔ AND THE `releases-absent` DETAIL MUST STILL NAME EVERY SHAPE THAT PRODUCES IT (#12589
+    # round 5, P3). #12589's comment 1 recorded that the token is defined as "the key is ABSENT"
+    # while being emitted for present-but-wrong-typed maps too. The token reaches an operator in
+    # the STEP SUMMARY table and the `--json` payload (⚠️ NOT the alert issue's body, which is
+    # `$why` + `tail -n 40` of the transcript — measured; an earlier revision of this comment
+    # claimed the alert rendered it verbatim, which that script does not do). The narrow wording
+    # points an operator at PyPI's deprecation instead of the shape served, so this pin keeps the
+    # detail from being narrowed back silently.
+    for absent in (None, [], "0.3.0", 0):
+        report = _client_report(
+            {"info": {"version": "0.3.0"}, "releases": absent}
+            if absent is not None
+            else {"info": {"version": "0.3.0"}}
+        )
+        detail = report.get("client-published").detail
+        assert canary.RELEASES_ABSENT in detail, (absent, detail)
+        assert "absent, null, or not an object" in detail, (absent, detail)
+
+    shape_refusal = _client_report({"info": {"version": "0.3.0"}, "releases": {"0.3.0": {}}})
+    summary = canary.render_summary(shape_refusal)
+    # ⛔ The UNKNOWN tail must not name ONE mechanism for every CANNOT RUN (#12589 round 4): on
+    # this report every index row above reads OK and the non-reading is a shape the canary
+    # refuses. The tail names both mechanisms and defers to the row.
+    assert "could not READ something it needs" in summary, summary
+    assert "could not read the index" not in summary, summary
+
+    # ⛔ AND THE ROW IT DEFERS TO MUST ACTUALLY CARRY THE MARK (#12589 review round 8, P2). The
+    # tail says "the row marked CANNOT RUN names which", so the table has to have a status column
+    # — before this, the only occurrence of those words in a rendered summary was the header, and
+    # the reader had to guess which row was the non-reader.
+    # The HEADER must declare the column too, or the rows are not a table at all.
+    assert "| arm | gated | status | reading |" in summary, summary
+
+    # ⛔ AN INFORMATIONAL ROW HAS NO VERDICT (#12589 review round 9, P3). `release-age` is built
+    # with status OK even when its own text says "uploaded unknown ago" — the arm read a value it
+    # did not obtain — and stamping PASS beside that is the non-reading-as-a-verdict class this
+    # issue removes, one row over. Rendered: `| \`release-age\` | no | — | …`.
+    unknown_age = canary.build_report(
+        engine_doc={"info": {"version": "0.2.0"}},  # no usable `releases` map -> no timestamp
+        client_doc={"info": {"version": "0.3.0"}, "releases": {"0.3.0": [_CLIENT_GOOD]}},
+        tree_version="0.2.0",
+        init_arm=_ok_init_arm(),
+        now=NOW,
+    )
+    rendered_age = canary.render_summary(unknown_age)
+    assert "uploaded unknown ago" in rendered_age, rendered_age
+    age_row = next(ln for ln in rendered_age.splitlines() if "`release-age`" in ln)
+    assert "| no | — |" in age_row, age_row
+    assert "PASS" not in age_row, age_row
+
+    # ⛔ AND THE POINTER TO "the row marked CANNOT RUN" MUST POINT AT A ROW THAT EXISTS (#12589
+    # review round 9, P3): an empty report, or one whose only arms are informational, renders no
+    # such row — and the tail used to send the operator looking for it anyway.
+    for bare in (canary.Report(),):
+        rendered_bare = canary.render_summary(bare)
+        assert "the row marked CANNOT RUN names which" not in rendered_bare, rendered_bare
+        assert "defect in the canary itself" in rendered_bare, rendered_bare
+    only_info = canary.Report()
+    only_info.add(canary.Arm("release-age", canary.OK, "uploaded unknown ago", gated=False))
+    rendered_info = canary.render_summary(only_info)
+    assert "the row marked CANNOT RUN names which" not in rendered_info, rendered_info
+    assert "defect in the canary itself" in rendered_info, rendered_info
+    table_lines = [ln for ln in summary.splitlines() if ln.startswith("| `")]
+    assert table_lines, summary
+    for row in table_lines:
+        assert "| yes |" in row or "| no |" in row, row
+    assert any("| CANNOT RUN |" in row for row in table_lines), summary
+    # ...and an UNKNOWN arm is exactly the row that carries it.
+    unknown_rows = [row for row in table_lines if "| CANNOT RUN |" in row]
+    assert any("client-published" in row for row in unknown_rows), summary
+
+    # ⛔ AND AN UNNAMED STATUS RENDERS AS THE FAIL-CLOSED LABEL, not as itself and not as a
+    # missing cell (#12589 review round 8, P2). "PASS" is the spelling THIS summary prints for a
+    # green verdict, which is exactly why an arm status must never be rendered by vocabulary: an
+    # arm carrying it must fall into the same gap the arms' allow-list polarity reserves.
+    odd = canary.Report()
+    odd.add(canary.Arm("odd", "PASS", "an unnamed arm status"))
+    rendered_odd = canary.render_summary(odd)
+    assert "| `odd` | yes | CANNOT RUN |" in rendered_odd, rendered_odd
+    assert "| `odd` | yes | PASS |" not in rendered_odd, rendered_odd
+
+    # ⛔ AND IT MUST NOT RULE THE TRANSPORT OUT EITHER (#12589 round 5, P2). A round-4 paragraph
+    # claimed "this is NOT an unreadable index when every index row above reads OK" — which is
+    # exactly backwards: when every index row reads OK, the CANNOT RUN arm is `engine-init`, i.e.
+    # the install really did fail. Both shapes that reach that state are pinned here.
+    timed_out = canary.build_report(
+        engine_doc=_engine_doc(),
+        client_doc={"info": {"version": "0.3.0"}, "releases": {"0.3.0": [_CLIENT_GOOD]}},
+        tree_version="0.2.0",
+        init_arm=canary.Arm("engine-init", canary.UNKNOWN, "timed out after 600s"),
+        now=NOW,
+    )
+    rendered = canary.render_summary(timed_out)
+    assert "NOT an unreadable index" not in rendered, rendered
+    assert "could not READ something it needs" in rendered, rendered
+    assert timed_out.get("engine-init").status == canary.UNKNOWN
+
+    # ⛔ AND THE INFORMATIONAL ROW MUST NOT LOSE A TIMESTAMP IT DID READ (#12589 round 4, P3):
+    # a timestamp needs neither `yanked` nor `filename`, so a partly-readable listing still says
+    # when the release first existed. "uploaded unknown ago" for a stamp that was read is a lie,
+    # and it is the same "the whole value was dropped" defect the helper change removed.
+    engine = {"info": {"version": "0.2.0"}, "releases": {"0.2.0": [_CLIENT_GOOD, "junk"]}}
+    assert canary.upload_time(engine, "0.2.0") is not None
+    report = canary.build_report(
+        engine_doc=engine,
+        client_doc={"info": {"version": "0.3.0"}, "releases": {"0.3.0": [_CLIENT_GOOD]}},
+        tree_version="0.2.0",
+        init_arm=_ok_init_arm(),
+        now=NOW,
+    )
+    rendered = canary.render_summary(report)
+    assert "uploaded unknown" not in rendered, rendered
+    # NOW is 2026-11-13 and the fixture's only readable stamp is 2026-08-08 -> 97d.
+    assert "97d" in rendered, rendered
+
+
+def test_installability_is_ONE_definition_of_the_installable_question():
+    """Three states, one reader — a caller cannot fold "could not read" into "read and negative".
+
+    (#12589 review round 7, P2.) The OK arm asks "is the ADVERTISED release installable?" to decide
+    which sentence to print. It first asked `release_files(...) is None`, which only sees
+    STRUCTURAL unreadability — so a value whose entries were dropped for an unreadable
+    `yanked`/`filename` (or an empty `filename`) looked READ and NEGATIVE, and the arm printed the
+    decisive "not resolvable for an unpinned install here" about a listing it had never read.
+    """
+    doc = {"info": {"version": "0.3.0"}}
+    good = {**_CLIENT_GOOD, "filename": "tortoise_client-0.3.0-py3-none-any.whl"}
+    yanked = {**good, "yanked": True}
+
+    assert canary.installability({**doc, "releases": {"0.3.0": [good]}}, "0.3.0") == (
+        canary.INSTALLABLE
+    )
+    # ⛔ AND THE ORDERING IS LOAD-BEARING (#12589 review round 14, P3). An installable entry
+    # OUTRANKS an unreadable sibling: `installable` is checked before `unreadable`, so a value
+    # holding one good file and one unreadable one is INSTALLABLE. Swapping the two checks left
+    # 88 tests green AND rendered the self-contradictory "advertised latest 0.3.0 could not be READ
+    # here; installable: 0.3.0" — a sentence about a listing the arm had just resolved.
+    mixed = {**doc, "releases": {"0.3.0": [good, {}]}}
+    assert canary.installability(mixed, "0.3.0") == canary.INSTALLABLE
+    # ⛔ AND A RECOGNISED STATE MUST NOT RENDER AS UNRECOGNISED (#12589 review round 15, P3).
+    # Deleting the `INSTALLABILITY_UNKNOWN` branch fell through to the last `else:` and published
+    # "unrecognised installability 'unreadable'" — with 89 tests green, because both pins were
+    # substrings the fallback also contains. The `;` closes the recognised form's clause.
+    recognised = _client_report(
+        {
+            "info": {"version": "0.3.0"},
+            "releases": {"0.2.0": [good], "0.3.0": {}},
+        }
+    ).get("client-published")
+    assert "advertised latest 0.3.0 could not be READ here;" in recognised.detail, recognised.detail
+    assert "unrecognised" not in recognised.detail, recognised.detail
+
+    mixed_arm = _client_report(mixed).get("client-published")
+    assert mixed_arm.status == canary.OK, (mixed_arm.status, mixed_arm.detail)
+    assert "advertised latest 0.3.0 is installable" in mixed_arm.detail, mixed_arm.detail
+    assert "could not be READ here" not in mixed_arm.detail, mixed_arm.detail
+    # ...the partial read is still DISCLOSED, so the green does not imply a complete parse.
+    assert canary.RELEASES_UNREADABLE in mixed_arm.detail, mixed_arm.detail
+    # ANSWERS.
+    for answered in ({"0.3.0": []}, {"0.3.0": [yanked]}, {}):
+        assert canary.installability({**doc, "releases": answered}, "0.3.0") == (
+            canary.NOT_INSTALLABLE
+        ), answered
+    assert canary.installability({**doc, "releases": {"0.2.0": [good]}}, "0.3.0") == (
+        canary.NOT_INSTALLABLE
+    )  # absent version key in a readable map IS an answer
+    # NON-READINGS — including the field-level drops that `release_files` cannot see.
+    for unreadable in (
+        {"0.3.0": {}},
+        {"0.3.0": ["junk"]},
+        {"0.3.0": [{**good, "yanked": "false"}]},
+        {"0.3.0": [{**good, "filename": ""}]},
+        {"0.3.0": [{"yanked": False}]},
+    ):
+        assert canary.installability({**doc, "releases": unreadable}, "0.3.0") == (
+            canary.INSTALLABILITY_UNKNOWN
+        ), unreadable
+    assert canary.installability({**doc, "releases": "x"}, "0.3.0") == (
+        canary.INSTALLABILITY_UNKNOWN
+    )
+
+    # AND THE ARM: a mixed map whose ADVERTISED value was dropped at field level must take the
+    # "could not be READ" sentence, not the decisive negative (which is reserved for a complete
+    # read). This is the shape the round-7 finding reproduced.
+    for field_shape in (
+        {"filename": "tortoise_client-0.3.0-py3-none-any.whl", "yanked": "false"},
+        {"yanked": False},
+        {"filename": ""},
+    ):
+        report = _client_report(
+            {**doc, "releases": {"0.2.0": [_CLIENT_GOOD], "0.3.0": [field_shape]}}
+        )
+        arm = report.get("client-published")
+        assert arm.status == canary.OK, (field_shape, arm.status, arm.detail)
+        assert "advertised latest 0.3.0 could not be READ here" in arm.detail, (
+            field_shape,
+            arm.detail,
+        )
+        assert "not resolvable for an unpinned install" not in arm.detail, arm.detail
+
+
+def test_a_non_STRING_version_is_the_same_class_one_key_further_in():
+    """`{"info": {"version": 0.3}}` must not be a release order while `{"releases": {"0.3.0": {}}}` is not.
+
+    ⛔ THE INCONSISTENCY THIS PINS was a review finding on the first revision of this change: the
+    map's VALUES had just been made non-readings, while a version value two lines away was still
+    coerced to "" and reported as "carries no latest version" — a FAIL, exit 1, an irreversible
+    upload order — off a document that carries a version. Same class, same doctrine, same verdict.
+    """
+    for version in (0.3, True, ["0.3.0"], {"v": "0.3.0"}, None):
+        doc = {"info": {"version": version}}
+        assert canary.version_unreadable(doc) is True, version
+        assert canary.latest_version(doc) == "", version
+        # client arm
+        report = _client_report({**doc, "releases": {"0.3.0": [_CLIENT_GOOD]}})
+        arm = report.get("client-published")
+        assert arm.status == canary.UNKNOWN, (version, arm.status, arm.detail)
+        assert canary.VERSION_UNREADABLE in arm.detail, arm.detail
+        assert "carries no published version" not in arm.detail, arm.detail
+        assert "not a reason to cut a release" in arm.detail.lower(), arm.detail
+        # engine arm
+        report = _client_report(
+            {"info": {"version": "0.3.0"}, "releases": {"0.3.0": [_CLIENT_GOOD]}},
+            engine_doc={"info": {"version": version}},
+        )
+        arm = report.get("engine-index")
+        assert arm.status == canary.UNKNOWN, (version, arm.status, arm.detail)
+        assert canary.VERSION_UNREADABLE in arm.detail, arm.detail
+        assert report.exit_code == 2, (version, report.exit_code)
+
+    # The states that ANSWER stay on the FAIL arm: no `version` key at all, and an empty string.
+    for answered in ({}, {"info": {}}, {"info": {"version": ""}}):
+        assert canary.version_unreadable(answered) is False, answered
+        report = _client_report({**answered, "releases": {"0.3.0": [_CLIENT_GOOD]}})
+        assert report.get("client-published").status == canary.FAIL, answered
+        assert report.exit_code == 1, (answered, report.exit_code)
