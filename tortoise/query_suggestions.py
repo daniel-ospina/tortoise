@@ -138,11 +138,17 @@ def compute_suggestion(kind: str) -> str | None:
 
     #12582: a NON-STR input returns None rather than raising. This is a library
     entry point (`tortoise.query_suggestions.compute_suggestion`) as well as an
-    internal helper, and every branch below assumes a string — ``kind in known``
-    is a containment test that accepts any hashable, and ``":" not in kind``
-    raises TypeError for a bool/int. The MCP caller now filters non-str values
-    before it gets here, so this is defence for the callers this module cannot
-    see, not a second guard for that one.
+    internal helper, and every branch below assumes a string. Two things go wrong
+    without the guard, neither of them a clean refusal: ``":" not in kind``
+    raises TypeError for a bool/int/float/None, while for a LIST (which does not
+    raise — ``kind in known`` is a linear scan over a LIST and `[] in known` is
+    simply False) the no-match branch answers a nonsense "did you mean" quoting
+    the repr, or None by accident: measured, `compute_suggestion(["a"])` ->
+    "kind '['a']' not found. Did you mean: 'api', …" and
+    `compute_suggestion(["statement"])` -> None. The MCP caller now filters
+    non-str values before it gets here, so
+    this is defence for the callers this module cannot see, not a second guard
+    for that one.
     """
     if not isinstance(kind, str):
         return None
