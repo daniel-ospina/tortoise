@@ -3540,9 +3540,11 @@ def _is_safe_root_file(path: str) -> bool:
 # failing probe above is the artifact signal, so `git fetch --unshallow` and
 # re-read. On a complete clone the reading does settle it: it names the same
 # commit the API names as `79c3d9dbe` — but `%h` prints an ABBREVIATION whose
-# length follows `core.abbrev` (unset here, so one character longer), so compare
-# the COMMIT, never the string. Either way the server is the answer to quote —
-# never write either set of local outputs into this comment as that answer.
+# length is `core.abbrev` when that is set and git's object-count-derived default
+# otherwise, so it can differ from the server's abbreviation and between clones:
+# compare the COMMIT, never the string. Either way the server is the answer to
+# quote — never write either set of local outputs into this comment as that
+# answer.
 #
 # The other wrong reading: `#12313` did not create the file (it appended the
 # reader — the original error). Re-derive before re-admitting the entry; do not
