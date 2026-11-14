@@ -176,10 +176,11 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
         # Pinned to the literal both sites spell (`raising=False` at `:49` and at
         # `:257`) rather than to a bare `delenv("TORTOISE_DB_URI"` arm: this row
         # must not authorize a FUTURE bare `delenv` in the same file. It is the same
-        # rule the `test_candidate_recall_11901.py` row above states for its own
-        # file — a future site is a DIFFERENT site and must be triaged, not
-        # authorized by this entry — applied to the `delenv` construct, which no
-        # other row here narrows (the other 53 `delenv` arms are bare).
+        # rule the `test_candidate_recall_11901.py` row BELOW states for its own file
+        # — a future site is a DIFFERENT site and must be triaged, not authorized by
+        # this entry — applied to the `delenv` construct, which no other arm in this
+        # table constrains: every other `delenv` arm here stops at the variable name
+        # (measured with `ast` at this head — none of the other 52 has a tail).
         r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI",\s*raising=False'],
     # #12275: `test_candidate_recall_11901.py` (#12159) landed with three
     # untriaged URI mutations, which reds this gate on `main` in `test (d)` —
