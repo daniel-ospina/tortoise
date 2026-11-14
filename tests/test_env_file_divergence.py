@@ -2536,22 +2536,30 @@ def test_a_keyless_rejection_is_reported_as_unknown_origin(
     """A rejection that names NO key must not blame a side that supplied none.
 
     The `embedded-allowed` rung calls `resolve_db_path()` UNWRAPPED, so a
-    RELATIVE embedded default — which is what a uid with no passwd entry and no
-    `HOME` gets, because `os.path.expanduser("~")` leaves the literal `~` — is
-    rejected by a PLAIN `ValueError` carrying no key at all. The disclosure read
-    that as `None in effective` -> False and called it `env`, or (when the error
-    did not pre-exist) `file`: either way a side is named that supplied nothing,
-    and the `file` arm also prints "the value it rejects is the one this `.env`
-    supplied" about a value the file never carried — it supplied the HATCH.
+    RELATIVE embedded default — what a uid with no passwd entry and no `HOME`
+    gets, because `os.path.expanduser("~")` leaves the literal `~` — is rejected
+    by a PLAIN `ValueError` carrying no key at all. The disclosure read that as
+    `None in effective` -> False and called it `env`, or (when the error did not
+    pre-exist) `file`: either way a side is named that supplied nothing, and the
+    `file` arm's RENDERED row also says "the value it rejects is the one this
+    `.env` supplied" about a value the file never carried — it supplied the HATCH.
 
-    Both handlers are driven, because they are separate branches and each was
-    wrong in its own way: the overlay arm's `_env_error_preexists` branch said
-    `env`, its `else` branch said `file`. Mutation-proven — disabling either
-    branch reddens exactly one arm below (`file != unknown` / `env != unknown`).
+    ⛔ THE CLAUSE ASSERTIONS READ THE RENDERED OUTPUT, not `payload["daemon_error"]`:
+    that sentence exists only in the two renderers (`config show`'s prose and
+    `doctor`'s ❌ row), so asserting it absent from the payload is true in every
+    possible code state and pins nothing (review, P2 — measured: with the `file`
+    branch disabled the phrase appeared on STDOUT while the payload assertion
+    stayed green).
+
+    All THREE attribution arms are driven, because they are separate branches and
+    each was wrong in its own way; each is mutation-proven below.
     """
     import tortoise.config as config
 
     monkeypatch.setattr(config, "DEFAULT_DB_PATH", "relative/unresolvable.db")
+
+    def _rendered():
+        return _show_text(capsys)
 
     # ARM 1 — clean environment, and the FILE supplies the hatch: the error does
     # not pre-exist, so the overlay's `else` branch ran and used to say `file`.
@@ -2559,22 +2567,34 @@ def test_a_keyless_rejection_is_reported_as_unknown_origin(
     payload = _show_json(capsys)["env_file"]
     assert payload["daemon_error_source"] == "unknown", (
         payload.get("daemon_error"))
-    assert "the value it rejects is the one this `.env` supplied" not in (
-        payload.get("daemon_error") or ""), payload["daemon_error"]
+    assert "the value it rejects is the one this `.env` supplied" not in _rendered()
 
-    # ARM 2 — the hatch is in the ENVIRONMENT (so the error pre-exists) while
-    # the file supplies a key of its own (so there IS something to overlay and
-    # the overlay arm runs). `None in effective` is False, so that arm said
-    # `env`. The file must not assign the hatch itself: the pre-existence probe
-    # REMOVES file-assigned values, which would make the error look new and route
-    # this to the other branch (measured — that is why ARM 1 exists separately).
+    # ARM 2 — the hatch is in the ENVIRONMENT (so the error pre-exists) while the
+    # file supplies a key of its own (so there IS something to overlay and the
+    # overlay arm runs). `None in effective` is False, so that arm said `env`.
+    # The file must not assign the hatch itself: the pre-existence probe REMOVES
+    # file-assigned values, which would make the error look new and route this to
+    # ARM 1 (measured — that is why the arms are separate).
     monkeypatch.setenv("TORTOISE_ALLOW_EMBEDDED", "1")
     _write_env(_isolated, "TORTOISE_LOG_LEVEL=info\n")
     payload = _show_json(capsys)["env_file"]
     assert payload["daemon_error_source"] == "unknown", (
         payload.get("daemon_error"))
-    assert "the value is the one this `.env` supplied" not in (
-        payload.get("daemon_error") or ""), payload["daemon_error"]
+    assert "the value is the one this `.env` supplied" not in _rendered()
+
+    # ARM 3 — the NON-OVERLAY arm (`effective` empty: the file's value is already
+    # in the environment), which is a third site with its own key derivation. It
+    # is correct today only because `_db_value_source(None)` answers `unknown`;
+    # forcing that site to `file` left all three suites green before this arm
+    # existed (review, P2 — measured).
+    from tortoise import dotenv_file as _dotenv_file
+
+    _write_env(_isolated, "TORTOISE_LOG_LEVEL=info\n")
+    _dotenv_file.load_dotenv()
+    payload = _show_json(capsys)["env_file"]
+    assert payload["daemon_error_source"] == "unknown", (
+        payload.get("daemon_error"))
+    assert "the value is the one this `.env` supplied" not in _rendered()
 
 
 def test_a_blank_path_rung_is_not_credited_with_the_default_it_fell_through_to(
@@ -2608,12 +2628,14 @@ def test_a_blank_path_rung_is_not_credited_with_the_default_it_fell_through_to(
         payload.get("daemon_error"))
 
     # CONTROL — a non-blank value IS the one that failed, so the ladder keeps
-    # naming its key. Asserted AT THE LADDER, because `config show` cannot reach
-    # it: the CLI resolves the same relative path and reports `cli_error` before
-    # the daemon ladder is asked again, so the payload carries no attribution at
-    # all (measured — the payload form of this control reads
-    # `KeyError: 'daemon_error_source'`, not a wrong source, which would have
-    # made the assertion vacuous).
+    # naming its key. Asserted AT THE LADDER because that is the surface the fix
+    # changes (`daemon_error_source` only mirrors it). ⛔ NOT because `config
+    # show` is unreachable here — an earlier version of this comment said that,
+    # citing a `cli_error`, and it was FALSE: with a `.env` present the payload
+    # does reach the ladder and reports `env`, with `cli_error` also set. The
+    # `KeyError` that prompted it came from an ABSENT `.env` (the `state: absent`
+    # short-circuit above), not from the CLI's error (review, P2 — measured
+    # step-by-step in one process).
     monkeypatch.setenv("TORTOISE_DB_PATH", "relative/kept.db")
     with pytest.raises(config.DaemonTargetError) as caught:
         config.daemon_db_target()

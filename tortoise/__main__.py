@@ -12050,8 +12050,11 @@ def _dotenv_divergence(graded_target: str | None = None, *,
             # `DEFAULT_DB_PATH` (no passwd entry, no `HOME`) raises a PLAIN
             # ``ValueError`` with no key at all. That state degrades to
             # ``unknown`` origin — which is the correct answer, not a fallback
-            # for a future rung — and is pinned by
-            # `test_a_keyless_rejection_is_reported_as_unknown_origin`.
+            # for a future rung — and is pinned by the THIRD arm of
+            # `test_a_keyless_rejection_is_reported_as_unknown_origin` (the
+            # `effective`-empty arm; the other two are the overlay branches, so
+            # before that arm existed a `file` here left all three suites green
+            # — review, P2, measured).
             _key = getattr(exc, "key", None)
             _source = _db_value_source(_key)
             daemon_error = _redact_db_value(
