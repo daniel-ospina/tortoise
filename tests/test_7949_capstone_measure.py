@@ -6051,8 +6051,13 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # ⛔ THE RECONCILE APPENDIX'S OWN REPRODUCTION BLOCK (#12462 review round 2).
         # `RECONCILE-A1-A2-A5.md` is in NEITHER `_BUNDLE_DOCS` nor any sweep, so the
         # comment block that prints this record's own `git grep` output had readers for
-        # NONE of its cites — the appendix reproduced a hit that §0 in the same document
-        # also states, and only §0's copy was ever re-pointed.
+        # NONE of its cites — and the document DID carry two numbers for one hit: at
+        # `30d222f40b` (this PR's pre-rebase first commit, held by `refs/av/pr/12569`)
+        # §0 read `sdk.py:18999` while BOTH appendix copies still read `:18996` —
+        # `git show 30d222f40b:docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md |
+        # grep -n 'sdk\.py:[0-9]*'` → `104:…18999`, `732:…18996`, `756:…18996`. A scan
+        # that found no such revision was a scan miss, not a refutation; `#12545`
+        # (`6916a6cd89`) then moved all three to `18999` together.
         # ⛔ The third is not an offset at all: the appendix read `:16911`, which is
         # `extracted, meta = self._extract_session_llm(` — the **m1** entry point — while
         # the sentence is about `_capture_session` reaching the **v2** fold. A reader
