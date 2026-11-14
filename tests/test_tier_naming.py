@@ -269,10 +269,16 @@ class TestEverySurfaceAgreesWithTheDeclaration:
 #:         indistinguishable by this heuristic, so the block was paid for with the miss.
 #:         `;` belongs here too as of cycle 11 — see `_CLAUSE_END_STRICT` — so a
 #:         `;`-closed denial IS a miss, which is what this bullet always claimed;
-#:       * a TEMPORAL qualifier in the same position (`… no Builder plan yet`, `… today`,
-#:         `… currently`, `… on the roadmap`) — the same class as `anymore`, one word
-#:         deep; true on `origin/main` too, so pre-existing, and listed because this
-#:         list is claimed to be MEASURED rather than complete (cycle-19 P2);
+#:       * a TEMPORAL qualifier FOLLOWED BY A CLAUSE BREAK (`… no Builder plan today,
+#:         and the roadmap is unaffected`). ⛔ A clause-FINAL `yet`/`today`/`currently`
+#:         is CAUGHT, not missed, and a cycle-19 revision of this bullet said the
+#:         opposite: all three sit in `_INTENSIFIER_WORDS` beside `anymore`, whose
+#:         behaviour they share (measured cycle 20: `There is no Builder plan today.`
+#:         and `… anymore.` both flag, while `… today, and the roadmap…` and
+#:         `… on the roadmap.` both escape). So what is left here is the SAME
+#:         clause-break miss as the bullet above, plus the no-break scope spelling
+#:         `… no Builder plan on the roadmap` — listed because this list is claimed to
+#:         be MEASURED rather than complete (cycle-19 P2, re-measured cycle 20);
 #:       * an ANAPHORIC re-assertion after a quoted record (`Previously the doc read
 #:         "there is no Builder plan"; there is no such plan anymore.` / `…; that plan
 #:         does not exist.`): :func:`_asserts_a_denial_outside_the_quotes` asks whether
@@ -432,7 +438,17 @@ _RESTATEMENT_TAIL = (r"\s*['\"\u201d\u2019]?\s*(?:[—–;,]|--)?\s*(?:"
                      r"(?=\s*['\"\u201d\u2019]?\s*(?:$|[.)]|" + _CITATION + r"))")
 _CLAUSE_END = (r"(?!" + _RESTATEMENT_TAIL + r")"
                r"(?=\s*['\"\u201d\u2019]?\s*"
-               r"(?:$|[.;)]|—|–|--|;|,|" + _CITATION + r"))")
+               r"(?:$|[.;)]|—|–|--|;|,))")
+#: ⛔ …and `_CITATION` was DEAD here and is deleted (cycle-20, measured). A cycle-16
+#: revision listed it under "One pin each, so neither term can be deleted silently",
+#: which is false for THIS set, and its stated reason refutes itself: `_INTENSIFIER` is
+#: entirely OPTIONAL, so every `_CLAUSE_END` arm has a zero-width-intensifier
+#: `_CLAUSE_END_STRICT` twin measured at the same position — which is why the base arm's
+#: `_CITATION` could never be the term that matched. Measured: deleting it here leaves
+#: `19 passed` and changes 0 verdicts over 1013 sentences (every `docs/` line naming
+#: `builder` plus every sentence pinned in this file); deleting it from
+#: `_CLAUSE_END_STRICT` alone REDS `test_the_lint_does_flag_the_real_denial`. So it is
+#: load-bearing in the strict set only, and the two `_CITATION` pins below still hold.
 
 #: A denial is often qualified by a trailing intensifier rather than nothing at all
 #: (`… anymore`, `… at all`). Measured false NEGATIVES before this existed: "There is
@@ -882,10 +898,23 @@ _REPORTED_CLAIM = re.compile(
     re.I)
 
 
-#: How far into the reported clause a denial may begin and still count as the thing the
-#: verb introduces. Small on purpose: `said "pro" and there is no Builder plan` must NOT
-#: count, and its denial begins well past this bound.
-_REPORTED_DENIAL_OFFSET = 6
+#: Where the REPORTED CLAUSE ends. A denial beginning after one of these is a SECOND
+#: claim, not the one the speech verb introduces — so the stretch a verb can introduce is
+#: everything UP TO its first break.
+#:
+#: ⛔ THIS REPLACES A FIXED 6-CHARACTER OFFSET (cycle-20, measured). That bound could not
+#: tell a harmless adverbial from a detour, so three correct retraction records were
+#: BLOCKED here while `origin/main` exempts all three:
+#: `Previously the doc said flatly that there is no Builder plan; #12444 corrected it.`
+#: and its `claimed (wrongly)` / `said throughout` twins (the denial begins at 12–14 and
+#: the offset was 6). `and`/`but` are in the set for the reason the offset existed:
+#: `said the naming was wrong and there is no Builder plan` asserts a denial and must stay
+#: FLAGGED, which is the pin below. `so`/`which`/`therefore` and friends are here because
+#: one bare `so` re-opens that same detour a word further out. A CLOSED set, like
+#: `_INTENSIFIER_WORDS`, so it cannot become a wildcard.
+_REPORTED_CLAUSE_END = re.compile(
+    r"[;:,\u2014\u2013]|\b(?:and|but|so|which|therefore|thus|hence|whereas)\b",
+    re.I)
 
 #: ⛔ `_REPORTED_CLAUSE_BREAK` LIVED HERE AND IS GONE (round-2 review, measured). It
 #: was added for a real finding — a reported denial whose match STARTED inside a
@@ -899,6 +928,12 @@ _REPORTED_DENIAL_OFFSET = 6
 #: this file has removed twice already (`_BUILDER_PHRASE`, `before then`). The FINDING is
 #: kept where it belongs: its two sentences are pinned live below, and removing the
 #: outside-quotation rule reds them.
+#:
+#: ⛔ `_REPORTED_CLAUSE_END` IS A DIFFERENT RULE, NOT THAT TERM RETURNING (cycle-20,
+#: measured): `_REPORTED_CLAUSE_BREAK` asked whether a MATCH crossed a break, to bound
+#: where a denial could END. `_REPORTED_CLAUSE_END` bounds where the reported CLAUSE
+#: ends, so a denial BEGINNING after the verb's first break is a second claim. Named
+#: apart so a reader cannot take one for the other.
 
 
 def _reports_a_denial(sentence: str) -> bool:
@@ -930,12 +965,14 @@ def _reports_a_denial(sentence: str) -> bool:
         # the suite at 19 passed when deleted, and no `docs/` verdict or pinned case
         # depends on it — an unpinned term with no corpus behind it, which is this file's
         # own cycle-14 rule for removing surface rather than carrying it.
-        rest = plain[verb.end():]
+        # ⛔ …AND ONLY UP TO THE FIRST CLAUSE BREAK (cycle-20, measured — see
+        # `_REPORTED_CLAUSE_END`): a denial beginning after one is a second claim, so
+        # `said the naming was wrong and there is no Builder plan` stays FLAGGED while
+        # `said flatly that there is no Builder plan` is the record it is.
+        reported = _REPORTED_CLAUSE_END.split(plain[verb.end():], 1)[0]
         for pattern in _DENIAL_PATTERNS:
-            match = pattern.search(rest)
-            if match is None or match.start() > _REPORTED_DENIAL_OFFSET:
-                continue
-            return True
+            if pattern.search(reported) is not None:
+                return True
     return False
 
 
@@ -1460,9 +1497,12 @@ class TestNoDocDeniesABuilderPlanExists:
             # retracted (cycle-18 P1) — and so is the `blocked 0 of those 18` this
             # comment carried until cycle 19, which contradicted its own next clause.
             # Measured: at `77deb656` the tuple is 66 sentences / 18 cue-bearing and the
-            # parent blocks 6 of them (the six pins below are the whole delta); at this
-            # head it is 76 / 23 and the parent blocks 10 of the 76. Two pins per arm,
-            # so a re-narrowing cannot be silent.
+            # parent blocks 6 of them (the six pins below are the whole delta). ⛔ The
+            # "at this head" figure a cycle-19 revision carried here ("76 / 23, the
+            # parent blocks 10") was stale at the head that shipped it — re-measured
+            # cycle 20: 88 / 25 — and the paragraph above already forbids quoting a
+            # head count, because the tuple grows with every fix. Two pins per arm, so
+            # a re-narrowing cannot be silent.
             'Previously the doc read "Builder is not a plan."; #12444 corrected it.',
             'Until #12444 the page read "Builder is not a plan".',
             'Previously the page read "There is no plan called Builder".',
@@ -1653,10 +1693,12 @@ class TestNoDocDeniesABuilderPlanExists:
                 # the denial disappears entirely — measured, the only shape found that
                 # depends on the rule at all.
                 "Plans we sell:\n- there is no Builder plan\n- the Team grid follows.\n",
-                # ⛔ THE REPORTED-OFFSET CEILING, PINNED (round-2 review, measured):
-                # `_REPORTED_DENIAL_OFFSET` could be raised to 1000 with the suite at 19
-                # passed, which re-opens the reported detour for any far-away denial —
-                # this sentence is exempt at offset 1000 and FLAGGED at the real bound.
+                # ⛔ THE REPORTED DETOUR, PINNED (cycle-20, measured): the reported
+                # arm accepts a denial only BEFORE its first clause break, so this
+                # sentence stays FLAGGED because `and` ends the reported clause. Widen
+                # that set to exclude `and` and it is exempt — the same detour the
+                # replaced 6-character offset existed to stop, now bounded by
+                # `_REPORTED_CLAUSE_END`.
                 "Until #12444 the doc said the naming was wrong and there is no Builder "
                 "plan.\n",
         ):
@@ -1782,14 +1824,14 @@ class TestNoDocDeniesABuilderPlanExists:
             'The page calls the tier "Builder"; the plan does not exist.',
             'Notes say "Builder" plan does not exist.',
             'The doc says "there is no Builder plan" and there is no Builder plan.',
-            # ⛔ THE TWO CLAUSE ENDS ARE REDUNDANTLY COVERED BY EVERY `There is no …
-            # plan (…)` PIN (cycle-16 P2, measured): deleting `_CITATION` from EITHER
-            # one alone left the suite fully green, while distinct classes escaped —
-            # the `builder is not a plan` arm has no intensifier twin and depends on
-            # `_CLAUSE_END` alone, and every intensifier arm depends on
-            # `_CLAUSE_END_STRICT` alone. One pin each, so neither term can be deleted
-            # silently (the cycle-11 rule: an exemption half that is stated but not
-            # pinned left the suite green when it was removed).
+            # ⛔ THE TWO CLAUSE ENDS DO NOT EACH CARRY A `_CITATION` PIN (cycle-20,
+            # measured). A cycle-16 revision claimed "One pin each, so neither term can
+            # be deleted silently"; measurement falsifies it for `_CLAUSE_END`, whose
+            # `_CITATION` was dead surface and is now deleted (see that constant). The
+            # strict set's copy IS pinned: removing it alone reds this test. What these
+            # two sentences actually pin is the CITATION-accepted clause end itself, on
+            # both arms, which is the class the cycle-11 rule demanded (an exemption half
+            # that is stated but not pinned left the suite green when it was removed).
             "Builder is not a plan (see #12444).",
             "There is no Builder plan at all (#12444).",
             # ⛔ THE RESTATEMENT EXEMPTION MUST END THE CLAUSE (cycle-15 P1, measured):
@@ -1925,8 +1967,10 @@ class TestNoDocDeniesABuilderPlanExists:
             # ⛔ `_REPORTED_CLAUSE_BREAK` and `_NEGATION_WORD` were DELETED in the
             # round-2 review and are no longer banned — banning a name that does not
             # exist is not a guard (the same rule that removed `_BUILDER_PHRASE` and
-            # `_QUOTED_NEGATION` here in cycle 17).
-            "_REPORTED_DENIAL_OFFSET",
+            # `_QUOTED_NEGATION` here in cycle 17). ⛔ `_REPORTED_DENIAL_OFFSET` was
+            # REPLACED in cycle 20 by `_REPORTED_CLAUSE_END`, so the ban moves with it:
+            # the deleted name is dropped and the live ingredient takes its place.
+            "_REPORTED_CLAUSE_END",
             "_QUOTE_PAIRS",
             "_BLOCK_START",
             "_asserts_a_denial_outside_the_quotes",
