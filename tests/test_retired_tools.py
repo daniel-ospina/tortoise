@@ -64,12 +64,16 @@ class TestDeclaration:
         not grow), with its manifest row in `config/surface-manifest.yml`.
 
         ⛔ This assertion is defence-in-depth, NOT the approval gate. What refuses an
-        UNAPPROVED addition is `tools/surface-guard.py` step 7 against the
-        BASE-REF-pinned `high_water_counts` (still 150) plus `tests/test_sdk_surface.py`
-        (`DECLARED_COUNT` / declaration-vs-baseline) — measured: adding a stray public
-        method to `TortoiseSDK` leaves `tests/test_sdk_retirement.py` green (14 passed;
-        it is a FLOOR, so growth cannot red it) and reds `surface-guard.py` and
-        `test_sdk_surface.py`. Do not read this count as approval.
+        UNAPPROVED addition is `tools/surface-guard.py` **step 1** — an SDK method or
+        tool that is not in the frozen baseline (`surface-guard.py:964`, "is not in the
+        frozen baseline") — plus `tests/test_sdk_surface.py` (`DECLARED_COUNT` /
+        declaration-vs-baseline). Measured: adding a stray public method to
+        `TortoiseSDK` leaves `tests/test_sdk_retirement.py` green (14 passed; it is a
+        FLOOR, so growth cannot red it), reds `test_sdk_surface.py` (5 failed) and is
+        refused by the guard from step 1. The `high_water_counts` ceiling (still 150)
+        is a SEPARATE stop: step 7 refuses a live count ABOVE it, so it does not fire
+        on a one-method addition — it stops a re-cut from raising the ceiling silently.
+        Do not read this count as approval.
         """
         from tortoise.sdk import TortoiseSDK
 
