@@ -834,7 +834,7 @@ surfaces:
   # #10612: the offload seam must not re-enter a stored contextvars.Context.
   # Same dual registration as the offload guard above and for the same reason:
   # tortoise/hosted_api.py is an exact `api` SOURCE_PATTERN that REPLACES the
-  # `core` fallback, so this file also has an `api` row above; the other file it
+  # `core` fallback, so this file also has an `api` row (this one); the other file it
   # guards, tortoise/monitoring.py, selects `core`, so the `core` row is what
   # delivers the guard for a monitoring.py-only diff.
   - test_context_confinement.py
@@ -1015,8 +1015,9 @@ surfaces:
   # this note and the `core` one come from different commits, and `--integrity` reported
   # the duplicate on `main`.) That is the mechanism `duplicate_entries()` documents: the
   # SAME row appended at two different positions survives as TWO rows, so a duplicate is
-  # NOT evidence of a union merge. One row per surface is what `integrity()` requires; the
-  # second copy is gone.
+  # NOT evidence of a union merge. One row per surface is what `duplicate_entries()`
+  # requires — `integrity()` only asks "is it classified?", which a duplicated row
+  # satisfies; the second copy is gone.
   - test_12477_health_honesty.py
   - test_agent_signup.py
   - test_agent_signup_idempotency.py
@@ -3049,11 +3050,11 @@ surfaces:
   # trap the #9964 row above records). It drives the real SDK doors against a
   # throwaway embedded graph, so it takes no `carve_out` slot.
   - test_kind_guards_12060.py
-  # #9494: registered ONCE, in the `core` block below beside `test_monitoring.py`
-  # (its consumers' siblings), with the `durations:` row the surface entry does
-  # not cover. Two lanes appended this file here and there while both fixed the
-  # same review finding, and a same-surface duplicate reds `duplicate_entries()`
-  # (#5373) — so this line is deliberately absent.
+  # #9494: registered ONCE, in this `core` block (its sibling `test_monitoring.py`
+  # sits at its own alphabetical position further down), with the `durations:` row
+  # the surface entry does not cover. Two lanes appended this file here and there
+  # while both fixed the same review finding, and a same-surface duplicate reds
+  # `duplicate_entries()` (#5373) — so this line is deliberately absent.
   - test_kind_vocabulary_consistency.py
   # #9123 (§17.1's THIRD lane): the `:EpMeta` epoch declaration. BOTH its
   # subjects — `tortoise/projection/__init__.py` (the new
@@ -6180,7 +6181,7 @@ surfaces:
   # `tortoise/incident_kinds.py` (no named surface → this `core` arm is the
   # fallback) AND the alert-plane emitters, including `tortoise/hosted_api.py` and
   # `tortoise/email_notify.py`, which are exact `api` SOURCE_PATTERNS — so the
-  # `api` arm below is load-bearing for an api-file-only diff (a named-surface
+  # `api` arm above is load-bearing for an api-file-only diff (a named-surface
   # match REPLACES the `core` fallback, #2938 convention). Registered in this
   # position to keep the list's alphabetical grouping.
   - test_incident_kinds.py
