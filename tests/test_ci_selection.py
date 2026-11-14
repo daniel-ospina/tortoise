@@ -3014,21 +3014,21 @@ def test_root_file_read_by_a_test_is_never_allowlisted():
     that needs it. Every name below IS read
     (README.md by `test_embedded_durability_claim.py:62`; AGENTS.md by the
     base-subset pin; `.gitignore` by
-    `test_kind_index.py::TestMemoizationAndLazy::test_gitignored_cache_dir`; CONTRIBUTING.md by
+    `test_kind_index.py::TestMemoizationAndLazy::test_gitignored_cache_dir`;
+    CONTRIBUTING.md by
     `test_surface_manifest.py`'s removal-docs pin; …) and keeps FULL.
     (`.gitignore` used to be cited as `:290` — a DIFFERENT test — while the read has
     been at `:302` since before both parents merged, so a line citation here is a claim
     that re-stales on the next neighbouring edit; that one is a symbol now. `README.md`'s
     `:62` is still a number and is the next one to rot.)
     """
+    # #12313's `test_surface_manifest` pin reads CONTRIBUTING.md's
+    # "**To REMOVE a symbol**" paragraph, so the doc keeps FULL and joins the
+    # other read files here rather than sitting in the docstring alone.
     for name in ("README.md", "AGENTS.md",
-                 "LICENSE", "MEMORY.md", "index.md",
+                 "LICENSE", "MEMORY.md", "index.md", "CONTRIBUTING.md",
                  ".gitignore", ".env.example", "fly.toml", "pyproject.toml",
-                 ".python-version",
-                 # #12313's `test_surface_manifest` pin reads this doc's
-                 # "**To REMOVE a symbol**" paragraph, so it keeps FULL and joins the
-                 # other read files here rather than sitting in the docstring alone.
-                 "CONTRIBUTING.md"):
+                 ".python-version"):
         r = _sel([name])
         assert r["full"] is True, (
             f"{name} is read by a test — it must keep the fail-closed FULL "

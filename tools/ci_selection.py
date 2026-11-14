@@ -3503,10 +3503,9 @@ def _is_safe_root_file(path: str) -> bool:
 # The membership test is the CONTENT-READER census, NOT a mention: a doc a guard
 # READS stays out. `README.md` (tests/test_embedded_durability_claim.py:62,
 # tests/test_capacity_page.py:40), `AGENTS.md` (the base-subset pin),
-# `.gitignore` (`test_kind_index.py::TestMemoizationAndLazy::test_gitignored_cache_dir`)
-# and `.env.example` are therefore NOT here. At #8785 the census found no content reader for `CONTRIBUTING.md`
-# either — every mention then was a docstring, a generated-doc link, or
-# `scripts/record-review.sh`'s basename case — and it was reprieved.
+# `.gitignore` (tests/test_kind_index.py:302 —
+# `TestMemoizationAndLazy::test_gitignored_cache_dir`) and `.env.example` are
+# therefore NOT here.
 #
 # ⛔ `CONTRIBUTING.md` IS NO LONGER HERE, and the reason it once was is worth
 # keeping. It was left out of #6786's two-file reprieve on a MENTION census
