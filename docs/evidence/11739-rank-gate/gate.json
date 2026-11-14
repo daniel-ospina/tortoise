@@ -56,7 +56,7 @@
       }
     },
     "B_prefix_query_sample": {
-      "definition": "query = the first max(6, 25%) of the point's content words (a 6-word floor for short content), seed 11739, n=1500 of 15008 queries, docs = full population; NOTE: the query text is the RAW arm's own index text (content) truncated, so this bounds the raw arm's full-text advantage rather than removing it \u2014 see the correction on #11739 comment 6869865848",
+      "definition": "query = the first max(6, 25%) of the point's content words (a 6-word floor for short content), seed 11739, n=1500 of 15008 queries, docs = full population; the query text is the RAW arm's own index text (content) truncated, so this bounds the raw arm's full-text advantage rather than removing it",
       "raw": {
         "n": 1500,
         "rank_1": 1005,
@@ -121,8 +121,18 @@
     "encoder": "BAAI/bge-small-en-v1.5 (384-d), mean cosine vs stored vectors = 1.000000",
     "issue_comment": 6869726971,
     "note": "no payload_sha256 self-binding and no pin test \u2014 this is a branch-only PROBE artifact, not the indexed bundle; see README.md's header",
-    "probe_sha256_current": "26c7f5d86fae006e6c5e1efddd3024cd6bbd1d72193aeca64a6a98fbdcadae53",
-    "probe_digest_note": "probe_sha256 = the probe AS RUN (it produced every number above). probe_sha256_current = the committed probe, which differs only by the numeric-shard-sort fix (10 shards 0-9, where string and numeric order agree, so the numbers are identical either way). A re-run must reproduce the numbers from the current file."
-  },
-  "corrections": "#11739 comment 6869865848: byte-identical twins do NOT displace each other (rank counts STRICTLY greater similarities, probes/rank_gate.py rank_arm), so the twin-group class is a property of the displaced Points and not their proximate cause; the displacement COUNTS above are unchanged."
+    "probe_sha256_current": "bda727333c4b07b3d7543af129f18dab798f014b0ea72d4f1af2dbdafb75b4b5",
+    "probe_digest_note": "probe_sha256 = the probe AS RUN (it produced every number in this file). probe_sha256_current = the committed probe, which differs by three review fixes that cannot move a number: numeric shard ordering, a shard-set/shape assertion, and the corrected B definition text (this file's B definition is that same corrected text). The published run used 10 shards, 0-9, where string and numeric order agree.",
+    "twin_groups_sha256": "5d1894be931c7d8f00bcd5b358ff6e064ff0231756fa4ddb973d8ccea0528e30",
+    "shards_as_run": {
+      "count": 10,
+      "names": "comp_vec_0..9",
+      "assembled_shape": [
+        15008,
+        384
+      ],
+      "how_verified": "re-running --mode measure with the committed probe re-assembled 'comp (15008, 384) from 10 shards' before the encoder import (no torch on the verifying box) \u2014 the assembly is checked, the encode is not re-derived"
+    },
+    "twin_group_figures": "produced by probes/twin_groups.py (committed), which reproduces displaced_total 1377 / in_band 803 independently from the raw+composed vectors and every row of the mechanism table"
+  }
 }

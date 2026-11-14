@@ -115,18 +115,21 @@ only **13,341** distinct composed texts), and the median rank of a twin-group Po
   plane was **up** at 01:27 UTC (`/health` 200 in 0.93 s, `/mcp/` 200 in 2.15 s), so this is a
   **time-bound decision, not a data-plane refusal**: the numbers are ranks over a pinned population,
   not a claim about the graph's live state at 02:00 UTC.
-* Hermetic re-run: `probes/rank_gate.py` (sha256 `6cd1220ab762dfcd3f8dfebdfdff516dca529dc162a21d2519c9dcbf654bda9d`)
-  against the cache above produced the population, both arms' ranks and histograms, and the item-displacement
-  counts. ⚠️ **It did NOT produce the twin-group classification** in "Why the composed arm loses facts" —
-  those counts came from a one-off pass over the same cache whose script is not in this bundle, so they have
-  **no `gate.json` field** and are not machine-followable yet. Treat them as one-off and re-derivable, not
-  pinned; folding them into the probe is follow-up work named in the header.
+* Hermetic re-run: `probes/rank_gate.py` (sha256 `6cd1220a…` — the probe **AS RUN**; the committed file is
+  `bda72733…`, differing only by three review fixes that cannot move a number: numeric shard ordering, a
+  shard-set/shape assertion, and the corrected B definition text — see
+  `gate.json.provenance.probe_sha256_current`) produced the population, both arms' ranks and histograms,
+  and the item-displacement counts. `probes/twin_groups.py` (sha256 `5d1894be…`) produced every figure in
+  "Why the composed arm loses facts", and independently reproduces `displaced_total` **1,377** and
+  `displaced_in_band` **803** from the raw + composed vectors — so those counts have two implementations
+  that agree, not one.
 
 ## Files
 
 | file | what |
 |---|---|
-| `probes/rank_gate.py` | the probe; produces the numbers above from the row cache |
-| `gate.json` | the machine-readable result (both arms, both query formulations, histograms, item displacement, digests) **plus a hand-written `provenance` block** — the probe emits no `provenance` key, so that block is not probe output |
+| `probes/rank_gate.py` | the probe: population, both arms' ranks + histograms, item displacement. `--mode measure` |
+| `probes/twin_groups.py` | the twin-group classification behind "Why the composed arm loses facts"; re-derives 1,377 / 803 independently |
+| `gate.json` | the machine-readable result (both arms, both query formulations, histograms, item displacement, digests) **plus a hand-written `provenance` block** — the probe emits no `provenance` key (it emits `shards` on a run; this file's `shards_as_run` is hand-recorded), so that block is not probe output |
 
 Refs #11739 · #11805 · #12439 · #12436 · #11682 · #11706 · #8488

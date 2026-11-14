@@ -183,6 +183,16 @@ def main(argv):
             key=lambda f: int(f[len("comp_vec_"):-len(".npy")]),
         )
         comp = unit(np.vstack([np.load(f"{WORK}/{f}") for f in parts]))
+        # ⛔ The shard SET must be the one this run produced, not whatever happens to be in WORK: a
+        # leftover comp_vec_*.npy from an earlier `--of` would be vstacked silently and every composed
+        # rank would then be computed against a mixed vector set with NO error. Fail loudly instead.
+        idxs = [int(f[len("comp_vec_"):-len(".npy")]) for f in parts]
+        if idxs != list(range(len(parts))):
+            sys.exit(f"PROBE-SHARD: shard indices are {idxs[:12]}… — not contiguous 0..{len(parts)-1}: "
+                     f"a leftover shard from another --of is in {WORK}")
+        if comp.shape[0] != len(ids):
+            sys.exit(f"PROBE-SHARD: assembled {comp.shape[0]} composed vectors against {len(ids)} ids — "
+                     "the shard set does not cover this population")
         rows, live_rows, pop = population(a.cache)
         src_rows = {r["id"]: r for r in pop}
         pop = [src_rows[i] for i in ids]
@@ -242,8 +252,15 @@ def main(argv):
                     "composed": hist(A_cmp["ranks"], A_cmp["sims"]),
                 },
                 "B_prefix_query_sample": {
-                    "definition": f"query = first 25% of the point's content words (arm-neutral, "
-                                  f"seed 11739, n={len(qi)} of {n} queries, docs = full population)",
+                    # ⛔ NOT "arm-neutral": the query text is the RAW arm's own index text (content)
+                    # truncated, so it BOUNDS the raw arm's full-text advantage rather than removing it,
+                    # and the 25% cut is floored at 6 words. Both were falsified as "first 25% …
+                    # (arm-neutral)" and corrected in #11739's review (comment 6869865848).
+                    "definition": f"query = the first max(6, 25%) of the point's content words "
+                                  f"(a 6-word floor for short content), seed 11739, n={len(qi)} of {n} "
+                                  f"queries, docs = full population; the query text is the RAW arm's "
+                                  f"own index text (content) truncated, so this bounds the raw arm's "
+                                  f"full-text advantage rather than removing it",
                     "raw": hist(B_raw["ranks"], B_raw["sims"]),
                     "composed": hist(B_cmp["ranks"], B_cmp["sims"]),
                 },
@@ -254,6 +271,11 @@ def main(argv):
                 "unbanded": d_all, "band_070_085_only": d_band,
             },
             "duration_s": None,
+            # provenance of the ASSEMBLY, so the "the numbers are unaffected" claim is checkable rather
+            # than asserted in a commit message: how many shards were assembled, their shape, and a
+            # digest of the assembled composed matrix.
+            "shards": {"count": len(parts), "rows": int(comp.shape[0]), "dim": int(comp.shape[1]),
+                       "comp_sha256": hashlib.sha256(np.ascontiguousarray(comp, np.float32).tobytes()).hexdigest()},
             "probe_sha256": hashlib.sha256(open(__file__, "rb").read()).hexdigest(),
             "cache_sha256": hashlib.sha256(open(a.cache, "rb").read()).hexdigest(),
         }
