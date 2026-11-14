@@ -13098,7 +13098,9 @@ class TortoiseSDK:
         behind (an account READ — a `{ns}_control_plane` created during a lookup
         is the same read-side mint #669 rejected) asks with ``create=False``.
         The existence test is :func:`tortoise.graph_delete_guard.graph_exists`, a
-        `GRAPH.LIST` read.
+        `GRAPH.LIST` read, and a probe performs it ONCE: a cold probe tests before
+        building a handle (and the `elif` below never re-tests that name), while a
+        warm probe tests the name it was cached for.
 
         Registry graph name is namespace-scoped (``{ns}_control_plane``) so
         different namespaces never share registry state, and test graphs get
@@ -13169,10 +13171,15 @@ class TortoiseSDK:
             # half-initialized handle whose next call would return it and skip
             # both the journal and the indexes, minting the registry graph
             # UNOWNED (the E2E-7 leak this append exists to stop).
-            self._registry_g = registry_graph
+            # ONCE, and the NAME before the handle: `close()` clears in this order
+            # too, and a handle visible with no name yet (the reverse order) is a
+            # window in which a concurrent probe on this same instance reads
+            # "handle set, name None" and answers `None` for a store that HAS the
+            # account — the one answer this method's docstring forbids.
             self._registry_name = registry_name
+            self._registry_g = registry_graph
             self._ensure_registry_indexes()
-        if not create and self._registry_g is not None:
+        elif not create:
             # A CACHED HANDLE IS NOT PROOF THE GRAPH STILL EXISTS. A sweep, or an
             # in-process flip to Supabase, can delete it underneath this process;
             # answering the stale handle is precisely how a read resurrects it
@@ -13180,6 +13187,10 @@ class TortoiseSDK:
             # was built for — same derivation, recorded once in `_registry_name`,
             # so the probe and the creator cannot disagree about which graph is
             # the registry.
+            # `elif`, not a fresh `if`: the cold branch above already answered the
+            # existence question for exactly this name (that is how execution got
+            # past it), so a second `GRAPH.LIST` here would be a redundant round
+            # trip per cold probe, not a second guarantee.
             if self._registry_name is None:
                 return None
             from .graph_delete_guard import graph_exists
