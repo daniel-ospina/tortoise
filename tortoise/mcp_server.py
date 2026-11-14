@@ -770,10 +770,11 @@ def _quota_state_timeout() -> float:
     ⛔ NEVER RAISES, and that is the whole point (#12482 fresh review, P3). Both callers are
     PLANNING sites in ``tortoise_health``'s tail, reached outside any ``try``: a bare ``from
     tortoise.quota import QUOTA_STATE_TIMEOUT`` at a stale or partially-written module raised
-    ``ImportError``, which left the tool entirely — measured: ``_safe`` could not turn it into an
-    error payload, because ``_safe``'s OWN handler imports ``QuotaCheckError``/
-    ``QuotaExceededError`` from ``tortoise.quota`` unguarded, so the exception propagated out of
-    ``tortoise_health`` instead. Either way the clamp's own safety arithmetic took down the
+    ``ImportError``, and the last mile then depended on HOW stale the module was — measured: a
+    module that still carries ``QuotaCheckError``/``QuotaExceededError`` is caught by ``_safe`` and
+    answers ``{'error': ...}`` with no ``status`` key, while one missing those classes too leaves the
+    tool ENTIRELY, because ``_safe``'s OWN handler imports them from ``tortoise.quota`` unguarded
+    (#12647). Either way the clamp's own safety arithmetic took down the
     instrument that reports whether the product is up, on a box where ``/health`` on main answered
     normally. The ``#11892`` block below imports ``tortoise.quota`` INSIDE its own ``try`` for
     exactly this reason; this helper is that rule applied to the two planning sites that run BEFORE
@@ -792,9 +793,9 @@ def _quota_state_timeout() -> float:
     non-numeric constant raised ``TypeError``/``ValueError`` from ``float()`` OUTSIDE the ``try``,
     while the first paragraph claimed the helper never raises. Measured on the previous head: a
     ``None`` constant raised ``TypeError`` and ``'3.0s'`` raised ``ValueError``. The observable is
-    the one described above for a stale ``tortoise.quota`` — the exception ESCAPES
-    ``tortoise_health``, because ``_safe``'s own handler cannot import its quota exception classes
-    either (#12647) — NOT the ``{'error': ...}`` shape a stale ``monitoring`` module produces.
+    the stale-quota one two paragraphs above, in whichever of its two shapes applies — the
+    ``{'error': ...}`` payload when the module still carries the exception classes ``_safe`` needs,
+    the escaped ``ImportError`` when it does not (#12647) — and NOT unconditionally the escape.
 
     ⛔ CONSERVATIVE ONLY AT THE RESERVE (cycle-4 review, P3): there the fallback merely over-reserves,
     which shortens the allowance. At the BUDGET site (``_health_quota_budget``) the same value is
