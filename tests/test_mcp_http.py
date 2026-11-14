@@ -909,6 +909,87 @@ class TestPackInstallRateBudgetMoved:
         assert not hasattr(ms, "tortoise_pack_install")
 
 
+class TestTheBudgetSeamStillCharges:
+    """#2050's seam must keep WORKING now that its only member is archived.
+
+    #11609 batch 1 emptied `_MCP_BUDGETED_OPS`, which makes
+    `_check_mcp_op_budget` return on its first line for every call: the suite is
+    green and NOTHING proves the seam charges, converts a 429 into a tool
+    refusal, or skips the lane with no tenant to bill. The three end-to-end tests
+    it replaced were the only proof, and they needed the archived tool. These
+    probes drive the seam directly, so the next budgeted op inherits a charging
+    path that is known to FIRE — not an inert enforcer that appears to protect a
+    budget whose refusal can never be reached.
+    """
+
+    @staticmethod
+    def _ground(monkeypatch, name, *, refuse=False):
+        """Insert a map entry + a stand-in budget for the duration of a call."""
+        import tortoise.hosted_api as ha_mod
+        import tortoise.mcp_server as ms
+
+        charged = []
+
+        async def fake_check(op, org):
+            charged.append((op, org))
+            if refuse:
+                from fastapi import HTTPException
+
+                raise HTTPException(
+                    status_code=429,
+                    detail="Rate limit exceeded for pack_manifest",
+                    headers={"Retry-After": "600"},
+                )
+
+        monkeypatch.setitem(ms._MCP_BUDGETED_OPS, name, "pack_manifest")
+        monkeypatch.setattr(ha_mod, "_check_sensitive_op_budget", fake_check)
+        return ms, charged
+
+    def test_an_entry_in_the_map_charges_the_shared_team_bucket(self, monkeypatch):
+        ms, charged = self._ground(monkeypatch, "tortoise_probe_budgeted")
+        asyncio.run(ms._check_mcp_op_budget("tortoise_probe_budgeted", "team-1"))
+        assert charged == [("pack_manifest", "team-1")], (
+            "a tool named in `_MCP_BUDGETED_OPS` did not charge its mapped op — "
+            f"the seam is inert: {charged}"
+        )
+
+    def test_the_budget_refusal_reaches_the_caller_as_a_ToolError(self, monkeypatch):
+        """A 429 must become an MCP refusal carrying Retry-After, not a 500."""
+        from fastmcp.exceptions import ToolError
+
+        ms, charged = self._ground(monkeypatch, "tortoise_probe_budgeted", refuse=True)
+        with pytest.raises(ToolError) as excinfo:
+            asyncio.run(ms._check_mcp_op_budget("tortoise_probe_budgeted", "team-1"))
+        assert charged, "the seam never called the budget"
+        message = str(excinfo.value)
+        assert "Rate limit exceeded for pack_manifest" in message, message
+        assert "Retry-After: 600s" in message, message
+
+    def test_an_unmapped_name_charges_nothing(self, monkeypatch):
+        """The map is the switch: today's empty map must mean NO charge."""
+        import tortoise.hosted_api as ha_mod
+        import tortoise.mcp_server as ms
+
+        detonated = []
+
+        async def explode(op, org):
+            detonated.append((op, org))
+
+        monkeypatch.setattr(ha_mod, "_check_sensitive_op_budget", explode)
+        assert "tortoise_probe_unmapped" not in ms._MCP_BUDGETED_OPS
+        asyncio.run(ms._check_mcp_op_budget("tortoise_probe_unmapped", "team-1"))
+        assert detonated == [], "an unmapped tool charged the sensitive-op budget"
+
+    def test_the_selfhost_lane_is_skipped_there_is_no_tenant_to_bill(self, monkeypatch):
+        """No org, and the self-host placeholder org, are both exempt by design."""
+        from tortoise.mcp_auth import SELFHOST_ORG_ID
+
+        ms, charged = self._ground(monkeypatch, "tortoise_probe_budgeted")
+        asyncio.run(ms._check_mcp_op_budget("tortoise_probe_budgeted", SELFHOST_ORG_ID))
+        asyncio.run(ms._check_mcp_op_budget("tortoise_probe_budgeted", ""))
+        assert charged == [], f"a lane with no tenant to bill was charged: {charged}"
+
+
 class TestExcludedTools:
     def test_excluded_absent_from_tools_list(self, mcp_client):
         tc, _ = mcp_client

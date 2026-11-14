@@ -1147,8 +1147,8 @@ def test_analyze_anchors_route_through_the_dispatch_GRAPH_SELECTION_ARCHIVED():
     assert "entityProfile(" in segment, (
         "the archived analyze handler no longer derives anchors from an entity "
         "profile — the assertion above would be vacuous")
-    # ... and it must ANALYSE the same name it derived from, not a second one.
-    assert segment.count("_dispatch_graph_name(") >= 1
+    # ... and the name it derives from must be BOUND to a local, so the analyze
+    # path reuses the dispatch's selection instead of deriving a second one.
     assert re.search(r"gname\s*=\s*\(_dispatch_graph_name\(", segment), (
         "the archived handler no longer binds the dispatch selection to a local "
         "that the analyze call can reuse")

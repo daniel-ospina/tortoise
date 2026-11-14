@@ -327,6 +327,30 @@ def test_the_owner_facing_docs_present_tense_counts_are_the_derived_ones():
             f"{live} + {retired} = {live + retired}"
         )
 
+    # 4. The vision doc's SDK count, in EVERY phrasing it states it. One narrow pattern is not a
+    #    fix: the round that rewrote this file left `the SDK **125 methods**` correct while three
+    #    sibling sentences still said 124 — including one that cites `tools/surface-guard.py`,
+    #    which prints 125. A guard matching only the first phrasing certifies green over a
+    #    self-contradicting artifact. Requiring each sentence to EXIST keeps every arm
+    #    non-vacuous: deleting a claim must not be a way to pass.
+    sdk = _manifest()["counts"]["sdk_public_methods"]
+    sdk_phrasings = {
+        "the present-tense method count": r"the SDK \*\*(\d+) methods\*\*",
+        "the reconciliation heading's 'now measures'": r"it now measures \*\*(\d+)\*\*",
+        "the __all__ row's 'today' count": (
+            r"(\d+) today — `tools/surface-guard\.py` is the live count"
+        ),
+        "the beta-sdk-surface row's 'over N'": r"40 methods\*\* over (\d+)",
+        "the canonical-sdk-methods row's inventory": r"inventory of all (\d+)",
+    }
+    for phrasing, pattern in sdk_phrasings.items():
+        claims = [int(n) for n in re.findall(pattern, vision)]
+        assert claims, f"the vision doc stopped stating {phrasing}"
+        assert claims == [sdk] * len(claims), (
+            f"vision-mcp-sdk-surface.md states {claims[0]} in {phrasing}; "
+            f"config/surface-manifest.yml derives counts.sdk_public_methods = {sdk}"
+        )
+
 
 def test_the_two_canonical_documents_table_lists_every_document_it_defers_to():
     """The vision doc's `## The two canonical documents` table must list every document the same
