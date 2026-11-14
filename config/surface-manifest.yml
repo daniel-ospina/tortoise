@@ -131,6 +131,26 @@ response_fields:
     coalesce the absence to 0.5, which is the second path §6.3 names. #11702.'
   unchanged_when_off: 'NO — additive key, so on each POINT node payload the key set grows by one (the values are
     the #11702 contract change); a non-Point node payload is byte-identical. Not flag-gated'
+- response: sdk:get_organisation_account
+  field: plan.limit
+  emitted_when: 'PRESENCE is the contract, and it has three states because a missing key and a null
+    one mean different things (#10015). A number = a bounded allowance. null = UNLIMITED — the encoding
+    `quota.resolve_org_limits` documents for a key that is PRESENT with no value (`billing.apply_limits`
+    writes NULL for exactly that). The key is ABSENT when the limit could not be read — the shape
+    `enforce_org_limit` treats as fail-closed — because `null` would read as unlimited and tell a capped
+    account it has no cap. A consumer must read the KEY, never only its value: `plan.limit` omitted is
+    UNKNOWN, not unlimited, and not 0.'
+  unchanged_when_off: 'n/a — not flag-gated. This is a NEW endpoint (approved SDK row 28), so there is no
+    prior response body to keep byte-identical; the three states above are its initial contract.'
+- response: sdk:get_organisation_account
+  field: plan.at_cap
+  emitted_when: 'PRESENT only when the answer is knowable: `true` when `used >= limit` (the predicate
+    `enforce_org_limit` itself refuses on, so the read and the 402 agree) and `false` when the plan is
+    unlimited. ABSENT when `used` could not be counted under a bounded limit — a `false` there would be
+    the falsely reassuring answer #4331 forbids on /v1/team. At-cap is a STATE in this reply, never an
+    exception: the account is held at its cap on purpose (#10175) and must read as held.'
+  unchanged_when_off: 'n/a — not flag-gated; PAIRED with `plan.used`, which is null (never a false 0)
+    when the count failed.'
 - response: tortoise_analyze
   field: why
   emitted_when: TORTOISE_W4_ENRICHMENT is truthy (1/true/yes/on; unset or 0 means off)
@@ -898,14 +918,16 @@ approval_pr: '4120'
 approval_date: '2026-09-18'
 # ⚠️ `counts` is DERIVED by `render`, and `cut_at_commit` above is the provenance of
 # the ORIGINAL cut — the two no longer describe the same snapshot: #4282 deleted 26
-# dead public SDK methods at `45eefb26c`, so `sdk_public_methods` is 124 here while
-# `d05370918` held 150. Re-cutting is the durable fix and is deliberately NOT done
+# dead public SDK methods at `45eefb26c`, so `sdk_public_methods` was 124 here while
+# `d05370918` held 150 — and it is 125 since #10015 implemented approved row 28
+# (`get_organisation_account`). The `counts:` value is DERIVED and moves whenever a
+# row does; read the live number beside it, not here. Re-cutting is the durable fix and is deliberately NOT done
 # here: `cut` is owner-gated per this tool's own docstring ("ask Daniel FIRST, before
 # the re-cut") because it re-derives every row from the declaration. Until then, read
 # the count as "at this head" and the sha as "when the rows were cut".
 counts:
   tools: 72
-  sdk_public_methods: 124
+  sdk_public_methods: 125
   retired: 23
   keyword_distribution:
     fetch: 14
@@ -4110,6 +4132,29 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.get_historical_knowledge.
+  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
+  lifecycle: active
+  used_by: tooling, docs
+  recommendation: review
+  reason: no MCP tool binds it, and no caller outside tests was found
+  recommended_family: null
+  proposed: false
+  exemption: false
+  approval: null
+  class: no-caller-found
+- name: sdk:get_organisation_account
+  method: get_organisation_account
+  approved: true
+  family: null
+  family_rank: null
+  served: sdk
+  sdk_method: null
+  group_source: null
+  keyword: null
+  keyword_rank: null
+  cluster: null
+  canonical: null
+  job: Public SDK method TortoiseSDK.get_organisation_account.
   dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
   lifecycle: active
   used_by: tooling, docs

@@ -14527,6 +14527,22 @@ class TestOverLimitSurfacesOfferTheHumanPath:
         # exist. Registered as a category entry, not a rewritten message, which is
         # this list's own rule (#10142, f8970b536).
         "this team's plan limits could not be read",
+        # #10015 row 28: the ACCOUNT read's store-MISMATCH refusal, the same
+        # fail-closed SERVER-fault category as "unreadable for resource" and
+        # "the team allowances could not be resolved for" above. The account row
+        # exists in this SDK's own control plane but not in the registry the
+        # plan's WRITE gates resolve (`quota.resolve_org_limits` reads
+        # TORTOISE_DB_URI / TORTOISE_DB_PATH, never the caller's handle), so the
+        # read refuses rather than substituting another store's cap onto the
+        # money surface. The customer hit no ceiling — no plan they could buy
+        # lifts a deployment pointing at two stores — and the message's own
+        # remedy is to point the process at the store the gates read.
+        # Registered as a CATEGORY entry, not a rewritten message, which is this
+        # list's own rule (#10142, f8970b536): the sentence carries the only
+        # true remedy, and appending the contact path would promise an upgrade
+        # that cannot exist. Measured: without this row the raise at
+        # `tortoise/sdk.py` reds `test-slow (c)` on the merge tree.
+        "get_organisation_account cannot answer for",
         "resolve_org_limits requires a org_id", "cohort is larger than the",
         "cannot bound anything", "cannot be evaluated",
         "an unscoped cap would apply", "Import artifact exceeds the size cap",

@@ -115,7 +115,17 @@ person managing their own account).
 | | **PLATFORM** | | | |
 | 40 | `check_connection` | **What does this credential reach?** Omit `key_id` to check your own connection; pass one to inspect a specific credential. Makes the isolation promise verifiable. **Programmatic, returns a result — not a wizard** | `check_connection` | builder |
 
-**40 methods** against **124** today. **MCP: 27 tools** (26 at the 2026-09-21 ruling; 27 since #3540) — every row except the tenancy block (28–39), `write_knowledge_batch`
+> **Row 28's delivery approval (#10015).** `get_organisation_account` — *read the account and
+> the plan it is on* — is approved to be **implemented**, with the plan's used count and limit
+> on its reply, by **daniel-ospina** on **2026-11-14**, recorded at
+> [#10015 comment `6863608333`](https://github.com/daniel-ospina/tortoise/issues/10015#issuecomment-6863608333).
+> No new name enters the surface: row 28 already **is** the name, so this delivers it rather than
+> adding to it. Two things are **not** approved and stay refused: `org_list` (or any scoped
+> account list — the 2026-10-25 ruling removed the unscoped one) and a `graph_count` name (its
+> logic survives as the internal `_graph_count`). `config/surface-manifest.yml`'s
+> `high_water_counts` pin does **not** move, and the approved 40 does not grow.
+
+**40 methods** against **125** today. **MCP: 27 tools** (26 at the 2026-09-21 ruling; 27 since #3540) — every row except the tenancy block (28–39), `write_knowledge_batch`
 (builder-only, 13) and the constructor/`close` (1–2) — **plus row 30**, `update_memory_graph`,
 which is inside the tenancy block but is the one tenancy method with an MCP twin, because the
 owner's 2026-09-21 ruling kept the `graph_set_recording` tool. 40 − 12 − 1 − 2 + 1 = 26. That
