@@ -915,16 +915,14 @@ approval_date: '2026-09-18'
 # below read 68 while `30c9e7c4d` itself holds 72. ⛔ A hand-edited `counts` reds
 # `check` — re-cut instead (`cut --commit $(git rev-parse origin/main)`), and never paste a
 # number in.
-# ⚠️ `counts` is DERIVED by `render`, and `cut_at_commit` above is the provenance of
-# the ORIGINAL cut — the two no longer describe the same snapshot: #4282 deleted 26
-# dead public SDK methods at `45eefb26c`, so `sdk_public_methods` was 124 here while
-# `d05370918` held 150 — and it is 125 since #10015 implemented approved row 28
-# (`get_organisation_account`). The `counts:` value is DERIVED and moves whenever a
-# row does; read the live number beside it, not here. This baseline HAS been cut since
-# (`cut_at_commit` above records it), so the two agree by construction rather than by
-# convention — a future `counts` edit still reds `check`, and the durable fix is still
-# `cut` (owner-gated per this tool's own docstring: "ask Daniel FIRST, before the
-# re-cut", because it re-derives every row from the declaration).
+# ⚠️ The SAME applies to `render`: the counts it emits are the derivation at this
+# manifest, not a copy of `cut_at_commit`’s tree. Precedents that moved one without the
+# other: #4282 deleted 26 dead public SDK methods at `45eefb26c` (`sdk_public_methods` was
+# 124 here while `d05370918` held 150), and #10015 added approved row 28
+# (`get_organisation_account`), so it is 125. Read the number here and the sha above as
+# the two different facts they are. This baseline WAS re-cut, against `30c9e7c4d`, so the
+# rows come from a tree that still holds the four no-destination tools — that difference
+# is the archive’s, not a hand edit, and `check` grades it as such.
 counts:
   tools: 68
   sdk_public_methods: 125
