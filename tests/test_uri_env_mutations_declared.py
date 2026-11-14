@@ -709,6 +709,30 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # leak into a later module. DELIBERATE_URI.
     "test_projection.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
                            r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
+    # #12422's canary landed this site AFTER the #12523 triage merged, which
+    # re-red the register (`undeclared TORTOISE_DB_URI mutation(s)` naming
+    # `test_published_artifact_canary.py:2107`).
+    # `test_install_and_run_strips_ambient_tortoise_env` PLANTS an ambient
+    # `TORTOISE_DB_URI` precisely so it can be shown to be STRIPPED before the
+    # canary measures the default path a new user gets — an ambient URI inherited
+    # from the runner would point the command somewhere else and turn a broken
+    # artifact green. So the value IS the test input, and nothing dials it: every
+    # probe drives `_Runner`, which records argv and returns scripted
+    # `CompletedProcess` results (no subprocess, no server), and the hand-rolled
+    # `_Capture` subclasses it only to read the env mapping it was called with.
+    # Function-scoped `monkeypatch` is auto-undone by pytest at teardown, so no
+    # lane flip can leak into a later module. DELIBERATE_URI — and the value is
+    # PINNED, because this module holds exactly ONE site. The table's precedent
+    # for a PINNED value: `test_7949_capstone_measure.py` (one site, like this
+    # one) and `test_11070_source_prose_repair.py` (THREE sites, all the same
+    # literal); `test_rerank_calibration_12297.py` pins its URI setenv and rides
+    # that row's KEY-ONLY `delenv` arm for its two `delenv` calls. A bare
+    # `setenv\(\s*"TORTOISE_DB_URI"` arm would auto-authorize a FUTURE,
+    # differently-intentioned URI setenv in a module whose whole design is
+    # "nothing here touches PyPI"; with the literal pinned, such a site reds
+    # and forces its own triage.
+    "test_published_artifact_canary.py": [
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*"docker://:x@localhost:6379/other"'],
     # #8939/#8870: the lane-gate unit pins for the version-anchor live file. The
     # setenv is DELIBERATE_URI — a CONFIGURED docker URI is the test input, and
     # the assertion is that `_live_uri()` uses it AS-IS instead of probing a
@@ -1100,7 +1124,23 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
         # the URI UNSET at :1946 so a file-supplied bad value is attributed to the
         # FILE that supplied it, and the "cannot be loaded at all" wording this
         # test exists to REFUTE stays out of the report.
-        r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
+        r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"',
+        # a docker-shaped URI used ONLY to drive the ladder to its `uri` rung in the
+        # rung-table completeness pin (:2420) — `daemon_db_target()` RETURNS the
+        # value, and neither that test nor any arm of this module dials it.
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*"docker://:pw@localhost:6379/g"',
+    ],
+    # ⛔ MAINLINE TRIAGE, not a site this PR added: `test_published_artifact_canary.py`
+    # landed with no register row, so `test_uri_env_mutations_declared` was RED on
+    # `origin/main` for every branch (an undeclared mutation reds until triaged),
+    # not just on this one — both this register and that module are byte-identical
+    # to main here, and the undeclared site is reported with them alone. Declared
+    # so main and every branch stop being red. The value is the AMBIENT env the
+    # canary exists to prove it STRIPS: the mutation is the INPUT, and the canary's
+    # own child process is what may resolve it.
+    "test_published_artifact_canary.py": [
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*"docker://:x@localhost:6379/other"',
+    ],
 }
 
 # Carve-out TEST-MODULE stems (Task 5 wires these into TEST_NO_REDIRECT_STEMS;

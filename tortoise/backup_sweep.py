@@ -494,7 +494,7 @@ def enumerate_orgs(source) -> list[str]:
 
 
 def enumerate_eligible_orgs(source) -> list[str]:
-    """List Pro orgs eligible for hosted backup (#655).
+    """List Builder orgs eligible for hosted backup (#655).
 
     Eligibility: tier != 'free' AND backup_enabled = true — registry Cypher
     or Supabase ``teams`` filters, dialect auto-detected (same seam as
@@ -1659,7 +1659,7 @@ def run_backup_sweep(
     the endpoint from BACKUP_MIRROR_ENABLED + R2_MIRROR_* env; None keeps the
     sweep byte-for-byte mirror-free.
 
-    When ``config.org_sweep_enabled`` is True, only Pro orgs (tier != 'free'
+    When ``config.org_sweep_enabled`` is True, only Builder orgs (tier != 'free'
     AND backup_enabled) are enumerated (#655). A 0-eligible-orgs result files
     a deduplicated NO_ELIGIBLE_ORGS incident — the chronic-no-op alarm.
     """
@@ -1688,13 +1688,13 @@ def run_backup_sweep(
     prev_team_count = int(ops_state.get("last_team_count") or 0)
 
     if not org_ids:
-        # ── Org-sweep no-op alarm (#655): enabled but 0 Pro orgs ──
+        # ── Org-sweep no-op alarm (#655): enabled but 0 Builder orgs ──
         if config.org_sweep_enabled:
             incidents.append(
                 {
                     "kind": KIND_NO_ELIGIBLE_TEAMS,
                     "org_id": "",
-                    "detail": {"message": "team sweep enabled but 0 eligible (Pro) teams found"},
+                    "detail": {"message": "team sweep enabled but 0 eligible (Builder) teams found"},
                 }
             )
             _noop_ops_state_write(storage, now, source=resolved_source)

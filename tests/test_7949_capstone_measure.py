@@ -5791,6 +5791,16 @@ _EPIC_CITE_DOCS = {
         _REPO / "docs/epics/2026-11-04-7949-extractor-v4-capstone/00-align.md",
     "04-plan.md":
         _REPO / "docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md",
+    # ⛔ Registered by `#12587`'s round-3 review, for the rule the block above states:
+    # "A document this bundle EDITS is a document this bundle reads". This PR edits
+    # BOTH of these and neither had a single reader, so its own repairs were as
+    # fragile as the rot they fixed — measured: reverting the `_honours` repair in
+    # `02-scope.md` or the `pkind.lower()` repair in `A4-PER-LAYER.md` left the whole
+    # file green (776 passed).
+    "02-scope.md":
+        _REPO / "docs/epics/2026-11-04-7949-extractor-v4-capstone/02-scope.md",
+    "A4-PER-LAYER.md":
+        _REPO / "docs/evidence/7949-capstone/A4-PER-LAYER.md",
     # `docs/evidence/11083/README.md` cites the SAME `relation_write.py` call the
     # RECONCILE row below pins, and was read by nothing at all until #12112. The
     # cite was CORRECT on main (`:631` WAS the call at `aebf91352bfd`, the parent of
@@ -5804,19 +5814,22 @@ _EPIC_CITE_DOCS = {
 _EPIC_CITE_SOURCES = {
     "sdk": _REPO / "tortoise/sdk.py",
     "search_engine": _REPO / "tortoise/search_engine.py",
+    # ⛔ Registered by `#12587`'s round-3 review: the two `extractor_v2` repairs this
+    # PR makes (`A4-PER-LAYER.md:146`, `00-plan.md:179`) had no way to be pinned at
+    # ALL, because a row's `sources[source_key]` lookup KeyErrors on an unregistered
+    # key and every row in this table names its source explicitly. Measured before
+    # adding it: reverting either repair left the whole file green (776 passed).
+    "extractor_v2": _REPO / "tortoise/extractor_v2.py",
     # `00-align.md`'s A-d row cites the fleet's real capture transport OUTSIDE every
     # sweep `_BUNDLE_CITE` can see (it resolves `sdk|edges|extractor_v2` only), so its
     # two `.ts` numbers had no reader at all and were stale: the row named `:948`/`:938`
-    # for the plain `postCapture` and its `install-probe` sibling while the tree then
-    # carried those two `def`s at `:955`/`:947` (the forward merge of `origin/main` has
-    # since moved them to `:1007`/`:999`, which is what the row below pins — the pair is
-    # ALWAYS 8 apart, so a move is a move and not a re-derivation). Registered because a
-    # repaired cite that nothing pins is a repair the next move of the symbol undoes
-    # silently.
+    # for the plain `postCapture` and its `install-probe` sibling while the tree carries
+    # those two `def`s at `:1007`/`:999`. Registered because a repaired cite that nothing
+    # pins is a repair the next move of the symbol undoes silently.
     "pi_hooks": _REPO / "tortoise/pi-hooks/tortoise-capture.ts",
     # ⛔ `03-test-design.md:82` cites the 402 quota guard and its refusal payload by
     # NUMBER, and that row was in NO pin: #12369 re-pointed a CORRECT
-    # `hosted_api.py:18494`/`:18519` to `:18493`/`:18518` (both comments) while
+    # `hosted_api.py:18503`/`:18528` to `:18493`/`:18518` (both comments) while
     # deleting the provenance section that said "do not re-point in passing", and
     # nothing red-ed — the regression was found by a reviewer reading the tree, not
     # by a test. A source key is the only way `_pin_row_failures` can resolve a
@@ -5987,19 +6000,56 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # ...and THAT sentence names a second file, so its `.ts` pair takes its
         # own row: a row carries ONE source key. Both anchors are the FUNCTIONS
         # the row's prose names (`postCapture` and its `install-probe` sibling),
-        # never a bare offset. The row named `:948`/`:938`; the tree THEN carried those
-        # two `def`s at `:955`/`:947`, which are **always 8 apart** across all 27
-        # revisions of the file — so nothing "rotted" and there is no offset to
+        # never a bare offset. The row named `:948`/`:938`; the tree carries those
+        # two `def`s at `:1007`/`:999`, which are **always 8 apart** across every
+        # revision of the file — so nothing "rotted" and there is no offset to
         # reuse: `:938` was `clearTimeout(timer);` and `:948` was
         # `cfg: CaptureConfig,`, i.e. the pair was WRONG, not shifted (the file did
         # not move in this wave at all). A reader who takes an offset from it
         # re-derives `948` → `957`, which lands on `postCapture`'s parameter list
         # (`payload: Record<string, unknown>,`) instead of its `def`, so the row
         # reds on content rather than silently resolving.
+        #
+        # ⛔ RE-DERIVED AGAIN at `#12545`'s squash-merge base (`7ce0d65fa0`): the
+        # pair moved `:955`/`:947` → `:1007`/`:999` between the base this branch
+        # was written against (`5bacb44e0b`) and the base the merge landed on, and
+        # the 8-line gap held. Every number here was opened, not offset.
         ("00-align.md", "`llm:deepseek-direct` is what", (
             ("1007", "export function postCapture("),
             ("999", "export function postInstallProbe("),
         ), "pi_hooks"),
+        # ...and the THIRD cite on that same sentence is `hosted_api.py`'s
+        # install-probe route, which the row above cannot see (a row carries ONE
+        # source key). `#12545`'s squash-merge review found it stale by the same
+        # `+9` that moved the 402 gate, and measured the gap: flipping `:20354`
+        # back to `:20345` left the whole file GREEN — 413 passed. Unpinned is
+        # exactly how it rotted, and the comment on `pi_hooks` above already says
+        # why that matters ("a repaired cite that nothing pins is a repair the
+        # next move of the symbol undoes silently"). Pinned by the DECORATOR, so
+        # the route's own line is the anchor rather than the `def` under it.
+        ("00-align.md", "`llm:deepseek-direct` is what", (
+            ("20354", 'app.post("/v1/sessions/install-probe")'),
+        ), "hosted_api"),
+        # ⛔ The four repairs `#12587` round 2 made, each given the reader it lacked.
+        # Every one was measured UNPINNED first (revert -> 776 passed), which is the
+        # exact condition the `pi_hooks` comment above calls out by name.
+        #
+        # `hosted_api._capture_lane()` — the door R6 turns on. Phrase is on the SAME
+        # LINE as the cite (`_pin_row_failures` scopes to one line, not a paragraph),
+        # so it is the clause after the number, not the heading above it.
+        ("00-plan.md", 'returns `"v2"` **unless**', (
+            ("17936", "def _capture_lane() -> str:"),
+        ), "hosted_api"),
+        ("00-plan.md", "**default-ON**: `TORTOISE_S4_DELTA`", (
+            ("1174", 'env_flag("TORTOISE_S4_DELTA", True)'),
+        ), "extractor_v2"),
+        ("02-scope.md", "per-door `_honours` set", (
+            ("19803", "_honours: dict[str, frozenset[str]] = {"),
+        ), "sdk"),
+        ("A4-PER-LAYER.md", "compares `pkind.lower()` against", (
+            ("11320", 'elif pkind.lower() not in {k.lower() for k in master["points"]}:'),
+            ("11596", '"pointKind": pkind,'),
+        ), "extractor_v2"),
         ("04-plan.md", "operator / label path", (
             ("25396", "declared = declared_relation_predicates()"),
         ), "sdk"),
@@ -6010,9 +6060,30 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # cites by arithmetic onto two comment lines instead of two statements — the
         # exact failure the deleted "Provenance of the numbers" section named. Held by
         # CONTENT, so a number that lands on a comment cannot satisfy it.
+        # ⛔ RE-DERIVED at `#12545`'s squash-merge base (`7ce0d65fa0`): both moved
+        # `+9` (`:18494`/`:18519` → `:18503`/`:18528`) when the capture path above
+        # them grew. Opened, not offset — and `:18528` is the `QuotaExceededError`
+        # refusal of the gate at `:18503`, not the `CohortCostCapExceeded`
+        # (cohort spend-cap) arm at `:18590`.
+        #
+        # The anchor is `quota_refusal_payload(QuotaExceededError(`, not the bare
+        # `quota_refusal_payload(`, because the OLD anchor's `detail=quota_refusal_payload(`
+        # form occurs at THREE lines (`:9632`, `:18528`, `:18590`) — and the bare
+        # call occurs at four (`:9214` is `return quota_refusal_payload(`): a
+        # `(document, pin)` pair moved together onto `:18590` would satisfy the
+        # content arm and stay green on the WRONG refusal.
+        # The hardened form occurs exactly once in the file, so a re-point onto a
+        # sibling arm now reds.
         ("03-test-design.md", "the A-corpus capture", (
             ("18503", "if count + est > max_points:"),
-            ("18528", "detail=quota_refusal_payload("),
+            ("18528", "quota_refusal_payload(QuotaExceededError("),
+        ), "hosted_api"),
+        # ...and the STAMP paragraph below it restates `:82`'s number, so it needs its
+        # own row: a row scopes to ONE line, and `:236` is a different line from `:82`.
+        # Measured unpinned (round-4 review): reverting `:236` to `:18494` left 776
+        # passed, re-creating a document that contradicts its own table two lines up.
+        ("03-test-design.md", "`:82`'s `hosted_api.py", (
+            ("18503", "if count + est > max_points:"),
         ), "hosted_api"),
         # ⛔ NOT A ROW ANY MORE — the `carve_out:` claim below the rows is checked
         # against the BLOCK (`_section_entries`) and not against a line number: the

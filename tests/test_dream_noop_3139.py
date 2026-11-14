@@ -412,6 +412,79 @@ class TestHealthAlarmIsHonest:
             "zero_output_with_backlog", "zero_coverage_with_backlog",
         ), health
 
+    @staticmethod
+    def _backlog_with_output(sdk) -> tuple[str, str, str]:
+        """A live backlog AND a non-zero last output — the fixture shape the
+        coverage term needs.
+
+        Both terms are established honestly: the pass sets ``last_pass_output``
+        by stamping real claims, and ``_mark_dirty`` re-creates the backlog the
+        pass retired. Seeding the metrics dict directly would let the fixture
+        drift out of the state this alarm is actually reached in.
+        """
+        a, b, c = _factored_graph(sdk)
+        sdk.dream(mode="local", require_calibration=False)
+        sdk._mark_dirty([a])
+        return a, b, c
+
+    def test_an_unreadable_stamp_pair_names_the_failure_not_a_measured_zero(
+            self, sdk):
+        """#12099 (the per-call half of #11823) — `BOUNDED-OPERATION-CONTRACT.md`
+        §1a: `0`, `"empty"` and "I could not read it" must never collapse.
+
+        The alarm's coverage input is the only term for which THIS call installs
+        a FALLBACK CONSTANT: on a failed pair read `coverage` becomes `0.0` at
+        the line above, so `zero_coverage_with_backlog` would assert a
+        measurement that never happened. (`last_pass_output` is unmeasured here
+        too — a not-observed `0` on an SDK that has served no pass — but it is
+        the instance's recorded value, not a constant installed at this line, and
+        the arm reading it is ordered ABOVE this one. `backlog` is a third term
+        whose READ FAILURE is swallowed by `_hydrate_dirty_roots`, which reports
+        `stale_backlog: 0` and lets the alarm answer `ok` — residual (c) on
+        #12099, deliberately untouched here.) The verdict must stay FAIL-LOUD
+        (an unreadable coverage over a live backlog is not "ok") — it is the
+        REASON that must stop claiming a zero it never read.
+
+        Discriminating: before the fix this state reported
+        `zero_coverage_with_backlog`, indistinguishable from a read that really
+        returned 0% — see the sibling test below, which pins that genuine case
+        so the new arm cannot swallow it.
+        """
+        self._backlog_with_output(sdk)
+        sdk._read_stamp_pair = lambda: (
+            None, RuntimeError("graph read failed"))
+
+        health = sdk.dream_health_check()
+
+        assert health["stale_backlog"] > 0, health
+        assert health["last_pass_output"] > 0, health
+        assert health["alarm_verdict"] is True, health
+        assert health["alarm_reason"] == "coverage_unavailable", health
+        assert health["alarm_reason"] != "zero_coverage_with_backlog", (
+            "the reason asserts a zero coverage this call could not read")
+        # The numeric value is deliberately UNCHANGED — it feeds the alarm.
+        assert health["coverage_pct"] == 0.0, health
+        # …and the WHY is on the same record, one key over (§1a).
+        assert "graph read failed" in (
+            health["propagation"]["unavailable"] or ""), health
+        # The counts that came from the SAME failed read stay NULL, never 0.
+        assert health["propagation"]["graph_live_claims"] is None, health
+
+    def test_a_measurable_zero_coverage_still_reports_zero_coverage(self, sdk):
+        """The anti-overreach half of #12099: a pair that WAS read and holds no
+        stamps is a measurement, so the reason must stay
+        `zero_coverage_with_backlog` — the new `coverage_unavailable` arm keys on
+        the read FAILING, not on the number being zero."""
+        self._backlog_with_output(sdk)
+        sdk._read_stamp_pair = lambda: ((3, 0), None)
+
+        health = sdk.dream_health_check()
+
+        assert health["alarm_verdict"] is True, health
+        assert health["alarm_reason"] == "zero_coverage_with_backlog", health
+        assert health["coverage_pct"] == 0.0, health
+        assert health["propagation"]["unavailable"] is None, health
+
     def test_silent_no_op_raise_turns_the_alarm_on(self, sdk, monkeypatch):
         """(b) The fixture must be one the OLD alarm was BLIND to.
 

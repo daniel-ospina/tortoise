@@ -551,7 +551,7 @@ def test_a_docs_only_edit_to_the_design_record_selects_the_step_pins():
     `config/ci-surfaces.yml`, and the CI `test` job's arm-2 invariant
     (`docs/ops/ci-wall-clock.md` §2, pinned by
     `test_ci_selection.py::test_the_test_job_carries_no_unbounded_cache_post_step`)
-    requires the SUM × 1.5 to clear a 90 m cap with 0.54 m of headroom — so this
+    requires the SUM × 1.5 to clear a 90 m cap with ~2 m of headroom — so this
     file's declared duration is bounded by an invariant elsewhere in the repo, and
     a pin that pays 3 parses to assert the same thing would spend that budget.
     The selector takes a changed-file LIST, which is also the shape a real PR
