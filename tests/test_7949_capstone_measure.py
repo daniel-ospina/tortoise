@@ -6018,15 +6018,23 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("1007", "export function postCapture("),
             ("999", "export function postInstallProbe("),
         ), "pi_hooks"),
+        # ⛔ THE SENTENCE'S THIRD FILE (`hosted_api.py`) HAD NO READER EITHER (#12462
+        # review round 5), in the very row this PR re-points the other two cites of:
+        # `:20345` was the install-probe endpoint at `#12507` and is a comment fragment
+        # here, because `#12466` (`9ccc8ed940`) pushed it to `:20354`. Unpinned, it
+        # re-staled for exactly the reason the `pi_hooks` key above exists — so it takes
+        # its own row, on its own source key.
+        ("00-align.md", "`llm:deepseek-direct` is what", (
+            ("20354", '@app.post("/v1/sessions/install-probe")'),
+        ), "hosted_api"),
         ("04-plan.md", "operator / label path", (
             ("25396", "declared = declared_relation_predicates()"),
         ), "sdk"),
         # ⛔ THE RECONCILE APPENDIX'S OWN REPRODUCTION BLOCK (#12462 review round 2).
         # `RECONCILE-A1-A2-A5.md` is in NEITHER `_BUNDLE_DOCS` nor any sweep, so the
         # comment block that prints this record's own `git grep` output had readers for
-        # NONE of its cites, and two of them silently re-staled while their §0 sibling
-        # was re-pointed — §0 said `sdk.py:18999` and the appendix said `:18996`, one
-        # document asserting two numbers for one hit.
+        # NONE of its cites — the appendix reproduced a hit that §0 in the same document
+        # also states, and only §0's copy was ever re-pointed.
         # ⛔ The third is not an offset at all: the appendix read `:16911`, which is
         # `extracted, meta = self._extract_session_llm(` — the **m1** entry point — while
         # the sentence is about `_capture_session` reaching the **v2** fold. A reader
@@ -6040,6 +6048,21 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # here and left unpinned, so it could re-stale silently while §0 stayed
             # right — the round-2 shape, one number short).
             ("19012", "relation_write = apply_relation_edges("),
+        ), "sdk"),
+        # ⛔ THIS HIT IS STATED **THREE** TIMES IN THE DOCUMENT, NOT TWO (#12462 review
+        # round 5), and §0's own copy is the one that had no reader of its own: two rows
+        # here and one above bound the appendix's summary line and its reproduction
+        # block, while `:104` — §0's sentence, the one a reader hits FIRST — was scoped by
+        # none of those phrases. A row per statement, because a row binds ONE line: three
+        # statements of one hit with two readers is exactly how "one document asserts two
+        # numbers for one `git grep` hit" comes back. Two rows, not one, because the same
+        # §0 line cites two FILES (`relation_write.py:7`, `sdk.py:18999`) and a row
+        # carries ONE source key.
+        ("RECONCILE-A1-A2-A5.md", 'against the *"that comment and no consumer at all"* this', (
+            ("7", "extractor_v2._assemble_relations"),
+        ), "relation_write"),
+        ("RECONCILE-A1-A2-A5.md", 'against the *"that comment and no consumer at all"* this', (
+            ("18999", "# `#10999` made the channel TRANSPORT ONLY"),
         ), "sdk"),
         ("RECONCILE-A1-A2-A5.md", "relation_write.py:7, sdk.py:", (
             ("18999", "# `#10999` made the channel TRANSPORT ONLY"),
