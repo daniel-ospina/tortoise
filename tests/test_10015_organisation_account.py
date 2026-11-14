@@ -439,3 +439,8 @@ class TestTenancy:
         assert "cannot answer for" in str(exc.value), (
             "the mismatch arm must still name the disagreement, not answer None"
         )
+
+
+def test_pr12628_scratch_future_site_BARE(monkeypatch):
+    """SCRATCH (reviewer mutant M2): a FUTURE BARE delenv."""
+    monkeypatch.delenv("TORTOISE_DB_URI")
