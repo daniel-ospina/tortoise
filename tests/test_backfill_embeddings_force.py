@@ -387,7 +387,7 @@ def test_composition_parity_point_prefers_embedding_text(proj, monkeypatch):
     monkeypatch.setattr("tortoise.embeddings.compute_embedding", fake)
 
     # The dry run and the live pass must promise the SAME rows (#5126).
-    dry_total, _ = mod._dry_run(proj.db, proj.graph_name, ["Point"])
+    dry_total, _, _ = mod._dry_run(proj.db, proj.graph_name, ["Point"])
 
     # NULL-only repair pass.
     stats = _backfill_run(mod, proj, ["Point"])
@@ -768,6 +768,12 @@ def test_completeness_marker_records_all_six_labels(proj, monkeypatch, capsys):
     assert marker["agent_sessions"] == 1
     assert marker["meeting_purged"] == 1
     assert marker["repair_skipped"] == 0
+    # #12496: the end state, read back from the GRAPH. Every row here is keyed
+    # and reachable, so a healthy force run must leave nothing missing — this
+    # is the assertion that fails if the marker reports its own intent instead
+    # of the graph's state.
+    assert marker["residual_missing"] == 0, marker
+    assert marker["residual_keyless"] == 0, marker
 
 
 def test_dry_run_force_counts_affected_rows_and_reports_purge(
@@ -1050,3 +1056,377 @@ def test_all_tenants_resolves_the_width_per_target_graph(
     assert asked == [tenant_graph], asked
     assert "0 scanned, 0 embedded, 1 skipped" in out, out
     assert _embedding(tenant, "Point", "id", "p1") is None
+
+
+# ── #12496: the count DESCRIBES the write, not the batch ────────────
+
+def test_unreachable_row_is_skipped_and_never_updated(proj, monkeypatch):
+    """#12496: a NULL-keyed node must count as ``skipped``, never ``updated``.
+
+    The write is ``MATCH (n:Point {id: row.id}) SET …``, so a row whose key is
+    NULL matches NO node and can never gain a vector. The pre-fix counter was
+    ``updated += len(batch)`` — a count of rows SUBMITTED — so this fixture
+    (both rows carry text, so both are submitted) reported ``updated: 2,
+    skipped: 0`` over a graph where only ONE node ended up with a vector: a
+    completeness marker claiming a repair that never happened.
+
+    The issue's own measurement was the single-orphan form of the same graph
+    (``updated: 1, skipped: 0``, vector ``None``); the numbers differ only
+    because the fixtures differ.
+
+    Pre-fix these three counter assertions fail (``updated`` 2, ``skipped`` 0,
+    ``unreachable`` absent).
+    """
+    g = _g(proj)
+    _create(g, "Point", {"id": "p1", "content": "reachable content"})
+    # No ``id`` at all: the surface predicate selects it (it HAS text, and its
+    # embedding is NULL), but the write cannot MATCH it.
+    _create(g, "Point", {"content": "orphan content"})
+
+    mod = _load_backfill()
+    fake = _FakeEmbed()
+    monkeypatch.setattr("tortoise.embeddings.compute_embedding", fake)
+
+    stats = _backfill_run(mod, proj, ["Point"])
+
+    assert stats["updated"] == 1, stats
+    assert stats["skipped"] == 1, stats
+    assert stats["unreachable"] == 1, stats
+    assert stats["per_label"]["Point"] == 1, stats
+    assert _embedding(g, "Point", "id", "p1") is not None
+    # The orphan is untouched — no vector, and nothing invented for it.
+    assert g.query(
+        "MATCH (n:Point) WHERE n.id IS NULL RETURN n.embedding"
+    ).result_set == [[None]]
+    assert "reachable content" in fake.calls
+
+
+def test_dry_run_discloses_but_never_counts_an_unreachable_row(
+        proj, monkeypatch, capsys):
+    """#12496: ``--dry-run`` must not promise a row the write cannot reach.
+
+    The operator's counts-first gate said "1 node would be embedded"; the live
+    pass could write that one and SKIP the key-less one. So the dry run now
+    counts only reachable rows (``dry_total == updated`` — the invariant the
+    issue names; it holds for a reachable row this store can encode, and
+    `_dry_run`'s docstring lists the populations where it does not) and prints
+    the excluded population on its own line — an excluded population is
+    disclosed, never silently dropped from the counts.
+    """
+    g = _g(proj)
+    _create(g, "Point", {"id": "p1", "content": "reachable content"})
+    _create(g, "Point", {"content": "orphan content"})
+
+    mod = _load_backfill()
+    dry_total, _purged, unreachable = mod._dry_run(
+        proj.db, proj.graph_name, ["Point"])
+    out = capsys.readouterr().out
+    assert dry_total == 1, (dry_total, out)
+    assert unreachable == 1, (unreachable, out)
+    assert "⚠️ 1 rows cannot be written" in out, out
+
+    # The invariant the issue names: what the dry run promised equals what the
+    # live pass actually wrote.
+    fake = _FakeEmbed()
+    monkeypatch.setattr("tortoise.embeddings.compute_embedding", fake)
+    stats = _backfill_run(mod, proj, ["Point"])
+    assert stats["updated"] == dry_total, stats
+    assert _embedding(g, "Point", "id", "p1") is not None
+
+
+def test_two_nodes_sharing_a_key_are_both_counted(proj, monkeypatch):
+    """#12496: the count is per SUBMITTED ROW, not per distinct id.
+
+    Two ``:Point`` nodes sharing one ``id`` are both collected, and the write's
+    ``MATCH`` finds both for one batch row — the vector lands on BOTH nodes.
+    Counting distinct returned ids would report 1 repair where 2 happened, so
+    the returned ids feed a per-row membership count instead.
+
+    ⚠️ This is a COUNT assertion on purpose, and the count is correct. The end
+    state underneath it is NOT: both nodes end up holding one of the two
+    vectors (#12570, and `test_shared_key_nodes_each_get_their_own_vector`
+    pins that defect). Do not read this test as evidence that both nodes were
+    repaired correctly.
+    """
+    g = _g(proj)
+    _create(g, "Point", {"id": "dup", "content": "first body"})
+    _create(g, "Point", {"id": "dup", "content": "second body"})
+
+    mod = _load_backfill()
+    fake = _FakeEmbed()
+    monkeypatch.setattr("tortoise.embeddings.compute_embedding", fake)
+
+    stats = _backfill_run(mod, proj, ["Point"])
+    assert stats["updated"] == 2, stats
+    assert stats["per_label"]["Point"] == 2, stats
+    assert stats["unreachable"] == 0, stats
+    assert g.query(
+        "MATCH (n:Point {id: 'dup'}) WHERE n.embedding IS NOT NULL "
+        "RETURN count(n)"
+    ).result_set == [[2]]
+
+
+def test_written_row_count_semantics():
+    """#12496: the counter's three edge cases, in isolation.
+
+    Pins the semantics the batch loop depends on without needing a graph: a
+    returned-but-unsubmitted id is not counted, a submitted-but-unreturned id
+    is not counted, and a duplicated id counts once per submitted row. A
+    mutant that counts ``len(written_ids)`` reds the duplicated case; one that
+    counts ``len(batch)`` reds the unreturned case.
+    """
+    mod = _load_backfill()
+    batch = [{"id": "a"}, {"id": "b"}, {"id": "b"}, {"id": "missing"}]
+    # 'a' and both 'b' rows matched; 'missing' did not; 'ghost' was never sent.
+    assert mod._written_row_count(batch, ["a", "b", "ghost"]) == 3
+    # Nothing matched at all — every submitted row was not repaired.
+    assert mod._written_row_count(batch, []) == 0
+    # Same id in two nodes is ONE returned id, TWO repaired submitted rows.
+    assert mod._written_row_count([{"id": "dup"}, {"id": "dup"}], ["dup"]) == 2
+
+
+def test_completeness_marker_names_the_unreachable_population(
+        proj, monkeypatch, capsys):
+    """#12496: the marker carries ``unreachable`` as its own key.
+
+    It is the one skip cause needing a human to SUPPLY A KEY, so folding it into
+    ``skipped`` alone would hide the number the operator can act on. ⚠️ It is not
+    the only cause no re-run clears: empty text on a surface with no
+    ``text_pred``, text in the ``trim()``/``strip()`` gap, and an encoder-declined
+    row are equally permanent and stay only in ``skipped`` (see #12572 and
+    `test_residual_missing_is_read_from_the_graph_not_from_the_counters`).
+    Pre-fix the key is absent entirely.
+    """
+    g = _g(proj)
+    _create(g, "Point", {"id": "p1", "content": "reachable content"})
+    _create(g, "Point", {"content": "orphan content"})
+    mod = _load_backfill()
+    monkeypatch.setattr("tortoise.embeddings.compute_embedding", _FakeEmbed())
+
+    # The COMPLETENESS marker is emitted by the force flow (#1349 T12).
+    rc = _run_main(mod, proj, "--force-re-embed", "--uri", "docker://dummy")
+    assert rc == 0
+    out = capsys.readouterr().out
+    marker_line = next(line for line in out.splitlines()
+                       if line.startswith("COMPLETENESS "))
+    marker = json.loads(marker_line[len("COMPLETENESS "):])
+    assert marker["unreachable"] == 1, marker
+    assert marker["labels"]["Point"] == 1, marker
+    # #12496: two independent paths agree on the unreachable row — the run's own
+    # counter (``unreachable``) and the graph read back afterwards
+    # (``residual_missing``/``residual_keyless``). A false PASS would have to
+    # fool both.
+    assert marker["residual_missing"] == 1, marker
+    assert marker["residual_keyless"] == 1, marker
+    # The headline says what happened, not one wrong cause.
+    assert "unreachable (no key: no re-run can repair)" in out, out
+
+
+def test_residual_missing_is_read_from_the_graph_not_from_the_counters(
+        proj, monkeypatch, capsys):
+    """#12496: ``residual_missing`` cannot be derived from the run's counters.
+
+    A wrong-width vector into an INDEXED store is declined (#4289): the row is
+    ``skipped``, NOT ``unreachable`` (it has a key), and after the run it still
+    has no vector. So ``residual_missing == 1`` while ``updated == 0`` and
+    ``unreachable == 0`` — no counter says WHICH row is still unrepaired
+    (``skipped == 1`` only says one row was skipped), and the end-state read
+    says it. That is what makes it an independent check rather than a
+    restatement.
+    """
+    from tortoise.embeddings import EMBEDDING_DIM
+
+    g = _g(proj)
+    _create(g, "Point", {"id": "p1", "content": "alpha"})
+    mod = _load_backfill()
+    monkeypatch.setattr("tortoise.embeddings.compute_embedding",
+                        _WrongWidthEmbed(EMBEDDING_DIM - 1))
+
+    stats = mod._backfill_graph(
+        proj.db, proj.graph_name, ["Point"], 0, 500,
+        required_dim=EMBEDDING_DIM)
+    assert stats["updated"] == 0, stats
+    assert stats["skipped"] == 1, stats
+    assert stats["unreachable"] == 0, stats
+    missing, keyless = mod._residual_missing(g, "Point")
+    assert (missing, keyless) == (1, 0), (missing, keyless)
+    assert _embedding(g, "Point", "id", "p1") is None
+
+
+def test_unreachable_agrees_between_dry_and_live_when_the_encoder_declines(
+        proj, monkeypatch, capsys):
+    """#12496 review (P2): BOTH passes count the keyless rows they SELECTED.
+
+    Round 1 counted them from the write BATCH, which silently lost every keyless
+    row declined BEFORE the batch — here a width-guarded store refuses the
+    vector (#4289), so the row never reaches `batch`. Measured pre-fix: dry
+    ``unreachable=1`` against live ``unreachable=0``, i.e. a headline claiming
+    ``0 unreachable`` over a row no re-run can reach.
+
+    The count is now taken over `chunk` (the rows the surface predicate
+    selected), which is the population `_dry_run` counts — so at ``limit=0`` the
+    two agree by construction, not by a test that happens to match. (``--limit``
+    bounds the live pass but not `_dry_run`, so a bounded run can still disagree;
+    see `_dry_run`'s docstring.)
+    """
+    from tortoise.embeddings import EMBEDDING_DIM
+
+    g = _g(proj)
+    _create(g, "Point", {"id": "p1", "content": "reachable content"})
+    _create(g, "Point", {"content": "orphan content"})
+    mod = _load_backfill()
+    monkeypatch.setattr("tortoise.embeddings.compute_embedding",
+                        _WrongWidthEmbed(EMBEDDING_DIM - 1))
+
+    _dry_total, _purged, dry_unreachable = mod._dry_run(
+        proj.db, proj.graph_name, ["Point"])
+    capsys.readouterr()
+    stats = mod._backfill_graph(
+        proj.db, proj.graph_name, ["Point"], 0, 500,
+        required_dim=EMBEDDING_DIM)
+    assert dry_unreachable == 1, dry_unreachable
+    assert stats["unreachable"] == dry_unreachable, stats
+    # Nothing was written and the encoder declined both rows.
+    assert stats["updated"] == 0, stats
+    assert stats["skipped"] == 2, stats
+
+
+def test_unreachable_is_counted_once_per_row_not_once_per_chunk(
+        proj, monkeypatch):
+    """#12496 review P3: a MULTI-chunk sweep must not multiply the counter.
+
+    The counter is incremented once per chunk, over that chunk's own rows. Every
+    pre-existing fixture fit in ONE chunk, so a mutant that counted `rows_all`
+    inside the chunk loop stayed GREEN (the reviewer measured it). Three rows
+    with `batch_size=1` gives three chunks and exactly one keyless row: the
+    correct answer is 1, the mutant's is 3.
+    """
+    g = _g(proj)
+    _create(g, "Point", {"id": "p1", "content": "one"})
+    _create(g, "Point", {"content": "orphan"})
+    _create(g, "Point", {"id": "p3", "content": "three"})
+    mod = _load_backfill()
+    monkeypatch.setattr("tortoise.embeddings.compute_embedding", _FakeEmbed())
+
+    stats = mod._backfill_graph(
+        proj.db, proj.graph_name, ["Point"], 0, 1, required_dim=None)
+    assert stats["unreachable"] == 1, stats
+    assert stats["updated"] == 2, stats
+
+
+def test_residual_missing_is_non_zero_on_a_healthy_graph_shape(
+        proj, monkeypatch):
+    """#12496 review (P1): a DOCUMENTED limitation, pinned as behaviour.
+
+    ``Object``/``Subject``/``Source`` declare no ``text_pred`` and their text IS
+    a bare property (``n.name`` / ``n.url``), whose predicate is ``IS NOT NULL``
+    — and ``''`` is non-NULL in Cypher. So an empty-text row is selected by the
+    surface predicate, declined by the live guard, and stays residual forever.
+
+    ⚠️ The two ``Event`` branches are NOT in that group, and this fixture does not
+    cover them: the ``AgentSession`` branch carries no text gate at all and the
+    ``other`` branch's text is a COMPOSED join, so an empty property beside a
+    non-empty neighbour still embeds. Either is residual only when its whole
+    composition is empty. That is why the marker carries ``limit`` and why
+    ``_residual_missing``'s docstring enumerates FOUR healthy-run populations
+    instead of promising 0. Round 1 promised 0; this pins the truth so the next
+    lane cannot re-derive the false guarantee.
+
+    Adding a non-empty-text predicate to the ungated surfaces is a REAL fix and a
+    separate decision (it changes which rows they sweep) — see #12572.
+    """
+    g = _g(proj)
+    _create(g, "Object", {"id": "o1", "name": ""})
+    mod = _load_backfill()
+    monkeypatch.setattr("tortoise.embeddings.compute_embedding", _FakeEmbed())
+
+    missing, keyless = mod._residual_missing(g, "Object")
+    assert (missing, keyless) == (1, 0), (missing, keyless)
+
+
+def test_residual_missing_counts_text_in_the_trim_strip_gap(proj, monkeypatch):
+    """#12496 review round 3: a FOURTH residual population, on a GATED surface.
+
+    Cypher ``trim()`` strips SPACES only; the live guard is Python
+    ``str.strip()``, which also strips tab, NBSP and em-space. A whitespace-only
+    text is therefore ACCEPTED by the Point surface's ``text_pred`` and dropped
+    by the live guard — so a keyed, unbounded run still leaves it residual.
+
+    "Has a ``text_pred``" is not immunity, which is why ``_residual_missing``
+    enumerates four healthy-run populations rather than promising 0. Same class
+    as ``_dry_run``'s documented residual (b).
+    """
+    g = _g(proj)
+    _create(g, "Point", {"id": "p-tab", "content": "\t"})
+    _create(g, "Point", {"id": "p-nbsp", "content": "\u00a0"})
+    mod = _load_backfill()
+    monkeypatch.setattr("tortoise.embeddings.compute_embedding", _FakeEmbed())
+
+    stats = _backfill_run(mod, proj, ["Point"])
+    assert stats["updated"] == 0, stats
+    assert stats["skipped"] == 2, stats
+    assert stats["unreachable"] == 0, stats
+    assert mod._residual_missing(g, "Point") == (2, 0)
+
+
+def test_marker_carries_the_run_limit_so_residual_is_interpretable(
+        proj, monkeypatch, capsys):
+    """#12496 review (P1): a BOUNDED run leaves a residual that is not damage.
+
+    ``_backfill_graph`` is capped by ``limit``; ``_residual_missing`` reads the
+    whole graph. Measured: 3 healthy Points with ``--limit 1`` leave
+    ``residual_missing=2, residual_keyless=0``. The marker therefore carries the
+    cap, so the field is an assertion only when ``limit == 0``.
+    """
+    g = _g(proj)
+    for i in range(3):
+        _create(g, "Point", {"id": f"p{i}", "content": f"body {i}"})
+    mod = _load_backfill()
+    monkeypatch.setattr("tortoise.embeddings.compute_embedding", _FakeEmbed())
+
+    rc = _run_main(mod, proj, "--force-re-embed", "--limit", "1",
+                   "--uri", "docker://dummy")
+    assert rc == 0
+    out = capsys.readouterr().out
+    marker = json.loads(
+        next(line for line in out.splitlines()
+             if line.startswith("COMPLETENESS "))[len("COMPLETENESS "):])
+    assert marker["limit"] == 1, marker
+    assert marker["residual_missing"] == 2, marker
+    assert marker["residual_keyless"] == 0, marker
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "#12570: the write addresses nodes by a NON-UNIQUE key, so two nodes sharing "
+    "one id both receive the same vector — one node ends up describing the "
+    "other's text. strict=True so #12570 must remove this marker when it lands."))
+def test_shared_key_nodes_each_get_their_own_vector(proj, monkeypatch):
+    """#12496 review (P3): the duplicate-key test must not read as "repaired".
+
+    `test_two_nodes_sharing_a_key_are_both_counted` asserts a COUNT. That count
+    is correct, but the end state underneath it is corrupt: the write MATCHes
+    both nodes for one batch row, so the last row's vector lands on both. This
+    test is the discriminating half — it asserts each node holds the vector for
+    ITS OWN text, which is what a reader of the count would assume.
+
+    It is expected to fail today (#12570). `strict=True` means it starts passing
+    only when the follow-up lands, at which point this marker must be removed.
+    """
+    g = _g(proj)
+    _create(g, "Point", {"id": "dup", "content": "first body"})
+    _create(g, "Point", {"id": "dup", "content": "second body"})
+    mod = _load_backfill()
+    fake = _FakeEmbed()
+    monkeypatch.setattr("tortoise.embeddings.compute_embedding", fake)
+
+    _backfill_run(mod, proj, ["Point"])
+    # Order-free on purpose (#12570 review): two nodes with the SAME id cannot be
+    # ordered by the query, so a positional assertion would depend on the
+    # engine's row order — and would make this strict xfail inert on a dialect
+    # that returns them the other way round.
+    rows = g.query(
+        "MATCH (n:Point {id: 'dup'}) RETURN n.content, n.embedding").result_set
+    assert len(rows) == 2, rows
+    for content, stored in rows:
+        assert stored == pytest.approx(fake(content)), (
+            f"the node whose content is {content!r} does not hold its own vector")
