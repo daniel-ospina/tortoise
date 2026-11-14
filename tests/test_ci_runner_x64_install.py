@@ -5365,8 +5365,10 @@ def test_the_correlated_probe_figure_is_the_same_naive_count_at_this_head():
     two days before the page was re-dated to 2026-11-14, so the sentence was carrying one axis
     from a 76-job tree and the other from a 9-job tree.
 
-    Measured across that fix: `142241697321^` -> 85 / 12, `142241697321` -> 87 / 13, `HEAD` ->
-    87 / 13. The rule is the sentence's own — every LINE containing `runs-on` AND the label
+    Measured across that fix: `1839535fd509` -> 85 / 12 (that is the pair the old sentence actually
+    described), `142241697321^` -> 85 / 13 — the 12 -> 13 move is `8126970432c9` (#12080,
+    2026-11-12), already an ancestor of #12422's parent — `142241697321` -> 87 / 13, `HEAD` -> 87 / 13.
+    The rule is the sentence's own — every LINE containing `runs-on` AND the label
     token, whole-line comments included (that is what "before it stripped whole-line comments"
     means), which is a different population from the sibling job-count pin above (that one
     `yaml.safe_load`s jobs). Token boundaries keep `ubuntu-24.04` from matching a longer label;
