@@ -915,9 +915,12 @@ def test_a_promoted_caller_vectored_point_keeps_its_raw_vector(tmp_path):
                           event_log_path=str(events / "events.jsonl"))
         try:
             pid = sdk.create_point("statement", "promote a caller vector",
-                                   embedding=caller_vec).get("id")
+                                   embedding=caller_vec, status="draft").get("id")
             assert _vector(sdk, pid) == _caller_expected(caller_vec)
             sdk.promote_point(pid)
+            assert any(e.get("type") == "PointPromoted" for e in _events(events)), (
+                "no PointPromoted was journalled — the point was born live, so "
+                "this guard is inert (#11859)")
             live_after = _vector(sdk, pid)
             assert live_after == _caller_expected(caller_vec), (
                 "premise: the live promote leaves the caller vector alone")
