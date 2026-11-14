@@ -2621,7 +2621,7 @@ to answer.
   per §8's rule for *any* edit to this file.
 - **§10.29 succeeds this entry**, and it re-measures the same values: `34bb716315`'s `+9`
   insert was removed again by `391313ca9a`, so nothing below moved. The entry that carries
-  a `LIVE for the merged tree` bullet is §10.31, not this one.
+  a `LIVE for the merged tree` bullet is §10.32, not this one.
 
 ### 10.29 — the §11/§9 cite block re-derived for THIS branch's delta, round 15's code included (2026-11-13, `#12067`)
 
@@ -2689,7 +2689,7 @@ to answer.
   the `edges.py` ones from §3.4/§3.7/§7 above, and the `record_projection.py` one from this
   entry, because no live carrier holds it.
 - **§10.30 succeeds this entry**, and it re-measures the §11/§9 cite block above against `main` at
-  `5bacb44e0b`. The entry that carries a `LIVE for the merged tree` bullet is §10.31, not this one.
+  `5bacb44e0b`. The entry that carries a `LIVE for the merged tree` bullet is §10.32, not this one.
   ⛔ For the `edges.py` windows the live carriers are §3.4/§3.7/§7 (this entry names them); for
   `record_projection.py:4996-4999` this entry is still the ONLY carrier, and it stays correct.
 
@@ -2790,5 +2790,64 @@ to answer.
   same commit that did the `extractor_v2.py` insert, which is why the two moved together. (An
   earlier draft of §10.30 attributed this move to `d63caecf56`/`#12338`; that commit never touches
   `projection/__init__.py`, and `d63caecf56^` already reads `14272` — measured, not inferred.)
-- **This entry is LIVE for the merged tree** — it has no successor, so it must not carry a
-  supersede marker.
+- **This entry was LIVE for the merged tree until §10.32**; §10.32 now carries the `sdk.py`
+  values for the next head, and this entry stays true to the `main` it names (`6916a6cd89`).
+
+### 10.32 — the `sdk.py` carriers re-derived after this branch's own `+8` (2026-11-13, `#11859`, PR #12478)
+
+> **A successor entry, not an edit to §10.31.** §10.31 recorded the values at `main`
+> `6916a6cd89` and stays true to that head. The branch that carries this entry
+> (`fix/11859-journal-pins-and-prose`) edits `tortoise/sdk.py` itself — **10 insertions, 2
+> deletions** above `_extract_session_v2`, a net **`+8`** — so on the tree that merges `main`
+> every `sdk.py` carrier below it moves by exactly `+8` from the `main` it merges. Measured:
+> `def _extract_session_v2(` is `18025` at `main` `6916a6cd89`, `18082` at the merge base
+> `30c9e7c4d3`, and `18090` on this merged tree.
+>
+> ⚠️ **TWO movements, and the mapping states both.** The branch's OWN edit moved every carrier
+> below it by `+8`; `main` then moved the same region by `+57` (its own `18025`→`18082`)
+> before the merge that makes this entry live. So the "new" column is `+65` from §10.31's
+> numbers, not `+8` — and the `old` column stays against `6916a6cd89` because that is the head
+> §10.31 is true to, not the tip this entry is measured on.
+>
+> **The mapping**, all twelve, old (at `6916a6cd89`) → new (the tree that merges `main`
+> `c1db6f3df2`, the head this entry is LIVE for):
+> `_extract_session_v2` `18025`→`18090`; `proj.link_source_to_event(` `19452`→`19517`;
+> `relation_write = apply_relation_edges(` `19012`→`19077`; `from tortoise.relation_write import
+> apply_relation_edges` `19011`→`19076`; the `#10999` TRANSPORT-ONLY comment `18999`→`19064`;
+> `"stats": _capture_stats_with_step_witness(...)` `19054`→`19119`;
+> `bind_point_subjects(proj, self, point_id=pid,` `18659`→`18724`;
+> `The v2 path reports` `16458`→`16523`; `"extraction_mode": "llm:<route>"` `16459`→`16524`;
+> `extracted, meta = self._extract_session_v2(` `16914`→`16979`;
+> `declared = declared_relation_predicates()` `25396`→`25461`; the kind→label write seam
+> `18206-18230`→`18271-18295` (`18271` = `_ekind = _payload_entity_kind(e)`, `18295` = the
+> OBJECT arm's `is_episodic=False)` — the subject arm's closes at `18290`).
+> ⛔ Each value was re-derived by OPENING THE LINE on that merged tree, never by arithmetic: the
+> offset here is `+65`, which is exactly what makes adding eight *tempting* and wrong. This
+> column was briefly `old + 8` — true of the branch's own edit and false of the tree — and the
+> correction is recorded rather than absorbed, because a mapping whose method sentence says one
+> thing and whose numbers do another is how the next reader re-stales it.
+>
+> **What did NOT move, and stays with §10.31:** `tortoise/extractor_v2.py`,
+> `tortoise/projection/` and `tortoise/pi-hooks/tortoise-capture.ts` are untouched by this
+> branch, so §10.31's `12730`, `15149`, `15277`, `15302`, `15611`, `15621`, `17804` and its
+> `#548` window `projection/__init__.py:14272-14274` keep their numbers there — that entry is
+> still their live carrier. `tortoise/search_engine.py`'s `6637` likewise stays with §10.31.
+>
+> **What moved: the citations, and nothing that is a protocol value.** No metric, denominator,
+> threshold, class set or corpus pin changes; `document_sha256` is re-cut in the same commit,
+> per §8.
+>
+> ⛔ **§10.1–§10.31 stay HISTORY.** §10.31's `18022`/`18025` chain and the rest are a per-commit
+> record of ITS head and must keep those numbers even though they name different lines on this
+> tree — that is the whole point of recording a head.
+>
+> ⚠️ **Why this entry exists at all, stated plainly:** nothing pins §10.31's live values. The
+> live-cite gates strip `§10.x` from their population, `PRE-REGISTRATION.md` is forbidden from
+> carrying `sdk.py:<n>` (so `_BUNDLE_CITE` never sees these), and the newest-entry pin checks
+> only the `extractor_v2.py` obligations. So a branch that inserts lines into `sdk.py` re-stales
+> this entry SILENTLY, and the only thing that catches it is a reviewer opening it. That is a
+> real gap in the pin set, recorded here rather than papered over; adding the pin is a separate
+> change, not this one.
+>
+> **This entry is LIVE for the merged tree** — it has no successor, so it must not carry a
+> supersede marker.

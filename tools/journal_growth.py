@@ -188,6 +188,20 @@ def _json_bytes(value) -> int:
     numbers are therefore *attribution*, not accounting — the per-record and
     total byte figures are the accounting, and they are exact (they are the
     bytes on disk).
+
+    ⛔ AND THE TWO RULERS DIFFER (#11886): this function serialises with
+    ``json.dumps``' DEFAULT separators (``", "`` / ``": "``), while the journal
+    on disk is written COMPACT (``","`` / ``":"``, ~1 extra byte per separator).
+    So on a compact journal this attribution is LARGER than the value's on-disk
+    span by roughly one byte per separator — measured: a post-`#11821` 384-d
+    vector attributes **5,072 B** here and occupies **4,689 B** on disk.
+
+    ⚠️ Never quote one of those figures as the other. Do not divide this
+    attribution by an on-disk total: the quotient is a mixed-ruler ratio that
+    reads the separator change as if it were payload (that is the `78.9 %` this
+    docstring exists to stop being published; the same-ruler pair is 73.0 %).
+    The on-disk span is measured by
+    `docs/evidence/11821-journal-encoding/probes/journal_encoding_probe.py`.
     """
     try:
         return len(json.dumps(value, ensure_ascii=False).encode("utf-8"))

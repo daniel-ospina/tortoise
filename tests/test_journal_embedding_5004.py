@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import json
 import logging
+import struct
 from unittest import mock
 
 import pytest
@@ -54,12 +55,102 @@ from tortoise.embeddings import (
     EMBEDDING_DIM,
     EMBEDDING_MODEL,
     EMBEDDING_MODEL_REVISION,
+    shortest_float32_vector,
 )
 from tortoise.ids import content_hash as _text_hash
 from tortoise.sdk import TortoiseSDK
 
 _EMBED_PATCH = "tortoise.embeddings.compute_embedding"
 _DIM = EMBEDDING_DIM if isinstance(EMBEDDING_DIM, int) else 384
+
+
+def _f32(value: float) -> float:
+    """``value`` as the float32 the embedder would emit, widened back to float64."""
+    return struct.unpack("<f", struct.pack("<f", value))[0]
+
+
+#: Seed values for `_caller_vector` — see there for why each one is in the mix.
+_CALLER_SEED = (0.1, -0.25, 1.0 / 3.0, 0.5)
+
+
+def _caller_vector(width: int = _DIM) -> list[float]:
+    """A caller-owned vector that makes a NARROWING bug REACHABLE (#11848).
+
+    ⛔ THE FIXTURE IS THE PIN. This file used ``[0.1] * _DIM`` (and ``0.2`` /
+    ``0.3``), and those literals are OFF the float32 grid — so
+    ``shortest_float32_vector`` returns ``None``, the seam declares ``f64`` and
+    leaves the values alone **whether or not** its verbatim arm exists. Measured
+    with the arm neutralised: this file was **32 passed**. A pin that cannot fail
+    for the promise it names is a comment with a suite around it.
+
+    Two properties are needed, and both are ASSERTED here rather than described —
+    so no future edit can move a pin onto a vacuous fixture:
+
+    * **on the grid** — every element is a float32 WIDENING
+      (``0.10000000149011612``, not the literal ``0.1``). That is what the
+      embedder emits and the only shape the seam will narrow at all.
+    * **changed by a narrowing** — at least one element's shortest-decimal form
+      differs from its float64 form (``0.10000000149011612`` -> ``0.1``), so the
+      narrowing is OBSERVABLE instead of a value-level no-op. ``0.5`` stays in
+      the mix as an exactly-representable value, where narrowing really is a
+      no-op: a fixture made only of moving elements could otherwise pass for the
+      wrong reason.
+
+    ⚠️ The widening is handed over deliberately. ``float(str(np.float32(0.1)))``
+    yields the plain literal ``0.1`` — still off the grid, and still blind.
+
+    ⛔ WHAT THIS SHAPE CANNOT SEE, stated so it is not assumed (#11859 review):
+    a grid-exact vector is a fixed point of ``vecf32``, so these pins no longer
+    catch the STORE-side half of #5004 round-7 (a caller vector written through
+    ``vecf32`` instead of ``$embedding``). That half needs an OFF-GRID value —
+    ``0.1`` -> ``0.10000000149011612`` moves under ``vecf32`` — and it is still
+    covered, discriminatingly, by `test_a_graph_only_caller_vectored_point_keeps_its_raw_vector_and_marker`
+    and `test_update_entity_caller_vector_rides_a_re_emit_verbatim`, which keep
+    their off-grid fixtures for exactly that reason. The two shapes cover two
+    different regressions; neither one alone covers both.
+    """
+    seed = [_f32(v) for v in _CALLER_SEED]
+    vec = [seed[i % len(seed)] for i in range(width)]
+    assert [_f32(v) for v in vec] == vec, (
+        "the caller fixture is not on the float32 grid, so the seam refuses to "
+        "narrow it and a narrowing bug is unreachable — this pin would pass "
+        "with the verbatim arm DELETED (#11848)")
+    narrowed = shortest_float32_vector(vec)
+    assert narrowed is not None and narrowed != vec, (
+        "narrowing this fixture would change nothing, so comparing the restored "
+        "vector against it cannot distinguish 'kept raw' from 'narrowed' "
+        "(#11848)")
+    assert any(a != b for a, b in zip(narrowed, vec, strict=True)), (
+        "no element would be CHANGED by a narrowing — the pin could not fail")
+    assert any(a == b for a, b in zip(narrowed, vec, strict=True)), (
+        "the fixture carries no exactly-representable value, so it proves only "
+        "that elements move, not that the untouched ones survive")
+    return vec
+
+
+def _graph_double(value: float) -> float:
+    """``value`` as the GRAPH hands a stored double back.
+
+    MEASURED (2026-11-13, this lane's FalkorDB): a stored double is rendered at
+    **15 significant digits**, so ``0.10000000149011612`` reads back as
+    ``0.100000001490116`` — and ``float(f"{v:.15g}")`` reproduces the read-back
+    EXACTLY for every value probed, including ``1.0000000000000002`` -> ``1.0``.
+
+    ⚠️ This is why a grid-exact caller vector can never be compared to a graph
+    read-back with ``==`` against its own fixture: a float32 widening needs 17
+    digits, so the GRAPH loses the last two — not a narrowing. The distinction
+    still survives, which is what keeps these pins discriminating: a narrowing
+    moves a fixture element by ~1.5e-8 relative (a float32-ulp-sized step) while
+    this render moves it by ~1e-15 — six orders of magnitude apart, and
+    ``_caller_vector`` asserts the narrowing-sized step is present in the
+    fixture.
+    """
+    return float(f"{value:.15g}")
+
+
+def _caller_expected(vec: list[float]) -> list[float]:
+    """``vec`` as the graph will hand it back — see `_graph_double`."""
+    return [_graph_double(v) for v in vec]
 
 
 def _embed_a(text: str, max_tokens: int = 512):
@@ -745,19 +836,28 @@ def test_a_caller_supplied_vector_is_restored_verbatim(tmp_path):
     """
     events = tmp_path / "events"
     events.mkdir()
-    caller_vec = [0.1] * _DIM
+    caller_vec = _caller_vector()      # ON the float32 grid (#11848)
     with mock.patch(_EMBED_PATCH, _embed_a):
         sdk = TortoiseSDK(str(tmp_path / "verbatim.db"),
                           event_log_path=str(events / "events.jsonl"))
         try:
             pid = sdk.create_point("statement", "caller-owned vector",
                                    embedding=caller_vec).get("id")
-            assert _vector(sdk, pid) == caller_vec
+            live = _vector(sdk, pid)
+            assert live == _caller_expected(caller_vec)
 
             rec = [e["point"] for e in _events(events)
                    if e.get("type") == "PointAdded"
                    and (e.get("point") or {}).get("id") == pid]
             assert rec, "no PointAdded journalled"
+            # ⛔ THE STRICTEST FORM, and render-free: the JOURNAL is what the
+            # replay reads, and its text must be the caller's own value — the
+            # graph's 15-digit render is not in this comparison at all (#11848).
+            assert rec[0].get("embedding") == caller_vec, (
+                "the journal narrowed a caller-owned vector: "
+                f"{rec[0].get('embedding')[:1]} != {caller_vec[:1]}")
+            assert rec[0].get("embedding_width") == "f64", (
+                "a caller-owned vector was declared at a width it does not have")
             assert rec[0].get("embedding_verbatim") is True, (
                 "the create site must tell the journal the vector is "
                 "caller-owned, so the replay stores it raw")
@@ -766,7 +866,10 @@ def test_a_caller_supplied_vector_is_restored_verbatim(tmp_path):
 
             with mock.patch(_EMBED_PATCH, _embed_b):
                 sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
-            assert _vector(sdk, pid) == caller_vec, (
+            # Live vs replay, not live vs fixture: this half is render-free, so
+            # a future change to how the GRAPH prints a double cannot make this
+            # red for a reason unrelated to the contract (#11859 review).
+            assert _vector(sdk, pid) == live, (
                 "the caller-supplied vector was narrowed to float32 (or "
                 "recomputed) on replay")
             props = sdk._get_proj().g.query(
@@ -806,17 +909,17 @@ def test_a_promoted_caller_vectored_point_keeps_its_raw_vector(tmp_path):
     """
     events = tmp_path / "events"
     events.mkdir()
-    caller_vec = [0.1] * _DIM
+    caller_vec = _caller_vector()      # ON the float32 grid (#11848)
     with mock.patch(_EMBED_PATCH, _embed_a):
         sdk = TortoiseSDK(str(tmp_path / "promote.db"),
                           event_log_path=str(events / "events.jsonl"))
         try:
             pid = sdk.create_point("statement", "promote a caller vector",
                                    embedding=caller_vec).get("id")
-            assert _vector(sdk, pid) == caller_vec
+            assert _vector(sdk, pid) == _caller_expected(caller_vec)
             sdk.promote_point(pid)
             live_after = _vector(sdk, pid)
-            assert live_after == caller_vec, (
+            assert live_after == _caller_expected(caller_vec), (
                 "premise: the live promote leaves the caller vector alone")
 
             with mock.patch(_EMBED_PATCH, _embed_b):
