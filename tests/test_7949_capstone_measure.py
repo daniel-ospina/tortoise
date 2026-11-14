@@ -5860,13 +5860,17 @@ _EPIC_CITE_SOURCES = {
     # for the plain `postCapture` and its `install-probe` sibling while the tree carried
     # those two `def`s at `:955`/`:947`. Registered because a repaired cite that nothing
     # pins is a repair the next move of the symbol undoes silently. ⛔ AND IT ALREADY
-    # HAS: measured at `6916a6cd89` — NOT the `origin/main` head this file merges into,
-    # where those two `def`s are at `:1007`/`:999` — while both the row and the document
-    # still said `:955`/`:947` (`#12507` landed above them). ⚠️ No merge head is claimed
-    # for that earlier round: `30c9e7c4d3` is named only because the pair was also read
-    # there, and it holds there and here. That is this source key's case in one
-    # line: the pin is what turned an invisible re-stale into a red; a name is pinned,
-    # its line is re-opened.
+    # HAS, TWICE: measured at `6916a6cd89` those two `def`s were at `:1007`/`:999`
+    # while both the row and the document still said `:955`/`:947` (`#12507` landed
+    # above them) — and at THIS head they are at `:1023`/`:1015`, because `#12695`
+    # (`3893603b07`, the Pi leg stamping the unrecorded-outcome marker) inserted 572
+    # lines in this file (and deleted 51) after the last re-derivation, netting `+16`
+    # ABOVE both `def`s, so `:1007` is `}` and `:999` is a `reason =` binding now.
+    # ⚠️ No head is claimed for the earlier round beyond the
+    # head it names: the pair was ALSO read at `30c9e7c4d3` and at this head, and it
+    # holds at neither of the numbers that round wrote. That is this source key's case
+    # in one line: the pin is what turned an invisible re-stale into a red; a name is
+    # pinned, its line is re-opened.
     "pi_hooks": _REPO / "tortoise/pi-hooks/tortoise-capture.ts",
     # ⛔ `03-test-design.md:82` cites the 402 quota guard and its refusal payload by
     # NUMBER, and that row was in NO pin: #12369 re-pointed a CORRECT
@@ -6069,7 +6073,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `#12545`'s commit, while `#12545` measured at `5bacb44e0b` which does NOT
         # contain it — so that pair arrived ALREADY stale at its own landing commit,
         # and `main` was red for this row at `6916a6cd89`. `#12695` (`3893603b07`) then added
-        # 16 lines above both, so the pair is **`:1023`/`:1015`** here. The two `def`s are always
+        # 16 lines above both, so the pair is **`:1023`/`:1015`** at this head — re-staled by
+        # that commit, and the pin is what said so. The two `def`s are always
         # **8 apart** in this file, and that is exactly the trap: an offset read off
         # a stale pair re-derives `948` → `957`, which WAS `postCapture`'s parameter
         # list (`payload: Record<string, unknown>,`) at `5bacb44e0b` — at
