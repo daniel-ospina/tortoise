@@ -113,9 +113,11 @@ and **none of the three was in the diff at the head that note was written** — 
 absorbed by the forward merges exactly like the rows below, so that table was itself an
 instance of the thing this document is about. ⛔ **`docs/00_index.md` WAS in the diff
 at `30c9e7c4d3` and is NOT at the head this merges into (`d05688df59`)**: `#12569`
-(`5e31405809`) had already resolved `main` and moved that bundle-registering row's meta
-fold from `sdk.py:19054` to `:19111`, so the re-point this sentence used to describe as
-pending is on the merge base and this branch moves no line of it. That also means the
+(`5e31405809`) had already resolved `main` and moved the meta fold on the ADJACENT row —
+`#7949` / `#9080` closing rule, `docs/00_index.md`'s "the extractor-v4 closing rule as a gate"
+entry, not the bundle-registering one, which carries no `sdk.py` cite at all — from
+`sdk.py:19054` to `:19111`, so the re-point this sentence used to describe as pending is on
+the merge base and this branch moves no line of it. That also means the
 number here is one a MERGE moved, not one this branch did — the distinction the
 paragraph above draws, applied to itself. `tools/ci_selection.py` and
 `tests/test_ci_selection.py` remain absorbed; read the set from the command, never from
@@ -143,7 +145,7 @@ cells say which — that is the marking this section promises.):
 | `tortoise/hosted_api.py` | the same census's `179 tracked files`/`449 distinct targets` figures, re-taken to `185`/`456` | none — comment text |
 | `.github/workflows/main-health-nightly.yml` | the `census-drift` job's **comment block**, removing the restated figures the `--refresh` verb cannot verify | none — no job, trigger, permission or step changes |
 | `tests/test_demo_session_read_exclusion_8290.py` | the census verb's arm 1 stops asserting the **shipped** figures — that arm is what redded this docs PR — and instead forces a degrade→refresh→read-back round trip on a throwaway copy; arm 2's degraded figure is derived, not the `**434**` literal | **CI effect: a guard MOVED, it was not added** — and the merge that absorbed it took `main`'s side, so this head carries neither the move nor its cost |
-| `docs/00_index.md` | one row registering the new bundle directory | index only — **absorbed at this head**: the file is byte-identical to `origin/main`, and the row's `sdk.py:19054` → `:19111` re-point because resolving `main` moved the meta fold is `#12569`'s, already on the merge base rather than this branch's. The change this table describes was absorbed AND so was the re-point (see the note above) |
+| `docs/00_index.md` | one row registering the new bundle directory | index only — **absorbed at this head**: the file is byte-identical to `origin/main`. The `sdk.py:19054` → `:19111` re-point that resolving `main` forced is `#12569`'s and already on the merge base, so it is not this branch's — and it is on the ADJACENT `#7949` / `#9080` closing-rule row, not on this bundle-registering row, which carries no `sdk.py` cite. The change this table describes was absorbed AND so was the re-point (see the note above) |
 | `tools/ci_selection.py` | `CONTRIBUTING.md` leaves `NON_CODE_DOC_PATHS` — `tests/test_surface_manifest.py:5542` reads that file's TEXT, so the exemption would have dropped a guard from the PR editing the file it guards | **CI effect: a `CONTRIBUTING.md`-only PR now runs the full matrix instead of tier-1 smoke.** This is deliberate and it FIXES a red on `main` (`test_non_code_doc_paths_have_no_content_reader`) |
 | `tests/test_ci_selection.py` | the arms over that list | none beyond the row above |
 
