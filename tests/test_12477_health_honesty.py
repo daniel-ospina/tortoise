@@ -209,7 +209,7 @@ def test_the_served_reader_reports_the_liveness_counter():
     assert progress["last_served_age_s"] == pytest.approx(2.0, abs=0.5)
 
 
-def test_health_reports_the_refusal_window_without_touching_status():
+def test_health_reports_the_refusal_window_without_touching_status(monkeypatch):
     """The reading that was missing on 2026-11-13 (#12477), on its own key.
 
     `wait_bound_breaches.total` reached 18 while `/health` answered
@@ -220,6 +220,24 @@ def test_health_reports_the_refusal_window_without_touching_status():
     present. The verdict lives on the liveness listener, which is allowed to say
     "not now" where `/health` is not.
     """
+    # ⛔ PIN THE THREE TERMS `status` IS DERIVED FROM. They are ambient process
+    # state (db probe, backup watcher, record), and in a shared pytest process
+    # they can flip between the two readings for a reason that has nothing to do
+    # with refusals — measured: this test failed once in a 10-file run with
+    # `clean="ok"` and `body="degraded"` while passing in isolation AND in the
+    # same run 2 minutes earlier. Pinning them is what makes the assertion about
+    # the FOLD (#10185/#10620) instead of about the ambient state.
+    hosting = {
+        "_HEALTH_PROBE": type("P", (), {
+            "snapshot": staticmethod(lambda: {"ok": True, "latency_ms": 1.0,
+                                              "error": None, "observed": True})})(),
+        "_backup_watcher_health": staticmethod(
+            lambda: {"ok": True, "state": "running"}),
+        "_record_health": staticmethod(
+            lambda: {"ok": True, "degraded_reasons": None}),
+    }
+    for name, value in hosting.items():
+        monkeypatch.setattr(hosted_api, name, value)
     clean = asyncio.run(hosted_api.health())
     for _ in range(10):
         monitoring.record_wait_bound_attempt(monitoring.WAIT_BOUND_SURFACE_REST)
