@@ -6054,8 +6054,15 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("19803", "_honours: dict[str, frozenset[str]] = {"),
         ), "sdk"),
         ("A4-PER-LAYER.md", "compares `pkind.lower()` against", (
-            ("11320", 'elif pkind.lower() not in {k.lower() for k in master["points"]}:'),
-            ("11596", '"pointKind": pkind,'),
+            # RE-DERIVED by CONTENT on the merged tree (main added this row, but this
+            # branch's `extractor_v2.py` carries +90 lines above these anchors):
+            # `grep -n 'elif pkind.lower() not in' tortoise/extractor_v2.py` -> 11410,
+            # `grep -n '"pointKind": pkind,'` -> 11686. main's 11320/11596 are the
+            # numbers the row was authored at and are RED here (measured: the A-corpus
+            # row's two pins were the only two reds in the epic-bundle arm that main
+            # does not carry).
+            ("11410", 'elif pkind.lower() not in {k.lower() for k in master["points"]}:'),
+            ("11686", '"pointKind": pkind,'),
         ), "extractor_v2"),
         ("04-plan.md", "operator / label path", (
             ("25396", "declared = declared_relation_predicates()"),
