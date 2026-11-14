@@ -498,8 +498,11 @@ DIMENSIONS: tuple[Dimension, ...] = (
             "postgres_storage_footprint();``) with no periodic caller by "
             "design — a scheduled footprint sweep is a separate decision, not "
             "a missing hook. The PER-ORG meter is NOT in this class: it runs on "
-            "the record write path (``RecordWriter.write``), one indexed read "
-            "per write segment."),
+            "the record write path, as TWO statements (the row sum plus the "
+            "TOAST-chunk disclosure) plus the ledger writer's window lookup and "
+            "increment RPC — so FOUR extra round trips per write segment, "
+            "inside the caller's open transaction. It is measured there and "
+            "RECORDED only after the caller commits."),
         limits=(
             "``live_rows`` is a PLANNER STATISTIC (``n_live_tup``) that can lag "
             "the truth; the exact per-org count comes from the row-growth row.",

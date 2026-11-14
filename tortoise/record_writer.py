@@ -475,6 +475,16 @@ class RecordWrite:
     #: RELEASE, where the pooled handle's ``close()`` parks the connection as it
     #: stands; the pool resets a leftover transaction on the next BORROW.
     connection: Any | None = field(default=None, repr=False)
+    #: #12762 — the STORED bytes this write created, measured from the rows
+    #: Postgres actually holds (``postgres_bytes.measure_written_rows``), and the
+    #: number of rows they cover. Carried rather than recorded HERE on purpose:
+    #: this seam does not own the transaction, so it cannot know whether the
+    #: write COMMITTED — and a ledger increment for a rolled-back write would
+    #: inflate the org's figure with no repair path (the counter refuses
+    #: negatives). :func:`write_live_record` records these after ITS commit;
+    #: a caller that injected ``conn=`` owns that decision itself.
+    written_bytes: int = 0
+    written_rows: int = 0
     #: WHY an ARMED call did not write — one of the tokens
     #: ``monitoring.metrics()["record_write_failures"]`` / ``["record_non_journal_skips"]``
     #: is counted under (``malformed_dsn``, ``no_durable_journal``, ``no_tenant``,
@@ -1654,12 +1664,13 @@ class RecordWriter:
                 f"({type(exc).__name__}: {_bounded_cause(exc)})"
             ) from exc
 
-        # #12762: measure what this write actually STORED, for the org that
-        # wrote it, and accumulate it on the meter's ledger. Deliberately AFTER
-        # the projection succeeded and BEFORE the return: the reading is of
-        # rows that now exist, and a failure here is swallowed (it must never
-        # change the write's outcome).
-        _meter_written_bytes(
+        # #12762: MEASURE what this write actually stored, for the org that
+        # wrote it. Deliberately AFTER the projection succeeded: the reading is
+        # of rows that now exist. ⛔ MEASURED, NOT RECORDED: this seam does not
+        # own the transaction, so it cannot know whether the write commits — the
+        # ledger increment happens at the door that commits
+        # (``write_live_record``) or, for an injected connection, at the caller.
+        written = _measure_written_bytes(
             target,
             org_id=org_id,
             graph_id=graph_id,
@@ -1675,10 +1686,12 @@ class RecordWriter:
             first_seq=first_seq,
             last_seq=first_seq + len(records) - 1,
             connection=opened,
+            written_bytes=written.row_bytes if written is not None else 0,
+            written_rows=written.rows if written is not None else 0,
         )
 
 
-def _meter_written_bytes(
+def _measure_written_bytes(
     conn: Any,
     *,
     org_id: str,
@@ -1686,50 +1699,74 @@ def _meter_written_bytes(
     first_seq: int,
     n_records: int,
     position: bool,
-) -> None:
-    """Accumulate the STORED bytes of the rows this write just created (#12762).
+) -> "postgres_bytes.WrittenRows | None":
+    """Measure the STORED bytes of the rows this write just created (#12762).
 
     The meter is :func:`tortoise.postgres_bytes.measure_written_rows` — one
     indexed read of ``public.journal_event`` for the positions this segment
     wrote, in the caller's own transaction, summing ``pg_column_size(row)``
     (the compressed stored size where compression applies; measured to follow
     the TOAST pointer, so a moved-out payload counts at its full stored size).
-    Then :func:`tortoise.metering.record_postgres_bytes_written` adds it to the
-    per-(org, window) ledger every other dimension writes through.
+    The SQL additionally restricts to rows THIS transaction inserted, so a
+    suppressed ``ON CONFLICT DO NOTHING`` — a lost position collision, which
+    the live path can hit between two durable journals (#9307 residual) —
+    contributes **0** and the org is never charged twice for the same bytes.
 
     ⛔ ``position=False`` IS SKIPPED, and that is a correctness gate, not an
     optimisation: a replay re-materialises rows that were ALREADY metered when
     they first landed, so metering it again would double the org's figure on
-    every rebuild. The positions are only the rows this call wrote, so a
-    duplicate-suppressed insert (``ON CONFLICT DO NOTHING``) contributes 0 —
-    the reading is of stored rows, not of attempts.
+    every rebuild.
 
-    ⛔ TOTAL — every failure is logged at DEBUG and dropped. A meter must never
-    fail, delay past its one read, or change the outcome of a record write.
+    ⛔ TOTAL — every failure is logged at DEBUG and returns ``None``. A meter
+    must never fail, or change the outcome of, a record write.
+
+    ⛔ IT DOES NOT WRITE THE LEDGER. The measurement is reported on
+    :attr:`RecordWrite.written_bytes`; the increment happens where the COMMIT
+    is known (see :func:`_record_written_bytes`), because a ledger row for a
+    rolled-back write is an over-count with no repair path.
     """
     if not position or n_records <= 0:
-        return
+        return None
     try:
-        written = postgres_bytes.measure_written_rows(
+        return postgres_bytes.measure_written_rows(
             conn,
             org_id=org_id,
             graph_id=graph_id,
             seqs=range(first_seq, first_seq + n_records),
         )
-        if written is None or written.rows == 0:
-            # None = the measurement failed (already logged); rows == 0 = the
-            # rows were not stored under this org (a suppressed conflict).
-            # Neither is a zero-byte record, so neither is recorded as one.
-            return
+    except Exception:  # noqa: BLE001 - never fail a write for a meter
+        _logger.debug(
+            "postgres byte measurement skipped for org=%s graph=%s "
+            "first_seq=%s (non-fatal)", org_id, graph_id, first_seq,
+            exc_info=True)
+        return None
+
+
+def _record_written_bytes(org_id: str, written: "RecordWrite") -> None:
+    """ACCUMULATE a COMMITTED write's stored bytes on the meter's ledger (#12762).
+
+    Call this ONLY after the write's transaction has committed. On the live door
+    that is :func:`write_live_record`; a caller that injected ``conn=`` into
+    :meth:`RecordWriter.write` owns the transaction and therefore owns this call
+    (``RecordWrite.written_bytes`` carries the figure for exactly that).
+
+    ⛔ TOTAL: a ledger failure is logged and dropped, never propagated — the
+    caller has already persisted its record and must not be failed by a meter.
+    """
+    if written.written_bytes <= 0 or written.written_rows <= 0:
+        # Either nothing was stored or the measurement failed (already logged).
+        # Neither is a zero-byte record, so neither is recorded as one.
+        return
+    try:
         from . import metering  # local: keep the write path's imports thin
 
         metering.record_postgres_bytes_written(
-            org_id, n_bytes=written.row_bytes, n_records=written.rows)
+            org_id, n_bytes=written.written_bytes,
+            n_records=written.written_rows)
     except Exception:  # noqa: BLE001 - never fail a write for a meter
         _logger.debug(
-            "postgres byte metering skipped for org=%s graph=%s "
-            "first_seq=%s (non-fatal)", org_id, graph_id, first_seq,
-            exc_info=True)
+            "postgres byte metering skipped for org=%s bytes=%s (non-fatal)",
+            org_id, written.written_bytes, exc_info=True)
 
 
 def write_records(
@@ -2435,6 +2472,15 @@ def write_live_record(record: Mapping[str, Any], *,
             # this one `record_write_failures: {}` cannot tell a writing
             # deployment from one that was never reached.
             _count_write_applied()
+            # #12762 — and the same ordering argument applies to the byte
+            # meter, with a worse failure mode: the ledger increment lives on
+            # another store (the control plane / the registry), so charging it
+            # BEFORE this commit would leave a rolled-back write's bytes on the
+            # org's figure forever (the counter refuses negatives, and no
+            # repair path exists). AFTER the commit, a failed ledger write is
+            # merely a missing increment — which `postgres_bytes.reconcile`
+            # reports as `unmetered_bytes`, the safe direction.
+            _record_written_bytes(org_id, write)
         if seq is None:
             # No position was consumed, so the watermark must not report one
             # as if it had been (a caller advancing `last_seq + 1` must neither

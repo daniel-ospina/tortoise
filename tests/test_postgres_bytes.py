@@ -2,7 +2,8 @@
 
 Covers ``tortoise/postgres_bytes.py`` (the meter + the audit wrapper), the
 ledger writer that accumulates the figure (``metering.record_postgres_bytes_
-written``) and the write-seam wiring (``record_writer._meter_written_bytes``).
+written``) and the write-seam wiring (``record_writer._measure_written_bytes``
+→ ``_record_written_bytes``).
 
 ⛔ THE FALSIFIER LIVES HERE (its Python half; the SQL half is
 ``supabase/tests/20261114000001_per_org_postgres_bytes.sql``, which runs the
@@ -488,3 +489,99 @@ def test_the_figure_carries_its_method_and_its_exclusions():
     assert d["postgres_residual_note"] == RESIDUAL_NOTE
     assert "ALLOCATION" in RESIDUAL_NOTE
     assert "TOAST" in METHOD_NOTE
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 7. The write-seam wiring — MEASURED there, RECORDED after the commit
+#
+# A fresh-context review (PR #12764) found the original wiring wrote the ledger
+# INCREMENT inside `RecordWriter.write`, i.e. BEFORE the caller committed: a
+# failed commit left the org's figure inflated forever (the counter refuses
+# negatives, so there is no repair path). These pins hold the corrected shape.
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_the_seam_MEASURES_and_does_not_write_the_ledger(monkeypatch):
+    from tortoise import record_writer as rw
+
+    calls = []
+    monkeypatch.setattr(
+        metering, "record_postgres_bytes_written",
+        lambda *a, **k: calls.append((a, k)))
+
+    written = rw._measure_written_bytes(
+        _FakeConn(STORED_VECTOR), org_id="o", graph_id="g",
+        first_seq=7, n_records=1, position=True)
+
+    assert written is not None and written.row_bytes == 7_241
+    assert calls == [], (
+        "the seam must MEASURE only: a ledger increment here is made on "
+        "another store before the caller's commit, so a rolled-back write "
+        "inflates the org's figure with no repair path")
+
+
+def test_the_seam_does_not_meter_a_replay(monkeypatch):
+    from tortoise import record_writer as rw
+
+    conn = _FakeConn(STORED_VECTOR)
+    assert rw._measure_written_bytes(
+        conn, org_id="o", graph_id="g", first_seq=1, n_records=3,
+        position=False) is None
+    # No read at all: a replay re-materialises rows already metered.
+    assert conn.cur.calls == []
+
+
+def test_the_ledger_increment_happens_AFTER_the_commit_not_before():
+    """The ordering IS the invariant, and it is asserted on the source.
+
+    A fake connection cannot prove WHERE in a transaction the ledger write
+    landed (the ledger is a different store), so this reads the live door and
+    requires the increment to follow the commit call. Red if the increment is
+    ever moved back into `RecordWriter.write`.
+    """
+    import inspect
+
+    from tortoise import record_writer as rw
+
+    src = inspect.getsource(rw.write_live_record)
+    commit_at = src.index("connection.commit()")
+    record_at = src.index("_record_written_bytes(org_id, write)")
+    assert record_at > commit_at, (
+        "the byte ledger is incremented BEFORE the record transaction commits "
+        "— a failed commit would leave the org charged for bytes it never "
+        "stored")
+
+    # And the seam itself must not record: it carries the figure instead.
+    write_src = inspect.getsource(rw.RecordWriter.write)
+    assert "_record_written_bytes" not in write_src
+    assert "written_bytes=written.row_bytes" in write_src
+
+
+def test_the_ledger_writer_is_non_fatal_from_the_seam(monkeypatch):
+    from tortoise import record_writer as rw
+
+    def boom(*a, **k):
+        raise RuntimeError("meter store down")
+
+    monkeypatch.setattr(metering, "record_postgres_bytes_written", boom)
+
+    class _W:
+        written_bytes = 7_241
+        written_rows = 1
+
+    # A meter failure after the commit must not surface to the caller.
+    rw._record_written_bytes("o", _W())
+
+    # Nothing stored ⇒ nothing recorded.
+    class _Empty:
+        written_bytes = 0
+        written_rows = 0
+
+    rw._record_written_bytes("o", _Empty())
+
+
+def test_record_write_carries_the_measurement_fields():
+    from tortoise import record_writer as rw
+
+    w = rw.RecordWrite(outcome=rw.RecordWriteOutcome.APPLIED)
+    assert w.written_bytes == 0 and w.written_rows == 0

@@ -99,6 +99,22 @@ COMMENT ON COLUMN public.metering_records.postgres_bytes_records IS
 -- stored. A write-time meter built on RETURNING is therefore a 3.4×
 -- OVER-count; this function reads the row back and reports 7,177.
 --
+-- ⛔ ONLY THE ROWS *THIS TRANSACTION* INSERTED — `xmin = pg_current_xact_id()`.
+-- `public.journal_event`'s insert is `ON CONFLICT (org_id, graph_id, seq) DO
+-- NOTHING` and the table is append-only, so a write that LOSES a position
+-- collision stores nothing — while those positions still exist and still have
+-- bytes. Summing by position alone would charge the org a SECOND time for
+-- bytes it already paid for, and no row count could reveal it (measured on
+-- PGlite 18.3: after a suppressed conflict `count(*) = 1` and the byte total
+-- is the full one). `xmin` is the exact discriminator (measured: an own insert
+-- has `xmin = pg_current_xact_id()`, a suppressed conflict has the older xid).
+--
+-- ⇒ CALL IT IN THE WRITE'S OWN TRANSACTION. Outside one it reports 0 rows —
+-- that is the contract, not a bug (there is nothing to attribute). Under a
+-- SAVEPOINT the row's xmin is the sub-transaction's, so the filter
+-- UNDER-counts; that is the safe direction (the bytes reappear in the audit as
+-- ``unmetered``), and the record write path takes no savepoints today.
+--
 -- `p_seqs` is an ARRAY so one call covers a whole write segment: the journal
 -- append is contiguous, so the meter costs ONE indexed read per segment, not
 -- one per record.
@@ -137,7 +153,10 @@ BEGIN
       FROM public.journal_event t
      WHERE t.org_id = p_org_id
        AND t.graph_id = p_graph_id
-       AND t.seq = ANY (p_seqs);
+       AND t.seq = ANY (p_seqs)
+       -- See the header: only rows THIS transaction inserted. A suppressed
+       -- ON CONFLICT leaves the older row in place and it is not our byte.
+       AND t.xmin::text = pg_catalog.pg_current_xact_id()::text;
 
     -- Chunk detail needs PG17+, and the *function* (not the server version) is
     -- the honest test: a 16.x server has no pg_column_toast_chunk_id (measured)
@@ -156,7 +175,8 @@ BEGIN
             'SELECT coalesce(sum(octet_length(ch.chunk_data)), 0)
                FROM public.journal_event t
                JOIN %s ch ON ch.chunk_id = pg_catalog.pg_column_toast_chunk_id(t.payload)
-              WHERE t.org_id = $1 AND t.graph_id = $2 AND t.seq = ANY ($3)',
+              WHERE t.org_id = $1 AND t.graph_id = $2 AND t.seq = ANY ($3)
+                AND t.xmin::text = pg_catalog.pg_current_xact_id()::text',
             v_toast_rel)
           INTO v_chunk
           USING p_org_id, p_graph_id, p_seqs;
@@ -279,7 +299,15 @@ BEGIN
     v_heap  := pg_catalog.pg_relation_size('public.journal_event'::regclass);
     v_index := pg_catalog.pg_indexes_size('public.journal_event'::regclass);
     v_toast := pg_catalog.pg_relation_size(v_toast_rel);
-    v_total := v_heap + v_index + v_toast;
+    -- ⛔ NOT heap + index + toast. That sum OMITS the TOAST relation's own
+    -- INDEX and both relations' FSM/VM forks — measured on PG 18.3: heap 8,192
+    -- + parent index 16,384 + toast 40,960 = 65,536 against a
+    -- pg_total_relation_size of 106,496, i.e. the residual would have been
+    -- understated by 40% and `attributed + residual = total` would have
+    -- reconciled against a partial total. `pg_total_relation_size` is the
+    -- relation's whole footprint as Postgres reports it (the per-part figures
+    -- above stay, as components of it).
+    v_total := pg_catalog.pg_total_relation_size('public.journal_event'::regclass);
 
     -- Clamp at 0: attributed ABOVE the relation total would mean the two were
     -- read at different instants (or a concurrent write), and a negative

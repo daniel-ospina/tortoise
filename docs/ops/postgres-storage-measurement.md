@@ -183,6 +183,27 @@ accumulated counter with the audit and names which way they disagree:
   per-row figure, so an excess is the double count or a fabricated number, and
   the reading says so rather than quietly under-billing.
 
+**Only the rows THIS transaction inserted.** The journal's insert is
+`ON CONFLICT (org_id, graph_id, seq) DO NOTHING` and the table is append-only, so
+a write that LOSES a position collision (reachable between two durable journals,
+#9307) stores nothing — while those positions still exist with bytes. Summing by
+position alone would charge the org a **second time**, and no row count could
+reveal it. The meter therefore filters `xmin = pg_current_xact_id()`: measured,
+an own insert matches and a suppressed conflict carries the older xid. It must
+be called **in the write's own transaction** (outside one it reports 0 rows —
+that is the contract, not a bug); under a `SAVEPOINT` it under-counts, which is
+the safe direction and which the audit then reports as `unmetered`.
+
+**Measured, then RECORDED after the commit.** `RecordWriter.write` only
+*measures*; the ledger increment happens where the commit is known
+(`write_live_record`, strictly after `connection.commit()`), because the ledger
+lives on another store — charging it before the commit would leave a
+rolled-back write's bytes on the org's figure forever, and the counter refuses
+negatives, so there is no repair path. A caller that injects its own connection
+owns that decision and receives the figure on `RecordWrite.written_bytes`. The
+`tools/backfill_copy_turns.py` backfill path therefore lands **unmetered** on
+purpose (a migration is not usage), and `reconcile` discloses it.
+
 **What the meter does not do.** It measures rows written from the day it lands.
 It does not backfill, does not prune, and does **not** arm `allowance_gate` —
 arming `postgres_storage` needs the `free`/`anon` included amounts decided first

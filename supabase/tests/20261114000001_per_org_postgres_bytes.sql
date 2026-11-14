@@ -2,18 +2,26 @@
 -- bytes measured from what we WRITE, plus the TOAST-aware audit.
 --
 -- Runs against the REAL SQL functions (the harness applies every migration
--- first), on a real PostgreSQL 17 engine — so the TOAST behaviour these
+-- first), on a real PostgreSQL engine — so the TOAST behaviour these
 -- assertions depend on is the engine's own, not a mock. Every check RAISEs on
 -- failure; the harness is ON_ERROR_STOP.
 --
+-- ⛔ TRANSACTION DISCIPLINE IS PART OF THE CONTRACT. The meter counts only the
+-- rows THIS transaction inserted (`xmin = pg_current_xact_id()`), because a
+-- losing `ON CONFLICT DO NOTHING` leaves the OLDER row in place and its bytes
+-- are not this write's. So every row the meter must see is inserted INSIDE the
+-- same `DO` block that asserts on it (one DO = one transaction), and §2b uses
+-- the opposite case deliberately: a row committed by an EARLIER statement is
+-- invisible to the meter for the same position.
+--
 -- ⛔ THIS SUITE CARRIES THE FALSIFIER. #12762 was filed on the premise that
 -- `sum(pg_column_size(...))` reports the 18-byte TOAST pointer for a
--- moved-out value, a ~100× undercount. MEASURED (PG 17.12 and 16.9) THAT
--- PREMISE IS FALSE: `pg_column_size` follows the TOAST pointer and reports
--- the value's stored size (compressed where compression applies). The pin that
--- "fails under the naive implementation" therefore cannot be the one the issue
--- describes — it would be green on both methods, which is exactly the
--- pin-that-cannot-fail failure of #11859.
+-- moved-out value, a ~100× undercount. MEASURED (PG 17.12, 16.9 and this
+-- harness's 18.3) THAT PREMISE IS FALSE: `pg_column_size` follows the TOAST
+-- pointer and reports the value's stored size (compressed where compression
+-- applies). The pin that "fails under the naive implementation" therefore
+-- cannot be the one the issue describes — it would be green on both methods,
+-- which is exactly the pin-that-cannot-fail failure of #11859.
 --
 -- So the falsifier here tests the SAME property (a multi-KB TOASTed payload is
 -- counted at its full stored size) against the naive write-time measure that
@@ -30,7 +38,8 @@
 -- §3 asserts the issue's own premise is false, with its numbers, so no later
 -- reader restores it.
 
--- ── Seed: three orgs, one graph each, and the payload shapes that matter ────
+-- ── Seed: three orgs, one graph each (committed by THIS statement, i.e. an
+--    EARLIER transaction than the DO block below — which §2b relies on) ─────
 INSERT INTO public.organizations (id, name, graph_name) VALUES
     ('org_12762_a', 'per-org-bytes-a', 'per-org-bytes-a'),
     ('org_12762_b', 'per-org-bytes-b', 'per-org-bytes-b'),
@@ -43,37 +52,53 @@ INSERT INTO public.graphs (id, org_id, name, namespace) VALUES
     ('g_12762_c', 'org_12762_c', 'per-org-bytes-c', 'org_org_12762_c_g_12762_c')
 ON CONFLICT (id) DO NOTHING;
 
--- A small record, a ~4 KB COMPRESSIBLE record (pglz squeezes it inline: the
--- shape whose stored size looks "absurdly small" and is still correct), and a
--- ~19 KB INCOMPRESSIBLE record (out of line, many chunks — the shape the
--- issue's pointer claim was about).
+-- A record committed in an EARLIER transaction at seq 1 — the "already there"
+-- row a second write must not charge for again.
 INSERT INTO public.journal_event (org_id, graph_id, seq, event_type, payload) VALUES
-    ('org_12762_a', 'g_12762_a', 1, 'PointAdded',
-     jsonb_build_object('type', 'PointAdded',
-                        'props', jsonb_build_object('label', 'small'))),
-    ('org_12762_b', 'g_12762_b', 1, 'PointAdded',
-     jsonb_build_object('type', 'PointAdded',
-                        'props', jsonb_build_object('text', repeat('b', 4000)))),
     ('org_12762_c', 'g_12762_c', 1, 'PointAdded',
      (SELECT jsonb_build_object('type', 'PointAdded',
                                 'props', jsonb_build_object('blob',
                                         string_agg(md5(random()::text), '')))
         FROM generate_series(1, 600)));
 
+-- ⛔ An EXPLICIT COMMIT, so the seed above is genuinely an EARLIER transaction
+-- than the block below: the harness may otherwise run this whole file inside
+-- one implicit transaction, in which case §2b's suppression would be a
+-- same-transaction conflict and could not distinguish the two cases. (Under a
+-- harness that does NOT wrap the file, PG reports "no transaction in progress"
+-- as a warning — harmless.)
+COMMIT;
+
 DO $$
 DECLARE
-    m            jsonb;
-    v_row_bytes  bigint;
-    v_payload    bigint;
-    v_rows       bigint;
-    v_chunk_ok   boolean;
+    m             jsonb;
+    v_row_bytes   bigint;
+    v_payload     bigint;
     v_big_logical bigint;
     v_big_stored  bigint;
     v_big_chunk   bigint;
     v_big_chunk_id bigint;
+    v_row_figure  bigint;
+    v_chunk_ok    boolean;
 BEGIN
+    -- ── 0. This transaction writes: a ~19 KB incompressible record (out of
+    --      line, the shape the pointer claim was about), a 4 KB compressible
+    --      one, and a small one on another org. ─────────────────────────────
+    INSERT INTO public.journal_event (org_id, graph_id, seq, event_type, payload) VALUES
+        ('org_12762_c', 'g_12762_c', 10, 'PointAdded',
+         (SELECT jsonb_build_object('type', 'PointAdded',
+                                    'props', jsonb_build_object('blob',
+                                            string_agg(md5(random()::text), '')))
+            FROM generate_series(1, 600))),
+        ('org_12762_b', 'g_12762_b', 10, 'PointAdded',
+         jsonb_build_object('type', 'PointAdded',
+                            'props', jsonb_build_object('text', repeat('b', 4000)))),
+        ('org_12762_a', 'g_12762_a', 10, 'PointAdded',
+         jsonb_build_object('type', 'PointAdded',
+                            'props', jsonb_build_object('label', 'small')));
+
     -- ── 1. The meter reports the stored bytes of the rows just written ──────
-    m := public.journal_event_bytes_for_rows('org_12762_c', 'g_12762_c', ARRAY[1::bigint]);
+    m := public.journal_event_bytes_for_rows('org_12762_c', 'g_12762_c', ARRAY[10::bigint]);
 
     IF m IS NULL OR jsonb_typeof(m) <> 'object' THEN
         RAISE EXCEPTION '#12762: meter did not return a jsonb object: %', m;
@@ -86,7 +111,7 @@ BEGIN
            sum(pg_catalog.pg_column_size(t.payload))::bigint
       INTO v_row_bytes, v_payload
       FROM public.journal_event t
-     WHERE t.org_id = 'org_12762_c' AND t.graph_id = 'g_12762_c' AND t.seq = 1;
+     WHERE t.org_id = 'org_12762_c' AND t.graph_id = 'g_12762_c' AND t.seq = 10;
 
     IF (m ->> 'row_bytes')::bigint <> v_row_bytes THEN
         RAISE EXCEPTION '#12762: meter row_bytes % disagreed with the stored '
@@ -98,15 +123,41 @@ BEGIN
             m ->> 'payload_bytes', v_payload;
     END IF;
 
-    -- ── 2. The meter covers exactly the rows it was asked about ────────────
-    -- A segment spanning two orgs must not leak one org's bytes into the
-    -- other's figure: this is the attribution property, not decoration.
+    -- ── 2. Attribution: a seq the org did not write in THIS transaction is not
+    --      counted, so a neighbouring org's bytes cannot leak into the figure.
     m := public.journal_event_bytes_for_rows(
-            'org_12762_a', 'g_12762_a', ARRAY[1::bigint, 2::bigint]);
+            'org_12762_a', 'g_12762_a', ARRAY[10::bigint, 11::bigint]);
     IF (m ->> 'rows')::bigint <> 1 THEN
         RAISE EXCEPTION '#12762: a seq the org did not write was counted '
             '(rows=%): a neighbouring org''s bytes would be attributed to it',
             m ->> 'rows';
+    END IF;
+
+    -- ── 2b. ⛔ THE SUPPRESSED-CONFLICT GUARD (a lost position collision must
+    --       NOT be charged twice). seq 1 was committed by an EARLIER
+    --       transaction, so this insert is suppressed and stores nothing —
+    --       yet the row exists with bytes. Summing by position alone would
+    --       charge the org again; the meter must report 0.
+    INSERT INTO public.journal_event (org_id, graph_id, seq, event_type, payload) VALUES
+        ('org_12762_c', 'g_12762_c', 1, 'PointAdded',
+         '{"type":"PointAdded","props":{"blob":"second write, must not count"}}'::jsonb)
+    ON CONFLICT (org_id, graph_id, seq) DO NOTHING;
+
+    m := public.journal_event_bytes_for_rows('org_12762_c', 'g_12762_c', ARRAY[1::bigint]);
+    IF (m ->> 'rows')::bigint <> 0 OR (m ->> 'row_bytes')::bigint <> 0 THEN
+        RAISE EXCEPTION '#12762: a SUPPRESSED conflict at seq 1 was metered '
+            '(rows=%, row_bytes=%) — the org would be charged twice for bytes '
+            'it already paid for. The meter must count only the rows THIS '
+            'transaction inserted (xmin = pg_current_xact_id()).',
+            m ->> 'rows', m ->> 'row_bytes';
+    END IF;
+    -- …and the row really does exist with bytes, so the guard above is not
+    -- passing because there was nothing to double count.
+    IF NOT EXISTS (SELECT 1 FROM public.journal_event t
+                    WHERE t.org_id = 'org_12762_c' AND t.graph_id = 'g_12762_c'
+                      AND t.seq = 1) THEN
+        RAISE EXCEPTION '#12762 seed: seq 1 is absent, so the suppression '
+            'assertion proves nothing';
     END IF;
 
     -- ── 3. THE PREMISE, FALSIFIED WITH ITS NUMBERS ─────────────────────────
@@ -120,7 +171,7 @@ BEGIN
            pg_catalog.pg_column_toast_chunk_id(t.payload)
       INTO v_big_logical, v_big_stored, v_big_chunk_id
       FROM public.journal_event t
-     WHERE t.org_id = 'org_12762_c' AND t.graph_id = 'g_12762_c' AND t.seq = 1;
+     WHERE t.org_id = 'org_12762_c' AND t.graph_id = 'g_12762_c' AND t.seq = 10;
 
     IF v_big_logical < 15000 THEN
         RAISE EXCEPTION '#12762 seed: expected a ~19 KB payload, got % bytes',
@@ -133,9 +184,9 @@ BEGIN
     IF v_big_stored < 1000 THEN
         RAISE EXCEPTION '#12762: pg_column_size() reported % bytes for a % B '
             'out-of-line payload — a pointer-shaped reading. The measured '
-            'behaviour (PG 17.12/16.9) is the full stored size; if an engine '
-            'ever does report the pointer, THE METER must not be built on it.',
-            v_big_stored, v_big_logical;
+            'behaviour (PG 16.9/17.12/18.3) is the full stored size; if an '
+            'engine ever does report the pointer, THE METER must not be built '
+            'on it.', v_big_stored, v_big_logical;
     END IF;
 
     -- ── 4. THE FALSIFIER: the naive write-time measure is WRONG, ours isn't ─
@@ -158,19 +209,19 @@ BEGIN
     DELETE FROM t12762_returning;
     WITH ins AS (
         INSERT INTO public.journal_event (org_id, graph_id, seq, event_type, payload)
-        VALUES ('org_12762_c', 'g_12762_c', 2, 'PointAdded',
+        VALUES ('org_12762_c', 'g_12762_c', 11, 'PointAdded',
                 jsonb_build_object('type', 'PointAdded',
                     'props', jsonb_build_object('label', 'finding',
                         'embedding', (SELECT jsonb_agg(round((random())::numeric, 6))
                                         FROM generate_series(1, 1536)))))
         RETURNING pg_catalog.pg_column_size(payload) AS returning_bytes)
-    INSERT INTO t12762_returning SELECT returning_bytes, 2 FROM ins;
+    INSERT INTO t12762_returning SELECT returning_bytes, 11 FROM ins;
 
     SELECT t.returning_bytes INTO v_big_stored FROM t12762_returning t;
     SELECT pg_catalog.pg_column_size(j.payload)::bigint
       INTO v_big_logical
       FROM public.journal_event j
-     WHERE j.org_id = 'org_12762_c' AND j.graph_id = 'g_12762_c' AND j.seq = 2;
+     WHERE j.org_id = 'org_12762_c' AND j.graph_id = 'g_12762_c' AND j.seq = 11;
 
     IF v_big_stored <= v_big_logical THEN
         RAISE EXCEPTION '#12762 FALSIFIER DID NOT FIRE: RETURNING reported % '
@@ -187,7 +238,7 @@ BEGIN
             v_big_stored, v_big_logical;
     END IF;
 
-    m := public.journal_event_bytes_for_rows('org_12762_c', 'g_12762_c', ARRAY[2::bigint]);
+    m := public.journal_event_bytes_for_rows('org_12762_c', 'g_12762_c', ARRAY[11::bigint]);
     IF (m ->> 'row_bytes')::bigint >= v_big_stored THEN
         RAISE EXCEPTION '#12762 FALSIFIER: the meter reported % against the '
             'naive RETURNING figure % — the two must DIFFER for this pin to '
@@ -202,40 +253,46 @@ BEGIN
     v_chunk_ok := EXISTS (SELECT 1 FROM pg_catalog.pg_proc p
                            WHERE p.proname = 'pg_column_toast_chunk_id');
     IF v_chunk_ok THEN
-        m := public.journal_event_bytes_for_rows('org_12762_c', 'g_12762_c', ARRAY[1::bigint]);
+        m := public.journal_event_bytes_for_rows('org_12762_c', 'g_12762_c', ARRAY[10::bigint]);
         IF (m ->> 'chunk_detail')::boolean IS NOT TRUE THEN
             RAISE EXCEPTION '#12762: chunk_detail must be true on a server '
                 'that HAS pg_column_toast_chunk_id (it is missing from the reply)';
         END IF;
         v_big_chunk := (m ->> 'chunk_bytes')::bigint;
-        v_big_logical := (m ->> 'row_bytes')::bigint;
+        v_row_figure := (m ->> 'row_bytes')::bigint;
         IF coalesce(v_big_chunk, 0) <= 0 THEN
             RAISE EXCEPTION '#12762: chunk_bytes is % for a TOASTed row — '
                 'the audit cannot disclose chunk overhead', v_big_chunk;
         END IF;
         -- The value is INSIDE row_bytes: row_bytes minus chunk_data is the
         -- row's own small overhead, never a second copy of the payload.
-        IF v_big_logical < v_big_chunk THEN
+        IF v_row_figure < v_big_chunk THEN
             RAISE EXCEPTION '#12762: row_bytes (%) < chunk_bytes (%) — the '
                 'meter does not contain the out-of-line value',
-                v_big_logical, v_big_chunk;
+                v_row_figure, v_big_chunk;
         END IF;
-        IF v_big_logical - v_big_chunk > 500 THEN
+        IF v_row_figure - v_big_chunk > 500 THEN
             RAISE EXCEPTION '#12762: row_bytes exceeds chunk_bytes by % bytes '
                 'for a single row — that gap is the signature of the '
                 'double-count trap (row + chunks) this meter must avoid',
-                v_big_logical - v_big_chunk;
+                v_row_figure - v_big_chunk;
         END IF;
-        -- And the DISCLOSED chunk figure must never be added to a per-org
-        -- total: the per-org figure is row_bytes alone.
-        IF (m ->> 'row_bytes')::bigint = v_big_logical + v_big_chunk THEN
-            RAISE EXCEPTION '#12762: row_bytes was reported as row + chunks — '
-                'the double count is live';
+        -- A per-org figure that equals row + chunks is the double count made
+        -- visible. It would nearly DOUBLE the figure (measured 14,418 against
+        -- 7,241), so "at least the row figure plus half the chunk figure"
+        -- catches any partial folding of chunks into the total, not just an
+        -- exact 2x. (The exact 2x check this replaces read a variable that the
+        -- lines above had already overwritten — a vacuous assertion of the
+        -- #11859 class.)
+        IF v_row_figure >= v_big_chunk * 2 THEN
+            RAISE EXCEPTION '#12762: row_bytes (%) is at least twice '
+                'chunk_bytes (%) — the row+chunks double count is folded in',
+                v_row_figure, v_big_chunk;
         END IF;
     ELSE
         -- PG < 17: chunk attribution is UNAVAILABLE, and must read as such —
         -- never as "no chunks".
-        m := public.journal_event_bytes_for_rows('org_12762_c', 'g_12762_c', ARRAY[1::bigint]);
+        m := public.journal_event_bytes_for_rows('org_12762_c', 'g_12762_c', ARRAY[10::bigint]);
         IF (m ->> 'chunk_detail')::boolean IS NOT FALSE
            OR (m ->> 'chunk_bytes') IS NOT NULL THEN
             RAISE EXCEPTION '#12762: on a server WITHOUT '
@@ -244,7 +301,7 @@ BEGIN
         END IF;
     END IF;
 
-    -- ── 6. A failed/absent row set is a measured ZERO, not an error ────────
+    -- ── 6. A position this transaction did not insert is a measured ZERO ────
     m := public.journal_event_bytes_for_rows('org_12762_a', 'g_12762_a', ARRAY[999::bigint]);
     IF (m ->> 'rows')::bigint <> 0 OR (m ->> 'row_bytes')::bigint <> 0 THEN
         RAISE EXCEPTION '#12762: an unwritten seq must read as 0 rows / 0 bytes, '
@@ -260,6 +317,8 @@ BEGIN
         v_residual   bigint;
         v_orgs       jsonb;
         v_org_bytes  bigint;
+        v_heap       bigint;
+        v_part_sum   bigint;
     BEGIN
         a := public.postgres_per_org_bytes();
         v_attributed := (a ->> 'attributed_bytes')::bigint;
@@ -281,15 +340,15 @@ BEGIN
                 'inconsistent payload', v_sum_orgs, v_attributed;
         END IF;
 
-        -- The audit's per-org figure AGREES with the meter for an org whose
-        -- rows were all written through the meter. This is the whole point of
-        -- the pair: two independent reads of the same property.
+        -- The audit's per-org figure AGREES with (and cannot be BELOW) the
+        -- meter for an org whose rows were all written through the meter. Two
+        -- independent reads of the same property: the point of the pair.
         SELECT (o ->> 'row_bytes')::bigint
           INTO v_org_bytes
           FROM jsonb_array_elements(v_orgs) o
          WHERE o ->> 'org_id' = 'org_12762_c';
         m := public.journal_event_bytes_for_rows(
-                'org_12762_c', 'g_12762_c', ARRAY[1::bigint, 2::bigint]);
+                'org_12762_c', 'g_12762_c', ARRAY[10::bigint, 11::bigint]);
         IF v_org_bytes < (m ->> 'row_bytes')::bigint THEN
             RAISE EXCEPTION '#12762: the audit reports % bytes for org_12762_c '
                 'but the write-time meter accumulated % — the audit must be '
@@ -297,9 +356,27 @@ BEGIN
                 v_org_bytes, m ->> 'row_bytes';
         END IF;
 
+        -- ⛔ The total must be the relation's WHOLE footprint. heap + parent
+        -- index + toast omits the toast INDEX and both FSM/VM forks (measured:
+        -- 65,536 against pg_total_relation_size 106,496), which would understate
+        -- the residual and still "reconcile".
+        v_heap := pg_catalog.pg_total_relation_size('public.journal_event'::regclass);
+        v_part_sum := (a -> 'residual' ->> 'heap_relation_bytes')::bigint
+                    + (a -> 'residual' ->> 'index_bytes')::bigint
+                    + (a -> 'residual' ->> 'toast_relation_bytes')::bigint;
+        IF v_total <> v_heap THEN
+            RAISE EXCEPTION '#12762: the audit total (%) is not '
+                'pg_total_relation_size (%) — the TOAST index and FSM/VM are '
+                'missing from it', v_total, v_heap;
+        END IF;
+        IF v_total <= v_part_sum THEN
+            RAISE EXCEPTION '#12762: the audit total (%) is not above the sum '
+                'of its own parts (%) — the whole-footprint figure is not '
+                'being computed', v_total, v_part_sum;
+        END IF;
+
         -- The residual is SEPARATE and LABELLED, and it cannot be folded into
-        -- a per-org figure without an allocation: assert it is real (indexes
-        -- and page overhead exist) and that attributed + residual = total.
+        -- a per-org figure without an allocation.
         IF v_residual <= 0 THEN
             RAISE EXCEPTION '#12762: audit residual is % — a footprint table '
                 'always has index/page overhead beyond the tuples, so a '
@@ -375,9 +452,8 @@ END $$;
 -- ── 9. The dimension is registered but NOT armed ───────────────────────────
 -- Nothing in this migration may price, cap or throttle. The gate's arming is a
 -- separate, owner-gated change (#12762: the free/anon included amounts are
--- undecided), so assert the two tables the gate reads carry no new
--- entitlement: this is a *negative* pin, and it is the one that would fire if
--- someone wired the meter straight into enforcement.
+-- undecided), so this pin fires if someone wires the meter straight into
+-- enforcement.
 DO $$
 DECLARE
     v_cols integer;
@@ -406,8 +482,7 @@ END $$;
 -- ── Clean up ───────────────────────────────────────────────────────────────
 -- `journal_event` refuses DELETE unless the tenant-erasure flag is set (the
 -- append-only trigger, migration 20261012000001) — the same flag the cascade
--- from `public.organizations` is designed to ride. Without it this cleanup (and
--- every later suite's seeds) would be refused.
+-- from `public.organizations` is designed to ride.
 SET app.record_journal_purge = 'on';
 DELETE FROM public.organizations WHERE id IN
     ('org_12762_a', 'org_12762_b', 'org_12762_c');
