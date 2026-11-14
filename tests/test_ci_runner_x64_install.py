@@ -5365,9 +5365,12 @@ def test_the_correlated_probe_figure_is_the_same_naive_count_at_this_head():
     two days before the page was re-dated to 2026-11-14, so the sentence was carrying one axis
     from a 76-job tree and the other from a 9-job tree.
 
-    Measured across that fix: `1839535fd509` -> 85 / 12 (that is the pair the old sentence actually
-    described), `142241697321^` -> 85 / 13 — the 12 -> 13 move is `8126970432c9` (#12080,
-    2026-11-12), already an ancestor of #12422's parent — `142241697321` -> 87 / 13, `HEAD` -> 87 / 13.
+    Measured with that rule: `1839535fd509` -> 85 / 12 (a tree where that pair holds), `8126970432c9`
+    -> 85 / 13 — the 12 -> 13 move — `142241697321^` -> 85 / 13 (already 13: `8126970432c9` is its
+    ancestor), `142241697321` -> 87 / 13, `HEAD` -> 87 / 13. ⛔ The sentence itself landed at
+    `48d745f2e817` (2026-10-30), whose tree measures **84 / 12** — so its `85` was already off by one
+    when it was written, which is why the claim here is a measurement at named refs and not "the tree
+    the sentence described": nobody recorded that tree, and the nearest anchor contradicts it.
     The rule is the sentence's own — every LINE containing `runs-on` AND the label
     token, whole-line comments included (that is what "before it stripped whole-line comments"
     means), which is a different population from the sibling job-count pin above (that one

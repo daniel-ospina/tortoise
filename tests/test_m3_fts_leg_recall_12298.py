@@ -1321,7 +1321,7 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
     ("tortoise/sparse.py", 590, "return escape_redisearch_literal(query)",
      "`sparse.py:590`"),
     # ⛔ The four `search_engine.py` locators moved +30 when #12536 (`adb6800c1ecf`)
-    # inserted lines above them; `2916a6cd` is where this was measured red on
+    # inserted lines above them; `6916a6cd89d7` is where this was measured red on
     # `main` and this is the re-derivation the pin's own message asks for — the
     # numbers move, the pin does not relax. The Cypher ROW's span moves with its
     # start (13 lines, `CALL … )` inclusive).
