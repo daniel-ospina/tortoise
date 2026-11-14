@@ -3295,8 +3295,9 @@ class TestHealthzListener:
         import time
 
         class _DeadTicker:
-            """The three methods ``heartbeat_task_is_dead`` reads, plus the
-            callback ``note_heartbeat_task`` registers."""
+            """The two methods ``heartbeat_task_is_dead`` reads
+            (``cancelled``, ``done``), plus the ``add_done_callback``
+            registration ``note_heartbeat_task`` performs."""
 
             def cancelled(self):
                 return True
