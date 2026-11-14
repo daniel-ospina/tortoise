@@ -3037,14 +3037,16 @@ to answer.
 - **Why it exists.** `#12304` went `CONFLICTING` after `main` landed `#12545`
   (`6916a6cd89d7`), which re-derived the SAME capstone-bundle cites this branch had already
   re-derived for its own delta. Each parent's numbers are correct for ITS tree: the parents differ
-  in 92 files (`git diff --name-only 6e9ef2caae0c 6916a6cd89d7 | wc -l`), and in FOUR of the files
-  these entries cite a parent difference reaches a cited line — `tortoise/extractor_v2.py` (this
+  in 92 files (`git diff --name-only 6e9ef2caae0c 6916a6cd89d7 | wc -l`), and in THREE of the
+  files these entries cite a parent difference reaches a cited line — `tortoise/extractor_v2.py` (this
   branch's `+102/-12`), `tortoise/pi-hooks/tortoise-capture.ts` (`+266/-29`; the A-d pair's `+52`
-  sits inside it), `tortoise/hosted_api.py` (`+10/-1`, which moved the `03-test-design.md` pair by
-  `+9`) and `tortoise/sdk.py`. ⛔ `sdk.py` differs too — `6efb1c3f7294` (`#12485`) rewrote the
+  sits inside it) and `tortoise/hosted_api.py` (`+10/-1`, which moved the `03-test-design.md` pair by
+  `+9`). ⛔ A fourth file, `tortoise/sdk.py`, also differs — `6efb1c3f7294` (`#12485`) rewrote the
   `#2498` residual COMMENT, `6` for `6` lines, and that commit is absent from this branch's history
   (`git merge-base --is-ancestor 6efb1c3f7294 6e9ef2caae0c` exits 1) — but a line-neutral comment
-  rewrite moves no cited line: the merged `sdk.py` is byte-identical to `main`'s
+  rewrite moves no cited line: its single hunk is at `:48408-48420`, while the highest `sdk.py` line
+  cited anywhere in this bundle is `25396`, so no cite can be affected. The merged `sdk.py` is
+  byte-identical to `main`'s
   (`git diff --numstat 6916a6cd89d7 HEAD -- tortoise/sdk.py` is empty) and all twelve §10.31
   carriers open on their content without any re-derivation. The `#12492` `+3` is a separate fact and
   is already on this branch (`_extract_session_v2` at `18025` on `6e9ef2caae0c`). So taking either
