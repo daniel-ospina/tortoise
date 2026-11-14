@@ -171,8 +171,9 @@ kill_timeout = 30
 #       is too OLD to vouch for anything (the refresher runs on the loop, so a
 #       wedge produces this within the probe's 30 s stale window), or it has
 #       produced NO result while a probe is in flight past that window, or
-#       nothing has produced one within `max(120 s, 4 x stale window)` of process
-#       start, or the REFRESHER TASK NEVER STARTED
+#       nothing has produced one within `max(120 s, 4 x stale window)` of this
+#       app instance's LIFESPAN ENTRY (the probe epoch — NOT of process start,
+#       which is #12630), or the REFRESHER TASK NEVER STARTED
 #       (`probe-refresher-never-started`, recorded where the startup `try/except`
 #       logs it) — the last three are why a missing refresher cannot leave this
 #       term silently green;
