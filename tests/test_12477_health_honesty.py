@@ -53,7 +53,8 @@ def _clean(monkeypatch):
     hosted_api._LAST_PLANE_SERVED_AT = None
     hosted_api._LIVENESS_LAST_SERVED_AT = None
     hosted_api._HEALTH_PROBE_START_FAILED = False
-    # a fresh process for every test: the never-produced arm reads uptime
+    # a fresh PROBE EPOCH for every test: the never-produced arm reads the
+    # probe-epoch age (not the process's uptime — #12630)
     hosted_api._HEALTH_PROBE_EPOCH_MONOTONIC = time.monotonic()
     # ⛔ the harness's `asyncio.run(_boot())` CLOSES the loop, so the heartbeat
     # task `_start_liveness` installs is DONE by the time any assertion runs —
@@ -360,8 +361,8 @@ def test_a_process_past_the_bound_with_NO_probe_result_is_a_FAILURE():
     lifespan, or a probe that never got its turn — all of which report
     `in_flight: False, result_age_s: None`, the shape the `in_flight` arm cannot
     see. Measured: a reset coordinator beside a FRESH heartbeat answered 200 with
-    `reasons: []` forever. Past the uptime bound that is a failure; inside it, it
-    is still a cold start.
+    `reasons: []` forever. Past the probe-epoch bound that is a failure; inside it,
+    it is still a cold start.
     """
     app = _FakeApp()
     _start(app)
