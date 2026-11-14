@@ -1639,6 +1639,19 @@ surfaces:
   # selecting `api` with this guard never run (the #1349 class), the
   # same reason tests/test_quota.py is registered here.
   - test_4503_edge_relationship_accounting.py
+  # #10015 row 28: the account read carries its plan. The subject is
+  # `TortoiseSDK.get_organisation_account` (`tortoise/sdk.py`) over
+  # `tortoise/quota.py`'s `resolve_org_limits`/`encode_plan_block` — and
+  # `tortoise/quota.py` is an EXACT `api` SOURCE_PATTERN match, so this is the
+  # surface a quota-only diff selects. Registered here for the same reason
+  # `test_8906_points_gate_counts_write_graph.py` and
+  # `test_4503_edge_relationship_accounting.py` above are: a `core`-only row
+  # would leave a `tortoise/quota.py`-only PR selecting `api` with this guard
+  # never run (the #1349/#2938/#3154 silent-drop class). DUAL-REGISTERED with
+  # `core` below, because `sdk.py` is a SHARED_MODULES path (`full: True`) and
+  # the account read's own behaviour is core SDK surface — neither side alone
+  # covers both diff classes.
+  - test_10015_organisation_account.py
   # #10668 review P1: the #9567 D11/D12 allowance-gate evidence.
   # DUAL-REGISTERED with `core` (below). Two modules carry this subject and
   # they classify DIFFERENTLY: `tortoise/quota.py` (`enforce_org_limit`, the
@@ -5097,6 +5110,13 @@ surfaces:
   # (no named surface matches `tortoise/projection/entities.py`, so
   # those fall to the `core` fallback).
   - test_4503_edge_relationship_accounting.py
+  # #10015 row 28 — dual-registered with `api` above (read that block for the
+  # rationale). `tortoise/sdk.py` is a SHARED_MODULES path, so an `sdk.py`-only
+  # diff already selects the full matrix; this row is the arm for a diff that
+  # reaches neither `quota.py` (exact `api`) nor `sdk.py` — e.g. the generated
+  # `config/sdk-surface.json` / `docs/product/sdk-surface-*.md` surfaces, which
+  # are non-python prefixes and fall through to the `core` fallback.
+  - test_10015_organisation_account.py
   - test_shared_state_concurrency.py
   - test_shared_state_events.py
   - test_shared_state_events_claim.py
@@ -12964,6 +12984,7 @@ durations:
   test_7949_e5_population_reconcile.py: 0.1
   test_8447_issue_insight_truncation.py: 6.8
   test_8906_points_gate_counts_write_graph.py: 6.5
+  test_10015_organisation_account.py: 2.0  # #10015 row 28: the row must EXIST, not merely take the header's flat `DEFAULT_FAST_WEIGHT` ("a default is not a reading") — the file landed without it and redded `manifest-integrity` on the merge tree. No seconds figure is quoted beside the weight: the readings live in `WORKTREE-REPORT.md` beside the verbatim commands that produced them, and a figure copied next to a shard-layout input re-stales against the run it came from. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
   test_allowance_gate.py: 0.3
   test_batch_gate.py: 7.5
   test_cache_evict_cli.py: 0.1

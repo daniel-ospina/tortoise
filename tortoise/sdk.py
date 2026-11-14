@@ -45876,9 +45876,7 @@ class TortoiseSDK:
             resolve_org_limits,
         )
         from .record_writer import (
-            RECORD_GRAPH_ENV,
-            RECORD_ORG_ENV,
-            RECORD_SINGLE_TENANT_ENV,
+            _refused_tenant_env_note,
             is_usable_tenant,
             record_tenant_effective,
         )
@@ -45891,9 +45889,15 @@ class TortoiseSDK:
                 "the cross-tenant read row 28 must not allow (#10015). Bind it "
                 "one of the two supported ways: on the hosted REST lane the "
                 "credential's tenant is carried on the SDK it opens; elsewhere "
-                "enter record_writer.use_record_tenant(org_id, graph_id), or set "
-                f"{RECORD_ORG_ENV}/{RECORD_GRAPH_ENV} together AND declare the "
-                f"process single-tenant with {RECORD_SINGLE_TENANT_ENV}=1."
+                "enter record_writer.use_record_tenant(org_id, graph_id)."
+                # The arm-specific sentence (which env pair to set, or which
+                # declaration is missing) renders in `record_writer`, the ONE
+                # module the `#9192` pin allows to touch the env literals. Naming
+                # them here would make this method a second reader of the
+                # process-global tenant — exactly the bypass
+                # `test_the_env_pair_has_no_reader_outside_the_gated_resolver`
+                # refuses (it reds this raise site, by SYMBOL not by line).
+                + _refused_tenant_env_note()
             )
         org_id = tenant[0]
         try:
