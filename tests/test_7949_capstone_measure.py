@@ -5907,13 +5907,13 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # tree (`grep -nF 'relation_write = apply_relation_edges(' tortoise/sdk.py`),
             # never carried forward from either side. The anchors are unchanged —
             # that is the point of keying a row on the symbol.
-            ("19012", "relation_write = apply_relation_edges("),
+            ("19020", "relation_write = apply_relation_edges("),
         ), "sdk"),
         ("RECONCILE-A1-A2-A5.md", "is the line above it, `:", (
-            ("19011", "from tortoise.relation_write import apply_relation_edges"),
+            ("19019", "from tortoise.relation_write import apply_relation_edges"),
         ), "sdk"),
         ("RECONCILE-A1-A2-A5.md", "`relation_write.py:7`, `sdk.py:", (
-            ("18999", "# `#10999` made the channel TRANSPORT ONLY"),
+            ("19007", "# `#10999` made the channel TRANSPORT ONLY"),
         ), "sdk"),
         # `subject_binding_available`'s DEFINITION and its CONSUME pair, in both
         # documents that state them — a row per document, because a row scopes to
@@ -5939,7 +5939,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # The A5 binder's CALL SITE (its `def` is in `subject_binding.py`; the plan
         # names the call), keyed by the quoted form the sentence prints.
         ("00-plan.md", "point-creation path at", (
-            ("18659", "bind_point_subjects(proj, self, point_id=pid,"),
+            ("18667", "bind_point_subjects(proj, self, point_id=pid,"),
         ), "sdk"),
         # The two cites this forward merge re-pointed in the documents no row read —
         # each is a RANGE, pinned at BOTH endpoints, because a range that moves by a
@@ -5978,8 +5978,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("2503", 'errors.append("hierarchies: entry missing \'type\' field")'),
         ), "pack_registry"),
         ("00-align.md", "`llm:deepseek-direct` is what", (
-            ("16458", "The v2 path reports"),
-            ("16459", '"extraction_mode": "llm:<route>"'),
+            ("16466", "The v2 path reports"),
+            ("16467", '"extraction_mode": "llm:<route>"'),
         ), "sdk"),
         # ...and THAT sentence names a second file, so its `.ts` pair takes its
         # own row: a row carries ONE source key. Both anchors are the FUNCTIONS
@@ -5998,7 +5998,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("947", "export function postInstallProbe("),
         ), "pi_hooks"),
         ("04-plan.md", "operator / label path", (
-            ("25396", "declared = declared_relation_predicates()"),
+            ("25404", "declared = declared_relation_predicates()"),
         ), "sdk"),
         # ⛔ THE 402 QUOTA GUARD, `03-test-design.md`'s A-corpus capture row (#12369
         # review, P2). This row is the one that would have caught #12369's own
@@ -14059,7 +14059,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         "cite — re-stale it and this record's only reproduction path points at a dead line")
     # ⛔ DIRECTION FLIPPED with the correction this arm forced. The comment at this line used to
     # read "nothing in this tree consumes `result[\"relations\"]`" — a claim that was FALSE from the
-    # moment `#11548` landed the consumer (this record's own §5 names it at `sdk.py:19012`), so the
+    # moment `#11548` landed the consumer (this record's own §5 names it at `sdk.py:19020`), so the
     # arm was pinning a falsehood into the live tree. It now asserts the corrected sentence AT THE
     # SAME LINE (the block's line count was held at 13 so every cite below keeps its number) and that
     # the retracted sentence is gone from the file entirely.
@@ -14081,7 +14081,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         "\"nothing consumes it\" reading is what this arm replaced")
     assert "nothing in this tree consumes" not in "\n".join(ext), (
         "the retracted sentence is back in the live file — it was false while this record's own §5 "
-        "cited `sdk.py:19012` as the consumer, so no arm may require it again")
+        "cited `sdk.py:19020` as the consumer, so no arm may require it again")
 
     # A1's environment block: the reproduction that states A1's producer claim — the
     # bare-token grep whose four `create_operator` mentions ARE its evidence that the
