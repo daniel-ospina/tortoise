@@ -1040,7 +1040,18 @@ retired:
   approval: null
 rows:
 - name: tortoise_query
-  served_from: tortoise/mcp_server.py:e745fd4824243d93
+  served_from: tortoise/mcp_server.py:f51c5318f92be458
+  # ⛔ #12372: `served_from` is the `_code_digest` of the handler's CODE OBJECT, so any
+  # edit inside `tortoise_query` re-stamps it. Refreshed BY HAND to the value `build_doc`
+  # derives (`check` re-derives and compares — it is the code that is authoritative, not
+  # this cell), because `cut` is owner-gated ("ask Daniel FIRST, before the re-cut",
+  # tools/surface_manifest.py) and this change adds/removes/renames NO tool or method.
+  # A full `cut` was measured on this box and DELIBERATELY NOT committed: with `skills/`
+  # dangling it drops `skill-docs` from 38 SDK `used_by` cells, and it DROPS every body
+  # rationale comment (`cut` re-emits only `MANIFEST_HEADER` verbatim, so the header
+  # survives and this note does not — no head-specific count belongs here, it moves with
+  # every line anyone adds). Both kinds are `NON_DERIVABLE` evidence a digest refresh
+  # must not move.
   served_attributes: 7a717e4e60ce3bfa
   family: memory
   family_rank: 1
@@ -1238,8 +1249,25 @@ rows:
   approval: null
   class: agent-reachable
   cluster_canonical: null
+# #12297: SPLICED, not re-cut — and the two reasons are the REAL costs of a cut,
+# not a claim that a cut would lose hand-curated cells (it would not:
+# `CARRIED_TOOL_ROW_KEYS` in tools/surface_manifest.py carries `used_by` /
+# `recommendation` / `basis` / `reason` / `exemption` forward from the committed
+# manifest, and a cut reproduces this tool row byte-for-byte). The costs it does
+# have: (1) `cut --commit` must be handed a DEFAULT-BRANCH sha (#11057 review F1)
+# — cut at a lane head, `provenance_report` reds — and (2) a cut re-derives EVERY
+# `sdk:` row's `used_by` cell (124 rows, all 124 carrying one; `CARRIED_SDK_ROW_KEYS`
+# is just `exemption`), churning a diff this change has nothing to do with.
+# ⛔ That 124 is re-derivable from this file: `rows` whose `name` starts `sdk:`.
+# So exactly one derived cell moves, to the value `check` itself derives from the
+# declaration (`_code_digest`; verified `aae4bf5f5ceffe7c` for the tool body as it
+# stands on this branch, after the owner's 2239f94ff6 and c82c0337a4 rewrote the
+# same two comments). Nothing else in this row, and nothing in any other row,
+# moves. ⛔ Splicing a DERIVED cell is safe only because `check` re-derives it: if
+# this value ever disagrees with the declaration, both gates go red rather than
+# drifting. It is not a general licence to edit derived cells.
 - name: tortoise_suggest_entry_points
-  served_from: tortoise/mcp_server.py:efb6a1ed2e00a044
+  served_from: tortoise/mcp_server.py:aae4bf5f5ceffe7c
   served_attributes: 542cf2dbb222d260
   family: memory
   family_rank: 1

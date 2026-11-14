@@ -972,6 +972,144 @@ def test_the_never_run_call_entry_NAMES_every_spelling_it_was_measured_on():
             f"ungated reach was MASKED; state that instead: {summary_clause[:240]!r}…")
 
 
+def test_the_register_scopes_its_SHADOW_claim_to_the_SEAM_and_names_the_builder_residual():
+    """⛔ `#12020` round 11 review (P3): the delta corrected the register's claim that the shadow is
+    threaded per scope — it is, for the SEAM spelling only — and round 11 measured that reverting
+    BOTH hunks left this whole file GREEN (47 passed). The sibling clauses of the same bullet are
+    pinned (the never-run clause and the `gated` summary above); this one was not, so a later
+    cleanup could restore the false universality silently. Pinned by SLICE + PHRASES: the clause is
+    located between two anchors and must carry the scoping operator, the measured DIRECTION and the
+    naming-entry pointer. ⛔ Not bare tokens — round 12 inverted the direction with a coherent
+    sentence (`never DELETES a real writer at all`) and a token check passed the whole file.
+    """
+    doc = re.sub(r"\s+", " ", (register.__doc__ or "").lower())
+    start = doc.find("for the seam spelling the shadow is threaded")
+    stop = doc.find("this bullet is the seam's")
+    assert start != -1 and stop > start, (
+        "the register's SEAM-shadow sentence moved — this pin reads the clause between \"for the "
+        "SEAM spelling the shadow is threaded\" and \"this bullet is the SEAM's\", so re-anchor "
+        "it deliberately rather than letting the pin cover nothing")
+    clause = doc[start:stop]
+    # ⛔ PHRASES, not bare TOKENS (`#12020` round 12 review, P2 — measured). The first cut of this
+    # pin asserted `"clause builder"` / `"delete"` / `"escapes as an argument"`, and a COHERENT
+    # INVERSION of the paragraph — `so suppressing a shadowed call never DELETES a real writer at
+    # all` — left the WHOLE register file green (48 passed), i.e. the pin held a false statement that
+    # argued the deletion direction does not exist. Dropping the `NOT` from the scoping line was
+    # likewise green. The sibling pin
+    # `test_the_never_run_call_entry_NAMES_every_spelling_it_was_measured_on` already measured this
+    # weakness and repaired it with clause-scoped exclusions; the phrases below do the same job
+    # without needing them.
+    assert "not threaded for a clause builder" in clause, (
+        "the seam-shadow clause no longer SCOPES itself — it must say the shadow is not threaded "
+        "for a clause builder (a bare `clause builder` token survives deleting the operator, "
+        "measured): "
+        f"{clause[:240]!r}…")
+    assert "deletes a real writer instead of demoting it" in clause, (
+        "the seam-shadow clause no longer states the DIRECTION of the builder exception — it must "
+        "say suppressing a shadowed builder call DELETES a real writer INSTEAD OF demoting it; a "
+        "bare `delete` token survives the coherent inversion \"never DELETES a real writer at "
+        "all\", measured: "
+        f"{clause[:240]!r}…")
+    assert "never deletes" not in clause, (
+        "the seam-shadow clause inverts the measured direction — the shadow-aware builder arm was "
+        "reverted precisely because it DELETES a real writer (`{'tortoise.m::apply': ...}`, `w` "
+        "gone): "
+        f"{clause[:240]!r}…")
+    # ⛔ `#12182` review P2: the token `"a builder alias escapes as an argument"` is present in BOTH
+    # the corrected clause AND the mis-citation it replaced, so asserting it left the correction
+    # undefended — restoring the pre-fix wording kept this test green (measured). Pin the two
+    # phrases the CORRECTION adds, and read them in the direction the clause now states.
+    low = clause.lower()
+    assert "not in `undecidable_write_shapes`" in low, (
+        "the seam-shadow clause no longer says the builder arm's OVER-credit residual is NOT an "
+        "`UNDECIDABLE_WRITE_SHAPES` entry — the pre-`#12020` wording sent readers to the entry that "
+        "documents the OPPOSITE direction (a builder PASSED, writer ABSENT): "
+        f"{clause[:240]!r}…")
+    assert "documents the opposite direction" in low, (
+        "the clause no longer distinguishes the table entry's SIGN from the builder arm's over-"
+        "credit: the entry documents a builder passed as an argument (writer ABSENT), while the arm "
+        "over-credits a CALL in a rebinding scope: "
+        f"{clause[:240]!r}…")
+    assert "a builder alias escapes as an argument" in clause, (
+        "the clause must still NAME the differently-signed table entry — as the one it does NOT "
+        "mean — so a reader who follows it lands on the right residual: "
+        f"{clause[:240]!r}…")
+    # ⛔ `#12182` review cycle 2 (P3): the three assertions above cover the NEGATION and the SIGN, and
+    # left the REDIRECT undefended — deleting `named where it is implemented, `probe._writes_an_embedding`'s
+    # builder-arm comment, and pinned by two arms` kept the file GREEN, and so did restoring the
+    # pre-fix claim ALONGSIDE the negation (a clause that then says the residual both IS and is NOT in
+    # the table). Pin the destination, and forbid the two from co-occurring.
+    assert "named where it is implemented" in clause, (
+        "the clause no longer says WHERE the builder arm's over-credit residual lives — it must "
+        "name the implementation site, because the table entry next to it documents the opposite "
+        "sign: "
+        f"{clause[:240]!r}…")
+    assert "`probe._writes_an_embedding`'s builder-arm comment" in clause, (
+        "the redirect must name the ACTUAL home of the residual "
+        "(`probe._writes_an_embedding`'s builder-arm comment), not a shape that reads similar: "
+        f"{clause[:240]!r}…")
+    assert "pinned by two arms" in clause, (
+        "the redirect must say the residual is PINNED, or a reader cannot tell it is measured "
+        "rather than merely written down: "
+        f"{clause[:240]!r}…")
+    assert "its own naming entry" not in clause, (
+        "the clause asserts BOTH that the residual is not in `UNDECIDABLE_WRITE_SHAPES` and that it "
+        "has its own naming entry there — the two claims contradict, and the pre-fix sentence may "
+        "not co-exist with the correction: "
+        f"{clause[:240]!r}…")
+
+
+def test_an_EQUAL_RANK_alias_collision_credits_the_SAME_name_in_both_source_orders(tmp_path):
+    """`_alias_credit_rank` decides the KIND; it does not decide WHICH same-rank name is credited.
+
+    ⛔ `#12182` review cycle 2 (P3): the tie-break had NO falsifier. Reverting `_alias_preference`
+    to the bare rank `>` left every test in both files green, while the published `callee`/
+    `callees` flipped with the source order — and that name is what a `recognised_producer` route
+    claim is re-derived from (`#11444`). Two aliasable names share rank 2 (the clause builders) and
+    two share rank 1 (`encode_for_store`, `compute_session_embedding`), so the collision is one
+    ordinary two-order test away, which is why the arms below assert the NAME and not the kind.
+
+    Control: the same fixtures must still be writers, so a resolver that stopped crediting them at
+    all cannot pass by making everything `unresolved_write` for the wrong reason.
+    """
+    builder_pair = (
+        "from tortoise.vector_write import set_embedding_clause as _a\n"
+        "from tortoise.vector_write import clear_then_set_prefix as _a\n"
+        "\n"
+        "def w(proj):\n"
+        '    return proj.g.query("MATCH (y) SET y += $p", {"p": _a("y")})\n'
+    )
+    ungated_pair = (
+        "from tortoise.embeddings import encode_for_store as _a\n"
+        # ⛔ the OTHER rank-1 name lives in a different module (`_ALIAS_HOMES`); same-module would
+        # simply not resolve and the arm would pass for the wrong reason.
+        "from tortoise.session_indexer import compute_session_embedding as _a\n"
+        "\n"
+        "def w(proj, text):\n"
+        '    return proj.g.query("MATCH (n:Point) SET n.embedding = $e", {"e": _a(text, 384)})\n'
+    )
+    for tag, body in (("builders", builder_pair), ("ungated", ungated_pair)):
+        # …and the REVERSED source order, built from the same two import lines swapped.
+        head, rest = body.split("\n\n", 1)
+        first, second = head.split("\n")
+        reversed_body = second + "\n" + first + "\n\n" + rest
+        credited = []
+        for order, src in (("as-written", body), ("reversed", reversed_body)):
+            found = probe._embedding_writers(_scratch_root(tmp_path, f"{tag}-{order}", src))
+            entry = found.get("tortoise.m::w")
+            assert entry is not None, (
+                f"{tag}/{order}: the writer vanished — a resolver that credits nothing is not a "
+                f"tie-break fix: {found}")
+            credited.append(frozenset(entry.get("callees") or ()))
+        assert credited[0] == credited[1], (
+            f"{tag}: the CREDITED name depends on source order \u2014 {sorted(credited[0])} vs "
+            f"{sorted(credited[1])}. `_alias_preference` must make an equal-rank tie deterministic, "
+            "because `callees` is what a route claim is re-derived from")
+        assert credited[0] & {"set_embedding_clause", "clear_then_set_prefix",
+                             "encode_for_store", "compute_session_embedding"}, (
+            f"{tag}: neither same-rank name was credited at all: {sorted(credited[0])}")
+
+
 def test_the_seam_CALL_population_is_the_one_the_register_names():
     """A `gated` writer owes NO declaration — so the register's only duty to it is an accurate
     statement of WHO is in that population, and this is the one claim about it that can go stale.
@@ -2578,21 +2716,26 @@ def _iterated_store_problem(node: ast.AST, constant: str, lines: list[str],
                 f"`{'`, `'.join(sorted(rebound))}` is RE-BOUND inside the loop over {constant}, so "
                 "the store is no longer built from the iterated value — the labels are no longer "
                 "derived from that constant")
-        # ⛔ `#12020` round 4: the store must execute in the LOOP's OWN scope. `ast.walk` descends
-        # into a nested `def`/`class`/`lambda`, so the same defect round 2 fixed in
-        # `_carrying_statements` was still open here: a store moved into a nested function the loop
-        # never calls — or one whose PARAMETER shadows the loop binding, or a class-body string —
-        # satisfied the row while nothing stored per iteration (measured: all three GREEN).
-        hits = [n for outer in body for n in _walk_own_scope(outer)
-                if isinstance(n, ast.stmt) and _executes_a_call(n)
-                and _carrier_issues_a_call(n)
-                # ⛔ `#12020` review round 12: a CONTAINER's slice spans its body, so without this
-                # the `If label == "Point":` block inside the loop was the "store" whenever the real
-                # store statements had been replaced by discarded clauses — the row stayed GREEN.
-                and not isinstance(n, _COMPOUND_STATEMENTS)
-                and (_STORE_CARRIER.search(_slice_own_scope(lines, n))
-                     or (merge_store
-                         and _MERGE_STORE_CARRIER.search(_slice_own_scope(lines, n))))]
+        # ⛔ `#12020` rounds 4 and 12: the store must execute in the LOOP's OWN scope, and it must be
+        # EXECUTED rather than merely held. `ast.walk` descends into a nested `def`/`class`/`lambda`,
+        # so the same defect round 2 fixed in `_carrying_statements` was still open here: a store
+        # moved into a nested function the loop never calls — or one whose PARAMETER shadows the loop
+        # binding, or a class-body string — satisfied the row while nothing stored per iteration
+        # (measured: all three GREEN).
+        # ⛔ AND IT MUST NOT KEEP ITS OWN COPY OF THAT PREDICATE (round 13, P2). This arm restated
+        # `_executes_a_call` + a bespoke gate — the drift class rounds 10-12 kept re-finding, inside
+        # the last arm holding a copy. It now calls the choke point, so the two cannot diverge.
+        # ⚠️ What that bought, stated no wider than measured (`#12182` review, P3 — corrected twice,
+        # so this half is MEASURED): on THIS fixture it changed no verdict. Restoring the pre-round-13
+        # inline copy verbatim in this arm leaves the whole two-file suite GREEN (measured here:
+        # 229 passed, 1 skipped), so this fixture cannot discriminate the two copies and must not be
+        # cited as the routing's pin. The two copies were NOT otherwise identical: the pre-PR carrier
+        # test accepted `_STORE_CARRIER`, OR — for a merge-class row — `_MERGE_STORE_CARRIER`, while
+        # the replacement passes exactly one `pattern`. A merge-class row therefore now accepts only
+        # the map-merge carrier. That narrowing is fail-closed and no live row's verdict changes, but
+        # it IS a behaviour change, not a de-duplication.
+        pattern = _MERGE_STORE_CARRIER if merge_store else _STORE_CARRIER
+        hits = [n for outer in body for n in _statements_that_store(outer, lines, pattern)]
         # ⛔ The MINIMAL store statements: without this, the enclosing `for` itself matches (its text
         # contains every store in its body) and any mention of the binding anywhere inside would
         # satisfy the target check — i.e. the arm would degrade to "something in the loop names it".
@@ -2683,13 +2826,46 @@ def _carrier_issues_a_call(statement: ast.stmt) -> bool:
     `bound_store` (its definition is the label PLUS a store), so the one kind that DOES owe an
     executed store was left on the gate that cannot see the discard shape.
 
-    ⚠️ Residual, stated (`#12020` round 10): this does not reach a store clause built into an
-    ASSIGNMENT that is never issued — `_unused = "…" + set_embedding_clause("e")` — nor a
-    `return`/`with`/`yield` that carries it. Those bind or scope a value and proving the built string
-    never reaches a `query(…)` is DATA FLOW, the same limit `UNDECIDABLE_WRITE_SHAPES` names for the
-    map merge. Measured on the reviewed head: the assignment mutation stayed GREEN. It is pinned as a
-    named residual by `test_a_carrier_that_only_HOLDS_the_store_text_is_the_named_residual`, so the
-    blind spot can narrow in neither direction silently.
+    ⚠️ Residual, stated (`#12020` round 10, widened round 13): this does not reach a store clause
+    BUILT into a value and never issued — `_unused = "…" + set_embedding_clause("e")`, and the same
+    for an `AnnAssign`/`AugAssign`/tuple-or-attribute target, an `.append(…)` that only buffers the
+    clause, and a `raise`/`return` that carries it. Those bind, buffer or escape the
+    value, and proving the built string never reaches a `query(…)` is DATA FLOW — the same limit
+    `UNDECIDABLE_WRITE_SHAPES` names for the map merge. Measured on the reviewed head: the assignment
+    and `raise` mutations stayed GREEN. ⛔ `raise` is NAMED rather than decided on purpose (round 13):
+    its value escapes into the exception, so it is the same data-flow class as `return` — unlike
+    `assert`, which discards what it evaluated.
+    ⛔ `with` and `yield` must NOT be listed with the shapes above (`#12182` review, P3, re-measured
+    at this head): they are REJECTED, not accepted, so they are the fail-CLOSED direction — an
+    over-block, not a blind spot. `with` reds because `_COMPOUND_STATEMENTS` is consulted at BOTH
+    gates and `ast.With`/`ast.AsyncWith` are members: `_statements_that_store` skips the container,
+    so the clause in `with <here>:` never reaches a body statement, and `_carrier_stores` sends a
+    container to that same own-scope list rather than reading its slice. `yield` reds because
+    `_carrier_issues_a_call` answers `isinstance(statement.value, ast.Call)` for an `ast.Expr`, which
+    is False for an `ast.Yield`. Both report "'…' is carried by 1 statement(s) in w, and none of them
+    stores anything". ⛔ BOTH gates are load-bearing for `with` — removing the tuple membership OR the
+    `_carrier_stores` container deferral accepts it — so naming one of them would be the same
+    claim-wider-than-mechanism defect this paragraph exists to catch. Listing either as residual
+    invited a maintainer to "decide" them — which would WIDEN the hole instead of narrowing it.
+    The REJECT direction and the residual list's DIRECTION are both pinned by
+    `test_WITH_and_YIELD_are_REJECTED_so_they_are_not_in_the_residual_list`, which also pins this
+    paragraph's own wording so the prose cannot drift away from the mechanism again.
+    ⛔ It pins the DIRECTION, not the coverage: measured (`#12182` cycle 15, P3) mutating
+    `_carrier_issues_a_call` so `AnnAssign` / `AugAssign` / tuple-or-attribute targets are
+    DECIDED-AGAINST leaves the file green, so those entries are NAMED and undefended — the
+    accounting below says exactly how many ARE pinned (FOUR), and an earlier draft of THIS sentence
+    claimed "the residual list" was pinned, which that accounting then contradicted three lines
+    later.
+    ⛔ `#12182` review: FOUR of the shapes above are pinned, not the list. The plain `Assign` by
+    `test_a_carrier_that_only_HOLDS_the_store_text_is_the_named_residual` (it rewrites the shipped
+    statement to `_unused = (…`), `raise` by
+    `test_a_DISCARDED_clause_stores_nothing_on_EVERY_claim_kind`, and `return` plus `.append(…)` by
+    `test_WITH_and_YIELD_are_REJECTED_so_they_are_not_in_the_residual_list`'s accepted arm.
+    `AnnAssign`, `AugAssign` and the tuple/attribute target are NAMED here and measured by hand, and
+    NOTHING reds if one of THEM silently changes direction — the previous wording ("they are pinned …
+    so the blind spot can narrow in neither direction silently") claimed otherwise, which is the
+    stale-disclosure shape the round-10 test exists to prevent. (`with` and `yield` used to be listed
+    with those three; they are rejected, not accepted, and are accounted for separately ABOVE.)
     """
     if isinstance(statement, ast.Expr):
         return isinstance(statement.value, ast.Call)
@@ -3471,6 +3647,136 @@ def test_a_DISCARDED_clause_stores_nothing_on_EVERY_claim_kind() -> None:
                                   match_discarded.splitlines()) == [], (
         "`ast.Match` is being counted as a store by its slice")
 
+    # ── the ITERATED arm answers through the SHARED choke point (round 13, P2) ────────────────────
+    # A loop with a GENUINE store that is NOT built from the binding, plus a discarded clause inside
+    # a container that IS. The statement arm passes (the real store carries the needle), so only the
+    # iterated arm can red.
+    # ⚠️ What this pins, stated no wider than measured (`#12182` review cycles 3 and 7): the SHAPE — a
+    # genuine store in the loop plus a discarded clause inside a container. It does NOT pin the
+    # ROUTING, and must not be cited for it.
+    # ⛔ `#12182` review cycle 7, P2 — and this is the SECOND correction of this note, so both halves
+    # are measured, not asserted. The sentence that stood here called "reverting the change left the
+    # suite green" MEASURED FALSE; the RETRACTION was the false half. `git show eb27f96d3:tests/…`
+    # (the pre-PR copy this arm replaced) already carried `and not isinstance(n, _COMPOUND_STATEMENTS)`
+    # beside `_executes_a_call` and `_carrier_issues_a_call`, and `_COMPOUND_STATEMENTS` contains
+    # `ast.If`; this test's `_walk_own_scope` never yields a scope node, so restoring that expression
+    # verbatim runs this file green (measured: 50 passed). Round 13 therefore removed a DUPLICATE and
+    # bought no behaviour change on THIS shape space — which is true of this fixture, not of the
+    # change as a whole: the carrier test narrowed for merge-class rows, where the arm is called.
+    # Reverting the routing leaves THIS fixture green. That is why it cannot be cited as the
+    # routing's pin; it is not a reason to doubt the revert, and the drift class is still real,
+    # because the fixture that would red it does not exist yet. The same measurement is stated above,
+    # at the arm the routing actually lives in.
+    iterated_mutant = (
+        '_KEYS = ("Point",)\n\n\n'
+        'def w(g):\n'
+        '    for label in _KEYS:\n'
+        '        if label == "Point":\n'
+        "            f\"MATCH (n:{label}) SET n += {set_embedding_clause('n')}\"\n"
+        '        g.query("MATCH (q)", {"p": set_embedding_clause("q")})\n')
+    problem_iterated = _evidence_violation(iterated_mutant, "w", "MATCH (q)", claim="store",
+                                           iterated="_KEYS")
+    # ⛔ These messages named the COPY in their first revision (`#12182` cycle 7, P3). They must name
+    # what the fixture actually pins: restoring the per-arm copy leaves this fixture GREEN→RED
+    # unchanged (measured — the pre-PR arm produces a character-identical message), so a message
+    # naming the copy sends a fixer hunting a duplicate that does not exist.
+    # ⛔ Only the FIRST message claimed the copy ("that arm kept its own copy of the store
+    # predicate"). The SECOND **disclaimed** it — "so this fixture does NOT pin the copy that drifted"
+    # — and a later review quoted the disclaimer with the `not` dropped, so this note then attributed
+    # the opposite claim to it (`#12182` cycle 8, P3; measured at `06261a5aa5:tests/…:3649-3651`).
+    # Named by its MESSAGE and not a `:LINE`, because an offset rots — this note pointed at one and
+    # the fix in this same cycle moved the line out from under it.
+    assert problem_iterated is not None, (
+        "a discarded clause inside a loop CONTAINER satisfied the iterated arm — the shape the "
+        "`_COMPOUND_STATEMENTS` exclusion exists to reject. This fixture reds on BOTH the pre- and "
+        "the post-round-13 copies (measured), so a GREEN here means the exclusion itself is gone, "
+        "not that a copy drifted")
+    assert "drives a store" in problem_iterated, (
+        f"the red is not the ITERATED arm's — another check fired first, so this fixture is not "
+        f"exercising the collision it exists for: {problem_iterated}")
+
+    # ── `raise` is NAMED, not decided (round 13, P3) ──────────────────────────────────────────────
+    # An `assert` discards what it evaluated, so it is decidable (round 11). A `raise` ESCAPES its
+    # value into the exception, so it is the `return` class — data flow — and is named in the
+    # residual instead. Both directions asserted: the shape stays GREEN and the name stays present.
+    raise_src = ('def w(g):\n'
+                 "    raise ValueError(f\"MERGE (e:Event) {set_embedding_clause('e')}\")\n")
+    assert violation(raise_src, "MERGE (e:Event)", "store") is None, (
+        "`raise` is now DECIDED against — if that is intended, delete the residual clause that "
+        "names it as data flow, so the two do not disagree")
+    # ⛔ The pin is a PHRASE, not the token (`#12182` review, P3): the docstring contains `raise`
+    # FOUR times — including the historical "the assignment and `raise` mutations stayed GREEN" and
+    # the shape list — so `"raise" in doc` was satisfied after deleting the residual clause it
+    # claims to defend, and by a coherent inversion that kept the word (measured). The sibling pin
+    # in `test_the_register_scopes_its_SHADOW_claim_to_the_SEAM_and_names_the_builder_residual`
+    # records the same weakness at round 12.
+    assert "`raise` is NAMED rather than decided" in (_carrier_issues_a_call.__doc__ or ""), (
+        "`raise` is credited by the choke point and no longer NAMED as a residual — an undisclosed "
+        "fail-open is the claim being wider than the mechanism")
+
+
+def test_WITH_and_YIELD_are_REJECTED_so_they_are_not_in_the_residual_list() -> None:
+    """`#12182` review, P3: `with`/`yield` were listed as fail-OPEN residual shapes and are not.
+
+    `_carrier_issues_a_call`'s docstring grouped `raise`/`return`/`yield`/`with` together as "a store
+    clause BUILT into a value and never issued", i.e. shapes the choke point ACCEPTS. Two of the four
+    do not: measured at this head, a clause in a `with` context expression and a clause in a `yield`
+    both RED the row. That is the fail-CLOSED direction, so the disclosure pointed a maintainer the
+    wrong way — "decide this residual" would have WIDENED the hole.
+
+    The two mechanisms, so this pin is not a transcript of one run:
+      * `_statements_that_store` skips every `_COMPOUND_STATEMENTS` member, and `ast.With`/
+        `ast.AsyncWith` are members — so the clause in `with <here>:` never reaches a body statement
+        and the row reports "carried by N statement(s) … and none of them stores anything".
+      * `_carrier_issues_a_call` returns `isinstance(statement.value, ast.Call)` for an `ast.Expr`,
+        which is False for `ast.Yield` — so `yield <clause>` is carried and not issued.
+
+    ⛔ Pinned in BOTH directions on purpose: the two names must be REJECTED, and the four shapes that
+    really are accepted must stay accepted. If a future change makes `with`/`yield` accepted, the
+    disclosure becomes wrong the OTHER way and this reds instead of silently contradicting itself.
+    """
+    accepted = {
+        "assign": 'def w(x):\n    _unused = "MERGE (e:Event) " + set_embedding_clause("e")\n',
+        "return": 'def w(x):\n    return "MERGE (e:Event) " + set_embedding_clause("e")\n',
+        "raise": 'def w(x):\n    raise ValueError("MERGE (e:Event) " + set_embedding_clause("e"))\n',
+        "append": 'def w(x):\n    _buf = []\n    _buf.append("MERGE (e:Event) " + set_embedding_clause("e"))\n',
+    }
+    rejected = {
+        "with": ('def w(x):\n    with open("MERGE (e:Event) " + set_embedding_clause("e")) as f:\n'
+                 '        pass\n'),
+        "yield": 'def w(x):\n    yield "MERGE (e:Event) " + set_embedding_clause("e")\n',
+    }
+    for name, source in accepted.items():
+        assert _evidence_violation(source, "w", "MERGE (e:Event)", claim="store") is None, (
+            f"the {name} shape is no longer the accepted residual — the docstring now understates "
+            "the blind spot and must name it again")
+    for name, source in rejected.items():
+        violation = _evidence_violation(source, "w", "MERGE (e:Event)", claim="store")
+        assert violation is not None, (
+            f"{name} is ACCEPTED now, so it belongs in the residual list again — the docstring "
+            "claims it is rejected, and an undisclosed fail-open is the claim being wider than "
+            "the mechanism")
+        assert "none of them stores anything" in violation, (
+            f"{name} reds for a DIFFERENT reason than the disclosure names: {violation!r}")
+
+    # ⛔ …and pin the DISCLOSURE, not only the mechanism (`#12182` review, P3). The file's own
+    # convention for this docstring is a phrase pin (see `test_the_register_scopes_its_SHADOW_claim_to_the_SEAM_and_names_the_builder_residual` and the
+    # `raise` pin above), because a mechanism-only pin passes while the sentence a maintainer READS
+    # says the opposite — which is exactly how `with`/`yield` sat in the fail-OPEN list while the
+    # code rejected them. A revert that re-adds them to the residual list must red HERE.
+    doc = _carrier_issues_a_call.__doc__ or ""
+    assert "`with` and `yield` must NOT be listed with the shapes above" in doc, (
+        "`_carrier_issues_a_call` no longer forbids listing `with`/`yield` as accepted residual "
+        "shapes — measured at this head they are REJECTED, so the disclosure would again point a "
+        "maintainer at WIDENING the blind spot instead of narrowing it")
+    assert "and a `raise`/`return` that carries it" in doc, (
+        "the accepted-residual sentence changed — re-derive whether it still names ONLY shapes the "
+        "choke point actually ACCEPTS, then re-cut this pin rather than deleting it")
+    assert "accounted for separately ABOVE" in doc, (
+        "the `with`/`yield` note points somewhere it is not — the corrected accounting sits ABOVE "
+        "the pinned-shapes paragraph, and a stale directional pointer is how a reader concludes the "
+        "sentence was never re-read")
+
 
 def test_a_deleted_vector_write_reds_the_BOUND_STORE_row() -> None:
     """`#12020` review round 6: `restore_graph`'s store is NAMEABLE, so `bound` was too weak.
@@ -3699,6 +4005,349 @@ def test_a_no_live_vector_declaration_executes_no_store_clause() -> None:
         f"{offenders} — row 2 REMOVES such a writer from the map it audits, so a real store would "
         "still print `stored-without-a-query-path: none`. Declare the label, or add a reasoned "
         "entry to NO_STORE_EXEMPTIONS"
+    )
+
+
+#: `#12170`. An `EXEMPT` row whose `stores` is :data:`NO_LIVE_VECTOR` because the store is
+#: **DELEGATED** is a claim about a DELEGATE: *"this writer's own body holds no store clause, and the
+#: store it feeds exists in the writer it names"*. The first half is re-derived by
+#: `test_a_no_live_vector_declaration_executes_no_store_clause` (absence in its own body). The second
+#: half had NO pin at all, and it is the half that can go quiet — measured **at `ca74f2375e`, before
+#: this pin existed**: delete `"embedding"` from `_EntityHandlers._SOURCE_EXTRA_PROPS` and the caller's
+#: vector is **denied on the node** (`#3998` deny-and-log: measured node value `None` while the
+#: `SourceCreated` record still carries the 4-float vector), so a vector is journalled and unreadable,
+#: the declaration above still says the store is delegated to that passthrough, whose closed surface
+#: `DECLARES` `embedding`, and **390 tests across the four suites that own this seam stayed green**. That is a
+#: silent retrieval loss behind a declaration nobody re-derived — the class `#12170` is about, one level in
+#: from the missing-entry symptom the issue names.
+#:
+#: Keyed by the register key, the routes are read off SOURCE at HEAD (no import, no graph — this
+#: suite is `core` and stays URI-less):
+#:   * `handoff` — the `(path, symbol)` that must still hand its payload to the delegate op,
+#:     by calling `handoff_call`;
+#:   * `delegate` — the `(path, symbol)` the register's `reason` NAMES, which must still exist;
+#:   * `passthrough` — the call inside the delegate that performs the extra-props store;
+#:   * `allowlist` — the constant the passthrough's `allow_keys=` is FED from (one hop), which must
+#:     still name `required`. ⛔ That is what makes the exemption TRUE: a key absent from the closed `:Source`
+#:     surface is dropped, not stored (`#3998`), so a declaration that names the delegate while the
+#:     delegate stops admitting the key is a claim about a write that no longer happens.
+DELEGATED_STORE_ROUTES: dict[str, dict[str, object]] = {
+    "tortoise.sdk::create_source": {
+        "handoff": ("tortoise/sdk.py", "create_source"),
+        "handoff_call": "_create_entity",
+        "delegate": ("tortoise/projection/entities.py", "_upsert_source"),
+        "passthrough": "_persist_extra_props",
+        "allowlist": "_SOURCE_EXTRA_PROPS",
+        "required": frozenset({"embedding"}),
+    },
+}
+
+
+def _constant_strings(tree: ast.Module, name: str) -> set[str] | None:
+    """Every string literal a binding of `name` carries, or None when the name is not bound.
+
+    ⛔ Not `tree.body` only: the allowlist this pin reads is a CLASS attribute
+    (`_SOURCE_EXTRA_PROPS` sits in `_EntityHandlers`' body, inherited by `FalkorProjection` — NOT in
+    `Projection`, which is a `Protocol` and carries no such attribute; measured, `hasattr(Projection,
+    "_SOURCE_EXTRA_PROPS")` is False), so a module-level-only walk would report
+    the constant as gone and red the control arm — a false hold naming the wrong cause.
+
+    ⚠️ STATED RESIDUAL — what this walk does NOT see, measured on this head rather than assumed:
+    (a) a CALL-SITE narrowing (`_allow = self._SOURCE_EXTRA_PROPS - {"embedding"}`, which the
+    `allow_keys=` feed check accepts because the expression still MENTIONS the constant), and (b) a
+    SECOND binding of the name in the same scope that shadows the real one — this returns the UNION
+    of every binding, so the shadow is invisible here even though Python uses the last. Both leave
+    this static half GREEN; the authority for the EFFECTIVE set is the live node assertion in
+    `tests/test_11858_source_door_markers.py::test_a_caller_vector_still_gets_a_truthfully_minted_marker`,
+    which was measured to red on both. A walk that cannot see a shadow must say so, not imply it
+    saw it.
+    """
+    values: set[str] = set()
+    found = False
+    for node in ast.walk(tree):
+        targets: list[ast.AST] = []
+        if isinstance(node, ast.Assign):
+            targets = list(node.targets)
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+        else:
+            continue
+        if not any(isinstance(t, ast.Name) and t.id == name for t in targets):
+            continue
+        found = True
+        values |= {
+            n.value for n in ast.walk(node.value)
+            if isinstance(n, ast.Constant) and isinstance(n.value, str)
+        }
+    return values if found else None
+
+
+def _delegation_violation(
+    *,
+    handoff_source: str,
+    delegate_source: str,
+    reason: str,
+    handoff: tuple[str, str],
+    handoff_call: str,
+    delegate: tuple[str, str],
+    passthrough: str,
+    allowlist: str,
+    required: frozenset[str],
+) -> str | None:
+    """Why the DELEGATED-store claim does not re-derive at this head, or None when it does.
+
+    Kept as a function over SOURCE (not over the live tree) so the mutations below drive it: a pin
+    that can only be run against the tree's current content cannot be checked at all once the
+    content is right — the same reason `register.load` is public.
+
+    ⛔ It does NOT try to prove the vector reaches the node by data flow (that is the live falsifier
+    in `tests/test_11858_source_door_markers.py`). It proves the text-level facts the declaration's
+    wording rests on: the writer hands off to the delegate, the delegate still calls the passthrough
+    with `allow_keys=` FEED FROM that constant, and the constant still admits the key. Deleting any
+    one of them makes the prose false, so each must red.
+
+    ⛔ Step (b) is a FEED check, not a co-occurrence check (round 1 of this lane's own review): an
+    earlier version asserted only that `self.<allowlist>` occurred SOMEWHERE in the delegate, which
+    a refactor that read the constant for an unrelated purpose while feeding the passthrough another
+    set would have satisfied — the "green over a delegation that no longer happens" shape one level
+    in. The `allow_keys=` argument must be the constant itself, or a local ASSIGNED from it (the real
+    shape: `_allow = self._SOURCE_EXTRA_PROPS`, then `allow_keys=_allow`).
+    """
+    if delegate[1] not in reason:
+        return (
+            f"the declaration's reason does not name {delegate[1]!r}, so this pin would be guarding "
+            "a delegation the row no longer claims"
+        )
+    # (a) the WRITER still hands its payload to the delegate, under a name discovery can see.
+    handoff_tree = ast.parse(handoff_source)
+    handers = [
+        n for n in ast.walk(handoff_tree)
+        if isinstance(n, ast.FunctionDef) and n.name == handoff[1]
+    ]
+    if not handers:
+        return f"{handoff[0]}::{handoff[1]} is not defined any more"
+    hands_off = any(
+        isinstance(n, ast.Call)
+        and (
+            (isinstance(n.func, ast.Attribute) and n.func.attr == handoff_call)
+            or (isinstance(n.func, ast.Name) and n.func.id == handoff_call)
+        )
+        for fn in handers for n in ast.walk(fn)
+    )
+    if not hands_off:
+        return (
+            f"{handoff[1]} no longer calls {handoff_call} — the payload never reaches the "
+            "delegate the declaration names"
+        )
+    delegate_tree = ast.parse(delegate_source)
+    delegates = [
+        n for n in ast.walk(delegate_tree)
+        if isinstance(n, ast.FunctionDef) and n.name == delegate[1]
+    ]
+    if not delegates:
+        return f"{delegate[0]}::{delegate[1]} — the DELEGATE the reason names — is not defined any more"
+    # (b) the delegate still stores through the passthrough, its `allow_keys=` FED from the constant.
+    keys = [
+        kw.value for fn in delegates for n in ast.walk(fn)
+        if isinstance(n, ast.Call)
+        and (
+            (isinstance(n.func, ast.Attribute) and n.func.attr == passthrough)
+            or (isinstance(n.func, ast.Name) and n.func.id == passthrough)
+        )
+        for kw in n.keywords if kw.arg == "allow_keys"
+    ]
+    if not keys:
+        return f"{delegate[1]} no longer calls {passthrough}(…, allow_keys=…) — the store is gone"
+
+    def _mentions(node: ast.AST) -> bool:
+        """Whether `node` names `self.<allowlist>` (directly, or inside a `|` union of it)."""
+        return any(
+            isinstance(n, ast.Attribute) and n.attr == allowlist for n in ast.walk(node)
+        )
+
+    def _fed_by(value: ast.AST) -> bool:
+        """Whether THIS `allow_keys=` expression reaches the constant (directly or one hop)."""
+        if _mentions(value):
+            return True
+        if not isinstance(value, ast.Name):
+            return False
+        for fn in delegates:
+            for node in ast.walk(fn):
+                if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                    continue
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                if (
+                    any(isinstance(t, ast.Name) and t.id == value.id for t in targets)
+                    and _mentions(node.value)
+                ):
+                    return True
+        return False
+
+    # EVERY `allow_keys=` on this passthrough, not "one of them": a second call fed a different set
+    # is a store the declaration does not cover, and `any()` would pass over it.
+    if not all(_fed_by(value) for value in keys):
+        return (
+            f"{delegate[1]} no longer FEEDS the passthrough's allow_keys from {allowlist} — the "
+            "declaration names a store that may not admit the vector"
+        )
+    # (c) the closed surface still admits the key, or the vector is DENIED rather than stored.
+    named = _constant_strings(delegate_tree, allowlist)
+    if named is None:
+        return f"{allowlist} is no longer defined at module level in {delegate[0]}"
+    missing = sorted(required - named)
+    if missing:
+        return (
+            f"{allowlist} no longer names {missing}, so the passthrough DENIES the vector "
+            "(#3998 deny-and-log) and the delegation stores nothing — the declaration is false"
+        )
+    return None
+
+
+def test_the_delegated_store_this_row_names_still_resolves() -> None:
+    """`#12170`: an EXEMPT-as-CARRIER row's OTHER half — the delegate — re-derived at HEAD.
+
+    ⛔ What this proves, stated at its true size: the writer still hands its payload to the delegate
+    the `reason` names, the delegate still stores through the extra-props passthrough fed from the
+    closed allowlist, and that allowlist still admits the vector key. It does NOT prove the node
+    ends up carrying the vector — that is
+    `tests/test_11858_source_door_markers.py::test_a_caller_vector_still_gets_a_truthfully_minted_marker`,
+    which drives the real write. Two halves, two homes, because a source reader cannot execute a
+    store and this suite must stay URI-less.
+
+    ⛔ Why it exists when the row's class is already pinned: `EXEMPT` + `NO_LIVE_VECTOR` is
+    ONE OF TWO rows whose truth lives in ANOTHER function — `tortoise.sdk::_index_process_unit`
+    (`tortoise/embed_writer_register.py`, the `#10541` block) declares the same pair and hands its
+    store to `_session_event_write` in the same prose shape. Every other declaration either names a
+    label (re-derived by `LABEL_EVIDENCE`) or proves absence in its own body (re-derived above).
+    These two say "the store is over there". This pin covers `create_source`'s; ⛔ `_index_process_unit`
+    is the RESIDUAL — nothing re-derives its delegation either, and it is left unpinned here on
+    purpose so the next reader does not read this pin as coverage of both.
+    """
+    assert DELEGATED_STORE_ROUTES, (
+        "no routed row is declared — this pin would assert nothing"
+    )
+    for key, route in sorted(DELEGATED_STORE_ROUTES.items()):
+        record = EMBED_WRITER_CLASSES[key]
+        # The pin is about ONE shape; if the row stops being that shape, the pin must be re-derived
+        # rather than silently guarding nothing.
+        assert (record.cls, record.stores) == (EXEMPT, NO_LIVE_VECTOR), (
+            f"{key} is no longer (EXEMPT, NO_LIVE_VECTOR): {record.cls!r}/{record.stores!r} — the "
+            "delegation pin re-derives the carrier shape, so a re-classified row needs it re-derived"
+        )
+        handoff: tuple[str, str] = route["handoff"]  # type: ignore[assignment]
+        delegate: tuple[str, str] = route["delegate"]  # type: ignore[assignment]
+        violation = _delegation_violation(
+            handoff_source=(REPO_ROOT / handoff[0]).read_text(encoding="utf-8"),
+            delegate_source=(REPO_ROOT / delegate[0]).read_text(encoding="utf-8"),
+            reason=record.reason,
+            handoff=handoff,
+            handoff_call=str(route["handoff_call"]),
+            delegate=delegate,
+            passthrough=str(route["passthrough"]),
+            allowlist=str(route["allowlist"]),
+            required=route["required"],  # type: ignore[arg-type]
+        )
+        assert violation is None, (
+            f"{key} declares a DELEGATED store ({record.stores}) whose route no longer re-derives: "
+            f"{violation}. The delegate's store is the WHOLE of this row's exemption; when it stops "
+            "being true the row reads as 'no vector here', which is the unqualified reading "
+            "`#12170`'s close-out note forbids"
+        )
+
+
+def test_the_delegation_pin_REDS_on_each_fact_it_rests_on() -> None:
+    """The falsifier, DRIVEN: each of the three facts must red the pin on its own.
+
+    A source-derived pin is the easiest kind to leave vacuous — a reader that returns None because
+    it found nothing reads exactly like a claim that re-derived. So each mutation below is applied
+    to the REAL source text (asserted to have changed, so a stale anchor cannot pass silently) and
+    the helper must name the fact it lost.
+    """
+    route = DELEGATED_STORE_ROUTES["tortoise.sdk::create_source"]
+    delegate_rel = route["delegate"][0]  # type: ignore[index]
+    allowlist = str(route["allowlist"])
+    delegate_source = (REPO_ROOT / delegate_rel).read_text(encoding="utf-8")
+    handoff_source = (REPO_ROOT / route["handoff"][0]).read_text(encoding="utf-8")  # type: ignore[index]
+    kwargs = dict(
+        handoff_source=handoff_source,
+        reason=EMBED_WRITER_CLASSES["tortoise.sdk::create_source"].reason,
+        handoff=route["handoff"],  # type: ignore[arg-type]
+        handoff_call=str(route["handoff_call"]),
+        delegate=route["delegate"],  # type: ignore[arg-type]
+        passthrough=str(route["passthrough"]),
+        allowlist=allowlist,
+        required=route["required"],  # type: ignore[arg-type]
+    )
+    assert _delegation_violation(delegate_source=delegate_source, **kwargs) is None, (
+        "the control arm does not re-derive on the real tree, so the mutations below prove nothing"
+    )
+
+    # (c) the key is dropped from the closed `:Source` surface — the measured #12170 mutation.
+    anchor = '"domain", "summary", "topics", "status", "embedding", "about_entities",'
+    assert delegate_source.count(anchor) == 1, (anchor, delegate_source.count(anchor))
+    dropped = delegate_source.replace(
+        anchor, '"domain", "summary", "topics", "status", "about_entities",')
+    assert dropped != delegate_source, "the allowlist anchor did not change — a stale needle"
+    violation = _delegation_violation(delegate_source=dropped, **kwargs)
+    assert violation is not None and "embedding" in violation, (
+        "dropping `embedding` from the :Source allowlist must red the delegation pin: the vector "
+        f"is then DENIED, not stored — got {violation!r}"
+    )
+
+    # (b) the passthrough call is renamed — the store the row names is gone.
+    renamed = delegate_source.replace(
+        "self._persist_extra_props(", "self._persist_other_props(")
+    assert renamed != delegate_source, "the passthrough anchor did not change — a stale needle"
+    violation = _delegation_violation(delegate_source=renamed, **kwargs)
+    assert violation is not None and str(route["passthrough"]) in violation, (
+        f"renaming the store passthrough must red the pin — got {violation!r}"
+    )
+
+    # (b') the passthrough is fed a different set — the row's wording stops being derivable.
+    refed = delegate_source.replace(
+        "_allow = self._SOURCE_EXTRA_PROPS", "_allow = frozenset()")
+    assert refed != delegate_source, "the allowlist-feed anchor did not change — a stale needle"
+    violation = _delegation_violation(delegate_source=refed, **kwargs)
+    assert violation is not None and allowlist in violation, (
+        f"re-feeding the passthrough from another set must red the pin — got {violation!r}"
+    )
+
+    # (b'') the constant is still READ by the delegate, but for something else — the co-occurrence
+    # hole round 1 found: a `reads` check passes, a FEED check must not.
+    decoy = delegate_source.replace(
+        "allow_keys=_allow,", "allow_keys=_capture_props,", 1)
+    assert decoy != delegate_source, "the allow_keys anchor did not change — a stale needle"
+    violation = _delegation_violation(delegate_source=decoy, **kwargs)
+    assert violation is not None and allowlist in violation, (
+        "a passthrough fed a DIFFERENT set while the constant is still mentioned in the body must "
+        f"red the pin (co-occurrence is not a feed) — got {violation!r}"
+    )
+
+    # (a) the DELEGATE the reason names stops existing — the row names a function that is gone.
+    gone = delegate_source.replace("def _upsert_source(", "def _upsert_source_renamed(")
+    assert gone != delegate_source, "the delegate anchor did not change — a stale needle"
+    violation = _delegation_violation(delegate_source=gone, **kwargs)
+    assert violation is not None and "_upsert_source" in violation, (
+        f"a renamed delegate must red the pin — got {violation!r}"
+    )
+
+    # (a') the writer stops handing its payload to the delegate — nothing reaches the store.
+    no_handoff = handoff_source.replace(
+        "self._create_entity(", "self._create_entity_renamed(")
+    assert no_handoff != handoff_source, "the handoff anchor did not change — a stale needle"
+    violation = _delegation_violation(
+        delegate_source=delegate_source, **{**kwargs, "handoff_source": no_handoff})
+    assert violation is not None and str(route["handoff_call"]) in violation, (
+        f"a writer that stops calling its handoff must red the pin — got {violation!r}"
+    )
+
+    # …and the reason no longer naming the delegate is its own red (the prose/pin drift guard).
+    violation = _delegation_violation(
+        delegate_source=delegate_source,
+        **{**kwargs, "reason": "a carrier with no delegate named"},
+    )
+    assert violation is not None and "reason" in violation, (
+        f"a reason that stops naming its delegate must red the pin — got {violation!r}"
     )
 
 
@@ -4334,8 +4983,98 @@ ALIASED_IMPORT_SHAPES: dict[str, tuple[str, dict[str, str], str]] = {
     # LEXICALLY FIRST binding (the walk yields siblings LIFO), so a GATE spelling that never runs
     # replaced the live BUILDER it shares a name with and the writer measured `gated` — outside
     # `NEEDS_A_DECLARATION`, i.e. it stopped owing a declaration. Neither binding is a "rebinding",
-    # so no other rule saw the collision. Resolution now prefers the BUILDER in every collision,
-    # which is fail-closed in both source orders; each arm below is the shape that was `gated`.
+    # so no other rule saw the collision. Resolution is now ordered by what the CREDIT DOES to the
+    # writer (builders > ungated > seam), so it does not depend on source order.
+    # ⛔ The collision arms below are NOT instances of one bug, and this note deliberately states NO
+    # count (a "three arms below" here was wrong within one commit — round 8 cycle 5, P3).
+    # ⛔ AND THIS NOTE NAMED THE WRONG DISCRIMINATORS (`#12182` review cycle 7, P3). It used to say
+    # `GATE_then_a_BUILDER` and `TYPE_CHECKING_then_a_builder` "were `gated` before the ranked fix"
+    # and that `BUILDER_then_a_GATE` was the reversed-order CONTROL — and it drew an empty
+    # two-clause distinction from that. Measured over all 40 rows by driving each through
+    # `origin/main`'s `_embedding_writers` (which carries NO rank rule at all), all three already
+    # measure `unresolved_write`, so none of them is evidence about the ranking in either direction.
+    # Exactly FIVE rows change verdict between `origin/main` and this head, and THEY are the arms
+    # that discriminate it: the two `UNGATED…SEAM` arms (`gated` → `ungated`) and the three
+    # WRITER-SCOPE cross-scope arms (`gated` → `unresolved_write`, `producer` → `unresolved_write`,
+    # `ungated` → `unresolved_write`). Read each arm's own note rather than a summary here: this
+    # paragraph has now been wrong twice about which arms say what.
+
+    # ⛔ `#12020` round 8 cycle 4 (P1) — the collision rule was BUILDER-ONLY, so a `SEAM_CALL` vs
+    # `UNGATED_CALLS` collision (neither is a builder) still fell through to first-seen, which is
+    # source-order-dependent — and LIFO made "first-seen" the lexically LAST binding, so the common
+    # `try: import encode_for_store` / `except ImportError: import encode_for_row` idiom resolved to
+    # the seam that never runs and the writer measured `gated`: HIDDEN. ⛔ NOT "a regression against
+    # `main`", which is what this note said until `#12182`'s rebase review measured it FALSE —
+    # `origin/main` `f33f5e2c32` has no rank rule and reads `gated` for this arm too, so the ranked
+    # rule closes a pre-existing hide. Both orders must now resolve to `ungated`,
+    # which is INSIDE `NEEDS_A_DECLARATION`.
+    # ⛔ `#12020` round 8 cycle 5 (P1) — the rank rule was applied INSIDE one `_import_aliases`
+    # call while the two maps were merged plainly (`{**module, **writer}`), so a WRITER-scope binding
+    # beat the module's whatever its rank — and a writer-scope import is not automatically the live
+    # one (`if TYPE_CHECKING:` is this PR's own idiom for a dead one). Measured: a dead writer-scope
+    # SEAM import beat a live module-level BUILDER alias → `gated`, and the rank-1 variant → `ungated`.
+    # ⛔ Both are `origin/main` `f33f5e2c32`'s OWN answers (measured there: `gated` and `ungated`
+    # respectively), so the ranked merge closes a pre-existing hide and a pre-existing demotion — the
+    # earlier wording called it "a regression against `main`" and the rebase review measured that FALSE.
+    "a_dead_WRITER-SCOPE_seam_import_does_not_beat_a_live_MODULE_builder_alias": (
+        "from typing import TYPE_CHECKING\n"
+        "from tortoise.vector_write import set_embedding_clause as _set\n"
+        "\n"
+        "def w(proj, text):\n"
+        "    if TYPE_CHECKING:\n"
+        "        from tortoise.embeddings import encode_for_row as _set\n"
+        '    proj.g.query("MATCH (n:Point) SET n.embedding = $e", {"e": text})\n'
+        '    return _set("n")\n',
+        {"tortoise.m::w": "unresolved_write"},
+        "the rank rule lived only INSIDE one map, so this measured `gated` — the dead gate import "
+        "won the merge and hid a writer whose live binding is the builder",
+    ),
+    "a_WRITER-SCOPE_ungated_import_over_a_module_BUILDER_with_NO_write_clause_is_NOT_demoted_to_producer": (
+        "from tortoise.vector_write import set_embedding_clause as _set\n"
+        "\n"
+        "def w(text):\n"
+        "    if False:\n"
+        "        from tortoise.embeddings import encode_for_store as _set\n"
+        '    return _set(text, 384)\n',
+        {"tortoise.m::w": "unresolved_write"},
+        "the cross-scope merge with NO own write clause: unranked, the dead ungated import won and "
+        "the writer measured `producer` — OUTSIDE `NEEDS_A_DECLARATION`, i.e. a hide",
+    ),
+    "a_dead_WRITER-SCOPE_ungated_import_does_not_beat_a_live_MODULE_builder_alias": (
+        "from tortoise.vector_write import set_embedding_clause as _set\n"
+        "\n"
+        "def w(proj, text):\n"
+        "    if False:\n"
+        "        from tortoise.embeddings import encode_for_store as _set\n"
+        '    proj.g.query("MATCH (n:Point) SET n.embedding = $e", {"e": text})\n'
+        '    return _set("n")\n',
+        {"tortoise.m::w": "unresolved_write"},
+        "the same cross-scope merge, one rank down: measured `ungated` here (INSIDE the guard) while "
+        "the maps were merged unranked, so the harm is the demotion this arm still catches, not a "
+        "hide",
+    ),
+    "one_local_name_bound_by_an_UNGATED_then_a_SEAM_import": (
+        "from tortoise.embeddings import encode_for_store as _a\n"
+        "from tortoise.embeddings import encode_for_row as _a\n"
+        "\n"
+        "def w(proj):\n"
+        '    proj.g.query("MATCH (n:Point) SET n.embedding = $e", {"e": _a("t", 384)})\n',
+        {"tortoise.m::w": "ungated"},
+        "neither name is a builder, so the builder-only preference left this to source order; the "
+        "seam rank must LOSE every collision because `gated` is the only rank that hides a writer",
+    ),
+    "one_local_name_bound_by_an_UNGATED_import_with_a_try_except_SEAM_fallback": (
+        "try:\n"
+        "    from tortoise.embeddings import encode_for_store as _a\n"
+        "except ImportError:\n"
+        "    from tortoise.embeddings import encode_for_row as _a\n"
+        "\n"
+        "def w(proj):\n"
+        '    proj.g.query("MATCH (n:Point) SET n.embedding = $e", {"e": _a("t", 384)})\n',
+        {"tortoise.m::w": "ungated"},
+        "the idiomatic optional-dependency spelling, whose LIVE binding is the ungated one: it "
+        "measured `gated` (hidden) while the fix was builder-only",
+    ),
     "one_local_name_bound_by_a_GATE_then_a_BUILDER_import": (
         "from tortoise.embeddings import encode_for_row as _a\n"
         "from tortoise.vector_write import set_embedding_clause as _a\n"

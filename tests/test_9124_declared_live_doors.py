@@ -578,6 +578,20 @@ _UNRESOLVED = {
     # is `MATCH (op:Point {is_operator:true})-[r:mitigated_by]->(m:Point) WHERE
     # op.id IN $ids AND <live-only predicate> RETURN …` — a read, the only one
     # this function issues, with no write clause and no write procedure.
+    # #12297: the rerank's pool-text read. ``match`` is chosen per entity type
+    # and the RETURN is an f-string (``coalesce(n.<field>, n.label, '')``), so
+    # the resolver reports '<unresolved>'. Checked by hand — every rendered
+    # statement is a READ with no SET/CREATE/MERGE/DELETE/REMOVE, no write
+    # procedure, and the function appends no record:
+    #   operator → ``MATCH (n:Point {is_operator: true}) WHERE n.id IN $ids …``
+    #   document → ``MATCH (n:Source) WHERE n.url IN $ids AND n.documentKind IS
+    #               NOT NULL …``
+    #   else     → ``MATCH (n:<Label>) WHERE n.<id_field> IN $ids …``
+    # It is this function's ONLY handle reach, and it exists precisely because
+    # the real text fetch (step 7) runs AFTER the caller's ``[:limit]`` cut —
+    # scoring rows step 7 then drops would order on evidence the caller never
+    # sees. Declares a read; blesses no undeclared write.
+    "_fetch_rerank_pool_texts",
     "_state_mitigations",
     "_state_related_objects",
     "_state_related_points",

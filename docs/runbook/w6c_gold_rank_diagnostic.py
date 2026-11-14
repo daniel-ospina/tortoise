@@ -108,7 +108,10 @@ def measure(q: dict, dense: bool) -> dict:
             q["question"], limit=LIMIT, pool_size=LEG_DEPTH,
             include_terminal=True, leg_trace=leg_trace,
             keep_numeric=True, search_keys_prf=True,
-            fusion_weights=None, fusion_k=60)
+            fusion_weights=None, fusion_k=60,
+            # #12297: the OUTPUT here IS the gold row's POSITION, which the
+            # rerank moves by construction — it must see the pre-rerank order.
+            _rerank_candidates=False)
         order = _ids_of(hits)
         ranks = {}
         for gid in gold_turn_ids(q):

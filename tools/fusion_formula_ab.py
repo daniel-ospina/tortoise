@@ -470,7 +470,9 @@ def measure_question(sdk, q: dict, *, alpha: float, primary: str,
                 # fusion (it reorders before the ``limit`` cut, so it can change
                 # which ids are returned), which would both confound the arm
                 # comparison and break comparability with that baseline.
-                _valid_time_rerank=False)
+                # #12297: the fused rerank is a THIRD pool mover with exactly
+                # that shape, so it is pinned OFF here for the same reason.
+                _valid_time_rerank=False, _rerank_candidates=False)
             elapsed_ms = (time.monotonic() - t0) * 1000.0
         capture["elapsed_ms"] = round(elapsed_ms, 1)
         return _ids_of(hits), capture

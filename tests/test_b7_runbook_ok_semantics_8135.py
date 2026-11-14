@@ -65,7 +65,16 @@ CLOSED_REFUSAL_CLAIM = ('since #9084 a tool-level refusal is answered as an '
 # (a domain answer carries one on purpose), and the seam only reads two levels
 # deep (a payload nested under a section is not classified).
 RESIDUAL_DOMAIN_ANSWER = 'a domain answer that carries an `error` key on purpose'
-RESIDUAL_NESTED_REFUSAL = 'a refusal buried deeper than the seam reads'
+#: ⚠️ RE-STATED when #11153 landed. It used to be pinned as "a refusal buried
+#: deeper than the seam reads (`tortoise_overview()` with no `section` nests each
+#: section's payload one level down)" — true while EVERY orientation outage nested.
+#: Since #11153 a TOTAL outage returns the refusal at the payload's top level (and
+#: ships `isError: true`), so only a PARTIAL summary still nests. The pin moves with
+#: the fact, in BOTH halves: the narrowed clause is required PRESENT, and the claim
+#: that a total outage still nests is required ABSENT — an operator who read the old
+#: sentence would filter on `status` for orientation outages that no longer read `ok`.
+RESIDUAL_NESTED_REFUSAL = 'a PARTIAL summary of `tortoise_overview()` with no `section`'
+STALE_TOTAL_OUTAGE_NESTING = 'a refusal buried deeper than the seam reads'
 #: What the gate actually scans — pinned so the doc cannot claim a narrower
 #: denominator than the one that holds the class shut.
 GATE_SCOPE_CLAIM = 'a gate on the producers (not a `status` filter) keeps it closed'
@@ -139,6 +148,13 @@ def test_the_runbook_states_the_meaning_of_ok_the_emitter_has() -> None:
             "the runbook's CLOSED claim must NAME this residual, or an "
             f"operator reads `status == ok` as excluding it: {why}"
         )
+    assert STALE_TOTAL_OUTAGE_NESTING not in flat, (
+        "the runbook still says a refusal 'buried deeper than the seam reads' is "
+        "the residual. Since #11153 a TOTAL orientation outage returns the refusal "
+        "at the payload's top level and ships `isError: true`, so only a PARTIAL "
+        "summary still nests — an operator filtering on `status` for orientation "
+        "outages would be looking for rows that no longer read `ok`"
+    )
 
 
 def test_the_pin_reads_the_runbook_the_scorecard_names() -> None:

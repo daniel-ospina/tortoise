@@ -1,17 +1,17 @@
 ---
-title: "Tortoise — Canonical Ontology v3.34"
+title: "Tortoise — Canonical Ontology v3.35"
 type: data
 domain: data
 status: live
 created: 2026-08-05
-updated: 2026-11-12
+updated: 2026-11-13
 ownedBy: epistemic-team
 aboutSubjects: epistemic-team
 aboutObjects: tortoise
 doc_status: live
 ---
 
-# Tortoise — Canonical Ontology v3.34
+# Tortoise — Canonical Ontology v3.35
 
 > **Status:** LIVE — canonical. Co-located with the code it governs (tortoise repo).
 > **Supersedes:** ONTOLOGY_v2.5.md (eldato repo, deprecated).
@@ -32,8 +32,10 @@ doc_status: live
 > **⭐ If this document and the code disagree, THIS DOCUMENT IS RIGHT and the code
 > has a defect.** The single exception is a *factual* error — the model itself
 > being wrong — which is corrected here and recorded in `ONTOLOGY-CHANGELOG.md`.
+>
+> **No issue state, no change history.** New prose here names no PR, no issue and no build status **as history**: a reference to *when* something was decided, fixed or landed belongs in `ONTOLOGY-CHANGELOG.md`, and so does a sentence reporting the state of the build. What belongs here is only *what the model is*. A reference that records **where a term or a decision lives** (`validTo`'s registration, `c_cal`) is not history and stays; replacing the ones that are is a separate change.
 
-**Convention:** camelCase throughout. `kind` = classification tag on an entity. `predicate` = named edge between entities. Capture-path/pipeline fields keep their code spelling (snake_case, or a leading-underscore internal field) — e.g. `file_hash`, `is_episodic`, `c_cal`, `passes_frequency_gate`, `provenance_spans`, `_searchText` (v3.6, #909).
+**Convention:** camelCase throughout. `kind` = classification tag on an entity. `predicate` = named edge between entities. Capture-path/pipeline fields keep their code spelling (snake_case, or a leading-underscore internal field) — e.g. `file_hash`, `is_episodic`, `c_cal`, `passes_frequency_gate`, `provenance_spans`, `_searchText`.
 
 ---
 CRITICAL RULE: no modification to this file is allowed without explicit approval of the exact changes by Daniel Ospina.
@@ -1174,7 +1176,9 @@ degraded_reason    timeout | assembly_error | breaker_open      # degradations o
 >
 > **Tombstone contract:** Retracted points stay in the graph (`get_point` returns them with `status='retracted'`). Default query surfaces (`query`, `paginated_query`) exclude them; pass `include_retracted=True` or an explicit `status='retracted'` filter to surface them. Deletion via `delete_point` hard-deletes (no tombstone).
 >
-> **A dead claim's temporal record is refused on the lifecycle doors (#2498, #7819).** `supersede_point`, `invalidate_point` and `retract_point` consult `TortoiseSDK._assert_lifecycle_guard`, whose predicate is `live.is_terminal_status` (the terminal statuses above plus `deprecated`, or the legacy `outdated=true` flag). Since #7819 `update_point` consults it too, for all four caller-temporal properties — `validFrom`, `validTo`, their precision markers, `expiredAt` and `when` (`_TEMPORAL_RESTAMP_PROPS`) — so a dead claim's validity window **and its occurrence anchor** can no longer be rewritten through that door. The scope is deliberate: a content or metadata revision of a terminal claim stays legal, because a `PointRevised` later than a terminalization is the newer same-id writer and the replay fold is built for it (`skip_updated_at` via `max_inline_seq`, #3305; `test_pointinvalidated_rebuild.py`, `test_pointsuperseded_rebuild.py`). #7819 does not close `update_entity`'s Point arms, which write caller props and `status` with a vocabulary check and no lifecycle guard (so they can also flip a `retracted` Point to `live`) — tracked as #9649. The promote residual is unchanged: the draft→live arm does not read the `outdated` flag, so a flag-dead point with a NULL status can still be given `status='live'` while the flag keeps it terminal for readers. **Consequence recorded so no one "tidies" it away:** a legacy INVERTED window (`validTo` before `validFrom`) already stored on a terminal claim is now frozen — `audit`'s `inverted_validity_window` check keeps reporting it HIGH (dead predecessors are the population #4021 damaged, and `get_historical_knowledge` walks them), but its published `fix` is lifecycle-aware and names the door that refuses — `tortoise_update_point`, which refuses a dead claim by construction (#7819) — instead of prescribing the call (`tests/test_5361_inverted_window_audit.py` pins both branches). It must **not** generalise that to the SDK: the unguarded `update_entity` Point arms above remain a live route to the same window (#9649), so "not repairable through the SDK" would be false.
+> **A terminal claim's temporal record is immutable.** Once a claim reaches a terminal status, its valid-time window (`validFrom`, `validTo`, and their precision markers), its transaction-time expiry (`expiredAt`), and its occurrence anchor (`when`) no longer change. Content and metadata stay revisable: a revision is a newer assertion of the same identity, not a restatement of when the claim held.
+>
+> **Consequence:** a stored inverted window (`validTo` before `validFrom`) on a terminal claim cannot be corrected — it is reported, not repaired.
 >
 > **Parity decision (#690, amended #1088):** SDK + EventAPI + CLI share a single status vocabulary (`POINT_STATUS_VALUES` in `sdk.py`). A no-status `create_point` is `live` and an explicit `draft` is honoured and never auto-promoted; EventAPI births `draft` as its own journal-composer posture — deliberately NOT SDK parity since #1088; CLI backfill promotes NULL-status legacy points to `live` (migration-only, not a drift). The `:GraphEvent` label is RESERVED for the #432 change-log stream (`{seq, ts, type, payload, event_id}`, zero relationships — graph islands) — distinct from the `:Event` ontology entity with `eventId` (§3.4). See docs/event-catalog.md.
 

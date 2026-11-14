@@ -137,6 +137,32 @@ class NonFoldedEntry(NamedTuple):
     candidate_ids: tuple
     shape: str  # "ambiguous-name" | "unaddressable-name" | "duplicate-id"
     #            | "endpoint-collision" | "no-live-holder"
+    # ⛔ `"unaddressable-name"` has TWO causes in `commit_ops`, and a consumer that
+    # reads the shape must not assume the first:
+    #  (a) the GONE-SURVIVOR arms — every holder is a carrier of ONE merged entity
+    #      whose survivor is deleted (`_ref_is_one_gone_entity` and the `if not
+    #      by_name` twins, four of the five sites); `candidate_ids` there holds only
+    #      REAL ids and never the `<id-less>` placeholder — but the GUARANTEE IS
+    #      PER-ARM, from two different mechanisms, so do not restate it as "falsy ids
+    #      are filtered out" (review round 27; that is true of two of the four): the
+    #      two `_ref_is_one_gone_entity` sites pass an UNFILTERED comprehension and
+    #      are protected by that predicate's own per-row id test, which returns False
+    #      for any row whose id is falsy or not in `widened`; the two `if not by_name`
+    #      twins are protected by their `if r[1]` filter. An empty tuple is therefore
+    #      a legal answer on the twins and is NOT a claim about which cause fired.
+    #      ⛔ Those four answer by ENTITY COUNT
+    #      (review round 25): two DISTINCT entities holding the ref keep
+    #      `"ambiguous-name"`, because telling a consumer to fix ONE dangling
+    #      pointer where the graph holds two is the same false repair this note
+    #      exists to prevent. So "ONE merged entity" is a PRECONDITION of the
+    #      shape on all four, not a description of whatever reaches them.
+    #  (b) the ID-LESS arms — a single resolved holder that carries no id, so the
+    #      journaled fold cannot address it (`commit_ops` id-less Object arm;
+    #      `_record_unaddressable` here, which records `["<id-less>"]`).
+    # They differ in cause, not in shape: in both the name cannot be addressed
+    # one-of-them, so neither may be silently picked. ⛔ The placeholder HAPPENS to
+    # separate them today, but that is incidental, not a contract — take the cause
+    # from the call site, never from these fields.
 
 
 _non_folded: list[NonFoldedEntry] = []
@@ -863,6 +889,60 @@ def _name_key_predicate(var: str, name: str, *,
     return f"({' OR '.join(arms)})", params
 
 
+def name_key_space_same_entity(var: str, name: str) -> tuple[str, dict]:
+    """``(WHERE, params)`` for EVERY holder of ``name`` over the WRITER's union.
+
+    #12120: :func:`resolve_entity_id_same_entity` is the right call for a reader
+    that needs ONE id. A reader that instead needs the matched **nodes** (to
+    attach to every carrier, or to reach an id-less stub no id-keyed write can
+    address) cannot use it — and the old remedy, spelling the arms again at the
+    call site, is how four readers ended up enumerating a narrower key space
+    than the write they describe (``hosted_api``'s ``aboutObject`` anchor,
+    ``sdk``'s ``about_entities`` loop, ``near_dup_merge``'s attachment,
+    ``commit_ops``' supersession probes). This is the props-returning twin: the
+    arms are :func:`_name_key_predicate`'s, the ONE definition of who holds a
+    name — never a second copy of the predicate.
+
+    ``var`` is the Cypher variable the WHERE clause is written against (``o``,
+    ``s``, …). The returned clause is PARENTHESISED, so a caller composes it
+    with ``AND`` directly.
+
+    Returns ``("", {})`` when the name folds away — a ZERO-ROW answer the caller
+    must honour (skip the query), never a degenerate ``WHERE ()``.
+    ⛔ The twins over the same union (``_name_holder_ids_same_entity`` /
+    ``_live_holders_same_entity``) keep a raw ``name`` fallback for a blank fold;
+    this helper does not. ⚠️ **They agree TODAY, and not because of the fold.**
+    Measured (review round 15): ``create_object("   ")`` DOES mint a node whose
+    ``name`` is the whitespace string (three spaces, readable BY ID), while an
+    indexed equality filter on that value matches NOTHING — the #9599 backend
+    behaviour, and it is the same for a padded non-blank name (``"  Widget  "``
+    matches nothing either). So the twins' raw fallback returns zero rows for the
+    same reason this arm does, and ``main``'s raw ``{name:$name}`` anchor wrote no
+    edge for such a node either (measured: 0 edges). The earlier text here claimed
+    the two answers differ, that a blank name is not mintable, and that ``main``
+    wrote the edge — all three were wrong, and the last one was measured at 0.
+    ⛔ What that means for a caller: the zero-row answer is **engine-contingent**,
+    not a fold decision. On a backend whose equality filter can see a
+    whitespace-bearing key, this helper would answer zero rows while the twins
+    (and the writer, ``resolve_or_mint``) address the node — the very
+    reader/writer disagreement this module exists to remove. Nothing in the tree
+    relies on the blank arm today, and the durable fix is on the WRITE side (no
+    blank-named holder), filed as #12242. Until then a caller must not treat
+    ``("", {})`` as "the graph is proven to hold no such name".
+    """
+    folded = normalize_entity_name(name) or ""
+    if not folded:
+        # Blank (or all-whitespace) name: the ZERO-ROW answer documented above,
+        # NOT a props-only clause. A blank-NAMED holder is real and mintable (see
+        # the docstring) but invisible to an indexed equality filter on this
+        # backend (#9599), which is why every other name-keyed read misses it too.
+        # The answer stays; its ENGINE-DEPENDENCE is stated rather than implied.
+        return "", {}
+    return _name_key_predicate(
+        var, name, name_props=("name", "canonical_name"),
+        also=(folded,), alias_of=(folded,))
+
+
 def _name_holder_ids(g, label: str, name: str, *,
                      case_insensitive: bool,
                      live_only: bool,
@@ -1270,6 +1350,11 @@ def resolve_entity_id_same_entity(g, label: str, value: str | None, *,
     lost :func:`_require_unique_id`'s duplicate-id claimant check and the R8
     evidence record for an ambiguous name (#12120 V-GATE finding 4). This keeps
     every guarantee of the raw resolver, over the widened space.
+
+    A caller that needs the matched NODES rather than one id (attach to every
+    carrier; reach an id-less stub) uses :func:`name_key_space_same_entity` —
+    the props-returning twin over the SAME arms. Neither should ever be
+    re-spelled at a call site.
     """
     folded = normalize_entity_name(value) if value else ""
     if not folded:

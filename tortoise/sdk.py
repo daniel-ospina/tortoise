@@ -62,6 +62,20 @@ from .commit_ops import OBJECT_TERMINAL_STATUSES as _OBJECT_TERMINAL_STATUSES
 # `_update_entity`. Imported so neither surface re-literals the vocabulary.
 from .commit_ops import SUBJECT_STATUS_VALUES as _SUBJECT_STATUS_VALUES
 from .env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
+# #12297: the fused-candidate rerank, imported at module scope because the read
+# path evaluates its gate on EVERY search. `rerank` is a light module (stdlib +
+# `env_truthy` + `heavy_imports`; torch is reached lazily inside the scorer), so
+# this adds no import cost to `sdk` and cannot cycle (it imports nothing from
+# here). The alternative — a function-local import — would sit in the hot path
+# for no benefit.
+from .rerank import (
+    RERANK_POOL_KEY,
+    RERANK_SCORED_KEY,
+    RERANK_UNSCORED_KEY,
+    fused_rerank_pool_width,
+    rerank_pool,
+    rerank_pool_enabled,
+)
 from .ids import ulid
 # #2782: the money value's WRITE gate. `money` imports only `numeric_domain`
 # (no cycle), and it is already loaded via `value_normalizer` below — importing
@@ -123,6 +137,7 @@ from .live import is_default_direction  # #7852 "does not differentiate" default
 from .entity_identity import (  # #3633 route-then-refuse identity resolution
     ADDRESSING_SOURCE, UnaddressableEntityName, all_name_holder_ids,
     ambiguous_holder_ids as _ambiguous_holder_ids, entity_create_lock,
+    name_key_space_same_entity,
     resolve_document_target_id, resolve_entity_id_same_entity)
 from .live import _terminal_expression  # #3142 shared Cypher terminal predicate (POSITIVE direction)
 from .live import is_terminal_status  # #2498 shared terminal predicate (Python mirror)
@@ -4686,6 +4701,101 @@ def _rec_point_id(rec: dict):
         if isinstance(point, dict):
             pid = point.get('id')
     return pid
+
+
+#: #12297 — the ONE property a fused-candidate rerank may score, keyed by the
+#: RESOLVED GRAPH LABEL (``read_ledger.label_for_entity_type``), with the two
+#: entity types that share a label and carry a different text split out below.
+#: ⛔ Keyed by label, not by the caller-facing ``entity_type``: ``document`` and
+#: ``source`` are both ``:Source`` (D10, ONTOLOGY v3.15 §4.4) and an ``operator``
+#: is a ``:Point``, so a map on ``entity_type`` would have to restate the very
+#: alias table ``read_ledger`` owns.
+_RERANK_TEXT_FIELD_BY_LABEL: dict[str, str] = {
+    "Point": "content",
+    "Event": "subject",
+    "Subject": "name",
+    "Object": "name",
+    "Source": "title",
+}
+
+
+def _rerank_text_field(entity_type: str, graph_label: str) -> str | None:
+    """#12297: the property the rerank scores for this read, or ``None``.
+
+    An operator's text is its ``label`` (a ``:Point`` whose ``content`` is not
+    the searchable string); a document's is its ``title``. Any label absent
+    from the map has no declared text field, and the rerank then degrades to the
+    retrieval order rather than scoring a property that is not that node's text
+    — a wrong field would produce a confident, meaningless order.
+    """
+    if entity_type == "operator":
+        return "label"
+    return _RERANK_TEXT_FIELD_BY_LABEL.get(graph_label)
+
+
+def _fetch_rerank_pool_texts(graph, entity_type: str, graph_label: str,
+                             id_field: str, ids: list[str]) -> dict[str, str]:
+    """#12297: ONE batch read of the fused pool's own text, for the rerank.
+
+    The real content fetch (``tortoise_fts_query`` step 7) runs AFTER the
+    ``[:limit]`` cut, so a rerank placed BEFORE it needs the pool's text and
+    nothing else. This reads exactly that, at the pool's own width.
+
+    ⛔ Two predicates are restated from step 7 and are the ONLY duplication:
+    ``is_operator: true`` for the operator leg and ``documentKind IS NOT NULL``
+    for the document leg. They are restated because the rerank must score the
+    SAME row set step 7 will materialise — scoring rows that step 7 then drops
+    would order a list on evidence the caller never sees — and
+    ``tests/test_rerank_pool.py`` pins both against the real fetch so the pair
+    cannot drift silently.
+
+    Best-effort by construction: any failure returns ``{}``, which makes the
+    caller degrade to the retrieval order (never a failed search).
+    """
+    field = _rerank_text_field(entity_type, graph_label)
+    if not field or not ids:
+        return {}
+    if entity_type == "operator":
+        match = "MATCH (n:Point {is_operator: true}) WHERE n.id IN $ids "
+    elif entity_type == "document":
+        # ⛔ NOT ``source``. Both spellings are a ``:Source`` read and both use
+        # ``url`` for the id, which makes them look interchangeable here — they are
+        # OPPOSITE partitions of the same label: ``search_engine`` defines document
+        # ⟺ ``documentKind IS NOT NULL`` and source ⟺ ``documentKind IS NULL``
+        # (#5026 / D10). ⛔ Step 7's own ``source`` branch adds NO predicate at all
+        # (it is reading the ids the partitioned legs already returned), which is
+        # why the NULL half is attributed to ``search_engine`` and not to step 7. Restating the document predicate
+        # for ``source`` therefore matched NO row and made the rerank structurally
+        # inert there (measured: ``source`` went from ``scored=1`` to
+        # ``ran=False, pool_text_read_failed``) — the pool read had succeeded and
+        # the disclosure blamed the wrong cause. ``source`` takes the generic
+        # branch, which adds no predicate.
+        match = ("MATCH (n:Source) WHERE n.url IN $ids "
+                 "AND n.documentKind IS NOT NULL ")
+    else:
+        match = f"MATCH (n:{graph_label}) WHERE n.{id_field} IN $ids "
+    # ⛔ A POINT POOL CONTAINS OPERATOR ROWS, and an operator carries NO
+    # ``content`` (``create_operator`` writes ``label``/``op_type``/``direction``
+    # only) while the operator leg above is a SEPARATE ``entity_type`` — so on a
+    # point read an operator arrives here with ``content = null``. Returning the
+    # empty string for it scored the operator on ``""``, and a cross-encoder
+    # ranks an empty passage ABOVE an unrelated real one, so the demotion ran
+    # backwards. ``label`` is the operator's own text; coalescing gives it one.
+    text_expr = (f"coalesce(n.{field}, n.label, '')"
+                 if graph_label in (None, "Point") and field == "content"
+                 else f"n.{field}")
+    try:
+        rows = graph.query(
+            match + f"RETURN n.{id_field}, {text_expr}",
+            params={"ids": ids},
+        ).result_set
+    except Exception:  # noqa: BLE001, RUF100 — best-effort, degrade below
+        return {}
+    out: dict[str, str] = {}
+    for row in rows or []:
+        if row and row[0] and len(row) > 1:
+            out[str(row[0])] = str(row[1] or "")
+    return out
 
 
 _NON_POINT_ENTITY_LABELS_CACHE: frozenset[str] | None = None
@@ -15408,8 +15518,11 @@ class TortoiseSDK:
         #    (`"embedding" in props`: that vector describes the caller's own
         #    text) and never when the embedder was unavailable (nothing then
         #    describes the composed text, and a later `backfill_embeddings`
-        #    re-encode is from `content`). Attaching it anyway is exactly the
-        #    #4194 lie `update_point`'s content arm clears.
+        #    re-encode USED TO be from `content` — since #12489 it reads
+        #    `embeddingText or content`, so the backfill is no longer a reason
+        #    this rule is safe; it stands on the #4194 identity alone). Attaching
+        #    it anyway is exactly the #4194 lie `update_point`'s content arm
+        #    clears.
         # ⛔ THE NEIGHBOUR HALF IS DELIBERATELY NOT WIRED HERE, and the reason is
         # measured rather than assumed (#11739 review round 4): a Point has NO
         # resolved neighbours at its own creation. `create_point` mints NO
@@ -18060,16 +18173,28 @@ class TortoiseSDK:
         # `about_entities` topic channel below SKIPS subject-kind names (it
         # must not emit an un-gated aboutSubject, and it must not mint an
         # id-less Object stub for one).
-        # F6: EXACT names, derived only from payload entities whose KIND is a
-        # subject kind — the same population the resolver checks against. A
-        # `.lower()` fold here would skip a legitimately-cased Object whose
-        # name only case-insensitively matches a subject name, while the
-        # `MATCH (o:Object {name:$n})` resolution below is case-SENSITIVE.
+        # F6 (corrected, #12120 review rounds 3-6): the names come from payload
+        # entities whose KIND is a subject kind — the same population the
+        # resolver checks against — and the SKIP stays EXACT (F6's rule: a
+        # legitimately-cased Object keeps its edge). The probe below, however, is
+        # FOLD-WIDE (`name_key_space_same_entity`), so a spelling that only
+        # FOLD-equals a declared subject-kind name (`"the acme corp"` beside a
+        # declared Subject `"Acme Corp"`) must be attributed to an EXACT-name
+        # Object only — otherwise a fold-equal Object takes the un-gated
+        # `aboutObject` edge the #4934 rule forbids, on a spelling the pre-fix raw
+        # probe could not reach. The fold therefore NARROWS THE LOOKUP; it never
+        # widens the skip (round 6 corrected round 4: dropping here is NOT free -
+        # it drops F6's case too).
         subject_entity_names: set[str] = set()
+        subject_entity_names_folded: set[str] = set()
         # #11237: `{name: [(graph_id, kind), …]}` — every entity THIS capture
         # wrote, so the S5 Job 1 relation leg can resolve a stated endpoint
         # name to the node it denotes (see the write leg below).
         entity_index: dict[str, list[tuple[str, str | None]]] = {}
+        # One fold for this whole function: the skip sets below and the
+        # `about_entities` loop compare in the writer's key space.
+        from .entity_resolver import normalize_entity_name as _fold
+
         # #12060 (review F1): every layer this capture's entity writes actually
         # LANDED on, by name. `subject_entity_names` above is seeded from the
         # payload's PRE-WRITE kind (an entity write can fail before any fact
@@ -18089,6 +18214,16 @@ class TortoiseSDK:
             _ekind = _payload_entity_kind(e)
             _is_subject = is_subject_kind(_ekind or "")
             if _is_subject:
+                # ⛔ The FOLDED set is NOT maintained here (review round 23): it is
+                # derived once, AFTER the `#12060` landed-layer correction below,
+                # because a guard redirect moves a name between the entity labels
+                # and the derived set must follow the write that LANDED. Maintaining
+                # it here as well was a dead store — written once per
+                # SUBJECT-KIND payload entity, then discarded before its only
+                # reader — and a trap: a
+                # later reader would take the seed as load-bearing and try to
+                # delta-maintain it, which cannot express "another name still holds
+                # this folded key".
                 subject_entity_names.add(name)
             try:
                 if _is_subject:
@@ -18149,6 +18284,18 @@ class TortoiseSDK:
                 subject_entity_names.add(_ln)
             else:
                 subject_entity_names.discard(_ln)
+        # ⛔ RE-DERIVED, not delta-maintained (review round 23): the correction
+        # above moves names in and out of `subject_entity_names`, and the folded
+        # set feeds `_subject_fold_only` — the discriminator that decides whether
+        # the `aboutObject` probe may be widened. A stale folded key made a
+        # pack-guard-redirected name (`"the operator"` → `core:role`, a `:Subject`)
+        # miss the exact-name narrowing and take the widened probe, attaching to an
+        # `:Object` whose folded name matches — the #4934-class un-gated edge `main`
+        # never wrote. Rebuilding is also the only correct form: an incremental
+        # `discard` would drop a folded key another subject-spelled name still
+        # holds.
+        subject_entity_names_folded = {
+            _fold(_n) for _n in subject_entity_names}
         if entity_failures:
             warnings.extend(entity_failures)
             warnings.append(
@@ -18436,12 +18583,52 @@ class TortoiseSDK:
                                 # aboutSubject edge; the topic channel must
                                 # not produce an un-gated one, nor an
                                 # id-less Object stub for a subject-kind
-                                # name (the #4934 label leak).
+                                # name (the #4934 label leak). EXACT, per F6:
+                                # a legitimately-cased Object whose name only
+                                # fold-equals a subject name keeps its edge
+                                # (`test_case_only_mismatch_still_gets_its_
+                                # about_object_edge`).
                                 continue
-                            _oid_rows = proj.g.query(
-                                "MATCH (o:Object {name:$n}) "
+                            # #12120 review round 3: the probe below is
+                            # FOLD-WIDE, so when this spelling only FOLD-equals
+                            # a declared subject-kind name (`"the acme corp"`
+                            # against a Subject `"Acme Corp"`) a fold-only
+                            # Object carrier must not be attributed — that is
+                            # the #4934 leak on a spelling the pre-fix raw probe
+                            # could not reach. An EXACT-name Object is still
+                            # attributed (F6's case), so the constraint is
+                            # exactness, never a blanket skip.
+                            _subject_fold_only = (
+                                _fold(_n) in subject_entity_names_folded)
+                            # #12120 about-anchor site: this twin of hosted_api's anchor
+                            # read the RAW `name` only, so a fold-equivalent
+                            # spelling of an already-registered Object matched
+                            # NOTHING and the `aboutObject` edge was silently
+                            # dropped on the local path while the write it
+                            # describes resolved on the folded union. One probe
+                            # over the WRITER's key space
+                            # (`name_key_space_same_entity`) — never a second
+                            # copy of the arms — and the id-less arm below reads
+                            # the SAME space, so an id-less holder reached only
+                            # by the folded spelling keeps its edge too.
+                            #
+                            # ⛔ ATTACH-TO-EVERY-CARRIER is kept (the recorded
+                            # disposition for this site): a resolver call here
+                            # would REFUSE on two live same-name carriers where
+                            # capture writes, silently losing an attachment.
+                            _space, _space_params = name_key_space_same_entity(
+                                "o", _n)
+                            if _subject_fold_only and _space:
+                                # Exact spelling only — the reference IS the
+                                # subject channel's name in the writer's key
+                                # space, so a fold-only carrier is ambiguous.
+                                _space = f"({_space}) AND o.name = $exact"
+                                _space_params = {**_space_params, "exact": _n}
+                            _oid_rows = (proj.g.query(
+                                f"MATCH (o:Object) WHERE {_space} "
                                 "RETURN o.id",
-                                params={"n": _n}).result_set
+                                params=_space_params).result_set
+                                if _space else [])
                             _idless = False
                             for _row in _oid_rows:
                                 _oid = _row[0] if _row else None
@@ -18457,13 +18644,16 @@ class TortoiseSDK:
                                 # MERGEs on {id:...} and would mint a
                                 # DIFFERENT node. Fall back to main's
                                 # name-based MERGE so the edge is not silently
-                                # dropped — live-only, honestly unjournaled.
+                                # dropped — live-only, honestly unjournaled —
+                                # over the SAME widened key space, or an
+                                # id-less holder reached by the folded spelling
+                                # would still lose its edge (#12120 about-anchor site).
                                 proj.g.query(
-                                    "MATCH (p:Point {id:$pid}), "
-                                    "(o:Object {name:$n}) "
-                                    "WHERE o.id IS NULL OR o.id = '' "
+                                    f"MATCH (p:Point {{id:$pid}}), (o:Object) "
+                                    f"WHERE ({_space}) "
+                                    "AND (o.id IS NULL OR o.id = '') "
                                     "MERGE (p)-[:aboutObject]->(o)",
-                                    params={"pid": pid, "n": _n})
+                                    params={"pid": pid, **_space_params})
                 proj.g.query(
                     "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
                     "MERGE (s)-[:CONTAINS]->(p)",
@@ -24396,11 +24586,22 @@ class TortoiseSDK:
             # hands a caller a terminal id). Nothing live to build a chain on.
             return []
         if unaddressable:
+            # #12120 review: the resolver above admitted this holder over the
+            # WRITER's widened union, so re-spelling the predicate here as raw
+            # `name`/`canonical_name` asked a NARROWER key space than the read it
+            # justifies — an id-less stub matched only by the folded spelling or
+            # an `alias` resolved, then matched NOTHING, and `belief_timeline`
+            # reported "no decisions" about a topic it had just resolved. The
+            # uniqueness excuse in the census was a different question: unique is
+            # not the same as spelled-this-way.
+            _space, _space_params = name_key_space_same_entity("o", topic)
+            if not _space:  # pragma: no cover - the resolver refuses a blank
+                return []
             entity_predicate = (
-                "(o.name = $topic OR o.canonical_name = $topic) "
-                f"AND {_terminal_excluded('o.status')}")
+                f"({_space}) AND {_terminal_excluded('o.status')}")
         else:
             entity_predicate = "o.id = $oid"
+            _space_params = {}
         # The DB window MUST be taken from the NEWEST end (#7293). The former
         # `ORDER BY p.validFrom LIMIT` was ASCENDING, so it truncated to the
         # OLDEST rows and the `entries[-limit:]` tail below could only re-take
@@ -24420,7 +24621,7 @@ class TortoiseSDK:
             f"AND {entity_predicate} "
             "RETURN p.id, p.content, p.validFrom, p.status, p.outdated "
             "ORDER BY (p.validFrom IS NULL), p.validFrom DESC LIMIT $limit",
-            params={"oid": entity_id, "topic": topic, "limit": limit},
+            params={"oid": entity_id, "limit": limit, **_space_params},
         ).result_set
         entries = [list(r) for r in rows]
         # Superseded priors dropped out of the topic query (supersede_point
@@ -33454,13 +33655,14 @@ class TortoiseSDK:
                 query_text, entity_type="point", limit=200,
                 _record_reads=False,  # #7983: a review pool, not a caller read
                 # #8487 (review round 6, P2): this pool is consumed as a
-                # MEMBERSHIP filter — both ``review_add`` (orders the
+                # MEMBERSHIP filter — both ``_review_add`` (orders the
                 # suggestions by SIMILARITY itself) and ``review_prune``
                 # discard the read order — so the only thing the valid-time
                 # selection could still do here is move which ids survive the
                 # ``limit`` cut: an unmeasured composition change on a product
                 # surface. Opt out, like ``recall_state``.
-                _valid_time_rerank=False)
+                _valid_time_rerank=False,
+                _rerank_candidates=False)  # #12297: same re-owned order
         except Exception:  # noqa: BLE001, RUF100
             return {}
         scoped = {}
@@ -39785,7 +39987,8 @@ class TortoiseSDK:
                 # #8487: the fallback's rows are re-scored into a confidence
                 # band below, so this is another candidate pool whose order the
                 # caller re-owns.
-                _valid_time_rerank=False)
+                _valid_time_rerank=False,
+                _rerank_candidates=False)  # #12297: same re-owned order
             results = []
             max_rrf = max(
                 (r.get("scores", {}).get("rrf", 0.0) for r in fts_results),
@@ -40001,6 +40204,7 @@ class TortoiseSDK:
                 text, entity_type="point", limit=pool_limit,
                 _record_reads=False,  # #7983: a candidate pool
                 _valid_time_rerank=False,  # #8487: caller re-owns the order
+                _rerank_candidates=False,  # #12297: same re-owned order
                 _truncation_out=_trunc_out,  # #8447: the retrieval path's proof
             )
             # The retrieval path's verdict: it dropped rows at the pool bound,
@@ -40535,6 +40739,52 @@ class TortoiseSDK:
         # on #8487 itself, so the next lane reading the #1745 convention finds
         # why this lever is the exception.
         _valid_time_rerank: bool = True,
+        # #12297: PRIVATE — the FUSED-CANDIDATE rerank. Default True = the
+        # product behaviour (a relevance read reranks when the gate is armed).
+        # Passed False by a caller whose PAGE COMPOSITION must not move. FOUR
+        # classes, not one — they are different harms, and the brief's §5 states
+        # the same four, in the same order (keep the two lists in step):
+        #   * ORDER RE-OWNERS — ``suggest_entry_points``, ``issue_insight``,
+        #     ``recall_state``, ``recall_gaps``, ``volunteer_context`` (bound as a
+        #     ``_search_fn`` seam) and ``search_sessions`` (which re-sorts its pool
+        #     by the PRE-rerank ``rrf`` score, so a rerank there is a permutation
+        #     its own sort discards). A pre-cut reorder moves which ids survive
+        #     ``limit`` and their own sort then hides it.
+        #   * CONSUMED AS A SET, never as a page — ``_review_pool`` (a
+        #     ``{pid: …}`` membership map; ``_review_add`` orders its own picks) and
+        #     ``_resolve_subgraph_seed`` (an expansion START set). ⛔ Neither keeps
+        #     an order, which is what ``_valid_time_rerank``'s docstring says about
+        #     them: do not file them as order re-owners.
+        #   * RECORDED-BASELINE HARNESSES — ``tools/longmem_eval/retrieve.py``,
+        #     ``tools/fusion_formula_ab.py``, ``tools/ask_pool_admission_probe.py``,
+        #     ``benchmarks/run_report.py`` and ``benchmarks/load_test.py``; also the
+        #     ``docs/runbook`` diagnostics whose output IS the measurement — for
+        #     ``w6c``/``w7a`` the gold row's POSITION, for ``5534`` an id-set delta,
+        #     for ``4107`` the gold turn's fused rank and rendered block — and
+        #     ``docs/evidence``'s cost probes. They pin it for comparability
+        #     against RECORDED numbers — and ⛔ only the first three of those also
+        #     pin ``_valid_time_rerank``, so that comparison holds for the
+        #     ``tools/`` harnesses and not for the ``docs/`` and ``benchmarks/``
+        #     halves: the harm here is a baseline that silently stops being the
+        #     baseline, not a moved page.
+        #   * MEMBERSHIP PROBES that read a page SMALLER than the pool width and ask
+        #     "is this row in it" — ``battery/runner/setup.py``'s seed-manifest
+        #     guard (a false ``ConfigError`` reading "stale PRE-FIX graph"),
+        #     ``tools/why_layer_rate.py``'s support-entry lookup (whose ``None`` is
+        #     the documented FAIL shape) and ``mcp_server``'s
+        #     ``tortoise_suggest_entry_points`` (the returned page IS the resolution
+        #     result set, at ``limit=5``). None of the three passes
+        #     ``_valid_time_rerank=False``, and a re-picked page turns each into a
+        #     false diagnosis.
+        # Composition can only move when ``limit < _pool_n``, so a large-pool
+        # caller (the evals' ``pool_size`` reads) is safe by construction — but
+        # "safe today because of an arithmetic accident" is not an opt-out. ⛔ The two
+        # levers are SEPARATE on purpose: the capture path
+        # (``extractor_v2._fts_rows``) deliberately KEEPS the rerank — it has a
+        # measured recall@3 delta and its own ``OVERRIDES:`` record — while
+        # opting out of the valid-time selection. One flag for both would force
+        # that departure to choose.
+        _rerank_candidates: bool = True,
         pool_size: int | None = None,
         leg_trace: list[dict] | None = None,
         # B6 (#3892): the read-path status sink — one of the four recorded terms
@@ -41895,6 +42145,7 @@ class TortoiseSDK:
         #     → byte-identical. ``id_field`` is the existing per-entity id
         #     (``id`` for Point, ``eventId`` for Event) and ``graph_label``
         #     likewise — the one batch Cypher per call stays label-correct.
+        _recency_applied = False
         if recency_field and recency_boost > 0 and result_ids:
             try:
                 rows = graph.query(
@@ -41914,6 +42165,36 @@ class TortoiseSDK:
                                     key=lambda x: (x[1], weights.get(x[0], 0.0)),
                                     reverse=True))
                 result_ids = list(fused.keys())
+                # What the #12297 rerank below keys its skip on: whether the
+                # caller's recency WEIGHTING could reorder anything. ⛔ Three
+                # framings are all wrong, and each was shipped at some point:
+                #
+                # 1. "did the id order move" — a recency multiplier that already
+                #    agrees with the fused order leaves the ids identical while the
+                #    caller's order IS in force (the test's own fixture seeds
+                #    newest-first, so 4b is a no-op permutation there and "no
+                #    movement" inverted the page).
+                # 2. "did any row carry a date" — ``_recency_factors`` returns an
+                #    all-zero map below TWO dated rows (``if len(dated) < 2: return
+                #    factors``, search_engine.py), because one date has nothing to
+                #    rank against. A pool with a single dated row weighs every row 0
+                #    and did nothing.
+                # 3. "did at least two rows carry a date" — a page whose dates all
+                #    fall in ONE group has many dated rows and still weighs every row
+                #    the SAME factor (a tie group shares its highest factor), so the
+                #    multiplier is an identity. Measured: five points created on one
+                #    date — a bulk import or one capture burst — the read with
+                #    recency byte-identical to the read without it, the rerank
+                #    skipped, and the trace naming recency over a
+                #    pool in plain fused order.
+                #
+                # The mechanical question is whether the EFFECTIVE WEIGHTS can
+                # reorder anything: a SPREAD, not a sign and not a count.
+                # Undated pools, one-dated-row pools and all-tied pages all collapse
+                # to zero spread and let the lever run, which is what each of the
+                # three must do — none of them applied an order to demote.
+                _eff = {pid: weights.get(pid, 0.0) for pid in fused}
+                _recency_applied = bool(_eff) and max(_eff.values()) > min(_eff.values())
             except Exception as e:
                 _logger.warning("recency weighting failed (%s) — plain RRF", e)
 
@@ -42069,6 +42350,364 @@ class TortoiseSDK:
             except Exception:
                 _logger.warning(
                     "turn-echo exclusion failed — pass-through", exc_info=True)
+
+        # ── #12297: the FUSED-CANDIDATE-LIST rerank, placed AHEAD of the cut.
+        #
+        # This is the ONE wiring point, so EVERY caller of this read is behind the
+        # gate — the two the issue names, plus the ask lane (``ask_lane`` reaches
+        # this method with the default ``order_by`` and no recency, so it runs the
+        # rerank too; the brief's §5 table states that its cost is NOT calibrated):
+        #   * user search — a caller's own ``limit`` (MCP ``tortoise_search`` /
+        #     the SDK read);
+        #   * the capture-time noun-matching prior — ``extractor_v2._fts_rows``
+        #     calls THIS function at ``limit=3`` for every derived entity query,
+        #     so the prior leg is reranked here without a second call site and
+        #     without touching its window (``#11901`` measured the window lever
+        #     and declined it standalone; this is the PAIRED shape).
+        #     ⛔ That call site opts OUT of #8487's valid-time selection with a
+        #     "no selection on the capture path" rationale, because the prior it
+        #     persists is consumed as a SET. This rerank is a deliberate
+        #     departure from that ruling and carries its own ``OVERRIDES:``
+        #     record AT the call site (``extractor_v2._fts_rows``), naming the
+        #     measured recall@3 delta and, explicitly, that only candidate
+        #     composition is measured — not the downstream link/supersession
+        #     outcomes. With the gate OFF (the default), none of this runs.
+        #
+        # ⛔ Placed BEFORE ``result_ids[:limit]`` on purpose: a reranker that
+        # ran after the cut could only reorder rows that already survived, and
+        # its entire value is choosing WHICH rows survive a fixed ``limit``.
+        # ⛔ ``rerank_pool`` is a PERMUTATION, never a filter — see its contract.
+        # ⛔ Ordered BEFORE step 5e (valid-time selection) ON PURPOSE, and this
+        # is a CORRECTNESS ordering, not a preference. #8487 made the valid-time
+        # demotion the read's last word on order so that a present-tense query
+        # never serves a superseded claim as current; a relevance reorder placed
+        # after it would silently re-promote exactly that row. Relevance may not
+        # outrank correctness, so the rerank runs first and the demotion lands on
+        # top of it. ``tests/test_rerank_pool.py`` pins the order.
+        # ⛔ Default OFF (``TORTOISE_FUSED_RERANK``): the shipped order is
+        # byte-identical when the flag is unset, which is also why the OFF path
+        # costs no graph read — only the gate lookup below, resolved ONCE for
+        # all four arms (it used to be four ``os.environ.get`` calls, which the
+        # comment beside them described as "one env lookup").
+        # ⛔ A CALLER-DECLARED RECENCY ORDER OUTRANKS A RELEVANCE REORDER. Step
+        # 4b above already ordered the fused list by date for a caller that asked
+        # for it (``recency_field`` + ``recency_boost``), and this block sorts on
+        # ``(-score, index)`` alone — so running it here demotes that multiplier
+        # to an exact-tie tie-break and INVERTS the page. Measured before this
+        # guard, end to end (5 points, ``recency_field="createdAt"``,
+        # ``recency_boost=10``, a positionally-descending scorer): gate off →
+        # newest→oldest, gate on → exactly REVERSED, and the trace said "ok" —
+        # no degrade, no disclosure. The skip is DISCLOSED for the same reason
+        # the degrade arms below are: an opted-in lever that declined to run must
+        # not be indistinguishable from one that was never switched on.
+        # ⛔ KEYED ON WHAT STEP 4b DID, NOT ON WHAT THE CALLER ASKED FOR. 4b
+        # fails OPEN — its ``except`` arm leaves plain RRF order — so a recency
+        # REQUEST whose read broke reordered nothing; skipping the rerank then,
+        # while reporting a reason naming recency, names a cause that never
+        # applied and suppresses a lever that was free to run. ``_recency_applied``
+        # is set inside 4b's ``try`` only. The emitted reason therefore says what
+        # BITT (``recency_order_applied``), not what was ASKED FOR — the request
+        # wording described the cause that did not fire.
+        # ⛔ ORDER_BY IS A PRECONDITION, and it is the same defect as the recency
+        # inversion in a different costume. The rerank runs BEFORE the ``limit``
+        # cut, so it changes which rows SURVIVE the page — that is the whole
+        # point on a relevance read, and it is a bug on every other ordering:
+        # ``order_by="confidence"`` sorts the SURVIVORS by EP belief and
+        # ``order_by="graph"`` by the graph ranker, both AFTER the cut, so a
+        # rerank that re-picked the page would silently drop high-confidence
+        # rows the un-reranked read returns. Step 5e's valid-time lever in this
+        # same method scopes itself the same way (``order_by == "relevance"``);
+        # this is that rule applied to the second pre-cut reorder. Not a silent
+        # choice either: a read that opted in and was left alone DISCLOSES it.
+        _rr_on = rerank_pool_enabled()
+        _rr_order_by_ok = order_by == "relevance"
+        _rr_text_ok = bool((query or "").strip())
+        # ⛔ THE ENTRY CONDITION IS "ARMED", NOT "ARMED AND NON-EMPTY" (#12382).
+        # Every arm below carries ``result_ids and ... and (query or "").strip()``
+        # in its condition, so the TWO shapes with the least to rerank — a
+        # query-less FULL SCAN (``tortoise_fts_query(None, kind=..., limit=N)``,
+        # a documented caller-facing mode) and a candidate set that a filter
+        # emptied before this point (the kind / claim-class / relationship /
+        # traversal / status / turn-echo filters all narrow ``result_ids`` in
+        # place) — left the block through its own ``not query``/empty-list exit
+        # WITHOUT an entry. Measured at #12343's head ``93af561442``: with
+        # ``TORTOISE_FUSED_RERANK=1`` a full-scan read returned 3 rows and
+        # ``rerank entries: []`` — byte-identical to a caller that never armed the
+        # gate, so "the lever declined" read as "the lever was never on".
+        # That is the ONE rule this block exists to enforce (see the degrade arms
+        # below and #8487's ``valid_time`` leg): an armed lever that did not run
+        # MUST say so.
+        # ⛔ NOT the read that found NOTHING AT ALL: that one returns from the
+        # fallback path above, before this block, and already carries its own
+        # verdict on every leg it asked (``empty_results``, or
+        # ``below_relevance_floor`` / ``breaker_open`` where that is what
+        # happened) — a rerank entry there would restate the same fact twice.
+        # ⛔ THE REASONS ARE ``rerank_pool``'s OWN vocabulary, not a new one: it
+        # already degrades on ``empty_query`` and ``empty_pool`` — terms the
+        # wiring could never reach because these two exits fired first. Naming
+        # them here makes the wiring agree with the function it calls.
+        # ⛔ AND THE TWO ARE NOT THE SAME FACT, so they are not one reason: a
+        # query-less read has nothing to SCORE WITH, an empty result set has
+        # nothing to score — collapsing them (both ``empty_query``) would blame
+        # the caller's query for a read whose candidate set was emptied, which is
+        # the mis-direction ``pool_text_empty`` vs ``pool_text_read_failed`` below
+        # is already careful about.
+        # ⛔ AND WHEN BOTH ARE TRUE THE POOL WINS — ``rerank_pool``'s own order
+        # (``tortoise/rerank.py``: the ``empty_pool`` return precedes the
+        # ``empty_query`` one). A read that returned NO rows reads
+        # ``empty_pool`` even when the query is also blank, because "you sent no
+        # query" is not an instruction that would have helped: the caller's own
+        # filter removed every candidate, and ``rerank_unscored`` is 0 either way.
+        # The other order inverted the function's precedence, so "the wiring
+        # agrees with the function it calls" was true only on the exclusive
+        # shapes (review round 2 on #12382).
+        # ⛔ GATE OFF STAYS SILENT — that is the one case where "no entry" is the
+        # truthful signal (``test_the_off_path_writes_no_rerank_trace_entry``),
+        # and it is why this arm keys on ``_rr_on`` rather than on the exits.
+        # ⛔ A CALLER DECISION OUTRANKS AN EMPTY INPUT, in the arms' OWN precedence
+        # (review round 1 on #12382): the four arms below are keyed on
+        # ``result_ids`` too, so they cannot fire on a read this arm catches — and
+        # naming ``empty_query`` for a caller that ALSO opted out (`recall_state`
+        # passes ``_rerank_candidates=False`` with ``query=None`` by default,
+        # ``sdk.py`` "1. Candidate pool") would send that reader to fix the query
+        # when the lever is what declined it. Same rule the block states for
+        # recency: the read's own reason wins over an incidental one.
+        # ⛔ ALL THREE caller decisions, not just the two that are booleans here
+        # (review round 4): ``recency_order_applied`` is the third — a read that
+        # asked for a recency order and ALSO has an empty input used to be told
+        # ``empty_query``, and supplying a query then reports
+        # ``recency_order_applied``, so the advice was a loop.
+        # ⛔ AND IT CAN COEXIST WITH AN EMPTIED POOL (review round 5):
+        # ``_recency_applied`` needs a non-empty pool AT STEP 4b, not here — the
+        # kind / relationship / traversal / status / claim-class / turn-echo
+        # filters all narrow ``result_ids`` AFTER it, so ``recency_order_applied``
+        # does shadow ``empty_pool`` on a filter-emptied pool (measured). That is
+        # the same rule as the two decisions above, not an accident, and
+        # ``test_the_recency_skip_CAN_coexist_with_an_emptied_pool`` pins it.
+        _rr_recency_conflict = bool(_recency_applied)
+        _rr_skip_reason = (
+            "order_by_not_relevance" if not _rr_order_by_ok
+            else "order_owned_downstream" if not _rerank_candidates
+            else "recency_order_applied" if _rr_recency_conflict
+            else "empty_pool" if not result_ids
+            else "empty_query")
+        if _rr_on and status_trace is not None and not (
+                result_ids and _rr_text_ok):
+            status_trace.append(dict(
+                _trace_entry("rerank", ran=False, degraded=False,
+                             reason=_rr_skip_reason, count=0),
+                **{RERANK_POOL_KEY: fused_rerank_pool_width(),
+                   RERANK_SCORED_KEY: 0,
+                   RERANK_UNSCORED_KEY: len(result_ids)}))
+        # ⛔ THE SECOND HALF OF THE SAME GUARD. ``order_by``/recency catch a
+        # caller that ASKS for another order; they do not catch a caller that
+        # re-owns the order DOWNSTREAM — or consumes it as a SET — and passes
+        # neither.
+        #   * ``_review_pool``, ``suggest_entry_points``, ``issue_insight``,
+        #     ``recall_state``, ``recall_gaps``, ``_resolve_subgraph_seed`` —
+        #     these six ALREADY pass ``_valid_time_rerank=False`` for the
+        #     identical reason. Note that the last of them and ``_review_pool``
+        #     are SET consumers rather than sorters (see the parameter's
+        #     docstring): same flag, different harm;
+        #   * ``search_sessions``, which re-sorts its pool by the PRE-rerank
+        #     ``rrf`` score before slicing, and ``volunteer_context``, which
+        #     binds this read as a ``_search_fn`` seam — ⛔ NEITHER opts out of
+        #     ``_valid_time_rerank`` (that lever's ordering is what they sort
+        #     on / feed), so do not "restore symmetry" by adding it here.
+        # Without this arm the rerank re-picked their page INVISIBLY — the trace
+        # said ``ok``, because nothing in the block knew the caller had opted
+        # out.
+        # (``_rr_recency_conflict`` is bound ABOVE, with the disclosure arm that
+        # also needs it.)
+        if (result_ids and _rr_on and _rr_text_ok
+                and _rr_order_by_ok and not _rerank_candidates
+                and status_trace is not None):
+            status_trace.append(dict(
+                _trace_entry("rerank", ran=False, degraded=False,
+                             reason="order_owned_downstream", count=0),
+                **{RERANK_POOL_KEY: fused_rerank_pool_width(),
+                   RERANK_SCORED_KEY: 0,
+                   RERANK_UNSCORED_KEY: len(result_ids)}))
+        if (result_ids and _rr_on and _rr_text_ok
+                and not _rr_order_by_ok and status_trace is not None):
+            status_trace.append(dict(
+                _trace_entry("rerank", ran=False, degraded=False,
+                             reason="order_by_not_relevance", count=0),
+                **{RERANK_POOL_KEY: fused_rerank_pool_width(),
+                   RERANK_SCORED_KEY: 0,
+                   RERANK_UNSCORED_KEY: len(result_ids)}))
+        # ⛔ AND NOT THE OPT-OUT: the two arms are not exclusive by construction —
+        # a caller that opted out AND has a live recency spread satisfied both and
+        # emitted TWO ``leg="rerank"`` entries for ONE read with two different
+        # reasons (measured: ``tools/longmem_eval/retrieve.py`` passes exactly that
+        # combination). The first reason the read has is the one that wins: it
+        # declined the rerank for its own sake, and recency never got a vote.
+        if (result_ids and _rr_on and _rr_text_ok
+                and _rr_order_by_ok and _rerank_candidates
+                and _rr_recency_conflict and status_trace is not None):
+            status_trace.append(dict(
+                _trace_entry("rerank", ran=False, degraded=False,
+                             reason="recency_order_applied", count=0),
+                **{RERANK_POOL_KEY: fused_rerank_pool_width(),
+                   RERANK_SCORED_KEY: 0,
+                   RERANK_UNSCORED_KEY: len(result_ids)}))
+        if (result_ids and _rr_on and _rr_text_ok
+                and _rr_order_by_ok and _rerank_candidates
+                and not _rr_recency_conflict):
+            # ONE width for the batch read AND the scorer (#12297 review): the
+            # knob used to be resolved only inside ``rerank_pool``, so a
+            # configured width ABOVE the default was silently unreachable —
+            # the text read had already dropped the ids past the constant.
+            _pool_n = fused_rerank_pool_width()
+            _pool_ids = result_ids[:_pool_n]
+            _pool_texts = _fetch_rerank_pool_texts(
+                graph, entity_type, graph_label, id_field, _pool_ids)
+            # Defined for BOTH branches: the honest arm below asks "was anything
+            # scored", which must be a value (not a NameError) when the read
+            # returned nothing at all.
+            _scored_rows: list[dict] = []
+            if _pool_texts:
+                # ⛔ A ROW THE READ DID NOT RETURN IS NOT SCORED. An id the read
+                # excluded (a :Source without ``documentKind``, an operator on
+                # the ``is_operator`` leg with no row) used to be handed to the
+                # scorer as ``""`` — and an empty passage outranks an unrelated
+                # real one, so an EXCLUDED row was PROMOTED over included ones.
+                # Only ids that came back WITH text are scored; every other row
+                # keeps the slot the fused order gave it, and the disclosed
+                # ``unscored`` count counts them.
+                # ⛔ MEMBERSHIP IS NOT ENOUGH — the text must be NON-EMPTY. The
+                # read maps a null/absent property to ``""`` (``str(row[1] or
+                # "")``), so a row that IS returned can still arrive with no text
+                # (a stubbed Source with no title; any row whose property is null)
+                # and a membership test would score it on ``""`` — the very
+                # inversion this filter exists to remove. Truthiness, not
+                # presence, is the test.
+                _scored_ids = [pid for pid in _pool_ids
+                               if (_pool_texts.get(pid) or "").strip()]
+                _scored_rows = [{"id": pid, "content": _pool_texts[pid]}
+                                for pid in _scored_ids]
+                # ⛔ ONE ROW PER CANDIDATE, IN FUSED ORDER. A row with no usable
+                # text cannot be scored, so it must keep the SLOT the fused order
+                # gave it: ``rerank_pool`` writes the scored rows back into their
+                # own slots and leaves the rest alone. Handing it a COMPACTED
+                # list instead (scored head + everyone else appended) demoted an
+                # unscored row below rows it outranked — measured, a textless row
+                # FIRST in the fused order landed last with a zeroed scorer, and at
+                # a fixed ``limit`` it dropped off the page while the trace said
+                # ``count: 0``. Silent recall loss, and the mirror of the
+                # promotion this block already refuses.
+                _pool_rows = [{"id": pid, "content": _pool_texts.get(pid) or ""}
+                              for pid in result_ids]
+                # ⛔ DO NOT SPEND A MODEL CALL ON A POOL WITH NOTHING TO SCORE.
+                # The REPORTING half of this case is the ``if not _scored_rows``
+                # arm below (it overwrites ``_rr_stats``, so the trace is honest
+                # whether or not this guard exists — measured, reverting this to
+                # ``if True:`` leaves the trace IDENTICAL). What only this guard
+                # prevents is the WORK: a read that returned rows but no USABLE
+                # text (every property null) would reach ``rerank_pool``, LOAD the
+                # cross-encoder and take its lock (~6.4 s cold, brief section 6)
+                # for a result that cannot differ — the function then returns
+                # ``no_scorable_text`` before ``score()``, so the lock is the whole
+                # cost and nothing is scored. ⛔ Not a zero ``pool`` and not a
+                # batch of empty passages: the caller passes the RESOLVED width
+                # (``_pool_n``), and a textless row is never scored at all.
+                # ``test_a_pool_with_no_usable_text_makes_no_scorer_call`` pins it.
+                if _scored_rows:
+                    # ⛔ ONE PASS, O(candidates). The shape this replaces rebuilt a
+                    # membership set INSIDE a comprehension (O(width^2) on a path
+                    # already priced at ~207 ms/mention, and
+                    # ``TORTOISE_FUSED_RERANK_POOL`` clamps only the FLOOR). No
+                    # set is needed at all now: ``_pool_rows`` is built once above
+                    # over ``result_ids``, and ``rerank_pool`` scores only the
+                    # scorable slots — so the cost cannot come back through this
+                    # block even at an unbounded width.
+                    # ⛔ EVERY CANDIDATE IS HANDED OVER, and by construction the
+                    # count is true: ``unscored`` is every candidate the scorer did
+                    # not see (textless inside the width, and every row past it).
+                    # Handing ``rerank_pool`` only the scored head made its
+                    # ``unscored`` structurally ZERO — the silent-cap defect
+                    # reproduced INSIDE the disclosure.
+                    _reranked, _rr_stats = rerank_pool(query, _pool_rows,
+                                                       pool=_pool_n)
+                    if _rr_stats.get("applied"):
+                        # ``rerank_pool`` is a permutation of what it was handed —
+                        # the scored slots reordered in place, every other slot
+                        # (no usable text, or past the width) untouched — so the
+                        # read's id set is unchanged AND an unscored row cannot be
+                        # pushed off a fixed-limit page.
+                        result_ids = [r["id"] for r in _reranked]
+            if not _scored_rows:
+                # ⛔ AN OPTED-IN LEVER THAT DID NOTHING MUST SAY SO. The pool
+                # text read is best-effort (it returns {} on any graph error),
+                # so without this arm a transient failure made the trace
+                # IDENTICAL to the never-opted-in one — "the reranker silently
+                # did nothing" indistinguishable from "the flag was never set".
+                # #8487's ``valid_time`` leg records ``state_read_failed`` for
+                # exactly this case; this is the same rule.
+                # ``no_text_field`` is DEFENSIVE, not reachable today: every
+                # ``entity_type`` this method accepts has a declared text
+                # property, so an unmapped label can only arrive with a future
+                # one. It is kept because the honest failure to report then is
+                # "this read has no property to score", not "the read broke",
+                # and a unit test exercises the arm so it cannot rot silently.
+                # ⛔ THREE ways to arrive here, and they are NOT the same fact:
+                #   no_text_field          the entity type has no text property
+                #   pool_text_empty        the read SUCCEEDED and every pooled row
+                #                          came back with empty/absent text — there
+                #                          is nothing to score, and blaming the
+                #                          read would send a reader to the graph
+                #                          when the data is the problem
+                #   pool_text_read_failed  the read itself returned nothing
+                # Reporting the middle case as the last one is a mis-direction,
+                # not a nicety: the counts below are identical either way, so the
+                # REASON is the only thing that tells them apart.
+                _rr_stats = {
+                    "applied": False,
+                    "degrade_reason": (
+                        "no_text_field"
+                        if _rerank_text_field(entity_type, graph_label) is None
+                        # ⛔ TWO DIFFERENT FAILURES, TWO NAMES. ``read_failed`` is
+                        # the batch read returning nothing (a graph error, an
+                        # excluded id set); ``empty`` is the read SUCCEEDING and
+                        # no row carrying usable text. Collapsing them blamed the
+                        # read for a pool that was simply empty of text — the
+                        # mislabel the ``source`` regression surfaced.
+                        else ("pool_text_empty"
+                              if _pool_texts else "pool_text_read_failed")),
+                }
+            # ⛔ THE CAP IS DISCLOSED, NEVER SILENT. ``rerank_pool`` bounds how
+            # many leading candidates are SCORED; rows past that width keep
+            # their retrieval order and can never be promoted, so a caller that
+            # opted into the lever must be able to tell "the reranker decided"
+            # from "the reranker never saw it". Before this, the stats were
+            # written to ``_trunc["rerank"]`` and read by NOTHING
+            # (``mark_truncation`` publishes only candidates/exact/incomplete),
+            # i.e. the cap was undisclosed.
+            # ``ran``/``reason``/``count`` follow the #8487 ``valid_time`` leg
+            # precedent (``count`` = what the lever DID); the width rides as
+            # ADDITIVE keys (#4999) and ``degraded`` stays False — in a leg
+            # trace that flag means "a retrieval leg did not run".
+            if status_trace is not None:
+                _rr_applied = bool(_rr_stats.get("applied"))
+                _rr_scored = int(_rr_stats.get("scored") or 0)
+                _rr_unscored = int(_rr_stats.get("unscored") or 0)
+                if not _rr_applied:
+                    # A degraded rerank ORDERED NOTHING, so every candidate went
+                    # unscored. Reporting the stats' absent keys as 0 would say
+                    # "nothing was left unscored" on a read where nothing was
+                    # scored — the same false all-clear one branch up.
+                    _rr_scored, _rr_unscored = 0, len(result_ids)
+                status_trace.append(dict(
+                    _trace_entry(
+                        "rerank",
+                        ran=_rr_applied,
+                        degraded=False,
+                        reason=("ok" if _rr_applied else str(
+                            _rr_stats.get("degrade_reason") or "not_applied")),
+                        count=int(_rr_stats.get("moved") or 0)),
+                    **{RERANK_POOL_KEY: _pool_n,
+                       RERANK_SCORED_KEY: _rr_scored,
+                       RERANK_UNSCORED_KEY: _rr_unscored}))
 
         # 5e. (#8487) VALID-TIME SELECTION — prefer the CURRENTLY-VALID version.
         #     Runs at the SAME pre-truncation seam as ``exclude_status`` (#898)
@@ -42877,7 +43516,16 @@ class TortoiseSDK:
             answered = frozenset(
                 pid for pid, sig in (read or {}).items() if sig.get("has_prior"))
             belief_consulted = bool(answered)
-        # Default: RRF relevance order (already in fused order)
+        # Default: RRF relevance order (already in fused order) — with one
+        # exception, and it is not cosmetic: when the #12297 rerank is ON (opt-in)
+        # the ORDER below is the reranker's, while each hit's ``scores.rrf`` is
+        # still ``fused.get(pid)``, the PRE-rerank fused score (set above, before
+        # the rerank reassigns ``result_ids``). The cross-encoder produces a
+        # RANKING, not a value on the RRF scale, so it cannot be folded in; what
+        # would be dishonest is leaving the divergence unstated, because a caller
+        # that sorts by ``scores.rrf`` then gets a different order than the one
+        # returned. The trace's ``rerank`` block records that the order changed;
+        # ``scores.rrf`` deliberately keeps the fused value it always meant.
 
         # #10137: `order_by="confidence"` above sorts on the belief mean — so
         # it DID consult the layer, unless its signal read failed (then every
@@ -44001,6 +44649,7 @@ class TortoiseSDK:
             query, kind=kind, entity_type="point", limit=pool,
             _record_reads=False,  # #7983: a CANDIDATE pool, not a caller read
             _valid_time_rerank=False,  # #8487: caller re-owns the order
+            _rerank_candidates=False,  # #12297: same re-owned order
             exclude_status=exclude_status,
             include_terminal=include_superseded,
             # Sec-1 (code-review gate): the pool can reach ~30k ids — W4
@@ -44017,6 +44666,7 @@ class TortoiseSDK:
                 query, kind=kind, entity_type="object", limit=pool,
                 _record_reads=False,  # #7983: a CANDIDATE pool, not a caller read
                 _valid_time_rerank=False,  # #8487: caller re-owns the order
+                _rerank_candidates=False,  # #12297: same re-owned order
                 include_terminal=include_superseded,
                 leg_trace=leg_trace,
                 read_status_out=_object_status)
@@ -44213,7 +44863,13 @@ class TortoiseSDK:
         return run_volunteer_pipeline(
             proj, window, session_id=session_id, prior_context=prior_context,
             min_confidence=min_confidence, max_pointers=max_pointers, why=why,
+            # #12297: the volunteer resolve pool is another page whose ORDER
+            # this read does not own — the pipeline re-sorts the pool (stage 6)
+            # before the cut, so a pre-cut re-pick moves MEMBERSHIP only.
+            # Passed as a kwargs SEAM rather than at a call site, which is why
+            # the AST census over ``.tortoise_fts_query(`` calls cannot see it.
             _search_fn=self.tortoise_fts_query,
+            _search_kwargs={"_rerank_candidates": False},
         )
 
     def _state_counter_evidence(self, point_ids: list[str]) -> dict[str, list[dict]]:
@@ -44450,7 +45106,8 @@ class TortoiseSDK:
                 # #8487: GapsRanker.rerank re-sorts the pool and ``[:limit]``
                 # is applied to THAT order, so this is the same
                 # re-owned-order shape as recall_state.
-                _valid_time_rerank=False)
+                _valid_time_rerank=False,
+                _rerank_candidates=False)  # #12297: same re-owned order
             pool_ids = [r["id"] for r in results if r.get("id")]
             op_ids = {
                 row[0] for row in proj.g.query(
@@ -44586,7 +45243,8 @@ class TortoiseSDK:
             # order, so the selection's ordering is discarded here and the only
             # effect left is which ≤5 seeds survive the cut — an unmeasured
             # change to the returned subgraph. Opt out, like ``recall_state``.
-            _valid_time_rerank=False)]
+            _valid_time_rerank=False,
+            _rerank_candidates=False)]  # #12297: same re-owned order
 
     # ── Multi-tenancy (#7001) ─────────────────────────────────
 
@@ -47758,12 +48416,12 @@ class TortoiseSDK:
                 # is not in the map) defers, so a legacy point that never got a
                 # status can still be given one (the CLI backfill's own route to
                 # `live`), and an identical status is not a transition at all.
-                # ⚠️ The #2498 residual ONTOLOGY §5 records — a flag-dead point
-                # (`outdated=true` with a NULL status) given `status='live'` — is
-                # NOT carried over to this door: the guard above runs first and it
-                # reads the legacy flag, so that shape is REFUSED here (pinned by
-                # `test_the_legacy_outdated_flag_alone_makes_the_point_dead`). The
-                # residual stays where §5 puts it, on `update_point`'s promote arm.
+                # ⚠️ The #2498 residual — a flag-dead point (`outdated=true`, NULL
+                # status) given `status='live'` — is NOT carried over: the guard
+                # above reads the legacy flag, so that shape is REFUSED here
+                # (pinned by `test_the_legacy_outdated_flag_alone_makes_the_point_dead`).
+                # It is still live on `update_point`'s promote arm, recorded as a code
+                # lag in ONTOLOGY-CHANGELOG v3.35, not in the model file.
                 # The TERMINAL half is already answered above by the shared guard,
                 # which also covers what the map cannot (`deprecated`, the legacy
                 # `outdated=true` flag, an operator fan-out) — that is why this
@@ -49400,6 +50058,14 @@ class TortoiseSDK:
             query, kind="AgentSession", entity_type="event",
             limit=candidate_limit,
             _record_reads=False,  # #7983: a candidate pool, sliced before return
+            # #12297: this pool is RE-SORTED by ``scores["rrf"]`` below (the
+            # PRE-rerank fused score) and then sliced — the same re-owned order
+            # the ``_valid_time_rerank=False`` lanes opt out of. A rerank
+            # here is a full permutation of the same list that the sort then
+            # throws away: it cannot change the page, and it pays a model load
+            # plus ~207 ms/mention to compute nothing. The trace said ``ok``
+            # because nothing in the block knew the caller had opted out.
+            _rerank_candidates=False,
         )
         has_semantic = any(
             r.get("scores")

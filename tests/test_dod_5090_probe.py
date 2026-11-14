@@ -2486,9 +2486,13 @@ def test_the_row_VERDICT_reads_the_DEPLOYMENT_not_the_any_surface_bool(
     call site moves it, and this PR's own fix commits already did, three times over. Do
     not substitute `31 + 1` either — measure. And a bare `grep -c` over this file also
     matches THIS sentence, so it over-reports by one (fresh review of PR #12016, P3).
-    The call sites that DIVERGE are this test, the `#11455` row-holds test below, and
-    `test_the_shipped_default_is_searched_not_assumed` — which scores the REAL tree but
-    asserts only the note, never `row.verdict`. So reverting the one line
+    The call sites that DIVERGE — this test, the `#11455` row-holds test below,
+    `test_the_shipped_default_is_searched_not_assumed` (which scores the REAL tree but
+    asserts only the note, never `row.verdict`), and
+    `test_a_deployment_channel_that_arms_NOTHING_holds_row_one_and_is_NAMED` (`#12022`)
+    — are named as EXAMPLES and never as an exhaustive list: a list here rotted the
+    first time a fix commit added a call site, which is the defect `#12070` item 1
+    recorded. So reverting the one line
     `on_by_default = deployment["on"]` to `shipped["on"]`, or folding `ambient` back
     into it, left the WHOLE suite green — and `row.verdict` is the artefact `#11086`
     item 4 is ticked on, so the clause `#11455` exists for was pinned nowhere.
@@ -2621,6 +2625,8 @@ def test_every_shipped_surface_is_named_with_a_state(tmp_path, monkeypatch):
         "docker-compose.yml": "OFF",
         "docker-compose.yaml": "ABSENT",
         "Dockerfile": "ABSENT",
+        "fly.toml": "ABSENT",
+        "entrypoint": "ABSENT",
         "config": "OFF",
         ".github/workflows": "ABSENT",
     }, states
@@ -2791,14 +2797,17 @@ def test_the_row_holds_at_PARTIAL_because_the_deployment_is_unarmed(
     # with the rule off" was false for exactly the shape below — the same
     # per-file-vs-merged-view conflation the note builder above had already been
     # corrected for. Both notes now qualify it.
-    assert "Read from that file ALONE the deployment is unarmed" in hold, hold
+    assert "read from that file ALONE the deployment is unarmed" in hold, hold
     assert "INHERITS that image's `ENV`" in hold, hold
 
     # The latent shape, executed: the compose file is silent while a DEPLOYMENT file
     # (`Dockerfile.selfhost`) arms the flag — the two facts the qualification exists
-    # for. ⛔ This walk globs `Dockerfile*` only; it does NOT parse the compose file's
-    # `build:` stanza, so what this fixture pins is the PER-FILE reading and the note's
-    # scoping of it, not a measured compose→image inheritance (that merge is `#12022`).
+    # for. ⛔ The `build:` edge itself is MEASURED now (`deployment["builds_from"]`,
+    # `#12022`/`#12070` item 3): the synthetic compose file here declares no
+    # `build.dockerfile`, so the caveat says `measured build edge(s): none` instead
+    # of asserting an inheritance this tree's fixture cannot express. A fixture that
+    # DOES declare the edge is pinned in
+    # `test_the_per_file_caveat_names_the_MEASURED_build_edge`.
     (tmp_path / "Dockerfile.selfhost").write_text(
         'FROM python:3.12-slim\nENV TORTOISE_EMBED_GATE="1"\n', encoding="utf-8")
     shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
@@ -2807,7 +2816,7 @@ def test_the_row_holds_at_PARTIAL_because_the_deployment_is_unarmed(
     row = probe.score_rule_bullet()
     assert row.verdict == "PARTIAL", f"{row.verdict}: {row.observed}"
     hold = next(n for n in row.notes if n.startswith("shipped default NOT armed"))
-    assert "Read from that file ALONE the deployment is unarmed" in hold, hold
+    assert "read from that file ALONE the deployment is unarmed" in hold, hold
     # ⛔ And the SIBLING note carries the same defect class (round-13 review, P3): the
     # gate note led with "a deployment built from that file ALONE runs with the gate
     # OFF" and retracted it a sentence later — and this shape makes it reachable, not
@@ -2819,7 +2828,7 @@ def test_the_row_holds_at_PARTIAL_because_the_deployment_is_unarmed(
         probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE"),
         "TORTOISE_EMBED_GATE", False)
     assert "read from that file ALONE the gate is off" in gate_note, gate_note
-    assert "does not model a compose file that BUILDS from an armed" in gate_note, gate_note
+    assert "INHERITS that image's `ENV`" in gate_note, gate_note
     assert "a Tortoise deployment built from that file" not in gate_note, gate_note
     # ⛔ And the OTHER half of the same conflation (round-11 review, P2): with an armed
     # surface that IS a deployment file, the note must NOT claim that surface "does
@@ -2852,6 +2861,1078 @@ def test_the_row_holds_at_PARTIAL_because_the_deployment_is_unarmed(
     assert "UNARMED deployment file(s) ['docker-compose.yml']" in shipped_default, shipped_default
     assert "Dockerfile.selfhost=ON" in shipped_default, shipped_default
     assert "SCOPED to the surface(s) that arm it" not in shipped_default, shipped_default
+
+
+#: ── `#12022`: the deployment channels are DISCOVERED, not a path list ─────────
+def test_fly_toml_ENV_table_arms_the_deployment_and_build_args_do_not(
+        tmp_path, monkeypatch):
+    """`fly.toml`'s `[env]` is a deployed process's environment; `[build.args]` is not.
+
+    `#12022`: the walk did not read `fly.toml` at all, so a `[env]` entry that the Fly
+    machine's process really gets was outside the population the row note called
+    "every existing deployment file". ⛔ The table SCOPING is the load-bearing half:
+    a line scan reads `[build.args]` exactly like `[env]` (both are `KEY = "value"`),
+    and a build argument never reaches the process — so the wrong reader here would
+    be a false PASS of the same class, one format over.
+    """
+    (tmp_path / "fly.toml").write_text(
+        '[build.args]\n  TORTOISE_EMBED_GATE = "1"\n\n'
+        '[env]\n  TORTOISE_LOOP_STALL_HARD_EXIT_S = "600"\n',
+        encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["fly.toml"]["state"] == "OFF", shipped["per_surface"]
+    assert shipped["deployment"]["on"] is False, shipped["deployment"]
+    # …and the ignored assignment is NAMED, never silently dropped: a reader has to
+    # be able to see that the walk found the line and decided it is not runtime env.
+    assert shipped["outside_runtime"], shipped
+    assert shipped["outside_runtime"][0].startswith("fly.toml:2:"), shipped["outside_runtime"]
+
+    # The SAME line inside `[env]` does arm it — so the OFF above is the table, not
+    # an inability to read TOML.
+    (tmp_path / "fly.toml").write_text(
+        '[env]\n  TORTOISE_EMBED_GATE = "1"\n', encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["fly.toml"]["state"] == "ON", shipped["per_surface"]
+    assert shipped["deployment"]["on"] is True, shipped["deployment"]
+    note = _gate_note(shipped)
+    assert "fly.toml=ON(toml:[env])" in note, note
+
+
+def test_the_fly_manifest_is_DISCOVERED_by_platform_name_not_a_fixed_path(
+        tmp_path, monkeypatch):
+    """A second Fly manifest is walked without editing a list (`#12022`).
+
+    A fixed `("fly.toml",)` entry is how the channel was missed in the first place;
+    Fly's own convention is `fly.toml` / `fly.<app>.toml`, so the glob is the
+    discovery and a `fly.staging.toml` that arms the flag must move the reading.
+    """
+    (tmp_path / "fly.toml").write_text("[env]\n  FOO = \"1\"\n", encoding="utf-8")
+    (tmp_path / "fly.staging.toml").write_text(
+        '[env]\n  TORTOISE_EMBED_GATE = "1"\n', encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["fly.toml"]["searched"] == [
+        "fly.staging.toml", "fly.toml"], shipped["per_surface"]["fly.toml"]
+    assert shipped["deployment"]["files"] == {
+        "fly.staging.toml": "ON", "fly.toml": "OFF"}, shipped["deployment"]
+
+
+def test_the_entrypoint_is_DISCOVERED_from_the_image_and_its_exports_are_read(
+        tmp_path, monkeypatch):
+    """`entrypoint.sh` is found through `ENTRYPOINT`, and its `export` is a setting.
+
+    `#12022`: the image RUNS this script, so an `export FLAG=1` in it arms every
+    deployment the image runs — and the walk never read it. Two facts are pinned:
+    the script is discovered from the manifest (no `entrypoint.sh` literal here), and
+    `export VAR="${VAR:-default}"` is read as the DEFAULT it is, not as an
+    unresolvable token that silently reads OFF.
+    """
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nCOPY entrypoint.sh /entrypoint.sh\n'
+        'ENTRYPOINT ["/entrypoint.sh"]\nCMD ["uvicorn", "app:app"]\n',
+        encoding="utf-8")
+    (tmp_path / "entrypoint.sh").write_text(
+        "#!/bin/bash\nset -euo pipefail\n"
+        'export HF_HOME="${HF_HOME:-/app/model}"\n',
+        encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    assert [p.name for p in probe._entrypoint_scripts()] == ["entrypoint.sh"]
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["entrypoint"]["searched"] == ["entrypoint.sh"], shipped
+    assert shipped["deployment"]["on"] is False, shipped["deployment"]
+
+    (tmp_path / "entrypoint.sh").write_text(
+        "#!/bin/bash\n"
+        'export TORTOISE_EMBED_GATE="${TORTOISE_EMBED_GATE:-1}"\n',
+        encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["entrypoint"]["state"] == "ON", shipped["per_surface"]
+    # ⛔ The row still holds, and the reason is NAMED: the IMAGE BUILD file this tree
+    # ships declares no gate of its own, so `deployment["on"]` is `False` even though
+    # the entrypoint arms it — one channel arming is not every channel arming.
+    assert shipped["deployment"]["armed"] == ["entrypoint.sh"], shipped["deployment"]
+    assert shipped["deployment"]["silent"] == ["Dockerfile.hosted"], shipped["deployment"]
+    assert shipped["deployment"]["on"] is False, shipped["deployment"]
+    note = _gate_note(shipped)
+    assert "entrypoint.sh=ON(shell:export)" in note, note
+
+
+def test_an_unexported_shell_assignment_is_not_a_shipped_environment_entry(
+        tmp_path, monkeypatch):
+    """A shell VARIABLE is not the process environment; only `export` reaches Python.
+
+    The entrypoint's own idiom elsewhere is `export NAME` as a separate statement, so
+    both spellings have to be understood: `export FLAG=1` and `FLAG=1` + `export FLAG`
+    arm it, while a bare `FLAG=1` that is never exported does NOT — reading it as a
+    shipped default would be a false PASS, and reading an EXPORTED one as silence
+    would be the false HOLD this walk exists to avoid.
+    """
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nENTRYPOINT ["/entrypoint.sh"]\n', encoding="utf-8")
+    (tmp_path / "entrypoint.sh").write_text(
+        "#!/bin/bash\nTORTOISE_EMBED_GATE=1\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["entrypoint"]["state"] == "OFF", shipped["per_surface"]
+    assert any(hit.startswith("entrypoint.sh:2:") for hit in shipped["outside_runtime"]), \
+        shipped["outside_runtime"]
+
+    # …exported by a LATER statement, which is `entrypoint.sh`'s own house style.
+    (tmp_path / "entrypoint.sh").write_text(
+        "#!/bin/bash\nTORTOISE_EMBED_GATE=1\nexport TORTOISE_EMBED_GATE\n",
+        encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["entrypoint"]["state"] == "ON", shipped["per_surface"]
+
+
+def test_a_shell_indirection_is_UNMEASURED_never_silent(tmp_path, monkeypatch):
+    """A value the walk cannot resolve is UNMEASURED — the unreadable-file doctrine.
+
+    `export FLAG="${OTHER}"` may arm the flag; reading it as OFF would publish "this
+    file declares nothing" over a line that may declare it (the fail-open direction).
+    Reading it as ON would be a measurement never made. UNMEASURED is the only
+    honest state, and it holds the row rather than passing it.
+    """
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nENTRYPOINT ["/entrypoint.sh"]\n', encoding="utf-8")
+    (tmp_path / "entrypoint.sh").write_text(
+        '#!/bin/bash\nexport TORTOISE_EMBED_GATE="${SOME_OTHER_FLAG}"\n',
+        encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["entrypoint"]["state"] == "UNMEASURED", shipped
+    assert shipped["deployment"]["files"] == {
+        "Dockerfile.hosted": "OFF", "entrypoint.sh": "UNMEASURED"}, shipped
+    assert shipped["deployment"]["measured"] is False, shipped["deployment"]
+    assert shipped["deployment"]["on"] is False, shipped["deployment"]
+    assert shipped["indeterminate"], shipped
+    note = _gate_note(shipped)
+    assert "gate enabled by default: UNMEASURED" in note, note
+    assert "cannot RESOLVE" in note, note
+    assert "indeterminate assignments: [" in note, note
+
+
+def test_a_LOWERCASE_dockerfile_instruction_is_still_a_deployment_hit(
+        tmp_path, monkeypatch):
+    """Dockerfile instruction names are case-insensitive, so `env FLAG=1` arms it.
+
+    ⛔ Measured (fresh review of PR #12474, P3, pre-existing): `env
+    TORTOISE_EMBED_GATE=1` read `OFF` and nothing was reported, so the row published
+    "silent" over an image whose container really has the flag — a false HOLD, and the
+    mirror of the false PASS the `ARG` fix closes. The sibling matcher in this same
+    module already compares Dockerfile instructions case-insensitively (that is how the
+    compose route was fixed), so the two readers now agree.
+    """
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nenv TORTOISE_EMBED_GATE=1\n', encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["Dockerfile"]["state"] == "ON", shipped["per_surface"]
+    assert shipped["deployment"]["on"] is True, shipped["deployment"]
+    # …and `arg` lowercase is still BUILD-TIME, not a hit (the two rules compose).
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\narg TORTOISE_EMBED_GATE=1\n', encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["Dockerfile"]["state"] == "OFF", shipped["per_surface"]
+    assert any("build-time ARG" in hit for hit in shipped["outside_runtime"]), shipped
+    # ⛔ …and a TAB between the instruction and its value is the same instruction: the
+    # space-only split read `ENV\tFLAG=1` as silent and let `ARG\tFLAG=1` disappear
+    # without even a report (fresh review of PR #12474, P3).
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nENV\tTORTOISE_EMBED_GATE=1\n', encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["Dockerfile"]["state"] == "ON", shipped["per_surface"]
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nARG\tTORTOISE_EMBED_GATE=1\n', encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["Dockerfile"]["state"] == "OFF", shipped["per_surface"]
+    assert any("build-time ARG" in hit for hit in shipped["outside_runtime"]), shipped
+    # ⛔ …and the SHELL keyword has the same white-space rule with the opposite CASE
+    # rule: `export\tFLAG=1` is legal and exports, and it used to be dropped in silence
+    # (no hit, no `outside_runtime`, no `indeterminate`) while `_SHELL_BARE_EXPORT`
+    # already accepted `\s+` for the bare form (fresh review of PR #12474, round 4).
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nENTRYPOINT ["/entrypoint.sh"]\n', encoding="utf-8")
+    (tmp_path / "entrypoint.sh").write_text(
+        "#!/bin/bash\nexport\tTORTOISE_EMBED_GATE=1\n", encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["entrypoint"]["state"] == "ON", shipped["per_surface"]
+    # …and `EXPORT FLAG=1` (uppercase SHELL keyword) is a different word, not a hit.
+    (tmp_path / "entrypoint.sh").write_text(
+        "#!/bin/bash\nEXPORT TORTOISE_EMBED_GATE=1\n", encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["entrypoint"]["state"] == "OFF", shipped["per_surface"]
+
+
+def test_a_BLOCK_LIST_compose_entrypoint_is_discovered_too(tmp_path, monkeypatch):
+    """The canonical compose block-list spelling is not silently outside the walk.
+
+    ⛔ Measured (fresh review of PR #12474, P3): the inline-only reader returned `set()`
+    for `entrypoint:` followed by `- /entrypoint.sh`, so the surface read `ABSENT` while
+    the script armed the gate — the same "route looks live, the spelling is missed"
+    defect the compose arm was fixed for. A QUOTED key is covered by the same reader.
+    """
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  tortoise:\n    entrypoint:\n      - /entrypoint.sh\n"
+        "    command:\n      - --serve\n", encoding="utf-8")
+    (tmp_path / "entrypoint.sh").write_text(
+        "#!/bin/bash\nexport TORTOISE_EMBED_GATE=1\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    assert [p.name for p in probe._entrypoint_scripts()] == ["entrypoint.sh"]
+    assert probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")[
+        "deployment"]["files"]["entrypoint.sh"] == "ON"
+    # The quoted-key spelling of the same key, and a SINGLE-quoted list value — the
+    # first token splitter kept the single quotes inside the token, so `.endswith(".sh")`
+    # was false and the spelling was silently dropped (fresh review of PR #12474, P3).
+    (tmp_path / "docker-compose.yml").write_text(
+        'services:\n  tortoise:\n    "entrypoint": /entrypoint.sh\n', encoding="utf-8")
+    assert [p.name for p in probe._entrypoint_scripts()] == ["entrypoint.sh"]
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  tortoise:\n    entrypoint:\n      - '/entrypoint.sh'\n",
+        encoding="utf-8")
+    assert [p.name for p in probe._entrypoint_scripts()] == ["entrypoint.sh"]
+
+
+def test_an_UNPARSEABLE_test_file_fails_the_citation_check_CLOSED(tmp_path):
+    """A file the universe cannot parse must not make its citations vanish.
+
+    ⛔ The fix for "unparseable files were silently dropped" had no falsifier (fresh
+    review of PR #12474, P3): `by_file[rel] = set()` keeps the file in the universe, so
+    a node-id citation INTO it is UNRESOLVED (fail-closed) instead of being skipped like
+    a citation of a file that does not exist. Driven on a tmp root, because on the real
+    tree the branch is never taken.
+    """
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_broken.py").write_text(
+        "def test_x(:\n    pass\n", encoding="utf-8")
+    (tmp_path / "tests" / "test_ok.py").write_text(
+        "def test_fine():\n    pass\n", encoding="utf-8")
+    defined, modules, by_file = _test_symbols(tmp_path)
+    assert "tests/test_broken.py" in by_file and by_file["tests/test_broken.py"] == set()
+    assert "test_fine" in defined
+    assert _unresolved_citations(
+        "`tests/test_broken.py::test_x`", defined, modules, by_file
+    ) == ["tests/test_broken.py::test_x"]
+    # …and a resolvable sibling still resolves, so the arm is not red for everything.
+    assert _unresolved_citations(
+        "`tests/test_ok.py::test_fine`", defined, modules, by_file) == []
+
+
+def test_a_COMPOSE_named_entrypoint_is_discovered_too(tmp_path, monkeypatch):
+    """The compose `entrypoint:` route is not decoration — it is a second name source.
+
+    ⛔ Measured dead before this arm (fresh review of PR #12474, P2): the matcher
+    uppercased the LINE and compared it to the RAW instruction, so the compose call
+    site's `("entrypoint:", "command:")` could never match — the whole route was
+    unreachable behind a docstring claiming it worked, and a deployment whose only
+    naming manifest is compose reported `entrypoint` ABSENT while its script armed
+    the gate. This fixture's ONLY manifest is the compose file, so the Dockerfile
+    route cannot rescue it.
+    """
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  tortoise:\n    build:\n      dockerfile: Dockerfile.selfhost\n"
+        '    entrypoint: ["/entrypoint.sh"]\n', encoding="utf-8")
+    (tmp_path / "Dockerfile.selfhost").write_text(
+        'FROM python:3.12\nCMD ["uvicorn", "tortoise.selfhost:app"]\n', encoding="utf-8")
+    (tmp_path / "entrypoint.sh").write_text(
+        "#!/bin/bash\nexport TORTOISE_EMBED_GATE=1\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    assert [p.name for p in probe._entrypoint_scripts()] == ["entrypoint.sh"]
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["entrypoint"]["state"] == "ON", shipped["per_surface"]
+    assert shipped["deployment"]["files"]["entrypoint.sh"] == "ON", shipped["deployment"]
+    # …and the compose `command:` spelling too, since compose accepts either key.
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  tortoise:\n    command: /entrypoint.sh\n", encoding="utf-8")
+    assert [p.name for p in probe._entrypoint_scripts()] == ["entrypoint.sh"]
+
+
+def test_a_Dockerfile_ARG_is_build_time_and_never_a_deployment_hit(
+        tmp_path, monkeypatch):
+    """`ARG FLAG=1` must not read as an armed deployment; `ENV FLAG=1` must.
+
+    ⛔ Measured before this arm (fresh review of PR #12474, P2, pre-existing): `ARG
+    TORTOISE_EMBED_GATE=1` read `ON`, because `_assigned_value` strips the `ARG `
+    prefix like any other. A build argument never reaches the running container's
+    environment, so that was a FALSE PASS in the exact direction `#12022` closes for
+    `[build.args]` and for unexported shell variables — the reader answering "a
+    deployed process never reads this" for two formats and nothing for the third.
+    """
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nARG TORTOISE_EMBED_GATE=1\n', encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["Dockerfile"]["state"] == "OFF", shipped["per_surface"]
+    assert shipped["deployment"]["on"] is False, shipped["deployment"]
+    assert any("build-time ARG" in hit for hit in shipped["outside_runtime"]), \
+        shipped["outside_runtime"]
+
+    # The runtime spelling is still a hit — the fix narrows the reader to the
+    # instruction that really does reach the process, it does not disarm the channel.
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nENV TORTOISE_EMBED_GATE=1\n', encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["Dockerfile"]["state"] == "ON", shipped["per_surface"]
+    assert shipped["deployment"]["on"] is True, shipped["deployment"]
+
+
+def test_a_reading_with_NO_builds_from_measurement_says_UNMEASURED():
+    """An absent `builds_from` is not "no compose file declares a build:" (#12070).
+
+    `deployment.get("builds_from") or {}` makes a MISSING measurement print the same
+    sentence as a measured none — the `#12016` `False`-for-UNMEASURED defect one field
+    down (fresh review of PR #12474, P3). `_fake_shipped` is exactly that shape, so it
+    is the fixture: every pre-existing note test runs this branch, which is why the
+    two readings have to be distinguishable.
+    """
+    deployment = _fake_shipped(False)["deployment"]
+    assert "builds_from" not in deployment
+    caveat = probe.per_file_scope_note(deployment)
+    assert "build edge: UNMEASURED" in caveat, caveat
+    assert "measured build edge(s): none" not in caveat, caveat
+    # …and a MEASURED none still says none, so the two do not collapse.
+    caveat_none = probe.per_file_scope_note({**deployment, "builds_from": {}})
+    assert "measured build edge(s): none" in caveat_none, caveat_none
+
+
+def test_an_UNDETERMINED_assignment_is_named_as_unresolved_not_unreadable(
+        tmp_path, monkeypatch):
+    """The UNMEASURED sentence must name the CAUSE it actually measured.
+
+    ⛔ Measured (fresh review of PR #12474, P2/P3): an indeterminate assignment puts a
+    file the walk READ SUCCESSFULLY into `deployment["unmeasured"]`, and the sentence
+    went on calling it "unreadable deployment file(s) ['entrypoint.sh']" while printing
+    `unreadable: none` in the same string — a reader would chase permissions or size on
+    a file that was read fine.
+    """
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nENTRYPOINT ["/entrypoint.sh"]\n', encoding="utf-8")
+    (tmp_path / "entrypoint.sh").write_text(
+        '#!/bin/bash\nexport TORTOISE_EMBED_GATE="${SOME_OTHER_FLAG}"\n', encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    note = _gate_note(shipped)
+    assert "cannot RESOLVE" in note, note
+    assert "UNREADABLE deployment file(s)" not in note, note
+    assert "unreadable: none" in note, note
+
+
+def test_a_deployment_channel_that_arms_NOTHING_holds_row_one_and_is_NAMED(
+        tmp_path, monkeypatch):
+    """`#12022`'s falsifier: an armed compose file must not cover a silent channel.
+
+    The shape `#12022` names as the false PASS: `docker-compose.yml` is armed (so the
+    old population reads `True`) while `fly.toml`'s `[env]` and the entrypoint say
+    nothing — and `fly.toml` is what the hosted deployment actually respects. The row
+    must HOLD, and the output must name every channel it walked, so a reader can see
+    the population rather than trusting a phrase.
+    """
+    _row_one_fixture(tmp_path, monkeypatch)          # docker-compose.yml armed
+    (tmp_path / "fly.toml").write_text(
+        '[env]\n  TORTOISE_LOOP_STALL_HARD_EXIT_S = "600"\n', encoding="utf-8")
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nENTRYPOINT ["/entrypoint.sh"]\n', encoding="utf-8")
+    (tmp_path / "entrypoint.sh").write_text(
+        "#!/bin/bash\nexport HF_HOME=\"/app/model\"\n", encoding="utf-8")
+    _no_register(monkeypatch)
+    monkeypatch.setattr(probe, "embedding_writers", lambda: _gated_writer("tortoise.a::_w"))
+    monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
+    row = probe.score_rule_bullet()
+    assert row.verdict == "PARTIAL", f"{row.verdict}: {row.observed}"
+    assert "UNARMED deployment file(s)" in row.observed, row.observed
+    hold = next(n for n in row.notes if n.startswith("shipped default NOT armed"))
+    assert "fly.toml" in hold, hold
+    assert "entrypoint.sh" in hold, hold
+    note = next(n for n in row.notes if n.startswith("gate enabled by default:"))
+    # The CHANNELS are named, not just the filenames: a reader can tell that a TOML
+    # `[env]` table and a shell `export` were actually read (#12022).
+    assert "fly.toml=OFF(toml:[env])" in note, note
+    assert "entrypoint.sh=OFF(shell:export)" in note, note
+    assert "docker-compose.yml=ON(compose)" in note, note
+
+
+def test_row_one_reaches_MET_when_the_ONLY_deployment_channel_is_FLY(
+        tmp_path, monkeypatch):
+    """`#12022`'s other half: a channel that DOES arm is read as armed, and can green.
+
+    The widening is a MEASUREMENT, not a blocker: a tree whose only deployment
+    channel is `fly.toml`'s `[env]` must reach `MET` once the writer clauses hold,
+    and the note must say which CHANNELS were walked — so a reader can see the TOML
+    table was read rather than trusting that "every deployment file" covered it.
+    """
+    _fake_rule_tree(tmp_path)
+    (tmp_path / "fly.toml").write_text(
+        '[env]\n  TORTOISE_EMBED_GATE = "1"\n', encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    _no_register(monkeypatch)
+    monkeypatch.setattr(probe, "embedding_writers",
+                        lambda: _gated_writer("tortoise.a::_w"))
+    monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
+    row = probe.score_rule_bullet()
+    assert row.verdict == "MET", f"{row.verdict}: {row.observed}"
+    note = next(n for n in row.notes if n.startswith("gate enabled by default:"))
+    assert "gate enabled by default: True" in note, note
+    assert "fly.toml=ON(toml:[env])" in note, note
+
+
+def test_the_per_file_caveat_is_ONE_string_BOTH_notes_call(tmp_path, monkeypatch):
+    """`#12054`: one inference, one string — the hold note and the gate note agree.
+
+    The measured cost: the gate note was corrected to a per-file reading while the
+    hold note 500 lines below still said a deployment built from the silent files
+    "runs with the rule off" — two opposite standards for one inference in one report.
+    The pin is structural, not a phrase list: BOTH notes must carry the SAME helper's
+    output, so reverting either one to its own wording reds here.
+    """
+    (tmp_path / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+    (tmp_path / "fly.toml").write_text("[env]\n  FOO = \"1\"\n", encoding="utf-8")
+    _fake_rule_tree(tmp_path)
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    caveat = probe.per_file_scope_note(shipped["deployment"])
+    # The caveat itself states the per-file fact and the inheritance, and asserts NO
+    # deployment consequence it then has to take back (`#12070` item 4).
+    assert "this reading is PER FILE" in caveat, caveat
+    assert "INHERITS that image's `ENV`" in caveat, caveat
+    assert "runs with the rule off" not in caveat, caveat
+    gate_note = _gate_note(shipped)
+    assert caveat in gate_note, gate_note
+    _no_register(monkeypatch)
+    monkeypatch.setattr(probe, "embedding_writers", lambda: _gated_writer("tortoise.a::_w"))
+    monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
+    row = probe.score_rule_bullet()
+    hold = next(n for n in row.notes if n.startswith("shipped default NOT armed"))
+    assert caveat in hold, hold
+    assert "runs with the rule off" not in hold, hold
+
+
+def test_the_per_file_caveat_names_the_MEASURED_build_edge(tmp_path, monkeypatch):
+    """`#12070` item 3: the compose→image edge is READ, so the caveat can name it.
+
+    The caveat's whole point is that a silent compose file can still yield an armed
+    deployment by INHERITING an armed image. Nothing read the `build:` stanza, so the
+    qualification named an edge the walk had never checked on the tree it described —
+    and a fixture writing `services: {}` could not express it at all. Both are fixed
+    by reading `build:`/`dockerfile:` and reporting the edge.
+    """
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  tortoise:\n    build:\n      context: .\n"
+        "      dockerfile: Dockerfile.selfhost\n", encoding="utf-8")
+    (tmp_path / "Dockerfile.selfhost").write_text(
+        'FROM python:3.12\nENV TORTOISE_EMBED_GATE="1"\n', encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["builds_from"] == {
+        "docker-compose.yml": ["Dockerfile.selfhost"]}, shipped["deployment"]
+    # The per-FILE reading still holds the row: the compose file itself declares
+    # nothing, and the walk does not model the merge (`#12022` keeps that boundary).
+    assert shipped["deployment"]["files"] == {
+        "docker-compose.yml": "OFF", "Dockerfile.selfhost": "ON"}, shipped
+    assert shipped["deployment"]["on"] is False, shipped["deployment"]
+    caveat = probe.per_file_scope_note(shipped["deployment"])
+    assert "docker-compose.yml BUILDS from Dockerfile.selfhost" in caveat, caveat
+
+    # ⛔ …and when the image the compose file names is OUTSIDE the walked population
+    # (a nested `docker/Dockerfile.prod`, which the root glob cannot see), the caveat
+    # says so instead of printing an edge whose arm state the note never reports
+    # (fresh review of PR #12474, P3).
+    (tmp_path / "docker").mkdir()
+    (tmp_path / "docker" / "Dockerfile.prod").write_text("FROM python:3.12\n", encoding="utf-8")
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  tortoise:\n    build:\n      dockerfile: docker/Dockerfile.prod\n",
+        encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["builds_from"] == {
+        "docker-compose.yml": ["docker/Dockerfile.prod"]}, shipped["deployment"]
+    assert "docker/Dockerfile.prod" not in shipped["deployment"]["files"], shipped
+    caveat = probe.per_file_scope_note(shipped["deployment"])
+    assert "OUTSIDE the walked population" in caveat, caveat
+
+    # ⛔ EVERY service's build reference (fresh review of PR #12474, P3): a compose file
+    # is multi-service, so keeping only the first presented a PARTIAL set as the edge
+    # set while the note said "measured".
+    (tmp_path / "Dockerfile.worker").write_text("FROM python:3.12\n", encoding="utf-8")
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  app:\n    build:\n      dockerfile: Dockerfile.selfhost\n"
+        "  worker:\n    build:\n      dockerfile: Dockerfile.worker\n", encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["builds_from"] == {
+        "docker-compose.yml": ["Dockerfile.selfhost", "Dockerfile.worker"]}, shipped
+    caveat = probe.per_file_scope_note(shipped["deployment"])
+    assert "BUILDS from Dockerfile.selfhost" in caveat, caveat
+    assert "BUILDS from Dockerfile.worker" in caveat, caveat
+    # ⛔ NEGATIVE pin: both images are IN the population, so neither may be marked with
+    # the outside-population caveat — an over-reporting mutation published a false
+    # statement in the row note and stayed green (fresh review of PR #12474, P3).
+    assert "OUTSIDE the walked population" not in caveat, caveat
+
+
+def test_the_UNMEASURED_doctrine_is_no_wider_than_the_walk_in_EITHER_direction(
+        tmp_path, monkeypatch):
+    """`UNMEASURED` holds, EXCEPT when a later resolvable TRUTHY assignment arms it.
+
+    ⛔ Measured twice (fresh reviews of PR #12474). The docstring first said the rule
+    UNCONDITIONALLY — "an assignment the walk cannot RESOLVE is also `UNMEASURED` … it
+    lands in `indeterminate` and the file holds as `UNMEASURED`" — while the walk's own
+    control arm returns `ON` for a later truthy assignment. The first correction then
+    said "unless a LATER resolvable assignment decides it", which is STILL wider than
+    the walk: a later resolvable **falsy** assignment does NOT clear the `UNMEASURED`.
+    Both errors are the defect class this probe exists to remove — a sentence wider
+    than the measurement under it — and a maintainer scoping follow-up work off either
+    one would conclude the falsy ordering is already handled.
+
+    So this pin drives EVERY ordering and states what the walk does, including the
+    conservative over-reading it now declares in prose. The two must move TOGETHER: if
+    a later falsy assignment is made to decide the file, the docstring's "does NOT
+    clear" half becomes false and this arm reds — which is the point.
+    """
+    # ⛔ NORMALISED before matching: a phrase pin that depends on the DOCSTRING'S line
+    # wrapping reds on a reflow that changes no meaning, and the first version of this
+    # pin did exactly that (the phrase straddled a wrap and the arm was red on a
+    # CORRECT docstring — measured). `" ".join(split())` asserts the SENTENCE.
+    doc = " ".join((probe.flag_in_shipped_configs.__doc__ or "").split())
+    for phrase, why in (
+        ("a LATER resolvable **truthy** assignment arms it",
+         "the exception is the ARM direction only — the walk honours truthy, not any "
+         "resolvable value (a later falsy does NOT clear the UNMEASURED)"),
+        ("does NOT clear the `UNMEASURED`",
+         "the conservative over-reading must be DECLARED, not implied away"),
+        ("in EVERY order",
+         "the unresolvable line stays REPORTED in every order, or the exception reads "
+         "as permission to drop it"),
+    ):
+        assert phrase in doc, f"the UNMEASURED doctrine's sentence lost: {why}"
+
+    # Every ordering the sentence now covers, MEASURED — not just the one it shipped for.
+    cases = {
+        'ENV TORTOISE_EMBED_GATE="${OTHER}"\nENV TORTOISE_EMBED_GATE=1\n': "ON",
+        'ENV TORTOISE_EMBED_GATE="${OTHER}"\nENV TORTOISE_EMBED_GATE=0\n': "UNMEASURED",
+        'ENV TORTOISE_EMBED_GATE="${OTHER}"\n': "UNMEASURED",
+        "ENV TORTOISE_EMBED_GATE=0\n" 'ENV TORTOISE_EMBED_GATE="${OTHER}"\n': "UNMEASURED",
+        'ENV TORTOISE_EMBED_GATE=1\nENV TORTOISE_EMBED_GATE="${OTHER}"\n': "UNMEASURED",
+    }
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    for body, expected in cases.items():
+        (tmp_path / "Dockerfile.hosted").write_text(
+            'FROM python:3.12\n' + body, encoding="utf-8")
+        shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+        state = shipped["deployment"]["files"]["Dockerfile.hosted"]
+        assert state == expected, (
+            f"{body!r} -> {state!r}, the docstring now says {expected!r}: "
+            "if the walk changed, the sentence must be re-derived WITH it")
+        # The unreadable line is REPORTED in every one of these orders.
+        assert shipped["indeterminate"], (
+            f"the unresolvable line vanished from `indeterminate` on {body!r}: "
+            f"{shipped['indeterminate']}")
+
+
+def test_a_superseded_unset_does_not_claim_this_tree_DISARMS_the_flag(
+        tmp_path, monkeypatch):
+    """A REPORTED disarm is not a DISARMED-by-it tree: the leading clause must not say so.
+
+    ⛔ The falsifier the ORDER qualification lacked (fresh review of PR #12474, P2):
+    `environment: [- FLAG, - FLAG=1]` is ONE file whose LAST word is truthy, so the walk
+    reads that file `ON` — while the reported `unset_declarations` still produced a
+    leading *"this tree DISARMS it in 1 declaration(s)"*. Two statements about one flag
+    in one note, and the false one was the clause a reader quotes; the subordinate
+    "the LAST of them by FILE order decides" did not undo it.
+
+    The arm keys on the file STATES, per PATH: a declaration is named as disarming the
+    tree only when the file it sits in really ends unarmed. Dropping the report instead
+    would be the other failure, so both halves are asserted.
+    """
+    (tmp_path / "Dockerfile.hosted").write_text('FROM python:3.12\n', encoding="utf-8")
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n"
+        "  tortoise:\n"
+        "    build:\n"
+        "      dockerfile: Dockerfile.selfhost\n"
+        "    environment:\n"
+        "      - TORTOISE_EMBED_GATE\n"
+        "      - TORTOISE_EMBED_GATE=1\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    files = shipped["deployment"]["files"]
+    # The fixture's whole point: the value-less entry is REPORTED, and the file it sits
+    # in ends `ON` because a LATER truthy assignment decides it. A silent sibling holds
+    # the tree at `on: False`, which is what reached the false cause in the first place.
+    assert shipped["unset_declarations"], shipped
+    assert files["docker-compose.yml"] == "ON", files
+    assert files["Dockerfile.hosted"] == "OFF", files
+    assert shipped["deployment"]["on"] is False, shipped["deployment"]
+
+    caveat = probe.per_file_scope_note(shipped["deployment"])
+    assert "DISARMS it" not in caveat, (
+        "the caveat claimed this tree is disarmed BY a declaration whose own file it "
+        "reads `ON`: " + caveat)
+    # …and the direction is still REPORTED, not dropped to make the sentence true.
+    assert "UNSET it" in caveat, caveat
+    note = _gate_note(shipped)
+    assert "DISARMS it" not in note, note
+    assert "declarations that UNSET it: ['docker-compose.yml:" in note, note
+
+    # The POSITIVE control, in the same fixture shape: move the truthy assignment FIRST
+    # and the value-less entry becomes the last word — the file ends `OFF`, and now the
+    # leading clause MUST name it, so the arm cannot pass by never saying it.
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n"
+        "  tortoise:\n"
+        "    build:\n"
+        "      dockerfile: Dockerfile.selfhost\n"
+        "    environment:\n"
+        "      - TORTOISE_EMBED_GATE=1\n"
+        "      - TORTOISE_EMBED_GATE\n", encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"]["docker-compose.yml"] == "OFF", shipped
+    assert "this tree DISARMS it in 1 declaration(s)" in probe.per_file_scope_note(
+        shipped["deployment"]), probe.per_file_scope_note(shipped["deployment"])
+
+
+def test_a_value_less_compose_environment_entry_is_reported_as_UNSET(
+        tmp_path, monkeypatch):
+    """A compose entry with NO value DISARMS the container — the direction that costs.
+
+    ⛔ Measured (fresh review of PR #12474, P2): `environment: - FLAG` / `FLAG:` /
+    `FLAG: null` REMOVES the variable from the container, so the caveat's
+    "inheritance can only ADD an arm" was false on a reachable shape — and the line
+    landed in NO bucket, so nothing a reader could consult said so. It is now reported,
+    the caveat names the bound, and the file still reads silent on that line (which is
+    right: it declares no value to arm with).
+    """
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  tortoise:\n    build:\n      dockerfile: Dockerfile.selfhost\n"
+        "    environment:\n      - TORTOISE_EMBED_GATE\n", encoding="utf-8")
+    (tmp_path / "Dockerfile.selfhost").write_text(
+        'FROM python:3.12\nENV TORTOISE_EMBED_GATE="1"\n', encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["unset_declarations"], shipped
+    assert shipped["deployment"]["files"]["docker-compose.yml"] == "OFF", shipped["deployment"]
+    caveat = probe.per_file_scope_note(shipped["deployment"])
+    assert "never unsets" not in caveat, caveat
+    # ⛔ The caveat VARIES with this tree's disarming declarations, so the arm measures
+    # something: the empty reading cannot produce the DISARMS sentence (fresh review of
+    # PR #12474, P3 — the first version's two arms passed for every input).
+    assert "DISARMS it" in caveat, caveat
+    assert "UNSET it" in caveat, caveat
+    empty = probe.per_file_scope_note(
+        {**shipped["deployment"], "unset_declarations": [], "disarming_assignments": []})
+    assert "DISARMS it" not in empty, empty
+    note = _gate_note(shipped)
+    assert "declarations that UNSET it: ['docker-compose.yml:" in note, note
+    # ⛔ …and the EXPLICIT-FALSE override is the other disarming direction: compose
+    # `environment:` OVERRIDES the image's `ENV`, so a `"0"` here disarms a deployment
+    # whose image arms it — and calling the file merely "silent" steered a reader to
+    # "armed" (fresh review of PR #12474, P2).
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  tortoise:\n    build:\n      dockerfile: Dockerfile.selfhost\n"
+        '    environment:\n      TORTOISE_EMBED_GATE: "0"\n', encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["disarming_assignments"], shipped
+    assert shipped["deployment"]["disarming_assignments"], shipped["deployment"]
+    caveat = probe.per_file_scope_note(shipped["deployment"])
+    assert "value(s) leave it OFF" in caveat, caveat
+    # …and a compose BUILD ARG is not a runtime arm (the fourth reader now agrees with
+    # the other three about what build-time means) — in BOTH the map and the list
+    # spelling, since the flush-left sequence is the same document.
+    for args_block in ('      args:\n        TORTOISE_EMBED_GATE: "1"\n',
+                       '      args:\n      - TORTOISE_EMBED_GATE="1"\n'):
+        (tmp_path / "docker-compose.yml").write_text(
+            "services:\n  tortoise:\n    build:\n      context: .\n" + args_block,
+            encoding="utf-8")
+        shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+        assert shipped["per_surface"]["docker-compose.yml"]["state"] == "OFF", shipped
+        assert any("build-time build arg" in hit
+                   for hit in shipped["outside_runtime"]), shipped["outside_runtime"]
+    # ⛔ And any OTHER compose scope is REPORTED, never armed: `labels` held the flag and
+    # read `ON` — a deployment armed off a value no process reads (fresh review of PR
+    # #12474, P2). Only `environment:` may arm.
+    (tmp_path / "docker-compose.yml").write_text(
+        'services:\n  tortoise:\n    labels:\n      TORTOISE_EMBED_GATE: "1"\n',
+        encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["docker-compose.yml"]["state"] == "OFF", shipped
+    assert shipped["deployment"]["on"] is False, shipped["deployment"]
+    assert any("not a runtime environment scope" in hit
+               for hit in shipped["outside_runtime"]), shipped["outside_runtime"]
+
+    # ⛔ The FLUSH-LEFT sequence spelling is the same YAML document as the indented one,
+    # and the context tracker popped the parent before the item, so it landed in NO
+    # bucket while the indented form worked (fresh review of PR #12474, P2, measured
+    # against the pre-delta blob). Both spellings, plus a TAB-preceded comment.
+    for block in ("    environment:\n    - TORTOISE_EMBED_GATE\n",
+                  "    environment:\n      - TORTOISE_EMBED_GATE\n",
+                  "    environment:\n    - TORTOISE_EMBED_GATE\t# disable\n"):
+        (tmp_path / "docker-compose.yml").write_text(
+            "services:\n  tortoise:\n" + block, encoding="utf-8")
+        assert probe.flag_in_shipped_configs(
+            "TORTOISE_EMBED_GATE")["unset_declarations"], block
+    # …and a flush-left FALSE value in `environment` is the OVERRIDE direction.
+    (tmp_path / "docker-compose.yml").write_text(
+        'services:\n  tortoise:\n    environment:\n    - TORTOISE_EMBED_GATE="0"\n',
+        encoding="utf-8")
+    assert probe.flag_in_shipped_configs(
+        "TORTOISE_EMBED_GATE")["disarming_assignments"]
+
+    # …the map spellings too.
+    for spelling in ("TORTOISE_EMBED_GATE:", "TORTOISE_EMBED_GATE: null",
+                     "TORTOISE_EMBED_GATE:\t# disable the gate",
+                     "TORTOISE_EMBED_GATE:   # disable the gate"):
+        (tmp_path / "docker-compose.yml").write_text(
+            f"services:\n  tortoise:\n    environment:\n      {spelling}\n",
+            encoding="utf-8")
+        assert probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")[
+            "unset_declarations"], spelling
+
+
+def test_the_LAST_assignment_in_a_file_decides_its_arming(tmp_path, monkeypatch):
+    """`ENV FLAG=1` then `ENV FLAG=0` leaves the container with 0 — the file is OFF.
+
+    ⛔ Measured (fresh review of PR #12474, P2, pre-existing): the walk read the file
+    `ON` because SOME line assigned a truthy value, so `gate enabled by default` could
+    publish `True` over an image whose effective environment has the gate off — the
+    fail-open direction, and the one concept on which the compose reader (which does
+    report an explicit override) disagreed with the Dockerfile and shell readers.
+    LAST WINS per file now, and the shadowed assignment is reported.
+    """
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nENV TORTOISE_EMBED_GATE=1\n'
+        "ENV TORTOISE_EMBED_GATE=0\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["Dockerfile"]["state"] == "OFF", shipped["per_surface"]
+    assert shipped["deployment"]["on"] is False, shipped["deployment"]
+    assert any("OVERRIDES an earlier truthy value" in hit
+               for hit in shipped["disarming_assignments"]), shipped
+    # …the reverse order is ON, and the shadowed OFF line is reported.
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nENV TORTOISE_EMBED_GATE=0\n'
+        "ENV TORTOISE_EMBED_GATE=1\n", encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["Dockerfile"]["state"] == "ON", shipped["per_surface"]
+    assert any("shadowed by a later truthy value" in hit
+               for hit in shipped["disarming_assignments"]), shipped
+    # …and the same in the shell reader.
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nENTRYPOINT ["/entrypoint.sh"]\n', encoding="utf-8")
+    (tmp_path / "entrypoint.sh").write_text(
+        "#!/bin/bash\nexport TORTOISE_EMBED_GATE=1\nexport TORTOISE_EMBED_GATE=0\n",
+        encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["entrypoint"]["state"] == "OFF", shipped["per_surface"]
+    # …and an EMPTY value with a TAB comment is still an OFF assignment, not silence.
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  tortoise:\n    environment:\n"
+        "    - TORTOISE_EMBED_GATE=\t# empty\n", encoding="utf-8")
+    assert probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")[
+        "disarming_assignments"]
+    # …and a TAB comment on the LEGACY space form keeps the hit.
+    (tmp_path / "Dockerfile.hosted").write_text(
+        "FROM python:3.12\nENV TORTOISE_EMBED_GATE 1\t# on\n", encoding="utf-8")
+    assert probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")[
+        "per_surface"]["Dockerfile"]["state"] == "ON"
+
+
+def test_a_file_with_NO_decision_of_its_own_does_not_inherit_the_PREVIOUS_file(
+        tmp_path, monkeypatch):
+    """The deployment population is per FILE — one file's arming never greens its neighbour.
+
+    ⛔ Measured (fresh review of PR #12474, P1): `decisions` was initialised OUTSIDE the
+    per-file loop and flushed per file, so a file that appended no decision inherited the
+    PREVIOUS file's — reported `ON` with that file's hit text, dropped out of `silent`, and
+    flipped `deployment["on"]` on the ORDER the filenames happen to sort in. Both orders
+    are reachable with this repo's own names (`Dockerfile.hosted` < `Dockerfile.selfhost`),
+    so the walk's verdict depended on a `glob` sort. This is the fail-open the PR exists to
+    close, one axis over: a build-time-only `ARG` file was greened by a neighbour.
+    """
+    armed = 'FROM python:3.12\nENV TORTOISE_EMBED_GATE=1\n'
+    argonly = 'FROM python:3.12\nARG TORTOISE_EMBED_GATE=1\n'
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+
+    # …the build-time-only file sorts FIRST: it must be OFF and SILENT, and the surface
+    # must carry exactly ONE hit (a duplicate was how the inherited decision showed up).
+    (tmp_path / "Dockerfile.a_argonly").write_text(argonly, encoding="utf-8")
+    (tmp_path / "Dockerfile.z_armed").write_text(armed, encoding="utf-8")
+    first = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    files = first["per_surface"]["Dockerfile"]["files"]
+    assert files["Dockerfile.a_argonly"]["state"] == "OFF", files
+    assert files["Dockerfile.z_armed"]["state"] == "ON", files
+    assert first["per_surface"]["Dockerfile"]["hits"] == [
+        "Dockerfile.z_armed: ENV TORTOISE_EMBED_GATE=1"], (
+            first["per_surface"]["Dockerfile"]["hits"])
+    assert "Dockerfile.a_argonly" in first["deployment"]["silent"], first["deployment"]
+    # …a build-time `ARG` is reported as outside the runtime, never as an arm.
+    assert any("build-time ARG" in entry for entry in first["outside_runtime"]), (
+        first["outside_runtime"])
+
+    # …and the SAME two files with the sort order reversed must read IDENTICALLY. Before
+    # the fix this order reported BOTH files `ON` and `deployment["on"] is True`.
+    (tmp_path / "Dockerfile.a_argonly").unlink()
+    (tmp_path / "Dockerfile.z_armed").unlink()
+    (tmp_path / "Dockerfile.a_armed").write_text(armed, encoding="utf-8")
+    (tmp_path / "Dockerfile.z_argonly").write_text(argonly, encoding="utf-8")
+    second = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    files = second["per_surface"]["Dockerfile"]["files"]
+    assert files["Dockerfile.z_argonly"]["state"] == "OFF", files
+    assert files["Dockerfile.a_armed"]["state"] == "ON", files
+    assert "Dockerfile.z_argonly" in second["deployment"]["silent"], (
+        second["deployment"])
+    # …the verdict is ORDER-INVARIANT, which is the property the sort broke.
+    assert first["deployment"]["on"] == second["deployment"]["on"] is False, (
+        first["deployment"]["on"], second["deployment"]["on"])
+    assert (len(first["per_surface"]["Dockerfile"]["hits"])
+            == len(second["per_surface"]["Dockerfile"]["hits"]) == 1), (
+        first["per_surface"]["Dockerfile"]["hits"],
+        second["per_surface"]["Dockerfile"]["hits"])
+
+
+def test_an_INDETERMINATE_last_assignment_holds_the_file_UNMEASURED(tmp_path, monkeypatch):
+    """An unresolvable assignment is the LAST word — it cannot leave an earlier arm standing.
+
+    ⛔ Measured (fresh review of PR #12474, P2): the indeterminate line took a bare
+    `continue`, appending no decision, so `decisions[-1]` stayed on the earlier truthy
+    value and `ENV FLAG=1` then `ENV FLAG="${OTHER}"` published `ON` with
+    `measured: True` — while `flag_in_shipped_configs`' own docstring promises an
+    assignment the walk cannot resolve holds the file UNMEASURED. The neighbouring
+    indirection test only covers a file whose ONLY line is indeterminate, so it could
+    not see this. The reverse order stays ON, because a LATER resolvable truthy value
+    genuinely decides it.
+    """
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nENV TORTOISE_EMBED_GATE=1\n'
+        'ENV TORTOISE_EMBED_GATE="${OTHER}"\n', encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["Dockerfile"]["state"] == "UNMEASURED", (
+        shipped["per_surface"]["Dockerfile"])
+    assert shipped["deployment"]["measured"] is False, shipped["deployment"]
+    assert shipped["deployment"]["on"] is False, shipped["deployment"]
+    assert any("${OTHER}" in entry for entry in shipped["indeterminate"]), shipped
+
+    # …the CONTROL direction: an indeterminate line FOLLOWED by a resolvable truthy one
+    # leaves the file's effective value known, so it is ON — the fix must not swallow it.
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nENV TORTOISE_EMBED_GATE="${OTHER}"\n'
+        'ENV TORTOISE_EMBED_GATE=1\n', encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["Dockerfile"]["state"] == "ON", (
+        shipped["per_surface"]["Dockerfile"])
+    assert shipped["deployment"]["on"] is True, shipped["deployment"]
+
+
+def test_a_shell_UNSET_disarms_the_file_and_is_REPORTED(tmp_path, monkeypatch):
+    """`unset FLAG` is the shell channel's DISARMING direction, and it is LAST WINS.
+
+    ⛔ Measured (fresh review of PR #12474, P2): `unset FLAG` is not an assignment, so
+    `_assigned_value` returned `None` and it landed in NO bucket at all — it was neither
+    scored nor reported, and an earlier `export FLAG=1` stood. `export FLAG=1` followed
+    by `unset FLAG` therefore read the file `ON` (surface `ON`, nothing in any bucket)
+    over a script whose executed process has no such variable. The compose value-less
+    spelling has been reported since this PR's compose reader landed; the shell channel,
+    which this PR ADDS, did not.
+    """
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    (tmp_path / "Dockerfile").write_text(
+        'FROM python:3.12\nENTRYPOINT ["/entrypoint.sh"]\n', encoding="utf-8")
+
+    # …arm then UNSET: the file is OFF and the disarming line is REPORTED, not silent.
+    (tmp_path / "entrypoint.sh").write_text(
+        "#!/bin/bash\nexport TORTOISE_EMBED_GATE=1\nunset TORTOISE_EMBED_GATE\n",
+        encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["entrypoint"]["state"] == "OFF", (
+        shipped["per_surface"]["entrypoint"])
+    assert any("unset TORTOISE_EMBED_GATE" in entry
+               for entry in shipped["unset_declarations"]), shipped[
+                   "unset_declarations"]
+
+    # …`unset -v FLAG`, the multi-name form, and a trailing comment are the same fact.
+    for script in (
+        "#!/bin/bash\nexport TORTOISE_EMBED_GATE=1\nunset -v TORTOISE_EMBED_GATE\n",
+        "#!/bin/bash\nexport TORTOISE_EMBED_GATE=1\nunset A B TORTOISE_EMBED_GATE\n",
+        "#!/bin/bash\nexport TORTOISE_EMBED_GATE=1\n"
+        "unset TORTOISE_EMBED_GATE # disarmed\n",
+    ):
+        (tmp_path / "entrypoint.sh").write_text(script, encoding="utf-8")
+        assert probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")[
+            "per_surface"]["entrypoint"]["state"] == "OFF", script
+
+    # …CONTROLS, so the fix cannot over-reach: an `unset` of ANOTHER name, and one of a
+    # longer name the flag PREFIXES, both leave the arm standing.
+    for script in (
+        "#!/bin/bash\nexport TORTOISE_EMBED_GATE=1\nunset OTHER_VAR\n",
+        "#!/bin/bash\nexport TORTOISE_EMBED_GATE=1\nunset TORTOISE_EMBED_GATE_EXTRA\n",
+    ):
+        (tmp_path / "entrypoint.sh").write_text(script, encoding="utf-8")
+        shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+        assert shipped["per_surface"]["entrypoint"]["state"] == "ON", script
+        assert not shipped["unset_declarations"], shipped["unset_declarations"]
+
+    # …and the ORDER decides, as everywhere else: an `unset` BEFORE the `export` leaves
+    # the export as the last word, so the file is ON.
+    (tmp_path / "entrypoint.sh").write_text(
+        "#!/bin/bash\nunset TORTOISE_EMBED_GATE\nexport TORTOISE_EMBED_GATE=1\n",
+        encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["entrypoint"]["state"] == "ON", (
+        shipped["per_surface"]["entrypoint"])
+
+
+#: The shapes `unset` has to classify, and the reading each one must produce. The
+#: CONTROLS are half the table on purpose: an arm that disarms on `unset OTHER` is a
+#: different defect from one that misses `unset FLAG`, and only a two-sided pin sees it.
+_UNSET_SHAPES = [
+    # (script body after a truthy arm, expected entrypoint state, why)
+    ("export TORTOISE_EMBED_GATE=1\nunset TORTOISE_EMBED_GATE\n", "OFF", "the plain form"),
+    ("export TORTOISE_EMBED_GATE=1\nunset -v TORTOISE_EMBED_GATE\n", "OFF", "-v is variables"),
+    ("export TORTOISE_EMBED_GATE=1\nunset A B TORTOISE_EMBED_GATE\n", "OFF", "multi-name"),
+    ("export TORTOISE_EMBED_GATE=1\nunset TORTOISE_EMBED_GATE # off\n", "OFF", "trailing comment"),
+    # ⛔ `set -a` (allexport) returns `None` from `_shell_exported_names`, so keying the
+    # arm on that value skipped every allexport entrypoint and kept the earlier `export`
+    # standing — the same fail-open (fresh review of PR #12474, P2).
+    ("set -a\nexport TORTOISE_EMBED_GATE=1\nunset TORTOISE_EMBED_GATE\n", "OFF",
+     "allexport entrypoint"),
+    ("set -a\nTORTOISE_EMBED_GATE=1\nunset TORTOISE_EMBED_GATE\n", "OFF",
+     "allexport, bare assignment"),
+    # ⛔ An OPTION CLUSTER must not be read as a name: `-f` unsets a FUNCTION and `-n` a
+    # NAMEREF, so neither removes the variable and neither may disarm (fail-CLOSED).
+    ("export TORTOISE_EMBED_GATE=1\nunset -f TORTOISE_EMBED_GATE\n", "ON", "-f is a function"),
+    ("export TORTOISE_EMBED_GATE=1\nunset -n TORTOISE_EMBED_GATE\n", "ON", "-n is a nameref"),
+    # …CONTROLS: another name, a longer name the flag PREFIXES, and a non-builtin word.
+    # ⛔ An OPERATOR glued to the last name (`unset FLAG;`, `unset FLAG|cmd`) was split on
+    # whitespace only, so `FLAG;` matched nothing and the earlier arm stood — fail-OPEN,
+    # and inconsistent with the SPACED ` ;` which read correctly (fresh review PR #12474, P3).
+    ("export TORTOISE_EMBED_GATE=1\nunset TORTOISE_EMBED_GATE;\n", "OFF", "glued ;"),
+    ("export TORTOISE_EMBED_GATE=1\nunset TORTOISE_EMBED_GATE; exec python -m x\n", "OFF",
+     "glued ; then a command"),
+    ("export TORTOISE_EMBED_GATE=1\nunset TORTOISE_EMBED_GATE|cat\n", "OFF", "glued |"),
+    ("export TORTOISE_EMBED_GATE=1\nunset TORTOISE_EMBED_GATE 2>/dev/null\n", "OFF",
+     "redirect"),
+    ("export TORTOISE_EMBED_GATE=1\nunset OTHER_VAR\n", "ON", "a different name"),
+    ("export TORTOISE_EMBED_GATE=1\nunset TORTOISE_EMBED_GATE_EXTRA\n", "ON", "a PREFIX"),
+    ("export TORTOISE_EMBED_GATE=1\nunsetfv TORTOISE_EMBED_GATE\n", "ON", "not an unset"),
+    ("export TORTOISE_EMBED_GATE=1\nUNSET TORTOISE_EMBED_GATE\n", "ON",
+     "UNSET is not a builtin"),
+    # ⛔ A COMPUTED name resolves to something the walk cannot read, so the file is
+    # UNMEASURED — never silently "no unset", which is what a bare `word == flag` test
+    # produced for `unset "$FLAG"` (fresh review of PR #12474, P3).
+    ('export TORTOISE_EMBED_GATE=1\nunset "$FLAG"\n', "UNMEASURED", "computed name"),
+    ("export TORTOISE_EMBED_GATE=1\nunset ${OTHER}\n", "UNMEASURED", "computed name"),
+]
+
+
+def test_every_unset_SHAPE_is_classified_and_the_controls_do_not_disarm(
+        tmp_path, monkeypatch):
+    """One row per `unset` shape, both directions — the arm must not over- or under-reach.
+
+    ⛔ Measured (fresh review of PR #12474, P2/P3): the first arm keyed its channel test
+    on `shell_exports is not None`, which is `None` for an ALLEXPORT script too, so every
+    `set -a` entrypoint skipped it; read any option token as a NAME, so `unset -f FLAG`
+    (a FUNCTION) vanished the arm; and silently ignored a computed name, so
+    `unset "$FLAG"` fell into no bucket at all. Each row below was measured against that
+    arm before it was fixed.
+    """
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    (tmp_path / "Dockerfile").write_text(
+        'FROM python:3.12\nENTRYPOINT ["/entrypoint.sh"]\n', encoding="utf-8")
+    wrong: list[str] = []
+    for body, expected, why in _UNSET_SHAPES:
+        (tmp_path / "entrypoint.sh").write_text(
+            "#!/bin/bash\n" + body, encoding="utf-8")
+        shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+        actual = shipped["per_surface"]["entrypoint"]["files"]["entrypoint.sh"]["state"]
+        if actual != expected:
+            wrong.append(f"{why}: expected {expected}, read {actual} ({body!r})")
+    assert not wrong, (
+        "an `unset` shape is classified wrongly — a MISS leaves an earlier arm standing "
+        "(fail-OPEN) and an over-reach disarms on a name that is not the flag:"
+        + "\n  " + "\n  ".join(wrong))
+
+
+def test_a_compose_VALUE_LESS_entry_is_LAST_WINS_not_just_reported(tmp_path, monkeypatch):
+    """A compose value-less entry UNSETS the variable, so a later one must win.
+
+    ⛔ Measured (fresh review of PR #12474, P3): the compose arm reported the unset and
+    `continue`d WITHOUT a decision, so `environment: [- FLAG=1, - FLAG]` read the file
+    `ON` — the compose-spec semantics read the wrong way, and exactly the asymmetry the
+    shell arm had just been fixed for. The reverse order is the control: the later truthy
+    value genuinely decides.
+    """
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  tortoise:\n    environment:\n"
+        "      - TORTOISE_EMBED_GATE=1\n"
+        "      - TORTOISE_EMBED_GATE\n", encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["docker-compose.yml"]["state"] == "OFF", (
+        shipped["per_surface"]["docker-compose.yml"])
+    # …the unset line is REPORTED (its own bucket) and NOT double-counted as a second
+    # "value that leaves it OFF" — one line published as two claims was the defect.
+    assert any("TORTOISE_EMBED_GATE" in entry
+               for entry in shipped["unset_declarations"]), shipped["unset_declarations"]
+    assert not shipped["disarming_assignments"], shipped["disarming_assignments"]
+
+    # …and the reverse order leaves the arm standing — and the unset line is claimed ONCE.
+    # ⛔ It used to appear in BOTH lists here, the second time under a heading that calls an
+    # `unset` "a value that OVERRIDES it OFF" — false about it, and no longer even the
+    # direction the file ends in (fresh review of PR #12474, P2, measured).
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  tortoise:\n    environment:\n"
+        "      - TORTOISE_EMBED_GATE\n"
+        "      - TORTOISE_EMBED_GATE=1\n", encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["docker-compose.yml"]["state"] == "ON", (
+        shipped["per_surface"]["docker-compose.yml"])
+    assert len(shipped["unset_declarations"]) == 1, shipped["unset_declarations"]
+    assert not shipped["disarming_assignments"], shipped["disarming_assignments"]
+
+
+
+def test_the_LEGACY_ENV_space_form_is_a_deployment_hit(tmp_path, monkeypatch):
+    """`ENV KEY value` (no `=`) sets KEY — the third form the Dockerfile grammar has.
+
+    ⛔ Measured (fresh review of PR #12474, P3, pre-existing): `ENV
+    TORTOISE_EMBED_GATE 1` read OFF with nothing reported, while `ENV KEY=1` read ON —
+    a false HOLD on the deployment channel this PR widened, on the same
+    instruction/spacing axis as the case and tab fixes. Scoped to `ENV`: no other
+    surface has this form, and `ARG` never reaches the process.
+    """
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nENV TORTOISE_EMBED_GATE 1\n', encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["Dockerfile"]["state"] == "ON", shipped["per_surface"]
+    assert shipped["deployment"]["on"] is True, shipped["deployment"]
+    # …an OFF value in the same form is still OFF, and a multi-word value is not truthy.
+    (tmp_path / "Dockerfile.hosted").write_text(
+        "FROM python:3.12\nENV TORTOISE_EMBED_GATE 0\n", encoding="utf-8")
+    assert probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")[
+        "per_surface"]["Dockerfile"]["state"] == "OFF"
+    # …and the ARG space form is still BUILD-TIME, not a hit.
+    (tmp_path / "Dockerfile.hosted").write_text(
+        "FROM python:3.12\nARG TORTOISE_EMBED_GATE 1\n", encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["Dockerfile"]["state"] == "OFF", shipped["per_surface"]
+    # ⛔ …and it is REPORTED as build-time, not silently dropped: the arm used to require
+    # the assignment reader to parse it, which it does not do for the legacy spelling
+    # (fresh review of PR #12474, P3).
+    assert any("build-time ARG" in hit for hit in shipped["outside_runtime"]), shipped
+    # ⛔ …and the MULTI-ASSIGNMENT form `ENV FLAG="1" OTHER=1` sets the flag: Docker's own
+    # grammar allows it, and the multi-word rejection read it as prose (PR #12474, P3).
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nENV TORTOISE_EMBED_GATE="1" PYTHONUNBUFFERED=1\n',
+        encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["Dockerfile"]["state"] == "ON", shipped["per_surface"]
+    # …while a genuine PROSE line after the value is still not a setting.
+    (tmp_path / "Dockerfile.hosted").write_text(
+        "FROM python:3.12\nENV TORTOISE_EMBED_GATE 1 to enable\n", encoding="utf-8")
+    assert probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")[
+        "per_surface"]["Dockerfile"]["state"] == "OFF"
+
 
 
 @pytest.mark.parametrize("text", [
@@ -4352,7 +5433,7 @@ def test_row_one_is_PARTIAL_because_ONE_writer_embeds_outside_the_gate(
     outside-gate writer holds the row **while the product does not name it**.
     The injected writer here is UNDECLARED on purpose (the register is empty),
     so this falsifier keeps its teeth; the DECLARED direction — the same writer,
-    named — is `test_a_named_ungated_writer_is_the_accepted_exception_reading_b`
+    named — is `test_a_named_UNGATED_writer_is_the_accepted_exception_reading_b`
     below. Dropping `undeclared` from the verdict reds this test.
     """
     _fake_rule_tree(tmp_path)
@@ -5532,6 +6613,48 @@ def _byref_sdk_source() -> str:
         "    def lambda_default_is_the_enclosing_scope(self):\n"
         "        f = lambda v=_review_pool: v\n"
         "        return f()\n"
+        # ⛔ `#12020` round 8 cycle 6 (P3): the LAMBDA BODY is its own scope too, and the walk
+        # descended into it — a walrus INSIDE a lambda landed in the METHOD's shadow set and
+        # suppressed a genuine by-reference mention further down (the under-report direction). `dis`
+        # confirms `lambda: (x := 1)` binds `x` as the lambda's own fast local.
+        "    def walrus_inside_a_LAMBDA_does_not_shade_the_body(self):\n"
+        "        f = lambda: (_review_pool := 1)\n"
+        "        return _safe(_review_pool)\n"
+        # ⛔ …but a lambda's DEFAULTS are evaluated in the ENCLOSING scope, so a walrus there DOES
+        # bind in the method (`symtable`: this method's locals include `_review_pool`, the lambda's
+        # do not) — the mention after it is not a reach. Pinned because the body fix skipped the
+        # whole `ast.Lambda` node and silently turned this arm into an over-report.
+        "    def walrus_in_a_LAMBDA_DEFAULT_named_like_an_entrant(self):\n"
+        "        f = lambda v=(_review_pool := 1): v\n"
+        "        return _safe(_review_pool)\n"
+        # ⛔ and the lambda BODY's own walrus shadows INSIDE the lambda, so a mention of that name
+        # later IN THE SAME LAMBDA is the lambda's binding, not the method's (`#12182` review P3:
+        # parameters were threaded and body targets were not, which published a spurious caveat).
+        "    def mention_inside_a_LAMBDA_after_its_own_walrus_named_like_an_entrant(self):\n"
+        "        f = lambda: (_safe((_review_pool := 1)), _safe(_review_pool))\n"
+        "        return f()\n"
+        # ⛔ …and a NESTED lambda is its own scope AGAIN, so a walrus in the INNER body must not
+        # suppress the OUTER lambda's mention of the method's binding — nor the method's own. Without
+        # this arm, descending into a nested lambda body left every other test green while dropping
+        # a real reach (the under-report direction), which the sibling comment above says is the
+        # dangerous one.
+        "    def nested_lambda_body_does_not_shade_the_enclosing_lambda(self):\n"
+        "        f = lambda: (lambda: (_review_pool := 1), _safe(_review_pool))\n"
+        "        return f()\n"
+        # ⛔ …and a COMPREHENSION's walrus binds in the scope that CONTAINS the comprehension — here
+        # that is the lambda, not the method — so a comprehension inside a lambda body must still be
+        # walked and its targets attributed to the LAMBDA. Skipping comprehensions inside the lambda
+        # body published the outer mention as a reach (the cry-wolf direction), and nothing reds.
+        "    def comprehension_inside_a_lambda_body_shadows_only_the_lambda(self):\n"
+        "        f = lambda: ([(_review_pool := i) for i in range(3)], _safe(_review_pool))\n"
+        "        return f()\n"
+        # ⛔ A KEYWORD-ONLY default is still a DEFAULT: `lambda *, v=(_p := 1): v` evaluates it in
+        # the enclosing scope exactly as a positional one does, and the walk has two separate lists
+        # (`defaults` and `kw_defaults`). Dropping the second left every other test green while
+        # publishing a spurious reach — so both lists are pinned, one arm each.
+        "    def walrus_in_a_KEYWORD_ONLY_LAMBDA_DEFAULT_named_like_an_entrant(self):\n"
+        "        f = lambda *, v=(_review_pool := 1): v\n"
+        "        return _safe(_review_pool)\n"
         # ── `#11397` review: `*. __class__` is only the ENCLOSING class when the base is an
         # in-module receiver; a foreign object's class is not this module's method.
         "    def foreign_dunder_class_receiver(self, other):\n"
@@ -5619,6 +6742,16 @@ def test_a_leg_reach_passed_BY_REFERENCE_is_declared_not_dropped(
               # in the enclosing scope, so it is a reach too.
               "lambda_param_does_not_shade_the_body",
               "lambda_default_is_the_enclosing_scope",
+              # ⛔ and the lambda BODY is its own scope: a walrus there is the lambda's local, so a
+              # mention of the same name in the enclosing method is still a reach (round 8 cycle 6).
+              "walrus_inside_a_LAMBDA_does_not_shade_the_body",
+              # ⛔ and a NESTED lambda body is a third scope: the inner walrus is the INNER lambda's,
+              # so the outer lambda's mention is still a reach into the method.
+              "nested_lambda_body_does_not_shade_the_enclosing_lambda",
+              # ⛔ and a comprehension inside a lambda body binds in the LAMBDA (its containing
+              # scope), which is NOT the method — so the mention after it is the lambda's binding,
+              # not a reach. This arm asserts the NEGATIVE direction: skipping comprehensions inside
+              # a lambda body published it as a reach (cry-wolf), which nothing else reds.
               # ⛔ `#12020` round 6 review (P3): `type(self)` is the receiver spelled through the
               # type — the positive half of the pair whose NEGATIVE (`type(other)`) is asserted
               # beside `other.__class__` above.
@@ -5737,6 +6870,15 @@ def test_a_leg_reach_passed_BY_REFERENCE_is_declared_not_dropped(
                       "nested_def_name_named_like_an_entrant",
                       "match_pattern_named_like_an_entrant",
                       "del_binding_named_like_an_entrant",
+                      # ⛔ and a lambda DEFAULT binds in the METHOD (`symtable`), unlike its BODY.
+                      "walrus_in_a_LAMBDA_DEFAULT_named_like_an_entrant",
+                      # ⛔ and the KEYWORD-ONLY spelling of the same rule (a separate list in the walk).
+                      "walrus_in_a_KEYWORD_ONLY_LAMBDA_DEFAULT_named_like_an_entrant",
+                      # ⛔ a comprehension walrus inside a lambda binds in the LAMBDA, so a mention
+                      # after it is the lambda's binding — not a method reach (the NEGATIVE half).
+                      "comprehension_inside_a_lambda_body_shadows_only_the_lambda",
+                      # ⛔ a mention of the lambda's OWN walrus target, later in the SAME lambda.
+                      "mention_inside_a_LAMBDA_after_its_own_walrus_named_like_an_entrant",
                       # …and the boundary of the `cls` receiver: a plain parameter named `cls`
                       # on a method whose FIRST argument is `self` is a foreign object, not the
                       # class — only the classmethod's own first parameter is the class receiver.
@@ -8012,7 +9154,7 @@ def test_the_census_doc_collects_what_the_file_collects():
     a `TORTOISE_DB_URI` satisfies) — one more skip and one fewer pass than the docker
     lane, which is the invariant that lasts; the two figures above are bound to the sha
     for exactly that reason. The two splits therefore add to the tree's OWN collected
-    count: `186 + 1` and `185 + 2` at THIS tree, both equal to the `187` the pin re-derives
+    count: `214 + 1` and `213 + 2` at THIS tree, both equal to the `215` the pin re-derives
     below (the `eee465029a` pair, `185/1` and `184/2`, adds to that tree's 186 instead),
     which is why the doc states its split as
     lane-bound: a carve-out run must not "correct" the docker lane's figure.
@@ -8338,60 +9480,105 @@ def test_the_LIVE_census_names_the_unindexed_labels_and_writes_NOTHING():
             graph.delete()
 
 
-def test_a_duplicate_literal_key_in_the_census_dicts_cannot_land_silently():
-    """#9314 — a duplicated literal key collapses BEFORE any code can see it.
+# ── the census half's duplicate-key detector (`#12182` review cycle 7, P2) ────────────────────────
+def test_the_census_has_no_DUPLICATE_dict_key_in_its_source() -> None:
+    """`WRITER_CENSUS` / `CENSUS_EVIDENCE` / `WRITER_LABEL_OVERRIDES` must not declare a key twice.
 
-    `WRITER_CENSUS` and `CENSUS_EVIDENCE` are dict literals, so Python keeps the
-    LAST binding and the earlier row is dead: the RUNTIME object cannot report the
-    duplicate, because it never saw one (`census_evidence_violations()` compares
-    key SETS, which are already collapsed). `#11996` landed exactly that pair in
-    both dicts, and these DICT duplicates were caught only by `ruff`'s `F601` —
-    post-merge, on the merge ref every open PR inherits.
+    ⛔ WHY THIS EXISTS, NOT AS ADVICE BUT AS A DETECTOR (`#12182` review cycle 7, P2). The register
+    half catches a duplicate itself: `load()` raises `DuplicateWriterDeclaration`, and because
+    `EMBED_WRITER_CLASSES = load(_DECLARATIONS)` runs at import, a merged tree carrying two entries
+    for one key cannot even be imported. Measured on PR #12182: `main`'s `#12016` and that branch each
+    added a `tortoise.sdk::create_source` declaration, both branches were green, and the forward merge
+    produced a duplicate that the guard rejected at import — the failure was CAUGHT only there.
 
-    So this pin is re-derived from the SOURCE AST and runs in the pytest lane,
-    which is the half the lint job cannot cover. `load()` in
-    `tortoise/embed_writer_register.py` already fails loud on the register's
-    tuple-of-pairs for the same reason; the dicts here had no equivalent.
+    The census half has no such guard. A dict literal accepts a repeated key silently and keeps the
+    LAST entry, so the same merge shape here does not fail — it quietly selects one of two
+    contradicting reasons, and `WRITER_CENSUS`'s class is what row-2 scoring reads (`bypass` /
+    `real_bypasses`). Measured: appending a second `create_source` row still imports, still has 23
+    keys (re-read at this tree, `#12182` cycle 9 — the figure read 22 on the tree that authored the
+    sentence, and `main`'s merge has added rows since), and leaves the census↔evidence key-set
+    equality green, with the appended — false — prose as the survivor.
 
-    ⛔ `main` was red from TWO causes at `9828250732`, and this pin closes the
-    second: the register's duplicate raised at import (so this whole file could not
-    even collect), while the dict duplicates here were caught only by `ruff`'s
-    `F601` after the merge — never in the pytest lane.
+    Read from SOURCE, not from the imported dicts: the import has already collapsed a duplicate, so
+    the evidence it could report is gone by the time this test could look at it.
     """
-    src = (probe.REPO_ROOT / "tools/dod_5090_probe.py").read_text(encoding="utf-8")
+    import ast
+
+    src = Path(probe.__file__).read_text(encoding="utf-8")
     tree = ast.parse(src)
-
-    wanted = {"WRITER_CENSUS", "CENSUS_EVIDENCE"}
-    keys_by_dict: dict[str, list[str]] = {}
-    for stmt in tree.body:
-        name: str | None = None
-        value = None
-        if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
-            name, value = stmt.target.id, stmt.value
-        elif (
-            isinstance(stmt, ast.Assign)
-            and len(stmt.targets) == 1
-            and isinstance(stmt.targets[0], ast.Name)
-        ):
-            name, value = stmt.targets[0].id, stmt.value
-        if name in wanted and isinstance(value, ast.Dict):
-            keys_by_dict[name] = [
-                ast.literal_eval(k) for k in value.keys if k is not None
-            ]
-
-    assert set(keys_by_dict) == wanted, (
-        "the declarations this pin reads were renamed or stopped being a dict "
-        f"literal — found {sorted(keys_by_dict)}, wanted {sorted(wanted)}. "
-        "Re-derive the pin rather than deleting it")
-    for name, keys in keys_by_dict.items():
-        assert len(keys) >= 10, (
-            f"{name} parsed to {len(keys)} literal keys — too few to be the real "
-            "table, so this pin would pass vacuously")
+    wanted = {"WRITER_CENSUS", "CENSUS_EVIDENCE", "WRITER_LABEL_OVERRIDES"}
+    seen: dict[str, list[str]] = {}
+    # ⛔ MODULE TOP LEVEL ONLY (`tree.body`), NOT `ast.walk`. These three tables are module-level
+    # declarations, so a top-level scan is both sufficient and the only scope where "the table" is a
+    # single object: a walk also visits a same-named literal inside a function, and that literal is
+    # not the table.
+    # ⚠️ What this scope is NOT: a duplicate fail-open fix. `assert not dupes` below fires PER
+    # VISITED NODE, so a duplicate in the real table reds whether or not a decoy literal exists —
+    # re-measured on the pre-`tree.body` version: real duplicate plus a 23-key decoy → RED, not
+    # clean. `seen` is last-wins, so a decoy CAN shadow the TRAILING checks that read it — the
+    # key-count comparison against the runtime dict AND the per-literal key floors below — while a
+    # decoy naming a table ABSENT from the top level also satisfies the vacuity `set(seen) == wanted`.
+    # Narrowing the scan removes that window; it does not close a duplicate fail-open, because there
+    # was none. What a walk DOES get wrong in the other direction: a 5-key function-local literal
+    # bearing the same name FALSE-BLOCKS on the floors below (measured), so the narrowing is not
+    # cosmetic either.
+    # ⚠️ And this is a DIRECTIVE, not a pin: restoring `ast.walk` leaves this file GREEN (measured),
+    # so nothing reds if a later lane widens it back. Re-derive the reason before changing the scope.
+    for node in tree.body:
+        if not isinstance(node, ast.AnnAssign | ast.Assign):
+            continue
+        targets = [node.target] if isinstance(node, ast.AnnAssign) else list(node.targets)
+        names = [t.id for t in targets if isinstance(t, ast.Name) and t.id in wanted]
+        if not names or not isinstance(node.value, ast.Dict):
+            continue
+        # ⛔ A key that is NOT a string literal (an alias like `_ALIAS_KEY = "…"` used as a key, a
+        # splat, any computed expression) must FAIL here rather than be filtered out. Filtering made
+        # the same name declared twice under one literal and once behind the alias collapse to "no
+        # duplicate" in BOTH checks below — the alias is skipped, and the literal-vs-runtime count
+        # still agrees, because the runtime dict collapses identically. Measured on a copy of this
+        # tree (`#12182` cycle 10): `_ALIAS_KEY = "tortoise.api::_emit"` plus `_ALIAS_KEY: (…)` in
+        # `WRITER_CENSUS` stayed GREEN here while `main`'s dropped `#9314` pin, which called
+        # `ast.literal_eval`, raised on the same file. That is the one shape where this detector was
+        # NARROWER than the pin it replaced: fail on it, never re-filter it.
+        keys: list[str] = []
+        for k in node.value.keys:
+            assert isinstance(k, ast.Constant) and isinstance(k.value, str), (
+                f"{names[0]} carries a key that is not a string LITERAL ({type(k).__name__}). This "
+                "pin reads literal keys, so an aliased or computed key is invisible to it — and a "
+                "duplicate hidden behind one is exactly the fail-open this detector exists to stop "
+                "(#9314). Spell the key as a literal, or re-derive the detector")
+            keys.append(k.value)
         dupes = sorted({k for k in keys if keys.count(k) > 1})
         assert not dupes, (
-            f"{name} declares {dupes} more than once. Python keeps the LAST "
-            "binding, so the earlier row is DEAD — an active override, not a "
-            "harmless no-op (#9314, measured on #11996)")
+            f"{names[0]} declares the same key more than once: {dupes}. A dict literal keeps the "
+            "LAST silently, so the earlier entry's reason is discarded with nothing red — which is "
+            "how a forward merge picks the wrong copy. Delete the stale row and say in a comment "
+            "which one survived and why")
+        seen[names[0]] = keys
+    # A vacuous pass is the failure mode of a source-reading test: if none of the three literals was
+    # found AT TOP LEVEL, nothing was checked. All three exist there today, so a MISS means a table
+    # was moved into a scope this detector no longer reads — re-derive it deliberately, do not widen
+    # it back to `ast.walk` (a decoy literal would then also feed `seen`, masking the vacuity check
+    # below and the floor/count assertions that read it, and a smaller one would false-block on the
+    # floors).
+    assert set(seen) == wanted, (
+        f"these census dict literals were not found in {probe.__file__}: "
+        f"{sorted(wanted - set(seen))} — the detector checked nothing for them")
+    # …and a literal found with a HANDFUL of keys is the same vacuity one level down: the walk above
+    # would happily report "no duplicates" over a population that is not the real table. The floors
+    # are well under the measured sizes (23 / 24 / 1 at this tree) on purpose — this is a
+    # still-the-real-table check, not a pin on a count that moves with every merge.
+    floors = {"WRITER_CENSUS": 10, "CENSUS_EVIDENCE": 10, "WRITER_LABEL_OVERRIDES": 1}
+    thin = {n: len(keys) for n, keys in seen.items() if len(keys) < floors[n]}
+    assert not thin, (
+        f"these census literals parsed to fewer literal keys than the real tables carry: {thin} "
+        f"(floors {floors}) — the detector would be checking a fragment, not the table")
+    # …and the collapsed dict the rest of the probe actually uses must still agree on size, so a
+    # delete-one-of-two edit cannot silently shrink the population instead of de-duplicating it.
+    for name in sorted(wanted):
+        assert len(seen[name]) == len(getattr(probe, name)), (
+            f"the {name} literal and the imported dict disagree on their key count — a literal key "
+            "is being shadowed by something other than a duplicate")
 # ── #12265 (root: #9314) — a duplicated declaration key is a SILENT loser ────
 #
 # `#11996` landed two duplicate `"tortoise.sdk::create_source"` rows in
@@ -9072,3 +10259,192 @@ def test_the_scan_REPORTS_a_duplicate_it_finds(tmp_path):
     # duplicate in it is the one the prose has to hold for.
     parse_only = _duplicate_key_report([v for v in violations if "broken.py" in v])
     assert "could not READ or PARSE" in parse_only.split("\n  ")[0], parse_only
+
+
+#: ── `#12312`: the citations this family makes are CHECKED, not trusted ───────
+#: ⛔ THE CAUSE IS A CASE TYPO, NOT A RENAME — `#12312`'s own CORRECTION comment
+#: records it, and this file records it too rather than repeating the body's first
+#: guess. The docstring wrote `test_a_named_ungated_writer_is_the_accepted_
+#: exception_reading_b`, lowercase; the `def` spells it `…_UNGATED_…`
+#: (`tests/test_dod_5090_probe.py` — `def test_a_named_UNGATED_writer_…`). Python
+#: identifiers are case-sensitive, so the citation resolved to nothing. Nothing red,
+#: because nothing checked. (An earlier draft of THIS comment called it a stale stem
+#: that had "survived one rename", and repointed the sentence at
+#: `test_naming_a_LIVE_undeclared_writer_is_the_acceptance_reading_b_describes` —
+#: the remedy the issue's correction explicitly falsifies, since that is a different
+#: test. The fix is one character's case, and the check below catches that class.)
+#:
+#: ⛔ The checker asserts RESOLVABILITY, never truth — the same thing every citation
+#: checker in the field asserts (rustdoc's `broken_intra_doc_links`, Sphinx
+#: `-n/--nitpicky` + `intersphinx`, mkdocs `strict`): a reference, once recognised,
+#: must resolve to a symbol that exists. It is deliberately lexical and cheap.
+#:
+#: ⚠️ THE BOUND, declared rather than implied, because the honest measurement is
+#: that repo-WIDE is NOT cheap today. Re-derived with this file's OWN extractor over
+#: `tools/`, `tortoise/`, `tests/` and `docs/` (the `_test_symbols` +
+#: `_unresolved_citations` pair below): **193 occurrences / 157 unique
+#: `file::name` pairs** name an existing test file and a test it does not define, of
+#: which **86 are wrap-shaped** (the truncated stem is a PREFIX of a real test —
+#: `…test_the_INDENT_pops_DECLARED_`) and **71 are neither**: documentation EXAMPLES
+#: (a `…::test_x` off a file that does ship) plus names that resolve nowhere.
+#: So the cost is a continuation-aware extractor AND an example-exclusion rule AND a
+#: genuine-stale-name triage — not one parser change. This check therefore covers
+#: the FAMILY that produced the defect — `tools/dod_5090_probe.py`, this file, and
+#: this epic's two artifacts — where it reports 0 violations, and the repo-wide item
+#: stays open in `#12312` with that cost stated.
+CITATION_SURFACES = (
+    "tools/dod_5090_probe.py",
+    "tests/test_dod_5090_probe.py",
+    "docs/epics/2026-11-04-5090-vector-layer/S3-VECTOR-CENSUS.md",
+    "docs/epics/2026-11-04-5090-vector-layer/TEST-DESIGN-surface-map.md",
+)
+
+_NODE_ID_CITATION = re.compile(r"([\w./-]+\.py)::(test_[A-Za-z0-9_]+)")
+_BARE_CITATION = re.compile(r"`(test_[A-Za-z0-9_]+)`")
+
+
+#: Memo for `_test_symbols`, keyed by the resolved root: the scan parses ~1500 files
+#: and measured **15.7 s per call**, and BOTH citation tests need it (fresh review of
+#: PR #12474, P3). A module-level cache is safe here because every caller asks about
+#: the same tree within a session; a test that monkeypatches `REPO_ROOT` is not a
+#: citation test and never reads this.
+_TEST_SYMBOLS_CACHE: dict[Path, tuple[set[str], set[str], dict[str, set[str]]]] = {}
+
+
+def _test_symbols(root: Path) -> tuple[set[str], set[str], dict[str, set[str]]]:
+    """``(every test def name, every test MODULE stem, {path: names})``.
+
+    The module stems are part of the universe on purpose: a backticked
+    ``test_lane`` is a citation of `tools/test_lane.py`, not a test that has gone
+    missing, and a checker that could not tell those apart would report hundreds of
+    false REDs. Both trees this repo keeps test tooling in are scanned — `tests/`
+    for the defs, `tests/` and `tools/` for the module stems.
+    """
+    cached = _TEST_SYMBOLS_CACHE.get(root)
+    if cached is not None:
+        return cached
+    defined: set[str] = set()
+    modules: set[str] = set()
+    by_file: dict[str, set[str]] = {}
+    for tree in ("tests", "tools"):
+        for path in sorted((root / tree).glob("**/test_*.py")):
+            modules.add(path.stem)
+    for path in sorted((root / "tests").glob("**/*.py")):
+        rel = path.relative_to(root).as_posix()
+        try:
+            tree_ast = ast.parse(path.read_text(encoding="utf-8", errors="ignore"))
+        except (OSError, SyntaxError):
+            # ⛔ A file that will not PARSE is a hole in the universe, not a file with
+            # no tests: its citations would then resolve to nothing and be SKIPPED
+            # (fail-open). Named rather than dropped — `by_file` keeps the key with an
+            # empty set, which makes a node-id citation into it UNRESOLVED (fail-closed
+            # on the citation) instead of silently unchecked.
+            by_file[rel] = set()
+            continue
+        names = {
+            node.name for node in ast.walk(tree_ast)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name.startswith("test_")
+        }
+        defined |= names
+        modules.add(path.stem)
+        by_file[rel] = names
+    _TEST_SYMBOLS_CACHE[root] = (defined, modules, by_file)
+    return defined, modules, by_file
+
+
+def _unresolved_citations(text: str, defined: set[str], modules: set[str],
+                          by_file: dict[str, set[str]]) -> list[str]:
+    """Every citation in ``text`` that names no test this tree declares.
+
+    Two citation shapes are checked, and the skip rules are what keep it honest:
+
+    * `path/to/test_x.py::test_name` — checked ONLY when that file resolves in this
+      tree. A documentation EXAMPLE naming a file that does not exist here
+      (`tests/test_x.py::test_y`) is not a broken citation of this repo, and
+      flagging it would make the check unusable.
+    * a backticked BARE test name — resolves if some test declares it OR a test
+      MODULE carries the stem.
+    """
+    unresolved: list[str] = []
+    for path, name in _NODE_ID_CITATION.findall(text):
+        candidates = [k for k in by_file if k == path or k.endswith("/" + path)]
+        if not candidates:
+            continue
+        if not any(name in by_file[k] for k in candidates):
+            unresolved.append(f"{path}::{name}")
+    for name in _BARE_CITATION.findall(text):
+        if name in defined or name in modules:
+            continue
+        unresolved.append(name)
+    return sorted(set(unresolved))
+
+
+def test_every_citation_this_family_makes_resolves_to_a_real_test():
+    """`#12312`: a docstring that names a test must name one that EXISTS.
+
+    The pin is the check, and the check is self-tested below on the exact stale stem
+    this issue was filed for — so the guard cannot silently degrade into a
+    tautology that passes on any text (the class this file reds elsewhere).
+    """
+    root = Path(probe.__file__).resolve().parent.parent
+    defined, modules, by_file = _test_symbols(root)
+    assert defined, "the symbol universe came back empty — the check asserts nothing"
+    unresolved: dict[str, list[str]] = {}
+    for rel in CITATION_SURFACES:
+        text = (root / rel).read_text(encoding="utf-8")
+        found = _unresolved_citations(text, defined, modules, by_file)
+        if found:
+            unresolved[rel] = found
+    assert not unresolved, (
+        "a citation names a test this tree does not declare — fix the stem (and, "
+        f"if a test was renamed, the citations with it): {unresolved}")
+    # …and the CITATION FOR THE GUARD ITSELF resolves, so a later rename of this
+    # test cannot leave `#12312`'s own reference pointing nowhere.
+    assert "test_every_citation_this_family_makes_resolves_to_a_real_test" in defined
+
+
+def test_the_citation_check_REDS_on_a_deliberately_broken_citation():
+    """The falsifier: red on a broken citation, green once it is fixed.
+
+    ⛔ Against the REAL universe, not a toy one: the broken name is the one `#12312`
+    was filed for, so this also pins the citation the CASE fix restored. Without this
+    arm the check above could compare two sets that never intersect and stay green.
+    """
+    root = Path(probe.__file__).resolve().parent.parent
+    defined, modules, by_file = _test_symbols(root)
+    # ⛔ The broken citations are ASSEMBLED from parts, not written as literals: this
+    # checker scans RAW TEXT, so a broken citation written in one piece would red the
+    # very check the falsifier is testing — a self-reference, not a defect.
+    stale_stem = "test_a_named_ungated_writer_is" + "_the_accepted_exception_reading_b"
+    # ⛔ A RESOLVABILITY example, and deliberately NOT the citation the engine should
+    # use: `#12312`'s correction falsifies repointing the sentence at this test (it is
+    # a different test, cited correctly elsewhere). The arm only needs a name that
+    # resolves, so that is all it is used as.
+    resolving_stem = "test_naming_a_LIVE_undeclared_writer_is" + \
+        "_the_acceptance_reading_b_describes"
+    restored_stem = "test_a_named_UNGATED_writer_is" + "_the_accepted_exception_reading_b"
+    broken = f"…the declared direction is `{stale_stem}` below."
+    assert _unresolved_citations(broken, defined, modules, by_file) == [stale_stem], broken
+    # …the CASE fix resolves it, which is the one-character repair #12312 prescribes.
+    assert _unresolved_citations(
+        f"…`{restored_stem}`", defined, modules, by_file) == [], restored_stem
+    fixed = f"…the declared direction is `{resolving_stem}` below."
+    assert _unresolved_citations(fixed, defined, modules, by_file) == [], fixed
+    # A NODE-ID citation is checked against the FILE's defs, not the whole universe:
+    # `<this file>::<a name this file does not declare>` is wrong even when the name
+    # exists elsewhere, and that is the shape a rename produces.
+    # ⛔ The name must exist in SOME OTHER file, or the arm cannot discriminate a
+    # file-scoped lookup from a universe-scoped one (fresh review of PR #12474, P3:
+    # the first version used a name that exists in NO file, so it passed either way).
+    misplaced_name = next(n for n in by_file["tests/test_lane_stash.py"]
+                          if n.startswith("test_"))
+    assert misplaced_name in defined and misplaced_name not in by_file[
+        "tests/test_dod_5090_probe.py"], misplaced_name
+    misplaced = f"`tests/test_dod_5090_probe.py::{misplaced_name}`"
+    assert _unresolved_citations(misplaced, defined, modules, by_file) == [
+        f"tests/test_dod_5090_probe.py::{misplaced_name}"], misplaced
+    # …and a citation of a file this tree does not ship is SKIPPED, not flagged: a
+    # documentation EXAMPLE is not a claim about this repo.
+    example = f"`tests/test_x.py::{'test' + '_y'}`"
+    assert _unresolved_citations(example, defined, modules, by_file) == []
