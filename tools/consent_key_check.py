@@ -497,17 +497,19 @@ def _fix_hint(verdict: Verdict) -> str:
                 "deploy-hosted run, because `.github/scripts/fly-managed-secrets.txt` declares it "
                 "`gh-secret:` and re-stages it), (2) set the same value on the "
                 "`tortoise-dashboard` Pages project, (3) REDEPLOY Pages (a corrected value does NOT "
-                "reach an already-deployed Function). ⛔ Never set only ONE half — from this state "
-                "that CREATES the split this check exists to catch. §2.5."
+                "reach an already-deployed Function). ⛔ Do not STOP after step 1: a half-applied "
+                "rotation reads as MISMATCH until Pages is redeployed — that is the rotation in "
+                "progress, not a second fault, so finish step 3 rather than re-rotating. §2.5."
             )
         # ABSENCE (`not_set` / `unreadable`): nothing is on the dark half, so copying the live value
         # IS the repair — but WHERE you write it differs per half, and getting that wrong is how the
         # alert clears and then re-reds. Branched on the dark half, which the reading prints.
         if dark_halves == ["app"]:
             return (
-                "fix: do NOT rotate a SINGLE side — the dark half (`app`) holds no usable key, so a "
-                "one-sided rotation would CREATE the split this check exists to catch. Set the SAME "
-                "value the LIVE half (`api`) already holds on the "
+                "fix: do NOT rotate a SINGLE side — the dark half (`app`) holds no usable key, so "
+                "there is nothing to reconcile, and a one-sided rotation would leave the two halves "
+                "holding DIFFERENT keys (a MISMATCH — the 2026-11-01 incident), not create another "
+                "split. Set the SAME "
                 "`tortoise-dashboard` Pages project (Cloudflare dashboard → Settings → Environment "
                 "variables — it is not CI-written), then REDEPLOY Pages: Pages bakes env at deploy "
                 "time, so a corrected dashboard value does NOT reach an already-deployed Function. "
@@ -517,8 +519,9 @@ def _fix_hint(verdict: Verdict) -> str:
                 "works, and it is the ONLY one. §2.5."
             )
         return (
-            "fix: do NOT rotate a SINGLE side — the dark half (`api`) holds no usable key, so a "
-            "one-sided rotation would CREATE the split this check exists to catch. "
+            "fix: do NOT rotate a SINGLE side — the dark half (`api`) holds no usable key, so there "
+            "is nothing to reconcile, and a one-sided rotation would leave the two halves holding "
+            "DIFFERENT keys (a MISMATCH — the 2026-11-01 incident), not create another split. "
             "Set the SAME value the LIVE half (`app`) already holds in the GITHUB REPO SECRET "
             "(`gh secret set CONSENT_TOKEN_SECRET`), then land (or `workflow_dispatch`) the "
             "`deploy-hosted` run so Fly is staged from it. ⚠️ The AS enforces floors the Pages half "

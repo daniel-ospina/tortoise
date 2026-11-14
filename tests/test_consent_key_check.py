@@ -783,8 +783,21 @@ def test_a_value_fault_SPLIT_never_tells_the_operator_to_copy_the_working_value(
         assert "always works" in hint, (
             f"the `{reason}` hint must justify the rotation as the repair that ALWAYS works: {hint!r}"
         )
-        # ⛔ It must still forbid the HALF-rotation, which is the harm this arm also has to prevent.
-        assert "Never set only ONE half" in hint, f"{reason}: the one-sided prohibition is gone"
+        # ⛔ It must still forbid the harm this arm has to prevent — but the harm is STOPPING, not
+        # the one-sided change itself: step (1) of the rotation it just prescribed IS a one-sided
+        # change, so a blanket "Never set only ONE half" forbade its own step 1 (measured at the
+        # previous head, and it ALSO contradicted the workflow's corrected prose in the same public
+        # issue body). What is true is that a half-applied rotation reads as MISMATCH until step 3;
+        # naming that is what stops an operator aborting or re-rotating.
+        assert "Never set only ONE half" not in hint, (
+            f"the `{reason}` hint forbids setting one half outright — which is its own step (1) "
+            f"(`gh secret set`); forbid STOPPING after step 1 instead: {hint!r}"
+        )
+        assert "Do not STOP after step 1" in hint and "MISMATCH" in hint, (
+            f"the `{reason}` hint must forbid a half-applied rotation AND name the state it produces "
+            f"(a MISMATCH until Pages is redeployed) — the same sentence the SPLIT alert now emits: "
+            f"{hint!r}"
+        )
 
     for reason in sorted(CKC.ABSENCE_REASONS):
         _serve(monkeypatch, _health(_fp(_KEY_A)), _pages(None, configured=False, reason=reason))
@@ -793,6 +806,14 @@ def test_a_value_fault_SPLIT_never_tells_the_operator_to_copy_the_working_value(
         assert "do NOT rotate" in hint and "TWO-SIDED" not in hint, (
             f"the `{reason}` SPLIT hint must keep the copy repair — that half holds nothing to "
             f"reproduce: {hint!r}"
+        )
+        # ⛔ The CONSEQUENCE must be the one that actually happens. A one-sided change from an
+        # absence SPLIT leaves both halves configured with different keys — a MISMATCH — not another
+        # SPLIT; naming the wrong verdict sends an operator to treat the next tick's MISMATCH as a
+        # second, unexplained fault. §2.5 states the same thing, so the hint cannot disagree with it.
+        assert "CREATE the split" not in hint, (
+            f"the `{reason}` hint says a one-sided change CREATES the split — it produces a MISMATCH "
+            f"(two DIFFERENT configured keys), which is the 2026-11-01 incident: {hint!r}"
         )
 
 
