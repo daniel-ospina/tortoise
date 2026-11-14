@@ -22,18 +22,18 @@ Every pool-eligible job in this repo asks for a **label**, never an architecture
 
 | `runs-on:` | count | who claims it |
 | --- | --- | --- |
-| `ubuntu-latest` | 78 | GitHub-hosted **and** (while the fallback is engaged) the self-hosted pool |
+| `ubuntu-latest` | 79 | GitHub-hosted **and** (while the fallback is engaged) the self-hosted pool — was 76 until `release-artifact-canary` added its `canary` + `report` jobs (#12422, which did not re-derive this row: 78) and this PR added the `consent-key-drift` scheduled job (#12464) |
 | `ubuntu-24.04` | 10 | **GitHub-hosted, plus — as a temporary mitigation since 2026-10-29 — the self-hosted pool.** Pinned to hosted on purpose (#6897/#7867); the pin deadlocks while hosted is unavailable, so the pool now claims it too (see the label contract). |
 
 Counts are JOBS (not files), re-measured 2026-11-14 at this head (`yaml.safe_load` each workflow,
-count each job's `runs-on`): **78 / 10** — the label classes `--status`'s `label-coverage` block
+count each job's `runs-on`): **79 / 10** — the label classes `--status`'s `label-coverage` block
 measures, though that block reports RUNNER counts per label, not job counts: measured on the live
 pool on 2026-10-29 it printed `ubuntu-24.04 = 7 of 7
 online runner(s)` (a bare version pin is measured against the x64 sub-pool, its own denominator,
 and only ONLINE runners are counted — an offline runner cannot be handed a job) and
 `ubuntu-latest = 0 of 12 online runner(s)` (a report — the gate is simply not routing that label
 here). ⛔ On THIS tree that block refuses instead — `exit 4` and NO row — because one job has no
-static label set at all (see *Verify it*); it counted 87 / 13 before it stripped whole-line
+static label set at all (see *Verify it*); it counted 89 / 13 before it stripped whole-line
 comments. Both rows count only jobs whose `runs-on` names a single `ubuntu-*` label, so TWO jobs
 here are in neither — `python-ci.yml`'s `test` (`${{ fromJSON(matrix.runner) }}`, the refusal below)
 and `ci.yml`'s `repo-harnesses` (`[self-hosted, self-hosted-x64]`, the #10237 canary, which names

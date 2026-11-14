@@ -431,6 +431,57 @@ export async function attemptKeyHash(key: string): Promise<string> {
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+/** How much of `sha256(CONSENT_TOKEN_SECRET)` this half PUBLISHES (#10488 §2.5).
+ *
+ * Must equal `tortoise/consent_token.py::CONSENT_KEY_FINGERPRINT_HEX_CHARS`, because the whole point
+ * is that one number means the same thing on both halves. 12 hex = 48 bits: a collision needs ~2^48
+ * and would only ever produce a false AGREEMENT between two different keys, never a false split.
+ * The full argument (and why no domain prefix) is on the Python constant.
+ */
+export const CONSENT_KEY_FINGERPRINT_HEX_CHARS = 12;
+
+/**
+ * THE ONE PLACE THIS DEPLOYMENT READS THE SIGNING KEY OUT OF THE ENVIRONMENT.
+ *
+ * ⛔ Both consumers must come through here, and that is the whole point of the function existing:
+ * the MINT (`api/consent/token.ts`) and the FINGERPRINT route (`api/consent/key.ts`) each used to
+ * read `env.CONSENT_TOKEN_SECRET` for themselves, with nothing enforcing that the two reads resolve
+ * to the same bytes. A future edit that derived one of them differently — trimming, falling back to
+ * a build-time constant, reading a second env name — would publish a fingerprint of bytes the mint
+ * no longer signs with, i.e. a GREEN AGREEMENT in front of a broken bridge, which is precisely the
+ * failure this whole mechanism exists to expose. The Python half has the same guarantee structurally
+ * (`/health` calls `consent_token_key_health()`, which calls the resolver the verifier uses, and a
+ * test pins that it holds no `hashlib` of its own).
+ *
+ * A single accessor is the smallest thing that makes the invariant checkable: one function, one
+ * phrase, and a test that neither route contains its own `env.CONSENT_TOKEN_SECRET` read.
+ */
+export function consentSecret(env: { CONSENT_TOKEN_SECRET?: string }): string | undefined {
+  return env.CONSENT_TOKEN_SECRET;
+}
+
+/**
+ * The signing key's PUBLIC identity — `sha256(secret)[:12]`, or `null` when nothing is configured.
+ *
+ * ⛔ THE BYTES ARE THE CONTRACT. This hashes `utf8(secret)` — the SAME expression `mintConsentToken`
+ * (below) feeds `crypto.subtle.importKey`, and the same bytes `consent_token.py` passes
+ * to `hmac.new` (byte-exact, never trimmed). Hash a normalised value and the fingerprint would
+ * report AGREEMENT between two halves that sign different bytes: the exact silent split it exists to
+ * expose, with a green light in front of it. So this function lives BESIDE the signer rather than in
+ * the route, and the two must be changed together.
+ *
+ * ⛔ `null`, never `""` and never a hash of nothing: a fingerprint of a key that cannot sign is a
+ * reading about nothing, and it would let an UNPROVISIONED deployment compare as equal to a working
+ * one. The route publishes `configured: false` beside it so the two are never confused.
+ */
+export async function consentKeyFingerprint(secret: string | undefined): Promise<string | null> {
+  if (!secret) return null;
+  const digest = await crypto.subtle.digest("SHA-256", utf8(secret));
+  return [...new Uint8Array(digest)]
+    .map((b) => b.toString(16).padStart(2, "0")).join("")
+    .slice(0, CONSENT_KEY_FINGERPRINT_HEX_CHARS);
+}
+
 /** A fresh attempt key: 32 random bytes, base64url — the encoding both halves already share. */
 export function newAttemptKey(): string {
   const bytes = new Uint8Array(32);

@@ -5,7 +5,7 @@ The tool's signature takes ``min_confidence`` and ``order_by``, and its docstrin
 presents them as general arguments — but only the ``text=`` arm consumes them
 (forwarded into ``sdk.tortoise_fts_query``). Both structural arms call
 ``sdk.paginated_query(kind, skip, limit, include_retracted, **filters)``, whose
-signature has **neither** parameter (``tortoise/sdk.py:26585-26588``), and the tag
+signature has **neither** parameter (``tortoise/sdk.py:26642-26645``), and the tag
 arm calls ``query_points_by_tag(tag)``, which takes the tag and nothing else.
 
 Measured: ``tortoise_query(kind="statement", min_confidence=0.9)`` reaches the
@@ -67,6 +67,29 @@ class _StubSDK:
         self.calls.append(("tortoise_fts_query", query, kind, {
             "min_confidence": min_confidence, "order_by": order_by,
             "limit": limit, "include_terminal": include_terminal, **kwargs}))
+        # FIXTURE FIDELITY (round-26 P2 1): the real SDK JUDGES both of these
+        # before any retrieval (`sdk.py:41222-41223` range-checks the floor,
+        # `sdk.py:41228` vocabulary-checks the order), so a stub that merely
+        # records them cannot tell a route that terminates from one that
+        # dead-ends in the caller's next call — the exact blind spot that let the
+        # structural/tag routes promise `pass text=` for `min_confidence=1.5`.
+        # BOTH halves are reachable, because the `text=` arm FORWARDS both
+        # arguments instead of refusing them: an out-of-domain value on that arm
+        # arrives HERE and is refused here, exactly as the real SDK refuses it
+        # (round-26: the floor; round-34 P2 1: the order). The structural and tag
+        # arms refuse these values at the tool boundary and never reach this
+        # stub. Round 33 deleted the `order_by` half as "refused on every arm
+        # too, so a check for it … could never fire" — false for `text=`,
+        # measured: `tortoise_query(text="x", order_by="garbage")` was served
+        # as `order_by='garbage'`. `test_the_stub_judges_order_by_…` pins it.
+        if not isinstance(min_confidence, (int, float)):
+            raise TypeError("'<=' not supported between 'float' and "
+                            f"'{type(min_confidence).__name__}'")
+        if not (0.0 <= min_confidence <= 1.0):
+            raise ValueError(f"min_confidence must be 0.0-1.0, got {min_confidence}")
+        if order_by not in ("relevance", "confidence", "graph"):
+            raise ValueError("order_by must be 'relevance', 'confidence', or "
+                             f"'graph', got {order_by!r}")
         return self.rows
 
     def paginated_query(self, kind=None, skip=0, limit=20, **kwargs):
@@ -388,7 +411,7 @@ def test_the_text_arm_REFUSES_a_floor_it_cannot_apply(stub, entity_type) -> None
     """`text=` applies the floor to POINT rows only (#12500 round-3 P1).
 
     The fts leg compares `min_confidence` against EP belief under
-    `entity_type == "point"` (`sdk.py:43288` — `ep` is `None` for every other
+    `entity_type == "point"` (`sdk.py:43377` — `ep` is `None` for every other
     type, and the branch is gated on it), so a non-Point read passed the floor
     straight through: measured at the tool boundary,
     `text="…", entity_type="document", min_confidence=0.9` returned the
@@ -442,17 +465,105 @@ def test_the_text_arm_floor_message_offers_a_route_that_terminates(stub) -> None
     assert "pass text=" not in message, message
 
 
+@pytest.mark.parametrize("kwargs, subject, domain", [
+    ({"kind": "statement", "min_confidence": 1.5},
+     "min_confidence", "a floor of 0.0-1.0"),
+    ({"kind": "statement", "order_by": "garbage"},
+     "order_by", "an order in {'relevance', 'confidence', 'graph'}"),
+    ({"tag": "pricing", "min_confidence": 1.5},
+     "min_confidence", "a floor of 0.0-1.0"),
+    ({"tag": "pricing", "order_by": "garbage"},
+     "order_by", "an order in {'relevance', 'confidence', 'graph'}"),
+    ({"kind": "statement", "min_confidence": 1.5, "order_by": "garbage"},
+     "min_confidence and order_by",
+     "a floor of 0.0-1.0 and an order in {'relevance', 'confidence', 'graph'}"),
+    ({"tag": "pricing", "min_confidence": 1.5, "order_by": "garbage"},
+     "min_confidence and order_by",
+     "a floor of 0.0-1.0 and an order in {'relevance', 'confidence', 'graph'}"),
+    # MIXED: one value outside the domain, one inside it, and `kind`, which `text=`
+    # DOES apply. The clause must qualify only what is actually out of domain — an
+    # earlier version used the message's `_them` (every refused argument), so it
+    # "corrected" the perfectly ordinary `min_confidence=0.9` and folded `kind` into
+    # an ordering domain (round-28 P2 1, measured).
+    ({"kind": "statement", "min_confidence": 1.5, "order_by": "relevance"},
+     "min_confidence", "a floor of 0.0-1.0"),
+    ({"tag": "pricing", "kind": "statement", "min_confidence": 0.9,
+      "order_by": "garbage"},
+     "order_by", "an order in {'relevance', 'confidence', 'graph'}"),
+    ({"tag": "pricing", "kind": "statement", "min_confidence": 1.5},
+     "min_confidence", "a floor of 0.0-1.0"),
+    # A BOOL floor is IN domain — `0.0 <= True <= 1.0` holds, which is why round 21
+    # had to stop treating `True` as unusable (sdk.py:41222). Excluding bools here
+    # again would "correct" a valid floor with the suite green (round-29 P2 3,
+    # measured), so the clause must be withheld and only the out-of-domain argument
+    # named.
+    ({"kind": "statement", "min_confidence": True, "order_by": "garbage"},
+     "order_by", "an order in {'relevance', 'confidence', 'graph'}"),
+])
+def test_a_route_to_pass_text_names_the_values_that_arm_accepts(
+        stub, kwargs, subject, domain) -> None:
+    """An unusable value must not be promised to an arm that rejects it (r26 P2 1).
+
+    The structural and tag arms DROP every value, so the SDK never judges it —
+    which means the refusal can be about `min_confidence=1.5` or
+    `order_by="garbage"`, values `text=` refuses outright (the SDK's own checks at
+    `sdk.py:41222-41223` / `41228`). The route used to say "pass text= — the floor
+    and the ordering are applied on that arm", so following it landed on a SECOND
+    error, on both arms (measured). The text-arm branch already avoids the
+    paragraph for these values, so the same call answered two ways by arm.
+
+    Fails if the clause stops naming the destination arm (`The text= arm applies`,
+    never a bare "That arm", which bound by proximity to the TAG arm on the tag
+    route), stops naming the arguments it qualifies, stops naming the domain, or if
+    the instruction it gives does not terminate — the last part executes it, on the
+    validating stub, with a value from the domain it names.
+
+    The subject is asserted EXPLICITLY per parameter, not derived from the shape:
+    an earlier version computed it from `len(kwargs)`, so the tag-side twin of the
+    both-arguments case demanded a string the correct product does not emit — a
+    gate that would false-block a correct message (round-28 P2 2, measured).
+    """
+    from tortoise.mcp_server import tortoise_query
+
+    result = tortoise_query(**kwargs)
+
+    assert _is_refusal(result), f"no refusal to read a message off: {result}"
+    message = result["error"]
+    assert "The text= arm applies" in message, message
+    assert f"The text= arm applies {subject} only as: {domain}" in message, message
+    # …and it must not end in a full stop: the template appends ", or drop …", so a
+    # stop here ships "…a floor of 0.0-1.0., or drop min_confidence for this read" —
+    # the junction defect round 22 removed from the paging note, pinned twice there
+    # (round-29 P2 2, measured: one added character, whole gate set green).
+    assert f"{domain}.," not in message, message
+    # …and the corrected call, with a value from the domain it names, IS served on
+    # the arm the route points at.
+    corrected = {k: v for k, v in kwargs.items()
+                 if k not in ("tag", "min_confidence", "order_by")}
+    corrected["text"] = "x"
+    if "min_confidence" in kwargs:
+        corrected["min_confidence"] = _CONFIDENCE_FLOOR
+    if "order_by" in kwargs:
+        corrected["order_by"] = "relevance"
+    followed = tortoise_query(**corrected)
+
+    assert not _is_refusal(followed), (
+        f"following the route with a value it names still refuses: {followed}"
+    )
+
+
 def test_an_unusable_floor_is_left_to_the_sdk_to_refuse(stub) -> None:
     """An out-of-range floor must NOT get the arm-scoping paragraph (round-20 P2 3).
 
     That paragraph's reason ("the fts leg applies its floor under a literal
     `entity_type == 'point'` gate"), its harm ("rows they excluded came back") and
     its route ("pass entity_type='point'") are all false of a floor the SDK
-    rejects outright: `sdk.py:41133-41134` range-checks `min_confidence` BEFORE
-    any retrieval, so `min_confidence=1.5` here used to RAISE — it never returned
-    the rows the message apologised for — and the offered route lands on that same
-    range error. Following a terminating route into a second error is the class
-    this guard exists to remove.
+    rejects outright: `sdk.py:41222-41223` range-checks `min_confidence` BEFORE
+    any retrieval, so `min_confidence=1.5` here was refused BY THE SDK and never
+    returned the rows the message apologised for — it did not "raise" at the tool
+    boundary, because `_safe` turns the exception into an `_SafeError` (round-26
+    P2 2) — and the offered route lands on that same check. Following a
+    terminating route into a second error is the class this guard exists to remove.
 
     Fails if the text=-arm clause stops checking that the floor is usable: the
     value is then intercepted and answered with a `#12500` paragraph.
@@ -462,15 +573,76 @@ def test_an_unusable_floor_is_left_to_the_sdk_to_refuse(stub) -> None:
     for bad in (1.5, -0.5):
         result = tortoise_query(text="x", entity_type="document", min_confidence=bad)
 
-        # Served, not refused here — and the stub records the forward, which is
-        # the seam the real SDK validates at (a stub cannot reproduce the range
-        # check, so the assertion is on the forward).
-        assert not _is_refusal(result), (
-            f"min_confidence={bad} is not a usable floor, so the #12500 paragraph "
-            f"is false about it (and its route dead-ends): {result}"
-        )
+        # Not intercepted: the call REACHES the accessor, which judges it exactly
+        # as the real SDK does (the stub mirrors `sdk.py:41222-41223` since
+        # round-26), so the caller gets the SDK's own complaint rather than a
+        # `#12500` paragraph that is false about the value and whose route
+        # dead-ends.
         fts = [c for c in stub.calls if c[0] == "tortoise_fts_query"]
-        assert fts and fts[-1][3]["min_confidence"] == bad, fts
+        assert fts and fts[-1][3]["min_confidence"] == bad, (
+            f"min_confidence={bad} never reached the accessor — this guard "
+            f"answered for a value it cannot judge: {result} / {fts}"
+        )
+        assert "#12500" not in str(result), (
+            f"an out-of-range floor got the arm-scoping paragraph: {result}"
+        )
+        assert "must be 0.0-1.0" in str(result), (
+            f"expected the SDK's own range refusal, got: {result}"
+        )
+
+    # …and a NON-NUMERIC floor, which is what the `isinstance` conjunct is for.
+    # Unpinned, deleting that conjunct left the suite green while
+    # `min_confidence="0.9"` raised TypeError INSIDE the handler body — out of the
+    # structured-error path this file's contract is about (round-22 P2 3,
+    # measured). The stub now judges the value the way the SDK does (round-26), so
+    # the assertion is the honest one: the call REACHES the accessor and the answer
+    # is the SDK's own complaint, not a `#12500` paragraph.
+    text_floor = tortoise_query(text="x", entity_type="document",
+                               min_confidence="0.9")
+    fts = [c for c in stub.calls if c[0] == "tortoise_fts_query"]
+
+    assert fts and fts[-1][3]["min_confidence"] == "0.9", (
+        f"the string floor never reached the accessor, so this guard answered "
+        f"for a value it cannot judge: {text_floor} / {fts}"
+    )
+    assert "#12500" not in str(text_floor), (
+        f"an unusable floor got the arm-scoping paragraph: {text_floor}"
+    )
+
+
+def test_the_stub_judges_order_by_the_way_the_sdk_does(stub) -> None:
+    """The `text=` arm FORWARDS `order_by`, and the real SDK judges it there.
+
+    `sdk.py:41228` vocabulary-checks `order_by` BEFORE any retrieval, and `text=`
+    is the one arm that forwards the value instead of refusing it (#12500 refuses
+    it at the tool boundary on the structural and tag arms), so a record-only stub
+    SERVES a call the product rejects: measured at round 34,
+    `tortoise_query(text="x", order_by="garbage")` reached this accessor as
+    `order_by='garbage'` and returned rows. Round 33 removed the mirror because
+    "an out-of-domain `order_by` is refused on every arm too" — false for `text=`,
+    the one arm whose route promises `pass text=`; restoring it is round-34 P2 1.
+
+    Fails if the stub stops judging the value (the call is then SERVED, and the
+    route's own `pass text=` promise is checked against a fixture that cannot
+    honour the SDK's contract), or if the tool starts intercepting it with a
+    `#12500` paragraph — on this arm the value belongs to the SDK, exactly as the
+    floor above does.
+    """
+    from tortoise.mcp_server import tortoise_query
+
+    result = tortoise_query(text="x", order_by="garbage")
+
+    fts = [c for c in stub.calls if c[0] == "tortoise_fts_query"]
+    assert fts and fts[-1][3]["order_by"] == "garbage", (
+        f"order_by never reached the accessor, so this fixture cannot judge it: "
+        f"{result} / {fts}"
+    )
+    assert "#12500" not in str(result), (
+        f"the text= arm answered for a value the SDK judges: {result}"
+    )
+    assert "must be 'relevance'" in str(result), (
+        f"expected the SDK's own vocabulary refusal, got: {result}"
+    )
 
 
 def test_the_text_arm_still_applies_the_floor_to_POINTS(stub) -> None:
@@ -512,10 +684,10 @@ def test_the_single_argument_ordering_reason_is_the_arms_own(stub) -> None:
 
     * structural `order_by` alone → "the accessor DOES apply the ordering to
       paginated reads", which is false: `paginated_query` declares no ordering at
-      all (sdk.py:26585-26588);
+      all (sdk.py:26642-26645);
     * tag `order_by` alone → "the accessor applies the tag ordering, not this
       guard", which is false: `query_points_by_tag` orders `p.createdAt DESC` and
-      never applies the caller's ordering (sdk.py:26920) — the exact sentence the
+      never applies the caller's ordering (sdk.py:26977) — the exact sentence the
       number-agreement test's docstring says it pins, on the arm it does not reach.
 
     Fails if either single-argument reason is replaced, or if the two messages stop
@@ -560,6 +732,21 @@ def test_the_message_agrees_in_number_with_the_arguments_it_names(stub) -> None:
     assert "min_confidence and order_by are not applied" in two["error"], two["error"]
     assert " are not applied" in two["error"], two["error"]
     assert " is not applied" in one["error"], one["error"]
+    # …and the SECOND sentence agrees too. It shipped "It used to be dropped
+    # silently" for two arguments inside one message that then says "To use them",
+    # and singular-for-plural kept the gate set green (round-30 P2 2, measured —
+    # the same class as the round-3 aux verb above).
+    assert "They used to be dropped silently" in two["error"], two["error"]
+    # …and THREE names render with list punctuation, matching the harm clause beside
+    # them: a bare " and " chain shipped "min_confidence and order_by and kind", one
+    # sentence after the same three were spelled "A, B and C" (round-31 P2 2).
+    three = tortoise_query(tag="pricing", kind="statement",
+                          min_confidence=_CONFIDENCE_FLOOR, order_by="confidence")
+    assert "min_confidence, order_by and kind are not applied" in three["error"], (
+        three["error"]
+    )
+    assert "It used to be dropped silently" in one["error"], one["error"]
+    assert "It used to be dropped silently" not in two["error"], two["error"]
     # BOTH reasons, not just both names — a join that keeps only the first
     # explains one argument while naming two (round-6 P2 4).
     assert "confidence floor" in two["error"], two["error"]
@@ -567,7 +754,7 @@ def test_the_message_agrees_in_number_with_the_arguments_it_names(stub) -> None:
     # …and the REASONS, not just the words. Unpinned, "the tag ordering is applied
     # by the accessor, not here" shipped green — false: `query_points_by_tag`
     # orders `p.createdAt DESC` and never applies the caller's ordering
-    # (sdk.py:26920), while the test's bare "ordering" substring still matched.
+    # (sdk.py:26977), while the test's bare "ordering" substring still matched.
     assert "tag mode reads a tag and nothing else" in two["error"], two["error"]
     assert "cannot apply an ordering" in two["error"], two["error"]
 
@@ -596,12 +783,19 @@ def test_a_floor_and_a_property_filter_have_no_common_arm(stub) -> None:
     {"tag": "pricing", "text": "x", "order_by": "confidence"},
 ])
 def test_the_tag_arm_still_refuses_when_text_is_also_passed(stub, kwargs) -> None:
-    """`tag=` wins, and the guard's `tag is not None` disjunct must survive (r4 P2 6).
+    """`tag=` wins, so a tag+text caller is refused on the TAG arm (r4 P2 6).
 
-    Without that disjunct the condition is `not text`, so `tag="t", text="x"`
-    skipped the guard entirely and the TAG arm answered (`query_points_by_tag`)
-    with the floor dropped — the exact defect this PR closes, reopened by a
-    one-word refactor, with the whole suite green before this test existed.
+    This is the `#12372` guard's precedence shape, still live here because the
+    `#12500` guard sits ABOVE the tag branch and must describe the arm that
+    actually answers. Fails if `_arm` stops preferring `tag=` (`_arm = "text=" if
+    text else …` reds BOTH params, measured).
+
+    NOT a pin on the `#12372` disjunct, though an earlier version of this
+    docstring claimed it was: deleting `tag is not None` there leaves this test
+    GREEN, because `_unapplied` is arm-driven now and the tag+text+floor shape is
+    still refused (round-24 P2 4, measured: `2 passed`). That disjunct is pinned
+    by `tests/test_12372_entity_type_dropped.py::test_tag_takes_precedence_over_text_so_it_must_still_refuse`,
+    which reds when it is removed.
     """
     from tortoise.mcp_server import tortoise_query
 
@@ -723,7 +917,11 @@ def test_the_refusal_never_repeats_its_route_or_says_a_entity_type(stub) -> None
 @pytest.mark.parametrize("entity_type", ["document", "source"])
 def test_the_relevance_ordering_is_served_for_every_type(
         stub, entity_type) -> None:
-    """The refusal is keyed on `order_by == "confidence"`, not on the TYPE (#12500 r5).
+    """The refusal is keyed on `order_by` in {"confidence", "graph"}, not on the TYPE.
+
+    (#12500 r5: the set form is what round 7 made it — `graph` was added to the same
+    condition, and a `== "confidence"` mutant now reds four tests, so the sentence
+    must state the set, not the singleton.)
 
     Mutating the condition to `if order_by and entity_type in (…, "source")` left
     the whole suite green while false-blocking `entity_type="document",
@@ -847,7 +1045,7 @@ _DOCSTRING_FALSE = (
 def test_the_tool_docstring_never_restates_a_falsified_claim() -> None:
     """The false claims this PR shipped, pinned so they cannot come back.
 
-    Both are wrap-insensitive (whitespace-collapsed), because a re-wrap must not
+    Each is wrap-insensitive (whitespace-collapsed), because a re-wrap must not
     silently disarm the pin — the `#12455` lesson. Fails if any reappears in
     `tortoise_query.__doc__`.
     """
@@ -944,6 +1142,28 @@ def test_a_graph_ordering_with_no_signal_is_refused_not_silently_reordered(
 #: measured on the flattened docstring: round 18 said "two of these live in the
 #: SECOND bullet" — one does; round 19 caught the follow-up sentence still saying
 #: "two of the claims" sit inside the spans — three do.)
+#: The POSITIVE behaviour sentences in the same bullets — the ones a route reader
+#: acts on, and the ones this PR spent rounds re-pointing citations FOR. Each was
+#: measured unpinned at round 33: inverted in turn, the whole five-file gate set
+#: stayed green (262 passed, 16 skipped), because nothing else anywhere asserts
+#: on `tortoise_query.__doc__` (`grep -rln 'tortoise_query.__doc__' tests/` finds
+#: only this file). They are presence checks, wrap-insensitive, like
+#: `_REFUSAL_CLAIMS` — they cannot re-red a true sentence.
+_DOCSTRING_BEHAVIOUR_CLAIMS = (
+    # which arm applies the floor at all (inverted: "for every type")
+    '`min_confidence` only for `entity_type="point"`',
+    # why an accepted structural value was discarded (inverted: "declares both")
+    "read through sdk.paginated_query, which declares neither",
+    # the feature does not exist (inverted: "is a shipped feature")
+    "structural filtering by confidence is Phase 2 in the hybrid-search plan, "
+    "not a shipped feature",
+    # the precedence between the two answering modes (inverted: "Text mode takes
+    # precedence over tag")
+    "Tag mode takes precedence over text",
+    # the non-Point structural/tag outcome (inverted: "SERVED there")
+    "a non-Point `entity_type` is REFUSED there (and on the structural arms)",
+)
+
 _REFUSAL_CLAIMS = (
     "`min_confidence` and `order_by` are REFUSED on this arm rather than dropped",
     "A floor on any other `entity_type`, and a confidence or graph ordering on "
@@ -991,13 +1211,18 @@ def test_the_tool_docstring_states_the_falsy_exception() -> None:
             f"the {_label} bullet must say the falsy value is SERVED, not refused: "
             f"{_bullet}"
         )
-    # No file-wide ban on "refused": `sdk.py:41138` DOES refuse an unknown
+    # No file-wide ban on "refused": `sdk.py:41228` DOES refuse an unknown
     # `order_by` outright, so banning those words reded a true sentence elsewhere
     # in the docstring (round-12 P2 1c). The PER-BULLET "stays served" assertion
     # above is what catches an inverted falsy clause — measured: replacing the
     # tag bullet's clause with "is REFUSED OUTRIGHT here" reds it, because the
     # served claim is then simply absent.
     assert "serialises its own defaults" in flat, flat[:600]
+
+    for _claim in _DOCSTRING_BEHAVIOUR_CLAIMS:
+        assert _claim in flat, (
+            f"the docstring must keep stating this behaviour; missing {_claim!r}"
+        )
 
     for _claim in _REFUSAL_CLAIMS:
         assert _claim in flat, (
@@ -1090,19 +1315,23 @@ def test_a_paged_caller_is_told_to_drop_offset_in_the_route(stub, kwargs) -> Non
 
     assert "drop offset=/page=" in message, message
     assert "text= takes no offset" in message, message
+    # …and it must be a whole SENTENCE. Appended to the route with its own full
+    # stop it collided with the template's ", or drop …" and every paged refusal
+    # shipped "… takes no offset., or drop min_confidence for this read"
+    # (round-22 P2 2, measured on all six paged shapes). Pinning the two fragments
+    # never caught it, so the junction is pinned here.
+    assert "text= takes no offset.," not in message, message
+    assert "text= takes no offset. " in message, message
 
-    # …and it must qualify EVERY alternative, not read as trailing advice on the
-    # last one. Appended as a final parenthetical it did exactly that, and
-    # `text=`+`offset=` is refused whatever `entity_type` says, so following the
-    # FIRST alternative ("pass entity_type='point'") landed on "offset/page not
-    # supported with text" (round-21 P2 2, measured on both two-alternative
-    # routes). The decidable form: execute the alternative, dropping only what the
-    # message says to drop, and require a served read.
-    if " or " in message:
-        assert ". Also drop offset=/page=" in message, (
-            f"a multi-alternative paged route qualifies the drop only at the end, "
-            f"so it reads as applying to the last alternative: {message}"
-        )
+    # NOT pinned here: that the drop qualifies EVERY alternative of a
+    # multi-alternative route. This test used to carry that assertion under
+    # `if " or " in message:` — which is inert, because the template's own tail
+    # (", or drop X for this read.") always supplies one " or ", and its inner
+    # assertion then merely repeated the `drop offset=/page=` check above
+    # (round-30 P2 3, measured: raising the guard to `> 99` still passed all 97).
+    # The real coverage is behavioural, in
+    # `test_every_alternative_of_a_paged_text_route_terminates`, which EXECUTES
+    # each alternative and requires a served read.
 
 
 def test_every_alternative_of_a_paged_text_route_terminates(stub) -> None:
@@ -1110,7 +1339,9 @@ def test_every_alternative_of_a_paged_text_route_terminates(stub) -> None:
 
     The paging parenthetical appended at the END of a route read as qualifying only
     the last alternative, and `text=`+`offset=` is refused whatever `entity_type`
-    says (mcp_server.py:4422-4424) — so following the FIRST alternative, "pass
+    says (`if paginated:` → "offset/page not supported with text" — cited by that
+    string, not a line number, since a count inside `mcp_server.py` drifts with
+    every edit above it) — so following the FIRST alternative, "pass
     entity_type='point'", landed on "offset/page not supported with text"
     (round-21 P2 2, measured verbatim on both two-alternative routes). The routes
     now state the drop as its own sentence, for the whole route, and this test
@@ -1125,15 +1356,29 @@ def test_every_alternative_of_a_paged_text_route_terminates(stub) -> None:
     order_only = tortoise_query(text="x", entity_type="document",
                                 order_by="confidence", offset=0)["error"]
     assert ". Also drop offset=/page=" in order_only, order_only
+    # The alternatives must be NAMED by the message this test says it follows.
+    # Without this the executions below are unbound literals: deleting the
+    # alternative from the route (keeping only `order_by='relevance'` — a
+    # terminating alternative in its own right, applied to every type, so nothing
+    # noticed its twin disappearing) left this FILE green (round-25 P2, measured:
+    # 87 passed here; the five-file gate set was 251 passed / 16 skipped — the count
+    # is quoted per population because round-29 found it mislabelled as the set).
+    assert "pass entity_type='point'" in order_only, order_only
+    assert "or order_by='relevance'" in order_only, order_only
 
     # both refused, paged: "Passing entity_type='point' fixes both".
     both = tortoise_query(text="x", entity_type="document",
                           min_confidence=_CONFIDENCE_FLOOR,
                           order_by="confidence", offset=0)["error"]
     assert ". Also drop offset=/page=" in both, both
+    assert "Passing entity_type='point' fixes both" in both, both
 
-    # Follow each FIRST alternative, dropping only what the message names.
-    first = tortoise_query(text="x", entity_type="point")
+    # Follow each FIRST alternative, dropping only what the message names. The
+    # order-only route's first alternative is "pass entity_type='point'", which
+    # FIXES THE ORDERING — so `order_by` stays. Dropping it as well (the round-21
+    # version) executed the LAST alternative and left the claim "each alternative
+    # as written" half-true (round-22 P2 4, measured).
+    first = tortoise_query(text="x", entity_type="point", order_by="confidence")
     assert not _is_refusal(first), first
     fixes_both = tortoise_query(text="x", entity_type="point",
                                 min_confidence=_CONFIDENCE_FLOOR,

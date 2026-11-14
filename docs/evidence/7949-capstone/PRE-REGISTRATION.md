@@ -2799,27 +2799,33 @@ to answer.
 > `6916a6cd89` and stays true to that head. The branch that carries this entry
 > (`fix/11859-journal-pins-and-prose`) edits `tortoise/sdk.py` itself — **10 insertions, 2
 > deletions** above `_extract_session_v2`, a net **`+8`** — so on the tree that merges `main`
-> every `sdk.py` carrier below it moves by exactly `+8`. Measured: `def _extract_session_v2(`
-> is `18025` at `main` `6916a6cd89` and `18033` on this merged tree.
+> every `sdk.py` carrier below it moves by exactly `+8` from the `main` it merges. Measured:
+> `def _extract_session_v2(` is `18025` at `main` `6916a6cd89`, `18082` at the merge base
+> `30c9e7c4d3`, and `18090` on this merged tree.
 >
-> ⛔ **This is not `main` moving.** Every line in this entry moved because of the branch's OWN
-> edit, which is why the mapping is stated against the `main` sha THE BRANCH MERGED and not
-> against a later `main` tip: a later tip would move the numbers again for a reason that has
-> nothing to do with this record.
+> ⚠️ **TWO movements, and the mapping states both.** The branch's OWN edit moved every carrier
+> below it by `+8`; `main` then moved the same region by `+57` (its own `18025`→`18082`)
+> before the merge that makes this entry live. So the "new" column is `+65` from §10.31's
+> numbers, not `+8` — and the `old` column stays against `6916a6cd89` because that is the head
+> §10.31 is true to, not the tip this entry is measured on.
 >
-> **The mapping**, all twelve, old (at `6916a6cd89`) → new (this tree):
-> `_extract_session_v2` `18025`→`18033`; `proj.link_source_to_event(` `19452`→`19460`;
-> `relation_write = apply_relation_edges(` `19012`→`19020`; `from tortoise.relation_write import
-> apply_relation_edges` `19011`→`19019`; the `#10999` TRANSPORT-ONLY comment `18999`→`19007`;
-> `"stats": _capture_stats_with_step_witness(...)` `19054`→`19062`;
-> `bind_point_subjects(proj, self, point_id=pid,` `18659`→`18667`;
-> `The v2 path reports` `16458`→`16466`; `"extraction_mode": "llm:<route>"` `16459`→`16467`;
-> `extracted, meta = self._extract_session_v2(` `16914`→`16922`;
-> `declared = declared_relation_predicates()` `25396`→`25404`; the kind→label write seam
-> `18206-18230`→`18214-18238` (`18214` = `_ekind = _payload_entity_kind(e)`, `18238` = the
-> OBJECT arm's `is_episodic=False)` — the subject arm's closes at `18233`).
-> Each value was confirmed by opening the line, never by adding eight: the offset is uniform
-> here, which makes arithmetic *tempting* and is exactly why it was not used.
+> **The mapping**, all twelve, old (at `6916a6cd89`) → new (the tree that merges `main`
+> `c1db6f3df2`, the head this entry is LIVE for):
+> `_extract_session_v2` `18025`→`18090`; `proj.link_source_to_event(` `19452`→`19517`;
+> `relation_write = apply_relation_edges(` `19012`→`19077`; `from tortoise.relation_write import
+> apply_relation_edges` `19011`→`19076`; the `#10999` TRANSPORT-ONLY comment `18999`→`19064`;
+> `"stats": _capture_stats_with_step_witness(...)` `19054`→`19119`;
+> `bind_point_subjects(proj, self, point_id=pid,` `18659`→`18724`;
+> `The v2 path reports` `16458`→`16523`; `"extraction_mode": "llm:<route>"` `16459`→`16524`;
+> `extracted, meta = self._extract_session_v2(` `16914`→`16979`;
+> `declared = declared_relation_predicates()` `25396`→`25461`; the kind→label write seam
+> `18206-18230`→`18271-18295` (`18271` = `_ekind = _payload_entity_kind(e)`, `18295` = the
+> OBJECT arm's `is_episodic=False)` — the subject arm's closes at `18290`).
+> ⛔ Each value was re-derived by OPENING THE LINE on that merged tree, never by arithmetic: the
+> offset here is `+65`, which is exactly what makes adding eight *tempting* and wrong. This
+> column was briefly `old + 8` — true of the branch's own edit and false of the tree — and the
+> correction is recorded rather than absorbed, because a mapping whose method sentence says one
+> thing and whose numbers do another is how the next reader re-stales it.
 >
 > **What did NOT move, and stays with §10.31:** `tortoise/extractor_v2.py`,
 > `tortoise/projection/` and `tortoise/pi-hooks/tortoise-capture.ts` are untouched by this
