@@ -4368,7 +4368,9 @@ def tortoise_query(kind: str | None = None,
             # arguments actually out of domain — so an in-domain value is never
             # "corrected" and `kind` is never folded into a floor/ordering domain
             # (round-28 P2 1; the earlier `{_them}` counted every refused argument,
-            # and restoring it reds nine params of the route test).
+            # and restoring it reds EVERY param of the route test — named, not
+            # counted: the count said nine and became ten when round 29 added a
+            # param to that very test, in the same commit that fixed a stale count).
             _route += (f". The text= arm applies "
                        f"{' and '.join(_domain_names)} only as: {_accepted}")
         if paginated and not (_arm == "tag=" and _names == ["kind"]):
@@ -4408,7 +4410,13 @@ def tortoise_query(kind: str | None = None,
             if filters and ({"min_confidence", "order_by"} & set(_names)) else ""
         )
         return _SafeError({"error": (
-            f"{_named} {_verb} not applied on the {_arm} arm (#12500): {_why}. It "
+            # "They"/"It" — the SECOND sentence has to agree too. It shipped "It
+            # used to be dropped silently" for two arguments, inside one message
+            # that then says "To use them", and nothing could tell the two apart
+            # (round-30 P2 2, measured: singular kept the gate set green). Same
+            # class as the round-3 aux verb and the round-27 domain pronoun.
+            f"{_named} {_verb} not applied on the {_arm} arm (#12500): {_why}. "
+            f"{'They' if _verb == 'are' else 'It'} "
             f"used to be dropped silently, so the caller got {_loss}.{_filters_note}"
             f"{_page_note} {_route}, or drop {_named} for this read."
         )})

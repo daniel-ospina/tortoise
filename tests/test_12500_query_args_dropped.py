@@ -688,6 +688,13 @@ def test_the_message_agrees_in_number_with_the_arguments_it_names(stub) -> None:
     assert "min_confidence and order_by are not applied" in two["error"], two["error"]
     assert " are not applied" in two["error"], two["error"]
     assert " is not applied" in one["error"], one["error"]
+    # …and the SECOND sentence agrees too. It shipped "It used to be dropped
+    # silently" for two arguments inside one message that then says "To use them",
+    # and singular-for-plural kept the gate set green (round-30 P2 2, measured —
+    # the same class as the round-3 aux verb above).
+    assert "They used to be dropped silently" in two["error"], two["error"]
+    assert "It used to be dropped silently" in one["error"], one["error"]
+    assert "It used to be dropped silently" not in two["error"], two["error"]
     # BOTH reasons, not just both names — a join that keeps only the first
     # explains one argument while naming two (round-6 P2 4).
     assert "confidence floor" in two["error"], two["error"]
@@ -1233,18 +1240,15 @@ def test_a_paged_caller_is_told_to_drop_offset_in_the_route(stub, kwargs) -> Non
     assert "text= takes no offset.," not in message, message
     assert "text= takes no offset. " in message, message
 
-    # …and it must qualify EVERY alternative, not read as trailing advice on the
-    # last one. Appended as a final parenthetical it did exactly that, and
-    # `text=`+`offset=` is refused whatever `entity_type` says, so following the
-    # FIRST alternative ("pass entity_type='point'") landed on "offset/page not
-    # supported with text" (round-21 P2 2, measured on both two-alternative
-    # routes). The decidable form: execute the alternative, dropping only what the
-    # message says to drop, and require a served read.
-    if " or " in message:
-        assert ". Also drop offset=/page=" in message, (
-            f"a multi-alternative paged route qualifies the drop only at the end, "
-            f"so it reads as applying to the last alternative: {message}"
-        )
+    # NOT pinned here: that the drop qualifies EVERY alternative of a
+    # multi-alternative route. This test used to carry that assertion under
+    # `if " or " in message:` — which is inert, because the template's own tail
+    # (", or drop X for this read.") always supplies one " or ", and its inner
+    # assertion then merely repeated the `drop offset=/page=` check above
+    # (round-30 P2 3, measured: raising the guard to `> 99` still passed all 97).
+    # The real coverage is behavioural, in
+    # `test_every_alternative_of_a_paged_text_route_terminates`, which EXECUTES
+    # each alternative and requires a served read.
 
 
 def test_every_alternative_of_a_paged_text_route_terminates(stub) -> None:
