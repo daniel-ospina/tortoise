@@ -401,7 +401,12 @@ _WRITE_ATTRS = frozenset({"write_text", "write_bytes", "open"})
 
 
 def _stray_writes(src: str) -> list[tuple[int, str]]:
-    """Every `_WRITE_ATTRS` call in `src` outside a function named `_write` — except `open()`.
+    """Every `_WRITE_ATTRS` call whose NEAREST enclosing function is not `_write` — except `open()`.
+
+    "Nearest enclosing function", not "outside a function named `_write`": a write inside a `def`
+    nested in `_write` IS reported (its nearest enclosing function is the nested one), which the pin
+    at `test_the_stray_write_guard_uses_the_INNERMOST_enclosing_function` asserts directly. The
+    earlier wording described the attribution backwards (⛔ #12688 review round 35, P3).
 
     The exception is a zero-argument `open` CALL: a builtin `open()` raises `TypeError` (no `file`)
     and `Path(p).open()` defaults to `'r'`, so neither can write. The test is on the NAME, so an
