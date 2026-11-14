@@ -5807,9 +5807,14 @@ _EPIC_CITE_SOURCES = {
     # `00-align.md`'s A-d row cites the fleet's real capture transport OUTSIDE every
     # sweep `_BUNDLE_CITE` can see (it resolves `sdk|edges|extractor_v2` only), so its
     # two `.ts` numbers had no reader at all and were stale: the row named `:948`/`:938`
-    # for the plain `postCapture` and its `install-probe` sibling while the tree carries
+    # for the plain `postCapture` and its `install-probe` sibling while the tree carried
     # those two `def`s at `:955`/`:947`. Registered because a repaired cite that nothing
-    # pins is a repair the next move of the symbol undoes silently.
+    # pins is a repair the next move of the symbol undoes silently. ⛔ AND IT ALREADY
+    # HAS: measured at the `origin/main` head this PR rebases onto (`6916a6cd89`), those
+    # two `def`s are at `:1007`/`:999` — `#12507` landed above them — while both the row
+    # and the document still said `:955`/`:947`. That is this source key's case in one
+    # line: the pin is what turned an invisible re-stale into a red; a name is pinned,
+    # its line is re-opened.
     "pi_hooks": _REPO / "tortoise/pi-hooks/tortoise-capture.ts",
     # ⛔ `03-test-design.md:82` cites the 402 quota guard and its refusal payload by
     # NUMBER, and that row was in NO pin: #12369 re-pointed a CORRECT
