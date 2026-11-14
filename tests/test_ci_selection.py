@@ -22221,11 +22221,16 @@ def test_the_health_honesty_suite_is_selected_on_BOTH_halves_of_its_module_pair(
     `integrity()` is not a substitute for this pin, and that is the point: it answers ONE
     question — is every `tests/**/test_*.py` classified SOMEWHERE — so a file that keeps
     one surface's row while losing the other's is reported CLEAN. Measured with the
-    `core` row deleted: `integrity(load_manifest()) == []`. (`duplicate_entries()` is a
-    different function on a different question — the duplicate row #12482 removed from
-    `main` — and it is composed by the `--integrity` CLI through
-    `ci_manifest.map_issues`, not by `integrity()` itself; #5050.) A lost arm is
-    invisible to both, so nothing but this pin notices it.
+    `core` row deleted: `integrity(load_manifest()) == []`. `duplicate_entries()` is a
+    different function on a different question, composed by the `--integrity` CLI through
+    `ci_manifest.map_issues` (#5050) — and it DID catch THIS artifact's duplicate `api`
+    row (`['api: test_12477_health_honesty.py']` at `f2ec5ec092`), which is why that half
+    was noticed while the dropped arm was not. Note the two `api` rows this docstring
+    just described: a claim that "a lost arm is invisible to both" would have been false
+    of the very tree it is about. What is silent to BOTH gates is an arm lost WITHOUT a
+    duplicate — the pure case, and the one no other pin covers. (Also: #12482 removed a
+    duplicate PAIR, one row per list — `c1db6f3df` api=2/core=2, `d05688df5990`
+    api=1/core=1 — not a single row.)
     """
     pin = "test_12477_health_honesty.py"
 
