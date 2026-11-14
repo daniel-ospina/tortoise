@@ -523,7 +523,7 @@ def _fix_hint(verdict: Verdict) -> str:
                 "fix: do NOT rotate a SINGLE side — the dark half (`app`) holds no usable key, so "
                 "there is nothing to reconcile, and a one-sided rotation would leave the two halves "
                 "holding DIFFERENT keys (a MISMATCH — the 2026-11-01 incident), not create another "
-                "split. Set the SAME "
+                "split. Set the SAME value the LIVE half (`api`) already holds on the "
                 "`tortoise-dashboard` Pages project (Cloudflare dashboard → Settings → Environment "
                 "variables — it is not CI-written), then REDEPLOY Pages: Pages bakes env at deploy "
                 "time, so a corrected dashboard value does NOT reach an already-deployed Function. "

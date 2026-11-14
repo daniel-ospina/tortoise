@@ -818,6 +818,16 @@ def test_a_value_fault_SPLIT_never_tells_the_operator_to_copy_the_working_value(
             f"the `{reason}` SPLIT hint must keep the copy repair — that half holds nothing to "
             f"reproduce: {hint!r}"
         )
+        # ⛔ AND IT MUST NAME THE VALUE AND ITS SOURCE, not only the destination. An incomplete edit
+        # once left "Set the SAME `tortoise-dashboard` Pages project" — the noun phrase deleted, so the
+        # sentence's object was the PROJECT, and the one instruction this arm exists to give (copy the
+        # live `api` value onto the empty Pages half) named neither the value nor where it lives. The
+        # operator's next reach is to write a DIFFERENT value, which is the MISMATCH the sentence above
+        # warns against. Nothing caught it: the 723-case battery is green over it.
+        assert "Set the SAME value the LIVE half" in hint, (
+            f"the `{reason}` SPLIT hint no longer names the value to copy or which half holds it — "
+            f"\"Set the SAME <destination>\" is not an instruction: {hint!r}"
+        )
         # ⛔ The CONSEQUENCE must be the one that actually happens. A one-sided change from an
         # absence SPLIT leaves both halves configured with different keys — a MISMATCH — not another
         # SPLIT; naming the wrong verdict sends an operator to treat the next tick's MISMATCH as a
