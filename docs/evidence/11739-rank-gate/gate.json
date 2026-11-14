@@ -122,8 +122,8 @@
     "issue_comment": 6869726971,
     "note": "no payload_sha256 self-binding and no pin test \u2014 this is a branch-only PROBE artifact, not the indexed bundle; see README.md's header",
     "probe_sha256_current": "bda727333c4b07b3d7543af129f18dab798f014b0ea72d4f1af2dbdafb75b4b5",
-    "probe_digest_note": "probe_sha256 = the probe AS RUN (it produced every number in this file). probe_sha256_current = the committed probe, which differs by three review fixes that cannot move a number: numeric shard ordering, a shard-set/shape assertion, and the corrected B definition text (this file's B definition is that same corrected text). The published run used 10 shards, 0-9, where string and numeric order agree.",
-    "twin_groups_sha256": "5d1894be931c7d8f00bcd5b358ff6e064ff0231756fa4ddb973d8ccea0528e30",
+    "probe_digest_note": "probe_sha256 = the probe AS RUN (it produced every number in this file). probe_sha256_current = the committed probe, which differs by four review changes that cannot move a number: numeric shard ordering, a shard-set/shape assertion, the corrected B definition text (this file's B definition is that same corrected text), and a new `shards` key that adds a field. The published run used 10 shards, 0-9, where string and numeric order agree.",
+    "twin_groups_sha256": "2a5619dcf9338539dbead83a4c8d239dd85b530f16e68be4ca8f8f8f6aa87bbe",
     "shards_as_run": {
       "count": 10,
       "names": "comp_vec_0..9",
@@ -133,6 +133,6 @@
       ],
       "how_verified": "re-running --mode measure with the committed probe re-assembled 'comp (15008, 384) from 10 shards' before the encoder import (no torch on the verifying box) \u2014 the assembly is checked, the encode is not re-derived"
     },
-    "twin_group_figures": "produced by probes/twin_groups.py (committed), which reproduces displaced_total 1377 / in_band 803 independently from the raw+composed vectors and every row of the mechanism table"
+    "twin_group_figures": "produced by probes/twin_groups.py (committed): it reproduces displaced_total 1377 / in_band 803 independently from the raw+composed vectors, every row of the mechanism table (including the 2-10 class at 171/110), points_in_ge11_inside_top10 = 592, and the largest group's rank 2 at sim 0.9724"
   }
 }

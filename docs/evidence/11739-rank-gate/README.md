@@ -116,10 +116,11 @@ only **13,341** distinct composed texts), and the median rank of a twin-group Po
   **time-bound decision, not a data-plane refusal**: the numbers are ranks over a pinned population,
   not a claim about the graph's live state at 02:00 UTC.
 * Hermetic re-run: `probes/rank_gate.py` (sha256 `6cd1220a…` — the probe **AS RUN**; the committed file is
-  `bda72733…`, differing only by three review fixes that cannot move a number: numeric shard ordering, a
-  shard-set/shape assertion, and the corrected B definition text — see
+  `bda72733…`, differing only by four review changes that cannot move a number: numeric shard ordering, a
+  shard-set/shape assertion, the corrected B definition text, and a new `shards` key (count/rows/dim/
+  comp_sha256) that ADDS a field and moves no number — see
   `gate.json.provenance.probe_sha256_current`) produced the population, both arms' ranks and histograms,
-  and the item-displacement counts. `probes/twin_groups.py` (sha256 `5d1894be…`) produced every figure in
+  and the item-displacement counts. `probes/twin_groups.py` (sha256 `5d1894be…`) produced and re-derives every figure in
   "Why the composed arm loses facts", and independently reproduces `displaced_total` **1,377** and
   `displaced_in_band` **803** from the raw + composed vectors — so those counts have two implementations
   that agree, not one.
