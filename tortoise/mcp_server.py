@@ -3948,9 +3948,12 @@ def tortoise_query(kind: str | None = None,
       are applied on the text= arm, but each on a different condition:
       `min_confidence` only for `entity_type="point"` (the fts leg gates the
       floor on the literal `entity_type == "point"`, sdk.py:43206), and
-      `order_by` for every type EXCEPT `document`/`source` (both map to the
-      `Source` label, which the ranker's belief sweep never reads — `event`,
-      `subject`, `object` and `operator` all carry a belief and honour it).
+      `order_by` for every type except a `confidence` ordering on
+      `document`/`source` (both map to the `Source` label, which the ranker's
+      belief sweep never reads, so a confidence sort there would leave the RRF
+      order untouched — `event`, `subject`, `object` and `operator` all carry a
+      belief and honour it, and `order_by="graph"`/`"relevance"` are applied to
+      every type including those two).
       A floor on any other `entity_type`, and a confidence ordering on those two,
       are REFUSED rather than dropped; structural filtering by confidence is
       Phase 2 in the hybrid-search plan, not a shipped feature.
@@ -4204,6 +4207,8 @@ def tortoise_query(kind: str | None = None,
         # order_by IS not applied" (round-3 P2, measured on a real call).
         _verb = "are" if len(_names) > 1 else "is"
         _them = "them" if _verb == "are" else "it"
+        # Every refused argument's OWN reason: a join that keeps only the first
+        # names two arguments and explains one (round-6 P2 4, measured).
         _why = "; ".join(reason for _, reason in _unapplied)
         # What the caller actually LOST — per argument, not generic: a `kind`
         # refusal served a WIDER population, it did not serve excluded rows.

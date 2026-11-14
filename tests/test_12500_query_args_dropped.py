@@ -360,7 +360,13 @@ def test_the_tag_arm_message_names_the_precedence_that_blocks_pass_text(stub) ->
 #: Valid NON-Point types only. "session" is not in VALID_ENTITY_TYPES, so it
 #: was refused by `validate_entity_type` ABOVE this guard and passed the
 #: assertion only because that message lists `point` (round-4 finding 5).
-@pytest.mark.parametrize("entity_type", ["document", "event", "object"])
+#: ALL six non-Point types. Pinning three of them left the class open for
+#: `source`/`subject`/`operator` under a mutant that refused only the three
+#: (79 passed, 0 failed — round-6 P2 2). `operator` is included because the SDK
+#: gate is the literal `entity_type == "point"`, not Point-ness, so an operator
+#: read is refused too.
+@pytest.mark.parametrize("entity_type", ["document", "event", "object", "source",
+                                         "subject", "operator"])
 def test_the_text_arm_REFUSES_a_floor_it_cannot_apply(stub, entity_type) -> None:
     """`text=` applies the floor to POINT rows only (#12500 round-3 P1).
 
@@ -448,6 +454,10 @@ def test_the_message_agrees_in_number_with_the_arguments_it_names(stub) -> None:
     assert " and " in two["error"], two["error"]
     assert " are not applied" in two["error"], two["error"]
     assert " is not applied" in one["error"], one["error"]
+    # BOTH reasons, not just both names — a join that keeps only the first
+    # explains one argument while naming two (round-6 P2 4).
+    assert "confidence floor" in two["error"], two["error"]
+    assert "ordering" in two["error"], two["error"]
 
 
 def test_a_floor_and_a_property_filter_have_no_common_arm(stub) -> None:
@@ -554,6 +564,10 @@ def test_the_kind_only_refusal_names_the_wider_population(stub) -> None:
     message = result["error"]
     assert "wider population" in message, message
     assert "floor" not in message and "ordering" not in message, message
+    # …and the route must be the KIND one. Deleting that branch pushed a caller
+    # who wanted a narrower population into a text search, with the suite green
+    # (round-6 P2 3).
+    assert "pass kind= to the structural arm" in message, message
 
 
 def test_the_refusal_never_repeats_its_route_or_says_a_entity_type(stub) -> None:
@@ -641,6 +655,11 @@ _DOCSTRING_FALSE = (
     # `event`/`subject`/`object`/`operator` DO carry a belief (measured live).
     "only a Point carries one",
     'applied on the text= arm for `entity_type="point"`',
+    # round-6: only a CONFIDENCE ordering is refused there — `graph` and
+    # `relevance` really do reorder document/source reads. This sentence was
+    # mandated as TRUE by this very test for one round, which is how a pin turns
+    # into a false-PASS generator.
+    "for every type EXCEPT `document`/`source`",
     # round-4: operators are Points, so this reason was self-contradictory.
     "selects non-Point rows",
 )
@@ -662,4 +681,22 @@ def test_the_served_docstring_never_restates_a_falsified_claim() -> None:
             f"the docstring restates a falsified claim: {claim!r}"
         )
     # …and the TRUE statement is present, so the pin is not satisfied by silence.
-    assert "every type EXCEPT `document`/`source`" in flat, flat[:400]
+    assert "except a `confidence` ordering on `document`/`source`" in flat, flat[:400]
+
+
+def test_each_refused_argument_gets_its_own_reason(stub) -> None:
+    """Two refused arguments need TWO reasons, on every arm (#12500 round 6).
+
+    Fails if a per-argument reason is replaced by its sibling — e.g. the
+    structural `order_by` reason answering "takes no confidence floor", which
+    leaves the caller told about a floor they may not have passed and never told
+    why the ordering went missing. Measured: that swap alone kept the whole suite
+    green before this test, because the agreement test above uses the tag arm.
+    """
+    from tortoise.mcp_server import tortoise_query
+
+    message = tortoise_query(kind="s", min_confidence=_CONFIDENCE_FLOOR,
+                             order_by="confidence")["error"]
+
+    assert "takes no confidence floor" in message, message
+    assert "takes no ordering" in message, message
