@@ -1697,7 +1697,7 @@ async def _await_under_mcp_wait_bound(name: str, arguments, *, version,
         # the default `abandon_on_cancel=False` — which is what propagates this ContextVar onto
         # the worker thread (fastmcp/utilities/async_utils.py: "properly propagates
         # contextvars"). A dispatch change to a bare `loop.run_in_executor` would NOT copy the
-        # context (cpython#78195 — the reason `hosted_api.py:454` and `tortoise/quota.py:2298`
+        # context (cpython#78195 — the reason `hosted_api.py:460` and `tortoise/quota.py:2376`
         # already say so), the body would read `None`, and #10749's unclamped tail would return
         # SILENTLY. `test_the_REAL_hop_hands_the_tool_body_a_clamped_allowance` is the guard for
         # exactly that class, and it is the ONLY one: it awaits the real chain and asserts the body
