@@ -328,32 +328,83 @@ def test_a_vector_off_the_float32_grid_is_not_ours_to_narrow():
     assert stamped[JOURNAL_VECTOR_WIDTH_KEY] == JOURNAL_VECTOR_WIDTH_F64
 
 
-def test_the_quantiser_leaves_process_wide_warning_state_alone():
+def test_the_quantiser_leaves_process_wide_warning_state_alone(monkeypatch):
     """`warnings.catch_warnings()` mutates PROCESS-GLOBAL filter state and is
     documented as not thread-safe; the SDK documents concurrent writers (#5612).
     Two interleaved blocks can leave a leaked `ignore` entry behind for the life
     of the process, muting the numeric warnings that surface a bad vector.
 
     The range refusal is done in plain Python BEFORE any numpyd cast precisely
-    so that no suppression is needed at all — and THAT is the observable this
-    pins: with the cast reached, numpy emits `RuntimeWarning: overflow
-    encountered in cast`. Asserting only on `warnings.filters` could not see it
-    (a `catch_warnings` block restores the filters on `__exit__`, so the leak
-    this test names is invisible to a before/after comparison — measured: the
-    removed defect restored, 20 passed).
+    so that no suppression is needed at all.
+
+    ⛔ TWO OBSERVABLES, and the SECOND is the one that makes this pin real
+    (#11859). The regression this test names is "the quantiser wraps its casts
+    in `catch_warnings` + `simplefilter('ignore', RuntimeWarning)`" — and a
+    restored suppression is INVISIBLE to both assertions that used to stand
+    here alone: the `ignore` entry is scoped to the block, so
+    `warnings.filters == before` still holds on `__exit__` (per
+    <https://docs.python.org/3/library/warnings.html>, `catch_warnings`
+    RESTORES the module's filters on exit — only the list identity moves), and
+    the `RuntimeWarning` is swallowed before this test's own `record=True` block
+    can see it.
+
+    MEASURED before this fix, on the pre-`833272921b` shape restored (range
+    refusal deleted **and** the suppression put back): `1 passed` for this row,
+    and **51 passed** for the whole file — a pin that could not fail for its own
+    docstring. After adding the ban below, the same mutant reds here.
+
+    So the primary assertion asks the only question that makes the claim true:
+    **did the quantiser enter `catch_warnings` at all?** A `catch_warnings` call
+    on this path IS the defect, whether or not its `ignore` entry leaks — one
+    interleaved with a concurrent writer is already the recorded hazard.
     """
     import warnings
 
+    def _boom(*args, **kwargs):
+        raise AssertionError(
+            "the quantiser entered `warnings.catch_warnings` — the path must "
+            "refuse an out-of-range value in plain Python, before any numpyd "
+            "cast, so it needs no process-global suppression at all (#5612)")
+
     before = list(warnings.filters)
+    outcomes: list = []
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")     # make the defect's warning VISIBLE
-        # out of range: the case that warned before the plain-Python refusal
-        assert shortest_float32_vector([1e300, 0.5]) is None
-        # underflowing to zero: the other cast-collision shape
-        assert shortest_float32_vector([1e-50, 0.5]) is None
-        # the on-grid path must still narrow (so the assertions above cannot be
-        # satisfied by a function that refuses everything)
-        assert shortest_float32_vector([float(np.float32(0.1)), 0.5]) == [0.1, 0.5]
+        # THE PRIMARY OBSERVABLE (#11859): the regression restores a
+        # suppression block; entering one is red even if its filters are
+        # restored on `__exit__` (which is why `filters == before` is blind).
+        #
+        # ⛔ SCOPED WITH `monkeypatch.context()`, never the shared instance
+        # (#11859 review). `monkeypatch.undo()` would undo EVERY patch the
+        # fixture holds — including the ones `tests/conftest.py`'s autouse
+        # fixtures installed (`TORTOISE_RECORD_*`, `TORTOISE_API_URL/KEY`,
+        # `TORTOISE_AUDIT_FALLBACK_DIR`, …) — so anything this test did after
+        # that point would run OUTSIDE the suite's isolation, silently. A
+        # context undoes only what was patched through it.
+        #
+        # …and it must not outlive the CALLS either: pytest's own
+        # failure-reporting path calls `warnings.catch_warnings`, so a ban still
+        # installed while a failure is formatted turns a clean "1 failed" into a
+        # run-aborting INTERNALERROR — measured on BOTH mutants below, and it
+        # hides which assertion actually failed. Hence: calls inside the
+        # context, every assertion outside it.
+        with monkeypatch.context() as ban:
+            ban.setattr(warnings, "catch_warnings", _boom)
+            # out of range: the case that warned before the plain-Python refusal
+            outcomes.append(shortest_float32_vector([1e300, 0.5]))
+            # underflowing to zero: the other cast-collision shape
+            outcomes.append(shortest_float32_vector([1e-50, 0.5]))
+            # the on-grid path must still narrow (so the assertions above cannot
+            # be satisfied by a function that refuses everything)
+            outcomes.append(shortest_float32_vector([float(np.float32(0.1)), 0.5]))
+
+    assert outcomes[0] is None, (
+        "an out-of-range element must be refused, not narrowed")
+    assert outcomes[1] is None, (
+        "an underflowing element must be refused, not collapsed to 0.0")
+    assert outcomes[2] == [0.1, 0.5], (
+        "the on-grid path must still narrow — otherwise the refusals above are "
+        "satisfied by a function that refuses everything")
     numeric = [str(w.message) for w in caught
                if issubclass(w.category, RuntimeWarning)]
     assert not numeric, (
@@ -467,7 +518,11 @@ def test_a_reemitted_snapshot_is_narrowed_because_the_store_already_did():
     """`PointPromoted` &c. carry a vector read back off the node, and the store
     writes `vecf32($embedding)` for every non-verbatim vector
     (`stored_form.node_statement`) — so narrowing keeps the float32 bits the
-    store holds and shortens the text. The width declaration is what moves.
+    store holds and shortens the text. ⛔ The declaration is NOT the only thing
+    that moves, and an earlier wording here said it was ("The width declaration
+    is what moves") — it contradicted the ⛔ paragraph directly below it (#11945),
+    and a reader who believed the summary alone would delete the truth-side
+    narrowing in `consistency._as_f32` as redundant and reinstate #8615.
 
     ⛔ It is NOT a no-op on the float64 (#11835 review round 3, F1): the payload's
     value becomes the shortest decimal for those bits (`0.001230153371579945` →

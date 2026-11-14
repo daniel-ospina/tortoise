@@ -6343,3 +6343,26 @@ def invitation_expire(cp, invitation_id: str, org_id: str,
                    "expired_by": actor_user_id},
     )
     return {"expired": True, "invitation_id": invitation_id}
+
+
+def metering_increment_postgres_bytes(cp, org_id: str, period_start: str,
+                                      period_end: str, n_bytes: int,
+                                      n_records: int = 0) -> None:
+    """ACCUMULATE the org's stored journal bytes for the window
+    ``[period_start, period_end)`` (#12762).
+
+    An INCREMENT, not a gauge: every journal segment adds the stored size of
+    the rows it wrote, so the window's figure is the sum of what landed in it.
+    Best-effort by contract — ``metering.record_postgres_bytes_written`` absorbs
+    a failure and the write path is served (a meter must never fail a write).
+
+    The SQL refuses a degenerate window (``end <= start``) and a negative
+    increment, because both would corrupt a figure that may later gate an
+    allowance; that refusal reaches the caller as the seam's own error.
+    """
+    cp.rpc(
+        "metering_increment_postgres_bytes",
+        {"p_org_id": org_id, "p_period_start": period_start,
+         "p_period_end": period_end, "p_bytes": int(n_bytes),
+         "p_records": int(n_records)},
+    )
