@@ -2903,6 +2903,72 @@ def test_the_cli_writes_the_summary_file_and_the_json_shape(tmp_path, monkeypatc
     assert age["status"] == "—", age
 
 
+def test_the_table_and_the_json_publish_the_SAME_status_for_every_arm(
+    tmp_path, monkeypatch, capsys
+):
+    """⛔ ONE RENDERING OF ONE STATUS, ON BOTH SURFACES (#12589 review round 11, P3).
+
+    Round 10 gave `--json` its own copy of the non-gated half of the rule, so the gated half kept
+    publishing a RAW status: an arm holding a status this module does not name read "CANNOT RUN" in
+    the table (`glyph.get(..., UNKNOWN)`) and that spelling in the payload. Both surfaces now call
+    `rendered_status`, so the pin is EQUALITY between them rather than a second copy of the rule.
+    """
+    import json
+
+    _stub_main(monkeypatch, canary.Arm("engine-init", canary.OK, "tortoise init succeeds"))
+    crafted = canary.Report()
+    # "PASS" is deliberately NOT one of the module's status constants: an unnamed status must render
+    # as the NON-READING, never as whatever spelling the arm happened to hold.
+    crafted.add(canary.Arm("engine-index", "PASS", "a status nothing in this module names"))
+    crafted.add(canary.Arm("release-age", canary.OK, "uploaded unknown ago", gated=False))
+    monkeypatch.setattr(canary, "build_report", lambda **kwargs: crafted)
+
+    monkeypatch.setattr(
+        canary, "render_summary_for", lambda report: canary.render_summary(report), raising=False
+    )
+    canary.main(["--json"])
+    payload = json.loads(capsys.readouterr().out)
+    by_name = {arm["name"]: arm for arm in payload["arms"]}
+    assert by_name["engine-index"]["status"] == "CANNOT RUN", by_name
+    assert by_name["release-age"]["status"] == "—", by_name
+
+    # ...and the table agrees, because it goes through the same function.
+    rendered = canary.render_summary(crafted)
+    engine_row = next(ln for ln in rendered.splitlines() if "`engine-index`" in ln)
+    assert "| CANNOT RUN |" in engine_row, engine_row
+    assert "PASS" not in engine_row, engine_row
+
+
+def test_the_installability_sentence_is_an_ALLOW_list_not_a_deny_list(monkeypatch):
+    """⛔ A FOURTH STATE MUST NAME ITSELF, NOT INHERIT THE DECISIVE NEGATIVE (#12589 review round
+    11, P3). The round-9 code put "not resolvable for an unpinned install here" on `else:`, so a
+    future reader returning anything unnamed would be rendered as an ARTIFACT finding. An
+    allow-list cannot manufacture that claim.
+    """
+    seen: list[str] = []
+    real = canary.installability
+
+    def fourth_state(index_doc, version):
+        seen.append(version)
+        return "some-new-state"
+
+    monkeypatch.setattr(canary, "installability", fourth_state)
+    report = canary.build_report(
+        engine_doc=_engine_doc(),
+        client_doc={"info": {"version": "0.3.0"}, "releases": {"0.3.0": [_CLIENT_GOOD]}},
+        tree_version="0.2.0",
+        init_arm=_ok_init_arm(),
+        now=NOW,
+    )
+    monkeypatch.undo()
+    assert seen, "the OK arm must ask `installability` at all — otherwise this pin proves nothing"
+    detail = report.get("client-published").detail
+    assert "not resolvable" not in detail, detail
+    assert "could not be READ here" in detail, detail
+    assert "some-new-state" in detail, detail
+    assert real is canary.installability
+
+
 def test_the_tree_version_row_implicates_only_the_arm_that_failed():
     """⛔ A `FAIL` ROW MAY NOT BLAME AN ARTIFACT THAT PASSED (#12589 review round 10, P3).
 
@@ -2922,6 +2988,25 @@ def test_the_tree_version_row_implicates_only_the_arm_that_failed():
     row = next(a for a in report.arms if a.name == "tree-version")
     assert "predates the fix" not in row.detail, row.detail
     assert "NOT the engine build" in row.detail, row.detail
+
+    # ⛔ AND A THIRD GATED ARM'S FAILURE DOES NOT IMPLICATE THE ENGINE EITHER (#12589 review round
+    # 11, P3). Round 10 keyed `engine_failed` on the ABSENCE of the name "client-published", so any
+    # new gated arm would inherit the engine-stale claim. This arm is deliberately NOT one of
+    # `ENGINE_ARMS`.
+    third_arm = canary.Report()
+    third_arm.add(canary.Arm("engine-index", canary.OK, "the index reads"))
+    third_arm.add(canary.Arm("documented-command", canary.FAIL, "the README command exits 1"))
+    assert third_arm.verdict == canary.FAIL
+    assert canary.engine_build_implicated(third_arm) is False, "a NON-engine arm's red"
+    # ...and the predicate still fires for the arms it names.
+    for name in sorted(canary.ENGINE_ARMS):
+        named = canary.Report()
+        named.add(canary.Arm(name, canary.FAIL, "red"))
+        assert canary.engine_build_implicated(named) is True, name
+    # A non-gated engine-named row must not count either — only gated arms carry the verdict.
+    ungated = canary.Report()
+    ungated.add(canary.Arm("engine-index", canary.FAIL, "red", gated=False))
+    assert canary.engine_build_implicated(ungated) is False
 
     # ...and the engine FAIL at the same version keeps the sentence it earned.
     engine_fail = canary.build_report(

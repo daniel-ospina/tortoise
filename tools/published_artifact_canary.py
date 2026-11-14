@@ -336,6 +336,22 @@ OK = "OK"
 FAIL = "FAIL"
 UNKNOWN = "UNKNOWN"
 
+#: The ONE allow-list rendering of an arm status, for BOTH surfaces (#12589 review round 11,
+#: P3). `.get(..., UNKNOWN)` is the allow-list: an arm carrying a status this module does not
+#: name renders as the non-reading, never as whatever spelling it happened to hold. The table
+#: applied this from round 8 and `--json` published the RAW value until round 11, so a gated arm
+#: holding an unnamed status could read "CANNOT RUN" on screen and "PASS" in the payload. A
+#: non-gated row has no verdict at all and renders `—` on both surfaces. Keep the two callers on
+#: this function; a second copy of the rule is how they drifted apart.
+GLYPH = {OK: "PASS", FAIL: "FAIL", UNKNOWN: "CANNOT RUN"}
+NO_VERDICT = "—"
+
+
+def rendered_status(arm: Arm) -> str:
+    """The single rendering of ``arm``'s status — table and ``--json`` both call this."""
+    return GLYPH.get(arm.status, GLYPH[UNKNOWN]) if arm.gated else NO_VERDICT
+
+
 #: Every env var named here is stripped from the child's environment before the
 #: documented command runs. The canary must measure the DEFAULT path a new user
 #: gets — an ambient ``TORTOISE_DB_URI``/``TORTOISE_DB_PATH`` inherited from the
@@ -683,6 +699,25 @@ def judged_value(files: Any) -> tuple[bool, bool]:
 
 #: ``installability`` results — three states, so a caller cannot fold "could not read" into
 #: "read and negative" (#12589 review round 7, P2).
+#: The arms whose failure means "the PUBLISHED ENGINE BUILD at this version is stale". Named
+#: positively so the `tree-version` row can never blame the engine artifact on some other arm's
+#: failure (#12589 review rounds 10 and 11).
+ENGINE_ARMS = frozenset({"engine-index", "engine-init"})
+
+
+def engine_build_implicated(report: Report) -> bool:
+    """Whether an arm whose failure implicates the PUBLISHED ENGINE BUILD is red.
+
+    ⛔ AN ALLOW-LIST OVER `ENGINE_ARMS`, not "any FAIL that is not the client" (#12589 review round
+    11, P3). Round 10 keyed this on the ABSENCE of one name, so a THIRD gated arm (a
+    documented-command smoke, say) failing would re-emit the engine-stale claim that round exists
+    to remove — an arm set that grows cannot grow a false claim this way. Extracted from the row's
+    construction so the property is testable with a report that has an arm `build_report` does not
+    produce today.
+    """
+    return any(arm.gated and arm.status == FAIL and arm.name in ENGINE_ARMS for arm in report.arms)
+
+
 INSTALLABLE = "installable"
 NOT_INSTALLABLE = "not-installable"
 INSTALLABILITY_UNKNOWN = "unreadable"
@@ -1040,15 +1075,25 @@ def build_report(
                 # third state (UNKNOWN) names itself instead of arriving through a negation —
                 # one definition of "read", `judged_value` behind `installability`, never
                 # `release_files` (which cannot see a field-level drop; round 7, P2).
+                # ⛔ AN ALLOW-LIST, NOT A DENY-LIST (#12589 review round 11, P3). Round 9 made
+                # the three states visible but left the negative sentence on `else:`, so any
+                # FOURTH state a future reader returns would be rendered as the decisive "not
+                # resolvable" instead of naming itself — the same unearned-negative class this
+                # issue exists to remove. The positive branch now has to be the one that speaks.
                 state = installability(client_doc, client_version)
                 if state == INSTALLABLE:
                     advertised = f"advertised latest {client_version} is installable"
+                elif state == NOT_INSTALLABLE:
+                    advertised = (
+                        f"advertised latest {client_version} is not resolvable for an "
+                        f"unpinned install here"
+                    )
                 elif state == INSTALLABILITY_UNKNOWN:
                     advertised = f"advertised latest {client_version} could not be READ here"
                 else:
                     advertised = (
-                        f"advertised latest {client_version} is not resolvable for an "
-                        f"unpinned install here"
+                        f"advertised latest {client_version} could not be READ here "
+                        f"(unrecognised installability {state!r})"
                     )
                 report.add(
                     Arm(
@@ -1141,10 +1186,7 @@ def build_report(
                 # FAIL, so a client-arm FAIL (e.g. `tortoise-client` 404) — with the engine build
                 # at that version PASSing in the row above — claimed the engine artifact was stale.
                 # Two sentences, each true of its arm.
-                engine_failed = any(
-                    arm.gated and arm.status == FAIL and arm.name != "client-published"
-                    for arm in report.arms
-                )
+                engine_failed = engine_build_implicated(report)
                 if report.verdict == FAIL and engine_failed:
                     relationship = (
                         "the tree carries the same version — a bump IS required: the "
@@ -1174,7 +1216,7 @@ def build_report(
 
 def render_summary(report: Report) -> str:
     """Markdown for a CI step summary / PR comment. No emoji-only status."""
-    glyph = {OK: "PASS", FAIL: "FAIL", UNKNOWN: "CANNOT RUN"}
+    glyph = GLYPH
     lines = [
         "## Published-artifact canary (#12363)",
         "",
@@ -1197,7 +1239,7 @@ def render_summary(report: Report) -> str:
         # unknown ago" — the arm reads a value it did not obtain — and rendering `PASS` beside that
         # is the non-reading-as-a-verdict class this issue removes, one row over. The verdict
         # property ignores non-gated arms, so this changes the TABLE only.
-        status = glyph.get(arm.status, glyph[UNKNOWN]) if arm.gated else "—"
+        status = rendered_status(arm)
         lines.append(f"| `{arm.name}` | {'yes' if arm.gated else 'no'} | {status} | {detail} |")
     if report.verdict == FAIL:
         if report.wheel_mode:
@@ -1243,11 +1285,7 @@ def render_summary(report: Report) -> str:
         # with no arms, or with only informational ones, renders no CANNOT RUN row — and the
         # sentence still told the operator to read one. When nothing is marked, say so: a
         # verdict of CANNOT RUN with no unreadable arm is a CANARY defect, not an artifact one.
-        marked = [
-            arm.name
-            for arm in report.arms
-            if (glyph.get(arm.status, glyph[UNKNOWN]) if arm.gated else "") == glyph[UNKNOWN]
-        ]
+        marked = [arm.name for arm in report.arms if rendered_status(arm) == glyph[UNKNOWN]]
         where = (
             "the row marked CANNOT RUN names which ("
             + ", ".join(f"`{name}`" for name in marked)
@@ -1927,11 +1965,13 @@ def _main(argv: list[str] | None = None) -> int:
                     "arms": [
                         {
                             "name": a.name,
-                            # ⛔ THE MACHINE SURFACE RENDERS IT THE SAME WAY THE TABLE DOES
-                            # (#12589 review round 10, P3): a non-gated row has no verdict, so
-                            # `--json` must not stamp "OK" on an informational row whose own
-                            # detail says the reading was not obtained ("uploaded unknown ago").
-                            "status": a.status if a.gated else "—",
+                            # ⛔ THE MACHINE SURFACE RENDERS IT THE SAME WAY THE TABLE DOES —
+                            # by CALLING the table's renderer (#12589 review rounds 10 and 11).
+                            # Round 10 gave this line its own copy of the rule, which fixed the
+                            # non-gated half and left the gated half publishing a RAW status: an
+                            # arm holding an unnamed status read "CANNOT RUN" on screen and that
+                            # spelling in the payload. One function, both surfaces (P3).
+                            "status": rendered_status(a),
                             "gated": a.gated,
                             "detail": a.detail,
                         }
