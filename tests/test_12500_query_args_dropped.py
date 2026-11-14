@@ -472,6 +472,21 @@ def test_an_unusable_floor_is_left_to_the_sdk_to_refuse(stub) -> None:
         fts = [c for c in stub.calls if c[0] == "tortoise_fts_query"]
         assert fts and fts[-1][3]["min_confidence"] == bad, fts
 
+    # …and a NON-NUMERIC floor, which is what the `isinstance` conjunct is for.
+    # Unpinned, deleting that conjunct left 87/87 green while
+    # `min_confidence="0.9"` raised TypeError INSIDE the handler body — out of the
+    # structured-error path this file's contract is about (round-22 P2 3,
+    # measured: deleting the conjunct and refusing a string both stayed green).
+    text_floor = tortoise_query(text="x", entity_type="document",
+                               min_confidence="0.9")
+
+    assert not _is_refusal(text_floor), (
+        f"a string floor is not a floor this arm can judge — it must reach the "
+        f"SDK's own validation, not this paragraph: {text_floor}"
+    )
+    fts = [c for c in stub.calls if c[0] == "tortoise_fts_query"]
+    assert fts and fts[-1][3]["min_confidence"] == "0.9", fts
+
 
 def test_the_text_arm_still_applies_the_floor_to_POINTS(stub) -> None:
     """The control for the branch above: `entity_type="point"` is the default.
@@ -1090,6 +1105,13 @@ def test_a_paged_caller_is_told_to_drop_offset_in_the_route(stub, kwargs) -> Non
 
     assert "drop offset=/page=" in message, message
     assert "text= takes no offset" in message, message
+    # …and it must be a whole SENTENCE. Appended to the route with its own full
+    # stop it collided with the template's ", or drop …" and every paged refusal
+    # shipped "… takes no offset., or drop min_confidence for this read"
+    # (round-22 P2 2, measured on all six paged shapes). Pinning the two fragments
+    # never caught it, so the junction is pinned here.
+    assert "text= takes no offset.," not in message, message
+    assert "text= takes no offset. " in message, message
 
     # …and it must qualify EVERY alternative, not read as trailing advice on the
     # last one. Appended as a final parenthetical it did exactly that, and
@@ -1110,7 +1132,8 @@ def test_every_alternative_of_a_paged_text_route_terminates(stub) -> None:
 
     The paging parenthetical appended at the END of a route read as qualifying only
     the last alternative, and `text=`+`offset=` is refused whatever `entity_type`
-    says (mcp_server.py:4422-4424) — so following the FIRST alternative, "pass
+    says (`if paginated:` → "offset/page not supported with text",
+    mcp_server.py:4444-4446) — so following the FIRST alternative, "pass
     entity_type='point'", landed on "offset/page not supported with text"
     (round-21 P2 2, measured verbatim on both two-alternative routes). The routes
     now state the drop as its own sentence, for the whole route, and this test
@@ -1132,8 +1155,12 @@ def test_every_alternative_of_a_paged_text_route_terminates(stub) -> None:
                           order_by="confidence", offset=0)["error"]
     assert ". Also drop offset=/page=" in both, both
 
-    # Follow each FIRST alternative, dropping only what the message names.
-    first = tortoise_query(text="x", entity_type="point")
+    # Follow each FIRST alternative, dropping only what the message names. The
+    # order-only route's first alternative is "pass entity_type='point'", which
+    # FIXES THE ORDERING — so `order_by` stays. Dropping it as well (the round-21
+    # version) executed the LAST alternative and left the claim "each alternative
+    # as written" half-true (round-22 P2 4, measured).
+    first = tortoise_query(text="x", entity_type="point", order_by="confidence")
     assert not _is_refusal(first), first
     fixes_both = tortoise_query(text="x", entity_type="point",
                                 min_confidence=_CONFIDENCE_FLOOR,
