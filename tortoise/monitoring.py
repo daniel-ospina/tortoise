@@ -7366,10 +7366,15 @@ def metrics(sdk=None, setup_timeout=None, graph_size_timeout=None) -> dict:
     ``degraded``/0.
 
     #10749: ``graph_size_timeout`` is the SAME seam one phase later — the count's own budget,
-    defaulting to ``GRAPH_SIZE_TIMEOUT``. ``tortoise_health`` passes what is LEFT of its transport
-    deadline, because this count sits between a probe and a quota block that are both bounded by
-    that same deadline, and a full 1.5 s here on a call with 0.4 s left is a ``-32009`` the tool
-    chose to cause. A zero/negative value is honest: the count raises immediately,
+    defaulting to ``GRAPH_SIZE_TIMEOUT``. ``tortoise_health`` passes what this count is PLANNED to
+    have: the transport deadline minus the probe's CEILING (``allowance + PROBE_TIMEOUT``) minus the
+    delivery margin — NOT ``remaining`` itself. ⛔ The two are different (fresh review of the final
+    head, P2): the count is planned at handler START, so on a fresh 10.0 s bound the value is
+    ``10 − 5.0 − 0.5 = 4.5``, which SATURATES at this constant — it is reduced only when the probe's
+    reserve ate the deadline, never by what the probe actually spent. That is still the right bound:
+    a full 1.5 s here on a call with 0.4 s of deadline left is a ``-32009`` the tool chose to cause,
+    and the count sits between a probe and a quota block that are both bounded by that same
+    deadline. A zero/negative value is honest: the count raises immediately,
     ``graph_size_error`` names it, and the report still answers with ``graph_size: 0``.
     """
     target = sdk if sdk is not None else _sdk

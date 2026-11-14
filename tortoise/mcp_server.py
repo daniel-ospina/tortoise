@@ -886,10 +886,14 @@ def _health_setup_allowance(remaining: float) -> float:
     round 2). ``max(0.0, …)`` floors the allowance, and on the first version of this change the
     other three bounded phases still spent their own timeouts below the reserve, so a dispatch with
     ``remaining < reserve`` (~6.5 s) overran the deadline and was served the SAME ``-32009`` this
-    change exists to remove. The count and the ``quota`` block are now each bounded by what is LEFT
-    of the deadline (``metrics(graph_size_timeout=…)``, ``_health_quota_budget`` — the latter capped
-    at its own constant as well), which bounds the whole tail at ``remaining − margin`` however
-    slowly the earlier phases ran. ⛔ The arithmetic still RESERVES ``PROBE_TIMEOUT`` for the probe
+    change exists to remove. Both later phases are bounded too, in DIFFERENT ways — stated in full
+    above and in ``_health_setup_allowance``'s docstring, because an earlier wording here said "each
+    bounded by what is LEFT of the deadline", which is FALSE of the count:
+    ``metrics(graph_size_timeout=…)`` is planned at handler start off the probe's CEILING (so it is
+    the full constant on a fresh bound, and only shrinks when the reserve ate the deadline), while
+    ``_health_quota_budget`` measures at its OWN start and is capped at its own constant as well.
+    Together they bound the whole tail at ``remaining − margin`` however slowly the earlier phases
+    ran. ⛔ The arithmetic still RESERVES ``PROBE_TIMEOUT`` for the probe
     even at a 0.0 allowance, and that reservation only makes the tail TIGHTER — it can never widen
     it, so the bound above is not eroded by it. ⛔ **The figures below are a PLANNING bound, not a
     measured spend** (fresh review of the final head, P3 — an earlier cut called them "spent"), and
@@ -6203,14 +6207,22 @@ def tortoise_health() -> dict:
         remaining = _mcp_remaining_wait_bound()
         allowance = (monitoring.probe_setup_timeout() if remaining is None
                      else _health_setup_allowance(remaining))
-        # #10749 (fresh review, cycle 5, round 2): the allowance bounds only the FIRST phase. The
-        # count that follows it is the middle of three and the quota block is the last, so each is
-        # handed what is actually LEFT rather than its full constant — a phase's budget is
-        # ``remaining − (what the phases AFTER it may spend) − margin``. The LAST phase's budget is
-        # measured at its own start, which is what makes the TOTAL ``remaining − margin`` however
-        # slowly the earlier ones ran. Measured before this: a dispatch with 2.0 s left spent 3.00 s
-        # in the quota phase alone and was refused inside the window where the runbook claimed a
-        # clamped probe never breaches the bound.
+        # #10749 (fresh review, cycle 5, round 2; CORRECTED by a later fresh review, P2): the
+        # allowance bounds only the FIRST phase. The two phases after it are bounded in DIFFERENT
+        # ways, and that difference is deliberate — it is stated in full in
+        # `_health_setup_allowance`'s docstring:
+        #   * the COUNT is planned HERE, at handler start, off the probe's CEILING. Its budget is
+        #     ``remaining − (allowance + PROBE_TIMEOUT) − margin``, i.e. it subtracts the phase
+        #     BEFORE it. On a fresh 10.0 s bound that is ``10 − 5.0 − 0.5 = 4.5``, which SATURATES
+        #     at ``GRAPH_SIZE_TIMEOUT`` — so it is the full constant unless the probe's reserve ate
+        #     the deadline. ⛔ An earlier wording said "each is handed what is actually LEFT" and
+        #     "rather than its full constant"; both are FALSE of this phase, because a reserve can
+        #     only PLAN — it cannot know what the probe went on to spend.
+        #   * the QUOTA block is the LAST phase, so its budget IS measured at its own start, and that
+        #     is what makes the TOTAL ``remaining − margin`` however slowly the earlier ones ran.
+        # Measured before this: a dispatch with 2.0 s left spent 3.00 s in the quota phase alone and
+        # was refused inside the window where the runbook claimed a clamped probe never breaches the
+        # bound.
         probe_ceiling = allowance + _monitoring_timeout(
             "PROBE_TIMEOUT", _PROBE_TIMEOUT_FALLBACK_S)
         graph_budget = None

@@ -883,9 +883,13 @@ def test_the_quota_budget_shrinks_by_what_the_earlier_phases_actually_spent(monk
 
     ⛔ Summing the budgets each phase is GRANTED is not the realised total, and an earlier version
     of this case made exactly that mistake: with `metrics` stubbed to return instantly, the quota
-    phase legitimately sees `remaining − margin` (~3.5 s of a 4.0 s deadline) and the four figures
-    add up to 6.0 s — a sum that can never be SPENT, because the phase that would spend it starts
-    later, when the earlier spend has already happened. This drives the real relationship: make the
+    phase legitimately sees `min(QUOTA_STATE_TIMEOUT, remaining − margin)` — **3.0 s of a 4.0 s
+    deadline**, because its own constant binds before the deadline does — so the four figures are
+    `0.0 + 1.5 + 1.5 + 3.0 = 6.0 s`, a sum that can never be SPENT, because the phase that would
+    spend it starts earlier, when the earlier spend has already happened. ⛔ An earlier wording said
+    the quota sees "~3.5 s" here; that is the UNCAPPED figure, and it would put the four terms at
+    6.5 s, which contradicts the 6.0 s the same sentence states (fresh review of the final head,
+    P2). This drives the real relationship: make the
     stubbed probe+count consume 2.0 s of a 4.0 s deadline and the quota budget must drop by that
     2.0 s, which a budget computed once at handler start could not do (fresh review of cycle 5
     round 2, P2 — the mutant is "compute `_health_quota_budget()` next to the allowance").
@@ -1119,15 +1123,19 @@ def test_a_raised_knob_cannot_widen_the_mcp_window(monkeypatch):
 
 
 def test_the_seam_does_not_leak_its_deadline_into_the_next_dispatch(monkeypatch):
-    """The `finally: reset` is claimed in prose — pin it with a SECOND dispatch (#12482 P3).
+    """The `finally: reset` is claimed in prose — pin the state a SECOND dispatch would read.
 
     ⛔ The first version of this case asserted the caller's ContextVar after `asyncio.run` and
     COULD NOT FAIL: `asyncio.run` gives the coroutine its own Task with a COPY of the context, so a
     leak inside is invisible outside with or without the reset (fresh review of cycle 5 round 2,
     measured: the inner task read a leaked 123.0 while the caller still read None). The leak that
-    matters is BETWEEN two dispatches on the same task, so both are awaited inside ONE
-    `asyncio.run` and the second asserts it started clean. Without the reset the second sees its
-    predecessor's deadline, clamps to ~0.0 and answers `unknown` for the life of that task.
+    matters is BETWEEN two dispatches on the same task, so ONE `asyncio.run` awaits a dispatch and
+    then reads what a SECOND one would inherit. ⛔ It is the GAP that is asserted, not a second
+    dispatch (fresh review of the final head, P3 — an earlier wording said "both are awaited",
+    and this case awaits one): performing a real second dispatch would `set()` a fresh deadline and
+    mask exactly the leak under test. Without the reset, the state read in that gap carries the
+    predecessor's deadline, and every later dispatch on the task would clamp to ~0.0 and answer
+    `unknown` for the life of that task.
     """
     seen: list = []
 
@@ -1142,7 +1150,7 @@ def test_the_seam_does_not_leak_its_deadline_into_the_next_dispatch(monkeypatch)
 
     import asyncio
 
-    async def two_dispatches():
+    async def dispatch_then_the_gap():
         await mcp_server._await_under_mcp_wait_bound(
             "tortoise_health", {}, version=None, task_meta=None)
         # The gap the reset exists for: a second dispatch on the SAME task, after the first
@@ -1152,7 +1160,7 @@ def test_the_seam_does_not_leak_its_deadline_into_the_next_dispatch(monkeypatch)
             "the first dispatch leaked its deadline into this task's context"
         )
 
-    asyncio.run(two_dispatches())
+    asyncio.run(dispatch_then_the_gap())
 
     assert seen[0] == pytest.approx(_BOUND, abs=1.0), (
         "the first dispatch did not bind the deadline the tool body reads")
