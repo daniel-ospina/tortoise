@@ -715,8 +715,10 @@ def _monitoring_timeout(attribute: str, fallback: float) -> float:
     here reached ``_safe`` and REPLACED the health answer with ``{'error': ...}`` — a payload with
     no ``status`` key at all (measured on the pre-fix tree, ``monitoring.PROBE_TIMEOUT`` deleted and
     ``quota`` intact: ``keys ['error']``). That is a different observable from the stale-QUOTA case
-    above (there the ``ImportError`` escapes the tool entirely, because ``_safe``'s own handler
-    imports ``QuotaCheckError`` unguarded — #12647); same class of harm, different last mile.
+    below, where the last mile depends on how stale the module is: a module that still carries
+    ``QuotaCheckError``/``QuotaExceededError`` gets the same ``{'error': ...}`` shape, while one
+    missing those classes too has the ``ImportError`` ESCAPE the tool entirely, because ``_safe``'s
+    own handler imports them unguarded (#12647). Same class of harm, different last mile.
     Guarding the quota read alone closed ONE of the two modules this arithmetic depends on.
     """
     try:

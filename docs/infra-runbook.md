@@ -866,9 +866,10 @@ probe even at a 0.0 allowance, and that reservation only makes the tail **tighte
 widen it. ⛔ **The figure is a PLANNING bound, not a measured spend, and it only holds AT OR ABOVE the
 reserve:** with `allowance + PROBE_TIMEOUT + GRAPH_SIZE_TIMEOUT + QUOTA_STATE_TIMEOUT <= remaining −
 the 0.5 s margin` (9.50 s at a 10.00 s bound and 6.00 s at 6.50 s — the two points
-`test_the_planned_phases_fit_the_bound_when_the_reserve_fits` iterates). Below 6.5 s those four
-terms no longer sum inside the deadline at all (their total is 6.50 s — 1.5 + 1.5 + 3.0 + 0.5 — i.e.
-6.00 s of phase constants plus the margin, against a remaining time that is itself under 6.5 s), which
+`test_the_planned_phases_fit_the_bound_when_the_reserve_fits` iterates). Below 6.5 s the RESERVE's
+four terms (`PROBE_TIMEOUT + GRAPH_SIZE_TIMEOUT + QUOTA_STATE_TIMEOUT + the 0.5 s margin` — 6.50 s)
+no longer fit inside a `remaining` that is itself under 6.5 s, so the `allowance` term of the formula
+above is pinned at 0.0 and cannot buy back the difference, which
 is why what bounds the tail there is the QUOTA phase's own deadline read — the count cannot run in that
 band at all — not the constant sum.
 ⛔ **Below the reserve two of those terms are also unreachable, and the allowance is a hard step,
@@ -931,8 +932,8 @@ curl -sS https://api.premiselabs.co/health | jq '{breaches: .wait_bound_breaches
   response only** — the aggregate body carries this counter and no discriminating clamp marker — so
   from `/health` a rise
   is a rise, and attributing it needs the per-call payload: the logs carry nothing about this clamp
-  (`record_health_setup_clamp` only increments the counter), and the `mcp_tool_call` row names the
-  tool, its status and its latency, never the payload.
+  (`record_health_setup_clamp` only increments the counter), and the `mcp_tool_call` row carries the
+  tool name, its status, its latency, an error kind and a result count — never the payload.
 - The hosted body carries it because it builds its own JSON (`tortoise/hosted_api.py`'s `health()`);
   `monitoring.serve_health`'s **`/health`** carries the same key from `monitoring.metrics()`. A `0`
   here is a measured zero (an unlabelled counter is exported from registration); `null` means the

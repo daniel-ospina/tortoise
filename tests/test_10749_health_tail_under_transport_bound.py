@@ -711,9 +711,12 @@ def test_a_stale_monitoring_module_cannot_cost_the_reserve_its_phase_constants(m
     """Guarding the quota read closed ONE of the two modules the reserve depends on.
 
     ``_health_tail_reserve`` adds ``monitoring.PROBE_TIMEOUT`` and ``monitoring.GRAPH_SIZE_TIMEOUT``
-    on the line below the guarded quota read, so a stale or partially written ``monitoring`` module
-    raised ``AttributeError`` out of the same PLANNING site and produced the identical status-less
-    outcome (fresh review, P3 — measured: ``_safe`` keys ``['error']``, no ``status``).
+    beside the guarded quota read, so a stale or partially written ``monitoring`` module raised
+    ``AttributeError`` out of the same PLANNING site and produced a ``{'error': ...}`` payload with
+    no ``status`` key (fresh review, P3 — measured: ``_safe`` keys ``['error']``). That is a
+    DIFFERENT last mile from the stale-quota arm, which only escapes the tool when the module also
+    lacks the exception classes ``_safe``'s handler imports (#12647) — this PR states each
+    observable where it happens rather than one shared shape.
 
     ``hosted_api._health_setup_clamped`` argues from exactly this premise, so leaving the constants
     unguarded made the delta's own reasoning hit only half its cases.
