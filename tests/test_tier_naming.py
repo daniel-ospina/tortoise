@@ -321,7 +321,16 @@ _IDENTIFIER_RESTATEMENT = (
 #: runnable), and the paragraph this PR rewrote uses a dash itself. Hoisted into its own
 #: lookahead so a restatement is a restatement whichever mark introduces it.
 #: lookahead so a restatement is a restatement whichever mark introduces it.
-_RESTATEMENT_TAIL = (r"\s*(?:[—–;,]|--)?\s*(?:" + _IDENTIFIER_RESTATEMENT + r")")
+#: ⛔ …and the two lookaheads that run BEFORE the clause end must tolerate that mark
+#: as well (cycle-10 P2, measured). `_BUILDER_PLAN` and `_CLAUSE_END` learned to accept a
+#: closing quote; `_RESTATEMENT_TAIL` and `_INTENSIFIER` did not, so a closing mark
+#: between the noun and the separator defeated BOTH — and because the clause end now
+#: accepts that mark, the sentence was flagged. Composing two independently pinned
+#: correct shapes was RED: `There is no "Builder plan" — only the `pro` identifier
+#: (#4336).`; and the pinned intensifier class went blind to its own quoted twin:
+#: `There is no "Builder plan" anymore.`
+_RESTATEMENT_TAIL = (r"\s*['\"\u201d\u2019]?\s*(?:[—–;,]|--)?\s*(?:"
+                     + _IDENTIFIER_RESTATEMENT + r")")
 _CLAUSE_END = (r"(?!" + _RESTATEMENT_TAIL + r")"
                r"(?=\s*['\"\u201d\u2019]?\s*"
                r"(?:$|[.;)]|—|–|--|;|,|\(\s*#\d+\s*\)))")
@@ -331,7 +340,8 @@ _CLAUSE_END = (r"(?!" + _RESTATEMENT_TAIL + r")"
 #: no Builder plan anymore." and "There is no Builder plan any more." both read as
 #: ordinary prose and both escaped the guard entirely (cycle-4 review). Kept to a
 #: CLOSED set so it cannot become a wildcard that swallows the next qualifier.
-_INTENSIFIER = r"(?:\s+(?:any\s?more|anymore|at\s+all|available|for\s+sale))?"
+_INTENSIFIER = (r"(?:\s*['\"\u201d\u2019]?\s+"
+                r"(?:any\s?more|anymore|at\s+all|available|for\s+sale))?")
 
 #: …and AFTER an intensifier only TERMINAL punctuation may end the assertion
 #: (cycle-5 review, measured). `_CLAUSE_END`'s comma arm re-entered through the new
@@ -435,8 +445,8 @@ _RETRACTION_CUES = re.compile(
 
 #: …but a cue word alone is not a record — it is a bypass: it exempted
 #: `The docs are stale: there is no Builder plan.`, a live denial (cycle 2). The
-#: same-sentence path therefore needs an ATTRIBUTION (:data:`_RETRACTION_ATTRIBUTION`
-#: or :data:`_REPORTED_CLAIM`); the forward-window path needs this CITATION half plus a
+#: same-sentence path therefore needs an ATTRIBUTION (:func:`_quotes_the_denial` or
+#: :data:`_REPORTED_CLAIM`); the forward-window path needs this CITATION half plus a
 #: tie. A quoted single word is NOT evidence — the denial's own subject is usually
 #: quoted (`"builder"`).
 _RETRACTION_EVIDENCE = re.compile(
@@ -743,6 +753,10 @@ class TestNoDocDeniesABuilderPlanExists:
             "#12444 corrected it.",
             # A quoted TRUE statement stays green (cycle-9 P2's other direction).
             "There is no \"Builder plan\" cheaper than Solo.",
+            # Cycle-10 P2: two independently pinned correct shapes COMPOSED — the
+            # quoted noun form inside the #4336 restatement — were RED because the two
+            # lookaheads that run FIRST did not tolerate the mark the clause end does.
+            "There is no \"Builder plan\" \u2014 only the `pro` identifier (#4336).",
             # The #4336 restatement in its most natural form: a comma followed by the
             # IDENTIFIER restatement qualifies the claim instead of ending it (cycles
             # 4 and 5 — `only|just` alone exempted the drift, so the noun is required).
@@ -919,6 +933,10 @@ class TestNoDocDeniesABuilderPlanExists:
             "There is no \u201cBuilder plan\u201d.",
             'There is no plan called "Builder".',
             'We do not offer a "Builder plan".',
+            # …and the quoted twin of the pinned intensifier class, which the same gap
+            # made invisible (cycle-10 P2).
+            'There is no "Builder plan" anymore.',
+            'There is no "Builder plan" at all.',
             "The Builder tier doesn't exist.",
             "We don't offer a Builder plan.",
             "Builder is not available as a plan.",
