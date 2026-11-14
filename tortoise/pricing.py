@@ -70,6 +70,39 @@ STORAGE_DIMENSIONS = ("postgres_storage", "graph_storage")
 #: that some prose mentions a number, which a contradictory sentence would pass.
 BYTES_PER_GB = 1_000_000_000
 
+#: A tier's DISPLAY name, keyed by its stable IDENTIFIER (#4336).
+#:
+#: ⛔ **The identifier is not the name, and it is not going to become the name.**
+#: #4336 (owner-filed; landed 2026-09-21 via PR #4383) ruled: *"The tier
+#: previously called **Pro** is presented to users as **Builder**. The internal
+#: tier key stays `pro`."* — and it names what must NOT change: the `pro` key in
+#: `product/pricing.json`, the Stripe price-id env keys, and the `pro` tier
+#: identifier in code (`pricing.py`, `quota.py`, `billing.py`, `hosted_api.py`).
+#: Rows in the control plane carry `tier='pro'`, so the key is also a data value.
+#:
+#: Before this map the pairing lived ONLY in the two hand-maintained JS label
+#: maps that render the pricing grid (`website/product.html` → `labels`,
+#: `website/apps/dashboard/src/pricing.js` → `TIER_LABELS`). That is why
+#: `docs/product/beta-sdk-surface.md` could assert *"there is no 'builder'
+#: plan"* for three days after #4336 landed: nothing in `tortoise/` stated the
+#: alias, so a doc author had nowhere to read it from (#12444).
+#:
+#: This map is that one place. `tests/test_tier_naming.py` pins it to the tier
+#: keys `product/pricing.json` declares AND to both JS label maps, so the three
+#: spellings cannot drift apart again without a red test.
+#:
+#: ⚠️ `anon` humanises to **Free**: it is the internal quota tier for unclaimed
+#: zero-email orgs (#1082), never rendered in the grid, and the dashboard's
+#: current-plan card shows it as Free. Its display name being Free is correct,
+#: not a copy-paste.
+TIER_DISPLAY_NAMES = {
+    "free": "Free",
+    "solo": "Solo",
+    "pro": "Builder",
+    "team": "Team",
+    "anon": "Free",
+}
+
 
 def _load() -> dict:
     global _cache
@@ -229,6 +262,48 @@ def has_overage(tier: str) -> bool:
 def all_tiers() -> list[str]:
     data = _load()
     return list(data.get("tiers", {}).keys())
+
+
+def tier_display_names() -> dict[str, str]:
+    """Display name of every tier the artifact declares, keyed by identifier.
+
+    ``{"free": "Free", "solo": "Solo", "pro": "Builder", "team": "Team",
+    "anon": "Free"}`` today — `pro` renders as **Builder** (#4336).
+
+    ⛔ **FAIL-CLOSED ON AN UNLABELLED TIER**, the same posture
+    :func:`tier_limits` takes on a missing limit key. A tier added to
+    ``product/pricing.json`` without a display name has no customer-facing name,
+    and the one thing a caller must never do is fall back to rendering the raw
+    identifier: that is how a plan ships as "pro" to a customer who was sold
+    "Builder". Raising here puts the failure at the one-line fix, not on a
+    rendered page.
+    """
+    tiers = all_tiers()
+    missing = [t for t in tiers if t not in TIER_DISPLAY_NAMES]
+    if missing:
+        raise KeyError(
+            f"pricing.json declares tier(s) {missing} with no display name — add "
+            f"them to pricing.TIER_DISPLAY_NAMES (#4336/#12444). Rendering the raw "
+            f"identifier as a plan name is the drift this raise exists to prevent"
+        )
+    return {t: TIER_DISPLAY_NAMES[t] for t in tiers}
+
+
+def tier_display_name(tier: str) -> str:
+    """The customer-facing name of ``tier`` — ``pro`` renders as **Builder** (#4336).
+
+    Unknown tiers resolve to the **Free** name, exactly as :func:`tier_limits`
+    resolves them to the Free limits: a legacy/missing tier must never acquire a
+    more expensive-looking name than the plan it is actually served.
+
+    ⚠️ That fallback covers ONLY a tier the map does not KNOW. It deliberately does
+    not soften the artifact check: this resolves through :func:`tier_display_names`,
+    so it raises ``KeyError`` whenever ``product/pricing.json`` declares a tier that
+    :data:`TIER_DISPLAY_NAMES` does not label — for EVERY input, a valid one
+    included — so a half-updated map is a load-time error rather than a silent
+    "Free" on a paid plan.
+    """
+    return tier_display_names().get(tier, TIER_DISPLAY_NAMES["free"])
 
 
 def allowance_reachability(tier: str, nodes_per_op: float) -> dict:

@@ -768,6 +768,12 @@ OVERRIDE: dict[str, tuple[str, str]] = {
     # N1 — the five the beta doc files as console plumbing.
     "org_create": (UNBACKED, ""),
     "org_get": ("get_organisation_account", "n1_account"),
+    # N1's target is PUBLIC since #10015 (2026-11-14): `get_organisation_account` gained
+    # its `def`, so the partition must COVER it and the disposition is UNCHANGED because
+    # the method IS its own destination — the same move N2's three rows made in phase 2.3.
+    # `org_get` above stays the DEPRECATED predecessor that maps onto it (`retain`, per the
+    # rename table's own reading of row 28), which is why both names are live at once.
+    "get_organisation_account": (UNCHANGED, "n1_account"),
     # 2026-10-25 owner ruling (#4282): `org_list` is GONE, not folded. It ran
     # `MATCH (t:Team)` with no tenant filter — every customer's account — and had
     # zero callers. A scoped account list is NEW behaviour, so it has no row here.

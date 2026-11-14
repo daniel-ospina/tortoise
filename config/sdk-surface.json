@@ -5,7 +5,7 @@
   "source": "tortoise/sdk.py",
   "derivation": "AST class-body walk (tools.bridge_table._sdk_targets)",
   "derivation_rule": "every `def`/`async def` in the AST class body of `TortoiseSDK` whose name does not begin with `_`",
-  "count": 124,
+  "count": 125,
   "methods": [
     "annotate_ask_hits",
     "annotate_operator",
@@ -53,6 +53,7 @@
     "get_entity",
     "get_events",
     "get_historical_knowledge",
+    "get_organisation_account",
     "get_owned_entities",
     "get_point",
     "get_session",

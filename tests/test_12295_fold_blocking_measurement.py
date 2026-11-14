@@ -732,8 +732,8 @@ def test_the_briefs_tables_are_exactly_the_artifacts(report):
             cell = f"{cell} ({pool['in_window'][ks]}/{pairs})"
         expected = _row(label, k, cell)
         assert expected in text, (
-            "the brief's k={} table row is not the one the artifact generates "
-            "({!r})".format(k, expected))
+            f"the brief's k={k} table row is not the one the artifact generates "
+            f"({expected!r})")
 
     #: §3.3 — the per-class table at the production window. The blocker cell is bold
     #: exactly where it exceeds the window, which is the shape the brief uses; the
@@ -745,8 +745,8 @@ def test_the_briefs_tables_are_exactly_the_artifacts(report):
         expected = _row(cls, row["pairs"], row["in_window"], reach_cell,
                         f"**{row['attached']}**")
         assert expected in text, (
-            "the brief's {!r} class row is not the one the artifact generates "
-            "({!r})".format(cls, expected))
+            f"the brief's {cls!r} class row is not the one the artifact generates "
+            f"({expected!r})")
 
     classes = arms["variant_by_class"]
     folded = arms["variant"][str(prod_k)]["attached_folded"]
@@ -760,7 +760,7 @@ def test_the_briefs_tables_are_exactly_the_artifacts(report):
     #: Each addend bound to its OWN class name, so the 386 total cannot be
     #: preserved by trading between two classes.
     for cls, value in zip(("article-drop", "space-to-hyphen", "hyphen-to-space",
-                           "hash-dropped"), addends):
+                           "hash-dropped"), addends, strict=True):
         assert f"{value} (`{cls}`" in flat, (
             f"the brief does not bind {value} to `{cls}` in its 386 decomposition")
     assert (f"{folded} = {addends[0]} + {addends[1]} + {addends[2]} + "

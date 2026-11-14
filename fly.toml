@@ -145,10 +145,84 @@ kill_timeout = 30
 # can be surfaced to an operator even though a stall can no longer take the app
 # offline (#3062). It points at the app's dedicated 9090 /healthz listener.
 #
-# ⚠️ The listener's predicate is `503 if (stale AND idle) else 200`
-# (tortoise/monitoring.py) — a stale loop WITH a request in flight still
-# reports 200, so this check does NOT reliably surface a true wedge; it errs
-# toward 200, which is the safe direction for the deploy gate it feeds.
+# ⚠️ THE LISTENER'S PREDICATE CHANGED (#12477) — read this before tuning it.
+# It used to be `503 if (stale AND idle) else 200` and that conjunct could never
+# fire on the outage it exists for: a wedged app keeps an MCP SSE stream counted
+# as in flight, so `workload_idle` is FALSE BY CONSTRUCTION during a wedge.
+# Measured twice with it live — 2026-11-02 (97 min wedged, #10585) and
+# 2026-11-13 (#12477: 30-45 s timeouts on every data request, `2/2 checks
+# passing`). It now fails on ANY of three terms (tortoise/monitoring.py):
+#   (a) `loop-not-serving`  — the heartbeat is stale AND work is waiting AND the
+#       app has not SERVED a request inside the staleness window. TWO served
+#       datums are read, and EITHER defeats the term: the age of the last
+#       data-plane request this process ANSWERED (stamped at the same seam that
+#       decides the refusal share — this is the one that moves on real traffic,
+#       and the one that makes "a busy loop stays green" true), and the age of
+#       the last `/liveness` answer. Both are written only when a handler RAN, so
+#       neither can be stamped during a real wedge; the `/liveness` stamp alone
+#       is NOT enough because its only production poller is a `*/5` cron with
+#       ~15 min measured delivery (so it is stale by default) and it is
+#       reachable unauthenticated (#12477 review round 11). A ticker that cannot
+#       tick is NOT a wedge (#2850's ruling, which is why the hard exit is
+#       disarmed in the same state). On a lane that registers no served counter
+#       the reason is `loop-stale`: the tick is then all the evidence there is
+#       (#2850's original contract);
+#   (b) `data-plane-failed` — the DB probe's last result is FRESH and not ok, or
+#       is too OLD to vouch for anything (the refresher runs on the loop, so a
+#       wedge produces this within the probe's 30 s stale window), or it has
+#       produced NO result while a probe is in flight past that window, or
+#       nothing has produced one within `max(120 s, 4 x stale window)` of process
+#       start, or the REFRESHER TASK NEVER STARTED
+#       (`probe-refresher-never-started`, recorded where the startup `try/except`
+#       logs it) — the last three are why a missing refresher cannot leave this
+#       term silently green;
+#   (c) `requests-refused` — a SHARE of the traffic this bound applies to was
+#       refused inside the last 120 s (`TORTOISE_WAIT_BOUND_HEALTH_WINDOW_S`):
+#       at least `TORTOISE_WAIT_BOUND_HEALTH_MIN_SHARE` (0.5) of at least
+#       `TORTOISE_WAIT_BOUND_HEALTH_MIN_ATTEMPTS` (5) requests — computed from
+#       DATA traffic only: the instrument's own polls and the whole-graph routes
+#       (import, export, backups, dream, promote) are excluded from both sides,
+#       and a refusal during a one-time embedder load (a machine that is merely
+#       WARMING) is counted but kept out of the verdict. A REFUSED control poll
+#       is a separate term of its own (`control-refused`, >= 2 in the window): a
+#       no-I/O poll that cannot run inside the bound is evidence a healthy box
+#       cannot produce (`/health/ready` and `/health/security` do I/O, so they
+#       stay DATA-plane evidence, and a 404 from a path no route matched never
+#       counts as demand; 422 joins the pre-plane status filters, because a
+#       validation error never ran the handler). Who may be COUNTED as demand
+#       (the serving side) is a
+#       separate rule from what a refusal MEANS: a route the app answers without
+#       the plane (`/.well-known/*` discovery, the readiness/security probes,
+#       `/v1/capabilities`, an index-job status, the `/mcp` metadata GET and its
+#       `DELETE`, and EVERY CORS preflight) is not demand when it is SERVED — 8
+#       served discovery
+#       requests beside 7 refusals measured `share 0.467 -> 200` over a refusing
+#       plane — while a POST to the `/mcp` mount root is a tool call and always
+#       counts (`/oauth/*` and `/register` are THIRD-PARTY work and are excluded
+#       from both sides, because a grant's own phase timeouts sum above the
+#       bound). A SHARE, because
+#       the bound is breached BY DESIGN for ~2.1% of calls: a count is blind on a
+#       quiet box (the two measured traces ran at 3.5/min and 17/min) and a
+#       bucket-density reds a HEALTHY box as traffic rises (measured: 92% of
+#       polls at 300 calls/min). The ratio is the only form that is ~2.1% at
+#       every volume while a failing plane refuses most of what it is offered.
+#       The attempts denominator is stamped at the transport seam itself, so
+#       numerator and denominator describe the same population. That population
+#       EXCLUDES traffic whose refusal is not evidence (measured, both
+#       directions): the instrument's own polls (`/health`, `/liveness`,
+#       `/metrics` — 12 served polls beside 10 refused data requests read
+#       share 0.455 -> 200, a fail-open), documented long routes
+#       (`/v1/organizations/{id}/import`, `/v1/sessions/commit`,
+#       `/v1/packs/manifests`, `/webhooks/stripe`, the trash restore, the GitHub
+#       onboarding/index jobs — 5 imports beside 5 requests read share 1.0 ->
+#       503, a healthy deploy failing its own gate), and routes the app serves
+#       WITHOUT the plane (see above). A LATENCY floor was tried instead and
+#       measured wrong: because a refusal stamps its own attempt, it degenerated
+#       to `refusals / (refusals + slow_served)` and red a healthy box at five
+#       refusals in a window, and it left every MCP call (served in ~12 ms, SSE
+#       before dispatch) as a numerator with no denominator.
+# `workload_idle` and `loop_stale` stay in the payload as DIAGNOSTICS. A red here
+# is what a wedged or refusing deployment is supposed to look like.
 #
 # ⚠️ DEPLOY-BLOCKING BY DESIGN: flyctl's deploy health wait counts top-level
 # checks (WaitForHealthchecksToPass requires every reported check to pass — no
@@ -214,10 +288,13 @@ kill_timeout = 30
   # `on-failure` restart policy replaces the process. This is the ONLY self-heal
   # available: Fly's own docs are explicit that a failing health check "does NOT
   # automatically restart or stop a Machine" and that restart policies act only
-  # on process EXIT — and `[checks.loop_liveness]` cannot even go red here,
-  # because its predicate requires `stale AND idle` while a wedged app keeps an
-  # MCP stream counted as in flight (`workload_idle: false`). Measured: 97 min
-  # wedged, `loop_lag_max_ms` 696164, machine reporting 2/2 checks passing.
+  # on process EXIT — and `[checks.loop_liveness]` could not even go red here at
+  # the time, because its predicate required `stale AND idle` while a wedged app
+  # keeps an MCP stream counted as in flight (`workload_idle: false`). Measured:
+  # 97 min wedged, `loop_lag_max_ms` 696164, machine reporting 2/2 checks
+  # passing. ⚠️ That predicate is FIXED as of #12477 (see the check's own comment
+  # above) — but the ceiling below is still the ONLY thing that REPLACES the
+  # process, which is what turns a wedge back into a working machine.
   # DEPENDENCY, versioned rather than re-read by hand: the exit only becomes a
   # RESTART because of the `[[restart]]` block ABOVE (`policy = "on-failure"`,
   # `retries = 10`, covering the `app` process group). Delete that block and

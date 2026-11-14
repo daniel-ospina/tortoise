@@ -3941,11 +3941,35 @@ def tortoise_query(kind: str | None = None,
     query_points_by_tag into this one tool).
 
     - Structural path (text=None): property-filter query, **bounded to `limit`**
-      (default 100 — see the #10602 note below).
+      (default 100 — see the #10602 note below). `min_confidence` and `order_by`
+      are REFUSED on this arm rather than dropped (#12500) — except a FALSY value
+      (`0.0`, `0`, `False`, `""`), which is the shipped spelling of "absent" and
+      stays served so a client that serialises its own defaults is not refused
+      for asking for nothing; both structural arms
+      read through sdk.paginated_query, which declares neither, so an accepted
+      value was discarded: a floor the caller set was replaced by no floor, so
+      rows they excluded came back, and an ordering they asked for was replaced
+      by the accessor's own. They
+      are applied on the text= arm, but each on a different condition:
+      `min_confidence` only for `entity_type="point"` (the fts leg gates the
+      floor on the literal `entity_type == "point"`, sdk.py:43288), and
+      `order_by="confidence"`/`"graph"` for every type except `document` and
+      `source` (both map to the `Source` label: it is outside the ranker's
+      belief sweep, so the graph boost is 0 on every row, and neither hit dict
+      carries the timestamp the recency term reads — rounded out, a confidence
+      ordering collapses to ONE key for every row, while a graph ordering keeps
+      keys that differ only by an identical offset, i.e. monotone in the
+      relevance score, so the order it returns is the one the caller already
+      had. `order_by="relevance"` is applied to every type).
+      A floor on any other `entity_type`, and a confidence or graph ordering on
+      those two, are REFUSED rather than dropped; structural filtering by
+      confidence is Phase 2 in the hybrid-search plan, not a shipped feature.
     - tag=<name>: filter Points by TAGGED edge (previously
       tortoise_query_points_by_tag). Tag mode takes precedence over text and
-      ignores kind/min_confidence/order_by, and REFUSES `filters=` (see the
-      tag= bullet below — it used to ignore it silently, #12455); a non-Point
+      REFUSES kind/min_confidence/order_by and `filters=` (see the tag= bullet
+      below — all of them used to be ignored silently, #12455/#12500; a FALSY
+      `kind`/`min_confidence`/`order_by` is the spelling of "absent" and stays
+      served, as on the structural arms); a non-Point
       `entity_type` is REFUSED there (and on the structural arms) rather than
       dropped — those arms read the Point label only, and the refusal names the
       per-type enumerator to use instead (#12372).
@@ -3965,11 +3989,10 @@ def tortoise_query(kind: str | None = None,
       IS applied here, forwarded as the fts leg's include_terminal.
     - tag=<name> mode: a Point reader keyed on the tag only. It has no
       property-filter parameter either, so `filters=` is REFUSED here too rather
-      than dropped (#12455). `kind`/`min_confidence`/`order_by` are NOT applied
-      by this arm: the same accepted-and-dropped class as #12500, which tracks
-      the STRUCTURAL arms — this arm's `kind`/`min_confidence`/`order_by` drop is
-      recorded in #12500's comment thread (its body scopes the structural arms
-      only), and is a known gap rather than a documented feature.
+      than dropped (#12455). `kind`, `min_confidence` and `order_by` are REFUSED
+      on this arm as well (#12500): `query_points_by_tag(tag)` takes the tag and
+      nothing else, and tag mode reads EVERY kind of tagged Point, so a named
+      kind narrows nothing while looking like it did.
     - include_retracted=True surfaces tombstones on every path (structural,
       paginated, text, and tag modes); default False excludes them. Known gap, tracked
       in #12502: the TAG arm's own exclusion is `status != "retracted"` only, so
@@ -4026,14 +4049,14 @@ def tortoise_query(kind: str | None = None,
         # missing key hands us `None`, and `""` is the same caller intent. The
         # structural arms used to serve both as Points while the `text=` arm
         # passed the RAW value to the SDK, whose `tortoise_fts_query` refuses it
-        # (`ValueError`, sdk.py:40829) — one argument value answering two
+        # (`ValueError`, sdk.py:41127) — one argument value answering two
         # different ways depending on which arm a caller happened to use.
         # Resolved HERE, above every arm, so all of them see one value.
         entity_type = "point"
     # The vocabulary refusal is the OWNER's (tortoise/security.py), and it is
     # asked ONCE, above every arm — a per-arm copy is how one invalid value ends
     # up with two different messages (`text=` used to surface the SDK's own
-    # re-typed copy from sdk.py:40830 while the structural arms surfaced this
+    # re-typed copy from sdk.py:41128 while the structural arms surfaced this
     # one), and a second copy of the message is what drifts. `point` is a
     # member, so the served path cannot be blocked here.
     from tortoise.security import validate_entity_type
@@ -4067,6 +4090,264 @@ def tortoise_query(kind: str | None = None,
             f"one. {_ENTITY_TYPE_REMEDY.get(entity_type, _ENTITY_TYPE_REMEDY_FALLBACK)} "
             f"For a structural Point read, omit entity_type or pass 'point' "
             f"(its default).")})
+    # ── #12500: `min_confidence`/`order_by` (and `kind` on the tag arm) ──────
+    # The signature takes `min_confidence` and `order_by`, and this docstring
+    # presented them as general arguments — but ONLY the `text=` arm consumes
+    # them (forwarded into `sdk.tortoise_fts_query`). NOTE the artifact: this
+    # docstring is DEVELOPER-facing. The description a model actually receives
+    # over MCP is `ToolDefinition.description` (`tortoise/tool_registry.py`,
+    # passed by `FastMCPAdapter` and rendered into
+    # `docs/product/mcp-sdk-surface.md`), and it does NOT mention these
+    # arguments at all — so the arm-scoping here is discoverable by reading the
+    # source or by hitting the refusal, never from the wire description (round-9
+    # finding 4, measured with `mcp.list_tools()`; recorded on #12500). Both
+    # structural arms call `sdk.paginated_query(kind, skip, limit,
+    # include_retracted, **filters)`, which declares NEITHER parameter
+    # (sdk.py:26585-26588), and the tag arm calls `query_points_by_tag(tag)`,
+    # which takes the tag and nothing else. Measured: `kind="statement",
+    # min_confidence=0.9` reaches the accessor as
+    # `paginated_query(kind='statement', skip=0, limit=100,
+    # include_retracted=False)` — the floor is simply gone and rows below 0.9
+    # come back, the #6146 wrong-answer-indistinguishable-from-right class this
+    # tool has now had removed three times (#12372 `entity_type`, #12455
+    # `filters=`, here).
+    #
+    # This one is NOT forwardable: `docs/plan/2026-08-03-hybrid-search-plan.md`
+    # records the non-text path as **Phase 2** ("structural filtering by
+    # confidence is a separate feature from hybrid search"), so the arguments
+    # were always text-path-only in the design while the served description did
+    # not say so. Teaching `paginated_query` to apply a floor at the
+    # pre-truncation seam would also be an SDK surface change, which this repo's
+    # rule reserves to the owner; filtering AFTER the slice would be a new bug
+    # (a page smaller than `limit`, a `total` that describes another population).
+    # So the arms that cannot apply them REFUSE — the shape #12455 shipped for
+    # `filters=`, placed here for the same two reasons: above the arms, so the
+    # refusal costs no read and cannot serve rows on an error path, and taking the
+    # same `tag=`-first precedence those arms use (`_arm` below), so a caller
+    # passing both keeps a message about the arm that ACTUALLY answers — there is
+    # no separate "precedence split" above this point (round-17 P2 2: the comment
+    # claimed one that did not exist; the tag branch is 200-odd lines below).
+    # TRUTHINESS, not `is not None` (round-1 P1, measured): this arm's own
+    # semantics define the falsy values as ABSENT — the `text=` call below
+    # normalises with `min_confidence or 0.0` and `order_by or "relevance"`, and
+    # the sibling `#12455` guard two blocks down keys on `if filters and …` for
+    # the same reason. A client that serialises its own defaults was getting a
+    # refusal where the answer had always been CORRECT — `min_confidence=0.0` and
+    # `order_by=""` on every structural AND tag read, and `kind=""` on the tag arm
+    # (measured: the `is not None` mutant serves `kind=""` alone and refuses
+    # `tag="t", kind=""`). A floor of 0.0 excludes nothing; an empty order names
+    # none.
+    #: (argument, why THIS arm cannot apply it) — one entry per refusal, and the
+    #: reason is built for the arm that ANSWERED. A single shared explanation said
+    #: "the structural arms read through sdk.paginated_query" on the tag= arm, and
+    #: named the floor/ordering harm for a `kind`-only refusal (round-4 P2s 4 and
+    #: 8, both measured on the shipped sentence).
+    _arm = "tag=" if tag is not None else ("text=" if text else "structural")
+    _unapplied: list[tuple[str, str]] = []
+
+    if _arm == "structural":
+        # Both structural arms share `paginated_query`.
+        if min_confidence:
+            _unapplied.append((
+                "min_confidence",
+                "sdk.paginated_query, the accessor both structural arms read "
+                "through, takes no confidence floor"))
+        if order_by:
+            _unapplied.append((
+                "order_by",
+                "the same accessor takes no ordering"
+                if min_confidence else
+                "sdk.paginated_query, the accessor both structural arms read "
+                "through, takes no ordering"))
+
+    elif _arm == "tag=":
+        # Tag mode reads a tag and nothing else.
+        if min_confidence:
+            _unapplied.append((
+                "min_confidence",
+                "tag mode reads a tag and nothing else, so it cannot apply a "
+                "confidence floor"))
+        if order_by:
+            _unapplied.append((
+                "order_by",
+                "tag mode cannot apply an ordering either"
+                if min_confidence else
+                "tag mode reads a tag and nothing else, so it cannot apply an "
+                "ordering"))
+        if kind:
+            # Tag mode reads EVERY kind of tagged Point, so a named kind narrows
+            # nothing while looking like it did.
+            _unapplied.append((
+                "kind",
+                "tag mode reads every kind of tagged Point, so a named `kind` "
+                "narrows nothing"))
+
+    else:
+        # ── the `text=` arm: it DOES apply both, for the rows that carry a
+        # belief, so these two are narrower than the arm itself.
+        if (min_confidence and entity_type != "point"
+                and isinstance(min_confidence, (int, float))
+                and 0.0 <= min_confidence <= 1.0):
+            # The fts leg compares the floor against EP belief under a literal
+            # `entity_type == "point"` gate (sdk.py:43288; `ep` is None for
+            # every other type at sdk.py:43273), so any other
+            # entity_type passed the floor straight through. Round-3 P1,
+            # measured at the tool boundary: `text="…", entity_type="document",
+            # min_confidence=0.9` returned the 0.1-belief rows, and the same read
+            # at 0.0 returned the identical page. NOTE the wording: `operator`
+            # rows ARE Points (security.py:166-174), so the reason is the literal
+            # gate, never "this type has no Point rows" (round-4 P2 3).
+            #
+            # A USABLE floor only (round-20 P2 3, measured): this branch's reason,
+            # its harm ("rows they excluded came back") and its route are all
+            # false of a value the SDK itself rejects — `sdk.py:41133-41134`
+            # range-checks `min_confidence` BEFORE any retrieval, so
+            # `min_confidence=1.5` here used to raise, never return rows, and the
+            # offered `entity_type='point'` route lands on that same range error.
+            # Out-of-range and non-numeric floors are therefore left to the SDK,
+            # the way `order_by="garbage"` already is (`sdk.py:41138`). The
+            # `isinstance` test is load-bearing: a non-numeric floor makes the
+            # SDK's own `not (0.0 <= …)` raise `TypeError`, and this guard must
+            # not turn that into a scoping paragraph. A `bool` is NOT excluded
+            # (round-21 P2 1, measured): `0.0 <= True <= 1.0` holds, so the SDK
+            # does not reject it, and the fts leg then skips the floor on a
+            # non-Point read (sdk.py:43288) — `min_confidence=True` came back with
+            # the 0.01 rows, while `1` and `1.0` were refused. One floor must not
+            # answer two ways depending on its Python spelling. `False` is still
+            # served: it is falsy, so the first conjunct already excludes it.
+            _unapplied.append((
+                "min_confidence",
+                f"the fts leg applies its floor under a literal `entity_type == "
+                f"'point'` gate, and this read's entity_type={entity_type!r} does "
+                f"not satisfy it"))
+
+        if order_by in ("confidence", "graph") and entity_type in ("document", "source"):
+            # Round-4 P2, measured live: `order_by="confidence"` sorts on the
+            # persisted EP belief that `GraphRanker._fetch_signals` reads for
+            # EPISTEMIC_LABELS = ("Point", "Subject", "Object", "Event")
+            # (live.py:512) — and BOTH `document` and `source` map to the
+            # `Source` label, which is not among them. The sweep answers `{}`,
+            # every row's key falls to `(1, 0.0)`, the stable sort leaves the RRF
+            # order untouched, and nothing on the wire marks it unapplied
+            # (`annotate_belief_order` labels only rows carrying an `ep` dict).
+            # `event`/`subject`/`object`/`operator` DO honour it — measured — so
+            # this is not a blanket non-Point refusal.
+            # Round-7: `graph` is the SAME defect one step further out —
+            # measured live on a `:Source` corpus, `order_by="graph"` returned the
+            # exact relevance order for every input, because BOTH of its
+            # non-similarity terms are constant on those rows: `graph_boost`
+            # needs an EPISTEMIC_LABELS read and `Source` is not one of them, and
+            # `recency_boost` needs `createdAt`/`startedAt`, which a
+            # `document`/`source` hit dict does not carry (`ranking.py` returns
+            # 1.0 for an unknown age). The sort key is therefore monotone in the
+            # same RRF score, so the caller gets a relevance page labelled as a
+            # graph ordering — accepted and not applied, the class this guard
+            # exists for. `relevance` IS applied to every type.
+            _unapplied.append((
+                "order_by",
+                (f"`order_by='confidence'` sorts on an EP belief and the ranker "
+                 f"reads that belief for the four epistemic labels only, so no "
+                 f"entity_type={entity_type!r} row carries one")
+                if order_by == "confidence" else
+                (f"`order_by='graph'` adds an EP belief and a recency term to the "
+                 f"similarity score, and an entity_type={entity_type!r} row "
+                 f"carries neither (its label is outside the belief sweep and its "
+                 f"hit dict carries no timestamp the ranker reads), so both extra "
+                 f"terms are IDENTICAL on every row and the key is monotone in "
+                 f"the relevance score — the order comes back unchanged")))
+
+    if _unapplied:
+        _names = [name for name, _ in _unapplied]
+        _named = " and ".join(_names)
+        # Agreement in number: two named arguments shipped as "min_confidence and
+        # order_by IS not applied" (round-3 P2, measured on a real call).
+        _verb = "are" if len(_names) > 1 else "is"
+        _them = "them" if _verb == "are" else "it"
+        # Every refused argument's OWN reason: a join that keeps only the first
+        # names two arguments and explains one (round-6 P2 4, measured).
+        _why = "; ".join(reason for _, reason in _unapplied)
+        # What the caller actually LOST — per argument, not generic: a `kind`
+        # refusal served a WIDER population, it did not serve excluded rows.
+        _losses = []
+        if "min_confidence" in _names:
+            _losses.append("rows they excluded")
+        if "order_by" in _names:
+            _losses.append("an order they did not ask for")
+        if "kind" in _names:
+            _losses.append("a wider population than they asked for")
+        _loss = ", ".join(_losses[:-1]) + (" and " if len(_losses) > 1 else "") + _losses[-1]
+        # The route must terminate HERE. "Pass text=" was the round-1 dead end on
+        # the tag arm (`tag=` takes precedence, so the caller re-reads the same
+        # sentence); it is a second dead end on the text= arm, which is refused
+        # precisely because text= is already set; and it is contradicted by the
+        # `filters=` refusal below, so a caller holding both would ping-pong
+        # between two messages that each undo the other (round-4 P1).
+        if _arm == "tag=":
+            if _names == ["kind"]:
+                # `tag=` wins over `text=`, so with BOTH set, "drop tag=" alone
+                # lands on the text= arm — not the structural arm this route
+                # promises, and a PAGED caller then hits "offset/page not
+                # supported with text" (round-11 P2, measured). Name every
+                # argument that has to go for the destination to be reachable.
+                _route = (
+                    "To narrow by kind, drop tag= and text=, then pass kind= to "
+                    "the structural arm, which applies it"
+                    if text else
+                    "To narrow by kind, drop tag= and pass kind= to the "
+                    "structural arm, which applies it")
+            else:
+                _route = (f"To use {_them}, drop tag= and pass text= — tag= takes "
+                          f"precedence, so keeping it re-reads this same arm")
+        elif _arm == "text=":
+            if "order_by" in _names and "min_confidence" in _names:
+                # Offering order_by='relevance' beside "pass entity_type='point'"
+                # implies both fix `them`, but relevance fixes only the ordering
+                # and the floor is still refused — the caller lands on a second
+                # refusal (round-5 P2, measured verbatim).
+                _route = ("Passing entity_type='point' fixes both; "
+                          "order_by='relevance' would fix only the ordering, "
+                          "leaving the floor refused")
+            elif "order_by" in _names:
+                _route = (f"To use {_them}, pass entity_type='point' (whose rows "
+                          f"carry the signals these orderings read) or "
+                          f"order_by='relevance'")
+            else:
+                _route = "To have the floor applied, pass entity_type='point'"
+        else:
+            _route = (f"To use {_them}, pass text= — the floor and the ordering "
+                      f"are applied on that arm")
+        if paginated and not (_arm == "tag=" and _names == ["kind"]):
+            # `text=` takes no offset/page (measured: following the route with
+            # offset= kept answers "offset/page not supported with text"), so a
+            # route that sends a PAGED caller there lands on a second refusal
+            # (round-9 finding 3). The ONE route that does not land on `text=` is
+            # the kind-only tag route — it sends the caller to the structural arm,
+            # which pages fine — so the suffix there was advice to drop a
+            # capability, naming an arm the route never mentions (round-10 P2).
+            #
+            # Its own SENTENCE, not a trailing parenthetical (round-21 P2 2,
+            # measured): appended at the end of a route with two alternatives it
+            # read as qualifying only the last one, and `text=`+`offset=` is
+            # refused whatever `entity_type` says (mcp_server.py:4422-4424) — so
+            # following the FIRST alternative ("pass entity_type='point'") landed
+            # on "offset/page not supported with text". The drop is required for
+            # EVERY alternative, so it is stated once, for the route.
+            _route += ". Also drop offset=/page= — text= takes no offset."
+        # Only where a floor/ordering is what was refused: the STRUCTURAL arm
+        # applies `filters=` together with `kind=` quite happily, so this note on
+        # a kind-only tag refusal told the caller to drop a filter that another
+        # arm honours — and the route in the same sentence said to use that arm
+        # (round-5 P2, measured).
+        _filters_note = (
+            " No arm applies a property `filters=` together with a confidence "
+            "floor or an ordering, so drop filters= if you need this argument."
+            if filters and ({"min_confidence", "order_by"} & set(_names)) else ""
+        )
+        return _SafeError({"error": (
+            f"{_named} {_verb} not applied on the {_arm} arm (#12500): {_why}. It "
+            f"used to be dropped silently, so the caller got {_loss}.{_filters_note}"
+            f" {_route}, or drop {_named} for this read."
+        )})
     # ── #12455: `filters=` was ACCEPTED on the `text=` and `tag=` arms and DROPPED
     # `filters` is a STRUCTURAL-path argument. `text=` forwards
     # kind/entity_type/limit/min_confidence/order_by (plus `include_terminal`,
