@@ -4466,8 +4466,12 @@ def tortoise_query(kind: str | None = None,
     # finding 4, measured with `mcp.list_tools()`; recorded on #12500). Both
     # structural arms call `sdk.paginated_query(kind, skip, limit,
     # include_retracted, **filters)`, which declares NEITHER parameter
-    # (sdk.py:26642-26645), and the tag arm calls `query_points_by_tag(tag)`,
-    # which takes the tag and nothing else. Measured: `kind="statement",
+    # (sdk.py:26642-26645), and the tag arm calls
+    # `query_points_by_tag(tag, _record_reads=False)` (sdk.py:26964), which declares
+    # no floor and no ordering either. ⛔ The served bullet ABOVE still says
+    # "takes the tag and nothing else" ON PURPOSE: it is a `co_consts` member, so
+    # fixing it moves `served_from` — an owner-gated surface change (#4282).
+    # Measured: `kind="statement",
     # min_confidence=0.9` reaches the accessor as
     # `paginated_query(kind='statement', skip=0, limit=100,
     # include_retracted=False)` — the floor is simply gone and rows below 0.9

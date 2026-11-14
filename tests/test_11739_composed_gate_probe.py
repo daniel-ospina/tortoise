@@ -397,6 +397,198 @@ def test_the_readme_wilson_bands_are_the_outward_ones():
             "the inward spelling cannot both be in a document whose value is declaration honesty")
 
 
+_WRITE_ATTRS = frozenset({"write_text", "write_bytes", "open"})
+
+
+def _stray_writes(src: str) -> list[tuple[int, str]]:
+    """Every `_WRITE_ATTRS` call whose NEAREST enclosing function is not `_write` — except a
+    zero-argument `open()`.
+
+    "Nearest enclosing function", not "outside a function named `_write`": a write inside a `def`
+    nested in `_write` IS reported (its nearest enclosing function is the nested one), which the pin
+    at `test_the_stray_write_guard_uses_the_INNERMOST_enclosing_function` asserts directly. The
+    earlier wording described the attribution backwards (⛔ #12688 review round 35, P3).
+
+    The exception is a zero-argument `open` CALL: a builtin `open()` raises `TypeError` (no `file`)
+    and `Path(p).open()` defaults to `'r'`, so neither can write. The test is on the NAME, so an
+    attribute receiver is exempt too — a custom `x.open()` that writes would be invisible here, which
+    sits with the same member-list residual as `os.replace` below.
+    (#12688 review round 34, P3: the previous wording said "prose, not a call", but prose is an
+    `ast.Constant` and never reaches this walk, so that was never the reason.)
+
+    ⛔ NOT "every file write". Three names are not a class: `os.replace(tmp, out)`, `shutil.copyfile`
+    and a bare `os.rename` are file writes the scan cannot see, and the atomic-publish idiom this
+    repo uses is exactly `os.replace` (measured at this head, #12688 review round 31, P2 — the
+    previous wording promised a class and delivered a member list; the repo states the same limit
+    for its own guard at `tools/published_artifact_canary.py:364-368`). The residual is PINNED by
+    `test_the_write_scan_is_a_MEMBER_list_not_a_class`: whoever widens the list must update this
+    docstring, because that pin reddens the moment they do.
+
+    ⛔ Extracted so the GUARD and its PIN are the same code path (#12688 review round 28, P2).
+    Attribution lives here; `src` is the only input, so a synthetic nested tree can be pinned and a
+    probe source asserted clean through ONE function — and reverting the attribution reddens the pin
+    (measured). Before the extraction the pin called `_innermost_enclosing_function` directly, so a
+    guard that grew its own scan could pass with the pin green.
+
+    ⛔ A TEXTUAL `open(` scan is defeatable and this is an AST walk instead. The shapes where this
+    walk CATCHES a write an `open(` regex MISSES are `Path(p).write_text(...)` and `write_bytes(...)`
+    (no `open(` at all) and `open ("x", "w")` (a space before the paren, opening for WRITING — a
+    bare `open ("x")` is caught by the walk too, but it is a read, so it is not an example of a
+    missed write); `Path.write_text` is the idiom
+    THIS repo uses, so it is the plausible shape of a future regression (measured: a regex version
+    left `pathlib.Path(p).write_text(...)` in `main()` green). ⛔ Not "the shapes that defeat an
+    `open(` regex" — that would be a closed set this docstring refutes two paragraphs up, since
+    `os.replace`/`shutil.copyfile`/`os.rename` defeat the regex too and this walk misses them as well:
+    that is the residual, not a reason to prefer the walk (#12688 review round 38, P3). NOT examples:
+    `os.open`/`io.open` both contain the literal `open(`, so a regex matches them and this walk
+    catches them under the same `"open"` name — listing them here said the opposite (⛔ #12688 review
+    round 36, P3).
+    """
+    import ast
+
+    tree = ast.parse(src)
+    writes = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = (
+            func.id
+            if isinstance(func, ast.Name)
+            else func.attr
+            if isinstance(func, ast.Attribute)
+            else ""
+        )
+        if name not in _WRITE_ATTRS:
+            continue
+        # A zero-argument builtin `open()` / `Path.open()` cannot write: the builtin raises TypeError
+        # (no `file`) and `Path.open()` defaults to 'r'. ⛔ `not node.args` alone is a HOLE:
+        # `open(file=p, mode="w")` and `Path(p).open(mode="w")` are real writes with empty `args`
+        # (measured green on that version), so a keyword-only call must be caught too.
+        if name == "open" and not node.args and not node.keywords:
+            continue
+        writes.append(node)
+    stray = []
+    for node in writes:
+        fn = _innermost_enclosing_function(tree, node)
+        if fn is None or fn.name != "_write":
+            stray.append((node.lineno, getattr(node.func, "id", getattr(node.func, "attr", ""))))
+    return stray
+
+
+def _innermost_enclosing_function(tree, node):
+    """The NEAREST FunctionDef/AsyncFunctionDef ancestor of `node`, or None.
+
+    ⛔ Not "the first FunctionDef `ast.walk` yields that contains the node": that walk is
+    breadth-first, so its first hit is the OUTERMOST enclosing function — a write inside a
+    nested `def` inside `_write` would be credited to `_write` and pass the stray-write guard
+    (measured on a synthetic tree, #12589 review round 27). Walking UP the parent chain cannot
+    skip an enclosing function. Pinned by
+    `test_the_stray_write_guard_uses_the_INNERMOST_enclosing_function`.
+
+    ⚠️ It is a LEXICAL-ancestor rule, not Python's enclosing-SCOPE rule: a write inside a nested
+    `def`'s decorator, default value or annotation is attributed to that nested `def`, although
+    Python evaluates it in `_write` (#12688 review round 28, P3).
+
+    ⚠️ Do NOT state the divergence as "narrows only" (#12688 review round 30, P3 — it was written
+    that way and it is false). The property that IS true, and was measured on every shape tried:
+    this rule credits a write ONLY when it is lexically inside a function named `_write`, and the
+    one shape where it credits what the breadth-first rule flagged is a `_write` that is ITSELF
+    nested inside another function — the old rule found the outer function first and called that
+    write stray. Both directions of divergence therefore exist, and the safety property does not
+    rest on direction: it rests on the fact that neither rule credits a write that is outside every
+    `_write`. Measured identical to the old rule for module level, class body, lambda,
+    comprehension, `if`/`try` blocks and a module-level `async def _write` — a write inside an
+    `async def` NESTED in `_write` diverges in the same direction as the nested `def` above, so the
+    list item is scoped to the module-level form rather than to `async` in general.
+    """
+    import ast
+
+    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+    parent = parents.get(node)
+    while parent is not None and not isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        parent = parents.get(parent)
+    return parent
+
+
+def test_the_write_scan_is_a_MEMBER_list_not_a_class():
+    """⛔ PINS THE KNOWN GAP, so the docstring cannot drift back into a class claim (#12688 round 31).
+
+    `_WRITE_ATTRS` is a member denylist (`write_text`, `write_bytes`, `open`). A write through another
+    name is invisible to the stray-write assertion, and the atomic-publish idiom this repo uses is one
+    of them. This test asserts the gap EXISTS: widening the list (a good change) reddens it, which is
+    the signal to reword `_stray_writes`'s docstring to whatever the new coverage actually is.
+    """
+    # ⛔ The SAMPLE cannot guard the class: widening `_WRITE_ATTRS` by a name this sample does not
+    # exercise left the file green (measured with `writelines`, `copy2`, `save`, `fdopen`, `writeFile`
+    # — #12688 review round 33, P2). So the pin asserts the SET ITSELF.
+    assert frozenset({"write_text", "write_bytes", "open"}) == _WRITE_ATTRS, (
+        "_WRITE_ATTRS grew — good, but `_stray_writes`'s docstring enumerates the members, so it must "
+        "be reworded to the new coverage, and the new member needs a catch-case here"
+    )
+    opaque = (
+        "os.replace(tmp, out)\n"  # atomic publish — invisible today
+        "shutil.copyfile(a, b)\n"
+        "os.rename(a, b)\n"
+    )
+    assert _stray_writes(opaque) == [], (
+        "the write scan now sees a name it used to miss — good, but reword `_stray_writes`'s "
+        "docstring to say what it DOES cover instead of leaving this pin red"
+    )
+    # …and the members it does list are still caught, so this is a member list and not a blanket
+    assert _stray_writes("os.replace(tmp, out)\n") == []
+    assert _stray_writes("Path(p).write_text('x')\n") == [(1, "write_text")]
+
+
+def test_the_stray_write_guard_uses_the_INNERMOST_enclosing_function():
+    """⛔ THE GUARD MUST NOT CREDIT A NESTED WRITE TO ITS OUTER FUNCTION (#12589 review round 27).
+
+    A breadth-first search for "a FunctionDef containing the node" returns `_write` for a write
+    inside `def nested()` inside `_write`, so the stray-write guard would pass that write. Measured
+    on the synthetic tree below: BFS-first -> `_write`, innermost -> `nested`. Today's probe has no
+    nested write, which is exactly why this needs a pin rather than a passing suite.
+    """
+    import ast
+
+    src = "def _write(p):\n    def nested():\n        open(p, 'w')\n    return nested\n"
+    # the GUARD itself reports it — not a helper used only here
+    assert _stray_writes(src) == [(3, "open")], _stray_writes(src)
+    tree = ast.parse(src)
+    write = next(n for n in ast.walk(tree) if isinstance(n, ast.Call))
+    assert _innermost_enclosing_function(tree, write).name == "nested"
+    # and the outermost rule the bug used is exactly what this refuses
+    bfs_first = next(
+        fn
+        for fn in ast.walk(tree)
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and any(child is write for child in ast.walk(fn))
+    )
+    assert bfs_first.name == "_write"
+
+    # ⛔ THE OTHER DIVERGENCE DIRECTION, PINNED (#12688 review round 37, P2): the docstring says the
+    # one shape where this rule CREDITS what breadth-first flagged is a `_write` that is ITSELF nested.
+    # Nothing pinned it, so the claim lived in prose only.
+    nested_write_src = "def outer(p):\n    def _write(p):\n        open(p, 'w')\n    return _write\n"
+    assert _stray_writes(nested_write_src) == [], _stray_writes(nested_write_src)
+    nested_tree = ast.parse(nested_write_src)
+    nested_call = next(n for n in ast.walk(nested_tree) if isinstance(n, ast.Call))
+    bfs_on_nested = next(
+        fn
+        for fn in ast.walk(nested_tree)
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and any(child is nested_call for child in ast.walk(fn))
+    )
+    assert bfs_on_nested.name == "outer", bfs_on_nested.name  # …which called it stray
+
+    # ⛔ AND THE `async` SCOPING (#12688 review round 37, P2): the docstring scopes its "identical"
+    # claim to a MODULE-LEVEL `async def _write`, and says a nested one diverges like the nested `def`.
+    # Both halves are pinned here because no test constructed an `async` shape at all.
+    async_flat = "async def _write(p):\n    open(p, 'w')\n"
+    assert _stray_writes(async_flat) == [], _stray_writes(async_flat)
+    async_nested = "def _write(p):\n    async def nested():\n        open(p, 'w')\n    return nested\n"
+    assert _stray_writes(async_nested) == [(3, "open")], _stray_writes(async_nested)
+
+
 def _first_hex_after(text: str, label: str) -> str:
     """The first 64-hex token after `label` — the digest that label presents."""
     tail = text.split(label, 1)[1]
@@ -780,45 +972,13 @@ def test_gate3s_measurement_writes_all_route_through_the_one_guard():
     what keeps the WIRING honest, because the behavioural case drives the helper and would stay
     green over a `main()` that went back to a bare `open()`.
 
-    ⛔ A TEXTUAL `open(` scan is defeatable and this is an AST walk instead: `Path.write_text`,
-    `write_bytes`, `os.open`, `io.open` and `open ("x")` (a space) all slip past a line regex while
-    doing exactly the damage — and `Path.write_text` is the idiom THIS repo uses, this very file
-    included, so it is the plausible shape of a future regression (measured: the regex version left
-    `pathlib.Path(p).write_text(...)` in `main()` green).
+    The scan and its attribution live in `_stray_writes`, so the synthetic nested-tree pin
+    (`test_the_stray_write_guard_uses_the_INNERMOST_enclosing_function`, above) drives the SAME code
+    this assertion does — a guard that grew a second, breadth-first attribution
+    could otherwise keep both green (#12688 review round 28, P2).
     """
-    import ast
-
     src = (PROBES / "gate3_false_proposals.py").read_text(encoding="utf-8")
-    tree = ast.parse(src)
-    WRITE_ATTRS = {"write_text", "write_bytes", "open"}
-
-    writes = []          # (lineno, enclosing function or None)
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        name = (func.id if isinstance(func, ast.Name)
-                else func.attr if isinstance(func, ast.Attribute) else "")
-        if name not in WRITE_ATTRS:
-            continue
-        # `open()` with NO arguments at all is prose, not a call; every real one passes an
-        # argument OR a keyword. ⛔ `not node.args` alone is a HOLE: `open(file=p, mode="w")` and
-        # `Path(p).open(mode="w")` are real writes with empty `args` (measured green on that
-        # version), so a keyword-only call must be caught too.
-        if name == "open" and not node.args and not node.keywords:
-            continue
-        writes.append(node)
-
-    def enclosing_ok(node) -> bool:
-        # Walk the tree once more for the innermost FunctionDef containing `node`.
-        for fn in ast.walk(tree):
-            if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) and any(
-                    child is node for child in ast.walk(fn)):
-                return fn.name == "_write"
-        return False
-
-    stray = [(w.lineno, getattr(w.func, "id", getattr(w.func, "attr", "")))
-             for w in writes if not enclosing_ok(w)]
+    stray = _stray_writes(src)
     assert not stray, (
         "gate3 performs a file write outside its `_write` guard — a bare write on --out / "
         "--pairs-out / the row cache raises OSError out of main() (exit 1, the code it promises "
