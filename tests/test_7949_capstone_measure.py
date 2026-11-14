@@ -5861,7 +5861,7 @@ _EPIC_CITE_SOURCES = {
     # those two `def`s at `:955`/`:947`. Registered because a repaired cite that nothing
     # pins is a repair the next move of the symbol undoes silently. ⛔ AND IT ALREADY
     # HAS: measured at `6916a6cd89` — an EARLIER round's base, NOT the `origin/main` head
-    # this merges into today (`4dd97bacc2`) — those two `def`s are at `:1007`/`:999`
+    # this was merging into then (`4dd97bacc2`) — those two `def`s are at `:1007`/`:999`
     # (`#12507` landed above them) while both the row and the document still said
     # `:955`/`:947`. ⚠️ The head is named because the measurement was taken there, and the
     # pair holds at `d05688df5990` too; nothing else here is claimed about any head. It
@@ -6071,14 +6071,13 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # minutes BEFORE it (2026-11-13T19:30:00 vs 19:34:09) and is an ancestor of
         # `#12545`'s commit, while `#12545` measured at `5bacb44e0b` which does NOT
         # contain it — so that pair arrived ALREADY stale at its own landing commit,
-        # and `main` was red for this row at `6916a6cd89`. The pair is
-        # **`:1023`/`:1015`** at the head this merges into (`origin/main`
-        # `4dd97bacc2`): `#12695` (`3893603b07`, the Pi leg's unrecorded-outcome
-        # stamp) inserted sixteen lines in `tortoise-capture.ts` above both `def`s
-        # and re-derived no cite, so `main` went red for this row again — measured
-        # here (`grep -nF 'export function postCapture(' …`), and repaired at this
-        # head rather than carried, because a red on `main` blocks every head. The
-        # two `def`s are always
+        # and `main` was red for this row at `6916a6cd89`. `#12695` (`3893603b07`, the
+        # Pi leg's unrecorded-outcome stamp) then added 16 lines above both `def`s,
+        # in `tortoise-capture.ts`, and re-derived no cite, so the pair is
+        # **`:1023`/`:1015`** here — measured at this head
+        # (`grep -nF 'export function postCapture(' …`) and repaired at this head
+        # rather than carried, because a red on `main` blocks every head. The two
+        # `def`s are always
         # **8 apart** in this file, and that is exactly the trap: an offset read off
         # a stale pair re-derives `948` → `957`, which WAS `postCapture`'s parameter
         # list (`payload: Record<string, unknown>,`) at `5bacb44e0b` — at
