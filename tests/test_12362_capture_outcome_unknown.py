@@ -52,8 +52,8 @@ def places(monkeypatch, tmp_path):
 
 #: The 504 → confirmation-read harness is SHARED with `#12379`'s composed test
 #: (`tests/_capture_504.py`), which drives the same producer for its own surface.
-#: The served detail is a SERVER contract that grows additive keys, so the copies
-#: that used to live here were a second thing to forget — and the failure mode of
+#: The served detail is a SERVER contract that grows additive keys, so a copy
+#: would be a second thing to forget — and the failure mode of
 #: forgetting one is a suite that keeps passing against a body production no
 #: longer serves. These two bindings keep this file's call sites readable while
 #: the shape has ONE definition.

@@ -8,14 +8,16 @@ whose confirm-on-refusal `GET /v1/sessions/<id>` serves the extraction qualifier
 * ``test_12379_unrecorded_trace.py`` — the durable spool marker and the health
   surface (`#12379`, end to end since `#12374` landed the producer).
 
-They had each grown a copy of the same three helpers. The served detail is a
-SERVER contract that grows additive keys (``#3520`` added the ``extraction``
-block this pair turns on), so a second copy is a second thing to forget — and the
-way it degrades is a suite that keeps passing against a body production no longer
-serves. The copies also had to be kept in step about the *turn* shape, which is
-the subtler half: `confirm_capture` compares stored turns against the posted ones
-and answers `TURNS_MISSING` when they disagree, so a harness that serves rows
-built from a different model makes a "composed" test assert nothing at all.
+`#12362` had grown this harness privately, for its own suite. `#12379`'s composed
+section needs the same 504 → confirmation-read pair, so it lives here once rather
+than being copied a second time. The served detail is a SERVER contract that
+grows additive keys (``#3520`` added the ``extraction`` block this pair turns
+on), so a copy is a thing to forget — and the way it degrades is a suite that
+keeps passing against a body production no longer serves. A second copy would
+also have to be kept in step about the *turn* shape, which is the subtler half:
+`confirm_capture` compares stored turns against the posted ones and answers
+`TURNS_MISSING` when they disagree, so a harness that serves rows built from a
+different model makes a "composed" test assert nothing at all.
 
 ⛔ Everything here is parameterised by ``session_id``, and that is load-bearing
 rather than tidiness: ``expected_turns`` derives the served turn IDs FROM the
