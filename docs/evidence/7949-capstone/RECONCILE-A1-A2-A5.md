@@ -761,17 +761,28 @@ git grep -n 'result\["relations"\]' -- tortoise/        # at this record's merge
                                                           # the claim: unscoped it also matches the
                                                           # reader below)
 git grep -c 'result\["relations"\]' -- tests/          # tree-wide MATCHES — THREE files on this merge,
-                                                          # but only ONE of them reads the channel as
-                                                          # data: tests/test_10999_batch_story_relations.py
-                                                          # — 56 LINES; then tests/eval/write_path/
-                                                          # test_write_path_relation_lane.py — 3 — all
-                                                          # three DOCSTRING prose (`:6`, `:22`, `:424`),
-                                                          # not assertions; and the capstone pin itself,
-                                                          # tests/test_7949_capstone_measure.py — 1 — a
-                                                          # SOURCE-TEXT scan of `extractor_v2.py`'s lines
-                                                          # (`:14043`) that derives the cite, so it is a
-                                                          # citation pin, not a consumer. 60 LINES in
-                                                          # total (`-c` counts lines per file)
+                                                          # 60 LINES (`-c` counts lines per file):
+                                                          # tests/test_10999_batch_story_relations.py —
+                                                          # 56 — assertions on the channel; tests/eval/
+                                                          # write_path/test_write_path_relation_lane.py
+                                                          # — 3 — and tests/test_7949_capstone_measure.py
+                                                          # — 1 — a SOURCE-TEXT scan of `extractor_v2.py`'s
+                                                          # lines (`:14043`) that derives the doc's cite
+# ⛔⛔ THIS GREP COUNTS LINES, NOT READERS — do not read the per-file numbers as "who consumes the
+# channel". Two of the three files are NOT what their matched lines look like:
+#   • `test_write_path_relation_lane.py`: its 3 matched lines are all DOCSTRING prose (`:6`, `:22`,
+#     `:424`), but the FILE is the strongest reader in the tree — it rebinds the result
+#     (`folded = ev2.execute_embed(...)`, `:439`) and asserts on `folded["relations"]` at `:441`,
+#     then drives it through the REAL commit leg (`_capture`, `:443`) and asserts
+#     `cap["relation_write"]["written"] == 2` plus both edges present in the graph (`:444-449`).
+#     A literal `result\["relations"\]` grep is blind to a REBIND — that is this block's own
+#     lesson (see the `-- tortoise/` scope note above), applied to itself.
+#   • `test_7949_capstone_measure.py`: the hit is a scan of `extractor_v2.py`'s source lines used to
+#     DERIVE the cite — a citation pin, not a consumer.
+# So: 1 file reads the channel through the literal name (`test_10999`), 1 reads it through a rebind
+# (`write_path_relation_lane`), and 1 does not read it at all (the pin). `"relations"` is a
+# RESULT-level key (`extractor_v2.py:12649`, `"relations": payload_relations`), which is why both
+# readers can see it at all.
 # ⚠️ The third file was added after this record was written, so the earlier "TWO files … 59"
 # was true of the head this block was first measured on (`e49788706a`, which reads 2 files /
 # 59 lines / 62 occurrences) and is re-measured here rather than left stale.
