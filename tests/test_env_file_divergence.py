@@ -2156,8 +2156,9 @@ def test_the_rendered_diagnostic_keeps_its_ValueError_prefix(
 
     ⛔ TWO render sites, and a pin on one says nothing about the other: measured,
     reverting ONLY the no-overlay site below left all three affected suites green
-    (467 passed at the head this was measured on) — the identical round-1 defect,
-    fixed in code and unpinned at the second arm. So both states are driven here.
+    (the count moves with every head, so it is a point-in-time measurement,
+    not a reproducible one) — the identical round-1 defect, fixed in code and
+    unpinned at the second arm. So both states are driven here.
 
     The subclass exists to carry the rung INTERNALLY; the label stays the base
     class, so every earlier run's output is byte-identical here.
