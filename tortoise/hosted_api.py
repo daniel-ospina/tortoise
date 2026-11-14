@@ -7743,6 +7743,38 @@ _LIVENESS_SERVED_COUNT = 0
 _LIVENESS_LAST_SERVED_AT: float | None = None
 
 
+def _health_setup_clamped() -> int | None:
+    """``monitoring.health_setup_clamped_count()``, or ``None`` when it cannot be read (#10749).
+
+    ⛔ THIS IS A GUARD, NOT A SECOND IMPLEMENTATION. The callee never raises — that half of its
+    contract is kept and tested. What it cannot protect against is its own ABSENCE: a stale or
+    partially written ``monitoring`` module has no such attribute, and an unguarded
+    ``_monitoring.health_setup_clamped_count()`` in the body below turned ``/health`` into a 500
+    (measured: ``AttributeError`` out of ``health()``).
+
+    ``health()`` promises, in its own docstring, that it "never 5xxes: a dead DB is 'degraded',
+    never a killed process" — and every sibling read on that body is wrapped for exactly that
+    reason (``wait_bound_breaches``, ``refusals``, ``record``, ``backup_watcher``). This key's
+    published shape is ``int | null``, so ``null`` is a value the contract already admits, and a
+    failed read is reported as nothing measured rather than as a fabricated 0 — the same
+    absent-vs-zero rule the counter channel is built on (#3253, #9548).
+    """
+    try:
+        read = _monitoring.health_setup_clamped_count
+    except AttributeError:  # a stale/partial monitoring module: nothing measured, not zero
+        # ⛔ Logged, because `null` on its own is a value with no reason attached: the callee's
+        # docstring justifies its own logging with "a failure here would land with no reason
+        # anywhere on the box", and on this path the callee is never reached (fresh review, P3).
+        _logger.warning(
+            "health: tortoise.monitoring has no health_setup_clamped_count attribute — a stale or "
+            "partially written module; publishing null (nothing measured, not zero)")
+        return None
+    try:
+        return read()
+    except Exception:  # a monitoring read must never 5xx (see docstring)
+        return None
+
+
 @app.get("/liveness")
 async def liveness(response: Response):
     """A liveness answer that can only be produced BY BEING SERVED (#10892).
@@ -7990,6 +8022,27 @@ async def health():
             # means `db.ok`, `backup_watcher.ok` and `record.ok` (the three
             # terms in the `status` expression above), not the counter.
             "wait_bound_breaches": breaches,
+            # #10749: the POSITIVE pair beside that count. The clamp publishes this counter on
+            # `monitoring.metrics()`, which reaches the standalone `/health` — JSON — and, as the
+            # Prometheus family `tortoise_health_setup_clamped_total`, `/metrics` (which is the
+            # exposition and carries NO JSON key) — but the hosted app builds its OWN body, so
+            # without this line the operator's first curl sees `wait_bound_breaches: 0` (which the
+            # clamp makes flat BY DESIGN) and nothing reporting that health came back unknown
+            # because the clamp cost the observation. Same rule as the block above: REPORTED,
+            # never folded into `status` (a cumulative counter must not pin the deployment degraded
+            # for the life of the process). `docs/infra-runbook.md` §4.1.1a is the operator
+            # contract.
+            #
+            # ⛔ WRAPPED, like `wait_bound_breaches` and `refusals` above — the callee's own
+            # docstring claims it "NEVER RAISES … identical to `wait_bound_breach_counts`", and that
+            # is true of the COUNTER READ; it is not true of the ATTRIBUTE. A stale or partially
+            # written `monitoring` module has no `health_setup_clamped_count` at all, and an
+            # unguarded attribute access then turns this handler into a 500 — the one outcome
+            # `health()`'s docstring forbids ("It never 5xxes: a dead DB is 'degraded', never a
+            # killed process"). `null` is already the documented failure value for this key
+            # (`int | null`), so the degraded path is inside the published shape (#12482 fresh
+            # review, P3; measured: `AttributeError` out of `health()` on a partial module).
+            "health_setup_clamped": _health_setup_clamped(),
             "record": record, "build": _build_identity(),
             # #10488: the consent bridge's key, published as a truncated hash so
             # a split between this deployment and the Pages mint is one COMPARISON
@@ -49590,7 +49643,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 181 tracked files (445 distinct
+# ABSOLUTE line number from 183 tracked files (448 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason
