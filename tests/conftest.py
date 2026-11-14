@@ -859,8 +859,9 @@ def _no_ambient_dead_heartbeat_ticker():
       fixture is NOT what greens it.
     * The LEAK is still there, and it is process-wide. Probing what each test
       OBSERVES at call time (a ``pytest_runtest_call`` hook reading
-      ``monitoring.heartbeat_task_is_dead()`` and ``_HEARTBEAT_TASK``): with this
-      fixture neutered, **12 of the file's 122 tests** read ``True`` over a
+      ``monitoring.heartbeat_task_is_dead()`` and ``_HEARTBEAT_TASK``) across
+      ``tests/test_dr_endpoints.py``: with this fixture neutered, **12 of that
+      file's 122 tests** read ``True`` over a
       ``<Task cancelled …loop_heartbeat_task()>`` left by an earlier test; with
       the fixture in place, **0** do.
     * The issue's own profile at ``30c9e7c4d3`` / ``8dc4f06ba5`` —
@@ -879,7 +880,8 @@ def _no_ambient_dead_heartbeat_ticker():
     plus the hard-ceiling cases that reset inline, and
     ``test_12477_health_honesty.py``::``_clean`` (entry only).
     A fixture scoped to a class cannot cover a leg in ANOTHER file, and the one
-    module-scoped reset runs on the way IN with nothing on the way out — so a
+    reset that covers a whole file (``test_12477``'s) is function-scoped and runs
+    on the way IN with nothing on the way out — so a
     leak still crosses FILE boundaries, and the next test to read the wedge term
     inherits a disarmed instrument unless it happens to remember the seam.
     Hence the conftest scope: the leak is process-wide, so the default has to be
