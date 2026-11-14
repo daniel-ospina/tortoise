@@ -89,8 +89,7 @@ class TestDeclaration:
         count in `docs/product/canonical-mcp-tools.md`); every rendered artifact
         (`docs/product/sdk-surface-baseline.md`, `mcp-sdk-surface.md`,
         `sdk-surface-declaration.md`, `config/sdk-surface.json`) must be REGENERATED
-        with the new row, and `surface_manifest.py check` / `tools/sdk_surface.py
-        --check` red the stale ones; and `tools/sdk_rename_table.py --check` REFUSES an
+        with the new row; and `tools/sdk_rename_table.py --check` REFUSES an
         unmapped public method outright — it demands a canonical group and a
         disposition, so the surface cannot grow without someone saying what the method IS.
 
