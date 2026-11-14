@@ -4969,8 +4969,22 @@ def tortoise_query(kind: str | None = None,
     # The un-paginated path's contract is a plain list; `paginated_query`
     # answers {results, total, hasMore}, so take only the page.
     result = bounded.get("results", []) if isinstance(bounded, dict) else bounded
-    # If empty results and a kind filter was provided, attach suggestion
-    if isinstance(result, list) and len(result) == 0 and kind is not None:
+    # If empty results and a kind filter was provided, attach suggestion.
+    # #12582: `isinstance(kind, str) and kind`, not `kind is not None`. A falsy
+    # non-str `kind` (`False`, `0`) is the shipped spelling of ABSENT — the same
+    # contract #12500 gave `min_confidence`/`order_by`, and the same test the SDK
+    # itself applies (`sdk.py`: `if kind:` before it builds the clause) — so the
+    # read is served the whole population, exactly as `kind=""` is. The old
+    # `is not None` sent that value to `compute_suggestion`, whose `":" not in
+    # kind` raised a bare TypeError out of the tool body: a client that
+    # serialises its own defaults got a transport failure instead of the served
+    # read this contract documents. (The answer was never meant to be a refusal —
+    # the bullet above says a falsy `kind` "stays served", and it is; the crash
+    # was the tool failing to deliver what it had already promised.) The
+    # suggestion feature is unchanged for a non-empty string — the only input it
+    # can say anything about.
+    if (isinstance(result, list) and len(result) == 0
+            and isinstance(kind, str) and kind):
         from tortoise.query_suggestions import compute_suggestion
         suggestion = compute_suggestion(kind)
         if suggestion:

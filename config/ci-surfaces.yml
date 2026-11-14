@@ -1569,6 +1569,12 @@ surfaces:
   - test_12500_query_args_dropped.py
   - test_12455_text_filters_dropped.py
   - test_12372_entity_type_dropped.py
+  # #12582: the non-str `kind` crash — same fixture and same reason: it drives
+  # `mcp_server.tortoise_query` with `mcp_auth`'s transport contextvars set, and
+  # `tortoise/mcp_auth.py` is an exact `api` SOURCE_PATTERN whose named match
+  # REPLACES the `core` fallback. Measured: `--changed-files
+  # tortoise/mcp_auth.py` did not include it while only the `core` row existed.
+  - test_12582_kind_typeerror.py
   # #10849 (found by the fold's own `ci_selection.py --integrity`, NOT by CI — the gate
   # cannot see an unregistered file, only its absence): #10856 adds this file and registered
   # no surface, so `manifest-integrity` (a required `python-ci-gate.needs` leg) reddened by
@@ -2475,6 +2481,17 @@ surfaces:
   # `test_ci_selection.py` pins in `test-slow`), and a diff to this file must
   # select `core`, where it runs.
   - test_12500_query_args_dropped.py
+  # #12582: a falsy non-str `kind` (`False`, `0`) raised a bare TypeError out of
+  # `tortoise_query` instead of serving the read — the empty-structural tail sent
+  # it to `compute_suggestion`, whose `":" not in kind` is a string-only test.
+  # Registered for the same two reasons as the row above, plus this one:
+  # `tortoise/query_suggestions.py` — the module holding the `compute_suggestion`
+  # half of this fix — matches no SOURCE_PATTERN, so its own diffs take the `core`
+  # fallback. Measured: `--changed-files tortoise/query_suggestions.py` selects
+  # `core`, and with this row removed the file is ABSENT from that selection's
+  # `test_files` — i.e. the `compute_suggestion` change would land with no test
+  # running on the diff that changes it (the #2938 silent-drop class).
+  - test_12582_kind_typeerror.py
   # #12477: the health surfaces must not read green over a failing data plane
   # (the `/health` body's verdict and the 9090 listener's registration). Landed in
   # `main` UNREGISTERED — so `main` was red on `integrity()` and every PR's merge
