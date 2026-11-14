@@ -12,12 +12,18 @@ published schema for `kind` is `anyOf[string, null]` (measured with
 body's contract must not depend on the transport narrowing its types.
 
 Its mirror image is the SECOND half of the fix, over a slightly wider
-population — three different wrong answers for a `kind` the accessor can never
-match, all measured on a live lane:
+population — three different wrong answers for a `kind` that does not NAME a
+kind (it can still MATCH rows, if the graph holds a non-str `pointKind`; see the
+first bullet), all measured on a live lane:
 
 - a truthy non-ITERABLE non-str (`True`, `1`, `5`) raised at `":" not in kind`,
   and once the tail learned to tolerate a non-str the STRUCTURAL arm served it as
-  `[]` — a true-looking "this kind has no rows". (Non-iterability, not non-str-ness,
+  `[]` on a graph whose rows all carry string kinds — a true-looking "this kind has
+  no rows". (A non-str `pointKind` row IS reachable: the write door only WARNS, so
+  `create_point(True, …)` stores one, and pre-fix `kind=True`/`1`/`1.0` then
+  MATCHED those rows — measured at `d05688df59` and at `2d19277237`. That is the
+  write door's own defect (#12763); the refusal rests on a non-str never naming a
+  kind, not on no row being able to carry one. Non-iterability, not non-str-ness,
   is what raised: a tuple `kind` never raised — a tuple read matches no row, so it
   was served `[]`, or a suggestion envelope when the tuple is a near-miss
   (measured with the guard removed: `("a",)` -> "kind '('a',)' not found. Did you
@@ -84,6 +90,16 @@ class _StubSDK:
         #: kind clause is built), so a stub that merely records the argument
         #: could not tell "served as absent" from "filtered to nothing".
         self.kind_clause_applied = None
+
+    def query_points_by_tag(self, tag, *, _record_reads=True):
+        """The tag arm's accessor (followed by the terminating-route test)."""
+        self.calls.append(("query_points_by_tag", tag, _record_reads))
+        return []
+
+    def tortoise_fts_query(self, text, kind=None, **_kw):
+        """The fts arm's accessor (followed by the terminating-route test)."""
+        self.calls.append(("tortoise_fts_query", text, kind))
+        return []
 
     def paginated_query(self, kind=None, skip=0, limit=20, **kwargs):
         self.calls.append(("paginated_query", kind, skip, limit, kwargs))
@@ -161,14 +177,55 @@ def test_a_falsy_non_str_kind_is_served_instead_of_raising(stub, falsy_kind) -> 
     assert stub.calls, f"the accessor was never asked: {stub.calls}"
 
 
+@pytest.mark.parametrize("arm_kwargs,arm_name", [
+    ({}, "structural"),
+    ({"tag": "x"}, "tag"),
+    ({"text": "quantum"}, "text"),
+])
+def test_the_route_a_refused_kind_offers_terminates_on_that_arm(
+        stub, arm_kwargs, arm_name) -> None:
+    """Following the message's own route must NOT be refused a second time.
+
+    The refusal offers a route per arm, and on the tag arm "pass the kind name"
+    is refused again by the #12500 block — so that arm is told to drop `kind=`
+    instead. This test follows whatever the message says and asserts the follow-up
+    is SERVED, which is the class #12500 had to fix: a refusal whose route is a
+    dead end sends the caller in a circle.
+
+    Fails if the message stops being arm-aware: measured, replacing the tag
+    branch with the generic "pass the kind name" leaves every other case in this
+    file green, so nothing else pins it.
+
+    Reaches the value: the follow-up read reaches an accessor (the stub's call log
+    grows), so a served answer is distinguishable from a silently refused one.
+    """
+    from tortoise.mcp_server import tortoise_query
+
+    refused = tortoise_query(kind=True, **arm_kwargs)
+    assert isinstance(refused, dict) and "kind must be a string" in refused["error"], (
+        refused)
+
+    if "Omit kind=" in refused["error"]:
+        # the tag arm's route: drop kind= entirely
+        followed = tortoise_query(**arm_kwargs)
+    else:
+        # the generic route: pass a string kind name
+        followed = tortoise_query(kind="statement", **arm_kwargs)
+
+    assert not (isinstance(followed, dict) and "error" in followed), (
+        f"following the {arm_name} arm's own route was refused again: {followed}")
+    assert stub.calls, (
+        f"the {arm_name} arm's follow-up read never reached an accessor")
+
+
 @pytest.mark.parametrize("truthy_kind", [True, 1, 5, 1.0, ["statement"]])
 def test_a_truthy_non_str_kind_is_refused_not_served_as_an_empty_page(
         stub, truthy_kind) -> None:
     """A kind that is SET but not a string cannot match, so it is REFUSED.
 
-    Measured at `2d19277237` (tail tolerant, refusal not yet added) on a live lane:
-    `kind=True`/`1`/`5` returned `[]` while `kind=False` returned the whole
-    population — the
+    Measured at `2d19277237` (tail tolerant, refusal not yet added) on a live lane
+    whose rows all carry string kinds: `kind=True`/`1`/`5` returned `[]` while
+    `kind=False` returned the whole population — the
     #6146 wrong-empty class, and the tag arm refused those same values (#12500),
     so one argument value answered two ways. The list param is here for its own
     measured pre-fix answer: `{"error": "unhashable type: 'list'"}` leaked out of
@@ -178,7 +235,7 @@ def test_a_truthy_non_str_kind_is_refused_not_served_as_an_empty_page(
     measured). It cannot see WHERE the refusal sits relative to the arms: measured,
     moving it below both the `tag=` and `text=` arms leaves THIS test green — the
     placement claim belongs to
-    `test_the_two_arms_agree_that_a_truthy_non_str_kind_is_refused`.
+    `test_every_arm_agrees_that_a_truthy_non_str_kind_is_refused`.
 
     Reaches the value: no read may happen at all, which is what the empty call
     log asserts — a refusal placed after the accessor would still return an error
@@ -195,35 +252,43 @@ def test_a_truthy_non_str_kind_is_refused_not_served_as_an_empty_page(
         f"the refusal must fire ABOVE the arm, before any read: {stub.calls}")
 
 
-def test_the_two_arms_agree_that_a_truthy_non_str_kind_is_refused(stub) -> None:
-    """The tag arm and the structural arm must give ONE answer for one value.
+@pytest.mark.parametrize("arm_kwargs,arm_name", [
+    ({}, "structural"),
+    ({"tag": "x"}, "tag"),
+    ({"text": "quantum"}, "text"),
+])
+def test_every_arm_agrees_that_a_truthy_non_str_kind_is_refused(
+        stub, arm_kwargs, arm_name) -> None:
+    """Every arm must give ONE answer for one value.
 
-    Measured on a live lane at `2d19277237` (tail tolerant, refusal not yet added):
-    `tortoise_query(kind=True)` returned `[]` (a wrong-empty) while
-    `tortoise_query(tag="x", kind=True)` was refused by the #12500 tag block — two
-    answers for the same argument value,
-    the defect #12372 removed for `entity_type`. With the refusal above every arm
-    both answer with the SAME message: the #12582 one. Measured at this head, a
-    STRING kind still reaches the per-arm block on the tag arm (`tag="x",
-    kind="statement"` → "kind is not applied on the tag= arm (#12500)"), which is
-    why asserting the message — not just "an error" — is what pins the new
-    refusal ABOVE the tag arm's precedence split: moved below it, the tag arm
-    would answer `kind=True` with the #12500 sentence and this test would red.
+    Measured on a live lane at `2d19277237` (tail tolerant, refusal not yet
+    added), on a graph whose rows all carry string kinds: `tortoise_query(
+    kind=True)` returned `[]` (a wrong-empty) while `tortoise_query(tag="x",
+    kind=True)` was refused by the #12500 tag block — two answers for the same
+    argument value, the defect #12372 removed for `entity_type`. With the refusal
+    above every arm all three answer with the same #12582 message.
 
-    Reaches the value: neither call may reach the accessor.
+    Each arm is its own param because the fts arm is a separate code path:
+    measured, exempting only the text arm (`... and not text`) served `[]` for
+    `text=..., kind=True` with every other case in this file green. A STRING kind
+    still reaches the per-arm block on the tag arm (`tag="x", kind="statement"` →
+    "kind is not applied on the tag= arm (#12500)"), which is why asserting the
+    message — not just "an error" — is what pins the refusal ABOVE the tag arm's
+    precedence split.
+
+    Reaches the value: no arm may reach the accessor.
     """
     from tortoise.mcp_server import tortoise_query
 
-    structural = tortoise_query(kind=True)
-    tagged = tortoise_query(tag="x", kind=True)
+    res = tortoise_query(kind=True, **arm_kwargs)
 
-    for name, res in (("structural", structural), ("tag", tagged)):
-        assert isinstance(res, dict) and "error" in res, (
-            f"the {name} arm served {res!r} for kind=True")
-        assert "kind must be a string" in res["error"], (
-            f"the {name} arm answered with another rule's message: {res['error']}")
+    assert isinstance(res, dict) and "error" in res, (
+        f"the {arm_name} arm served {res!r} for kind=True")
+    assert "kind must be a string" in res["error"], (
+        f"the {arm_name} arm answered with another rule's message: {res['error']}")
     assert stub.calls == [], (
-        f"neither arm may reach the accessor with a non-str kind: {stub.calls}")
+        f"the {arm_name} arm reached the accessor with a non-str kind: "
+        f"{stub.calls}")
 
 
 @pytest.mark.parametrize("not_a_kind", [False, 0, 0.0, "", None, True, 1])
@@ -239,8 +304,9 @@ def test_a_non_str_kind_never_reaches_the_suggestion_builder(
     - the truthy-non-str refusal removed -> `True`/`1` reach the builder here,
       all five refusal params are served an empty page BY THIS STUB (the real SDK
       answers the list with the leaked `unhashable type: 'list'` instead, which
-      this fixture does not model — it never touches the expansion map), and the
-      two-arm test sees one arm refuse while the other serves — 8 reds, measured;
+      this fixture does not model — it never touches the expansion map), the
+      refusal test's params are all served, and every arm-parameterised case sees
+      a served read where it expects the refusal — 13 reds, measured;
     - a refusal for a FALSY kind -> the served-read cases red (5 in all), because
       they assert the read is SERVED, not refused.
 
@@ -276,10 +342,16 @@ def test_a_falsy_non_str_kind_serves_the_whole_population(stub, falsy_kind) -> N
     The empty-page case above cannot tell "the accessor answered with its page"
     from "an empty list was manufactured for this input" — measured: inserting
     either `if not isinstance(kind, str): return []` or `if not kind: return []`
-    between the read and the tail leaves every other case in this file green
-    (26 passed), i.e. the very #6146 wrong-empty this diff removes for TRUTHY
-    values could ship for falsy ones with no test red. Fails if such a
-    short-circuit is introduced after the read: the rows must come back.
+    between the read and the tail leaves every OTHER case in this file green and
+    reds exactly these two params, i.e. the very #6146 wrong-empty this diff
+    removes for TRUTHY values could ship for falsy ones with no test red before
+    this case existed. The other placements ARE seen, by the empty-page case's
+    call-log assertions, and the two spellings red different counts there:
+    `if not isinstance(kind, str): return []` reds five placed immediately before
+    the structured read and sixteen at the top of the body, while
+    `if not kind: return []` reds six and seven. This case exists for the one
+    placement none of those can see. Fails if such a short-circuit is introduced
+    after the read: the rows must come back.
 
     Reaches the value: the stub is given two rows, so an empty answer is
     distinguishable from a served one.
@@ -303,7 +375,8 @@ def test_an_empty_string_kind_is_served_as_before(stub) -> None:
     under that mutant `""` reaches the builder, but `compute_suggestion("")`
     returns None (measured), so no suggestion is attached and all three
     assertions here still hold — the four reds the mutant produces are all params
-    of the test above (`False`, `0`, `0.0` and its own `""` param), not this one.
+    of `test_a_non_str_kind_never_reaches_the_suggestion_builder` (`False`, `0`,
+    `0.0` and its own `""` param, measured 4 failed), not this one.
     There is no `isinstance` conjunct in the tail either: the truthy-non-str
     refusal above the arms makes one unreachable, so a redundant guard here would
     be a branch no case could distinguish from its absence.

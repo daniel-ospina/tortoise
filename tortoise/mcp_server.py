@@ -4361,14 +4361,15 @@ def tortoise_query(kind: str | None = None,
 
     Validation: page must be >= 1, offset >= 0, limit >= 1 — violations return
     a structured error dict. A `kind` that is SET but not a string (`True`, `1`,
-    `5`, `["statement"]`) is REFUSED (#12582): a point kind is a string property
-    and the accessor builds an equality against it, so a non-string can never
-    MATCH — serving `kind=True` as an empty page would present "this kind has no
-    rows" as a true answer when the population was simply unfilterable (the #6146
-    wrong-empty class). (The tag arm refuses the same values by its OWN rule —
-    tag mode reads every kind (#12500) — which is why one message for both arms
-    needed the refusal here, above the arms.) A FALSY non-str (`False`, `0`,
-    `0.0`) is "absent" and stays served, as above.
+    `5`, `["statement"]`) is REFUSED (#12582): it never NAMES a kind, and the
+    accessor either matches nothing (serving a "this kind has no rows" answer for
+    a filter that could not be applied — the #6146 wrong-empty class), matches a
+    row whose `pointKind` is itself not a string (reachable through the write
+    door, which only warns), or raises outright for an unhashable value. (The tag
+    arm refuses the same values by its OWN rule — tag mode reads every kind
+    (#12500) — which is why one message for all three arms needed the refusal
+    here, above the arms.) A FALSY non-str (`False`, `0`, `0.0`) is "absent" and
+    stays served, as above.
 
     Use tortoise_query for known shapes; use tortoise_search for semantic
     relevance; use tortoise_get_point for a single known ID.
@@ -4380,19 +4381,29 @@ def tortoise_query(kind: str | None = None,
         return _SafeError({"error": "offset must be >= 0, got " + str(offset)})
     if limit is not None and limit < 1:
         return _SafeError({"error": "limit must be >= 1, got " + str(limit)})
-    # #12582: a `kind` that is SET but not a string cannot name a point kind, and
-    # the two ways it failed differ. A HASHABLE non-str (`True`/`1`/`5`) gets
-    # `[kind]` back from both maps (`expand_kind` / `read_filter_kinds` fall back
-    # to `[kind]`, `pack_registry.py`), so the accessor builds an EQUALITY
+    # #12582: a `kind` that is SET but not a string is not a kind NAME, and the
+    # two ways the read answered one differ. A HASHABLE non-str (`True`/`1`/`5`)
+    # gets `[kind]` back from both maps (`expand_kind` / `read_filter_kinds` fall
+    # back to `[kind]`, `pack_registry.py`), so the accessor builds an EQUALITY
     # `n.pointKind = $kind` (`sdk.py`: the `len(expanded) == 1` branch — the
-    # `IN [...]` form is for a string that expands) and no row can carry it: it
-    # matched NOTHING and was served as `[]`, a true-looking "this kind has no
-    # rows" for a filter that could never be applied (the #6146 wrong-empty
-    # class). An UNHASHABLE one (a list) never gets that far — it raises inside
-    # the kind-expansion map BEFORE any read (`_operator_scope_clauses` ->
-    # `_expand_kind` -> `self._kind_expansions.get(kind, [kind])`) and leaked
-    # `unhashable type: 'list'` out as an error dict. Neither is the refusal such
-    # a value deserves. The tag arm
+    # `IN [...]` form is for a string that expands): against a graph of string
+    # kinds that matches nothing and was served as `[]`, a true-looking "this
+    # kind has no rows" for a filter that could never be applied (the #6146
+    # wrong-empty class, measured at `2d19277237` for `kind=5`). An UNHASHABLE
+    # one (a list) never gets that far — it raises inside the kind-expansion map
+    # BEFORE any read (`_operator_scope_clauses` -> `_expand_kind` ->
+    # `self._kind_expansions.get(kind, [kind])`) and leaked `unhashable type:
+    # 'list'` out as an error dict.
+    # ⛔ The reason for refusing is NOT "no row can carry it" — that claim is
+    # FALSE: the write door only WARNS for an unrecognised kind and
+    # `_refuse_invisible_kind` opts a non-str out (`if not isinstance(value, str):
+    # return`), so `create_point(True, …)` stores a `pointKind: True` row, and
+    # pre-fix `kind=True`/`1`/`1.0` MATCHED it (measured: 2 rows at
+    # `d05688df59` and at `2d19277237`; the float matched the int row by
+    # coercion). The reason is that a non-str never NAMES a kind: serving it is
+    # either an empty answer that looks true or a match against a row the kind
+    # vocabulary cannot name, and both are worse than a refusal that says so. The
+    # write door's half of that is #12763. The tag arm
     # already refuses the same values (#12500), so leaving the structural and fts
     # arms to answer them as an empty page (or a leaked internal error) made one
     # argument value answer two ways depending on the arm the caller happened to
@@ -4400,12 +4411,21 @@ def tortoise_query(kind: str | None = None,
     # arm; a FALSY non-str stays "absent" and is served (see the docstring's
     # `Validation:` paragraph).
     if kind and not isinstance(kind, str):
+        # The route must TERMINATE on the arm the caller actually used: on the
+        # tag= arm "pass the kind name" is refused again by the #12500 block
+        # below, so that arm is told to drop kind= (which is all it can do).
+        _route = (
+            "Omit kind= — tag mode reads every kind of tagged Point, so kind= "
+            "narrows nothing there (#12500)."
+            if tag is not None else
+            "Pass a string kind name, or omit kind= for no kind filter (a falsy "
+            "value such as False/0 already means that)."
+        )
         return _SafeError({"error": (
             f"kind must be a string naming a point kind — got "
-            f"{type(kind).__name__} ({kind!r}). Omit kind= for no kind filter "
-            f"(a falsy value such as False/0 already means that), or pass the "
-            f"kind name; a non-string is refused rather than served as an empty "
-            f"page, because it cannot match any kind (#12582).")})
+            f"{type(kind).__name__} ({kind!r}). {_route} A non-string never names "
+            f"a kind, so it is refused rather than served as if it filtered "
+            f"(#12582).")})
     # Resolve include_retracted (#888): explicit param wins; else the filters-dict
     # value (don't silently drop a caller's True intent — review P2-2); else False.
     # Guard non-dict filters: a malformed-JSON string from _parse passes the substring
