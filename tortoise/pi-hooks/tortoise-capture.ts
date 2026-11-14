@@ -1,4 +1,4 @@
-// tortoise-hook-version: 21
+// tortoise-hook-version: 22
 // tortoise-capture — the in-repo Pi capture extension (#3575, #1727 T1).
 //
 // The `tortoise-hook-version` marker above is the install-contract generation
@@ -53,6 +53,28 @@
 // ("reinstall"), never as `modified-artifact` ("local edit"). Both halves of the
 // Pi seam move together — `contract_version_for("pi")` grades them as ONE
 // contract.
+// Generation 22 (#12460): the filing path READS the 2xx body. `post()` returned
+// only `{ok, status, detail}`, so `flushSpool` could not see what the server said
+// about the capture — a synthesised confirmation body's `confirmed`, or (the
+// shape this leg actually receives) the raw capture receipt's `extracted` — and
+// therefore could neither STAMP nor CLEAR the
+// unrecorded-outcome marker (#12379) that the Python drain writes
+// into the SAME spool meta. A session the server had RESOLVED kept being named by
+// `session health` as "filed with no recorded outcome at the time" until its entry
+// was evicted, while a Python-side filing of the same verdict cleared it: two
+// legs, one shared directory, opposite answers about one session. `PostResult.body`
+// now carries the parsed body and the filing CAS applies the predicate pair
+// (`outcomeUnrecorded` stamps, `outcomeRecorded` clears; anything else leaves the
+// marker alone). Between them the two predicates read both vocabularies
+// (`outcomeUnrecorded` the `extraction_outcome` key, `outcomeRecorded` the
+// `confirmed` verdict and the `extracted` count). On this leg only the
+// receipt is reachable, so `extracted >= 1` is its live clause; on the Python leg
+// that same receipt is the routine 2xx TOO (`__main__`'s `PostOutcome` carries
+// `json.loads(resp.read())`), and the synthesised `confirmed` body is an ADDITIONAL
+// shape from its confirm-on-refusal path.
+// BEHAVIOUR MOVED on shipped bytes, so the generation moves with it — a
+// generation-21 copy installed from main still cannot clear the marker and must
+// read as STALE (its read half changes by its header line only).
 //
 // Generation 19 (#11662): the MARKER moves onto bytes that already shipped —
 // the same shape as generation 4. #11636 edited this artifact and left the
@@ -434,6 +456,17 @@ export interface PostResult {
   ok: boolean;
   status?: number;
   detail?: string;
+  /** #12460: the PARSED 2xx body, when there was one — the only place the
+   *  server's own account of a capture lives. ⛔ It is NOT a `confirmed` pair on
+   *  this leg: that verdict is synthesised by the Python CLI's `_session_post`
+   *  for a refusal that committed, and the Pi hook posts to `/v1/sessions`
+   *  directly. What arrives here is the capture RECEIPT
+   *  (`{session_id, turns, extracted, points, extraction_mode, …}`), which is
+   *  why `outcomeRecorded` has to read `extracted` rather than only the mirrored
+   *  verdict vocabulary. Absent when there was no usable body (no body, a
+   *  non-JSON body, or a read that failed): an uninformative body is not
+   *  evidence, and `undefined` says so without inventing a verdict. */
+  body?: unknown;
 }
 
 export type Env = Record<string, string | undefined>;
@@ -918,7 +951,26 @@ async function post(
       body: JSON.stringify(body),
       signal: controller.signal,
     });
-    if (res.ok) return { ok: true, status: res.status };
+    if (res.ok) {
+      // #12460: the 2xx BODY is the evidence. What the server said about the
+      // capture lives there — the raw receipt's `extracted` on this leg, or a
+      // synthesised confirmation body's `confirmed` on the Python drain's — and
+      // it is the ONLY input the
+      // spool marker's stamp/clear is allowed to act on (see `outcomeRecorded` /
+      // `outcomeUnrecorded`). A body that is empty, not JSON, or says nothing about
+      // the outcome leaves `body` undefined — the filing succeeded, and "succeeded"
+      // is not "recorded how extraction ended".
+      let parsed: unknown;
+      try {
+        parsed = await res.json();
+      } catch {
+        // a 2xx with no usable JSON body carries no verdict
+        parsed = undefined;
+      }
+      return parsed === undefined
+        ? { ok: true, status: res.status }
+        : { ok: true, status: res.status, body: parsed };
+    }
     let detail = `HTTP ${res.status}`;
     try {
       const parsed = (await res.json()) as { detail?: unknown };
@@ -1170,13 +1222,25 @@ export interface SpoolMeta {
    *  equal. */
   filed_stamp?: number;
   filed_at?: string;
-  /** #12379: the Python drain filed this entry with an extraction outcome the
-   *  server never recorded (`extraction_outcome: "unknown"`). Written ONLY by
-   *  that leg; this one PRESERVES it across snapshots, because a growing session
-   *  rewrites the meta on every turn and the state is not resolved by a new turn
-   *  (a NULL-outcome session replays instead of re-extracting). Without the carry
-   *  a Python-stamped entry loses its only durable trace the next time the Pi leg
-   *  re-snapshots it — the two legs share this directory. */
+  /** #12379: the drain filed this entry with an extraction outcome the server
+   *  never recorded (`extraction_outcome: "unknown"`) — the durable trace
+   *  `session health` counts. Both legs run the same predicate pair (`flushSpool`
+   *  stamps via `outcomeUnrecorded`, clears via `outcomeRecorded`; the drain does
+   *  the same in `capture_spool._flush_one`), so this leg DOES stamp — ⚠️ but the
+   *  key has no producer on this tree: `__main__._session_post._refused` builds
+   *  only `{"confirmed": verdict}` (the `extraction_outcome` half is #12374's
+   *  PENDING branch), and `hosted_api`'s receipt carries no such field, so nothing
+   *  this leg can receive says `"unknown"` today. The stamp branch is therefore
+   *  live code with no live input — kept so the pair stays symmetric (and so the
+   *  predicate cannot be trimmed to "clear only" without the trim being visible).
+   *  ⚠️ It does NOT become live when #12374 lands: that producer is Python-CLI's
+   *  `_session_post`, which this leg never calls; only a `hosted_api` receipt that
+   *  grew the field could make it fire. It is also CARRIED across snapshots,
+   *  because a growing session rewrites the meta on every turn and a new turn does
+   *  not resolve the state (a NULL-outcome session replays instead of
+   *  re-extracting). Without the carry a stamped entry loses its only durable
+   *  trace the next time the Pi leg re-snapshots it — the two legs share this
+   *  directory. */
   extraction_outcome?: string;
   /** #7708: set when a PERMANENT HTTP refusal was recorded. The entry is KEPT
    *  but `flushSpool` skips it — terminal, never destructive. Cleared when a
@@ -2245,29 +2309,30 @@ export function writeSpoolEntry(
     // (attempts=0) and a genuinely fresh entry starts at zero.
     attempts: clampAttempts(prior?.attempts),
     next_attempt_at_ms: carriedWindow(prior?.next_attempt_at_ms),
-    // #12379: the Python drain's "extraction outcome was never recorded" marker
-    // is CARRIED, not rebuilt. This leg never WRITES it and never CLEARS it: the
-    // drain's filing CAS (`capture_spool._flush_one`) does both, stamping on a
-    // body that says the outcome was never recorded and clearing on a body that
-    // instead REPORTS it (`filed` / `unextracted`).
-    //
-    // ⚠️ This leg DOES file (its own `flushSpool`), but its filing path reads no
-    // response body — `PostResult` carries none — so it CANNOT stamp or clear
-    // this key. Its obligation is therefore PRESERVATION, and stating the
-    // residual rather than implying it: a session whose growth is filed by this
-    // leg keeps a marker that a Python-side filing of the same verdict would
-    // have cleared, until the entry is pruned. That over-reports an unknown state
-    // (it can never hide a resolved one), which is why the `session health` line
-    // is worded historically; porting the clear here needs the body on this path.
+    // #12379: the "extraction outcome was never recorded" marker is CARRIED by
+    // a snapshot, not rebuilt — the turn path cannot decide it either way. The
+    // DECISIONS belong to the two FILING legs: the drain's CAS
+    // (`capture_spool._flush_one`) and, since #12460, this leg's own
+    // `flushSpool` CAS — each running the SAME predicate pair, pinned equal across
+    // the two files: clear on `confirmed` in `{filed, unextracted}` OR on an
+    // integer `extracted >= 1`, nothing else. The PREDICATES are identical; the
+    // BODIES are not, so one shape can still be decided differently: Python also
+    // receives a synthesised `{"confirmed": "unextracted"}` for a refused POST that
+    // a confirm-on-refusal GET found committed, and this leg has no such path — so
+    // on a Pi-filing box a keyless session resolved that way keeps the marker until
+    // eviction. Fail-SAFE in the sense that matters: this leg can only clear on
+    // bodies it actually receives, and every one of those is a body the Python leg
+    // would clear on too. The health line's historical wording survives only the
+    // case neither leg can resolve (no later filing at all).
     //
     // The carry itself matters because the two legs share this directory: a
     // growing session rewrites the meta on EVERY turn, so a fresh meta literal
-    // without it would erase a Python-stamped entry's only durable trace on the
-    // next Pi snapshot. A new turn cannot resolve the state (a NULL-outcome
-    // session replays rather than re-extracts), so preserving it is the safe
-    // answer for the leg that cannot decide.
-    ...(prior?.extraction_outcome === "unknown"
-      ? { extraction_outcome: "unknown" }
+    // without it would erase a stamped entry's only durable trace on the next
+    // Pi snapshot. A new turn cannot resolve the state (a NULL-outcome session
+    // replays rather than re-extracts), so preserving it is the safe answer for
+    // the leg that cannot decide.
+    ...(prior?.[UNRECORDED_OUTCOME_KEY] === UNRECORDED_OUTCOME_VALUE
+      ? { [UNRECORDED_OUTCOME_KEY]: UNRECORDED_OUTCOME_VALUE }
       : {}),
     // A lane UPGRADE also invalidates the filing marker: `filed_key` is
     // content-derived (the lane is not part of it), so an entry already filed
@@ -2937,6 +3002,151 @@ function terminalMarker(meta: SpoolMeta): { reason?: string; detail?: string } |
 }
 
 /**
+ * #12379 / #12460: the spool meta key the drain uses for "the server never
+ * recorded how extraction ended". MIRRORED byte-for-byte from the Python leg
+ * (`capture_spool.UNRECORDED_OUTCOME_KEY` / `UNRECORDED_OUTCOME_VALUE`) — the
+ * two legs write ONE shared meta, so a different spelling here would mean
+ * neither leg could see the other's marker.
+ */
+const UNRECORDED_OUTCOME_KEY = "extraction_outcome";
+const UNRECORDED_OUTCOME_VALUE = "unknown";
+
+/**
+ * The `confirmed` verdicts that mean the capture's ending is settled, so a marker
+ * standing over one of them is stale.
+ *
+ * MIRRORED from `capture_spool.RECORDED_OUTCOME_VERDICTS` — `filed` is
+ * `extracted >= 1` (#12374's FILED verdict); `unextracted` is the confirmation
+ * read's "durable, no points visible yet" (`session_confirm.UNEXTRACTED`) — a
+ * verdict that fires on any zero count BEHIND A TURN MATCH (a non-empty mismatch or
+ * a grown set returns `TURNS_MISSING`, an absent one `UNKNOWN` — both defer), not
+ * only on a store-only capture.
+ * ⚠️ `unextracted` rests on the confirmation READ matching the posted
+ * turns, NOT on the server having recorded an outcome — on this tree that read
+ * does not consult `extraction.outcome_known` (see the ⚠️ RESIDUAL below), so it
+ * is exactly as strong as the read, and #12374's PENDING branch is what qualifies
+ * it. Everything else — `pending` (still unknown), `replayed` (already captured,
+ * says nothing about extraction), an absent verdict, a malformed body — leaves
+ * the marker alone.
+ */
+const RECORDED_OUTCOME_VERDICTS = ["filed", "unextracted"] as const;
+
+/**
+ * #12379: does this 2xx body say the EXTRACTION OUTCOME was never recorded?
+ *
+ * THE one definition of the state #12379 owns on this leg; the Python leg's
+ * `outcome_unrecorded` is the same predicate over the same wire body. It is
+ * NOT "extracted nothing": a keyless capture (#4188) or a team with extraction
+ * switched off (#4258) genuinely produced no points and the server SAYS so
+ * (`outcome_known: true`) — pricing those as unrecorded would offer a re-attempt
+ * for a session that may already have extracted (the #12362 bug).
+ *
+ * ⚠️ `outcome_known` is read off the STORED session (`capture_ok is not None`),
+ * not per write: a keyless RE-capture writes no new outcome, so a session whose
+ * `capture_ok` is `null` (built by a driver that never records one) stays
+ * `outcome_known: false` — mirroring the Python leg — while one that already
+ * carries a recorded lane keeps reading true.
+ *
+ * Deliberately fail-safe: only the explicit marker counts, so a body from a
+ * tree without #12362, a malformed one, or `undefined` never FABRICATES a trace.
+ */
+function outcomeUnrecorded(body: unknown): boolean {
+  return Boolean(
+    body && typeof body === "object" && !Array.isArray(body) &&
+      (body as Record<string, unknown>)[UNRECORDED_OUTCOME_KEY] === UNRECORDED_OUTCOME_VALUE,
+  );
+}
+
+/**
+ * #12460: does this 2xx body settle how the capture ended?
+ *
+ * The inverse question, and the ONLY evidence allowed to CLEAR the marker.
+ * A CLOSED allow-list, never "anything that is not pending": a typo, a `null`, a
+ * future verdict or an uninformative body must leave the marker alone, because
+ * clearing over one of them deletes the only trace on the routine
+ * resume/clear/compact path where the server answers `replayed` (measured
+ * in #12416's review round 1: marker set → replay filing → marker gone, while
+ * the condition provably persisted).
+ *
+ * MIRRORED from `capture_spool.outcome_recorded` — one predicate per leg, and
+ * both must stay identical or the two writes to one shared meta flip the marker
+ * against each other.
+ *
+ * ⛔ Two body SHAPES carry this verdict, and only one of them was believed by
+ * the first version of this port — it read only the one that never arrives here:
+ *
+ *  1. The **Python drain's** vocabulary (`confirmed: "filed" | "unextracted"`).
+ *     That body is synthesised by `__main__._session_post` for a refusal that
+ *     turned out to have committed — the Pi leg POSTs to `/v1/sessions` directly
+ *     and never sees it. Kept because it is the same question and a body carrying
+ *     it must be read alike; on this leg it is inert today.
+ *  2. The **capture receipt** this leg actually receives — the `resp = {…}`
+ *     dict in `hosted_api._capture_session_impl` (`tortoise/hosted_api.py`,
+ *     `resp = {` .. `"first_capture": …}`): `{session_id, turns, extracted,
+ *     points, extraction_mode, …}` — NO `confirmed`, NO `extraction_outcome`.
+ *     So the clear has to be derived from the receipt's own evidence, or this
+ *     port is dead code that closes the issue without changing behaviour
+ *     (measured in this lane's verification: a mirrored-only predicate never
+ *     fires in production).
+ *
+ * The receipt clause, the SAME evidence the Python leg's verdicts rest on
+ * (`session_confirm.confirm_capture`):
+ *
+ *  - `extracted >= 1` ⇒ extraction RAN ⇒ `FILED` ⇒ recorded. This is the
+ *    dominant resolved case, and the one #12460's symptom is about. A REPLAY
+ *    reports `extracted: 0`, so the routine resume/clear/compact path can never
+ *    satisfy it.
+ *
+ * ⛔ `extracted: 0` in a normal mode is NOT on the list. The capture handler that
+ * the transport bound abandoned may still be extracting — the server's own
+ * "there is no outcome yet" state — so a zero is AMBIGUOUS, not a negative, and
+ * treating it as evidence is the #12362 bug wearing the other mask. The marker
+ * stands, which over-reports an unknown state and never hides a resolved one.
+ *
+ * ⛔ NEITHER IS A STORE-ONLY `extraction_mode`. `no-provider` /
+ * `extraction-disabled` says only that THIS REQUEST skipped extraction: the
+ * server gates its durable outcome record on `not session_existed`
+ * (`hosted_api.py` — `_record_session_state = (not session_existed) if store_only`),
+ * so a keyless RE-capture of an existing session records NOTHING while still
+ * reporting `extraction_mode: "no-provider"` with `extracted: 0`. Clearing on
+ * that destroys the only trace of a session whose outcome was never recorded —
+ * exactly the false-PASS direction this trace exists to prevent (found in review
+ * of PR #12507, verified against `hosted_api.py`).
+ *
+ * ⚠️ RESIDUAL, and it is NOT closed by the Python leg either: `confirm_capture`
+ * matches the posted turns and reads `extracted`, but does NOT consult
+ * `extraction.outcome_known` on this tree (`session_confirm.py`), so its
+ * `unextracted` verdict cannot distinguish a store-only re-capture from a
+ * resolved store-only outcome — a `confirmed: "unextracted"` body can therefore
+ * still clear this marker over an unrecorded outcome. That is pre-existing
+ * (#12379's accepted decision) and #12374's PENDING branch is what qualifies it;
+ * it is stated here so this paragraph's own reasoning is not read as "the other
+ * leg is authoritative".
+ */
+function outcomeRecorded(body: unknown): boolean {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return false;
+  const receipt = body as Record<string, unknown>;
+  const verdict = receipt.confirmed;
+  if (
+    typeof verdict === "string" &&
+    (RECORDED_OUTCOME_VERDICTS as readonly string[])
+      .includes(verdict.trim().toLowerCase())
+  ) {
+    return true;
+  }
+  // `extracted >= 1` — the clause mirrors `session_confirm.session_extracted`:
+  // a bool, a string or a non-numeric reads as 0, so an odd count can never
+  // satisfy it. ⚠️ Not identical to the Python predicate on one input: JSON has
+  // no float/integer distinction here (`JSON.parse('{"extracted": 4.0}')` gives
+  // `4`, and `Number.isInteger(4)` is true) while Python's `isinstance(4.0, int)`
+  // is false — so a float-spelled count WOULD clear on this leg and not on the
+  // other. Unreachable in practice: the only producer is
+  // `hosted_api`'s `"extracted": len(extracted)`, an integer token.
+  const extracted = receipt.extracted;
+  return typeof extracted === "number" && Number.isInteger(extracted) && extracted >= 1;
+}
+
+/**
  * #2100: is this entry already FILED — has the server accepted EXACTLY this
  * content, for this lane and this client stamp?
  *
@@ -3194,6 +3404,33 @@ export async function flushSpool(
           onDisk.filed_at = new Date(nowMs).toISOString();
           onDisk.attempts = 0;
           onDisk.next_attempt_at_ms = 0;
+          // #12460: the DURABLE half of the trace, in the SAME CAS as
+          // `filed_key` so it describes the content that was actually filed —
+          // asking the SAME two questions `capture_spool._flush_one` asks
+          // (stamp when the outcome is unrecorded, clear when it is recorded),
+          // answered from the body THIS leg receives: the raw capture receipt,
+          // whose `extracted` count is the evidence — the
+          // synthesised `confirmed` body the Python drain sees never reaches
+          // this leg.
+          //
+          // Before this, the filing path read no response body at all, so this
+          // leg could neither STAMP the marker nor CLEAR it: a session the
+          // server had resolved kept being named by `session health` as "filed
+          // with no recorded outcome at the time" until its entry was evicted,
+          // while a Python-side filing of the SAME verdict cleared it. Two legs,
+          // one shared directory, opposite answers about one session.
+          //
+          // ⛔ An UNINFORMATIVE body never clears it (round 1's P1 in #12416's
+          // review): `replayed`, a bare 2xx, a malformed one — each says nothing
+          // about extraction, and a NULL-outcome session replays rather than
+          // re-extracts, so clearing there deletes the only trace while the
+          // condition persists. Only `outcomeRecorded` may clear, and only
+          // `outcomeUnrecorded` may stamp.
+          if (outcomeUnrecorded(res.body)) {
+            onDisk[UNRECORDED_OUTCOME_KEY] = UNRECORDED_OUTCOME_VALUE;
+          } else if (outcomeRecorded(res.body)) {
+            delete onDisk[UNRECORDED_OUTCOME_KEY];
+          }
           writeMeta(dir, onDisk);
         }
         // else: the posted content WAS filed; the entry keeps the newer turns

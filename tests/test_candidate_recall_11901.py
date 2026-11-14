@@ -1495,8 +1495,9 @@ def test_the_control_artifact_covers_both_pools_and_all_three_scorers(lexical):
     # ⛔ THE CEILING NOTE IS A CLAIM, so it is pinned, not just generated: the
     # retracted wording ("its ceiling is arm 1's miss_past_k … the
     # miss_absent_at_max_k rows are unreachable at every pool width") is FALSE on
-    # this artifact's own data (miss_past_k at k=P is 0 by construction, and the
-    # pool-40 arm returns every gold), and it survived in this file after the
+    # this artifact's own data (miss_past_k is 0 by construction ONLY at arm 1's
+    # widest measured window, and the pool-40 arm returns every gold), and it
+    # survived in this file after the
     # brief retracted it — the artifact contradicting the document it is the
     # evidence for.
     for arm in ("rerank", "lexical_difflib", "lexical_overlap"):
@@ -1557,15 +1558,21 @@ def test_the_artifacts_ceiling_note_is_the_one_the_tool_emits(
 
     §7 points at this JSON as its citation, so a note left over from an earlier
     draft hands an auditing reader an inference the PR says it removed: the
-    committed file still called the ceiling "arm 1's miss_past_k" — which is 0 at
-    k=P BY CONSTRUCTION, and therefore no bound at all — two revisions after the
+    committed file still called the ceiling "arm 1's miss_past_k" — which is 0 BY
+    CONSTRUCTION only at arm 1's widest measured window (0 is reachable at any
+    narrower k), and therefore no bound at any width — two revisions after the
     brief and the body were corrected. The note is a GENERATED string, so the pin
     is against the generator, not against a copy of its text: change either side
     and this reds.
     """
     source = Path(tool_mod.__file__).read_text()
     start = source.index('"ceiling_note": (')
-    literal = source[start:source.index("}", start)]
+    # ⛔ SLICE TO THE `.format(` TERMINATOR, not to the first `}`: the template
+    # carries a `{label}` placeholder, and `source.index("}", start)` stopped
+    # INSIDE it — truncating the "literal" to the text before the placeholder, so
+    # every comparison below would have been against half a note.
+    end = source.index(".format(label=label)", start)
+    literal = source[start:end]
     literal = literal[literal.index("(") + 1:]
     emitted = "".join(re.findall(r'"([^"]*)"', literal))
     assert emitted, "could not read the tool's ceiling_note literal"
@@ -1577,16 +1584,61 @@ def test_the_artifacts_ceiling_note_is_the_one_the_tool_emits(
     # measured figure.
     assert not re.search(r"\b\d+/\d+", emitted), (
         f"the ceiling note restates a measured figure: {emitted}")
+    # ⛔ PRESENCE, not just text: the previous form `continue`d past any arm
+    # without a note, so DELETING `arms.rerank.ceiling_note` from an artifact left
+    # the suite green (measured — the coverage came only from the lexical
+    # control's older assertion). The expected carriers are named here instead, so
+    # a missing note is a failure rather than a skip.
+    EXPECTED_CARRIERS = {
+        "measurement-lexical-control.json": {"rerank", "lexical_difflib", "lexical_overlap"},
+        "measurement-noun-path.json": {"rerank"},
+    }
     for artifact, name in ((lexical, "measurement-lexical-control.json"),
                            (noun, "measurement-noun-path.json")):
-        for arm, arm_data in artifact["arms"].items():
-            if not isinstance(arm_data, dict) or "ceiling_note" not in arm_data:
-                continue
-            got = arm_data["ceiling_note"]
-            assert got == emitted, (
+        carriers = {arm for arm, arm_data in artifact["arms"].items()
+                    if isinstance(arm_data, dict) and "ceiling_note" in arm_data}
+        assert carriers == EXPECTED_CARRIERS[name], (
+            f"{name}: the ceiling_note carriers moved — expected "
+            f"{sorted(EXPECTED_CARRIERS[name])}, found {sorted(carriers)} "
+            "(a missing note is not a pass)")
+        for arm in sorted(carriers):
+            got = artifact["arms"][arm]["ceiling_note"]
+            # ⛔ RENDER THE TEMPLATE PER CARRIER. The note names the arm's OWN
+            # achieved cell, so the same literal becomes three different strings;
+            # comparing every carrier against one rendering is what let a
+            # `arms.rerank` pointer sit on the lexical arms, naming a different
+            # arm's numbers than the one the note describes.
+            assert "{label}" in emitted, (
+                "the ceiling note lost its {label} placeholder — a constant arm "
+                "pointer reads the WRONG arm on the lexical carriers")
+            want = emitted.replace("{label}", arm)
+            # ⛔ THE POINTER MUST NAME ITS OWN CARRIER. `"{label}" in emitted` alone
+            # is satisfied by a note that hard-codes `arms.rerank` in the pointer
+            # and puts the placeholder somewhere decorative — measured: that mutant
+            # passed while the lexical carriers read `arms.rerank.<P>`.
+            assert f"arms.{arm}.<P>.exact.recall_3_after" in got, (
+                f"{name}:{arm}: the note names another arm's achieved cell — it "
+                f"must point at `arms.{arm}.<P>.exact.recall_3_after`")
+            # ⛔ EVERY arm-bearing pointer, not just the achieved cell. The note
+            # now carries a SECOND `arms.{label}` pointer (the "this arm's own
+            # at-pool figures live in its ... cell" clause), and pinning only the
+            # first left it free: measured, hard-coding THAT one to `arms.rerank`
+            # (with the artifacts regenerated) kept this test green while the
+            # lexical carriers pointed at the rerank arm's numbers.
+            foreign = sorted({a for a in ("rerank", "lexical_difflib",
+                                         "lexical_overlap") if a != arm})
+            for other in foreign:
+                assert f"arms.{other}." not in got, (
+                    f"{name}:{arm}: the note carries a pointer into `arms.{other}` "
+                    f"— every arm-bearing pointer must name this carrier")
+            assert got.count(f"arms.{arm}.") == emitted.count(
+                "arms.{label}."), (
+                f"{name}:{arm}: the note does not carry every one of the "
+                f"template's arm pointers")
+            assert got == want, (
                 f"{name}:{arm}: the artifact's ceiling_note is not what the tool "
-                f"emits — regenerate the artifact (it is generated, never "
-                f"hand-edited)")
+                f"emits for this arm — regenerate the artifact (it is generated, "
+                f"never hand-edited)")
             assert "its ceiling is arm 1" not in got, (
                 f"{arm}: the retracted 'arm 1's miss_past_k' reading is back")
 

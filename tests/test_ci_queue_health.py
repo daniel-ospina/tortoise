@@ -683,6 +683,16 @@ def test_read_runs_stops_on_a_short_page(monkeypatch):
     assert truncated is False
 
 
+def test_read_runs_short_page_below_total_count_is_truncated(monkeypatch):
+    # #12395: a short page is not the end of the feed when total_count says more exist.
+    monkeypatch.setattr(
+        Q, "gh_json", lambda args: {"total_count": 205, "workflow_runs": [{"id": i} for i in range(98)]}
+    )
+    items, truncated = Q.read_runs("o/r", "queued", max_pages=5)
+    assert len(items) == 98
+    assert truncated is True          # 205 declared, 98 read
+
+
 def test_read_runs_raises_rather_than_returning_an_empty_queue(monkeypatch):
     monkeypatch.setattr(Q, "gh_json", lambda args: {"total_count": 0, "workflow_runs": "nope"})
     with pytest.raises(Q.MeasureError):

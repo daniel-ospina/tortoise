@@ -483,9 +483,11 @@ class LexicalScorer:
       character-only perturbations produce.
     * ``overlap`` — Jaccard over lowercased alphanumeric tokens. Token-level,
       so it is the strongest fair form of "a 5 us string compare". (An exact
-      match needs no short-circuit: equal token sets make the Jaccard ratio 1.0
-      on its own, and a branch that returned early would have been a second code
-      path to time.)
+      match needs no short-circuit: equal NON-EMPTY token sets make the Jaccard
+      ratio 1.0 on its own, and a branch that returned early would have been a
+      second code path to time. ⛔ Two EMPTY token sets are 0.0 — returned by the
+      ``if not ta or not tb`` guard in ``_one``, not by the ratio — so the
+      shortcut is safe to omit either way.)
     """
 
     def __init__(self, mode: str = "difflib") -> None:
@@ -596,23 +598,70 @@ def _rerank_arm(
         # numbers ("277/300 at a 15-window, 300/300 at 40") as a literal, so a
         # re-run on a grown corpus (this file already records `population_digest`
         # moving between runs) would have shipped a note contradicting its OWN
-        # `arms.exact.<P>.in_window`, and a hand-edit of either artifact's copy was
+        # `arms.<label>.<P>.exact`, and a hand-edit of either artifact's copy was
         # invisible (measured: rewriting 277 -> 299 in the noun-path artifact left
         # every test green). The figures now live only where they are COMPUTED —
-        # `arms.exact.<P>.in_window` / `mentions` — and the note says which cell
-        # to read.
-        "ceiling_note": (
+        # `arms.<label>.<P>.exact.recall_3_after` / `mentions` — and the note says
+        # which cell to read AND that it is the ACHIEVED count, not the ceiling
+        # (`recall_3_before` minus `lost` plus `gained` is what separates them; the
+        # note called the two identical, then called `lost` the discriminator, which
+        # is wrong in ONE direction at a pool wider than the top-3 cut — there `lost`
+        # 0 is NECESSARY but not sufficient: the witness is a rerank with `lost` 0 and
+        # `gained` 0 that still leaves an in-pool gold outside the top 3 (at a pool no
+        # wider than the cut, `lost` 0 IS sufficient — every in-window gold is already
+        # in the top 3).
+        # ⛔ LABEL-DERIVED, and it has to be: this same note is emitted onto the
+        # lexical carriers too (`_rerank_arm(..., label=...)`), where "this arm" is
+        # `lexical_difflib` / `lexical_overlap`. A hard-coded `arms.rerank` pointer
+        # read the WRONG ARM there — the same defect the ceiling half of this note
+        # was rewritten to remove, reintroduced by a constant string.
+        "ceiling_note": (  # noqa: UP032 — .format keeps the literal segments the test parses
             "a reranker only reorders rows the legs already returned, so its "
-            "ceiling is the number of golds the legs put INSIDE the scored "
-            "window at that width — in_window(P) of `mentions`, WIDTH DEPENDENT: "
-            "read `arms.exact.<P>.in_window` for each width in this artifact "
-            "rather than a figure quoted here (the pool-40 arm returns every gold "
-            "arm 1's maximum window 15 already returned, which is why its "
-            "in_window equals the mention count). miss_past_k at k=P is 0 BY "
-            "CONSTRUCTION (a response has at most P rows, so 'the rank is past P' "
-            "cannot occur) and is not the ceiling; miss_absent_at_max_k is not a "
-            "width-independent bound either — it counts golds absent within "
-            "arm 1's MAXIMUM window (15)"),
+            "CEILING is in_window(P) — the number of golds the legs put INSIDE the "
+            "scored window at that width — while the figure this arm records as its "
+            "HEADLINE is the ACHIEVED one: "
+            "`arms.{label}.<P>.exact.recall_3_after` over its `mentions` "
+            "denominator. ⛔ The two are not the same quantity: the achieved figure "
+            "is the ceiling MINUS the in-pool golds the arm still leaves outside "
+            "the top 3, i.e. `recall_3_before` minus `lost` plus `gained`, so read "
+            "those three fields in the same cell rather than treating the achieved "
+            "count as the ceiling — at a pool wider than the top-3 cut `lost` 0 is "
+            "necessary but not sufficient (it can be 0 with the achieved figure still "
+            "below the ceiling). WIDTH "
+            "DEPENDENT throughout, and not quoted here. "
+            "⛔ `arms.exact` is a DIFFERENT table: arm 1's in-window count at arm 1's "
+            "widths, beside arm 1's own miss counters, sliced by class under "
+            "`arms.exact_by_class.<cls>.<k>.in_window`. A pool width outside arm 1's "
+            "key set has no cell there at all, so read it only where the key matches "
+            "the width you are asking about; this arm's own at-pool figures live in "
+            "its `arms.{label}.<P>.exact` cell instead, which stores no in_window "
+            "of its own — no other arm records a FULL-POPULATION mention-level in-pool "
+            "count (arm 4 keeps one for its gated subset), and arm 1's is at arm 1's "
+            "own four widths only — so at a pool width "
+            "outside that set the ceiling is NOT recorded here: it is a measurement "
+            "of what the legs returned at that width, not a function of the width, so "
+            "it has to be re-measured rather than read off. The VARIANT pairs carry "
+            "at-pool TOP-3 "
+            "counts of their own (`variant.in_window_3_before` / `in_window_3_after`); "
+            "the variant pairs' in-pool count is arm 2's, in "
+            "`arms.variant.<k>.in_window` and `arms.variant_by_class.<cls>.<k>.in_window` "
+            "at arm 2's widths — WINDOW containment like arm 1's, but over the "
+            "variant-PAIR population rather than this arm's mentions, which is why it is "
+            "not this arm's ceiling. The separate `in_window_3_before` / "
+            "`in_window_3_after` fields measure TOP-3 containment instead: they are "
+            "counted over the same variant PAIRS, so their comparand is that pair-level "
+            "window count, not this arm's mention ceiling — they equal it only where "
+            "every in-window gold happens to land in the top 3, which is always the "
+            "case at a pool no wider than the cut. So treat them as a different "
+            "quantity, not as the ceiling. miss_past_k is "
+            "0 BY CONSTRUCTION only "
+            "at arm 1's WIDEST window (a response has at most that many rows, so "
+            "'the rank is past it' cannot occur) and can be non-zero at a narrower "
+            "k, where a gold the legs returned further down is genuinely past the "
+            "cut — so it is never a width-independent ceiling at any width; "
+            "miss_absent_at_max_k is "
+            "not a width-independent bound either — it counts golds absent within "
+            "arm 1's MAXIMUM window").format(label=label),
     }
     # ⛔ THE ORDER IS PRODUCED BY THE SHIPPED FUNCTION, NOT BY A COPY OF IT.
     # This arm used to sort the scores itself and reorder EVERY row, including a
@@ -1592,16 +1641,31 @@ def run(args: argparse.Namespace) -> int:
         # ⛔ A reranker REORDERS what retrieval returned; it cannot surface a row
         # the leg never produced. So this arm's ceiling is `in_window(P)` — the
         # golds the legs put INSIDE the scored window at that width — which is
-        # WIDTH DEPENDENT, so the figures live in `arms.exact.<P>.in_window`
-        # (computed) and NOT as a literal here: a re-run moves them, and an
-        # earlier draft hardcoded one run's pair in the emitted note.
+        # WIDTH DEPENDENT, so the ACHIEVED figures live in `arms.rerank.<P>.exact`
+        # (`recall_3_after` / `mentions`, computed) and NOT as a literal here: a
+        # re-run moves them, and an earlier draft hardcoded one run's pair in the
+        # emitted note. ⛔ `recall_3_after` is what the arm ACHIEVED, not the
+        # ceiling, so the note names both the ceiling (in_window) and the achieved
+        # cell: they coincide when `recall_3_before - lost + gained` reaches
+        # `in_window`, and at a pool wider than the top-3 cut `lost` 0 is NECESSARY
+        # but not sufficient (a no-gain rerank has it 0 with the achieved figure
+        # still below the ceiling; at a pool no wider than the cut it IS sufficient).
+        # ⛔ Not `arms.exact.<P>`: that
+        # table is arm 1's own width-by-width one, and a pool width outside its
+        # keys has no cell there.
         #
         # ⛔ `miss_past_k` is NOT that ceiling, and this comment used to say it
-        # was: at k=P it is 0 BY CONSTRUCTION (a response has at most P rows, so
-        # "its rank is past P" cannot occur), so it measures the counter, not the
-        # legs. `miss_absent_at_max_k` is not a width-independent bound either —
-        # it is "absent within arm 1's maximum window (15)", and the pool-40 arm
-        # returns every one of those golds. The count is the artifact's own
+        # was: it is 0 BY CONSTRUCTION only at arm 1's WIDEST window (a response
+        # has at most that many rows, so "the rank is past it" cannot occur) and
+        # only possibly non-zero at a narrower k, where a gold the legs returned
+        # further down is genuinely past the cut — so at the widest window it
+        # measures the counter, not the legs; at a narrower k it is a real
+        # measurement that is still not a bound. ⛔ "non-zero at every narrower k" was the previous
+        # wording and it bakes a corpus fact into a generated string: 0 is reachable
+        # whenever every in-window gold sits inside the top k. `miss_absent_at_max_k` is not a width-independent bound either —
+        # it is "absent within arm 1's maximum window (15)", and a wider window
+        # returns some of those golds — which is why the bound is width-dependent
+        # rather than a constant. The count is the artifact's own
         # field, deliberately not restated as a literal here (an earlier draft
         # said 81, which was a previous run's number). The bound is stated rather
         # than left to inference because a rerank arm reporting a recall figure

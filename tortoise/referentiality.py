@@ -220,6 +220,21 @@ def _tokens(surface: str) -> list[str]:
     return _WORD.findall(str(surface or "").strip(_EDGE).lower().replace("’", "'"))
 
 
+def phrase_tokens(surface: str) -> list[str]:
+    """The phrase the cue JUDGES, as tokens — for callers that must locate it.
+
+    Public because a second caller now needs the SAME definition: #12094 records
+    the occurrence offset of each held surface in its section, and reconstructing
+    the phrase there from the RAW model string is how the two paths disagree
+    (measured: ``The  Former`` is held, and a case-sensitive raw search records
+    ``None`` for a phrase that is present — #12102 round-3 review).
+
+    Deliberately a wrapper, not a re-implementation: one tokeniser, so the
+    decision and the provenance cannot drift.
+    """
+    return _tokens(surface)
+
+
 def judge(surface: object) -> tuple[str, str] | None:
     """Is ``surface`` a MENTION rather than a referent?
 
