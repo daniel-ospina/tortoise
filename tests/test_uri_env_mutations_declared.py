@@ -269,11 +269,16 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     #         the registry through `quota._make_sdk(namespace="registry")` off the
     #         AMBIENT env, never the caller's handle — so with an ambient docker
     #         URI the resolver would read the SHARED server graph while the Team
-    #         row lives in this test's `TORTOISE_DB_PATH` db, and the plan gates
-    #         would answer about a store the assertion does not own (the row reads
-    #         as absent, which is the money-surface fail-open the suite is checking
-    #         for). The delenv plus the `TORTOISE_DB_PATH` setenv is what points the
-    #         resolver at THIS store.
+    #         row lives in this test's `TORTOISE_DB_PATH` db, so the two control
+    #         planes would disagree about a store the assertion does not own — and
+    #         `get_organisation_account` REFUSES that disagreement with
+    #         `ControlPlaneError` (`tortoise/sdk.py:45924`) rather than reporting the
+    #         account absent, which is the behaviour
+    #         `test_an_account_the_gates_cannot_see_is_refused_not_reported_absent`
+    #         pins. So an ambient URI would red these cases as an unrelated
+    #         control-plane refusal instead of measuring the fixture's store. The
+    #         delenv plus the `TORTOISE_DB_PATH` setenv is what points the resolver at
+    #         THIS store.
     #   :257  the split-store case: the test PROVES the refusal when the gates read
     #         a different store from the one the SDK was opened on, so it must own
     #         both sides. An ambient URI would make the "gates read a different
