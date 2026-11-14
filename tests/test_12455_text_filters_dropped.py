@@ -433,7 +433,16 @@ def test_a_tag_read_without_filters_still_serves(stub) -> None:
 #: `filters/min_confidence/order_by`) normalises with a space and slipped past the
 #: full spelling — measured green. `ignores kind/filters` is contiguous in every
 #: wrap position that could carry the claim.
-_DOCSTRING_STALE = ("ignores kind/filters",)
+_DOCSTRING_STALE = (
+    "ignores kind/filters",
+    # #12500 rewrote that bullet's tail from "ignores kind/min_confidence/order_by"
+    # to "REFUSES kind/min_confidence/order_by", and the fragment above no longer
+    # matches the new text — so this pin, which guards the served contract, was
+    # silently disarmed for the tag arm by a LATER PR. Pinned separately so the
+    # claim cannot come back in EITHER spelling (measured: the #12500 review found
+    # the contradiction live in the docstring, with nothing red).
+    "ignores kind/min_confidence",
+)
 
 #: The stale sentence that shipped in THIS FILE's header (the round-1 "BOUNDARY"
 #: paragraph), pinned against this module's own docstring.

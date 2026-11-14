@@ -4792,7 +4792,11 @@ def test_the_live_surface_is_the_baseline_the_guard_froze():
     # `_graph_count`, `org_list` deleted) (−2). The manifest pin records the same
     # rationale beside it. 150 → 124 on 2026-10-27: the owner ruled the surplus methods
     # nothing calls may be deleted (PR #10187), and the 26 with no caller left the class.
-    assert live["sdk"] == manifest["counts"]["sdk_public_methods"] == 124
+    # 124 → 125 on 2026-11-14 (#10015): row 28 `get_organisation_account` was IMPLEMENTED.
+    # The approved 40 did not grow — the approval (`#10015` comment `6863608333`) delivers a
+    # name that was already approved and unshipped, the same move PR #10053 made for three
+    # rows — so `high_water_counts` (150) does not move; only the frozen ROW SET does.
+    assert live["sdk"] == manifest["counts"]["sdk_public_methods"] == 125
 
 
 def test_the_sdk_count_the_sequencing_list_types_is_the_measured_one():

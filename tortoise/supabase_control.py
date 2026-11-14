@@ -1826,7 +1826,7 @@ def expire_stale_invitations(cp, *, now: str | None = None,
 
     WHY THIS EXISTS. ``expires_at`` is a DERIVED terminal state in this lane:
     ``invitation_accept``, ``invitation_accept_by_id``, ``invitation_resend``,
-    ``pending_invitations_for_email`` and the hosted route's Pro-capacity read
+    ``pending_invitations_for_email`` and the hosted route's Builder-capacity read
     all compare it to now. The DEDUP did not. Its authoritative layer is the
     0008 partial unique index ``uq_invitations_org_email_pending ON (org_id,
     email) WHERE status = 'pending'``, and a partial-index predicate must be
@@ -6315,7 +6315,7 @@ def invitation_expire(cp, invitation_id: str, org_id: str,
                       *, actor_user_id: str) -> dict:
     """Owner/admin expire-now (Slack-style, #2003): a PENDING invitation is
     marked status='expired' with expires_at=now — the link dies, the invite
-    leaves every actionable/pending list, and the Pro seat it held is freed.
+    leaves every actionable/pending list, and the Builder seat it held is freed.
     Consumed (accepted) invitations are not expire-able (409)."""
     now = datetime.now(UTC).isoformat()
     rows = cp.query(
