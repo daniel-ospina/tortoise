@@ -3036,14 +3036,19 @@ to answer.
 
 - **Why it exists.** `#12304` went `CONFLICTING` after `main` landed `#12545`
   (`6916a6cd89d7`), which re-derived the SAME capstone-bundle cites this branch had already
-  re-derived for its own delta. Each parent's numbers are correct for ITS tree, and the two trees
-  differ in exactly two places: `main` does not carry this branch's `+90` in
-  `tortoise/extractor_v2.py`, and this branch does not carry `main`'s `+52` in
-  `tortoise/pi-hooks/tortoise-capture.ts`. (`tortoise/sdk.py` is NOT a difference: this branch's
-  pre-merge tip `6e9ef2caae0c` already carries `#12492`'s `+3` — `git merge-base --is-ancestor
-  cca42fa599 6e9ef2caae0c` exits 0 and `_extract_session_v2` is at `18025` there — which is why the
-  `sdk.py` carriers below need no re-derivation at all.) So taking either side wholesale would have
-  published a number measured on a tree this one is not.
+  re-derived for its own delta. Each parent's numbers are correct for ITS tree: the parents differ
+  in 92 files (`git diff --name-only 6e9ef2caae0c 6916a6cd89d7 | wc -l`), and in FOUR of the files
+  these entries cite a parent difference reaches a cited line — `tortoise/extractor_v2.py` (this
+  branch's `+102/-12`), `tortoise/pi-hooks/tortoise-capture.ts` (`+266/-29`; the A-d pair's `+52`
+  sits inside it), `tortoise/hosted_api.py` (`+10/-1`, which moved the `03-test-design.md` pair by
+  `+9`) and `tortoise/sdk.py`. ⛔ `sdk.py` differs too — `6efb1c3f7294` (`#12485`) rewrote the
+  `#2498` residual COMMENT, `6` for `6` lines, and that commit is absent from this branch's history
+  (`git merge-base --is-ancestor 6efb1c3f7294 6e9ef2caae0c` exits 1) — but a line-neutral comment
+  rewrite moves no cited line: the merged `sdk.py` is byte-identical to `main`'s
+  (`git diff --numstat 6916a6cd89d7 HEAD -- tortoise/sdk.py` is empty) and all twelve §10.31
+  carriers open on their content without any re-derivation. The `#12492` `+3` is a separate fact and
+  is already on this branch (`_extract_session_v2` at `18025` on `6e9ef2caae0c`). So taking either
+  side wholesale would have published a number measured on a tree this one is not.
 - **`tortoise/extractor_v2.py` did NOT move, so §10.36's numbers are the live ones.** The MERGED
   file is byte-identical to this branch's pre-merge tree at `6e9ef2caae0c` (`git hash-object` on both
   sides: `c8f83ed4e77b…`), because `main` never touched that file between this branch's base
