@@ -1,0 +1,8 @@
+{"start": {"redis_version": "8.6.3", "graph_module": 42006, "graph_path": "/var/lib/falkordb/bin/falkordb.so", "thread_count": null, "graph_module_args": ["THREAD_COUNT", "8", "TIMEOUT_MAX", "30000"], "persistence": {"save": "", "appendonly": "no"}, "port": 16422}}
+{"kind": "FULLTEXT", "nodes": 5000, "payload_bytes": 331419, "source": {"label": "Doc", "status": "OPERATIONAL", "documents": 5000, "terms": 25035, "inverted_bytes": 557500, "hits": 1250}, "target": {"status": "OPERATIONAL", "documents": 5000, "terms": 25035, "inverted_bytes": 557500, "hits": 1250}, "target_nodes": 5000, "source_still_present": 0, "verdict": "CARRIED-BY-THE-GRAPH-KEY"}
+{"kind": "RANGE", "nodes": 5000, "payload_bytes": 330709, "source": {"label": "Num", "status": "OPERATIONAL", "documents": 5000, "terms": 0, "inverted_bytes": 19682, "rows": 5000}, "target": {"status": "OPERATIONAL", "documents": 5000, "terms": 0, "inverted_bytes": 19680, "rows": 4999}, "target_nodes": 5000, "source_still_present": 0, "verdict": "CARRIED-BY-THE-GRAPH-KEY"}
+
+FULLTEXT: source OPERATIONAL (5000 docs, 25035 terms, 557500 inverted bytes) -> target OPERATIONAL (5000 docs, 25035 terms, 557500 bytes, answered 1250) under a DIFFERENT name; source graph gone (0)
+RANGE   : source OPERATIONAL (5000 docs, 0 terms, 19682 inverted bytes) -> target OPERATIONAL (5000 docs, 0 terms, 19680 bytes, answered 4999) under a DIFFERENT name; source graph gone (0)
+
+VERDICT: the index DEFINITION travels inside the graph key's payload — a target graph that has never seen it comes back with the index populated and answering.
