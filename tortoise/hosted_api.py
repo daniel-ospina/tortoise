@@ -2980,20 +2980,27 @@ async def _lifespan(app):
     # made a re-entered lifespan answer `503 data-plane-failed` for the whole of
     # its boot — already past the 120 s bound the moment it was evaluated — and
     # that reds `test-slow` in any shard whose process is that old, which is a
-    # required check. One `global` write, at the same seam as the reset, so the
-    # two can never disagree.
+    # required check. One `global` write, at the same seam as the reset, so
+    # exactly one place advances it — the two are still two STATEMENTS, and the
+    # order below matters.
     #
     # ⛔ THE EPOCH IS WRITTEN BEFORE THE RESET, AND THE ORDER IS LOAD-BEARING
-    # (review P2, round 2). These are two statements with no lock spanning them,
-    # and the `/healthz` reader runs on the listener's OWN thread — which
-    # `_stop_liveness` deliberately keeps alive across lifespans. A poll landing
-    # between them saw a FRESH coordinator (reset done) against the OLD epoch, so
-    # it answered `failed` / `probe-never-produced-a-result` over a healthy boot:
-    # the microsecond-width version of the very 503 this change exists to remove.
-    # Epoch-first makes that window read a fresh epoch over the previous result —
-    # `healthy` only if that result was fresh AND ok, `failed` if it was stale or
-    # not-ok — which can never mask a real failure because the `age`, not-ok and
-    # `in_flight_s` arms do not read the epoch at all.
+    # (review P2, round 3). Two statements, no lock spanning them, and the
+    # `/healthz` handler can poll on the listener's own thread. The LISTENER is
+    # kept alive across lifespans (`_stop_liveness` leaves it up) but the READER
+    # it calls is NOT: `_stop_liveness` clears the dataplane verdict source, so an
+    # ORDINARY re-entry polls NO reader — `dataplane_verdict()` answers `unknown`
+    # with `registered: False`, which the handler prices GREEN. The window is
+    # reachable only when a previous lifespan FAILED BEFORE its shutdown half and
+    # the reader is therefore still registered; there, reset-first answers
+    # `failed` / `probe-never-produced-a-result` over a healthy boot (measured
+    # with the epoch aged to -400 s: `uptime_s: 400.0`) — the microsecond-width
+    # version of the very 503 this change exists to remove. Epoch-first makes that
+    # window read a fresh epoch over the PREVIOUS state, so the answer is the one
+    # that state already had: `healthy` if the previous result was fresh AND ok,
+    # `failed` if it was stale, not-ok or in flight past the window, `unknown` if
+    # the previous coordinator had no result. It cannot mask a real failure: the
+    # `age`, not-ok and `in_flight_s` arms never read the epoch.
     global _HEALTH_PROBE_EPOCH_MONOTONIC
     _HEALTH_PROBE_EPOCH_MONOTONIC = time.monotonic()
     _HEALTH_PROBE.reset()
