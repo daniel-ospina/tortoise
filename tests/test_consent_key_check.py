@@ -727,15 +727,20 @@ def test_every_published_reason_code_is_accepted(monkeypatch, capsys) -> None:
     # ⚠️ DECLARED RESIDUAL: a seventh code that is an ABSENCE fault would be given the rotation, which
     # it does not need. Nothing here can infer "absence" from a string, and a code the halves start
     # publishing cannot be seen as an omission at all — it simply joins `VALUE_FAULT_REASONS`.
-    # The guard is the EXACT-SET equality below: `ABSENCE_REASONS` is pinned to the two literals, so any
-    # later edit to it must be deliberate. It cannot detect an omission and does not claim to.
-    # ⛔ The two set-algebra lines above are true by construction — `VALUE` is *defined* as
-    # `REASON` minus `ABSENCE`, so a new code joins it automatically — and catch nothing.
-    # ⛔ An earlier cut of this block added `assert len(CKC.ABSENCE_REASONS) == 2` and called it the
-    # guard. It was unreachable: the exact-set line beneath it already requires that set to be the
-    # two literals, so the length arm could never be the one that fails (measured: a third absence code
-    # reds the exact-set line, never the length). A dead assertion advertised as the guard is the class
-    # this PR removes, not ships.
+    # ⛔ The two set-algebra lines below are true by construction — `VALUE` is *defined* as `REASON`
+    # minus `ABSENCE`, so a new code joins it automatically — and catch nothing.
+    # ⛔ TWO GUARDS WERE CLAIMED HERE AND NEITHER DID THE JOB:
+    #   * `assert len(CKC.ABSENCE_REASONS) == 2` was UNREACHABLE behind the exact-set pin on the same
+    #     literal — any edit that would fail a length arm fails the exact-set arm first — so it guarded
+    #     nothing and is gone.
+    #   * the EXACT-SET pin is real against an EDIT but blind to an OMISSION: leaving a code out of the
+    #     literal keeps the set exactly as pinned, so it still passes.
+    # MEASURED in this worktree: a seventh ABSENCE-class code added to BOTH `REASON_CODES` and
+    # `consent_token._SECRET_PROBLEM_CODES`, `ABSENCE_REASONS` untouched, left the suite at **43
+    # passed** — and the mutant answers `compare(api dark reason="brand_new", app live)` with
+    # "TWO-SIDED rotation", sending an operator to rotate the production signing key on both halves for
+    # a fault a one-sided copy repairs. The TOTAL pin below is the guard that can see GROWTH: adding a
+    # code of either class reds it until the addition is classified here deliberately.
     assert CKC.ABSENCE_REASONS | CKC.VALUE_FAULT_REASONS == CKC.REASON_CODES
     assert not (CKC.ABSENCE_REASONS & CKC.VALUE_FAULT_REASONS)
     assert {"not_set", "unreadable"} == CKC.ABSENCE_REASONS, (
@@ -743,6 +748,12 @@ def test_every_published_reason_code_is_accepted(monkeypatch, capsys) -> None:
         "repaired by copying the working half's value onto the empty one; every OTHER code is given "
         "the rotation, so an absence code left out of this literal sends an operator to rotate a key "
         "that a copy would have fixed"
+    )
+    assert len(CKC.REASON_CODES) == 6, (
+        "a code was added to the closed set — classify it HERE, deliberately: an ABSENCE fault "
+        "belongs in `ABSENCE_REASONS` (the copy repair); every unlisted code inherits "
+        "`VALUE_FAULT_REASONS` (the rotation), so an unclassified absence code sends an operator to "
+        "rotate a key a one-sided copy would have fixed"
     )
 
 
@@ -857,6 +868,18 @@ def test_the_workflow_prose_branches_the_SPLIT_remedy_the_same_way() -> None:
     assert "gh secret set" in absence and "fly secrets set" in absence, (
         "the absence arm no longer names the api-dark route — for an `api`-dark split the durable "
         "repair is the repo secret, not `fly secrets set`, and every deploy reverts the latter"
+    )
+    # ⛔ THE FLOORS CAVEAT MUST BE PINNED ON BOTH SIDES. The tool's `api`-dark hint carries it (its own
+    # assertions above), and the SOURCE of the copied value is the Pages half, which enforces NO floors
+    # while the AS refuses <32 bytes as `too_short`. Measured: deleting these lines from the workflow
+    # left the suite fully green, so the alert could revert to prescribing the unconditional copy and
+    # the operator would perform it, get refused, and re-red with a value-fault SPLIT whose remedy is
+    # the opposite of the one just followed. The alert is read BEFORE the JSON fence.
+    assert "Pages takes any non-empty string" in absence, (
+        "the alert's absence arm lost the warning that the Pages source enforces no floors"
+    )
+    assert "rotate BOTH halves instead" in absence, (
+        "the alert's absence arm lost the fallback for when the copied value fails the AS's floors"
     )
 
     # The value-fault arm: the always-works rotation, and never a copy stated as the repair.

@@ -178,10 +178,24 @@ REASON_CODES = frozenset(
 #: than on the absence side.
 #: ⚠️ DECLARED RESIDUAL: a seventh code that is an ABSENCE fault would therefore be handed the
 #: rotation, which it does not need. Nothing here can infer "absence" from a string, and a code the
-#: halves start publishing simply joins `VALUE_FAULT_REASONS` — it does not read as an omission. The
-#: guard is therefore the suite's EXACT-SET pin on `ABSENCE_REASONS`: any edit to that literal must be
-#: deliberate, and the suite reds on one that is not. (An earlier cut of this comment said the count
-#: pin was the guard; that pin was unreachable behind the exact-set line, so it guarded nothing.)
+#: halves start publishing simply joins `VALUE_FAULT_REASONS` — it does not read as an omission.
+#:
+#: ⛔ TWO GUARDS WERE CLAIMED HERE AND NEITHER DID THE JOB, so both are recorded rather than swapped:
+#:   * `assert len(ABSENCE_REASONS) == 2` was UNREACHABLE — it sat behind an exact-set pin on the same
+#:     literal, so any edit that would fail a length arm fails the exact-set arm first and the length
+#:     arm can never be the one that reds. It guarded nothing and was removed.
+#:   * the EXACT-SET pin on `ABSENCE_REASONS` is a real guard against an EDIT, but it cannot see an
+#:     OMISSION: omitting a code from that literal leaves the set exactly as pinned. MEASURED in this
+#:     worktree — a seventh ABSENCE-class code added to BOTH `REASON_CODES` and
+#:     `consent_token._SECRET_PROBLEM_CODES`, `ABSENCE_REASONS` untouched, left the suite fully green,
+#:     and the mutant answers `compare(api dark reason="brand_new", app live)` with "TWO-SIDED
+#:     rotation" — an operator rotating the production signing key on both halves for a fault a
+#:     one-sided copy repairs.
+#:
+#: So the guard that can see GROWTH is the suite's TOTAL pin on `REASON_CODES`: adding a code of
+#: either class reds it until the addition is classified here deliberately. The set-algebra lines
+#: beside it are true by construction (`VALUE` is *defined* as `REASON` minus `ABSENCE`) and catch
+#: nothing at all.
 ABSENCE_REASONS = frozenset({"not_set", "unreadable"})
 VALUE_FAULT_REASONS = REASON_CODES - ABSENCE_REASONS
 
