@@ -320,7 +320,6 @@ _IDENTIFIER_RESTATEMENT = (
 #: 944, a figure no command reproduces, and a number stated as a measurement has to be
 #: runnable), and the paragraph this PR rewrote uses a dash itself. Hoisted into its own
 #: lookahead so a restatement is a restatement whichever mark introduces it.
-#: lookahead so a restatement is a restatement whichever mark introduces it.
 #: ⛔ …and the two lookaheads that run BEFORE the clause end must tolerate that mark
 #: as well (cycle-10 P2, measured). `_BUILDER_PLAN` and `_CLAUSE_END` learned to accept a
 #: closing quote; `_RESTATEMENT_TAIL` and `_INTENSIFIER` did not, so a closing mark
@@ -724,8 +723,8 @@ class TestNoDocDeniesABuilderPlanExists:
             "The Builder tier is not a tier you can downgrade to.",
             # The AFFIRMATIVE — the sentence a correct doc must be able to write
             # (cycle 2: an optional `no` made the denial regex match this).
-            # false-blocked the restatement and the scope qualifier alike — `git grep -l
-            # ' — ' -- docs` counts 948 files).
+            "The Builder plan exists and is called `pro`.",
+            "A Builder tier exists for teams that outgrow Solo.",
             "The Builder plan and the Team plan are both unlimited.",
             # The doc's OWN rendering style, which the lint must not punish.
             "The **Builder** and **Team** plans are both unlimited.",
