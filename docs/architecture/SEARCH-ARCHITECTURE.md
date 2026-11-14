@@ -283,14 +283,15 @@ opposite of the ordering in §5.
 > actual defect is a **tokenizer contract**, not a scorer or a ranking baseline, and it is filed as
 > `#12350`. Numbers, method and the artifacts: `docs/research/2026-11-13-12298-m3-fts-leg/`; the
 > changelog entry records what changed and what did not. ⛔ **This note does not decide `C3` (SPLADE)**
-> — that pre-authorisation is ruled in the OPEN homes `#12186` / `#12192`, and the measurement is the
-> evidence before it. ⛔ `#12298`, which this note cites as the source of the measurement, is
-> **CLOSED** (`COMPLETED`, 2026-11-13T05:21:53Z) on the reading *"M3 FAILS"* — a reading this
-> measurement contradicts: the issue's own falsifier sentence states a **closure** condition (BM25
-> does *not* beat the current scorer), and that condition is **not triggered** — a deployable
-> BM25-in-Postgres does beat it (0.9633 vs 0.7133). What *is* satisfied is the pre-authorisation's
-> **trigger**, which is why C3 is neither closed nor proceeding until the owner rules. Correcting
-> that closure is the owner's; it is not a lane's.
+> — that pre-authorisation is ruled in the epic and pre-registration that carry it (`#12186` /
+> `#12192`), and the measurement is the evidence before it. ⛔ **Two conditions, and the measurement
+> meets only the second.** The pre-authorisation's falsifier sentence states a **closure** condition
+> (BM25 does *not* beat the current scorer), and that condition is **not triggered** — a deployable
+> BM25-in-Postgres does beat it (0.9633 vs 0.7133). What *is* met is the pre-authorisation's
+> **trigger**, which is why C3 is neither closed nor proceeding until the owner rules. ⛔ Tracker
+> facts — which issues carry the ruling and what state they are in — are recorded in
+> `SEARCH-ARCHITECTURE-CHANGELOG.md`, and no statement here turns on them. Correcting `#12298`'s
+> closure is the owner's; it is not a lane's.
 
 ### 6.3 EP state — the carve-out stands, and the fix is not to store it
 
