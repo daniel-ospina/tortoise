@@ -1271,6 +1271,19 @@ SOURCE_PATTERNS = {
             # #2938/#3154/#4367 silent-drop class).
             "tortoise/selfhost_backup.py",
             "tortoise/retrieval_metering.py",
+            # #12764: the per-org Postgres-bytes meter. Its guard
+            # (tests/test_postgres_bytes.py) is registered in `api` — the surface
+            # that owns `metering.py` + `supabase_control.py` above — so without
+            # this entry a postgres_bytes.py-only diff matched no pattern, fell
+            # through to `core`, and skipped the guard that pins it. That is the
+            # #7076 self-guard class `test_every_named_guard_runs_for_its_own_source`
+            # refuses (measured before this row:
+            # `select(['tortoise/postgres_bytes.py'])` -> surfaces=['core'],
+            # guard ABSENT; after: surfaces=['api'], guard present). Naming the
+            # source REPLACES the `core` fallback, which loses nothing here:
+            # `tests/test_allowance_gate.py`, the other test that reads this
+            # module, is itself `api` + `core`.
+            "tortoise/postgres_bytes.py",
             "tortoise/transport.py",
             # #2938: EventAPI — the append surface `ingest.py`, `mining.py`,
             # `extractor.py`, `m0.py` and `__main__.py` all write through.
