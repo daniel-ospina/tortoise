@@ -263,7 +263,7 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # not after it. A later literal key SILENTLY REPLACES an earlier one at runtime, so
     # the rows looked additive and were not. `ruff`'s F601 reads the repeat as a lint
     # error, which is what surfaced it. Consolidating NARROWS as well as de-duplicates,
-    # on purpose: both `origin/main` rows carried this pinned literal, while this
+    # on purpose: both rows at `a808f9f8ba` carried this pinned literal, while this
     # branch's first commit carried a KEY-ONLY arm
     # (`r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'`), which the entry above refuses
     # — so the surviving row is the narrower one. The prose each carried, kept:

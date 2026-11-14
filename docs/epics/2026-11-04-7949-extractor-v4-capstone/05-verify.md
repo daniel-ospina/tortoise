@@ -111,8 +111,7 @@ The bundle's headline lists **7 files** under `docs/epics/2026-11-04-7949-extrac
 spot named `docs/00_index.md`, `tools/ci_selection.py` and `tests/test_ci_selection.py`,
 and **none of the three was in the diff at the head that note was written** — they were
 absorbed by the forward merges exactly like the rows below, so that table was itself an
-instance of the thing this document is about. ⛔ **`docs/00_index.md` is BACK in the diff
-at the head this merges into (`30c9e7c4d3`)**: resolving `main` moved the meta fold under
+instance of the thing this document is about. ⛔ **`docs/00_index.md` was BACK in the diff at `30c9e7c4d3` (an earlier base of this branch — at `c1db6f3df28e`, the head this merges into, it is out of the diff again)**: resolving `main` moved the meta fold under
 that bundle-registering row's `sdk.py:19054` cite, so the row re-points to `:19111` — the
 same row, with a number this merge moved. `tools/ci_selection.py` and
 `tests/test_ci_selection.py` remain absorbed; read the set from the command, never from
