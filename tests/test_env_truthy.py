@@ -563,7 +563,7 @@ _LEDGER_LITERAL_OWNERS: dict[str, tuple[int, str]] = {
 #: below; the list is kept so the next addendum has the precedent in front of it
 #: rather than a stale tally. Each read is the SOLE authorization for an irreversible
 #: journal-blind DETACH DELETE + GRAPH.DELETE of a cohort the journal cannot
-#: attribute, or (for the three added since) for arming a WRITE path nobody chose —
+#: attribute — or, for the journal raise, by arming a WRITE path nobody chose —
 #: exactly the fail-open surface the ledger exists to freeze — so narrowing it is the
 #: safe policy. The #3634 entry is recorded on issue #3634 and in
 #: the epic CI-Fix Changelog, and pinned by
