@@ -2357,8 +2357,9 @@ surfaces:
   # it through the FULL matrix a SHARED_MODULES path forces, not through this row.
   - test_12455_text_filters_dropped.py
   - test_candidate_recall_11901.py
-  # ⛔ `test_env_file_divergence.py` is registered ABOVE (line ~2303, main's row, with
-  # its `durations:` weight) — the re-pointed copy that lived here was dropped by the
+  # ⛔ `test_env_file_divergence.py` is registered ABOVE, in `core`, with its
+  # `durations:` weight (#11892 option (3)'s row there) — the re-pointed copy
+  # that lived here was dropped by the
   # forward merge of `origin/main`: both branches had added the row for the same
   # reason, and `--integrity` refuses a duplicate (`duplicate entry
   # 'test_env_file_divergence.py' at .surfaces.core[]`).
