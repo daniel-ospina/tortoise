@@ -112,11 +112,39 @@ limit and at k=15** on the shipped leg. The identifier capability the product be
 the shapes `#8933` was built for.
 
 **The defect it found, stated as a design fact rather than as tracker state.** RediSearch treats `_` as a
-word character; `sparse.tokenize_sparse_query` (`tortoise/sparse.py:381`, splitting on `[^a-z0-9]` at
-`:58`) does not. So for a stored name `web_search` the leg issues `search|web` — two terms the index does
+word character; `sparse.tokenize_sparse_query` (`tortoise/sparse.py:662`, splitting on `[^a-z0-9]` at
+`:67`) does not. So for a stored name `web_search` the leg issues `search|web` — two terms the index does
 not contain — and `snake_case` names are unretrievable by their own name: of the 73 in the sample,
 **1 was found at k=3 by the shipped leg and 68 by the in-place query**. The repair is additive (the
 `#8933` alias pattern — an OR alternative, never a removed term) and it has **zero** regressions across
-the sample. It is **measured in this harness and not shipped**: a query-bytes change touches every label
-and reverts part of `#2070`'s byte-identity control, so it needs its own review with the number in front
-of it.
+the sample. It is **measured in this harness and not shipped** — that is the state at THIS measurement;
+the reason it was withheld (a query-bytes change touches every label and reverts part of `#2070`'s
+byte-identity control) is exactly what `#12368` then answered with the number in front of it, and it is
+shipped there (see the entry below).
+
+---
+
+## `#12368` — the `_`-preserving composite shipped, on both surfaces
+
+`#12298`'s M3 finding ended with the one repair it could not land on its own authority: the index holds
+`web_search` as **one** term while `build_or_query` emitted `search|web`, so the record was
+unretrievable by its own name. `#12360` asked for that repair and `#12368` lands it in the one seam
+every text read shares (`tortoise/sparse.py::build_or_query`), as an **additional OR alternative** —
+`underscore_run_terms` rides after the originals, the `#8933` alias/phrase tails and the `#2070`
+expansion tail, and no term is ever removed.
+
+**What it costs and what it buys, at the seam.** Additive-only by construction, and byte-identical for
+every query carrying no `_` at all: measured over this bundle's own 300-name population, the emitted
+string changes for **87** of them — exactly the names whose §3.4 mechanism row says the leg emitted terms
+the index never holds. Measured on the real read path (not a harness), candidate recall@3 over that
+population moves 0.7133 → 0.9633 with **zero** regressions, and the same on both fused surfaces.
+
+**The tokenizer contract is NOT what was repaired.** `tokenize_sparse_query` still splits on `_`, so
+`#12350`'s question is untouched, and this entry is not a ruling on it. What the repair rides is the
+query side, which is why every query without a `_` is byte-for-byte the old one — the property `#2070`'s
+control depends on and the reason the review that withheld this in `#12298` was right to withhold it
+until the number existed.
+
+⚠️ M3's published tables were measured before this tail existed and were **not** re-run here — a
+re-measurement needs a live FalkorDB lane and a `pg_search` Postgres. Its brief §3.4 records that
+disclosure in place; the numbers there are a record of the pre-`#12368` emission, not of what ships.

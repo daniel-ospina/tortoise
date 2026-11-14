@@ -5995,14 +5995,14 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # one FILE and the consume pair was re-pointed in one document while the
         # definition stayed wrong in both.
         ("00-plan.md", "is a **fail-OPEN** probe, defined at", (
-            ("6637", "def subject_binding_available(graph) -> bool:"),
+            ("6659", "def subject_binding_available(graph) -> bool:"),
         ), "search_engine"),
         ("00-plan.md", "consumed at `sdk.py:", (
             ("10064", "subject_binding_available,"),
             ("10117", "and not subject_binding_available(graph):"),
         ), "sdk"),
         ("03-test-design.md", "is a **fail-OPEN** probe (`search_engine.py:", (
-            ("6637", "def subject_binding_available(graph) -> bool:"),
+            ("6659", "def subject_binding_available(graph) -> bool:"),
         ), "search_engine"),
         # ...and that same row's CONSUME pair names `sdk.py`, so it takes its own
         # row: a row carries ONE source key, and a mis-keyed cite must red with a
@@ -6068,8 +6068,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # minutes BEFORE it (2026-11-13T19:30:00 vs 19:34:09) and is an ancestor of
         # `#12545`'s commit, while `#12545` measured at `5bacb44e0b` which does NOT
         # contain it — so that pair arrived ALREADY stale at its own landing commit,
-        # and `main` was red for this row at `6916a6cd89`. The pair is
-        # **`:1007`/`:999`** at the head this merges into. The two `def`s are always
+        # and `main` was red for this row at `6916a6cd89`. `#12695` (`3893603b07`) then added
+        # 16 lines above both, so the pair is **`:1023`/`:1015`** here. The two `def`s are always
         # **8 apart** in this file, and that is exactly the trap: an offset read off
         # a stale pair re-derives `948` → `957`, which WAS `postCapture`'s parameter
         # list (`payload: Record<string, unknown>,`) at `5bacb44e0b` — at
@@ -6077,8 +6077,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # line; the row is held by CONTENT, so a wrong pair reds rather than
         # silently resolving.
         ("00-align.md", "`llm:deepseek-direct` is what", (
-            ("1007", "export function postCapture("),
-            ("999", "export function postInstallProbe("),
+            ("1023", "export function postCapture("),
+            ("1015", "export function postInstallProbe("),
         ), "pi_hooks"),
         # ⛔ THE SENTENCE'S THIRD FILE (`hosted_api.py`) HAD NO READER EITHER (#12462
         # review round 5), in the very row this PR re-points the other two cites of:

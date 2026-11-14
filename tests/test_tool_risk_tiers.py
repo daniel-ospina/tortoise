@@ -43,12 +43,15 @@ from tortoise.tool_registry import (
     get_write_tool_names,
 )
 
-#: The three tools the ruling is about. They refresh stored state, so they are
+#: The tools the #4122 ruling is about. They refresh stored state, so they are
 #: not pure reads; they keep a read permission, so they are not writes.
+#: ⛔ THREE -> TWO in #11609 batch 1: `tortoise_packs_list` was the third and is
+#: ARCHIVED (`archive/mcp-tools/b1-removed-no-destination/tortoise_packs_list.py`), so
+#: the `maintenance` tier is carried by the two confidence tools today. The RULING is
+#: unchanged — a maintenance entry is not a read and must not claim `readOnlyHint`.
 MAINTENANCE_TOOLS = (
     "tortoise_get_confidence",
     "tortoise_compute_confidence",
-    "tortoise_packs_list",
 )
 
 
@@ -116,8 +119,15 @@ class TestTheRiskAxis:
         #   and `tortoise_onboarding_github_status`, the tenant-visible reads the owner's
         #   2026-09-22 ruling rehomed) without adding a name: 100 -> 95 served, 52 -> 50.
         # Neither side's own figure is the answer: 95 and 50 is.
-        assert len(reading) == 50, sorted(reading)   # 47 read + 3 maintenance
-        assert len(served()) == 95, sorted(e.name for e in served())
+        #   #11609 batch 1 — FOUR names left the SERVED registry (not retired-forward:
+        #   `tortoise_analyze` (read), `tortoise_packs_list` (maintenance),
+        #   `tortoise_backfill_v25` (destructive) and `tortoise_pack_install` (admin) were
+        #   ARCHIVED), so 95 -> 91 served and the reading-eligible population 50 -> 48
+        #   (47 read + 3 maintenance -> 46 read + 2 maintenance). The other two left the
+        #   writing side: `tortoise_backfill_v25` (destructive) and `tortoise_pack_install`
+        #   (admin).
+        assert len(reading) == 48, sorted(reading)   # 46 read + 2 maintenance
+        assert len(served()) == 91, sorted(e.name for e in served())
 
     def test_the_destructive_set_is_pinned_by_name(self):
         """`destructive` means "removes or overwrites user-authored state".
@@ -162,7 +172,7 @@ class TestTheRiskAxis:
             # terminal status writes / replacement
             "tortoise_supersede", "tortoise_invalidate", "tortoise_promote_point",
             # whole-graph rewrites
-            "tortoise_dream", "tortoise_backfill_v25",
+            "tortoise_dream",
             # bulk re-ingest that rewrites an existing corpus' stored rows
             "tortoise_index_files", "tortoise_ingest_corpus",
             "tortoise_index_sessions", "tortoise_mine_conversations",
@@ -173,7 +183,6 @@ class TestTheRiskAxis:
         admin = {e.name for e in served() if e.risk == "admin"}
         assert admin == {
             "tortoise_org_create",            # org provisioning
-            "tortoise_pack_install",          # installs code
             "tortoise_onboarding_session_recording",  # org-wide recording
             "tortoise_graph_set_recording",   # per-graph recording override
             "tortoise_manage_sources",        # enable/disable sources
@@ -408,7 +417,10 @@ class TestHintsCannotDrift:
         # 48 -> 45: #4282 Phase 3.2 removed three writing tools from the served
         # registry (`tortoise_onboarding_github_connect` (admin),
         # `tortoise_onboarding_seed` and `tortoise_onboarding_demo_create`).
-        assert len(expected) == 45, sorted(expected)  # census, hard-coded
+        # 45 -> 43: #11609 batch 1 removed two more writing tools, both ARCHIVED rather
+        # than retired-forward (`tortoise_backfill_v25` (destructive) and
+        # `tortoise_pack_install` (admin)).
+        assert len(expected) == 43, sorted(expected)  # census, hard-coded
 
 
 class TestTheMitigationWriteIsNeverAdvertisedAsRepeatable:
@@ -527,7 +539,6 @@ class TestTheReadThroughToolsRegressionPin:
         # a repeat call (both take the same lazy `dream(dirty_only=True)` path).
         for name in ("tortoise_get_confidence", "tortoise_compute_confidence"):
             assert entries[name].annotations.idempotentHint is False, name
-        assert entries["tortoise_packs_list"].annotations.idempotentHint is True
 
     def test_the_hint_the_client_sees_is_the_false_one(self):
         """The regression is about the SERVED hint, not the registry value — read

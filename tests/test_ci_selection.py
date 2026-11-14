@@ -3017,9 +3017,18 @@ def test_root_file_read_by_a_test_is_never_allowlisted():
     doc's edit must keep the FULL matrix or that guard is skipped on the only PR
     that needs it. Every name below IS read
     (README.md by `test_embedded_durability_claim.py:62`; AGENTS.md by the
-    base-subset pin; `.gitignore` by `test_kind_index.py:302`; CONTRIBUTING.md by
+    base-subset pin; `.gitignore` by
+    `test_kind_index.py::TestMemoizationAndLazy::test_gitignored_cache_dir`;
+    CONTRIBUTING.md by
     `test_surface_manifest.py`'s removal-docs pin; …) and keeps FULL.
+    (`.gitignore` used to be cited as `:290` — a DIFFERENT test — while the read has
+    been at `:302` since before both parents merged, so a line citation here is a claim
+    that re-stales on the next neighbouring edit; that one is a symbol now. `README.md`'s
+    `:62` is still a number and is the next one to rot.)
     """
+    # #12313's `test_surface_manifest` pin reads CONTRIBUTING.md's
+    # "**To REMOVE a symbol**" paragraph, so the doc keeps FULL and joins the
+    # other read files here rather than sitting in the docstring alone.
     for name in ("README.md", "AGENTS.md",
                  "LICENSE", "MEMORY.md", "index.md", "CONTRIBUTING.md",
                  ".gitignore", ".env.example", "fly.toml", "pyproject.toml",
@@ -3482,7 +3491,8 @@ def test_doc_reprieve_is_per_path_not_per_diff():
     assert r3["full"] is True
 
     # ⛔ CONTRIBUTING.md is NO LONGER reprieved (`main`, #12313's
-    # `tests/test_surface_manifest.py` READS its text to hold the documented
+    # `tests/test_surface_manifest.py::test_the_REMOVAL_docs_do_not_name_a_route_the_writer_REFUSES`
+    # READS its text to hold the documented
     # surface rule to the shipped one). A root prose file outside the census list
     # falls through to the unknown-path branch, which fails closed to FULL — and
     # that is the point: the PR that edits the file runs the guard that reads it.
@@ -22188,3 +22198,85 @@ def test_the_consent_key_runbook_pin_runs_on_a_runbook_only_diff():
     # what makes the pin unconditional rather than surface-dependent.
     for src in ("tools/consent_key_check.py", "tortoise/consent_token.py"):
         assert "test_consent_key_runbook_10488.py" in _sel([src])["test_files"], src
+
+
+def test_the_health_honesty_suite_is_selected_on_BOTH_halves_of_its_module_pair():
+    """#12645: pin the DUAL registration, not the row.
+
+    `tests/test_12477_health_honesty.py` drives two modules: `tortoise/hosted_api.py`
+    (an EXACT `api` SOURCE_PATTERNS match that REPLACES the `core` fallback) and the
+    liveness readers in `tortoise/monitoring.py` (which falls through to `core`). It is
+    therefore registered in `surfaces.api` AND `surfaces.core`, and the manifest's own
+    comments say so — but until this pin, nothing under `tests/` ASSERTED the
+    registration: naming the file in prose is not reading its surface rows. So a
+    registration that lost one half was silent.
+
+    That is not hypothetical, and the wrong root cause buys the wrong defence. A REPLAY of
+    #12645 onto `main` produced exactly this, and the reproduction is committed rather than
+    narrated — `git merge-file` takes its three arguments as CURRENT, BASE, OTHER, so in that
+    order `git merge-file -p --union` over current=`d05688df5990`, base=`c1db6f3df`,
+    other=`9122a08a72` (each `config/ci-surfaces.yml`) is BYTE-IDENTICAL to
+    `f2ec5ec092:config/ci-surfaces.yml`
+    (`sha256 50d1b19d74a40a52d84ea6d68234913175bd0bba4e1f54608c2a1f6b72a241da`), a tree
+    carrying two `api` rows and NO `core` row, which selects this suite on a
+    `hosted_api.py` diff and NOT on a `monitoring.py` one.
+
+    That replay produced two symptoms with different causes, which is why neither a clean
+    merge nor a duplicate alarm substitutes for this pin:
+
+      * the LOST ARM went silently. `core` is 0 in the merged output of EITHER mode —
+        `--union` and plain alike — so no driver and no conflict report was ever going to
+        mention it. Each parent had deleted a DIFFERENT one of the base's two `core` rows
+        (`c1db6f3df` carried TWO `api` and TWO `core`; #12482's `d05688df5990` deleted one
+        of each, and #12645's pre-rebase original `9122a08a72` the other of each), and both
+        deletions applied.
+      * the DUPLICATE came from the `merge=union` attribute (`.gitattributes:21`), which
+        keeps BOTH sides of the conflicted `api` region — so the rebase printed
+        "Successfully rebased". ⚠️ It did NOT go unnoticed: `--integrity` reds on it
+        (`duplicate_entries()` on `f2ec5ec092`'s manifest →
+        `['api: test_12477_health_honesty.py']`). That is the half that WAS caught; the arm
+        is the half that was not.
+
+    ⚠️ `config/ci-surfaces.yml`'s note retracts a DIFFERENT claim about this same driver,
+    and borrowing it here would be wrong: it says a duplicate is not evidence union ran,
+    because two INDEPENDENT appends at different anchors survive as two rows with the
+    attribute set or unset (#12464/#12640, 69 s apart). That is `main`'s original pair, not
+    a conflicted replay.
+
+    `integrity()` is not a substitute for this pin, and that is the point: it answers ONE
+    question — is every `tests/**/test_*.py` classified SOMEWHERE — so a file that keeps
+    one surface's row while losing the other's is reported CLEAN. Measured with the `core`
+    row deleted: `integrity(load_manifest()) == []`. `duplicate_entries()` is a different
+    function on a different question, composed by the `--integrity` CLI through
+    `ci_manifest.map_issues` (#5050): it catches a duplicate ROW, and a pure lost arm has
+    neither a duplicate nor an unclassified file — which is the case nothing but this pin
+    notices. (#12482 removed a duplicate PAIR, one row per list: `c1db6f3df` api=2/core=2,
+    `d05688df5990` api=1/core=1.)
+    """
+    pin = "test_12477_health_honesty.py"
+
+    api_arm = _sel(["tortoise/hosted_api.py"])
+    assert api_arm["surfaces"] == ["api", "onboarding"], api_arm["surfaces"]
+    assert pin in api_arm["test_files"], (
+        "a `hosted_api.py`-only regression of the `/health` verdict (#12477 itself) "
+        "must run this suite — the `api` row is what carries that arm"
+    )
+
+    core_arm = _sel(["tortoise/monitoring.py"])
+    assert core_arm["surfaces"] == ["core"], core_arm["surfaces"]
+    assert pin in core_arm["test_files"], (
+        "the liveness readers this suite pins (`start_health_listener`, "
+        "`set_dataplane_verdict_source`, `set_served_progress_source`) live in "
+        "`tortoise/monitoring.py`, which selects `core` alone — losing this row leaves "
+        "the guard asleep on the diff class that owns half its subject, and "
+        "`integrity()` still reports clean (measured)"
+    )
+
+    # NON-VACUITY, and the reason these two rows are load-bearing rather than decorative:
+    # `tier1` is unioned into EVERY PR selection, so if this file ever joins `tier1` the
+    # surface rows stop being what selects it and this pin would pass over a lost arm.
+    # Asserted rather than left implicit (#9778 review P2).
+    assert pin not in load_manifest()["tier1"], (
+        "if this file joins `tier1` the `api`/`core` rows stop being load-bearing, and "
+        "this pin must be re-derived rather than assumed"
+    )

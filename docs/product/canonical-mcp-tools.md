@@ -225,16 +225,28 @@ do not: a warning that names nothing serves a caller who does not exist. The **9
 > ⚠️ **Measured again at #4282 Phase 3.2:** the five `run_onboarding` names in that list have
 > since been REMOVED — `tortoise_onboarding_state`, `tortoise_onboarding_seed`,
 > `tortoise_onboarding_demo_create`, `tortoise_onboarding_github_connect`,
-> `tortoise_onboarding_github_status` are no longer in `TOOL_REGISTRY` (76 live tools then). The
-> remaining four — `tortoise_analyze`, `tortoise_backfill_v25`, `tortoise_packs_list`,
-> `tortoise_pack_install` — are still live and keep their own entries here. **This branch's
-> `graph_overview` container then took the live surface 76 → 72**, so 72 is the figure at this
-> head (`uv run python tools/surface_manifest.py check` is the live count).
+> `tortoise_onboarding_github_status` are no longer in `TOOL_REGISTRY` (76 live tools then).
+> **This branch's `graph_overview` container then moved the live surface from 76 to 72 at that
+> head**, so 72 was the figure there until #11609 batch 1 took the live surface 72 → 68
+> (`uv run python tools/surface_manifest.py check` is the live count).
 > **The five REMOVED tools'** capabilities survive as hand-written REST
 > routes in `tortoise/hosted_api.py` (`POST /v1/demo`, `GET|PATCH /v1/onboarding/state`,
 > `POST /v1/onboarding/seed`, `POST /v1/onboarding/github/connect`,
 > `GET /v1/onboarding/github/status`); `tortoise/selfhost_api.py` serves only the state and
 > seed routes, so the other three are hosted-only.
+>
+> ⚠️ **Measured again at #11609 batch 1:** the remaining four — `tortoise_analyze`,
+> `tortoise_backfill_v25`, `tortoise_packs_list`, `tortoise_pack_install` — are now REMOVED as
+> well, and unlike the five above they are **ARCHIVED** rather than merely deleted:
+> `archive/mcp-tools/b1-removed-no-destination/<tool>.py` holds each one's verbatim
+> `ToolDefinition` + handler, per the owner ruling of 2026-11-12
+> ([comment `6831894340`](https://github.com/daniel-ospina/tortoise/issues/11609#issuecomment-6831894340)):
+> *"Anything outside the target gets removed — archived code, so not available … but ultimately
+> outside the product because we don't want it."* No replacement is named, because there is
+> none (the ruling above: no warning that names nothing). Their capabilities survive on
+> SDK/REST where one exists — `GET /v1/packs` and `POST /v1/packs/manifests` for the two pack
+> tools — and the live surface is **68** MCP tools after this batch (`surface_manifest.py
+> check` is the live count; the target is 27, and batches 2+ are the containers).
 
 **What this does NOT authorise — stated because the answer was broader than the question.** The
 **18** existing `RETIRED_USE_INSTEAD` forward entries are a *different population*: every one of them
@@ -246,8 +258,9 @@ carry two recorded decisions **in this document**: the 2026-10-17 amendment (ret
 replacement"*) and the 2026-10-25 one (*"the absorbed names stay retired-forward entries"*).
 **Removing them is a separate decision** and would need its own argument naming #3540 and #9660; it
 is not done here. The end state of the epic is still **27 advertised tools**, but that is reached by
-the full **72 → 27** consolidation (was 76 before this container, 81 before #4282 Phase 3.2), **not** by this amendment — these two answers remove 0 tools and 0
-methods on their own.
+the full consolidation (**68 → 27** after #11609 batch 1's archive of four no-destination tools;
+72 before it, 76 before this container, 81 before #4282 Phase 3.2), **not** by this amendment —
+these two answers remove 0 tools and 0 methods on their own.
 
 > **OVERRIDES:** the plan item `1.4` (`#3883`) requirement that *nothing is removed from the MCP
 > surface until a caller of a retired tool name gets a warning naming its replacement* — for the
@@ -271,9 +284,15 @@ Any deletion PR must use **26 / 111**.
 status: approved · principal: daniel-ospina · PR #10187 · date: 2026-10-27.
 
 **Amended 2026-11-03** (execution record, #4282): the **first container batch has landed**, so the
-surface is now **72 advertised tools** with **23** retired-forward entries — the 18 above plus five
-more. `tortoise_graph_overview` (row 6) absorbs `tortoise_overview`, `tortoise_summarize_structure`,
+surface was **72 advertised tools** at that head with **23** retired-forward entries — the 18 above
+plus five more. `tortoise_graph_overview` (row 6) absorbs `tortoise_overview`, `tortoise_summarize_structure`,
 `tortoise_validate_domain`, `tortoise_audit` and `tortoise_dream_health`.
+
+**Amended 2026-11-13** (execution record, #11609 batch 1): the four remaining no-destination tools
+(`tortoise_analyze`, `tortoise_backfill_v25`, `tortoise_packs_list`, `tortoise_pack_install`) were
+REMOVED and their code ARCHIVED under `archive/mcp-tools/b1-removed-no-destination/`, per the owner
+ruling quoted below, so the surface is now **68 advertised tools** with **23** retired-forward
+entries. Nothing was retired-forward into a replacement: a name with no destination gets no shim.
 
 Three consequences for readers of the paragraph below, which is left as written because it records
 the 2026-10-27 ruling, not the current state:
@@ -317,10 +336,14 @@ read permission can be granted generously with no path to a destructive action.
 > `pg_maintain` role, added in 17 — a SEPARATE grant from SELECT/INSERT/UPDATE/DELETE).
 > PostgreSQL mints its own grant; we deliberately do not, because a new scope would be a
 > surface change, so the read key stays and only the read-only CLAIM is dropped.
-> `tortoise_get_confidence`, `tortoise_compute_confidence` and
-> `tortoise_packs_list` are `maintenance`: a `graphs:read` key may call them, they never
-> require `graphs:write`, and they do NOT declare `readOnlyHint: true` (that literal hint is
-> what clients auto-approve on). The declaration is `risk` on the registry entry; `writes`,
+> `tortoise_get_confidence` and `tortoise_compute_confidence` are `maintenance`: a
+> `graphs:read` key may call them, they never require `graphs:write`, and they do NOT declare
+> `readOnlyHint: true` (that literal hint is what clients auto-approve on). **They are the
+> whole tier today — `tortoise_packs_list` was the third member until #11609 batch 1 archived
+> it** (`archive/mcp-tools/b1-removed-no-destination/tortoise_packs_list.py`), so
+> `MAINTENANCE_TOOLS` is TWO, pinned by
+> `tests/test_tool_risk_tiers.py::test_the_maintenance_tier_is_exactly_the_ruling`. The
+> RULING is unchanged. The declaration is `risk` on the registry entry; `writes`,
 > `readOnlyHint`, `destructiveHint` and `idempotentHint` are **derived** from it
 > (`tortoise/tool_registry.py`) and pinned by `tests/test_tool_risk_tiers.py`, so a hint
 > cannot be "fixed" in one place and left wrong in the other. A future lane that wants these
@@ -346,8 +369,8 @@ move to the SDK/REST pack surface. See **Open items**.
 
 Grantable freely. The one item that used to block this — `recall_beliefs` absorbing
 `get_confidence`, which is read-labelled but writes — is **resolved by the #4122 ruling**
-(the trio is `risk="maintenance"`: a `graphs:read` key may call it and it no longer claims
-`readOnlyHint: true`). See **Open items**.
+(the maintenance tier is `risk="maintenance"`: a `graphs:read` key may call the two confidence
+tools and they no longer claim `readOnlyHint: true`). See **Open items**.
 
 | # | Tool | Absorbs |
 |---|---|---|

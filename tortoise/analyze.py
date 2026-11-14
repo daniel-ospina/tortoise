@@ -1,6 +1,31 @@
-"""tortoise_analyze — template-based NL→Cypher graph analysis.
+"""Template-based NL→Cypher graph analysis (the `analyze()` engine).
 
-Single MCP tool: tortoise_analyze(question) → natural language answer.
+⛔ NO LIVE DOOR. `analyze()` was fronted by the MCP tool `tortoise_analyze`, which
+#11609 batch 1 ARCHIVED (no destination in the approved surface) — and it has no
+other door: it is not a `TortoiseSDK` method, no CLI verb calls it, no REST route
+calls it, and outside `tests/` its only importer is the archived handler. Do not
+describe it as "still live for SDK/CLI callers": it is not. The follow-up —
+archive the engine too, or re-open a door — is OPEN and owner-gated, filed as #12480.
+
+What keeps this module in the product is its HELPERS, which live code imports —
+and THIS LIST IS THE DEPENDENCY MAP, so keep it exhaustive:
+
+- `_bfs_select_operators` — `tortoise/sdk.py` (`TortoiseSDK._select_subgraph`, whose
+  `compute_confidence` is the public caller: the SDK is a module consumer even
+  though it is not a door), `tortoise/dream.py`, and the `graph-scripts/`
+  diagnostics (`graph-diagnostics.py`, `parity_sample.py`, `dream-scale-bench.py`)
+- `_stale_first_claims`, `_stale_first_count_stamped` — `tortoise/dream.py`
+  (`Dreamer.dream_window`'s stale-first scheduler, reached from
+  `TortoiseSDK.dream(mode="stale-first")`; a FUNCTION-LEVEL import, so nothing
+  fails until that pass runs) and `graph-scripts/dream-scale-bench.py`
+- `mean_grounding`, `grounding_snapshot` — `tortoise/mining.py`
+- `_LLM_PROVIDERS` — `tortoise/hosted_api.py`
+
+Any lane that considers archiving or moving this module must re-derive that list
+with an AST sweep (a single-line `grep` misses the multi-name imports above):
+`rg -n "from .analyze import|from tortoise.analyze import" --glob '!archive/**'`
+over the package and `graph-scripts/`. An omission here is how a restore or an
+archive breaks `compute_confidence` or `dream(mode="stale-first")`.
 Template Cypher + LLM for intent classification and result synthesis.
 No LLM-Cypher generation (rejected: 61% accuracy, 40% silent errors).
 """
@@ -600,7 +625,9 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int | None = 1,
     anchors, direction/rel-filter constrained). For explicit k the operator
     cap (op_cap, default 200) stays a mid-BFS safety bound; for None the cap
     is lifted (genuine full closure) — internal callers only (the
-    user-facing tortoise_analyze HTTP tool keeps an explicit k).
+    user-facing analyze door passed an explicit k while it existed; its MCP form
+    was archived in #11609 batch 1 and no other door was opened — see this
+    module's header).
 
     op_cap (#1241, epic 903-C3): truncation bound for explicit-k runs. The
     stale-first scheduler passes its per-pass operator budget through so an
