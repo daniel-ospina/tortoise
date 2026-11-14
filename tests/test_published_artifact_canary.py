@@ -3508,3 +3508,263 @@ def test_the_index_read_ignores_the_ambient_proxy_the_child_strips(monkeypatch):
     assert state == canary.INDEX_OK, (reason, state)
     assert doc == {"info": {"version": "0.2.0"}}
     assert calls["hit"] and "pypi.org/pypi/tortoise-graph/json" in calls["hit"], calls
+
+
+# --------------------------------------------------------------------------
+# #12589 — the same class as #12525, one level DOWN
+#
+# #12525 split the `releases` MAP's type (absent/null/wrong-typed → UNKNOWN) from the ANSWER
+# "no releases" (`{}` → FAIL). Two shapes one level below survived that fix, and both turned an
+# UNPARSEABLE reading into a verdict:
+#
+#   1. a present, non-empty map whose VERSION VALUES are not arrays → every value failed
+#      `isinstance(files, list)`, `resolvable == []`, and the arm printed "the index lists NO
+#      installable file in ANY release … README.md documents `pip install …`, which cannot
+#      resolve" → FAIL → exit 1 → the text the alert renders as **"cut a release"**.
+#   2. a document whose `info` is not an object → `AttributeError` → `main()`'s backstop → exit
+#      2. The exit code was right; the REASON was a traceback.
+#
+# The rule these pin is: the arms read a document COMPLETELY or they judge nothing. A FAIL may
+# only assert what a complete reading established.
+# --------------------------------------------------------------------------
+
+_CLIENT_GOOD = {
+    "filename": "tortoise_client-0.2.0-py3-none-any.whl",
+    "yanked": False,
+    "upload_time_iso_8601": "2026-08-08T00:30:10.719404Z",
+}
+_CLIENT_YANKED = {
+    "filename": "tortoise_client-0.3.0-py3-none-any.whl",
+    "yanked": True,
+    "upload_time_iso_8601": "2026-09-01T00:00:00Z",
+}
+
+
+def _client_report(client_doc: dict, engine_doc: dict | None = None):
+    return canary.build_report(
+        engine_doc=canary_engine_doc() if engine_doc is None else engine_doc,
+        client_doc=client_doc,
+        tree_version="0.2.0",
+        init_arm=_ok_init_arm(),
+        now=NOW,
+    )
+
+
+def canary_engine_doc() -> dict:
+    return _engine_doc()
+
+
+def test_resolvable_releases_reports_BOTH_facts_because_the_claims_differ_in_POLARITY():
+    """The truth table, at the one helper the client arm reads (#12589).
+
+    Two independent facts, and the polarity of the arm's two claims is what decides which of them
+    gates which verdict:
+
+      * the OK claim ("the unpinned requirement resolves") is EXISTENTIAL — one readable
+        installable release settles it, so a resolvable version is returned even when a sibling
+        value could not be read;
+      * the FAIL claim ("NO installable file in ANY release") is UNIVERSAL — it needs a complete
+        parse, so any unreadable value supplies a `reason` and the arm cannot say it.
+
+    Both halves are asserted because either alone is satisfiable by the wrong code: a helper that
+    always answers `([], something)` keeps the FAIL pins green, and one that never answers a
+    reason keeps the UNKNOWN pins green.
+    """
+    doc = {"info": {"version": "0.3.0"}}
+
+    # COMPLETE readings — the reason is empty even when the answer is "nothing".
+    assert canary.resolvable_releases({**doc, "releases": {"0.3.0": [_CLIENT_GOOD]}}) == (
+        ["0.3.0"],
+        "",
+    )
+    assert canary.resolvable_releases({**doc, "releases": {}}) == ([], "")
+    assert canary.resolvable_releases({**doc, "releases": {"0.3.0": []}}) == ([], "")
+    assert canary.resolvable_releases({**doc, "releases": {"0.3.0": [_CLIENT_YANKED]}}) == (
+        [],
+        "",
+    )
+    # Latest yanked, an older release installable — pip resolves, so this is a complete POSITIVE.
+    assert canary.resolvable_releases(
+        {**doc, "releases": {"0.3.0": [_CLIENT_YANKED], "0.2.0": [_CLIENT_GOOD]}}
+    ) == (["0.2.0"], "")
+
+    # NON-READINGS, each named. Map level (already fixed in #12525) and VALUE level (#12589).
+    assert canary.resolvable_releases(doc) == ([], canary.RELEASES_ABSENT)
+    assert canary.resolvable_releases({**doc, "releases": None}) == (
+        [],
+        canary.RELEASES_ABSENT,
+    )
+    # ⛔ `[]` is NOT in this loop: an empty ARRAY is a COMPLETE empty answer (`{"0.3.0": []}` is
+    # the pinned FAIL below). What is unreadable is a list of NON-OBJECTS, asserted separately.
+    for unparseable in ({}, "0.3.0", 0, ["a.whl"]):
+        versions, reason = canary.resolvable_releases({**doc, "releases": {"0.3.0": unparseable}})
+        assert (versions, reason) == ([], canary.RELEASES_UNREADABLE), unparseable
+
+    # ⛔ BOTH FACTS AT ONCE: a resolvable release is still reported when a sibling value is
+    # unreadable, WITH the reason. Returning `([], reason)` here would be the over-strict reading
+    # that loses a true PASS on a mirror quirk (the old code returned OK for this document);
+    # returning `(versions, "")` would let the arm claim "no installable file in ANY release"
+    # off a partial parse. The arm applies the polarity; this helper is not allowed to decide it.
+    assert canary.resolvable_releases(
+        {**doc, "releases": {"0.2.0": [_CLIENT_GOOD], "0.3.0": {}}}
+    ) == (["0.2.0"], canary.RELEASES_UNREADABLE)
+
+    # And the ONE reader, so a future arm cannot re-spell an unreadable listing as `[]`.
+    assert canary.readable_entries([_CLIENT_GOOD]) == [_CLIENT_GOOD]
+    assert canary.readable_entries([]) == []
+    assert canary.readable_entries({}) is None
+    assert canary.readable_entries(["a.whl"]) is None
+    assert canary.release_files({"releases": {"0.3.0": {}}}, "0.3.0") is None
+    assert canary.release_files({"releases": {"0.3.0": ["a.whl"]}}, "0.3.0") is None
+    assert canary.release_files({"info": {"version": "0.2.0"}}, "0.2.0") == []
+
+
+def test_an_UNPARSEABLE_release_VALUE_is_UNKNOWN_and_never_orders_a_release():
+    """A version value that is not an array must not become the claim "no installable file" (#12589).
+
+    The FAIL sentence is the one `published-artifact-alert.sh` renders as "cut a release", so this
+    test asserts the sentence's ABSENCE, not merely a non-zero exit: exit 1 and exit 2 both stop
+    the ledger, and only one of them is allowed to say the artifact is broken.
+    """
+    for unparseable in (
+        {},  # a bare object — the shape the issue names
+        "0.3.0",  # a string
+        0,  # a number
+        {  # the file OBJECT at the wrong level — `[<object>]` is the right one
+            "filename": "tortoise_client-0.3.0-py3-none-any.whl"
+        },
+    ):
+        report = _client_report({"info": {"version": "0.3.0"}, "releases": {"0.3.0": unparseable}})
+        arm = report.get("client-published")
+        assert arm.status == canary.UNKNOWN, (unparseable, arm.status, arm.detail)
+        assert report.verdict == canary.UNKNOWN, (unparseable, report.verdict)
+        assert report.exit_code == 2, (unparseable, report.exit_code)
+        assert canary.RELEASES_UNREADABLE in arm.detail, arm.detail
+        assert "UNKNOWN, not false" in arm.detail, arm.detail
+        assert "not a reason to cut a release" in arm.detail.lower(), arm.detail
+        # The release-order clauses must be ABSENT.
+        assert "any release" not in arm.detail.lower(), arm.detail
+        assert "cannot resolve" not in arm.detail.lower(), arm.detail
+
+    # A list of non-objects is the same class, one level down.
+    report = _client_report({"info": {"version": "0.3.0"}, "releases": {"0.3.0": ["a.whl"]}})
+    assert report.get("client-published").status == canary.UNKNOWN
+    assert report.exit_code == 2
+
+    # AND the states that must NOT move: a document that ANSWERED stays FAIL/exit 1 — including
+    # the all-lists mixed case, whose reading is complete.
+    for answered in (
+        {},  # no releases at all
+        {"0.3.0": []},  # an empty file list
+        {"0.3.0": [_CLIENT_YANKED]},  # only-yanked
+        {"0.3.0": [], "0.4.0": [_CLIENT_YANKED]},  # every value IS a list; nothing installable
+    ):
+        report = _client_report({"info": {"version": "0.3.0"}, "releases": answered})
+        assert report.get("client-published").status == canary.FAIL, (answered, report.verdict)
+        assert report.exit_code == 1, (answered, report.exit_code)
+
+    # ⛔ AND THE DIRECTION A "COMPLETE-OR-NOTHING" RULE WOULD BREAK: a resolvable release settles
+    # the EXISTENTIAL OK claim even when a SIBLING value is unreadable — the old code returned OK
+    # for this document, and turning that into a permanent CANNOT-RUN red would trade a true PASS
+    # for detail completeness. The detail must DISCLOSE the partial parse, so the green does not
+    # imply it read the whole map.
+    report = _client_report(
+        {
+            "info": {"version": "0.3.0"},
+            "releases": {"0.2.0": [_CLIENT_GOOD], "0.3.0": {}},
+        }
+    )
+    arm = report.get("client-published")
+    assert arm.status == canary.OK, (arm.status, arm.detail)
+    assert report.exit_code == 0, report.exit_code
+    assert canary.RELEASES_UNREADABLE in arm.detail, arm.detail
+    assert "READABLE subset" in arm.detail, arm.detail
+    # ...and an UNREADABLE-only map still gets the disclosure-free UNKNOWN detail.
+    assert (
+        canary.RELEASES_UNREADABLE
+        in _client_report({"info": {"version": "0.3.0"}, "releases": {"0.3.0": {}}})
+        .get("client-published")
+        .detail
+    )
+
+
+def test_a_non_object_info_is_a_LEGIBLE_NON_READING_on_BOTH_arms():
+    """`info` present but not an object: no traceback, UNKNOWN — and the exit code SPLITS (#12589).
+
+    ⛔ TWO DEFECTS, TWO EXIT-CODES STORIES, and conflating them was a review finding on this very
+    test. Measured against the pre-diff expression `(index_doc.get("info") or {}).get("version")`:
+
+      * a TRUTHY non-object (`"x"`) raised `AttributeError`, and `main()`'s backstop turned that
+        into exit 2 — the right CODE by the wrong ROUTE (a traceback as the recorded reason);
+      * the FALSY ones (`[]`, `0`, `null`) were swallowed by `or {}` into "", took the FAIL arm,
+        and reported exit 1 — the "cut a release" text — off a document that DID carry a version
+        in a shape this client refuses to parse.
+
+    So the fix MOVES the exit code (1 → 2) for the falsy shapes, deliberately and fail-closed. The
+    invariance that actually matters is the one a naive "don't raise" fix would break: a
+    non-reading must never become an exit 1, on EITHER arm. That is pinned here, at both arms.
+    """
+    for index_doc in ({"info": "x"}, {"info": []}, {"info": 0}, {"info": None}):
+        assert canary.latest_version(index_doc) == "", index_doc
+        assert canary.info_unreadable(index_doc) is True, index_doc
+
+    # The absence pin stays a FAIL — an ABSENT `info` is an empty ANSWER, not a non-reading.
+    for answered in ({}, {"info": {}}, {"info": {"version": ""}}):
+        assert canary.info_unreadable(answered) is False, answered
+        assert canary.latest_version(answered) == "", answered
+
+    for doc in ({"info": "x"}, {"info": []}, {"info": 0}, {"info": None}):
+        # client arm
+        report = _client_report({**doc, "releases": {"0.3.0": [_CLIENT_GOOD]}})
+        arm = report.get("client-published")
+        assert arm.status == canary.UNKNOWN, (doc, arm.status, arm.detail)
+        assert canary.INFO_UNREADABLE in arm.detail, arm.detail
+        assert "not a reason to cut a release" in arm.detail.lower(), arm.detail
+        assert "carries no published version" not in arm.detail, arm.detail
+        assert report.exit_code == 2, (doc, report.exit_code)
+        # engine arm — the one a naive fix would have flipped from exit 2 to exit 1
+        report = _client_report(
+            {"info": {"version": "0.3.0"}, "releases": {"0.3.0": [_CLIENT_GOOD]}},
+            engine_doc=doc,
+        )
+        arm = report.get("engine-index")
+        assert arm.status == canary.UNKNOWN, (doc, arm.status, arm.detail)
+        assert canary.INFO_UNREADABLE in arm.detail, arm.detail
+        assert report.exit_code == 2, (doc, report.exit_code)
+
+
+def test_a_non_STRING_version_is_the_same_class_one_key_further_in():
+    """`{"info": {"version": 0.3}}` must not be a release order while `{"releases": {"0.3.0": {}}}` is not.
+
+    ⛔ THE INCONSISTENCY THIS PINS was a review finding on the first revision of this change: the
+    map's VALUES had just been made non-readings, while a version value two lines away was still
+    coerced to "" and reported as "carries no latest version" — a FAIL, exit 1, an irreversible
+    upload order — off a document that carries a version. Same class, same doctrine, same verdict.
+    """
+    for version in (0.3, True, ["0.3.0"], {"v": "0.3.0"}, None):
+        doc = {"info": {"version": version}}
+        assert canary.version_unreadable(doc) is True, version
+        assert canary.latest_version(doc) == "", version
+        # client arm
+        report = _client_report({**doc, "releases": {"0.3.0": [_CLIENT_GOOD]}})
+        arm = report.get("client-published")
+        assert arm.status == canary.UNKNOWN, (version, arm.status, arm.detail)
+        assert canary.VERSION_UNREADABLE in arm.detail, arm.detail
+        assert "carries no published version" not in arm.detail, arm.detail
+        assert "not a reason to cut a release" in arm.detail.lower(), arm.detail
+        # engine arm
+        report = _client_report(
+            {"info": {"version": "0.3.0"}, "releases": {"0.3.0": [_CLIENT_GOOD]}},
+            engine_doc={"info": {"version": version}},
+        )
+        arm = report.get("engine-index")
+        assert arm.status == canary.UNKNOWN, (version, arm.status, arm.detail)
+        assert canary.VERSION_UNREADABLE in arm.detail, arm.detail
+        assert report.exit_code == 2, (version, report.exit_code)
+
+    # The states that ANSWER stay on the FAIL arm: no `version` key at all, and an empty string.
+    for answered in ({}, {"info": {}}, {"info": {"version": ""}}):
+        assert canary.version_unreadable(answered) is False, answered
+        report = _client_report({**answered, "releases": {"0.3.0": [_CLIENT_GOOD]}})
+        assert report.get("client-published").status == canary.FAIL, answered
+        assert report.exit_code == 1, (answered, report.exit_code)

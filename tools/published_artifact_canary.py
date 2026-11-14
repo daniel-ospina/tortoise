@@ -461,9 +461,66 @@ class Report:
         return {OK: 0, FAIL: 1, UNKNOWN: 2}[self.verdict]
 
 
+#: ``info`` is PRESENT but is not an object (``"x"``, ``[]``, ``0``, ``null``) — the version
+#: metadata could not be read at all (#12589).
+INFO_UNREADABLE = "info-unreadable"
+
+
+def info_unreadable(index_doc: dict[str, Any]) -> bool:
+    """True when ``info`` is PRESENT but is not an object — a NON-READING.
+
+    ⛔ An ABSENT ``info`` is deliberately NOT this case: an empty document is pinned as a FAIL
+    (``test_a_client_document_with_no_version_is_red_not_ok``), because a caching proxy answering
+    ``{}`` must not certify that the documented install resolves. What this predicate separates is
+    the document that ANSWERED "no version" from the one whose ``info`` could not be parsed at all
+    — the same absent-vs-unreadable split ``releases_map`` makes one level down (#12525/#12589).
+
+    ⛔ It exists because the old ``latest_version`` raised on a TRUTHY non-object. The pre-diff
+    expression was ``(index_doc.get("info") or {}).get("version")``: on ``{"info": "x"}`` that
+    is an ``AttributeError``, which ``main()``'s exception backstop turned into exit 2 with a
+    traceback as the recorded reason — the right CODE by the wrong ROUTE. The FALSY non-objects
+    (``[]``, ``0``, ``null``) were swallowed by ``or {}`` into "" and reached the FAIL arm, i.e.
+    exit 1 and the "cut a release" text, off a document that DID carry a version. So this
+    predicate fixes two different defects at once, and the second one MOVES an exit code (1 → 2)
+    on purpose — fail-closed, because the old sentence "carries no latest version" was false.
+    #12589 review, P2: state the split rather than claiming an invariance that does not hold.
+    """
+    return "info" in index_doc and not isinstance(index_doc["info"], dict)
+
+
+#: ``info`` is an object whose ``version`` is PRESENT but not a string (``0.3``, ``true``, ``[]``,
+#: ``null``, an object) — the version metadata could not be READ (#12589 review, P2).
+VERSION_UNREADABLE = "version-unreadable"
+
+
+def version_unreadable(index_doc: dict[str, Any]) -> bool:
+    """True when ``info`` is an object but ``info.version`` is present and not a string.
+
+    The third predicate this module needs, for symmetry with the two above it: the same class, one
+    key further in. Before it, ``{"info": {"version": 0.3}}`` was coerced to "" and reported as
+    "carries no latest version" — a FAIL, exit 1, a release order — while the IDENTICAL shape one
+    key across (``{"releases": {"0.3.0": {}}``) had just been made UNKNOWN. Two readers, one
+    document, opposite verdicts about which shapes are answers.
+
+    An ABSENT ``version`` and an EMPTY STRING ``version`` stay on the FAIL arm: both are pinned
+    (``test_a_client_document_with_no_version_is_red_not_ok``), and both are the document
+    ANSWERING that it serves nothing — which is exactly the claim the FAIL sentence makes.
+    """
+    info = index_doc.get("info")
+    if not isinstance(info, dict):
+        return False
+    return "version" in info and not isinstance(info["version"], str)
+
+
 def latest_version(index_doc: dict[str, Any]) -> str:
-    """The version the index serves as latest (``info.version``), else ""."""
-    info = index_doc.get("info") or {}
+    """The version the index serves as latest (``info.version``), else "".
+
+    Never raises: a non-object ``info`` yields "" (see ``info_unreadable``), and the ARM decides
+    whether that empty reading is a FAIL (the document answered) or an UNKNOWN (it did not).
+    """
+    info = index_doc.get("info")
+    if not isinstance(info, dict):
+        return ""
     version = info.get("version")
     return version if isinstance(version, str) else ""
 
@@ -503,12 +560,109 @@ def releases_map(index_doc: dict[str, Any]) -> dict[str, Any] | None:
     return releases
 
 
-def release_files(index_doc: dict[str, Any], version: str) -> list[dict[str, Any]]:
-    # One source of truth for what an absent key means, so the two arms cannot disagree
-    # about one response (#12525).
+#: A release map this client cannot read a FILE LISTING from — a version value that is not a
+#: list, or a list holding an entry that is not an object (#12589).
+RELEASES_UNREADABLE = "releases-unreadable"
+
+
+def readable_entries(files: Any) -> list[dict[str, Any]] | None:
+    """The file objects in ONE version's value, or ``None`` when that value is UNREADABLE.
+
+    ``None`` is not ``[]``, for the same reason ``releases_map``'s is not ``{}``: ``[]`` is the
+    ANSWER "this release lists no files", and an unreadable value is the ABSENCE of an answer.
+    One helper for every reader, so a version value this client cannot parse cannot be spelled
+    ``[]`` by one arm and UNKNOWN by another (#12589 review, P3).
+    """
+    if not isinstance(files, list):
+        return None
+    if any(not isinstance(entry, dict) for entry in files):
+        return None
+    return list(files)
+
+
+def resolvable_releases(index_doc: dict[str, Any]) -> tuple[list[str], str]:
+    """Versions that make ``pip install <pkg>`` (UNPINNED) resolve, and what could not be read.
+
+    TWO INDEPENDENT FACTS, because the two arms' claims differ in polarity:
+
+    * ``versions`` — the releases holding a non-yanked file. The arm's OK claim ("the unpinned
+      requirement resolves") is EXISTENTIAL: one readable installable release settles it. So an
+      unreadable value elsewhere cannot withdraw it (it could not make pip stop resolving).
+    * ``reason`` — ``""`` when every value was read, else the shape that was not:
+      ``RELEASES_ABSENT`` (the map is absent / null / not an object) or ``RELEASES_UNREADABLE``
+      (a value that is not a list, or a list holding a non-object).
+
+    ⛔ AND THE FAIL CLAIM IS UNIVERSAL, WHICH IS WHY ``reason`` EXISTS (#12589). "The index lists
+    NO installable file in ANY release" is only TRUE once every value has been read. Emitting it
+    from a partial parse orders the irreversible PyPI upload the #12525 split exists to prevent,
+    one level below the map's own type: a cache emitting ``{"0.3.0": {}}`` (or
+    ``{"0.3.0": ["name.whl"]}``) left ``resolvable`` empty and the arm RED, i.e. "cut a release",
+    off a listing that was never understood. So ``reason`` gates FAIL, and only FAIL.
+
+    The line is between an answer and a non-answer, NOT between "some files" and "no files":
+    ``{}``, ``{"0.3.0": []}``, all-yanked files and a non-yanked file are all COMPLETE readings
+    (``reason == ""``), because those documents did answer (#12525's pins keep their meaning).
+    """
+    releases = releases_map(index_doc)
+    if releases is None:
+        return [], RELEASES_ABSENT
+    resolvable: list[str] = []
+    reason = ""
+    for version, files in releases.items():
+        entries = readable_entries(files)
+        if entries is None:
+            # Not readable: it can neither establish nor withdraw the existential OK claim.
+            reason = RELEASES_UNREADABLE
+            continue
+        if any(not entry.get("yanked") for entry in entries):
+            resolvable.append(version)
+    return resolvable, reason
+
+
+def missing_version_arm(
+    name: str, index_doc: dict[str, Any], *, package: str, answered_detail: str
+) -> Arm:
+    """The arm for a document that yields no version: FAIL if it answered, UNKNOWN if it did not.
+
+    Shared by the engine and client arms on purpose — the two readings must not be able to
+    disagree about one shape (#12589), which is the same reason ``releases_map`` exists. Three
+    input classes, two verdicts: a present-but-not-an-object ``info`` and a present-but-not-a-
+    string ``version`` are NON-READINGS (UNKNOWN); an absent (or empty-string) version is the
+    document ANSWERING that it serves nothing, which is the FAIL this arm already had.
+    """
+    if info_unreadable(index_doc):
+        return Arm(
+            name,
+            UNKNOWN,
+            f"could not read the index metadata for {package} — the document's `info` is "
+            f"PRESENT but is not an object ({INFO_UNREADABLE}), so the version it serves is "
+            f"UNPARSEABLE. That is a NON-READING: it says nothing about whether the "
+            f"distribution resolves, and it is NOT a reason to cut a release",
+        )
+    if version_unreadable(index_doc):
+        return Arm(
+            name,
+            UNKNOWN,
+            f"could not read the version the index serves for {package} — `info.version` is "
+            f"PRESENT but is not a string ({VERSION_UNREADABLE}), so the metadata this arm "
+            f"reads is UNPARSEABLE. That is a NON-READING: it says nothing about whether the "
+            f"distribution resolves, and it is NOT a reason to cut a release",
+        )
+    return Arm(name, FAIL, answered_detail)
+
+
+def release_files(index_doc: dict[str, Any], version: str) -> list[dict[str, Any]] | None:
+    """One version's file objects, ``[]`` when the version is absent, ``None`` when unreadable.
+
+    One source of truth for what an absent key means, so the two arms cannot disagree about one
+    response (#12525) — and, since #12589, one source of truth for what an UNREADABLE value means
+    too: ``None`` here, the same value ``readable_entries`` returns, so a future arm built on this
+    helper cannot silently re-introduce the class this issue removed.
+    """
     releases = releases_map(index_doc) or {}
-    files = releases.get(version) or []
-    return [f for f in files if isinstance(f, dict)]
+    if version not in releases:
+        return []  # absent version key — an ANSWER ("no such release"), pinned as []
+    return readable_entries(releases[version])
 
 
 def upload_time(index_doc: dict[str, Any], version: str) -> datetime | None:
@@ -519,7 +673,9 @@ def upload_time(index_doc: dict[str, Any], version: str) -> datetime | None:
     what users get".
     """
     stamps = []
-    for entry in release_files(index_doc, version):
+    # `or []`: an unreadable listing is not a zero count — this row is informational and must not
+    # crash a run that has nothing to report (#12589).
+    for entry in release_files(index_doc, version) or []:
         raw = entry.get("upload_time_iso_8601") or entry.get("upload_time")
         if not isinstance(raw, str) or not raw:
             continue
@@ -618,11 +774,20 @@ def build_report(
     else:
         version = latest_version(engine_doc)
         if not version:
+            # FAIL when the document ANSWERED (no version in a readable `info`) and UNKNOWN when
+            # it did not (#12589). The exit code did NOT move for a TRUTHY non-object `info` —
+            # that already raised into main()'s exit-2 backstop. It DID move (1 → 2) for the
+            # falsy ones (`[]`, `0`, `null`), which `or {}` swallowed into the FAIL arm: a
+            # deliberate fail-closed move, because "carries no latest version" was a false
+            # claim about a document that carries one in a shape we refuse to parse.
             report.add(
-                Arm(
+                missing_version_arm(
                     "engine-index",
-                    FAIL,
-                    f"index metadata for {ENGINE_PACKAGE} carries no latest version",
+                    engine_doc,
+                    package=ENGINE_PACKAGE,
+                    answered_detail=(
+                        f"index metadata for {ENGINE_PACKAGE} carries no latest version"
+                    ),
                 )
             )
         else:
@@ -670,11 +835,17 @@ def build_report(
             # distribution resolves: the engine arm treats the identical shape as a
             # FAIL, and a caching proxy answering `{}` must not turn the documented
             # install path green (#12363 review B4).
+            # ⛔ A NON-OBJECT `info` IS NOT THAT SHAPE (#12589): it is present and unparseable, so
+            # the arm cannot even ask the version question — UNKNOWN, not a FAIL that would order
+            # a release. `missing_version_arm` makes this one decision for both arms.
             report.add(
-                Arm(
+                missing_version_arm(
                     "client-published",
-                    FAIL,
-                    f"the {CLIENT_PACKAGE} index document carries no published version",
+                    client_doc,
+                    package=CLIENT_PACKAGE,
+                    answered_detail=(
+                        f"the {CLIENT_PACKAGE} index document carries no published version"
+                    ),
                 )
             )
         else:
@@ -702,8 +873,32 @@ def build_report(
             # PyPI upload, off a response that never answered the question. `{}` PRESENT is
             # still a FAIL: that IS an answer, and it is pinned by
             # `test_a_client_version_with_no_INSTALLABLE_file_in_ANY_release_is_red`.
-            releases = releases_map(client_doc)
-            if releases is None:
+            resolvable, unreadable = resolvable_releases(client_doc)
+            if resolvable:
+                # ⛔ OK OUTRANKS AN UNREADABLE SIBLING, because the two claims differ in POLARITY
+                # (#12589 review, P3). "The unpinned requirement resolves" is EXISTENTIAL — one
+                # readable installable release settles it, and an unreadable value elsewhere
+                # cannot make pip stop resolving. The FAIL below is UNIVERSAL ("NO installable
+                # file in ANY release") and therefore does need a complete parse. Reading them
+                # the same way would lose a true PASS: a mirror emitting one odd-shaped version
+                # value turned a genuine green into a daily CANNOT-RUN red. The detail DISCLOSES
+                # the partial parse so the reading is not overstated.
+                partial = (
+                    ""
+                    if not unreadable
+                    else f"; NOTE {unreadable}: another release value in this map could "
+                    f"not be read, so this list is the READABLE subset"
+                )
+                report.add(
+                    Arm(
+                        "client-published",
+                        OK,
+                        f"{CLIENT_PACKAGE} resolves on the index (unpinned → "
+                        f"{client_version}; installable: {', '.join(sorted(resolvable))})"
+                        f"{partial}",
+                    )
+                )
+            elif unreadable == RELEASES_ABSENT:
                 report.add(
                     Arm(
                         "client-published",
@@ -717,33 +912,40 @@ def build_report(
                         f"to cut a release",
                     )
                 )
+            elif unreadable:
+                # ⛔ AN UNPARSEABLE FILE LISTING IS NOT AN EMPTY ONE (#12589). The FAIL below
+                # asserts "NO installable file in ANY release"; a version value that is not a
+                # list (or a list of non-objects) leaves that sentence unproven, and emitting it
+                # would order an irreversible release off a listing this client never
+                # understood. `{}` / empty lists / all-yanked stay COMPLETE readings and keep
+                # their FAIL (#12525's pins).
+                report.add(
+                    Arm(
+                        "client-published",
+                        UNKNOWN,
+                        f"could not read a file listing out of the {CLIENT_PACKAGE} release "
+                        f"map ({unreadable}) — a version value that is not a list, or a list "
+                        f"holding an entry that is not an object. PyPI documents each "
+                        f"version's value as an ARRAY of file objects, so this is a shape "
+                        f"this client cannot parse, and whether `pip install "
+                        f"{CLIENT_PACKAGE}` resolves is UNKNOWN, not false. This is NOT "
+                        f"evidence the artifact is broken and is NOT a reason to cut a "
+                        f"release",
+                    )
+                )
             else:
-                resolvable = [
-                    version
-                    for version, files in releases.items()
-                    if isinstance(files, list)
-                    and any(isinstance(entry, dict) and not entry.get("yanked") for entry in files)
-                ]
-                if resolvable:
-                    report.add(
-                        Arm(
-                            "client-published",
-                            OK,
-                            f"{CLIENT_PACKAGE} resolves on the index (unpinned → "
-                            f"{client_version}; installable: {', '.join(sorted(resolvable))})",
-                        )
+                # Reached ONLY on a complete reading (see the `unreadable` arm above), so this is a
+                # real count rather than a coerced one (#12589).
+                listed = len(release_files(client_doc, client_version) or [])
+                report.add(
+                    Arm(
+                        "client-published",
+                        FAIL,
+                        f"the {CLIENT_PACKAGE} index lists NO installable file in ANY release "
+                        f"({listed} file(s) on {client_version}, none usable) — README.md "
+                        f"documents `pip install {CLIENT_PACKAGE}`, which cannot resolve",
                     )
-                else:
-                    listed = len(release_files(client_doc, client_version))
-                    report.add(
-                        Arm(
-                            "client-published",
-                            FAIL,
-                            f"the {CLIENT_PACKAGE} index lists NO installable file in ANY release "
-                            f"({listed} file(s) on {client_version}, none usable) — README.md "
-                            f"documents `pip install {CLIENT_PACKAGE}`, which cannot resolve",
-                        )
-                    )
+                )
 
     # 4. informational rows — reported, never gated (see module docstring).
     published = latest_version(engine_doc or {})
