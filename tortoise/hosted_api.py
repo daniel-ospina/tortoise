@@ -2057,8 +2057,10 @@ _HEALTH_PROBE_START_FAILED = False
 #: `503 data-plane-failed` through the whole of a perfectly healthy boot.
 #: Measured: `tests/test_hosted_api.py::TestLivenessDecouple::
 #: test_lifespan_starts_the_dedicated_healthz_listener` reds in any shard where
-#: the process crosses 120 s before that test runs (reproduced by aging this
-#: global to -400 s with nothing else changed).
+#: the process crosses 120 s before that test runs. The recipe is aging this
+#: global to -400 s WITH the re-base in `_lifespan` removed — at this head the
+#: re-base discards the aged value before any verdict reads it, which is the fix
+#: working, so aging it alone now reproduces GREEN.
 #: Re-basing HERE rather than adding a second clock is deliberate: one epoch has
 #: one writer, so it cannot drift from the reset it describes, and a second
 #: module global would make the read depend on which file's fixture ran last
