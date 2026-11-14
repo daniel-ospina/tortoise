@@ -1009,12 +1009,14 @@ surfaces:
   # attributed it to that driver, and `duplicate_entries()`' own measurement retracts it —
   # the SAME row appended at two different POSITIONS survives as TWO rows, with the
   # attribute set and unset alike, because nothing reconciles independent appends. The
-  # entry is still exactly the duplicate `duplicate_entries()` exists to catch (#5373, and
-  # carried by the `manifest-integrity` check rather than by `--integrity`): a same-surface
-  # repeat is invisible to selection AND to `integrity()`, which only asks "is it
-  # classified?" — a duplicated row satisfies that. The redundant copies are deleted, not
-  # merged: both carried the same classification. One row per surface is what
-  # `duplicate_entries()` requires, and the second copy is gone.
+  # entry is still exactly the duplicate `duplicate_entries()` exists to catch (#5373): it
+  # reaches `--integrity` through `_manifest_contract_issues`, the step the
+  # `manifest-integrity` job runs, and that job's `registry_integrity` step reports the raw
+  # duplicate-entry form as well. What does NOT catch it is `integrity()` the FUNCTION — it
+  # returns only the unclassified files, which a duplicated row is not — and selection
+  # cannot see a same-surface repeat either, so `duplicate_entries()` is the only reader
+  # that does. One row per surface is what it requires. The redundant copies are deleted,
+  # not merged: both carried the same classification, and the second copy is gone.
   - test_12477_health_honesty.py
   - test_agent_signup.py
   - test_agent_signup_idempotency.py
