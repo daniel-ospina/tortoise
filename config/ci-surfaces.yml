@@ -37,7 +37,7 @@ version: 1
 # and `shard_watchdog_minutes()` rounds 840.2/60 x 2.0 up to 29 m — 0.2 s of
 # packing crosses a whole watchdog minute. At 29 m the arm-2 SUM is 60.64 m,
 # x 1.5 = 90.96 m against the 90 m cap (RED, where BOTH parents pass). At S=11
-# the shipped map packs the worst shard at 780.2 s -> 27 m, i.e. 58.64 x 1.5 = 87.96 m: 2.04 m of
+# the shipped map packs the worst shard at 781.3 s -> 27 m, i.e. 58.64 x 1.5 = 87.96 m: 2.04 m of
 # real headroom rather than the 0.54 m S=10 was clearing by. ⛔ The cap was NOT
 # moved: `test_the_test_job_carries_no_unbounded_cache_post_step` says raising it
 # re-opens `#3239`'s stale-head exposure, and the SUM grew from the POOL, not
@@ -12418,7 +12418,7 @@ durations:
   test_cursor_mcp_exit_evidence.py: 2.8  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 2.9
   test_d3_session_identity.py: 2.5  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 2.9
   test_dashboard_unknown_address.py: 0.2  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 0.3
-  test_demo_session_read_exclusion_8290.py: 14.0  # #11576 (#3400 trap: a file ADDED BY A PR has no CI junit measurement). Locally measured 2026-11-09, the WHOLE file as committed: 30 tests in 10.10s (`TORTOISE_TEST_CARVE_OUT=1`). Declared 14.0s — ~1.4x the measured body, so a cold leg pays interpreter start and the 1.2 MB `config/ci-surfaces.yml` parse two of its census pins make. ⛔ Absent this row the file packs at the flat 2.0s `DEFAULT_FAST_WEIGHT`, understating it 5x. At S=11 this weight still packs the worst shard at 780.2s -> 27 m (arm-2 SUM 58.64 m x 1.5 = 87.96 m against the 90 m cap); at S=10 it would ADD to the 29 m shard and hold the SUM red. Refresh from the first post-merge junit artifact.
+  test_demo_session_read_exclusion_8290.py: 14.0  # #11576 (#3400 trap: a file ADDED BY A PR has no CI junit measurement). Locally measured 2026-11-09, the WHOLE file as committed: 30 tests in 10.10s (`TORTOISE_TEST_CARVE_OUT=1`). Declared 14.0s — ~1.4x the measured body, so a cold leg pays interpreter start and the 1.2 MB `config/ci-surfaces.yml` parse two of its census pins make. ⛔ Absent this row the file packs at the flat 2.0s `DEFAULT_FAST_WEIGHT`, understating it 5x. At S=11 this weight still packs the worst shard at 781.3s -> 27 m (arm-2 SUM 58.64 m x 1.5 = 87.96 m against the 90 m cap); at S=10 it would ADD to the 29 m shard and hold the SUM red. Refresh from the first post-merge junit artifact.
   test_dream_noop_3139.py: 4.6  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 6.3
   test_durability_posture.py: 9.6  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 8.2
   test_embed_metering.py: 2.4  # #4488: no source leg of the sweep collected it — refresh from CI junit — ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 2.5
