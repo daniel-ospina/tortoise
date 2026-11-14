@@ -5807,9 +5807,12 @@ _EPIC_CITE_SOURCES = {
     # `00-align.md`'s A-d row cites the fleet's real capture transport OUTSIDE every
     # sweep `_BUNDLE_CITE` can see (it resolves `sdk|edges|extractor_v2` only), so its
     # two `.ts` numbers had no reader at all and were stale: the row named `:948`/`:938`
-    # for the plain `postCapture` and its `install-probe` sibling while the tree carries
-    # those two `def`s at `:955`/`:947`. Registered because a repaired cite that nothing
-    # pins is a repair the next move of the symbol undoes silently.
+    # for the plain `postCapture` and its `install-probe` sibling while the tree then
+    # carried those two `def`s at `:955`/`:947` (the forward merge of `origin/main` has
+    # since moved them to `:1007`/`:999`, which is what the row below pins — the pair is
+    # ALWAYS 8 apart, so a move is a move and not a re-derivation). Registered because a
+    # repaired cite that nothing pins is a repair the next move of the symbol undoes
+    # silently.
     "pi_hooks": _REPO / "tortoise/pi-hooks/tortoise-capture.ts",
     # ⛔ `03-test-design.md:82` cites the 402 quota guard and its refusal payload by
     # NUMBER, and that row was in NO pin: #12369 re-pointed a CORRECT
@@ -5984,7 +5987,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # ...and THAT sentence names a second file, so its `.ts` pair takes its
         # own row: a row carries ONE source key. Both anchors are the FUNCTIONS
         # the row's prose names (`postCapture` and its `install-probe` sibling),
-        # never a bare offset. The row named `:948`/`:938`; the tree carries those
+        # never a bare offset. The row named `:948`/`:938`; the tree THEN carried those
         # two `def`s at `:955`/`:947`, which are **always 8 apart** across all 27
         # revisions of the file — so nothing "rotted" and there is no offset to
         # reuse: `:938` was `clearTimeout(timer);` and `:948` was
