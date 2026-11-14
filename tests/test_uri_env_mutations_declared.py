@@ -150,6 +150,58 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # undeclared mutation in the tree).
     "test_9664_capstone_connector_to_record.py": [
         r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
+    # #12521: `test_10015_organisation_account.py` landed URI-unsets with no
+    # register row (`monkeypatch.delenv("TORTOISE_DB_URI", raising=False)`, at `:49`
+    # and `:257`), which reds this gate on `main` — the same "module landed without
+    # its entry" shape as #9664 above and #12275 below. Both are the embedded-lane
+    # control, and they point the resolver in OPPOSITE ways, so one sentence does not
+    # describe both:
+    #   the `sdk` fixture — unsets the ambient URI and points `TORTOISE_DB_PATH` at a
+    #     tmp DB, then opens the handle on the SAME store, because `resolve_org_limits`
+    #     resolves the registry through `quota._make_sdk(namespace="registry")` and the
+    #     ambient env, never the caller's handle. A URI redirect THERE would make the
+    #     resolver read an ambient server, so the account row would be missing for a
+    #     reason unrelated to the code under test.
+    #   `test_an_account_the_gates_cannot_see_is_refused_not_reported_absent` — the
+    #     deliberate MISMATCH case, and it takes no `sdk` fixture: it unsets the URI in
+    #     the test body and points the resolver at a DIFFERENT local store than its own
+    #     handle, so TWO control planes ARE the thing under test. ⛔ A shared-server
+    #     graph still RAISES the same `ControlPlaneError` here — `_make_sdk` takes the
+    #     URI branch, the server holds no such Team row, and this handle's own registry
+    #     does — so the redirect does NOT change the assertion. Its cost is that the
+    #     second plane stops being the store this test NAMES, and on a box with no live
+    #     server the resolver fails before the assertion is reached at all.
+    # The `delenv` IS the point at both, and the monkeypatch is fixture/function-scoped
+    # and auto-restored, so no lane flip can leak into a later module.
+    "test_10015_organisation_account.py": [
+        # Pinned to the literal those sites spell (`raising=False` at `:49` and at
+        # `:257`) rather than to a bare `delenv("TORTOISE_DB_URI"` arm, so a FUTURE
+        # BARE `delenv` in the same file is not authorized. ⛔ Do not claim more than
+        # that: this row does NOT inherit the "a future site is a DIFFERENT site and
+        # must be triaged" guarantee the `test_candidate_recall_11901.py` row BELOW
+        # gets. That row earns it from a line LAYOUT — its setenv arm requires the
+        # line-wrapped `…"TORTOISE_DB_URI",` at end of line, so the one-line form is
+        # a different site. A `delenv` has no such distinguishing tail to pin here:
+        # `raising=False` is the DOMINANT spelling across `tests/` — an order of
+        # magnitude more common than the key-only form — so a future site repeating
+        # this exact literal is SILENCED by this arm and must be triaged BY HAND. No
+        # TREE-WIDE numeral is quoted on purpose: the count moves with every commit
+        # that touches `tests/`, and a cardinal nobody can state twice is how "Two
+        # sites" went stale here. The narrowing still earns its place, and no other
+        # arm in this table does it: every other `delenv` arm here stops at the
+        # variable name. The one thing it DOES guarantee is asserted, not merely
+        # claimed — `test_declaration_path_rejects_undeclared` reds if the arm is
+        # widened.
+        # ⛔ The in-flight #12601 carries BOTH of this file's rows — this one AND the
+        # `test_published_artifact_canary.py` row above — with IDENTICAL arms. A
+        # second identical row is a duplicate dict key: `ruff` reds it `F601` in the
+        # lint leg, and `test_dod_5090_probe.py`'s duplicate-key scan (see this
+        # file's own note on it further down) reds it in the pytest shard. Neither removes the hazard —
+        # the later key still shadows the earlier — so whichever of the two PRs lands
+        # second must drop the duplicate row in EACH of the two pairs, not add a
+        # third: clearing only the `test_10015…` one leaves the duplicate
+        # `test_published_artifact_canary.py` key this PR exists to clear.
+        r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI",\s*raising=False'],
     # #12275: `test_candidate_recall_11901.py` (#12159) landed with three
     # untriaged URI mutations, which reds this gate on `main` in `test (d)` —
     # the same "module landed without its entry" shape as #9664 above. None of
@@ -619,9 +671,14 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     "test_4125_legacy_session_source_migration.py": [
         r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*\w+\)'],
     # #11070: the operator-CLI arms are driven against a deliberately UNREACHABLE
-    # docker URI — `open_projection` is faked at both sites, so the value is a
-    # placeholder that is never dialled, not a lane choice. Two sites, one intent.
-    # DELIBERATE_URI.
+    # docker URI — `open_projection` is faked where an arm would reach it, and the
+    # two arms that do not are refused BEFORE a connection, though not both at the
+    # boundary: `--graph ""` exits 2 at the boundary, while the census arm's
+    # non-Postgres `TORTOISE_RECORD_DSN` is refused INSIDE `open_record`, by
+    # `record_dsn`, before any connection is attempted — that test's own docstring
+    # says so plainly ("The real door is used here (no fake)"). So the value is a
+    # placeholder that is never dialled, not a lane choice.
+    # Three sites, one intent. DELIBERATE_URI.
     "test_11070_source_prose_repair.py": [
         r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*"docker://:x@127\.0\.0\.1:1/none"\)'],
     "test_server_hygiene_gate.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
@@ -697,17 +754,29 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # leak into a later module. DELIBERATE_URI.
     "test_projection.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
                            r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
-    # #12422's canary landed this site AFTER the #12523 triage merged, which
-    # re-red the register (`undeclared TORTOISE_DB_URI mutation(s)` naming
-    # `test_published_artifact_canary.py:2107`).
+    # ⛔ MAINLINE TRIAGE, not the feature PR that landed the site: #12422's canary
+    # landed this site with NO register row, so `test_uri_env_mutations_declared` was RED on
+    # `origin/main` for every branch (an undeclared mutation reds until triaged).
+    # #12588 triaged it FIRST (`0f7f21c342`, the row kept here) and #12555 added a
+    # SECOND row for the same module 3.5 minutes later (`a808f9f8ba`, the row this
+    # collapse deletes) — two rows for one module are a duplicate dict key (ruff
+    # F601) and the later key silently SHADOWS the earlier one.
     # `test_install_and_run_strips_ambient_tortoise_env` PLANTS an ambient
     # `TORTOISE_DB_URI` precisely so it can be shown to be STRIPPED before the
     # canary measures the default path a new user gets — an ambient URI inherited
     # from the runner would point the command somewhere else and turn a broken
-    # artifact green. So the value IS the test input, and nothing dials it: every
-    # probe drives `_Runner`, which records argv and returns scripted
-    # `CompletedProcess` results (no subprocess, no server), and the hand-rolled
-    # `_Capture` subclasses it only to read the env mapping it was called with.
+    # artifact green. So the value IS the test input, and nothing dials it: this
+    # test's own runner is the hand-rolled `_Capture`, a `_Runner` subclass that
+    # reads the env mapping it was called with and delegates to `_Runner`, which
+    # records argv and returns scripted `CompletedProcess` results — so every
+    # command `install_and_run` issues HERE goes through the injected runner and
+    # opens no socket.
+    # Scoped to THIS test on purpose: the MODULE is not subprocess-free. Other
+    # tests in it use plain-function runner stubs, and
+    # `test_the_DEFAULT_runner_is_plain_subprocess_run_and_keeps_the_output`
+    # really spawns a child through `subprocess.run`. None of them read
+    # `TORTOISE_DB_URI`, and this `setenv` is function-scoped, so no child can
+    # inherit the decoy — which is the property the classification rests on.
     # Function-scoped `monkeypatch` is auto-undone by pytest at teardown, so no
     # lane flip can leak into a later module. DELIBERATE_URI — and the value is
     # PINNED, because this module holds exactly ONE site. The table's precedent
@@ -1117,17 +1186,6 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
         # rung-table completeness pin (:2420) — `daemon_db_target()` RETURNS the
         # value, and neither that test nor any arm of this module dials it.
         r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*"docker://:pw@localhost:6379/g"',
-    ],
-    # ⛔ MAINLINE TRIAGE, not a site this PR added: `test_published_artifact_canary.py`
-    # landed with no register row, so `test_uri_env_mutations_declared` was RED on
-    # `origin/main` for every branch (an undeclared mutation reds until triaged),
-    # not just on this one — both this register and that module are byte-identical
-    # to main here, and the undeclared site is reported with them alone. Declared
-    # so main and every branch stop being red. The value is the AMBIENT env the
-    # canary exists to prove it STRIPS: the mutation is the INPUT, and the canary's
-    # own child process is what may resolve it.
-    "test_published_artifact_canary.py": [
-        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*"docker://:x@localhost:6379/other"',
     ],
 }
 
@@ -3018,6 +3076,19 @@ def test_declaration_path_rejects_undeclared():
         "sub/test_config.py", 'monkeypatch.delenv("TORTOISE_DB_URI")')
     assert not _is_declared(
         "e2e/test_config.py", 'monkeypatch.delenv("TORTOISE_DB_URI")')
+    # #12521: the `test_10015_organisation_account.py` row's arm is pinned to the
+    # literal both real sites spell (`,\s*raising=False`), and that narrowing is a
+    # CLAIM the row's own comment makes — so it is enforced here, not just written.
+    # Scoped to the SAME declared file on purpose (the `test_unknown.py` lesson
+    # above): a negative taken against an undeclared file answers False against ANY
+    # pattern and pins nothing. With this pair, loosening the arm to a bare
+    # `delenv\(\s*"TORTOISE_DB_URI"` reds the second assert.
+    assert _is_declared(
+        "test_10015_organisation_account.py",
+        'monkeypatch.delenv("TORTOISE_DB_URI", raising=False)')
+    assert not _is_declared(
+        "test_10015_organisation_account.py",
+        'monkeypatch.delenv("TORTOISE_DB_URI")')
 
 
 def test_restoration_exemption_boundary():

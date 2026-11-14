@@ -766,13 +766,18 @@ git grep -n 'result\["relations"\]' -- tortoise/        # at this record's merge
                                                           # the claim: unscoped it also matches the
                                                           # reader below)
 git grep -c 'result\["relations"\]' -- tests/          # tree-wide MATCHES — THREE files on this merge,
-                                                          # 60 LINES (`-c` counts lines per file):
+                                                          # 63 LINES (`-c` counts lines per file; re-measured
+                                                          # on the merged tree, where the two finder lines below
+                                                          # add their own matches):
                                                           # tests/test_10999_batch_story_relations.py —
                                                           # 56 — assertions on the channel; tests/eval/
                                                           # write_path/test_write_path_relation_lane.py
                                                           # — 3 — and tests/test_7949_capstone_measure.py
-                                                          # — 1 — a SOURCE-TEXT scan of `extractor_v2.py`'s
-                                                          # lines (`:14043`) that derives the doc's cite
+                                                          # — 4 — SOURCE-TEXT scans and one prose comment, not
+                                                          # consumers: one is the `extractor_v2.py` scan
+                                                          # (`:14435`) that derives the doc's cite, two are the
+                                                          # finder's own conditions (#12569), and the fourth is
+                                                          # a prose line about `#11001`'s in-place correction
 # ⛔⛔ THIS GREP COUNTS LINES, NOT READERS — do not read the per-file numbers as "who consumes the
 # channel". Two of the three files are NOT what their matched lines look like:
 #   • `test_write_path_relation_lane.py`: its 3 matched lines are all DOCSTRING prose (`:6`, `:22`,
@@ -792,7 +797,7 @@ git grep -c 'result\["relations"\]' -- tests/          # tree-wide MATCHES — T
 # ⚠️ The third file was added after this record was written, so the earlier "TWO files … 59"
 # was true of the head this block was first measured on (`e49788706a`, which reads 2 files /
 # 59 lines / 62 occurrences) and is re-measured here rather than left stale.
-git grep -o 'result\["relations"\]' -- tests/ | wc -l    # 63 OCCURRENCES on this merge (60 lines + the 3
+git grep -o 'result\["relations"\]' -- tests/ | wc -l    # 66 OCCURRENCES on this merge (63 lines + the 3
                                                           # doubly-named ones below). ⛔ A count is only
                                                           # as good as the BASE it was taken at, and the
                                                           # earlier text's pair belonged to a different
