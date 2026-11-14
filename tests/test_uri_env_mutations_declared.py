@@ -179,8 +179,13 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
         # rule the `test_candidate_recall_11901.py` row BELOW states for its own file
         # — a future site is a DIFFERENT site and must be triaged, not authorized by
         # this entry — applied to the `delenv` construct, which no other arm in this
-        # table constrains: every other `delenv` arm here stops at the variable name
-        # (measured with `ast` at this head — none of the other 52 has a tail).
+        # table constrains: every other `delenv` arm here stops at the variable name.
+        # No count is stated on purpose — the number changes with the counting rule,
+        # and a cardinal nobody can state twice is how "Two sites" went stale here.
+        # ⛔ The in-flight #12601 carries this SAME key with this SAME arm. A second
+        # identical row is still a duplicate dict key (ruff F601, and the later key
+        # silently shadows the earlier) — so whichever of the two lands second must
+        # DELETE this row, not add another.
         r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI",\s*raising=False'],
     # #12275: `test_candidate_recall_11901.py` (#12159) landed with three
     # untriaged URI mutations, which reds this gate on `main` in `test (d)` —
