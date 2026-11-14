@@ -369,6 +369,80 @@ def test_a_missing_configured_flag_is_UNVERIFIABLE_not_false(monkeypatch, capsys
     assert "configured_not_a_bool" in capsys.readouterr().out
 
 
+def test_the_CONTRACTED_unreadable_payload_is_UNVERIFIABLE_and_NAMES_its_reason(monkeypatch, capsys) -> None:
+    """⛔ `configured: null` IS A CONTRACTED ANSWER, not a malformed body.
+
+    It is what a half publishes when its OWN resolver could not run: `hosted_api._consent_token_key_health()`
+    returns exactly `{"key_fingerprint": None, "configured": None, "reason": "unreadable"}` on any
+    exception, and SPEC §2.5, runbook §4.4 and this tool's own `REASON_CODES` comment all pair
+    `unreadable` with `configured: null`. Refusing it as `configured_not_a_bool` accused the AS of a
+    malformed body for the one answer that means "I could not state my key", and left the sixth reason
+    code unproducible through the only shape that publishes it.
+    """
+    unreadable = _health(None, configured=None, reason="unreadable")
+    _serve(monkeypatch, unreadable, _pages(_fp(_KEY_A)))
+    assert CKC.main([]) == 2
+    out = capsys.readouterr().out
+    assert "CONSENT-KEY: UNVERIFIABLE" in out, out
+    assert "unreadable" in out, f"the diagnosis must name the contracted reason, not a shape fault: {out!r}"
+    assert "configured_not_a_bool" not in out, (
+        f"the contracted `configured: null` answer was reported as a payload-shape fault: {out!r}"
+    )
+
+
+def test_BOTH_halves_unreadable_is_UNVERIFIABLE_and_never_OFF(monkeypatch, capsys) -> None:
+    """⛔ "both resolvers crashed" must not be read as "the feature is disabled".
+
+    `compare` coerces `configured` to bool for the OFF test, and `None` coerces to `False` — so if the
+    unreadable gate ever moved below the OFF branch, two crashed halves would report OFF (a
+    legitimate steady state) instead of UNVERIFIABLE. The gate is first on purpose; this pins the
+    ORDER, which is the whole reason accepting `configured: null` is safe.
+    """
+    _serve(
+        monkeypatch,
+        _health(None, configured=None, reason="unreadable"),
+        _pages(None, configured=None, reason="unreadable"),
+    )
+    assert CKC.main([]) == 2
+    out = capsys.readouterr().out
+    assert "CONSENT-KEY: UNVERIFIABLE" in out, (
+        f"two unresolvable halves were read as a configured state: {out!r}"
+    )
+    assert "CONSENT-KEY: OFF" not in out, (
+        f"an unreadable bridge was reported as a DISABLED one — `None` coerced to `False`: {out!r}"
+    )
+
+
+def test_a_sub_3_12_interpreter_exits_NO_VERDICT_not_a_disagreement() -> None:
+    """⛔ The interpreter guard used to exit **1** — the tool's `EXIT_DISAGREE`.
+
+    `SystemExit(<str>)` exits 1, which the module's own table, `--help` and runbook §4.4 publish as
+    "MISMATCH/SPLIT — a measured disagreement". So an environment fault (a 3.11 `python3`, the
+    shebang's own interpreter) reported itself as the 2026-11-01 key split — the third instance of a
+    class this file fixes twice for a malformed origin and an unparseable body. NO measurement is
+    exit 2. Run in a SUBPROCESS because the guard is module-level, and `sys.version_info` is patched
+    before the source is compiled so the real guard executes.
+    """
+    guard = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; sys.version_info=(3,11,0); "
+            f"exec(compile(open({str(REPO / 'tools/consent_key_check.py')!r}).read(), 'ckc', 'exec'))",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert guard.returncode == 2, (
+        "a <3.12 interpreter must report NO VERDICT (2), not a measured disagreement: "
+        f"got {guard.returncode}; stderr={guard.stderr[-300:]!r}"
+    )
+    assert "requires Python >= 3.12" in guard.stderr, (
+        f"the refusal message is written separately (SystemExit(int) prints nothing): {guard.stderr!r}"
+    )
+
+
 # ── the tool cannot be handed a key ───────────────────────────────────────
 
 def test_the_tool_has_no_way_to_be_given_a_key(capsys) -> None:
@@ -427,6 +501,32 @@ def test_the_urls_asked_for_are_the_two_contracted_surfaces(monkeypatch) -> None
     asked = _serve(monkeypatch, _health(_fp(_KEY_A)), _pages(_fp(_KEY_A)))
     assert CKC.main(["--api-url", "https://api.example", "--app-url", "https://app.example"]) == 0
     assert sorted(asked) == ["https://api.example/health", "https://app.example/api/consent/key"]
+
+
+def test_a_CREDENTIAL_BEARING_origin_is_never_echoed(monkeypatch, capsys) -> None:
+    """⛔ The origin was the ONE string in the public issue body nothing gated.
+
+    `Reading.url` is printed in the CI log AND `cat`-ed into an auto-filed issue in a PUBLIC repo, and
+    `--api-url`/`--app-url` are free-form (the workflow's `workflow_dispatch` inputs). The natural
+    shape of a protected preview origin is `https://user:token@host`, so echoing it verbatim
+    republishes a credential — the disclosure-amplifier behaviour every other field here refuses.
+    """
+    secret = "s3cr3t-token-value"
+    _serve(monkeypatch, _health(_fp(_KEY_A)), _pages(_fp(_KEY_A)))
+    assert CKC.main([
+        "--api-url", f"https://user:{secret}@api.example/health?tok={secret}#frag",
+        "--app-url", f"https://app.example/api/consent/key?tok={secret}",
+        "--json",
+    ]) == 0
+    out = capsys.readouterr().out
+    assert secret not in out, (
+        f"a credential-bearing origin was republished into the issue body: {out[:400]!r}"
+    )
+    urls = [r["url"] for r in json.loads(out)["readings"]]
+    assert all("user:" not in u and "?" not in u and "#" not in u for u in urls), urls
+    assert any(u == "https://api.example/health" for u in urls), (
+        f"redaction must keep scheme+host+path so the reading still names its half: {urls}"
+    )
 
 
 # ── the fourth disclosure gate: `reason` ──────────────────────────────────

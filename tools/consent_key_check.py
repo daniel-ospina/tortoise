@@ -83,17 +83,24 @@ import sys
 
 # #5128: refuse a <3.12 interpreter before the imports below — a module-level
 # 3.11+-only import would fail first with an unrelated message.
+# ⛔ AND THE EXIT CODE IS `2`, NOT THE DEFAULT 1. `SystemExit(<str>)` exits **1**, which this tool
+# publishes as `EXIT_DISAGREE` — "a measured disagreement" (the runbook §4.4 table an operator reads).
+# An interpreter mismatch is NO MEASUREMENT of anything, so reporting it as the 2026-11-01 key split
+# is the same false signal this file fixes twice below for a malformed origin and an unparseable
+# body. The message is written separately because `SystemExit(int)` prints nothing.
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
-    raise SystemExit(
+    sys.stderr.write(
         f"tools/consent_key_check.py requires Python >= 3.12 (got "
         f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
-        f"`uv run python tools/consent_key_check.py`"
+        f"`uv run python tools/consent_key_check.py`\n"
     )
+    raise SystemExit(2)
 
 import argparse
 import json
 import re
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 
@@ -206,12 +213,6 @@ def parse_reading(half: str, url: str, payload: object) -> Reading:
     """
     if not isinstance(payload, dict):
         return Reading(half, url, problem="payload_not_an_object")
-    configured = payload.get(CONFIGURED_FIELD)
-    if not isinstance(configured, bool):
-        # `null`/absent is not `false`: "this deployment did not say" and "this deployment has no
-        # key" are different readings, and only the second one can be compared against the other
-        # half's silence.
-        return Reading(half, url, problem="configured_not_a_bool")
     raw_reason = payload.get(REASON_FIELD)
     # ⛔ THE FOURTH DISCLOSURE GATE. `reason` is remote-chosen and this tool's output is pasted into a
     # PUBLIC issue body, so it is reduced to a CLOSED-SET code before it can be stored — see
@@ -222,6 +223,27 @@ def parse_reading(half: str, url: str, payload: object) -> Reading:
         if not isinstance(raw_reason, str) or raw_reason not in REASON_CODES:
             return Reading(half, url, problem="reason_not_a_code")
         reason = raw_reason
+    if CONFIGURED_FIELD not in payload:
+        # ⛔ ABSENT IS A SHAPE FAULT, and it is NOT `false`: "this deployment did not say" and "this
+        # deployment has no key" are different readings, and only the second can be compared against
+        # the other half's silence.
+        return Reading(half, url, problem="configured_not_a_bool")
+    configured = payload[CONFIGURED_FIELD]
+    if configured is None:
+        # ⛔ THE CONTRACT'S THIRD STATE, and refusing it was a contract bug. `configured: null` is what
+        # a half publishes when its OWN resolver could not run —
+        # `hosted_api._consent_token_key_health()` returns exactly
+        # `{"key_fingerprint": None, "configured": None, "reason": "unreadable"}` on any exception —
+        # and SPEC §2.5, runbook §4.4 and this file's own `REASON_CODES` comment all name `unreadable`
+        # as the code paired with it. Reporting `configured_not_a_bool` accused the AS of a malformed
+        # body for the one answer that means "I could not state my key", and left the sixth reason
+        # code unproducible through the only shape that publishes it.
+        # It stays UNREADABLE — `problem` is set, so `compare`'s first gate routes it to UNVERIFIABLE
+        # before `configured` is ever coerced to bool. Never AGREE, and never OFF: "both halves
+        # crashed" is not "the feature is disabled".
+        return Reading(half, url, configured=None, reason=reason, problem="unreadable")
+    if not isinstance(configured, bool):
+        return Reading(half, url, problem="configured_not_a_bool")
     raw_fp = payload.get(FINGERPRINT_FIELD)
     if configured:
         if not isinstance(raw_fp, str) or not FINGERPRINT_RE.match(raw_fp):
@@ -342,18 +364,40 @@ def _get_json(url: str, timeout: float) -> tuple[object | None, str | None]:
         return None, "body_not_json"
 
 
+def _redact_url(url: str) -> str:
+    """`scheme://host[:port]/path` only — userinfo, query and fragment are DROPPED.
+
+    ⛔ THE ONE STRING IN THE PUBLIC ISSUE BODY THIS TOOL DID NOT GATE. `Reading.url` is printed in the
+    CI log AND `cat`-ed into an auto-filed issue in a PUBLIC repo, and `--api-url`/`--app-url` are
+    free-form values (the workflow's `workflow_dispatch` inputs). The natural shape of a protected
+    preview origin is `https://user:token@host`, so echoing the origin verbatim republishes a
+    credential — which is exactly the disclosure-amplifier behaviour every other field here refuses.
+    The REQUEST still uses the full URL (a token may be needed to reach the half); only what is
+    STORED and PRINTED is reduced. Unparseable input cannot be echoed either.
+    """
+    try:
+        parts = urllib.parse.urlsplit(url)
+        host = parts.hostname or ""
+        netloc = f"{host}:{parts.port}" if parts.port is not None else host
+        if not netloc:
+            return "<unparseable origin>"
+        return urllib.parse.urlunsplit((parts.scheme or "https", netloc, parts.path, "", ""))
+    except ValueError:                                  # a bad port, an unbalanced IPv6 literal, …
+        return "<unparseable origin>"
+
+
 def read_api(api_url: str, timeout: float) -> Reading:
     """The Fly half — `{api}/health` → `consent_token_key`."""
     url = api_url.rstrip("/") + API_PATH
     payload, problem = _get_json(url, timeout)
     if problem:
-        return Reading("api", url, problem=problem)
+        return Reading("api", _redact_url(url), problem=problem)
     block = payload.get(PAYLOAD_FIELD) if isinstance(payload, dict) else None
     if not isinstance(block, dict):
         # ⛔ A `/health` WITHOUT this block is not "an older deployment is fine": it is a deployment
         # that cannot answer the question, which is the shape that made this drift invisible.
-        return Reading("api", url, problem=f"{PAYLOAD_FIELD}_absent")
-    return parse_reading("api", url, block)
+        return Reading("api", _redact_url(url), problem=f"{PAYLOAD_FIELD}_absent")
+    return parse_reading("api", _redact_url(url), block)
 
 
 def read_app(app_url: str, timeout: float) -> Reading:
@@ -361,8 +405,8 @@ def read_app(app_url: str, timeout: float) -> Reading:
     url = app_url.rstrip("/") + APP_PATH
     payload, problem = _get_json(url, timeout)
     if problem:
-        return Reading("app", url, problem=problem)
-    return parse_reading("app", url, payload)
+        return Reading("app", _redact_url(url), problem=problem)
+    return parse_reading("app", _redact_url(url), payload)
 
 
 def _fix_hint(verdict: Verdict) -> str:

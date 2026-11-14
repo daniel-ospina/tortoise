@@ -365,7 +365,14 @@ def consent_key_fingerprint(key: str | None = None) -> str | None:
     configured one.
     """
     raw = key if key is not None else consent_token_secret()
-    if raw is None:
+    if not raw:
+        # ⛔ `not raw`, not `raw is None`: an EMPTY key cannot sign anything, so a fingerprint of it is
+        # a reading about nothing — and `consent-bridge.ts::consentKeyFingerprint` already guards with
+        # `if (!secret) return null` for exactly that reason. `raw is None` alone let this function
+        # return `sha256(b"")[:12]` (`e3b0c44298fc`) for `""` while its TypeScript twin answered
+        # `null`, i.e. the two halves disagreed about the empty value inside the one function §2.5
+        # names as the contract. Latent through `/health` (`consent_token_key_health` short-circuits on
+        # `_secret_state()`), but this is the documented entry point for callers holding a key.
         return None
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:CONSENT_KEY_FINGERPRINT_HEX_CHARS]
 

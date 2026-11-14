@@ -190,6 +190,16 @@ def test_the_fingerprint_hashes_the_BYTES_the_HMAC_uses(clean_env) -> None:
             "the fingerprint normalised the key before hashing it — it MUST be the same `key.encode()` "
             "the HMAC is computed over, byte for byte (§2.5)"
         )
+    # ⛔ AND THE EMPTY VALUE IS `None`, MATCHING THE TYPESCRIPT TWIN. `raw is None` alone returned
+    # `sha256(b"")[:12]` (`e3b0c44298fc`) for `""`, while `consent-bridge.ts::consentKeyFingerprint`
+    # guards with `if (!secret) return null` — so the two halves disagreed about the empty value inside
+    # the one function §2.5 names as the contract, and a deployment publishing `""` would have
+    # fingerprinted a key that cannot sign (the docstring's own words). Latent through `/health`
+    # (`consent_token_key_health` short-circuits), which is exactly why the FUNCTION is pinned.
+    assert consent_token.consent_key_fingerprint("") is None, (
+        "an EMPTY key must publish no fingerprint — a digest of nothing is a reading about nothing, "
+        "and the TypeScript twin already answers `null`"
+    )
     # Mint with the key the deployment holds, then verify the same token: the MAC is reproducible
     # only from the bytes the fingerprint describes, so the two cannot be derived from different
     # values without one of them failing.
