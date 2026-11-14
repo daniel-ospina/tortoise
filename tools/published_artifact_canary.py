@@ -964,7 +964,7 @@ def build_report(
             # deliberate fail-closed move, NOT a correction of a false sentence — those documents
             # carry no version at all, so "carries no latest version" was literally true of them;
             # what was wrong was issuing a VERDICT off an `info` this client never parsed. (See
-            # `info_unreadable` for the sibling case where the old sentence really was false:
+            # `version_unreadable` for the sibling case where the old sentence really was false:
             # `{"version": 0.3}` carries a version.)
             report.add(
                 missing_version_arm(
