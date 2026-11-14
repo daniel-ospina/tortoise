@@ -2685,6 +2685,11 @@ def test_wheel_mode_fail_names_a_build_defect_not_a_release():
     assert (
         "the failing arm is `documented-command` (the README example exits 1)"
     ) in foreign_summary, foreign_summary
+    # ...and the clause that limits what that arm establishes: rewriting it to "failed to install"
+    # would put the wheel's claim back into a sentence built for a foreign arm (#12589 round 17).
+    assert (
+        "that arm does not establish that the built wheel fails its documented command"
+    ) in foreign_summary, foreign_summary
     # ...and the branch that could not attribute the failure may not CLASSIFY it either: no
     # "re-dispatch this publish" instruction (that sentence carries the code-defect verdict), and
     # the honest alternative instead.
@@ -2832,6 +2837,87 @@ def _UNKNOWN_REPORT():
     )
 
 
+GOLDEN_RELEASES_ABSENT_DETAIL = (
+    "could not read the tortoise-client release map — the index document carries no usable "
+    "`releases` map (the key is absent, null, or not an object). PyPI documents `releases` as "
+    "DEPRECATED and may remove it (releases-absent), so whether `pip install tortoise-client` "
+    "resolves is UNKNOWN, not false. This is NOT evidence the artifact is broken and is NOT a "
+    "reason to cut a release"
+)
+
+
+def test_the_releases_absent_detail_is_PINNED_VERBATIM():
+    """⛔ A NON-READING MAY NOT BE WORDED AS A NEGATIVE FINDING (#12589 review round 17, P2).
+
+    The `releases-absent` detail ends "… resolves is UNKNOWN, not false". Inverting that one word
+    to "FALSE" — a non-reading asserting non-resolution, the exact class this issue removes — left
+    all 93 tests green, because only the sibling `releases-unreadable` arm's sentence was pinned
+    (by GOLDEN_UNKNOWN). Same treatment for the other arm: the full sentence, verbatim.
+    """
+    detail = _client_report({"info": {"version": "0.3.0"}}).get("client-published").detail
+    assert detail == GOLDEN_RELEASES_ABSENT_DETAIL, detail
+
+
+def test_the_index_absent_client_detail_names_the_documented_install():
+    """⛔ THE README POINTER IS WHAT MAKES A 404 A FINDING (#12589 review round 17, P3).
+
+    The `client-published` arm reads FAIL on a 404 because README.md documents the install; the
+    sentence that says so was deletable with all 93 tests green. Without it the FAIL is just "a
+    package is not on the index".
+    """
+    report = canary.build_report(
+        engine_doc=_engine_doc(),
+        client_doc=None,
+        client_error="404 Not Found",
+        client_state=canary.INDEX_ABSENT,
+        tree_version="0.2.0",
+        init_arm=_ok_init_arm(),
+        now=NOW,
+    )
+    arm = report.get("client-published")
+    assert arm.status == canary.FAIL, (arm.status, arm.detail)
+    assert "tortoise-client is not resolvable on the index (404 Not Found)" in arm.detail, (
+        arm.detail
+    )
+    assert "README.md documents `pip install tortoise-client` as a supported install" in arm.detail
+
+
+def test_the_index_UNREADABLE_detail_names_the_shape_it_could_not_read():
+    """⛔ AND ITS SIBLING (#12589 review round 17, P3): the unreadable-index detail named the
+    distribution's presence in two clauses; both were deletable with the suite green (the token and
+    the trailing "NOT a reason to cut a release" were pinned, the body was not)."""
+    report = canary.build_report(
+        engine_doc=None,
+        engine_error="timed out",
+        engine_state=canary.INDEX_UNREADABLE,
+        client_doc=_client_doc(),
+        tree_version="0.2.0",
+        init_arm=_ok_init_arm(),
+        now=NOW,
+    )
+    arm = report.get("engine-index")
+    assert arm.status == canary.UNKNOWN, arm.detail
+    assert "could not read the tortoise-graph index metadata (timed out)" in arm.detail, arm.detail
+    assert "the distribution's presence is UNKNOWN, not absent" in arm.detail, arm.detail
+
+    # ...and the CLIENT arm's identical clause, which is a separate f-string (#12589 round 17).
+    client_side = canary.build_report(
+        engine_doc=_engine_doc(),
+        client_doc=None,
+        client_error="timed out",
+        client_state=canary.INDEX_UNREADABLE,
+        tree_version="0.2.0",
+        init_arm=_ok_init_arm(),
+        now=NOW,
+    )
+    client_arm = client_side.get("client-published")
+    assert client_arm.status == canary.UNKNOWN, client_arm.detail
+    assert "could not read the tortoise-client index metadata (timed out)" in client_arm.detail
+    assert "the distribution's presence is UNKNOWN, not absent" in client_arm.detail, (
+        client_arm.detail
+    )
+
+
 def test_the_RENDERED_summaries_are_PINNED_VERBATIM():
     """⛔ THIS IS THE CLASS-CLOSING PIN FOR EVERY RENDERED LITERAL (#12589 review rounds 13-16).
 
@@ -2844,8 +2930,13 @@ def test_the_RENDERED_summaries_are_PINNED_VERBATIM():
     A single verbatim expectation per TAIL closes the class instead of the instance: any change to
     any word, table cell, glyph or blank line in these four outputs fails here, so a text edit has
     to be made DELIBERATELY, with this expectation updated in the same commit. The four shapes are
-    one per verdict path plus the wheel (pre-publish) path, which is every branch `render_summary`
-    can take.
+    one per verdict path plus the wheel (pre-publish) path. ⚠️ NOT every branch: the wheel
+    tail's other three sub-branches (does-not-install, console-script, the foreign-arm fallback) and
+    the UNKNOWN tail's EMPTY-`marked` variant are pinned by
+    `test_wheel_mode_fail_names_a_build_defect_not_a_release`,
+    `test_the_wheel_tail_names_the_CONSOLE_SCRIPT_case_separately` and
+    `test_the_UNREADABLE_reason_names_every_cause_the_code_can_produce` — this pin covers one
+    shape per tail; those cover the siblings.
     """
     assert canary.render_summary(_GREEN_REPORT()) == GOLDEN_GREEN
     assert canary.render_summary(_INDEX_FAIL_REPORT()) == GOLDEN_INDEX_FAIL
@@ -2938,6 +3029,40 @@ def test_the_wheel_tail_names_the_CONSOLE_SCRIPT_case_separately():
         now=NOW,
         wheel_path=Path("dist/tortoise_graph-0.2.0-py3-none-any.whl"),
     )
+    # ⛔ AND A FOREIGN ARM WHOSE DETAIL MERELY MENTIONS A CONSOLE SCRIPT (#12589 review round 17,
+    # P3): the substring branches keyed on the PROSE alone, so this report rendered "The BUILT wheel
+    # installs but ships no `tortoise` console script … this is a code defect" for an arm that never
+    # installed anything.
+    mentions = canary.build_report(
+        engine_doc=None,
+        client_doc=None,
+        tree_version="0.2.0",
+        init_arm=canary.Arm(
+            "docs-smoke", canary.FAIL, "the docs reference the tortoise console script"
+        ),
+        now=NOW,
+        wheel_path=Path("dist/tortoise_graph-0.2.0-py3-none-any.whl"),
+    )
+    # ...and the same for a foreign arm whose detail OPENS with the wheel's install vocabulary.
+    opens_with = canary.build_report(
+        engine_doc=None,
+        client_doc=None,
+        tree_version="0.2.0",
+        init_arm=canary.Arm(
+            "docs-smoke", canary.FAIL, "the BUILT wheel example in the docs failed to install"
+        ),
+        now=NOW,
+        wheel_path=Path("dist/tortoise_graph-0.2.0-py3-none-any.whl"),
+    )
+    opens_summary = canary.render_summary(opens_with)
+    assert "is NOT judged by this summary" in opens_summary, opens_summary
+    assert "does not install" not in opens_summary, opens_summary
+
+    mentions_summary = canary.render_summary(mentions)
+    assert "is NOT judged by this summary" in mentions_summary, mentions_summary
+    assert "ships no `tortoise` console script" not in mentions_summary, mentions_summary
+    assert "`docs-smoke`" in mentions_summary, mentions_summary
+
     install_summary = canary.render_summary(install_fail)
     assert "BUILT wheel does not install" in install_summary, install_summary
     assert "re-dispatch this publish" in install_summary, install_summary

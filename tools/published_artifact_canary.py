@@ -1274,14 +1274,25 @@ def render_summary(report: Report) -> str:
             # asks the operator to read it.
             step = next((arm for arm in report.arms if arm.gated and arm.status == FAIL), None)
             detail = step.detail if step is not None else ""
+            # ⛔ EVERY BRANCH HERE IS GATED ON THE ARM, NOT ONLY ON ITS PROSE (#12589 review round
+            # 17, P3). A bare `"console script" in detail` let a hand-built report whose failing
+            # arm merely MENTIONS a console script render "The BUILT wheel installs but ships no
+            # `tortoise` console script … this is a code defect" — the wheel's claim attributed to
+            # an arm that never installed it. Only the arm that runs the built wheel can support
+            # any of these sentences.
+            runs_the_wheel = step is not None and step.name in WHEEL_COMMAND_ARMS
             named_it = False
-            if detail.startswith("the BUILT wheel") and "failed to install" in detail:
+            if (
+                runs_the_wheel
+                and detail.startswith("the BUILT wheel")
+                and "failed to install" in detail
+            ):
                 what = "does not install"
                 named_it = True
-            elif "console script" in detail:
+            elif runs_the_wheel and "console script" in detail:
                 what = "installs but ships no `tortoise` console script, so the documented first command cannot run"
                 named_it = True
-            elif step is not None and step.name in WHEEL_COMMAND_ARMS:
+            elif runs_the_wheel:
                 # The arm that RUNS the built wheel's documented command — the only one whose
                 # failure establishes this sentence (`test_wheel_mode_fail_names_a_build_defect_
                 # not_a_release` is this shape: the wheel installs, `tortoise init` exits 1).
