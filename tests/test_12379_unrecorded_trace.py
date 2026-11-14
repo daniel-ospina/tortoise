@@ -21,20 +21,28 @@ trace rather than a decision about re-attempting):
   line.
 
 ⛔ The trace keys on the wire marker #12362 introduces
-(``body["extraction_outcome"] == "unknown"``, set by
-``_session_post._refused`` for its ``PENDING`` verdict). On a tree that does not
-carry #12362 the marker is ABSENT, so this trace simply never fires — inert, not
-wrong. It never prices anything: a deferral is an offer to re-extract, and the
-server has not said that extraction did not run.
+(``body["extraction_outcome"] == "unknown"``). ⚠️ NOTHING ON THIS TREE PRODUCES
+IT YET: ``_session_post._refused`` builds only ``{"confirmed": verdict}`` (plus
+``extraction_mode`` for ``UNEXTRACTED``), ``session_confirm`` has no ``pending``
+verdict, and ``hosted_api``'s receipt carries no such field — the producer is
+#12374's PENDING branch, and until it lands the marker is ABSENT, so this trace
+never fires: inert, not wrong. The fixtures below are therefore #12374-SHAPED,
+not production-shaped (``capture_spool.UNRECORDED_OUTCOME_KEY`` says the same).
+It never prices anything: a deferral is an offer to re-extract, and the server
+has not said that extraction did not run.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
 
 from tortoise import capture_backlog
 from tortoise.capture_spool import (
+    RECORDED_OUTCOME_VERDICTS,
+    UNRECORDED_OUTCOME_KEY,
+    UNRECORDED_OUTCOME_VALUE,
     PostOutcome,
     Snapshot,
     capture_health_line,
@@ -55,8 +63,10 @@ TURNS = [
     {"role": "assistant", "content": "On it."},
 ]
 
-#: What `_session_post._refused` synthesises for a confirmed-but-UNRECORDED
-#: capture (#12362's `PENDING`): durable turns, outcome not recorded.
+#: ⚠️ #12374-SHAPED, not production-shaped: the `extraction_outcome` half is what
+#: #12374's PENDING branch will synthesise, and NO producer emits it on this tree
+#: (`_refused` builds only `{"confirmed": verdict}`). Durable turns, outcome not
+#: recorded — pinned so the predicate pair stays symmetric.
 UNRECORDED_BODY = {"confirmed": "pending", "extraction_outcome": "unknown"}
 #: The KNOWN store-only shape (#4188 keyless) — a real, priced deferral.
 STORE_ONLY_BODY = {"confirmed": "UNEXTRACTED",
@@ -194,10 +204,20 @@ def test_a_later_recorded_verdict_CLEARS_the_marker(tmp_path):
     assert (read_spool_meta(tmp_path, SESSION) or {}).get("filed_key") is not None
 
 
-def test_a_recorded_STORE_ONLY_verdict_also_clears_the_marker(tmp_path):
-    """The other resolved shape: `confirmed: unextracted` says extraction did
-    NOT run, and the server KNOWS it (#4188 / #4258) — not the same state as
-    "unknown".
+def test_an_unextracted_verdict_clears_a_marker_a_real_flush_stamped(tmp_path):
+    """The ``unextracted`` verdict clears even when the marker was written by a
+    flush (the full stamp → clear sequence on one entry) rather than by a direct
+    ``stamp_unrecorded_marker`` call. ⚠️ "A real prior pass" means the REAL code
+    path, not a live producer: the marker's own producer is #12374's PENDING
+    branch, which has not landed, so nothing on this tree emits it in production.
+
+    ⚠️ It rests on the confirmation READ matching the posted turns, NOT on the
+    server having recorded an extraction outcome — on this tree
+    ``session_confirm.confirm_capture`` does not consult
+    ``extraction.outcome_known``, so the verdict is exactly as strong as the read
+    (``#12374``'s PENDING branch qualifies it). It stays in the allow-list
+    because ``#12379``'s accepted decision is that a keyless session must stop
+    being reported as unresolved forever.
 
     MUTATIONS THAT RED THIS: narrow `outcome_recorded` to `filed` alone.
     """
@@ -242,6 +262,138 @@ def test_only_a_closed_verdict_vocabulary_clears_the_marker(tmp_path):
         assert unrecorded_captures(tmp_path) == [SESSION], (
             f"{junk!r} does not report how the capture ended, so it is not "
             "evidence — the marker must stand")
+
+
+#: The shape the spool ACTUALLY receives on a routine 2xx, on both legs: the
+#: hosted capture receipt (`hosted_api` POST `/v1/sessions`). It carries neither
+#: `confirmed` nor `extraction_outcome` — that is the whole reason #12460 exists.
+#: Server-shaped: `points` is `extracted` itself and `turns` is the turn count of
+#: the snapshot these are posted against (`hosted_api`: `"turns":
+#: len(body.conversation)`, `"points": extracted, "extracted": len(extracted)`),
+#: so a fixture whose counts disagree with the request would not describe a body
+#: the server can emit.
+RECEIPT_EXTRACTED_BODY = {"session_id": SESSION, "turns": 3, "extracted": 4,
+                          "points": ["p1", "p2", "p3", "p4"],
+                          "extraction_mode": "llm:openai"}
+RECEIPT_STORE_ONLY_BODY = {"session_id": SESSION, "turns": 3, "extracted": 0,
+                           "points": [],
+                           "extraction_mode": _CAPTURE_NO_PROVIDER_MODE}
+RECEIPT_AMBIGUOUS_BODY = {"session_id": SESSION, "turns": 3, "extracted": 0,
+                          "points": [], "extraction_mode": "llm:openai"}
+
+
+def test_a_receipt_reporting_extracted_points_clears_the_marker(tmp_path):
+    """⛔ THE PRODUCTION SHAPE — the clear on a ROUTINE 2xx.
+
+    A predicate that reads only the synthesised ``confirmed`` vocabulary never
+    fires on a success: the drain's own 2xx body is the capture receipt
+    (``{session_id, turns, extracted, …}``), which has no ``confirmed``. Measuring
+    that in #12460's verification is what turned a green, inert port into a real
+    one — the fake-green class this suite exists to prevent.
+
+    MUTATIONS THAT RED THIS: drop the ``extracted`` clause from
+    ``outcome_recorded`` (the marker then stands over a session the server
+    resolved, until eviction — the permanent false alarm #12460 describes).
+    """
+    write_spool_entry(tmp_path, _snapshot())
+    flush_spool(tmp_path, _post(UNRECORDED_BODY), now=1000.0)
+    assert unrecorded_captures(tmp_path) == [SESSION]
+
+    write_spool_entry(tmp_path, _snapshot(
+        turns=[*TURNS, {"role": "user", "content": "one more turn"}]))
+    resolved = flush_spool(tmp_path, _post(RECEIPT_EXTRACTED_BODY), now=2000.0)
+
+    assert resolved.filed == 1
+    assert unrecorded_captures(tmp_path) == [], (
+        "the receipt reports four extracted points — extraction RAN, so the "
+        "marker is stale and must not outlive the evidence that resolved it")
+
+
+def test_a_store_only_receipt_mode_does_NOT_clear_the_marker(tmp_path):
+    """⛔ A store-only ``extraction_mode`` is NOT evidence the outcome was recorded.
+
+    It says only that THIS REQUEST skipped extraction. The server gates its
+    durable outcome record on ``not session_existed`` (``hosted_api``:
+    ``_record_session_state = (not session_existed) if store_only``), so a keyless
+    RE-capture of an existing session records NOTHING while still reporting
+    ``extraction_mode: "no-provider"`` with ``extracted: 0``. Clearing on that
+    destroys the only trace of a session whose outcome was never recorded — the
+    false-PASS direction this trace exists to prevent (found in review of
+    PR #12507).
+
+    MUTATIONS THAT RED THIS: add a store-only ``extraction_mode`` clause to
+    ``outcome_recorded`` (the shape PR #12507 first shipped, and the reason this
+    test reads as a negative).
+    """
+    write_spool_entry(tmp_path, _snapshot())
+    flush_spool(tmp_path, _post(UNRECORDED_BODY), now=1000.0)
+    assert unrecorded_captures(tmp_path) == [SESSION]
+
+    write_spool_entry(tmp_path, _snapshot(
+        turns=[*TURNS, {"role": "user", "content": "one more turn"}]))
+    received = flush_spool(tmp_path, _post(RECEIPT_STORE_ONLY_BODY), now=2000.0)
+    # ⚠️ The body must actually have been received, or this pins nothing about a
+    # store-only mode: an un-reposted entry also leaves the marker standing.
+    assert received.filed == 1, "the receipt must have been POSTed and accepted"
+
+    assert unrecorded_captures(tmp_path) == [SESSION], (
+        "a keyless re-capture records no outcome, so the marker must stand — "
+        "clearing here hides a session nobody resolved")
+
+
+def test_an_unextracted_confirmation_still_clears_the_marker(tmp_path):
+    """...but the CONFIRMATION vocabulary still does — that is #12379's decision.
+
+    ``confirmed: "unextracted"`` is synthesised by ``_session_post`` from
+    ``session_confirm.confirm_capture``, which read the session back and matched
+    the posted turns. ⚠️ That read establishes DURABILITY, not the extraction
+    outcome: on this tree it does not consult ``extraction.outcome_known``, so an
+    ``unextracted`` confirmation cannot distinguish a store-only re-capture from a
+    resolved store-only outcome, and clearing on it is only as strong as the
+    confirmation read. It stays in the allow-list because #12379's accepted
+    decision is that a keyless session must stop being reported as unresolved;
+    #12374's PENDING branch is what qualifies the verdict. Removing it would make the
+    unresolved-alarm permanent for every keyless session, which is the trade the
+    issue already settled.
+
+    MUTATIONS THAT RED THIS: narrow ``RECORDED_OUTCOME_VERDICTS`` to ``filed``
+    alone (every keyless session then keeps a permanent false alarm).
+    """
+    write_spool_entry(tmp_path, _snapshot())
+    flush_spool(tmp_path, _post(UNRECORDED_BODY), now=1000.0)
+    assert unrecorded_captures(tmp_path) == [SESSION]
+
+    write_spool_entry(tmp_path, _snapshot(
+        turns=[*TURNS, {"role": "user", "content": "one more turn"}]))
+    flush_spool(tmp_path, _post(STORE_ONLY_BODY), now=2000.0)
+
+    assert unrecorded_captures(tmp_path) == []
+
+
+def test_an_AMBIGUOUS_receipt_leaves_the_marker_standing(tmp_path):
+    """⛔ The load-bearing negative: ``extracted: 0`` in a NORMAL mode.
+
+    The capture handler the transport bound abandoned may still be extracting —
+    the server's "no outcome yet" state (#12362's measurement: three captures
+    printed "nothing extracted" and read back holding 7, 2 and 5 points seconds
+    later). Reading a zero as a negative is the #12362 bug wearing the other mask.
+
+    MUTATIONS THAT RED THIS: treat a zero extraction count as resolved (``>= 0``,
+    or "anything that is not pending").
+    """
+    write_spool_entry(tmp_path, _snapshot())
+    flush_spool(tmp_path, _post(UNRECORDED_BODY), now=1000.0)
+
+    write_spool_entry(tmp_path, _snapshot(
+        turns=[*TURNS, {"role": "user", "content": "one more turn"}]))
+    received = flush_spool(tmp_path, _post(RECEIPT_AMBIGUOUS_BODY), now=2000.0)
+    # ⚠️ Same guard as its store-only sibling: an un-reposted entry would satisfy
+    # the final assertion for the wrong reason.
+    assert received.filed == 1, "the receipt must have been POSTed and accepted"
+
+    assert unrecorded_captures(tmp_path) == [SESSION], (
+        "a zero extraction count in a normal mode does not say whether the "
+        "outcome was ever recorded — it must never resolve the marker")
 
 
 def test_a_known_store_only_outcome_is_not_counted_as_unrecorded(tmp_path):
@@ -433,3 +585,100 @@ def test_the_events_line_is_unchanged_when_nothing_is_unrecorded(tmp_path):
 
     assert summary["unrecorded"] == 0
     assert "unrecorded" not in format_progress(summary)
+
+
+# ── Cross-leg parity: ONE marker, ONE verdict allow-list ────────────────────
+#
+# Both legs write the SAME spool meta (`capture_spool` the Python drain,
+# `tortoise/pi-hooks/tortoise-capture.ts` the Pi filing path). #12460 gave the Pi
+# leg the stamp/clear the Python leg already had, so the two predicates now act
+# on one shared file in two languages — and a divergence would flip the marker
+# against itself depending on which leg filed the growth (the Python leg reading
+# `extraction_outcome`, the Pi leg writing something else; or one leg clearing on
+# a verdict the other refuses). Neither language's behaviour suite can see the
+# other's constants, so the pin lives here: read the TypeScript source and
+# compare it to the Python definitions.
+#
+# These are SOURCE-level assertions. The Pi BEHAVIOUR is pinned by
+# `tortoise/pi-hooks/tortoise-capture.test.ts`'s `#12460` tests, which pytest
+# does not run (they need `node --test`).
+
+PI_SEAM = (Path(__file__).resolve().parent.parent
+           / "tortoise" / "pi-hooks" / "tortoise-capture.ts")
+
+PY_SEAM = Path(__file__).resolve().parent.parent / "tortoise" / "capture_spool.py"
+
+
+def _ts_source() -> str:
+    return PI_SEAM.read_text(encoding="utf-8")
+
+
+def _ts_source_name() -> str:
+    return "tortoise/pi-hooks/tortoise-capture.ts"
+
+
+_PY_SOURCE = PY_SEAM.read_text(encoding="utf-8")
+
+
+def _ts_string_const(name: str) -> str:
+    match = re.search(rf'const {name} = "([^"]+)";', _ts_source())
+    assert match is not None, (
+        f"`{name}` is not declared in {PI_SEAM.name} — the two legs no longer "
+        "share the marker the #12379 trace is keyed on")
+    return match.group(1)
+
+
+def test_the_two_legs_share_one_marker_and_verdict_vocabulary():
+    """The marker key/value and the recorded-verdict closed lists must be
+    IDENTICAL on both legs, and that NEITHER leg infers the outcome from a
+    receipt's ``extraction_mode``.
+
+    MUTATIONS THAT RED THIS: rename the key on one leg only (the marker becomes
+    invisible to the other — written by whoever stamped it, read by nobody),
+    change ``unknown`` on one side, add a verdict to the Python allow-list
+    without the Pi CAS clearing on it (then a Pi filing over a resolved session
+    keeps reporting a permanent false alarm), or reintroduce a store-only
+    ``extraction_mode`` clause on either leg (a keyless RE-capture records no
+    outcome, so that clause HIDES a session nobody resolved — the false-PASS
+    direction; the shape PR #12507 first shipped and review caught).
+    """
+    assert _ts_string_const("UNRECORDED_OUTCOME_KEY") == UNRECORDED_OUTCOME_KEY
+    assert _ts_string_const("UNRECORDED_OUTCOME_VALUE") == UNRECORDED_OUTCOME_VALUE
+
+    ts_list = re.search(r"const RECORDED_OUTCOME_VERDICTS = \[([^\]]*)\] as const;",
+                        _ts_source())
+    assert ts_list is not None, (
+        "the Pi leg declares no `RECORDED_OUTCOME_VERDICTS` allow-list — a "
+        "predicate without a closed vocabulary clears the marker on anything")
+    ts_verdicts = tuple(re.findall(r'"([^"]+)"', ts_list.group(1)))
+
+    assert ts_verdicts == tuple(RECORDED_OUTCOME_VERDICTS), (
+        f"the two legs disagree about which verdicts resolve the state: "
+        f"Pi={ts_verdicts!r} Python={tuple(RECORDED_OUTCOME_VERDICTS)!r}")
+
+    # ⛔ Neither leg may read `extraction_mode` as evidence of a recorded outcome.
+    # The server gates its durable outcome record on `not session_existed`, so a
+    # keyless RE-capture records NOTHING while still reporting `no-provider` with
+    # `extracted: 0` (`hosted_api._record_session_state`). The behavioural halves
+    # are `test_a_store_only_receipt_mode_does_NOT_clear_the_marker` (here) and
+    # its `#12460` namesake in `tortoise-capture.test.ts`; this is the source-level
+    # guard so neither predicate can grow the clause back quietly. Matched on the
+    # READ FORMS (both prose blocks legitimately discuss the mode), not the word.
+    for source, name, reads in (
+        (_ts_source(), _ts_source_name(),
+         ("receipt.extraction_mode", "body.extraction_mode",
+          'receipt["extraction_mode"]', "receipt['extraction_mode']",
+          "{ extraction_mode }")),
+        (_PY_SOURCE, "tortoise/capture_spool.py",
+         ('.get("extraction_mode")', ".get('extraction_mode')",
+          '["extraction_mode"]')),
+    ):
+        predicate = re.search(
+            r"(?:function outcomeRecorded|def outcome_recorded)\b.*?\n(?:\}|(?=\S))",
+            source, re.S)
+        assert predicate is not None, f"{name}: outcomeRecorded not found"
+        body = predicate.group(0)
+        assert not any(read in body for read in reads), (
+            f"{name}'s recorded-outcome predicate reads `extraction_mode` — a "
+            "keyless RE-capture would then clear the marker while recording no "
+            "outcome at all")

@@ -2324,11 +2324,14 @@ def _mcp_result_ok(status: int, body: str) -> bool:
     Tool-level failure arrives in TWO shapes in this repo, and the second one
     hides: ``result.isError`` (HTTP 200 — ``tests/test_mcp_http.py`` asserts
     it), and an error dict carried INSIDE a ``result`` whose ``isError`` is
-    false — ``tortoise/mcp_server.py`` returns ``{"error": ..., "code": ...}``
-    on an SDK exception (``_safe``) and on a quota refusal (``_quota_gated``),
-    and ``_maybe_onboarding_auto_complete`` is NOT called for those, so no
-    ``harness-connected`` edge is filed. Treating that as success made a quota
-    refusal read as "the server did not observe" — the #4291 conflation.
+    false. Since #11153 the CURRENT surface only produces the first —
+    ``_safe`` and ``_quota_gated`` refusals now ship ``isError: true`` — so the
+    nested arm below is kept for a server that PREDATES #11153 (an older
+    hosted deployment, or a self-hosted one pinned to an older release), not
+    for this surface. ``_maybe_onboarding_auto_complete`` is NOT called for
+    either shape, so no ``harness-connected`` edge is filed. Treating them as
+    success made a quota refusal read as "the server did not observe" — the
+    #4291 conflation.
     """
     if status != 200:
         return False

@@ -4573,7 +4573,13 @@ def _cmd_config(args) -> int:
         # nothing reads it.
         print("  ·  a `.env` NO entry point reads")
         print(f"     {_printable(_other['path'])}")
-        print(f"  sets          {_printable(', '.join(_other['keys']))}")
+        if _other.get("state") == "unreadable":
+            # Nothing was parsed, so there is no key list to print — and printing
+            # "sets" with an empty list would report an observation this command
+            # could not make (#12441 item 3).
+            print("  sets          (unknown — this file cannot be read)")
+        else:
+            print(f"  sets          {_printable(', '.join(_other['keys']))}")
         print("  ⚠️  the daemon reads "
               f"{_printable(env_file['path'])} — not this file — and no CLI")
         print("      verb reads any .env for its graph target, so nothing above")
@@ -8444,7 +8450,11 @@ def _session_post(api_key: str, api_url: str):
     from urllib.error import HTTPError, URLError
     from urllib.request import Request, urlopen
 
-    from tortoise.capture_spool import PostOutcome
+    from tortoise.capture_spool import (
+        UNRECORDED_OUTCOME_KEY,
+        UNRECORDED_OUTCOME_VALUE,
+        PostOutcome,
+    )
 
     def handle(payload: dict) -> PostOutcome:
         def _refused(outcome: PostOutcome) -> PostOutcome:
@@ -8479,6 +8489,7 @@ def _session_post(api_key: str, api_url: str):
                 return outcome
             from tortoise.session_confirm import (
                 FILED,
+                PENDING,
                 UNEXTRACTED,
                 confirm_capture,
             )
@@ -8488,19 +8499,34 @@ def _session_post(api_key: str, api_url: str):
                 session_detail, api_url, api_key,
                 str(payload.get("session_id") or ""),
                 payload.get("conversation") or [])
-            if verdict in (FILED, UNEXTRACTED):
+            if verdict in (FILED, PENDING, UNEXTRACTED):
                 # The spool's contract is TURN DURABILITY, so a confirmed
-                # capture terminalises on either verdict — `_flush_one` stamps
-                # `filed_key` through its own compare-and-swap.
+                # capture terminalises on any of these three verdicts —
+                # `_flush_one` stamps `filed_key` through its own
+                # compare-and-swap.
                 #
                 # An UNEXTRACTED confirmation carries the keyless-mode marker
                 # so `session capture`'s existing #4188 disclosure fires: the
                 # caller must not print an unqualified success for a capture
                 # whose memory points were never minted.
+                #
+                # A PENDING confirmation carries NO extraction_mode on purpose
+                # (#12362): the server has not recorded an outcome, so there is
+                # no cause to name. Labelling it keyless made the CLI print
+                # "no memory points were extracted" — measured FALSE on
+                # captures that extracted 2-7 points seconds later — and
+                # recorded a priced saved-backlog entry for work already done.
                 body: dict = {"confirmed": verdict}
                 if verdict == UNEXTRACTED:
                     from tortoise.sdk import _CAPTURE_NO_PROVIDER_MODE
                     body["extraction_mode"] = _CAPTURE_NO_PROVIDER_MODE
+                elif verdict == PENDING:
+                    # ⛔ The WIRE SPELLING comes from `capture_spool`'s one
+                    # definition (#12362): this body is read back by the drain
+                    # and the day-file writer through `outcome_unrecorded`, so a
+                    # literal here would be a second definition of the same
+                    # contract that could drift without any test noticing.
+                    body[UNRECORDED_OUTCOME_KEY] = UNRECORDED_OUTCOME_VALUE
                 return PostOutcome(
                     ok=True, status=200,
                     detail=f"{outcome.status} after commit — confirmed {verdict}",
@@ -8771,6 +8797,7 @@ def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
         DISCARD_SPOOL_SATURATED,
         _terminal_marker,
         flush_spool,
+        outcome_unrecorded,
         read_spool_meta,
     )
     if not capture_consent_enabled():
@@ -8928,6 +8955,35 @@ def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
     # "memory points were not extracted" for it would be a false statement
     # about the session.
     #
+    # ⛔ #12362: an UNKNOWN extraction outcome is not a store-only capture and
+    # must not be rendered as one. The confirmation can prove the posted turns
+    # while the capture handler the wait bound abandoned is STILL EXTRACTING,
+    # in which case `GET /v1/sessions/<id>` reports `extracted: 0` beside
+    # `extraction.outcome_known: false` — the server saying "not recorded yet",
+    # not "nothing was extracted". Measured on the hosted deployment: three
+    # captures printed the sentence below and were read back holding 7, 2 and 5
+    # memory points seconds later. Nothing is asserted here (neither success nor
+    # failure) and NO backlog deferral is written: a deferral is a priced offer
+    # to re-extract, and offering it for work already done is how the false
+    # negative became actionable.
+    if outcome_unrecorded(body):
+        # ⛔ #12362 review: name NO cause as fact and assert no outcome. The
+        # state is reached by two different histories — the abandoned handler
+        # still extracting, and one that stopped before writing its outcome
+        # (a SIGKILL, a failed `capture_ok` write) — and the client cannot tell
+        # them apart. It also names no REMEDY: "re-capture this transcript" is
+        # inert here — the spool entry is terminal with this session id, and a
+        # re-POST of a session whose recorded outcome is NULL replays rather
+        # than re-extracting (`retry_failed_capture` requires
+        # `prior_capture_ok is False`) — so an imperative would be a false
+        # instruction. Name the surface that CAN answer instead.
+        print("  Extraction: outcome not recorded yet — the turns are STORED; "
+              "the server has not recorded whether extraction ran (it may "
+              "still be running, or it may have stopped before recording). "
+              "No saved-backlog deferral was recorded for this capture; "
+              "'tortoise session view <id>' reports the server's state later.",
+              file=_sys.stderr)
+    #
     # #3971 merge resolution: main's hunk (#4188) is kept for its INTENT, but
     # RETARGETED to this branch's variables + #4258's mode set. Main binds
     # `result` only in its own direct-POST version of this function; here the
@@ -8967,11 +9023,21 @@ def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
             reason=(_CAPTURE_NO_PROVIDER_MODE
                     if _capture_mode == _CAPTURE_NO_PROVIDER_MODE
                     else _CAPTURE_EXTRACTION_DISABLED_MODE))
-    else:
+    elif not outcome_unrecorded(body):
         # #4197: extraction ran for this session — if it had been deferred
         # before, its backlog entry is now retired. No offer here (see
         # `_flush_backlog_offer`): this path is the hook's, and it runs on
         # every capture.
+        #
+        # ⛔ #12362: NOT for an UNRECORDED outcome. `_flush_backlog_offer`
+        # retires the entry through `capture_backlog.mark_processed` — its own
+        # contract says "Call it ONLY where extraction provably ran" — and the
+        # PENDING state above is precisely the case where the server has NOT
+        # said that extraction ran. Retiring on it would mark a session
+        # `processed` (overwriting the record: nothing restores it, `--forget`
+        # only drops) on the one shape this issue says may still FAIL. So the
+        # ledger is left exactly as it was: a session already deferred stays
+        # deferred, and one never deferred gains no entry either way.
         _flush_backlog_offer(session_id=session_id,
                              server_session_id=server_session, offer=False)
     if body.get("warnings"):
@@ -9238,7 +9304,14 @@ def _record_drain_deferrals(root, summary) -> None:
                 continue
             _reason = _deferral_reason(outcome.body)
             if not _reason:
-                # Extraction ran — this entry is not a deferral.
+                # No re-attempt to offer. That is NOT the same as "extraction
+                # ran": since #12362 a body may be `pending` — the turns are
+                # stored and the server has not RECORDED whether extraction ran
+                # (`extraction_outcome: unknown`) — and it correctly records no
+                # priced deferral, because pricing a session that may have
+                # extracted is the bug #12362 fixed. The resulting trace gap is
+                # a separate decision, owned by #12379 (a non-priced trace),
+                # NOT by this writer.
                 continue
             _meta = read_spool_meta(root, sid) or {}
             _turns = read_spool_turns(root, sid)
@@ -10170,7 +10243,11 @@ def _print_backlog_offer() -> int:
 def _degraded_extraction(body) -> str | None:
     """The deferral reason when a 2xx STORED the turns and extracted NOTHING.
 
-    ``None`` when extraction ran. The rule lives here, once, because THREE call
+    ``None`` when this body carries no degraded marker — which is NOT proof that
+    extraction ran: since #12362 a body may be ``pending`` (the server has not
+    RECORDED whether extraction ran), and it correctly yields ``None`` here
+    because pricing a session that may have extracted is the bug #12362 fixed.
+    The rule lives here, once, because THREE call
     sites observe the same response body — ``sessions import``, ``session
     capture`` and ``session drain`` — and when they disagreed the hook path lost
     the case the whole feature exists for: the server stored the session and
@@ -10188,7 +10265,13 @@ def _degraded_extraction(body) -> str | None:
 
 
 def _deferral_reason(body) -> str | None:
-    """WHY a 2xx stored the session without extracting — ``None`` if extraction ran.
+    """WHY a 2xx stored the session without extracting — ``None`` if no KNOWN reason.
+
+    ⛔ ``None`` does NOT assert that extraction ran (that was the #12362 bug in
+    another form): a ``pending`` body — durable turns, extraction outcome not
+    recorded — also yields ``None``, deliberately, because a PRICED deferral
+    for a session that may have extracted is the bug #12362 fixed. ``None``
+    means "no re-attempt to offer from this body", nothing more.
 
     THE single definition of "this capture still needs a re-attempt", used by all
     three writers (`sessions import`, `session capture`, `session drain`) so they
@@ -11500,6 +11583,29 @@ def _db_value_source(key: str | None) -> str:
     return ("file" if _dotenv_file.applied_value(key, _path) == value else "env")
 
 
+def _ladder_deciding_key() -> str | None:
+    """The ladder key `config.daemon_db_target` reads FIRST — by ITS OWN test.
+
+    TRUTHINESS, not `.strip()`: the ladder is written `if uri:` /
+    `if os.environ.get("TORTOISE_DB_PATH"):`, so a WHITESPACE-ONLY value is a
+    DECIDING rung carrying a value it then REJECTS (a relative path), not an
+    unset one. A `.strip()` scan went blind to exactly those values, fell
+    through to the file's healthy key, and reported "the value is the one this
+    `.env` supplied" about a value the SHELL supplied — while the same payload's
+    `blank_graph_keys["env"]` named the environment (#12441). Where the blank is
+    a `TORTOISE_DB_PATH`, `resolve_db_path` strips it itself and falls through to
+    the canonical default, so `env_graph_keys`' non-blank filter stays right:
+    that one answers which key a RESOLVED target came from, not which rung the
+    ladder was ON when it raised.
+    """
+    import os
+
+    for key in _DB_LADDER_KEYS:
+        if os.environ.get(key):
+            return key
+    return None
+
+
 def _dotenv_already_applied() -> bool:
     """Has THIS process applied the daemon's `.env` yet? (Recorded in `LOADED_PATHS`)
 
@@ -11639,9 +11745,25 @@ def _dotenv_divergence(graded_target: str | None = None, *,
         cwd_assignments = _dotenv_file.parse_dotenv(candidate)
         if cwd_assignments:
             other.append({"path": _printable(candidate),
+                          "state": "present",
                           "keys": sorted(cwd_assignments),
                           "graph_keys": [key for key in _DB_LADDER_KEYS
                                          if key in cwd_assignments]})
+        elif not os.access(candidate, os.R_OK):
+            # ⛔ A file that cannot be READ and a file that sets NOTHING both
+            # parse to nothing, and only the parse result was consulted, so a
+            # `chmod 000` `.env` in the project directory vanished from the
+            # report while the daemon side of this same payload reports it as
+            # "exists but cannot be read — this command cannot tell". The
+            # posture "cannot tell is never a pass" is not a property of one
+            # path, so it applies one level out (#12441 item 3). EMPTY is not
+            # this state: an empty readable file configures nothing, and stays
+            # silent — the two are distinguished by READABILITY here, not by
+            # the key count, which an unreadable file cannot supply.
+            other.append({"path": _printable(candidate),
+                          "state": "unreadable",
+                          "keys": [],
+                          "graph_keys": []})
     payload["unread_env_files"] = other
     if payload["state"] == "absent":
         return payload
@@ -11789,9 +11911,11 @@ def _dotenv_divergence(graded_target: str | None = None, *,
                         # (the file sets a healthy `TORTOISE_DB_PATH`, the shell
                         # exports a broken `TORTOISE_DB_URI`) makes the file a
                         # bystander, not a second cause (#12428 review).
-                        _overlay_key = next(
-                            (key for key in _DB_LADDER_KEYS
-                             if (os.environ.get(key) or "").strip()), None)
+                        # ⛔ The ladder's OWN test (truthiness), via the one
+                        # helper — a whitespace-only key is DECIDING and
+                        # rejected, so it is the file's cause only when the FILE
+                        # supplied that key. See `_ladder_deciding_key`.
+                        _overlay_key = _ladder_deciding_key()
                         payload["daemon_error_source"] = (
                             "both" if _overlay_key in effective else "env")
                     else:
@@ -11837,11 +11961,7 @@ def _dotenv_divergence(graded_target: str | None = None, *,
             # FILE put it there, or because the user exported it themselves —
             # and only the record can tell (#12428 review).
             daemon_target = None
-            _key = None
-            for _candidate in _DB_LADDER_KEYS:
-                if (os.environ.get(_candidate) or "").strip():
-                    _key = _candidate
-                    break
+            _key = _ladder_deciding_key()
             _source = _db_value_source(_key)
             daemon_error = _redact_db_value(
                 f"{type(exc).__name__}: {exc}"
@@ -11925,6 +12045,17 @@ def _dotenv_rows(env_file: dict) -> list[tuple[str, str, str]]:
     """
     rows: list[tuple[str, str, str]] = []
     for other in env_file.get("unread_env_files") or ():
+        if other.get("state") == "unreadable":
+            # ⛔ "cannot tell" is never a pass — the rule the daemon's own arm
+            # already applies. Nothing is known about what this file sets, so the
+            # row must not claim it sets anything and must not go silent either
+            # (#12441 item 3).
+            rows.append(("Config: .env (unread)", "⚠️",
+                         f"{_printable(other['path'])} exists but cannot be read — "
+                         "NO Tortoise entry point reads it, and this command "
+                         "cannot tell what it sets, so a target configured "
+                         "there is invisible here. Fix its permissions"))
+            continue
         keys = ", ".join(other.get("graph_keys") or other.get("keys") or ())
         rows.append(("Config: .env (unread)", "⚠️",
                      f"{_printable(other['path'])} sets {_printable(keys)} but "

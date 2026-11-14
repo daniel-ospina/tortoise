@@ -1638,6 +1638,18 @@ def is_function_sitemap_path(path: str) -> bool:
 
 CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.py",
              "tortoise/projection/edges.py",
+             # #12363: the published-artifact canary's tool. `tools/` is in
+             # `NON_PYTHON_PREFIXES`, so `_keep_changed` DROPS every `tools/` path and the
+             # docs-only early return answers with `surfaces: []` — measured before this
+             # entry: `--changed-files tools/published_artifact_canary.py` → `surfaces: []`
+             # and `test_published_artifact_canary.py` was NOT in the selected set, so a
+             # PR that changed the tool ALONE (its 0/1/2 exit contract, the `--wheel`
+             # empty-path refusal, the ambient-env strip) merged with every
+             # falsifiability pin unrun. Same silent-drop class as the `website/` binaries
+             # and `tools/skip-guard.py` above. With the entry: `surfaces=['core']` and the
+             # pin is selected. Pinned by
+             # tests/test_published_artifact_canary.py::test_a_tool_only_diff_selects_this_pin.
+             "tools/published_artifact_canary.py",
              # #9607: `tortoise/quadrature.py` is registered in `onboarding` (its
              # /docs formula guard lives there), and a SOURCE_PATTERNS match
              # REPLACES the `core` fallback (#2938) — so without this entry the
@@ -2618,7 +2630,7 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # `select(["docs/ax/how-to-use-tortoise-step1-eval.md"])` →
              # `surfaces=[]`, `full=False`, pin ABSENT. `docs/` is a
              # flat NON_PYTHON_PREFIXES entry and `_is_non_code_doc` recognises
-             # four exact paths, so the changed list comes back empty and
+             # only exact paths, so the changed list comes back empty and
              # select() takes the docs-only early return — tier-1 smoke, which
              # does not carry the pin. A one-file PR could therefore re-cut the
              # headline to any number and merge with the guard that re-measures
@@ -3476,7 +3488,9 @@ def _is_safe_root_file(path: str) -> bool:
 # this it fell through to the unknown-path branch and reserved the FULL matrix:
 # a one-line `CONTRIBUTING.md` or `.github/pull_request_template.md` edit ran
 # `test (a)…(i)`, `test-carve-out (a)(b)(c)`, `test-slow (a)(b)` and more
-# (measured on PR #8726: 2 files, 0 Python, ~17 test jobs).
+# (measured on PR #8726: 2 files, 0 Python, ~17 test jobs). That cost is now back
+# for `CONTRIBUTING.md` alone — a test reads its content, so it keeps the FULL
+# matrix (see the ⛔ block below); the reprieve still covers the other prose paths.
 #
 # This is the DISTINCTION #8785 asks for: "no surface matched because the file is
 # not code" (drop it -> the tier-1 smoke, as `docs/` already does) versus "no
@@ -3489,11 +3503,73 @@ def _is_safe_root_file(path: str) -> bool:
 # The membership test is the CONTENT-READER census, NOT a mention: a doc a guard
 # READS stays out. `README.md` (tests/test_embedded_durability_claim.py:62,
 # tests/test_capacity_page.py:40), `AGENTS.md` (the base-subset pin),
-# `.gitignore` (tests/test_kind_index.py:290) and `.env.example` are therefore
-# NOT here. `CONTRIBUTING.md` was left out of #6786's two-file reprieve on a
-# MENTION census ("the surface tooling"); re-derived here, every mention is a
-# docstring, a generated-doc link, or `scripts/record-review.sh`'s basename case
-# — no test or tool reads its CONTENT, so the mention was not a reader.
+# `.gitignore` (tests/test_kind_index.py:302) and `.env.example` are therefore
+# NOT here.
+#
+# ⛔ `CONTRIBUTING.md` IS NO LONGER HERE, and the reason it once was is worth
+# keeping. It was left out of #6786's two-file reprieve on a MENTION census
+# ("the surface tooling") and admitted here on a re-derived one: every mention
+# was a docstring, a generated-doc link, or `scripts/record-review.sh`'s basename
+# case, so — at that head — no test or tool read its CONTENT. That census was
+# correct then and is FALSE now: `#12313` (`45cebfc5df`) added the reader IN
+# `tests/test_surface_manifest.py` — a suite that already existed (created on
+# `main` by `#3966`, `79c3d9dbe`) — which READS the doc
+# (`(sm.ROOT / "CONTRIBUTING.md").read_text(...)`) and asserts on its
+# "**To REMOVE a symbol**" paragraph. ⛔ THREE creation numbers have now been
+# written into this sentence and TWO of them were wrong, so LEAD WITH THE SERVER,
+# which is authoritative, and treat the local commands as conditional:
+#
+#   gh api "repos/daniel-ospina/tortoise/commits?path=tests/test_surface_manifest.py&sha=main&per_page=100"
+#     → the FULL path history (30 commits — never trust the default page size,
+#       which happens to equal it today) and `79c3d9dbe` (`#3966`) is the OLDEST.
+#   gh api repos/daniel-ospina/tortoise/commits/79c3d9dbe
+#     → its file list carries this path with status `added`.
+#   gh api "repos/daniel-ospina/tortoise/compare/main...79c3d9dbe"
+#     → `status=behind`, `merge_base=79c3d9dbe` → it IS an ancestor of `main`.
+#   gh api repos/daniel-ospina/tortoise/commits/6429a14b49
+#     → its file list does NOT contain this path.
+#
+# ⛔ THE LOCAL COMMAND BELOW IS NOT A CREATION NUMBER — the server is. Run it only
+# to CORROBORATE what the API already told you: which reading a history command
+# gives depends on where THIS clone's GRAFT BOUNDARY sits, and that MOVES — the
+# same box has measured the same command both ways. A graft boundary has no local
+# parent, so git diffs the boundary commit against the EMPTY TREE: it reads as an
+# addition, and every ancestry test for a commit OLDER than the boundary returns a
+# false negative. `git rev-parse --is-shallow-repository` is not sufficient either
+# (the contradictory readings came from clones that both reported themselves
+# shallow); the boundary's POSITION decides.
+#
+#   git cat-file -e 79c3d9dbe^   # fails → this clone does not reach BELOW the
+#                                 #         creation commit → artifact, not a reading
+#   git log --diff-filter=A --format=%h -- tests/test_surface_manifest.py
+#                                 # what it prints is only evidence once the probe
+#                                 # above succeeds
+#
+# Probe the CREATION commit's parent, not `6429a14b49^`: a boundary that sits
+# between the two passes the latter while still reporting a boundary commit as the
+# creation. So: on a clone whose boundary sits at or above the creation, a local
+# reading is evidence about your clone's boundary, NOT about creation — the
+# failing probe above is the artifact signal, so `git fetch --unshallow` and
+# re-read. On a complete clone the reading does settle it: it names the same
+# commit the API names as `79c3d9dbe` — but `%h` prints an ABBREVIATION whose
+# length is `core.abbrev` when that is set and git's object-count-derived default
+# otherwise, so it can differ from the server's abbreviation and between clones:
+# compare the COMMIT, never the string. Either way the server is the answer to
+# quote — never write either set of local outputs into this comment as that
+# answer.
+#
+# The other wrong reading: `#12313` did not create the file (it appended the
+# reader — the original error). Re-derive before re-admitting the entry; do not
+# inherit a number from this comment.
+#
+# By this set's OWN membership rule the entry
+# had to go, and leaving it reprieved is a fail-open: an edit to `CONTRIBUTING.md`
+# would select the tier-1 smoke and SKIP the guard that reads it, on the very PR
+# that edits the doc. `main` was red from `45cebfc5df` until the removal landed
+# inside `f244be9bc7` (#12369's rebase repair) — earlier revisions of this
+# comment credited `#12443`, which is the ISSUE, and an issue removes nothing.
+# Re-derive the reader census before re-admitting it; do not
+# re-admit it on the older mention census, which is what produced the red.
 #
 # Ratchets: `test_non_code_doc_paths_exist` (liveness) and
 # `test_non_code_doc_paths_have_no_content_reader` (the read census).
@@ -3501,7 +3577,6 @@ NON_CODE_DOC_PATHS = frozenset({
     ".github/pull_request_template.md",
     "CHANGELOG.md",
     "CLAUDE.md",
-    "CONTRIBUTING.md",
 })
 
 

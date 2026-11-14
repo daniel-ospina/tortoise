@@ -834,6 +834,98 @@ _TRANSPORT_WAIT_BOUND_NOT_SENT_MESSAGE = (
     "Re-sending it is safe once the advertised delay has elapsed."
 )
 
+#: The refusal when the graph LOOKUP's own margin cut the call while the request
+#: still had time on the clock (#11153 review round 9). Deliberately NOT the
+#: shared wording above: there the budget was not exceeded and nothing was
+#: executed, so "the work may still complete on the server" is false on both
+#: counts. Declared HERE, next to its siblings, so the classifier below can see it
+#: — the producer (`mcp_server._resolve_graph_argument`) writes this constant, and
+#: a copy of the sentence in two files is how a reworded message silently turns a
+#: designed refusal into a "crash" at every consumer.
+_REFUSAL_GRAPH_LOOKUP_MARGIN_MESSAGE = (
+    "The graph lookup for this request did not finish inside the time it had "
+    "left, so the call was not executed. "
+)
+
+#: The LEAD of the sensitive-op rate-limit refusal (429) — the last designed
+#: refusal a tool caller can receive as prose (the per-op detail is appended by
+#: `hosted_api._sensitive_op_budget`, the producer, which writes this constant).
+_REFUSAL_RATE_LIMIT_LEAD = "Rate limit exceeded for "
+
+#: The leads of the GRAPH-TARGET refusals — `_retarget_refusal`, the resolver's
+#: "No graph … is reachable" answer, and the `graph`-argument guards all raise this
+#: family, and each reaches a caller as `ToolError(str(exc))`
+#: (`mcp_server._resolve_graph_argument`). They are DESIGNED refusals: a graph-bound
+#: credential declining to be re-targeted is the surface working correctly. Two
+#: consumers need the classification (#11153 review round 10, measured):
+#: `read_points` has only `except C.CurationRefused` around its query, so an
+#: unclassified refusal escaped as an uncaught `ToolError` traceback (rc 1) instead of
+#: the rc-3 path that keeps its offset/row diagnostic — ⛔ and NOT because it takes a
+#: graph fallback: it deliberately does NOT (it has no `_looks_like_graph_refusal` arm,
+#: and adding one would re-read a DIFFERENT graph while the artifact is stamped with the
+#: requested one, the census-mixing failure `_section`'s own comment forbids); and
+#: `tortoise-client call` printed `call failed:` for a refusal.
+#: ⛔ LEADS, not whole messages: each embeds caller-specific detail (the requested
+#: graph, this transport's capabilities), and they live HERE beside their siblings so
+#: a reworded producer cannot silently re-open rc 1.
+#: ⛔ DELIBERATELY EXCLUDED — TWO arms, named so the gap is not rediscovered as a bug:
+#: (a) "`<tool>` does not take a `graph` argument" (`mcp_server._take_graph_argument`):
+#: a USAGE error the caller fixes by removing the argument, and its message begins
+#: with the tool NAME, so no stable prefix exists to key on;
+#: (b) the cannot-be-opened arm (`plan_graph_target`'s
+#: `f"Graph {_describe_graph(row)} cannot be opened: …"`): the GRAPH NAME sits
+#: immediately after "Graph ", so no prefix short of the name itself exists.
+#: ⛔ The bare lead `"Graph "` was tried and REMOVED — it is 6 characters and matched
+#: unrelated prose that must stay CRASH-class: measured, it classified
+#: "Graph disclosure: 3 rows were read from …" (an informational note),
+#: "Graph limit reached for this workspace." and "Graph was purged by an operator."
+#: as DESIGNED REFUSALS, which silences a crash page — the exact INVERSE of the
+#: defect #11153 fixes. A generic lead is worse than a missing one.
+#: Both arms stay crash-class on purpose; the CLI still surfaces their text through
+#: `describe_failure`, and no census site would take a graph fallback for them.
+_REFUSAL_GRAPH_TARGET_LEADS = (
+    "This credential is bound to one graph and cannot be re-targeted ",
+    "The `graph` argument requires a hosted workspace connection ",
+    "The `graph` argument must be a graph id or name ",
+    "The `graph` argument is empty. ",
+)
+
+#: Refusals whose VARIABLE comes FIRST, so no prefix can carry their identity: matched
+#: on a stable INTERIOR phrase instead of a lead. Their two messages are the resolver's
+#: (`No graph {ref!r} is reachable from this workspace. Reachable graphs: …` and
+#: `Graph name {ref!r} matches {n} graphs in this workspace: …`), so the only text that
+#: survives a caller-supplied name is in the middle — and a lead that stops at the
+#: variable (`"No graph "`, `"Graph name "`) matches neighbours, which is the measured
+#: failure that removed the bare `"Graph "` lead (see the note beside
+#: `_REFUSAL_AUTHZ_LEADS`).
+_REFUSAL_GRAPH_RESOLVER_PHRASES = (
+    "is reachable from this workspace.",
+    "graphs in this workspace:",
+)
+
+#: The leads of the AUTHORIZATION refusals — the ones a scoped or graph-bound key
+#: receives from the dispatch seam itself (`mcp_server._enforce_mcp_tool_scope`,
+#: `_reject_graph_bound_mcp_org_surface`). They are DESIGNED refusals: the seam
+#: classifies them `auth_error` (`_classify_mcp_call_error`), and fastmcp hands their
+#: text to the caller as a bare `ToolError`. They were registered by NOBODY until
+#: round 11, so both consumers reported a scope denial as a crash — `curate_graph`
+#: re-raised it (uncaught traceback, rc 1, instead of rc 3 with the actionable text)
+#: and the CLI printed `call failed:` for the most common refusal a scoped key gets.
+#: ⛔ Each lead is the message's own stable opening INCLUDING the words after the
+#: variable ("for tool …", "cannot access …"): a lead short enough to match a
+#: neighbour is worse than a missing one, because it silences a crash page
+#: (see `_REFUSAL_GRAPH_TARGET_LEADS` for the measured example).
+_REFUSAL_AUTHZ_UNKNOWN_TOOL_LEAD = "Unknown tool "
+_REFUSAL_AUTHZ_WRITE_SCOPE_LEAD = "Key lacks graphs:write scope for tool "
+_REFUSAL_AUTHZ_READ_SCOPE_LEAD = "Key lacks a graph data scope (graphs:read) for tool "
+_REFUSAL_AUTHZ_GRAPH_SCOPED_LEAD = "Graph-scoped keys cannot access "
+_REFUSAL_AUTHZ_LEADS = (
+    _REFUSAL_AUTHZ_UNKNOWN_TOOL_LEAD,      # "… — denied (not present in the registry)."
+    _REFUSAL_AUTHZ_WRITE_SCOPE_LEAD,
+    _REFUSAL_AUTHZ_READ_SCOPE_LEAD,
+    _REFUSAL_AUTHZ_GRAPH_SCOPED_LEAD,
+)
+
 #: The refusal as a caller of a MUTATING tool must read it (#10849).
 #:
 #: ``_TRANSPORT_WAIT_BOUND_MESSAGE`` above is transport-neutral, so on the write
@@ -869,6 +961,57 @@ _TRANSPORT_WAIT_BOUND_WRITE_MESSAGE = (
     "hint — is what decides whether a repeat is safe for THIS call, because a "
     "converging operation can still be called in a way that does not converge. "
     "Wait for the advertised delay before retrying."
+)
+
+#: The prose refusals `mcp_client.refusal_message` recognises. ONE collection, read
+#: by the classifier that keeps a designed refusal apart from a server CRASH
+#: (`Error calling tool: TypeError: …`). A refusal added without an entry here does
+#: not merely go unclassified: it reads as a crash at every consumer (rc 1 instead
+#: of rc 3 in `tools/curate_graph.py`, `call failed:` instead of the refusal payload
+#: in the CLI, round 9's measured finding). The JSON-envelope arm is matched
+#: separately, by parsing.
+#:
+#: ⛔ SCOPE: an earlier version of this comment said "Every DESIGNED tool-level
+#: refusal whose MESSAGE is PROSE", which was FALSE at the time — the
+#: `graph`-ARGUMENT family (`mcp_auth.GraphTargetError`) was missing and the CLI
+#: reported it as a crash. It is registered now, through
+#: `_REFUSAL_GRAPH_TARGET_LEADS` above (declared there, beside the producers' other
+#: constants), so the exhaustive claim holds for the arms that carry a STABLE lead.
+#: ⛔ TWO arms remain OUT by design, and they are named beside that tuple so neither
+#: gap is rediscovered as a bug: `_take_graph_argument`'s "`<tool>` does not take a
+#: `graph` argument" (tool NAME leads) and the cannot-be-opened arm (GRAPH NAME
+#: leads). Both stay crash-class (the CLI still prints their text through
+#: `describe_failure`). A bare `"Graph "` lead was tried and removed — it classified
+#: "Graph disclosure: …" and "Graph was purged…" as refusals, silencing crashes.
+#: ⛔ The other graph-target arms are classified where it matters for routing —
+#: `curate_graph` reads them through `_looks_like_graph_refusal` — for the arms whose
+#: wording that classifier matches (`cannot be re-targeted`, `No graph …
+#: reachable`, `graph-bound`). ⚠️ It does NOT match the hosted-workspace or
+#: multi-match arms, which still raise rather than taking the credential-bound
+#: fallback; that predates this PR (they raised as `ToolError` before) and is
+#: tracked separately rather than claimed here.
+#:
+#: ⛔ ALL THREE `-32009` wait-bound arms are named, including the WRITE one, rather
+#: than leaning on the base message's leading 60 characters: they agree today only
+#: by that prefix coincidence, and the prose is user-facing text a human may reword.
+#: A reworded WRITE arm would slip the match and a refused WRITE would re-raise as
+#: rc 1 "the run crashed" — the class rounds 4 and 8 closed.
+REFUSAL_PROSE_MESSAGES = (
+    _TRANSPORT_WAIT_BOUND_MESSAGE,
+    _TRANSPORT_WAIT_BOUND_NOT_SENT_MESSAGE,
+    _TRANSPORT_WAIT_BOUND_WRITE_MESSAGE,
+    _REFUSAL_GRAPH_LOOKUP_MARGIN_MESSAGE,
+    _REFUSAL_RATE_LIMIT_LEAD,
+    *_REFUSAL_GRAPH_TARGET_LEADS,
+    *_REFUSAL_AUTHZ_LEADS,
+)
+
+#: Every DESIGNED refusal whose identity is a stable INTERIOR phrase rather than a lead
+#: — the ones whose producer puts a caller-supplied value first. Read by
+#: `mcp_client.refusal_message` through the same registry path as the leads; kept
+#: SEPARATE so no one "tidies" a free-floating `"No graph "` lead back into the tuple.
+REFUSAL_PROSE_PHRASES = (
+    *_REFUSAL_GRAPH_RESOLVER_PHRASES,
 )
 
 

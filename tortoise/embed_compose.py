@@ -91,12 +91,18 @@ later lane:**
      is a GATED writer, so it carries NO declaration row in the register and no
      census row (the register's own prose names it as gated). This change gates
      one writer and no other.
-   * ``graph-scripts/backfill_embeddings.py`` re-encodes ``:Point`` rows from
-     ``text_prop: "content"`` and lives outside ``tortoise/``, so the discovery
-     walk (which scans ``tortoise/`` only) never sees it: it is OUTSIDE the
-     census population, not merely undeclared within it. An armed graph
-     therefore needs it to embed ``embeddingText or content`` before a backfill
-     may run — the fourth stated boundary, and gap (d) in ``.env.example``.
+   * ``graph-scripts/backfill_embeddings.py`` lives outside ``tortoise/``, so
+     the discovery walk (which scans ``tortoise/`` only) never sees it: it is
+     OUTSIDE the census population, not merely undeclared within it. It USED to
+     re-encode ``:Point`` rows from ``text_prop: "content"``, which an armed
+     graph could not tolerate: a backfill would have overwritten a composed
+     vector with a content-derived one — the fourth stated boundary, and gap (d)
+     in ``.env.example``.
+     ✅ **CLOSED for the backfill by #12489:** ``LABEL_CONFIG["Point"]`` now
+     embeds ``embeddingText or content`` — spelled as a ``CASE``, because
+     ``coalesce`` treats ``''`` as present while Python's ``or`` (the
+     read/replay rule it must match) does not. Gap (d)'s ``add_point`` half is
+     still OPEN.
 6. **The truncation budget.** ``EMBED_WORD_BUDGET`` (512, the same cap
    ``embeddings._truncate_for_embedding`` applies at encode time) is spent
    HEAD-FIRST on the quote, and the names line is RESERVED out of it: the quote

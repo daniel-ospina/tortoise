@@ -482,6 +482,71 @@ def test_a_cwd_env_file_no_entry_point_reads_is_reported(capsys, _isolated, tmp_
     assert "NO Tortoise entry point" in out, out
 
 
+def test_an_unreadable_cwd_env_file_is_reported_not_dropped(
+        capsys, _isolated, tmp_path, monkeypatch):
+    """An unreadable `.env` in cwd is "cannot tell", never "nothing to report".
+
+    `chmod 000` makes the parse return nothing, and the cwd scan appended an entry
+    only when the parse returned something — so the file disappeared from the
+    report entirely. The daemon's own arm takes the opposite posture for the file
+    IT reads ("exists but cannot be read — this command cannot tell"); that rule
+    is not a property of one path, so it applies one level out too (#12441 item
+    3). The distinguishing state is READABILITY, not the key count: an EMPTY
+    readable `.env` configures nothing and is still correctly silent.
+    """
+    cwd_env = _write_env(tmp_path / ".env", f"TORTOISE_DB_URI={DOCKER_URI}\n")
+    cwd_env.chmod(0o000)
+    if os.access(cwd_env, os.R_OK):
+        # Root ignores mode 000 — the product is right and this host cannot
+        # express the state. Same skip, same reason, as the daemon-file case.
+        pytest.skip("running as a uid that ignores mode 000 — cannot create the state")
+    monkeypatch.setattr(main, "_dotenv_unread_candidates",
+                        lambda daemon_path: [str(cwd_env)])
+
+    payload = _show_json(capsys)
+    unread = payload["env_file"]["unread_env_files"]
+
+    assert [entry["path"] for entry in unread] == [str(cwd_env)], (
+        json.dumps(unread, indent=2)
+    )
+    assert unread[0]["state"] == "unreadable", json.dumps(unread, indent=2)
+    # Nothing is known about a file that could not be read — asserted so the
+    # renderer cannot be handed an empty key list it then reports as "sets …".
+    assert unread[0]["keys"] == []
+
+    assert _run(("doctor",)) == 0
+    out = capsys.readouterr().out
+    assert str(cwd_env) in out, out
+    assert "cannot be read" in out, out
+
+    # ⛔ The OTHER renderer, pinned on its own. `_cmd_config`'s unreadable arm must
+    # say the contents are UNKNOWN rather than print an empty "sets …" — and this
+    # is also the assertion that makes that arm REACHABLE: drop the branch and the
+    # block falls through to `sets          ` with no marker, reddening this row
+    # (#12441 item 3; the marker is quoted in full because `unknown` alone appears
+    # in unrelated rows).
+    out = _show_text(capsys)
+    assert str(cwd_env) in out, out
+    assert "unknown — this file cannot be read" in out, out
+
+
+def test_an_empty_readable_cwd_env_file_stays_silent(capsys, _isolated, tmp_path,
+                                                     monkeypatch):
+    """The counterpart above must not turn "nothing configured" into a warning.
+
+    An empty `.env` is readable and sets nothing, so there is nothing being
+    ignored — the report stays silent. Without this pin, "always emit an entry"
+    would warn on every project that has merely touched the file.
+    """
+    cwd_env = _write_env(tmp_path / ".env", "# nothing configured yet\n")
+    monkeypatch.setattr(main, "_dotenv_unread_candidates",
+                        lambda daemon_path: [str(cwd_env)])
+
+    payload = _show_json(capsys)
+
+    assert payload["env_file"]["unread_env_files"] == []
+
+
 def test_the_unread_scan_ignores_the_daemons_own_file(tmp_path, monkeypatch):
     """The cwd scan must not report the daemon's file as "read by nobody".
 
@@ -920,6 +985,36 @@ def test_the_sets_clause_describes_the_FILE_not_what_is_left_to_fill(
     out = _show_text(capsys)
     assert "sets TORTOISE_DB_URI" in out, out
     assert "no graph key" not in out, out
+
+
+def test_doctor_differs_row_describes_the_FILE_not_what_is_left_to_fill(
+        capsys, _isolated, monkeypatch):
+    """The DOCTOR diverging row must read `file_graph_keys`, not `graph_keys`.
+
+    The same state as the `config show` pin above, on the OTHER renderer: a
+    mid-run application empties `graph_keys` (nothing is left to fill) while the
+    file plainly sets one graph key, so a row built from `graph_keys` states
+    "sets no graph key" about a file whose only graph key it is (#12441 item 2).
+    Reverting the doctor arm to `graph_keys` left the whole suite green before
+    this case existed — that arm had no test that could see it.
+    """
+    from tortoise.mcp_server import _load_dotenv
+
+    monkeypatch.setenv("TORTOISE_DB_PATH", "/tmp/cli-side.db")
+    _write_env(_isolated, "TORTOISE_DB_URI=/tmp/daemon-side.db\n")
+    _load_dotenv(str(_isolated))          # as any earlier import would
+
+    env_file = _show_json(capsys)["env_file"]
+    # The state this row is written for, asserted rather than assumed: the fill is
+    # empty, the file is not.
+    assert env_file["differs"] is True, json.dumps(env_file, indent=2)
+    assert env_file["graph_keys"] == [], json.dumps(env_file, indent=2)
+    assert env_file["file_graph_keys"] == ["TORTOISE_DB_URI"]
+
+    assert _run(("doctor",)) in (0, 1)
+    out = capsys.readouterr().out
+    assert "sets TORTOISE_DB_URI" in out, out
+    assert "sets no graph key" not in out, out
 
 
 def test_config_show_does_not_deny_reading_a_file_it_just_applied(capsys, _isolated):
@@ -1961,6 +2056,88 @@ def test_the_mixed_shadowed_row_names_each_half_by_its_origin(
     assert "now sets TORTOISE_DB_PATH" in out, out
 
 
+def test_a_blank_env_uri_beside_a_broken_file_key_is_not_reported_as_both(
+        capsys, _isolated, monkeypatch):
+    """The `both` arm is NARROWED: a whitespace env URI decides, so the file is no cause.
+
+    `config.daemon_db_target` tests `if uri:`, so `TORTOISE_DB_URI='   '` is a
+    DECIDING rung that raises BEFORE the file's `TORTOISE_DB_PATH` is ever read.
+    The file's value therefore cannot be a co-cause: the source is `env`, not
+    `both`, even though the file's key is broken too (#12441 item 6).
+
+    ⛔ WHAT IS ACTUALLY NEW HERE — corrected after review, because the first
+    version of this docstring overstated it. `test_a_whitespace_only_ladder_key_
+    is_attributed_to_the_ENVIRONMENT` already pins `daemon_error_source == "env"`
+    for this same environment state in BOTH scans — but with a HEALTHY file key
+    (`/tmp/file-path.db`), where `both` is not a plausible answer anyway. The
+    additive part is the state where `both` IS plausible: the file's own key is
+    broken (`relative/x.db`), so only the ladder's own truthiness test keeps the
+    attribution on `env`. Plus the two quoted-value assertions below, which are
+    the diagnostic-precision gain: the message must quote the value of the rung
+    that RAISED, and never the file's.
+
+    The applied half is kept as DELIBERATE duplication of that older test's
+    applied assertion: the narrowed boundary is the property under test, and a
+    future split of the two scans must not be able to redden one and leave this
+    state's answer unchecked in the other.
+    """
+    monkeypatch.setenv("TORTOISE_DB_URI", "   ")
+    _write_env(_isolated, "TORTOISE_DB_PATH=relative/x.db\n")
+
+    # The state where the file still has a PENDING ladder key.
+    payload = _show_json(capsys)["env_file"]
+    assert payload["daemon_error_source"] == "env", payload.get("daemon_error")
+    # The quoted value belongs to the rung that RAISED (the environment's), never
+    # to the file's — naming the file's value would send the user to the wrong one.
+    assert "'   '" in (payload.get("daemon_error") or ""), payload["daemon_error"]
+    assert "relative/x.db" not in (payload.get("daemon_error") or ""), (
+        payload["daemon_error"])
+
+    # …and the APPLIED state, which reaches the OTHER attribution scan.
+    dotenv_file.load_dotenv()
+    payload = _show_json(capsys)["env_file"]
+    assert payload["daemon_error_source"] == "env", payload.get("daemon_error")
+    assert "the value is the one this" not in (payload.get("daemon_error") or ""), (
+        payload["daemon_error"])
+
+
+def test_the_mixed_shadowed_doctor_row_credits_the_FILE_when_its_key_is_the_top_rung():
+    """The `doctor` surface's FILE-wins half, which no test reached at all.
+
+    `_dotenv_rows` derives two mixed sentences and only the env-wins one was
+    pinned. Measured by injecting `raise SystemExit` at the file-wins arm in the
+    #12428 round-11 review: `test_env_file_divergence` + `test_doctor` +
+    `test_cli_config_show` — 434 tests at that head — stayed fully green. (With
+    this PR's two cases the same three files collect 437, so the figure is not
+    reproducible here; the substantive claim is: the mutant reddens exactly ONE
+    test, the new one.) The sentence is true in every state a review reached;
+    only its pin was missing, the same class as the `file_graph_keys` clause.
+
+    ⛔ The payload must be one `_dotenv_divergence` can actually emit, including
+    its own `differs` computation — a fixture with `differs: False` beside two
+    DIFFERENT targets would pin the sentence against a state the product cannot
+    produce, and a later `_dotenv_rows` change keyed off `differs` would then be
+    validated against fiction (review, P3). Both targets are therefore equal.
+    """
+    row = _rows_text({"differs": False,
+                      "keys": ["TORTOISE_DB_URI"],
+                      "file_graph_keys": ["TORTOISE_DB_URI"],
+                      "shadowed_graph_keys": ["TORTOISE_DB_PATH"],
+                      "applied_graph_keys": ["TORTOISE_DB_URI"],
+                      "keys_in_effect": ["TORTOISE_DB_URI"],
+                      "graph_keys": [],
+                      # Equal on purpose: this is the state `_dotenv_divergence`
+                      # computes `differs: False` FOR.
+                      "cli_target": "/tmp/from-file.db",
+                      "daemon_target": "/tmp/from-file.db"})
+
+    assert ("which the daemon ranks above the environment's own "
+            "TORTOISE_DB_PATH") in row, row
+    assert "is the one this file selects" in row, row
+    # The env-wins sentence must NOT be the one printed for this ordering.
+    assert "cannot change the target" not in row, row
+
+
 def test_the_mixed_shadowed_doctor_row_names_each_half_by_its_origin():
     """The `doctor` row is a SECOND surface over the same payload (#12428).
 
@@ -2006,3 +2183,33 @@ def test_a_mixed_shadowed_set_credits_the_FILE_when_its_key_is_the_top_rung(
     assert "ranks above the environment's own TORTOISE_DB_PATH" in out, out
     assert "is the one this file selects" in out, out
     assert "cannot change the target here" not in out, out
+
+
+def test_a_whitespace_only_ladder_key_is_attributed_to_the_ENVIRONMENT(
+        capsys, _isolated, monkeypatch):
+    """The ladder tests TRUTHINESS; the attribution used to test `.strip()`.
+
+    `config.daemon_db_target` reads `if uri:` — so `TORTOISE_DB_URI='   '` is a
+    DECIDING rung carrying a value it rejects (a relative path), not an unset
+    one. The disclosure's attribution scan stripped the value, went blind to it,
+    and credited the FILE's healthy `TORTOISE_DB_PATH` instead — printing "the
+    value is the one this `.env` supplied" about a value the SHELL supplied,
+    while the same payload's `blank_graph_keys["env"]` named the environment as
+    its source. One payload, two opposite claims (#12441, found by #12428's
+    round-11 review).
+    """
+    monkeypatch.setenv("TORTOISE_DB_URI", "   ")
+    _write_env(_isolated, "TORTOISE_DB_PATH=/tmp/file-path.db\n")
+
+    # The state where the file still has something PENDING (its own scan).
+    payload = _show_json(capsys)["env_file"]
+    assert payload["daemon_error_source"] == "env", payload.get("daemon_error")
+    assert "the value is the one this" not in (payload.get("daemon_error") or ""), (
+        payload["daemon_error"])
+
+    # …and the APPLIED state, which reaches the OTHER attribution scan.
+    dotenv_file.load_dotenv()
+    payload = _show_json(capsys)["env_file"]
+    assert payload["daemon_error_source"] == "env", payload.get("daemon_error")
+    assert "the value is the one this" not in (payload.get("daemon_error") or ""), (
+        payload["daemon_error"])

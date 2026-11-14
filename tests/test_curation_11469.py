@@ -989,6 +989,51 @@ def test_a_transport_failure_does_not_fall_back_to_another_graph():
     assert len(calls) == 1, "a transport error must not trigger a second, unbound read"
 
 
+def test_a_labelled_refusal_quoting_the_graph_still_does_NOT_fall_back():
+    """Round-9: this file's OWN site label must not satisfy `_looks_like_graph_refusal`.
+
+    `_section_call` / `_operator_call` re-raise as
+    ``"read of section 'status' was refused: <raw>"``. The classifier requires the text to
+    QUOTE a graph AND read like a refusal — and the label supplies **"refused"**, so ANY
+    raw text that quotes a graph matched it. A timeout or a DB fault
+    (``"timed out reading graph 'org_x_g_aaa'"``) was therefore classified as a graph
+    refusal and the read FELL BACK to the credential's own graph, mixing two graphs into
+    one census while the artifact was stamped with the requested one — the exact failure
+    the fallback's own guard exists to prevent.
+    
+    On `origin/main` the handler classified the RAW text (there was no label), so this was
+    introduced by the wrapper, not inherited.
+
+    ⛔ The fake must raise `C.CurationRefused`, NOT a `TimeoutError`: `_section_call` /
+    `_operator_call` only wrap a `CurationRefused` (a `TimeoutError` propagates unlabelled,
+    so it reproduces nothing — measured, an earlier draft of this test passed under the
+    mutation). The refusal's OWN text must also quote the graph while carrying NONE of
+    the classifier's trigger words ("quota exhausted on graph 'x'"): that is the raw
+    half the classifier must say NO to. Measured: with `str(exc)` restored BOTH reads
+    make a second, unbound call; with `_unlabelled_refusal` they raise after ONE.
+    """
+    mod = _tool_module()
+
+    for which in ("section", "operators"):
+        calls: list[dict] = []
+
+        def call(_name, args, _which=which, _calls=calls):
+            _calls.append(dict(args or {}))
+            # Quotes the graph; contains NO trigger word (no "refus"/"unknown"/"cannot"…).
+            raise C.CurationRefused("quota exhausted on graph 'org_x_g_aaa'")
+
+        reader = mod.MCPReader(call, "org_x_g_aaa")
+        with pytest.raises(C.CurationRefused):
+            if which == "section":
+                reader._section("status")
+            else:
+                reader.read_operators()
+        assert len(calls) == 1, (
+            f"{which}: a refusal whose text merely QUOTES the graph was misread as a "
+            f"graph refusal because this file's own label says 'was refused', so the "
+            f"census re-read the credential's own graph ({calls})")
+
+
 def test_a_graph_refusal_does_fall_back_and_says_so_once_per_section():
     mod = _tool_module()
 
@@ -1275,8 +1320,10 @@ def test_an_unknown_kind_prefix_is_not_pack_ownership():
 
 
 def test_a_points_refusal_names_its_real_cause():
-    """Round-12: a `_safe` quota envelope reads as "0 rows" (is_error=False), and the
-    refusal discarded the cause, sending the operator to the wrong remedy."""
+    """Round-12: a `_safe` quota envelope must not read as "0 rows", and the
+    refusal must keep its cause. Since #11153 that envelope arrives with
+    `is_error=True` (it used to arrive false — the false PASS), so the reader sees
+    it as a `CurationRefused` either way; the cause still has to survive."""
     mod = _tool_module()
 
     def call(_name, args):
@@ -3323,20 +3370,14 @@ def test_an_operator_layer_beyond_one_call_is_refused_not_truncated(monkeypatch,
     )
 
 
-def test_an_operator_read_that_fills_its_limit_is_refused_unless_the_count_vouches(
-        monkeypatch, capsys, tmp_path):
-    """A response that fills the requested limit EXACTLY may be truncated.
+def test_an_operator_read_that_fills_its_bound_is_refused(monkeypatch, capsys, tmp_path):
+    """A response that FILLS the requested limit may be truncated — so it is refused.
 
     `tortoise_search` has a `limit` and no `offset`, so there is no page to walk to:
-    "a full page" and "a truncated layer" are the same bytes unless a reported count
-    says that is the whole population. Round-1 review found this arm unpinned.
-
-    ⛔ BOTH arms are pinned here. Refusing is the safe failure, but always refusing is
-    the OVER-BROAD one: a layer of exactly `OPERATOR_READ_CEILING` rows that
-    `structure.operators` vouches for as complete is a legitimate full read, and round-7
-    review measured that flipping the guard to `if len(raw) == OPERATOR_READ_CEILING:`
-    (refuse the vouched-for case too) left every test green while blocking the whole
-    census — the carry set included, since the refusal has no override.
+    "a full page" and "a truncated layer" are the same bytes. This is the arm that held
+    the UNREPORTED half, split out when #12440 made the fill refusal absolute — it is the
+    reachable pin on the fill shape (the at-bound arm lives in the test below, which
+    refuses before the read).
     """
     mod = _tool_module()
     at_limit = [{"id": f"o{i}", "content": "", "point_kind": "IMPL"}
@@ -3347,17 +3388,66 @@ def test_an_operator_read_that_fills_its_limit_is_refused_unless_the_count_vouch
     assert rc == 3, (rc, capsys.readouterr())
     assert "truncat" in capsys.readouterr().err.lower()
 
-    # …and the ACCEPT arm: the same 10,000 rows WITH a count that vouches for them is a
-    # complete layer, not a truncation.
+
+def test_an_operator_layer_at_the_bound_is_refused_before_the_read(
+        monkeypatch, capsys, tmp_path):
+    """A count AT the bound is not a voucher — the layer is refused BEFORE the read.
+
+    ⛔ #12440 reverses what this test asserted until it landed. Round-7 review had pinned
+    the opposite ("a layer of exactly `OPERATOR_READ_CEILING` rows that
+    `structure.operators` vouches for as complete is a legitimate full read") to keep the
+    refusal from being over-broad. That reasoning holds for a count that DISAGREES; it
+    fails exactly at the bound, where the count coincides with the engine's default
+    `RESULTSET_SIZE` and the SDK slices the answer back at `limit` — so a layer ENDING
+    there and one the engine CUT there return the same bytes, and no count on this
+    surface can tell them apart. The genuinely-whole at-bound layer is refused with them:
+    that cost is stated in the refusal text and in `docs/architecture/CURATION-11469.md`,
+    and the counter-arm below pins that a layer BELOW the bound is still accepted.
+
+    ⛔ The fixture is keyed on the COUNT, not on rows: three operator rows beside a
+    reported 10,000 refuses for the count alone, and the assertion that NO read was spent
+    is what separates this arm from the disagreement arm one line further down (which
+    would refuse the same input AFTER spending a `tortoise_search` call, with a different
+    message).
+    """
+    mod = _tool_module()
+    calls: list[str] = []
+    surface = _operator_surface(operators=OPERATOR_ROWS,
+                                reported=mod.OPERATOR_READ_CEILING)
+
+    def call(name, args):
+        calls.append(name)
+        return surface(name, args)
+
+    monkeypatch.setattr(mod, "_live_call_tool", call)
+    rc = mod.main(["inventory", "--out", str(tmp_path / "inv.json"), "--no-verify-read"])
+    assert rc == 3, (rc, capsys.readouterr())
+    assert "RESPONSE BOUND" in capsys.readouterr().err, (
+        "the refusal must be the bound gate's, not the disagreement arm's")
+    assert "tortoise_search" not in calls, (
+        "a count at the bound must refuse BEFORE the read is spent")
+
+
+def test_an_operator_layer_one_row_below_the_bound_is_accepted(monkeypatch, tmp_path):
+    """The counter-arm: the strict bound must not become an over-broad refusal.
+
+    A layer of `OPERATOR_READ_CEILING - 1` rows with a count that agrees is provably the
+    whole layer — the RESPONSE fills nothing (9 999 rows against a 10 000-row request that
+    is itself the engine's cap), so it cannot have been cut. #12440
+    moves only the single cell where the count and the response are both AT the bound;
+    everything below it must keep reading, or the fix would block a census it can measure.
+    """
+    mod = _tool_module()
+    below = [{"id": f"o{i}", "content": "", "point_kind": "IMPL"}
+             for i in range(mod.OPERATOR_READ_CEILING - 1)]
     monkeypatch.setattr(mod, "_live_call_tool",
-                        _operator_surface(operators=at_limit,
-                                          reported=mod.OPERATOR_READ_CEILING))
-    out = tmp_path / "inv_accepted.json"
+                        _operator_surface(operators=below, reported=len(below)))
+    out = tmp_path / "inv_below.json"
     rc = mod.main(["inventory", "--out", str(out), "--no-verify-read"])
-    assert rc == 0, (rc, capsys.readouterr())
+    assert rc == 0, (rc, "")
     payload = json.loads(out.read_text())
-    assert payload["operators_read"] == mod.OPERATOR_READ_CEILING, payload["operators_read"]
-    assert payload["operators_total_reported"] == mod.OPERATOR_READ_CEILING
+    assert payload["operators_read"] == mod.OPERATOR_READ_CEILING - 1, payload["operators_read"]
+    assert payload["operators_total_reported"] == mod.OPERATOR_READ_CEILING - 1
     assert payload["operators_reconciled"] is True
 
 
@@ -4533,6 +4623,30 @@ def test_a_non_graph_refusal_on_the_event_read_does_NOT_fall_back():
                 f"{shape}: a non-graph refusal was re-read without the graph argument, so "
                 "the Event layer came from a DIFFERENT graph than the one requested")
         assert not reader.note or "read from the credential" not in reader.note, reader.note
+
+
+def test_the_event_layer_error_arm_is_a_designed_refusal():
+    """The in-band `_error_of` arm must raise `CurationRefused`, NOT a bare `RuntimeError`.
+
+    The rc table (`docs/architecture/CURATION-11469.md`) answers **3** for a designed
+    refusal and **1** for "the run crashed", and `cmd_inventory`/`cmd_plan` catch
+    `C.CurationRefused` only — so a bare `RuntimeError` here reported a designed
+    Event-layer refusal to a driver as a crash.
+
+    ⛔ The class needs its OWN assertion: `CurationRefused` IS a `RuntimeError` subclass, so
+    every `pytest.raises(RuntimeError, ...)` in this file (and `except Exception` in the
+    fallback test above) stays green either way — measured, with a bare `RuntimeError` the
+    whole suite passed. Same reason the sibling arms in `read_sources` and `read_operators`
+    are `CurationRefused`.
+    """
+    mod = _tool_module()
+
+    def call(name, args):
+        return {"error": "Team points limit reached (25000). Upgrade your plan."}
+
+    reader = mod.MCPReader(call, None)
+    with pytest.raises(C.CurationRefused, match="read of the Event layer was refused"):
+        reader.read_events({"counts": {"Event": 3}})
 
 
 def test_an_event_payload_that_is_not_a_row_listing_is_refused():
