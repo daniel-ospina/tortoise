@@ -255,13 +255,20 @@ class TestEverySurfaceAgreesWithTheDeclaration:
 #:   * **False negatives — MEASURED, not assumed, and stated so the next author does
 #:     not mistake this for a prover.** A green run is not a proof of prose
 #:     correctness; these shapes are known to escape:
-#:       * a hard-wrapped denial;
+#:       * a denial whose CONTINUATION LINE STARTS A NEW BLOCK — `>` in a blockquote,
+#:         `-`/`*` in a list, `|` in a table (`_doc_sentences` opens a fragment there, so
+#:         `_denial_in` never sees the two halves together); a plain WORD-WRAP is caught,
+#:         and `test_a_hard_wrap_is_not_a_sentence_boundary` pins that it is — an earlier
+#:         revision of this list said "a hard-wrapped denial", which measurement refutes
+#:         and that test contradicts (cycle-11 P2, measured);
 #:       * `You cannot buy Builder.` / `Builder is not a purchasable plan.` — an
 #:         inability phrasing with no `no`/`not exist` predicate;
-#:       * a denial whose assertion is closed by `;`/`—`/`,` AFTER an intensifier
+#:       * a denial whose assertion is closed by `—`/`,` AFTER an intensifier
 #:         (`…no Builder plan available — so self-hosters…`): the intensifier arms use
 #:         the strict clause end, and the scope-qualifier twin of that same sentence is
-#:         indistinguishable by this heuristic, so the block was paid for with the miss;
+#:         indistinguishable by this heuristic, so the block was paid for with the miss.
+#:         `;` belongs here too as of cycle 11 — see `_CLAUSE_END_STRICT` — so a
+#:         `;`-closed denial IS a miss, which is what this bullet always claimed;
 #:       * a following fragment that records a correction in a `That was corrected in
 #:         #N.` shape (pronoun + auxiliary): :data:`_RETRACTION_TIE` requires the pronoun
 #:         at a clause boundary, so a genuine record in that phrasing would be BLOCKED —
@@ -306,11 +313,21 @@ _BUILDER_PLAN = (r"['\"`\u201c\u201d\u2018\u2019]?builder['\"`\u201c\u201d\u2018
 #:   * exempt — `…, only the `pro` identifier (#4336)`, `…, it is the `pro` identifier`
 #:   * denied — `…, only pro and team` (drift), `…, only a paid one`, `…, only the Team plan`
 #: A comma followed by anything else still ends the clause (`…, so a builder buys pro`).
+#: ⛔ WORD ORDER IS NOT THE PROPERTY (cycle-11 P2, measured). The exemption keyed on
+#: two orders only, so the same #4336 restatement blocked on syntax: `— the identifier
+#: is `pro` (#4336)` and `— `pro` is the identifier` were both RED while `— only the
+#: `pro` identifier` was green. A lint whose stated expensive half is the false block
+#: cannot discriminate on word order. Both inversions are now accepted.
 _IDENTIFIER_RESTATEMENT = (
     r"(?:only|just)\s+(?:the\s+)?(?:pro|builder)\s+"
     r"(?:identifier|key|name|spelling|tier)\b"
     r"|it\s*(?:is|['\u2019]s)\s+(?:just\s+)?(?:the\s+)?(?:pro|builder)\s+"
     r"(?:identifier|key|name|spelling|tier)\b"
+    r"|(?:the|its)\s+(?:identifier|key|name|spelling|tier)"
+    r"(?:\s+(?:key|name|spelling))?\s*(?:is|['\u2019]s)\s+"
+    r"(?:the\s+)?(?:pro|builder)\b"
+    r"|(?:the\s+)?(?:pro|builder)\s+(?:is|['\u2019]s)\s+"
+    r"(?:the\s+)?(?:identifier|key|name|spelling|tier)\b"
 )
 #: …and the exemption is NOT a property of the comma (cycle-6 P1, measured). Bolted onto
 #: the comma arm only, it protected the restatement in ONE punctuation style while the
@@ -330,9 +347,14 @@ _IDENTIFIER_RESTATEMENT = (
 #: `There is no "Builder plan" anymore.`
 _RESTATEMENT_TAIL = (r"\s*['\"\u201d\u2019]?\s*(?:[—–;,]|--)?\s*(?:"
                      + _IDENTIFIER_RESTATEMENT + r")")
+#: A bare `(#N)` is not this repo's only citation style: `git grep -o '(see #' -- docs`
+#: counts 10, so a citation written the house way escaped the clause end entirely —
+#: `There is no Builder plan (see #12444).` and `… (per #12444).` were both GREEN while
+#: the bare form was pinned as a denial (cycle-11 P2, measured).
+_CITATION = r"\(\s*(?:(?:see|per|tracked\s+in|cf\.?)\s+)?#\d+\s*\)"
 _CLAUSE_END = (r"(?!" + _RESTATEMENT_TAIL + r")"
                r"(?=\s*['\"\u201d\u2019]?\s*"
-               r"(?:$|[.;)]|—|–|--|;|,|\(\s*#\d+\s*\)))")
+               r"(?:$|[.;)]|—|–|--|;|,|" + _CITATION + r"))")
 
 #: A denial is often qualified by a trailing intensifier rather than nothing at all
 #: (`… anymore`, `… at all`). Measured false NEGATIVES before this existed: "There is
@@ -349,11 +371,15 @@ _INTENSIFIER = (r"(?:\s*['\"\u201d\u2019]?\s+"
 #: and `There is no Builder plan at all, in the OSS install.` were both red. A comma
 #: after an intensifier qualifies; it does not close. ⛔ The same holds for `—`/`–`/`;`
 #: (cycle-6 P1): they are NOT terminal either, and their pinned comma twins proved each
-#: one a false block. So the strict set is terminal punctuation and a bare issue
-#: citation — and NOT a comma, dash or semicolon, whose cost is stated as a false
-#: NEGATIVE in the class docstring above rather than paid for with a false block.
+#: one a false block. So the strict set is terminal punctuation and an issue citation —
+#: and NOT a comma, dash or semicolon, whose cost is stated as a false NEGATIVE in the
+#: class docstring above rather than paid for with a false block.
+#: ⛔ THE SET STILL CARRIED THE SEMICOLON (cycle-11 P2, measured), so this comment
+#: contradicted the regex underneath it and the `;` twin of the scope-qualifier class
+#: was RED on one separator while its `,` and `—` twins were pinned green. `;` is now
+#: out of the strict set, which is what the sentence above always claimed.
 _CLAUSE_END_STRICT = (r"(?!" + _RESTATEMENT_TAIL + r")"
-                      r"(?=\s*['\"\u201d\u2019]?\s*(?:$|[.;)]|\(\s*#\d+\s*\)))")
+                      r"(?=\s*['\"\u201d\u2019]?\s*(?:$|[.)]|" + _CITATION + r"))")
 
 #: Markdown down to prose, applied BEFORE matching. The drift has to be caught in the
 #: style the DOC ITSELF uses: this repo renders the tier as ``**Builder**`` and the
@@ -410,17 +436,35 @@ _DENIAL_PATTERNS = (
     # adjective. Clause-final so "the Builder tier is not available in your region"
     # (a true, scoped statement) does not match; the `as a plan/tier` continuation is
     # optional because that is the denial's own tail (cycle-6 P2, measured).
+    #: ⛔ …and each of the three arms below carries an INTENSIFIER TWIN (cycle-11 P2,
+    #: measured). The older arms learned in cycle 4 that one trailing qualifier defeats
+    #: a clause-final pattern; the arms added in cycles 6/7 were born without that twin,
+    #: so `We don't offer a Builder plan anymore.`, `Builder is not available anymore.`
+    #: and `There is no plan called Builder anymore.` all read as ordinary prose again —
+    #: the same class, one word deep.
     re.compile(r"\bbuilder\s+(?:plan\s+|tier\s+)?(?:is|are)(?:n['\u2019]t|\s+not)\s+"
                r"(?:available|offered|sold|purchasable|buyable)\b"
                r"(?:\s+as\s+(?:a\s+)?(?:plan|tier))?" + _CLAUSE_END, re.I),
+    re.compile(r"\bbuilder\s+(?:plan\s+|tier\s+)?(?:is|are)(?:n['\u2019]t|\s+not)\s+"
+               r"(?:available|offered|sold|purchasable|buyable)\b"
+               r"(?:\s+as\s+(?:a\s+)?(?:plan|tier))?"
+               + _INTENSIFIER + _CLAUSE_END_STRICT, re.I),
     # "we don't offer a Builder plan" — the negation carried by the VERB. Measured
     # escaping (cycle-6 P2).
     re.compile(r"\b(?:do|does)(?:n['\u2019]t|\s+not)\s+(?:offer|sell|have)\s+"
                r"(?:a\s+|the\s+|any\s+)?" + _BUILDER_PLAN + _CLAUSE_END, re.I),
+    re.compile(r"\b(?:do|does)(?:n['\u2019]t|\s+not)\s+(?:offer|sell|have)\s+"
+               r"(?:a\s+|the\s+|any\s+)?" + _BUILDER_PLAN +
+               _INTENSIFIER + _CLAUSE_END_STRICT, re.I),
     # "there is no plan called Builder" / "no such plan as Builder" — the noun BEFORE
-    # the name. Measured escaping (cycle-6 P2).
-    re.compile(r"\bno\s+(?:such\s+)?plan\s+(?:called|named|as)\s+"
+    # the name. Measured escaping (cycle-6 P2). `tier` is the same noun: every other arm
+    # in this tuple spells `tiers?`, and matching only `plan` left `There is no tier
+    # called Builder.` green (cycle-11 P2, measured).
+    re.compile(r"\bno\s+(?:such\s+)?(?:plan|tier)\s+(?:called|named|as)\s+"
                r"['\"`\u201c\u2018]?builder\b" + _CLAUSE_END,
+               re.I),
+    re.compile(r"\bno\s+(?:such\s+)?(?:plan|tier)\s+(?:called|named|as)\s+"
+               r"['\"`\u201c\u2018]?builder\b" + _INTENSIFIER + _CLAUSE_END_STRICT,
                re.I),
     # "Builder is not a plan/tier" — predicate nominative, clause-final, so a plan
     # name used as an OBJECT ("the Builder tier is not a tier you can downgrade
@@ -554,7 +598,14 @@ def _quotes_the_denial(sentence: str) -> bool:
     for span, closed in _quoted_spans(sentence):
         plain_span = _plain(span)
         phrase = _BUILDER_PHRASE.search(plain_span)
+        # ⛔ "A NEGATION SOMEWHERE IN THE SPAN" IS NOT "THE DENIAL IS QUOTED" (cycle-11
+        # P2, measured). `no downtime is guaranteed; the Builder plan is unlimited`
+        # satisfied both halves while asserting the tier EXISTS, so a quotation carrying
+        # an unrelated negation exempted the live denial beside it — the cycle-8 class one
+        # level deeper. The span must itself BE a denial, by this module's own patterns.
         if phrase is None or not _QUOTED_NEGATION.search(plain_span):
+            continue
+        if not any(pattern.search(plain_span) for pattern in _DENIAL_PATTERNS):
             continue
         if closed or phrase.start() <= 2:
             return True
@@ -682,11 +733,15 @@ def _denials_in_document(text: str) -> list[tuple[int, str]]:
     behaviour its own exemption was written to protect.
 
     The window is FORWARD ONLY and is not a concatenation of the window's text: the
-    following fragment must ITSELF carry a cue AND evidence
-    (:func:`_quotes_a_retracted_claim`) AND tie back to this claim
-    (:data:`_RETRACTION_TIE`), so `The docs are stale: <denial>` cannot buy an
-    exemption by borrowing a cue from the next sentence, and neither can a genuine
-    correction OF SOMETHING ELSE (measured, cycle 5).
+    following fragment must ITSELF carry a cue AND a citation (:func:`_is_a_correction_record`)
+    AND tie back to this claim (:data:`_RETRACTION_TIE`), so `The docs are stale: <denial>`
+    cannot buy an exemption by borrowing a cue from the next sentence, and neither can a
+    genuine correction OF SOMETHING ELSE (measured, cycle 5).
+
+    The citation half is PINNED, not merely stated (cycle-11 P2, measured): replacing
+    :func:`_is_a_correction_record`'s body with ``return True`` left this suite fully
+    GREEN, because every pinned record carried a citation and nothing pinned the case
+    that has the cue and the tie but no citation.
     """
     sentences = _doc_sentences(text)
     out: list[tuple[int, str]] = []
@@ -768,12 +823,26 @@ class TestNoDocDeniesABuilderPlanExists:
             # …and the SAME two sentences with the dash the repo actually writes
             # (cycle-6 P1: the exemption was bolted onto the comma arm, so `—`/`–`/`;`
             # false-blocked the restatement and the scope qualifier alike — `grep -rl
-            # ' — ' docs/` counts 944 files).
+            # ' — ' docs/` counts **948** files — this measurement is stated ONCE, in
+            # the `_IDENTIFIER_RESTATEMENT` block above; an earlier revision of this
+            # comment said 944, the figure that block retracts as unreproducible
+            # (cycle-11 P2, measured: `git grep -l ' — ' -- docs | wc -l` = 948).
             "There is no Builder plan available — so self-hosters use the OSS build.",
             "There is no Builder plan at all — in the OSS install.",
             "There is no Builder plan — only the `pro` identifier (#4336).",
             "There is no Builder plan – only the `pro` identifier (#4336).",
             "There is no Builder plan; only the `pro` identifier (#4336).",
+            # ⛔ WORD ORDER IS NOT THE PROPERTY (cycle-11 P2, measured): the same #4336
+            # restatement in the orders a doc author actually writes was RED, because
+            # `_IDENTIFIER_RESTATEMENT` keyed on ONE syntax.
+            "There is no Builder plan — the identifier is `pro` (#4336).",
+            "There is no Builder plan; the identifier is `pro`.",
+            "There is no Builder plan — the tier key is `pro` (#4336).",
+            "There is no Builder plan — `pro` is the identifier.",
+            # …and the `;` twin of the scope-qualifier class: `_CLAUSE_END_STRICT` still
+            # carried a semicolon while its own comment said it did not (cycle-11 P2).
+            "There is no Builder plan available; so self-hosters use the OSS build.",
+            "There is no Builder plan at all; in the OSS install.",
             "Builder isn't a plan — it is the `pro` identifier.",
             # CONTRASTED spelling (cycle 7): the contraction a doc that writes `isn't`
             # naturally continues with — this was RED before the tail accepted it.
@@ -877,6 +946,16 @@ class TestNoDocDeniesABuilderPlanExists:
                 # NAMES the tier is not a record of its absence.
                 'The doc previously said "the Builder plan is unlimited"; there is no '
                 'Builder plan.\n',
+                # Cycle-11 P2: a negation ANYWHERE in the span satisfied the record
+                # test, so a quotation that merely carries an unrelated `no` (and
+                # asserts the tier EXISTS) exempted the live denial beside it. The
+                # span must itself BE a denial.
+                'The doc previously said "no downtime is guaranteed; the Builder plan '
+                'is unlimited"; there is no Builder plan.\n',
+                # Cycle-11 P2: the forward-window exemption's CITATION half was stated
+                # but never pinned — a cue plus the tie was enough here. Replacing
+                # `_is_a_correction_record` with `return True` left the suite green.
+                "There is no Builder plan.\n\nWe corrected it.\n",
                 # Cycle-9 P2: an UNCLOSED quotation earlier in the sentence made
                 # everything after it "quoted", so a live denial merely FOLLOWING one
                 # was exempt. An unclosed span now counts only if the claim OPENS it.
@@ -941,6 +1020,23 @@ class TestNoDocDeniesABuilderPlanExists:
             "Builder is not available as a plan.",
             "There is no such plan as Builder.",
             "There is no plan called Builder.",
+            # ⛔ The three arms added in cycles 6/7 were born WITHOUT the intensifier
+            # twin the older arms learned for in cycle 4 — one trailing qualifier
+            # defeated all three (cycle-11 P2, measured).
+            "We don't offer a Builder plan anymore.",
+            "We don't offer a Builder plan at all.",
+            "Builder is not available anymore.",
+            "Builder is not sold at all.",
+            "There is no plan called Builder anymore.",
+            # …and the noun-before-name arm matched `plan` only, while every other arm
+            # spells `tiers?` (cycle-11 P2, measured).
+            "There is no tier called Builder.",
+            "There is no such tier as Builder.",
+            # …and a citation written in the repo's house style (`git grep -o '(see #'
+            # -- docs` = 10) escaped the clause end, which accepted only a bare `(#N)`.
+            "There is no Builder plan (see #12444).",
+            "There is no Builder plan (per #12444).",
+            "There is no Builder plan (tracked in #12444).",
             "There is no Builder plan (#12444).",
             "There is no **Builder** plan.",
             "There is no *Builder* plan.",
@@ -1024,6 +1120,13 @@ class TestNoDocDeniesABuilderPlanExists:
             "_RETRACTION_CUES",          # the exemption's cue half
             "_RETRACTION_EVIDENCE",      # …and its evidence half
             "_quotes_a_retracted_claim",  # …and the composed exemption
+            # …and the ingredients the cycle-6/8 review ADDED (cycle-11 P2, measured):
+            # this guard did not ban them, so the next test to reach for one could pin
+            # the prose around the decision and stay green — the cycle-2 defect this
+            # test exists to prevent, one function later.
+            "_is_a_correction_record",
+            "_quotes_the_denial",
+            "_REPORTED_CLAIM",
         }
         offenders: list[str] = []
         for node in cls.body:
