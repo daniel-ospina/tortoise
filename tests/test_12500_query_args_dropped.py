@@ -837,9 +837,12 @@ def test_a_graph_ordering_with_no_signal_is_refused_not_silently_reordered(
 #: The REFUSAL half of the contract, verbatim — one entry per SHIPPED sentence.
 #: A bullet carries more than one `REFUS…` clause, so a presence check on the
 #: word alone stayed green while one of them was flipped to "SERVED"
-#: (round-15, measured at four sites); and two of these live in the SECOND `tag=`
+#: (round-15, measured at four sites); and one of these lives in the SECOND `tag=`
 #: bullet, outside the spans the falsy check splits on, so they are matched
-#: against the whole docstring rather than per bullet.
+#: against the whole docstring rather than per bullet. (The count was "two" and is
+#: corrected here: two of the claims sit in the FIRST two bullets, which those
+#: spans already cover — round-18, measured on the flattened docstring, so the
+#: reason for matching whole-docstring rests on a number that holds.)
 _REFUSAL_CLAIMS = (
     "`min_confidence` and `order_by` are REFUSED on this arm rather than dropped",
     "A floor on any other `entity_type`, and a confidence or graph ordering on "
