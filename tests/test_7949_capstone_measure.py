@@ -6078,6 +6078,13 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("18503", "if count + est > max_points:"),
             ("18528", "quota_refusal_payload(QuotaExceededError("),
         ), "hosted_api"),
+        # ...and the STAMP paragraph below it restates `:82`'s number, so it needs its
+        # own row: a row scopes to ONE line, and `:236` is a different line from `:82`.
+        # Measured unpinned (round-4 review): reverting `:236` to `:18494` left 776
+        # passed, re-creating a document that contradicts its own table two lines up.
+        ("03-test-design.md", "`:82`'s `hosted_api.py", (
+            ("18503", "if count + est > max_points:"),
+        ), "hosted_api"),
         # ⛔ NOT A ROW ANY MORE — the `carve_out:` claim below the rows is checked
         # against the BLOCK (`_section_entries`) and not against a line number: the
         # entry sits BELOW the `surfaces:` blocks `tools/ci_selection.py::register_tests`
