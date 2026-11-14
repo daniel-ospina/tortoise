@@ -2622,7 +2622,8 @@ to answer.
 > **A successor entry, not an edit to §10.28.** §10.28's numbers are a faithful record of the head
 > it names. Two merges have landed since: `34bb716315` added 9 lines to the relation builder, and
 > `391313ca9a` then REMOVED them again — the mechanism guard became the DECLARED table in
-> `tortoise/ep.py`, so the band this block lives in is back to `+54` while the total grew elsewhere.
+> `tortoise/ep.py`, so the band this block lives in is back to `+54` at that head (`c7499ac7a7`
+> against `main` `4b1d6cd0d4`) while the total grew elsewhere.
 > An entry that recorded the intermediate `+63` reading would name a head that no longer exists, so
 > this entry's `New value` block was measured on `main` at `070d97360c` — the tree the forward
 > integration of `main` had produced — and this branch's merged tree, which sits a further `+90`
@@ -2634,8 +2635,9 @@ to answer.
   **`+99 / -12` in fifteen hunks**, not one band: `+0` above `:1761`, `+28` at the `#10360`
   read-back (`:10508` on `main`, `:10536` on the branch), and `+54` from `_collect_classify_items`
   (`:11803` → `:11857`) through the S2.2 VET gate (`:16779` → `:16833`). ⛔ **THE DELTA FIGURES IN
-  THIS BULLET ARE THE OLDER TREE'S OWN — kept as the record of that delta, not restated here —
-  WHILE THE `New value` CITES BELOW ARE `main`'S TREE AT `070d97360c`, NOT THIS BRANCH'S.** They were
+  THIS BULLET ARE `c7499ac7a7`'S DELTA AGAINST `main` `4b1d6cd0d4` — kept as the record of that
+  delta, not restated here — WHILE THE `New value` CITES BELOW ARE `main`'S TREE AT `070d97360c`,
+  NOT THIS BRANCH'S.** Those were
   opened on `main` after the forward integration of
   `main` (`6408da01ce`) moved the file by `+48` — verified at `main` `070d97360c`, where `:12730` is
   the `def` and `:11409` the read-back. This branch's merged tree sits a further `+90` above that
