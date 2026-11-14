@@ -4,7 +4,8 @@
 falsy, non-`None`, non-string value. That tail attached a "did you mean…"
 suggestion via `compute_suggestion(kind)`, whose ``":" not in kind`` test raises
 for any non-iterable, so the caller got a transport-level failure instead of the
-structured error dict the tool documents.
+served read the tool documents (a falsy `kind` is "the spelling of absent", which
+that contract says "stays served" — the answer was never meant to be a refusal).
 
 It matters beyond the crash: #12500 made a FALSY `min_confidence` / `order_by` /
 `kind` the *documented spelling of absent*, precisely so a client that

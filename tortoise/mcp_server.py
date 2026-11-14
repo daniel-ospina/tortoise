@@ -4973,10 +4973,12 @@ def tortoise_query(kind: str | None = None,
     # read is served the whole population, exactly as `kind=""` is. The old
     # `is not None` sent that value to `compute_suggestion`, whose `":" not in
     # kind` raised a bare TypeError out of the tool body: a client that
-    # serialises its own defaults got a transport failure instead of the error
-    # dict every other outcome here produces. The suggestion feature is
-    # unchanged for a non-empty string — the only input it can say anything
-    # about.
+    # serialises its own defaults got a transport failure instead of the served
+    # read this contract documents. (The answer was never meant to be a refusal —
+    # the bullet above says a falsy `kind` "stays served", and it is; the crash
+    # was the tool failing to deliver what it had already promised.) The
+    # suggestion feature is unchanged for a non-empty string — the only input it
+    # can say anything about.
     if (isinstance(result, list) and len(result) == 0
             and isinstance(kind, str) and kind):
         from tortoise.query_suggestions import compute_suggestion
