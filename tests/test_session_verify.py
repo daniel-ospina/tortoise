@@ -42,6 +42,7 @@ from tortoise.capture_install import install_capture
 from tortoise.capture_receipts import capture_receipt_key
 from tortoise.session_verify import (
     EXIT_BROKEN,
+    EXIT_OK,
     EXIT_UNVERIFIABLE,
     resolve_install_root,
     verify_session_capture,
@@ -61,11 +62,25 @@ class _Graph:
         self.fail_post = False
         self.fail_delete = False
         self.fail_get_session = False
+        #: The receipt read (`/v1/onboarding/state`) fails: the API is a
+        #: PRECONDITION, so nothing is exercised and every link is
+        #: UNVERIFIABLE (exit 2) — the fourth exit-2 cause.
+        self.fail_state_read = False
         self.hide_session_on_get = False
         self.no_source = False
         self.omit_source_field = False
         self.no_receipt = False
         self.zero_extracted = False
+        #: The `extraction` block the DETAIL endpoint serves (#3520). `None`
+        #: omits it entirely — the pre-#3520 shape, which every consumer must
+        #: still read. A bool serves `{status, outcome_known: <bool>}`; any
+        #: other value is served VERBATIM so a malformed block is reachable
+        #: (the fail-safe arms are pinned here, not only upstream).
+        self.extraction: object = None
+        #: The raw `extracted` value the detail serves, when a count of odd
+        #: PROVENANCE must be reachable (a JSON bool, a string, a negative).
+        #: `None` falls back to `zero_extracted`.
+        self.extracted_override: object = None
         #: Write the per-harness receipt only from the Nth ``/v1/onboarding/state``
         #: read onward — models the server writing it AFTER the session row is
         #: visible (the abandoned handler completing), which is the real
@@ -118,17 +133,21 @@ def _make_handlers(graph: _Graph):
                 n = graph.turn_override.get(sid, len(conv))
                 if not graph.no_receipt:
                     graph.receipts[capture_receipt_key(harness)] = graph.tick()
+                n_extracted = (graph.extracted_override
+                               if graph.extracted_override is not None
+                               else 0 if graph.zero_extracted else 1)
                 session = {
                     "id": sid,
                     "harness": harness,
                     "turns": n,
-                    "extracted": 0 if graph.zero_extracted else 1,
+                    "extracted": n_extracted,
                     "turn_points": [
                         {"id": f"{sid}_t{i}", "role": t.get("role"),
                          "content": t.get("content")}
                         for i, t in enumerate(conv[:n])
                     ],
-                    "extracted_points": ([] if graph.zero_extracted else
+                    "extracted_points": ([] if (graph.extracted_override is not None
+                                                or graph.zero_extracted) else
                                          [{"id": "pt_x", "kind": "statement",
                                            "content": "probe"}]),
                     "source": None if graph.no_source else {
@@ -137,11 +156,17 @@ def _make_handlers(graph: _Graph):
                 }
                 if graph.omit_source_field:
                     session.pop("source", None)
+                if graph.extraction is not None:
+                    session["extraction"] = (
+                        {"status": "stored",
+                         "outcome_known": graph.extraction}
+                        if isinstance(graph.extraction, bool)
+                        else graph.extraction)
                 graph.sessions[sid] = session
                 if graph.post_delay:
                     time.sleep(graph.post_delay)
                 self._send(200, {"session_id": sid, "turns": n,
-                                 "extracted": 0 if graph.zero_extracted else 1,
+                                 "extracted": n_extracted,
                                  "extraction_mode": "llm:mock"})
                 return
             self._send(404, {"detail": "not found"})
@@ -149,6 +174,9 @@ def _make_handlers(graph: _Graph):
         def do_GET(self):
             if self.path == "/v1/onboarding/state":
                 graph.state_reads += 1
+                if graph.fail_state_read:
+                    self._send(500, {"detail": "state refused (test)"})
+                    return
                 if (graph.receipt_on_state_read is not None
                         and graph.state_reads >= graph.receipt_on_state_read
                         and "session_capture_receipt_claude"
@@ -1024,6 +1052,355 @@ def test_guard_zero_extraction_reds_memory(hosted, setup):
     assert report["exit_code"] == EXIT_BROKEN
     assert report["links"]["memory"]["status"] == "FAIL"
     assert "no memory Point" in report["links"]["memory"]["detail"]
+
+
+def test_guard_unrecorded_outcome_is_not_a_memory_FAIL(hosted, setup):
+    """#12497: ``extracted == 0`` beside ``outcome_known: false`` is the
+    server saying "no extraction outcome recorded" — the verifier must NOT
+    report it as a FAIL, because that asserts an absence it cannot observe.
+
+    Mutation: remove the pair read entirely (keep the old count-only
+    ``elif not extracted_ok`` FAIL path) and this test's status/exit
+    assertions fail with ``FAIL``/exit 1."""
+    home, _bindir, _fake = setup
+    root = _install(home, "claude")
+    graph, _url = hosted
+    graph.zero_extracted = True
+    graph.extraction = False          # outcome_known: false
+    report = _verify(hosted, home, "claude", root)
+    memory = report["links"]["memory"]
+    assert memory["status"] == "UNVERIFIABLE-IN-CI", memory
+    # The absence must not be claimed in ANY form, and the line must say what
+    # the server actually recorded, not invent a cause.
+    assert "no memory Point" not in memory["detail"], memory["detail"]
+    assert "outcome" in memory["detail"].lower(), memory["detail"]
+    # #12497 acceptance: the line must name NEITHER a cause NOR a guarantee
+    # that extraction is still running (``outcome_known: false`` also covers a
+    # handler that was SIGKILLed), so the words for those readings are
+    # checked as a closed list rather than trusted.
+    lowered = memory["detail"].lower()
+    invented = [word for word in (
+        "still running", "never started", "has not started", "pending",
+        "sigkill", "killed", "abandoned", "timed out", "crashed",
+        "failed", "in progress", "ongoing", "queued", "still working",
+        "still in flight",
+    ) if word in lowered]
+    assert not invented, (invented, memory["detail"])
+    # A closed word list cannot carry the property on its own (a paraphrase
+    # can always slip through), so the sentence is ALSO pinned literally: if
+    # you reword it, update this expectation — that is the review.
+    expected = (
+        f"session {report['session_id']!r} appears as a Source, but the "
+        f"server has not recorded an extraction outcome for it "
+        f"(extracted=0, outcome_known=false) — memory points were neither "
+        f"observed nor ruled out")
+    assert memory["detail"] == expected, memory["detail"]
+    # Nothing provably broken: exit 2, never the BROKEN exit a FAIL earns.
+    assert report["exit_code"] == EXIT_UNVERIFIABLE, report["exit_code"]
+
+
+def test_guard_recorded_empty_extraction_still_FAILs(hosted, setup):
+    """The OTHER half of the pair: ``outcome_known: true`` with
+    ``extracted == 0`` IS a recorded empty extraction (keyless
+    ``none``/``disabled``, #4188/#4258), so it keeps its FAIL.
+
+    Mutation: treat every ``extracted == 0`` as unknown and this assertion
+    drops to UNVERIFIABLE."""
+    home, _bindir, _fake = setup
+    root = _install(home, "claude")
+    graph, _url = hosted
+    graph.zero_extracted = True
+    graph.extraction = True           # outcome_known: true
+    report = _verify(hosted, home, "claude", root)
+    assert report["links"]["memory"]["status"] == "FAIL"
+    assert "no memory Point" in report["links"]["memory"]["detail"]
+    assert report["exit_code"] == EXIT_BROKEN
+
+
+def test_guard_malformed_outcome_known_keeps_the_FAIL(hosted, setup):
+    """A non-bool ``outcome_known`` is garbage, and garbage must not buy the
+    PENDING reading — the same fail-safe ``session_confirm`` pins for its own
+    PENDING arm (``test_guard_the_arm_reads_the_canonical_predicate`` pins
+    that this link actually ASKS that reader).
+
+    Mutation: read the qualifier as truthiness (``not
+    extraction_outcome_known(detail)``) instead of ``is False`` and the served
+    ``"false"`` string — canonical ``None`` — becomes UNVERIFIABLE here."""
+    home, _bindir, _fake = setup
+    root = _install(home, "claude")
+    graph, _url = hosted
+    graph.zero_extracted = True
+    graph.extraction = {"status": "stored", "outcome_known": "false"}
+    report = _verify(hosted, home, "claude", root)
+    assert report["links"]["memory"]["status"] == "FAIL"
+    # The GENUINE extraction FAIL, not the "never captured" FAIL.
+    assert "no memory Point" in report["links"]["memory"]["detail"]
+    assert report["exit_code"] == EXIT_BROKEN
+
+
+def test_guard_a_missing_source_node_still_OUTRANKS_the_unknown_outcome(
+        hosted, setup):
+    """#12497 review round 3: the Source checks run BEFORE the pair arm, and a
+    missing Source node is an OBSERVABLE failure — it must keep its FAIL even
+    when the extraction outcome is unrecorded, or a broken graph is downgraded
+    to exit 2 ("nothing provably broken").
+
+    Mutation: move the `elif not extracted_ok and ...` arm above
+    `elif not source_ok:` and this reports UNVERIFIABLE / exit 2."""
+    home, _bindir, _fake = setup
+    root = _install(home, "claude")
+    graph, _url = hosted
+    graph.no_source = True
+    graph.zero_extracted = True
+    graph.extraction = False
+    report = _verify(hosted, home, "claude", root)
+    memory = report["links"]["memory"]
+    assert memory["status"] == "FAIL", memory
+    assert "no Source node" in memory["detail"], memory["detail"]
+    assert report["exit_code"] == EXIT_BROKEN
+
+
+def test_guard_a_recorded_count_outranks_the_unknown_qualifier(hosted, setup):
+    """The count is checked FIRST, exactly as ``session_confirm``'s FILED arm
+    does: a served ``extracted >= 1`` is proof even beside an
+    ``outcome_known: false`` (a projection that appends the qualifier late
+    must not un-prove an observed Point).
+
+    Mutation: drop the ``not extracted_ok`` conjunct (read the qualifier
+    BEFORE the count) and this link reports UNVERIFIABLE for extracted 1."""
+    home, _bindir, _fake = setup
+    root = _install(home, "claude")
+    graph, _url = hosted
+    graph.extraction = False          # outcome_known: false, extracted == 1
+    report = _verify(hosted, home, "claude", root)
+    assert report["links"]["memory"]["status"] == "PROVEN"
+    assert report["exit_code"] == EXIT_OK
+
+
+def test_guard_a_bool_count_is_not_a_count(hosted, setup):
+    """#12497 review round 3: the count must come from the canonical reader,
+    which reads a JSON ``true``/``false`` as 0. Its docstring states the
+    contract verbatim: "an unknown extraction count must never satisfy the
+    'extraction observed' test that gates the import receipt"
+    (``session_confirm.py:224-228``).
+
+    Python considers a bool an ``int``, so a local
+    ``isinstance(extracted, int)`` check proves the leg from garbage.
+
+    Mutation: restore ``extracted_ok = isinstance(extracted, int) and
+    extracted >= 1`` and a served ``extracted: true`` beside
+    ``outcome_known: false`` reports PROVEN / exit 0."""
+    home, _bindir, _fake = setup
+    root = _install(home, "claude")
+    graph, _url = hosted
+    graph.extracted_override = True   # a bool is not a count
+    graph.extraction = False          # outcome not recorded either
+    report = _verify(hosted, home, "claude", root)
+    memory = report["links"]["memory"]
+    assert memory["status"] == "UNVERIFIABLE-IN-CI", memory
+    assert report["exit_code"] == EXIT_UNVERIFIABLE
+    # ⛔ AND THE LINE MAY NOT PARROT THE VALUE IT JUST REJECTED (#12730 review
+    # P2). The arm is reached only because the canonical count is 0, so a line
+    # interpolating the raw field read "(extracted=True, outcome_known=false) —
+    # memory points were neither observed nor ruled out": a count displayed by
+    # the very sentence that discarded it. The served value is named ONLY when
+    # it disagrees with the count, and it is labelled as the served one.
+    assert "(extracted=0, served True, outcome_known=false)" in memory["detail"], (
+        memory["detail"])
+    assert "extracted=True" not in memory["detail"], memory["detail"]
+    # ⛔ AND THE FAIL ARM RENDERS THE SAME PAIR (#12730 review round 2, P2).
+    # Setting only the UNVERIFIABLE arm's rendering left the sibling pinned by
+    # nothing: every other FAIL-arm assertion is the substring "no memory Point"
+    # on a detail whose served value EQUALS the canonical count, so reverting
+    # `session_verify.py`'s FAIL arm to the raw field rendered a byte-identical
+    # line and the whole file stayed green (measured: 56 passed under exactly
+    # that one-arm revert). `outcome_known: true` keeps the FAIL, and the line
+    # must still name the count the verdict used, never the value it rejected.
+    graph.extracted_override = True
+    graph.extraction = True           # recorded outcome -> the FAIL arm
+    report = _verify(hosted, home, "claude", root)
+    memory = report["links"]["memory"]
+    assert memory["status"] == "FAIL", memory
+    assert "(extracted=0, served True)" in memory["detail"], memory["detail"]
+    assert "extracted=True" not in memory["detail"], memory["detail"]
+    assert report["exit_code"] == EXIT_BROKEN, report["exit_code"]
+
+
+def test_guard_the_count_is_the_canonical_reader_too(hosted, setup,
+                                                     monkeypatch):
+    """#12497 review round 4: the pair's delegation is pinned behaviourally,
+    the COUNT's was not — a bool-aware local re-implementation
+    (``isinstance(extracted, int) and not isinstance(extracted, bool) and
+    extracted >= 1``, the shape ``capture_spool.py`` already mirrors) kept the
+    whole file green. Both directions are pinned here, because a count can be
+    too high as well as too low.
+
+    Mutation: replace ``_session_extracted(detail)`` with any local count
+    re-implementation and neither patch below is observed."""
+    import tortoise.session_confirm as sc
+
+    home, _bindir, _fake = setup
+    root = _install(home, "claude")
+    graph, _url = hosted
+
+    # (a) the server serves ZERO points, the canonical reader says five.
+    graph.zero_extracted = True
+    graph.extraction = False          # unrecorded, so only the count decides
+    monkeypatch.setattr(sc, "session_extracted", lambda _detail: 5)
+    report = _verify(hosted, home, "claude", root)
+    assert report["links"]["memory"]["status"] == "PROVEN", \
+        report["links"]["memory"]
+    assert report["exit_code"] == EXIT_OK
+
+    # (b) the mirror image: a served count the canonical reader rejects as 0.
+    monkeypatch.setattr(sc, "session_extracted", lambda _detail: 0)
+    graph.zero_extracted = False
+    graph.extraction = None           # absent block: the FAIL arm must run
+    report = _verify(hosted, home, "claude", root)
+    assert report["links"]["memory"]["status"] == "FAIL", \
+        report["links"]["memory"]
+    assert report["exit_code"] == EXIT_BROKEN
+
+
+def test_guard_the_arm_reads_the_canonical_predicate(hosted, setup,
+                                                     monkeypatch):
+    """#12497 review P2: the one-reader property must be BEHAVIOURALLY pinned,
+    not held only by the import line. The link has to ask
+    ``session_confirm.extraction_outcome_known`` — never a second copy of the
+    pair logic that could drift from it.
+
+    Mutation: replace the call with an inline
+    ``detail.get("extraction", {}).get("outcome_known") is False`` — or with a
+    same-named local copy of the reader, which a module-attribute patch would
+    not reach — and this stays UNVERIFIABLE while the assertion below expects
+    FAIL."""
+    import tortoise.session_confirm as sc
+
+    home, _bindir, _fake = setup
+    root = _install(home, "claude")
+    graph, _url = hosted
+    graph.zero_extracted = True
+    graph.extraction = False          # the server says "not recorded"
+    # Force the CANONICAL reader's own "no usable block" arm. If the link
+    # consults it, the qualifier is unavailable and the old FAIL stands; a
+    # second, inline copy — or a local same-named copy — would not notice this.
+    monkeypatch.setattr(sc, "extraction_outcome_known", lambda _detail: None)
+    report = _verify(hosted, home, "claude", root)
+    assert report["links"]["memory"]["status"] == "FAIL"
+    # The GENUINE extraction FAIL, not the "never captured" FAIL.
+    assert "no memory Point" in report["links"]["memory"]["detail"]
+    assert report["exit_code"] == EXIT_BROKEN
+    # ⛔ THE OTHER DIRECTION (#12730 review P2). The arm above alone is GREEN on
+    # the UNFIXED tree — an unqualified `extracted: 0` gets the same FAIL without
+    # consulting anything — so it excludes an inline COPY of the reader but
+    # cannot tell "asks the canonical reader" from "asks nothing". Asking the
+    # reader for its ``False`` (the served, recorded-unknown state) must move the
+    # link to UNVERIFIABLE; on the pre-fix tree this assertion reds.
+    monkeypatch.setattr(sc, "extraction_outcome_known",
+                        lambda _detail: False)
+    report = _verify(hosted, home, "claude", root)
+    assert report["links"]["memory"]["status"] == "UNVERIFIABLE-IN-CI", report
+    assert report["exit_code"] == EXIT_UNVERIFIABLE
+
+
+def test_importing_session_verify_does_not_pull_the_sdk():
+    """#12497 review P2: `tortoise/__main__.py` imports this module at the top
+    of ``main()``, so a module-scope import of ``session_confirm`` put the
+    whole SDK (and ``prometheus_client``) on the CLI's import path for EVERY
+    subcommand — measured on this box at 0.043 s → 0.24 s to import this
+    module, with ``tortoise.sdk`` newly in ``sys.modules``. The readers are
+    imported lazily instead, so the cost lands only on ``session verify``.
+
+    Mutation: move ``from tortoise.session_confirm import
+    extraction_outcome_known`` back to module scope, OR add such an import to
+    the block in ``tortoise/__main__.py``'s ``main()``, and this subprocess
+    reports ``True``."""
+    # Two shapes, because a future reader would extend the SECOND without
+    # noticing: the bare module import, and the CLI entry point that imports
+    # this module for EVERY subcommand (`__main__.py` imports HARNESSES at the
+    # top of main()).
+    bare = ["-c", "import sys, tortoise.session_verify; "
+                   "print('tortoise.sdk' in sys.modules)"]
+    cli = ["-c", "import sys, runpy\n"
+                  "sys.argv = ['tortoise', '--help']\n"
+                  "try:\n"
+                  "    runpy.run_module('tortoise', run_name='__main__')\n"
+                  "except SystemExit:\n"
+                  "    pass\n"
+                  "print('tortoise.sdk' in sys.modules)\n"]
+    for cmd in (bare, cli):
+        proc = subprocess.run(
+            [sys.executable, *cmd], cwd=str(_REPO_ROOT),
+            capture_output=True, text=True, timeout=180)
+        assert proc.returncode == 0, (cmd, proc.stderr[-800:])
+        assert proc.stdout.strip().splitlines()[-1] == "False", (
+            cmd, proc.stdout[-400:])
+
+
+def test_guard_an_unreadable_api_is_unverifiable_not_broken(hosted, setup):
+    """#12497 review round 4: the receipt read failing BEFORE the fire is the
+    fourth exit-2 cause — the API is a PRECONDITION, so nothing was
+    exercised and no link may claim PROVEN or BROKEN. It had no test at all,
+    so its exit code could change invisibly.
+
+    Mutation: return `EXIT_BROKEN` from that arm (or set one link FAIL) and
+    this reds."""
+    home, _bindir, _fake = setup
+    root = _install(home, "claude")
+    graph, _url = hosted
+    graph.fail_state_read = True
+    report = _verify(hosted, home, "claude", root)
+    assert report["exit_code"] == EXIT_UNVERIFIABLE, report["exit_code"]
+    for link in ("installed", "captured", "memory"):
+        assert report["links"][link]["status"] == "UNVERIFIABLE-IN-CI", \
+            report["links"][link]
+    assert graph.posts == [], "the seam must not be fired off an unreadable API"
+
+
+def test_the_exit_two_summary_does_not_invent_a_cause():
+    """#12497 review P2: exit 2 has FOUR causes — a harness this command
+    cannot fire, an API unreadable before the fire, an API build that serves
+    no ``source`` field, and a server that recorded no extraction outcome.
+    The report's summary line must not name any one of them for the others,
+    because that points the operator at the wrong remedy (the link's own line
+    already names the real reason).
+
+    Mutation: restore the fixed "a link could not be exercised in this
+    environment" sentence and the ``not in`` assertion below fails."""
+    import tortoise.session_verify as sv
+
+    report = {
+        "harness": "claude", "root": "/tmp/proj", "links": {
+            "memory": sv._link(
+                sv.STATUS_UNVERIFIABLE,
+                "the server has not recorded an extraction outcome")},
+        "cleanup": {}, "exit_code": sv.EXIT_UNVERIFIABLE,
+    }
+    text = sv.render_report(report)
+    assert "exit 2" in text, text
+    assert "could not be exercised" not in text, text
+    assert "NOT VERIFIED" in text, text
+    # A single fixed sentence is printed for EVERY exit-2 report, so a closed
+    # phrasal check cannot carry the property: a reworded version of the SAME
+    # round-1 defect ("NOT VERIFIED — the harness is not headlessly firable")
+    # passed the three assertions above. The sentence is therefore pinned
+    # literally — if you reword it, update this expectation, which is the
+    # review — and the four causes it must not name are checked as words.
+    # The verdict is about the SUMMARY line — the link line above it is
+    # supposed to name the real reason, so the word check runs on the summary
+    # alone.
+    summary = [ln for ln in text.splitlines() if ln.strip().startswith("exit ")]
+    assert len(summary) == 1, text
+    summary_line = summary[0]
+    assert summary_line.rstrip().endswith(
+        "exit 2 — nothing provably broken, but a link was NOT VERIFIED "
+        "— see its line above"), summary_line
+    lowered = summary_line.lower()
+    named = [word for word in (
+        "firable", "headless", "unreadable", "source field",
+        "extraction outcome", "in this environment", "harness is not",
+    ) if word in lowered]
+    assert not named, (named, summary_line)
 
 
 def test_guard_cleanup_failure_is_surfaced_not_swallowed(hosted, setup):

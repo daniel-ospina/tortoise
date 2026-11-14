@@ -27,7 +27,15 @@ whole chain for the four beta harnesses (claude, pi, cursor, codex):
    window is.  A settled turn count that is NOT the expected one still breaks
    the window early, because it never becomes the expected one;
 3. **memory** — the session appears in the graph as a ``Source`` and its turns
-   were extracted into memory Points.
+   were extracted into memory Points.  An unobserved count asserts an ABSENCE, so it is a
+   ``FAIL`` when the pair records an empty extraction
+   (``outcome_known: true``) or carries no usable pair at all, and
+   ``UNVERIFIABLE`` only beside an explicit ``outcome_known: false`` — where the
+   server has recorded NOTHING either way — the
+   same half-pair obligation ``tortoise/session_confirm.py`` states for every
+   consumer of that detail (#12362/#12379, fixed here by #12497).  A served
+   count of 1 or more still proves the leg, and a malformed / absent
+   ``extraction`` block keeps the old reading (garbage is neither state).
 
 BEHAVIOURAL, NOT A SOURCE-TEXT SCAN.  Every guard executes the path and
 asserts the resolved outcome; nothing here greps an artifact.  The install
@@ -66,7 +74,11 @@ faked.  Cursor's ``sessionEnd`` fires only from a local desktop-editor session
 TypeScript extension the Pi process loads in-process — neither is a command
 this verifier can execute and present as "the harness fired it", so their
 links report ``UNVERIFIABLE-IN-CI``.  That ruling is about the INSTALL leg, not
-the seam's testability: Pi's handler logic is exercised hermetically by
+the seam's testability: the SAME token is used where the SERVER could not have
+asserted a link (an API build that serves no ``source`` field, and a session
+detail that records no extraction outcome), which is why the exit-2 summary
+says only that a link was NOT VERIFIED instead of naming a cause.  Pi's
+handler logic is exercised hermetically by
 ``tortoise/pi-hooks/tortoise-capture.test.ts``, and the artifact AS INSTALLED
 is loaded and fired by the node probe in
 ``tests/test_pi_capture_hooks.py`` (into a temp ``HOME``); the residual (a real
@@ -128,9 +140,13 @@ STATUS_INERT = "INERT"
 
 #: Exit codes.  0 = every link PROVEN; 1 = a link is BROKEN (the install is
 #: wrong, or the capture/memory leg failed); 2 = nothing is provably broken,
-#: but at least one link could not be exercised in this environment (the
-#: harness is not headlessly firable) — a CI caller must treat 2 as "not
-#: verified", never as a pass.
+#: but at least one link was NOT VERIFIED.  These are the FOUR sites that can
+#: produce 2 today, and the list is meant to be COMPLETE — a fifth site must
+#: add itself here: this command could not fire the seam (a harness that is
+#: not headlessly firable); the API was unreadable before the fire, so no link
+#: was exercised at all; and two server-side ones, a detail that serves no
+#: Source field and one that records no extraction outcome.  A CI caller must
+#: treat 2 as "not verified", never as a pass.
 EXIT_OK = 0
 EXIT_BROKEN = 1
 EXIT_UNVERIFIABLE = 2
@@ -672,6 +688,45 @@ session_detail = _session_detail
 # ── the chain ─────────────────────────────────────────────────────────────
 
 
+def _extraction_outcome_known(detail: Any) -> bool | None:
+    """The canonical ``outcome_known`` qualifier, imported LAZILY.
+
+    ``tortoise.session_confirm`` imports ``tortoise.sdk``, which imports
+    ``tortoise.monitoring``/``prometheus_client`` — so a module-scope import
+    here put the whole SDK on the CLI's import path: ``tortoise/__main__.py``
+    does ``from tortoise.session_verify import HARNESSES`` at the top of
+    ``main()``, which meant EVERY subcommand paid it (measured: 0.043 s →
+    0.24 s to import this module, with ``tortoise.sdk`` newly in
+    ``sys.modules``).  Deferring the import keeps the cost on ``session
+    verify``, which is the only command that reads the pair.
+
+    Still ONE definition: this delegates to ``session_confirm``'s reader, and
+    the import is performed at CALL time, so patching
+    ``session_confirm.extraction_outcome_known`` is observable here (a local
+    copy of the predicate would not be — the pin in
+    ``tests/test_session_verify.py`` relies on exactly that).
+    """
+    from tortoise.session_confirm import extraction_outcome_known
+
+    return extraction_outcome_known(detail)
+
+
+def _session_extracted(detail: Any) -> int:
+    """The canonical extracted-point count, imported LAZILY.
+
+    Same reason as :func:`_extraction_outcome_known` (keeping ``tortoise.sdk``
+    off the CLI's import path), same one-definition rule: the count is
+    ``session_confirm.session_extracted``'s, which reads a NEGATIVE or
+    non-integer value — and a JSON ``true``/``false``, which Python considers
+    an ``int`` — as 0.  A count of unknown provenance must never satisfy
+    "extraction observed", and the bool case is the one a local
+    ``isinstance(extracted, int)`` test gets wrong (#12497 review round 3).
+    """
+    from tortoise.session_confirm import session_extracted
+
+    return session_extracted(detail)
+
+
 def _link(status: str, detail: str, **extra: Any) -> dict[str, Any]:
     return {"status": status, "detail": detail, **extra}
 
@@ -959,7 +1014,16 @@ def verify_session_capture(harness: str,
             extracted = detail.get("extracted")
             source_ok = (isinstance(source, dict)
                          and source.get("url") == f"session:{probe_id}")
-            extracted_ok = isinstance(extracted, int) and extracted >= 1
+            counted = _session_extracted(detail)
+            extracted_ok = counted >= 1
+            # The SERVED value, named only when it DISAGREES with the count this
+            # verdict used.  ``session_extracted`` reads a JSON ``true``/``false``,
+            # a string and a negative as 0, so interpolating the raw field beside
+            # "neither observed nor ruled out" would print ``extracted=True`` for a
+            # value the line above has just rejected as a count (#12730 review P2).
+            # Absent a disagreement this is empty, so every message keeps the
+            # exact shape it already had for the ordinary ``extracted: 0`` state.
+            served = (f", served {extracted!r}" if extracted != counted else "")
             if source == "<absent>":
                 report["links"]["memory"] = _link(
                     STATUS_UNVERIFIABLE,
@@ -972,17 +1036,36 @@ def verify_session_capture(harness: str,
                     f"session {probe_id!r} has no Source node in the graph "
                     f"(url session:{probe_id})",
                     extracted=extracted, source=source)
+            elif (not extracted_ok
+                  and _extraction_outcome_known(detail) is False):
+                # #12497: the server published ``extracted: 0`` WITHOUT having
+                # recorded whether extraction ran (``outcome_known: false`` —
+                # the state behind an abandoned 504 handler, a commit-created
+                # session, a demo seed).  "No memory Point" is an absence we
+                # cannot observe, so this is NOT the ``FAIL`` below; it claims
+                # nothing about memory points and names no cause (it may still
+                # be running, or may never have started — the server has not
+                # said).  ``UNVERIFIABLE`` is the vocabulary's honest third
+                # value, and it keeps exit 2 (nothing provably broken) rather
+                # than the BROKEN exit a fabricated absence earns.
+                report["links"]["memory"] = _link(
+                    STATUS_UNVERIFIABLE,
+                    f"session {probe_id!r} appears as a Source, but the server "
+                    f"has not recorded an extraction outcome for it "
+                    f"(extracted={counted}{served}, outcome_known=false) — "
+                    f"memory points were neither observed nor ruled out",
+                    extracted=extracted, source=source)
             elif not extracted_ok:
                 report["links"]["memory"] = _link(
                     STATUS_FAIL,
                     f"session {probe_id!r} appears as a Source but extraction "
-                    f"produced no memory Point (extracted={extracted})",
+                    f"produced no memory Point (extracted={counted}{served})",
                     extracted=extracted, source=source)
             else:
                 report["links"]["memory"] = _link(
                     STATUS_PROVEN,
                     f"session {probe_id!r} is the Source {source.get('url')!r} "
-                    f"and {extracted} memory Point(s) were extracted",
+                    f"and {counted} memory Point(s) were extracted",
                     extracted=extracted, source=source)
     except _ApiError as e:
         # The API read broke AFTER the seam fired: the chain is BROKEN, but
@@ -1324,8 +1407,8 @@ def render_report(report: dict[str, Any]) -> str:
     verdict = {
         EXIT_OK: "all links PROVEN",
         EXIT_BROKEN: "a link is BROKEN",
-        EXIT_UNVERIFIABLE: "nothing provably broken, but a link could not be "
-                           "exercised in this environment",
+        EXIT_UNVERIFIABLE: "nothing provably broken, but a link was NOT "
+                           "VERIFIED — see its line above",
     }.get(code, "unknown")
     lines.append(f"  exit {code} — {verdict}")
     return "\n".join(lines)
