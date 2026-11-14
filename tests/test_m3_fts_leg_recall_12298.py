@@ -1467,6 +1467,16 @@ def test_section_1_locators_still_point_at_the_code_they_name(brief: str) -> Non
     `c17e3c5f78` left every test green — while the merge rail SQUASHES, so any
     sha it could name is one `main` will never contain. The table now claims
     exactly what this test enforces: these locators point at their symbols.
+
+    ⛔ PRESENCE IS NOT AGREEMENT (owner review on #12633): a citation that the
+    table merely *contains* does not have to name the line this row pins, so a
+    repair that moves BOTH the tuple's `line` and the code — while leaving the
+    brief citing the old number — passes every assertion above. This pin
+    therefore reads the brief's OWN number out of the citation form and holds it
+    EQUAL to the pinned line, and holds a span's end after its start.
+    DECLARED RESIDUAL: a range cite is checked at its START (the line the row's
+    symbol names) plus `end > start` — the END's content stays prose, because
+    the brief names the span and not the text on 3028.
     """
     scope = _scope_slice(brief, "1")
     marker = "The pinned read of the code"
@@ -1495,6 +1505,23 @@ def test_section_1_locators_still_point_at_the_code_they_name(brief: str) -> Non
         assert line == actual, (
             f"§1 cites {rel}:{line} for {symbol!r}, but that text is at line "
             f"{actual} — update the brief's locator, do not relax this pin")
+        # ⛔ The brief's OWN number must be the same one. Presence is not
+        # agreement: without this, editing only the tuple (and the tree it
+        # pins) leaves the document citing a line that holds something else,
+        # and every check above still passes (#12604 review reproduction).
+        m = re.search(r":(\d+)(?:-(\d+))?`", cited)
+        assert m, (
+            f"§1's citation {cited!r} names no line number — a citation that "
+            "carries no line is not the locator this row pins")
+        assert int(m.group(1)) == line, (
+            f"§1's citation {cited!r} names line {m.group(1)}, but this pin "
+            f"holds {line} for {symbol!r} in {rel} — the brief and the pin must "
+            "name the SAME line, or a repair that updates one of them reports "
+            "GREEN over a document citing a line that holds something else")
+        if m.group(2) is not None:
+            assert int(m.group(2)) > int(m.group(1)), (
+                f"§1's citation {cited!r} is an empty or inverted range — the "
+                "row names a span, so its end must sit after its start")
 
 
 def test_the_scorer_control_is_a_tie_and_the_rule_says_fail(artifact, brief_text) -> None:
