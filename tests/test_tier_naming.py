@@ -301,8 +301,22 @@ class TestEverySurfaceAgreesWithTheDeclaration:
 #:         rather than taken;
 #:       * a MIXED quotation pair (`The doc read “there is no Builder plan".`, one ASCII
 #:         and one typographic mark): :data:`_QUOTE_PAIRS` pairs same-direction marks
-#:         only, so no span exists and the mention is FLAGGED — a false POSITIVE, green at
-#:         `origin/main` only because main had no closing-quote tolerance at all;
+#:         only, so no CLOSED span exists — but an UNCLOSED span does, opened by the
+#:         typographic mark, and `_quotes_the_whole_denial`'s `match.start() <= start + 2`
+#:         tolerance accepts it, so the mention is EXEMPT (green) BOTH here and at
+#:         `origin/main` (cycle-20 round 3, measured: `_denial_in` is False at both).
+#:         ⛔ An earlier revision of this bullet called it a false POSITIVE that was “RED
+#:         here, `origin/main` green”; the unclosed-span tolerance removed that and the
+#:         bullet was not updated. Recorded as a miss, not a block;
+#:       * a PARENTHETICAL-aside record whose aside is COMMA-delimited —
+#:         `Previously the doc said, until #12444 corrected it, that there is no Builder
+#:         plan.` — BLOCKED here while `origin/main` exempts it (cycle-20 round 3,
+#:         measured). The reported clause is cut at its first break and that break is the
+#:         aside's own comma. The `--…--` / `—…—` forms are fixed by
+#:         :data:`_REPORTED_ASIDE`; the comma form is NOT, because treating a lone comma
+#:         as strippable would re-open `… said the naming was wrong, there is no Builder
+#:         plan.`, which every head here and `origin/main` agree must stay FLAGGED. It is
+#:         a false positive on correct prose and is listed rather than silently traded;
 #:       * an APOSTROPHE pseudo-span in the CUE arm: two ordinary apostrophes (an
 #:         elision `'90s` opening, a plural possessive `customers'` closing) produce a
 #:         CLOSED span, and a cue word beside it exempts the drift —
@@ -716,10 +730,13 @@ _QUOTE_PAIRS = (('"', '"'), ('`', '`'), ('\u201c', '\u201d'), ('\u2018', '\u2019
 #: unclosed tail then swallowed a live denial and turned
 #: `Until then the doc said "no plan called Builder" and there is no Builder plan.`
 #: — a PINNED true positive — GREEN. A false block traded for a false PASS on the exact
-#: drift this file guards is the wrong trade, so the pairs stay same-direction and the
-#: mixed-mark mention is recorded as a measured false POSITIVE in the class docstring
-#: instead. Repairing it properly means a scanner that pairs an opening mark with the
-#: NEAREST mark from its own closer set, which is a change to `_quoted_span_offsets`'
+#: drift this file guards is the wrong trade, so the pairs stay same-direction. ⛔ The
+#: mixed-mark mention is NOT a false positive, which an earlier revision of this comment
+#: claimed: the unclosed span the typographic mark opens is accepted by
+#: `_quotes_the_whole_denial`, so it is EXEMPT here and at `origin/main` (cycle-20 round 3,
+#: measured — see the class docstring bullet). Repairing it properly means a scanner that
+#: pairs an opening mark with the NEAREST mark from its own closer set, which is a change
+#: to `_quoted_span_offsets`'
 #: contract and belongs in its own cycle with its own pins, not bolted onto this one.
 #: ⛔ `_QUOTED_NEGATION` and `_BUILDER_PHRASE` lived here and are GONE (cycle-17 P1,
 #: measured). Both became dead when `_quotes_the_denial` moved its gate from "the span
@@ -919,9 +936,21 @@ _REPORTED_CLAIM = re.compile(
 #: is a clause break everywhere else in this file (`_RESTATEMENT_TAIL`, `_CLAUSE_END`)
 #: and 65 `docs/` files use it, so `Until #12444 the docs said the naming was wrong --
 #: there is no Builder plan.` was exempt here while `origin/main` and the pre-fix head
-#: both FLAG it — likewise `while`, `although`/`though`, and a connective `yet`. A break
-#: AFTER the denial is harmless (the split keeps the prefix), so widening this set cannot
-#: add a false block.
+#: both FLAG it — likewise `while`, `although`/`though`, and a connective `yet`.
+#:
+#: ⛔ A BREAK BEFORE THE DENIAL IS NOT HARMLESS, AND AN EARLIER CUT CLAIMED IT WAS
+#: (cycle-20 round 3, measured). Widening this set DOES add false blocks when the break is
+#: an ASIDE inside the reported material, because the split keeps only the PREFIX and
+#: `reported` collapses to `''` — the exact opposite of the sentence that used to sit
+#: here ("A break AFTER the denial is harmless … so widening this set cannot add a false
+#: block"), which was true of breaks after the denial and false of breaks before it:
+#: `Previously the doc said -- until #12444 corrected it -- that there is no Builder
+#: plan.` and `… said yet again that there is no Builder plan; #12444 corrected it.` are
+#: CORRECT records that `origin/main` exempts and the round-2 terms BLOCKED.
+#: :data:`_REPORTED_ASIDE` strips a matched pair / the adverbial before the split, so both
+#: are exempt again without giving back the assertions those terms were added for
+#: (`… wrong -- there is no Builder plan.` stays FLAGGED: a lone `--` is not a pair).
+_REPORTED_ASIDE = re.compile(r"--[^-]*--|\u2014[^\u2014]*\u2014|\byet\s+again\b", re.I)
 _REPORTED_CLAUSE_END = re.compile(
     r"[;:,\u2014\u2013]|--|\b(?:and|but|so|which|therefore|thus|hence|whereas|"
     r"while|although|though|yet|since|because)\b",
@@ -976,11 +1005,17 @@ def _reports_a_denial(sentence: str) -> bool:
         # the suite at 19 passed when deleted, and no `docs/` verdict or pinned case
         # depends on it — an unpinned term with no corpus behind it, which is this file's
         # own cycle-14 rule for removing surface rather than carrying it.
+        # ⛔ AN ASIDE IS NOT A CLAUSE BREAK (cycle-20 round 3, measured — see
+        # `_REPORTED_ASIDE`): a matched `--…--` / `—…—` pair, or the adverbial `yet again`,
+        # sits INSIDE the reported material, so it is removed before the clause is cut.
+        # Without this the split keeps only the prefix and `reported` is empty, which
+        # BLOCKED two correct records while `origin/main` exempts both.
+        rest = _REPORTED_ASIDE.sub(" ", plain[verb.end():])
         # ⛔ …AND ONLY UP TO THE FIRST CLAUSE BREAK (cycle-20, measured — see
         # `_REPORTED_CLAUSE_END`): a denial beginning after one is a second claim, so
         # `said the naming was wrong and there is no Builder plan` stays FLAGGED while
         # `said flatly that there is no Builder plan` is the record it is.
-        reported = _REPORTED_CLAUSE_END.split(plain[verb.end():], 1)[0]
+        reported = _REPORTED_CLAUSE_END.split(rest, 1)[0]
         for pattern in _DENIAL_PATTERNS:
             if pattern.search(reported) is not None:
                 return True
@@ -1519,6 +1554,17 @@ class TestNoDocDeniesABuilderPlanExists:
             'Previously the page read "There is no plan called Builder".',
             "Previously the doc said there's no Builder plan; #12444 corrected it.",
             "Previously the doc said there isn't a Builder plan; #12444 corrected it.",
+            # ⛔ AN ASIDE INSIDE THE REPORTED CLAUSE IS NOT A CLAUSE BREAK (cycle-20 round
+            # 3, measured): both are exempt at `origin/main` and were BLOCKED by the
+            # round-2 terms until `_REPORTED_ASIDE` stripped the matched pair / adverbial.
+            # The lone-`--` twin stays FLAGGED and is pinned in the live-denial tuple, so
+            # this pair cannot be satisfied by dropping `--` from the break set.
+            'Previously the doc said -- until #12444 corrected it -- that there is no '
+            'Builder plan.',
+            'Previously the doc said — until #12444 corrected it — that there is no '
+            'Builder plan.',
+            'Previously the doc said yet again that there is no Builder plan; #12444 '
+            'corrected it.',
             "Previously the doc said the Builder tier does not exist; #12444 corrected it.",
             'The doc previously read "There is no Builder plan."; #12444 corrected it.',
             # ⛔ A MENTION OF THE FORBIDDEN SENTENCE IS NOT AN ASSERTION OF IT
