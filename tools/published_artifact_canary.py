@@ -959,21 +959,26 @@ def build_report(
                     if not unreadable
                     else f"; NOTE {unreadable}: part of this release map could not be read "
                     f"(a value that is not an array, an entry that is not an object, or a "
-                    f"file entry with no boolean `yanked` / no `filename`), so this list is "
-                    f"the READABLE subset"
+                    f"file entry with no boolean `yanked` / no non-empty string `filename`), "
+                    f"so this list is the READABLE subset"
                 )
                 # ⛔ THE DETAIL NAMES WHAT WAS READ, NOT WHAT PIP RESOLVES TO (#12589 review
-                # rounds 3 and 4). `info.version` is what the index ADVERTISES; an unpinned
+                # rounds 3, 4 and 5). `info.version` is what the index ADVERTISES; an unpinned
                 # requirement resolves to the HIGHEST installable release, which membership in
                 # `resolvable` does not establish (0.2.0 advertised + 0.3.0 also installable →
                 # pip takes 0.3.0). Printing `unpinned → 0.2.0` there asserted a resolution the
                 # reading never computed, and on the partial path it asserted one about the very
-                # version whose listing was not read. So the arrow is gone: the arm states the
-                # existential claim it can prove, and names the set it proved it from.
+                # version whose listing was not read.
+                # ⛔ AND "NOT INSTALLABLE" WOULD BE FALSE, not merely unproven (#12589 review
+                # round 5, P3): an ADVERTISED-BUT-YANKED release installs fine under a `==` pin
+                # — PEP 592 is what makes an unpinned requirement skip it (this module's own
+                # round-15 comment says exactly that). So the negative branch states the claim
+                # this arm actually tests (the UNPINNED resolution) and stops there.
                 advertised = (
                     f"advertised latest {client_version} is installable"
                     if client_version in resolvable
-                    else f"advertised latest {client_version} is not installable/readable here"
+                    else f"advertised latest {client_version} is not resolvable for an "
+                    f"unpinned install here"
                 )
                 report.add(
                     Arm(
@@ -1011,11 +1016,11 @@ def build_report(
                         f"could not read a file listing out of the {CLIENT_PACKAGE} release "
                         f"map ({unreadable}) — a version value that is not an array, an entry "
                         f"that is not an object, or a file entry with no boolean `yanked` / no "
-                        f"`filename`. PyPI documents each version's value as an ARRAY of file "
-                        f"objects, so this is a shape this client cannot parse, and whether "
-                        f"`pip install {CLIENT_PACKAGE}` resolves is UNKNOWN, not false. This "
-                        f"is NOT evidence the artifact is broken and is NOT a reason to cut a "
-                        f"release",
+                        f"non-empty string `filename`. PyPI documents each version's value as "
+                        f"an ARRAY of file objects, so this is a shape this client cannot "
+                        f"parse, and whether `pip install {CLIENT_PACKAGE}` resolves is "
+                        f"UNKNOWN, not false. This is NOT evidence the artifact is broken and "
+                        f"is NOT a reason to cut a release",
                     )
                 )
             else:
@@ -1125,16 +1130,21 @@ def render_summary(report: Report) -> str:
                 "credentials. See #12363.",
             ]
     elif report.verdict == UNKNOWN:
+        # ⛔ THE TAIL POINTS AT THE ROW, AND NOTHING MORE (#12589 review rounds 4 and 5). The
+        # pre-fix text named ONE mechanism ("could not read the index") for every CANNOT RUN,
+        # which is false when the non-reading is a SHAPE the canary refuses. The fix is the first
+        # sentence: it covers both mechanisms and defers to the mark on the arm. A second
+        # paragraph that tried to rule the transport OUT was added in round 4 and REMOVED in round
+        # 5, because it fired exactly where its premise was wrong: whenever every index row reads
+        # OK, the CANNOT RUN arm is `engine-init` — i.e. the install did fail in transport — and in
+        # wheel mode both index rows read "not consulted" with status OK, so the paragraph denied
+        # the transport on the two shapes where the transport IS the story. Do not reintroduce a
+        # per-mechanism claim here without a condition that can actually see the arm.
         lines += [
             "",
             "The canary could not READ something it needs, or could not exercise the "
             "artifact: the row marked CANNOT RUN names which. Reported as RED on purpose: "
             "a detector that cannot run must never look like a pass.",
-            "",
-            "⛔ This is NOT an unreadable index when every index row above reads OK — on that "
-            "shape the non-reading is a SHAPE the canary refuses (an absent `releases` map, a "
-            "release value or `yanked` flag it cannot parse, a non-string version), and the "
-            "reason is in the row, not in the transport.",
         ]
     return "\n".join(lines) + "\n"
 

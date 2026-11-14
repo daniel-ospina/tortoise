@@ -3852,8 +3852,25 @@ def test_the_OK_detail_does_not_claim_a_RESOLUTION_the_reading_did_not_establish
     )
     detail = report.get("client-published").detail
     assert "unpinned →" not in detail, detail
-    assert "advertised latest 0.3.0 is not installable/readable here" in detail, detail
+    assert "advertised latest 0.3.0 is not resolvable for an unpinned install here" in detail, (
+        detail
+    )
     assert "installable: 0.2.0" in detail, detail
+
+    # ⛔ AND THAT WORDING IS LOAD-BEARING ON THE CASE THAT MOTIVATED THE ARM (#12589 round 5, P3):
+    # an ADVERTISED-BUT-YANKED release IS installable under a `==` pin — PEP 592 is what makes an
+    # unpinned requirement skip it. Saying "not installable" about it would be false, not merely
+    # unproven, so the negative branch says "not resolvable for an unpinned install".
+    report = _client_report(
+        {
+            "info": {"version": "0.3.0"},
+            "releases": {"0.3.0": [_CLIENT_YANKED], "0.2.0": [_CLIENT_GOOD]},
+        }
+    )
+    arm = report.get("client-published")
+    assert arm.status == canary.OK, (arm.status, arm.detail)
+    assert "not installable" not in arm.detail, arm.detail
+    assert "not resolvable for an unpinned install" in arm.detail, arm.detail
 
     # When the advertised version IS installable, say so — and still do not claim pip's target.
     report = _client_report({"info": {"version": "0.3.0"}, "releases": {"0.3.0": [_CLIENT_GOOD]}})
@@ -3896,16 +3913,51 @@ def test_the_UNREADABLE_reason_names_every_cause_the_code_can_produce():
         arm = _client_report({"info": {"version": "0.3.0"}, "releases": releases}).get(
             "client-published"
         )
-        assert "yanked" in arm.detail, (releases, arm.detail)
-        assert "filename" in arm.detail, (releases, arm.detail)
+        assert "no boolean `yanked`" in arm.detail, (releases, arm.detail)
+        # ⛔ NOT "no filename": the filter also drops a filename that is PRESENT and unusable
+        # (empty / wrong type), and the constant's own comment says "not of the documented type".
+        # The two texts are read against each other, so they must agree (#12589 round 5, P3).
+        assert "no non-empty string `filename`" in arm.detail, (releases, arm.detail)
 
-    summary = canary.render_summary(
-        _client_report({"info": {"version": "0.3.0"}, "releases": {"0.3.0": {}}})
-    )
-    # ⛔ The UNKNOWN tail must not blame the TRANSPORT for a SHAPE refusal: on this report every
-    # index row above reads OK and the non-reading is a shape the canary refuses (#12589 round 4).
+    # ⛔ AND THE `releases-absent` DETAIL MUST STILL NAME EVERY SHAPE THAT PRODUCES IT (#12589
+    # round 5, P3). #12589's comment 1 recorded that the token is defined as "the key is ABSENT"
+    # while being emitted for present-but-wrong-typed maps too — the alert renders the token
+    # VERBATIM to an operator, so the narrow wording points them at PyPI's deprecation instead of
+    # at the shape served. This pin is the one that was missing: the detail can no longer be
+    # narrowed back silently.
+    for absent in (None, [], "0.3.0", 0):
+        report = _client_report(
+            {"info": {"version": "0.3.0"}, "releases": absent}
+            if absent is not None
+            else {"info": {"version": "0.3.0"}}
+        )
+        detail = report.get("client-published").detail
+        assert canary.RELEASES_ABSENT in detail, (absent, detail)
+        assert "absent, null, or not an object" in detail, (absent, detail)
+
+    shape_refusal = _client_report({"info": {"version": "0.3.0"}, "releases": {"0.3.0": {}}})
+    summary = canary.render_summary(shape_refusal)
+    # ⛔ The UNKNOWN tail must not name ONE mechanism for every CANNOT RUN (#12589 round 4): on
+    # this report every index row above reads OK and the non-reading is a shape the canary
+    # refuses. The tail names both mechanisms and defers to the row.
     assert "could not READ something it needs" in summary, summary
-    assert "NOT an unreadable index" in summary, summary
+    assert "could not read the index" not in summary, summary
+
+    # ⛔ AND IT MUST NOT RULE THE TRANSPORT OUT EITHER (#12589 round 5, P2). A round-4 paragraph
+    # claimed "this is NOT an unreadable index when every index row above reads OK" — which is
+    # exactly backwards: when every index row reads OK, the CANNOT RUN arm is `engine-init`, i.e.
+    # the install really did fail. Both shapes that reach that state are pinned here.
+    timed_out = canary.build_report(
+        engine_doc=_engine_doc(),
+        client_doc={"info": {"version": "0.3.0"}, "releases": {"0.3.0": [_CLIENT_GOOD]}},
+        tree_version="0.2.0",
+        init_arm=canary.Arm("engine-init", canary.UNKNOWN, "timed out after 600s"),
+        now=NOW,
+    )
+    rendered = canary.render_summary(timed_out)
+    assert "NOT an unreadable index" not in rendered, rendered
+    assert "could not READ something it needs" in rendered, rendered
+    assert timed_out.get("engine-init").status == canary.UNKNOWN
 
     # ⛔ AND THE INFORMATIONAL ROW MUST NOT LOSE A TIMESTAMP IT DID READ (#12589 round 4, P3):
     # a timestamp needs neither `yanked` nor `filename`, so a partly-readable listing still says
