@@ -565,19 +565,28 @@ def releases_map(index_doc: dict[str, Any]) -> dict[str, Any] | None:
 RELEASES_UNREADABLE = "releases-unreadable"
 
 
-def readable_entries(files: Any) -> list[dict[str, Any]] | None:
-    """The file objects in ONE version's value, or ``None`` when that value is UNREADABLE.
+def readable_entries(files: Any) -> tuple[list[dict[str, Any]], bool]:
+    """One version's file OBJECTS, and whether anything in its value could not be read.
 
-    ``None`` is not ``[]``, for the same reason ``releases_map``'s is not ``{}``: ``[]`` is the
-    ANSWER "this release lists no files", and an unreadable value is the ABSENCE of an answer.
-    One helper for every reader, so a version value this client cannot parse cannot be spelled
-    ``[]`` by one arm and UNKNOWN by another (#12589 review, P3).
+    Returns ``(entries, partial)``: the file objects this client could read, plus ``True`` when it
+    had to DROP something — a value that is not a list at all (then ``entries == []``), or a list
+    holding an entry that is not an object.
+
+    ⛔ WHY IT DOES NOT DROP THE WHOLE VALUE (#12589 review, P2). The first revision returned
+    ``None`` for the entire value as soon as ONE entry was not a dict, which turned a real green
+    into a permanent CANNOT-RUN: ``{"0.3.0": [good_wheel, "junk"]}`` reported OK before the change
+    and UNKNOWN after it, even though the readable wheel record alone settles the arm's EXISTENTIAL
+    claim ("the unpinned requirement resolves"). The grain is the same one the value-level branch
+    uses: read what you can, REPORT that something was dropped, and let the caller apply the
+    polarity — OK may stand on what was read, FAIL may not.
+
+    ⛔ And ``[]`` is not 'unreadable', for the same reason ``releases_map``'s ``{}`` is not 'absent':
+    ``[]`` is the ANSWER "this release lists no files".
     """
     if not isinstance(files, list):
-        return None
-    if any(not isinstance(entry, dict) for entry in files):
-        return None
-    return list(files)
+        return [], True
+    entries = [entry for entry in files if isinstance(entry, dict)]
+    return entries, len(entries) != len(files)
 
 
 def resolvable_releases(index_doc: dict[str, Any]) -> tuple[list[str], str]:
@@ -585,10 +594,11 @@ def resolvable_releases(index_doc: dict[str, Any]) -> tuple[list[str], str]:
 
     TWO INDEPENDENT FACTS, because the two arms' claims differ in polarity:
 
-    * ``versions`` — the releases holding a non-yanked file. The arm's OK claim ("the unpinned
-      requirement resolves") is EXISTENTIAL: one readable installable release settles it. So an
-      unreadable value elsewhere cannot withdraw it (it could not make pip stop resolving).
-    * ``reason`` — ``""`` when every value was read, else the shape that was not:
+    * ``versions`` — the releases holding a non-yanked FILE OBJECT. The arm's OK claim ("the
+      unpinned requirement resolves") is EXISTENTIAL: one readable installable release settles it,
+      so an unreadable value elsewhere cannot withdraw it (it could not make pip stop resolving).
+      A PARTLY readable value counts too — the entries this client read can witness OK.
+    * ``reason`` — ``""`` when every value and every entry was read, else the shape that was not:
       ``RELEASES_ABSENT`` (the map is absent / null / not an object) or ``RELEASES_UNREADABLE``
       (a value that is not a list, or a list holding a non-object).
 
@@ -598,6 +608,7 @@ def resolvable_releases(index_doc: dict[str, Any]) -> tuple[list[str], str]:
     one level below the map's own type: a cache emitting ``{"0.3.0": {}}`` (or
     ``{"0.3.0": ["name.whl"]}``) left ``resolvable`` empty and the arm RED, i.e. "cut a release",
     off a listing that was never understood. So ``reason`` gates FAIL, and only FAIL.
+
 
     The line is between an answer and a non-answer, NOT between "some files" and "no files":
     ``{}``, ``{"0.3.0": []}``, all-yanked files and a non-yanked file are all COMPLETE readings
@@ -609,11 +620,11 @@ def resolvable_releases(index_doc: dict[str, Any]) -> tuple[list[str], str]:
     resolvable: list[str] = []
     reason = ""
     for version, files in releases.items():
-        entries = readable_entries(files)
-        if entries is None:
-            # Not readable: it can neither establish nor withdraw the existential OK claim.
+        entries, partial = readable_entries(files)
+        if partial:
+            # Not readable (in whole or in part): it can neither establish nor withdraw the
+            # existential OK claim by itself, but the entries that WERE read still can.
             reason = RELEASES_UNREADABLE
-            continue
         if any(not entry.get("yanked") for entry in entries):
             resolvable.append(version)
     return resolvable, reason
@@ -652,17 +663,25 @@ def missing_version_arm(
 
 
 def release_files(index_doc: dict[str, Any], version: str) -> list[dict[str, Any]] | None:
-    """One version's file objects, ``[]`` when the version is absent, ``None`` when unreadable.
+    """One version's file objects, ``[]`` when absent, ``None`` when the listing is unreadable.
+
+    The STRICT reader: any drop (an unreadable map, an unreadable value, a non-object entry) is
+    ``None``, because its callers report this as an ENUMERATION — a count, a timestamp — and a
+    count nobody read is exactly the class #12589 removed. Verdicts do NOT go through it: the
+    client arm reads ``resolvable_releases``, which applies the existential/universal polarity.
 
     One source of truth for what an absent key means, so the two arms cannot disagree about one
-    response (#12525) — and, since #12589, one source of truth for what an UNREADABLE value means
-    too: ``None`` here, the same value ``readable_entries`` returns, so a future arm built on this
-    helper cannot silently re-introduce the class this issue removed.
+    response (#12525) — and, since #12589, one source of truth for what an UNREADABLE map or value
+    means too, INCLUDING at the map level (``releases_map`` returning ``None`` is ``None`` here,
+    not an empty listing).
     """
-    releases = releases_map(index_doc) or {}
+    releases = releases_map(index_doc)
+    if releases is None:
+        return None  # no usable map at all — #12525's non-reading, not an empty listing
     if version not in releases:
         return []  # absent version key — an ANSWER ("no such release"), pinned as []
-    return readable_entries(releases[version])
+    entries, partial = readable_entries(releases[version])
+    return None if partial else entries
 
 
 def upload_time(index_doc: dict[str, Any], version: str) -> datetime | None:
@@ -673,8 +692,9 @@ def upload_time(index_doc: dict[str, Any], version: str) -> datetime | None:
     what users get".
     """
     stamps = []
-    # `or []`: an unreadable listing is not a zero count — this row is informational and must not
-    # crash a run that has nothing to report (#12589).
+    # `or []`: the caller is the INFORMATIONAL `release-age` row, which must not crash a run that
+    # has nothing to report — an unreadable listing contributes no timestamp, rather than a zero
+    # count. Verdicts never come through here (#12589).
     for entry in release_files(index_doc, version) or []:
         raw = entry.get("upload_time_iso_8601") or entry.get("upload_time")
         if not isinstance(raw, str) or not raw:
@@ -886,8 +906,9 @@ def build_report(
                 partial = (
                     ""
                     if not unreadable
-                    else f"; NOTE {unreadable}: another release value in this map could "
-                    f"not be read, so this list is the READABLE subset"
+                    else f"; NOTE {unreadable}: part of this release map could not be read "
+                    f"(a value that is not an array, or an entry that is not an object), so "
+                    f"this list is the READABLE subset"
                 )
                 report.add(
                     Arm(
@@ -934,15 +955,25 @@ def build_report(
                     )
                 )
             else:
-                # Reached ONLY on a complete reading (see the `unreadable` arm above), so this is a
-                # real count rather than a coerced one (#12589).
-                listed = len(release_files(client_doc, client_version) or [])
+                # ⛔ Reached ONLY when `unreadable` is "" — i.e. every value AND every entry was
+                # read — so `release_files` cannot be `None` here. The guard is not decorative: if
+                # that invariant is ever relaxed, raising fails CLOSED into main()'s exit-2
+                # backstop instead of printing "0 file(s) … none usable", a count nobody read.
+                # That sentence is the release order this issue exists to remove (#12589 review,
+                # P3).
+                files = release_files(client_doc, client_version)
+                if files is None:
+                    raise RuntimeError(
+                        "the FAIL verdict on the client arm requires a COMPLETE reading of the "
+                        "release map; `resolvable_releases` reported it complete but "
+                        "`release_files` could not read it (#12589)"
+                    )
                 report.add(
                     Arm(
                         "client-published",
                         FAIL,
                         f"the {CLIENT_PACKAGE} index lists NO installable file in ANY release "
-                        f"({listed} file(s) on {client_version}, none usable) — README.md "
+                        f"({len(files)} file(s) on {client_version}, none usable) — README.md "
                         f"documents `pip install {CLIENT_PACKAGE}`, which cannot resolve",
                     )
                 )

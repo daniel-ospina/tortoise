@@ -494,7 +494,12 @@ def test_releases_map_separates_ABSENT_from_EMPTY():
     # The absent key must not raise on the informational path either (the `release-age` and
     # `tree-version` rows are gated=False, so a crash here would take down a run that has
     # nothing to report).
-    assert canary.release_files({"info": {"version": "0.2.0"}}, "0.2.0") == []
+    # ⛔ CHANGED by #12589 (review round 2, P3): this was `== []`, i.e. an ABSENT map was spelled
+    # as the ANSWER "no files listed" — the map-level version of the very class this issue removes,
+    # and a disagreement with `releases_map` (which returns `None` for the same document). `None`
+    # means "no usable listing"; `[]` is reserved for a READABLE map with no such version key.
+    assert canary.release_files({"info": {"version": "0.2.0"}}, "0.2.0") is None
+    assert canary.release_files({"releases": {}}, "0.2.0") == []
     assert canary.upload_time({"info": {"version": "0.2.0"}}, "0.2.0") is None
 
 
@@ -3609,14 +3614,35 @@ def test_resolvable_releases_reports_BOTH_facts_because_the_claims_differ_in_POL
         {**doc, "releases": {"0.2.0": [_CLIENT_GOOD], "0.3.0": {}}}
     ) == (["0.2.0"], canary.RELEASES_UNREADABLE)
 
-    # And the ONE reader, so a future arm cannot re-spell an unreadable listing as `[]`.
-    assert canary.readable_entries([_CLIENT_GOOD]) == [_CLIENT_GOOD]
-    assert canary.readable_entries([]) == []
-    assert canary.readable_entries({}) is None
-    assert canary.readable_entries(["a.whl"]) is None
+    # ⛔ ENTRY GRAIN, not just value grain (#12589 review round 2, P2). A list holding ONE
+    # non-object used to make the whole value unreadable, so `{"0.3.0": [good, "junk"]}` went from
+    # OK (before this change) to a permanent CANNOT-RUN — even though the readable wheel record
+    # alone settles the existential claim. The reading reports the drop; the arm still greens.
+    assert canary.readable_entries([_CLIENT_GOOD, "junk"]) == ([_CLIENT_GOOD], True)
+    assert canary.resolvable_releases({**doc, "releases": {"0.3.0": [_CLIENT_GOOD, "junk"]}}) == (
+        ["0.3.0"],
+        canary.RELEASES_UNREADABLE,
+    )
+
+    # And the STRICT reader, so a future arm cannot re-spell an unreadable listing as `[]` — at
+    # the VALUE level and at the MAP level (`releases: "x"` is #12525's non-reading, not a listing
+    # with no files).
+    assert canary.readable_entries([_CLIENT_GOOD]) == ([_CLIENT_GOOD], False)
+    assert canary.readable_entries([]) == ([], False)
+    assert canary.readable_entries({}) == ([], True)
+    assert canary.readable_entries(["a.whl"]) == ([], True)
+    for doc_unreadable in (
+        {"info": {"version": "0.3.0"}},
+        {"info": {"version": "0.3.0"}, "releases": None},
+        {"info": {"version": "0.3.0"}, "releases": "0.3.0"},
+    ):
+        assert canary.release_files(doc_unreadable, "0.3.0") is None, doc_unreadable
     assert canary.release_files({"releases": {"0.3.0": {}}}, "0.3.0") is None
     assert canary.release_files({"releases": {"0.3.0": ["a.whl"]}}, "0.3.0") is None
-    assert canary.release_files({"info": {"version": "0.2.0"}}, "0.2.0") == []
+    assert canary.release_files({"releases": {"0.3.0": [_CLIENT_GOOD, "junk"]}}, "0.3.0") is None
+    # absent MAP is a non-reading (`None`); absent VERSION in a readable map is an answer (`[]`)
+    assert canary.release_files({"info": {"version": "0.2.0"}}, "0.2.0") is None
+    assert canary.release_files({"releases": {}}, "0.2.0") == []
 
 
 def test_an_UNPARSEABLE_release_VALUE_is_UNKNOWN_and_never_orders_a_release():
@@ -3686,6 +3712,25 @@ def test_an_UNPARSEABLE_release_VALUE_is_UNKNOWN_and_never_orders_a_release():
         .get("client-published")
         .detail
     )
+
+    # ⛔ AND THE SAME AT ENTRY GRAIN (#12589 review round 2, P2): one junk entry inside an
+    # otherwise-readable release must not withdraw the OK — the code before this change returned OK
+    # here, and the reading must not trade that true PASS away. The drop is disclosed.
+    report = _client_report(
+        {"info": {"version": "0.3.0"}, "releases": {"0.3.0": [_CLIENT_GOOD, "junk"]}}
+    )
+    arm = report.get("client-published")
+    assert arm.status == canary.OK, (arm.status, arm.detail)
+    assert report.exit_code == 0, report.exit_code
+    assert canary.RELEASES_UNREADABLE in arm.detail, arm.detail
+    assert "READABLE subset" in arm.detail, arm.detail
+    # ...while a release whose ONLY entries are unreadable has no OK to stand on: UNKNOWN, and the
+    # FAIL sentence must stay absent.
+    report = _client_report({"info": {"version": "0.3.0"}, "releases": {"0.3.0": ["junk"]}})
+    arm = report.get("client-published")
+    assert arm.status == canary.UNKNOWN, (arm.status, arm.detail)
+    assert report.exit_code == 2
+    assert "any release" not in arm.detail.lower(), arm.detail
 
 
 def test_a_non_object_info_is_a_LEGIBLE_NON_READING_on_BOTH_arms():
