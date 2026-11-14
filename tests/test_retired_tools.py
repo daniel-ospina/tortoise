@@ -59,16 +59,20 @@ class TestDeclaration:
         #4282's owner-ruled deletion of the 26 surplus methods nothing called
         (2026-10-27, PR #10187); the 124 → 125 move is an owner-approved
         **implementation** of an already-approved row — row 28,
-        `get_organisation_account`, which the canonical doc says "already **is** the
-        name, so this delivers it rather than **adding to it**" (the approved 40 did
-        not grow), with its manifest row in `config/surface-manifest.yml`. #12521
-        (`8e4e335b05`) gave it its `def`, approved by daniel-ospina on 2026-11-14 and
-        recorded at `#10015` comment `6863608333`; `docs/product/beta-sdk-surface.md`
-        already reads *"40 methods against **125** today"* and
-        `config/surface-manifest.yml`'s `counts.sdk_public_methods` is already `125`,
-        so this assertion was the one place still pinned to the pre-delivery number.
-        Re-derive it from `len(public)` at the head; never type a number ahead of the
-        manifest.
+        `get_organisation_account`, which `docs/product/beta-sdk-surface.md` records as
+        row 28 "already **is** the name" — delivered, not added (the approved 40 did not
+        grow) — with its manifest row in `config/surface-manifest.yml`. The CANONICAL
+        docs say the same fact in their own words: `canonical-sdk-methods.md` calls it
+        "an IMPLEMENTATION of an already-approved name, not an addition to the approved
+        40", and `canonical-mcp-tools.md` records that "in none of these moves did the
+        declared surface change". Note that `beta-sdk-surface.md` says of itself, in its
+        own header: "This document is a PROPOSAL, and it is NOT the authority for the
+        MCP target" — where it and `canonical-mcp-tools.md` differ, canonical governs.
+        #12521 (`8e4e335b05`) gave it its `def`, approved by daniel-ospina on 2026-11-14
+        and recorded at `#10015` comment `6863608333`; `config/surface-manifest.yml`'s
+        `counts.sdk_public_methods` is already `125`, so this assertion was the one place
+        still pinned to the pre-delivery number. Re-derive it from `len(public)` at the
+        head; never type a number ahead of the manifest.
 
         ⛔ This assertion is defence-in-depth, NOT the approval gate. What refuses an
         UNAPPROVED addition is `tools/surface-guard.py` **step 1** — an SDK method or
@@ -96,8 +100,7 @@ class TestDeclaration:
         count in `docs/product/canonical-mcp-tools.md`); every rendered artifact
         (`docs/product/sdk-surface-baseline.md`, `mcp-sdk-surface.md`,
         `sdk-surface-declaration.md`, `config/sdk-surface.json`) must be REGENERATED
-        with the new row, and `surface_manifest.py check` / `tools/sdk_surface.py
-        --check` red the stale ones; and `tools/sdk_rename_table.py --check` REFUSES an
+        with the new row; and `tools/sdk_rename_table.py --check` REFUSES an
         unmapped public method outright — it demands a canonical group and a
         disposition, so the surface cannot grow without someone saying what the method IS.
 
