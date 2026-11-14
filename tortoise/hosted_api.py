@@ -2025,13 +2025,13 @@ def _health_probe_stale_after_s() -> float:
 #: evidence fresh does not exist" — and the second must not report green forever.
 _HEALTH_PROBE_START_FAILED = False
 
-#: #12477 (review round 12): how long a process may be up with NO probe result
-#: before "nothing yet" becomes "nothing is ever coming". A LIFESPAN that fails,
-#: a task cancelled by a re-entered lifespan, or a probe that never gets its
-#: turn all leave `in_flight: False, result_age_s: None`, which the `in_flight`
-#: arm above cannot see and the start-failure flag does not cover — measured: a
-#: reset coordinator beside a FRESH heartbeat reads `unknown` -> `200 reasons=[]`
-#: FOREVER, i.e. one of the three claimed terms silently inert.
+#: #12477 (review round 12): how long THIS APP INSTANCE's probe may go with NO
+#: result before "nothing yet" becomes "nothing is ever coming". A LIFESPAN that
+#: fails, a task cancelled by a re-entered lifespan, or a probe that never gets
+#: its turn all leave `in_flight: False, result_age_s: None`, which the
+#: `in_flight` arm above cannot see and the start-failure flag does not cover —
+#: measured: a reset coordinator beside a FRESH heartbeat reads `unknown` ->
+#: `200 reasons=[]` FOREVER, i.e. one of the three claimed terms silently inert.
 #: The floor is the stale window times four, itself floored at 120 s: a cold start
 #: must never red the deploy gate, and this listener is only reachable once
 #: startup has finished, by which point the refresher has had many intervals.
@@ -2045,28 +2045,33 @@ _HEALTH_PROBE_START_FAILED = False
 #: cannot collide, and `test_the_boot_clock_is_a_float_and_not_the_identity_string`
 #: pins the type so a future rename cannot bring the collision back.
 #:
-#: ⛔ AND IT IS RE-BASED ON EVERY LIFESPAN ENTRY (`_lifespan`, beside
-#: `_HEALTH_PROBE.reset()`) — this is the epoch of the CURRENT health-probe
-#: state, not the process's age (#12630). The bound above asks "has THIS probe
-#: coordinator been waiting past a cold start", and `reset()` starts a new
-#: waiting period, so a process-age clock answers a different question: a
-#: lifespan entered 6 minutes into the process (a second in-process app
-#: instance, a `TestClient` reuse, a re-entered lifespan) reset the probe while
-#: the clock kept counting, so the bound was already blown the moment it was
-#: evaluated and the listener answered `503 data-plane-failed` through the whole
-#: of a perfectly healthy boot. Measured: `tests/test_hosted_api.py::
-#: TestLivenessDecouple::test_lifespan_starts_the_dedicated_healthz_listener`
-#: reds in any shard where the process crosses 120 s before that test runs
-#: (reproduced by aging this global to -400 s with nothing else changed).
+#: ⛔ IT IS THE EPOCH OF THE CURRENT PROBE STATE, RE-BASED ON EVERY LIFESPAN
+#: ENTRY (`_lifespan`, beside `_HEALTH_PROBE.reset()`) — NOT the process's age
+#: (#12630), which is why it is named for the probe epoch and no longer for a
+#: process boot. The bound above asks "has THIS probe coordinator been waiting
+#: past a cold start", and `reset()` starts a new waiting period, so a
+#: process-age clock answers a different question: a lifespan entered 6 minutes
+#: into the process (a second in-process app instance, a `TestClient` reuse, a
+#: re-entered lifespan) reset the probe while the clock kept counting, so the
+#: bound was already blown the moment it was evaluated and the listener answered
+#: `503 data-plane-failed` through the whole of a perfectly healthy boot.
+#: Measured: `tests/test_hosted_api.py::TestLivenessDecouple::
+#: test_lifespan_starts_the_dedicated_healthz_listener` reds in any shard where
+#: the process crosses 120 s before that test runs (reproduced by aging this
+#: global to -400 s with nothing else changed).
 #: Re-basing HERE rather than adding a second clock is deliberate: one epoch has
 #: one writer, so it cannot drift from the reset it describes, and a second
 #: module global would make the read depend on which file's fixture ran last
 #: (the #12666 leak class).
-_PROCESS_BOOT_MONOTONIC = time.monotonic()
+_HEALTH_PROBE_EPOCH_MONOTONIC = time.monotonic()
 
 
 def _health_probe_never_produced_bound_s() -> float:
-    """The uptime past which "no probe result yet" is a FAILURE (seconds)."""
+    """The PROBE-EPOCH age past which "no probe result yet" is a FAILURE (s).
+
+    Measured from `_HEALTH_PROBE_EPOCH_MONOTONIC` — this app instance's probe
+    reset — not from process start (#12630); see that constant for why.
+    """
     try:
         return max(120.0, 4.0 * _health_probe_stale_after_s())
     except Exception:  # a resolver must never raise into a verdict
@@ -2124,9 +2129,9 @@ def _liveness_dataplane_verdict() -> dict:
       covers a boot that never gets going. This state is only reachable while
       something is actually running that can produce the missing result, or
       within ``_health_probe_never_produced_bound_s()`` of THIS app instance's
-      probe reset (``_PROCESS_BOOT_MONOTONIC``, re-based per lifespan entry —
-      not of process start, which is the #12630 defect) — past that bound,
-      nothing-produced is a FAILURE.
+      probe reset (``_HEALTH_PROBE_EPOCH_MONOTONIC``, re-based per lifespan
+      entry — not of process start, which is the #12630 defect) — past that
+      bound, nothing-produced is a FAILURE.
     """
     try:
         # ⛔ ``peek()``, NOT ``snapshot()`` (#12477): snapshot() self-heals by
@@ -2177,7 +2182,14 @@ def _liveness_dataplane_verdict() -> dict:
         # `reasons: []`, one of the three claimed terms silently inert. The
         # bound is generous on purpose (four stale windows, floored at 120 s) so
         # a genuine cold start never reds the deploy gate.
-        uptime_s = max(0.0, time.monotonic() - float(_PROCESS_BOOT_MONOTONIC))
+        # ⛔ THE DATUM IS THE PROBE EPOCH, NOT THE PROCESS'S AGE (#12630): the
+        # variable keeps its local name because the payload key below still says
+        # `uptime_s`, but what it measures is "how long has THIS app instance's
+        # probe been waiting" — the two coincide in production, where a lifespan
+        # is entered once per process, and diverge only in the re-entry shape the
+        # epoch exists for. Reporting the epoch there is the honest answer: the
+        # old one reported the process's age as this boot's, which is the defect.
+        uptime_s = max(0.0, time.monotonic() - float(_HEALTH_PROBE_EPOCH_MONOTONIC))
         if uptime_s > _health_probe_never_produced_bound_s():
             return {"state": "failed",
                     "detail": {"reason": "probe-never-produced-a-result",
@@ -2970,9 +2982,9 @@ async def _lifespan(app):
     # that reds `test-slow` in any shard whose process is that old, which is a
     # required check. One `global` write, at the same seam as the reset, so the
     # two can never disagree.
-    global _PROCESS_BOOT_MONOTONIC
+    global _HEALTH_PROBE_EPOCH_MONOTONIC
     _HEALTH_PROBE.reset()
-    _PROCESS_BOOT_MONOTONIC = time.monotonic()
+    _HEALTH_PROBE_EPOCH_MONOTONIC = time.monotonic()
     _READY_PROBE.reset()
     _CONTROL_PLANE_PROBE.reset()
     _probe_sdk_reset()
