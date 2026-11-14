@@ -147,6 +147,22 @@ def tracked_python(root: Path) -> list[str]:
     return list(_tracked_python(Path(root).resolve()))
 
 
+#: `archive/` is NOT part of the Python corpus. Its records hold VERBATIM FRAGMENTS of
+#: the modules they freeze (the `ToolDefinition(...)` block still nested inside
+#: `register_all`'s indentation), so they are deliberately unparseable — `ruff` excludes
+#: them the same way (`[tool.ruff] extend-exclude = ["archive"]`) and nothing imports them.
+#: Counting them here made every archived tool red the corpus scans as "cannot be parsed",
+#: which is drift about the archive's FORMAT, not about a metric or a dead hook (#11609
+#: batch 1). The archive has its own gate (`tools/archive_surface.py`), which checks the
+#: blocks byte-for-byte against their restore anchors — a stronger claim than a scan for
+#: `Counter(` would make about a file that never runs.
+_NOT_PYTHON_CORPUS = ("archive/",)
+
+
+def _in_corpus(rel: str) -> bool:
+    return rel.endswith(".py") and not rel.startswith(_NOT_PYTHON_CORPUS)
+
+
 @cache
 def _tracked_python(root: Path) -> tuple[str, ...]:
     """Cached corpus: the audit is called once per check and the tree is static."""
@@ -155,8 +171,9 @@ def _tracked_python(root: Path) -> tuple[str, ...]:
             ["git", "ls-files", "*.py"], cwd=root, capture_output=True,
             text=True, check=True).stdout
     except (OSError, subprocess.CalledProcessError):
-        return tuple(str(p.relative_to(root)) for p in root.rglob("*.py"))
-    return tuple(line for line in out.splitlines() if line.endswith(".py"))
+        return tuple(str(p.relative_to(root)) for p in root.rglob("*.py")
+                     if _in_corpus(str(p.relative_to(root))))
+    return tuple(line for line in out.splitlines() if _in_corpus(line))
 
 
 def migration_text(root: Path) -> str:
