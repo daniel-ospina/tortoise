@@ -1291,19 +1291,48 @@ def test_unreachable_agrees_between_dry_and_live_when_the_encoder_declines(
     assert stats["skipped"] == 2, stats
 
 
+def test_unreachable_is_counted_once_per_row_not_once_per_chunk(
+        proj, monkeypatch):
+    """#12496 review P3: a MULTI-chunk sweep must not multiply the counter.
+
+    The counter is incremented once per chunk, over that chunk's own rows. Every
+    pre-existing fixture fit in ONE chunk, so a mutant that counted `rows_all`
+    inside the chunk loop stayed GREEN (the reviewer measured it). Three rows
+    with `batch_size=1` gives three chunks and exactly one keyless row: the
+    correct answer is 1, the mutant's is 3.
+    """
+    g = _g(proj)
+    _create(g, "Point", {"id": "p1", "content": "one"})
+    _create(g, "Point", {"content": "orphan"})
+    _create(g, "Point", {"id": "p3", "content": "three"})
+    mod = _load_backfill()
+    monkeypatch.setattr("tortoise.embeddings.compute_embedding", _FakeEmbed())
+
+    stats = mod._backfill_graph(
+        proj.db, proj.graph_name, ["Point"], 0, 1, required_dim=None)
+    assert stats["unreachable"] == 1, stats
+    assert stats["updated"] == 2, stats
+
+
 def test_residual_missing_is_non_zero_on_a_healthy_graph_shape(
         proj, monkeypatch):
     """#12496 review (P1): a DOCUMENTED limitation, pinned as behaviour.
 
-    ``Object``/``Subject``/``Source`` and both ``Event`` branches gate on
-    ``IS NOT NULL`` only, and ``''`` is non-NULL in Cypher — so an empty-text row
-    is selected by the surface predicate and declined by the live guard, and it
-    stays residual forever. That is why the marker carries ``limit`` and why
+    ``Object``/``Subject``/``Source`` declare no ``text_pred`` and their text IS
+    a bare property (``n.name`` / ``n.url``), whose predicate is ``IS NOT NULL``
+    — and ``''`` is non-NULL in Cypher. So an empty-text row is selected by the
+    surface predicate, declined by the live guard, and stays residual forever.
+
+    ⚠️ The two ``Event`` branches are NOT in that group, and this fixture does not
+    cover them: the ``AgentSession`` branch carries no text gate at all and the
+    ``other`` branch's text is a COMPOSED join, so an empty property beside a
+    non-empty neighbour still embeds. Either is residual only when its whole
+    composition is empty. That is why the marker carries ``limit`` and why
     ``_residual_missing``'s docstring enumerates FOUR healthy-run populations
     instead of promising 0. Round 1 promised 0; this pins the truth so the next
     lane cannot re-derive the false guarantee.
 
-    Adding a non-empty-text predicate to those surfaces is a REAL fix and a
+    Adding a non-empty-text predicate to the ungated surfaces is a REAL fix and a
     separate decision (it changes which rows they sweep) — see #12572.
     """
     g = _g(proj)
@@ -1391,9 +1420,13 @@ def test_shared_key_nodes_each_get_their_own_vector(proj, monkeypatch):
     monkeypatch.setattr("tortoise.embeddings.compute_embedding", fake)
 
     _backfill_run(mod, proj, ["Point"])
-    vectors = [r[0] for r in g.query(
-        "MATCH (n:Point {id: 'dup'}) RETURN n.embedding").result_set]
-    assert len(vectors) == 2
-    # Each node's stored vector must be the encoder's output for its OWN text.
-    assert vectors[0] == pytest.approx(fake("first body"))
-    assert vectors[1] == pytest.approx(fake("second body"))
+    # Order-free on purpose (#12570 review): two nodes with the SAME id cannot be
+    # ordered by the query, so a positional assertion would depend on the
+    # engine's row order — and would make this strict xfail inert on a dialect
+    # that returns them the other way round.
+    rows = g.query(
+        "MATCH (n:Point {id: 'dup'}) RETURN n.content, n.embedding").result_set
+    assert len(rows) == 2, rows
+    for content, stored in rows:
+        assert stored == pytest.approx(fake(content)), (
+            f"the node whose content is {content!r} does not hold its own vector")

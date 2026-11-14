@@ -627,10 +627,16 @@ def _dry_run(db, graph_name: str, labels: list[str], *,
 
     * **an encoder-declined row** — a keyed row the store's width guard refuses
       (``encode_for_store`` -> ``None``) is counted here and skipped live (#4289);
-    * **a text-less row on a surface with no ``text_pred``** — ``Source``,
-      ``Object``, ``Subject`` and BOTH ``Event`` branches gate on ``IS NOT NULL``
-      only, and ``''`` is non-NULL in Cypher, so an empty-text row is counted
-      here and skipped live (residual (a) above);
+    * **a text-less row on a surface with no ``text_pred``** — ``Source``
+      (text IS ``n.url``) and ``Object``/``Subject`` (text IS ``n.name``)
+      declare no ``text_pred``, so ``''`` (non-NULL in Cypher) is selected and
+      the live guard drops it — residual forever. Measured on healthy keyed rows
+      (residual (a) above). ⚠️ The ``Event`` branches are residual by a DIFFERENT
+      mechanism, because they COMPOSE their text: the ``other`` branch joins
+      ``[subject, kind, object]`` and the ``AgentSession`` branch calls
+      ``session_embedding_text`` and carries no text gate at all — so an empty
+      property beside a non-empty neighbour still EMBEDS, and each branch is
+      residual only when its whole composition is empty;
     * **whitespace-only text in the ``trim()``/``strip()`` gap** — a tab, NBSP or
       em-space value is counted here even on a ``text_pred`` surface and dropped
       live (residual (b) above);
@@ -897,12 +903,24 @@ def _residual_missing(g, label: str) -> tuple[int, int]:
        ``limit`` for exactly this reason: the field is an assertion only when
        ``limit == 0``.
     2. **Empty text on a surface with no ``text_pred``.** Only ``Point`` and
-       ``Document`` gate on non-empty text. The other four ROW SOURCES —
-       ``Source`` (text is ``n.url``), ``Object``/``Subject`` (``n.name``) and
-       BOTH ``Event`` branches — gate on ``IS NOT NULL`` alone, so ``''``
-       (non-NULL in Cypher) is selected and the live guard drops it: residual
-       forever. Measured on healthy keyed rows: ``Object{name:''}`` -> ``(1, 0)``
-       and ``Source{url:''}`` -> ``(1, 0)``.
+       ``Document`` gate on non-empty text. The other ROW SOURCES fall in two
+       groups, and which group a branch is in decides whether ``''`` is residual:
+
+       * ``Source`` (text IS ``n.url``), ``Object``/``Subject`` (text IS
+         ``n.name``): the text IS that property and the predicate is
+         ``IS NOT NULL``, so ``''`` (non-NULL in Cypher) is selected and the live
+         guard drops it — residual forever. Measured on healthy keyed rows:
+         ``Object{name:''}`` -> ``(1, 0)`` and ``Source{url:''}`` -> ``(1, 0)``.
+       * BOTH ``Event`` branches COMPOSE their text, so an empty property beside
+         a non-empty neighbour still EMBEDS and is NOT residual. The ``other``
+         branch joins ``[subject, kind, object]`` — measured
+         ``Event{eventId:'e2', eventKind:'review', subject:''}`` -> ``updated=1,
+         skipped=0, residual=(0, 0)``. The ``AgentSession`` branch carries no
+         text gate at all (`"the session branch does not gate on name"`) and
+         composes ``session_embedding_text(name, summary, keywords, topics)`` —
+         measured ``Event{eventId:'s1', eventKind:'AgentSession', name:'',
+         keywords:['alpha']}`` -> ``updated=1, skipped=0, residual=(0, 0)``.
+         Either branch is residual only when its WHOLE composition is empty.
     3. **Whitespace-only text the predicate accepts and the guard drops.** This
        one reaches the GATED surfaces too, so "has a ``text_pred``" is not
        immunity: Cypher ``trim()`` strips SPACES only, while the live guard is
@@ -1046,10 +1064,11 @@ def _print_completeness(stats: dict) -> None:
         "meeting_purged": stats.get("meeting_purged", 0),
         "repair_skipped": stats.get("repair_skipped", 0),
         "repair_updated": stats.get("repair_updated", 0),
-        # #12496: the population NO re-run can repair — the predicate selected
-        # these rows and the write could not MATCH them because they carry no
-        # key. ⚠️ It is not the ONLY non-converging cause (empty text on a
-        # surface with no ``text_pred``, and an encoder-declined row, are equally
+        # #12496: the population only a HUMAN can clear — a key must be
+        # supplied. The predicate selected these rows and the write could not
+        # MATCH them because they carry no key. ⚠️ It is not the ONLY
+        # non-converging cause (empty text on a surface with no ``text_pred``,
+        # and an encoder-declined row, are equally
         # permanent and stay only in ``skipped``), but it is the one that needs a
         # HUMAN to supply a key, so it is the one worth naming on its own.
         "unreachable": stats.get("unreachable", 0),
