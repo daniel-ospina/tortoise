@@ -73,6 +73,10 @@ class _Graph:
         #: other value is served VERBATIM so a malformed block is reachable
         #: (the fail-safe arms are pinned here, not only upstream).
         self.extraction: object = None
+        #: The raw `extracted` value the detail serves, when a count of odd
+        #: PROVENANCE must be reachable (a JSON bool, a string, a negative).
+        #: `None` falls back to `zero_extracted`.
+        self.extracted_override: object = None
         #: Write the per-harness receipt only from the Nth ``/v1/onboarding/state``
         #: read onward — models the server writing it AFTER the session row is
         #: visible (the abandoned handler completing), which is the real
@@ -125,17 +129,21 @@ def _make_handlers(graph: _Graph):
                 n = graph.turn_override.get(sid, len(conv))
                 if not graph.no_receipt:
                     graph.receipts[capture_receipt_key(harness)] = graph.tick()
+                n_extracted = (graph.extracted_override
+                               if graph.extracted_override is not None
+                               else 0 if graph.zero_extracted else 1)
                 session = {
                     "id": sid,
                     "harness": harness,
                     "turns": n,
-                    "extracted": 0 if graph.zero_extracted else 1,
+                    "extracted": n_extracted,
                     "turn_points": [
                         {"id": f"{sid}_t{i}", "role": t.get("role"),
                          "content": t.get("content")}
                         for i, t in enumerate(conv[:n])
                     ],
-                    "extracted_points": ([] if graph.zero_extracted else
+                    "extracted_points": ([] if (graph.extracted_override is not None
+                                                or graph.zero_extracted) else
                                          [{"id": "pt_x", "kind": "statement",
                                            "content": "probe"}]),
                     "source": None if graph.no_source else {
@@ -154,7 +162,7 @@ def _make_handlers(graph: _Graph):
                 if graph.post_delay:
                     time.sleep(graph.post_delay)
                 self._send(200, {"session_id": sid, "turns": n,
-                                 "extracted": 0 if graph.zero_extracted else 1,
+                                 "extracted": n_extracted,
                                  "extraction_mode": "llm:mock"})
                 return
             self._send(404, {"detail": "not found"})
@@ -1067,9 +1075,19 @@ def test_guard_unrecorded_outcome_is_not_a_memory_FAIL(hosted, setup):
     invented = [word for word in (
         "still running", "never started", "has not started", "pending",
         "sigkill", "killed", "abandoned", "timed out", "crashed",
-        "failed",
+        "failed", "in progress", "ongoing", "queued", "still working",
+        "still in flight",
     ) if word in lowered]
     assert not invented, (invented, memory["detail"])
+    # A closed word list cannot carry the property on its own (a paraphrase
+    # can always slip through), so the sentence is ALSO pinned literally: if
+    # you reword it, update this expectation — that is the review.
+    expected = (
+        f"session {report['session_id']!r} appears as a Source, but the "
+        f"server has not recorded an extraction outcome for it "
+        f"(extracted=0, outcome_known=false) — memory points were neither "
+        f"observed nor ruled out")
+    assert memory["detail"] == expected, memory["detail"]
     # Nothing provably broken: exit 2, never the BROKEN exit a FAIL earns.
     assert report["exit_code"] == EXIT_UNVERIFIABLE, report["exit_code"]
 
@@ -1108,9 +1126,30 @@ def test_guard_malformed_outcome_known_keeps_the_FAIL(hosted, setup):
     graph.extraction = {"status": "stored", "outcome_known": "false"}
     report = _verify(hosted, home, "claude", root)
     assert report["links"]["memory"]["status"] == "FAIL"
-    # The GENUINE extraction FAIL, not the "never captured" FAIL — without this
-    # the test passes for the wrong reason on a box whose capture leg is dead.
+    # The GENUINE extraction FAIL, not the "never captured" FAIL.
     assert "no memory Point" in report["links"]["memory"]["detail"]
+    assert report["exit_code"] == EXIT_BROKEN
+
+
+def test_guard_a_missing_source_node_still_OUTRANKS_the_unknown_outcome(
+        hosted, setup):
+    """#12497 review round 3: the Source checks run BEFORE the pair arm, and a
+    missing Source node is an OBSERVABLE failure — it must keep its FAIL even
+    when the extraction outcome is unrecorded, or a broken graph is downgraded
+    to exit 2 ("nothing provably broken").
+
+    Mutation: move the `elif not extracted_ok and ...` arm above
+    `elif not source_ok:` and this reports UNVERIFIABLE / exit 2."""
+    home, _bindir, _fake = setup
+    root = _install(home, "claude")
+    graph, _url = hosted
+    graph.no_source = True
+    graph.zero_extracted = True
+    graph.extraction = False
+    report = _verify(hosted, home, "claude", root)
+    memory = report["links"]["memory"]
+    assert memory["status"] == "FAIL", memory
+    assert "no Source node" in memory["detail"], memory["detail"]
     assert report["exit_code"] == EXIT_BROKEN
 
 
@@ -1129,6 +1168,24 @@ def test_guard_a_recorded_count_outranks_the_unknown_qualifier(hosted, setup):
     report = _verify(hosted, home, "claude", root)
     assert report["links"]["memory"]["status"] == "PROVEN"
     assert report["exit_code"] == EXIT_OK
+
+
+def test_guard_a_bool_count_is_not_a_count(hosted, setup):
+    """#12497 review round 3: the count must come from the canonical reader,
+    which reads a JSON ``true``/``false`` as 0 (``session_confirm.py``:
+    "an unknown extraction count must never satisfy the extraction-observed
+    test"). Python considers a bool an ``int``, so a local ``isinstance(\n    extracted, int)`` check proves the leg from garbage.
+
+    Mutation: restore ``extracted_ok = isinstance(extracted, int) and\n    extracted >= 1`` and a served ``extracted: true`` beside\n    ``outcome_known: false`` reports PROVEN / exit 0."""
+    home, _bindir, _fake = setup
+    root = _install(home, "claude")
+    graph, _url = hosted
+    graph.extracted_override = True   # a bool is not a count
+    graph.extraction = False          # outcome not recorded either
+    report = _verify(hosted, home, "claude", root)
+    memory = report["links"]["memory"]
+    assert memory["status"] == "UNVERIFIABLE-IN-CI", memory
+    assert report["exit_code"] == EXIT_UNVERIFIABLE
 
 
 def test_guard_the_arm_reads_the_canonical_predicate(hosted, setup,
@@ -1170,15 +1227,29 @@ def test_importing_session_verify_does_not_pull_the_sdk():
     lazily instead.
 
     Mutation: move ``from tortoise.session_confirm import
-    extraction_outcome_known`` back to module scope and this subprocess
+    extraction_outcome_known`` back to module scope, OR add such an import to
+    the block in ``tortoise/__main__.py``'s ``main()``, and this subprocess
     reports ``True``."""
-    proc = subprocess.run(
-        [sys.executable, "-c",
-         "import sys, tortoise.session_verify; "
-         "print('tortoise.sdk' in sys.modules)"],
-        cwd=str(_REPO_ROOT), capture_output=True, text=True, timeout=120)
-    assert proc.returncode == 0, proc.stderr
-    assert proc.stdout.strip() == "False", proc.stdout
+    # Two shapes, because a future reader would extend the SECOND without
+    # noticing: the bare module import, and the CLI entry point that imports
+    # this module for EVERY subcommand (`__main__.py` imports HARNESSES at the
+    # top of main()).
+    bare = ["-c", "import sys, tortoise.session_verify; "
+                   "print('tortoise.sdk' in sys.modules)"]
+    cli = ["-c", "import sys, runpy\n"
+                  "sys.argv = ['tortoise', '--help']\n"
+                  "try:\n"
+                  "    runpy.run_module('tortoise', run_name='__main__')\n"
+                  "except SystemExit:\n"
+                  "    pass\n"
+                  "print('tortoise.sdk' in sys.modules)\n"]
+    for cmd in (bare, cli):
+        proc = subprocess.run(
+            [sys.executable, *cmd], cwd=str(_REPO_ROOT),
+            capture_output=True, text=True, timeout=180)
+        assert proc.returncode == 0, (cmd, proc.stderr[-800:])
+        assert proc.stdout.strip().splitlines()[-1] == "False", (
+            cmd, proc.stdout[-400:])
 
 
 def test_the_exit_two_summary_does_not_invent_a_cause():

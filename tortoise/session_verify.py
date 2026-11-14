@@ -27,8 +27,7 @@ whole chain for the four beta harnesses (claude, pi, cursor, codex):
    window is.  A settled turn count that is NOT the expected one still breaks
    the window early, because it never becomes the expected one;
 3. **memory** — the session appears in the graph as a ``Source`` and its turns
-   were extracted into memory Points.  An unobserved count (``extracted``
-   below 1, or not an integer at all) asserts an ABSENCE, so it is only a
+   were extracted into memory Points.  An unobserved count asserts an ABSENCE, so it is only a
    ``FAIL`` when the server recorded an outcome
    (``extraction.outcome_known``): beside ``outcome_known: false`` the server
    has recorded NOTHING either way, and the link is ``UNVERIFIABLE`` — the
@@ -708,6 +707,22 @@ def _extraction_outcome_known(detail: Any) -> bool | None:
     return extraction_outcome_known(detail)
 
 
+def _session_extracted(detail: Any) -> int:
+    """The canonical extracted-point count, imported LAZILY.
+
+    Same reason as :func:`_extraction_outcome_known` (keeping ``tortoise.sdk``
+    off the CLI's import path), same one-definition rule: the count is
+    ``session_confirm.session_extracted``'s, which reads a NEGATIVE or
+    non-integer value — and a JSON ``true``/``false``, which Python considers
+    an ``int`` — as 0.  A count of unknown provenance must never satisfy
+    "extraction observed", and the bool case is the one a local
+    ``isinstance(extracted, int)`` test gets wrong (#12497 review round 3).
+    """
+    from tortoise.session_confirm import session_extracted
+
+    return session_extracted(detail)
+
+
 def _link(status: str, detail: str, **extra: Any) -> dict[str, Any]:
     return {"status": status, "detail": detail, **extra}
 
@@ -995,7 +1010,7 @@ def verify_session_capture(harness: str,
             extracted = detail.get("extracted")
             source_ok = (isinstance(source, dict)
                          and source.get("url") == f"session:{probe_id}")
-            extracted_ok = isinstance(extracted, int) and extracted >= 1
+            extracted_ok = _session_extracted(detail) >= 1
             if source == "<absent>":
                 report["links"]["memory"] = _link(
                     STATUS_UNVERIFIABLE,
