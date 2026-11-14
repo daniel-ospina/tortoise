@@ -4208,8 +4208,10 @@ def tortoise_query(kind: str | None = None,
             # its harm ("rows they excluded came back") and its route are all
             # false of a value the SDK itself rejects — `sdk.py:41222-41223`
             # range-checks `min_confidence` BEFORE any retrieval, so
-            # `min_confidence=1.5` here used to raise, never return rows, and the
-            # offered `entity_type='point'` route lands on that same range error.
+            # `min_confidence=1.5` here was REFUSED BY THE SDK'S OWN CHECK and
+            # never returned rows (it did not "raise" at the tool boundary —
+            # `_safe` turns the exception into an `_SafeError`, round-26 P2 2), and
+            # the offered `entity_type='point'` route lands on that same check.
             # Out-of-range and non-numeric floors are therefore left to the SDK,
             # the way `order_by="garbage"` already is (`sdk.py:41228`). The
             # `isinstance` test is load-bearing: a non-numeric floor makes the
@@ -4325,6 +4327,27 @@ def tortoise_query(kind: str | None = None,
         else:
             _route = (f"To use {_them}, pass text= — the floor and the ordering "
                       f"are applied on that arm")
+        # The structural and tag arms DROP any value, so the SDK never judges it
+        # — which means the refusal can be about a value the destination would
+        # reject outright. `pass text=` with `min_confidence=1.5` lands on the
+        # SDK's range refusal, and `order_by="garbage"` on its vocabulary one, so
+        # the route must name the domain that arm actually applies rather than
+        # promising the value is applied (round-26 P2 1, measured on both arms).
+        _domain = []
+        if "min_confidence" in _names and not (
+                isinstance(min_confidence, (int, float))
+                and 0.0 <= min_confidence <= 1.0):
+            _domain.append("a floor of 0.0-1.0")
+        if ("order_by" in _names
+                and order_by not in ("relevance", "confidence", "graph")):
+            _domain.append("an order of 'relevance', 'confidence' or 'graph'")
+        if _domain:
+            _accepted = (_domain[0] if len(_domain) == 1
+                         else ", ".join(_domain[:-1]) + " and " + _domain[-1])
+            # No trailing stop: the template appends ", or drop …" to the route,
+            # and a full stop here produced "…0.0-1.0., or drop" — the same
+            # junction defect round 22 removed from the paging note.
+            _route += f". That arm applies it only as {_accepted}"
         if paginated and not (_arm == "tag=" and _names == ["kind"]):
             # `text=` takes no offset/page (measured: following the route with
             # offset= kept answers "offset/page not supported with text"), so a

@@ -67,6 +67,20 @@ class _StubSDK:
         self.calls.append(("tortoise_fts_query", query, kind, {
             "min_confidence": min_confidence, "order_by": order_by,
             "limit": limit, "include_terminal": include_terminal, **kwargs}))
+        # FIXTURE FIDELITY (round-26 P2 1): the real SDK JUDGES these two before
+        # any retrieval (`sdk.py:41222-41223` range-checks `min_confidence`,
+        # `sdk.py:41228` vocabulary-checks `order_by`), so a stub that merely
+        # records them cannot tell a route that terminates from one that dead-ends
+        # in the caller's next call — the exact blind spot that let the
+        # structural/tag routes promise `pass text=` for `min_confidence=1.5`.
+        if not isinstance(min_confidence, (int, float)):
+            raise TypeError("'<=' not supported between 'float' and "
+                            f"'{type(min_confidence).__name__}'")
+        if not (0.0 <= min_confidence <= 1.0):
+            raise ValueError(f"min_confidence must be 0.0-1.0, got {min_confidence}")
+        if order_by not in ("relevance", "confidence", "graph"):
+            raise ValueError("order_by must be 'relevance', 'confidence', or "
+                             f"'graph', got {order_by!r}")
         return self.rows
 
     def paginated_query(self, kind=None, skip=0, limit=20, **kwargs):
@@ -442,6 +456,52 @@ def test_the_text_arm_floor_message_offers_a_route_that_terminates(stub) -> None
     assert "pass text=" not in message, message
 
 
+@pytest.mark.parametrize("kwargs, domain", [
+    ({"kind": "statement", "min_confidence": 1.5}, "a floor of 0.0-1.0"),
+    ({"kind": "statement", "order_by": "garbage"},
+     "an order of 'relevance', 'confidence' or 'graph'"),
+    ({"tag": "pricing", "min_confidence": 1.5}, "a floor of 0.0-1.0"),
+    ({"tag": "pricing", "order_by": "garbage"},
+     "an order of 'relevance', 'confidence' or 'graph'"),
+])
+def test_a_route_to_pass_text_names_the_values_that_arm_accepts(stub, kwargs, domain) -> None:
+    """An unusable value must not be promised to an arm that rejects it (r26 P2 1).
+
+    The structural and tag arms DROP every value, so the SDK never judges it —
+    which means the refusal can be about `min_confidence=1.5` or
+    `order_by="garbage"`, values `text=` refuses outright (the SDK's own checks at
+    `sdk.py:41222-41223` / `41228`). The route used to say "pass text= — the floor
+    and the ordering are applied on that arm", so following it landed on a SECOND
+    error, on both arms (measured). The text-arm branch already avoids the
+    paragraph for these values, so the same call answered two ways by arm.
+
+    Fails if the route stops naming the accepted domain, or if the instruction it
+    now gives does not terminate — the second half executes it, on the validating
+    stub, with a value from the domain it names.
+    """
+    from tortoise.mcp_server import tortoise_query
+
+    result = tortoise_query(**kwargs)
+
+    assert _is_refusal(result), f"no refusal to read a message off: {result}"
+    message = result["error"]
+    assert domain in message, message
+    # …and the corrected call, with a value from the domain it names, IS served on
+    # the arm the route points at.
+    corrected = {k: v for k, v in kwargs.items()
+                 if k not in ("tag", "min_confidence", "order_by")}
+    corrected["text"] = "x"
+    if "min_confidence" in kwargs:
+        corrected["min_confidence"] = _CONFIDENCE_FLOOR
+    if "order_by" in kwargs:
+        corrected["order_by"] = "relevance"
+    followed = tortoise_query(**corrected)
+
+    assert not _is_refusal(followed), (
+        f"following the route with a value it names still refuses: {followed}"
+    )
+
+
 def test_an_unusable_floor_is_left_to_the_sdk_to_refuse(stub) -> None:
     """An out-of-range floor must NOT get the arm-scoping paragraph (round-20 P2 3).
 
@@ -449,10 +509,11 @@ def test_an_unusable_floor_is_left_to_the_sdk_to_refuse(stub) -> None:
     `entity_type == 'point'` gate"), its harm ("rows they excluded came back") and
     its route ("pass entity_type='point'") are all false of a floor the SDK
     rejects outright: `sdk.py:41222-41223` range-checks `min_confidence` BEFORE
-    any retrieval, so `min_confidence=1.5` here used to RAISE — it never returned
-    the rows the message apologised for — and the offered route lands on that same
-    range error. Following a terminating route into a second error is the class
-    this guard exists to remove.
+    any retrieval, so `min_confidence=1.5` here was refused BY THE SDK and never
+    returned the rows the message apologised for — it did not "raise" at the tool
+    boundary, because `_safe` turns the exception into an `_SafeError` (round-26
+    P2 2) — and the offered route lands on that same check. Following a
+    terminating route into a second error is the class this guard exists to remove.
 
     Fails if the text=-arm clause stops checking that the floor is usable: the
     value is then intercepted and answered with a `#12500` paragraph.
@@ -462,30 +523,41 @@ def test_an_unusable_floor_is_left_to_the_sdk_to_refuse(stub) -> None:
     for bad in (1.5, -0.5):
         result = tortoise_query(text="x", entity_type="document", min_confidence=bad)
 
-        # Served, not refused here — and the stub records the forward, which is
-        # the seam the real SDK validates at (a stub cannot reproduce the range
-        # check, so the assertion is on the forward).
-        assert not _is_refusal(result), (
-            f"min_confidence={bad} is not a usable floor, so the #12500 paragraph "
-            f"is false about it (and its route dead-ends): {result}"
-        )
+        # Not intercepted: the call REACHES the accessor, which judges it exactly
+        # as the real SDK does (the stub mirrors `sdk.py:41222-41223` since
+        # round-26), so the caller gets the SDK's own complaint rather than a
+        # `#12500` paragraph that is false about the value and whose route
+        # dead-ends.
         fts = [c for c in stub.calls if c[0] == "tortoise_fts_query"]
-        assert fts and fts[-1][3]["min_confidence"] == bad, fts
+        assert fts and fts[-1][3]["min_confidence"] == bad, (
+            f"min_confidence={bad} never reached the accessor — this guard "
+            f"answered for a value it cannot judge: {result} / {fts}"
+        )
+        assert "#12500" not in str(result), (
+            f"an out-of-range floor got the arm-scoping paragraph: {result}"
+        )
+        assert "must be 0.0-1.0" in str(result), (
+            f"expected the SDK's own range refusal, got: {result}"
+        )
 
     # …and a NON-NUMERIC floor, which is what the `isinstance` conjunct is for.
-    # Unpinned, deleting that conjunct left 87/87 green while
+    # Unpinned, deleting that conjunct left the suite green while
     # `min_confidence="0.9"` raised TypeError INSIDE the handler body — out of the
     # structured-error path this file's contract is about (round-22 P2 3,
-    # measured: deleting the conjunct and refusing a string both stayed green).
+    # measured). The stub now judges the value the way the SDK does (round-26), so
+    # the assertion is the honest one: the call REACHES the accessor and the answer
+    # is the SDK's own complaint, not a `#12500` paragraph.
     text_floor = tortoise_query(text="x", entity_type="document",
                                min_confidence="0.9")
-
-    assert not _is_refusal(text_floor), (
-        f"a string floor is not a floor this arm can judge — it must reach the "
-        f"SDK's own validation, not this paragraph: {text_floor}"
-    )
     fts = [c for c in stub.calls if c[0] == "tortoise_fts_query"]
-    assert fts and fts[-1][3]["min_confidence"] == "0.9", fts
+
+    assert fts and fts[-1][3]["min_confidence"] == "0.9", (
+        f"the string floor never reached the accessor, so this guard answered "
+        f"for a value it cannot judge: {text_floor} / {fts}"
+    )
+    assert "#12500" not in str(text_floor), (
+        f"an unusable floor got the arm-scoping paragraph: {text_floor}"
+    )
 
 
 def test_the_text_arm_still_applies_the_floor_to_POINTS(stub) -> None:
