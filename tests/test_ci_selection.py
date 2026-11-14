@@ -22201,36 +22201,44 @@ def test_the_health_honesty_suite_is_selected_on_BOTH_halves_of_its_module_pair(
     registration: naming the file in prose is not reading its surface rows. So a
     registration that lost one half was silent.
 
-    That is not hypothetical, and the wrong root cause buys the wrong defence: the arm was
-    lost in a REPLAY that git resolved under `config/ci-surfaces.yml`'s `merge=union`
-    (`.gitattributes:21`), not by any edit that removed a block — and the attribute is why
-    the DUPLICATE survived silently, NOT why the arm went. Measured per revision: the
-    pre-#12482 base `c1db6f3df` carried TWO `api` and TWO `core` rows; #12482's
-    `d05688df5990` deleted one of each; #12645's pre-rebase original `9122a08a72` (parent
-    `c1db6f3df`) deleted the other of each and was CORRECT. Replaying that onto
-    `d05688df5990` is a three-way merge in which both `core` deletions apply cleanly — the
-    arm goes in EITHER mode — while both `api` regions are delete-vs-keep conflicts that
-    `union` resolves by KEEPING BOTH SIDES, which is why nothing conflicted. So the
-    post-rebase tree (`f2ec5ec092`, whose parent is `d05688df5990`) carries two `api` rows
-    and NO `core` row, selects this suite on a `hosted_api.py` diff and NOT on a
-    `monitoring.py` one, and the rebase printed "Successfully rebased". Reproduce rather
-    than trust: `git merge-file -p --union` over those three revisions is BYTE-IDENTICAL
-    to `f2ec5ec092:config/ci-surfaces.yml`
-    (`sha256 50d1b19d74a40a52d84ea6d68234913175bd0bba4e1f54608c2a1f6b72a241da`).
+    That is not hypothetical, and the wrong root cause buys the wrong defence. A REPLAY of
+    #12645 onto `main` produced exactly this, and the reproduction is committed rather than
+    narrated — `git merge-file -p --union` over base=`c1db6f3df`, ours=`d05688df5990`,
+    theirs=`9122a08a72` is BYTE-IDENTICAL to `f2ec5ec092:config/ci-surfaces.yml`
+    (`sha256 50d1b19d74a40a52d84ea6d68234913175bd0bba4e1f54608c2a1f6b72a241da`), a tree
+    carrying two `api` rows and NO `core` row, which selects this suite on a
+    `hosted_api.py` diff and NOT on a `monitoring.py` one.
+
+    Two things went missing in that one replay and they have different causes, which is
+    why neither a clean merge nor a duplicate alarm substitutes for this pin:
+
+      * the LOST ARM went silently. `core` is 0 in the merged output of EITHER mode —
+        `--union` and plain alike — so no driver and no conflict report was ever going to
+        mention it. Each parent had deleted a DIFFERENT one of the base's two `core` rows
+        (`c1db6f3df` carried TWO `api` and TWO `core`; #12482's `d05688df5990` deleted one
+        of each, and #12645's pre-rebase original `9122a08a72` the other of each), and both
+        deletions applied.
+      * the DUPLICATE came from the `merge=union` attribute (`.gitattributes:21`), which
+        keeps BOTH sides of the conflicted `api` region — so the rebase printed
+        "Successfully rebased". ⚠️ It did NOT go unnoticed: `--integrity` reds on it
+        (`duplicate_entries(f2ec5ec092)` → `['api: test_12477_health_honesty.py']`). That is
+        the half that WAS caught; the arm is the half that was not.
+
+    ⚠️ `config/ci-surfaces.yml`'s note retracts a DIFFERENT claim about this same driver,
+    and borrowing it here would be wrong: it says a duplicate is not evidence union ran,
+    because two INDEPENDENT appends at different anchors survive as two rows with the
+    attribute set or unset (#12464/#12640, 69 s apart). That is `main`'s original pair, not
+    a conflicted replay.
 
     `integrity()` is not a substitute for this pin, and that is the point: it answers ONE
     question — is every `tests/**/test_*.py` classified SOMEWHERE — so a file that keeps
-    one surface's row while losing the other's is reported CLEAN. Measured with the
-    `core` row deleted: `integrity(load_manifest()) == []`. `duplicate_entries()` is a
-    different function on a different question, composed by the `--integrity` CLI through
-    `ci_manifest.map_issues` (#5050) — and it DID catch THIS artifact's duplicate `api`
-    row (`['api: test_12477_health_honesty.py']` at `f2ec5ec092`), which is why that half
-    was noticed while the dropped arm was not. Note the two `api` rows this docstring
-    just described: a claim that "a lost arm is invisible to both" would have been false
-    of the very tree it is about. What is silent to BOTH gates is an arm lost WITHOUT a
-    duplicate — the pure case, and the one no other pin covers. (Also: #12482 removed a
-    duplicate PAIR, one row per list — `c1db6f3df` api=2/core=2, `d05688df5990`
-    api=1/core=1 — not a single row.)
+    one surface's row while losing the other's is reported CLEAN. Measured with the `core`
+    row deleted: `integrity(load_manifest()) == []`. `duplicate_entries()` is a different
+    function on a different question, composed by the `--integrity` CLI through
+    `ci_manifest.map_issues` (#5050): it catches a duplicate ROW, and a pure lost arm has
+    neither a duplicate nor an unclassified file — which is the case nothing but this pin
+    notices. (#12482 removed a duplicate PAIR, one row per list: `c1db6f3df` api=2/core=2,
+    `d05688df5990` api=1/core=1.)
     """
     pin = "test_12477_health_honesty.py"
 
