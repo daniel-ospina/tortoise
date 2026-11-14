@@ -721,7 +721,7 @@ retry is a true retry. ⚠️ §5.4's citation (`:17212-17217`) was wrong, and t
 written: the range did hold `_SESSION_CAPTURED_AT_SOURCE_VALUES` and `class SessionRequest` at `a577d0e25c`
 (`:17212`/`:17216`). The NUMBER then rotted — at `5843fdf234` (the pre-de-conflict head, and already at `d05688df59`, the
 base it grew from) `:17212-17217` is a **422** branch,
-which is what F3 records there, and those two symbols are at `:18299`/`:18303` at `9d790287`, the head this merges into (`:18298`/`:18302`
+which is what F3 records there, and those two symbols are at `:18299`/`:18303` at `9d790287`, the previous merge head (`:18298`/`:18302`
 before `#12438`'s comment edit above them added the one line — its docstring hunk at `:14965` is 3-for-3 and moves nothing). Neither the range nor the
 correction named the replay path. **The retry contract is the door's; the plan declares it, it does not restate a different one.**
 
