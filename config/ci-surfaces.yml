@@ -1685,6 +1685,10 @@ surfaces:
   # `api` AND `core` entry — and a duplicate is `--integrity` DRIFT, not a second
   # guard (`select()` is membership, so the second row guards nothing). #12645 removed
   # the duplicate pair; keep exactly one `api` and one `core` row for this file.
+  # ⛔ THIS row is the survivor (#12640's); #12464's copy was the one removed, so this
+  # lane's attribution survives here rather than in a commit message that cannot be
+  # amended. The `core` half carries the module-pair mapping and the #12488 gate
+  # measurement — see the `core` row beside `test_10602_wait_bound_breach_visible.py`.
   - test_12477_health_honesty.py
   - test_quota.py
   # #8906: the points gate must count the graph the request WRITES. Every pin
@@ -4826,6 +4830,25 @@ surfaces:
   - test_container_reaper.py
   - test_transport_wait_bound.py  # #3834: transport wait bound + cold-half gate wiring (dual: api)
   - test_10602_wait_bound_breach_visible.py  # #10602: the breach channel itself — `wait_bound_breaches` on `/health`, the counter family in `tortoise/monitoring.py` (which selects `core`) plus the two emit sites in `hosted_api.py`/`mcp_server.py` (dual: api)
+  # #12477/#2876: DUAL-REGISTERED, and the pair is the point. `tortoise/hosted_api.py` is an
+  # EXACT `api` SOURCE_PATTERNS match that REPLACES the `core` fallback, while the health
+  # readers this file pins (`monitoring.start_health_listener`, `set_dataplane_verdict_source`,
+  # `set_served_progress_source`) live in `tortoise/monitoring.py`, which falls through to
+  # `core` — so a one-surface registration drops the file on the other half's own diff. This
+  # row is the `core` half; the `api` half and its measurement sit beside
+  # `test_11892_health_quota.py` above.
+  # ⛔ It landed on `main` UNREGISTERED (#12488), so `main` was red on `integrity()` and every
+  # PR's merge ref inherited it. The mechanism matters more than the drift: on that PR the
+  # `manifest-integrity` leg completed FAILURE at 04:28:39Z and the PR merged at 05:15:26Z
+  # anyway (`enforce_admins: false`, owner merge). That is a STRONGER instance than #11978
+  # records — there the leg completed AFTER the merge ("The gate is correct — it simply
+  # reported after the tree was already on `main`"); here it completed FAILURE 47 minutes
+  # BEFORE it, so the leg does not GATE the merge either. Kept so the recovery travels with
+  # the next PR that touches this file.
+  # ⛔ Register this file ONCE in `api` and ONCE in `core` — no more. Two lanes (#12464,
+  # #12640) each registered it independently and BOTH landed, so `main` carried a duplicate in
+  # both lists, `duplicate_entries()` was non-empty and `--integrity` went red again (#12645).
+  # `select()` is membership, not a count: a second row guards NOTHING, it is DRIFT.
   - test_12477_health_honesty.py  # #12477/#2876: `/health` (and the Fly `/healthz` check) must not read green over a failing data plane; pins the readers `_start_liveness` registers and the body's verdict (dual: api — see the `api` row above for the module pair)
   # #2877: DB-free guards that a dead backup watcher degrades /health (the file
   # it guards, tortoise/hosted_api.py, selects the `api` surface, so it is
