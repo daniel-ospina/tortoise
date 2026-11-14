@@ -529,8 +529,24 @@ class DaemonTargetError(ValueError):
     does the disclosure's own overlay arms, so no call site had to change.
     ⛔ ``mcp_server._get_sdk`` is NOT one of them: it calls this function with no
     local try/except, so a relative target propagates out of it exactly as a
-    plain ``ValueError`` did before. The subclass changes no caller's behaviour;
-    it does not add a handler that did not exist.
+    plain ``ValueError`` did before. The subclass adds no handler that did not
+    exist, and no caller's CONTROL FLOW changes.
+
+    ⛔ But it is not invisible, and an earlier version of this paragraph claimed
+    it was "no caller's behaviour" (review, P3). Control flow is unchanged; the
+    RENDERING of the one path that lets it escape uncaught is not. ``serve``
+    (``__main__`` → ``mcp_server.main()`` → ``_get_sdk()``, none of the three
+    guarded) used to die ending at ``ValueError:``, and now dies ending at
+    ``tortoise.config.DaemonTargetError:`` with the original ``ValueError:`` line
+    chained ABOVE it by ``from exc``. Nothing is lost — the stable token is still
+    in the output, so a runbook grep still matches — but the terminal line moved,
+    and that is exactly the kind of user-visible drift ``_daemon_error_label``
+    exists to prevent at the two disclosure render sites. It is NOT prevented
+    here: a traceback names the class it was raised with, and papering over that
+    would mean not raising the subclass at all. Accepted because the alternative
+    — attaching ``.key`` to a plain ``ValueError`` instance — was ruled out by
+    #12441 item 5's recorded durable form, which names ``DaemonTargetError`` as
+    the carrier.
     """
 
     def __init__(self, message: str, key: str | None) -> None:

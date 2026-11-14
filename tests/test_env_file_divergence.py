@@ -2114,7 +2114,7 @@ def test_the_daemon_resolver_reports_the_rung_it_was_on(monkeypatch):
     Both keyed rungs are pinned, plus the `ValueError` compatibility every
     existing caller (`mcp_server._get_sdk`, the `.env` disclosure) relies on.
     """
-    from tortoise.config import DaemonTargetError, daemon_db_target
+    from tortoise.config import RELATIVE_PATH_ERROR, DaemonTargetError, daemon_db_target
 
     monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
     monkeypatch.setenv("TORTOISE_DB_URI", "relative/x.db")
@@ -2122,12 +2122,18 @@ def test_the_daemon_resolver_reports_the_rung_it_was_on(monkeypatch):
         daemon_db_target()
     assert uri_err.value.key == "TORTOISE_DB_URI"
     assert isinstance(uri_err.value, ValueError)      # call sites stay compatible
-    assert "relative/x.db" in str(uri_err.value)      # the message is unchanged
+    # ⛔ BYTE-IDENTICAL, not merely "mentions the value" (review, P3): the
+    # invariant `from exc` exists to keep is that the message survives the
+    # wrapping untouched, and `"relative/x.db" in str(...)` also passes for a
+    # message rewritten to `f"daemon target rejected: {exc}"` — a pin that cannot
+    # fail on the thing its own comment names is a finding, not a pin.
+    assert str(uri_err.value) == RELATIVE_PATH_ERROR.format(path="relative/x.db")
     monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
     monkeypatch.setenv("TORTOISE_DB_PATH", "relative/y.db")
     with pytest.raises(DaemonTargetError) as path_err:
         daemon_db_target()
     assert path_err.value.key == "TORTOISE_DB_PATH"
+    assert str(path_err.value) == RELATIVE_PATH_ERROR.format(path="relative/y.db")
 
     # …and a whitespace-only URI is a DECIDING rung (`if uri:`), not an unset
     # one — the distinction the whole attribution rests on.
@@ -2223,7 +2229,7 @@ def test_the_mixed_shadowed_doctor_row_credits_the_FILE_when_its_key_is_the_top_
     pinned. Measured by injecting `raise SystemExit` at the file-wins arm in the
     #12428 round-11 review: `test_env_file_divergence` + `test_doctor` +
     `test_cli_config_show` — 434 tests at that head — stayed fully green. (The
-    same three files collect 440 with this PR's five extra cases, so the figure is
+    same three files collect 443 with this PR's three extra cases, so the figure is
     not reproducible here; the substantive claim is: the mutant reddens exactly
     ONE test, the new one.) The sentence is true in every state a review reached;
     only its pin was missing, the same class as the `file_graph_keys` clause.
