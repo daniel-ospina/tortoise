@@ -27,10 +27,11 @@ whole chain for the four beta harnesses (claude, pi, cursor, codex):
    window is.  A settled turn count that is NOT the expected one still breaks
    the window early, because it never becomes the expected one;
 3. **memory** — the session appears in the graph as a ``Source`` and its turns
-   were extracted into memory Points.  An unobserved count asserts an ABSENCE, so it is only a
-   ``FAIL`` when the server recorded an outcome
-   (``extraction.outcome_known``): beside ``outcome_known: false`` the server
-   has recorded NOTHING either way, and the link is ``UNVERIFIABLE`` — the
+   were extracted into memory Points.  An unobserved count asserts an ABSENCE, so it is a
+   ``FAIL`` when the pair records an empty extraction
+   (``outcome_known: true``) or carries no usable pair at all, and
+   ``UNVERIFIABLE`` only beside an explicit ``outcome_known: false`` — where the
+   server has recorded NOTHING either way — the
    same half-pair obligation ``tortoise/session_confirm.py`` states for every
    consumer of that detail (#12362/#12379, fixed here by #12497).  A served
    count of 1 or more still proves the leg, and a malformed / absent
