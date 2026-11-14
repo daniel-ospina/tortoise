@@ -5821,7 +5821,7 @@ _EPIC_CITE_DOCS = {
     # COUNT, NOT A SENTENCE COUNT: eight are in the `Measured at` sentence and `:1194` is in the sentence
     # BEFORE it on the same markdown line ("…is STAMP-bound (`:1186` is the `corpus = {…}`
     # line here; the frozen literal is at `:1194`)"). Three are pinned on the two rows
-    # below (`19238`/`19345` here, `sdk.py:10037` on its own row because a row carries ONE
+    # below (`19340`/`19447` here, `sdk.py:10037` on its own row because a row carries ONE
     # source key), `10064`/`10117` on their OWN `05-verify.md` row (round 6 — NOT by the
     # `subject_binding_available` rows that predate this PR: those scope `00-plan.md` and
     # `03-test-design.md`, and a row resolves only against the `doc_label` it names, so they
@@ -6087,9 +6087,9 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # re-staled for exactly the reason the `pi_hooks` key above exists — so it takes
         # its own row, on its own source key.
         # ⚠️ BOTH routes are pinned, because the row distinguishes them and the number
-        # alone had stopped doing so: `:18641` is `POST /v1/sessions` — the capture door
-        # the sentence is about, whose handler holds the quota 402 at `:19345` — and
-        # `:21196` is the `install-probe` sibling the row names as NOT that door (auth,
+        # alone had stopped doing so: `:18743` is `POST /v1/sessions` — the capture door
+        # the sentence is about, whose handler holds the quota 402 at `:19447` — and
+        # `:21298` is the `install-probe` sibling the row names as NOT that door (auth,
         # no quota gate). ⚠️ THESE ARE THIS HEAD'S NUMBERS. The same three at `6916a6cd89`
         # (an earlier round's base) were `:17799`/`:18503`/`:20354`, and the merge that
         # moved `hosted_api.py` by +842 re-derived the ROW and the DOCUMENT while leaving
@@ -6190,10 +6190,10 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         #
         # The anchor is `quota_refusal_payload(QuotaExceededError(`, not the bare
         # `quota_refusal_payload(`, because the OLD anchor's `detail=quota_refusal_payload(`
-        # form occurs at THREE lines (`:10474`, `:19370`, `:19432`) — and the bare
-        # call occurs at four (`:10056` is `return quota_refusal_payload(`): a
-        # `(document, pin)` pair moved together onto `:18590` would satisfy the
-        # content arm and stay green on the WRONG refusal.
+        # form occurs at THREE lines (`:10576`, `:19472`, `:19534`) — and the bare
+        # call occurs at four (`:10158` is `return quota_refusal_payload(`): a
+        # `(document, pin)` pair moved together onto `:19534` — the `CohortCostCap`
+        # arm, the WRONG refusal — would satisfy the bare anchor and stay green.
         # The hardened form occurs exactly once in the file, so a re-point onto a
         # sibling arm now reds.
         ("03-test-design.md", "the A-corpus capture", (
@@ -6201,7 +6201,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("19472", "quota_refusal_payload(QuotaExceededError("),
         ), "hosted_api"),
         # ⛔ THE LINE THAT *QUOTES* :82's NUMBER (#12462 review). `03-test-design.md:236`
-        # re-states `hosted_api.py:19345` as the same guard read at an older head, so it is
+        # re-states `hosted_api.py:19447` as the same guard read at an older head, so it is
         # a second statement of one hit — and the paragraph it sits in INSTRUCTS the next
         # merger to re-point line 82, which is exactly how 236 comes to assert the old
         # number while 82 moves. Unpinned until the review reverted it green. Only the
@@ -6240,7 +6240,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         ), "extractor_v4_arch"),
         # ⛔ THE TWO THIS-HEAD NUMBERS TWO EARLIER CUTS LEFT UNREAD (#12569 review), and the
         # count that hid one of them. D5's row states NINE distinct this-head numbers:
-        # `19238`, `19345`, `10037`, `10064`, `10117`, `1186`, `1194`, `1400`, `1418`. The
+        # `19340`, `19447`, `10037`, `10064`, `10117`, `1186`, `1194`, `1400`, `1418`. The
         # counts in the comments above said SEVEN, then EIGHT, and each time the number left
         # out was green under mutation: `:1418` (in the "Measured at" continuation) and
         # `:1194` — which is stated one clause EARLIER on the same markdown line, in the
