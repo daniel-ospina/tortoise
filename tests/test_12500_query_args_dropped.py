@@ -410,6 +410,18 @@ def test_the_text_arm_REFUSES_a_floor_it_cannot_apply(stub, entity_type) -> None
     )
     assert "point" in result["error"], result["error"]
 
+    # …and the bool spelling of the SAME floor. `True` is 1.0: the SDK's range
+    # check passes it (`0.0 <= True <= 1.0`) and the fts leg then skips the floor
+    # on a non-Point read, so it came back with the 0.01 rows while `1` and `1.0`
+    # were refused — one argument value answering two ways depending on its Python
+    # spelling (round-21 P2 1, measured). `False` stays SERVED: it is falsy, which
+    # the first conjunct already excludes.
+    assert _is_refusal(tortoise_query(text="anything", entity_type=entity_type,
+                                      min_confidence=True)), (
+        f"text= with entity_type={entity_type!r} served min_confidence=True — a "
+        f"floor of 1.0 this arm cannot apply — while refusing 1 and 1.0"
+    )
+
 
 def test_the_text_arm_floor_message_offers_a_route_that_terminates(stub) -> None:
     """The route must be followable FROM here (#12500 round-3, P2 class).
@@ -1078,6 +1090,59 @@ def test_a_paged_caller_is_told_to_drop_offset_in_the_route(stub, kwargs) -> Non
 
     assert "drop offset=/page=" in message, message
     assert "text= takes no offset" in message, message
+
+    # …and it must qualify EVERY alternative, not read as trailing advice on the
+    # last one. Appended as a final parenthetical it did exactly that, and
+    # `text=`+`offset=` is refused whatever `entity_type` says, so following the
+    # FIRST alternative ("pass entity_type='point'") landed on "offset/page not
+    # supported with text" (round-21 P2 2, measured on both two-alternative
+    # routes). The decidable form: execute the alternative, dropping only what the
+    # message says to drop, and require a served read.
+    if " or " in message:
+        assert ". Also drop offset=/page=" in message, (
+            f"a multi-alternative paged route qualifies the drop only at the end, "
+            f"so it reads as applying to the last alternative: {message}"
+        )
+
+
+def test_every_alternative_of_a_paged_text_route_terminates(stub) -> None:
+    """Each alternative the paged `text=` routes offer must be followable (#12500 r21).
+
+    The paging parenthetical appended at the END of a route read as qualifying only
+    the last alternative, and `text=`+`offset=` is refused whatever `entity_type`
+    says (mcp_server.py:4422-4424) — so following the FIRST alternative, "pass
+    entity_type='point'", landed on "offset/page not supported with text"
+    (round-21 P2 2, measured verbatim on both two-alternative routes). The routes
+    now state the drop as its own sentence, for the whole route, and this test
+    executes each alternative as written.
+
+    Fails if the paging sentence stops qualifying every alternative (first
+    assertion), or if an alternative it names still refuses (the executions).
+    """
+    from tortoise.mcp_server import tortoise_query
+
+    # order_by only, paged: the route offers entity_type='point' OR relevance.
+    order_only = tortoise_query(text="x", entity_type="document",
+                                order_by="confidence", offset=0)["error"]
+    assert ". Also drop offset=/page=" in order_only, order_only
+
+    # both refused, paged: "Passing entity_type='point' fixes both".
+    both = tortoise_query(text="x", entity_type="document",
+                          min_confidence=_CONFIDENCE_FLOOR,
+                          order_by="confidence", offset=0)["error"]
+    assert ". Also drop offset=/page=" in both, both
+
+    # Follow each FIRST alternative, dropping only what the message names.
+    first = tortoise_query(text="x", entity_type="point")
+    assert not _is_refusal(first), first
+    fixes_both = tortoise_query(text="x", entity_type="point",
+                                min_confidence=_CONFIDENCE_FLOOR,
+                                order_by="confidence")
+    assert not _is_refusal(fixes_both), fixes_both
+    # …and the second alternative: relevance on a document read.
+    relevance = tortoise_query(text="x", entity_type="document",
+                               order_by="relevance")
+    assert not _is_refusal(relevance), relevance
 
 
 def test_an_operator_floor_refusal_names_the_gate_not_a_label(stub) -> None:

@@ -4187,7 +4187,6 @@ def tortoise_query(kind: str | None = None,
         # belief, so these two are narrower than the arm itself.
         if (min_confidence and entity_type != "point"
                 and isinstance(min_confidence, (int, float))
-                and not isinstance(min_confidence, bool)
                 and 0.0 <= min_confidence <= 1.0):
             # The fts leg compares the floor against EP belief under a literal
             # `entity_type == "point"` gate (sdk.py:43288; `ep` is None for
@@ -4209,7 +4208,13 @@ def tortoise_query(kind: str | None = None,
             # the way `order_by="garbage"` already is (`sdk.py:41138`). The
             # `isinstance` test is load-bearing: a non-numeric floor makes the
             # SDK's own `not (0.0 <= …)` raise `TypeError`, and this guard must
-            # not turn that into a scoping paragraph.
+            # not turn that into a scoping paragraph. A `bool` is NOT excluded
+            # (round-21 P2 1, measured): `0.0 <= True <= 1.0` holds, so the SDK
+            # does not reject it, and the fts leg then skips the floor on a
+            # non-Point read (sdk.py:43288) — `min_confidence=True` came back with
+            # the 0.01 rows, while `1` and `1.0` were refused. One floor must not
+            # answer two ways depending on its Python spelling. `False` is still
+            # served: it is falsy, so the first conjunct already excludes it.
             _unapplied.append((
                 "min_confidence",
                 f"the fts leg applies its floor under a literal `entity_type == "
@@ -4319,7 +4324,15 @@ def tortoise_query(kind: str | None = None,
             # the kind-only tag route — it sends the caller to the structural arm,
             # which pages fine — so the suffix there was advice to drop a
             # capability, naming an arm the route never mentions (round-10 P2).
-            _route += " (and drop offset=/page= — text= takes no offset)"
+            #
+            # Its own SENTENCE, not a trailing parenthetical (round-21 P2 2,
+            # measured): appended at the end of a route with two alternatives it
+            # read as qualifying only the last one, and `text=`+`offset=` is
+            # refused whatever `entity_type` says (mcp_server.py:4422-4424) — so
+            # following the FIRST alternative ("pass entity_type='point'") landed
+            # on "offset/page not supported with text". The drop is required for
+            # EVERY alternative, so it is stated once, for the route.
+            _route += ". Also drop offset=/page= — text= takes no offset."
         # Only where a floor/ordering is what was refused: the STRUCTURAL arm
         # applies `filters=` together with `kind=` quite happily, so this note on
         # a kind-only tag refusal told the caller to drop a filter that another
