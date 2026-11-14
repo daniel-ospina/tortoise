@@ -145,7 +145,15 @@ jobs:
         # deployments for what is a runner fault. A step that ran and failed has outcome `failure`,
         # not `skipped`, so the red path this step exists for is untouched: the run is simply RED
         # with no issue, and the failing run IS the alert (that substrate's own doctrine).
-        if: always() && steps.check.outcome != 'skipped'
+        # ⛔ `!cancelled()` is the THIRD exclusion and not a formality: `steps.<id>.outcome` is
+        # `success|failure|cancelled|skipped`, so a cancel landing INSIDE the compare step (a manual
+        # `gh run cancel`, a superseded scheduled run, a job-level cancel) yields `cancelled` — which
+        # satisfies `!= 'skipped'`, and `always()` is precisely what runs a step on a cancelled run.
+        # The body would then render an empty reading under "The reading (this tool, this run)" and
+        # point an operator at two PRODUCTION deployments for a run that measured neither half. This
+        # is the idiom the fleet already uses for the same reason (`deploy-hosted.yml`:
+        # "`if: always() && !cancelled()` on purpose").
+        if: always() && !cancelled() && steps.check.outcome != 'skipped'
         env:
           # Actions exposes the token only as a CONTEXT, never as an env var (#3092), and
           # `auto-file-issue.sh` asserts the author from the write's own response (a PAT files as its
@@ -199,7 +207,15 @@ jobs:
             echo '### The reading (`tools/consent_key_check.py`, this run)'
             echo
             echo '```json'
-            cat /tmp/consent-key.json 2>/dev/null || echo '{"verdict": "UNVERIFIABLE"}'
+            # ⛔ `-s`, not just `cat`: a 0-byte file EXISTS (the shell redirect in the compare step
+            # creates it before `python3` has written anything), so `cat` succeeds on it and the fence
+            # renders EMPTY under the heading "The reading" — the alert then asserts a cause with no
+            # reading at all. `-s` is true only for a NON-EMPTY file, so the fallback still fires.
+            if [ -s /tmp/consent-key.json ]; then
+              cat /tmp/consent-key.json
+            else
+              echo '{"verdict": "UNVERIFIABLE", "why": "the tool wrote no reading"}'
+            fi
             echo '```'
             echo
             echo '### If it IS a key mismatch — THREE steps, because Pages bakes env at deploy time'

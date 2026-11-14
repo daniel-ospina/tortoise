@@ -458,7 +458,7 @@ def _steps() -> list[dict]:
 
 
 def test_the_workflow_files_the_drift_ON_A_FAILING_READING() -> None:
-    """⛔ `if: always() && outcome != 'skipped'` IS THE ALERTING CONTRACT — do not "tidy" it.
+    """⛔ `if: always() && !cancelled() && outcome != 'skipped'` IS THE ALERTING CONTRACT.
 
     A red verdict FAILS the check step (`exit "$rc"`), so `if: success()` would skip the filing step
     exactly when it must fire — the deaf-monitor class #2140/#2189 recorded. The second clause is not
@@ -467,11 +467,24 @@ def test_the_workflow_files_the_drift_ON_A_FAILING_READING() -> None:
     synthetic `UNVERIFIABLE` as "The reading (this run)" and point an operator at two PRODUCTION
     deployments for what is a runner fault. A step that RAN and failed has outcome `failure`, not
     `skipped`, so the red path this step exists for is untouched.
+
+    ⛔ AND THE THIRD CLAUSE, `!cancelled()`, is the same hazard through the last open door:
+    `steps.<id>.outcome` is `success|failure|cancelled|skipped`, so a cancel landing INSIDE the
+    compare step (a manual `gh run cancel`, a superseded scheduled run, a job-level cancel) yields
+    `cancelled` — which SATISFIES `!= 'skipped'`, while `always()` is precisely the predicate that
+    runs a step on a cancelled run. The filing step would then alert on a run that measured neither
+    half and hand an operator two PRODUCTION deployments. Pinned because the two clauses above were
+    each added after a reviewer found the previous cut could look green (or alert) on evidence it
+    never had.
     """
     filing = [s for s in _steps() if "Auto-file" in (s.get("name") or "")]
     assert len(filing) == 1, "exactly one auto-file step"
     condition = filing[0]["if"]
     assert "always()" in condition, f"the filing step must survive a failing check step, got {condition!r}"
+    assert "!cancelled()" in condition, (
+        "a CANCELLED run must not file an alert: the cancelled check step's outcome is `cancelled`, "
+        f"which passes `!= 'skipped'`, so the alert would assert a cause it never measured: {condition!r}"
+    )
     assert "steps.check.outcome != 'skipped'" in condition, (
         f"a skipped check step must NOT file a fabricated reading, got {condition!r}"
     )
@@ -920,6 +933,107 @@ def test_the_filing_step_files_the_RIGHT_finding_and_never_resolves_a_split(tmp_
     assert "Every consent grant is dead" not in body, (
         "the UNKNOWN arm's body asserts a disagreement it did not measure"
     )
+
+
+def test_a_ZERO_BYTE_reading_never_renders_an_EMPTY_fence(tmp_path) -> None:
+    """⛔ `cat` FAILS OPEN ON A 0-BYTE FILE, so `-s` — never `cat` alone — must trigger the fallback.
+
+    The compare step opens the reading with `--json > /tmp/consent-key.json`, and the shell creates
+    that file BEFORE `python3` has written a byte. So the run where the checker itself died (OOM, the
+    runner's timeout, an import error) is exactly the run that leaves a 0-byte file behind: `cat`
+    SUCCEEDS on it and prints nothing, so `|| echo …` never fires and the alert renders an EMPTY
+    fenced block under "### The reading (this run)" — asserting a cause with no reading at all.
+
+    Both arms, because `-s` alone is not the property under test: an unconditional `echo <fallback>`
+    would satisfy a fallback-only pin while destroying EVERY real reading, which is the fail-closed
+    error in the other direction (the alert discarding the evidence it exists to publish).
+    """
+    import fcntl
+    import os
+    import stat
+
+    filing = [s for s in _steps() if "Auto-file" in (s.get("name") or "")]
+    assert len(filing) == 1, "exactly one auto-file step"
+    root = tmp_path / "root"
+    (root / ".github" / "scripts").mkdir(parents=True)
+    record = tmp_path / "calls.txt"
+    stub = root / ".github" / "scripts" / "auto-file-issue.sh"
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        "printf '%s\\n' \"$*\" >> \"$REC\"\n"
+        'case "$1" in\n'
+        "  file)\n"
+        '    bf=""\n'
+        "    while [ $# -gt 0 ]; do [ \"$1\" = '--body-file' ] && bf=\"$2\"; shift; done\n"
+        "    if [ -z \"$bf\" ] || [ ! -f \"$bf\" ]; then echo 'BODY-FILE-MISSING' >> \"$REC\"; exit 2; fi\n"
+        '    cp "$bf" "$REC.body"\n'
+        "    ;;\n"
+        "esac\n"
+        "exit 0\n"
+    )
+    stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+
+    reading = Path("/tmp/consent-key.json")
+    # Same parallel-safety contract as `test_the_check_step_exits_with_the_code_the_checker_returned`:
+    # the body's paths are LITERAL, so an exclusive lock serialises copies and only bytes THIS test
+    # wrote are removed — an operator's real reading is restored, never deleted.
+    lock = Path("/tmp/consent-key.json.lock").open("a+")
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    pre_existing = reading.read_bytes() if reading.exists() else None
+    try:
+
+        def rendered_reading() -> str:
+            record.unlink(missing_ok=True)
+            Path(str(record) + ".body").unlink(missing_ok=True)
+            proc = subprocess.run(
+                ["bash", "-e", "-c", filing[0]["run"]],
+                cwd=root,
+                env={
+                    **os.environ,
+                    "REC": str(record),
+                    "RC": "2",
+                    "GITHUB_SERVER_URL": "https://gh.example.test",
+                    "GITHUB_REPOSITORY": "o/r",
+                    "GITHUB_RUN_ID": "1",
+                },
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            assert proc.returncode == 0, proc.stderr[-400:]
+            body = Path(str(record) + ".body").read_text()
+            block = re.search(r"### The reading.*?```json\n(.*?)```", body, re.S)
+            assert block is not None, f"the body lost its reading fence: {body[:400]!r}"
+            return block.group(1)
+
+        # ARM 1 — the 0-byte file a dead checker leaves behind.
+        reading.write_bytes(b"")
+        empty_arm = rendered_reading()
+        assert empty_arm.strip(), (
+            "a 0-byte reading rendered an EMPTY fence under 'The reading (this run)': `cat` succeeds "
+            "on an empty file, so the fallback never fired and the alert asserts a cause with no "
+            "reading at all"
+        )
+        assert "the tool wrote no reading" in empty_arm, (
+            f"the empty-reading arm did not render the fallback: {empty_arm!r}"
+        )
+
+        # ARM 2 — a real reading must still render ITS OWN bytes, not the fallback.
+        reading.write_bytes(b'{"verdict": "MISMATCH"}\n')
+        real_arm = rendered_reading()
+        assert "MISMATCH" in real_arm, (
+            f"a NON-EMPTY reading was replaced by the fallback: {real_arm!r}"
+        )
+        assert "the tool wrote no reading" not in real_arm, (
+            "the fallback fires on a real reading — the alert would discard its own evidence"
+        )
+    finally:
+        if pre_existing is None:
+            reading.unlink(missing_ok=True)
+        else:
+            reading.write_bytes(pre_existing)
+        fcntl.flock(lock, fcntl.LOCK_UN)
+        lock.close()
 
 
 def test_the_step_outputs_are_WIRED_from_the_check_step_and_the_dispatch_inputs() -> None:
