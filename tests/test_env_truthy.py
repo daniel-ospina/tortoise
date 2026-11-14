@@ -553,7 +553,8 @@ _LEDGER_LITERAL_OWNERS: dict[str, tuple[int, str]] = {
 #: `TORTOISE_11070_CENSUS_DEDUPE_DISABLED`
 #: (`tortoise/session_source_prose_migration.py`, #11453), `TORTOISE_JOURNAL_SEGMENTS`
 #: (`tortoise/journal_segments.py`, #12551), and `tortoise/config.py`'s
-#: `TORTOISE_ALLOW_EMBEDDED` (#12407/#12428, restructured by #12555). The other TWO
+#: `TORTOISE_ALLOW_EMBEDDED` (#12407/#12428; `#12555` re-shaped the rung attribution
+#: around it, not the read). The other TWO
 #: were already in the ledger when #4128 ruled, so they are not growths since it: the
 #: tenant-namespace opt-in pinned above (`TORTOISE_TEST_SWEEP_TEAM_STRAYS`, there since
 #: #4097) and `TORTOISE_TEST_SWEEP_LEGACY` (#3634 Task 3). ⛔ The COUNT is not
