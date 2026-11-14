@@ -2613,8 +2613,9 @@ class TestNoDocDeniesABuilderPlanExists:
             "_CLAUSE_END",
             "_CLAUSE_END_STRICT",
             "_IDENTIFIER_RESTATEMENT",
-            # ⛔ …and TWO MORE the guard was still silent on (round-9 review cycle 9,
-            # MEASURED): an injected test pinning `_BUILDER_PLAN` or
+            # ⛔ …and TWO MORE the guard was still silent on (round-9 review cycle 8,
+            # measured — the bans landed in that commit; cycle 9 re-checked them): an
+            # injected test pinning `_BUILDER_PLAN` or
             # `_INTENSIFIER_WORDS` ran GREEN, so the guard was silent on the noun the
             # whole lint is about and on the set `_INTENSIFIER` is built from. The
             # comment above gets the COUNT right (four) and the SET wrong:
