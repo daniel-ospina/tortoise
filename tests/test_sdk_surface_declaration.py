@@ -194,7 +194,9 @@ def test_the_absence_failure_is_NOT_vacuous():
 def test_the_gate_is_RED_on_todays_gap_and_names_every_offender():
     """#4282's true state: 40 approved, 125 live. Not green, and not vague.
 
-    The approved side has not moved: 13 of the 40 exist, 27 do not. The LIVE side moved
+    The approved side has not moved: 14 of the 40 exist (13 live methods the
+    declaration names, plus row 1's `Tortoise(...)`, which resolves to the class
+    itself), 26 do not. The LIVE side moved
     150 → 124 on 2026-10-27, when the owner's ruling that the surplus methods nothing calls
     may be deleted (PR #10187) removed the 26 with no caller under `tortoise/**` — so the
     off-surface gap falls 138 → 112 — and 124 → 125 on 2026-11-14 (#10015), when approved

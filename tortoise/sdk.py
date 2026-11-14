@@ -13076,10 +13076,22 @@ class TortoiseSDK:
                 f"Override with TORTOISE_ALLOW_PRODUCTION=1."
             )
 
-    def _get_registry(self):
+    def _get_registry(self, *, create: bool = True):
         """Return the control_plane registry graph handle (cached).
 
         Uses the existing db connection — no second FalkorDB connection.
+
+        ``create=False`` is the PROBE form: it answers the cached handle when one
+        exists, else ``None`` without materialising anything. The default path
+        below MINTS the graph — `select_graph` is client-side, but
+        :meth:`_ensure_registry_indexes` issues a `CREATE INDEX` per label, and the
+        first DDL on a name is what brings the graph into existence. So a caller
+        that must not leave a graph behind (an account READ — a `{}_control_plane`
+        created during a lookup is the same read-side mint #669 rejected) asks
+        with ``create=False`` and skips its probe on ``None``. The test is
+        :func:`tortoise.graph_delete_guard.graph_exists`, a `GRAPH.LIST` read, so
+        the probe mints nothing either way.
+
         Registry graph name is namespace-scoped (``{ns}_control_plane``) so
         different namespaces never share registry state, and test graphs get
         an isolated name derived from ``{ns}_{test_graph}_control_plane`` that
@@ -13122,6 +13134,14 @@ class TortoiseSDK:
                 registry_name = f"{ns}_control_plane"      # shared — NEVER prefixed
             else:
                 registry_name = "control_plane"            # shared — NEVER prefixed
+            if not create:
+                # `create=False` is the probe contract: a graph this store does
+                # not already hold is reported ABSENT, never brought into being.
+                # Checked on the DERIVED name (one derivation, above) so the two
+                # callers cannot disagree about which graph is the registry.
+                from .graph_delete_guard import graph_exists
+                if not graph_exists(proj.db, registry_name):
+                    return None
             registry_graph = proj.db.select_graph(registry_name)
             # Epic #1647 (CI P2): the registry name derived from a TEST graph
             # must ALSO be journaled — the redirect only journals the main
@@ -45880,9 +45900,6 @@ class TortoiseSDK:
             is_usable_tenant,
             record_tenant_effective,
         )
-        from .supabase_control import (  # method-local, like `quota`'s own: it pulls
-            is_supabase_enabled as _is_supabase_control_plane,  # the Supabase seam
-        )
 
         tenant = record_tenant_effective(self._record_tenant)
         if not is_usable_tenant(tenant):
@@ -45921,21 +45938,25 @@ class TortoiseSDK:
             # the same org id would be a fail-open on the money surface. Fail closed
             # and name the mismatch instead.
             #
-            # ⛔ THE PROBE IS `org_get`, SO IT MAY NOT RUN IN SUPABASE MODE. It
-            # resolves this handle's registry (`_get_registry` →
-            # `_ensure_registry_indexes`' `CREATE INDEX` set), which MATERIALISES
-            # `{ns}_control_plane` on a store that has no graph by that name — and
-            # in Supabase mode the registry is DELETED by design (post-#669 flip),
-            # so probing there resurrects the very graph the flip removed, from a
-            # read, on the money surface, while `resolve_org_limits` (which reads
-            # the orgs row in that mode and never touches a graph) reports
-            # `OrgNotFoundError`. So the probe is gated to REGISTRY mode, where it
-            # mints nothing: `resolve_org_limits` had to query that same registry to
-            # reach this arm, so the graph already exists. In Supabase mode the
-            # gates' store and this handle's orgs row are the SAME store, so a
-            # registry-only org is not the state to report — `None` is the honest
-            # answer, and no graph is created to ask.
-            if not _is_supabase_control_plane() and self.org_get(org_id) is not None:
+            # ⛔ THE PROBE IS `org_get`, SO IT MAY NOT RUN ON A STORE THAT HAS NO
+            # REGISTRY GRAPH. `org_get` resolves this handle's registry
+            # (`_get_registry`), whose `_ensure_registry_indexes` issues a
+            # CREATE INDEX per label — the first DDL is what MATERIALISES
+            # `{ns}_control_plane`. Probing unconditionally therefore left a new
+            # graph behind on every read of an account with no row, which is the
+            # read-side mint #669 rejected: in Supabase mode the registry is
+            # DELETED by design (`resolve_org_limits` reads the orgs row there and
+            # touches no graph), so the probe would resurrect exactly the graph
+            # the flip removed — from a READ, on the money surface, inside a
+            # method whose docstring promises no such write. `create=False` asks
+            # the same question against `GRAPH.LIST` and mints nothing, so the
+            # answer is "is this SDK's control plane even present", which is the
+            # only question that has an answer here: absent graph ⇒ this handle
+            # holds no Team row ⇒ `None` is the honest reply. Where the graph IS
+            # present the disagreement diagnosis below still runs in full, in
+            # every mode (a registry-written org is a real state even on a
+            # Supabase deployment).
+            if self._get_registry(create=False) is not None and self.org_get(org_id) is not None:
                 raise ControlPlaneError(
                     f"get_organisation_account cannot answer for {org_id!r}: the "
                     "account exists in this SDK's control plane but not in the one "

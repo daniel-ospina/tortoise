@@ -332,28 +332,24 @@ class TestTenancy:
             reply = sdk.get_organisation_account()
         assert reply["org_id"] == a["id"]
 
-    def test_an_absent_account_creates_no_control_plane_graph(self, sdk, monkeypatch):
+    def test_an_absent_account_creates_no_control_plane_graph(self, sdk):
         """The `OrgNotFoundError` arm must not MATERIALISE the registry it probes.
 
         The arm asks the caller's own control plane whether the account exists —
         `self.org_get` — and `org_get` resolves this handle's registry
         (`_get_registry` -> `_ensure_registry_indexes`' CREATE INDEX set), which
-        creates `{ns}_control_plane` on a store that has no graph by that name.
-        In SUPABASE mode that is not a cosmetic leak: the registry is DELETED by
-        design (the #669 flip — see `quota.resolve_org_limits`' own docstring),
-        so a read of an account with no row would resurrect the graph the flip
-        removed, from the money surface, in a method whose docstring promises
-        "Read-only: nothing here clears, refills, prunes or overrides a cap".
-        So the probe is gated to registry mode, where it mints nothing (the
-        resolver had to query that same registry to reach this arm).
-
-        Both directions are asserted: the read answers None without creating a
-        graph, and the pre-fix shape — the probe with the gate forced off — DOES
-        create one. A guard that cannot fail is not a guard (#4872).
+        brings `{ns}_control_plane` into existence on a store that has no graph
+        by that name. That is the read-side mint #669 rejected: in Supabase mode
+        the registry is DELETED by design (see `quota.resolve_org_limits`' own
+        docstring), so a read of an account with no row would resurrect the graph
+        the flip removed, from the money surface, in a method whose docstring
+        promises "Read-only: nothing here clears, refills, prunes or overrides a
+        cap". The probe therefore asks `_get_registry(create=False)`, which reads
+        `GRAPH.LIST` and mints nothing, and skips the lookup entirely when this
+        store holds no registry graph — in which case there is no Team row here
+        to disagree about, so `None` is the honest answer.
         """
         db = sdk._get_proj().db
-        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "supabase")
-        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
         sdk._record_tenant = ("no-such-org-10015", "g-10015")
 
         before = sorted(str(g) for g in (db.list_graphs() or []))
@@ -364,31 +360,49 @@ class TestTenancy:
         created = [g for g in after if g not in before]
         assert created == [], (
             "the account read materialised a graph: "
-            f"{created} — in Supabase mode that resurrects the registry the "
-            "#669 flip deleted, from a READ, on the money surface"
+            f"{created} — a read-side mint, and in Supabase mode a resurrection "
+            "of the registry the #669 flip deleted"
         )
 
-    def test_the_supabase_gate_on_that_probe_is_load_bearing(self, sdk, monkeypatch):
-        """The negative control for the pin above, on the SAME store.
+    def test_the_probe_would_create_that_graph_without_the_gate(self, sdk):
+        """Negative control for the pin above, on an equivalent fresh store.
 
-        With `is_supabase_enabled` forced False the probe runs, so the graph IS
-        created — which is what proves the test above is measuring the gate and
-        not the absence of a side effect that was never there.
+        The unfixed shape — a bare `org_get` — DOES materialise the registry. If
+        this stopped being true, the pin above would be passing over nothing (a
+        guard that cannot fail is not a guard, #4872).
         """
         db = sdk._get_proj().db
-        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "supabase")
-        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
-        sdk._record_tenant = ("no-such-org-10015b", "g-10015")
-
         before = sorted(str(g) for g in (db.list_graphs() or []))
-        with mock.patch("tortoise.quota.resolve_org_limits",
-                        side_effect=OrgNotFoundError("no such org")), \
-                mock.patch("tortoise.supabase_control.is_supabase_enabled",
-                           return_value=False):
-            assert sdk.get_organisation_account() is None
+        assert sdk._get_registry(create=False) is None, (
+            "this store already holds a registry graph — the control below "
+            "cannot show what the probe would create"
+        )
+        sdk.org_get("no-such-org-10015c")
         after = sorted(str(g) for g in (db.list_graphs() or []))
         created = [g for g in after if g not in before]
-        assert created, (
-            "the pre-fix probe created no graph either — then the pin above "
-            "cannot distinguish the fix from the defect"
+        assert created, "org_get created no graph — then the pin above proves nothing"
+
+    def test_the_gate_keeps_the_mismatch_diagnosis_where_the_registry_exists(
+        self, sdk,
+    ):
+        """The other direction: with a registry graph PRESENT the arm still refuses.
+
+        The method's contract is that an account this SDK can see but the gates'
+        resolver cannot REFUSES with `ControlPlaneError` rather than reporting a
+        plainly-existing account as absent. Gating the probe on the graph's
+        EXISTENCE (not on the control-plane mode) is what keeps that true in every
+        mode — a registry-written org on a Supabase deployment is exactly the
+        state this arm exists for.
+        """
+        team = sdk.org_create("p3-present-org-10015")
+        assert sdk._get_registry(create=False) is not None, (
+            "org_create must have materialised the registry this test relies on"
+        )
+        sdk._record_tenant = (team["id"], "g-10015")
+        with mock.patch("tortoise.quota.resolve_org_limits",
+                        side_effect=OrgNotFoundError("no such org")), \
+                pytest.raises(ControlPlaneError) as exc:
+            sdk.get_organisation_account()
+        assert "cannot answer for" in str(exc.value), (
+            "the mismatch arm must still name the disagreement, not answer None"
         )
