@@ -3852,9 +3852,12 @@ def test_the_OK_detail_does_not_claim_a_RESOLUTION_the_reading_did_not_establish
     )
     detail = report.get("client-published").detail
     assert "unpinned →" not in detail, detail
-    assert "advertised latest 0.3.0 is not resolvable for an unpinned install here" in detail, (
-        detail
-    )
+    # ⛔ THE ADVERTISED VERSION'S LISTING WAS NOT READ HERE, SO THE CLAUSE MAY NOT CLAIM A PROPERTY
+    # OF IT (#12589 review round 6, P2). "not resolvable …" is an artifact claim manufactured from
+    # a non-reading, and it would be byte-identical to the READABLE all-yanked case below — the
+    # operator could not tell a shape refusal from a yanked release.
+    assert "advertised latest 0.3.0 could not be READ here" in detail, detail
+    assert "not resolvable for an unpinned install" not in detail, detail
     assert "installable: 0.2.0" in detail, detail
 
     # ⛔ AND THAT WORDING IS LOAD-BEARING ON THE CASE THAT MOTIVATED THE ARM (#12589 round 5, P3):

@@ -567,11 +567,12 @@ def releases_map(index_doc: dict[str, Any]) -> dict[str, Any] | None:
 
 
 #: A release map this client cannot read an INSTALLABLE-FILE reading from: a version value that
-#: is not a list, a list holding an entry that is not an object, or a file entry whose `yanked`
-#: flag or `filename` is missing / not of the documented type (#12589). One constant, ONE
-#: enumeration of its causes — the client arm's UNKNOWN detail, the OK-branch NOTE and the
-#: `resolvable_releases` docstring all name the same three, because an operator reads them against
-#: each other (#12589 review round 4, P3).
+#: is not a list, a list holding an entry that is not an object, or a file entry with no boolean
+#: `yanked` / no non-empty string `filename` (#12589). One constant, ONE enumeration of its causes —
+#: the client arm's UNKNOWN detail, the OK-branch NOTE, the `resolvable_releases` docstring and
+#: this comment all say the SAME words, because an operator reads them against each other and an
+#: empty-string `filename` is of the documented TYPE while still being unusable (#12589 review
+#: round 6, P3: "not of the documented type" understated it in two of the four sites).
 RELEASES_UNREADABLE = "releases-unreadable"
 
 
@@ -611,7 +612,7 @@ def resolvable_releases(index_doc: dict[str, Any]) -> tuple[list[str], str]:
     * ``reason`` — ``""`` when every value and every entry was read, else the shape that was not:
       ``RELEASES_ABSENT`` (the map is absent / null / not an object) or ``RELEASES_UNREADABLE``
       (a value that is not a list, an entry that is not an object, or a file entry with no boolean
-      ``yanked`` / no ``filename``).
+      ``yanked`` / no non-empty string ``filename``).
 
     ⛔ AND THE FAIL CLAIM IS UNIVERSAL, WHICH IS WHY ``reason`` EXISTS (#12589). "The index lists
     NO installable file in ANY release" is only TRUE once every value has been read. Emitting it
@@ -969,17 +970,25 @@ def build_report(
                 # pip takes 0.3.0). Printing `unpinned → 0.2.0` there asserted a resolution the
                 # reading never computed, and on the partial path it asserted one about the very
                 # version whose listing was not read.
-                # ⛔ AND "NOT INSTALLABLE" WOULD BE FALSE, not merely unproven (#12589 review
-                # round 5, P3): an ADVERTISED-BUT-YANKED release installs fine under a `==` pin
-                # — PEP 592 is what makes an unpinned requirement skip it (this module's own
-                # round-15 comment says exactly that). So the negative branch states the claim
-                # this arm actually tests (the UNPINNED resolution) and stops there.
-                advertised = (
-                    f"advertised latest {client_version} is installable"
-                    if client_version in resolvable
-                    else f"advertised latest {client_version} is not resolvable for an "
-                    f"unpinned install here"
-                )
+                # ⛔ AND THE CLAUSE DEPENDS ON WHETHER THE ADVERTISED VERSION WAS READ AT ALL
+                # (#12589 review rounds 5 and 6). Three states, three sentences:
+                #   * it is installable → say so;
+                #   * its listing could NOT be read → say THAT (`could not be READ here`), because
+                #     "not resolvable" would be an artifact claim manufactured from a non-reading,
+                #     and it would be byte-identical to the READABLE all-yanked case below;
+                #   * it was read and is not installable (yanked, empty, no usable file) → "not
+                #     resolvable for an UNPINNED install here", which is what this arm tests. NOT
+                #     "not installable": a yanked release installs fine under a `==` pin (PEP 592
+                #     is what makes an unpinned requirement skip it).
+                if client_version in resolvable:
+                    advertised = f"advertised latest {client_version} is installable"
+                elif release_files(client_doc, client_version) is None:
+                    advertised = f"advertised latest {client_version} could not be READ here"
+                else:
+                    advertised = (
+                        f"advertised latest {client_version} is not resolvable for an "
+                        f"unpinned install here"
+                    )
                 report.add(
                     Arm(
                         "client-published",
