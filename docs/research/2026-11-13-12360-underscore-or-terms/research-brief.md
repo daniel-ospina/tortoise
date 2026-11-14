@@ -261,8 +261,8 @@ And one shape the tail does NOT emit, kept because the old row conflated it with
 
 | shape | tail output | parsed | matched |
 |---|---|---|---|
-| `café_menu` (an underscore run after a **unicode break**) | `[]` — the abutment rule drops it, so the emitted query is `menu|caf` | yes | **no** — and the reason is the abutment rule, not the parser: the bytes `menu|caf` do not spell the name. This is the shape the previous row's label described while its claim was about `_menu`, which does emit and does match. |
-| `search\|web\|web_search` (the full union) | yes | yes |
+| `café_menu` (an underscore run after a **unicode break**) | `[]` — the abutment rule drops it, so the emitted query is `menu\|caf` | yes | **no** — and the reason is the abutment rule, not the parser: the bytes `menu\|caf` do not spell the name. This is the shape the previous row's label described while its claim was about `_menu`, which does emit and does match. |
+| `web_search` (the composite) → the full union it emits | `search\|web\|web_search` | yes | yes |
 
 Nothing in the emitted alphabet can be a metacharacter: `underscore_run_terms` only ever emits
 `[a-z0-9_]` (lowercased), and a test asserts that against the module's own
