@@ -465,6 +465,12 @@ def test_the_message_agrees_in_number_with_the_arguments_it_names(stub) -> None:
     # explains one argument while naming two (round-6 P2 4).
     assert "confidence floor" in two["error"], two["error"]
     assert "ordering" in two["error"], two["error"]
+    # …and the REASONS, not just the words. Unpinned, "the tag ordering is applied
+    # by the accessor, not here" shipped green — false: `query_points_by_tag`
+    # orders `p.createdAt DESC` and never applies the caller's ordering
+    # (sdk.py:26920), while the test's bare "ordering" substring still matched.
+    assert "tag mode reads a tag and nothing else" in two["error"], two["error"]
+    assert "cannot apply an ordering" in two["error"], two["error"]
 
 
 def test_a_floor_and_a_property_filter_have_no_common_arm(stub) -> None:
@@ -538,6 +544,13 @@ def test_a_ranking_ordering_is_refused_where_every_key_is_constant(
         f"every row's sort key is identical so the order comes back unchanged"
     )
     assert "order_by" in result["error"], result["error"]
+    # The REASON, not just the argument name: unpinned, "`order_by='confidence'`
+    # is not supported for an entity_type='document' read" shipped green — false,
+    # the value IS accepted and merely cannot reorder (round-17 P2 1).
+    if order_by == "confidence":
+        assert "four epistemic labels" in result["error"], result["error"]
+    else:
+        assert "IDENTICAL on every row" in result["error"], result["error"]
 
 
 @pytest.mark.parametrize("entity_type", ["point", "event", "subject", "object",
@@ -578,6 +591,12 @@ def test_the_kind_only_refusal_names_the_wider_population(stub) -> None:
     message = result["error"]
     assert "wider population" in message, message
     assert "floor" not in message and "ordering" not in message, message
+    # …and the REASON. Unpinned, this shipped: "a named `kind` excludes tagged
+    # Points, so rows you asked for came back missing" — false (tag mode serves a
+    # SUPERSET) and self-contradictory with the harm clause in the same sentence
+    # (round-17 P2 1, measured green).
+    assert "reads every kind of tagged Point" in message, message
+    assert "narrows nothing" in message, message
     # …and the route must be the KIND one. Deleting that branch pushed a caller
     # who wanted a narrower population into a text search, with the suite green
     # (round-6 P2 3).

@@ -4122,9 +4122,11 @@ def tortoise_query(kind: str | None = None,
     # (a page smaller than `limit`, a `total` that describes another population).
     # So the arms that cannot apply them REFUSE — the shape #12455 shipped for
     # `filters=`, placed here for the same two reasons: above the arms, so the
-    # refusal costs no read and cannot serve rows on an error path, and below the
-    # `tag=` precedence split, so a caller passing both keeps a message about the
-    # arm that actually answered.
+    # refusal costs no read and cannot serve rows on an error path, and taking the
+    # same `tag=`-first precedence those arms use (`_arm` below), so a caller
+    # passing both keeps a message about the arm that ACTUALLY answers — there is
+    # no separate "precedence split" above this point (round-17 P2 2: the comment
+    # claimed one that did not exist; the tag branch is 200-odd lines below).
     # TRUTHINESS, not `is not None` (round-1 P1, measured): this arm's own
     # semantics define the falsy values as ABSENT — the `text=` call below
     # normalises with `min_confidence or 0.0` and `order_by or "relevance"`, and
