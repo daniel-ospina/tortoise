@@ -22207,11 +22207,14 @@ def test_the_health_honesty_suite_is_selected_on_BOTH_halves_of_its_module_pair(
     "Successfully rebased", and the resulting tree selected this suite on a
     `hosted_api.py` diff and NOT on a `monitoring.py` one.
 
-    `integrity()` is not a substitute for this pin, and that is the point. It flags a
-    duplicate row (`duplicate_entries()` was the `main` red this PR removed) and an
-    UNCLASSIFIED file, but a file that keeps one surface's row while losing another's
-    is reported CLEAN. Measured with the `core` row deleted:
-    `integrity(load_manifest()) == []` — so nothing but this pin notices.
+    `integrity()` is not a substitute for this pin, and that is the point: it answers ONE
+    question — is every `tests/**/test_*.py` classified SOMEWHERE — so a file that keeps
+    one surface's row while losing the other's is reported CLEAN. Measured with the
+    `core` row deleted: `integrity(load_manifest()) == []`. (`duplicate_entries()` is a
+    different function on a different question — the duplicate row #12482 removed from
+    `main` — and it is composed by the `--integrity` CLI through
+    `ci_manifest.map_issues`, not by `integrity()` itself; #5050.) A lost arm is
+    invisible to both, so nothing but this pin notices it.
     """
     pin = "test_12477_health_honesty.py"
 
