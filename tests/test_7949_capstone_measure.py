@@ -5830,8 +5830,8 @@ _EPIC_CITE_DOCS = {
     # `:1418`) on the two source keys registered just below. ⛔ THE POPULATION IS NINE, NOT
     # SEVEN: the first two cuts each miscounted it, and the two numbers they left out were
     # exactly the shape this PR exists to close (mutating `:1194` or `:1418` alone left the file
-    # GREEN until they were pinned — 420 collected at that round's head, 413 at `8e86c7e108`,
-    # and a count is only readable with the head it was taken at: D5's own rule). ⛔ AND NINE WAS STILL NOT THE WHOLE PARAGRAPH (round 7,
+    # GREEN until they were pinned — a collected count that moves with every row added above
+    # it, so it is stated with the head it was read at or not at all: D5's own rule). ⛔ AND NINE WAS STILL NOT THE WHOLE PARAGRAPH (round 7,
     # P1): D5 also states three more this-head numbers, in the composition clauses EARLIER on
     # the same markdown line — `:191`, `:4201-4208`, `:4209-4230` — in two files that no row
     # scoped to THIS document, and no `_EPIC_CITE_SOURCES` key, named at all (`capstone_verdict_check`
@@ -6208,7 +6208,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # SUBJECT is that line numbers rot carried NINE this-head cites and no reader at
         # all. Five rows here (nine cells), because a row carries ONE source key; the phrase
         # is unique in the file. The first cut pinned only three of the nine, and review measured the
-        # residual by mutating the rest — 413/420 GREEN — so they are pinned too.
+        # residual by mutating the rest — the rest of the file GREEN — so they are pinned too.
         ("05-verify.md", "Measured at `30c9e7c4d3`", (
             ("19238", "``body.harness`` only ever introduces a harness on a session the server"),
             ("19345", "if count + est > max_points:"),
