@@ -5861,7 +5861,7 @@ _EPIC_CITE_SOURCES = {
     # those two `def`s at `:955`/`:947`. Registered because a repaired cite that nothing
     # pins is a repair the next move of the symbol undoes silently. ⛔ AND IT ALREADY
     # HAS: measured at `6916a6cd89` — an EARLIER round's base, NOT the `origin/main` head
-    # this merges into, which is `d05688df5990` — those two `def`s are at `:1007`/`:999`
+    # the round that wrote this merged into, which was `30c9e7c4d3` — those two `def`s are at `:1007`/`:999`
     # (`#12507` landed above them) while both the row and the document still said
     # `:955`/`:947`. ⚠️ The head is named because the measurement was taken there, and the
     # pair happens to hold at both heads; nothing else here is claimed about either head. That is this source key's case in one
@@ -6307,6 +6307,15 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # is a row: the range's END is a blank line (`14542`), which no anchor can hold —
         # so the range is checked by CONTENT below as well, and this row reds if the block
         # starts elsewhere.
+        # ⛔ RE-DERIVED at `d05688df59`'s head, and the hop is worth recording because the
+        # pin had gone stale TWICE while it waited: `5e31405809` (#12569) put the START on
+        # `:14363`, then `9b31716705` (#12464) added 50 lines to `hosted_api.py` above
+        # `org_info` and `d05688df59` (#12482) added 54 more — so the cited span published
+        # NEITHER reader and `test_each_block_arm_reds_on_the_mutation_it_guards` reported
+        # "the only failure was a stale TABLE ROW" on every parametrization. The new START
+        # is the `point_count` read the row anchors (`:14465`) and the new END is again the
+        # blank line immediately before `return OrgInfoResponse(` (`:14542`), measured — the
+        # shift is +102 NET (50+54 insertions, one deletion each), never a 104-line offset.
         ("04-plan.md", "**point budget - a POINTER, not a snapshot**", (
             ("14465", "point_count = await asyncio.to_thread("),
         ), "hosted_api"),
