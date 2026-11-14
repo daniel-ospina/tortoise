@@ -73,6 +73,11 @@ def _client_doc(version: str = "0.2.0", yanked: bool = False):
     `{"info": {"version": "0.2.0"}}` with no `releases` entry — the precise
     advertised-but-uninstallable shape — and `client-published` certified it OK. A fixture
     that cannot be installed must not be the healthy default.
+
+    ⛔ As of #12525 that same shape is UNKNOWN (a document with no usable `releases` map is a
+    NON-READING, never an answer), so it is now neither the healthy default NOR a FAIL — which
+    is the stronger reason a fixture must carry files: a shape that cannot answer the question
+    cannot certify the arm either.
     """
     return {
         "info": {"version": version},
@@ -409,6 +414,88 @@ def test_a_client_version_with_no_INSTALLABLE_file_in_ANY_release_is_red():
 
     # GREEN: the ordinary healthy shape.
     assert _report({"0.3.0": [good]}).get("client-published").status == canary.OK
+
+
+def test_an_ABSENT_releases_key_is_UNKNOWN_and_never_orders_a_release():
+    """`{}` present and `releases` absent are DIFFERENT answers (#12525).
+
+    PyPI documents `releases` as deprecated and removable — "In the future, each of these
+    keys may be removed entirely from this API response" (docs.pypi.org/api/json). Before
+    this pin, both shapes collapsed to `{}` at the client arm, so a deprecation landing (or a
+    mirror/cache answering `info` only) produced `resolvable == []` and the arm reported
+    "lists NO installable file in ANY release … README.md documents `pip install
+    tortoise-client`, which cannot resolve" — a FAIL, i.e. exit 1, i.e. the text the alarm
+    renders as **"cut a release"**, ordering an irreversible PyPI upload off a response that
+    never answered the question.
+
+    So the split is asserted on BOTH sides, because either half alone is satisfiable by the
+    wrong code:
+      * absent key  → UNKNOWN → exit 2 (no answer; never a release order);
+      * present `{}` → FAIL → exit 1 (an ANSWER: no releases; pinned by the test above).
+    """
+
+    def _report(client_doc: dict) -> object:
+        return canary.build_report(
+            engine_doc=_engine_doc(),
+            client_doc=client_doc,
+            tree_version="0.2.0",
+            init_arm=_ok_init_arm(),
+            now=NOW,
+        )
+
+    # THE FIX: an `info`-bearing document that cannot supply a `releases` MAP cannot answer
+    # the question. Absent, explicit JSON `null`, and a wrong-typed value are all the same
+    # class: a non-reading. The wrong-typed case is the module's own allow-list doctrine
+    # ("a state a later refactor introduces" is a NON-READING, never a verdict) — mapping it
+    # to `{}` would turn it into the ANSWER "no releases" and so into a FAIL/exit 1.
+    for absent in (
+        {"info": {"version": "0.3.0"}},  # a deprecation landing / `info`-only cache
+        {"info": {"version": "0.3.0"}, "releases": None},  # explicit JSON null
+        {"info": {"version": "0.3.0"}, "releases": []},  # wrong type: list
+        {"info": {"version": "0.3.0"}, "releases": "0.3.0"},  # wrong type: str
+    ):
+        report = _report(absent)
+        arm = report.get("client-published")
+        assert arm.status == canary.UNKNOWN, (absent, arm.status, arm.detail)
+        assert report.verdict == canary.UNKNOWN, (absent, report.verdict)
+        assert report.exit_code == 2, (absent, report.exit_code)
+        # The reason must NAME the deprecation and must NOT carry the release-order clause.
+        assert canary.RELEASES_ABSENT in arm.detail, arm.detail
+        assert "deprecated" in arm.detail.lower(), arm.detail
+        assert "not a reason to cut a release" in arm.detail.lower(), arm.detail
+        assert "any release" not in arm.detail.lower(), arm.detail
+        assert "cannot resolve" not in arm.detail.lower(), arm.detail
+
+    # AND the state that must NOT move: `releases` PRESENT but empty is still a FAIL.
+    empty = _report({"info": {"version": "0.3.0"}, "releases": {}})
+    assert empty.get("client-published").status == canary.FAIL
+    assert empty.exit_code == 1
+
+
+def test_releases_map_separates_ABSENT_from_EMPTY():
+    """The three-state truth table, tested at the helper both arms now share (#12525).
+
+    A caller reading this helper is the only thing standing between one response and two
+    arms disagreeing about it, so the distinction is pinned directly rather than only
+    through `build_report`.
+    """
+    assert canary.releases_map({"info": {"version": "0.2.0"}}) is None
+    assert canary.releases_map({"releases": None}) is None
+    assert canary.releases_map({"releases": {}}) == {}
+    assert canary.releases_map({"releases": {"0.2.0": []}}) == {"0.2.0": []}
+    # A non-dict `releases` is NOT a map and NOT an empty answer — it is a NON-READING.
+    # Routing it to `{}` would make it the ANSWER "no releases" and so a FAIL/exit 1: the
+    # release order. The module's allow-list doctrine says an unnamed value is never a
+    # verdict (#12525 review, P2).
+    assert canary.releases_map({"releases": []}) is None
+    assert canary.releases_map({"releases": "0.3.0"}) is None
+    assert canary.releases_map({"releases": 0}) is None
+
+    # The absent key must not raise on the informational path either (the `release-age` and
+    # `tree-version` rows are gated=False, so a crash here would take down a run that has
+    # nothing to report).
+    assert canary.release_files({"info": {"version": "0.2.0"}}, "0.2.0") == []
+    assert canary.upload_time({"info": {"version": "0.2.0"}}, "0.2.0") is None
 
 
 def test_index_mode_installs_the_DOCUMENTED_unpinned_spec(tmp_path):

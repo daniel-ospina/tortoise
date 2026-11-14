@@ -468,8 +468,45 @@ def latest_version(index_doc: dict[str, Any]) -> str:
     return version if isinstance(version, str) else ""
 
 
+#: The ``releases`` key is ABSENT from a document that still carries ``info``. PyPI
+#: documents ``releases`` as deprecated and REMOVABLE — "In the future, each of these keys
+#: may be removed entirely from this API response" (docs.pypi.org/api/json) — so an absent
+#: key is the absence of an ANSWER about installable files, not an answer that there are
+#: none (#12525).
+RELEASES_ABSENT = "releases-absent"
+
+
+def releases_map(index_doc: dict[str, Any]) -> dict[str, Any] | None:
+    """The ``releases`` map, or ``None`` when the document carries no USABLE map.
+
+    ``None`` covers every non-reading: the key absent, an explicit JSON ``null``, and a
+    present-but-wrong-typed value (``[]``, ``"…"``, ``0``).
+
+    ⛔ ``None`` is NOT ``{}`` (#12525). A PRESENT ``{}`` is an ANSWER — the project lists
+    no releases — and stays a FAIL at the client arm. An absent key is "no answer was
+    obtained": PyPI documents ``releases`` as deprecated and removable, so collapsing it to
+    ``{}`` reported "the artifact is broken, cut a release" — an irreversible PyPI upload —
+    off a response that never answered the question. This is the same absent-vs-unreadable
+    split the tool already makes for a 404 (``INDEX_ABSENT`` → FAIL) against a timeout
+    (``INDEX_UNREADABLE`` → UNKNOWN → exit 2), applied to the document's own shape.
+
+    ⛔ A PRESENT BUT WRONG-TYPED value (``[]``, ``"…"``, ``0``) is ALSO ``None``. It is not an
+    empty answer, it is a shape this client does not understand — "a state a later refactor
+    introduces" — and the module's allow-list doctrine (see the absence probe in
+    ``install_and_run``) says an unnamed value is a NON-READING, never a verdict. Mapping it
+    to ``{}`` would turn it into the ANSWER "no releases" and so into a FAIL/exit 1, i.e. the
+    release order this helper exists to prevent (#12525 review, P2).
+    """
+    releases = index_doc.get("releases")
+    if not isinstance(releases, dict):
+        return None
+    return releases
+
+
 def release_files(index_doc: dict[str, Any], version: str) -> list[dict[str, Any]]:
-    releases = index_doc.get("releases") or {}
+    # One source of truth for what an absent key means, so the two arms cannot disagree
+    # about one response (#12525).
+    releases = releases_map(index_doc) or {}
     files = releases.get(version) or []
     return [f for f in files if isinstance(f, dict)]
 
@@ -656,32 +693,57 @@ def build_report(
             # So the question is asked across the WHOLE release map: any release with a
             # non-yanked file means the documented install resolves. Only when NO release has
             # one is the arm red, which is the one state where the sentence above is true.
-            resolvable = [
-                version
-                for version, files in (client_doc.get("releases") or {}).items()
-                if isinstance(files, list)
-                and any(isinstance(entry, dict) and not entry.get("yanked") for entry in files)
-            ]
-            if resolvable:
+            # ⛔ AN ABSENT `releases` KEY IS NOT AN EMPTY RELEASE MAP (#12525). PyPI
+            # documents `releases` as deprecated and removable, so a deprecation landing —
+            # or a mirror/cache answering `info` only — omits the key. Collapsing that to
+            # `{}` left `resolvable` empty and reported "the client index lists NO
+            # installable file in ANY release … README.md documents `pip install …, which
+            # cannot resolve" — a FAIL, i.e. exit 1, i.e. an order to cut an IRREVERSIBLE
+            # PyPI upload, off a response that never answered the question. `{}` PRESENT is
+            # still a FAIL: that IS an answer, and it is pinned by
+            # `test_a_client_version_with_no_INSTALLABLE_file_in_ANY_release_is_red`.
+            releases = releases_map(client_doc)
+            if releases is None:
                 report.add(
                     Arm(
                         "client-published",
-                        OK,
-                        f"{CLIENT_PACKAGE} resolves on the index (unpinned → "
-                        f"{client_version}; installable: {', '.join(sorted(resolvable))})",
+                        UNKNOWN,
+                        f"could not read the {CLIENT_PACKAGE} release map — the index "
+                        f"document carries no usable `releases` map (the key is absent, "
+                        f"null, or not an object). PyPI documents `releases` as "
+                        f"DEPRECATED and may remove it ({RELEASES_ABSENT}), so whether "
+                        f"`pip install {CLIENT_PACKAGE}` resolves is UNKNOWN, not false. "
+                        f"This is NOT evidence the artifact is broken and is NOT a reason "
+                        f"to cut a release",
                     )
                 )
             else:
-                listed = len(release_files(client_doc, client_version))
-                report.add(
-                    Arm(
-                        "client-published",
-                        FAIL,
-                        f"the {CLIENT_PACKAGE} index lists NO installable file in ANY release "
-                        f"({listed} file(s) on {client_version}, none usable) — README.md "
-                        f"documents `pip install {CLIENT_PACKAGE}`, which cannot resolve",
+                resolvable = [
+                    version
+                    for version, files in releases.items()
+                    if isinstance(files, list)
+                    and any(isinstance(entry, dict) and not entry.get("yanked") for entry in files)
+                ]
+                if resolvable:
+                    report.add(
+                        Arm(
+                            "client-published",
+                            OK,
+                            f"{CLIENT_PACKAGE} resolves on the index (unpinned → "
+                            f"{client_version}; installable: {', '.join(sorted(resolvable))})",
+                        )
                     )
-                )
+                else:
+                    listed = len(release_files(client_doc, client_version))
+                    report.add(
+                        Arm(
+                            "client-published",
+                            FAIL,
+                            f"the {CLIENT_PACKAGE} index lists NO installable file in ANY release "
+                            f"({listed} file(s) on {client_version}, none usable) — README.md "
+                            f"documents `pip install {CLIENT_PACKAGE}`, which cannot resolve",
+                        )
+                    )
 
     # 4. informational rows — reported, never gated (see module docstring).
     published = latest_version(engine_doc or {})
