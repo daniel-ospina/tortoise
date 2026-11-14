@@ -48,8 +48,12 @@ Exit codes
 ----------
   0  every gated arm passed
   1  at least one gated arm FAILED — the published artifact is broken
-  2  the canary could not be evaluated (unreadable index, no venv/network, and a
-     failed install that pip did NOT attribute to the artifact) — fail-closed,
+  2  the canary could not be evaluated (unreadable index, no venv/network, a
+     failed install that pip did NOT attribute to the artifact, or a document
+     whose SHAPE this client refuses to read — `info-unreadable`,
+     `version-unreadable`, `releases-absent`, or `releases-unreadable` WHEN NO
+     READABLE RELEASE RESOLVES: a partial parse that still holds an installable
+     release is a PASS, and its detail carries `releases-unreadable` as a NOTE) — fail-closed,
      reported as RED because a detector that cannot run must never look like a
      pass (the no-op-gate class). ⛔ An install failure the INDEX corroborates is
      exit 1: pip's absence vocabulary is not proof of absence, but a confirmed
@@ -336,6 +340,22 @@ OK = "OK"
 FAIL = "FAIL"
 UNKNOWN = "UNKNOWN"
 
+#: The ONE allow-list rendering of an arm status, for BOTH surfaces (#12589 review round 11,
+#: P3). `.get(..., UNKNOWN)` is the allow-list: an arm carrying a status this module does not
+#: name renders as the non-reading, never as whatever spelling it happened to hold. The table
+#: applied this from round 8 and `--json` published the RAW value until round 11, so a gated arm
+#: holding an unnamed status could read "CANNOT RUN" on screen and "PASS" in the payload. A
+#: non-gated row has no verdict at all and renders `—` on both surfaces. Keep the two callers on
+#: this function; a second copy of the rule is how they drifted apart.
+GLYPH = {OK: "PASS", FAIL: "FAIL", UNKNOWN: "CANNOT RUN"}
+NO_VERDICT = "—"
+
+
+def rendered_status(arm: Arm) -> str:
+    """The single rendering of ``arm``'s status — table and ``--json`` both call this."""
+    return GLYPH.get(arm.status, GLYPH[UNKNOWN]) if arm.gated else NO_VERDICT
+
+
 #: Every env var named here is stripped from the child's environment before the
 #: documented command runs. The canary must measure the DEFAULT path a new user
 #: gets — an ambient ``TORTOISE_DB_URI``/``TORTOISE_DB_PATH`` inherited from the
@@ -461,18 +481,87 @@ class Report:
         return {OK: 0, FAIL: 1, UNKNOWN: 2}[self.verdict]
 
 
+#: ``info`` is PRESENT but is not an object (``"x"``, ``[]``, ``0``, ``null``) — the version
+#: metadata could not be read at all (#12589).
+INFO_UNREADABLE = "info-unreadable"
+
+
+def info_unreadable(index_doc: dict[str, Any]) -> bool:
+    """True when ``info`` is PRESENT but is not an object — a NON-READING.
+
+    ⛔ An ABSENT ``info`` is deliberately NOT this case: an empty document is pinned as a FAIL
+    (``test_a_client_document_with_no_version_is_red_not_ok``), because a caching proxy answering
+    ``{}`` must not certify that the documented install resolves. What this predicate separates is
+    the document that ANSWERED "no version" from the one whose ``info`` could not be parsed at all
+    — the same absent-vs-unreadable split ``releases_map`` makes one level down (#12525/#12589).
+
+    ⛔ It exists because the old ``latest_version`` raised on a TRUTHY non-object. The pre-diff
+    expression was ``(index_doc.get("info") or {}).get("version")``: on ``{"info": "x"}`` that
+    is an ``AttributeError``, which ``main()``'s exception backstop turned into exit 2 with a
+    traceback as the recorded reason — the right CODE by the wrong ROUTE. The FALSY non-objects
+    (``[]``, ``0``, ``null``) were swallowed by ``or {}`` into "" and reached the FAIL arm, i.e.
+    exit 1 and the "cut a release" text — a release order issued off an ``info`` this client never
+    parsed. So this predicate fixes two different defects at once, and the second one MOVES an exit
+    code (1 → 2) on purpose: fail-closed, NOT a correction of a false sentence. The falsy non-objects
+    carry no version at all, so "carries no latest version" was literally true of them; what was
+    wrong was issuing a VERDICT off an unparsed field. (``version_unreadable`` is the sibling case
+    where the old sentence really was false: ``{{"version": 0.3}}`` carries a version.)
+    #12589 review, P2: state the split rather than claiming an invariance that does not hold.
+    """
+    return "info" in index_doc and not isinstance(index_doc["info"], dict)
+
+
+#: ``info`` is an object whose ``version`` is PRESENT but not a string (``0.3``, ``true``, ``[]``,
+#: ``null``, an object) — the version metadata could not be READ (#12589 review, P2).
+VERSION_UNREADABLE = "version-unreadable"
+
+
+def version_unreadable(index_doc: dict[str, Any]) -> bool:
+    """True when ``info`` is an object but ``info.version`` is present and not a string.
+
+    The third predicate this module needs, for symmetry with the two above it: the same class, one
+    key further in. Before it, ``{"info": {"version": 0.3}}`` was coerced to "" and reported as
+    "carries no latest version" — a FAIL, exit 1, a release order — while the IDENTICAL shape one
+    key across (``{"releases": {"0.3.0": {}}``) had just been made UNKNOWN. Two readers, one
+    document, opposite verdicts about which shapes are answers.
+
+    An ABSENT ``version`` and an EMPTY STRING ``version`` stay on the FAIL arm: both are pinned
+    (``test_a_client_document_with_no_version_is_red_not_ok``), and both are the document
+    ANSWERING that it serves nothing — which is exactly the claim the FAIL sentence makes.
+    """
+    info = index_doc.get("info")
+    if not isinstance(info, dict):
+        return False
+    return "version" in info and not isinstance(info["version"], str)
+
+
 def latest_version(index_doc: dict[str, Any]) -> str:
-    """The version the index serves as latest (``info.version``), else ""."""
-    info = index_doc.get("info") or {}
+    """The version the index serves as latest (``info.version``), else "".
+
+    Never raises: a non-object ``info`` yields "" (see ``info_unreadable``), and the ARM decides
+    whether that empty reading is a FAIL (the document answered) or an UNKNOWN (it did not).
+    """
+    info = index_doc.get("info")
+    if not isinstance(info, dict):
+        return ""
     version = info.get("version")
     return version if isinstance(version, str) else ""
 
 
-#: The ``releases`` key is ABSENT from a document that still carries ``info``. PyPI
-#: documents ``releases`` as deprecated and REMOVABLE — "In the future, each of these keys
-#: may be removed entirely from this API response" (docs.pypi.org/api/json) — so an absent
-#: key is the absence of an ANSWER about installable files, not an answer that there are
-#: none (#12525).
+#: The ``releases`` map could not be READ: the key is absent, present as explicit JSON
+#: ``null``, or present-but-wrong-typed (``[]``, ``"…"``, ``0``). PyPI documents ``releases``
+#: as deprecated and REMOVABLE — "In the future, each of these keys may be removed entirely from
+#: this API response" (docs.pypi.org/api/json) — so a missing key is the absence of an ANSWER
+#: about installable files, not an answer that there are none (#12525).
+#:
+#: ⛔ THE NAME IS NARROWER THAN THE TOKEN'S USE, and the token is rendered to an operator in the
+#: STEP SUMMARY table and the ``--json`` payload: someone reading ``(releases-absent)`` over
+#: ``"releases": []`` who is pointed at PyPI's deprecation is being pointed AWAY from the shape
+#: actually served. This comment is the definition the token is read against, so it names every
+#: shape that produces it (#12590 review note, fixed here rather than left to drift).
+#: ⚠️ NOT the alert issue's body: that body is `$why` + `tail -n 40` of the TRANSCRIPT file, so it
+#: carries no TOKEN. An arm detail can reach it only by way of the transcript's own command output
+#: (the pip case — see the measured note beside ``engine-init``), which this token is not part of.
 RELEASES_ABSENT = "releases-absent"
 
 
@@ -503,12 +592,251 @@ def releases_map(index_doc: dict[str, Any]) -> dict[str, Any] | None:
     return releases
 
 
-def release_files(index_doc: dict[str, Any], version: str) -> list[dict[str, Any]]:
-    # One source of truth for what an absent key means, so the two arms cannot disagree
-    # about one response (#12525).
-    releases = releases_map(index_doc) or {}
-    files = releases.get(version) or []
-    return [f for f in files if isinstance(f, dict)]
+#: A release map this client cannot read an INSTALLABLE-FILE reading from: a version value that
+#: is not a list, a list holding an entry that is not an object, or a file entry with no boolean
+#: `yanked` / no non-empty string `filename` (#12589). One constant, ONE enumeration of its causes —
+#: the client arm's UNKNOWN detail, the OK-branch NOTE, the `resolvable_releases` docstring and
+#: this comment all say the SAME words, because an operator reads them against each other and an
+#: empty-string `filename` is of the documented TYPE while still being unusable (#12589 review
+#: round 6, P3: "not of the documented type" understated it in two of the four sites).
+RELEASES_UNREADABLE = "releases-unreadable"
+
+
+def readable_entries(files: Any) -> tuple[list[dict[str, Any]], bool]:
+    """One version's file OBJECTS, and whether anything in its value could not be read.
+
+    Returns ``(entries, partial)``: the file objects this client could read, plus ``True`` when it
+    had to DROP something — a value that is not a list at all (then ``entries == []``), or a list
+    holding an entry that is not an object.
+
+    ⛔ WHY IT DOES NOT DROP THE WHOLE VALUE (#12589 review, P2). The first revision returned
+    ``None`` for the entire value as soon as ONE entry was not a dict, which turned a real green
+    into a permanent CANNOT-RUN: ``{"0.3.0": [good_wheel, "junk"]}`` reported OK before the change
+    and UNKNOWN after it, even though the readable wheel record alone settles the arm's EXISTENTIAL
+    claim ("the unpinned requirement resolves"). The grain is the same one the value-level branch
+    uses: read what you can, REPORT that something was dropped, and let the caller apply the
+    polarity — OK may stand on what was read, FAIL may not.
+
+    ⛔ And ``[]`` is not 'unreadable', for the same reason ``releases_map``'s ``{}`` is not 'absent':
+    ``[]`` is the ANSWER "this release lists no files".
+    """
+    if not isinstance(files, list):
+        return [], True
+    entries = [entry for entry in files if isinstance(entry, dict)]
+    return entries, len(entries) != len(files)
+
+
+def resolvable_releases(index_doc: dict[str, Any]) -> tuple[list[str], str]:
+    """Versions that make ``pip install <pkg>`` (UNPINNED) resolve, and what could not be read.
+
+    TWO INDEPENDENT FACTS, because the two arms' claims differ in polarity:
+
+    * ``versions`` — the releases holding a non-yanked FILE OBJECT. The arm's OK claim ("the
+      unpinned requirement resolves") is EXISTENTIAL: one readable installable release settles it,
+      so an unreadable value elsewhere cannot withdraw it (it could not make pip stop resolving).
+      A PARTLY readable value counts too — the entries this client read can witness OK.
+    * ``reason`` — ``""`` when every value and every entry was read, else the shape that was not:
+      ``RELEASES_ABSENT`` (the map is absent / null / not an object) or ``RELEASES_UNREADABLE``
+      (a value that is not a list, an entry that is not an object, or a file entry with no boolean
+      ``yanked`` / no non-empty string ``filename``).
+
+    ⛔ AND THE FAIL CLAIM IS UNIVERSAL, WHICH IS WHY ``reason`` EXISTS (#12589). "The index lists
+    NO installable file in ANY release" is only TRUE once every value has been read. Emitting it
+    from a partial parse orders the irreversible PyPI upload the #12525 split exists to prevent,
+    one level below the map's own type: a cache emitting ``{"0.3.0": {}}`` (or
+    ``{"0.3.0": ["name.whl"]}``) left ``resolvable`` empty and the arm RED, i.e. "cut a release",
+    off a listing that was never understood. So ``reason`` gates FAIL, and only FAIL.
+
+
+    The line is between an answer and a non-answer, NOT between "some files" and "no files":
+    ``{}``, ``{"0.3.0": []}``, all-yanked files and a non-yanked file are all COMPLETE readings
+    (``reason == ""``), because those documents did answer (#12525's pins keep their meaning).
+    """
+    releases = releases_map(index_doc)
+    if releases is None:
+        return [], RELEASES_ABSENT
+    resolvable: list[str] = []
+    reason = ""
+    for version, files in releases.items():
+        installable, unreadable = judged_value(files)
+        if unreadable:
+            # Not readable (in whole or in part): it can neither establish nor withdraw the
+            # existential OK claim by itself, but the entries that WERE read still can.
+            reason = RELEASES_UNREADABLE
+        if installable:
+            resolvable.append(version)
+    return resolvable, reason
+
+
+def judged_value(files: Any) -> tuple[bool, bool]:
+    """``(has_installable_file, unreadable)`` for ONE version's value. THE one definition.
+
+    ⛔ AN ENTRY IS NOT CONSULTED UNTIL IT CARRIES WHAT MAKES IT A FILE (#12589 review rounds 3, 4
+    and 7). Round 3 caught the FLAG, round 4 the OTHER field (never read at all), and round 7
+    caught that a caller had re-derived the question with a WEAKER reader:
+
+      * an entry with no `yanked` (`{}`) read as "not yanked" and GREENED the arm on a value
+        nothing was read FROM;
+      * `"yanked": "false"` (a truthy STRING) read as yanked and reported "NO installable file in
+        ANY release" — FAIL, exit 1, the release order;
+      * `{"yanked": False}` with no `filename` was called installable — a false PASS off an object
+        that is not a file record.
+
+    PyPI documents each entry as a file object carrying `filename` + a boolean `yanked`, so
+    anything else is a shape outside the contract: the entry is dropped and ``unreadable`` is set.
+    ⛔ THE DROPPED ENTRY neither establishes nor withdraws the existential OK claim — but a VALUE
+    holding one readable installable entry still DOES establish it, and the arm then discloses the
+    partial read in its detail (the "MIXED at entry grain" pin). This paragraph said "the value
+    neither establish nor withdraw" until #12589 review round 18, i.e. the pre-round-2 rule its own
+    code rejects.
+
+    ⛔ ONE DEFINITION, because the OK detail ALSO asks this question about ONE version ("is the
+    advertised release installable?") and re-deriving it from ``release_files`` — which only sees
+    STRUCTURAL unreadability — classified a field-level drop as the decisive "not resolvable",
+    i.e. the exact artifact claim from a non-reading this issue removes. NOTE this is the only
+    place that needs either field: ``release_files``/``upload_time`` enumerate and timestamp, and
+    neither activity consults `yanked` or needs a filename.
+    """
+    entries, partial = readable_entries(files)
+    judged = [
+        entry
+        for entry in entries
+        if isinstance(entry.get("yanked"), bool)
+        and isinstance(entry.get("filename"), str)
+        and entry["filename"]
+    ]
+    return any(not entry.get("yanked") for entry in judged), partial or len(judged) != len(entries)
+
+
+#: The arms whose failure means "the PUBLISHED ENGINE BUILD at this version is stale". Named
+#: positively so the `tree-version` row can never blame the engine artifact on some other arm's
+#: failure (#12589 review rounds 10 and 11).
+ENGINE_ARMS = frozenset({"engine-index", "engine-init"})
+
+#: The arms in WHEEL mode that exercise the wheel just built — the only ones whose red supports
+#: "The BUILT wheel fails its documented first command" (#12589 review round 12, P3). An arm that
+#: grows later cannot inherit that claim by failing.
+WHEEL_COMMAND_ARMS = frozenset({"engine-init"})
+
+
+def engine_build_implicated(report: Report) -> bool:
+    """Whether an arm whose failure implicates the PUBLISHED ENGINE BUILD is red.
+
+    ⛔ AN ALLOW-LIST OVER `ENGINE_ARMS`, not "any FAIL that is not the client" (#12589 review round
+    11, P3). Round 10 keyed this on the ABSENCE of one name, so a THIRD gated arm (a
+    documented-command smoke, say) failing would re-emit the engine-stale claim that round exists
+    to remove — an arm set that grows cannot grow a false claim this way. Extracted from the row's
+    construction so the property is testable with a report that has an arm `build_report` does not
+    produce today.
+    """
+    return any(arm.gated and arm.status == FAIL and arm.name in ENGINE_ARMS for arm in report.arms)
+
+
+#: ``installability`` results — three states, so a caller cannot fold "could not read" into
+#: "read and negative" (#12589 review round 7, P2). Round 11's comment shuffle left these three
+#: undocumented and the sentence attached to `ENGINE_ARMS`; the review caught it (#12589 round 12).
+INSTALLABLE = "installable"
+NOT_INSTALLABLE = "not-installable"
+INSTALLABILITY_UNKNOWN = "unreadable"
+
+
+def installability(index_doc: dict[str, Any], version: str) -> str:
+    """Whether ``version`` has an installable file: INSTALLABLE / NOT_INSTALLABLE / UNKNOWN.
+
+    The same question, asked about ONE version, through the SAME reader ``resolvable_releases``
+    uses — see ``judged_value``. A caller that instead asks ``release_files(...) is None`` gets a
+    weaker answer: that reader only sees STRUCTURAL unreadability, so a value whose entries were
+    dropped for an unreadable ``yanked``/``filename`` looks READ and NEGATIVE, and the OK arm would
+    print "not resolvable for an unpinned install here" about a listing it never read (#12589
+    review round 7, P2).
+
+    An ABSENT version key in a READABLE map is NOT_INSTALLABLE — that IS an answer ("no such
+    release"), the same split ``release_files`` makes. An unreadable MAP is UNKNOWN.
+    """
+    releases = releases_map(index_doc)
+    if releases is None:
+        return INSTALLABILITY_UNKNOWN
+    if version not in releases:
+        return NOT_INSTALLABLE
+    installable, unreadable = judged_value(releases[version])
+    if installable:
+        return INSTALLABLE
+    return INSTALLABILITY_UNKNOWN if unreadable else NOT_INSTALLABLE
+
+
+def missing_version_arm(
+    name: str, index_doc: dict[str, Any], *, package: str, answered_detail: str
+) -> Arm:
+    """The arm for a document that yields no version: FAIL if it answered, UNKNOWN if it did not.
+
+    Shared by the engine and client arms on purpose — the two readings must not be able to
+    disagree about one shape (#12589), which is the same reason ``releases_map`` exists. Three
+    input classes, two verdicts: a present-but-not-an-object ``info`` and a present-but-not-a-
+    string ``version`` are NON-READINGS (UNKNOWN); an absent (or empty-string) version is the
+    document ANSWERING that it serves nothing, which is the FAIL this arm already had.
+    """
+    if info_unreadable(index_doc):
+        return Arm(
+            name,
+            UNKNOWN,
+            # ⛔ NOT "the version it serves": `info` may be `[]`/`null`/`0`, which carries no
+            # version at all — naming one would be the non-reading-as-property class this issue
+            # removes, in the form the parallel `version_unreadable` arm already words correctly
+            # (#12589 review round 8, P3).
+            f"could not read the index metadata for {package} — the document's `info` is "
+            f"PRESENT but is not an object ({INFO_UNREADABLE}), so the version metadata this "
+            f"arm reads is UNPARSEABLE (any version the document may carry was never "
+            f"obtained). That is a NON-READING: it says nothing about whether the "
+            f"distribution resolves, and it is NOT a reason to cut a release",
+        )
+    if version_unreadable(index_doc):
+        return Arm(
+            name,
+            UNKNOWN,
+            f"could not read the version the index serves for {package} — `info.version` is "
+            f"PRESENT but is not a string ({VERSION_UNREADABLE}), so the metadata this arm "
+            f"reads is UNPARSEABLE. That is a NON-READING: it says nothing about whether the "
+            f"distribution resolves, and it is NOT a reason to cut a release",
+        )
+    return Arm(name, FAIL, answered_detail)
+
+
+def release_files(index_doc: dict[str, Any], version: str) -> list[dict[str, Any]] | None:
+    """One version's file objects, ``[]`` when absent, ``None`` when the listing is unreadable.
+
+    The STRICT reader for STRUCTURAL drops: an unreadable map, an unreadable value, or a
+    non-object entry is ``None``, because a caller reporting this as an ENUMERATION — the gated
+    FAIL arm's count — must not print a count nobody read.
+
+    ⛔ BUT "ANY DROP" WOULD BE FALSE, and this docstring said it until #12589 review round 14 (P3):
+    a FIELD-LEVEL drop (an entry with no boolean ``yanked`` / no non-empty string ``filename``) is
+    returned here as a usable entry, because those two fields are only consulted by
+    ``judged_value``. That asymmetry is deliberate — ``upload_time`` needs neither field — and it is
+    exactly why the FAIL count is reached only on the branch where ``unreadable == ""``: the VERDICT
+    path never infers "no installable file" from this reader's output alone. The verdict itself does NOT come from here: the client arm
+    reads ``resolvable_releases``, which applies the existential/universal polarity. That one
+    VERDICT-path call site treats a ``None`` as an invariant failure that raises (fail-closed to
+    exit 2) rather than printing a count it did not read.
+
+    ⛔ AND IT IS NOT THE READER FOR A PARTIAL-TOLERANT ACTIVITY (#12589 review round 4, P3).
+    ``upload_time`` wants timestamps, which need neither ``yanked`` nor ``filename`` — so it reads
+    through ``readable_entries`` directly. This docstring previously said "its callers report this
+    as an enumumeration, a count, a timestamp", which was wrong in the direction that cost a
+    reading: the timestamps in a partly-readable listing WERE read, and this reader would have
+    dropped them ("uploaded unknown ago").
+
+    One source of truth for what an absent key means, so the two arms cannot disagree about one
+    response (#12525) — and, since #12589, one source of truth for what an UNREADABLE map or value
+    means too, INCLUDING at the map level (``releases_map`` returning ``None`` is ``None`` here,
+    not an empty listing).
+    """
+    releases = releases_map(index_doc)
+    if releases is None:
+        return None  # no usable map at all — #12525's non-reading, not an empty listing
+    if version not in releases:
+        return []  # absent version key — an ANSWER ("no such release"), pinned as []
+    entries, partial = readable_entries(releases[version])
+    return None if partial else entries
 
 
 def upload_time(index_doc: dict[str, Any], version: str) -> datetime | None:
@@ -519,7 +847,18 @@ def upload_time(index_doc: dict[str, Any], version: str) -> datetime | None:
     what users get".
     """
     stamps = []
-    for entry in release_files(index_doc, version):
+    # ⛔ PARTIAL-TOLERANT, ON PURPOSE (#12589 review round 4, P3): a timestamp needs neither
+    # `yanked` nor `filename`, so an entry this client could not judge as INSTALLABLE can still
+    # tell us when the release first existed. Reading through the strict `release_files` would
+    # drop a timestamp it had read and print "uploaded unknown ago" for a release whose listing
+    # was readable in part. `None` from `releases_map` (no usable map) is the only total
+    # non-reading here, and it means no timestamp — this row is informational and must never
+    # crash or gate a run.
+    releases = releases_map(index_doc)
+    if releases is None or version not in releases:
+        return None
+    entries, _partial = readable_entries(releases[version])
+    for entry in entries:
         raw = entry.get("upload_time_iso_8601") or entry.get("upload_time")
         if not isinstance(raw, str) or not raw:
             continue
@@ -618,11 +957,20 @@ def build_report(
     else:
         version = latest_version(engine_doc)
         if not version:
+            # FAIL when the document ANSWERED (no version in a readable `info`) and UNKNOWN when
+            # it did not (#12589). The exit code did NOT move for a TRUTHY non-object `info` —
+            # that already raised into main()'s exit-2 backstop. It DID move (1 → 2) for the
+            # falsy ones (`[]`, `0`, `null`), which `or {}` swallowed into the FAIL arm: a
+            # deliberate fail-closed move, because "carries no latest version" was a false
+            # claim about a document that carries one in a shape we refuse to parse.
             report.add(
-                Arm(
+                missing_version_arm(
                     "engine-index",
-                    FAIL,
-                    f"index metadata for {ENGINE_PACKAGE} carries no latest version",
+                    engine_doc,
+                    package=ENGINE_PACKAGE,
+                    answered_detail=(
+                        f"index metadata for {ENGINE_PACKAGE} carries no latest version"
+                    ),
                 )
             )
         else:
@@ -670,11 +1018,17 @@ def build_report(
             # distribution resolves: the engine arm treats the identical shape as a
             # FAIL, and a caching proxy answering `{}` must not turn the documented
             # install path green (#12363 review B4).
+            # ⛔ A NON-OBJECT `info` IS NOT THAT SHAPE (#12589): it is present and unparseable, so
+            # the arm cannot even ask the version question — UNKNOWN, not a FAIL that would order
+            # a release. `missing_version_arm` makes this one decision for both arms.
             report.add(
-                Arm(
+                missing_version_arm(
                     "client-published",
-                    FAIL,
-                    f"the {CLIENT_PACKAGE} index document carries no published version",
+                    client_doc,
+                    package=CLIENT_PACKAGE,
+                    answered_detail=(
+                        f"the {CLIENT_PACKAGE} index document carries no published version"
+                    ),
                 )
             )
         else:
@@ -702,8 +1056,81 @@ def build_report(
             # PyPI upload, off a response that never answered the question. `{}` PRESENT is
             # still a FAIL: that IS an answer, and it is pinned by
             # `test_a_client_version_with_no_INSTALLABLE_file_in_ANY_release_is_red`.
-            releases = releases_map(client_doc)
-            if releases is None:
+            resolvable, unreadable = resolvable_releases(client_doc)
+            if resolvable:
+                # ⛔ OK OUTRANKS AN UNREADABLE SIBLING, because the two claims differ in POLARITY
+                # (#12589 review, P3). "The unpinned requirement resolves" is EXISTENTIAL — one
+                # readable installable release settles it, and an unreadable value elsewhere
+                # cannot make pip stop resolving. The FAIL below is UNIVERSAL ("NO installable
+                # file in ANY release") and therefore does need a complete parse. Reading them
+                # the same way would lose a true PASS: a mirror emitting one odd-shaped version
+                # value turned a genuine green into a daily CANNOT-RUN red. The detail DISCLOSES
+                # the partial parse so the reading is not overstated.
+                partial = (
+                    ""
+                    if not unreadable
+                    else f"; NOTE {unreadable}: part of this release map could not be read "
+                    f"(a value that is not an array, an entry that is not an object, or a "
+                    f"file entry with no boolean `yanked` / no non-empty string `filename`), "
+                    f"so this list is the READABLE subset"
+                )
+                # ⛔ THE DETAIL NAMES WHAT WAS READ, NOT WHAT PIP RESOLVES TO (#12589 review
+                # rounds 3, 4 and 5). `info.version` is what the index ADVERTISES; an unpinned
+                # requirement resolves to the HIGHEST installable release, which membership in
+                # `resolvable` does not establish (0.2.0 advertised + 0.3.0 also installable →
+                # pip takes 0.3.0). Printing `unpinned → 0.2.0` there asserted a resolution the
+                # reading never computed, and on the partial path it asserted one about the very
+                # version whose listing was not read.
+                # ⛔ AND THE CLAUSE DEPENDS ON WHETHER THE ADVERTISED VERSION WAS READ AT ALL
+                # (#12589 review rounds 5 and 6). Three states, three sentences:
+                #   * it is installable → say so;
+                #   * its listing could NOT be read → say THAT (`could not be READ here`), because
+                #     "not resolvable" would be an artifact claim manufactured from a non-reading,
+                #     and it would be byte-identical to the READABLE all-yanked case below;
+                #   * it was read and is not installable (yanked, empty, no usable file, or
+                #     ABSENT from a readable map — `installability` returns NOT_INSTALLABLE for a
+                #     missing version key too, and that path is reachable through `build_report`)
+                #     → "not resolvable for an UNPINNED install here", which is what this arm
+                #     tests. NOT
+                #     "not installable": a yanked release installs fine under a `==` pin (PEP 592
+                #     is what makes an unpinned requirement skip it).
+                # ⛔ THE THREE STATES ARE BRANCHED ON, not folded (#12589 review round 9, P3).
+                # The round-7 version asked `client_version in resolvable` FIRST and then
+                # `installability(...) != NOT_INSTALLABLE`, i.e. it collapsed the enum back to two
+                # states and relied on the membership test happening to be equivalent. The
+                # three-state contract of `installability` is now visible in the code, and the
+                # third state (UNKNOWN) names itself instead of arriving through a negation —
+                # one definition of "read", `judged_value` behind `installability`, never
+                # `release_files` (which cannot see a field-level drop; round 7, P2).
+                # ⛔ AN ALLOW-LIST, NOT A DENY-LIST (#12589 review round 11, P3). Round 9 made
+                # the three states visible but left the negative sentence on `else:`, so any
+                # FOURTH state a future reader returns would be rendered as the decisive "not
+                # resolvable" instead of naming itself — the same unearned-negative class this
+                # issue exists to remove. The positive branch now has to be the one that speaks.
+                state = installability(client_doc, client_version)
+                if state == INSTALLABLE:
+                    advertised = f"advertised latest {client_version} is installable"
+                elif state == NOT_INSTALLABLE:
+                    advertised = (
+                        f"advertised latest {client_version} is not resolvable for an "
+                        f"unpinned install here"
+                    )
+                elif state == INSTALLABILITY_UNKNOWN:
+                    advertised = f"advertised latest {client_version} could not be READ here"
+                else:
+                    advertised = (
+                        f"advertised latest {client_version} could not be READ here "
+                        f"(unrecognised installability {state!r})"
+                    )
+                report.add(
+                    Arm(
+                        "client-published",
+                        OK,
+                        f"{CLIENT_PACKAGE} resolves on the index ({advertised}; installable: "
+                        f"{', '.join(sorted(resolvable))}){partial}",
+                    )
+                )
+            elif unreadable == RELEASES_ABSENT:
                 report.add(
                     Arm(
                         "client-published",
@@ -717,33 +1144,50 @@ def build_report(
                         f"to cut a release",
                     )
                 )
+            elif unreadable:
+                # ⛔ AN UNPARSEABLE FILE LISTING IS NOT AN EMPTY ONE (#12589). The FAIL below
+                # asserts "NO installable file in ANY release"; a version value that is not a
+                # list (or a list of non-objects) leaves that sentence unproven, and emitting it
+                # would order an irreversible release off a listing this client never
+                # understood. `{}` / empty lists / all-yanked stay COMPLETE readings and keep
+                # their FAIL (#12525's pins).
+                report.add(
+                    Arm(
+                        "client-published",
+                        UNKNOWN,
+                        f"could not read a file listing out of the {CLIENT_PACKAGE} release "
+                        f"map ({unreadable}) — a version value that is not an array, an entry "
+                        f"that is not an object, or a file entry with no boolean `yanked` / no "
+                        f"non-empty string `filename`. PyPI documents each version's value as "
+                        f"an ARRAY of file objects, so this is a shape this client cannot "
+                        f"parse, and whether `pip install {CLIENT_PACKAGE}` resolves is "
+                        f"UNKNOWN, not false. This is NOT evidence the artifact is broken and "
+                        f"is NOT a reason to cut a release",
+                    )
+                )
             else:
-                resolvable = [
-                    version
-                    for version, files in releases.items()
-                    if isinstance(files, list)
-                    and any(isinstance(entry, dict) and not entry.get("yanked") for entry in files)
-                ]
-                if resolvable:
-                    report.add(
-                        Arm(
-                            "client-published",
-                            OK,
-                            f"{CLIENT_PACKAGE} resolves on the index (unpinned → "
-                            f"{client_version}; installable: {', '.join(sorted(resolvable))})",
-                        )
+                # ⛔ Reached ONLY when `unreadable` is "" — i.e. every value AND every entry was
+                # read — so `release_files` cannot be `None` here. The guard is not decorative: if
+                # that invariant is ever relaxed, raising fails CLOSED into main()'s exit-2
+                # backstop instead of printing "0 file(s) … none usable", a count nobody read.
+                # That sentence is the release order this issue exists to remove (#12589 review,
+                # P3).
+                files = release_files(client_doc, client_version)
+                if files is None:
+                    raise RuntimeError(
+                        "the FAIL verdict on the client arm requires a COMPLETE reading of the "
+                        "release map; `resolvable_releases` reported it complete but "
+                        "`release_files` could not read it (#12589)"
                     )
-                else:
-                    listed = len(release_files(client_doc, client_version))
-                    report.add(
-                        Arm(
-                            "client-published",
-                            FAIL,
-                            f"the {CLIENT_PACKAGE} index lists NO installable file in ANY release "
-                            f"({listed} file(s) on {client_version}, none usable) — README.md "
-                            f"documents `pip install {CLIENT_PACKAGE}`, which cannot resolve",
-                        )
+                report.add(
+                    Arm(
+                        "client-published",
+                        FAIL,
+                        f"the {CLIENT_PACKAGE} index lists NO installable file in ANY release "
+                        f"({len(files)} file(s) on {client_version}, none usable) — README.md "
+                        f"documents `pip install {CLIENT_PACKAGE}`, which cannot resolve",
                     )
+                )
 
     # 4. informational rows — reported, never gated (see module docstring).
     published = latest_version(engine_doc or {})
@@ -764,12 +1208,25 @@ def build_report(
                 # that version — today's exact state (0.2.0 published, 0.2.0 in the
                 # tree, wheel missing #2204). Saying "no bump pending" here tells the
                 # operator the opposite of what the summary row requires (#12363 round 5).
-                relationship = (
-                    "the tree carries the same version — a bump IS required: the "
-                    "published build at this version predates the fix"
-                    if report.verdict == FAIL
-                    else "the tree's version (no bump pending)"
-                )
+                # ⛔ AND ONLY THE ENGINE ARM IMPLICATES THE ENGINE BUILD (#12589 review round 10,
+                # P3). "the published build at this version predates the fix" was emitted for ANY
+                # FAIL, so a client-arm FAIL (e.g. `tortoise-client` 404) — with the engine build
+                # at that version PASSing in the row above — claimed the engine artifact was stale.
+                # Two sentences, each true of its arm.
+                engine_failed = engine_build_implicated(report)
+                if report.verdict == FAIL and engine_failed:
+                    relationship = (
+                        "the tree carries the same version — a bump IS required: the "
+                        "published build at this version predates the fix"
+                    )
+                elif report.verdict == FAIL:
+                    relationship = (
+                        "the tree carries the same version — the failing arm above is NOT the "
+                        "engine build, so this version's engine artifact is not implicated; "
+                        "read the failing row before deciding what a bump would fix"
+                    )
+                else:
+                    relationship = "the tree's version (no bump pending)"
             else:
                 relationship = "the tree's version differs (a release is owed or in flight)"
             report.add(
@@ -786,18 +1243,31 @@ def build_report(
 
 def render_summary(report: Report) -> str:
     """Markdown for a CI step summary / PR comment. No emoji-only status."""
-    glyph = {OK: "PASS", FAIL: "FAIL", UNKNOWN: "CANNOT RUN"}
+    glyph = GLYPH
     lines = [
         "## Published-artifact canary (#12363)",
         "",
         f"**Verdict: {glyph[report.verdict]}**",
         "",
-        "| arm | gated | reading |",
-        "|---|---|---|",
+        # ⛔ THE STATUS COLUMN IS LOAD-BEARING, not decoration (#12589 review round 8, P2). The
+        # UNKNOWN tail tells the operator "the row marked CANNOT RUN names which" — and with a
+        # `| arm | gated | reading |` table the ONLY place the words CANNOT RUN appeared was the
+        # verdict header, so the sentence pointed at a mark that did not exist and the reader had
+        # to guess which row was the non-reader. `glyph.get(..., CANNOT RUN)` keeps this on the
+        # allow-list polarity the arms obey: a status outside the three known ones renders as the
+        # fail-closed label rather than vanishing.
+        "| arm | gated | status | reading |",
+        "|---|---|---|---|",
     ]
     for arm in report.arms:
         detail = arm.detail.replace("|", "\\|")
-        lines.append(f"| `{arm.name}` | {'yes' if arm.gated else 'no'} | {detail} |")
+        # ⛔ AN INFORMATIONAL ROW HAS NO VERDICT, so it must not be stamped with one (#12589 review
+        # round 9, P3). `release-age` is built with status OK even when its own text says "uploaded
+        # unknown ago" — the arm reads a value it did not obtain — and rendering `PASS` beside that
+        # is the non-reading-as-a-verdict class this issue removes, one row over. The verdict
+        # property ignores non-gated arms, so this changes the TABLE only.
+        status = rendered_status(arm)
+        lines.append(f"| `{arm.name}` | {'yes' if arm.gated else 'no'} | {status} | {detail} |")
     if report.verdict == FAIL:
         if report.wheel_mode:
             # Branch on which arm actually failed. A substring test was wrong twice: the
@@ -805,19 +1275,77 @@ def render_summary(report: Report) -> str:
             # `tortoise` console script", which contains "install" and rendered as "does
             # not install" — false, it installed cleanly. Match the LEADING clause, and
             # name the entry-point case separately (#12363 rounds 5 and 6).
+            # ⛔ AN ALLOW-LIST, AND THE FALLBACK NAMES THE ARM (#12589 review round 12, P3). The
+            # trailing `else:` published "fails its documented first command" for ANY gated arm
+            # whose detail matched neither prefix, so an arm added later inherited the wheel's
+            # claim — the same class round 11 removed from `engine_build_implicated`. Only the two
+            # shapes that can NAME their claim keep it; anything else says which arm is red and
+            # asks the operator to read it.
             step = next((arm for arm in report.arms if arm.gated and arm.status == FAIL), None)
             detail = step.detail if step is not None else ""
-            if detail.startswith("the BUILT wheel") and "failed to install" in detail:
+            # ⛔ EVERY BRANCH HERE IS GATED ON THE ARM, NOT ONLY ON ITS PROSE (#12589 review round
+            # 17, P3). A bare `"console script" in detail` let a hand-built report whose failing
+            # arm merely MENTIONS a console script render "The BUILT wheel installs but ships no
+            # `tortoise` console script … this is a code defect" — the wheel's claim attributed to
+            # an arm that never installed it. Only the arm that runs the built wheel can support
+            # any of these sentences.
+            runs_the_wheel = step is not None and step.name in WHEEL_COMMAND_ARMS
+            named_it = False
+            if (
+                runs_the_wheel
+                and detail.startswith("the BUILT wheel")
+                and "failed to install" in detail
+            ):
                 what = "does not install"
-            elif "console script" in detail:
+                named_it = True
+            elif runs_the_wheel and "console script" in detail:
                 what = "installs but ships no `tortoise` console script, so the documented first command cannot run"
-            else:
+                named_it = True
+            elif runs_the_wheel and "created no database" in detail:
+                # ⛔ THE COMMAND EXITED 0 (#12589 review round 21, P3). `install_and_run` reports
+                # "reported success but created no database" for a wheel whose documented command
+                # RAN and left nothing behind — saying it "fails its documented first command" is a
+                # claim the arm's own detail contradicts, in the row directly above it. Measured on
+                # the rendered summary; no test had exercised this producer shape.
+                what = (
+                    "runs its documented first command successfully but creates no database, "
+                    "so the documented flow does not work"
+                )
+                named_it = True
+            elif runs_the_wheel:
+                # The arm that RUNS the built wheel's documented command — the only one whose
+                # failure establishes this sentence (`test_wheel_mode_fail_names_a_build_defect_
+                # not_a_release` is this shape: the wheel installs, `tortoise init` exits 1).
                 what = "fails its documented first command"
+                named_it = True
+            else:
+                # ⛔ AND THE FALLBACK CLAIMS NOTHING BEYOND ITS OWN READING (#12589 review rounds
+                # 12 and 13). Round 12 made this branch name the arm, but left the shared tail
+                # sentence "fix the tree … a code defect, not a release-owed finding" attached to
+                # it — a CLASSIFICATION this branch has just said it cannot establish. The arm
+                # `step` is provably non-None here: `report.verdict == FAIL` implies a gated red
+                # arm exists, which is the same predicate that produced `step`. The earlier
+                # `else 'no arm reported'` survived that proof as an unreachable literal — a claim
+                # no arm supports, kept in the OUTPUT (#12589 review round 20, P3). Do not
+                # reintroduce a rendered fallback for a state the invariant excludes; if a guard
+                # is ever wanted, make it an assert, not text.
+                what = (
+                    f"is NOT judged by this summary: the failing arm is "
+                    f"`{step.name}` "
+                    f"({detail or 'no detail'}) — read it, because that arm does not establish "
+                    f"that the built wheel fails its documented command"
+                )
             lines += [
                 "",
-                f"The BUILT wheel {what}. Nothing has been "
-                "uploaded: fix the tree and re-dispatch this publish. This is a code "
-                "defect, not a release-owed finding. See #12363.",
+                f"The BUILT wheel {what}. Nothing has been uploaded. "
+                + (
+                    "Fix the tree and re-dispatch this publish: this is a code defect, not a "
+                    "release-owed finding. See #12363."
+                    if named_it
+                    else "Read that arm before deciding whether this is a code defect or a "
+                    "wheel-mode wiring problem — the summary cannot tell you which. "
+                    "See #12363."
+                ),
             ]
         else:
             lines += [
@@ -828,10 +1356,33 @@ def render_summary(report: Report) -> str:
                 "credentials. See #12363.",
             ]
     elif report.verdict == UNKNOWN:
+        # ⛔ THE TAIL POINTS AT THE ROW, AND NOTHING MORE (#12589 review rounds 4 and 5). The
+        # pre-fix text named ONE mechanism ("could not read the index") for every CANNOT RUN,
+        # which is false when the non-reading is a SHAPE the canary refuses. The fix is the first
+        # sentence: it covers both mechanisms and defers to the mark on the arm. A second
+        # paragraph that tried to rule the transport OUT was added in round 4 and REMOVED in round
+        # 5, because it fired exactly where its premise was wrong: whenever every index row reads
+        # OK, the CANNOT RUN arm is `engine-init` — i.e. the install did fail in transport — and in
+        # wheel mode both index rows read "not consulted" with status OK, so the paragraph denied
+        # the transport on the two shapes where the transport IS the story. Do not reintroduce a
+        # per-mechanism claim here without a condition that can actually see the arm.
+        # ⛔ THE POINTER MUST POINT AT A ROW THAT EXISTS (#12589 review round 9, P3). A `Report`
+        # with no arms, or with only informational ones, renders no CANNOT RUN row — and the
+        # sentence still told the operator to read one. When nothing is marked, say so: a
+        # verdict of CANNOT RUN with no unreadable arm is a CANARY defect, not an artifact one.
+        marked = [arm.name for arm in report.arms if rendered_status(arm) == glyph[UNKNOWN]]
+        where = (
+            "the row marked CANNOT RUN names which ("
+            + ", ".join(f"`{name}`" for name in marked)
+            + ")"
+            if marked
+            else "NO row is marked CANNOT RUN, which is a defect in the canary itself rather "
+            "than in the artifact — report it, do not cut a release"
+        )
         lines += [
             "",
-            "The canary could not read the index or could not exercise the "
-            "artifact. Reported as RED on purpose: a detector that cannot run "
+            "The canary could not READ something it needs, or could not exercise the "
+            f"artifact: {where}. Reported as RED on purpose: a detector that cannot run "
             "must never look like a pass.",
         ]
     return "\n".join(lines) + "\n"
@@ -1499,7 +2050,13 @@ def _main(argv: list[str] | None = None) -> int:
                     "arms": [
                         {
                             "name": a.name,
-                            "status": a.status,
+                            # ⛔ THE MACHINE SURFACE RENDERS IT THE SAME WAY THE TABLE DOES —
+                            # by CALLING the table's renderer (#12589 review rounds 10 and 11).
+                            # Round 10 gave this line its own copy of the rule, which fixed the
+                            # non-gated half and left the gated half publishing a RAW status: an
+                            # arm holding an unnamed status read "CANNOT RUN" on screen and that
+                            # spelling in the payload. One function, both surfaces (P3).
+                            "status": rendered_status(a),
                             "gated": a.gated,
                             "detail": a.detail,
                         }

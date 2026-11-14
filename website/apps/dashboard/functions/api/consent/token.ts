@@ -46,6 +46,7 @@ import {
 import { getAccessTokenForSession } from "../../_shared/auth/token";
 import {
   attemptKeyHash,
+  consentSecret,
   mintConsentToken,
   readConsentAttempt,
 } from "../../_shared/auth/consent-bridge";
@@ -185,7 +186,10 @@ async function mint(request: Request, env: Env): Promise<Response> {
   // ── the signing key first: without it there is nothing this route can do ────────────
   // Fail CLOSED and NAMED (§2.3). Never a hardcoded default: a default secret is a
   // forgeable consent, and an "empty key" would sign a token anyone could mint.
-  const secret = env.CONSENT_TOKEN_SECRET;
+  // ⛔ Through `consentSecret(env)`, the SAME accessor `api/consent/key.ts` publishes the fingerprint
+  // from — reading `env.CONSENT_TOKEN_SECRET` here directly is how the mint and the fingerprint
+  // could one day disagree about which bytes the key is (see that accessor's docstring).
+  const secret = consentSecret(env);
   if (!secret) {
     return corsJson(env, origin, { error: "unavailable", reason: "not_configured" }, 503);
   }

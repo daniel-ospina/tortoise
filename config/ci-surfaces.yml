@@ -737,6 +737,24 @@ surfaces:
   # exists for (the "guard for X does not run when X changes" class). The `core`
   # arm covers the `record_projection.py` migration resolver the same pin reads.
   - test_health_build_identity_10447.py
+  # #10488: the `/health` consent-key block (`consent_token_key`). DUAL-REGISTERED (api + core) for
+  # exactly the reason above: `tortoise/hosted_api.py` is an exact `api` SOURCE_PATTERN and a match
+  # REPLACES the `core` fallback, so registering this only in `core` would mean a hosted_api.py-only
+  # diff that dropped or broke the block ran NO guard at all. Measured before this row existed:
+  # `tools/ci_selection.py --changed-files tortoise/hosted_api.py` → surfaces ['api','onboarding']
+  # and the file was NOT selected. Coverage of the OTHER files this change touches is by different
+  # mechanisms, each verified: a `tools/consent_key_check.py`-only edit selects `api` through its
+  # SOURCE_PATTERNS row (see `tools/ci_selection.py`), a Pages-route edit
+  # (`functions/api/consent/key.ts`) selects `onboarding`, where `test_oauth_consent_bff_routes.py`
+  # lives and pins the cross-language fingerprint equality, and a workflow edit sets `full: true`.
+  - test_consent_key_fingerprint_10488.py
+  # #10488: the drift COMPARISON's verdict table. Registered in `api` as well as `core` because
+  # `tools/consent_key_check.py` is an `api` SOURCE_PATTERNS row (a checker-only edit would otherwise
+  # select no surface at all — `tools/` is a flat NON_PYTHON_PREFIXES entry), and a named-surface
+  # match REPLACES the `core` fallback. The `core` arm carries the same pin wherever `core` is
+  # selected — measured: `--changed-files config/ci-surfaces.yml` → `['core']`, both consent
+  # guards selected. It is NOT a per-class claim: see the note on the `api` row above.
+  - test_consent_key_check.py
   # #7816: importing tortoise.hosted_api must not write the audit JSONL fallback
   # into $HOME. Dual-registered from `core` for the reason this list exists: the
   # guard subprocess-imports tortoise/hosted_api.py, an exact `api` surface match
@@ -955,6 +973,40 @@ surfaces:
   # through to `core`. A one-surface registration drops this file on either
   # half's own diff — the #1349/#3332 silent-drop class the manifest exists for.
   - test_10602_wait_bound_breach_visible.py
+  # #10749: the health tail must fit INSIDE the transport wait bound. Dual-registered
+  # for the same reason as #10602 directly above and #3834 before it: the publish sites
+  # live on BOTH halves — `setup_timeout_clamped` / `setup_timeout_clamped_s` on the
+  # MCP `tortoise_health` report (`tortoise/mcp_server.py`) and `health_setup_clamped`
+  # on the hosted `/health` body (`tortoise/hosted_api.py`). ⛔ NOT the per-call pair on
+  # the hosted body: that endpoint never runs `tortoise_health`, so it carries only the
+  # counter (grep for `setup_timeout_clamped` in `hosted_api.py` is zero — an earlier cut
+  # of this row claimed otherwise). `hosted_api.py` is an
+  # exact `api` SOURCE_PATTERN that REPLACES the `core` fallback. The counter family
+  # it also pins lives in `tortoise/monitoring.py`, which falls through to `core`.
+  # MEASURED with this manifest: `--changed-files` = `tortoise/hosted_api.py` alone
+  # resolves `['api','onboarding']`, and a `core`-only registration drops this file
+  # from that selection — the #1349/#3332 silent-drop class.
+  - test_10749_health_tail_under_transport_bound.py
+  # #12477/#2876: the health surfaces must not read green over a failing data plane. Added
+  # to `main` by `ea5d476e9b` (#12488) WITHOUT a manifest row, so `--integrity` reported it
+  # as drift on every head carrying that file and red `manifest-integrity` (a `needs` of the
+  # required `python-ci-gate`) repo-wide — #2876's recurring class, recorded there. It imports
+  # `tortoise/hosted_api` AND `tortoise/monitoring`, i.e. exactly its sibling's module pair
+  # above, so it is dual-registered `api`+`core` for that sibling's reason: `hosted_api.py` is
+  # an EXACT `api` SOURCE_PATTERNS match that REPLACES the `core` fallback, while the liveness
+  # readers it pins live in `tortoise/monitoring.py`, which falls through to `core`. A
+  # one-surface registration drops this file on the other half's own diff — MEASURED with
+  # the `core` row alone: `select(['tortoise/hosted_api.py'])` did NOT include this file,
+  # so a `hosted_api.py`-only regression of the `/health` verdict (#12477 itself) carried
+  # no guard. Registered in BOTH lists, like `test_11892_health_quota.py`.
+  #
+  # ⛔ ONE row per list, deliberately: this entry had been emitted TWICE in `.surfaces.api`
+  # and twice in `.surfaces.core` by the `merge=union` driver (.gitattributes) when two
+  # racing merges each added it — exactly the duplicate the `registry_integrity.py` step
+  # exists to catch (#5373), and undetected on `main` because `manifest-integrity` had not
+  # yet run on the sha that carried it. The redundant copies are deleted, not merged: both
+  # carried the same classification.
+  - test_12477_health_honesty.py
   - test_agent_signup.py
   - test_agent_signup_idempotency.py
   - test_api.py
@@ -1490,6 +1542,19 @@ surfaces:
   - test_mcp_route_challenge.py  # #2864: RFC 9728 challenge on /mcp 401s + /mcp route canonicalization (docker lane)
   - test_mcp_server.py
   - test_mcp_server_auth_modes.py
+  # The #12500/#12455/#12372 refusal pins all drive `mcp_server.tortoise_query`
+  # through an http-transport fixture that SETS `tortoise/mcp_auth.py`'s
+  # contextvars (`_transport_mode`, `_current_org_id`, `_current_org_limits`) —
+  # and `mcp_auth.py` is an exact `api` SOURCE_PATTERN, not a SHARED_MODULE, so a
+  # named match REPLACES the `core` fallback. Measured: `--changed-files
+  # tortoise/mcp_auth.py` selects this surface and did NOT include any of the
+  # three, so a transport-context regression (the flag that decides whether
+  # `_get_org_sdk` is the accessor those pins stub) ran them zero times. The same
+  # measurement the `test_wait_bound_write_ack.py` row above records, and why
+  # these sit beside `test_mcp_server.py` rather than under `core` alone.
+  - test_12500_query_args_dropped.py
+  - test_12455_text_filters_dropped.py
+  - test_12372_entity_type_dropped.py
   # #10849 (found by the fold's own `ci_selection.py --integrity`, NOT by CI — the gate
   # cannot see an unregistered file, only its absence): #10856 adds this file and registered
   # no surface, so `manifest-integrity` (a required `python-ci-gate.needs` leg) reddened by
@@ -2312,6 +2377,14 @@ surfaces:
   # it guards span `tortoise/` — a battery-only or sdk-only change must run it.
   - test_vector_write_seam_4520.py
   core:
+  # #10749: DUAL-REGISTERED with `api` — see the `api` row for the measurement and
+  # WHY both halves are load-bearing (`hosted_api.py` is an exact `api` SOURCE_PATTERN
+  # that REPLACES the `core` fallback; `tortoise/monitoring.py` only falls through to
+  # `core`, so a `core`-only row would drop this file on `hosted_api.py`'s own diff and
+  # an `api`-only row on `monitoring.py`'s). ⚠️ `tortoise/mcp_server.py` is NOT part of
+  # that argument: it is a `SHARED_MODULE`, so its own diff forces the FULL matrix and
+  # selects this file regardless of either row.
+  - test_10749_health_tail_under_transport_bound.py    # #10749: dual: api
   - test_12296_entity_verdict.py
   # #11892 option (3): the `health.quota` boundary report — see the `api` row for
   # the dual registration and WHY both are load-bearing (a `core`-only row was
@@ -2386,6 +2459,18 @@ surfaces:
   # `test_ci_selection.py` pins in `test-slow`), and a diff to this file must
   # select `core`, where it runs.
   - test_12500_query_args_dropped.py
+  # #12477: the health surfaces must not read green over a failing data plane
+  # (the `/health` body's verdict and the 9090 listener's registration). Landed in
+  # `main` UNREGISTERED — so `main` was red on `integrity()` and every PR's merge
+  # ref inherited it. The mechanism, measured on that PR (#12488): the leg is NOT
+  # blind before the merge — `manifest-integrity` runs on every event and completed
+  # FAILURE at 04:28:39Z, and the PR merged at 05:15:26Z anyway (enforce_admins:
+  # false, owner merge). That is a STRONGER instance than #11978 records: there the
+  # leg completed AFTER the merge ("The gate is correct — it simply reported after
+  # the tree was already on `main`"); here it completed FAILURE 47 minutes BEFORE
+  # it, so the leg does not GATE the merge either. Registered here so
+  # the recovery travels with the next PR that touches this file.
+  - test_12477_health_honesty.py
   - test_candidate_recall_11901.py
   - test_journal_segments.py
   - test_journal_segments_falsifier.py
@@ -5935,6 +6020,38 @@ surfaces:
   # guard tests key presence); a ZERO row packs it at weight 0. Neither is a
   # substitute for the measured value (#4259 review).
   - test_fly_secret_drift.py
+  # #10488: the consent bridge's key-fingerprint halves. Registered in `core` beside the other
+  # deploy-time config guards (test_fly_secret_drift.py, test_fly_machines_guard.py,
+  # test_deploy_workflow.py) because the defect it closes is the SAME class one provider along: a
+  # secret whose value is set by hand in one deployment and by CI in the other, with no comparison
+  # between them. `test_consent_key_check.py` pins the comparison's verdict table (including the
+  # MISMATCH arm, which is the 2026-11-01 incident); `test_consent_key_fingerprint_10488.py` pins the
+  # published reading itself, including the `/health` block.
+  # ⛔ `test_consent_key_fingerprint_10488.py` is DUAL-REGISTERED (`api` + here). `tortoise/hosted_api.py`
+  # is an EXACT `api` SOURCE_PATTERN, and a match REPLACES the `core` fallback — so a
+  # hosted_api.py-only diff that dropped or broke the `/health` block would select `api` and this
+  # guard would NOT run. Measured: `tools/ci_selection.py --changed-files tortoise/hosted_api.py` →
+  # surfaces `['api','onboarding']`, and the `api` row above is what makes the pin run there.
+  # ⛔ The `core` arm does NOT cover the other file classes of this change — measured, one row each:
+  # a `tools/consent_key_check.py` edit selects `api` (its own SOURCE_PATTERNS row, so both consent
+  # guards run); a `docs/engineering/auth/consent-identity-bridge.md` edit selects
+  # `['api','onboarding']` (that doc is now an `api` SOURCE_PATTERNS row too — ⛔ NOT because it
+  # ran no guard before: `onboarding` already runs three consent guards on it, but NONE of them
+  # pins §2.5, so a §2.5-only rewrite of the runbook was invisible — and the pin that DOES cover
+  # §2.5 (`test_the_SPEC_section_2_5_still_states_the_contract_the_code_implements`, in
+  # `test_consent_key_fingerprint_10488.py`) lives in `api`, which the `api` row above is what selects); a
+  # `functions/api/consent/key.ts` edit selects `onboarding` (the BFF suite pins the cross-language
+  # equality); and a workflow edit sets
+  # `full: true`. What the `core` arm covers is the diff that SELECTS `core` — measured:
+  # `--changed-files config/ci-surfaces.yml` → `['core']`, both guards selected.
+  - test_consent_key_check.py
+  - test_consent_key_fingerprint_10488.py
+  # #10488: the §4.4 operator-table pin. Its SELECTION comes from `tier1` (a runbook-only diff
+  # reaches nothing else); this `core` row is what CLASSIFIES it, because `tier1` is not a
+  # manifest surface and an unclassified test file is integrity drift (#1266) — measured:
+  # `--integrity` → `half i entry test_consent_key_runbook_10488 is not in any manifest surface`.
+  # Belt-and-braces on the selection side too: `core` is where the consent pair already lives.
+  - test_consent_key_runbook_10488.py
   # #5656: the MACHINE-side half of #4568 — asserts the RUNNING machine's
   # `config.env` carries every `fly-toml-env` name with the value `fly.toml`
   # `[env]` declares. Registered in `core` beside its sibling deploy-time guards
@@ -9668,6 +9785,20 @@ tier1:
 # Pinned by tests/test_ci_selection.py::
 # test_the_record_schema_placement_pins_run_on_a_doc_only_diff.
 - test_record_schema_placement.py
+# #10488: the OPERATOR-facing table for the consent-key check (§4.4 of the runbook — the
+# `consent_token_key` field list, the `configured: null` state, the closed `reason` vocabulary,
+# and the two misreads: a rotation window that legitimately reads MISMATCH, and `fly secrets set`
+# being reverted by the next deploy). Same mechanism as the two entries below: the runbook matches
+# no SOURCE_PATTERNS row and `docs/` is in NON_PYTHON_PREFIXES, so a runbook-only diff takes the
+# docs-only early return — tier1 ONLY — and `select()` emits a surface's test files only for a
+# surface it MATCHED. So a pin on that table registered on `api`/`core` alone would be asleep on
+# the only diff that can break it. Measured before this entry:
+# `select(['docs/infra-runbook.md'])` -> `surfaces=[]`, this file NOT selected; selected once it is
+# in. It is its OWN file, not a test inside the fingerprint suite, because tier1 runs on EVERY PR:
+# one table does not justify pulling fourteen unrelated tests into the always-run smoke.
+# Hermetic (one file read, no graph, no DB) — tier1 is the correct lane. Pinned by
+# tests/test_ci_selection.py::test_the_consent_key_runbook_pin_runs_on_a_runbook_only_diff.
+- test_consent_key_runbook_10488.py
 # #11064 review round 9 (P2): the two runbook readers that census left asleep. Same
 # mechanism as the entry above — `docs/infra-runbook.md` matches no SOURCE_PATTERNS
 # entry and `docs/` is in NON_PYTHON_PREFIXES, so a runbook-only diff filters to
@@ -10652,7 +10783,11 @@ durations_floors:
   test_calibration.py: {value: 355.0, pinned: true}
   eval/write_path/test_write_path_operator_lane.py: {value: 355.0, pinned: true}
 durations:
+  test_consent_key_check.py: 2.0  # new in #10488 — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the durations refresher samples push-to-main runs only), so it takes the flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core`/`api` registrations above put it in `fast_pool()`, and `--integrity` stays green either way, so only this row records the weight. ⛔ No local timing and no CASE COUNT are quoted on purpose — a figure beside a weight re-stales against the run it came from, and the count is `tools/ci_selection.py --integrity`'s business; `tools/ci_timing.py --refresh-durations` replaces this from the first push-to-main junit sweep that includes the file. What the weight covers: the checker AND the workflow it feeds — the exit-code table, the fingerprint and closed-set `reason` gates, the fail-closed `configured` states, and the alert body's arms EXECUTED end to end against a stubbed `auto-file-issue.sh`, each pin checked against the mutation it names. Hermetic: the transport is a fake `urlopen`, no docker, no graph, no network, no model call.
+  test_consent_key_fingerprint_10488.py: 2.0  # new in #10488 — same #3400/#4348 basis as the row above: PR-added, so flat `DEFAULT_FAST_WEIGHT`, no local reading. DUAL-REGISTERED (`api` + `core`), and both registrations are what put it in `fast_pool()`. What the weight covers: the two implementations must agree BYTE-FOR-BYTE — the Python `consent_key_fingerprint` against the shape the TS twin computes, the `\Z` anchor (a trailing newline must not pass), the whitespace/padding arms, and the rule that a fingerprint is derived from the same bytes the HMAC signs and never from a normalised value. ⛔ The CASE COUNT is deliberately not quoted (`tools/ci_selection.py --integrity` is the authority).
+  test_consent_key_runbook_10488.py: 2.0  # new in #10488 — same #3400/#4348 basis: PR-added, flat `DEFAULT_FAST_WEIGHT`, no local reading. What the weight covers: the OPERATOR table in `docs/infra-runbook.md` §4.4 — its heading, the three field names (`key_fingerprint`/`configured`/`reason`), the closed six-code `reason` vocabulary, the `null`-is-not-`false` misread, `MISMATCH`-during-a-rotation reading as the rotation, the `fly secrets set`-alone-is-reverted warning, the `sha256sum | cut -c1-12` reproduce one-liner, and the `gh workflow disable consent-key-drift` off-switch. ⛔ NOT the `\Z` anchor and NOT a `gh secret set` invocation: those are §2.5 pins, they live in `test_consent_key_fingerprint_10488.py`, and the row above already describes them — THIS row used to copy that description verbatim, so it claimed coverage that did not exist and a rewrite of §4.4's shape to `sha256(key)[:12]` in uppercase stayed green. The clause is now enumerated from the file it annotates. Documentation pins only: no docker, no graph, no network, no model call. ⛔ The CASE COUNT is deliberately not quoted (`tools/ci_selection.py --integrity` is the authority).
   test_m3_fts_leg_recall_12298.py: 2.0  # new in #12298 (PR #12349), registered in the repair that followed it — the #3400/#4348 trap: a file a PR ADDS cannot carry a CI junit reading yet (the refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core`/`tier1` registrations above put it in `fast_pool()`, and the coverage check is a 0.90 RATIO — it cannot police one missing row, which is why `tests/test_ci_selection.py` carries the entry rule as a note beside `ROWED_BY_THIS_FOLD`. ⛔ **No local timing is quoted beside this weight, on purpose** — a seconds figure copied next to a shard-layout input re-stales against the run it came from, and only a CI junit reading may move the value. What the weight covers: hermetic — no DB, no graph, no network, no model call — though ⛔ NOT "stdlib-only": the file imports `pytest` and the DB-free `tortoise.sparse` / `tortoise.search_engine` at call time (round-14 finding 2; the same row already half-admitted it in its defect-claim clause). The harness `tools/m3_fts_leg_recall.py` is `importlib`-loaded by path (its own heavy imports are function-local), the committed `artifact.json`/`population.json` are read, the brief's published tables that the artifact can DERIVE are recomputed from it CELL BY CELL — §0, §3.1, §3.2, §3.3, §3.5, §2's census and §3.3's decomposition — plus its derived PROSE figures, each scoped to the section that carries it (§0's Reading-2 bullets and §4's Result line, §4.1's rule clauses, §4.2's decomposition, §2's corpus provenance, §3.3's path-gap and ident-recall sentences, §3.4's empty-result count, ident `recall@3` and its miss count, §3.5's mechanism sentence, §4.4's "at any k" count with its rows-zero-uniformity assertion, §4.3's derived prose (its share column compared as a fixed, non-re-derivable value), §2's write-order claim, §2's reuse-guard claims, `SEARCH-ARCHITECTURE.md` §6.2's status note, §5's stricter-leg direction and its `understate` clause, §6's `#11901` `rows_zero` pair and its `21.1 %` share); §4.3's share column is compared as a FIXED value — its 62.3 %/2.2 %/9.0 % come from the committed `#2730` attachment audit's brief, so they are not re-derived from `artifact.json`, but the three cells ARE asserted (review cycle 4's finding was that they were not) — and the changelog's four pinned claims — its recall@3 table, fixture-count sentence, k=5 direction and `snake_case` finding; NOT its paired-p/Δ columns, which nothing pins — ⛔ backed by a recomputation from the arms' per-query `ranks` — `recall_by_k` and every paired statistic are re-derived from the ranks that produced them, so the summary cells and the prose cannot agree with each other while disagreeing with the run, and `tokens_controlled_subset` is checked against its own `n` because it is computed over 174 rows, not 300 — and the DEFECT claim is asserted against the real functions (`sparse.tokenize_sparse_query` splits on `_` where RediSearch's index does not), so the tokenizer repair the brief recommends (#12350) reds this file instead of silently dating the prose. The measurement itself is deliberately NOT run: it needs a live FalkorDB, a `pg_search` Postgres and a real capture corpus, and a test that needed those would skip on CI and guard nothing (#11901's convention). No DB, no graph, no docker, no network, no model call. ⛔ The CASE COUNT is deliberately not quoted: it moves whenever a review round adds a pin. `tools/ci_selection.py --integrity` is the authority; `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
+  test_10749_health_tail_under_transport_bound.py: 2.0  # new in #10749 — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core` + `api` registrations above put the file in `fast_pool()`, and `--integrity` exits 0 either way (the 0.90 coverage ratio has headroom), so only this row records the weight. What the weight covers: hermetic by construction — every case drives `mcp_server`'s health tail in process (the REAL `_await_under_mcp_wait_bound` called directly with a stand-in inner handler, the `_WAIT_BOUND_DEADLINE` ContextVar set and read directly, the handler's allowance clamped and asserted by monkeypatching `monitoring.metrics`), plus one case that runs `monitoring.metrics` FOR REAL with a `0.0` allowance against a scripted slow-cold-start handle (no connect, the probe gives up on its own deadline), and one that asserts the served `hosted_api.health()` body — so the clamp arithmetic, the counter, the `/health` publish and the stdio/no-arrival-stamp arms cost no DB, no graph, no network, no model call and no spawned server. ⚠️ Its cost is FOUR real blocking waits, measured with `--durations` on this head: 2.00 s + 2.00 s + 1.50 s + 1.50 s ≈ 7.0 s in a 10.8 s file (the two 2.00 s cases hold the seam and spend the budget; the two 1.50 s ones drive a slow cold start through the REAL `metrics()` at the full per-attempt budget). ⛔ An earlier cut of this row said "ONE real blocking wait, `time.sleep(2.0)`" and then explained the 0.4 s handle away as non-blocking — the measurement falsifies both halves: there are four, and in the two 1.50 s cases the CALLER does block for its whole budget while that same handle sleeps. What is true of the 0.4 s handle is narrower: its `time.sleep(0.4)` runs on the probe's daemon worker AFTER `metrics()` has returned (measured: `metrics(...)` returns in ~4 ms while `_get_proj` is still sleeping), so it is not itself the caller's cost. No total is quoted as a weight input, because a seconds figure beside a shard-layout input re-stales against the run it came from. ⛔ The CASE COUNT is deliberately not quoted: it moves whenever a review round adds a pin — exactly how a hand-written count re-stales. `tools/ci_selection.py --integrity` is the authority; `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
   test_11892_health_quota.py: 2.0  # new in #11892 option (3) — the #3400/#4348 trap: a file a PR ADDS cannot carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"), and the `tests/` fallback in `select()` is what puts it in `fast_pool()` as `core`. ⛔ No case count and no local timing are quoted on purpose: a hand-written count re-stales on every round a reviewer adds a case (this file gained cases inside its own PR), and a reading taken on a contended lane box is not a shard-layout input. What the weight covers: the `health.quota` boundary report end to end — `quota.org_quota_state`'s four states (open/closed/unknown/not_applicable), the truth-table that drives `enforce_org_limit` itself and asserts the report is `closed` exactly when the gate refuses, the UNLIMITED present-but-`None` limit (#683), the fail-closed arms (a missing `max_points` key, an unreadable limit, a count that raises, a count that overruns its budget), and the `mcp_server.tortoise_health` attach path (the block is present, a closed quota does NOT degrade `status`, and a quota read that explodes still leaves health answering). GRAPH-TOUCHING but not server-backed: most cases take a throwaway EMBEDDED engine per test under `tmp_path` (no docker, no Postgres, no network, no model), and the boundary table patches `_count_resource` instead of materialising 31,248 points, so no case writes more than a couple of rows. `tools/ci_selection.py --integrity` is the authority; `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
   test_12447_provision_discovery.py: 2.0  # new in #12447 — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the durations refresher samples push-to-main runs only), so it takes the flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `api` registration above is what puts the file in `fast_pool()`, and `--integrity` stays green either way, so only this row records the weight. `tools/ci_timing.py --refresh-durations` replaces this value from the first push-to-main junit sweep that includes the file. ⛔ No local timing and no CASE COUNT are quoted here on purpose — a figure beside a weight re-stales against the run it came from, and the count is `tools/ci_selection.py --integrity`'s business. What the weight covers: the four refusal doors end to end, each asserting the `{error_code, message}` shape and that the message names the endpoint that would work (the three PROVISIONING refusals also name `graphs:create`; the LISTING refusal deliberately names an id-recovery route instead of a scope, because no scope would make it work), and that the one-level-deep policy still holds (`_MINTABLE_SCOPES` asserted as a SET, so a future edit adding `graphs:create` reds even if every behaviour test passes on a lenient path). ⚠️ It is NOT a pure-unit file and this row does not call it one: the shared `_setup` (`tests/test_hosted_api.py`) seeds a real EMBEDDED registry — a `Team` node and a default team graph via `_seed_team_graphs` — and one case reads a stored node back out of that registry. The per-graph ACL user is NOT created there: it is created at MINT time (`_mint_graph_key(acl_strict=True)` → `_ensure_default_user_secured`), and THAT is exactly why the module declares `TORTOISE_ACL_LAYER=off` (the posture `fly.toml` ships) rather than assuming a passwordless lane can host the strict layer (#10141/#10992/#11856) — on a `nopass` lane the strict mint raises and the 201 would roll back. What it does NOT do: no docker lane, no network, no model call.
   test_published_artifact_canary.py: 2.0  # new in #12363 — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the durations refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"); the `core` registration above is what puts it in `fast_pool()`. ⛔ No local timing is quoted beside this weight on purpose — a seconds figure copied next to a shard-layout weight re-stales against the run it came from; the readings live in `WORKTREE-REPORT.md` beside the verbatim commands. What the weight covers: pure/offline verdict logic for `tools/published_artifact_canary.py` — every arm's ability to come back RED, a FAIL outranking an UNKNOWN, an empty report never green, fail-closed on an unreadable index, the ambient-`TORTOISE_*` strip that keeps the measurement on the DEFAULT path, wheel mode installing the local file rather than an index spec, and the exit-code contract the workflow relays. No DB, no graph, no network, no venv (the install/run half runs through an injected runner). ⛔ The CASE COUNT is deliberately not quoted (`tools/ci_selection.py --integrity` is the authority).
@@ -13060,6 +13195,7 @@ durations:
   test_10122_point_name_not_indexed.py: 9.4  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 15.7
   test_10194_eval_suite_non_gating.py: 5.9  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 4.7
   test_10602_wait_bound_breach_visible.py: 0.4  # The row has to EXIST, not merely default: the `api` + `core` registrations above put one more fast file in `fast_pool()`, and `--integrity`'s `duration_coverage_issues` floor is measured against that pool's own size. What the weight covers: DB-free, graph-free, network-free and model-free — the counter and its read are driven directly, and the two transport arms are driven through the real `WaitBoundMiddleware` with `_TRANSPORT_WAIT_BOUND_S` monkeypatched to 0.05s (the #6133 note below on `_hang()` under a short bound), so the file's own cost is interpreter/`hosted_api` import plus two sub-second waits. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it — ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 2.0
+  test_12477_health_honesty.py: 2.0  # The row has to EXIST, not merely default ("a default is not a reading", #3400/#4348), and the `api`+`core` registrations above put the file in `fast_pool()`, whose size `--integrity`'s `duration_coverage_issues` floor is measured against. The VALUE is the flat `DEFAULT_FAST_WEIGHT`, NOT a local reading: ⛔ this map forbids a hand-taken timing as a SHARD-LAYOUT input (#2818/#3419/#4348) — a seconds figure copied beside a weight re-stales against the run and the host it came from — and only `tools/ci_timing.py --refresh-durations` may move it. ⛔ This file is NOT PR-added: it landed on `main` in `ea5d476e9b` (#12488) and #12464 only REGISTERS it (an earlier cut of this row said otherwise, and quoted a local `--durations=0` reading the map does not accept — both retracted). `tools/ci_timing.py --refresh-durations` replaces this from the first push-to-main junit sweep that includes the file. What the weight covers: the `/health` body's verdict and the liveness readers `_start_liveness` registers, asserted through the REAL wiring — the failure is injected by moving the probe's own recorded result, so no socket and no graph are opened. ⛔ No case count is quoted on purpose: `tools/ci_selection.py --integrity` is the authority, and a count re-stales whenever a review round adds a pin.
   test_6388_startup_seam_assert.py: 0.1
   test_7949_e5_section10_writeback.py: 0.1
   test_8447_c3_ingest_door.py: 1.3  # new in #8447 C3 — the basis this row opened with is SPENT: a PR-ADDED file has no push-to-main sample yet, so it starts as a default, and the 2026-11-09 junit-census sweep has since measured it (#2818/#3419/#4348). The note is rewritten to that basis rather than left asserting the unmeasured state its own tail falsifies. The row must EXIST for the #3400/#4348 reason — a default is not a reading — and the `core` registration keeps one more file in `fast_pool()`. What the weight covers — the cost is the DOCUMENT UPSERT, not the S7 stage: an unmocked ingest constructs the real embedding model (`add_document` → `projection apply` → `entities.encode_for_row` → `EmbeddingModel.get()`), whose huggingface.co HEAD request the hermetic egress guard blocks and retries five times (#4387). It lands on the FIRST ingest in a PROCESS, because the embedder's failed-load negative cache then answers the rest — which is why pinning the ONE arm `--durations` named only moved the cost to the next arm that needed the model. The pin that holds is FILE-WIDE: the module-level autouse fixture `_no_embedder` requests `tests/conftest.py::force_sparse_tfidf` (#2573/#2772, the documented "no embedder" pin) for every arm; ⛔ do not de-duplicate it against an arm-level request, since an arm-level one alone does not cover the other full-ingest arms. The DB-bearing arms drive a real graph through `main()` — a refused `--upgrade`, a skipped re-ingest, the already-extracted skip, the `--capture-metadata` refusal, the resolution-Point control, a sweep that leaves a document behind, and the partial-extraction arms on `--upgrade` and full ingest — so the docker lane / carve-out split decides whether they run; the `skipif` on `TORTOISE_DB_URI` is class-level on two of the classes and per-method on the rest, so do not say "class-level" for the whole set. The DB-free classes run everywhere, and they are NOT all enum/entry-point assertions: the sweep-idempotency arms drive `_do_upgrade_all` against stubs, and the pointer guard parses this file's own AST and docstrings — needing no database is a different claim from needing no scrutiny. ⛔ NO WALL-CLOCK FIGURE, NO CASE COUNT, and no past-count anecdote — all three re-stale (a count on every case a round adds; a figure on every host, and on every arm that gains a model call). The mechanism and the fixture name are the durable content; the number is not. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it — ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 2.0

@@ -3,9 +3,11 @@ from __future__ import annotations  # noqa: I001
 
 import asyncio
 import contextlib
+import contextvars
 import inspect
 import json
 import logging
+import math
 import os
 import sys
 import threading
@@ -630,6 +632,333 @@ def _wait_bound_arrival() -> float | None:
         if isinstance(stamp, (int, float)):
             return float(stamp)
     return None
+
+
+#: #10749: the ABSOLUTE deadline (``time.monotonic()`` + the seam's ``remaining``) the wait-bound
+#: seam will enforce for this dispatch, as a ContextVar.
+#:
+#: ⛔ It is the FIRST/initial deadline, not a hard cap on everything the seam may spend. On the
+#: #4055 one-time cold-setup exemption the seam DRAINS the load and RE-ARMS
+#: (``mcp_auth.await_under_wait_bound``: ``remaining = max(0.0, float(timeout))``), so it can
+#: enforce up to 2x the original bound while the handler clamps under the EARLIER deadline — a
+#: health call that takes the exemption can therefore report an avoidable ``status="unknown"``.
+#: The direction is SAFE (over-clamped, never under), which is why the clamp keeps using this value
+#: rather than tracking the re-arm; it is recorded so a future reader does not take the
+#: ``unknown`` on that path for a store fault.
+#:
+#: ``_wait_bound_arrival()`` is None on stdio and on the self-hosted apps (only
+#: ``hosted_api.WaitBoundMiddleware`` writes that stamp) — but the seam still enforces the FULL
+#: ``_TRANSPORT_WAIT_BOUND_S`` there (``remaining = float(_mcp_auth._TRANSPORT_WAIT_BOUND_S)  #
+#: stdio / no HTTP request``), so "no stamp" is NOT "no deadline": re-deriving the deadline from
+#: the stamp alone read that arm as unbounded and left the tool's 26.0 s tail inside a 10.0 s
+#: bound, which is #10749's defect preserved on stdio and self-hosted HTTP.
+#:
+#: ⛔ A DEADLINE, not the DURATION the seam happens to have left when it bound this. A duration is
+#: frozen at bind time, and the seam's own ``wait_for(shield(task), remaining)`` clock started THEN
+#: — so anything the dispatch spends before the handler clamps (graph resolution, `_get_org_sdk()`)
+#: would be silently un-deducted, and the handler would claim an allowance it no longer has. Measured
+#: with a 4.0 s in-dispatch spend: the duration shape granted the full ``bound − reserve`` and the
+#: worst case became 13.5 s inside a 10.0 s bound, i.e. the -32009 refusal this change removes.
+#: Reading the deadline back at the point of use is what makes the reserve arithmetic true where it
+#: is enforced.
+#: `None` therefore means "the seam never ran" — a direct in-process call (a unit test,
+#: ``_original_call_tool`` reached unwrapped) — the only state where #3143's unclamped allowance is
+#: still the right answer.
+_WAIT_BOUND_DEADLINE: contextvars.ContextVar[float | None] = contextvars.ContextVar(
+    "tortoise_wait_bound_deadline", default=None)
+
+
+#: #10749: the margin kept back from the transport deadline AFTER the health tool's other three
+#: bounded phases, so a clamped report still has time to be serialised and delivered before the
+#: caller's own deadline expires. Nothing waits on it — it is a reserve, not a timeout.
+_HEALTH_TAIL_MARGIN_S = 0.5
+
+
+def _mcp_remaining_wait_bound() -> float | None:
+    """Seconds left of the deadline the seam bound for THIS dispatch, or None if it never ran.
+
+    Prefers the ContextVar deadline (it covers stdio and the self-hosted apps, where no arrival
+    stamp exists but the bound is still enforced) and SUBTRACTS the time already spent in this
+    dispatch, so the number returned is the deadline's remaining life NOW, not when the seam
+    started. Falls back to the arrival stamp for a call that reached the tool body without the seam
+    binding — the stamp is still a real deadline, and it too is read as of now.
+    """
+    deadline = _WAIT_BOUND_DEADLINE.get()
+    if deadline is not None:
+        return max(0.0, float(deadline) - _time.monotonic())
+    arrival = _wait_bound_arrival()
+    if arrival is None:
+        return None
+    return max(0.0, float(_mcp_auth._TRANSPORT_WAIT_BOUND_S)
+               - (_time.monotonic() - arrival))
+
+
+#: The documented per-phase bound for the ``quota`` block (``quota.QUOTA_STATE_TIMEOUT``).
+#: ⛔ A FALLBACK, never a second source of truth — ``_quota_state_timeout`` reads the real constant
+#: whenever the module can supply it, and ``tests/test_10749_health_tail_under_transport_bound.py``
+#: pins this figure equal to ``quota.QUOTA_STATE_TIMEOUT`` so the two cannot drift apart silently.
+_QUOTA_STATE_TIMEOUT_FALLBACK_S = 3.0
+
+#: Documented defaults for the two ``monitoring`` phase constants, used only when a stale or
+#: partially written module cannot supply them (#12482 fresh review, P3). Over-reserving only
+#: SHORTENS the allowance and can never widen the tail, so the documented value is the safe
+#: fallback. ``test_the_quota_timeout_fallback_is_the_documented_constant`` pins all three, so a
+#: constant that moves cannot leave its fallback behind.
+_PROBE_TIMEOUT_FALLBACK_S = 1.5
+_GRAPH_SIZE_TIMEOUT_FALLBACK_S = 1.5
+
+
+def _phase_timeout(value: object, fallback: float) -> float:
+    """``value`` as a phase timeout in seconds, or ``fallback`` when it cannot be one.
+
+    ⛔ FINITE AND NON-NEGATIVE, not merely convertible (#12482 cycle-5 review, P2 — measured).
+    ``float()`` ADMITS ``nan`` and ``inf``, so a corrupted ``monitoring.PROBE_TIMEOUT = float('nan')``
+    passed the conversion guard untouched and made ``_health_tail_reserve()`` ``nan``; then
+    ``min(knob, remaining - nan)`` returned the KNOB (every ``nan`` comparison is False), so at
+    ``remaining`` 10.0 the allowance came back **20.0** with no clamp marker — #10749's defect
+    restored, through the helper built to make the arithmetic safe. It also FALSIFIED the
+    fallback's own premise ("over-reserving only shortens the allowance and can never widen the
+    tail"): ``nan`` widens the allowance back to the FULL unclamped knob — 20.0 at the shipped
+    default — with no clamp marker, so the report claims a deep probe it cannot deliver. (Bounded
+    by the knob, not by infinity: its ceiling is ``probe_setup_timeout()``'s 300.0. The ``inf``
+    arm is the opposite extreme — a reserve of ``inf`` floors the allowance at 0.0.) A negative
+    constant points the same way at the reserve (a smaller reserve widens the allowance) and is
+    not a duration at the budget site, so both are rejected here rather than at each call site.
+
+    ⛔ Only the DOMAIN is judged; the numeric arms still come from the constant or its documented
+    fallback, exactly as before. ``except Exception`` is retained deliberately: this is a planning
+    read on the health path, and a broken module can raise anything from ``__float__``.
+    """
+    try:
+        seconds = float(value)  # type: ignore[arg-type]
+    except Exception:  # a planning read must never turn the health answer into an error
+        return fallback
+    return seconds if math.isfinite(seconds) and seconds >= 0.0 else fallback
+
+
+def _monitoring_timeout(attribute: str, fallback: float) -> float:
+    """``monitoring.<attribute>`` as a float, or ``fallback`` when the module cannot supply it.
+
+    ⛔ NEVER RAISES, for the same reason ``_quota_state_timeout`` does not: ``_health_tail_reserve``
+    is a PLANNING site outside any ``try`` in ``tortoise_health``'s tail, so an ``AttributeError``
+    here reached ``_safe`` and REPLACED the health answer with ``{'error': ...}`` — a payload with
+    no ``status`` key at all (measured on the pre-fix tree, ``monitoring.PROBE_TIMEOUT`` deleted and
+    ``quota`` intact: ``keys ['error']``). That is a different observable from the stale-QUOTA case
+    below, where the last mile depends on how stale the module is: a module that still carries
+    ``QuotaCheckError``/``QuotaExceededError`` gets the same ``{'error': ...}`` shape, while one
+    missing those classes too has the ``ImportError`` ESCAPE the tool entirely, because ``_safe``'s
+    own handler imports them unguarded (#12647). Same class of harm, different last mile.
+    Guarding the quota read alone closed ONE of the two modules this arithmetic depends on.
+
+    ⛔ The VALUE is judged by ``_phase_timeout``, not merely converted: a name that exists and
+    converts but is not a usable duration (``nan``/``inf``/negative) falls back too. This is the
+    helper the cycle-5 review measured the hole ON (``PROBE_TIMEOUT`` is read only here) — its twin
+    ``_quota_state_timeout`` already carried a non-numeric pin for the ``None``/``'3.0s'`` shapes,
+    which is why the delta closed that class on one side and left ``float()``'s non-finite arm open
+    on this one.
+    """
+    try:
+        value = getattr(monitoring, attribute)
+    except Exception:  # a planning read must never turn the health answer into an error
+        return fallback
+    return _phase_timeout(value, fallback)
+
+
+def _quota_state_timeout() -> float:
+    """``quota.QUOTA_STATE_TIMEOUT``, or its documented default when the module cannot supply it.
+
+    ⛔ NEVER RAISES, and that is the whole point (#12482 fresh review, P3). Both callers are
+    PLANNING sites in ``tortoise_health``'s tail, reached outside any ``try``: a bare ``from
+    tortoise.quota import QUOTA_STATE_TIMEOUT`` at a stale or partially-written module raised
+    ``ImportError``, and the last mile then depended on HOW stale the module was — measured: a
+    module that still carries ``QuotaCheckError``/``QuotaExceededError`` is caught by ``_safe`` and
+    answers ``{'error': ...}`` with no ``status`` key, while one missing those classes too leaves the
+    tool ENTIRELY, because ``_safe``'s OWN handler imports them from ``tortoise.quota`` unguarded
+    (#12647). Either way the clamp's own safety arithmetic took down the
+    instrument that reports whether the product is up, on a box where ``/health`` on main answered
+    normally. The ``#11892`` block below imports ``tortoise.quota`` INSIDE its own ``try`` for
+    exactly this reason; this helper is that rule applied to the two planning sites that run BEFORE
+    it.
+
+    ⛔ The coercion is inside the guard too: a partially written module can supply the NAME and not
+    a number (``QUOTA_STATE_TIMEOUT = None``), and ``float()`` outside the ``try`` raised
+    ``TypeError`` out of the same planning site (measured, fresh review P2) — the identical last
+    mile as the absent-name arm above, through the helper built to prevent it.
+
+    Over-reserving only shortens the allowance and can never widen the tail, so the fallback is the
+    constant's own documented value rather than ``0.0``: a phase whose bound cannot be read is
+    still planned for, conservatively.
+
+    ⛔ THE CONVERSION IS INSIDE THE GUARD TOO (cycle-4 review, P3). An importable module carrying a
+    non-numeric constant raised ``TypeError``/``ValueError`` from ``float()`` OUTSIDE the ``try``,
+    while the first paragraph claimed the helper never raises. Measured on the previous head: a
+    ``None`` constant raised ``TypeError`` and ``'3.0s'`` raised ``ValueError``. The observable is
+    the stale-quota one recorded in the first paragraph above, in whichever of its two shapes
+    applies — the ``{'error': ...}`` payload when the module still carries the exception classes
+    ``_safe`` needs, the escaped ``ImportError`` when it does not (#12647) — and NOT unconditionally
+    the escape.
+
+    ⛔ CONSERVATIVE ONLY AT THE RESERVE (cycle-4 review, P3): there the fallback merely over-reserves,
+    which shortens the allowance. At the BUDGET site (``_health_quota_budget``) the same value is
+    handed to the quota phase as its SPEND, so it is exact rather than conservative — benign only
+    because the two are pinned equal by ``test_the_quota_timeout_fallback_is_the_documented_constant``.
+
+    ⛔ The same DOMAIN rule applies at this site too (cycle-5 review, P2), though the review
+    measured the hole on ``_monitoring_timeout`` rather than here: at the BUDGET site a ``nan``
+    constant came back out of ``min(nan, remaining - margin)`` as ``nan`` — every comparison with
+    it is False — so the quota phase was handed a budget that is not a duration. Sharing
+    ``_phase_timeout`` is what keeps the two readers from drifting apart.
+    """
+    try:
+        from tortoise.quota import QUOTA_STATE_TIMEOUT
+    except Exception:  # a planning read must never turn the health answer into an error
+        return _QUOTA_STATE_TIMEOUT_FALLBACK_S
+    return _phase_timeout(QUOTA_STATE_TIMEOUT, _QUOTA_STATE_TIMEOUT_FALLBACK_S)
+
+
+def _health_tail_reserve() -> float:
+    """Everything ``tortoise_health`` spends AFTER its cold-start allowance (#10749).
+
+    ``monitoring.probe_db`` charges an explicit ``setup_timeout`` ONE deadline of
+    ``setup_timeout + PROBE_TIMEOUT``; ``metrics`` then spends up to ``GRAPH_SIZE_TIMEOUT`` on its
+    own worker; and the ``quota`` block spends up to ``quota.QUOTA_STATE_TIMEOUT`` on its own daemon
+    worker (#11892 option (3)).
+
+    ⛔ This is the PLANNING budget — what the allowance must leave room for — not the enforcement
+    mechanism. The two later phases are handed what is left in DIFFERENT ways, and the difference
+    is deliberate (#12482 fresh review, P3): the COUNT (`metrics`' `graph_size_timeout=`) is planned
+    at handler START off the probe's CEILING (`allowance + PROBE_TIMEOUT`), because a reserve can
+    only plan — so on a call whose probe ran long the count receives less than the deadline
+    actually had left. Only the QUOTA block (`_health_quota_budget`) measures its budget at its
+    own start, which is what makes the total `remaining - margin` however slowly the earlier
+    phases ran. If the deadline is shorter than this figure the allowance floors at 0.0 and the
+    later phases would otherwise still spend their full constants.
+    """
+    return (_monitoring_timeout("PROBE_TIMEOUT", _PROBE_TIMEOUT_FALLBACK_S)
+            + _monitoring_timeout("GRAPH_SIZE_TIMEOUT", _GRAPH_SIZE_TIMEOUT_FALLBACK_S)
+            + _quota_state_timeout() + _HEALTH_TAIL_MARGIN_S)
+
+
+def _health_setup_allowance(remaining: float) -> float:
+    """The cold-start allowance ``tortoise_health`` may spend inside ``remaining`` (#10749).
+
+    Unclamped, this tool's bounded tail is ``probe_setup_timeout() + PROBE_TIMEOUT +
+    GRAPH_SIZE_TIMEOUT + QUOTA_STATE_TIMEOUT`` — **26.0 s** at the shipped defaults — inside a
+    **10.0 s** transport bound that ``_await_under_mcp_wait_bound`` applies to EVERY tool, with
+    no allowlist and no exemption. A reachable store is therefore refused with the transport's
+    own vocabulary (*"the server's wait budget for this request was exceeded"*), which reads as
+    "the queue is busy" and says nothing about the tool's budget.
+
+    Measured 2026-11-13 on the deployed process (#10749): the tool answered **2 of 27** attempts,
+    and the one timed success spent **6.96 s** of its **10.77 s** round trip in the DB probe —
+    i.e. ~3.8 s of the bound is gone before the probe's first byte, so the refusal becomes
+    certain once ``db.latency_ms`` exceeds ~6.2 s.
+
+    The clamp only ever REDUCES, so #3143's cold-start allowance is preserved wherever it fits —
+    but the docstring has to say where it actually fits, rather than leave a conditional that reads
+    as "usually unaffected": surviving requires ``remaining - reserve >= 20.0``, i.e.
+    ``remaining >= 26.5 s``, while every seam-served dispatch has
+    ``remaining <= _TRANSPORT_WAIT_BOUND_S`` (10.0 s). At a FULL bound the allowance is **3.5 s** —
+    an 82 % cut on every seam-served call — so #3143's deep probe is now reachable only by a store
+    that finishes its projection cold-start inside ~3.5 s. A slower one reports an UNOBSERVED
+    result, ``metrics`` maps that to ``ok=None`` / ``status="unknown"`` (#3683), and the report
+    carries ``setup_timeout_clamped_s`` — so the caller can tell "the allowance was clamped" from
+    "the store is broken". A direct in-process call (a unit test, ``_original_call_tool`` reached
+    unwrapped — ``remaining is None``) keeps the unclamped allowance.
+
+    ⛔ BELOW THE CEILING THE KNOB IS THE SPEND — ON A DISPATCH WHOSE DEADLINE STILL LEAVES
+    ``knob + reserve`` (fresh review, final round P3: the earlier wording scoped this to the
+    CONFIGURATION and was false for a legal low knob). Configured under ``bound − reserve`` (the
+    documented minimum is 1.5 s, well under 3.5 s) such a call receives the knob verbatim, no clamp
+    marker fires, and raising the knob widens the window by that much. But the SAME configuration
+    on a dispatch that has already burned ~3 s of its bound spends only ~0.5 s for knob 1.5, 2.0,
+    3.0 or 3.4 alike, and ``setup_timeout_clamped`` IS set — so there, raising the knob widens
+    nothing. The knob sets the CEILING; the deadline decides what is left under it.
+
+    ⛔ THIS DOES NOT RESTORE THE DEEP REPORT — tracked in **#12481**, whose candidate shapes include
+    serving the deep probe from a background refresher (the shape ``/health`` already uses), which may
+    need no MCP-surface change at all; read that issue rather than assuming this is owner-gated code.
+    Reading this docstring as "the deep probe still works" would be the same class of false claim as
+    the counter docstring that said it answered a degradation rate: state the number, and route the
+    remedy.
+
+    ⛔ THE RESIDUAL IS AN ARITHMETIC BOUND, NOT A WINDOW THE TOOL REACHES (#12482 cycle 5,
+    round 2). ``max(0.0, …)`` floors the allowance, and on the first version of this change the
+    other three bounded phases still spent their own timeouts below the reserve, so a dispatch with
+    ``remaining < reserve`` (~6.5 s) overran the deadline and was served the SAME ``-32009`` this
+    change exists to remove. Both later phases are bounded too, in DIFFERENT ways — stated in full
+    above, in ``_health_tail_reserve``'s docstring — because an earlier wording here said "each
+    bounded by what is LEFT of the deadline", which is FALSE of the count:
+    ``metrics(graph_size_timeout=…)`` is planned at handler start off the probe's CEILING (so it is
+    the full constant on a fresh bound, and only shrinks when the reserve ate the deadline), while
+    ``_health_quota_budget`` measures at its OWN start and is capped at its own constant as well.
+    Together they bound the whole tail at ``remaining − margin`` however slowly the earlier phases
+    ran. ⛔ The arithmetic still RESERVES ``PROBE_TIMEOUT`` for the probe
+    even at a 0.0 allowance, and that reservation only makes the tail TIGHTER — it can never widen
+    it, so the bound above is not eroded by it. ⛔ **The figures below are a PLANNING bound, not a
+    measured spend** (fresh review of the final head, P3 — an earlier cut called them "spent"), and
+    they hold only AT OR ABOVE the reserve (verified: at 3.00 s of remaining the allowance is a hard
+    0.0, so the planned sum's four TERMS — that allowance plus ``PROBE_TIMEOUT +
+    GRAPH_SIZE_TIMEOUT + QUOTA_STATE_TIMEOUT`` — reach 6.00 s, which is not ``<= 2.50``; ⛔ an
+    earlier wording said "the four constants sum to 6.00 s" and mislabelled them, because the
+    RESERVE's four terms are 6.50 s and only these four, the 0.0 allowance included, are 6.00 —
+    fresh review of the final head, P3): the property the tests pin is
+    ``allowance + PROBE_TIMEOUT + GRAPH_SIZE_TIMEOUT + QUOTA_STATE_TIMEOUT <= remaining − margin`` at
+    ``remaining`` 10.00 and 6.50, i.e. 9.50 and 6.00. (An earlier cut of this paragraph read the
+    reservation BACKWARDS and claimed the tail could come out up to 1.5 s short OF THE MARGIN; the
+    direction is the other way — over-reserving the probe shrinks the phases after it.)
+    ⛔ **And BELOW the reserve the allowance is a hard step, not a gradient** (above it, each second
+    of remaining buys a second of allowance until the knob caps it): it is ``max(0.0, min(knob, remaining −
+    6.5))``, so at ``remaining <= 6.5`` it is exactly **0.0**. In that band the probe is submitted and
+    abandoned before its reachability query, so ``metrics`` skips the ``graph_size`` count (that
+    branch is reached only when the probe was OBSERVED) and the 1.5 s planned for the count is spent
+    on nothing; what the tool then spends is the ``quota`` phase's ``min(3.0, remaining − margin)`` —
+    exactly ``remaining − margin`` at or below 3.5 s, at most 3.0 s above that. The over-reserve is
+    conservative (it can only shorten the tail); 6.5 s is simply where the observable flips, so a
+    store answering in milliseconds still reads ``status="unknown"`` on a dispatch whose pre-handler
+    cost exceeded ~3.5 s — the shape #10749 measured, whose remedy is the deep report in #12481
+    (candidate shapes, one of which needs no surface change), not a bigger knob. With a warm
+    projection the tool RESPONDS WITHOUT A REFUSAL at ``remaining`` 2.5 /
+    1.5 / 0.6 s (``status="unknown"`` wherever the allowance is 0.0). Read the figure as an upper
+    bound the arithmetic permits, never as a refusal an operator should expect.
+    ⛔ TWO TESTS, TWO DIFFERENT FACTS (fresh review of the final head, P2 — an earlier wording said
+    both pin "the realised bound … not the constants", and the FIRST one does not):
+    ``test_the_planned_phases_fit_the_bound_when_the_reserve_fits`` pins the **planning** bound — it
+    sums ``allowance + PROBE_TIMEOUT + GRAPH_SIZE_TIMEOUT + QUOTA_STATE_TIMEOUT`` from the module
+    constants and never enters the handler, which is exactly the arithmetic the paragraph above
+    states, and it is that paragraph's pin — while
+    ``test_the_quota_budget_shrinks_by_what_the_earlier_phases_actually_spent`` pins the
+    **realised** budgets the handler actually hands each phase.
+    """
+    return max(0.0, min(monitoring.probe_setup_timeout(),
+                       remaining - _health_tail_reserve()))
+
+
+def _health_quota_budget() -> float | None:
+    """The ``quota`` phase's budget: whatever is LEFT of the transport deadline (#10749).
+
+    ``None`` means the seam never ran, so nothing is enforcing a bound and the phase keeps its own
+    ``quota.QUOTA_STATE_TIMEOUT``.
+
+    This is the phase that makes the whole tail bounded, and it is measured HERE rather than
+    planned up front on purpose: it runs LAST, so its budget can be the deadline's remaining life
+    without starving the phases before it, and no earlier phase's overrun can hide inside it.
+    Measured before it existed: a dispatch with 2.0 s left spent 3.00 s in this phase alone and was
+    refused inside the window where the runbook claimed a clamped probe never breaches the bound.
+
+    ⛔ CAPPED at the phase's own constant, not at the deadline (#12482 cycle 5, round 2): a fast
+    probe and count leave almost the whole bound here (~9 s of the 10.0 s — the exact figure moves
+    with how fast those two return, so read it as "the deadline allows about nine"), and handing
+    this phase all of it made a hung `resolve_org_limits`/count hold the SINGLE quota worker slot
+    for that long on a health read whose documented per-phase bound is
+    ``quota.QUOTA_STATE_TIMEOUT``. ``min(QUOTA_STATE_TIMEOUT, …)``
+    keeps both properties: the total still fits (this is the last phase, so a smaller budget can
+    only shorten it) and the documented 3.0 s stays true.
+    """
+    remaining = _mcp_remaining_wait_bound()
+    if remaining is None:
+        return None
+    return min(_quota_state_timeout(), max(0.0, remaining - _HEALTH_TAIL_MARGIN_S))
 
 
 def _wait_bound_refused() -> bool:
@@ -1365,7 +1694,38 @@ async def _await_under_mcp_wait_bound(name: str, arguments, *, version,
             task_meta=task_meta) if graph_ref is None else
             _scoped_dispatch(name, arguments, graph_ref, version=version,
                              task_meta=task_meta))
-        task = asyncio.ensure_future(dispatch)
+        # #10749: bind the DEADLINE THIS seam is about to enforce, so a handler that
+        # owns its own bounded phases (tortoise_health) can clamp them under it
+        # instead of re-deriving a deadline from the arrival stamp — which does not
+        # exist on stdio or the self-hosted apps even though the bound still applies.
+        # An absolute deadline rather than the `remaining` duration on purpose: the
+        # seam's `wait_for` clock starts HERE, so the handler must deduct whatever this
+        # dispatch spends before it clamps (measured: a 4.0 s graph-resolution spend made
+        # the duration shape grant an allowance whose worst case was 13.5 s inside 10.0 s).
+        # Set BEFORE the task is created so the task's copied context carries it; the
+        # reset below touches only this frame's binding, never the task's copy.
+        #
+        # ⚠️ THE THREAD HOP IS PART OF THE CONTRACT (cycle-6 review, P3). The tool bodies are
+        # SYNC callables, and fastmcp runs a sync callable via `anyio.to_thread.run_sync` with
+        # the default `abandon_on_cancel=False` — which is what propagates this ContextVar onto
+        # the worker thread (fastmcp/utilities/async_utils.py: "properly propagates
+        # contextvars"). A dispatch change to a bare `loop.run_in_executor` would NOT copy the
+        # context (cpython#78195 — the reason `hosted_api.py:460` and `tortoise/quota.py:2376`
+        # already say so), the body would read `None`, and #10749's unclamped tail would return
+        # SILENTLY. `test_the_REAL_hop_hands_the_tool_body_a_clamped_allowance` is the guard for
+        # exactly that class, and it is the ONLY one: it awaits the real chain and asserts the body
+        # ran on a different thread. ⛔ DO NOT restate a case count here (cycle-4 review, P3 — and a
+        # fresh review of the final head, P2, because that first correction left the counts in): this
+        # comment has carried a count before and it went stale on every review round that added a
+        # pin, which is BY DESIGN — the counts move, the RATIO does not. The ratio is the fact:
+        # mutating this seam to a bare `run_in_executor` leaves that ONE case red, while losing the
+        # deadline reds MANY. Keep that one case if this seam changes; the same dependency is
+        # relied on at ``tortoise_session_capture``'s cancellation note.
+        bound_token = _WAIT_BOUND_DEADLINE.set(_time.monotonic() + remaining)
+        try:
+            task = asyncio.ensure_future(dispatch)
+        finally:
+            _WAIT_BOUND_DEADLINE.reset(bound_token)
     try:
         # ``wait_for`` + ``shield`` rather than ``asyncio.wait`` — the same
         # primitive choice as ``hosted_api.WaitBoundMiddleware.__call__``. The
@@ -3952,7 +4312,7 @@ def tortoise_query(kind: str | None = None,
       by the accessor's own. They
       are applied on the text= arm, but each on a different condition:
       `min_confidence` only for `entity_type="point"` (the fts leg gates the
-      floor on the literal `entity_type == "point"`, sdk.py:43288), and
+      floor on the literal `entity_type == "point"`, sdk.py:43377), and
       `order_by="confidence"`/`"graph"` for every type except `document` and
       `source` (both map to the `Source` label: it is outside the ranker's
       belief sweep, so the graph boost is 0 on every row, and neither hit dict
@@ -4026,8 +4386,11 @@ def tortoise_query(kind: str | None = None,
     # ── #12372: `entity_type` was DROPPED on every arm except `text=` ────────
     # The signature has always taken `entity_type`, but only the `text=` arm
     # forwarded it (into `sdk.tortoise_fts_query`, which honours it). The tag
-    # arm documents that it ignores the argument; the paginated arm and the
-    # plain structural arm call `sdk.paginated_query(kind, skip, limit, …)`,
+    # arm USED to document that it ignores the argument (that sentence was itself
+    # replaced by #12372 — the served tag bullet now says a non-Point
+    # `entity_type` is REFUSED there, and `ToolDefinition.description` does not
+    # mention the argument at all; round-23 P2 1, measured). The paginated arm and
+    # the plain structural arm call `sdk.paginated_query(kind, skip, limit, …)`,
     # which has no `entity_type` parameter at all — it is a Point reader by
     # construction (`MATCH (n:Point) …`). Measured against live-v4 on
     # 2026-11-13: `entity_type="operator", offset=0, limit=5` answered
@@ -4049,14 +4412,14 @@ def tortoise_query(kind: str | None = None,
         # missing key hands us `None`, and `""` is the same caller intent. The
         # structural arms used to serve both as Points while the `text=` arm
         # passed the RAW value to the SDK, whose `tortoise_fts_query` refuses it
-        # (`ValueError`, sdk.py:41127) — one argument value answering two
+        # (`ValueError`, sdk.py:41216-41217) — one argument value answering two
         # different ways depending on which arm a caller happened to use.
         # Resolved HERE, above every arm, so all of them see one value.
         entity_type = "point"
     # The vocabulary refusal is the OWNER's (tortoise/security.py), and it is
     # asked ONCE, above every arm — a per-arm copy is how one invalid value ends
     # up with two different messages (`text=` used to surface the SDK's own
-    # re-typed copy from sdk.py:41128 while the structural arms surfaced this
+    # re-typed copy from sdk.py:41217 while the structural arms surfaced this
     # one), and a second copy of the message is what drifts. `point` is a
     # member, so the served path cannot be blocked here.
     from tortoise.security import validate_entity_type
@@ -4103,7 +4466,7 @@ def tortoise_query(kind: str | None = None,
     # finding 4, measured with `mcp.list_tools()`; recorded on #12500). Both
     # structural arms call `sdk.paginated_query(kind, skip, limit,
     # include_retracted, **filters)`, which declares NEITHER parameter
-    # (sdk.py:26585-26588), and the tag arm calls `query_points_by_tag(tag)`,
+    # (sdk.py:26642-26645), and the tag arm calls `query_points_by_tag(tag)`,
     # which takes the tag and nothing else. Measured: `kind="statement",
     # min_confidence=0.9` reaches the accessor as
     # `paginated_query(kind='statement', skip=0, limit=100,
@@ -4126,7 +4489,10 @@ def tortoise_query(kind: str | None = None,
     # same `tag=`-first precedence those arms use (`_arm` below), so a caller
     # passing both keeps a message about the arm that ACTUALLY answers — there is
     # no separate "precedence split" above this point (round-17 P2 2: the comment
-    # claimed one that did not exist; the tag branch is 200-odd lines below).
+    # claimed one that did not exist; the tag branch is `if tag is not None:`,
+    # far below — named, not counted, because a line count inside the block it
+    # measures drifts with every edit above it (round-23 P2 4: it was 245 at r17
+    # and 282 at r22, with nothing red when it passed "200-odd").
     # TRUTHINESS, not `is not None` (round-1 P1, measured): this arm's own
     # semantics define the falsy values as ABSENT — the `text=` call below
     # normalises with `min_confidence or 0.0` and `order_by or "relevance"`, and
@@ -4189,8 +4555,8 @@ def tortoise_query(kind: str | None = None,
                 and isinstance(min_confidence, (int, float))
                 and 0.0 <= min_confidence <= 1.0):
             # The fts leg compares the floor against EP belief under a literal
-            # `entity_type == "point"` gate (sdk.py:43288; `ep` is None for
-            # every other type at sdk.py:43273), so any other
+            # `entity_type == "point"` gate (sdk.py:43377; `ep` is None for
+            # every other type at sdk.py:43362), so any other
             # entity_type passed the floor straight through. Round-3 P1,
             # measured at the tool boundary: `text="…", entity_type="document",
             # min_confidence=0.9` returned the 0.1-belief rows, and the same read
@@ -4200,18 +4566,20 @@ def tortoise_query(kind: str | None = None,
             #
             # A USABLE floor only (round-20 P2 3, measured): this branch's reason,
             # its harm ("rows they excluded came back") and its route are all
-            # false of a value the SDK itself rejects — `sdk.py:41133-41134`
+            # false of a value the SDK itself rejects — `sdk.py:41222-41223`
             # range-checks `min_confidence` BEFORE any retrieval, so
-            # `min_confidence=1.5` here used to raise, never return rows, and the
-            # offered `entity_type='point'` route lands on that same range error.
+            # `min_confidence=1.5` here was REFUSED BY THE SDK'S OWN CHECK and
+            # never returned rows (it did not "raise" at the tool boundary —
+            # `_safe` turns the exception into an `_SafeError`, round-26 P2 2), and
+            # the offered `entity_type='point'` route lands on that same check.
             # Out-of-range and non-numeric floors are therefore left to the SDK,
-            # the way `order_by="garbage"` already is (`sdk.py:41138`). The
+            # the way `order_by="garbage"` already is (`sdk.py:41228`). The
             # `isinstance` test is load-bearing: a non-numeric floor makes the
             # SDK's own `not (0.0 <= …)` raise `TypeError`, and this guard must
             # not turn that into a scoping paragraph. A `bool` is NOT excluded
             # (round-21 P2 1, measured): `0.0 <= True <= 1.0` holds, so the SDK
             # does not reject it, and the fts leg then skips the floor on a
-            # non-Point read (sdk.py:43288) — `min_confidence=True` came back with
+            # non-Point read (sdk.py:43377) — `min_confidence=True` came back with
             # the 0.01 rows, while `1` and `1.0` were refused. One floor must not
             # answer two ways depending on its Python spelling. `False` is still
             # served: it is falsy, so the first conjunct already excludes it.
@@ -4258,7 +4626,13 @@ def tortoise_query(kind: str | None = None,
 
     if _unapplied:
         _names = [name for name, _ in _unapplied]
-        _named = " and ".join(_names)
+        # List punctuation, the way `_loss` is built below: a bare " and " chain
+        # rendered a three-argument tag refusal as "min_confidence and order_by and
+        # kind", one sentence after the harm clause spelled the same three as
+        # "A, B and C" (round-31 P2 2, measured). Byte-identical for one or two
+        # names, so no existing pin moves.
+        _named = (", ".join(_names[:-1])
+                  + (" and " if len(_names) > 1 else "") + _names[-1])
         # Agreement in number: two named arguments shipped as "min_confidence and
         # order_by IS not applied" (round-3 P2, measured on a real call).
         _verb = "are" if len(_names) > 1 else "is"
@@ -4276,6 +4650,9 @@ def tortoise_query(kind: str | None = None,
         if "kind" in _names:
             _losses.append("a wider population than they asked for")
         _loss = ", ".join(_losses[:-1]) + (" and " if len(_losses) > 1 else "") + _losses[-1]
+        # The paging requirement is a PRECONDITION of the whole route, so it is
+        # emitted before it (set where the route is built, below).
+        _page_note = ""
         # The route must terminate HERE. "Pass text=" was the round-1 dead end on
         # the tag arm (`tag=` takes precedence, so the caller re-reads the same
         # sentence); it is a second dead end on the text= arm, which is refused
@@ -4316,6 +4693,52 @@ def tortoise_query(kind: str | None = None,
         else:
             _route = (f"To use {_them}, pass text= — the floor and the ordering "
                       f"are applied on that arm")
+        # The structural and tag arms DROP any value, so the SDK never judges it
+        # — which means the refusal can be about a value the destination would
+        # reject outright. `pass text=` with `min_confidence=1.5` lands on the
+        # SDK's range refusal, and `order_by="garbage"` on its vocabulary one, so
+        # the route must name the domain that arm actually applies rather than
+        # promising the value is applied (round-26 P2 1, measured on both arms).
+        # The clause's SUBJECT is the arguments it actually qualifies, not `_them`:
+        # `_them` counts every refused argument, so a mixed refusal (one value
+        # outside the domain, one inside it, or `kind`, which `text=` DOES apply)
+        # told the caller that the perfectly good value was wrong too — round-27's
+        # own P2 2 defect, reopened through round-27's pronoun fix (round-28 P2 1,
+        # measured: `min_confidence=0.9, order_by="garbage"` "corrected" 0.9, and a
+        # `kind` refusal was folded into an ordering domain).
+        _domain = []
+        _domain_names = []
+        if "min_confidence" in _names and not (
+                isinstance(min_confidence, (int, float))
+                and 0.0 <= min_confidence <= 1.0):
+            _domain.append("a floor of 0.0-1.0")
+            _domain_names.append("min_confidence")
+        if ("order_by" in _names
+                and order_by not in ("relevance", "confidence", "graph")):
+            # Rendered with braces, not "'a', 'b' or 'c'": the trailing `or` landed
+            # immediately before the template's own ", or drop …" (round-27 P2 3c).
+            _domain.append("an order in {'relevance', 'confidence', 'graph'}")
+            _domain_names.append("order_by")
+        if _domain:
+            _accepted = (_domain[0] if len(_domain) == 1
+                         else ", ".join(_domain[:-1]) + " and " + _domain[-1])
+            # No trailing stop: the template appends ", or drop …" to the route,
+            # and a full stop here produced "…0.0-1.0., or drop" — the same
+            # junction defect round 22 removed from the paging note.
+            #
+            # The arm is NAMED, not "That arm" (round-27 P2 3a, measured): on the
+            # tag route this clause lands straight after "…keeping it re-reads this
+            # same arm", so "That arm" bound by proximity to the arm the same
+            # message has just said CANNOT apply a floor — self-contradictory in
+            # adjacent sentences. And the subject is `_domain_names` — only the
+            # arguments actually out of domain — so an in-domain value is never
+            # "corrected" and `kind` is never folded into a floor/ordering domain
+            # (round-28 P2 1; the earlier `{_them}` counted every refused argument,
+            # and restoring it reds EVERY param of the route test — named, not
+            # counted: the count said nine and became ten when round 29 added a
+            # param to that very test, in the same commit that fixed a stale count).
+            _route += (f". The text= arm applies "
+                       f"{' and '.join(_domain_names)} only as: {_accepted}")
         if paginated and not (_arm == "tag=" and _names == ["kind"]):
             # `text=` takes no offset/page (measured: following the route with
             # offset= kept answers "offset/page not supported with text"), so a
@@ -4328,11 +4751,20 @@ def tortoise_query(kind: str | None = None,
             # Its own SENTENCE, not a trailing parenthetical (round-21 P2 2,
             # measured): appended at the end of a route with two alternatives it
             # read as qualifying only the last one, and `text=`+`offset=` is
-            # refused whatever `entity_type` says (mcp_server.py:4422-4424) — so
+            # refused whatever `entity_type` says (the `text=` arm's `if paginated:`
+            # → "offset/page not supported with text" — cited by that string, not
+            # by a line number, because a count INSIDE this file drifts with every
+            # edit above it; four rounds have now re-pointed this one, 2026-11) — so
             # following the FIRST alternative ("pass entity_type='point'") landed
             # on "offset/page not supported with text". The drop is required for
             # EVERY alternative, so it is stated once, for the route.
-            _route += ". Also drop offset=/page= — text= takes no offset."
+            #
+            # It is emitted BEFORE the route (see `_page_note` below), not appended
+            # to it: appended with its own full stop it collided with the
+            # template's ", or drop …" and shipped "… takes no offset., or drop
+            # min_confidence for this read" on every paged refusal (round-22 P2 2,
+            # measured on all six paged shapes).
+            _page_note = " Also drop offset=/page= — text= takes no offset."
         # Only where a floor/ordering is what was refused: the STRUCTURAL arm
         # applies `filters=` together with `kind=` quite happily, so this note on
         # a kind-only tag refusal told the caller to drop a filter that another
@@ -4344,9 +4776,15 @@ def tortoise_query(kind: str | None = None,
             if filters and ({"min_confidence", "order_by"} & set(_names)) else ""
         )
         return _SafeError({"error": (
-            f"{_named} {_verb} not applied on the {_arm} arm (#12500): {_why}. It "
+            # "They"/"It" — the SECOND sentence has to agree too. It shipped "It
+            # used to be dropped silently" for two arguments, inside one message
+            # that then says "To use them", and nothing could tell the two apart
+            # (round-30 P2 2, measured: singular kept the gate set green). Same
+            # class as the round-3 aux verb and the round-27 domain pronoun.
+            f"{_named} {_verb} not applied on the {_arm} arm (#12500): {_why}. "
+            f"{'They' if _verb == 'are' else 'It'} "
             f"used to be dropped silently, so the caller got {_loss}.{_filters_note}"
-            f" {_route}, or drop {_named} for this read."
+            f"{_page_note} {_route}, or drop {_named} for this read."
         )})
     # ── #12455: `filters=` was ACCEPTED on the `text=` and `tag=` arms and DROPPED
     # `filters` is a STRUCTURAL-path argument. `text=` forwards
@@ -4354,7 +4792,7 @@ def tortoise_query(kind: str | None = None,
     # promoted from `include_retracted` — never a property filter) into
     # `sdk.tortoise_fts_query`, whose knobs are named (`exclude_status`,
     # `claim_class`, `exclude_turn_echo_session`, `relationship_filter`, …) and
-    # which has NO property-filter parameter (sdk.py:40637-40710). `tag=` reads
+    # which has NO property-filter parameter (sdk.py:40729-40909). `tag=` reads
     # `query_points_by_tag(tag)`, which has no filter parameter either. So a dict
     # a caller passed on EITHER arm was never looked at, and the answer was the
     # unfiltered population with `total`/ordering computed over it — the #6146
@@ -4441,7 +4879,7 @@ def tortoise_query(kind: str | None = None,
         # a caller who asked for tombstoned rows got them excluded with no
         # signal. The fts leg already has the knob (`include_terminal`, an
         # EXISTING parameter — no surface change), and its documented semantics
-        # are exactly this flag (sdk.py:40823).
+        # are exactly this flag (sdk.py:40915-40924).
         return _safe(_get_org_sdk().tortoise_fts_query, text, kind=kind,
                      entity_type=entity_type, limit=eff_limit,
                      min_confidence=min_confidence or 0.0,
@@ -5562,7 +6000,7 @@ def tortoise_status() -> dict:
     return _safe(_get_org_sdk().status)
 
 
-def _org_quota_block(sdk=None) -> dict:
+def _org_quota_block(sdk=None, timeout: float | None = None) -> dict:
     """The ``health.quota`` block: the ENFORCED boundary, from the gate's numbers.
 
     #11892 option (3). ``health`` reported ``graph_size`` and nothing about the
@@ -5595,6 +6033,14 @@ def _org_quota_block(sdk=None) -> dict:
     it forever — the rule ``hosted_api.health``'s docstring already states for
     ``change_feed``, ``record``, ``build`` and ``wait_bound_breaches``, and the
     same reason ``record``'s cumulative counters do not degrade it (#10185).
+
+    ``timeout`` (#10749) is this phase's budget, defaulting to
+    ``quota.QUOTA_STATE_TIMEOUT``. ``tortoise_health`` passes what is LEFT of its
+    transport deadline, and that is load-bearing rather than decorative: this is the
+    LAST bounded phase of the tail, so bounding it by the deadline at its own start
+    is what makes the WHOLE tail bounded — every earlier phase's spend is already
+    water under the bridge by then, and a budget measured at that moment can only be
+    spent if the deadline still has it.
     """
     try:
         # ⛔ INSIDE the try (fresh review of #12426, P2): every other import here
@@ -5653,7 +6099,7 @@ def _org_quota_block(sdk=None) -> dict:
             return org_quota_state(limits, "points", sdk=sdk,
                                    count_runner=count_resource_now)
 
-        return run_bounded_quota_state(_compute)
+        return run_bounded_quota_state(_compute, timeout=timeout)
     except Exception as exc:  # noqa: BLE001, RUF100 — health must answer, always
         # Same shape as every other unmeasurable arm: `unknown` + None values +
         # a reason. NOT `open` and NOT zeros — see org_quota_state's docstring.
@@ -5722,7 +6168,27 @@ def tortoise_health() -> dict:
     ``probe_setup_timeout() + PROBE_TIMEOUT + GRAPH_SIZE_TIMEOUT +
     QUOTA_STATE_TIMEOUT`` — still a bounded tail, never "as long as the server
     stalls". The block never changes ``status`` (a full graph is not a degraded
-    process — see ``_org_quota_block``) and never raises."""
+    process — see ``_org_quota_block``) and never raises.
+
+    #10749 (health-honest): that 26.0 s tail is a budget this tool was never ALLOWED
+    to spend. ``_await_under_mcp_wait_bound`` serves EVERY tool under
+    ``mcp_auth._TRANSPORT_WAIT_BOUND_S`` (10.0 s) — no allowlist, no exemption — so the
+    handler was arithmetically guaranteed to be refused on a reachable store once its
+    probe ran slower than ~6.2 s. Measured 2026-11-13 on the deployed process: **2 of 27**
+    attempts answered, the one timed success spending 6.96 s of a 10.77 s round trip in the
+    DB probe. The allowance is therefore CLAMPED to
+    ``remaining − (PROBE_TIMEOUT + GRAPH_SIZE_TIMEOUT + QUOTA_STATE_TIMEOUT + margin)``
+    (``_health_setup_allowance``) under the deadline the seam itself bound into
+    ``_WAIT_BOUND_DEADLINE`` — NOT re-derived from the arrival stamp, which does not exist on
+    stdio or the self-hosted apps even though the bound still applies there. The clamp only
+    REDUCES, so #3143's allowance stands wherever it fits; where it does not, the probe is
+    unobserved and ``status="unknown"`` (#3683) carries the truth, and ``setup_timeout_clamped``
+    (a boolean — the duration beside it can be a falsy 0.0) names the clamp so an unknown is
+    never read as a broken store. The clamp is a SAFETY NET, not the shape: where it bites, this
+    tool can no longer report a truthful deep state for a cold-but-reachable store at all — and at
+    or below the reserve it cannot for ANY store, because the allowance there is a hard 0.0 s (see
+    ``_health_setup_allowance``). Restoring the deep report is #12481, whose candidate shapes include
+    a background refresher that may need no MCP-surface change."""
     # #236: route through _safe() so every tool is gated (defense-in-depth;
     # reachable only post-auth over HTTP).
     # #3143: pass the cold-start allowance (call-time resolved) so a reachable
@@ -5732,14 +6198,87 @@ def tortoise_health() -> dict:
     # block's count is measured on the SAME handle this report uses — "count on
     # the SAME org SDK the tool writes to" is the gate's own rule
     # (quota.enforce_org_limit); a second handle could open another graph.
+    # #10749: the allowance is CLAMPED under the transport deadline the tool is served under.
+    # Unclamped, this handler's tail (26.0 s) is 2.6x the 10.0 s bound, so a reachable store was
+    # refused with the transport's "wait budget exceeded" text. The clamp only reduces, and the
+    # report says when it did, so `status="unknown"` is never mistaken for a broken store.
     def _report() -> dict:
         sdk = _get_org_sdk()
-        report = monitoring.metrics(
-            sdk=sdk,
-            setup_timeout=monitoring.probe_setup_timeout(),
-        )
+        remaining = _mcp_remaining_wait_bound()
+        allowance = (monitoring.probe_setup_timeout() if remaining is None
+                     else _health_setup_allowance(remaining))
+        # #10749 (fresh review, cycle 5, round 2; CORRECTED by a later fresh review, P2): the
+        # allowance bounds only the FIRST phase. The two phases after it are bounded in DIFFERENT
+        # ways, and that difference is deliberate — it is stated in full in
+        # `_health_setup_allowance`'s docstring:
+        #   * the COUNT is planned HERE, at handler start, off the probe's CEILING. Its budget is
+        #     ``remaining − (allowance + PROBE_TIMEOUT) − margin``, i.e. it subtracts the phase
+        #     BEFORE it. On a fresh 10.0 s bound that is ``10 − 5.0 − 0.5 = 4.5``, which SATURATES
+        #     at ``GRAPH_SIZE_TIMEOUT`` — so it is the full constant unless the probe's reserve ate
+        #     the deadline. ⛔ An earlier wording said "each is handed what is actually LEFT" and
+        #     "rather than its full constant"; both are FALSE of this phase, because a reserve can
+        #     only PLAN — it cannot know what the probe went on to spend.
+        #   * the QUOTA block is the LAST phase, so its budget IS measured at its own start, and that
+        #     is what makes the TOTAL ``remaining − margin`` however slowly the earlier ones ran.
+        # Measured before this: a dispatch with 2.0 s left spent 3.00 s in the quota phase alone and
+        # was refused inside the window where the runbook claimed a clamped probe never breaches the
+        # bound.
+        probe_ceiling = allowance + _monitoring_timeout(
+            "PROBE_TIMEOUT", _PROBE_TIMEOUT_FALLBACK_S)
+        graph_budget = None
+        if remaining is not None:
+            graph_budget = max(0.0, min(
+                _monitoring_timeout("GRAPH_SIZE_TIMEOUT", _GRAPH_SIZE_TIMEOUT_FALLBACK_S),
+                remaining - probe_ceiling - _HEALTH_TAIL_MARGIN_S))
+        metrics_kwargs: dict = {"sdk": sdk, "setup_timeout": allowance}
+        if graph_budget is not None:
+            # Only under a live deadline: an ABSENT kwarg is what every other caller and every test
+            # stub already sees, and `metrics`' own default is the full constant.
+            metrics_kwargs["graph_size_timeout"] = graph_budget
+        report = monitoring.metrics(**metrics_kwargs)
         if isinstance(report, dict):
-            report["quota"] = _org_quota_block(sdk)
+            if allowance < monitoring.probe_setup_timeout():
+                # #10749 review: TWO views of one decision, because either alone is misread.
+                # The BOOLEAN is the discriminator — the duration can legitimately be `0.0`
+                # (a spent deadline), which is falsy, so `if report.get("setup_timeout_clamped_s")`
+                # would read the most severe clamp as "not clamped" (the repo's `graph_size_error
+                # is None` / `db.ok is None` convention: a marker must never be falsy when it
+                # fires).
+                report["setup_timeout_clamped"] = True
+                # ⛔ THE VALUE IS THE ALLOWANCE IN EFFECT, not the reduction. A caller reading
+                # `3.49` could take it either as "3.49 s granted" or "3.49 s clamped away"; it is
+                # the former (`0.0` on a spent deadline means NOTHING was granted). The reduction
+                # is `monitoring.probe_setup_timeout() - this`.
+                report["setup_timeout_clamped_s"] = allowance
+                # #10749 cycle-5 review (P2): the COUNT must count the FACT its justification
+                # names — this call came back UNOBSERVED, so the caller got `status="unknown"` —
+                # NOT "a clamp was applied". The clamp is applied on essentially EVERY
+                # seam-served call (while the seam enforces the bound `remaining <= 10.0 s`, and
+                # an unclamped 20.0 s allowance needs `remaining > 26.5 s`), so counting the
+                # APPLICATION made this key an MCP-health-call counter: a healthy store
+                # answering `ok` in 50 ms incremented it, and a real degradation still moved
+                # nothing — the blindness the counter exists to remove, reintroduced one layer
+                # down. `observed is False` is #3683's own bit for "never reached the
+                # reachability query", which is precisely the answer the clamp costs.
+                # #10749 cycle-6 review (P2): unobserved ALONE is not "the clamp cost the answer".
+                # `observed=False` is ALSO returned when the single-slot worker REFUSED the
+                # submission (a saturated `_WorkerBacklogFull` backlog,
+                # monitoring._probe_once's backlog arm) — there the store may be perfectly fast and
+                # the SAME call would be `unknown` under the unclamped 20.0 s allowance too, so the
+                # counter would rise while the clamp cost nothing and an operator reading the
+                # runbook would narrow the allowance instead of adding probe capacity.
+                #
+                # So the gate requires the SPELLING the clamp actually produces, not just the
+                # observation bit: the setup-timeout message covers BOTH arms a smaller allowance
+                # genuinely worsens — the cold-start that overran it, and the submission that was
+                # queued and never ran for its whole budget — and excludes the backlog refusal,
+                # which carries the worker's own message.
+                db = report.get("db")
+                if isinstance(db, dict) and db.get("observed", True) is False:
+                    err = str(db.get("error") or "")
+                    if err.startswith(monitoring._PROBE_SETUP_TIMEOUT_MSG):
+                        monitoring.record_health_setup_clamp()
+            report["quota"] = _org_quota_block(sdk, timeout=_health_quota_budget())
         return report
 
     return _safe(_report)

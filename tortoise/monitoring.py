@@ -60,7 +60,10 @@ _sdk = None  # set by register()
 # ``acquire=`` caller (selfhost's refresher) pays
 # ``PROBE_SDK_ACQUISITION_BUDGET + setup_timeout + PROBE_TIMEOUT`` (23.5s at
 # the shipped defaults), while an ``sdk=`` caller (the MCP ``tortoise_health``
-# tool) pays only ``setup_timeout + PROBE_TIMEOUT`` (21.5s). NEITHER is bounded
+# tool) pays ``setup_timeout + PROBE_TIMEOUT`` — 21.5s UNCLAMPED, which is the
+# knob's CEILING and not the spend: #10749 clamps this caller's ``setup_timeout``
+# to ``mcp_server._health_setup_allowance(remaining)`` (3.5s at a full 10.0s
+# transport bound), so the phase is 3.5 + 1.5 = **5.0s** over MCP. NEITHER is bounded
 # by ``PROBE_HARD_TIMEOUT``. ``PROBE_DB_TOTAL_TIMEOUT`` (2 x this + the retry
 # delay) survives ONLY as the loose outer-alignment figure for the platform
 # plane — an over-estimate of this shape, not its exact total. Quoting the
@@ -140,11 +143,35 @@ PROBE_SETUP_TIMEOUT_MAX = 300.0
 
 
 def probe_setup_timeout() -> float:
-    """Resolve the #3143 cold-start allowance.
+    """Resolve the #3143 cold-start allowance — an UPPER BOUND, not what the caller may spend.
 
-    Spent by the on-demand MCP health tool, and — off the request path only —
-    by the selfhost liveness coordinator's refresher (#2988/#3243; see
-    ``PROBE_SETUP_TIMEOUT`` for the request-path-vs-background rule).
+    ⛔ ABOVE ``bound − reserve`` THIS IS A CEILING, NOT THE SPEND (#10749). The tool runs inside
+    ``mcp_auth._TRANSPORT_WAIT_BOUND_S`` (10.0 s) and spends
+    ``max(0.0, min(this, remaining − 6.5))`` where ``remaining`` is what is left of that deadline
+    when the handler starts (``mcp_server._health_setup_allowance``) — so at most **3.5 s** on a
+    fresh dispatch (the shipped knob is 20.0 s), and 0.0 once ~3.5 s of the dispatch is gone.
+    Raising the knob past that ceiling cannot widen the MCP tool's window, and it is NOT the remedy
+    for a rising ``health_setup_clamped`` on a clamped dispatch: there the transport bound is the
+    constraint, so a larger knob buys nothing (fresh review, round 4 P3 — the earlier phrasing "NO
+    seam-served call ever receives the value returned here" was FALSE for a legal low knob).
+    ⛔ That is ONE of that counter's CAUSES, never all of them (fresh review of the final head, P2;
+    and a re-review found a fourth): it cannot separate "the clamp cost the observation" from "the
+    store was too cold for even the unclamped 20.0 s" from "the dispatch had already spent more than
+    ``bound − reserve`` so the probe was granted ZERO seconds". None of those is fixed by a larger
+    KNOB — see ``record_health_setup_clamp``, which enumerates all four with their remedies.
+
+    ⛔ And BELOW the ceiling the knob IS the spend, so raising it does help — ON A DISPATCH WHOSE
+    DEADLINE STILL LEAVES ``knob + reserve``. Configured under ``bound − reserve`` (the documented
+    minimum is 1.5 s) such a call receives the knob verbatim and no clamp marker fires; the SAME
+    configuration on a dispatch that has already burned 3.8 s of its bound (the shape #10749
+    measured on the deployed process) still clamps to 0.0 and marks it. The deadline decides what
+    is left under the ceiling — which is why the whole
+    ``[PROBE_SETUP_TIMEOUT_MIN, PROBE_SETUP_TIMEOUT_MAX]`` range stays accepted, and why the knob
+    still governs the OFF-request-path selfhost refresher at its full range (#2988/#3243; see
+    ``PROBE_SETUP_TIMEOUT`` for the request-path-vs-background rule). A large/cold graph that needs
+    more than the ceiling gets ``status="unknown"`` with ``setup_timeout_clamped: true`` rather
+    than a truthful deep report; restoring that is #12481, whose candidate shapes include serving the
+    deep probe from a background refresher — which may need no MCP-surface change at all.
 
     Read at CALL time, not import time, for two reasons:
 
@@ -261,8 +288,9 @@ PROBE_STALE_AFTER = 30.0
 #
 # ⛔ ``PROBE_HARD_TIMEOUT`` does NOT cover the #3143 EXPLICIT-ALLOWANCE shape
 # (``setup_timeout`` given). That shape's enforced total is
-# ``setup_timeout + PROBE_TIMEOUT`` (21.5s at the shipped defaults) for an
-# ``sdk=`` caller such as the MCP ``tortoise_health`` tool, and
+# ``setup_timeout + PROBE_TIMEOUT`` for an ``sdk=`` caller such as the MCP
+# ``tortoise_health`` tool — 21.5s as the unclamped ceiling, but **5.0s** on a
+# seam-served dispatch (3.5s clamped allowance + 1.5s, #10749) — and
 # ``PROBE_SDK_ACQUISITION_BUDGET +`` that (23.5s) for an ``acquire=`` caller
 # such as ``selfhost._probe_db`` — several times this constant either way. A
 # coordinator over the ``acquire=`` form must derive its OWN bound that way
@@ -868,6 +896,7 @@ WAIT_BOUND_BREACH_COUNT = Counter(
 for _surface in _WAIT_BOUND_SURFACES:      # bounded by construction
     WAIT_BOUND_BREACH_COUNT.labels(surface=_surface)
 
+
 # ── #12477: the SAME channel, read as a WINDOW instead of a lifetime total ──
 # The counter above is cumulative since process start, and `status` deliberately
 # does not derive from it: a total that never resets would pin a deployment
@@ -1087,7 +1116,10 @@ def record_wait_bound_control_breach(at: float | None = None) -> None:
 
 #: #12477: registered by the APP (`hosted_api._start_liveness`) so this module
 #: never imports it. Returns True while a one-time cold-start load is in flight.
-_COLD_START_SOURCE: callable | None = None
+#: ⛔ `Callable[[], bool]`, never the BUILTIN `callable`: `callable` is a function,
+#: not a type, so annotating with it is not a narrower or looser claim — it is not
+#: a claim at all, and `mypy tortoise/` refuses the file (`valid-type`, #12644).
+_COLD_START_SOURCE: Callable[[], bool] | None = None
 
 
 def set_cold_start_source(source) -> None:
@@ -1304,6 +1336,60 @@ def reset_wait_bound_breach_window() -> None:
             _WAIT_BOUND_RECENT[surface] = deque(maxlen=stamps.maxlen)
             _WAIT_BOUND_BUCKETS[surface] = {}
         _WAIT_BOUND_CONTROL_RECENT.clear()
+
+
+# #10749: an MCP health probe that answered `status="unknown"` because its cold-start allowance
+# was CLAMPED under the transport bound it is served under — an honest non-answer, in place of the
+# transport's `-32009 "wait budget exceeded"` (which reads as "the queue is busy").
+#
+# ⛔ WHY IT NEEDS A COUNTER AT ALL. The clamp CONVERTS a counted symptom into an uncounted one: a
+# slow store no longer breaches the transport bound (so `WAIT_BOUND_BREACH_COUNT` above stops
+# rising, by design), `errors` is reached from the `graph_size` arm of `metrics()`, from the
+# standalone `serve_health` handler's 500 path and from `mcp_server._safe`'s except for ANY tool
+# exception (none of the three is this shape — fresh review of the final head, P3: the earlier cut
+# said `serve_health` was the graph-size arm's ONLY other caller, which under-counted the writers and
+# would have left an operator unable to account for a rise caused by ordinary tool errors), and the
+# `mcp_tool_call`
+# telemetry row now classifies as `ok` — NOT because the payload lacks a top-level `error` string
+# (key presence is explicitly not the discriminator: a successful write may carry a user prop
+# literally named `error`, which is why #3926 made `_SafeError` a dict subclass), but because the
+# clamped report is a plain dict that matches no recorded `_safe` failure. The per-call `setup_timeout_clamped` marker is enough for a CALLER and useless to an operator, so
+# without this counter "how often is health degraded to unknown?" has no answer anywhere — the same
+# shape of blindness #10602 removed for refusals.
+#
+# ⛔ AND IT COUNTS THE DEGRADATION, NOT THE CLAMP. The clamp is applied on essentially EVERY
+# seam-served call: while the seam enforces the bound `remaining <= 10.0 s`, and an unclamped
+# 20.0 s allowance needs `remaining > 26.5 s`, so a healthy store answering in 50 ms is clamped
+# too. Counting the APPLICATION would therefore make this key a health-CALL counter — it would
+# read 100 % on a perfectly healthy process and a genuine degradation would still move nothing,
+# which is the blindness this counter exists to remove.
+#
+# ⛔ AND UNOBSERVED ALONE IS NOT ENOUGH EITHER. The increment needs a CONJUNCTION, both halves
+# load-bearing: the probe came back UNOBSERVED (`db["observed"] is False`, #3683's bit for "never
+# reached the reachability query") **and** its `error` carries the SETUP-TIMEOUT spelling
+# (`_PROBE_SETUP_TIMEOUT_MSG`). The spelling half exists because `observed=False` is also how a
+# saturated single-slot worker reports a REFUSED submission (`_WorkerBacklogFull`): there the store
+# may be perfectly fast and the identical call would be `unknown` under the unclamped 20.0 s
+# allowance too, so the clamp cost nothing and counting it would send an operator to the wrong
+# remedy (narrow the allowance instead of adding probe capacity). ⛔ It does NOT read `0` on every
+# process whose stores answer (fresh review of the final head, P2): a dispatch that had already
+# spent more than `bound - reserve` grants the probe a hard 0.0 s, so a store answering in
+# milliseconds still comes back unobserved and raises this key — there the remedy is the dispatch's
+# pre-handler latency, not the store and not the knob. A submission QUEUED behind an occupied single
+# probe slot and never run for its whole allowance spells the same way too (re-review P2), and THERE
+# the remedy IS probe capacity. So: this counter does not name a cause it cannot separate — read
+# `record_health_setup_clamp` for the four and their remedies. It is also NOT simply
+# "the aggregate of `setup_timeout_clamped` AND `status="unknown"`", because a backlog refusal
+# satisfies both of those and is deliberately excluded. Unlabelled on purpose: the value is a single
+# fact, and a plain `Counter` is exported at 0 the moment it is registered, so the absent-vs-zero
+# rule the channel above is built on needs no child initialisation here.
+HEALTH_SETUP_CLAMPED_COUNT = Counter(
+    "tortoise_health_setup_clamped_total",
+    "MCP health probes left UNOBSERVED on the SETUP-TIMEOUT spelling by a CLAMPED cold-start "
+    "allowance (#10749) — NOT every clamped call, and NOT a backlog refusal the clamp did not "
+    "cause. It does NOT assert the store was slow: a probe granted a hard 0.0 s, or one queued "
+    "behind an occupied probe slot, counts here too",
+)
 # #10515: a LEGITIMATE revision was refused by `update_point`'s ABSENT arm.
 #
 # The arm itself is #10119's and is correct: an id absent from the live graph at
@@ -2206,6 +2292,95 @@ def record_wait_bound_breach(surface: str, *, windowed: bool = True) -> None:
         logger.warning(
             "#12477: wait-bound breach stamp failed for %s", surface,
             exc_info=True)
+
+
+def record_health_setup_clamp() -> None:
+    """Count one MCP health probe left UNOBSERVED by a CLAMPED cold-start allowance (#10749).
+
+    Called from ``mcp_server.tortoise_health``'s report builder when the clamp is applied **and**
+    the probe came back unobserved **with the setup-timeout spelling** (``db["observed"] is False``
+    and ``db["error"]`` starts with ``_PROBE_SETUP_TIMEOUT_MSG``).
+
+    ⛔ This is the aggregate of a THREE-term conjunction — ``setup_timeout_clamped: true`` **and**
+    the probe being unobserved **and** its error carrying the setup-timeout spelling. It is
+    deliberately NOT "the aggregate of the per-call pair (clamped AND unobserved)", a phrasing an
+    earlier cycle used and this gate superseded: that pair admits the ``_WorkerBacklogFull`` refusal,
+    which the paragraph below explains is excluded. ``setup_timeout_clamped`` alone fires
+    on essentially every seam-served call (a healthy 50 ms answer included), so the marker by itself
+    is not this fact. Counting the APPLICATION would count health CALLS, not degradations; that
+    mistake is the reason this gate exists (see ``HEALTH_SETUP_CLAMPED_COUNT`` above).
+
+    ⛔ WHAT THE SPELLING CANNOT SEPARATE (fresh review of cycle 5 round 3, P3; extended by a
+    re-review, P2). It covers the arms a smaller allowance genuinely worsens (a cold-start that
+    overran it, and a submission queued and never run for its whole budget) and excludes the backlog
+    refusal, which carries the worker's own message. FOUR causes spell identically and the
+    instrumentation cannot tell them apart, so read it as "a CLAMPED probe came back unobserved" and
+    nothing narrower:
+
+      1. the clamped allowance was too small for a cold start that DID run — remedy: a warmer store,
+         or #12481's truthful deep report;
+      2. the store was too cold for even the UNCLAMPED 20.0 s knob — remedy: the store, not #12481;
+      3. the probe was granted a hard **0.0 s** because the dispatch had already spent more than
+         ``bound − reserve`` — remedy: the dispatch's pre-handler latency, or #12481;
+      4. the single probe slot was occupied by another dispatch, so this one spent its allowance
+         WAITING and never contacted the store — remedy: probe capacity (the #2850 single slot), not
+         the store, not the knob and not #12481.
+
+    ⛔ CAUSE (3) IN DETAIL (fresh review of the final head, P2): the allowance is
+    ``max(0.0, min(knob, remaining - 6.5))``, so a dispatch that had already spent more than
+    ``bound - reserve`` (the ~3.8 s of pre-handler cost #10749 measured) grants the probe a hard
+    **0.0 s** — ``setup.result(timeout=0.0)`` raises before the reachability query — and a store
+    answering in milliseconds comes back unobserved on this spelling and moves this counter.
+    Measured at this head through the real handler with a ~1 ms store: ``remaining`` 6.4 s ⇒
+    ``observed=False``, ``error='probe setup timeout after 0.0s'``, counter +1. That is why the
+    counter is not a store-health signal.
+
+    ⛔ A VARIANT OF CAUSE (3) CAN MOVE IT WITH NOBODY LEFT TO SERVE (non-blocking, recorded rather
+    than gated): the seam KEEPS an abandoned dispatch running (``_hold_mcp_dispatch_after_request``),
+    and that task still carries this deadline in its context. If it later reaches health
+    (``tortoise_graph_overview(section="health")`` calls ``tortoise_health()`` directly), it reads a
+    SPENT deadline, gets the 0.0 allowance, and ticks this counter for a report nothing will read.
+    Rare, but it means a rise is not always attributable to a served call.
+
+    The clamp moves a degradation from a REFUSAL (which ``WAIT_BOUND_BREACH_COUNT`` above counted)
+    to an honest ``status="unknown"`` (which nothing else counts), so this is the only aggregate
+    that keeps "health is degraded to unknown" answerable.
+    """
+    HEALTH_SETUP_CLAMPED_COUNT.inc()
+
+
+def health_setup_clamped_count() -> int | None:
+    """Current value of ``HEALTH_SETUP_CLAMPED_COUNT`` (#10749); ``None`` when the read fails.
+
+    ⛔ NEVER RAISES, and that is a CONTRACT rather than a convenience, identical to
+    ``wait_bound_breach_counts`` below: this is read by ``hosted_api.health()``, whose docstring
+    promises "it never 5xxes" and whose every other read is wrapped for exactly that reason
+    (#10648 review P2, #2850). A monitoring read that can throw turns the change that makes a
+    degradation visible into a 500 on the endpoint Fly probes.
+
+    ⛔ AND A FAILED READ IS NOT A ZERO (``#9548`` review P2, the rule three keys away on that same
+    body): this returns ``None``, never a fabricated ``0``. ``0`` is a MEASURED zero — an
+    unlabelled counter is exported from registration — and it is the reading that means "no clamp
+    cost an observation", which is the whole point of the channel. ``None`` cannot be misread as
+    that.
+
+    ⚠️ DELIBERATE ASYMMETRY with ``wait_bound_breach_counts`` below: that one carries a ``reason``
+    (``{"total": None, …, "error": "…unreadable: …"}``) because its value is a DICT on the body, so
+    a reason field costs nothing. This one is a SCALAR body key — the runbook's
+    ``jq .health_setup_clamped``, and any alert rule keyed on it, read a number-or-``null`` — so
+    turning it into an object to carry a reason would change the published shape of a key an
+    operator already scripts against. The failure is reported as ``null`` and that is all the shape
+    admits. ⛔ The sibling ``wait_bound_breaches.error`` is NOT a usable substitute reason (fresh
+    review, round 2): that field is ``None`` whenever ITS OWN read succeeded — the overwhelmingly
+    common case — so a failure here would land with no reason anywhere on the box. It is therefore
+    LOGGED, the same treatment ``wait_bound_breach_counts`` gives its own failure (cycle-6 review,
+    P3; corrected in #12482's round-2 pass).
+    """
+    try:
+        return _counter_val(HEALTH_SETUP_CLAMPED_COUNT)
+    except Exception as exc:  # noqa: BLE001, RUF100
+        logger.warning("#10749: health_setup_clamped unreadable: %r", exc)
+        return None
 
 
 def wait_bound_breach_counts() -> dict:
@@ -4365,8 +4540,11 @@ def probe_db(sdk=None, setup_timeout=None, *, acquire=None) -> dict:
       outer-alignment figure a coordinator is sized above.
     * explicit ``setup_timeout`` (the MCP ``tortoise_health`` tool, which
       passes ``sdk=``): one deadline of ``setup_timeout + PROBE_TIMEOUT``
-      (21.5s at the shipped defaults) — the cold-start allowance plus one
-      reachability budget; the retry rides the remainder of THAT.
+      (21.5s at the shipped defaults UNCLAMPED) — the cold-start allowance plus
+      one reachability budget; the retry rides the remainder of THAT. ⛔ 21.5s is
+      the ceiling, not this caller's spend: #10749 clamps ``setup_timeout`` to
+      ``mcp_server._health_setup_allowance(remaining)``, i.e. 3.5 + 1.5 = **5.0s**
+      at a full 10.0s transport bound.
       ⛔ ``PROBE_HARD_TIMEOUT`` does NOT sit above this shape, nor above the
       ``acquire=`` + ``setup_timeout`` form ``selfhost._probe_db`` uses
       (``PROBE_SDK_ACQUISITION_BUDGET + setup_timeout + PROBE_TIMEOUT`` =
@@ -7108,10 +7286,12 @@ def _reset_graph_size_worker() -> None:
     reset_daemon_worker(GRAPH_SIZE_WORKER_NAME)
 
 
-def metrics(sdk=None, setup_timeout=None) -> dict:
+def metrics(sdk=None, setup_timeout=None, graph_size_timeout=None) -> dict:
     """Return {status, db, falkordb, graph_size, graph_size_error, last_ingest,
     errors, journal_write_failures, audit_fallback_drops, telemetry_drops,
-    offload_refusals, uptime}.
+    offload_refusals, uptime} — plus the counter keys below (``wait_bound_breaches``
+    #10602, ``health_setup_clamped`` #10749, ``record_position_unproven`` #9307,
+    ``record_writes_applied``/``record_last_write_at`` #9548 and the rest).
 
     ``db`` is the deep-check result ({ok, observed, latency_ms, error}) added
     by #1384 (#3683 added ``observed``); ``falkordb`` keeps the legacy message
@@ -7165,8 +7345,15 @@ def metrics(sdk=None, setup_timeout=None) -> dict:
     ``graph_size_error``: ``None`` means it was (so a 0 is a genuinely empty
     graph), a string means it was not (a raised count OR a budget overrun),
     which makes the two distinguishable WITHOUT diffing the cumulative
-    ``errors`` counter. A failed count still increments ``errors`` and is
-    never raised; ``graph_size`` stays 0 for backward compatibility.
+    ``errors`` counter. A count that overruns its OWN FULL budget still increments
+    ``errors`` and is never raised; a count handed a budget the transport deadline
+    REDUCED below ``GRAPH_SIZE_TIMEOUT`` does not, and ⛔ NO AGGREGATE COUNTS IT
+    (fresh review, round 4; tracked as #12600): ``health_setup_clamped`` requires an UNOBSERVED probe
+    (``db["observed"] is False`` plus the setup-timeout spelling), while this
+    count is only reached when the probe was OBSERVED with ``ok is True`` — the
+    two conditions are mutually exclusive. For that shape the per-call
+    ``graph_size_error`` string is the only signal (#10749 — see the gate in the
+    count's ``except``). ``graph_size`` stays 0 for backward compatibility.
 
     #3143: ``setup_timeout`` (named to match ``probe_db``'s keyword — the
     previous ``probe_setup_timeout`` SHADOWED the module function of the same
@@ -7177,6 +7364,18 @@ def metrics(sdk=None, setup_timeout=None) -> dict:
     (``probe_setup_timeout()``) so a reachable graph whose cold-start exceeds
     1.5s is reported ``ok`` with its real ``graph_size`` instead of
     ``degraded``/0.
+
+    #10749: ``graph_size_timeout`` is the SAME seam one phase later — the count's own budget,
+    defaulting to ``GRAPH_SIZE_TIMEOUT``. ``tortoise_health`` passes what this count is PLANNED to
+    have: the transport deadline minus the probe's CEILING (``allowance + PROBE_TIMEOUT``) minus the
+    delivery margin — NOT ``remaining`` itself. ⛔ The two are different (fresh review of the final
+    head, P2): the count is planned at handler START, so on a fresh 10.0 s bound the value is
+    ``10 − 5.0 − 0.5 = 4.5``, which SATURATES at this constant — it is reduced only when the probe's
+    reserve ate the deadline, never by what the probe actually spent. That is still the right bound:
+    a full 1.5 s here on a call with 0.4 s of deadline left is a ``-32009`` the tool chose to cause,
+    and the count sits between a probe and a quota block that are both bounded by that same
+    deadline. A zero/negative value is honest: the count raises immediately,
+    ``graph_size_error`` names it, and the report still answers with ``graph_size: 0``.
     """
     target = sdk if sdk is not None else _sdk
     if target is None:
@@ -7208,16 +7407,74 @@ def metrics(sdk=None, setup_timeout=None) -> dict:
     graph_size_error: str | None = None
     if target is None:
         graph_size_error = f"{_GRAPH_SIZE_UNAVAILABLE}: no probe target"
+    elif db["ok"] is None and db.get("observed") is False:
+        # #10749: a probe that was never GIVEN time (the MCP tool's allowance is clamped to the
+        # transport deadline, so this is the ROUTINE shape on a slow store) is not a probe that
+        # FAILED. Saying "db probe failed" on the same payload as ``setup_timeout_clamped`` told a
+        # consumer the store was broken — the exact misread the clamp marker exists to prevent.
+        # ⛔ The clamped clause is CONDITIONAL on a clamp having actually HAPPENED (#12482 cycle 5,
+        # rounds 2 and 3). Two earlier cuts got this wrong in opposite directions: the first hard-coded
+        # "allowance clamped" for every unobserved probe (so ``serve_health``'s own ``/health``, which
+        # passes no ``setup_timeout`` at all, told an operator to read a marker its payload does not
+        # carry), and the second keyed on the ARGUMENT BEING PRESENT, which is true for every caller
+        # that passes any allowance — including an unclamped one. Measured with a legal
+        # ``TORTOISE_PROBE_SETUP_TIMEOUT=1.5`` (the documented minimum) and a cold start slower than
+        # the knob: the handler applied NO clamp (no marker, counter still), yet the message said
+        # "allowance clamped". Compare the allowance to the knob the way the handler does, so the
+        # four arms are distinguishable and each names its own remedy:
+        #   * no allowance on this surface  — ``serve_health``'s ``/health`` (nothing to clamp)
+        #   * worker refused the submission — ``_WorkerBacklogFull``: a CAPACITY problem, which no
+        #                                     allowance would have changed
+        #   * allowance clamped             — the seam took budget away (#12481 restores it)
+        #   * allowance not clamped         — the store itself did not answer in its full budget
+        #
+        # ⛔ The refused-submission arm is keyed on the SAME SPELLING GATE as
+        # ``record_health_setup_clamp`` (``_PROBE_SETUP_TIMEOUT_MSG``), and it is tested BEFORE
+        # the clamp comparison (#12482 fresh review, P2). Order is the whole point: a clamp is
+        # applied on essentially EVERY seam-served call (``remaining <= 10.0`` makes
+        # ``setup_timeout < probe_setup_timeout()`` true), so a saturated single-slot worker on a
+        # clamped call used to read "allowance clamped" and send the operator to #12481 for a
+        # capacity problem. That also made this parenthetical contradict the counter on the very
+        # same payload — ``record_health_setup_clamp`` deliberately does NOT count the refusal.
+        # Today ``_WorkerBacklogFull`` is the only unobserved arm whose error is not the setup
+        # spelling; the prefix test keeps that true if another refusal arm is ever added.
+        if setup_timeout is None:
+            cause = "no allowance on this surface"
+        elif not str(db.get("error") or "").startswith(_PROBE_SETUP_TIMEOUT_MSG):
+            cause = "probe worker refused the submission"
+        elif setup_timeout < probe_setup_timeout():
+            cause = "allowance clamped"
+        else:
+            cause = "allowance not clamped"
+        graph_size_error = f"{_GRAPH_SIZE_UNAVAILABLE}: probe not observed ({cause})"
     elif db["ok"] is not True:
         graph_size_error = f"{_GRAPH_SIZE_UNAVAILABLE}: db probe failed"
     else:
         try:
-            graph_size = _bounded_graph_size(target, GRAPH_SIZE_TIMEOUT)
+            graph_size = _bounded_graph_size(
+                target,
+                GRAPH_SIZE_TIMEOUT if graph_size_timeout is None else graph_size_timeout,
+            )
         except Exception as exc:  # noqa: BLE001, RUF100
             graph_size_error = (
                 f"{_GRAPH_SIZE_UNAVAILABLE}: {str(exc)[:160] or type(exc).__name__}"
             )
-            record_error()
+            # #12482 (fresh review, rounds 1-2): only an overrun of the count's OWN full budget is
+            # a generic error. ⛔ The test is "was the budget actually REDUCED", NOT "was a kwarg
+            # passed" — the handler supplies `graph_size_timeout` on EVERY seam-served call, and at
+            # a full 10.0 s bound that value IS `GRAPH_SIZE_TIMEOUT` (measured: allowance 3.5,
+            # probe ceiling 5.0, budget `10 - 5.0 - 0.5` saturates at 1.5 == the constant), so a
+            # `is not None` test silently stopped counting real count overruns on the very tool
+            # this change exists for — the uncounted-symptom class it forbids elsewhere.
+            # A budget clamped BELOW the constant was starved by the transport deadline on a store
+            # that may be perfectly healthy, so the generic `ERROR_COUNT` would raise an alertable
+            # "total errors" for it. ⛔ That degradation is NOT counted by
+            # `HEALTH_SETUP_CLAMPED_COUNT` either (fresh review, round 4 — an earlier cut of this
+            # comment claimed it was): that counter requires an UNOBSERVED probe, and this count is
+            # only reached when the probe was OBSERVED with `ok is True`, so the two are mutually
+            # exclusive — the per-call `graph_size_error` is the only signal for this shape.
+            if graph_size_timeout is None or graph_size_timeout >= GRAPH_SIZE_TIMEOUT:
+                record_error()
     return {
         "status": status,
         "db": db,
@@ -7253,6 +7510,19 @@ def metrics(sdk=None, setup_timeout=None) -> dict:
         # It does NOT feed `status`: `degraded` stays reserved for an observed
         # probe failure (see `metrics`'s own note), so this is additive only.
         "wait_bound_breaches": wait_bound_breach_counts(),
+        # #10749: the counts above go FLAT when the clamp does its job (a clamped probe no longer
+        # breaches the bound), so the refusal channel cannot report "health is degraded to
+        # unknown". This is that channel's positive pair: how many health probes came back
+        # UNOBSERVED on a clamped allowance WITH the setup-timeout spelling — ⛔ NOT simply "the
+        # aggregate of `setup_timeout_clamped` AND `status="unknown"`", because a saturated worker
+        # backlog also yields both of those while the clamp cost nothing, and the gate excludes it
+        # deliberately (see `record_health_setup_clamp`). NOT a count of calls the clamp was
+        # applied to either (which is essentially every one). `0` is a real zero (an unlabelled counter is
+        # exported from registration), so "no clamp cost an observation" and "this build cannot
+        # see clamps" stay distinguishable; `None` means the read itself failed. That asymmetry is
+        # deliberate and is the body's own rule a few keys down: a `None`-on-unread counter is
+        # never folded to `0`, because "an unread counter and a zero are different facts".
+        "health_setup_clamped": health_setup_clamped_count(),
         # #9307 review F1: a DURABLE journal whose append could not prove the
         # record's position writes no layer-1 row (a replay heals it). Its own
         # key, so neither the failure counter nor the non-journal skip counter

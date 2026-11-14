@@ -7743,6 +7743,38 @@ _LIVENESS_SERVED_COUNT = 0
 _LIVENESS_LAST_SERVED_AT: float | None = None
 
 
+def _health_setup_clamped() -> int | None:
+    """``monitoring.health_setup_clamped_count()``, or ``None`` when it cannot be read (#10749).
+
+    ⛔ THIS IS A GUARD, NOT A SECOND IMPLEMENTATION. The callee never raises — that half of its
+    contract is kept and tested. What it cannot protect against is its own ABSENCE: a stale or
+    partially written ``monitoring`` module has no such attribute, and an unguarded
+    ``_monitoring.health_setup_clamped_count()`` in the body below turned ``/health`` into a 500
+    (measured: ``AttributeError`` out of ``health()``).
+
+    ``health()`` promises, in its own docstring, that it "never 5xxes: a dead DB is 'degraded',
+    never a killed process" — and every sibling read on that body is wrapped for exactly that
+    reason (``wait_bound_breaches``, ``refusals``, ``record``, ``backup_watcher``). This key's
+    published shape is ``int | null``, so ``null`` is a value the contract already admits, and a
+    failed read is reported as nothing measured rather than as a fabricated 0 — the same
+    absent-vs-zero rule the counter channel is built on (#3253, #9548).
+    """
+    try:
+        read = _monitoring.health_setup_clamped_count
+    except AttributeError:  # a stale/partial monitoring module: nothing measured, not zero
+        # ⛔ Logged, because `null` on its own is a value with no reason attached: the callee's
+        # docstring justifies its own logging with "a failure here would land with no reason
+        # anywhere on the box", and on this path the callee is never reached (fresh review, P3).
+        _logger.warning(
+            "health: tortoise.monitoring has no health_setup_clamped_count attribute — a stale or "
+            "partially written module; publishing null (nothing measured, not zero)")
+        return None
+    try:
+        return read()
+    except Exception:  # a monitoring read must never 5xx (see docstring)
+        return None
+
+
 @app.get("/liveness")
 async def liveness(response: Response):
     """A liveness answer that can only be produced BY BEING SERVED (#10892).
@@ -7890,6 +7922,24 @@ async def health():
     against ``origin/main``); this block publishes the datum that comparison
     needs, plus ``build_identified`` so an unstamped deployment is readable as
     unstamped rather than as current.
+
+    Consent-key check (#10488, §2.5): ``consent_token_key`` publishes
+    ``sha256(CONSENT_TOKEN_SECRET)[:12]`` — the consent bridge's signing key's
+    PUBLIC identity — plus ``configured`` and a closed-set ``reason``. It exists
+    because that secret has TWO homes and only one is managed: Fly's copy is
+    staged by ``deploy-hosted.yml``, Cloudflare Pages' copy is typed into a
+    dashboard by hand, and on 2026-11-01 they held different values (mint
+    answered ``200``, this AS answered ``401 signature does not verify``) while
+    every deploy stayed green. Neither provider returns a secret's VALUE, so the
+    only way to answer "do the halves agree?" is for each half to publish a
+    derived tag and a third party to compare — ``tools/consent_key_check.py``
+    (scheduled: ``.github/workflows/consent-key-drift.yml``). ⛔ It does NOT fold
+    into ``status``: an unprovisioned consent arm is legitimate on a self-hosted
+    install that never enables the bridge, and a process degraded by a
+    configuration choice would be restarted by Fly forever. ⛔ The ``reason`` is
+    a CODE, never `consent_token_secret_problem`'s message — that message names
+    the byte length of a short key, which on an unauthenticated surface would
+    narrow exactly the key space the `_MIN_SECRET_BYTES` floor exists to refuse.
     """
     try:
         db = _HEALTH_PROBE.snapshot()
@@ -7972,7 +8022,35 @@ async def health():
             # means `db.ok`, `backup_watcher.ok` and `record.ok` (the three
             # terms in the `status` expression above), not the counter.
             "wait_bound_breaches": breaches,
-            "record": record, "build": _build_identity()}
+            # #10749: the POSITIVE pair beside that count. The clamp publishes this counter on
+            # `monitoring.metrics()`, which reaches the standalone `/health` — JSON — and, as the
+            # Prometheus family `tortoise_health_setup_clamped_total`, `/metrics` (which is the
+            # exposition and carries NO JSON key) — but the hosted app builds its OWN body, so
+            # without this line the operator's first curl sees `wait_bound_breaches: 0` (which the
+            # clamp makes flat BY DESIGN) and nothing reporting that health came back unknown
+            # because the clamp cost the observation. Same rule as the block above: REPORTED,
+            # never folded into `status` (a cumulative counter must not pin the deployment degraded
+            # for the life of the process). `docs/infra-runbook.md` §4.1.1a is the operator
+            # contract.
+            #
+            # ⛔ WRAPPED, like `wait_bound_breaches` and `refusals` above — the callee's own
+            # docstring claims it "NEVER RAISES … identical to `wait_bound_breach_counts`", and that
+            # is true of the COUNTER READ; it is not true of the ATTRIBUTE. A stale or partially
+            # written `monitoring` module has no `health_setup_clamped_count` at all, and an
+            # unguarded attribute access then turns this handler into a 500 — the one outcome
+            # `health()`'s docstring forbids ("It never 5xxes: a dead DB is 'degraded', never a
+            # killed process"). `null` is already the documented failure value for this key
+            # (`int | null`), so the degraded path is inside the published shape (#12482 fresh
+            # review, P3; measured: `AttributeError` out of `health()` on a partial module).
+            "health_setup_clamped": _health_setup_clamped(),
+            "record": record, "build": _build_identity(),
+            # #10488: the consent bridge's key, published as a truncated hash so
+            # a split between this deployment and the Pages mint is one COMPARISON
+            # instead of a diagnosis cycle. Reported, never folded into `status`
+            # (see the docstring). Resolved through the SAME module the verifier
+            # uses, so the reading cannot describe a key this process does not
+            # actually sign with.
+            "consent_token_key": _consent_token_key_health()}
 
 
 @app.get("/health/ready")
@@ -8309,6 +8387,30 @@ def _build_identity() -> dict:
         # indistinguishable, and the packaged one is plausible and wrong.
         "migrations_source": _MIGRATIONS_SOURCE,
     }
+
+
+def _consent_token_key_health() -> dict:
+    """The consent bridge's key, as a PUBLISHABLE tag (#10488, §2.5).
+
+    Thin on purpose: the rule that decides "is this deployment provisioned" and the digest that
+    describes the key BOTH live in ``tortoise/consent_token.py``, which is the module the verifier
+    uses. Re-implementing either here would let ``/health`` describe a key this process does not
+    actually sign with — the second-opinion failure #10447 removed from ``/health``/``/v1/version``.
+
+    Lazy import, like every other ``consent_token`` use in this module: the arm is optional, and an
+    import-time dependency would make ``/health`` — the liveness surface — share fate with it.
+
+    Never raises: ``/health`` must answer always (#2850). A failure is reported as unreadable, which
+    is a READING ("cannot state the key") and not a green one.
+    """
+    try:
+        from tortoise.consent_token import consent_token_key_health
+    except Exception:                                       # pragma: no cover - import-time only
+        return {"key_fingerprint": None, "configured": None, "reason": "unreadable"}
+    try:
+        return consent_token_key_health()
+    except Exception:
+        return {"key_fingerprint": None, "configured": None, "reason": "unreadable"}
 
 
 @app.get("/v1/version")
@@ -49541,7 +49643,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 181 tracked files (445 distinct
+# ABSOLUTE line number from 183 tracked files (448 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason

@@ -667,7 +667,7 @@ def test_the_lifetime_baseline_excludes_the_sample_at_the_query(tmp_path):
 #: ``LIFETIME_MEMORY_QUERY``. Spelled here rather than imported — the NUMBER is
 #: the claim's subject, and importing the API module for it would pull the whole
 #: stack into a fast suite.
-_PIVOT = 23667
+_PIVOT = 24620
 
 #: The one pattern that defines a "cite target" lives in
 #: ``tools/hosted_api_cite_census.py`` — ONE implementation, so the note's stated
