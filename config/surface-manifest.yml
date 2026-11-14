@@ -907,22 +907,22 @@ approval_date: '2026-09-18'
 # `cut_at_commit` records the commit passed to `cut --commit` (defaulting to the worktree HEAD,
 # which the provenance property then reds — RESOLVE **and** SURVIVE — once a lane head is
 # rebased away), which must be a DEFAULT-BRANCH sha so the citation survives a squash-merge
-# (#11057 review F1). So the two can legitimately DISAGREE, and they are graded by different
-# properties — `counts` is compared by the DERIVATION property, while `cut_at_commit` is
-# excluded from that drift check and graded only by the provenance property. Do not read
-# the pair as one snapshot: this very baseline is such a case — #11609 batch 1 cut a lane
-# tree with four no-destination MCP tools removed and recorded `origin/main`, so the counts
-# below read 68 while `30c9e7c4d` itself holds 72. ⛔ A hand-edited `counts` reds
-# `check` — re-cut instead (`cut --commit $(git rev-parse origin/main)`), and never paste a
-# number in.
-# ⚠️ The SAME applies to `render`: the counts it emits are the derivation at this
-# manifest, not a copy of `cut_at_commit`’s tree. Precedents that moved one without the
-# other: #4282 deleted 26 dead public SDK methods at `45eefb26c` (`sdk_public_methods` was
-# 124 here while `d05370918` held 150), and #10015 added approved row 28
-# (`get_organisation_account`), so it is 125. Read the number here and the sha above as
-# the two different facts they are. This baseline WAS re-cut, against `30c9e7c4d`, so the
-# rows come from a tree that still holds the four no-destination tools — that difference
-# is the archive’s, not a hand edit, and `check` grades it as such.
+# (#11057 review F1). So the two describe DIFFERENT trees and can legitimately disagree, and
+# they are graded by different properties: `counts` is compared by the DERIVATION property,
+# while `cut_at_commit` is excluded from that drift check and graded only by the provenance
+# property. This baseline is such a case — #11609 batch 1 removed four no-destination MCP
+# tools in the tree it cut, and recorded `origin/main` as the base, so the counts below read
+# 68 while `30c9e7c4d`'s own tree still holds those four and reads 72. That four-tool
+# difference is the ARCHIVE's; no property compares the two numbers to each other.
+# The same holds for `render`: the numbers it prints are this manifest's derivation, not a
+# copy of the base tree's. Precedents where they diverged: #4282 deleted 26 dead public SDK
+# methods at `45eefb26c` (`sdk_public_methods` fell from 150 at its parent `13e6856e4` to
+# 124), and it is 125 since #10015 implemented approved row 28
+# (`get_organisation_account`).
+# ⛔ A hand-edited `counts` reds `check` — re-cut instead
+# (`cut --commit $(git rev-parse origin/main)`), and never paste a number in. `cut` is
+# OWNER-GATED per this tool's own docstring ("ask Daniel FIRST, before the re-cut") because
+# it re-derives every row from the declaration, so a re-cut needs his word first.
 counts:
   tools: 68
   sdk_public_methods: 125
