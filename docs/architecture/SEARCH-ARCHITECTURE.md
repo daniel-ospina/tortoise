@@ -290,8 +290,8 @@ opposite of the ordering in §5.
 > BM25-in-Postgres does beat it (0.9633 vs 0.7133). What *is* met is the pre-authorisation's
 > **trigger**, which is why C3 is neither closed nor proceeding until the owner rules. ⛔ Tracker
 > facts — which issues carry the ruling and what state they are in — are recorded in
-> `SEARCH-ARCHITECTURE-CHANGELOG.md`, and no statement here turns on them. Correcting `#12298`'s
-> closure is the owner's; it is not a lane's.
+> `SEARCH-ARCHITECTURE-CHANGELOG.md`, and no statement here turns on them. Correcting the closure
+> recorded in `SEARCH-ARCHITECTURE-CHANGELOG.md` is the owner's; it is not a lane's.
 
 ### 6.3 EP state — the carve-out stands, and the fix is not to store it
 
