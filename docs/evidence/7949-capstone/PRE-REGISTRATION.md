@@ -3056,9 +3056,11 @@ to answer.
   tortoise/extractor_v2.py` is empty. So the `+90` band §10.36 measured is the band this tree
   carries, and every cite it owns still opens on the content it claims; §10.36 is not re-stated
   here, because a second unpinned copy of a number is a place to disagree.
-- **`tortoise/sdk.py` did NOT move either, so §10.31's twelve carriers are the live ones.** This
-  branch touches no file under `tortoise/` that `main` moved after `cca42fa599` other than the
-  extractor above, and all twelve were re-opened on the merged tree: `_extract_session_v2` at
+- **`tortoise/sdk.py` moved no cited line either, so §10.31's twelve carriers are the live ones.** It
+  is NOT unchanged — `#12485` (`6efb1c3f7294`) rewrote the `#2498` residual comment line-neutrally,
+  as recorded above — but no carrier moved with it: this branch touches no file under `tortoise/`
+  that `main` moved after `cca42fa599` other than the extractor above, and all twelve were re-opened
+  on the merged tree: `_extract_session_v2` at
   `18025`, `proj.link_source_to_event(` at `19452`, `relation_write = apply_relation_edges(` at
   `19012`, `from tortoise.relation_write import apply_relation_edges` at `19011`, the `#10999`
   transport-only comment at `18999`, the meta fold's `_capture_stats_with_step_witness` at `19054`,
