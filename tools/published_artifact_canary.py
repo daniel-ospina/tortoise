@@ -138,12 +138,21 @@ PYPI_SIMPLE = "https://pypi.org/simple"
 #: `package_name` is **the candidate being prepared**, i.e. always OUR name whatever the
 #: cause was. The cause is printed ABOVE that line, not in it.
 #:
-#: ⛔ SO THE STEP NAMES IN THIS TUPLE ARE AN ALLOW-LIST ON PURPOSE. Every entry is a
-#: subprocess that executes THIS artifact's backend on THIS artifact's sdist:
-#: `getting requirements to build wheel` (`distributions/sdist.py`),
-#: `preparing metadata (pyproject.toml)` (`operations/build/metadata.py`), and
-#: `building wheel for <name>` (`operations/build/wheel.py`). A failure there is the
-#: artifact's own defect, so it is a finding about the artifact and a release can fix it.
+#: ⛔ SO THE STEP NAMES IN THIS TUPLE ARE AN ALLOW-LIST ON PURPOSE, AND IT HOLDS ONE ENTRY
+#: ON PURPOSE TOO (#12422 round-30 review, P1/P2, MEASURED). The wrapper is raised from ONE
+#: site — `resolution/resolvelib/candidates.py::_prepare`, catching
+#: `InstallationSubprocessError` — so a step can only appear here if its failure reaches
+#: that `except`. `getting requirements to build wheel` (`distributions/sdist.py`) does.
+#: The other two steps a reader would expect are UNREACHABLE, by their own source:
+#: * `preparing metadata (pyproject.toml)` — `operations/build/metadata.py` CATCHES the
+#:   `InstallationSubprocessError` and re-raises `MetadataGenerationFailed`, which is a
+#:   `DiagnosticPipError`/`InstallationError` and NOT an `InstallationSubprocessError`, so
+#:   `_prepare` never sees it and no `Failed to build '…' when preparing metadata` exists.
+#: * `building wheel for <name>` — `operations/build/wheel.py` catches bare `Exception`,
+#:   logs, and returns `None`; nothing propagates to the wrapper.
+#: Listing either one was a claim that pip prints a line it does not print. Both are the
+#: FAIL this tool wants, and both read UNKNOWN today — recorded, not papered over, in
+#: `_install_failure_is_absence`'s residuals and tracked by #12530.
 #:
 #: ⛔ `installing build dependencies` IS DELIBERATELY ABSENT, and a deny-list would not
 #: have caught it. Its step description embeds our name too —
@@ -160,13 +169,19 @@ PYPI_SIMPLE = "https://pypi.org/simple"
 #: OUR pyproject (pip names the dependency there too), so the step is UNKNOWN by
 #: construction — fail-closed, and consistent with the `Requires-Dist` residual stated in
 #: `_install_failure_is_absence`.
+#:
+#: ⛔ AND AT THE PIP THIS CANARY ACTUALLY RUNS, THIS WHOLE ALTERNATIVE IS INERT — stated
+#: here because a detector that cannot run must never look like a pass. The wrapper does
+#: not exist before pip 25.3 (measured: absent in 24.0, 24.2, 24.3.1, 25.0, 25.2; present
+#: in 25.3, 26.0, 26.2.1), while `install_and_run` builds its venv with
+#: `sys.executable -m venv` and never upgrades pip, so it inherits ensurepip's bundle
+#: (measured 24.0). Under the shipped configuration this alternative matches nothing and an
+#: unbuildable sdist reads UNKNOWN. #12530 tracks closing that, either by reading pip's
+#: ACTUAL per-step text or by pinning the pip the venv gets; until then the honest
+#: description of what this predicate buys in production is "nothing yet", not "a fix".
 #: ⚠️ An unrecognised step falls to UNKNOWN, never to FAIL: that is what an allow-list
 #: buys, and it is the same reasoning that made the unnamed-probe-state arm an allow-list.
-_ABSENCE_OWN_BUILD_STEPS = (
-    "getting requirements to build wheel",
-    "preparing metadata",
-    "building wheel for",
-)
+_ABSENCE_OWN_BUILD_STEPS = ("getting requirements to build wheel",)
 _ABSENCE_NAMED = re.compile(
     r"(?:no matching distribution found for|could not find a version that satisfies the requirement)"
     r"\s+(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)"
@@ -185,15 +200,15 @@ def _canonical_dist_name(name: str) -> str:
     are one name. pip echoes the requirement as the caller wrote it, which is not
     guaranteed to be the spelling the console script or the index uses.
 
-    ⛔ The trailing `.strip("-")` is DEFENSIVE, and its old justification was wrong in a way
-    a reader would have cited: the `Failed to build '…'` form is quoted, and the closing
-    quote terminates the capture, so that form cannot carry trailing punctuation. What it
-    really protects is an UNQUOTED, punctuation-attached spelling —
-    `failed to build tortoise-graph. when …` captures `tortoise-graph.`, which without the
-    strip normalises to `tortoise-graph-`, a name no package has. pip does not emit that
-    spelling today (measured, pip 26.2.1), so the pin below it is a direct-call test on
-    synthetic input: it keeps the strip from being deleted as dead code, and says so,
-    instead of claiming a real pip message exercises it (#12422 round-21 delta review, P3).
+    ⛔ The trailing `.strip("-")` IS load-bearing, and both earlier attempts to describe it
+    were wrong in opposite directions. The capture class is `[A-Za-z0-9._-]*`, which
+    INCLUDES `.` and `-`, so a name carrying trailing punctuation keeps it even inside the
+    quotes: `Failed to build 'tortoise-graph.' when …` captures `tortoise-graph.`, and
+    without the strip that normalises to `tortoise-graph-` — a name no package has, losing
+    the match the alternative exists for (measured on this regex). pip's own
+    `package_name` does not end in punctuation today, so this is defence against a near
+    miss rather than something a current pip message exercises; the pin below states that
+    instead of implying a real message covers it (#12422 round-30 review, P3).
     """
     return re.sub(r"[-_.]+", "-", name.strip().lower()).strip("-")
 
@@ -232,10 +247,9 @@ def _install_failure_is_absence(
     about this package, so it returns False and the caller takes the UNKNOWN path.
 
     ⚠️ STATED RESIDUALS, because they are real blind spots and pretending otherwise is how
-    the next lane mistakes them for bugs. Both are the SAME ambiguity — pip names the
-    dependency that could not resolve, never us — and both read as UNKNOWN ("detector
-    outage", exit 2) instead of FAIL. That is fail-closed: it never orders an upload that
-    cannot help.
+    the next lane mistakes them for bugs. All three read as UNKNOWN ("detector outage",
+    exit 2) instead of FAIL. That is fail-closed — it never orders an upload that cannot
+    help — but none of them is invisible any more:
 
     1. A release whose OWN declared dependency is unsatisfiable (`Requires-Dist:
        falkordblite>=999`). Attributing it needs the release's own `requires_dist`.
@@ -243,6 +257,10 @@ def _install_failure_is_absence(
        `Failed to build '<us>' when installing build dependencies for <us>` — the step is
        excluded above because the same bytes are produced by a transient failure of
        SOMEONE ELSE'S build dependency, and the two cannot be told apart from stderr.
+    3. An artifact whose OWN metadata generation or wheel build fails, which IS a
+       release-owed defect and which this predicate cannot see: pip converts those
+       failures before they reach the wrapper (see `_ABSENCE_OWN_BUILD_STEPS`), and on the
+       pip this canary's venv gets the wrapper does not exist at all. Tracked by #12530.
 
     The narrower claim this function now makes is exactly: a failure that names no package,
     names a different one, or names us only as the candidate whose build could not be

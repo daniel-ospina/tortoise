@@ -803,27 +803,61 @@ def test_an_install_failure_is_only_RED_when_the_INDEX_confirms_the_absence(tmp_
         f"{build_deps_arm.detail})"
     )
 
-    # ⛔ …and the arm is NOT disabled: the steps that DO run our own backend on our own
-    # sdist stay release calls, so an unbuildable sdist is still caught (the intent the
-    # over-wide alternative was reaching for). Each is a real pip step description
-    # (`operations/build/metadata.py`, `operations/build/wheel.py`,
-    # `distributions/sdist.py`) — not a paraphrase of one.
-    for step, marks in (
+    # ⛔ …and the arm is NOT disabled: the step that DOES reach this wrapper is still a
+    # release call, so an unbuildable sdist at that step is caught.
+    # ⚠️ THERE IS EXACTLY ONE SUCH STEP, and the list is short because pip's source is
+    # short (#12422 round-30 review, P1). The wrapper is raised from one `except
+    # InstallationSubprocessError` in `resolution/resolvelib/candidates.py::_prepare`, and
+    # the other two steps a reader expects never reach it: `operations/build/metadata.py`
+    # re-raises `MetadataGenerationFailed` (NOT an `InstallationSubprocessError`), and
+    # `operations/build/wheel.py` catches bare `Exception` and returns `None`. The two rows
+    # that used to sit here asserted FAIL on messages pip does not print — a test pinning a
+    # fiction is worse than no test, because it certifies the fiction.
+    own_build_arm = canary.install_and_run(
+        package="tortoise-graph",
+        version="0.2.0",
+        workdir=tmp_path,
+        timeout=10,
+        runner=_Runner(
+            {
+                "pip": _completed(
+                    ["pip", "install"],
+                    1,
+                    "",
+                    "ERROR: Failed to build 'tortoise-graph' when getting requirements "
+                    "to build wheel",
+                )
+            }
+        ),
+        absent_probe=lambda package: canary.INDEX_OK,
+    )[0]
+    assert own_build_arm.status == canary.FAIL, (
+        f"the artifact failing to build ITSELF at `getting requirements to build wheel` "
+        f"IS a finding about the artifact, so it must stay a release call (got "
+        f"{own_build_arm.status}: {own_build_arm.detail})"
+    )
+
+    # ⛔ AND THE TWO STEPS THAT DO **NOT** REACH THE WRAPPER ARE PINNED AS THE BLIND SPOT
+    # THEY ARE, not as defects they are not (#12422 round-30 review, P1; #12530). These are
+    # the shapes pip actually prints for our own metadata/wheel build failing — the
+    # `throw`/`logger.error` sites in `operations/build/metadata.py` and
+    # `operations/build/wheel.py`, plus pip's `«<step>» did not run successfully.` framing
+    # (`exceptions.py`) — and today they read UNKNOWN. ⚠️ If a future change makes either
+    # one a FAIL, this assertion REDS ON PURPOSE: the residual has closed, and the next lane
+    # must update #12530 rather than assume the blind spot still exists.
+    for blind_step, marks in (
         (
             "preparing metadata",
-            "ERROR: Failed to build 'tortoise-graph' when preparing metadata (pyproject.toml)",
+            "  × Preparing metadata (pyproject.toml) did not run successfully.\n"
+            "  × Encountered error while generating package metadata.",
         ),
         (
             "building wheel for",
-            "ERROR: Failed to build 'tortoise-graph' when building wheel for "
-            "tortoise-graph (pyproject.toml)",
-        ),
-        (
-            "getting requirements to build wheel",
-            "ERROR: Failed to build 'tortoise-graph' when getting requirements to build wheel",
+            "  × Building wheel for tortoise-graph (pyproject.toml) did not run successfully.\n"
+            "ERROR: Failed building wheel for tortoise-graph",
         ),
     ):
-        own_build_arm = canary.install_and_run(
+        blind_arm = canary.install_and_run(
             package="tortoise-graph",
             version="0.2.0",
             workdir=tmp_path,
@@ -831,10 +865,11 @@ def test_an_install_failure_is_only_RED_when_the_INDEX_confirms_the_absence(tmp_
             runner=_Runner({"pip": _completed(["pip", "install"], 1, "", marks)}),
             absent_probe=lambda package: canary.INDEX_OK,
         )[0]
-        assert own_build_arm.status == canary.FAIL, (
-            f"the artifact failing to build ITSELF at `{step}` IS a finding about the "
-            f"artifact, so it must stay a release call (got {own_build_arm.status}: "
-            f"{own_build_arm.detail})"
+        assert blind_arm.status == canary.UNKNOWN, (
+            f"`{blind_step}` is a release-owed defect this predicate CANNOT see (pip "
+            f"converts or swallows it before the wrapper), so it must stay UNKNOWN rather "
+            f"than pretend — if this now reads FAIL the blind spot has closed and #12530 "
+            f"must be updated (got {blind_arm.status}: {blind_arm.detail})"
         )
 
     # ⛔ AND AN UNRECOGNISED STEP IS NOT A VERDICT. The allow-list is what buys this: a
@@ -1052,14 +1087,14 @@ def test_an_install_failure_is_only_RED_when_the_INDEX_confirms_the_absence(tmp_
 
 def test_the_absence_name_match_NORMALISES_the_name_it_compares(tmp_path):
     """`_install_failure_is_absence` compares PEP 503-normalised names, and that
-    normaliser is defensive rather than tidiness (#12422 round-21 review, P3).
+    normaliser is load-bearing (#12422 round-21 review, P3).
 
-    Measured before this test existed: removing `.strip("-")` reddened NOTHING. The fix is
-    the direct-call assertions below, not a claim about a pip message: pip's
-    `Failed to build '…'` form is QUOTED, so the closing quote terminates the capture and
-    that form cannot carry trailing punctuation. What the strip really protects is an
-    unquoted, punctuation-attached spelling — which is why the last assertion calls the
-    normaliser directly instead of pretending pip emits it.
+    Measured before this test existed: removing `.strip("-")` reddened NOTHING, and the
+    first two attempts to justify the line were both wrong — one described an unquoted
+    spelling, the other claimed the quoted form cannot carry trailing punctuation. The
+    capture class includes `.` and `-`, so it can: `Failed to build 'tortoise-graph.'`
+    captures `tortoise-graph.`. The pin is the direct-call assertions below, and the
+    docstring says plainly that pip's own `package_name` does not end in punctuation today.
     """
     assert canary._canonical_dist_name("Tortoise_Graph") == "tortoise-graph"
     assert canary._canonical_dist_name("tortoise.graph") == "tortoise-graph"
@@ -1067,12 +1102,16 @@ def test_the_absence_name_match_NORMALISES_the_name_it_compares(tmp_path):
         "a name carrying trailing punctuation normalised to a DIFFERENT name, so pip's "
         "wording would stop matching the package under test"
     )
+    # ⚠️ This uses the ONE step that reaches the wrapper, on purpose: coupling the strip's
+    # pin to an unreachable step made the assertion blame the strip for a removed tuple
+    # entry (#12422 round-30 review, P3).
     assert canary._ABSENCE_NAMED.search(
-        "failed to build tortoise-graph. when preparing metadata (pyproject.toml)"
+        "Failed to build 'tortoise-graph.' when getting requirements to build wheel"
     ), (
-        "the unquoted, punctuation-attached `Failed to build` spelling pip does not emit "
-        "today is what the strip exists for; if this stops matching, the strip is dead "
-        "code and the docstring says otherwise"
+        "the quoted form DOES capture trailing punctuation — the capture class includes "
+        "`.` — so the strip is what keeps `tortoise-graph.` from normalising to "
+        "`tortoise-graph-`; if this stops matching, the strip is dead code and the "
+        "docstring says otherwise"
     )
     assert canary._install_failure_is_absence(
         "ERROR: No matching distribution found for tortoise-graph.", None, "tortoise-graph"
