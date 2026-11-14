@@ -5864,7 +5864,7 @@ _EPIC_CITE_SOURCES = {
     # this merges into, which is `c1db6f3df28e` — those two `def`s are at `:1007`/`:999`
     # (`#12507` landed above them) while both the row and the document still said
     # `:955`/`:947`. ⚠️ The head is named because the measurement was taken there, and the
-    # pair happens to hold at both heads; nothing else here is claimed about `30c9e7c4d3`. That is this source key's case in one
+    # pair happens to hold at both heads; nothing else here is claimed about either head. That is this source key's case in one
     # line: the pin is what turned an invisible re-stale into a red; a name is pinned,
     # its line is re-opened.
     "pi_hooks": _REPO / "tortoise/pi-hooks/tortoise-capture.ts",
