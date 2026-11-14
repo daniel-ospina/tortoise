@@ -257,7 +257,7 @@ later**: main's `test_embed_decision_step_11086.py` and that branch's
 `test_demo_session_read_exclusion_8290.py` land in `fast_pool()` together, the union
 packs the worst shard at **840.2 s** (either parent alone packed 840.0 s), `ceil(840.2/60 x 2)`
 rounds up to **29 m**, and the arm-2 SUM became **60.64 m, x 1.5 = 90.96 m against the 90 m cap**
-— RED where both parents pass. `fast_shards: 11` packs the same map to 781.8 s → 27 m, i.e. the
+— RED where both parents pass. `fast_shards: 11` packs the same map to 782.0 s → 27 m, i.e. the
 58.6 m above: 2.0 m of real headroom instead of the 0.5 m S=10 had been clearing by. The cap was
 NOT moved — `#3239`'s stale-head exposure is what raising it re-opens, and the SUM rose from the
 POOL, not from the pre-suite terms.) The write term fits because #11063 split this job's cache by payload: `~/.cache/pip`

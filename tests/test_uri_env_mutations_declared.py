@@ -241,7 +241,7 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # inherits a runner's target instead of measuring a new user's default.
     # The arm is bound to THIS site's literal value on purpose: an unanchored
     # `setenv("TORTOISE_DB_URI"` arm would authorize any future one-line setenv in this
-    # 3.5k-line file (`wc -l` → 3510 at this head), which the entry 10 lines above
+    # 5.3k-line file (`wc -l` → 5256 at this head), which the entry 10 lines above
     # refuses to do for its own file.
     # ⛔ ONE key, not three. At `a808f9f8ba` the file carried TWO rows for this file and
     # `#12628` collapsed them again on main (this branch rebased onto the collapsed base),
