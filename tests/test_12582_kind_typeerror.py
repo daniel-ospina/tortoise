@@ -170,10 +170,12 @@ def test_a_truthy_non_str_kind_is_refused_not_served_as_an_empty_page(
     so one argument value answered two ways. The list param is here for its own
     measured pre-fix answer: `{"error": "unhashable type: 'list'"}` leaked out of
     the SDK's kind-expansion map, which was neither a refusal nor a route. Fails
-    if the refusal is absent (the empty page, or the leaked error, comes back),
-    if it is placed BELOW an arm (the read happens and the tag arm's message
-    differs), or if it is widened to falsy values (the served-read tests red
-    instead — five, measured).
+    if the refusal is absent (the empty page, or the leaked error, comes back) or
+    if it is widened to falsy values (the served-read tests red instead — five,
+    measured). It cannot see WHERE the refusal sits relative to the arms: measured,
+    moving it below both the `tag=` and `text=` arms leaves THIS test green — the
+    placement claim belongs to
+    `test_the_two_arms_agree_that_a_truthy_non_str_kind_is_refused`.
 
     Reaches the value: no read may happen at all, which is what the empty call
     log asserts — a refusal placed after the accessor would still return an error
@@ -217,6 +219,8 @@ def test_the_two_arms_agree_that_a_truthy_non_str_kind_is_refused(stub) -> None:
             f"the {name} arm served {res!r} for kind=True")
         assert "kind must be a string" in res["error"], (
             f"the {name} arm answered with another rule's message: {res['error']}")
+    assert stub.calls == [], (
+        f"neither arm may reach the accessor with a non-str kind: {stub.calls}")
 
 
 @pytest.mark.parametrize("not_a_kind", [False, 0, 0.0, "", None, True, 1])
@@ -230,8 +234,10 @@ def test_a_non_str_kind_never_reaches_the_suggestion_builder(
       falsy params here (`False`, `0`, `0.0`) plus `""`, and the truthy ones are
       already refused upstream — 4 reds, measured;
     - the truthy-non-str refusal removed -> `True`/`1` reach the builder here,
-      the five refusal params are served as empty pages, and the two-arm test
-      sees one arm refuse while the other serves — 8 reds, measured;
+      all five refusal params are served an empty page BY THIS STUB (the real SDK
+      answers the list with the leaked `unhashable type: 'list'` instead, which
+      this fixture does not model — it never touches the expansion map), and the
+      two-arm test sees one arm refuse while the other serves — 8 reds, measured;
     - a refusal for a FALSY kind -> the served-read cases red (5 in all), because
       they assert the read is SERVED, not refused.
 
