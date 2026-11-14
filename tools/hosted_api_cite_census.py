@@ -136,7 +136,11 @@ _CITE_CANDIDATE_RE = r"[[:alnum:]_.-]*hosted_api\.py:[0-9]+"
 #: `tests/test_demo_session_read_exclusion_8290.py` asserts it equals the site —
 #: and that pin is what reds when a forward merge grows the module, which is the
 #: remedy this constant relies on rather than a hand sweep.
-DEFAULT_PIVOT = 23667
+#: ⛔ THE FALLBACK PIVOT, re-derived with the notes (#12616). `9ccc8ed940` (#12466)
+#: moved the execution site 23667 -> 23676 (+9) and the pin below caught the notes
+#: but not this constant — the test asserts `lifetime_query_sites()[0] ==
+#: DEFAULT_PIVOT`, so the two can only disagree while nobody runs `--check`.
+DEFAULT_PIVOT = 23676
 
 _SCORECARD = "tortoise/activation_scorecard.py"
 _HOSTED = "tortoise/hosted_api.py"

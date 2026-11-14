@@ -5984,19 +5984,40 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # ...and THAT sentence names a second file, so its `.ts` pair takes its
         # own row: a row carries ONE source key. Both anchors are the FUNCTIONS
         # the row's prose names (`postCapture` and its `install-probe` sibling),
-        # never a bare offset. The row named `:948`/`:938`; the tree carries those
+        # never a bare offset. The row named `:948`/`:938`; the tree carried those
         # two `def`s at `:955`/`:947`, which are **always 8 apart** across all 27
-        # revisions of the file — so nothing "rotted" and there is no offset to
+        # revisions of the file — so nothing "rotted" then and there was no offset to
         # reuse: `:938` was `clearTimeout(timer);` and `:948` was
         # `cfg: CaptureConfig,`, i.e. the pair was WRONG, not shifted (the file did
-        # not move in this wave at all). A reader who takes an offset from it
+        # not move in that wave at all). A reader who takes an offset from it
         # re-derives `948` → `957`, which lands on `postCapture`'s parameter list
         # (`payload: Record<string, unknown>,`) instead of its `def`, so the row
         # reds on content rather than silently resolving.
+        #
+        # ⛔ THEN IT DID MOVE: `54193b722e` (#12507, "the capture filing legs read
+        # the 2xx body") shifted the pair **+52** — `postInstallProbe` 947 → 999,
+        # `postCapture` 955 → 1007 — and re-derived nothing, reddening `test (i)`
+        # on `main` (#12616). The 8-apart spacing still holds (999/1007), which is
+        # exactly why a reader must re-derive BOTH by symbol here and never assume
+        # the pair's offset can be carried: it cannot, because the two ends sit in
+        # different functions and every insertion above either one moves it alone.
         ("00-align.md", "`llm:deepseek-direct` is what", (
-            ("955", "export function postCapture("),
-            ("947", "export function postInstallProbe("),
+            ("1007", "export function postCapture("),
+            ("999", "export function postInstallProbe("),
         ), "pi_hooks"),
+        # ⛔ THE FOURTH CITE ON THAT SAME SENTENCE, which no row read until this
+        # one (#12616 review, P2). The A-d sentence names four FILES; `sdk` and
+        # `pi_hooks` had a row, `probes/capstone_measure.py` carries no line at all,
+        # and `hosted_api.py:20354` — the `POST /v1/sessions/install-probe` route —
+        # was read by NOTHING. It moved 20345 → 20354 when `9ccc8ed940` (#12466)
+        # shifted `tortoise/hosted_api.py` +9, and it was re-derived here by hand; a
+        # repaired cite that nothing pins is a repair the next move of the symbol
+        # undoes silently, which is this table's own doctrine
+        # (`_EPIC_CITE_SOURCES`). Pinned now, so the next insertion above the route
+        # reds instead of re-staling it.
+        ("00-align.md", "`llm:deepseek-direct` is what", (
+            ("20354", '@app.post("/v1/sessions/install-probe")'),
+        ), "hosted_api"),
         ("04-plan.md", "operator / label path", (
             ("25396", "declared = declared_relation_predicates()"),
         ), "sdk"),
@@ -6008,8 +6029,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # exact failure the deleted "Provenance of the numbers" section named. Held by
         # CONTENT, so a number that lands on a comment cannot satisfy it.
         ("03-test-design.md", "the A-corpus capture", (
-            ("18494", "if count + est > max_points:"),
-            ("18519", "detail=quota_refusal_payload("),
+            ("18503", "if count + est > max_points:"),
+            ("18528", "detail=quota_refusal_payload("),
         ), "hosted_api"),
         # ⛔ NOT A ROW ANY MORE — the `carve_out:` claim below the rows is checked
         # against the BLOCK (`_section_entries`) and not against a line number: the
