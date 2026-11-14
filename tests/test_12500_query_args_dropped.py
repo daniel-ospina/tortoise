@@ -1155,12 +1155,20 @@ def test_every_alternative_of_a_paged_text_route_terminates(stub) -> None:
     order_only = tortoise_query(text="x", entity_type="document",
                                 order_by="confidence", offset=0)["error"]
     assert ". Also drop offset=/page=" in order_only, order_only
+    # The alternatives must be NAMED by the message this test says it follows.
+    # Without this the executions below are unbound literals: deleting the
+    # alternative from the route (keeping only `order_by='relevance'`, which fixes
+    # the ordering for no type at all) left the whole gate set green (round-25 P2,
+    # measured: 87 passed).
+    assert "pass entity_type='point'" in order_only, order_only
+    assert "or order_by='relevance'" in order_only, order_only
 
     # both refused, paged: "Passing entity_type='point' fixes both".
     both = tortoise_query(text="x", entity_type="document",
                           min_confidence=_CONFIDENCE_FLOOR,
                           order_by="confidence", offset=0)["error"]
     assert ". Also drop offset=/page=" in both, both
+    assert "Passing entity_type='point' fixes both" in both, both
 
     # Follow each FIRST alternative, dropping only what the message names. The
     # order-only route's first alternative is "pass entity_type='point'", which
