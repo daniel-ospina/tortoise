@@ -6224,11 +6224,11 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # all. Five rows here (nine cells), because a row carries ONE source key; the phrase
         # is unique in the file. The first cut pinned only three of the nine, and review measured the
         # residual by mutating the rest — the rest of the file GREEN — so they are pinned too.
-        ("05-verify.md", "Measured at `d05688df5990`", (
+        ("05-verify.md", "Measured at `4dd97bacc2`", (
             ("19341", "``body.harness`` only ever introduces a harness on a session the server"),
             ("19448", "if count + est > max_points:"),
         ), "hosted_api"),
-        ("05-verify.md", "Measured at `d05688df5990`", (
+        ("05-verify.md", "Measured at `4dd97bacc2`", (
             ("10037", "_registry_cache = PackRegistry(packs_dir)"),
             # …and the `subject_binding_available` consume pair on the SAME line, which the
             # registration above left unread (#12569 review round 6: `:10064`/`:10117` →
@@ -6236,10 +6236,10 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("10064", "subject_binding_available,"),
             ("10117", "and not subject_binding_available(graph):"),
         ), "sdk"),
-        ("05-verify.md", "Measured at `d05688df5990`", (
+        ("05-verify.md", "Measured at `4dd97bacc2`", (
             ("1186", '"sha256": sha, "turns": None'),
         ), "capstone_run"),
-        ("05-verify.md", "Measured at `d05688df5990`", (
+        ("05-verify.md", "Measured at `4dd97bacc2`", (
             ("1400", "a **two-method** event-sourced Protocol"),
             # ⛔ AND THE EIGHTH THIS-HEAD NUMBER IN THAT SENTENCE (#12569 review round 4):
             # "D6 sits at `:1418`" is present tense and this-head, and mutating it to
@@ -6257,7 +6257,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # literal is at `:1194`"), so a count taken over the continuation sentence alone
         # misses it even though the row's scoping phrase binds the whole line.
         # `:1418` is pinned on the row above already; only `:1194` needs its own here.
-        ("05-verify.md", "Measured at `d05688df5990`", (
+        ("05-verify.md", "Measured at `4dd97bacc2`", (
             ("1194", 'if not frozen.get("sha256"):'),
         ), "capstone_run"),
         # ⛔ THE THREE THIS-HEAD CITES IN THAT SAME PARAGRAPH THAT STILL HAD NO READER
