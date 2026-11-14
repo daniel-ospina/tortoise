@@ -775,7 +775,7 @@ git grep -c 'result\["relations"\]' -- tests/          # tree-wide MATCHES — T
                                                           # — 3 — and tests/test_7949_capstone_measure.py
                                                           # — 4 — SOURCE-TEXT scans and one prose comment, not
                                                           # consumers: one is the `extractor_v2.py` scan
-                                                          # (`:14445`) that derives the doc's cite, two are the
+                                                          # (`:14454`) that derives the doc's cite, two are the
                                                           # finder's own conditions (#12569), and the fourth is
                                                           # a prose line about `#11001`'s in-place correction
 # ⛔⛔ THIS GREP COUNTS LINES, NOT READERS — do not read the per-file numbers as "who consumes the
@@ -792,7 +792,7 @@ git grep -c 'result\["relations"\]' -- tests/          # tree-wide MATCHES — T
 #     DERIVE the cite — a citation pin, not a consumer.
 # So: 1 file reads the channel through the literal name (`test_10999`), 1 reads it through a rebind
 # (`write_path_relation_lane`), and 1 does not read it at all (the pin). `"relations"` is a
-# RESULT-level key (`extractor_v2.py:12649`, `"relations": payload_relations`), which is why both
+# RESULT-level key (`extractor_v2.py:12739`, `"relations": payload_relations`), which is why both
 # readers can see it at all.
 # ⚠️ The third file was added after this record was written, so the earlier "TWO files … 59"
 # was true of the head this block was first measured on (`e49788706a`, which reads 2 files /

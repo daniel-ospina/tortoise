@@ -5868,12 +5868,16 @@ _EPIC_CITE_SOURCES = {
     # those two `def`s at `:955`/`:947`. Registered because a repaired cite that nothing
     # pins is a repair the next move of the symbol undoes silently. ⛔ AND IT ALREADY
     # HAS: measured at `6916a6cd89` — an EARLIER round's base, NOT the `origin/main` head
-    # this merges into, which is `4dd97bacc2` — those two `def`s are at `:1007`/`:999`
+    # this was merging into then (`4dd97bacc2`) — those two `def`s are at `:1007`/`:999`
     # (`#12507` landed above them) while both the row and the document still said
-    # `:955`/`:947`. ⚠️ The head is named because the measurement was taken there. ⛔ The
-    # pair does NOT hold at both heads any more: `main` moved by +16 (`:1015`/`:1023` at
-    # `4dd97bacc2`, measured by the `#12295` de-conflict, which re-derived this row to that
-    # pair) — so nothing here is claimed about any head but the one named. That is this source key's case in one
+    # `:955`/`:947`. ⚠️ The head is named because the measurement was taken there, and the
+    # pair holds at `d05688df5990` too; nothing else here is claimed about any head. ⛔ It
+    # moved ONCE MORE since: `#12695` (`3893603b07`) took the pair to `:1023`/`:1015` at
+    # `origin/main` `5843fdf234` and re-derived no cite, so `main` was red for this row
+    # until that number was re-measured in the tree this head merges — and the `#12295`
+    # de-conflict re-derived the row to the same pair. Measured in THIS merged tree
+    # (`grep -n 'export function postCapture(\|export function postInstallProbe('
+    # tortoise/pi-hooks/tortoise-capture.ts` -> `:1023`/`:1015`). That is this source key's case in one
     # line: the pin is what turned an invisible re-stale into a red; a name is pinned,
     # its line is re-opened.
     "pi_hooks": _REPO / "tortoise/pi-hooks/tortoise-capture.ts",
@@ -6077,8 +6081,13 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # minutes BEFORE it (2026-11-13T19:30:00 vs 19:34:09) and is an ancestor of
         # `#12545`'s commit, while `#12545` measured at `5bacb44e0b` which does NOT
         # contain it — so that pair arrived ALREADY stale at its own landing commit,
-        # and `main` was red for this row at `6916a6cd89`. `#12695` (`3893603b07`) then added
-        # 16 lines above both, so the pair is **`:1023`/`:1015`** here. The two `def`s are always
+        # and `main` was red for this row at `6916a6cd89`. `#12695` (`3893603b07`, the
+        # Pi leg's unrecorded-outcome stamp) then added 16 lines above both `def`s,
+        # in `tortoise-capture.ts`, and re-derived no cite, so the pair is
+        # **`:1023`/`:1015`** here — measured at this head
+        # (`grep -nF 'export function postCapture(' …`) and repaired at this head
+        # rather than carried, because a red on `main` blocks every head. The two
+        # `def`s are always
         # **8 apart** in this file, and that is exactly the trap: an offset read off
         # a stale pair re-derives `948` → `957`, which WAS `postCapture`'s parameter
         # list (`payload: Record<string, unknown>,`) at `5bacb44e0b` — at
@@ -6214,8 +6223,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         #
         # The anchor is `quota_refusal_payload(QuotaExceededError(`, not the bare
         # `quota_refusal_payload(`, because the OLD anchor's `detail=quota_refusal_payload(`
-        # form occurs at THREE lines (`:10474`, `:19370`, `:19432`) — and the bare
-        # call occurs at four (`:10056` is `return quota_refusal_payload(`): a
+        # form occurs at THREE lines (`:10576`, `:19473`, `:19535`) — and the bare
+        # call occurs once too (`:10158` is `return quota_refusal_payload(`): a
         # `(document, pin)` pair moved together onto `:18590` would satisfy the
         # content arm and stay green on the WRONG refusal.
         # The hardened form occurs exactly once in the file, so a re-point onto a
@@ -6225,7 +6234,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("19473", "quota_refusal_payload(QuotaExceededError("),
         ), "hosted_api"),
         # ⛔ THE LINE THAT *QUOTES* :82's NUMBER (#12462 review). `03-test-design.md:236`
-        # re-states `hosted_api.py:19345` as the same guard read at an older head, so it is
+        # re-states `hosted_api.py:19448` as the same guard read at an older head, so it is
         # a second statement of one hit — and the paragraph it sits in INSTRUCTS the next
         # merger to re-point line 82, which is exactly how 236 comes to assert the old
         # number while 82 moves. Unpinned until the review reverted it green. Only the
