@@ -247,11 +247,25 @@ _BUILDER_PLAN = r"['\"`]?builder['\"`]?\s+(?:plan|tier)"
 #: Builder plan, **only the `pro` identifier** (#4336)" is the #4336 restatement in
 #: its most natural form — and a bare `,` in this set flagged it, which is the
 #: EXPENSIVE half of the trade (a lint that blocks correct prose is worse than the
-#: drift it guards). A comma followed by a RESTRICTIVE marker (`only`, `just`) opens
-#: a qualification, so it does not end the clause; a comma followed by anything else
-#: still does (`…, so a builder buys pro`), so the measured denial's comma variant
-#: stays caught instead of being traded away for the fix.
-_CLAUSE_END = r"(?=\s*(?:$|[.;)]|—|–|--|;|,(?!\s*(?:only|just)\b)))"
+#: drift it guards).
+#:
+#: ⛔ `only|just` ALONE WAS TOO LOOSE (cycle-5 review, measured): it exempted
+#: `there is no "builder" plan, only pro and team` — the MEASURED drift reflowed with
+#: a comma, i.e. the exact sentence this pin exists for — and `, only a paid one`,
+#: `, only the Team plan`. The exception therefore keys on the IDENTIFIER
+#: RESTATEMENT: the trailing clause must name `pro`/`builder` **as an identifier**
+#: (`identifier`, `key`, `name`, `spelling`, `tier`), or say it IS one. That is the
+#: #4336 sentence and nothing else:
+#:   * exempt — `…, only the `pro` identifier (#4336)`, `…, it is the `pro` identifier`
+#:   * denied — `…, only pro and team` (drift), `…, only a paid one`, `…, only the Team plan`
+#: A comma followed by anything else still ends the clause (`…, so a builder buys pro`).
+_IDENTIFIER_RESTATEMENT = (
+    r"(?:only|just)\s+(?:the\s+)?(?:pro|builder)\s+"
+    r"(?:identifier|key|name|spelling|tier)\b"
+    r"|it\s+is\s+(?:just\s+)?(?:the\s+)?(?:pro|builder)\s+"
+    r"(?:identifier|key|name|spelling|tier)\b"
+)
+_CLAUSE_END = (r"(?=\s*(?:$|[.;)]|—|–|--|;|,(?!\s*(?:" + _IDENTIFIER_RESTATEMENT + r"))))")
 
 #: A denial is often qualified by a trailing intensifier rather than nothing at all
 #: (`… anymore`, `… at all`). Measured false NEGATIVES before this existed: "There is
@@ -259,6 +273,14 @@ _CLAUSE_END = r"(?=\s*(?:$|[.;)]|—|–|--|;|,(?!\s*(?:only|just)\b)))"
 #: ordinary prose and both escaped the guard entirely (cycle-4 review). Kept to a
 #: CLOSED set so it cannot become a wildcard that swallows the next qualifier.
 _INTENSIFIER = r"(?:\s+(?:any\s?more|anymore|at\s+all|available|for\s+sale))?"
+
+#: …and AFTER an intensifier only TERMINAL punctuation may end the assertion
+#: (cycle-5 review, measured). `_CLAUSE_END`'s comma arm re-entered through the new
+#: intensifier and false-blocked the SCOPE-qualifier class the module's own doctrine
+#: protects — `There is no Builder plan available, so self-hosters use the OSS build.`
+#: and `There is no Builder plan at all, in the OSS install.` were both red. A comma
+#: after an intensifier qualifies; it does not close.
+_CLAUSE_END_STRICT = r"(?=\s*(?:$|[.;)]|—|–|--|;))"
 
 #: Markdown down to prose, applied BEFORE matching. The drift has to be caught in the
 #: style the DOC ITSELF uses: this repo renders the tier as ``**Builder**`` and the
@@ -277,12 +299,17 @@ def _plain(sentence: str) -> str:
 
 _DENIAL_PATTERNS = (
     # "there is no 'builder' plan" — asserted, unqualified absence.
+    re.compile(r"\bthere(?:'s| is| are)\s+no\s+" + _BUILDER_PLAN + _CLAUSE_END, re.I),
+    # …the same arm qualified by a trailing intensifier, where only TERMINAL punctuation
+    # may end the assertion (a comma after an intensifier is the scope-qualifier shape).
     re.compile(r"\bthere(?:'s| is| are)\s+no\s+" + _BUILDER_PLAN + _INTENSIFIER +
-               _CLAUSE_END, re.I),
+               _CLAUSE_END_STRICT, re.I),
     # "Tortoise has no Builder plan" / "we offer no Builder tier" — the same asserted
     # absence with the vendor as the subject. Measured false negative (cycle 4).
     re.compile(r"\b(?:has|have|offer|offers|sell|sells)\s+no\s+" + _BUILDER_PLAN +
-               _INTENSIFIER + _CLAUSE_END, re.I),
+               _CLAUSE_END, re.I),
+    re.compile(r"\b(?:has|have|offer|offers|sell|sells)\s+no\s+" + _BUILDER_PLAN +
+               _INTENSIFIER + _CLAUSE_END_STRICT, re.I),
     # "no 'builder' plan exists" (with an explicit non-existence predicate)
     re.compile(r"\bno\s+(?:such\s+(?:thing\s+as\s+(?:a\s+)?)?)?" + _BUILDER_PLAN +
                r"\s+exists\b", re.I),
@@ -321,6 +348,15 @@ _RETRACTION_EVIDENCE = re.compile(
     r"|\b(?:read|said|says|claimed|asserted|stated|wrote|worded)\b[^.]{0,40}"
     r"['\"“”`]",                                            # quotes it AS a claim
     re.I)
+
+#: …AND the record must TIE BACK to the denied claim (cycle-5 review, measured). A
+#: following fragment carrying a cue and evidence about a DIFFERENT correction exempted
+#: a whole document: `There is no Builder plan.` + `The stale `org` wording was
+#: corrected in #12444.` returned NO offenders — i.e. the forward window had become the
+#: cycle-2 "dress the denial" bypass, two sentences wide. The record must name the
+#: builder claim or refer back to the sentence it follows.
+_RETRACTION_TIE = re.compile(r"\bbuilder\b|\b(?:it|this|that|these|the\s+above)\b",
+                             re.I)
 
 
 def _quotes_a_retracted_claim(sentence: str) -> bool:
@@ -421,8 +457,10 @@ def _denials_in_document(text: str) -> list[tuple[int, str]]:
 
     The window is FORWARD ONLY and is not a concatenation of the window's text: the
     following fragment must ITSELF carry a cue AND evidence
-    (:func:`_quotes_a_retracted_claim`), so `The docs are stale: <denial>` cannot buy
-    an exemption by borrowing a cue from the next sentence.
+    (:func:`_quotes_a_retracted_claim`) AND tie back to this claim
+    (:data:`_RETRACTION_TIE`), so `The docs are stale: <denial>` cannot buy an
+    exemption by borrowing a cue from the next sentence, and neither can a genuine
+    correction OF SOMETHING ELSE (measured, cycle 5).
     """
     sentences = _doc_sentences(text)
     out: list[tuple[int, str]] = []
@@ -435,8 +473,8 @@ def _denials_in_document(text: str) -> list[tuple[int, str]]:
         if not _denial_in(sentence):
             continue
         following = sentences[i + 1][1] if i + 1 < len(sentences) else ""
-        if _quotes_a_retracted_claim(following):
-            continue   # the retraction record's SECOND half
+        if _quotes_a_retracted_claim(following) and _RETRACTION_TIE.search(following):
+            continue   # the retraction record's SECOND half, tied to THIS claim
         out.append((lineno, sentence))
     return out
 
@@ -466,9 +504,15 @@ class TestNoDocDeniesABuilderPlanExists:
             "The **Builder** and **Team** plans are both unlimited.",
             "**Builder *is* the `pro` tier** — the identifier is `pro`.",
             "The **Builder** plan exists and is called `pro`.",
-            # The #4336 restatement in its most natural form: a comma followed by a
-            # RESTRICTIVE marker qualifies the claim instead of ending it (cycle 4).
+            # The #4336 restatement in its most natural form: a comma followed by the
+            # IDENTIFIER restatement qualifies the claim instead of ending it (cycles
+            # 4 and 5 — `only|just` alone exempted the drift, so the noun is required).
             "There is no Builder plan, only the `pro` identifier (#4336).",
+            "Builder isn't a plan, it is the `pro` identifier.",
+            # SCOPE-qualified statements behind an intensifier (cycle 5: the intensifier
+            # re-admitted the comma arm and red both of these).
+            "There is no Builder plan available, so self-hosters use the OSS build.",
+            "There is no Builder plan at all, in the OSS install.",
             # ⚠️ DOCUMENTED RESIDUAL (false positive, cycle 4): a comma-SCOPE qualifier
             # still ends the clause, so "There is no Builder plan, and no Team plan
             # either, in the OSS install." is flagged. Tolerated on purpose — every
@@ -515,6 +559,12 @@ class TestNoDocDeniesABuilderPlanExists:
                 "There is no Builder plan.\n\n#12444 tracks the naming.\n",
                 "There is no Builder plan.\n\nThat statement was corrected.\n",
                 "There is no Builder plan.\n\nThis is stale.\n",
+                # Cycle-5 P2: a real retraction record — of a DIFFERENT correction —
+                # exempted the live denial above it, two sentences wide.
+                "There is no Builder plan.\n\nThe stale `org` wording was corrected "
+                "in #12444.\n",
+                "There is no Builder plan. See #12444, which corrected the `org` "
+                "wording.\n",
         ):
             assert _denials_in_document(live), (
                 f"a live denial was exempted by a following fragment that is not a "
@@ -541,6 +591,12 @@ class TestNoDocDeniesABuilderPlanExists:
             # The drift re-written in this repo's own markdown emphasis style — the
             # style the corrected doc itself uses, so the likeliest re-edit form, and
             # the one the first cut could not see at all (cycle-3 review).
+            # The MEASURED drift reflowed with a comma — the shape the loose
+            # `only|just` exception exempted, i.e. the P1 of cycle 5. Pinned here so
+            # the exception can never widen onto it again.
+            'there is no "builder" plan, only pro and team',
+            "There is no Builder plan, only a paid one.",
+            "There is no Builder plan, only the Team plan.",
             "There is no **Builder** plan.",
             "There is no *Builder* plan.",
             "No **Builder** plan exists.",
