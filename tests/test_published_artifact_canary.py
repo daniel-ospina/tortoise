@@ -3903,9 +3903,10 @@ def test_the_OK_detail_does_not_claim_a_RESOLUTION_the_reading_did_not_establish
 def test_the_UNREADABLE_reason_names_every_cause_the_code_can_produce():
     """One constant, one enumeration — round 3 added a cause and only two of four sites said so.
 
-    (#12589 review round 4, P3.) An operator reads the arm's detail, the run summary and the filed
-    alert issue against each other, so a cause that exists in the code but not in the text points
-    them at the wrong shape. This pin fails if any site drifts back to the two-cause wording.
+    (#12589 review round 4, P3.) An operator reads the arm's detail and the run summary against each
+    other, so a cause that exists in the code but not in the text points them at the wrong shape.
+    (⚠️ Not the filed alert issue: its body is `$why` + a transcript tail, and carries no token —
+    see the pin below.) This pin fails if any site drifts back to the two-cause wording.
     """
     for releases in (
         {"0.3.0": {}},
@@ -3947,6 +3948,31 @@ def test_the_UNREADABLE_reason_names_every_cause_the_code_can_produce():
     # refuses. The tail names both mechanisms and defers to the row.
     assert "could not READ something it needs" in summary, summary
     assert "could not read the index" not in summary, summary
+
+    # ⛔ AND THE ROW IT DEFERS TO MUST ACTUALLY CARRY THE MARK (#12589 review round 8, P2). The
+    # tail says "the row marked CANNOT RUN names which", so the table has to have a status column
+    # — before this, the only occurrence of those words in a rendered summary was the header, and
+    # the reader had to guess which row was the non-reader.
+    # The HEADER must declare the column too, or the rows are not a table at all.
+    assert "| arm | gated | status | reading |" in summary, summary
+    table_lines = [ln for ln in summary.splitlines() if ln.startswith("| `")]
+    assert table_lines, summary
+    for row in table_lines:
+        assert "| yes |" in row or "| no |" in row, row
+    assert any("| CANNOT RUN |" in row for row in table_lines), summary
+    # ...and an UNKNOWN arm is exactly the row that carries it.
+    unknown_rows = [row for row in table_lines if "| CANNOT RUN |" in row]
+    assert any("client-published" in row for row in unknown_rows), summary
+
+    # ⛔ AND AN UNNAMED STATUS RENDERS AS THE FAIL-CLOSED LABEL, not as itself and not as a
+    # missing cell (#12589 review round 8, P2). "PASS" is the spelling THIS summary prints for a
+    # green verdict, which is exactly why an arm status must never be rendered by vocabulary: an
+    # arm carrying it must fall into the same gap the arms' allow-list polarity reserves.
+    odd = canary.Report()
+    odd.add(canary.Arm("odd", "PASS", "an unnamed arm status"))
+    rendered_odd = canary.render_summary(odd)
+    assert "| `odd` | yes | CANNOT RUN |" in rendered_odd, rendered_odd
+    assert "| `odd` | yes | PASS |" not in rendered_odd, rendered_odd
 
     # ⛔ AND IT MUST NOT RULE THE TRANSPORT OUT EITHER (#12589 round 5, P2). A round-4 paragraph
     # claimed "this is NOT an unreadable index when every index row above reads OK" — which is

@@ -536,8 +536,9 @@ def latest_version(index_doc: dict[str, Any]) -> str:
 #: ``"releases": []`` who is pointed at PyPI's deprecation is being pointed AWAY from the shape
 #: actually served. This comment is the definition the token is read against, so it names every
 #: shape that produces it (#12590 review note, fixed here rather than left to drift).
-#: ⚠️ NOT the alert issue's body: that body is `$why` + `tail -n 40` of the TRANSCRIPT file, and
-#: carries no arm detail or token (measured — see the same note beside ``engine-init``).
+#: ⚠️ NOT the alert issue's body: that body is `$why` + `tail -n 40` of the TRANSCRIPT file, so it
+#: carries no TOKEN. An arm detail can reach it only by way of the transcript's own command output
+#: (the pip case — see the measured note beside ``engine-init``), which this token is not part of.
 RELEASES_ABSENT = "releases-absent"
 
 
@@ -726,9 +727,14 @@ def missing_version_arm(
         return Arm(
             name,
             UNKNOWN,
+            # ⛔ NOT "the version it serves": `info` may be `[]`/`null`/`0`, which carries no
+            # version at all — naming one would be the non-reading-as-property class this issue
+            # removes, in the form the parallel `version_unreadable` arm already words correctly
+            # (#12589 review round 8, P3).
             f"could not read the index metadata for {package} — the document's `info` is "
-            f"PRESENT but is not an object ({INFO_UNREADABLE}), so the version it serves is "
-            f"UNPARSEABLE. That is a NON-READING: it says nothing about whether the "
+            f"PRESENT but is not an object ({INFO_UNREADABLE}), so the version metadata this "
+            f"arm reads is UNPARSEABLE (any version the document may carry was never "
+            f"obtained). That is a NON-READING: it says nothing about whether the "
             f"distribution resolves, and it is NOT a reason to cut a release",
         )
     if version_unreadable(index_doc):
@@ -1153,12 +1159,20 @@ def render_summary(report: Report) -> str:
         "",
         f"**Verdict: {glyph[report.verdict]}**",
         "",
-        "| arm | gated | reading |",
-        "|---|---|---|",
+        # ⛔ THE STATUS COLUMN IS LOAD-BEARING, not decoration (#12589 review round 8, P2). The
+        # UNKNOWN tail tells the operator "the row marked CANNOT RUN names which" — and with a
+        # `| arm | gated | reading |` table the ONLY place the words CANNOT RUN appeared was the
+        # verdict header, so the sentence pointed at a mark that did not exist and the reader had
+        # to guess which row was the non-reader. `glyph.get(..., CANNOT RUN)` keeps this on the
+        # allow-list polarity the arms obey: a status outside the three known ones renders as the
+        # fail-closed label rather than vanishing.
+        "| arm | gated | status | reading |",
+        "|---|---|---|---|",
     ]
     for arm in report.arms:
         detail = arm.detail.replace("|", "\\|")
-        lines.append(f"| `{arm.name}` | {'yes' if arm.gated else 'no'} | {detail} |")
+        status = glyph.get(arm.status, glyph[UNKNOWN])
+        lines.append(f"| `{arm.name}` | {'yes' if arm.gated else 'no'} | {status} | {detail} |")
     if report.verdict == FAIL:
         if report.wheel_mode:
             # Branch on which arm actually failed. A substring test was wrong twice: the
