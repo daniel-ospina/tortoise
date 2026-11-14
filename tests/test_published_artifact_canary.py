@@ -3008,7 +3008,10 @@ def test_the_RENDERED_summaries_are_PINNED_VERBATIM():
     any word, table cell, glyph or blank line in these four outputs fails here, so a text edit has
     to be made DELIBERATELY, with this expectation updated in the same commit. The four shapes are
     one per verdict path plus the wheel (pre-publish) path. ⚠️ NOT every branch: the wheel
-    tail's other three sub-branches (does-not-install, console-script, the foreign-arm fallback) and
+    tail's other FOUR sub-branches (does-not-install, console-script, init-success-no-database, the
+    foreign-arm fallback — the last three of those are pinned end-to-end by
+    `test_the_wheel_tail_reads_the_PRODUCERS_OWN_text_end_to_end`, the console-script shape by
+    `test_the_wheel_tail_names_the_CONSOLE_SCRIPT_case_separately`) and
     the UNKNOWN tail's EMPTY-`marked` variant are pinned by
     `test_wheel_mode_fail_names_a_build_defect_not_a_release`,
     `test_the_wheel_tail_names_the_CONSOLE_SCRIPT_case_separately` and
@@ -3301,9 +3304,34 @@ def test_the_wheel_tail_reads_the_PRODUCERS_OWN_text_end_to_end(tmp_path):
         return _Done(returncode=0)
 
     silent_summary = _report_for(_init_succeeds_silently, tmp_path / "c")
-    assert "creates no database" in silent_summary, silent_summary
+    # ⛔ THE SENTENCE VERBATIM, conclusion clause included (#12589 review round 22, P3): pinning
+    # "creates no database" plus two absent phrases let the CONCLUSION be inverted — "… which is the
+    # documented behaviour and needs no release" passed, because nothing asserted what the sentence
+    # concludes about it.
+    assert (
+        "The BUILT wheel runs its documented first command successfully but creates no database, "
+        "so the documented flow does not work. Nothing has been uploaded."
+    ) in silent_summary, silent_summary
     assert "fails its documented first command" not in silent_summary, silent_summary
     assert "does not install" not in silent_summary, silent_summary
+
+    # ⛔ AND THE BRANCH'S ARM GATE (#12589 review round 22, P3): dropping `runs_the_wheel` from it
+    # kept 104 green, and a gated foreign arm whose detail merely MENTIONS the phrase then
+    # published the wheel's own claim — the round-17 defect shape, on the new branch.
+    foreign = canary.Report(wheel_mode=True)
+    foreign.add(
+        canary.Arm(
+            "docs-smoke",
+            canary.FAIL,
+            "the docs note that `tortoise init` created no database on a Windows box",
+        )
+    )
+    foreign_summary = canary.render_summary(foreign)
+    assert "is NOT judged by this summary" in foreign_summary, foreign_summary
+    assert "creates no database, so the documented flow does not work" not in foreign_summary, (
+        foreign_summary
+    )
+    assert "`docs-smoke`" in foreign_summary, foreign_summary
 
 
 def test_the_wheel_tail_only_reads_GATED_arms():
