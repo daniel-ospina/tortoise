@@ -846,35 +846,45 @@ def _no_ambient_dead_heartbeat_ticker():
                       and not heartbeat_task_is_dead())
 
     So any test that starts and stops a REAL hosted server (``test_dr_endpoints``,
-    ``test_hosted_api``) hands every later wedge test a 200 where it demands 503.
-    A leg of ``test_monitoring`` itself is never such a source: the only legs
-    there that record a ticker are in ``TestStallWatchdog``, whose class-local
-    autouse fixture resets the seam on both sides (and its one ``_stop_liveness``
-    leg arms no task to cancel).
+    ``test_hosted_api``) hands every later wedge-reading test a 200 where it
+    demands 503 — unless that later test resets the seam itself.
 
-    MEASURED in this branch's worktree (base ``origin/main`` ``8dc4f06ba5``; the
-    issue reported the same profile at ``30c9e7c4d3``), one pytest process each:
+    MEASURED on this branch's rebased base ``origin/main`` ``d05688df59`` (this
+    worktree, one pytest process each, ``TORTOISE_TEST_CARVE_OUT=1``):
 
-    * ``tests/test_monitoring.py`` alone — **219 passed**;
-    * ``tests/test_dr_endpoints.py`` + the two wedge nodeids — **2 failed, 122
-      passed**, with the payload the issue quotes (``loop_stale: true``,
-      ``served.registered: true``, ``status: "ok"``);
-    * the same command with this fixture in place — **124 passed**.
+    * ``tests/test_dr_endpoints.py`` + the two wedge nodeids of ``test_monitoring``
+      — **124 passed with this fixture AND 124 passed with it neutered**. #12482
+      gave ``TestHealthzListener`` its own class-local reset for this input, so
+      the pairing that #12666 was filed for no longer reds at this base, and this
+      fixture is NOT what greens it.
+    * The LEAK is still there, and it is process-wide. Probing what each test
+      OBSERVES at call time (a ``pytest_runtest_call`` hook reading
+      ``monitoring.heartbeat_task_is_dead()`` and ``_HEARTBEAT_TASK``): with this
+      fixture neutered, **12 of the file's 122 tests** read ``True`` over a
+      ``<Task cancelled …loop_heartbeat_task()>`` left by an earlier test; with
+      the fixture in place, **0** do.
+    * The issue's own profile at ``30c9e7c4d3`` / ``8dc4f06ba5`` —
+      ``test_monitoring.py`` alone **219 passed**, the pair **2 failed, 122
+      passed** with ``loop_stale: true``, ``served.registered: true``,
+      ``status: "ok"`` — is the red #12482 closed at class scope.
 
     ``_reset_heartbeat_task`` is the seam for exactly this — its own docstring
     says "Test seam: forget the recorded ticker (no cross-test latch to leak)".
     Production never calls it (0 call sites under ``tortoise/`` and ``tools/``;
-    the record is CORRECT for a process that has stopped its ticker), and the
-    only test-side callers were the two files that arm a ticker themselves —
-    ``test_monitoring.py::TestStallWatchdog._isolated_ticker`` (a CLASS-LOCAL
-    autouse fixture whose own docstring already names this hazard: "a
-    hosted-API test leaving a cancelled one behind would disarm the ceiling in
-    a later test") and ``test_12477_health_honesty``. A leg in ANOTHER file that
-    starts and stops a real server gets no isolation from either, so
-    ``test_dr_endpoints`` still handed the next FILE its cancelled ticker.
-    Hence the conftest scope: the leak is between files, and a fixture scoped to
-    the class that remembers cannot cover it. Cleared on BOTH sides, so a leg
-    that arms a ticker cannot hand it to the next one either.
+    the record is CORRECT for a process that has stopped its ticker). The
+    test-side callers all reach it from inside a scope that has to remember —
+    ``test_monitoring.py``::``TestStallWatchdog._isolated_ticker`` and
+    ::``TestHealthzListener._isolated_verdict_inputs`` (both CLASS-LOCAL autouse
+    fixtures; the fixture is #12488's, its ticker reset landed with #12482)
+    plus the hard-ceiling cases that reset inline, and
+    ``test_12477_health_honesty.py``::``_clean`` (entry only).
+    A fixture scoped to a class cannot cover a leg in ANOTHER file, and the one
+    module-scoped reset runs on the way IN with nothing on the way out — so a
+    leak still crosses FILE boundaries, and the next test to read the wedge term
+    inherits a disarmed instrument unless it happens to remember the seam.
+    Hence the conftest scope: the leak is process-wide, so the default has to be
+    a clean process. Cleared on BOTH sides, so a leg that arms a ticker cannot
+    hand it to the next one either.
 
     ⛔ THE PRODUCT KEEPS THE RECORD. Clearing a cancelled ticker inside
     ``_stop_liveness`` would make ``heartbeat_task_is_dead()`` answer False again
