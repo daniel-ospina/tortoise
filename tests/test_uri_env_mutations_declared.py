@@ -182,17 +182,22 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
         # gets. That row earns it from a line LAYOUT — its setenv arm requires the
         # line-wrapped `…"TORTOISE_DB_URI",` at end of line, so the one-line form is
         # a different site. A `delenv` has no such distinguishing tail to pin here:
-        # `raising=False` is the DOMINANT spelling (`rg` → 239 sites in 82 files
-        # under `tests/`, against 7 key-only), so a future site repeating this exact
-        # literal is SILENCED by this arm and must be triaged BY HAND. The narrowing
-        # still earns its place, and no other arm in this table does it: every other
-        # `delenv` arm here stops at the variable name. The one thing it DOES
-        # guarantee is asserted, not merely claimed —
+        # `raising=False` is the DOMINANT spelling across `tests/` — an order of
+        # magnitude more common than the key-only form — so a future site repeating
+        # this exact literal is SILENCED by this arm and must be triaged BY HAND. No
+        # numeral is quoted on purpose: the count moves with every commit that
+        # touches `tests/`, and a cardinal nobody can state twice is how "Two sites"
+        # went stale here. The narrowing still earns its place, and no other arm in
+        # this table does it: every other `delenv` arm here stops at the variable
+        # name. The one thing it DOES guarantee is asserted, not merely claimed —
         # `test_declaration_path_rejects_undeclared` reds if the arm is widened.
-        # ⛔ The in-flight #12601 carries this SAME key with this SAME arm. A second
-        # identical row is still a duplicate dict key (ruff F601, and the later key
-        # silently shadows the earlier) — so whichever of the two lands second must
-        # DELETE this row, not add another.
+        # ⛔ The in-flight #12601 carries BOTH of this file's rows — this one AND the
+        # `test_published_artifact_canary.py` row above — with IDENTICAL arms. A
+        # second identical row is still a duplicate dict key (ruff F601, and the
+        # later key silently shadows the earlier), and `ruff` is the ONLY detector
+        # here: this module carries no AST duplicate-key guard. So whichever of the
+        # two PRs lands second must DELETE BOTH rows, not add another — clearing
+        # only this one re-creates the duplicate canary key this PR exists to clear.
         r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI",\s*raising=False'],
     # #12275: `test_candidate_recall_11901.py` (#12159) landed with three
     # untriaged URI mutations, which reds this gate on `main` in `test (d)` —
