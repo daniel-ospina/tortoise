@@ -793,9 +793,10 @@ def _quota_state_timeout() -> float:
     non-numeric constant raised ``TypeError``/``ValueError`` from ``float()`` OUTSIDE the ``try``,
     while the first paragraph claimed the helper never raises. Measured on the previous head: a
     ``None`` constant raised ``TypeError`` and ``'3.0s'`` raised ``ValueError``. The observable is
-    the stale-quota one two paragraphs above, in whichever of its two shapes applies — the
-    ``{'error': ...}`` payload when the module still carries the exception classes ``_safe`` needs,
-    the escaped ``ImportError`` when it does not (#12647) — and NOT unconditionally the escape.
+    the stale-quota one recorded in the first paragraph above, in whichever of its two shapes
+    applies — the ``{'error': ...}`` payload when the module still carries the exception classes
+    ``_safe`` needs, the escaped ``ImportError`` when it does not (#12647) — and NOT unconditionally
+    the escape.
 
     ⛔ CONSERVATIVE ONLY AT THE RESERVE (cycle-4 review, P3): there the fallback merely over-reserves,
     which shortens the allowance. At the BUDGET site (``_health_quota_budget``) the same value is

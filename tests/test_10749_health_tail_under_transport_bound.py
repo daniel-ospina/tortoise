@@ -690,10 +690,13 @@ def test_a_non_numeric_quota_constant_falls_back_instead_of_raising(monkeypatch,
 
     ``float(QUOTA_STATE_TIMEOUT)`` originally sat OUTSIDE the ``try``, so an importable
     ``tortoise.quota`` carrying a non-numeric constant raised ``TypeError`` from ``float(None)`` or
-    ``ValueError`` from ``float('3.0s')`` — measured: both escaped ``_quota_state_timeout()`` and
-    would reach ``_safe`` as an error payload with no ``status`` key, the exact fail-closed shape
-    the helper exists to prevent, while its own docstring claimed it "NEVER RAISES". The absent-name
-    arm above does not cover this: the module imports fine, the VALUE is wrong.
+    ``ValueError`` from ``float('3.0s')`` — measured: both escaped ``_quota_state_timeout()`` and,
+    when the module still carries the exception classes ``_safe``'s handler imports, would reach
+    ``_safe`` as an error payload with no ``status`` key — the exact fail-closed shape the helper
+    exists to prevent, while its own docstring claimed it "NEVER RAISES". (A module missing those
+    classes too escapes as an ``ImportError`` instead, #12647 — which is the shape the fake module
+    below builds, since it carries neither class.) The absent-name arm above does not cover this:
+    the module imports fine, the VALUE is wrong.
     """
     import sys
     import types
