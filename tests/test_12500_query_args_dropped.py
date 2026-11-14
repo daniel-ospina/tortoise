@@ -815,6 +815,21 @@ def test_a_graph_ordering_with_no_signal_is_refused_not_silently_reordered(
     assert "monotone in" in message, message
 
 
+#: The REFUSAL half of the contract, verbatim — one entry per SHIPPED sentence.
+#: A bullet carries more than one `REFUS…` clause, so a presence check on the
+#: word alone stayed green while one of them was flipped to "SERVED"
+#: (round-15, measured at four sites); and two of these live in the SECOND `tag=`
+#: bullet, outside the spans the falsy check splits on, so they are matched
+#: against the whole docstring rather than per bullet.
+_REFUSAL_CLAIMS = (
+    "`min_confidence` and `order_by` are REFUSED on this arm rather than dropped",
+    "A floor on any other `entity_type`, and a confidence or graph ordering on "
+    "those two, are REFUSED rather than dropped",
+    "REFUSES kind/min_confidence/order_by and `filters=`",
+    "`kind`, `min_confidence` and `order_by` are REFUSED on this arm as well",
+)
+
+
 def test_the_tool_docstring_states_the_falsy_exception() -> None:
     """The contract must not read as an unconditional refusal (#12500 round 8).
 
@@ -838,6 +853,16 @@ def test_the_tool_docstring_states_the_falsy_exception() -> None:
     _tag = flat[flat.find("- tag=<name>"):flat.find("- Pagination")]
     assert _struct and _tag, flat[:400]
     for _label, _bullet in (("structural", _struct), ("tag", _tag)):
+        # BOTH halves of the carve-out: the REFUSAL and the falsy exception. The
+        # refusal half was unpinned, so flipping "are REFUSED on this arm" to
+        # "are SERVED" — the opposite of shipped behaviour, in the primary
+        # contract statement — left the whole gate green (round-15 P2, measured
+        # at all four sites). Each SENTENCE is pinned verbatim, wrap-insensitively:
+        # a bare `"REFUS" in bullet` check is what a first attempt used, and it
+        # stayed green because each bullet carries more than one `REFUS…` clause,
+        # so flipping one left the other. These are presence checks — they cannot
+        # re-red a true sentence, unlike the word bans retired above.
+
         assert "FALSY" in _bullet, f"the {_label} bullet omits the falsy case: {_bullet}"
         assert "stays served" in _bullet, (
             f"the {_label} bullet must say the falsy value is SERVED, not refused: "
@@ -850,6 +875,12 @@ def test_the_tool_docstring_states_the_falsy_exception() -> None:
     # tag bullet's clause with "is REFUSED OUTRIGHT here" reds it, because the
     # served claim is then simply absent.
     assert "serialises its own defaults" in flat, flat[:600]
+
+    for _claim in _REFUSAL_CLAIMS:
+        assert _claim in flat, (
+            f"the docstring must state that the argument is REFUSED where it "
+            f"cannot be applied; missing {_claim!r}"
+        )
 
 
 def test_the_tool_docstring_states_the_harm_per_argument() -> None:
