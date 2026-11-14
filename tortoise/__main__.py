@@ -4512,11 +4512,6 @@ def _cmd_config(args) -> int:
                     # `None` here means the rung is unmapped — see
                     # `config.RUNG_DECIDING_KEY`, which a test keeps complete.
                     _deciding = rung_deciding_key(env_file.get("daemon_rung"))
-                    # ⛔ The sentence below is "the ENVIRONMENT's <key> decides
-                    # it", so that key must BE an environment key.
-                    # `rung_deciding_key` names the ladder key a rung answers
-                    # FOR, and for `embedded-allowed` that is
-                    # `TORTOISE_DB_PATH` — a value the ladder read and found
                     # ⛔ TWO ways the "the ENVIRONMENT's <key> decides it"
                     # sentence can be FALSE, and they need different answers —
                     # which is why the test is the RUNG, not set membership
