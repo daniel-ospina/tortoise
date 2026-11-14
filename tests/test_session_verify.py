@@ -1344,6 +1344,27 @@ def test_the_exit_two_summary_does_not_invent_a_cause():
     assert "exit 2" in text, text
     assert "could not be exercised" not in text, text
     assert "NOT VERIFIED" in text, text
+    # A single fixed sentence is printed for EVERY exit-2 report, so a closed
+    # phrasal check cannot carry the property: a reworded version of the SAME
+    # round-1 defect ("NOT VERIFIED — the harness is not headlessly firable")
+    # passed the three assertions above. The sentence is therefore pinned
+    # literally — if you reword it, update this expectation, which is the
+    # review — and the four causes it must not name are checked as words.
+    # The verdict is about the SUMMARY line — the link line above it is
+    # supposed to name the real reason, so the word check runs on the summary
+    # alone.
+    summary = [ln for ln in text.splitlines() if ln.strip().startswith("exit ")]
+    assert len(summary) == 1, text
+    summary_line = summary[0]
+    assert summary_line.rstrip().endswith(
+        "exit 2 — nothing provably broken, but a link was NOT VERIFIED "
+        "— see its line above"), summary_line
+    lowered = summary_line.lower()
+    named = [word for word in (
+        "firable", "headless", "unreadable", "source field",
+        "extraction outcome", "in this environment", "harness is not",
+    ) if word in lowered]
+    assert not named, (named, summary_line)
 
 
 def test_guard_cleanup_failure_is_surfaced_not_swallowed(hosted, setup):

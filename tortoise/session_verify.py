@@ -139,13 +139,13 @@ STATUS_INERT = "INERT"
 
 #: Exit codes.  0 = every link PROVEN; 1 = a link is BROKEN (the install is
 #: wrong, or the capture/memory leg failed); 2 = nothing is provably broken,
-#: but at least one link was NOT VERIFIED.  The list below is NOT exhaustive
-#: (it is the set this module can name): there are FOUR causes today — this
-#: command could not fire the seam (a harness that is not headlessly
-#: firable); the API was unreadable before the fire, so no link was exercised
-#: at all; and two server-side ones, a detail that serves no Source field and
-#: one that records no extraction outcome.  A CI caller must treat 2 as "not
-#: verified", never as a pass.
+#: but at least one link was NOT VERIFIED.  These are the FOUR sites that can
+#: produce 2 today, and the list is meant to be COMPLETE — a fifth site must
+#: add itself here: this command could not fire the seam (a harness that is
+#: not headlessly firable); the API was unreadable before the fire, so no link
+#: was exercised at all; and two server-side ones, a detail that serves no
+#: Source field and one that records no extraction outcome.  A CI caller must
+#: treat 2 as "not verified", never as a pass.
 EXIT_OK = 0
 EXIT_BROKEN = 1
 EXIT_UNVERIFIABLE = 2
