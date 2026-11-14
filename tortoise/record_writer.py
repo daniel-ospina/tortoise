@@ -1699,7 +1699,7 @@ def _measure_written_bytes(
     first_seq: int,
     n_records: int,
     position: bool,
-) -> "postgres_bytes.WrittenRows | None":
+) -> postgres_bytes.WrittenRows | None:
     """Measure the STORED bytes of the rows this write just created (#12762).
 
     The meter is :func:`tortoise.postgres_bytes.measure_written_rows` — one
@@ -1734,7 +1734,7 @@ def _measure_written_bytes(
             graph_id=graph_id,
             seqs=range(first_seq, first_seq + n_records),
         )
-    except Exception:  # noqa: BLE001 - never fail a write for a meter
+    except Exception:  # never fail a write for a meter
         _logger.debug(
             "postgres byte measurement skipped for org=%s graph=%s "
             "first_seq=%s (non-fatal)", org_id, graph_id, first_seq,
@@ -1742,7 +1742,7 @@ def _measure_written_bytes(
         return None
 
 
-def _record_written_bytes(org_id: str, written: "RecordWrite") -> None:
+def _record_written_bytes(org_id: str, written: RecordWrite) -> None:
     """ACCUMULATE a COMMITTED write's stored bytes on the meter's ledger (#12762).
 
     Call this ONLY after the write's transaction has committed. On the live door
@@ -1763,7 +1763,7 @@ def _record_written_bytes(org_id: str, written: "RecordWrite") -> None:
         metering.record_postgres_bytes_written(
             org_id, n_bytes=written.written_bytes,
             n_records=written.written_rows)
-    except Exception:  # noqa: BLE001 - never fail a write for a meter
+    except Exception:  # never fail a write for a meter
         _logger.debug(
             "postgres byte metering skipped for org=%s bytes=%s (non-fatal)",
             org_id, written.written_bytes, exc_info=True)

@@ -27,14 +27,12 @@ Hermetic: no Docker, no network. Every engine figure below was measured
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
-from datetime import UTC, datetime
-
 from tortoise import metering
-from tortoise import postgres_bytes as pb
 from tortoise.postgres_bytes import (
     AUDIT_RPC,
     DEFAULT_EXCESS_BAND,
@@ -47,6 +45,7 @@ from tortoise.postgres_bytes import (
     per_org_bytes,
     reconcile,
 )
+
 
 def _dt(day: str) -> datetime:
     """A UTC instant from an ISO date — the ledger's window bounds are real
