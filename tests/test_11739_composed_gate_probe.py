@@ -432,10 +432,12 @@ def _stray_writes(src: str) -> list[tuple[int, str]]:
 
     ⛔ A TEXTUAL `open(` scan is defeatable and this is an AST walk instead. The shapes where this
     walk CATCHES a write an `open(` regex MISSES are `Path(p).write_text(...)` and `write_bytes(...)`
-    (no `open(` at all) and `open ("x")` (a space before the paren); `Path.write_text` is the idiom
+    (no `open(` at all) and `open ("x", "w")` (a space before the paren, opening for WRITING — a
+    bare `open ("x")` is caught by the walk too, but it is a read, so it is not an example of a
+    missed write); `Path.write_text` is the idiom
     THIS repo uses, so it is the plausible shape of a future regression (measured: a regex version
     left `pathlib.Path(p).write_text(...)` in `main()` green). ⛔ Not "the shapes that defeat an
-    `open(` regex" — that would be a closed set this docstring refutes one paragraph up, since
+    `open(` regex" — that would be a closed set this docstring refutes two paragraphs up, since
     `os.replace`/`shutil.copyfile`/`os.rename` defeat the regex too and this walk misses them as well:
     that is the residual, not a reason to prefer the walk (#12688 review round 38, P3). NOT examples:
     `os.open`/`io.open` both contain the literal `open(`, so a regex matches them and this walk
