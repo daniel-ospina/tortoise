@@ -382,6 +382,39 @@ class TestTenancy:
         created = [g for g in after if g not in before]
         assert created, "org_get created no graph — then the pin above proves nothing"
 
+    def test_a_cached_handle_is_not_proof_the_registry_still_exists(
+        self, sdk,
+    ):
+        """The cache must not defeat the gate: a deleted registry stays deleted.
+
+        `_registry_g` survives a deletion it did not observe (a sweep, or an
+        in-process flip to Supabase), and answering that stale handle is how the
+        next query resurrects the name — the exact resurrection `create=False`
+        exists to make impossible. So the probe RE-TESTS the name the handle was
+        built for (`_registry_name`, recorded once at build time, so probe and
+        creator cannot disagree about which graph is the registry).
+        """
+        from tortoise.graph_delete_guard import safe_graph_delete
+
+        sdk.org_get("bootstrap-10015")           # materialise + cache the registry
+        name = sdk._registry_name
+        assert name and sdk._get_registry(create=False) is not None
+        db = sdk._get_proj().db
+        assert safe_graph_delete(db, name) is True, (
+            "the delete did not take — the rest proves nothing"
+        )
+        assert sdk._get_registry(create=False) is None, (
+            "the probe answered a cached handle for a graph that no longer exists "
+            "— the next query would resurrect it"
+        )
+        before = sorted(str(g) for g in (db.list_graphs() or []))
+        sdk._record_tenant = ("no-such-org-10015d", "g-10015")
+        with mock.patch("tortoise.quota.resolve_org_limits",
+                        side_effect=OrgNotFoundError("no such org")):
+            assert sdk.get_organisation_account() is None
+        created = [g for g in (db.list_graphs() or []) if str(g) not in before]
+        assert created == [], f"the read resurrected {created} from a stale cache"
+
     def test_the_gate_keeps_the_mismatch_diagnosis_where_the_registry_exists(
         self, sdk,
     ):

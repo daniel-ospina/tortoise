@@ -11764,6 +11764,9 @@ class TortoiseSDK:
         self._ep = None  # lazy-init TortoiseEP
         self._evidence: dict[str, tuple[float, float]] = {}
         self._registry_g = None
+        # Name the cached handle was built for, so `create=False` can re-test its
+        # EXISTENCE without deriving the name a second time (`_get_registry`).
+        self._registry_name: str | None = None
         self._audit_logger = None
         # Issue #1005 (lifecycle): idempotent close + context-manager support
         # + atexit registration so a NORMAL process exit never orphans the
@@ -13081,16 +13084,21 @@ class TortoiseSDK:
 
         Uses the existing db connection — no second FalkorDB connection.
 
-        ``create=False`` is the PROBE form: it answers the cached handle when one
-        exists, else ``None`` without materialising anything. The default path
-        below MINTS the graph — `select_graph` is client-side, but
-        :meth:`_ensure_registry_indexes` issues a `CREATE INDEX` per label, and the
-        first DDL on a name is what brings the graph into existence. So a caller
-        that must not leave a graph behind (an account READ — a `{}_control_plane`
-        created during a lookup is the same read-side mint #669 rejected) asks
-        with ``create=False`` and skips its probe on ``None``. The test is
-        :func:`tortoise.graph_delete_guard.graph_exists`, a `GRAPH.LIST` read, so
-        the probe mints nothing either way.
+        ``create=False`` is the PROBE form: it answers the handle only while the
+        registry graph it was built for STILL EXISTS, else ``None``, and it never
+        brings that graph into being. Two ways a caller gets ``None``: a cold
+        handle whose store holds no graph by the derived name (a `GRAPH.LIST`
+        read), and a CACHED handle whose graph was deleted underneath this
+        process (a sweep, or an in-process flip to Supabase) — the cache is not
+        proof of existence, and answering a stale handle is how the next query
+        would resurrect the name. The default path below MINTS the graph —
+        `select_graph` is client-side, but :meth:`_ensure_registry_indexes` issues
+        a `CREATE INDEX` per label, and the first DDL on a name is what brings a
+        FalkorDB graph into existence. So a caller that must not leave a graph
+        behind (an account READ — a `{ns}_control_plane` created during a lookup
+        is the same read-side mint #669 rejected) asks with ``create=False``.
+        The existence test is :func:`tortoise.graph_delete_guard.graph_exists`, a
+        `GRAPH.LIST` read.
 
         Registry graph name is namespace-scoped (``{ns}_control_plane``) so
         different namespaces never share registry state, and test graphs get
@@ -13162,7 +13170,21 @@ class TortoiseSDK:
             # both the journal and the indexes, minting the registry graph
             # UNOWNED (the E2E-7 leak this append exists to stop).
             self._registry_g = registry_graph
+            self._registry_name = registry_name
             self._ensure_registry_indexes()
+        if not create and self._registry_g is not None:
+            # A CACHED HANDLE IS NOT PROOF THE GRAPH STILL EXISTS. A sweep, or an
+            # in-process flip to Supabase, can delete it underneath this process;
+            # answering the stale handle is precisely how a read resurrects it
+            # (the next `query` re-creates the name). Re-test the name the handle
+            # was built for — same derivation, recorded once in `_registry_name`,
+            # so the probe and the creator cannot disagree about which graph is
+            # the registry.
+            if self._registry_name is None:
+                return None
+            from .graph_delete_guard import graph_exists
+            if not graph_exists(self._get_proj().db, self._registry_name):
+                return None
         return self._registry_g
 
     def _ensure_registry_indexes(self) -> None:
@@ -33075,6 +33097,9 @@ class TortoiseSDK:
             self._proj.close()
             self._proj = None
         self._registry_g = None
+        # The NAME goes with the handle: a stale name would let a later probe test
+        # a graph this (closed) handle no longer refers to.
+        self._registry_name = None
 
     # ── P1-4: Entity Linking ────────────────────────────────────
 
@@ -45832,8 +45857,9 @@ class TortoiseSDK:
         refusal itself cannot: ``docs/capacity.md`` §4 records the cap as a
         STOCK, not a flow — the 402 is terminal and carries no ``Retry-After``,
         so backing off retries forever and the refusal is otherwise the first
-        time a builder learns the cap exists. Read-only: nothing here clears,
-        refills, prunes or overrides a cap, so an account held at its cap on
+        time a builder learns the cap exists. Read-only where it matters: nothing
+        here clears, refills, prunes or overrides a cap and no node is written,
+        so an account held at its cap on
         purpose (#10175) reads as held, not as an outage.
 
         ⛔ **Scoped to the caller's own account — by construction, not by a
