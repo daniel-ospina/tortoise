@@ -499,13 +499,14 @@ def info_unreadable(index_doc: dict[str, Any]) -> bool:
     expression was ``(index_doc.get("info") or {}).get("version")``: on ``{"info": "x"}`` that
     is an ``AttributeError``, which ``main()``'s exception backstop turned into exit 2 with a
     traceback as the recorded reason — the right CODE by the wrong ROUTE. The FALSY non-objects
-    (``[]``, ``0``, ``null``) were swallowed by ``or {}`` into "" and reached the FAIL arm, i.e.
+    (``[]``, ``0``, ``null``, ``""``, ``false``) were swallowed by ``or {}`` into "" and reached the
+    FAIL arm, i.e.
     exit 1 and the "cut a release" text — a release order issued off an ``info`` this client never
     parsed. So this predicate fixes two different defects at once, and the second one MOVES an exit
     code (1 → 2) on purpose: fail-closed, NOT a correction of a false sentence. The falsy non-objects
     carry no version at all, so "carries no latest version" was literally true of them; what was
     wrong was issuing a VERDICT off an unparsed field. (``version_unreadable`` is the sibling case
-    where the old sentence really was false: ``{{"version": 0.3}}`` carries a version.)
+    where the old sentence really was false: ``{"version": 0.3}`` carries a version.)
     #12589 review, P2: state the split rather than claiming an invariance that does not hold.
     """
     return "info" in index_doc and not isinstance(index_doc["info"], dict)
@@ -960,7 +961,7 @@ def build_report(
             # FAIL when the document ANSWERED (no version in a readable `info`) and UNKNOWN when
             # it did not (#12589). The exit code did NOT move for a TRUTHY non-object `info` —
             # that already raised into main()'s exit-2 backstop. It DID move (1 → 2) for the
-            # falsy ones (`[]`, `0`, `null`), which `or {}` swallowed into the FAIL arm: a
+            # falsy ones (`[]`, `0`, `null`, `""`, `false`), which `or {}` swallowed into the FAIL arm: a
             # deliberate fail-closed move, NOT a correction of a false sentence — those documents
             # carry no version at all, so "carries no latest version" was literally true of them;
             # what was wrong was issuing a VERDICT off an `info` this client never parsed. (See

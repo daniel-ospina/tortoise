@@ -4831,7 +4831,7 @@ def test_a_non_object_info_is_a_LEGIBLE_NON_READING_on_BOTH_arms():
 
       * a TRUTHY non-object (`"x"`) raised `AttributeError`, and `main()`'s backstop turned that
         into exit 2 — the right CODE by the wrong ROUTE (a traceback as the recorded reason);
-      * the FALSY ones (`[]`, `0`, `null`) were swallowed by `or {}` into "", took the FAIL arm,
+      * the FALSY ones (`[]`, `0`, `null`, `""`, `false`) were swallowed by `or {}` into "", took the FAIL arm,
         and reported exit 1 — the "cut a release" text — off an `info` this client never parsed.
         Those documents carry no version at all, so "carries no latest version" was literally true
         of them; what was wrong was issuing a VERDICT off an unparsed field. (The sibling
