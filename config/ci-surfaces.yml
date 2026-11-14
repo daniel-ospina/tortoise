@@ -1009,9 +1009,14 @@ surfaces:
   # one-surface registration drops this file on the other half's own diff. MEASURED, with the
   # `core` row alone: `--changed-files tortoise/hosted_api.py` did NOT select this file, so a
   # `hosted_api.py`-only regression of the `/health` verdict — #12477 itself — carried no
-  # guard. (Two independent fixes for this registration landed in the same merge, so this
-  # list held the row TWICE and `--integrity` reported the duplicate on `main`; one row per
-  # surface is what `integrity()` requires, and the second copy is gone.)
+  # guard. (Two independent fixes for this registration landed 69 s apart in TWO merges
+  # — #12640 and #12464, with #12569 between them — and each appended at its own anchor,
+  # so both lists held the row TWICE: one row per merge survived into `main`, which is why
+  # this note and the `core` one come from different commits, and `--integrity` reported
+  # the duplicate on `main`.) That is the mechanism `duplicate_entries()` documents: the
+  # SAME row appended at two different positions survives as TWO rows, so a duplicate is
+  # NOT evidence of a union merge. One row per surface is what `integrity()` requires; the
+  # second copy is gone.
   - test_12477_health_honesty.py
   - test_agent_signup.py
   - test_agent_signup_idempotency.py
@@ -4439,7 +4444,7 @@ surfaces:
   # SOURCE_PATTERNS row, so a TOOL-ONLY diff would select NO surface and fall back
   # to tier-1 smoke, which does not carry this file — the neighbouring `CORE_ALSO`
   # entry for the tool closes that half (same #1349/#3332/#3616 class as
-  # `test_work_claim.py` above). Pinned by
+  # `test_work_claim.py` below). Pinned by
   # `tests/test_ci_selection.py::test_worktree_report_tool_change_selects_core_not_tier1`.
   - test_worktree_report.py
   # `tools/gh_write_preflight.py` — the "can this credential WRITE repository contents here?"
@@ -4540,7 +4545,7 @@ surfaces:
   # `tortoise/sdk.py` and `tortoise/projection/__init__.py` are SHARED_MODULES
   # (already the full matrix), so 2 of the 3 changed modules need no separate
   # arm. **Deliberately NOT dual-registered with `eval`** (contrast
-  # `test_journal_embedding_5004.py` above): this file pins no embedding path,
+  # `test_journal_embedding_5004.py` below): this file pins no embedding path,
   # so an `embeddings.py`-only PR cannot leave a guard here unrun. The
   # fail-before/pass-after evidence: 12 of the original 21 fail on the unfixed
   # base and all pass here; the 9 review-round-6 pins (P1-A competing write,
@@ -5452,7 +5457,7 @@ surfaces:
   # only that a port answered, so the file was green there on the PRE-fix
   # statements, which is the false evidence #8870 survived on. A green now means
   # the assertions ran on an engine that can produce a red; the skip is the
-  # honest signal elsewhere, and `test_source_version_set_order_7362.py` below
+  # honest signal elsewhere, and `test_source_version_set_order_7362.py` above
   # guards the defect in every lane regardless. The engine-free gate tests in
   # this file (the probe/skip-reason/URI tests) run in EVERY lane.
   - test_8870_version_anchor_write_order.py

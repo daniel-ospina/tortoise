@@ -1146,7 +1146,7 @@ def test_a_graph_ordering_with_no_signal_is_refused_not_silently_reordered(
 #: The POSITIVE behaviour sentences in the same bullets — the ones a route reader
 #: acts on, and the ones this PR spent rounds re-pointing citations FOR. Each was
 #: measured unpinned — the five at round 33, the two additions at round 34 — by
-#: inverting it in turn: the whole five-file gate set stayed green (262 passed,
+#: inverting it in turn: the whole five-file gate set stayed green (261 passed,
 #: 16 skipped), because nothing else anywhere asserts
 #: on `tortoise_query.__doc__` (`grep -rln 'tortoise_query.__doc__' tests/` finds
 #: only this file). They are presence checks, wrap-insensitive, like
