@@ -33,12 +33,18 @@ bodies below are proven shape-compatible with the producer rather than
 taken on faith. It never prices anything: a deferral is an offer to re-extract,
 and the server has not said that extraction did not run.
 
-⚠️ SCOPE OF THE TRACE, recorded here because no other test in this file can see
-it: the producer is Python-CLI-only. The Pi leg posts to ``/v1/sessions``
-itself (``tortoise-capture.ts``'s ``post()``), so it never receives a body
-carrying the marker and its ``flushSpool`` stamp branch has no live input —
-``session health`` on a Pi box reports nothing for a session in exactly the
-measured state (filed, ``outcome_known: false``). Tracked in #12603.
+⚠️ SCOPE OF THE TRACE — TWO producers, one per leg, and BOTH are now live.
+This file exercises the Python-CLI one (``__main__._session_post._refused``). The
+Pi leg posts to ``/v1/sessions`` itself (``tortoise-capture.ts``'s ``post()``), so
+it never receives the synthesised body; since **#12603** it produces the same
+marker from its own CONFIRM-ON-REFUSAL READ instead (a retryable refusal →
+``GET /v1/sessions/<id>`` → turn match → explicit
+``extraction.outcome_known: false``), pinned by the ``#12603`` family in
+``tortoise/pi-hooks/tortoise-capture.test.ts``. Before #12603 that stamp branch
+had no live input and ``session health`` on a Pi box reported nothing for a
+session in exactly the measured state (filed, ``outcome_known: false``). The two
+legs write ONE shared meta, so the marker key/value must stay identical —
+``test_the_two_legs_share_one_marker_and_verdict_vocabulary`` pins that.
 """
 from __future__ import annotations
 
@@ -204,10 +210,14 @@ def test_a_later_recorded_verdict_CLEARS_the_marker(tmp_path):
     the state "we do not know how it ended" is over. A marker left standing
     over that verdict makes `session health` cry wolf for every session the
     server later resolved, until the entry is evicted — the alert-fatigue shape
-    the health line's own states are ordered to avoid. (The case NOTHING on the
-    client can resolve — no later filing at all — is why the health line states
-    this historically: "were filed with NO recorded extraction outcome at the
-    time".)
+    the health line's own states are ordered to avoid. (What nothing on the
+    client can resolve is a later filing that does NOT record the ending — a
+    REPLAY, see `test_the_unrecorded_marker_is_STICKY_across_a_replay_filing` — which
+    is why the health line states this historically, VERBATIM: "have NO
+    recorded extraction outcome at the time". Do not paraphrase that qualifier
+    away — it is the whole difference between a trace and a false alarm.
+    Since #12603 the marker is also written by the Pi leg on a retryable
+    REFUSAL, so the line may name a still-QUEUED capture, not only a filed one.)
 
     MUTATIONS THAT RED THIS: make the stamp unconditional (`if unrecorded:` /
     `elif outcome_recorded(...)` → a single-or-no branch that never pops).

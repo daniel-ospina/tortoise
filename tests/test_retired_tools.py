@@ -61,7 +61,14 @@ class TestDeclaration:
         **implementation** of an already-approved row — row 28,
         `get_organisation_account`, which the canonical doc says "already **is** the
         name, so this delivers it rather than **adding to it**" (the approved 40 did
-        not grow), with its manifest row in `config/surface-manifest.yml`.
+        not grow), with its manifest row in `config/surface-manifest.yml`. #12521
+        (`8e4e335b05`) gave it its `def`, approved by daniel-ospina on 2026-11-14 and
+        recorded at `#10015` comment `6863608333`; `docs/product/beta-sdk-surface.md`
+        already reads *"40 methods against **125** today"* and
+        `config/surface-manifest.yml`'s `counts.sdk_public_methods` is already `125`,
+        so this assertion was the one place still pinned to the pre-delivery number.
+        Re-derive it from `len(public)` at the head; never type a number ahead of the
+        manifest.
 
         ⛔ This assertion is defence-in-depth, NOT the approval gate. What refuses an
         UNAPPROVED addition is `tools/surface-guard.py` **step 1** — an SDK method or

@@ -234,6 +234,67 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     "test_candidate_recall_11901.py": [
         r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"',
         r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*$'],
+    # #12523/#12588: the published-artifact canary sets an AMBIENT `TORTOISE_DB_URI`
+    # (and DB_PATH/FALKORDB_HOST) to prove the install-and-run child STRIPS it — the
+    # mutation IS the point (DELIBERATE_URI): without a value in the parent env there
+    # is nothing to strip, and the test would pass over a command that silently
+    # inherits a runner's target instead of measuring a new user's default.
+    # The arm is bound to THIS site's literal value on purpose: an unanchored
+    # `setenv("TORTOISE_DB_URI"` arm would authorize any future one-line setenv in this
+    # 5.3k-line file (`wc -l` → 5256 at this head), which the entry 10 lines above
+    # refuses to do for its own file.
+    # ⛔ ONE key, not three. At `a808f9f8ba` the file carried TWO rows for this file and
+    # `#12628` collapsed them again on main (this branch rebased onto the collapsed base),
+    # so the state the FIRST commit had to repair was three: `#12588` (the `#12523` triage) added the
+    # first, and `#12555` then added a SECOND over it — NOT from a base that predated it,
+    # which is measurable: `git show 76b25fcfd1:tests/test_uri_env_mutations_declared.py
+    # | grep -c '"test_published_artifact_canary.py":'` → **1** (that parent is `#12551`),
+    # while `git show a808f9f8ba:…` → **2**, and `#12555`'s own diff ADDS the
+    # "MAINLINE TRIAGE, not a site this PR added" key. So the base already held
+    # `#12588`'s row and `#12555` re-declared it anyway. (The merged squash
+    # `a808f9f8ba` does contain `#12588`'s squash `0f7f21c342` — its parent is
+    # `76b25fcfd1`, already a descendant of it. `#12555`'s own branch head is not in this
+    # clone, so its ancestry is UNMEASURABLE here, not absent: do not read a failing
+    # `merge-base --is-ancestor` against a missing object as a "no".
+    # Ancestry and tree-content are different instruments: a grep of the
+    # squash's tree finds both rows because that tree is the parent's tree plus the
+    # branch diff, which says nothing about what the branch saw. Do not cite either one
+    # alone.) And `#12422`'s
+    # canary had in fact merged at 01:32:47Z, hours BEFORE the triage at 05:13:00Z —
+    # not after it. A later literal key SILENTLY REPLACES an earlier one at runtime, so
+    # the rows looked additive and were not. `ruff`'s F601 reads the repeat as a lint
+    # error, which is what surfaced it. Consolidating NARROWS as well as de-duplicates,
+    # on purpose: both rows at `a808f9f8ba` carried this pinned literal, while this
+    # branch's first commit carried a KEY-ONLY arm
+    # (`r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'`), which the entry above refuses
+    # — so the surviving row is the narrower one. The prose each carried, kept:
+    # the site is `test_install_and_run_strips_ambient_tortoise_env`, which PLANTS an
+    # ambient `TORTOISE_DB_URI` precisely so it can be shown to be STRIPPED before the
+    # canary measures the default path a new user gets (an ambient URI inherited from
+    # the runner would point the command elsewhere and turn a broken artifact green);
+    # the value IS the test input and nothing dials it: this test's own runner is the
+    # hand-rolled `_Capture`, a `_Runner` subclass that reads the env mapping it was
+    # called with and delegates to `_Runner`, which records argv and returns scripted
+    # `CompletedProcess` results — so every command `install_and_run` issues HERE goes
+    # through the injected runner and opens no socket.
+    # Scoped to THIS test on purpose: the MODULE is not subprocess-free. Other tests in
+    # it use plain-function runner stubs, and
+    # `test_the_DEFAULT_runner_is_plain_subprocess_run_and_keeps_the_output` really
+    # spawns a child through `subprocess.run`. None of them read `TORTOISE_DB_URI`, and
+    # this `setenv` is function-scoped, so no child can inherit the decoy — which is the
+    # property the classification rests on.
+    # Every site is a function-scoped `monkeypatch`, auto-undone by pytest at teardown,
+    # so no lane flip leaks into a later module. DELIBERATE_URI — and the value is
+    # PINNED, because this module holds exactly ONE site. The table's precedent for a
+    # PINNED value: `test_7949_capstone_measure.py` (one site, like this one) and
+    # `test_11070_source_prose_repair.py` (THREE sites, all the same literal);
+    # `test_rerank_calibration_12297.py` pins its URI setenv and rides that row's
+    # KEY-ONLY `delenv` arm for its two `delenv` calls. A bare
+    # `setenv\(\s*"TORTOISE_DB_URI"` arm would auto-authorize a FUTURE,
+    # differently-intentioned URI setenv in a module whose whole design is "nothing here
+    # touches PyPI"; with the literal pinned, such a site reds and forces its own triage.
+    "test_published_artifact_canary.py": [
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*"docker://:x@localhost:6379/other"'],
     # #9567 capstone: the D11/D12 quota case forces the EMBEDDED lane (delenv
     # the URI, then pin TORTOISE_DB_PATH to a tmp_path db) so the gate's count
     # never rides a shared server graph. The delenv IS the point; the
@@ -754,42 +815,6 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # leak into a later module. DELIBERATE_URI.
     "test_projection.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
                            r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
-    # ⛔ MAINLINE TRIAGE, not the feature PR that landed the site: #12422's canary
-    # landed this site with NO register row, so `test_uri_env_mutations_declared` was RED on
-    # `origin/main` for every branch (an undeclared mutation reds until triaged).
-    # #12588 triaged it FIRST (`0f7f21c342`, the row kept here) and #12555 added a
-    # SECOND row for the same module 3.5 minutes later (`a808f9f8ba`, the row this
-    # collapse deletes) — two rows for one module are a duplicate dict key (ruff
-    # F601) and the later key silently SHADOWS the earlier one.
-    # `test_install_and_run_strips_ambient_tortoise_env` PLANTS an ambient
-    # `TORTOISE_DB_URI` precisely so it can be shown to be STRIPPED before the
-    # canary measures the default path a new user gets — an ambient URI inherited
-    # from the runner would point the command somewhere else and turn a broken
-    # artifact green. So the value IS the test input, and nothing dials it: this
-    # test's own runner is the hand-rolled `_Capture`, a `_Runner` subclass that
-    # reads the env mapping it was called with and delegates to `_Runner`, which
-    # records argv and returns scripted `CompletedProcess` results — so every
-    # command `install_and_run` issues HERE goes through the injected runner and
-    # opens no socket.
-    # Scoped to THIS test on purpose: the MODULE is not subprocess-free. Other
-    # tests in it use plain-function runner stubs, and
-    # `test_the_DEFAULT_runner_is_plain_subprocess_run_and_keeps_the_output`
-    # really spawns a child through `subprocess.run`. None of them read
-    # `TORTOISE_DB_URI`, and this `setenv` is function-scoped, so no child can
-    # inherit the decoy — which is the property the classification rests on.
-    # Function-scoped `monkeypatch` is auto-undone by pytest at teardown, so no
-    # lane flip can leak into a later module. DELIBERATE_URI — and the value is
-    # PINNED, because this module holds exactly ONE site. The table's precedent
-    # for a PINNED value: `test_7949_capstone_measure.py` (one site, like this
-    # one) and `test_11070_source_prose_repair.py` (THREE sites, all the same
-    # literal); `test_rerank_calibration_12297.py` pins its URI setenv and rides
-    # that row's KEY-ONLY `delenv` arm for its two `delenv` calls. A bare
-    # `setenv\(\s*"TORTOISE_DB_URI"` arm would auto-authorize a FUTURE,
-    # differently-intentioned URI setenv in a module whose whole design is
-    # "nothing here touches PyPI"; with the literal pinned, such a site reds
-    # and forces its own triage.
-    "test_published_artifact_canary.py": [
-        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*"docker://:x@localhost:6379/other"'],
     # #8939/#8870: the lane-gate unit pins for the version-anchor live file. The
     # setenv is DELIBERATE_URI — a CONFIGURED docker URI is the test input, and
     # the assertion is that `_live_uri()` uses it AS-IS instead of probing a

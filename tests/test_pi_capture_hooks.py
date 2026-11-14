@@ -117,6 +117,115 @@ def test_extension_turn_cap_matches_the_server_handler_cap():
     )
 
 
+def test_the_pi_confirm_read_excludes_the_python_leg_refusal_statuses():
+    """#12603: the confirm-on-refusal READ must exclude the SAME statuses the
+    Python leg's ``_session_post._refused`` excludes BY NAME.
+
+    ``capture_receipts.REFUSAL_STATUSES`` (402/403/503) is the family whose
+    session can never be confirmed even though the status is ``retryable``
+    (#4675's recorded 2xx-only rule). The Pi leg's guard is a shipped literal
+    (the extension cannot import Python), so without this pin the two legs
+    drift silently and one of them confirms a quota refusal the other refuses
+    to — a reviewer then has to work out why the same status behaves
+    differently per harness.
+
+    MUTATION THAT REDS THIS: drop a status from the TS list (the Pi leg would
+    read a 402), or add one (it would stop confirming a status Python confirms).
+    """
+    from tortoise.capture_receipts import REFUSAL_STATUSES
+
+    m = re.search(
+        r"^const NO_CONFIRM_READ_STATUSES: readonly number\[\] = \[([^\]]*)\];",
+        _src(), re.M)
+    assert m, (
+        "the extension declares no `NO_CONFIRM_READ_STATUSES` list — the "
+        "confirm-on-refusal read would then be issued for the refusal family "
+        "the Python leg excludes")
+    ts_statuses = tuple(int(n) for n in re.findall(r"\d+", m.group(1)))
+    assert ts_statuses == tuple(sorted(REFUSAL_STATUSES)), (
+        f"the two legs disagree about which refusals can be confirmed: "
+        f"Pi={ts_statuses!r} Python={tuple(sorted(REFUSAL_STATUSES))!r}")
+
+
+def test_the_frame_inverse_strips_python_whitespace_and_not_feff():
+    """#12603: the reader's frame inverse consumes Python's `re \\s` set, not
+    the union `BLANK_CHARS`.
+
+    `sdk._capture_turn_role_text` strips a LEADING whitespace run from a served
+    body, so the Pi leg's turn match must strip exactly that set from its own
+    expectation — it is an equality test, so stripping MORE than the server does
+    makes the expectation shorter and the row never matches (the trace then goes
+    silently inert for that capture, with `tortoise session drain` stamping the
+    same shared entry and the Pi leg not).
+
+    The union in `BLANK_CHARS` exists for the CLIPPER, where a superset is safe;
+    its one extra member is U+FEFF, which Python's `re \\s` refuses. This pins
+    BOTH halves: that U+FEFF is the only such member of Python's own set, and
+    that the TS inverse is derived by removing exactly it.
+
+    MUTATION THAT REDS THIS: strip `BLANK_CHARS` (or JS `trim()`) instead — or
+    add a member to Python's `_CAPTURE_BLANK_CHARS` that `re \\s` refuses and
+    leave the TS derivation alone.
+    """
+    import re as _re
+
+    from tortoise.sdk import _CAPTURE_BLANK_CHARS
+
+    not_whitespace = {
+        ch for ch in _CAPTURE_BLANK_CHARS if _re.fullmatch(r"\s", ch) is None
+    }
+    assert not_whitespace == {"\ufeff"}, (
+        "the TS inverse removes U+FEFF on the claim that it is the ONLY member "
+        f"of Python's blank set that `re \\s` refuses; measured {not_whitespace!r}")
+
+    src = _src()
+    m = _re.search(
+        r'^const FRAME_INVERSE_BLANKS = BLANK_CHARS\.replace\("(\\u[0-9A-Fa-f]{4})", ""\);',
+        src, _re.M)
+    assert m, (
+        "the extension no longer derives its frame-inverse blank set from "
+        "`BLANK_CHARS` by removing one member — re-derive or re-pin it, do not "
+        "let the two sets drift")
+    removed = chr(int(m.group(1)[2:], 16))
+    assert {removed} == not_whitespace, (
+        f"the TS inverse removes {removed!r} while Python's `re \\s` refuses "
+        f"{not_whitespace!r} — the turn match would over- or under-strip")
+
+
+def test_the_pi_turn_id_matches_session_confirm():
+    """#12603: the confirm-on-refusal read's turn id is ONE derivation.
+
+    The read proves the served session holds OUR turns by comparing
+    `{session_id}_t{i}` rows. The extension is a standalone artifact — it cannot
+    import `session_confirm.turn_point_id` — so the TS literal is a copy, and a
+    copy with no pin drifts silently: when the server's derivation moved, the
+    match would stop matching, the stamp would go dark again, and nothing would
+    red. That is the exact defect #12603 exists to fix, so the pin matters.
+
+    `test_session_confirm.py` pins Python↔Python (`turn_point_id` against
+    `sdk._capture_turn_id`); this is the third side of that pin.
+
+    MUTATION THAT REDS THIS: change the TS template to `${sessionId}-t${index}`
+    (or to 1-based `${index + 1}`) — the ids stop matching and the marker never
+    lands.
+    """
+    from tortoise.session_confirm import turn_point_id
+
+    m = re.search(
+        r"function turnPointId\([^)]*\)[^{]*\{\s*return `([^`]*)`;", _src())
+    assert m, (
+        "the extension's `turnPointId` is not a single-template return — this "
+        "pin cannot verify it, and the turn match's id derivation is unpinned")
+    template = m.group(1)
+    assert set(re.findall(r"\$\{(\w+)\}", template)) == {"sessionId", "index"}, (
+        f"the turn-id template carries unexpected placeholders: {template!r}")
+    rendered = template.replace("${sessionId}", "sess-1").replace("${index}", "7")
+    assert rendered == turn_point_id("sess-1", 7), (
+        f"the Pi leg derives turn ids as {rendered!r} while "
+        f"`session_confirm.turn_point_id` derives "
+        f"{turn_point_id('sess-1', 7)!r} — the served-row match would never fire")
+
+
 def test_extension_turn_max_chars_matches_the_sdk_stored_window():
     """#4897 criterion 4: the per-turn cap is ONE number.
 
