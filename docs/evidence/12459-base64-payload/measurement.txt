@@ -1,0 +1,90 @@
+== corpus
+  supabase/tests/fixtures/record_projection_journal.jsonl: 39 records, 29 types
+  vector: 384-d, float32, produced by 384-wide generator (same vector as the P0 probe)
+
+== tools/journal_growth.py on the P0 journal (the committed instrument)
+  39 records  32,130 B  mean 823.8 B  p95 5,148 B  max 5,423 B
+  ⚠️ the tool's `embedding` share is a SPACED re-serialisation (#11886) — not used for any vector figure below.
+
+== per class, vector-bearing records (P0 bytes ON DISK; P2 is the framed candidate, re-serialised)
+   class                 P0 rec   P0 vector   P2 vector   P2 rec   rec ratio
+   PointAdded             5,423      4,689      2,064    2,798   1.94x
+   OperatorAdded          5,124      4,689      2,064    2,499   2.05x
+   PointPromoted          4,936      4,689      2,064    2,311   2.14x
+   OperatorPromoted       4,924      4,689      2,064    2,299   2.14x
+
+== a creating record (PointAdded), the acceptance surface
+  record              5,423 B → 2,798 B  (1.94x)
+  its vector payload  4,689 B → 2,064 B  (2.27x)
+  chars/float         12.2 → 5.4
+  raw float32 packed  1,536 B  (base64 is +33.3 % framing over raw: 2,048 B string − 1,536 B raw = 512 B)
+  pre-#11821 baseline  9,176 B → 2,798 B  (3.28x)
+  ⇒ the P0 figures above are the WRITTEN bytes (4 lines `raw_decode`d out of the tempdir journal, vector span included); the writer's compact separators reproduce each line exactly
+
+== whole corpus
+  P0  39 records  32,130 B
+  P2  39 records  19,005 B  (1.69x vs P0, 2.70x vs pre-P0)
+  delta 13,125 B — all of it in the 5 vector-bearing records
+
+== decode equivalence (float32 bits, not float64 values)
+  PointAdded            384-d  base64→f32 == producer f32: True   P0 text→f32 == producer f32: True   (frame invertible: True)
+  PointAdded            384-d  base64→f32 == producer f32: True   P0 text→f32 == producer f32: True   (frame invertible: True)
+  OperatorAdded         384-d  base64→f32 == producer f32: True   P0 text→f32 == producer f32: True   (frame invertible: True)
+  PointPromoted         384-d  base64→f32 == producer f32: True   P0 text→f32 == producer f32: True   (frame invertible: True)
+  OperatorPromoted      384-d  base64→f32 == producer f32: True   P0 text→f32 == producer f32: True   (frame invertible: True)
+  5 of 39 corpus records carry a vector and were verified
+  float64-VALUE decoded == producer (must PASS — value equality cannot see width): True  elements equal: 384 of 384
+  float64-VALUE decoded == P0 un-narrowed text (must REJECT a correct encode): False  elements equal: 0 of 384
+  the same assertion on a 1-ULP perturbation (must be False): False
+
+== the caller-owned / preserved population (#5004 round-7)
+  float64 frame round-trip bit-identical: True
+  …and it is genuinely off the float32 grid: True  (so a narrowing WOULD be visible)
+  f64 spans (the off-grid fixture): today 5,770 B (15.0 chars/float) → frame 4,112 B (10.71) = 1.40x
+  f64 spans (a realistic full-precision float64 vector): today 7,552 B (19.7 chars/float) → frame 4,112 B (10.71) = 1.84x
+
+== degenerate vectors: the trade's SIGN depends on the vector (ratio = text/frame; <1 means the frame is LARGER)
+   shape                 f32: text     frame    ratio    f64: text     frame    ratio
+   all zeros                        1,537     2,064    0.74x      1,537     4,112    0.37x
+   small ints 0..383                2,195     2,064    1.06x      2,195     4,112    0.53x
+   the probe's real vector (f32)     4,689     2,064    2.27x      8,031     4,112    1.95x
+   ⛔ a ratio BELOW 1x means base64 is LARGER than the decimal text —
+      the frame is chosen for bit-exactness and one reader, not for bytes.
+
+== the reader refuses (each raises, none decodes silently short)
+  last quantum replaced + one dropped (1,533 B) REFUSED (ValueError, decoded 1,533 B)
+  one element short, count unchanged         REFUSED (ValueError, decoded 1,532 B)
+  packed f64 under a declared f32            REFUSED (ValueError, decoded 3,072 B)
+  unknown version                            REFUSED (ValueError, decoded 1,536 B)
+  non-base64 character REPLACING alphabet chars REFUSED (Error)
+  non-base64 chars INSERTED (count-clean, validate-only) REFUSED (Error)
+
+== the default decoder vs validate=True (why validate is mandatory)
+  4 inserted '*' chars: default decode 1,536 B  len%4==0 True  bits == the packed payload True  validate=True raises True
+  ⇒ only `validate=True` refuses it: an insertion is count-clean (1,536 B, 384 whole floats, bit-identical to the payload).
+
+== silent truncation: which cuts a LENGTH-ONLY check would accept
+   cut   chars%4   decoded    floats   len%4==0   count check (declared n)
+   -1    3        refused by b64decode (Incorrect padding)
+   -2    2        refused by b64decode (Incorrect padding)
+   -3    1        refused by b64decode (Invalid base64-encoded string: number of data characters (2045) cannot be 1 more than a multiple of 4)
+   -4    0          1,533 B   383.25   False       refuses
+   -8    0          1,530 B   382.50   False       refuses
+   -12   0          1,527 B   381.75   False       refuses
+   -16   0          1,524 B   381.00   True        refuses
+   -20   0          1,521 B   380.25   False       refuses
+  count check on the -16 frame: REFUSED (frame declares 384 elements at f32 (1536 B), decoded 1524 B)
+
+== text alphabets (body B = encoded chars; field B = 14 B frame prefix +
+   the JSON-escaped string as it lands on the line, so an alphabet that
+   needs escaping is charged for it)
+   alphabet            body B   field B   vs b64   needs JSON escaping
+   hex                    3,072     3,088    1.496x   False
+   base64 (RFC 4648 §4)   2,048     2,064    1.000x   False
+   base64url (§5)         2,048     2,064    1.000x   False
+   b85 (RFC 1924)         1,920     1,936    0.938x   False
+   a85 (Adobe Ascii85)    1,920     1,970    0.954x   True
+   z85 (ZeroMQ)           1,920     1,936    0.938x   False
+  b85/z85 are 25 % overhead against base64's 33.3 % — cheaper by 128 B on this field. base64 is chosen for ubiquity and hand-inspectability (most languages' stdlibs: Python, Java, Go, C#, Node -- not Rust's or C's, the same reason b85's support is thin -- and `echo | base64 -d`), not for being the smallest.
+
+VERDICT: measured. The frame is 2.27x the P0 vector span on a creating record, the float32 bits are unchanged, and the f64 population is preserved at its own width.
