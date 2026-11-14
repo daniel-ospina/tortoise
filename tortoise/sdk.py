@@ -11764,6 +11764,9 @@ class TortoiseSDK:
         self._ep = None  # lazy-init TortoiseEP
         self._evidence: dict[str, tuple[float, float]] = {}
         self._registry_g = None
+        # Name the cached handle was built for, so `create=False` can re-test its
+        # EXISTENCE without deriving the name a second time (`_get_registry`).
+        self._registry_name: str | None = None
         self._audit_logger = None
         # Issue #1005 (lifecycle): idempotent close + context-manager support
         # + atexit registration so a NORMAL process exit never orphans the
@@ -13076,10 +13079,29 @@ class TortoiseSDK:
                 f"Override with TORTOISE_ALLOW_PRODUCTION=1."
             )
 
-    def _get_registry(self):
+    def _get_registry(self, *, create: bool = True):
         """Return the control_plane registry graph handle (cached).
 
         Uses the existing db connection — no second FalkorDB connection.
+
+        ``create=False`` is the PROBE form: it answers the handle only while the
+        registry graph it was built for STILL EXISTS, else ``None``, and it never
+        brings that graph into being. Two ways a caller gets ``None``: a cold
+        handle whose store holds no graph by the derived name (a `GRAPH.LIST`
+        read), and a CACHED handle whose graph was deleted underneath this
+        process (a sweep, or an in-process flip to Supabase) — the cache is not
+        proof of existence, and answering a stale handle is how the next query
+        would resurrect the name. The default path below MINTS the graph —
+        `select_graph` is client-side, but :meth:`_ensure_registry_indexes` issues
+        a `CREATE INDEX` per label, and the first DDL on a name is what brings a
+        FalkorDB graph into existence. So a caller that must not leave a graph
+        behind (an account READ — a `{ns}_control_plane` created during a lookup
+        is the same read-side mint #669 rejected) asks with ``create=False``.
+        The existence test is :func:`tortoise.graph_delete_guard.graph_exists`, a
+        `GRAPH.LIST` read, and a probe performs it ONCE: a cold probe tests before
+        building a handle (and the `elif` below never re-tests that name), while a
+        warm probe tests the name it was cached for.
+
         Registry graph name is namespace-scoped (``{ns}_control_plane``) so
         different namespaces never share registry state, and test graphs get
         an isolated name derived from ``{ns}_{test_graph}_control_plane`` that
@@ -13122,6 +13144,14 @@ class TortoiseSDK:
                 registry_name = f"{ns}_control_plane"      # shared — NEVER prefixed
             else:
                 registry_name = "control_plane"            # shared — NEVER prefixed
+            if not create:
+                # `create=False` is the probe contract: a graph this store does
+                # not already hold is reported ABSENT, never brought into being.
+                # Checked on the DERIVED name (one derivation, above) so the two
+                # callers cannot disagree about which graph is the registry.
+                from .graph_delete_guard import graph_exists
+                if not graph_exists(proj.db, registry_name):
+                    return None
             registry_graph = proj.db.select_graph(registry_name)
             # Epic #1647 (CI P2): the registry name derived from a TEST graph
             # must ALSO be journaled — the redirect only journals the main
@@ -13141,8 +13171,35 @@ class TortoiseSDK:
             # half-initialized handle whose next call would return it and skip
             # both the journal and the indexes, minting the registry graph
             # UNOWNED (the E2E-7 leak this append exists to stop).
+            # ONCE, and the NAME before the handle — the MIRROR of `close()`, which
+            # clears the handle and then the name. Both orders exist to keep one
+            # state unobservable: "a handle with no name yet". Build: name first, so
+            # the moment a handle is visible its name is already known. Close: handle
+            # first, so the moment the name disappears no handle is visible. Reversed,
+            # a probe on this same instance reads "handle set, name None" and answers
+            # `None` for a store that HAS the account — the one answer this method's
+            # docstring forbids. (Do not "restore consistency" by matching `close()`:
+            # the two directions are deliberately opposite.)
+            self._registry_name = registry_name
             self._registry_g = registry_graph
             self._ensure_registry_indexes()
+        elif not create:
+            # A CACHED HANDLE IS NOT PROOF THE GRAPH STILL EXISTS. A sweep, or an
+            # in-process flip to Supabase, can delete it underneath this process;
+            # answering the stale handle is precisely how a read resurrects it
+            # (the next `query` re-creates the name). Re-test the name the handle
+            # was built for — same derivation, recorded once in `_registry_name`,
+            # so the probe and the creator cannot disagree about which graph is
+            # the registry.
+            # `elif`, not a fresh `if`: the cold branch above already answered the
+            # existence question for exactly this name (that is how execution got
+            # past it), so a second `GRAPH.LIST` here would be a redundant round
+            # trip per cold probe, not a second guarantee.
+            if self._registry_name is None:
+                return None
+            from .graph_delete_guard import graph_exists
+            if not graph_exists(self._get_proj().db, self._registry_name):
+                return None
         return self._registry_g
 
     def _ensure_registry_indexes(self) -> None:
@@ -33055,6 +33112,9 @@ class TortoiseSDK:
             self._proj.close()
             self._proj = None
         self._registry_g = None
+        # The NAME goes with the handle: a stale name would let a later probe test
+        # a graph this (closed) handle no longer refers to.
+        self._registry_name = None
 
     # ── P1-4: Entity Linking ────────────────────────────────────
 
@@ -34353,6 +34413,35 @@ class TortoiseSDK:
             alarm_reason = "silent_no_op"
         elif backlog > 0 and last_output == 0:
             alarm_reason = "zero_output_with_backlog"
+        elif stamp_error is not None:
+            # #12099 (the per-call half of #11823) — the "could not read it" pole
+            # of `BOUNDED-OPERATION-CONTRACT.md` §1a (`0`, `"empty"` and "I
+            # could not read it" must never become one answer). The pair read
+            # FAILED, so `coverage` above is the `0.0` FALLBACK, not a reading,
+            # and `zero_coverage_with_backlog` would assert a measurement that
+            # never happened.
+            #
+            # SCOPE: this arm closes the FAILED-READ pole only, not §1a for this
+            # field. Two residuals stay open on #12099 and are deliberately not
+            # touched here: (a) an EMPTY denominator (`_coverage_ratio`'s `0/0`
+            # → `0.0`) is still labelled as a measured zero — the "empty" pole;
+            # and (b) this arm is unreachable while `last_pass_output == 0`, i.e.
+            # on ANY instance that has served no pass — `GET /v1/dream/health`'s
+            # per-request SDK, and an embedded SDK before its first pass — where
+            # the `zero_output_with_backlog` arm ABOVE wins. (b) is a CONDITION,
+            # not a surface: fixing only the hosted door would leave it intact on
+            # embedded (measured: identical output before and after this change).
+            #
+            # The VERDICT is unchanged on purpose: an unreadable coverage over a
+            # live backlog still alarms (fail-loud), and `coverage_pct` keeps its
+            # pre-existing `0.0` because that number FEEDS this alarm — moving it
+            # to `None` would disarm the term the alarm exists for. Only the
+            # REASON stops claiming the zero was read; the WHY travels beside it
+            # on `propagation.unavailable` in this same record (that field
+            # conflates a failed stamp read with a failed census read where
+            # coverage WAS measured, so it cannot answer "was the alarm's input
+            # measured" — which is why the reason token is the right home).
+            alarm_reason = "coverage_unavailable"
         else:
             alarm_reason = "zero_coverage_with_backlog"
         state = self.dream_health_state()
@@ -45804,6 +45893,164 @@ class TortoiseSDK:
             params={"id": org_id},
         ).result_set
         return rows[0][0] if rows else None
+
+    def get_organisation_account(self) -> dict | None:
+        """Read THIS caller's account and the plan it is on (#10015, row 28).
+
+        Answers *"how full is my plan?"* BEFORE a write is refused, which the
+        refusal itself cannot: ``docs/capacity.md`` §4 records the cap as a
+        STOCK, not a flow — the 402 is terminal and carries no ``Retry-After``,
+        so backing off retries forever and the refusal is otherwise the first
+        time a builder learns the cap exists. Read-only where it matters: nothing
+        here clears, refills, prunes or overrides a cap and no node is written,
+        so an account held at its cap on
+        purpose (#10175) reads as held, not as an outage.
+
+        ⛔ **Scoped to the caller's own account — by construction, not by a
+        filter.** The method takes no ``org_id``: there is no argument through
+        which a caller could name another tenant's row (which is what
+        ``org_get`` permits, and why it stays the deprecated control-plane
+        primitive while this name is row 28's customer read). The account is
+        resolved from the SDK's own tenant — the SAME seam every write uses
+        (``record_writer.record_tenant_effective``: carried on the SDK by the
+        hosted REST lane, else the ``use_record_tenant`` scope, else the
+        declared single-tenant env pair). An SDK that names no tenant REFUSES;
+        it never falls back to a guess, because a guessed org is a
+        cross-tenant read that happens to return well-formed data.
+
+        Returns ``None`` when no account row exists — in THIS SDK's control plane
+        and in the one the plan's write gates read. When the two disagree (a Team
+        row visible to ``org_get`` but not to ``quota.resolve_org_limits``) the
+        method REFUSES with ``ControlPlaneError`` naming the mismatch rather than
+        reporting an account that plainly exists as absent, and rather than
+        publishing another store's cap for the same id. It also raises
+        ``ControlPlaneError`` when no tenant is bound at all.
+
+        The reply — every field reuses vocabulary the quota surfaces already
+        own, so the pre-write read and the 402 that follows it line up::
+
+            {
+              "org_id": "<the caller's own account>",
+              "tier": "pro",
+              "plan": {
+                "resource": "points",
+                "used": 10234,     # or None when the count could not be read
+                "limit": 100000,   # int | None = UNLIMITED | ABSENT = UNKNOWN
+                "at_cap": False,   # present only when the answer is knowable
+              },
+            }
+
+        ``plan.resource`` names what the limit bounds — the ``points`` resource
+        (``quota.count_org_usage``: non-episodic Points + Object/Subject +
+        non-episodic Events) — because ``limit``/``used`` are unitless without
+        it (AIP-141: a quantity names its unit). ``plan.limit`` has THREE states
+        and none of them is a lie: a number (bounded), ``None`` (unlimited — a
+        key that is PRESENT with no value, ``billing.apply_limits``' own
+        encoding), or the key ABSENT (we could not read it, which the gate also
+        treats as fail-closed). ``plan.used`` is the count the gate compares, or
+        ``None`` when the count failed — a failed read is never a genuine ``0``
+        (#4331). ``plan.at_cap`` is the gate's own predicate (``used >=
+        limit``) and is omitted when it cannot be computed.
+
+        ⚠️ Which graph ``used`` counts: THIS SDK's, the same handle the caller
+        writes through. That is deliberate and it is ``enforce_org_limit``'s
+        house rule (#8906): a graph-bound credential is metered against the
+        graph it writes, so counting the default graph instead would report
+        headroom on a graph the caller cannot touch.
+        """
+        from .exceptions import ControlPlaneError
+        from .quota import (
+            OrgNotFoundError,
+            count_org_usage,
+            encode_plan_block,
+            resolve_org_limits,
+        )
+        from .record_writer import (
+            _refused_tenant_env_note,
+            is_usable_tenant,
+            record_tenant_effective,
+        )
+
+        tenant = record_tenant_effective(self._record_tenant)
+        if not is_usable_tenant(tenant):
+            raise ControlPlaneError(
+                "get_organisation_account needs a bound account: this SDK names "
+                "no tenant, and reading an account by a caller-supplied id is "
+                "the cross-tenant read row 28 must not allow (#10015). Bind it "
+                "one of the two supported ways: on the hosted REST lane the "
+                "credential's tenant is carried on the SDK it opens; elsewhere "
+                "enter record_writer.use_record_tenant(org_id, graph_id)."
+                # The arm-specific sentence (which env pair to set, or which
+                # declaration is missing) renders in `record_writer`, the ONE
+                # module the `#9192` pin allows to touch the env literals. Naming
+                # them here would make this method a second reader of the
+                # process-global tenant — exactly the bypass
+                # `test_the_env_pair_has_no_reader_outside_the_gated_resolver`
+                # refuses (it reds this raise site, by SYMBOL not by line).
+                + _refused_tenant_env_note()
+            )
+        org_id = tenant[0]
+        try:
+            # ONE limits read, from the resolver the WRITE gates use — so the
+            # cap reported here is the cap they enforce, not a second opinion.
+            limits = resolve_org_limits(org_id)
+        except OrgNotFoundError:
+            # A bound tenant with no row in the registry the GATES read is a STATE
+            # (#9567), not a fault — but it is only honest to report it as "no
+            # account" when the caller's own control plane agrees it does not
+            # exist. `resolve_org_limits` resolves the registry through
+            # `_make_sdk(namespace="registry")` (TORTOISE_DB_URI / TORTOISE_DB_PATH),
+            # NEVER this handle — so a deployment can hold a Team row in a store the
+            # gates will not read (an embedded `db_path=` store: `org_get` finds the
+            # row, the gates never see it). Answering `None` there would be a
+            # factual claim about the caller's account made from a store that
+            # cannot see it — and silently substituting a DIFFERENT store's cap for
+            # the same org id would be a fail-open on the money surface. Fail closed
+            # and name the mismatch instead.
+            #
+            # ⛔ THE PROBE IS `org_get`, SO IT MAY NOT RUN ON A STORE THAT HAS NO
+            # REGISTRY GRAPH. `org_get` resolves this handle's registry
+            # (`_get_registry`), whose `_ensure_registry_indexes` issues a
+            # CREATE INDEX per label — the first DDL is what MATERIALISES
+            # `{ns}_control_plane`. Probing unconditionally therefore left a new
+            # graph behind on every read of an account with no row, which is the
+            # read-side mint #669 rejected: in Supabase mode the registry is
+            # DELETED by design (`resolve_org_limits` reads the orgs row there and
+            # touches no graph), so the probe would resurrect exactly the graph
+            # the flip removed — from a READ, on the money surface, inside a
+            # method whose docstring promises no such write. `create=False` asks
+            # the same question against `GRAPH.LIST` and mints nothing, so the
+            # answer is "is this SDK's control plane even present", which is the
+            # only question that has an answer here: absent graph ⇒ this handle
+            # holds no Team row ⇒ `None` is the honest reply. Where the graph IS
+            # present the disagreement diagnosis below still runs in full, in
+            # every mode (a registry-written org is a real state even on a
+            # Supabase deployment).
+            if self._get_registry(create=False) is not None and self.org_get(org_id) is not None:
+                raise ControlPlaneError(
+                    f"get_organisation_account cannot answer for {org_id!r}: the "
+                    "account exists in this SDK's control plane but not in the one "
+                    "the plan's write gates read (quota.resolve_org_limits resolves "
+                    "the registry through TORTOISE_DB_URI / TORTOISE_DB_PATH, not "
+                    "this handle). Point this process at the store the gates read."
+                ) from None
+            return None
+        used: int | None = None
+        try:
+            used = count_org_usage(org_id, "points", sdk=self)
+        except Exception:
+            # Best-effort, like /v1/team's #4331 node figure: the account read
+            # must not fail because one count did, and the reply says so
+            # explicitly (`used: None`) rather than reporting a reassuring 0.
+            _logger.warning(
+                "get_organisation_account: points count unavailable for %s",
+                org_id, exc_info=True,
+            )
+        return {
+            "org_id": limits.get("org_id") or org_id,
+            "tier": limits.get("tier"),
+            "plan": encode_plan_block(limits, "points", used=used),
+        }
     # ── Control Plane: Membership CRUD ─────────────────────────────
 
     def membership_create(self, org_id: str, user_id: str, role: str) -> dict:
