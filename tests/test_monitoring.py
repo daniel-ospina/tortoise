@@ -3078,14 +3078,32 @@ class TestHealthzListener:
         failed on COLLECTION ORDER alone. The same isolation the rest of this file
         already has for the refusal window, for the three inputs the verdict now
         also reads.
+
+        #12464 (measured): the TICKER is the fourth input, and it was the one
+        still missing. ``heartbeat_task_is_dead()`` disarms the wedge term
+        (#2850: a dead ticker must not be mistaken for a wedge), and any earlier
+        test in the same worker that started a liveness ticker
+        (``hosted_api._start_liveness`` -> ``note_heartbeat_task``) and then let
+        it finish or be cancelled leaves a DEAD one recorded. The verdict is then
+        ``stale`` but not ``wedged``, so ``/healthz`` answers
+        ``200 {"status": "ok", "reasons": [], "loop_stale": true}`` and the two
+        tests that assert 503 fail — as they do on ``test-slow (a)`` (and on
+        ``main`` itself, 1 in 15 runs), where this shard's file list puts
+        ``test_monitoring.py`` after files whose app lifespans close their loop.
+        Reproduced deterministically: `note_heartbeat_task(<finished task>)`
+        before the two tests makes both answer 200 with that exact body. With the
+        ticker cleared, ``None`` means "nothing instrumented" and the ceiling is
+        ARMED, which is the state these tests measure.
         """
         monitoring.set_served_progress_source(None)
         monitoring.set_dataplane_verdict_source(None)
         monitoring.reset_wait_bound_breach_window()
+        monitoring._reset_heartbeat_task()
         yield
         monitoring.set_served_progress_source(None)
         monitoring.set_dataplane_verdict_source(None)
         monitoring.reset_wait_bound_breach_window()
+        monitoring._reset_heartbeat_task()
 
     def test_default_target_is_the_fixed_contract(self, monkeypatch):
         """Port 9090 on 0.0.0.0 — another agent wires the Fly check to it."""
