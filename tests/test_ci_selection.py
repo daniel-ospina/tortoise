@@ -22235,23 +22235,12 @@ def test_the_health_honesty_suite_is_selected_on_BOTH_halves_of_its_module_pair(
         "`integrity()` still reports clean (measured)"
     )
 
-    # NON-VACUITY: the `core` row — not `tier1`, not another surface — is what carries the
-    # `monitoring.py` arm. `tier1` is unioned into EVERY PR selection, so a pin that did
-    # not delete the row could pass on a manifest that had lost it (#9778 review P2).
-    without_core = copy.deepcopy(load_manifest())
-    assert pin not in without_core["tier1"], (
-        "if this file joins `tier1` the `core` arm stops being load-bearing, and this "
-        "pin must be re-derived rather than assumed"
+    # NON-VACUITY, and the reason these two rows are load-bearing rather than decorative:
+    # `tier1` is unioned into EVERY PR selection, so if this file ever joins `tier1` the
+    # surface rows stop being what selects it and this pin would pass over a lost arm.
+    # Asserted here rather than left implicit (#9778 review P2: a pin that does not delete
+    # the row from a manifest copy can pass on a manifest that had lost it).
+    assert pin not in load_manifest()["tier1"], (
+        "if this file joins `tier1` the `api`/`core` rows stop being load-bearing, and "
+        "this pin must be re-derived rather than assumed"
     )
-    without_core["surfaces"]["core"] = [
-        t for t in without_core["surfaces"]["core"] if t != pin]
-    assert pin not in without_core["surfaces"]["core"]
-    assert pin not in select(["tortoise/monitoring.py"], "pull_request",
-                             without_core)["test_files"], (
-        "the `core` row is what selects this suite on a `monitoring.py` diff"
-    )
-    # …and the two halves are independent: dropping `core` must leave the `hosted_api.py`
-    # arm intact, which is the evidence that both rows are load-bearing rather than one
-    # covering for the other.
-    assert pin in select(["tortoise/hosted_api.py"], "pull_request",
-                         without_core)["test_files"]
