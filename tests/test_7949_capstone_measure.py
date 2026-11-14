@@ -5496,11 +5496,13 @@ def test_the_bare_continuation_cites_name_what_they_say():
             ("14786", "edus = _edus_from_conversation(conversation)"),
         )),
         # ⛔ The `_IDLE_CITES` docstring's OWN early-return cite (#12369 review, P3):
-        # it said `:14649`, the PRE-merge value, while the `follows at` row five lines
-        # above already pinned `:14697` for the same `if not edus:` statement. One
-        # claim, two numbers in one function, and only one of them had a reader — the
-        # bare continuation here sat in no row, so `grep -c '14649'` over this file's
-        # tests was `0`.
+        # it said `:14649`, the PRE-merge value, while the `if not edus:` statement is
+        # pinned HERE at `:14787` (the `follows at` row five lines above pins a
+        # DIFFERENT statement — `edus = _edus_from_conversation(conversation)` — at
+        # `:14786`; an earlier cut of this comment claimed that row pinned the `if` at
+        # `:14697`, which no row in this file ever pinned). One claim, two numbers in one
+        # function, and only one of them had a reader — the bare continuation here sat
+        # in no row, so `grep -c '14649'` over this file's tests was `0`.
         ("probes/capstone_measure.py", "emits literally", (
             ("14787", "if not edus:"),
         )),
@@ -13752,8 +13754,8 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     `TORTOISE_PARTIAL_GAP_FILL` pin landed above it, `:2736-2738` before `#11523`'s
     `DOOR_PINNED_ON` comment rewrap (`8212c41eff`, +2), and `:2724-2726` before main's
     #11517 (`7dabb59e0f45`) landed its +12 above it;
-    `extractor_v2.py:1764` unchanged — the relations schema that spells the predicate
-    allowlist, which `#11002`'s rebase moved `:1720` → `:1764` in THIS tree, so the
+    `extractor_v2.py:1773` — the relations schema that spells the predicate
+    allowlist, `#11002`'s rebase having moved `:1720` → `:1773` in THIS tree, so the
     pre-#11002 number is not a reading of this one — the `create_operator`
     reproduction quote this PR re-derived (`:8938 :8956 :8963 :9343` ->
     `:9021 :9039 :9046 :9426` after the `f5c69f7478` base merge (+68 at #11449, then +15
@@ -13884,7 +13886,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         "a base in parentheses is still a BASE — the false block main's shape produced")
     assert _cite_qualifiers("`:12929` at\n**`a1dff7cec8`**") == [("12929", "a1dff7cec8")], (
         "§2's own spelling wraps the base in a newline and bold — typography, not the claim")
-    assert _cite_qualifiers("the comment at :11362 and 40 lines") == [], (
+    assert _cite_qualifiers("the comment at :12487 and 40 lines") == [], (
         "a BARE cite has no qualifier — it is the grammar gap stated beside the arm, not a hit")
     assert _cite_qualifiers(":9021 (see the note above)") == [], (
         "an ordinary PARENTHESISED ASIDE after a cite is not a qualifier — only a CLOSED,"
@@ -13971,12 +13973,15 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
 
     # A1: #11205's channel is TRANSPORT ONLY — the schema line that spells the
     # predicate allowlist, and the comment saying nothing in `tortoise/` consumes it.
-    # ⛔ RE-DERIVED for `#11002`'s rebase, not offset by hand: this branch inserts
+    # ⛔ RE-MEASURED at the merged tree, not offset by hand: this branch inserts
     # above BOTH anchors (the G5 record at the module head and the `run_s1`
-    # emphasis seam), so the schema line moved `:1720` → `:1764` and the comment
-    # `:10891` → `:11362` — the same **+15** §10.15 records for the collector.
+    # emphasis seam), so the schema line sits at `:1720` → `:1773` in THIS tree.
     # Measured off the MERGED tree (`grep -n 'hasPart' tortoise/extractor_v2.py`
-    # → `:1764`, `grep -n 'nothing in this tree consumes'` → `:11362`).
+    # → the schema row at `:1773`; `:1764` is the unrelated `#12067` comment).
+    # ⛔ A later cut of THIS comment wrote `:1764` and a `:11362` for the retired
+    # "nothing in this tree consumes" comment — which is GONE from `tortoise/` at this
+    # head (corrected in place, see RECONCILE-A1-A2-A5.md), so it has no line to cite.
+    # A cite re-derived by ARITHMETIC is not a measurement: re-read it, never add.
     # ⛔ DERIVED, not typed: the relations schema line is the one line carrying both the
     # `hasPart` spelling and the predicate allowance, so a merge that moves it moves the
     # cite too. (Typed `:1771` here was correct at one head and two lines stale at the next.)
@@ -14484,7 +14489,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         # not a base ([])" — naming the OPPOSITE defect — because its lookahead excludes only a
         # base that STARTS WITH A DIGIT.
         # ⚠️ Still not seen here: a cite with NO qualifier at all (`:13011` alone) — the block as
-        # shipped carries `:11362` that way (a live cite, correctly), so a no-bare-number rule
+        # shipped carries `:12487` that way (a live cite, correctly), so a no-bare-number rule
         # would false-block on the record itself. That is the same grammar gap as §2, one line up.
         if _is_repro_block:
             _quals = _cite_qualifiers(_region)

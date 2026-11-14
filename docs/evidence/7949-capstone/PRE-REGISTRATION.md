@@ -3018,8 +3018,9 @@ to answer.
   class set or corpus pin is changed — every §1–§9 criterion VALUE and the E4 denominator are the ones
   this record froze. `document_sha256` is re-cut in this same commit, per §8's rule for *any* edit to
   this file, and the bundle README's present-tense digest with it.
-- **This entry is LIVE for the merged tree** — it has no successor, so it must not carry a supersede
-  marker.
+- **This entry was LIVE for the merged tree at the head it shipped at** — it now has a successor
+  (§10.37), which re-derives the same carriers onto the tree that merges `main` `6916a6cd89d7`. Its
+  own numbers are untouched here, and the supersede marker above is the record of what moved.
 
 ### 10.37 — the merge with `main` `6916a6cd89d7`: what moved, and the three carriers that did not (2026-11-14, `#12295`)
 
