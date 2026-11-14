@@ -129,9 +129,9 @@ and why this paragraph names one rather than claiming a current set.
 Re-read it at the head you
 merge, because a typed list of paths rots exactly the way a typed line number does.
 
-**No longer in the diff — absorbed by the forward merges, kept as history.** (Three rows below
-have come BACK as FILES while their described changes stayed absorbed; each one's effect cell
-says so, which is the per-row marking this section promises.):
+**No longer in the diff — absorbed by the forward merges, kept as history.** (Two rows below are BACK as FILES at this head while their described
+changes stayed absorbed, and a third (`docs/00_index.md`) came back at `30c9e7c4d3` and is out
+again — each row's effect cell says which, the per-row marking this section promises.):
 
 | file | what it changed when this branch carried it | effect |
 |---|---|---|

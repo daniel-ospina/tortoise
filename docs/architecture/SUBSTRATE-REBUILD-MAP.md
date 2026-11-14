@@ -301,7 +301,7 @@ docstring, and `_entity_label`'s record of why the local copy of the canonical
 map had to go). That move is the same kind as the five before it — prose that
 names the retired label in order to explain a rule about it — and it is the first
 one whose point is a WIDENING rather than a retirement. The seventh, #12434's `:Document`
-retirement prose in `tortoise/mcp_server.py:3873`, IS a retirement. All seven are the point
+retirement prose in `tortoise/mcp_server.py:4233`, IS a retirement. All seven are the point
 rather than an accident: this population grows for good reasons, so the figure tracks the tree
 and not a past commit.
 `tests/test_substrate_map.py` re-derives both numbers over the **same**

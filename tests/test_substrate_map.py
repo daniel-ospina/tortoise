@@ -1686,7 +1686,7 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
     `tortoise/why.py:200` (`live.KIND_PROPERTIES`' scope note, `kind_expression`'s
     docstring, `_entity_label`'s record of the derived map) — the first move whose
     point is a WIDENING rather than a retirement — and **#12434**'s `:Document`
-    retirement prose in `tortoise/mcp_server.py:3873`, the seventh, whose point IS
+    retirement prose in `tortoise/mcp_server.py:4233`, the seventh, whose point IS
     a retirement. Each move is the mechanism
     working: the census landed, this check reddened, and §5 was re-measured instead
     of the number being quietly widened or the guard loosened.
