@@ -84,8 +84,9 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Sequence
+from typing import Any
 
 _logger = logging.getLogger(__name__)
 
@@ -291,7 +292,7 @@ def measure_written_rows(
         if not row:
             raise ValueError(f"{ROWS_RPC} returned no row")
         return parse_written_rows(row[0])
-    except Exception:  # noqa: BLE001 - a meter must never break the write
+    except Exception:  # a meter must never break the write
         _logger.debug("postgres byte measurement failed (non-fatal)", exc_info=True)
         return None
 
@@ -439,7 +440,7 @@ def per_org_bytes(cp: Any) -> PerOrgPostgresBytes:
         if cp is None:
             raise ValueError("no control-plane handle supplied")
         return parse_per_org_bytes(cp.rpc_value(AUDIT_RPC, {}))
-    except Exception as e:  # noqa: BLE001 - a measurement fault is a reading
+    except Exception as e:  # a measurement fault is a reading
         _logger.debug("per-org postgres bytes audit failed (non-fatal)", exc_info=True)
         return PerOrgPostgresBytes(
             orgs=(), rows=0, attributed_bytes=0,
