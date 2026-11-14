@@ -74,18 +74,22 @@ class TestDeclaration:
         `test_the_clean_run_reports_all_three_views` arms) and reds THIS pin too —
         five failures across the two files, not five in `test_sdk_surface.py` alone.
 
-        Two guards, and the path decides which one you meet — and there is a band
-        between them. WITHOUT a re-cut the addition is refused by `surface-guard.py`
-        **step 1** ("is not in the frozen baseline"). WITH a re-cut — which writes the new
-        method's own baseline row and so GREENS step 1 — the only layer left is the
-        `high_water_counts` CEILING (still 150), which `cut` CARRIES rather than
-        re-derives, so a re-cut cannot RAISE it. But the ceiling is an EXCEEDS check
-        (`live_n > high_water`), so it speaks only once the live count passes 150:
-        measured, +1 re-cut addition (live 126) → **exit 0, no guard fires**; +26 (live
-        151) → step 7, "public SDK methods live 151 > pin 150". So for a one- or
-        two-method regenerate-and-push the owner-approved-row rule is enforced in
-        REVIEW, not by the ceiling — 126…150 is headroom no gate covers. That band is
-        the growth half of the bypass recorded on #12327.
+        Two guard layers, and the path decides which you meet: WITHOUT a re-cut a
+        stray method is refused by `tools/surface-guard.py` **step 1** ("is not in the
+        frozen baseline"). WITH a re-cut, `cut` writes the new method's own baseline row
+        (greening step 1) and CARRIES `high_water_counts` (so it cannot be RAISED), and
+        the ceiling is an EXCEEDS check (`live_n > high_water`): measured, live 150 +
+        re-cut → rc 0, live 151 → rc 1, "public SDK methods live 151 > pin 150". So
+        between 126 and 150 **no guard REFUSES** a small addition that arrives with a
+        regenerate-and-push. What remains is not a refusal but four hand-typed count
+        registers — `DECLARED_COUNT` in `tests/test_sdk_surface.py`, THIS pin, the
+        `== 125` in `tests/test_surface_manifest.py::
+        test_the_live_surface_is_the_baseline_the_guard_froze`, and the typed `125` in
+        `docs/product/canonical-mcp-tools.md` — plus the two rendered docs `cut` leaves
+        STALE (`surface_manifest.py check` reds them). Every one of those is greened by
+        editing the same number, which makes the band reviewer-VISIBLE rather than
+        machine-refused. Measured evidence, and the SHRINK half of this same root, on
+        #12327 — which records only that half and treats growth as already pinned.
 
         Do not read this count as approval.
         """
