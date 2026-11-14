@@ -54,7 +54,7 @@ def _clean(monkeypatch):
     hosted_api._LIVENESS_LAST_SERVED_AT = None
     hosted_api._HEALTH_PROBE_START_FAILED = False
     # a fresh process for every test: the never-produced arm reads uptime
-    hosted_api._PROCESS_BOOT_MONOTONIC = time.monotonic()
+    hosted_api._HEALTH_PROBE_EPOCH_MONOTONIC = time.monotonic()
     # ⛔ the harness's `asyncio.run(_boot())` CLOSES the loop, so the heartbeat
     # task `_start_liveness` installs is DONE by the time any assertion runs —
     # and `heartbeat_task_is_dead()` would then disarm the wedge term in every
@@ -371,7 +371,7 @@ def test_a_process_past_the_bound_with_NO_probe_result_is_a_FAILURE():
     assert hosted_api._liveness_dataplane_verdict()["state"] == "unknown"
     # the assertion above is the COLD START. Age the process past the bound and
     # the same state must read as a failure, not as `unknown` for ever.
-    hosted_api._PROCESS_BOOT_MONOTONIC = time.monotonic() - (
+    hosted_api._HEALTH_PROBE_EPOCH_MONOTONIC = time.monotonic() - (
         hosted_api._health_probe_never_produced_bound_s() + 5.0)
     verdict = hosted_api._liveness_dataplane_verdict()
     assert verdict["state"] == "failed", verdict
@@ -391,7 +391,7 @@ def test_the_boot_clock_is_a_float_and_not_the_identity_string():
     `503 reasons=['data-plane-failed']`.
 
     ⛔ THIS TEST READS THE MODULE SOURCE, not the attribute value (round 14): the
-    autouse fixture sets `_PROCESS_BOOT_MONOTONIC` for isolation, i.e. it CREATES
+    autouse fixture sets `_HEALTH_PROBE_EPOCH_MONOTONIC` for isolation, i.e. it CREATES
     the very attribute a value check would type-check — measured, the value form
     of this test passed on the reverted code while the read raised. The runtime
     guarantee is `test_a_cold_start_with_no_probe_result_does_not_fail_the_deploy_gate`;
@@ -401,7 +401,7 @@ def test_the_boot_clock_is_a_float_and_not_the_identity_string():
     import inspect
 
     source = inspect.getsource(hosted_api)
-    assert "_PROCESS_BOOT_MONOTONIC = time.monotonic()" in source, (
+    assert "_HEALTH_PROBE_EPOCH_MONOTONIC = time.monotonic()" in source, (
         "the boot clock must be DEFINED as a monotonic float under its own name")
     assert isinstance(hosted_api._PROCESS_STARTED_AT, str), (
         "_PROCESS_STARTED_AT is the ISO string `_build_identity()` publishes; if "
@@ -421,7 +421,7 @@ def test_a_cold_start_with_no_probe_result_does_not_fail_the_deploy_gate():
     port = monitoring.start_health_listener(port=0, bind="127.0.0.1").server_address[1]
     hosted_api._HEALTH_PROBE.reset()
     hosted_api._HEALTH_PROBE_START_FAILED = False
-    hosted_api._PROCESS_BOOT_MONOTONIC = time.monotonic()
+    hosted_api._HEALTH_PROBE_EPOCH_MONOTONIC = time.monotonic()
     monitoring.heartbeat_record()
     status, body = _get(port)
     assert status == 200, body
