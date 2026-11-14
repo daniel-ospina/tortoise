@@ -69,11 +69,20 @@ class TestDeclaration:
         frozen baseline") — plus `tests/test_sdk_surface.py` (`DECLARED_COUNT` /
         declaration-vs-baseline). Measured: adding a stray public method to
         `TortoiseSDK` leaves `tests/test_sdk_retirement.py` green (14 passed; it is a
-        FLOOR, so growth cannot red it), reds `test_sdk_surface.py` (5 failed) and is
-        refused by the guard from step 1. The `high_water_counts` ceiling (still 150)
-        is a SEPARATE stop: step 7 refuses a live count ABOVE it, so it does not fire
-        on a one-method addition — it stops a re-cut from raising the ceiling silently.
-        Do not read this count as approval.
+        FLOOR, so growth cannot red it), reds `test_sdk_surface.py` on FOUR rows
+        (`test_the_declaration_describes_the_live_class_exactly` plus the three
+        `test_the_clean_run_reports_all_three_views` arms) and reds THIS pin too —
+        five failures across the two files, not five in `test_sdk_surface.py` alone.
+
+        Two guards, and the path decides which one you meet: WITHOUT a re-cut the
+        addition is refused by `surface-guard.py` **step 1** ("is not in the frozen
+        baseline"); WITH a re-cut — which would write the new method's own baseline row
+        and green step 1 — it is refused by the `high_water_counts` CEILING (still 150),
+        which `cut` CARRIES rather than re-derives, so a re-cut cannot raise it. That
+        second layer is the "enforced INDEPENDENTLY of the re-cut" one, and it is why
+        this header's owner-approved-row rule holds even against a regenerate-and-push.
+        Measured: +1 stray method (live 126) → step 1, exactly one violation; +26 (live
+        151) → step 7, "live 151 > pin 150". Do not read this count as approval.
         """
         from tortoise.sdk import TortoiseSDK
 
