@@ -133,9 +133,11 @@ and why this paragraph names one rather than claiming a current set.
 Re-read it at the head you
 merge, because a typed list of paths rots exactly the way a typed line number does.
 
-**No longer in the diff — absorbed by the forward merges, kept as history.** (Two rows below are BACK as FILES at this head while their described
-changes stayed absorbed, and a third (`docs/00_index.md`) came back at `30c9e7c4d3` and is out
-again — each row's effect cell says which, the per-row marking this section promises.):
+**No longer in the diff — absorbed by the forward merges, kept as history.** (Two rows below came BACK as FILES at `10a4c95031b4` — `#12601`'s head, on another
+branch, not this one — while their described changes stayed absorbed, and a third (`docs/00_index.md`) came back at `30c9e7c4d3` and is out
+again. Neither of the two is in THIS branch's diff: `git diff --name-only origin/main...HEAD`
+lists neither `tortoise/activation_scorecard.py` nor `tortoise/hosted_api.py` — each row's effect
+cell says which head it is describing, which is the per-row marking this section promises.):
 
 | file | what it changed when this branch carried it | effect |
 |---|---|---|
