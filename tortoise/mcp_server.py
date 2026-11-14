@@ -4100,7 +4100,7 @@ def tortoise_query(kind: str | None = None,
     # finding 4, measured with `mcp.list_tools()`; recorded on #12500). Both
     # structural arms call `sdk.paginated_query(kind, skip, limit,
     # include_retracted, **filters)`, which declares NEITHER parameter
-    # (sdk.py:26582-26585), and the tag arm calls `query_points_by_tag(tag)`,
+    # (sdk.py:26585-26588), and the tag arm calls `query_points_by_tag(tag)`,
     # which takes the tag and nothing else. Measured: `kind="statement",
     # min_confidence=0.9` reaches the accessor as
     # `paginated_query(kind='statement', skip=0, limit=100,
@@ -4183,7 +4183,7 @@ def tortoise_query(kind: str | None = None,
         if min_confidence and entity_type != "point":
             # The fts leg compares the floor against EP belief under a literal
             # `entity_type == "point"` gate (sdk.py:43288; `ep` is None for
-            # every other type at sdk.py:43277), so any other
+            # every other type at sdk.py:43273), so any other
             # entity_type passed the floor straight through. Round-3 P1,
             # measured at the tool boundary: `text="…", entity_type="document",
             # min_confidence=0.9` returned the 0.1-belief rows, and the same read

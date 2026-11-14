@@ -5,7 +5,7 @@ The tool's signature takes ``min_confidence`` and ``order_by``, and its docstrin
 presents them as general arguments — but only the ``text=`` arm consumes them
 (forwarded into ``sdk.tortoise_fts_query``). Both structural arms call
 ``sdk.paginated_query(kind, skip, limit, include_retracted, **filters)``, whose
-signature has **neither** parameter (``tortoise/sdk.py:26582-26585``), and the tag
+signature has **neither** parameter (``tortoise/sdk.py:26585-26588``), and the tag
 arm calls ``query_points_by_tag(tag)``, which takes the tag and nothing else.
 
 Measured: ``tortoise_query(kind="statement", min_confidence=0.9)`` reaches the
@@ -664,9 +664,15 @@ def test_a_kind_only_refusal_carries_no_filters_advice(stub) -> None:
 #: developer reading the source; "the docstring says nothing wrong" is not
 #: decidable, but "these exact claims are gone" is.
 _DOCSTRING_FALSE = (
-    # round-5: order_by is applied for every type but document/source, and
-    # `event`/`subject`/`object`/`operator` DO carry a belief (measured live).
-    "only a Point carries one",
+    # round-5: the falsity is a CLAUSE, not a bare phrase. The bare phrase reds a
+    # sentence that REJECTS the claim ("it is NOT the case that only a Point
+    # carries one — event/subject/object do too"), so each entry is the shipped
+    # clause verbatim, wrap-insensitively matched. `event`/`subject`/`object`/
+    # `operator` DO carry a belief (measured live); only `document`/`source` do
+    # not.
+    "compares the floor against EP belief, and only a Point carries one",
+    "(the fts leg compares the floor against EP belief, and only a Point "
+    "carries one",
     # The EXCLUSIVE form: `order_by` IS applied for `entity_type="point"` (and
     # for event/subject/object/operator), so banning the bare phrase forbade a
     # correct edit — the round-6 defect mirrored, and rounds 7/8 hit its scoped
@@ -686,7 +692,12 @@ _DOCSTRING_FALSE = (
     # (round 10: the previous comment still argued the refuted round-6 premise —
     # "only a CONFIDENCE ordering is refused there" — while the ban itself stands
     # on the measurement above).
-    "`order_by` for every type EXCEPT `document`/`source`",
+    # Round-12: the bare form is also too broad — "a confidence or graph
+    # `order_by` for every type EXCEPT `document`/`source` is applied" is TRUE.
+    # Pinned as the shipped clause instead: the unqualified sentence continued
+    # with the claim that both orderings were applied "to every type including
+    # those two".
+    "`order_by` for every type EXCEPT `document`/`source` (both map to the",
     # round-8: the harm clause was lumped, so it claimed an ORDERING let rows
     # through — an ordering excludes nothing; it only re-decides their sequence.
     "an accepted value was discarded and rows the caller excluded came back",
@@ -804,9 +815,12 @@ def test_the_tool_docstring_states_the_falsy_exception() -> None:
             f"the {_label} bullet must say the falsy value is SERVED, not refused: "
             f"{_bullet}"
         )
-    assert "refused outright" not in flat, (
-        "a falsy value is served on every arm — the contract must not say otherwise"
-    )
+    # No file-wide ban on "refused": `sdk.py:41138` DOES refuse an unknown
+    # `order_by` outright, so banning those words reded a true sentence elsewhere
+    # in the docstring (round-12 P2 1c). The PER-BULLET "stays served" assertion
+    # above is what catches an inverted falsy clause — measured: replacing the
+    # tag bullet's clause with "is REFUSED OUTRIGHT here" reds it, because the
+    # served claim is then simply absent.
     assert "serialises its own defaults" in flat, flat[:600]
 
 
