@@ -354,27 +354,66 @@ def production_terms(query: str) -> tuple[list[str], bool]:
     string from this list and REFUSES on any difference. The control is
     verified, never assumed: a drifted "controlled" arm would measure a
     tokenizer that is not the product's and look perfectly healthy.
+
+    ⛔ **``#12368`` ADDED A THIRD TAIL**, after the alias and phrase tails: the
+    ``_``-PRESERVING composites (:func:`tortoise.sparse.underscore_run_terms`),
+    which is the repair this harness's own §3.4 finding asked for. ⛔ It does NOT
+    enter ``build_or_query``'s DEGENERATE predicate — that stays
+    ``len(tokens) <= 1 and not aliases and not phrases`` — it decides which branch
+    UNDER it runs (``if degenerate and not composites:`` escaped-raw, else
+    ``if degenerate:`` literal + composite tail). So a `_`-carrying query whose
+    plain tokens all die (``in_progress``) keeps the escaped literal byte-for-byte
+    and only its FLAG moves; an earlier wording here said the tail "counts in the
+    degenerate predicate", which is the opposite of the code (`sparse.py:905-911`
+    carries the same correction, and names the failure: a maintainer aligning the
+    predicate to that prose would delete the escaped-literal branch).
+    Both are reproduced below, because a control that skipped either would stop
+    reproducing the shipped leg — the one thing this module exists to guarantee.
+
+    Measured on THIS bundle's committed population (300 names): the emitted string
+    CHANGES for **87** of them, and the degenerate census moves 126 -> 125 — one
+    row (``in_progress``), whose BYTES are unchanged (the escaped literal and the
+    composite are the same string); its flag moves because the leg now hands it a
+    term list of one instead of the raw text. So the ranks in ``artifact.json`` are
+    untouched by the repair, which is why ``#12368`` did **not** re-run M3: what
+    moved is the emitted QUERY, on the very 87 names whose §3.4 mechanism row says
+    the leg emitted terms the index never holds. See the brief's §3.4 disclosure —
+    the recorded ``terms_census`` is the ``#12349`` measurement, taken before this
+    tail existed.
     """
     from tortoise.sparse import (
         DEFAULT_MAX_OR_TERMS,
+        escape_redisearch_literal,
         identifier_aliases,
         identifier_phrase_terms,
         identifier_tokens_enabled,
         tokenize_sparse_query,
+        underscore_run_terms,
+        underscore_terms_enabled,
     )
     on = identifier_tokens_enabled()
     aliases = identifier_aliases(query) if on else []
     phrases = identifier_phrase_terms(query) if on else []
+    composites = underscore_run_terms(query) if underscore_terms_enabled() else []
     tokens = tokenize_sparse_query(query, keep_numeric=False,
                                    keep_identifiers=False)
     if len(tokens) <= 1 and not aliases and not phrases:
-        return [query], True
+        if not composites:
+            return [query], True
+        # `build_or_query`'s degenerate-WITH-composites arm: the escaped literal
+        # STAYS (the non-ASCII repair — for `año_actual` the index's term is the
+        # literal, and the composite this module can build from it is a term
+        # NOTHING holds), and the composites ride beside it, deduped against it
+        # CASE-INSENSITIVELY because the index folds case.
+        literal = escape_redisearch_literal(query)
+        tail = [c for c in composites if c != literal and c != literal.lower()]
+        return [literal, *tail], False
     tokens.sort(key=len, reverse=True)  # stable — ties keep source order
     terms = list(tokens[:DEFAULT_MAX_OR_TERMS])
-    # `build_or_query`'s own dedupe: an alias/phrase already present as a plain
-    # token is not appended twice (``present = set(terms)``).
+    # `build_or_query`'s own dedupe: an alias/phrase/composite already present as
+    # a plain token is not appended twice (``present = set(terms)``).
     present = set(terms)
-    for term in list(aliases) + list(phrases):
+    for term in list(aliases) + list(phrases) + list(composites):
         if term not in present:
             present.add(term)
             terms.append(term)
@@ -387,6 +426,19 @@ def assert_terms_match(queries: list[str]) -> dict:
     Returns the terms-mode census (how many queries ride the ordinary OR union
     and how many are DEGENERATE), because that split is a property of the
     measurement a reader is owed, not a footnote — see :func:`arm_terms`.
+
+    ⛔ **AND IT REFUSES WHEN THE RECOVERY ARM HAS COLLAPSED INTO THE SHIPPED ONE**
+    (``#12368`` review, P2). ``falkordb_tfidf__tokens_fixed`` is the arm that asks
+    *“can the shipped index recover the name with the ``_``-preserving terms
+    added?”* — and once ``build_or_query`` emits the composite itself, the terms it
+    would add are ALREADY in the shipped query, so ``recovery_query(q)`` returns
+    ``build_or_query(q)`` verbatim. MEASURED on the committed population: **0 of
+    300** names differ, i.e. the arm is the shipped leg measured twice. Nothing
+    reds on that — the artifact is a record of a run taken BEFORE the tail existed
+    — but a RE-RUN would silently publish “in-place recovery = 0” and the reader
+    would take it for a finding. So the census now counts the differing rows and
+    the run refuses at zero, naming the way to keep the arm independent (run the
+    shipped arm with ``TORTOISE_UNDERSCORE_TERMS=0``).
     """
     from tortoise.sparse import (
         build_or_query,
@@ -394,6 +446,7 @@ def assert_terms_match(queries: list[str]) -> dict:
     )
     bad: list[tuple[str, str, str]] = []
     degenerate_n = 0
+    recovery_independent_n = 0
     for q in queries:
         terms, degenerate = production_terms(q)
         degenerate_n += int(degenerate)
@@ -402,14 +455,25 @@ def assert_terms_match(queries: list[str]) -> dict:
                     else "|".join(terms))
         if rebuilt != expected:
             bad.append((q, expected, rebuilt))
+        recovery_independent_n += int(recovery_query(q) != rebuilt)
     if bad:
         raise SystemExit(
             "REFUSED: the controlled token set does not reproduce "
             f"build_or_query for {len(bad)} of {len(queries)} queries "
             f"(first: {bad[0]!r}) — a tokenizer control that has drifted "
             "measures the wrong thing.")
+    if recovery_independent_n == 0:
+        raise SystemExit(
+            "REFUSED: the recovery arm is IDENTICAL to the shipped arm on all "
+            f"{len(queries)} queries — `build_or_query` now emits the "
+            "`_`-preserving composites itself (#12360), so the terms the "
+            "recovery arm would add are already there and the two arms are one "
+            "measurement. Run the shipped arm with "
+            "TORTOISE_UNDERSCORE_TERMS=0 to keep them distinct, and say so in "
+            "the brief before publishing a re-run.")
     return {"queries": len(queries), "degenerate": degenerate_n,
-            "tokens_controlled": len(queries) - degenerate_n}
+            "tokens_controlled": len(queries) - degenerate_n,
+            "recovery_independent": recovery_independent_n}
 
 
 def arm_terms(q: str) -> tuple[str, bool]:
@@ -486,6 +550,15 @@ def recovery_query(query: str) -> str:
     The recovery terms are computed from the SANITISED QUERY, never from
     ``build_or_query``'s output: the output has already split ``web_search`` into
     ``web``/``search``, so reading it back would recover nothing.
+
+    ⛔ **IT IS NOW A NO-OP, AND THAT IS A MEASURED FACT** (``#12368`` review, P2).
+    ``recovery_terms`` returns the ``_``-preserving composite, and since ``#12360``
+    ``build_or_query`` emits that composite itself — so ``extra`` is empty and this
+    returns ``build_or_query(query)`` verbatim for **all 300** population names
+    (measured). The in-place arm and the shipped arm are therefore ONE arm on this
+    code. :func:`assert_terms_match` refuses a run where zero queries differ, and
+    the ship-state fix is to run the SHIPPED arm with
+    ``TORTOISE_UNDERSCORE_TERMS=0``; the brief's §3.4 records it.
     """
     from tortoise.sparse import build_or_query
 

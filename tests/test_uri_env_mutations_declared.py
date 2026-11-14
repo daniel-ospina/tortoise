@@ -372,6 +372,18 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # test, and an unreachable lane degrades to `LIVE = False` (skips), never to
     # a silently-embedded green (`requires_live`, #6673 probe pattern).
     "test_identifier_tokens_8933.py": [r'os\.environ\["TORTOISE_DB_URI"]\s*=', r'os\.environ\.pop\(\s*"TORTOISE_DB_URI"'],
+    # #12360: `test_12360_underscore_or_terms.py` is the SIBLING of the 8933 module
+    # above and copied its module-level live probe verbatim — including the
+    # set/restore of `TORTOISE_DB_URI` — but not its declaration, which red-ed the
+    # required `test (d)` shard with "undeclared TORTOISE_DB_URI mutation(s)"
+    # naming `:65` (set), `:73` (restore) and `:75` (pop when it was unset). The
+    # three sites are one save/restore pair at import and DELIBERATE_URI is the
+    # point: the claim under test is that RediSearch stores `web_search` as ONE
+    # term and the composite OR alternative retrieves it, which no pure-function
+    # test can observe. An unreachable lane degrades to `LIVE = False` (the live
+    # arms skip), never to a silently-embedded green, and nothing leaks into a
+    # later docker-lane test.
+    "test_12360_underscore_or_terms.py": [r'os\.environ\["TORTOISE_DB_URI"]\s*=', r'os\.environ\.pop\(\s*"TORTOISE_DB_URI"'],
     "test_aggregative_facet_coverage.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
                                             r'monkeypatch\.setenv\s*\(\s*"TORTOISE_DB_URI"'],  # #2521: module-level live probe + per-test isolated-graph fixture (DELIBERATE_URI — probe/setenv IS the test input, mirrors #2518's entity-key pattern)
     # #2165 connected-assembly (merged via #2657): the assembly fixture/sdk

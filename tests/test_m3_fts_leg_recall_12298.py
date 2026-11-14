@@ -57,6 +57,8 @@ from typing import ClassVar
 import pytest
 from markdown_it import MarkdownIt
 
+from tortoise.sparse import UNDERSCORE_ENV
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DOC_DIR = REPO_ROOT / "docs" / "research" / "2026-11-13-12298-m3-fts-leg"
 BRIEF = DOC_DIR / "research-brief.md"
@@ -941,41 +943,67 @@ def test_the_claim_shape_identifies_its_claim_and_reds_the_plant() -> None:
     ("capstone_verdict_check", "capstone_verdict_check"),
     ("lease_until", "lease_until"),
 ])
-def test_the_shipped_tokenizer_splits_the_run_the_index_keeps(name: str, run: str) -> None:
+def test_the_shipped_tokenizer_splits_the_run_the_index_keeps(
+        name: str, run: str, monkeypatch) -> None:
     """The measured defect, in the code rather than in prose.
 
     RediSearch treats ``_`` as a word character, so the index's term for
     ``web_search`` IS ``web_search`` (probe recorded in the brief §3.4:
     ``'web_search' -> [['web_search', 8.0]]`` while ``'web' -> []``). The
-    shipped tokenizer splits that run, so the OR query it builds contains
-    **no term the index holds** — which is why the identifier class scores
+    shipped tokenizer splits that run, so the OR query it built contained
+    **no term the index holds** — which is why the identifier class scored
     ``recall@3 = 0.20`` with 21 empty result sets.
 
-    ⛔ If this reds, the tokenizer gained ``_``-preservation: re-measure M3 and
-    update the brief. Do not delete the test to make the document true.
+    ⛔ **``#12368`` REPAIRED THE EMITTED-QUERY HALF, and this pin now asserts the
+    repaired state.** The tokenizer assertion below is UNCHANGED, and that is the
+    point: the repair is query-side, so ``_`` still splits and
+    ``tokenize_sparse_query`` is still the module #12350 has to decide about.
+    Deleting the direction instead of flipping it is what this docstring forbade,
+    so both halves are named rather than relaxed away.
     """
     from tortoise.sparse import build_or_query, tokenize_sparse_query
 
+    # ⛔ PIN THE SHIPPED STATE, do not read it from the ambient shell (#12368
+    # review, P2). This module's own documented remedy for the in-place arm is
+    # `TORTOISE_UNDERSCORE_TERMS=0`, and every assertion here is about the
+    # SHIPPED (ON) leg — so an operator following that advice redded six tests.
+    # MEASURED before this pin: `TORTOISE_UNDERSCORE_TERMS=0` +
+    # "in_place_arm or shipped_tokenizer or identifier_class" -> 6 failed.
+    monkeypatch.setenv(UNDERSCORE_ENV, "1")
     assert tokenize_sparse_query(name, keep_numeric=False,
                                  keep_identifiers=False) == name.split("_"), (
         f"{name!r}: the tokenizer's split changed — re-measure #12298")
     emitted = build_or_query(name).split("|")
-    assert run not in emitted, (
-        f"{name!r}: build_or_query now emits the run the index holds "
-        f"({emitted}) — the measured defect is repaired; re-measure and "
-        f"rewrite the brief §3.4 rather than relaxing this assertion")
+    assert run in emitted, (
+        f"{name!r}: the emitted query no longer carries the run the index holds "
+        f"({emitted}) — #12368's `_`-preserving composite is gone, so the record "
+        f"is unretrievable by its own name again")
 
 
-def test_the_identifier_class_cannot_match_its_own_node(tool_mod) -> None:
-    """The finding in one line: every emitted term for the class is not the index's term."""
+def test_the_identifier_class_cannot_match_its_own_node(tool_mod,
+                                                monkeypatch) -> None:
+    """The finding in one line: no emitted term WAS the index's term — now one is.
+
+    ⛔ ``#12368`` appended the ``_``-preserving composite as a further OR
+    alternative, so the set now CONTAINS the index's term while still being a real
+    multi-term query (not a fallback to the raw name). Both halves stay asserted:
+    a change that dropped the split terms would still red here.
+    """
+    # ⛔ PIN THE SHIPPED STATE, do not read it from the ambient shell (#12368
+    # review, P2). This module's own documented remedy for the in-place arm is
+    # `TORTOISE_UNDERSCORE_TERMS=0`, and every assertion here is about the
+    # SHIPPED (ON) leg — so an operator following that advice redded six tests.
+    # MEASURED before this pin: `TORTOISE_UNDERSCORE_TERMS=0` +
+    # "in_place_arm or shipped_tokenizer or identifier_class" -> 6 failed.
+    monkeypatch.setenv(UNDERSCORE_ENV, "1")
     from tortoise.sparse import build_or_query
 
     for name in ("web_search", "verified_files", "py_compile"):
         emitted = set(build_or_query(name).split("|"))
         # The OR string is a real multi-term query (not a fallback to the raw
-        # name), and NONE of its terms is the term the index actually holds.
+        # name), and the term the index actually holds is now ONE OF its terms.
         assert len(emitted) > 1, (name, emitted)
-        assert not (emitted & {name}), name
+        assert name in emitted, name
 
 
 # ── 2. the control is verified, not assumed ─────────────────────────────────
@@ -1309,26 +1337,40 @@ _HEADLINE_ROWS: tuple[tuple[str, tuple[str, str] | None], ...] = (
 #: two halves this pin compares, so sharing one source would make the comparison
 #: vacuous.
 _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
-    ("tortoise/sparse.py", 505, "def build_or_query(",
-     "`tortoise/sparse.py:505`"),
-    ("tortoise/sparse.py", 58, "_SPLIT_RE", "`:58`"),
-    ("tortoise/sparse.py", 381, "def tokenize_sparse_query(",
-     "`tortoise/sparse.py:381`"),
-    ("tortoise/sparse.py", 63, "DEFAULT_MAX_OR_TERMS = 12",
-     "`tortoise/sparse.py:63`"),
-    # ⛔ The degenerate branch is the `return`, NOT the enclosing `def`: the row
-    # cited 505 (the function header) for a statement 85 lines below it.
-    ("tortoise/sparse.py", 590, "return escape_redisearch_literal(query)",
-     "`sparse.py:590`"),
-    ("tortoise/search_engine.py", 2800, "def run_fts_query(",
-     "`tortoise/search_engine.py:2800`"),
-    ("tortoise/search_engine.py", 2986, "CALL db.idx.fulltext.queryNodes",
-     "`:2986-2998`"),
-    ("tortoise/search_engine.py", 2642, "def recency_tie_clause(",
-     "`search_engine.py:2642`"),
-    ("tortoise/search_engine.py", 4492,
+    ("tortoise/sparse.py", 793, "def build_or_query(",
+     "`tortoise/sparse.py:793`"),
+    ("tortoise/sparse.py", 67, "_SPLIT_RE", "`:67`"),
+    ("tortoise/sparse.py", 662, "def tokenize_sparse_query(",
+     "`tortoise/sparse.py:662`"),
+    ("tortoise/sparse.py", 72, "DEFAULT_MAX_OR_TERMS = 12",
+     "`tortoise/sparse.py:72`"),
+    # ⛔ The degenerate branch is the branch, NOT the `max_terms < 1` guard that
+    # shares its `return` and NOT the enclosing `def`: the row cited 505 (the
+    # function header) for a statement 85 lines below it, and then 931 — the
+    # `max_terms < 1` return — which is a DIFFERENT branch whose behaviour the row
+    # does not describe (#12368 review, P2). The symbol is the `if`, because two
+    # `return escape_redisearch_literal(query)` lines exist and `next()` takes the
+    # FIRST; pinning the guard makes the lookup unique and still reds if the branch
+    # moves or is deleted. It reads 943 because the two #12368 comment repairs above
+    # the branch added eleven lines in total (932 -> 937 -> 943) — this pin is exactly
+    # what caught each of them, so move
+    # BOTH this locator and the brief's §3.1 row together, never one alone.
+    ("tortoise/sparse.py", 943, "if degenerate and not composites:",
+     "`sparse.py:943`"),
+    # #12360: the four `search_engine.py` rows below were uniformly +30 behind the
+    # tree when this branch picked them up — the drift is ALREADY ON `main` (its
+    # `run_fts_query` sits at 2830, its brief cited 2800), and this branch's own
+    # #12360 insert inside `run_fts_query` moves the two LATE rows a further +22.
+    # Re-derived against the live file, not nudged by a constant.
+    ("tortoise/search_engine.py", 2830, "def run_fts_query(",
+     "`tortoise/search_engine.py:2830`"),
+    ("tortoise/search_engine.py", 3038, "CALL db.idx.fulltext.queryNodes",
+     "`:3038-3047`"),
+    ("tortoise/search_engine.py", 2672, "def recency_tie_clause(",
+     "`search_engine.py:2672`"),
+    ("tortoise/search_engine.py", 4544,
      "for rank, (pid, _score) in enumerate(ranked):",
-     "`tortoise/search_engine.py:4492`"),
+     "`tortoise/search_engine.py:4544`"),
     ("tortoise/projection/__init__.py", 20346, '("Object", "name", "FULLTEXT")',
      "`tortoise/projection/__init__.py:20346`"),
     ("tortoise/projection/__init__.py", 20774, "def _create_fulltext_index(",
@@ -1568,7 +1610,52 @@ def test_the_degenerate_branch_is_declared_not_hidden(tool_mod, artifact) -> Non
 
     # What the two arms do on a degenerate query, stated as behaviour.
     assert tool_mod.arm_terms("the diff") == ("the diff", True)
-    assert tool_mod.arm_terms("web_search") == ("search web", False)
+    # ⛔ `#12368`: `web_search` is NOT degenerate any more — `build_or_query` rides
+    # the composite as a further OR alternative, so the leg hands over a term LIST
+    # (the split terms, then the composite) and the two Postgres arms are two arms
+    # on this row. The census above is the `#12349` measurement, taken before that
+    # tail existed (a re-run reads 125, one row fewer); see the brief's §3.4.
+    assert tool_mod.arm_terms("web_search") == ("search web web_search", False)
+
+
+def test_the_in_place_arm_COLLAPSED_into_the_shipped_one_and_both_say_so(
+        tool_mod, population, brief: str, monkeypatch) -> None:
+    """#12368 review, P2: the recovery arm is no longer an independent arm.
+
+    `falkordb_tfidf__tokens_fixed` asks whether the shipped index recovers the name
+    with the `_`-preserving terms ADDED. Since `build_or_query` emits the composite
+    itself, the terms it would add are already there: MEASURED here, 0 of the 300
+    population names differ, so the arm re-reads the shipped leg. Nothing reds on
+    that in the committed artifact (a run taken BEFORE the tail existed), so
+    without this pin a re-run would publish `in-place recovery = 0` as a finding.
+    """
+    # ⛔ PIN THE SHIPPED STATE, do not read it from the ambient shell (#12368
+    # review, P2). This module's own documented remedy for the in-place arm is
+    # `TORTOISE_UNDERSCORE_TERMS=0`, and every assertion here is about the
+    # SHIPPED (ON) leg — so an operator following that advice redded six tests.
+    # MEASURED before this pin: `TORTOISE_UNDERSCORE_TERMS=0` +
+    # "in_place_arm or shipped_tokenizer or identifier_class" -> 6 failed.
+    monkeypatch.setenv(UNDERSCORE_ENV, "1")
+    from tortoise.sparse import build_or_query
+
+    names = [r["name"] for r in population["names"]]
+    differing = [n for n in names
+                 if tool_mod.recovery_query(n) != build_or_query(n)]
+    assert len(names) == 300 and not differing, (
+        f"the recovery arm differs on {len(differing)} of {len(names)} names — it "
+        "is independent again, so RE-MEASURE M3 and rewrite this pin and §3.4 "
+        "rather than deleting them")
+    # …and the run must refuse to publish that collapse as a measurement.
+    with pytest.raises(SystemExit) as exc:
+        tool_mod.assert_terms_match(names)
+    assert "recovery arm is IDENTICAL" in str(exc.value), (
+        "`assert_terms_match` must REFUSE a run whose recovery arm collapsed "
+        f"into the shipped one (got {exc.value})")
+    # …and the record says it, in the § the mechanism lives in.
+    _only_claim(
+        _scoped(brief, "3.4").replace("**", "").replace("`", ""),
+        "the two arms are one measurement",
+        "§3.4's recovery-arm collapse disclosure")
 
 
 def test_degenerate_rows_are_identical_across_the_two_postgres_arms(artifact) -> None:

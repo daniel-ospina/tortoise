@@ -409,6 +409,16 @@ _ROUTED_FROM_URI_SITES: dict[str, list[str]] = {
     # `graph_name=test_ident8933_<uuid>` handle, and those are the only handles
     # the live cases read or write (#10203: the probe is what the census saw).
     "test_identifier_tokens_8933.py": [r"from_uri\(_LANE_URI\)"],
+    # #12360: the SAME shape and the same reason — `test_12360_underscore_or_terms.py`
+    # copied the 8933 module's live probe, so `:66` (the module availability probe:
+    # construct + close, never DETATACH) and `:666` (the per-test fixture's
+    # `_FP.from_uri(_LANE_URI)` availability probe) both open the lane handle with
+    # no `graph_name`. The file's actual graph handles DO carry
+    # `graph_name=f"test_12360_{uuid4…}"` and those are the only graphs the live
+    # arms read or write; declaring the two `_LANE_URI` probes here is what the
+    # census asks for, and leaving it out red-ed `test (a)` with
+    # "un-declared no-graph_name from_uri site(s)".
+    "test_12360_underscore_or_terms.py": [r"from_uri\(_LANE_URI\)"],
     # #7813: the live lane's read-back helper `_stored_directions(uri)` opens a
     # `_live_utils.docker_uri(graph)` handle — the `tortoise_test_t7813_*` graph
     # minted by the calling test — and only MATCHes `o.direction` on it (no

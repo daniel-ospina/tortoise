@@ -2860,7 +2860,11 @@ def run_fts_query(
     scan mode (query=None) never reaches this function. Single-token and
     stopword-only queries return the raw string — byte-identical to the
     pre-R2 behavior for inputs without RediSearch-special characters
-    (escaped via escape_redisearch_literal, issue #1791).
+    (escaped via escape_redisearch_literal, issue #1791). ⚠️ That is no longer
+    a claim about every shape: an identifier-shaped or `_`-carrying query can
+    emit MORE terms than its plain tokens (#8933, #12360 — see the call-site
+    note below), so the raw-literal branch describes a query whose only
+    surviving term is itself, not literally "a query with one token".
 
     Note: the connection-level `timeout` is passed straight to the FalkorDB
     driver (Graph.query(timeout=...)) so a slow query is killed server-side,
@@ -2970,14 +2974,32 @@ def run_fts_query(
     # #8933: that is no longer a claim about the WHOLE call. The identifier
     # mechanism is a separate, ON-by-default input to ``build_or_query`` that
     # takes no argument here, so an identifier-SHAPED query does change bytes
-    # (``ERR-4032`` -> ``err|err4032|"err 4032"``) while every other query
-    # stays byte-identical. That is the owner's ruling on #8933, which
-    # reopened the #2070 byte-identity control for exactly that shape; the
-    # bisect switch is ``TORTOISE_IDENTIFIER_TOKENS`` (``.env.example``),
+    # (``ERR-4032`` -> ``err|err4032|"err 4032"``). That is the owner's ruling
+    # on #8933, which reopened the #2070 byte-identity control for exactly that
+    # shape; the bisect switch is ``TORTOISE_IDENTIFIER_TOKENS`` (``.env.example``),
     # pinned by ``tests/test_identifier_tokens_8933.py``.
+    #
+    # #12360: and there is a SECOND no-argument, ON-by-default input, so the
+    # surviving byte-identity claim is narrower than "every other query": a
+    # query carrying NO ``_`` AT ALL is byte-identical. A query WITH a `_` run
+    # MAY gain that run's composite — ``web_search`` ->
+    # ``search|web|web_search``, recall@3 0.7133 -> 0.9633 measured on both
+    # product doors — and where it fires it is ADDITIVE only (nothing that
+    # matched before stops matching). ⛔ Not "any `_` query changes": where the
+    # composite IS the literal (``a_b``, ``x__y``, ``a_``) the bytes are
+    # unchanged, and an alnum-free (``___``) or over-bound run gains nothing
+    # (both declared lossy in ``sparse.underscore_run_terms``). An edge run does
+    # fire (``'foo_ bar'`` -> ``'foo|bar|foo_'``). Its switch is
+    # ``TORTOISE_UNDERSCORE_TERMS``, pinned by
+    # ``tests/test_12360_underscore_or_terms.py`` and evidenced in
+    # ``docs/research/2026-11-13-12360-underscore-or-terms/``.
     # (#10203 review round 11: this comment said "the search lane's query
     # bytes are unchanged" directly above the call the change moved — the two
-    # more stale claims of that family, left in prose by the round-10 F3 fix.)
+    # more stale claims of that family, left in prose by the round-10 F3 fix.
+    # #12360's review round 1: the same block then said "every other query stays
+    # byte-identical", false for the `_` shape the moment that shape moved — an
+    # enumeration that stops at the mechanism it was written for is how this
+    # paragraph goes stale a third time.)
     from .sparse import build_or_query
     fts_query = build_or_query(
         query, keep_numeric=keep_numeric,
