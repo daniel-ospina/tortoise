@@ -107,8 +107,9 @@ at limit 100, declared as a prefix, not a random sample; 4,220 composed / 2,661 
 **Composed-only delta — the pairs the switch actually causes: 3,319, all 3,319 FALSE (100%), exact, no
 sampling** (every one sits below 0.72 in content space) and **0** of them crosses 0.89 on this prefix
 (the pinned 1,500-Point sample recorded 20 — same mechanism, different sample). Wilson 95% intervals on
-the audited strata: shared T4 n=100 k=98 → 93.0–99.4%; raw-only n=40 k=39 → 87.1–99.6%; all-Point
-composed ≈ 4,157–4,215 (98.5–99.9%), raw ≈ 2,372–2,648 (89.1–99.5%) — bounds rounded **outward**, and
+the audited strata: shared T4 n=100 k=98 → 92.9–99.5%; raw-only n=40 k=39 → 87.1–99.6%; all-Point
+composed ≈ 4,157–4,216 (98.5–99.9%), raw ≈ 2,371–2,649 (89.1–99.6%) — bounds rounded **outward**
+(floor on the low end, ceil on the high end, 1 dp), and
 the true/proposed totals derived from the audited rates (≈18 composed, ≈62 raw) are **estimates, not
 counts**.
 
@@ -228,11 +229,18 @@ uv run python docs/evidence/11739-composed-gate/probes/composed_gate.py \
 # 2. the root cause (no encoding, ~30 s)
 uv run python docs/evidence/11739-composed-gate/probes/quote_identity.py \
     --rows /tmp/11739-rows.jsonl --out /tmp/quote_identity.json
-# 3. gate 3's false-proposal count (both arms, ~70 s against the row cache; no network beyond it)
+# 3. gate 3's false-proposal count (both arms, ~70 s; no network beyond the row cache)
 #    ⛔ it DUMPS the T4 samples for labelling, it does not label them — see the gate-3 section
+#    ⛔ ITS POPULATION IS NOT STEP 1's. It reads `G3_ROWS_CACHE`, default
+#       /tmp/11739-g3-rows.jsonl — the 900-row page PREFIX the count was measured on (823 live
+#       quoted+embedded Points). NEITHER cache is committed. If that file is absent the probe
+#       does its OWN bounded live walk (PAGE=100, ROWS_TARGET=900) and caches it, which
+#       re-creates the prefix's SHAPE, not necessarily its exact rows.
+#       Pointing G3_ROWS_CACHE at step 1's cache instead is a DIFFERENT frame: ~15,008 live
+#       Points, and the counts move ~18x. Reproduce the committed FRAME this way or say the
+#       numbers are a new measurement — do not quote them against step 1.
 uv run python docs/evidence/11739-composed-gate/probes/gate3_false_proposals.py \
     --out /tmp/11739-g3.json --pairs-out /tmp/11739-g3-pairs.jsonl
-#    (row cache from step 1 via G3_ROWS_CACHE, default /tmp/11739-g3-rows.jsonl)
 # 4. only after a probe EDIT — rebinds provenance (code digest + payload digest) to the edited
 #    probe WITHOUT re-running the measurement; every fresh run already writes its own provenance
 uv run python docs/evidence/11739-composed-gate/probes/composed_gate.py \
@@ -263,7 +271,7 @@ definition — in-toto's Statement itself has no build-definition field):
 * `provenance.probe_sha256` binds it to the **code** that produced it (gate.json:
   `4f066693fbc1c742e36d29875f4b970af7ee12df264217cf95911f480b47a411`; quote_identity.json:
   `b66f8a174708f855501ac02ae3e5da57dd9e7ae62fac5721cb77c2036f3dfc65`;
-  gate3_false_proposals.json: `ef32a4b753e813f779f1174757d546ac2c72b173ea55acc0dc2db8fa478d05bd`), and
+  gate3_false_proposals.json: `d98e31aa450f5c3f2ea1d7b706fa6aba446a7b7dcae8d42eaa134c14f63ddc8b`), and
 * `provenance.payload_sha256` binds it to the **numbers** it produced **and to the row cache they
   are attributed to** — sha256 over `{"artifact": <every field except provenance>,
   "rows_source": …}`, canonicalised `indent=2, sort_keys=True` (gate.json:
@@ -279,7 +287,7 @@ Neither is a head sha — the repo squash-merges, so a head sha is unverifiable 
 the probe to check it (the same binding the #11838 census uses). `_provenance()` in each probe is
 the ONE producer of its block: a fresh run calls it, and `--attest` calls it on an existing artifact.
 `--attest` fails closed, exit `2`, under four markers — and the ARM SURFACE differs per probe,
-because the two artifacts answer different questions. `composed_gate.py` refuses an unreadable or
+because the three artifacts answer different questions. `composed_gate.py` refuses an unreadable or
 unparseable artifact (`ATTEST-UNREADABLE`); an artifact whose ROOT is not an object, no gate
 verdicts, a `verdict` that is not an object, a `verdict.gates` block that does not carry **exactly**
 the three gate names (so neither a deleted block nor a partially deleted flag can be blessed — the
@@ -288,7 +296,15 @@ same guard subsumes both, `#12476`) or no `source` to record as `rows_source` (`
 (`PROBE-WRITE`). `quote_identity.py` refuses an unreadable artifact (`ATTEST-UNREADABLE`); an
 artifact whose root or `provenance` is not an object, no root-cause measurement, or no
 `provenance.rows_source` (`ATTEST-REFUSED`); and an unwritable target (`PROBE-WRITE`) — it carries
-no verdict block, so it has no inconsistent-verdict arm. ⛔ **Every one of these exits `2` and none
+no verdict block, so it has no inconsistent-verdict arm. `gate3_false_proposals.py` refuses an
+unreadable or unparseable artifact, or one whose ROOT is not an object (`ATTEST-UNREADABLE` — a JSON
+ARRAY parses fine, so that shape needs its own guard before any `.get`); an artifact with no
+`source` to record as `rows_source` (`ATTEST-REFUSED`); and an unwritable target (`PROBE-WRITE`) —
+on `--attest`, and equally on the MEASUREMENT writes (`--out`, `--pairs-out`, and the row cache),
+so a full read plus a full encode never ends in an `OSError` traceback; an unreadable or TRUNCATED
+row cache is its own refusal (`PROBE-READ`, exit `2`) rather than a fall-through to a live walk,
+because that would swap the frame without saying so. It carries no verdict block,
+so it has no inconsistent-verdict arm. ⛔ **Every one of these exits `2` and none
 raises**: the shape checks come before any `.get`/`.values()` call, because a lane script cannot
 tell an `AttributeError` out of `main()` (exit `1`) from a refusal. It exists
 because a fresh run is ~16 minutes of

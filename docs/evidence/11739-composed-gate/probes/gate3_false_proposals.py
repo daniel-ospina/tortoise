@@ -54,7 +54,8 @@ only tier that needs judgement — `shared_T4` (proposed by BOTH arms, raw >= 0.
 recorded in the issue and the bundle README; this probe records the sample frame and its size
 so the labels have a denominator, and it never invents a label of its own.
 
-Exit codes: 0 measured · 2 usage / unwritable --out / an artifact `--attest` refused
+Exit codes: 0 measured · 2 usage / unwritable `--out` or `--pairs-out` (`PROBE-WRITE`) / an
+unreadable or malformed row cache (`PROBE-READ`) / an artifact `--attest` refused
 (`ATTEST-REFUSED`: no `source` field to attribute the numbers to) · 3 graph unreachable /
 empty population · 4 embedder unavailable.
 """
@@ -89,6 +90,25 @@ AUDIT_RAW_ONLY_MAX = 40   # raw-only T4 pairs dumped (the counter-movement's own
 
 def _say(msg: str) -> None:
     sys.stderr.write(msg)
+
+
+def _write(path, writer) -> int:
+    """Write through ``writer(fh)``; return 0, or 2 on an unwritable destination.
+
+    ONE guard for EVERY write this probe performs — ``--out``, ``--pairs-out``, the row cache and
+    the ``--attest`` rebind — because a bare ``open()`` raises ``OSError`` out of ``main()``: exit
+    1 WITH a traceback, after a full live read and a full encode. Exit 1 is the one code a lane
+    script cannot tell from a crash, and the docstring promises 2. Extracted so the arm is
+    DRIVABLE: before this the documented ``PROBE-WRITE`` arm lived only in ``_attest`` while the
+    measurement writes were bare, so reverting them left the suite green.
+    """
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            writer(fh)
+    except OSError as e:
+        _say(f"PROBE-WRITE({path}): {e}\n")
+        return 2
+    return 0
 
 
 def _payload_digest(report: dict, rows_source: str) -> str:
@@ -151,11 +171,9 @@ def _attest(path: str) -> int:
         _say(f"ATTEST-REFUSED({path}): no `source` field, so `rows_source` cannot be recorded\n")
         return 2
     report["provenance"] = _provenance(report, source)
-    try:
-        pathlib.Path(path).write_text(json.dumps(report, indent=1) + "\n", encoding="utf-8")
-    except OSError as e:
-        _say(f"ATTEST-WRITE({path}): {e}\n")
-        return 2
+    rc = _write(path, lambda fh: fh.write(json.dumps(report, indent=1) + "\n"))
+    if rc:
+        return rc
     _say(f"attested {path} -> {report['provenance']['probe_sha256']}\n")
     return 0
 
@@ -303,15 +321,23 @@ def main() -> int:
 
     cache = pathlib.Path(os.environ.get("G3_ROWS_CACHE", "/tmp/11739-g3-rows.jsonl"))
     if cache.exists():
-        rows = [json.loads(line) for line in cache.read_text(encoding="utf-8").splitlines()]
+        try:
+            rows = [json.loads(line) for line in cache.read_text(encoding="utf-8").splitlines()]
+        except (OSError, ValueError) as e:
+            # An unreadable or TRUNCATED cache is a refusal, not a crash: falling through to a live
+            # walk would silently swap the frame (a 900-row prefix re-derived by a fresh read), and
+            # raising would exit 1 with a traceback — the code a lane cannot tell from a crash.
+            _say(f"PROBE-READ({cache}): {e}\n")
+            return 2
         meta = {"endpoint": "cache:" + str(cache), "rows_walked": len(rows),
                 "pages": None, "offset_reached": None, "refused_at": None}
         _say(f"rows from cache: {len(rows)}\n")
     else:
         rows, meta = read_rows(ROWS_TARGET)
-        with cache.open("w", encoding="utf-8") as fh:
-            for r in rows:
-                fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+        rc = _write(cache, lambda fh: [fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+                                       for r in rows])
+        if rc:
+            return rc
     if not rows:
         _say("GATE-EMPTY: the read returned no rows.\n")
         return 3
@@ -394,9 +420,10 @@ def main() -> int:
                      "content_b": contents[rec["b"]][:300],
                      "quote_a": quotes[rec["a"]][:100],
                      "quote_b": quotes[rec["b"]][:100]})
-    with open(args.pairs_out, "w", encoding="utf-8") as fh:
-        for rec in dump:
-            fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    rc = _write(args.pairs_out,
+                lambda fh: [fh.write(json.dumps(rec, ensure_ascii=False) + "\n") for rec in dump])
+    if rc:
+        return rc
 
     def summarize(tiers: dict, total: int) -> dict:
         t1, t2, t3 = (len(tiers["T1_same_content"]),
@@ -439,8 +466,9 @@ def main() -> int:
         "duration_s": round(time.time() - t0, 1),
     }
     out["provenance"] = _provenance(out, source)
-    with open(args.out, "w", encoding="utf-8") as fh:
-        json.dump(out, fh, indent=1)
+    rc = _write(args.out, lambda fh: json.dump(out, fh, indent=1))
+    if rc:
+        return rc
     _say(json.dumps({k: out[k] for k in ("proposals", "composed", "composed_only", "raw")},
                     indent=1) + "\n")
     return 0

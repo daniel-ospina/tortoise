@@ -22,9 +22,10 @@ payload binding — the `test_the_bundle_records_a_failed_measurement` assertion
 `global_worst_composed` 1.0 → 0.10, `items_displaced_from_top_k` 3706 → 3707, and the like, which
 no assertion at that head read.) `provenance.payload_sha256` is what makes every such edit red.
 
-Every test names the mutation that reds it. Hermetic: two probes are hashed and two JSON
+Every test names the mutation that reds it. Hermetic: three probes are hashed and three JSON
 artifacts are parsed, plus one float-pair read from `tortoise.embeddings` (no model, no key, no
-network, no DB).
+network, no DB). No collected-case count is quoted anywhere in this file or its `ci-surfaces.yml`
+row: a hand-written count re-stales on every case a review round adds.
 """
 from __future__ import annotations
 
@@ -238,11 +239,12 @@ def test_artifact_evidence_is_the_evidence_that_was_attested(name: str):
 
 
 def test_the_readme_quotes_each_probes_digest_in_its_own_context():
-    """FAILS IF the README's two quoted `probe_sha256` values are stale or SWAPPED.
+    """FAILS IF the README's three quoted `probe_sha256` values are stale or SWAPPED.
 
     The README's binding paragraph is the human-readable half of `provenance.probe_sha256`:
     it prints one digest per artifact, each after its own `gate.json:` / `quote_identity.json:`
-    label. Nothing pinned that before this test, and the failure it guards is not hypothetical —
+    / `gate3_false_proposals.json:` label. Nothing pinned that before this test, and the failure
+    it guards is not hypothetical —
     it happened WHILE the digests were being refreshed by a script in #12490: the refresh mapped
     the old values by SORTED order rather than by artifact, so `b66f8a17…` (quote_identity's)
     landed after the `gate.json:` label and `4f066693…` (gate.json's) after
@@ -256,7 +258,8 @@ def test_the_readme_quotes_each_probes_digest_in_its_own_context():
         "the README no longer carries the probe-digest binding paragraph this test parses")
     paragraph = readme.split("`provenance.probe_sha256`", 1)[1].split("payload_sha256", 1)[0]
     for label, name in (("gate.json:", "gate.json"),
-                        ("quote_identity.json:", "quote_identity.json")):
+                        ("quote_identity.json:", "quote_identity.json"),
+                        ("gate3_false_proposals.json:", "gate3_false_proposals.json")):
         assert label in paragraph, f"the README's binding paragraph lost its `{label}` label"
         quoted = _first_hex_after(paragraph, label)
         own = _artifact(name)["provenance"]["probe_sha256"]
@@ -390,7 +393,6 @@ def _load_probe(filename: str):
 
 def _attest_a_tmp_copy(probe_name: str, artifact_name: str, mutate) -> tuple[int, bytes, bytes]:
     """Run `<probe>._attest` on a mutated TEMP COPY of a committed artifact.
-
     Returns (rc, bytes_before, bytes_after) so a test can assert the refusal left the file alone.
     The committed artifact is only ever READ — a test that mutated it in place would be the very
     hand-edit these arms exist to refuse.
@@ -550,13 +552,18 @@ def test_attest_refuses_an_unreadable_artifact(probe_name):
     ("gate3_false_proposals.py", "gate3_false_proposals.json"),
 ])
 def test_attest_reports_probe_write_on_an_unwritable_target(probe_name, artifact_name):
-    """FAILS IF either probe's unwritable-target arm reverts to a bare `PermissionError` (exit 1).
+    """FAILS IF a probe's unwritable-target arm reverts to a bare `PermissionError` (exit 1).
 
-    The arm is `PROBE-WRITE(…): …` with exit 2 — a refusal a caller can act on, not a crash. BOTH
-    probes are driven: the README and `config/ci-surfaces.yml` describe the refusal set as the
+    The arm is `PROBE-WRITE(…): …` with exit 2 — a refusal a caller can act on, not a crash. ALL
+    THREE probes are driven: the README and `config/ci-surfaces.yml` describe the refusal set as the
     probes' property, and until this was parametrized only `composed_gate.py`'s arm had a case, so
     deleting `quote_identity.py`'s `try/except OSError` reddened nothing but the probe digest
     (measured).
+
+    ⚠️ This drives `_attest`'s arm only. gate3's MEASUREMENT writes (`--out`, `--pairs-out`, the row
+    cache) are a separate surface and are covered by the next test — before it, gate3 documented
+    that arm in its docstring and README while implementing it nowhere, which a green run here did
+    not reveal (#12593 review).
     """
     with tempfile.TemporaryDirectory() as td:
         ro = Path(td) / "ro"
@@ -574,3 +581,46 @@ def test_attest_reports_probe_write_on_an_unwritable_target(probe_name, artifact
             os.chmod(target, 0o600)
         assert rc == 2, f"an unwritable target exited {rc}, not 2 (PROBE-WRITE)"
         assert target.read_bytes() == before
+
+
+def test_gate3s_measurement_writes_refuse_instead_of_crashing():
+    """FAILS IF gate3's `--out` / `--pairs-out` / row-cache writes regress to a bare `open()`.
+
+    The probe's docstring, the README's refusal inventory and `config/ci-surfaces.yml` all describe
+    `PROBE-WRITE` as this probe's property, but the guard had to be EXTRACTED (`_write`) before it
+    could be driven without a live read plus a full encode: the first version of this bundle
+    documented the arm and implemented it only in `_attest`, so `--out /unwritable/path` raised
+    `OSError` out of `main()` — exit 1 with a traceback, after the whole measurement (#12593 review
+    finding 1). Driving `_write` directly is what makes the promise mechanical, and the source
+    assertion below is what keeps the WIRING honest: without it, reverting `main()` to a bare
+    `open()` would leave this case green (it drives the helper, not the call sites) and red only the
+    digest pin — a green arm over a probe that still crashes.
+    """
+    probe = _load_probe("gate3_false_proposals.py")
+    # Every write in this probe goes through the ONE guard: the module body must contain no
+    # `open(` outside `_write` (the only text `open(` appears in is that guard's own `with open(`).
+    src = (PROBES / "gate3_false_proposals.py").read_text(encoding="utf-8")
+    # `open()` inside prose (a docstring naming the hazard) is not a call: match only an `open(`
+    # that carries an ARGUMENT, which is what a bare write looks like.
+    write_calls = [ln for ln in src.splitlines()
+                   if re.search(r"\bopen\((?!\))", ln) and not ln.lstrip().startswith("#")]
+    assert len(write_calls) == 1, (
+        "gate3 opens a file outside its `_write` guard — a bare `open()` on --out / --pairs-out / "
+        f"the row cache raises OSError out of main() (exit 1, the code it promises never to "
+        f"return): {write_calls}")
+    with tempfile.TemporaryDirectory() as td:
+        target = Path(td) / "out.json"
+        target.write_text("prior", encoding="utf-8")
+        os.chmod(target, 0o400)
+        try:
+            rc = probe._write(str(target), lambda fh: fh.write("x"))
+        finally:
+            os.chmod(target, 0o600)
+        assert rc == 2, f"an unwritable --out exited {rc}, not 2 (PROBE-WRITE)"
+        assert target.read_bytes() == b"prior", "a refused write must leave the target untouched"
+        # …and the same guard is the one a WRITABLE target goes through, so it cannot be a
+        # refusal-only stub: a pass must actually write.
+        ok = Path(td) / "ok.json"
+        rc = probe._write(str(ok), lambda fh: fh.write('{"a": 1}'))
+        assert rc == 0, f"a writable target exited {rc}, not 0"
+        assert json.loads(ok.read_text(encoding="utf-8")) == {"a": 1}
