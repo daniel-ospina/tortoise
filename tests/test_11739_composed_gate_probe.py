@@ -559,6 +559,29 @@ def test_the_stray_write_guard_uses_the_INNERMOST_enclosing_function():
     )
     assert bfs_first.name == "_write"
 
+    # ⛔ THE OTHER DIVERGENCE DIRECTION, PINNED (#12688 review round 37, P2): the docstring says the
+    # one shape where this rule CREDITS what breadth-first flagged is a `_write` that is ITSELF nested.
+    # Nothing pinned it, so the claim lived in prose only.
+    nested_write_src = "def outer(p):\n    def _write(p):\n        open(p, 'w')\n    return _write\n"
+    assert _stray_writes(nested_write_src) == [], _stray_writes(nested_write_src)
+    nested_tree = ast.parse(nested_write_src)
+    nested_call = next(n for n in ast.walk(nested_tree) if isinstance(n, ast.Call))
+    bfs_on_nested = next(
+        fn
+        for fn in ast.walk(nested_tree)
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and any(child is nested_call for child in ast.walk(fn))
+    )
+    assert bfs_on_nested.name == "outer", bfs_on_nested.name  # …which called it stray
+
+    # ⛔ AND THE `async` SCOPING (#12688 review round 37, P2): the docstring scopes its "identical"
+    # claim to a MODULE-LEVEL `async def _write`, and says a nested one diverges like the nested `def`.
+    # Both halves are pinned here because no test constructed an `async` shape at all.
+    async_flat = "async def _write(p):\n    open(p, 'w')\n"
+    assert _stray_writes(async_flat) == [], _stray_writes(async_flat)
+    async_nested = "def _write(p):\n    async def nested():\n        open(p, 'w')\n    return nested\n"
+    assert _stray_writes(async_nested) == [(3, "open")], _stray_writes(async_nested)
+
 
 def _first_hex_after(text: str, label: str) -> str:
     """The first 64-hex token after `label` — the digest that label presents."""
