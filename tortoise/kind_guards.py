@@ -294,7 +294,7 @@ SKIP_ROLE_HOLDER_NOT_LEGAL_ON_SUBJECT = "role-holder-not-legal-on-subject"
 #:
 #: ⛔ `False` HERE MEANS "A REDIRECT CANNOT SATISFY IT", NOT "THE PREDICATE IS
 #: UNBUILT". `holdsRole` is a sanctioned person→role predicate
-#: (`docs/ONTOLOGY.md:206`, `:423`, deliberately distinct from `memberOf`) and it
+#: (`docs/ONTOLOGY.md:208`, `:243`, deliberately distinct from `memberOf`) and it
 #: IS produced: `#12047` LANDED — `entity_resolver.wire_holds_role` is called
 #: from `create_entity(..., roleHolder=…)`. What a NAME-MATCHED redirect cannot
 #: do is name a holder, so it cannot produce the edge that keeps the role from

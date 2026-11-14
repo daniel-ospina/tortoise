@@ -347,8 +347,10 @@ class TestTools:
             "dedup": True,
         })
         # CallToolResult — parse the JSON text and assert a real Point id came
-        # back (fail-closed: a rejected engine call also yields is_error=False
-        # with an error dict — only a parsed "id" proves the write succeeded).
+        # back (fail-closed: only a parsed "id" proves the write succeeded).
+        # Since #11153 a REFUSED call no longer reaches here at all: it ships
+        # `isError: true`, which the client turns into a `ToolError`. This result is
+        # therefore an accepted write, and the payload check below is what proves it.
         import json as _json
 
         assert result.is_error in (False, None)

@@ -53,6 +53,16 @@ tree that change landed in, every deployment FILE — `docker-compose.yml`,
 `Dockerfile.hosted`, `Dockerfile.selfhost` — is silent, so row 1 goes back to
 `PARTIAL`, which is the reading `#11086` item 4 must not be ticked over.
 
+⛔ **`#12022` widened that DEPLOYMENT subset, because it had two real channels
+missing.** `fly.toml`'s `[env]` table and the image's `entrypoint.sh` both shape a
+deployed process's environment and were outside the walk, so "every existing
+deployment file is armed" named a population that excluded them. They are walked
+now — and, like the image build files, they are DISCOVERED from the manifests
+rather than listed (see `DEPLOYMENT_SURFACES`), which is the part that keeps the
+NEXT channel from being missed the same way. On this tree all five deployment
+files are still silent, so the stricter walk CONFIRMS row 1's `PARTIAL` instead
+of moving it.
+
 ## §12.2a — the distinct-predicate count
 
 `STORAGE-ARCHITECTURE.md` §12.2a forbids *"a second, independently-derived rule
@@ -2022,6 +2032,8 @@ CONFIG_SURFACES: tuple[str, ...] = (
     "docker-compose.yml",
     "docker-compose.yaml",
     "Dockerfile",
+    "fly.toml",
+    "entrypoint",
     "config",
     ".github/workflows",
 )
@@ -2042,7 +2054,7 @@ CONFIG_SURFACES: tuple[str, ...] = (
 #:   container's environment.
 #: * `.github/workflows` runs CI, not a deployment.
 #:
-#: ⛔ This is a READING of the six surfaces, not a removal from them: `#11455`
+#: ⛔ This is a READING of the surfaces, not a removal from them: `#11455`
 #: forbids dropping `.env.example` from the walk, because a walk that skipped it
 #: would report `set ON in: none` over a tree that arms it.
 #:
@@ -2056,17 +2068,9 @@ CONFIG_SURFACES: tuple[str, ...] = (
 #: over, materialising the moment `#11086` arms the compose file.
 #:
 #: ⚠️ **The population is the deployment files that build/run THIS repo's Tortoise
-#: process — not every compose file and not every channel this repo has.** Three
-#: boundaries, all three deliberate:
+#: process — not every compose file and not every channel this repo has.** Two
+#: boundaries, both deliberate:
 #:
-#: * `fly.toml`'s `[env]` table and `entrypoint.sh`'s `export`s DO shape the Tortoise
-#:   process's environment and are OUTSIDE `CONFIG_SURFACES` (measured:
-#:   `fly.toml:244` carries `TORTOISE_LOOP_STALL_HARD_EXIT_S` (inside the `[env]`
-#:   table that starts at `:211`), `entrypoint.sh:355-876`
-#:   exports runtime defaults). Latent today — all three walked files are silent, so
-#:   row 1 holds either way — and tracked by `#12022`, whose scope is the missing
-#:   channels; adding them here would change the declared surface set `#11455` and
-#:   its pins speak about, and needs a TOML `[env]` reader this module does not have.
 #: * Sub-application compose files — `apps/graph-viz/docker-compose.yml` (a FalkorDB
 #:   sidecar for the viz) and `integrations/crm/twenty/docker-compose.yml` (the
 #:   Twenty CRM stack) — deploy OTHER services; nothing in them runs the Tortoise
@@ -2079,15 +2083,35 @@ CONFIG_SURFACES: tuple[str, ...] = (
 #:   reads every deployment file as an independent "does this file arm it" question
 #:   (the reading the compose→image INHERITANCE above also needs), which is the wrong
 #:   question for a patch — globbing the family in would make a SILENT override red
-#:   the deployment reading while the merged view is armed. Doing it right needs
-#:   compose merge semantics, which is `#12022`'s shape (it already owns the other
+#:   the deployment reading while the merged view is armed. ⛔ AND THE INVERSE
+#:   DIRECTION FAILS OPEN, which is the one that costs a false PASS (`#12070` item 8):
+#:   an override that DISARMS an armed base merges LAST, so the deployed process has
+#:   the gate OFF while this per-file reading sees the base's `ON` and reports
+#:   `deployment["on"] is True`. Doing it right needs compose merge ORDER, which is
+#:   `#12022`'s shape (it already owns the other
 #:   channels a deployed process's environment comes from), so it is a named gap here
 #:   rather than a half-implemented glob. Latent today: `git ls-files | grep -iE
 #:   'compose\.(override|prod|dev|local)'` is empty.
+#:
+#: ⛔ **`fly.toml` and `entrypoint.sh` USED TO BE the third boundary, and that is
+#: exactly the defect `#12022` removed.** They were named as "outside
+#: `CONFIG_SURFACES`" with a documented reason (a TOML `[env]` reader did not
+#: exist), and the row note then said "every existing deployment file is armed"
+#: over a population that excluded two channels a deployed process really takes
+#: its environment from: `fly.toml`'s `[env]` table reaches the Fly machine's
+#: process the way an image `ENV` does, and `entrypoint.sh` `export`s runtime
+#: defaults and is executed by the image. Both are walked now, and neither is
+#: named by a fixed path here: the manifest TYPES are declared and the FILES are
+#: discovered from the manifests themselves (`_image_build_files`, `_fly_manifests`,
+#: `_entrypoint_scripts`, all below). ⛔ A fixed path list is HOW those two were
+#: missed — the next channel (a `Procfile`-shaped runner, a second Fly manifest)
+#: is found by its manifest, not by someone remembering to add a string here.
 DEPLOYMENT_SURFACES: tuple[str, ...] = (
     "docker-compose.yml",
     "docker-compose.yaml",
     "Dockerfile",
+    "fly.toml",
+    "entrypoint",
 )
 
 #: The files the `Dockerfile` surface stands for. An `ENV` in any image build file
@@ -2095,7 +2119,7 @@ DEPLOYMENT_SURFACES: tuple[str, ...] = (
 #: input of its own — a single armed variant must not stand in for the rest.
 #:
 #: ⚠️ The glob is REPO-ROOT-scoped (`REPO_ROOT.glob`), and that is a boundary like
-#: the three above rather than an unstated truth: a NESTED image file
+#: the two above rather than an unstated truth: a NESTED image file
 #: (`docker/Dockerfile.prod`, which a compose `build.dockerfile:` can reference)
 #: is outside both this glob and the walk, so moving the images out of the root
 #: would leave the surface reading `ABSENT` while `deployment["on"]` could still
@@ -2104,6 +2128,471 @@ DEPLOYMENT_SURFACES: tuple[str, ...] = (
 #: ones (`git ls-files | grep -i dockerfile` → `Dockerfile.hosted`,
 #: `Dockerfile.selfhost`). Named here so a later move is visible rather than silent.
 IMAGE_BUILD_GLOB = "Dockerfile*"
+
+#: The Fly manifest(s). Fly's own convention names the file `fly.toml` (and
+#: `fly.<app>.toml` for a multi-app repo), so the GLOB is the discovery and the
+#: platform is the authority — there is no repo-local name to remember (#12022).
+#: A `fly*.toml` in this tree is read for its `[env]` table only: `[build]`,
+#: `[[services]]`, `[deploy]` and the rest are platform configuration whose keys
+#: are NOT a process's environment, which is why the reader is table-scoped.
+FLY_MANIFEST_GLOB = "fly*.toml"
+
+#: The compose BASE files, by their conventional names. The compose-family glob is
+#: deliberately NOT widened: `docker-compose.override.yml` and any
+#: `docker-compose.<stage>.yml` are PATCHES that compose merges over a base (see the
+#: boundary in `DEPLOYMENT_SURFACES`), so globbing the family in would read a
+#: silent override as an unarmed deployment while the MERGED view is armed.
+#: ⛔ AND THE OTHER DIRECTION IS THE ONE THAT FAILS OPEN (`#12070` item 8, fresh
+#: review of PR #12474): an override that DISARMS an armed base merges LAST, so the
+#: real deployment has the gate OFF while this per-file reading sees the base's `ON`
+#: and publishes `deployment["on"] is True`. Excluding the family is what keeps that
+#: false PASS out of the verdict, and it is why the exclusion is a documented
+#: boundary rather than an oversight — a later "completeness" fix that globbed the
+#: family in would have to model merge ORDER before it could be correct.
+COMPOSE_BASE_NAMES: tuple[str, ...] = ("docker-compose.yml", "docker-compose.yaml")
+
+#: The TOML table a deployed process's environment comes from. Fly reads `[env]`
+#: into the machine's environment; `[build.args]` reaches the BUILD, never the
+#: process, so a flag set there is not a shipped default.
+TOML_RUNTIME_ENV_TABLE = "env"
+
+_TOML_TABLE_HEADER = re.compile(
+    r"^\s*(?P<open>\[\[?)\s*(?P<name>[^\]]+?)\s*(?:\]\]?)\s*(?:#.*)?$")
+
+#: The Dockerfile instructions that name what the image RUNS — the entrypoint is
+#: discovered from them, never from a fixed `entrypoint.sh` (#12022).
+_EXEC_INSTRUCTIONS = ("ENTRYPOINT", "CMD")
+
+
+#: ── Deployment-channel DISCOVERY (#12022) ────────────────────────────────────
+#: ⛔ These four functions exist because a POPULATION ASSEMBLED FROM A FIXED PATH
+#: LIST is how two real channels were missed: `fly.toml`'s `[env]` table and the
+#: container `entrypoint.sh`. The declared thing here is the set of manifest
+#: TYPES the walk understands; the FILES are read out of the manifests, so a
+#: renamed entrypoint, a second image file or a `fly.<app>.toml` moves the walk
+#: with it. The settled practice is the same one: parse the config, do not grep a
+#: remembered path (compose-spec, `docker compose config`, `kustomize build` and
+#: `systemd-analyze` all normalise the manifest rather than accept a hand-list).
+#:
+#: ⚠️ The bound, stated rather than implied: a channel whose manifest this module
+#: does not understand (a Kubernetes `envFrom`, a systemd `EnvironmentFile=`) is
+#: still invisible. Discovery cannot report a format it has no reader for; the
+#: mitigation is that the supported TYPES are named in one place (this comment and
+#: `DEPLOYMENT_SURFACES`) instead of being spread across a path list.
+
+def _repo_files(rel_glob: str) -> list[Path]:
+    """Repo-root files matching ``rel_glob``, sorted — the walk's discovery step."""
+    return sorted(p for p in REPO_ROOT.glob(rel_glob) if p.is_file())
+
+
+def _image_build_files() -> list[Path]:
+    """Every image build file at the repo root (`Dockerfile*`)."""
+    return _repo_files(IMAGE_BUILD_GLOB)
+
+
+def _fly_manifests() -> list[Path]:
+    """Every Fly manifest at the repo root (`fly*.toml`)."""
+    return _repo_files(FLY_MANIFEST_GLOB)
+
+
+def _compose_files() -> list[Path]:
+    """The compose BASE files that exist (see `COMPOSE_BASE_NAMES`)."""
+    return [REPO_ROOT / name for name in COMPOSE_BASE_NAMES
+            if (REPO_ROOT / name).is_file()]
+
+
+def _exec_script_names(text: str, instructions: tuple[str, ...]) -> set[str]:
+    """Basenames of the script-looking tokens in a manifest's exec command.
+
+    Handles both Dockerfile forms — exec (`ENTRYPOINT ["/entrypoint.sh"]`) and shell
+    (`ENTRYPOINT	/entrypoint.sh --flag`) — by taking every token that names a `.sh`
+    file. A non-script form (`CMD ["uvicorn", …]`) yields nothing, which is the honest
+    answer: that deployment has no entrypoint SCRIPT, so there is nothing to walk.
+
+    ⛔ This function reads DOCKERFILE instructions only; `_compose_exec_scripts` is the
+    compose `entrypoint:`/`command:` reader. The two were one function until the
+    compose route turned out to be dead code here (the line was uppercased and compared
+    to a raw lowercase instruction, so it could never match — fresh review of PR
+    #12474, P2); keeping the split means neither docstring can claim the other's route
+    again, which is exactly the defect that cost a round.
+
+    ⛔ The instruction match is CASE-INSENSITIVE and accepts a SPACE OR A TAB: Dockerfile
+    instruction names are case-insensitive, and `ENTRYPOINT	/entrypoint.sh` is legal.
+    """
+    names: set[str] = set()
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        head = stripped.upper()
+        for instruction in instructions:
+            if (head.startswith(instruction.upper() + " ")
+                    or head.startswith(instruction.upper() + "\t")):
+                rest = stripped[len(instruction):]
+                break
+        else:
+            continue
+        for token in re.split(r'[\s,\[\]"]+', rest):
+            token = token.strip("'")
+            if token.endswith(".sh"):
+                names.add(Path(token).name)
+    return names
+
+
+#: A compose mapping KEY, bare or quoted — `entrypoint:` / `"entrypoint":`.
+_COMPOSE_KEY = re.compile(r"""^(?P<q>["']?)(?P<key>[A-Za-z_][\w.-]*)(?P=q)\s*:""")
+
+
+def _script_tokens(text: str) -> set[str]:
+    """Basenames of the `.sh` tokens in one command rendering.
+
+    Both quote kinds are stripped: a compose list item may be written `'/entrypoint.sh'`
+    and the first version dropped it (the split kept single quotes inside the token, so
+    `.endswith(".sh")` was false) — a missed spelling that read as `ABSENT` (fresh review
+    of PR #12474, P3).
+    """
+    tokens = re.split(r"[\s,\[\]]+", text)
+    return {Path(token.strip("'\"")).name for token in tokens
+            if token.strip("'\"").endswith(".sh")}
+
+
+def _compose_exec_scripts(text: str) -> set[str]:
+    """Scripts a compose file names through `entrypoint:` / `command:`.
+
+    ⛔ A reader that handled only the inline form reported `entrypoint` ABSENT over a
+    deployment that names it — the "route looks live, the spelling is missed" defect
+    (fresh review of PR #12474, P3). **Handled**, and this is the measured list rather
+    than "every spelling compose accepts": the inline scalar
+    (`entrypoint: /entrypoint.sh`), the flow list (`entrypoint: ["/entrypoint.sh"]`),
+    the BLOCK list (`entrypoint:` then `- /entrypoint.sh`) and a QUOTED key
+    (`"entrypoint": …`).
+
+    ⚠️ Declared bound: a BLOCK SCALAR (`command: |` … a shell string) and a one-line
+    FLOW MAPPING (`services: {t: {entrypoint: [/entrypoint.sh]}}`) are not read. Both
+    are latent here — this repo's compose file names no entrypoint — and both read as
+    `ABSENT` rather than as a false arm.
+    """
+    names: set[str] = set()
+    key: str | None = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        # A compose KEY may be bare or quoted (`entrypoint:` / `"entrypoint":`), so it
+        # is parsed rather than prefix-matched — a prefix match on the raw line missed
+        # the quoted spelling (fresh review of PR #12474, P3).
+        header = _COMPOSE_KEY.match(line)
+        if header and header.group("key").lower() in ("entrypoint", "command"):
+            key = header.group("key").lower()
+            rest = line[header.end():].strip()
+            if rest:
+                names |= _script_tokens(rest)
+                key = None
+            continue
+        if key is not None:
+            if line.startswith("-"):
+                names |= _script_tokens(line[1:])
+                continue
+            key = None
+    return names
+
+
+def _entrypoint_scripts() -> list[Path]:
+    """The container entrypoint SCRIPTS this tree's deployment manifests run.
+
+    ⛔ DISCOVERED from the manifests that execute them (#12022): every
+    `Dockerfile*`'s `ENTRYPOINT`/`CMD`, plus a compose file's `entrypoint:` /
+    `command:` override. The script is resolved by BASENAME against the repo root
+    — the image path (`/entrypoint.sh`) is not a repo path — and only when the
+    file exists, so a manifest naming a script this tree does not ship reports
+    nothing rather than inventing a file.
+
+    ⚠️ Declared bound: a script copied from a SUBDIRECTORY, or renamed between
+    `COPY` and `ENTRYPOINT`, resolves to nothing.
+    """
+    names: set[str] = set()
+    for manifest in _image_build_files():
+        try:
+            names |= _exec_script_names(
+                manifest.read_text(encoding="utf-8", errors="ignore"),
+                _EXEC_INSTRUCTIONS)
+        except OSError:
+            continue
+    for manifest in _compose_files():
+        try:
+            names |= _compose_exec_scripts(
+                manifest.read_text(encoding="utf-8", errors="ignore"))
+        except OSError:
+            continue
+    return sorted(p for p in (REPO_ROOT / name for name in sorted(names)) if p.is_file())
+
+
+def _compose_build_refs() -> dict[str, str]:
+    """``{compose file: the image build file its `build:` stanza names}``.
+
+    MEASURED, not assumed (#12070 item 3): the notes used to qualify a per-file
+    reading with *"a compose file that builds from an armed image build file
+    INHERITS that image's `ENV`"* while nothing read the `build:` stanza, so the
+    edge could not be named for the tree it described — and a fixture that wrote
+    `services: {}` could not express it either. The edge is now read, so
+    `docker-compose.yml` → `Dockerfile.selfhost` is a reading rather than prose.
+
+    Both compose `build:` spellings are read (`build: <file>` and a `build:` map
+    carrying `dockerfile:`), and a value that names no file in this tree is dropped
+    — an unresolvable reference is not an edge. ``{compose file: [image, …]}``: a
+    compose file is multi-service, so EVERY reference is kept.
+    """
+    # ⛔ EVERY reference, not the first one (fresh review of PR #12474, P3): a compose
+    # file is multi-service by definition, so one image per file presented a PARTIAL set
+    # as "the edge set" — an armed image reached through the second service's `build:`
+    # was invisible while the note said "measured".
+    refs: dict[str, list[str]] = {}
+    for manifest in _compose_files():
+        try:
+            text = manifest.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        found: list[str] = []
+        for match in re.finditer(
+                r"^\s*(?:dockerfile|build)\s*:\s*(?P<value>[^\s#]+)\s*(?:#.*)?$",
+                text, re.MULTILINE):
+            value = match.group("value").strip("'\"")
+            if not value or value in ("true", "false") or value.startswith("{"):
+                continue
+            candidate = Path(value)
+            resolved: str | None = None
+            if (REPO_ROOT / candidate).is_file() and candidate.name.startswith("Dockerfile"):
+                resolved = candidate.as_posix()
+            elif re.match(r"^[A-Za-z0-9_./-]+$", value):
+                named = [p for p in _image_build_files()
+                         if p.name == Path(value).name]
+                if named:
+                    resolved = named[0].relative_to(REPO_ROOT).as_posix()
+            if resolved and resolved not in found:
+                found.append(resolved)
+        if found:
+            refs[manifest.relative_to(REPO_ROOT).as_posix()] = found
+    return refs
+
+
+def _toml_table_lines(text: str) -> dict[int, str]:
+    """1-based line number → the TOML TABLE that line lives in (lowercased).
+
+    A TOML file is a sequence of tables, and only ONE of them is a runtime
+    environment (`[env]`). ⛔ A line-by-line scan would read a `[build.args]` key
+    EXACTLY like an `[env]` one — both are `KEY = "value"` — while a build argument
+    reaches the build and never the process; the table a key lives in is what makes
+    an assignment a shipped default or not. (This is a constraint the reader
+    enforces, not a defect it fixes: before `#12022` this file did not read
+    `fly.toml` at all.)
+
+    Top-level keys (before any header) map to `""`; `[[array.of.tables]]` is
+    recorded under its name like a table, because the caller tests for ONE name.
+    """
+    tables: dict[int, str] = {}
+    current = ""
+    for number, line in enumerate(text.splitlines(), 1):
+        header = _TOML_TABLE_HEADER.match(line)
+        if header:
+            current = header.group("name").strip().lower()
+        tables[number] = current
+    return tables
+
+
+#: The shell words that put an assignment INTO a child process's environment. A
+#: bare `FLAG=1` in a shell script is a shell variable, not an environment entry —
+#: `export FLAG=1` or a later bare `export FLAG` is what the executed process sees.
+_SHELL_BARE_EXPORT = re.compile(
+    r"^\s*export\s+(?P<names>[A-Za-z_][A-Za-z0-9_]*(?:\s+[A-Za-z_][A-Za-z0-9_]*)*)\s*$")
+_SHELL_ASSIGN = re.compile(r"^\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)=")
+_SHELL_ALLEXPORT = re.compile(r"^\s*set\s+-[a-zA-Z]*a[a-zA-Z]*\s*$")
+
+#: `unset NAME`, `unset -v NAME`, the multi-name form, and an OPTION CLUSTER. `unset` is
+#: a shell BUILTIN, so it is matched CASE-SENSITIVELY — `UNSET` is a different
+#: (nonexistent) command, unlike the Dockerfile instructions, which are case-insensitive.
+_SHELL_UNSET = re.compile(
+    r"^\s*unset[ \t]+(?P<opts>(?:-[a-zA-Z]+[ \t]+)*)(?P<names>[^#]*?)\s*(?:#.*)?$")
+
+
+def _shell_unset_target(line: str, flag: str) -> str | None:
+    """What does this `unset` do to ``flag``?  ``value`` / ``other`` / ``unknown`` / None.
+
+    ⛔ A shell `unset FLAG` is the shell channel's DISARMING direction, and it matched
+    NOTHING here: it is not an assignment (`_assigned_value` returns `None` for it), so
+    it fell through every bucket and vanished, leaving an earlier `export FLAG=1`
+    standing — `export FLAG=1` then `unset FLAG` read the file `ON`. The compose
+    value-less spelling has been reported since this PR's compose reader landed; the
+    shell channel, which this PR ADDS, did not (fresh review of PR #12474, P2).
+
+    ``None`` = not an `unset` at all. ``other`` = an `unset` that does not remove THIS
+    variable, so it must not disarm — which is why the OPTION CLUSTER is consumed rather
+    than read as a name (`-f` unsets a FUNCTION and `-n` a NAMEREF; neither removes a
+    variable binding, and reading `-f` as a name made `unset -f FLAG` disappear the arm,
+    the fail-CLOSED direction). ``unknown`` = a COMPUTED name (`unset "$FLAG"`) that
+    this walk cannot resolve: unknown, never silently "no unset" — the same doctrine
+    `_resolved_assignment` applies to an assignment (fresh review of PR #12474, P3).
+    """
+    match = _SHELL_UNSET.match(line)
+    if not match:
+        return None
+    # ⛔ Split on shell OPERATORS as well as whitespace: `unset FLAG;` / `unset FLAG|cmd`
+    # glue the operator to the last name, so a whitespace-only split produced the single
+    # word `FLAG;`, matched nothing, and left an earlier `export` standing — fail-OPEN on a
+    # spelling shell scripts really use, and inconsistent with the SPACED ` ;` which read
+    # correctly (fresh review of PR #12474, P3, measured).
+    names = [word for word in re.split(r"[ \t;&|()<>]+", match.group("names")) if word]
+    if not names:
+        return None
+    if re.search(r"-[a-zA-Z]*[fn]", match.group("opts") or ""):
+        return "other"
+    if any(word.strip("'\"") == flag for word in names):
+        return "value"
+    if any("$" in word for word in names):
+        return "unknown"
+    return "other"
+
+
+def _shell_exported_names(text: str) -> set[str] | None:
+    """The names a shell script EXPORTS by a bare `export NAME`, or `None` = all.
+
+    `None` means the script turns on `set -a` (allexport), where every assignment is
+    exported; the caller then treats every assignment as eligible. Returning a set
+    is the normal case, and an unexported assignment is then correctly NOT a
+    shipped environment entry — the shell's own variable never reaches the Python
+    process that reads the flag.
+    """
+    exported: set[str] = set()
+    for line in text.splitlines():
+        if _SHELL_ALLEXPORT.match(line):
+            return None
+        match = _SHELL_BARE_EXPORT.match(line.strip("\n"))
+        if match:
+            exported.update(match.group("names").split())
+    return exported
+
+
+def _shell_line_is_exported(line: str, flag: str,
+                            exported: set[str] | None) -> bool:
+    """Does ``line`` put ``flag`` into the environment of what this script runs?"""
+    if exported is None:
+        return True
+    stripped = line.strip()
+    # ⛔ SPACE OR TAB: `export\tFLAG=1` is legal shell and exports, and the space-only
+    # test dropped it while the bare-export matcher above already accepted `\s+`.
+    if re.match(r"^export[ \t]", stripped):
+        return True
+    match = _SHELL_ASSIGN.match(line)
+    if not match or match.group("name") != flag:
+        return False
+    return flag in exported
+
+
+#: A compose mapping ENTRY, bare or quoted key, optionally an array item.
+_COMPOSE_ENTRY_KEY = re.compile(
+    r"""^(?P<indent>\s*)(?:-\s+)?(?P<q>["']?)(?P<key>[A-Za-z_][\w.-]*)(?P=q)\s*:(?P<rest>.*)$""")
+
+
+def _compose_contexts(text: str) -> dict[int, str]:
+    """1-based line → the dotted mapping PATH it lives in (`environment`, `build.args`).
+
+    ⛔ compose is a structure, not a line list: `TORTOISE_EMBED_GATE: "1"` is a RUNTIME
+    arm under `services.<svc>.environment`, a BUILD-TIME value under
+    `services.<svc>.build.args` and a label under `labels` — the same line, three
+    meanings (fresh review of PR #12474, P2). The TOML reader got a table scope for
+    exactly this reason; this is the same rule for compose. ⛔ The three are EXCLUSIVE
+    in the reader: only `environment` arms, `build.args` is reported as build-time, and
+    every other scope is reported rather than armed — the shape that armed "anything
+    not build.args/environment" made this docstring false for its own third example.
+
+    Indentation-driven: a mapping key with no inline value opens a scope, and a line
+    belongs to the innermost open scope. Array items (`- FLAG`) inherit their parent's.
+    """
+    ctx: dict[int, str] = {}
+    stack: list[tuple[int, str]] = []
+    for number, line in enumerate(text.splitlines(), 1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            ctx[number] = ".".join(key for _, key in stack)
+            continue
+        indent = len(line) - len(line.lstrip())
+        # ⛔ A block SEQUENCE may sit at its parent key's own indentation
+        # (`environment:` then `- FLAG` flush with it), and YAML reads the two spellings
+        # as the same document — popping on `>=` dropped the parent before the item, so
+        # the flush-left item landed in no bucket while the indented one worked (fresh
+        # review of PR #12474, P2, measured against the pre-delta blob).
+        is_item = stripped.startswith("-")
+        while stack and (stack[-1][0] > indent
+                         or (stack[-1][0] == indent and not is_item)):
+            stack.pop()
+        entry = _COMPOSE_ENTRY_KEY.match(line)
+        if entry:
+            # ⛔ The line's context is the ENCLOSING scope, not including its own key:
+            # assigning before the push put `FLAG:` inside `environment.FLAG`, so the
+            # unset arm (which tests for `environment`) never fired on the map spelling.
+            ctx[number] = ".".join(key for _, key in stack)
+            rest = entry.group("rest").split("#", 1)[0].strip()
+            if not rest:
+                stack.append((indent, entry.group("key").lower()))
+            continue
+        ctx[number] = ".".join(key for _, key in stack)
+    return ctx
+
+
+def _is_unset_declaration(line: str, flag: str) -> bool:
+    """A compose `environment:` entry that DECLARES ``flag`` with no value → UNSETS it.
+
+    ⛔ Compose's own semantics (and this module's `_assigned_value` docstring): a bare
+    `- FLAG` array item, or a `FLAG:` / `FLAG: null` map entry, REMOVES the variable
+    from the container — the one direction that can DISARM an armed image. Counting it
+    as silence made the per-file caveat's "inheritance can only ADD an arm" false on a
+    reachable shape (fresh review of PR #12474, P2), so it is reported in its own bucket
+    and the caveat names the bound.
+    """
+    stripped = line.strip()
+    if not stripped or stripped[0] in "#;":
+        return False
+    # ⛔ An INLINE comment is not part of the value: `- FLAG   # disable the gate` is
+    # YAML-null (unset) and the comment-blind version read the words as a value, so the
+    # disarming line landed in no bucket at all (fresh review of PR #12474, P3).
+    stripped = _strip_inline_comment(stripped).strip()
+    stripped = stripped.lstrip("-").lstrip()
+    if not stripped or stripped.startswith("#"):
+        return False
+    name, colon, value = stripped.partition(":")
+    if name.strip().strip("'\"") != flag:
+        return False
+    if not colon:                      # `- FLAG` (array form): no value at all
+        return True
+    void = value.strip()
+    # `FLAG: ""` is SET-to-empty, not unset, so the quoting is read before the test.
+    if void in ('""', "''"):
+        return False
+    return void.lower() in ("", "null", "~")
+
+
+def _resolved_assignment(value: str, flag: str) -> tuple[bool, str]:
+    """``(resolved, literal)`` for an assigned value that may be a shell default.
+
+    `entrypoint.sh`'s own form is `export VAR="${VAR:-default}"` — a DEFAULT, which
+    arms the process when nothing overrides it, so reading the raw token as a value
+    made every such line read OFF. Two shapes are resolved here:
+
+    * `${FLAG:-1}` / `${FLAG-1}` / `$FLAG` with a literal default → the default;
+    * anything else that references another variable (`${OTHER}`, `${FLAG:+x}`) is
+      INDETERMINATE, and the caller must not read it as silence — the same
+      doctrine as an unreadable file, one line down.
+    """
+    if not value.startswith("$"):
+        return True, value
+    match = re.fullmatch(
+        r"\$\{?(?P<name>[A-Za-z_][A-Za-z0-9_]*)"
+        r"(?:(?::?[-=])(?P<default>[^}]*))?\}?", value)
+    if not match:
+        return False, ""
+    if match.group("name") != flag or match.group("default") is None:
+        return False, ""
+    return True, match.group("default").strip().strip("'\"")
+
 
 
 #: ⛔ There is deliberately NO truthy vocabulary in this module. The values a
@@ -2203,6 +2692,17 @@ def _yaml_block_scalar_bodies(text: str) -> dict[int, str]:
     return body
 
 
+def _strip_inline_comment(text: str) -> str:
+    """Drop a `#` comment introduced by a SPACE **or a TAB**.
+
+    ⛔ One helper, because the two hand-rolled strips disagreed: `" #"` missed a
+    TAB-preceded comment, so `- FLAG\t# disable` and `FLAG=\t# empty` vanished from
+    every bucket (fresh review of PR #12474, P3). The white-space axis is the same one
+    `ENV`/`export` are read on, so it is fixed in one place.
+    """
+    return re.split(r"[ \t]#", text, maxsplit=1)[0].rstrip()
+
+
 def _assigned_value(line: str, flag: str) -> str | None:
     """The value ``line`` ASSIGNS to ``flag``, or `None` when it is a mention.
 
@@ -2235,10 +2735,33 @@ def _assigned_value(line: str, flag: str) -> str | None:
     stripped = stripped.lstrip("-").lstrip()
     if not stripped or stripped[0] in "#;":
         return None
-    for prefix in ("export ", "ENV ", "ARG "):
-        if stripped.startswith(prefix):
-            stripped = stripped[len(prefix):].lstrip()
-            break
+    # ⛔ Dockerfile instruction NAMES are case-insensitive, so `env FLAG=1` arms the
+    # container exactly like `ENV FLAG=1` — and reading only the uppercase spelling
+    # published "silent" over an image whose container really has the flag (fresh
+    # review of PR #12474, P3; measured, and pre-existing). `export` stays
+    # case-SENSITIVE because that is shell, not Dockerfile.
+    # ⛔ A SPACE **or a TAB** separates the keyword from its arguments — for a
+    # Dockerfile instruction (`ENV\tFLAG=1`) AND for the shell's `export` — and
+    # accepting only the space read both OFF, which is the same false HOLD the
+    # lowercase fix closed, on the white-space axis (fresh review of PR #12474, P3).
+    # ⛔ `export` stays case-SENSITIVE (shell is), unlike `ENV`/`ARG`; the two axes are
+    # separate and each was measured. A tab-separated `export` used to be dropped in
+    # silence — no hit, no `outside_runtime`, no `indeterminate` — while this module's
+    # own `_SHELL_BARE_EXPORT` already accepted `\s+` for the same keyword (review of PR
+    # #12474, round 4).
+    # ⛔ Matched on the ORIGINAL line: `ENV`/`ARG` case-insensitively (Dockerfile),
+    # `export` case-SENSITIVELY (shell) — matching the uppercased line would have made
+    # the lowercase literal `export` unmatchable, which is the same reading-in-the-wrong-
+    # case defect the Dockerfile arm was fixed for.
+    dockerfile_instruction = re.match(r"^(?P<kw>ENV|ARG)[ \t]+", stripped, re.IGNORECASE)
+    legacy_value_form = False
+    if dockerfile_instruction:
+        legacy_value_form = dockerfile_instruction.group("kw").upper() == "ENV"
+        stripped = stripped[dockerfile_instruction.end():].lstrip()
+    else:
+        shell_export = re.match(r"^export[ \t]+", stripped)
+        if shell_export:
+            stripped = stripped[shell_export.end():].lstrip()
     # The flag must be the KEY: at the start of the line, followed by `=` or
     # `:` and nothing but the value. `Set FLAG=1 to enable` and
     # `name: verify FLAG=1 takes effect` fail here, which is the point.
@@ -2246,14 +2769,32 @@ def _assigned_value(line: str, flag: str) -> str | None:
         return None
     # `KEY : value` is valid YAML (the space before the indicator is not part
     # of the key), so the separator is looked for after an `lstrip`.
-    rest = stripped[len(flag):].lstrip()
+    rest_raw = stripped[len(flag):]
+    rest = rest_raw.lstrip()
     if rest[:1] not in ("=", ":"):
-        return None
-    value = rest[1:].strip()
+        # ⛔ The LEGACY Dockerfile form, `ENV KEY value`, sets KEY to the REST OF THE
+        # LINE — it is the same instruction/spacing axis as the case and tab fixes, and
+        # reading it as a mention published "silent" over an image that has the flag
+        # (fresh review of PR #12474, P3; measured `ENV FLAG 1` → OFF). The separator is
+        # tested on the RAW remainder, because `lstrip` is what erased it. Scoped to
+        # ENV: no other surface has this form, and `ARG` never reaches the process.
+        if not (legacy_value_form and rest_raw[:1] in (" ", "\t")):
+            return None
+        legacy = _strip_inline_comment(rest).strip().strip("'\"")
+        return legacy or None
+    value = _strip_inline_comment(rest[1:]).strip()
     # A genuine assignment's value is ONE token, optionally followed by a
     # comment (`FLAG=1  # enable`). Words after it mean the line is prose
-    # about the flag, not a setting of it.
-    value = value.split(" #", 1)[0].split("\t#", 1)[0].strip()
+    # about the flag, not a setting of it — ⛔ EXCEPT the Dockerfile
+    # MULTI-ASSIGNMENT form `ENV FLAG="1" PYTHONUNBUFFERED=1`, where every later
+    # token carries its own `=`: prose tokens do not, so that test separates the two
+    # (fresh review of PR #12474, P3; measured `ENV FLAG="1" OTHER=1` → OFF, a false
+    # HOLD on a form Docker's own grammar defines).
+    value = _strip_inline_comment(value).strip()
+    tokens = value.split()
+    if len(tokens) > 1 and not all("=" in token for token in tokens[1:]):
+        return None
+    value = tokens[0] if tokens else ""
     value = value.strip("'\"")
     if len(value.split()) > 1:
         return None
@@ -2266,7 +2807,12 @@ def flag_in_shipped_configs(flag: str) -> dict:
     Returns ``{"on": bool, "files": [...], "searched": [paths],
     "mentions": [paths], "unreadable": [paths], "per_surface": {rel: {...}},
     "armed": [rels], "silent": [rels], "absent": [rels], "unmeasured": [rels],
-    "deployment": {...}}``.
+    "indeterminate": [paths], "outside_runtime": [paths],
+    "deployment": {...}}`` — where ``deployment`` carries ``files`` (per-FILE
+    state), ``channels`` (the READER applied to each file: `toml:[env]`,
+    `shell:export`, `compose`, `dockerfile`), ``builds_from`` (each compose file's
+    MEASURED image build reference) and the ``present``/``armed``/``silent``/
+    ``absent``/``unmeasured``/``measured``/``on`` reading row 1 uses.
 
     ⛔ **``on`` answers *any surface arms it* — it is NOT the question DoD row 1
     asks, and reading it as one was the `#11455` defect.** Row 1 published
@@ -2302,19 +2848,55 @@ def flag_in_shipped_configs(flag: str) -> dict:
     read; `unreadable` names any path the walk could not read (oversize, I/O
     error) so "nowhere" cannot silently exclude a file that does set it — and a
     deployment surface holding an unreadable file is `UNMEASURED`, never silent.
+
+    ⛔ **The same doctrine, one shape over (#12022): an assignment the walk cannot
+    RESOLVE holds the file `UNMEASURED`, with ONE exception measured below.**
+    `export FLAG="${OTHER}"` may arm the flag, so reading it as silence would be a
+    claim about half an assignment; it lands in ``indeterminate`` and the file holds
+    as `UNMEASURED`. ⚠️ The exception is the ARM direction only, and it is NARROWER
+    than "the last assignment wins": the file is `ON` when a LATER resolvable
+    **truthy** assignment arms it (`ENV FLAG="${OTHER}"` then `ENV FLAG=1` → `ON`),
+    while a later resolvable **falsy** one does NOT clear the `UNMEASURED`
+    (`ENV FLAG="${OTHER}"` then `ENV FLAG=0` still holds `UNMEASURED`, not `OFF`) —
+    a known over-reading in the CONSERVATIVE direction, declared here and pinned as
+    such rather than described as a rule the walk implements. The unresolvable line
+    is REPORTED in ``indeterminate`` in EVERY order, so the exception cannot turn a
+    half-read assignment back into silence. (Fresh review of PR #12474, twice: the
+    first version of this sentence was unconditional, and the second said
+    "resolvable" where the walk honours only truthy.) And an assignment in a
+    place a deployed process never reads — a TOML key outside `[env]`, a shell
+    variable the entrypoint never `export`s — lands in ``outside_runtime`` and is
+    REPORTED rather than silently discounted, because a reader has to be able to
+    see that the walk found the line and why it is not a shipped default.
     """
     from tortoise.env_truthy import is_truthy
 
     def _candidates(rel: str) -> list[Path]:
         """The files one `CONFIG_SURFACES` root stands for.
 
-        `Dockerfile` is a CLASS of file, not one filename (see
-        `DEPLOYMENT_SURFACES`): this repo ships `Dockerfile.hosted` and
-        `Dockerfile.selfhost` and no plain `Dockerfile`, so an exact match walked
-        none of the image build files while reporting the surface `ABSENT`.
+        ⛔ Every DEPLOYMENT root is DISCOVERED from the manifests (#12022), never
+        named by a fixed path — a path list is how `fly.toml`'s `[env]` and the
+        container entrypoint were missed:
+
+        * `Dockerfile` is a CLASS of file, not one filename (see
+          `DEPLOYMENT_SURFACES`): this repo ships `Dockerfile.hosted` and
+          `Dockerfile.selfhost` and no plain `Dockerfile`, so an exact match walked
+          none of the image build files while reporting the surface `ABSENT`.
+        * `fly.toml` is the platform's own manifest name (`fly*.toml`).
+        * `entrypoint` is the script the IMAGE RUNS, read out of the
+          `ENTRYPOINT`/`CMD` of the build files above (`_entrypoint_scripts`), so
+          the surface is `ABSENT` when nothing names a script — never a guess at
+          `entrypoint.sh`.
         """
         if rel == "Dockerfile":
-            return sorted(p for p in REPO_ROOT.glob(IMAGE_BUILD_GLOB) if p.is_file())
+            return _image_build_files()
+        if rel == "fly.toml":
+            return _fly_manifests()
+        if rel == "entrypoint":
+            return _entrypoint_scripts()
+        if rel in COMPOSE_BASE_NAMES:
+            target = REPO_ROOT / rel
+            return [target] if target.is_file() else []
         target = REPO_ROOT / rel
         return ([target] if target.is_file()
                 else sorted(target.rglob("*")) if target.is_dir() else [])
@@ -2324,6 +2906,20 @@ def flag_in_shipped_configs(flag: str) -> dict:
     mentions: list[str] = []
     unreadable: list[str] = []
     documented_only = 0
+    # ⛔ Reported, never dropped: a line this walk cannot resolve — an assignment of the
+    # flag to a value it cannot read (`export FLAG="${OTHER}"`, `${FLAG:+x}`), or a
+    # COMPUTED NAME in an `unset` (`unset "$FLAG"`), which may or may not remove the
+    # variable — and an assignment in a place a deployed process never reads (`fly.toml`'s
+    # `[build.args]`, or a shell variable the entrypoint never `export`s). Both are the
+    # shapes where reading "silent" would be a claim about a line the walk did not
+    # understand.
+    indeterminate: list[str] = []
+    outside_runtime: list[str] = []
+    # ⛔ The TWO DISARMING directions, reported separately, because either one takes an
+    # arm AWAY: a compose `environment:` entry with no value UNSETS the variable, and one
+    # that assigns it a NON-truthy value OVERRIDES the image's `ENV` with that value.
+    unset_declarations: list[str] = []
+    disarming_assignments: list[str] = []
     per_surface: dict[str, dict] = {}
     for rel in CONFIG_SURFACES:
         target = REPO_ROOT / rel
@@ -2332,11 +2928,26 @@ def flag_in_shipped_configs(flag: str) -> dict:
         surface_hits: list[str] = []
         surface_searched: list[str] = []
         surface_unreadable: list[str] = []
+        surface_indeterminate: list[str] = []
         surface_file_hits: dict[str, list[str]] = {}
+        # ⛔ LAST WINS, per file: `ENV FLAG=1` then `ENV FLAG=0` (or two `export`s) leaves
+        # the container with 0, and counting ANY truthy line read the file ARMED —
+        # a false PASS on the deployment population this lane widened, and the one concept
+        # on which the compose reader (which reported the override) disagreed with the
+        # Dockerfile and shell readers (fresh review of PR #12474, P2). The decisions are
+        # DEFERRED so the file's state is the LAST one, and a shadowing assignment is
+        # reported instead of vanishing.
+        # ⛔ AND THE STATE IS PER FILE, so the decision list is REBUILT for each one: it
+        # used to be initialised outside this loop and flushed per file, so a file that
+        # appended NO decision inherited the PREVIOUS file's — reported `ON` with that
+        # file's hit text, dropped from `silent`, and flipping `deployment["on"]` on the
+        # ORDER the filenames sort in. Both orderings were reachable with this repo's own
+        # `Dockerfile.hosted` / `Dockerfile.selfhost` names (fresh review of PR #12474, P1).
         for path in candidates:
             if not path.is_file():
                 continue
             posix = path.relative_to(REPO_ROOT).as_posix()
+            decisions: list[tuple[bool | None, str, str]] = []
             try:
                 if path.stat().st_size > 2_000_000:
                     unreadable.append(posix)
@@ -2360,6 +2971,20 @@ def flag_in_shipped_configs(flag: str) -> dict:
             bodies = (_yaml_block_scalar_bodies(text)
                       if posix.endswith((".yml", ".yaml")) else {})
             workflow = posix.startswith(WORKFLOW_SURFACE + "/")
+            # `fly.toml` is read TABLE-SCOPED: only `[env]` reaches the machine's
+            # process, so a flag in `[build.args]` is not a shipped default.
+            toml_tables = (_toml_table_lines(text)
+                           if posix.endswith(".toml") else None)
+            # A shell script's environment is what it EXPORTS, not every variable
+            # it assigns — `entrypoint.sh` is discovered from the image's
+            # `ENTRYPOINT`, and its `export VAR="${VAR:-default}"` form is how a
+            # deployment really gets a runtime default.
+            shell_exports = (_shell_exported_names(text)
+                             if posix.endswith(".sh") else None)
+            # ⛔ compose is read STRUCTURALLY: the enclosing mapping decides whether a
+            # line is runtime env, a build arg, or a label (`_compose_contexts`).
+            compose_ctx = (_compose_contexts(text)
+                           if posix.startswith("docker-compose") else None)
             for number, line in enumerate(text.splitlines(), 1):
                 if number in bodies:
                     executed = (workflow
@@ -2370,12 +2995,167 @@ def flag_in_shipped_configs(flag: str) -> dict:
                         continue
                     # An executed `run:` body: fall through to the real scan,
                     # so a shipped `export FLAG=1` is a HIT, not a note.
+                if (toml_tables is not None
+                        and toml_tables.get(number, "") != TOML_RUNTIME_ENV_TABLE):
+                    if _assigned_value(line, flag) is not None:
+                        outside_runtime.append(f"{posix}:{number}: {line.strip()[:90]}")
+                    continue
+                # ⛔ The shell channel's DISARMING direction, and a LAST-WINS decision:
+                # `unset FLAG` removes the variable, so it cannot leave an earlier
+                # `export FLAG=1` standing. It landed in NO bucket at all before this —
+                # not an assignment, not the compose unset spelling — so the file read
+                # `ON` with `measured: True` and nothing reported it (fresh review of PR
+                # #12474, P2, measured). Reported in `unset_declarations` exactly as the
+                # compose value-less spelling is, so the direction is visible, not just
+                # scored.
+                # ⛔ The channel test is the FILE, not `shell_exports`: that value is
+                # `None` for a `set -a` (allexport) script as well as for a non-shell
+                # file, so keying the arm on it made every allexport entrypoint skip the
+                # arm and keep the earlier `export` standing — the same fail-open, still
+                # open, on the shape the reader explicitly models (fresh review of PR
+                # #12474, P2). ⛔ And BEFORE the exported-assignment gate, which
+                # `continue`s on any line that is not an export and would swallow this.
+                if posix.endswith(".sh"):
+                    target = _shell_unset_target(line, flag)
+                    if target == "value":
+                        unset_declarations.append(
+                            f"{posix}:{number}: {line.strip()[:90]}")
+                        decisions.append((False,
+                                          f"{posix}: {line.strip()[:90]}",
+                                          f"{posix}:{number}: {line.strip()[:90]}"))
+                        continue
+                    if target == "unknown":
+                        # A computed name (`unset "$FLAG"`) may or may not be this flag:
+                        # UNKNOWN holds the file UNMEASURED rather than leaving an arm.
+                        indeterminate.append(
+                            f"{posix}:{number}: {line.strip()[:90]}")
+                        surface_indeterminate.append(posix)
+                        decisions.append((None,
+                                          f"{posix}: {line.strip()[:90]}",
+                                          f"{posix}:{number}: {line.strip()[:90]}"))
+                        continue
+                if (shell_exports is not None
+                        and not _shell_line_is_exported(line, flag, shell_exports)):
+                    if _assigned_value(line, flag) is not None:
+                        outside_runtime.append(f"{posix}:{number}: {line.strip()[:90]}")
+                    continue
+                # ⛔ A Dockerfile `ARG` is BUILD-TIME: it can feed a later `ENV`, but it
+                # never reaches the running container's environment on its own, so
+                # `ARG FLAG=1` is not a deployment that carries the flag. Counting it as
+                # a hit was a false PASS in the other direction from the ones `#12022`
+                # closes — the reader answered "a deployed process never reads this"
+                # for `[build.args]` and for unexported shell variables, and answered
+                # nothing for the one Dockerfile instruction that has the same property
+                # (fresh review of PR #12474, P2, measured: `ARG FLAG=1` read `ON`).
+                if (posix.startswith(IMAGE_BUILD_GLOB.rstrip("*"))
+                        and re.match(r"^ARG[ \t]+" + re.escape(flag) + r"(?:[ \t=]|$)",
+                                     line.strip(), re.IGNORECASE)):
+                    outside_runtime.append(
+                        f"{posix}:{number}: {line.strip()[:90]} (build-time ARG)")
+                    continue
+                where = compose_ctx.get(number, "") if compose_ctx is not None else ""
+                if (compose_ctx is not None
+                        and not (where == "environment"
+                                 or where.endswith(".environment"))
+                        and not (where == "build.args"
+                                 or where.endswith(".build.args"))
+                        and (_assigned_value(line, flag) is not None
+                             or _is_unset_declaration(line, flag))):
+                    # ⛔ POSITIVE scoping, not a subtraction: only `environment:` is a
+                    # deployed process's environment, so a flag under `labels:` (or any
+                    # other service scope) is reported and never armed. The earlier shape
+                    # armed everything that was not `build.args`/`environment`, which made
+                    # the docstring's "same line, three meanings" claim false for the third
+                    # (fresh review of PR #12474, P2).
+                    outside_runtime.append(
+                        f"{posix}:{number}: {line.strip()[:90]} "
+                        f"(not a runtime environment scope: {where or 'top level'})")
+                    continue
+                if where == "build.args" or where.endswith(".build.args"):
+                    # A compose BUILD ARG reaches `docker build --build-arg`, never the
+                    # container's environment — the same reading `[build.args]` and a
+                    # Dockerfile `ARG` already get (fresh review of PR #12474, P2).
+                    if (_assigned_value(line, flag) is not None
+                            or _is_unset_declaration(line, flag)):
+                        outside_runtime.append(
+                            f"{posix}:{number}: {line.strip()[:90]} "
+                            "(build-time build arg)")
+                    continue
+                # ⛔ Checked BEFORE the assignment reader: a bare `FLAG:` parses as an
+                # assignment with an EMPTY value (`_assigned_value` returns `""`), so the
+                # unset arm placed after it never ran for the map spellings (measured).
+                if ((where == "environment" or where.endswith(".environment"))
+                        and _is_unset_declaration(line, flag)):
+                    unset_declarations.append(
+                        f"{posix}:{number}: {line.strip()[:90]}")
+                    # ⛔ A LAST-WINS decision, exactly like the shell arm: a value-less
+                    # compose entry UNSETS the variable, so a declaration that comes
+                    # AFTER a truthy one leaves the container DISARMED. Reporting it
+                    # without scoring it meant `environment: [- FLAG=1, - FLAG]` read the
+                    # file `ON` — the compose spec's own semantics, read the wrong way,
+                    # and the asymmetry the shell arm had just been fixed for (fresh
+                    # review of PR #12474, P3, measured).
+                    decisions.append((False,
+                                      f"{posix}: {line.strip()[:90]}",
+                                      f"{posix}:{number}: {line.strip()[:90]}"))
+                    continue
                 value = _assigned_value(line, flag)
-                if value is not None and is_truthy(value):
-                    hit = f"{posix}: {line.strip()[:90]}"
-                    hits.append(hit)
-                    surface_hits.append(hit)
-                    surface_file_hits.setdefault(posix, []).append(hit)
+                if value is None:
+                    continue
+                resolved, literal = _resolved_assignment(value, flag)
+                if not resolved:
+                    indeterminate.append(f"{posix}:{number}: {line.strip()[:90]}")
+                    surface_indeterminate.append(posix)
+                    # ⛔ A DEFERRED DECISION, not a `continue`: the value this line gives
+                    # the flag is UNKNOWN, and it is the LAST assignment, so the file's
+                    # effective value is unknown — the earlier truthy line does not
+                    # survive it. Skipping the append left `decisions[-1]` on the earlier
+                    # truthy value, so `ENV FLAG=1` then `ENV FLAG="${OTHER}"` published
+                    # `ON` with `measured: True` while the walk's own docstring promises
+                    # an unresolvable assignment holds the file UNMEASURED (fresh review
+                    # of PR #12474, P2).
+                    decisions.append((None,
+                                      f"{posix}: {line.strip()[:90]}",
+                                      f"{posix}:{number}: {line.strip()[:90]}"))
+                    continue
+                # ⛔ Deferred, never applied here: the FILE's state is its LAST
+                # runtime-relevant assignment (`is_truthy` is decided per line).
+                decisions.append((is_truthy(literal),
+                                  f"{posix}: {line.strip()[:90]}",
+                                  f"{posix}:{number}: {line.strip()[:90]}"))
+            # ── the file's effective value, once its lines are read (LAST WINS) ──
+            if decisions:
+                effective_truthy, hit_text, plain_text = decisions[-1]
+                if effective_truthy is None:
+                    # The LAST assignment is unreadable, so the file's effective value is
+                    # UNKNOWN — it cannot be reported arming the flag. `surface_indeterminate`
+                    # already holds this file, so the UNMEASURED downgrade below applies.
+                    pass
+                elif effective_truthy:
+                    hits.append(hit_text)
+                    surface_hits.append(hit_text)
+                    surface_file_hits.setdefault(posix, []).append(hit_text)
+                    for truthy, _hit, earlier in decisions[:-1]:
+                        # ⛔ DEDUPED HERE TOO, not only in the `else` branch below: since a
+                        # value-less compose entry and a shell `unset` are `False`
+                        # DECISIONS now, an already-reported `unset` line reached this loop
+                        # and was published a SECOND time — under a heading that is false
+                        # about it, since an `unset` is not "a value that OVERRIDES it OFF"
+                        # (fresh review of PR #12474, P2, measured).
+                        if truthy is False and earlier not in unset_declarations:
+                            disarming_assignments.append(
+                                earlier + " (shadowed by a later truthy value)")
+                else:
+                    # ⛔ A value-less entry / `unset` is ALREADY named by
+                    # `unset_declarations` (same `path:line: text` shape). Appending it here
+                    # too published ONE line as two different claims — "1 declaration(s) with
+                    # no value UNSET it AND 1 value(s) leave it OFF" — a heading-count
+                    # defect in the note a reader trusts (fresh review of PR #12474, P2).
+                    if plain_text not in unset_declarations:
+                        disarming_assignments.append(
+                            plain_text + (" (OVERRIDES an earlier truthy value)"
+                                          if any(t is True for t, _h, _l in decisions[:-1])
+                                          else ""))
         if not present:
             state = "ABSENT"
         elif surface_hits:
@@ -2389,10 +3169,12 @@ def flag_in_shipped_configs(flag: str) -> dict:
             # P3). The unreadable file is still reported — in `unreadable:` and in this
             # surface's own `UNMEASURED` accounting below — so nothing is hidden.
             state = "ON"
-        elif surface_unreadable:
+        elif surface_unreadable or surface_indeterminate:
             # A file this walk could not read could arm the flag, so "present and
             # silent" would be a claim about a surface half of which was never
-            # read. UNMEASURED is the only honest state — never a quiet OFF.
+            # read. UNMEASURED is the only honest state — never a quiet OFF. The
+            # same holds for an assignment whose VALUE the walk could not resolve
+            # (`${OTHER}`), added by `#12022`.
             state = "UNMEASURED"
         else:
             state = "OFF"
@@ -2406,10 +3188,18 @@ def flag_in_shipped_configs(flag: str) -> dict:
         }
         for posix in surface_unreadable:
             file_states[posix] = {"state": "UNMEASURED", "hits": []}
+        # ⛔ An INDETERMINATE assignment is UNMEASURED, not silent: the file assigns
+        # the flag something this walk cannot read, so "declares no gate" would be
+        # a claim about half an assignment — the unreadable-file doctrine, one line
+        # down (#12022). It only downgrades a file the walk did NOT read arming it.
+        for posix in surface_indeterminate:
+            if file_states.get(posix, {}).get("state") != "ON":
+                file_states[posix] = {"state": "UNMEASURED", "hits": []}
         per_surface[rel] = {"state": state, "hits": surface_hits,
                             "files": file_states,
                             "searched": surface_searched,
-                            "unreadable": surface_unreadable}
+                            "unreadable": surface_unreadable,
+                            "indeterminate": sorted(set(surface_indeterminate))}
 
     def _rels(state: str, pool: tuple[str, ...]) -> list[str]:
         return [rel for rel in pool if per_surface[rel]["state"] == state]
@@ -2428,16 +3218,39 @@ def flag_in_shipped_configs(flag: str) -> dict:
     deployment = {
         "surfaces": list(DEPLOYMENT_SURFACES),
         "files": deployment_files,
+        # The CHANNEL each file speaks for — the reader applied to it — so a reader
+        # of the note can see the walk covered a TOML `[env]` table and a shell
+        # `export`, not only compose maps and Dockerfile `ENV` (#12022).
+        "channels": {
+            posix: ("toml:[env]" if posix.endswith(".toml") else
+                    "shell:export" if posix.endswith(".sh") else
+                    "compose" if posix.startswith("docker-compose") else
+                    "dockerfile")
+            for posix in deployment_present
+        },
+        # MEASURED, not asserted: the compose→image build edge the per-file caveat
+        # names (`#12070` item 3).
+        "builds_from": _compose_build_refs(),
         "present": deployment_present,
         "armed": [p for p in deployment_present if deployment_files[p] == "ON"],
         "silent": [p for p in deployment_present if deployment_files[p] == "OFF"],
         "absent": _rels("ABSENT", DEPLOYMENT_SURFACES),
         "unmeasured": deployment_unmeasured,
-        # MEASURED requires at least one deployment surface FILE to exist and every
-        # existing one to be READABLE: a tree that ships no deployment config
-        # cannot answer "what does a deployment get", and that is UNMEASURED —
-        # never a pass, and never a `False` that blames the product.
-        "measured": bool(deployment_present) and not deployment_unmeasured,
+        # ⛔ The two DISARMING directions carried WITH the deployment reading, so the
+        # caveat that speaks about them can vary with THIS tree rather than printing a
+        # constant sentence a test cannot distinguish from an empty one.
+        "unset_declarations": list(unset_declarations),
+        "disarming_assignments": list(disarming_assignments),
+        # MEASURED requires at least one deployment surface FILE to exist, every
+        # existing one to be READABLE, and every RUNTIME-RELEVANT assignment of the
+        # flag in it to be RESOLVABLE: a tree that ships no deployment config cannot
+        # answer "what does a deployment get", and neither can one whose flag line the
+        # walk could not read (`${OTHER}`). Both are UNMEASURED — never a pass, and
+        # never a `False` that blames the product. ⛔ A build-time `ARG` is NOT
+        # runtime-relevant: it is reported in `outside_runtime` and does not hold the
+        # file at UNMEASURED, so an unresolvable `ARG` leaves `measured` True — which
+        # is the `not deployment_unmeasured` expression this comment describes.
+        "measured": (bool(deployment_present) and not deployment_unmeasured),
     }
     deployment["on"] = (deployment["measured"] and not deployment["silent"]
                         and not deployment_unmeasured)
@@ -2450,6 +3263,11 @@ def flag_in_shipped_configs(flag: str) -> dict:
             # `run:` body is not counted here — it is a setting, and it is
             # allowed to move `on`.
             "documented_only": documented_only,
+            # Reported, never silently dropped — see the declarations above.
+            "indeterminate": indeterminate,
+            "outside_runtime": outside_runtime,
+            "unset_declarations": unset_declarations,
+            "disarming_assignments": disarming_assignments,
             "surfaces": list(CONFIG_SURFACES),
             "per_surface": per_surface,
             "armed": _rels("ON", CONFIG_SURFACES),
@@ -2457,6 +3275,109 @@ def flag_in_shipped_configs(flag: str) -> dict:
             "absent": _rels("ABSENT", CONFIG_SURFACES),
             "unmeasured": _rels("UNMEASURED", CONFIG_SURFACES),
             "deployment": deployment}
+
+
+def per_file_scope_note(deployment: dict) -> str:
+    """The ONE statement of what a PER-FILE deployment reading is, and is not.
+
+    ⛔ ONE string, called by BOTH notes (`shipped_default_note`'s OFF branch and
+    row 1's hold note), because `#12054` is what two spellings of the same
+    inference cost: the hold note said *"a deployment built from them runs with the
+    rule off"* while the sibling note 500 lines above had already been corrected
+    to *"a deployment built from that file ALONE runs with the gate OFF … a compose
+    file that builds from an image build file INHERITS that image's `ENV`"* — so one
+    file stated two opposite standards for one inference and a reader could not
+    tell which was the tool's position. Factoring it is `#12054`'s "better still":
+    there is now one string, so the two notes cannot drift apart again.
+
+    ⛔ The leading clause is the PER-FILE fact, never a deployment consequence that
+    a parenthetical then retracts (`#12070` item 4): a reader quotes the leading
+    clause. ⛔ AND THE DEPLOYMENT STATEMENT IS BOUNDED, not absolute (fresh review of
+    PR #12474, P2): compose `environment:` ADDS TO or OVERRIDES the image's `ENV`, so
+    inheritance can ADD an arm — and the two directions that TAKE IT AWAY are a
+    value-less entry (which UNSETS the variable) and a non-truthy value (which
+    OVERRIDES it). Neither is modelled here; both are REPORTED (`unset_declarations`,
+    `disarming_assignments`) and named in the sentence this function returns, which is
+    the only honest form — an earlier draft said "never unsets it, so inheritance can
+    only ADD an arm", which the function five lines below falsified.
+
+    ⛔ The build edge is MEASURED (`deployment["builds_from"]`, read from each
+    compose file's `build:`/`dockerfile:`), not assumed (`#12070` item 3): before
+    that, this qualification named an edge no reader had ever checked on the tree
+    it described, and no fixture could express it.
+    """
+    edges = deployment.get("builds_from") or {}
+    files = deployment.get("files") or {}
+    if "builds_from" not in deployment:
+        # ⛔ ABSENT IS NOT EMPTY (fresh review of PR #12474, P3): a reading that did not
+        # carry the measurement must not publish "no compose file declares a build:"
+        # — that is the `#12016` `False`-for-UNMEASURED defect, one field down.
+        edge_note = (
+            "; build edge: UNMEASURED — this reading carries no `builds_from`, so "
+            "'no compose inheritance' is NOT a claim it makes")
+    elif edges:
+        edge_note = "; measured build edge(s): " + ", ".join(
+            f"{compose} BUILDS from {image}"
+            + (" (that image is OUTSIDE the walked population, so its arm state is "
+               "NOT reported here)" if image not in files else "")
+            for compose, images in sorted(edges.items())
+            for image in ([images] if isinstance(images, str) else images))
+    else:
+        edge_note = ("; measured build edge(s): none — no compose file in this tree "
+                     "declares a `build:`/`dockerfile:` that names an image build file")
+    unsets = len(deployment.get("unset_declarations") or ())
+    overrides = len(deployment.get("disarming_assignments") or ())
+    disarm = ""
+    if unsets or overrides:
+        parts = []
+        if unsets:
+            # ⛔ QUALIFIED BY ORDER, like the overrides part: an unset declaration only
+            # DISARMS the file when it is the file's LAST word. A LATER truthy assignment
+            # leaves the arm standing, and the per-surface line above then reads the file
+            # `ON` — so an unqualified "this tree DISARMS it" contradicted the state the
+            # same note had just printed (fresh review of PR #12474, P2, measured).
+            parts.append(f"{unsets} declaration(s) with no value UNSET it — the LAST of "
+                         "them by FILE order decides, and a LATER truthy assignment "
+                         "leaves the arm standing")
+        if overrides:
+            parts.append(f"{overrides} value(s) leave it OFF — the LAST of them by compose "
+                         "override or by FILE order (an earlier truthy assignment does not "
+                         "survive a later non-truthy one)")
+        # ⛔ THE LEADING CLAUSE IS THE ONE A READER QUOTES, so it states what this tree's
+        # files actually END as — the ORDER qualification above is a subordinate clause and
+        # did not stop "and this tree DISARMS it in 1 declaration(s)" from being printed
+        # beside a per-file line reading that same file `ON`. Measured shape: a compose
+        # `environment: [- FLAG, - FLAG=1]` REPORTS the value-less entry and ends `ON`, so a
+        # tree whose only disarmed file is a SILENT sibling published a false cause for its
+        # own OFF — the retracted-consequence shape this module forbids everywhere
+        # (fresh review of PR #12474, the falsifier the ORDER fix lacked).
+        # ⛔ And a file being `OFF` is not the same as a DECLARATION having disarmed it: the
+        # fixture that falsified the previous wording had the unset in a file that ends `ON`
+        # and an unrelated SILENT sibling — so "this tree DISARMS it in 1 declaration(s)"
+        # attributed the sibling's silence to a line the walk had just read deciding the
+        # other way. Attribute by PATH, and only where that file really ends unarmed.
+        files_by_state = deployment.get("files") or {}
+        declared_paths = {str(entry).split(":", 1)[0]
+                          for entry in list(deployment.get("unset_declarations") or ())
+                          + list(deployment.get("disarming_assignments") or ())
+                          if str(entry)}
+        disarmed_by_declaration = sorted(
+            posix for posix in declared_paths if files_by_state.get(posix) == "OFF")
+        lead = ("this tree DISARMS it in " if disarmed_by_declaration else
+                "the disarming direction is REPORTED here but is NOT the last word in "
+                "its own file, so it does NOT disarm this tree — see ")
+        disarm = ("; ⛔ and " + lead + " and ".join(parts)
+                  + " — neither direction is modelled by the per-file arming rule")
+    return (
+        "this reading is PER FILE and does not model the MERGE: a compose file's "
+        "`environment:` mapping ADDS TO or OVERRIDES the image's `ENV`, so a silent "
+        "compose file that BUILDS from an ARMED image build file INHERITS that image's "
+        "`ENV` — EXCEPT in the two directions that take the arm away, which this "
+        "reading does not model: a value-less entry UNSETS the variable and a "
+        "non-truthy value OVERRIDES it"
+        + disarm
+        + edge_note
+    )
 
 
 def shipped_default_note(shipped: dict, flag: str, ambient: bool) -> str:
@@ -2487,11 +3408,13 @@ def shipped_default_note(shipped: dict, flag: str, ambient: bool) -> str:
     # cannot give one — a reader lifting the leading value would quote a measurement
     # the run never made (fresh review of PR #12016, P3).
     reported = on_by_default if deployment["measured"] else "UNMEASURED"
+    channels = deployment.get("channels") or {}
     per_surface_note = ", ".join(
         f"{rel}={shipped['per_surface'][rel]['state']}" for rel in shipped["surfaces"]
     )
     deployment_surfaces_note = ", ".join(
-        f"{posix}={state}" for posix, state in deployment["files"].items()
+        f"{posix}={state}" + (f"({channels[posix]})" if posix in channels else "")
+        for posix, state in deployment["files"].items()
     ) or "none"
     if not deployment["measured"]:
         if not deployment["present"]:
@@ -2501,10 +3424,29 @@ def shipped_default_note(shipped: dict, flag: str, ambient: bool) -> str:
                 "to a question the tree cannot ask"
             )
         else:
+            # ⛔ The CAUSE is named, and it is not always readability (`#12022`, fresh
+            # review of PR #12474): an indeterminate assignment puts a file the walk
+            # READ SUCCESSFULLY into `unmeasured`, so calling it "unreadable" published
+            # "unreadable deployment file(s) ['entrypoint.sh']" beside its own
+            # "unreadable: none" — a misattribution a reader would chase as a
+            # permissions or size problem on a file that was read.
+            unreadable_files = [p for p in deployment["unmeasured"]
+                                if p in (shipped.get("unreadable") or [])]
+            unresolved_files = [p for p in deployment["unmeasured"]
+                                if p not in unreadable_files]
+            causes: list[str] = []
+            if unreadable_files:
+                causes.append(
+                    f"UNREADABLE deployment file(s) {unreadable_files} — an unread "
+                    "file could arm the gate")
+            if unresolved_files:
+                causes.append(
+                    f"deployment file(s) carrying a line this walk cannot RESOLVE "
+                    f"{unresolved_files} — it could arm OR disarm the gate, and the walk "
+                    f"cannot read which (see `indeterminate assignments`)")
             deployment_reading = (
-                f"UNMEASURED — unreadable deployment file(s) "
-                f"{deployment['unmeasured']}: an unread file could arm the gate, so "
-                "this is NOT a measurement of silence"
+                "UNMEASURED — " + "; and ".join(causes)
+                + ", so this is NOT a measurement of silence"
             )
     elif deployment["on"]:
         deployment_reading = (
@@ -2529,14 +3471,8 @@ def shipped_default_note(shipped: dict, flag: str, ambient: bool) -> str:
         # string the probe publishes (fresh review of PR #12016, P2).
         deployment_reading = (
             f"UNARMED deployment file(s) {deployment['silent']} declare no gate of "
-            "their own, so read from that file ALONE the gate is off — this reading is "
-            "PER FILE and does not model a compose file that BUILDS from an armed "
-            "image build file (it INHERITS that image's `ENV`), so it is not a claim "
-            "about such a deployment"
-            # ⛔ No trailing period: `shipped_default_note` joins this clause with a
-            # literal `"; files read: "`, so a period here published
-            # "… about such a deployment.; files read: 64" (fresh review of PR
-            # #12016, P3). The other three branches already end punctuation-free.
+            "their own — read from that file ALONE the gate is off; "
+            + per_file_scope_note(deployment)
         )
     return (
         f"gate enabled by default: {reported} (ambient "
@@ -2548,6 +3484,22 @@ def shipped_default_note(shipped: dict, flag: str, ambient: bool) -> str:
         f"deployment surfaces that can arm a deployed process: "
         f"{deployment_surfaces_note} — {deployment_reading}; files read: "
         f"{len(shipped['searched'])}; unreadable: {shipped['unreadable'] or 'none'}; "
+        # ⛔ Both lists are REPORTED and neither is silently dropped (#12022): an
+        # assignment the walk could not resolve, and an assignment a deployed
+        # process never reads (a TOML key outside `[env]`, an unexported shell
+        # variable). Naming them is what stops "silent" from covering them.
+        f"indeterminate assignments: {shipped.get('indeterminate') or 'none'}; "
+        f"assignments a deployed process never reads: "
+        f"{shipped.get('outside_runtime') or 'none'}; "
+        # ⛔ The DISARMING direction, named: a value-less `environment:` entry (compose)
+        # or an `unset` (shell) UNSETS the variable, and this per-file reading models it
+        # as the LAST word. ⛔ NOT "compose": both channels append here, and a label that
+        # named one of them published a shell line as "compose declarations that UNSET
+        # it" — a diagnostic naming a neighbour's state (fresh review of PR #12474, P2).
+        f"declarations that UNSET it: "
+        f"{shipped.get('unset_declarations') or 'none'}; "
+        f"values that OVERRIDE it OFF: "
+        f"{shipped.get('disarming_assignments') or 'none'}; "
         f"mentioning it: {shipped['mentions'] or 'none'}"
         f"; set ON in: {shipped['files'] or 'none'})"
     )
@@ -3097,12 +4049,22 @@ def score_rule_bullet() -> Row:
             # ⛔ NO consequence is asserted from the assignment (fresh review of PR
             # #12016, P3): the walk's per-file verdict is "some line of this file
             # ASSIGNS the flag a truthy value", which is not "a build using this file
-            # carries the flag". Both divergence shapes are reachable and the walk
-            # reads them ON: an `ARG TORTOISE_EMBED_GATE=1` is build-time only and never
-            # reaches the container's environment, and `ENV …=1` followed by `ENV …=0`
-            # is last-wins, so a build from that file carries 0. The claim is deleted
-            # rather than qualified — a second arm here would be another sentence to
-            # falsify, and the per-FILE caveat below already carries the meaning.
+            # carries the flag". ⛔ `ARG TORTOISE_EMBED_GATE=1` is no longer one of the
+            # divergence shapes READ ON — it is build-time only and never reaches the
+            # container's environment, so `#12022` routes it to `outside_runtime`
+            # (a deployed process never reads it) instead of counting it as a hit. ⛔ THE
+            # `ENV …=1` / `ENV …=0` SHAPE IS NO LONGER ONE OF THEM EITHER: last-wins makes
+            # the walk read the file OFF, which
+            # `test_the_LAST_assignment_in_a_file_decides_its_arming` pins — an earlier
+            # revision of this comment still claimed it read ON, the "a sentence wider
+            # than the measurement under it" class this probe exists to police (fresh
+            # review of PR #12474, P3, measured). The one remaining shape is
+            # a builder-stage-only `ENV` in a multi-stage build, since nothing here reads
+            # stage semantics. Stated as examples, never as an enumeration — a list here
+            # is what `#12070` item 1 recorded rotting. The claim
+            # is deleted rather than qualified — a second arm here would be another
+            # sentence to falsify, and the per-FILE caveat below already carries the
+            # meaning.
             armed_clause = (
                 f"the flag is armed in deployment file(s) "
                 f"({', '.join(armed_deployment_files)}) — this reading is per FILE and "
@@ -3145,10 +4107,9 @@ def score_rule_bullet() -> Row:
         notes.append(
             "shipped default NOT armed for every deployment file (hold this row "
             "at PARTIAL — silent deployment file(s): "
-            f"{deployment['silent']} declare no gate. Read from that file ALONE the "
-            "deployment is unarmed; a compose file that builds from an ARMED image "
-            "build file INHERITS that image's `ENV`, so this is a per-FILE reading and "
-            f"not the merged view's; {armed_clause})"
+            f"{deployment['silent']} declare no gate of their own — read from that "
+            f"file ALONE the deployment is unarmed; "
+            f"{per_file_scope_note(deployment)}; {armed_clause})"
         )
     if not stated or not shared or not gated:
         verdict = "NOT MET"

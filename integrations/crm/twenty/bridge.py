@@ -233,10 +233,21 @@ def tortoise_available() -> bool:
 def _point_id(result) -> tuple[str | None, str | None]:
     """Extract (point_id, error) from an MCP call_tool result.
 
-    Fail-closed (code-review P1, #338): a rejected engine call surfaces as JSON
-    text with an "error" key (and is_error may be False) — detect it so the
-    caller never reports success for a failed write. Returns (None, error_msg)
-    on failure.
+    Fail-closed (code-review P1, #338): a rejected engine call carries an "error"
+    key in its JSON text — detect it so the caller never reports success for a
+    failed write. Returns (None, error_msg) on failure.
+
+    ⚠️ Delivery shape, since #11153: a rejected hosted call now RAISES `ToolError`
+    (the client runs `raise_on_error=True`, and the surface flags the refusal with
+    `isError: true`), so `_write` converts it to the dict shape this function reads.
+    The `is_error`/JSON-text arms below cover a refusal that still arrives IN BAND
+    (a self-hosted server, or a tool whose payload carries the error as data).
+
+    ⚠️ The in-band text is passed through as-is, NOT `describe_failure`-redacted
+    (#10605): it is the SERVER's answer inside an ordinary result, the pre-#11153
+    shape, and this function has no exception to redact. The RAISED arm is the one
+    that reaches stdout from `main()`, and `_write` redacts it — named here so the
+    asymmetry is a decision rather than an oversight (review round 12).
     """
     import json as _json
 
@@ -279,13 +290,47 @@ def push_to_tortoise(frontmatter: dict) -> dict:
     if not tortoise_available():
         return {"status": "skipped", "reason": "tortoise_unavailable"}
 
+    # ⛔ DECLARED BEFORE the `try` so the failure handler below can report them
+    # (#11153 review round 9): anything that already landed is STILL on the graph
+    # when an exception escapes mid-loop, and a handler that cannot see the ids
+    # produces an unreconcilable partial push — the same class `_write` narrows for
+    # `ToolError`, one exception class over (a `ConnectionError`/`McpError`/
+    # transport error between writes).
+    point_ids: list[dict] = []
+    failures: list[dict] = []
+
     try:
         from tortoise.mcp_client import call_tool
 
-        point_ids = []
-        failures = []
+        def _write(name: str, payload: dict) -> dict:
+            """One write, with a REFUSAL handed back as a payload.
 
-        meeting_point = call_tool("tortoise_create_point", {
+            #11153: the surface now flags a refused call with `isError: true`, and
+            `tortoise.mcp_client` runs fastmcp's client with
+            `raise_on_error=True`, so a refusal arrives as a raised `ToolError`.
+            Left uncaught it aborted this loop into `tortoise_push_failed`,
+            DISCARDING the ids of the points that had already landed — a partial
+            minutes push that cannot be reconciled, from a DESIGNED refusal. The
+            payload shape keeps `_point_id`'s existing accounting, so the result
+            stays `tortoise_push_partial` with the ids AND the refusal detail.
+            """
+            from fastmcp.exceptions import ToolError
+
+            from tortoise.mcp_client import describe_failure
+
+            try:
+                return call_tool(name, payload)
+            except ToolError as exc:
+                # ⛔ `describe_failure`, not `str(exc)`: this dict travels to
+                # `push_to_tortoise`'s result and `main()` PRINTS it on stdout, where
+                # scripted callers log it — and fastmcp carries the server's own
+                # JSON-RPC text, which may echo the credential it rejected (#10605,
+                # the same rule `client/tortoise_client/cli.py` applies to this exact
+                # refusal shape). Measured: the arm shipped unredacted while the CLI's
+                # arm was redacted in the same change (review round 12).
+                return {"error": describe_failure(exc)[:200]}
+
+        meeting_point = _write("tortoise_create_point", {
             "kind": "event",
             "content": f"Meeting: {frontmatter['title']} ({frontmatter['date']})",
             "authoredBy": "minutes-bridge",
@@ -299,7 +344,7 @@ def push_to_tortoise(frontmatter: dict) -> dict:
         for idx, decision in enumerate(frontmatter.get("decisions", [])):
             if not decision.get("text"):
                 continue
-            dp = call_tool("tortoise_create_point", {
+            dp = _write("tortoise_create_point", {
                 "kind": "decision",
                 "content": decision["text"],
                 "authoredBy": "minutes-bridge",
@@ -313,7 +358,7 @@ def push_to_tortoise(frontmatter: dict) -> dict:
         for idx, commitment in enumerate(frontmatter.get("commitments", [])):
             if not commitment.get("text"):
                 continue
-            cp = call_tool("tortoise_create_point", {
+            cp = _write("tortoise_create_point", {
                 "kind": "commitment",
                 "content": commitment["text"],
                 "authoredBy": "minutes-bridge",
@@ -325,14 +370,28 @@ def push_to_tortoise(frontmatter: dict) -> dict:
                 failures.append({"type": "commitment", "index": idx, "error": cerr})
 
         if failures:
-            return {"status": "error", "reason": "tortoise_push_partial",
+            # The TERM says what actually landed. `tortoise_push_partial` means
+            # "some rows are on the graph, reconcile the ids"; a push where NOTHING
+            # landed (a server crash on every write — `_write` hands back any
+            # `ToolError`, not only a refusal) is a different report, and reporting
+            # it as `partial` would stop the `tortoise_push_failed` alarm firing for
+            # a bridge that is simply broken (review round 5, measured).
+            landed = any(p.get("id") for p in point_ids)
+            return {"status": "error",
+                    "reason": "tortoise_push_partial" if landed else "tortoise_push_failed",
                     "points": point_ids, "failed": failures}
         return {"status": "ok", "points": point_ids}
 
     except Exception:
         import traceback
         traceback.print_exc()
-        return {"status": "error", "reason": "tortoise_push_failed"}
+        # The TERM follows what actually landed, exactly as the `failures` arm above
+        # does — an escape between writes must not report a push with landed rows as
+        # a total failure, or the caller discards ids that are on the graph.
+        landed_any = any(p.get("id") for p in point_ids)
+        return {"status": "error",
+                "reason": "tortoise_push_partial" if landed_any else "tortoise_push_failed",
+                "points": point_ids, "failed": failures}
 
 
 def _as_calendar_day(value) -> _date | None:

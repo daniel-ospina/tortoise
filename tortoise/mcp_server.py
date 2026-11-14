@@ -1486,16 +1486,15 @@ def _enforce_mcp_tool_scope(name: str) -> None:
         # default used to be "read", so a write missing from the parallel list
         # was reachable from a graphs:read-only key.
         raise AuthorizationError(
-            f"Unknown tool {name} — denied (not present in the registry).")
+            f"{_mcp_auth._REFUSAL_AUTHZ_UNKNOWN_TOOL_LEAD}{name} — denied "
+            "(not present in the registry).")
     if entry.writes:
         if "graphs:write" not in have:
             raise AuthorizationError(
-                f"Key lacks graphs:write scope for tool {name}.")
+                f"{_mcp_auth._REFUSAL_AUTHZ_WRITE_SCOPE_LEAD}{name}.")
     elif "graphs:read" not in have and "graphs:write" not in have:
         raise AuthorizationError(
-            f"Key lacks a graph data scope (graphs:read) for tool {name}.")
-
-
+            f"{_mcp_auth._REFUSAL_AUTHZ_READ_SCOPE_LEAD}{name}.")
 def _reject_graph_bound_mcp_org_surface(surface: str) -> None:
     """C5 #2114 (re-review 3): MCP tools that write ORG-level state (the
     DEFAULT graph's onboarding node / pack installs / session-recording
@@ -1507,7 +1506,7 @@ def _reject_graph_bound_mcp_org_surface(surface: str) -> None:
 
     if _current_graph_id.get():
         raise AuthorizationError(
-            f"Graph-scoped keys cannot access {surface}.")
+            f"{_mcp_auth._REFUSAL_AUTHZ_GRAPH_SCOPED_LEAD}{surface}.")
 
 
 #: #2050 — MCP tools that perform a budgeted SENSITIVE OP in-process, mapped to
@@ -1813,7 +1812,12 @@ _dispatch_safe_failures: ContextVar[list[dict[str, Any]] | None] = ContextVar(
 #: Failures retained per dispatch. A tool body calls `_safe` a handful of times,
 #: so this is not reached in practice; it bounds the holder for a body that
 #: loops over caller-sized batches. Dropping the OLDEST can only make a failure
-#: MISS (it reads ``ok``) — it can never misclassify a success.
+#: MISS — it can never misclassify a success, but a MISS now has a WIRE
+#: consequence since #11153 (the verdict flip reads this list), not only a
+#: telemetry one. `tortoise_overview`'s no-`section` aggregate constructs eleven
+#: in one dispatch, so it is reachable: a producer that returns a refusal built
+#: EARLY must re-record it (`_SafeError(dict(...))`, which re-appends) rather than
+#: hand back an object already evicted from the window.
 _MAX_RECORDED_SAFE_FAILURES = 8
 
 
@@ -1888,10 +1892,19 @@ def _returned_safe_failure(payload: Any) -> dict[str, Any] | None:
 
     Residual, deliberate: a tool that REWRITES the text (prefixes it with its
     own prose) or buries it deeper than the top level / wrap envelope still
-    reads ``ok``. No tool in the tree does either — every `_safe` return site
-    hands the `_SafeError` back verbatim, and `tortoise_recall`'s only reshape
-    keeps the text at the `error` key. That false-negative direction is
-    preferred to inventing a failure the wire never showed.
+    reads ``ok``. That false-negative direction is preferred to inventing a
+    failure the wire never showed.
+
+    ⚠️ The second half of that sentence USED to read "No tool in the tree does
+    either" — it was false, and #11153's contract depended on it: ``tortoise_
+    overview()`` with no ``section`` copied each section's `_SafeError` into
+    ``combined[sec]``, one level down, so a TOTAL outage shipped
+    ``isError: false`` on the orientation door (measured, review round 6). Fixed
+    at the producer instead: when NO section answered, the refusal is returned at
+    the top level, where this gate sees it (a PARTIAL summary keeps the old
+    shape). A tool that buries a failure today would still read ``ok`` here —
+    that is the residual, stated as a property of a hypothetical rather than of
+    a tool that exists.
     """
     failures = _dispatch_safe_failures.get()
     if not failures or not isinstance(payload, dict):
@@ -1991,6 +2004,43 @@ def _schema_error_result(result, name: str, schema: dict) -> ToolResult:
         content=content,
         structured_content=None,
         meta=meta or None,
+        is_error=True,
+    )
+
+
+def _payload_refusal_result(result) -> ToolResult:
+    """Flip a payload-carried refusal's VERDICT: same payload, ``is_error=True`` (#11153).
+
+    Why this exists at all. ``_safe`` answers a failure with an ``_SafeError`` dict, and
+    for a DICT-annotated tool that dict is schema-valid — so FastMCP ships it as a
+    *successful* payload and nothing in the envelope says the call failed::
+
+        {"structuredContent": {"error": "Team points limit reached (25000)…",
+                              "code": -32006},
+         "isError": false}
+
+    ``isError`` is the only failure signal uniform across MCP clients, so a client that
+    keys on it records a REFUSED WRITE as a success — measured on the production
+    workspace (#11153) and on the fleet's own graph CLI, which printed the refusal and
+    exited 0.
+
+    Why the payload is NOT dropped, unlike :func:`_schema_error_result`. #8482 has to
+    drop its envelope because the payload VIOLATES the advertised schema. A dict tool's
+    error dict does not: it is exactly the shape it advertised, so dropping it would
+    cost the client the machine-readable half (``code``) for no gain, and break every
+    reader that already parses ``payload["error"]``. The verdict was never the
+    payload's business — only the envelope's.
+
+    What this is NOT allowed to do. It is applied only to a payload the seam has already
+    PROVEN to be this dispatch's `_safe` failure (:func:`_returned_safe_failure`), never
+    to key presence: a successful write whose user props carry a key literally named
+    ``error`` is not a failure (#3926), and a tool that RECOVERED from a secondary
+    `_safe` failure answered successfully (#8135).
+    """
+    return ToolResult(
+        content=getattr(result, "content", None),
+        structured_content=getattr(result, "structured_content", None),
+        meta=getattr(result, "meta", None),
         is_error=True,
     )
 
@@ -2428,13 +2478,22 @@ def _disclose_graph_resolution(result: Any, name: str,
     for it would mean re-deriving a target this seam does not own.
 
     It leaves an `is_error` result and a non-`ToolResult` UNTOUCHED (the same
-    object, by identity). ⚠️ It does NOT catch a `_safe`-answered failure: that is
-    a plain `ToolResult` with `is_error=False`, so the thing that keeps a failure
-    from being disclosed is the CALLER's gate — `if status == "ok":` in
-    `_wrapped_call_tool`, which is where `exec_error`/`safe_error` is already
-    classified. Pinned by
-    `test_a_safe_answered_failure_is_not_disclosed`, because a reader (or a
-    mutant) that believes this function is the guard would be wrong.
+    object, by identity). For a `_safe`-answered failure TWO guards now cover it,
+    and the ORDER matters when you are deciding what may be deleted:
+
+    * since #11153 such a failure IS an `is_error` result, so this function's own
+      check below would return it untouched — belt-and-braces;
+    * but this function is never ENTERED for one: the caller gate
+      `if status == "ok":` in `_wrapped_call_tool` is false first, because the
+      payload was already classified `exec_error`/`safe_error` a few lines above
+      (measured: wrapping this call in a recorder and driving a refused write
+      through the seam records ZERO invocations).
+
+    So the seam gate is the guard that RUNS and this check is the second layer —
+    and that in turn is why `test_a_safe_answered_failure_is_not_disclosed` no
+    longer kills the mutant that deletes the seam gate: with the gate replaced by
+    `if True:`, this check still returns early. State that plainly rather than
+    letting the test read as a non-vacuity proof it is not.
     """
     if name not in WRITE_TOOL_NAMES:
         return result
@@ -2567,8 +2626,7 @@ async def _resolve_graph_argument(ref: str | None,
             # the dispatch is never created. Hence a self-contained message
             # rather than that prefix with a different parenthetical.
             raise ToolError(
-                "The graph lookup for this request did not finish inside the "
-                "time it had left, so the call was not executed. "
+                f"{_mcp_auth._REFUSAL_GRAPH_LOOKUP_MARGIN_MESSAGE}"
                 f"Retry after {_mcp_auth._TRANSPORT_WAIT_RETRY_AFTER_S}s."
             ) from None
         # No time left at all (the transport had already spent the bound): keep
@@ -2792,6 +2850,20 @@ async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None,
                     # SAME pair this line produces, so the two producers of one
                     # failure class agree on what it is called.
                     status, error_kind = "exec_error", "safe_error"
+        # #11153: ...and the VERDICT must agree with the payload even when the payload
+        # is schema-VALID. #8482 repaired only the tools whose declared schema forbids
+        # the `_safe` error dict, which left every DICT-annotated tool shipping a
+        # refusal as `isError: false` — a false PASS for the caller, and the reason a
+        # refused write reads as a recorded one. The payload is kept byte-identical
+        # here (see `_payload_refusal_result`); only `is_error` changes.
+        #
+        # Keyed on the seam's own proof (`_returned_safe_failure`, the discriminator
+        # #8135 established) rather than on `status`/`error_kind`, so an auth refusal
+        # (`auth_error`) is covered too and a payload the tool merely CONTAINS an
+        # `error` key in stays a success. Applied AFTER #8482's repair, whose result is
+        # already an error and must not be rebuilt.
+        if not getattr(result, "is_error", False) and _returned_safe_failure(payload) is not None:
+            result = _payload_refusal_result(result)
         # #10084 (owner ruling: default-graph-with-disclosure): a WRITE that
         # named no `graph` has just landed somewhere, and until now nothing in
         # the result said where. Applied LAST — after every classification and
@@ -4816,6 +4888,13 @@ def tortoise_get_operator(id: str) -> dict:
     if isinstance(point, _SafeError):
         return point
     if isinstance(point, dict) and point and not point.get("is_operator"):
+        # ⛔ DELIBERATELY a plain dict, NOT `_SafeError` (#4576, pinned by
+        # `test_get_operator_still_rejects_real_non_operator` and named as a
+        # deliberate residual in `tortoise/activation_scorecard.py`'s refusal
+        # telemetry contract): this is a SUCCESSFUL fetch reporting a domain fact,
+        # not a refused call. Typing it would classify it `exec_error`/`safe_error`
+        # and hand a caller a failure verdict for an answer that arrived.
+        # #11153's verdict flip does NOT reach it, on purpose.
         return {"error": f"Point {id!r} is not an operator"}
     return point
 
@@ -6337,12 +6416,24 @@ def tortoise_overview(section: str | None = None,
     """
     if section is None:
         combined: dict[str, Any] = {}
+        answered = 0
+        first_refusal: Any = None
         for sec in _OVERVIEW_SECTIONS:
             if sec in _OVERVIEW_SUMMARY_SKIP:
                 # requires an argument, or is deliberately not part of the
                 # default summary — see `_OVERVIEW_SUMMARY_SKIP`.
                 continue
             result = _overview_section(sec, entity_id, days, limit)
+            if isinstance(result, _SafeError):
+                # #11153: a section that was REFUSED is remembered, not buried.
+                # Folding it into `combined[sec]` puts the failure one level down
+                # where neither the verdict flip nor the #8135 telemetry arm can
+                # see it — so a total outage shipped `isError: false` on the
+                # orientation door (measured, review round 6).
+                if first_refusal is None:
+                    first_refusal = result
+            else:
+                answered += 1
             # #3510: every data-proportional section is folded to bounded
             # counts here — the rows themselves stay behind the explicit
             # section= calls. `tags`/`pointkinds` fold in their section's own
@@ -6360,6 +6451,21 @@ def tortoise_overview(section: str | None = None,
             elif sec == "structure_check":
                 result = _overview_summary(result, "type", "by_rule")
             combined[sec] = result
+        if answered == 0 and first_refusal is not None:
+            # NOTHING answered: this is a refused call, not an empty graph. Return
+            # the refusal at the payload's TOP level, where the seam's
+            # `_returned_safe_failure` gate flips the verdict and the telemetry row
+            # stops reading `ok`.
+            #
+            # ⛔ RE-CONSTRUCTED, not returned as-is: `_SafeError.__init__` is what
+            # RECORDS the failure, and the holder keeps only the last
+            # `_MAX_RECORDED_SAFE_FAILURES` (8) of them — while this aggregate
+            # builds eleven. Returning the first section's object verbatim handed
+            # the seam a payload that had already been evicted, so on a TOTAL
+            # outage whose per-section texts DIFFER the match missed and the wire
+            # still said `isError: false` (measured, review round 7). Building a
+            # new `_SafeError` from it re-records it as the most recent one.
+            return _SafeError(dict(first_refusal))
         return combined
     if not isinstance(section, str):
         return _SafeError({"error": f"overview: section must be a string, got "

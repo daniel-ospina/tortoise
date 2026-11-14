@@ -134,6 +134,7 @@ from .live import TERMINAL_EXCLUDED_STATUSES
 __all__ = [
     "DEFINITION_BOUNDARY_PROP",
     "DERIVED_GOAL_STATES",
+    "GONE_UNPROVEN",
     "NOT_DURABLE_REASON",
     "RETIRED_GOAL_STATES",
     "STALE_REASONS",
@@ -336,8 +337,10 @@ def _retirement(node: Any, *, goal: bool = False) -> str | None:
     # review, P1). `commit_ops.OBJECT_TERMINAL_STATUSES` omits `outdated` — the
     # legacy supersede/invalidate WORD — and the OBJECT family is SPLIT about it:
     # the four retrieval legs and the recall view still SERVE an Object whose
-    # status is `outdated` (`search_engine._status_vocab_for`,
-    # `commit_ops.py:1472` states it: *"'outdated' IS visible — it is not in the
+    # status is `outdated` (`search_engine._status_vocab_for`; cited by SHAPE, not
+    # by line — a stale pointer here read `commit_ops.py:1472` while the text lives
+    # ~1,100 lines below it, #12457 review cycle 9. The source states it:
+    # *"'outdated' IS visible — it is not in the
     # object vocabulary, only in the POINT-terminal set"*), while the recall
     # fold's own exclusion, ``assembly._RECALL_OBJECT_EXCLUDED_STATUSES``, is
     # `OBJECT_TERMINAL_STATUSES | {"outdated"}` and is frozen by
@@ -1048,6 +1051,18 @@ def reconcile_goal_state_cache(sdk: Any, goal_id: str | None) -> dict:
     documented repair route reported it again, forever. The absent case returns
     ``checked: False`` with ``gone: True``, which ``invalidate_stale`` surfaces as
     ``counts.gone`` — a sweep may not read clean while a reconcile did not happen.
+
+    ⚠️ AND ``gone`` IS NOT PROOF OF ABSENCE. It means "``sdk.get_entity`` could not
+    resolve this id", which an UNADDRESSABLE node produces exactly as a deleted one
+    does: this function resolves only the canonical labels, each by its OWN primary
+    identity prop (``Event`` is keyed by ``eventId``), so a ``:Widget``, an
+    unlabelled node, or a ``:Event {id:…}`` carrying no ``eventId`` all come back
+    the same as a node that is really gone. This function cannot tell those apart
+    and does not try — that is the caller's job, and a caller that needs proof of a
+    deletion must OBSERVE the graph (:data:`_GONE_PROBE` /
+    :data:`GONE_UNPROVEN`, #12336/#12457) rather than read this flag as one.
+    ⛔ ``invalidate_stale``'s ``counts.gone`` still derives straight from this
+    answer, un-probed — #12534.
     """
     if not goal_id:
         # ⛔ NOT "the claim names no goal" — this function cannot know that: it
@@ -1069,10 +1084,13 @@ def reconcile_goal_state_cache(sdk: Any, goal_id: str | None) -> dict:
         # ⛔ NOT the same fact as "the goal holds no derived word": there is no
         # node to point at anything, so nothing was reconciled. Reported as
         # `gone` so a sweep cannot read clean on a retirement it could not follow.
-        # A falsy read IS the absent case: `get_entity` answers `{}` for an id
-        # with no node (measured — a deleted node and a never-existent id both
-        # return `{}`, never `None`), which is why the caller must use the same
-        # predicate the read paths do rather than truthiness of a prop.
+        # ⛔ AND A FALSY READ IS *NOT* PROOF OF ABSENCE. `get_entity` answers `{}`
+        # in two different worlds (never `None`): an id with NO node, and an id
+        # this surface cannot ADDRESS — a non-canonical label, an unlabelled
+        # node, or an `:Event` carrying no `eventId` (#12336). So the caller must
+        # OBSERVE the graph (`_GONE_PROBE`) before claiming a deletion; reading
+        # this flag as one is the false "the goal no longer exists" which the
+        # sweep's `unaddressable` arm exists to stop.
         return {"checked": False, "gone": True,
                 "reason": f"the goal {goal_id!r} no longer exists — its cache "
                           "cannot be reconciled"}
@@ -1146,6 +1164,83 @@ _GOAL_STATE_CANDIDATES = (
     "MATCH (n) WHERE NOT n:Point AND toStringOrNull(n.goalState) IN $words "
     "RETURN n.id AS id, n.goalState AS word ORDER BY n.id LIMIT $lim"
 )
+
+#: Asked of the graph when the door answers ``gone`` — see :data:`GONE_UNPROVEN`.
+_GONE_PROBE = "MATCH (n) WHERE n.id = $id RETURN n.id LIMIT 1"
+
+#: Why a ``gone`` answer from the door is not, on its own, proof of a deletion.
+#:
+#: :func:`reconcile_goal_state_cache` decides ``gone`` by ``sdk.get_entity``, which
+#: resolves only the CANONICAL labels and resolves each by its OWN primary identity
+#: prop (``projection._CANONICAL_ENTITY_ID_PROPS``: ``Event`` is keyed by
+#: ``eventId``). This scan is an EXCLUSION (``WHERE NOT n:Point``) that names its
+#: candidates by ``n.id`` alone. The two predicates are not the same, so the door's
+#: "I could not resolve this id" and "this node is gone" collapse into ONE answer:
+#: a node it cannot address is indistinguishable there from a node that does not
+#: exist.
+#:
+#: MEASURED (#12412 review cycle 5; #12457 review cycle 2): ``:Widget
+#: {id:'w-1', goalState:'met'}``, an unlabelled ``{id:'nolabel-1', goalState:'met'}``
+#: and a ``:Event {id:'e-1', goalState:'met'}`` (id present, ``eventId`` absent) each
+#: came back ``action: 'gone'`` with a ``reason`` naming that node's OWN id — the
+#: door's exact wording is ``the goal '<id>' no longer exists — its cache cannot be
+#: reconciled`` (``reconcile_goal_state_cache``'s absent arm; quoted in full here
+#: because a quotation that is not a substring of the source is this PR's defect
+#: class) — while ``MATCH (n {id:'w-1'}) RETURN n.goalState`` still answered
+#: ``met``. The payload asserted a DELETION that never happened — the same false
+#: PASS the rest of this module exists to prevent, in its most literal form.
+#:
+#: ⛔ SO THE GRAPH IS ASKED, one id-wide read, ONLY on the already-rare ``gone`` arm.
+#: A node that is still there is UNADDRESSABLE — counted with the no-``id`` shape —
+#: and ``gone`` then means what the GRAPH says: no node carries this id. ⚠️ That is
+#: NOT what the door's own un-probed ``gone`` means ("could not resolve this id"),
+#: which is the whole reason the probe exists — so the sweep's ``gone`` and
+#: ``invalidate_stale``'s ``counts.gone`` are the same bucket NAME and different
+#: predicates (#12534). This is deliberately an
+#: OBSERVATION rather than a second spelling of the door's label/identity table:
+#: restating that table here is how the two would drift apart again, and a
+#: label-membership filter over-excludes (it would sweep every ``:Event`` into
+#: ``unaddressable``, including the ones that carry their real ``eventId`` and ARE
+#: repairable — measured on #12457's review).
+#:
+#: ⚠️ THE COST, stated rather than implied by "one read": the probe carries no
+#: label, so a MISS takes an All-Node scan — ``LIMIT 1`` bounds the ROWS RETURNED,
+#: not the scan. It runs only where the sweep was already about to write a
+#: falsehood, and the label-less candidate scan immediately before it is the same
+#: order of work, so a handful of gone goals is not a cost change. A graph carrying
+#: MANY genuinely-deleted goals makes it O(N) per goal, and ⛔ THERE IS NO INDEX
+#: ESCAPE HATCH: FalkorDB indexes are label-scoped (the `sdk.py` rule below says so),
+#: so no index — not even "an ``id`` index over all labels", which does not exist —
+#: can serve an unlabelled pattern. The knobs are the caller's ``limit`` and how
+#: often the sweep runs, not a weaker probe.
+#:
+#: ⛔ THIS IS A DELIBERATE DEPARTURE, and it is named here because the shape is
+#: forbidden elsewhere in this codebase: `sdk.py` carries the rule twice, verbatim
+#: as "⛔ LABEL-SCOPED probes, never `MATCH (n) WHERE n.id = $id AND …`" (its
+#: entity-resolution path and its `_update_entity` write path), because FalkorDB
+#: indexes are label-scoped and an unlabelled pattern can use no label's ``id``
+#: index. This probe breaks that rule on purpose, for the one question a labelled
+#: pattern cannot ask: presence on ANY label — which is exactly what makes a node
+#: unaddressable to the door. ⛔ An earlier version of this comment cited "the note
+#: at projection/__init__.py", which says nothing of the kind (#12457 review, cycle
+#: 5, verified: that module's index notes are about an un-indexed PROP inside a
+#: LABELLED branch); the rule it overrides is the `sdk.py` one above, so an auditor
+#: can tell a measured trade-off from an accident.
+#:
+#: ⚠️ WHAT THE PROBE ESTABLISHES, stated here rather than inside the payload string:
+#: it is id-WIDE (``MATCH (n) WHERE n.id = $id``), so it proves that A node with
+#: this id exists — not, strictly, that the GOAL node does. That asymmetry is kept
+#: deliberately: a same-id stranger outliving a real deletion can only make the
+#: sweep under-report a ``gone``, never assert one. ⛔ ``GONE_UNPROVEN`` below is
+#: CONSUMER-FACING (it is assigned verbatim to ``record["reason"]``), so it is plain
+#: prose with no Sphinx roles and no emoji — the rationale lives in this comment,
+#: the way ``NOT_DURABLE_REASON``'s does.
+GONE_UNPROVEN = (
+    "a node carrying this goal id is still in the graph, but the entity surface "
+    "cannot resolve it by that id, so its cache was NOT reconciled and it is "
+    "counted rather than reported gone"
+)
+
 
 #: The population the sweep DECLINES, counted (never repaired) so its summary
 #: cannot read clean over words it could not durably repair: a node carrying the
@@ -1266,6 +1361,22 @@ def reconcile_goal_states(
       ``counts.unaddressable`` rather than filtered away silently: a candidate
       read that matched and then vanished would be the same false PASS as the
       declined label above.
+    * **a node whose ``id`` sits on a label the entity surface cannot resolve** —
+      the same unaddressable population, in its second shape: the scan is
+      label-agnostic by design (``WHERE NOT n:Point``) while the door resolves each
+      label by its OWN primary identity prop, so an ``:Widget`` node — or an
+      unlabelled one — matches the scan and cannot be named to the door. ⛔ **It
+      includes a canonical label whose identity is not ``id``**: ``Event`` is keyed
+      by ``eventId``, so a ``:Event {id:'…'}`` is unaddressable even though the
+      surface CAN resolve an Event that carries its real ``eventId``. Such a node is
+      classified ``counts.unaddressable`` on a LIVE sweep, when the ``gone`` arm
+      probes the graph (:data:`GONE_UNPROVEN`) — not by pre-filtering on the label,
+      and not under ``dry_run``: the door is what ``dry_run`` skips, and the probe
+      hangs off the door's own answer (see the ``dry_run`` paragraph). A label filter
+      over-excludes and would sweep every repairable ``:Event`` in with them
+      (#12457 review cycle 2 measured both directions). Reachability is
+      raw/legacy-write only, like the no-``id`` shape above, because no SDK create
+      path mints these labels and ``_upsert_event`` sets ``id == eventId``.
     * **a word written inside the DOOR's read→write window** — see the note on
       ``preserved`` below.
 
@@ -1297,7 +1408,13 @@ def reconcile_goal_states(
 
     ``dry_run=True`` reports what it WOULD do and writes nothing: the safe
     preview for a graph-wide call, which is the one shape that can touch every
-    goal.
+    goal. ⛔ ONE DISCLOSED DIVERGENCE, structural rather than an oversight: the
+    door is never called under ``dry_run`` (it WRITES), and the probe that
+    reveals an id-unaddressable goal is reachable only from the door's ``gone``
+    answer — so a live sweep reports such a goal ``unaddressable`` while a dry run
+    of the SAME graph reports ``would-clear``/``would-rewrite`` for it. Nothing is
+    mis-written either way (a dry run writes nothing at all), but a preview cannot
+    promise the ``unaddressable`` count of the run it previews.
 
     ⛔ A FAILED SCAN RAISES. A summary of zero goals over a scan that never ran is
     exactly the false PASS this module exists against, so an unreadable
@@ -1314,9 +1431,22 @@ def reconcile_goal_states(
     ``notDurableReason``, ``goals`` (a record per SCANNED goal:
     ``goalId``, ``from``,
     ``to``, ``action`` — ``cleared``/``rewritten``/``consistent``/``preserved``/
-    ``gone``/``failed``, or ``would-clear``/``would-rewrite`` under ``dry_run`` —
-    plus ``error`` on a failure and ``reason`` where the door reported one), and
-    ``counts``.
+    ``gone``/``failed``/``unaddressable``, or ``would-clear``/``would-rewrite``
+    under ``dry_run`` — plus ``error`` on a failure and ``reason`` where one was
+    given), and ``counts``. ⛔ The actions with NO ``to`` are exactly ``failed``,
+    ``gone`` and ``unaddressable`` — the three where the sweep has no cache value to
+    name as the outcome; ``failed`` carries ``error`` in its place and the other two
+    carry ``reason``. A consumer reading ``to`` unconditionally gets a ``KeyError``
+    on those. ⚠️ That is NOT the same statement as "nothing was written":
+    ``consistent`` writes nothing and DOES carry ``to`` (the word that already
+    stood), as do ``would-clear``/``would-rewrite``, so a consumer must branch on
+    ``action`` and must never infer a write from the mere presence of ``to``.
+    ``unaddressable``'s
+    ``reason`` is the SWEEP's own :data:`GONE_UNPROVEN`, not the door's: the door
+    reported ``gone``, and this arm is the sweep saying it does not believe a
+    deletion it can disprove. The list is CLOSED — a consumer branching on
+    ``action`` must handle this value, so adding a new one here is part of adding
+    it in the loop below.
 
     ``notDurableReason`` is a STRING when ``counts.notDurable`` is non-zero and
     ``None`` otherwise: the counter never appears without its meaning beside it,
@@ -1338,21 +1468,40 @@ def reconcile_goal_states(
       ``guideline``) was left alone and reported, so a sweep cannot read clean over
       a goal it refused to touch. ⚠️ Scoped by VALUE for the same reason the gate
       above is: a human ``met``/``unmet`` in that window IS overwritten;
-    * ``gone`` — the goal no longer exists, so there is no cache to reconcile
-      (reported the same way :func:`invalidate_stale` reports ``counts.gone``);
-    * ``failed`` — the reconcile could not run or its write was refused. A sweep
-      may not read clean while a goal still displays a word it could not repair;
+    * ``gone`` — the goal node is GONE, so there is no cache to reconcile. The
+      record carries the DOOR's ``reason``, not the sweep's. ⚠️ The same BUCKET
+      NAME as :func:`invalidate_stale`'s ``counts.gone``, but NOT the same meaning:
+      that one still derives from the un-probed door answer (#12534), so a consumer
+      must not read the two counters as one predicate.
+      ⛔ The door's own ``gone`` answer is NOT sufficient to report this: it
+      resolves only the canonical labels, each by its OWN identity prop, while the
+      scan matched the node label-agnostically by ``n.id`` — so a node the surface
+      cannot address is indistinguishable THERE from one that does not exist. This
+      arm therefore probes the graph once (:data:`_GONE_PROBE`) and re-buckets a
+      node that is still present as ``unaddressable``; only a node the graph no
+      longer holds is reported ``gone``;
+    * ``failed`` — the reconcile could not run, its write was refused, or its
+      ``gone`` answer could not be VERIFIED (the :data:`_GONE_PROBE` read raised, so
+      the sweep could not tell a deletion from an id the surface cannot address).
+      A sweep may not read clean while a goal still displays a word it could not
+      repair;
     * ``notDurable`` — goals the sweep DECLINED because their repair cannot be
       durable (a node carrying the unwrapped POINT write branch), each holding a
       derived word. It is not a failure and not a repair: it is the population
       this call does not cover, counted so `scanned: 0` cannot be read as "this
       graph is clean" (:data:`NOT_DURABLE_REASON` says the same in the payload);
-    * ``unaddressable`` — candidates in the fetched WINDOW that carry no ``id``, so
-      the entity surface cannot name them and the sweep cannot repair them. The
-      counter is window-scoped; ``truncated`` is what says the window itself was
-      capped, so a caller reading both sees the whole shape (a capped scan whose
-      tail was unaddressable now reports ``truncated: True`` rather than looking
-      exhaustive);
+    * ``unaddressable`` — candidates in the fetched WINDOW that the entity surface
+      cannot ADDRESS, in any of its shapes: a node carrying no ``id`` (counted on
+      the scan, window-scoped); and, counted later on the ``gone`` arm, a node that
+      IS there but whose ``id``-named identity the surface cannot resolve — a node
+      on a non-canonical label, on no label, or on a canonical label whose primary
+      identity prop is not ``id`` (``Event`` is keyed by ``eventId``). The later
+      shapes used to come back ``gone`` — a deletion recorded for a node that still
+      exists with its word intact (#12412 review cycle 5, #12457 review cycle 2,
+      both measured). The counter is deliberately ONE bucket for both; ``truncated``
+      is what says the window itself was capped, so a caller reading both sees the
+      whole shape (a capped scan whose tail was unaddressable now reports
+      ``truncated: True`` rather than looking exhaustive);
     * ``wouldRepair`` — what a ``dry_run`` WOULD change; always ``0`` when
       ``dry_run`` is false, because nothing was previewed.
     """
@@ -1366,7 +1515,11 @@ def reconcile_goal_states(
     # A matched node with no `id` cannot be named to the entity surface, so it is
     # not repairable here — and it is COUNTED rather than filtered away: a
     # candidate that matched the scan and then vanished from the payload is the
-    # same false PASS as the declined label below.
+    # same false PASS as the declined label below. ⛔ The label/identity shapes are
+    # NOT pre-filtered here: they are caught on the `gone` arm by an OBSERVATION of
+    # the graph instead (:data:`GONE_UNPROVEN`), because a label-membership filter
+    # over-excludes every `:Event` — including the ones that carry their real
+    # `eventId` and ARE repairable.
     unaddressable = len(result) - len(rows)
     # ⛔ THE DECLINED POPULATION IS MEASURED, NOT ASSUMED EMPTY. Without this a
     # sweep over a graph whose only stale words sit on nodes the sweep cannot
@@ -1436,8 +1589,37 @@ def reconcile_goal_states(
             goals.append(record)
             continue
         if repaired.get("gone") is True:
-            record.update(action="gone", reason=repaired.get("reason"))
-            counts["gone"] += 1
+            # ⛔ THE DOOR'S `gone` IS NOT PROOF OF A DELETION (:data:`GONE_UNPROVEN`).
+            # It resolves only the canonical labels, each by its OWN identity prop,
+            # while this scan matched the node label-agnostically by `n.id`. So ask
+            # the graph, once, on this already-rare arm: a node that is still there
+            # is UNADDRESSABLE and counted — never reported as deleted.
+            # ⛔ A PROBE THAT COULD NOT RUN IS NOT A DELETION, and it is not the
+            # end of the sweep either: this is a PER-GOAL read, so it is reported
+            # on this goal and the rest still lands (the same isolation contract
+            # the `latest_judgement` and door calls above honour — see the
+            # docstring's "A FAILED SCAN RAISES … unlike a PER-GOAL failure").
+            # Letting it escape would discard `goals` for every goal already
+            # reconcile in this sweep, which is a throw-away a caller cannot
+            # diagnose. `failed` is the module's own word for "this goal could not
+            # be accounted for", and a sweep may not read clean over a word it
+            # could not account for.
+            try:
+                present = sdk._get_proj().g.query(
+                    _GONE_PROBE, params={"id": goal_id},
+                ).result_set or []
+            except Exception as exc:
+                record.update(action="failed",
+                              error=f"{type(exc).__name__}: {exc}")
+                counts["failed"] += 1
+                goals.append(record)
+                continue
+            if present:
+                record.update(action="unaddressable", reason=GONE_UNPROVEN)
+                counts["unaddressable"] += 1
+            else:
+                record.update(action="gone", reason=repaired.get("reason"))
+                counts["gone"] += 1
         elif repaired.get("error"):
             record.update(action="failed", error=repaired["error"])
             counts["failed"] += 1
@@ -1547,9 +1729,12 @@ def invalidate_stale(
     (``claim is None``) means the claim was never readable, so the answer is
     genuinely unknown and ``None`` is the only honest value.
 
-    ``counts.gone`` counts the findings whose goal NO LONGER EXISTS, so its
-    ``goalState`` cache could not be reconciled: there is no node to reconcile it
-    on. FOUR shapes set it, and it means the same thing in all of them — "the
+    ``counts.gone`` counts the findings whose cache reconcile did not happen
+    because the door could not resolve the goal. ⛔ That is a DELETED node AND an id
+    the entity surface merely cannot ADDRESS: it is the door's UN-PROBED answer, so
+    the two are counted alike here (#12534 owns the code fix; the sweep's wording
+    above is the correct one).
+    FOUR shapes set it, and it means the same thing in all of them — "the
     cache could not be reconciled", never "a retirement landed": a retirement
     that DID land whose cache follow-up could not; #12315's ABSENT arm (``found:
     False``), where no retirement was needed at all; #12315's SECOND VANISH
@@ -1564,7 +1749,7 @@ def invalidate_stale(
     both edits made BEFORE the sweep instead give ``stale: 0`` and no finding at
     all, because the scan reads live judgements only). It is neither a failure of
     a retirement nor a success of the reconcile, and it exists so a sweep over
-    deleted goals cannot read clean.
+    UNRESOLVED goals cannot read clean.
 
     ⛔ THE BUCKETS ARE PER-FINDING PREDICATES, NOT A PARTITION — do not read a
     bucket total as a finding count. A retirement that landed and whose cache
@@ -1669,8 +1854,10 @@ def invalidate_stale(
             "retired": sum(1 for r in invalidated if r.get("invalidated")),
             "alreadyRetired": sum(1 for r in invalidated if r.get("alreadyRetired")),
             # ⛔ ``gone`` IS A CACHE FACT, NOT A RETIREMENT FACT. It counts the
-            # findings whose goal no longer exists, so its ``goalState`` could not
-            # be reconciled — there is no node to reconcile it on. FOUR shapes set
+            # findings whose goal the DOOR could not resolve — which is a deleted
+            # node and also an id the entity surface cannot address, the two being
+            # indistinguishable from that answer alone (#12534) — so its
+            # ``goalState`` could not be reconciled. FOUR shapes set
             # it and they mean the same thing in all four (see the
             # ``invalidate_stale`` docstring, which enumerates them):
             #   1. a retirement that DID land whose cache follow-up could not;

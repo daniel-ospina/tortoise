@@ -155,12 +155,18 @@ def _assert_call_succeeded(body, what):
       `isError`, never `error`, and a non-JSON text block falls through
       `_tool_payload` to the raw result.
 
-    ⚠️ `mcp_server._safe` deliberately produces the OTHER shape — an ORDINARY
-    successful result carrying `{"error": …}` (`_SafeError`), `isError` false.
-    Pairing the two producers is the mistake `_SafeError`'s own module docstring
-    spends its length keeping apart ("two separate questions, two separate
-    gates"), and it is why the verify step's payload check below cannot rely on
-    the absence of `error`: only POSITIVE evidence separates the two.
+    ⚠️ `mcp_server._safe` produces a THIRD shape, and since #11153 it is a real
+    tool error too: `_SafeError` is a dict subclass whose only key is `error`, and
+    it ships with `isError: true` while the PAYLOAD stays the ordinary dict (a
+    dict-annotated tool's advertised schema admits it, so it is not dropped the way
+    #8482 drops a wrap envelope). Before #11153 that same payload arrived with
+    `isError` false — the false PASS where a refused write read as a success. The
+    payload half is still `{"error": …}` and still `_SafeError`; only the verdict
+    changed. Pairing `_SafeError` with a genuine `ToolError`-derived result is the
+    mistake `_SafeError`'s own module docstring spends its length keeping apart
+    ("two separate questions, two separate gates"), and it is why the verify step's
+    payload check below cannot rely on the absence of `error`: only POSITIVE
+    evidence separates the two.
 
     So both checks are made on the RAW body, where the envelopes actually are.
     """
@@ -175,12 +181,12 @@ def _assert_healthy_verify_payload(payload):
     """The journey's verify step really measured a healthy graph.
 
     ⛔ NOT `"error" not in payload` ALONE: `_SafeError` — a
-    dict subclass whose only key is `error`, returned as an ORDINARY successful
-    `tools/call` result and never as `isError` (`mcp_server._safe`: "every tool
-    returns the SDK result on success or `{"error": message}` on failure") — is
-    the shape a RAISED exception in `tortoise_health()` produces. Neither
-    `isError` nor a JSON-RPC `error` key accompanies it, and an empty/absent
-    result carries no `error` either, so the check has to demand POSITIVE evidence.
+    dict subclass whose only key is `error`, shipped with `isError: true` since
+    #11153 (the payload is unchanged; before that change the verdict was false,
+    which is the false PASS the issue removed) — is the shape a failure inside
+    `tortoise_health()` produces. A JSON-RPC `error` key does not accompany it, and
+    an empty/absent result carries no `error` either, so the check has to demand
+    POSITIVE evidence.
 
     The positive term is `monitoring.metrics()`'s own success verdict —
     `status == "ok"` — set only when the db probe observed success
