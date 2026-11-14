@@ -2064,3 +2064,642 @@ async def test_synchronous_handler_is_not_bounded_it_is_stated_not_assumed(
     assert rec.status == 200, (
         "the loop was blocked, so the bound could not fire")
     assert rec.json == {"ok": True}
+
+
+# ── #12477 round 4: which traffic the refusal SHARE is computed from ──────
+# The liveness verdict is `windowed refusals / attempts`, and these tests pin the
+# PARTITION — because both directions were measured wrong before it existed.
+#
+# Each case drives the real middleware with a real breach (a 0.05 s bound and a
+# handler that never answers), then reads the window the 9090 listener derives
+# its verdict from.
+
+@pytest.fixture
+def refusal_window(monkeypatch):
+    """Fresh window per test; restores the global state other tests assert on."""
+    from tortoise import monitoring
+    monitoring.reset_wait_bound_breach_window()
+    yield monitoring
+    monitoring.reset_wait_bound_breach_window()
+
+
+async def _served_ok(scope, receive, send):
+    await send({"type": "http.response.start", "status": 200,
+                "headers": [(b"content-type", b"application/json")]})
+    await send({"type": "http.response.body", "body": b'{"ok": true}'})
+
+
+async def _breach(mw, path, method="GET"):
+    """Drive ONE request to a transport refusal under the fast bound."""
+    rec = await _drive(mw, _scope(path, method=method))
+    assert rec.status == 504, (path, rec.status)
+    return rec
+
+
+@pytest.mark.asyncio
+async def test_control_plane_polls_are_not_in_the_denominator(
+        fast_bound, refusal_window):
+    """12 served `/health` polls must not dilute 10 refused data requests.
+
+    Measured before the partition: `attempts 22, total 10, share 0.455,
+    refusing False` — the check answering **200 while every data request was
+    refused**, because a dashboard's health polls outnumbered real traffic. That
+    is a fail-open in the exact class this issue exists for.
+    """
+    async def ok(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200,
+                    "headers": [(b"content-type", b"application/json")]})
+        await send({"type": "http.response.body", "body": b'{"ok": true}'})
+
+    mw = ha.WaitBoundMiddleware(ok)
+    for _ in range(12):
+        await _drive(mw, _scope("/health"))
+        await _drive(mw, _scope("/liveness"))
+
+    hanging = ha.WaitBoundMiddleware(_slow_app(10.0))
+    for _ in range(10):
+        await _breach(hanging, "/v1/search")
+
+    window = refusal_window.wait_bound_breach_window()
+    assert window["attempts"] == 10, (
+        "the instrument's own polls must not be in the denominator", window)
+    assert window["total"] == 10
+    assert window["share"] == 1.0
+    assert window["refusing"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_documented_long_route_is_not_a_refusal_of_the_plane(
+        fast_bound, refusal_window):
+    """5 legitimate imports beside 5 data requests must stay green.
+
+    Measured before the partition: `share 0.5, refusing True` — a HEALTHY
+    deployment failing its own deploy gate, because a 64 MiB restore is supposed
+    to exceed a 10 s bound and its refusal is the product working.
+    """
+    async def ok(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200,
+                    "headers": [(b"content-type", b"application/json")]})
+        await send({"type": "http.response.body", "body": b'{"ok": true}'})
+
+    mw = ha.WaitBoundMiddleware(ok)
+    for _ in range(5):
+        await _drive(mw, _scope("/v1/organizations/org-1/import", method="POST"))
+
+    hanging = ha.WaitBoundMiddleware(_slow_app(10.0))
+    for _ in range(5):
+        await _breach(hanging, "/v1/organizations/org-1/import", method="POST")
+
+    window = refusal_window.wait_bound_breach_window()
+    # ⚠️ BOTH SIDES are excluded for the long class, so an all-import window has
+    # no traffic to divide by and decides NOTHING — which the listener treats as
+    # green (an idle plane refuses nobody). Asserting "attempts == 5" here would
+    # pin the opposite of what makes the term safe.
+    assert window["attempts"] == 0, (
+        "a long route is excluded from the denominator as well as the "
+        "numerator", window)
+    assert window["total"] == 0, (
+        "an import refusal is the bound working, not the plane failing", window)
+    assert window["refusing"] is None
+    # …and mixing them in must not let imports carry the share over the bar
+    ok = ha.WaitBoundMiddleware(_slow_app(0.002))
+    hanging = ha.WaitBoundMiddleware(_slow_app(10.0))
+    for _ in range(5):
+        await _drive(ok, _scope("/v1/search"))
+    for _ in range(5):
+        await _breach(hanging, "/v1/organizations/org-1/import", method="POST")
+    window = refusal_window.wait_bound_breach_window()
+    assert window["attempts"] == 5 and window["total"] == 0
+    # a DECIDED green: five data attempts, none refused
+    assert window["refusing"] is False
+
+
+@pytest.mark.asyncio
+async def test_the_cumulative_counter_still_sees_every_refusal(
+        fast_bound, refusal_window):
+    """The WINDOW is partitioned; the LIFETIME counter is not.
+
+    `/metrics` and `test_10602` read the cumulative total, and narrowing it would
+    silently change a published metric. Only the verdict's inputs are filtered.
+    """
+    before = refusal_window.wait_bound_breach_counts()["total"]
+    hanging = ha.WaitBoundMiddleware(_slow_app(10.0))
+    await _breach(hanging, "/health")
+    await _breach(hanging, "/v1/search")
+    counts = refusal_window.wait_bound_breach_counts()
+    assert counts["total"] - before == 2
+    window = refusal_window.wait_bound_breach_window()
+    assert window["total"] == 1, "only the data-route refusal is evidence"
+
+
+# ── #12477 round 4: which traffic the refusal SHARE is computed from ──────
+# The liveness verdict is `windowed refusals / attempts`, and these tests pin the
+# PARTITION — because both directions were measured wrong before it existed. Each
+# case drives the real middleware to a real breach (a 0.05 s bound and a handler
+# that never answers), then reads the window the 9090 listener derives its
+# verdict from.
+
+
+# ── round 5: a REFUSED control poll, and the cold-start carve-out ─────────
+
+@pytest.mark.asyncio
+async def test_a_refused_control_poll_is_the_verdict_on_its_own_arm(
+        fast_bound, refusal_window):
+    """A serving health poll is not evidence of data service — a REFUSED one is.
+
+    Round 4 excluded control traffic from the share to kill a fail-open; round 5
+    found that the refusal went with it, so a quiet refusing plane read GREEN.
+    Measured: 2 refused data requests + 8 refused `/health` polls →
+    `attempts 2, total 2, share 1.0, refusing None` → **200**, on the incident's
+    own shape (the issue's `/health` 504'd half the time). The refusal now has its
+    own arm, OUT of the data denominator.
+    """
+    hanging = ha.WaitBoundMiddleware(_slow_app(10.0))
+    for _ in range(2):
+        await _breach(hanging, "/v1/search")
+    for _ in range(8):
+        await _breach(hanging, "/health")
+
+    window = refusal_window.wait_bound_breach_window()
+    assert window["control_refusals"] == 8
+    assert window["min_control_refusals"] == (
+        refusal_window.WAIT_BOUND_HEALTH_MIN_CONTROL_REFUSALS)
+    assert window["control_refusing"] is True
+    assert window["attempts"] == 2, (
+        "control polls must still stay OUT of the data denominator", window)
+
+
+@pytest.mark.asyncio
+async def test_one_refused_control_poll_is_not_yet_the_verdict(
+        fast_bound, refusal_window):
+    """A cold start can produce one; two in the window is a process failing."""
+    hanging = ha.WaitBoundMiddleware(_slow_app(10.0))
+    await _breach(hanging, "/health")
+    window = refusal_window.wait_bound_breach_window()
+    assert window["control_refusals"] == 1
+    assert window["control_refusing"] is False
+
+
+@pytest.mark.asyncio
+async def test_attempts_do_not_count_requests_the_plane_never_saw(
+        fast_bound, refusal_window):
+    """A 401 storm must not dilute the share into a false green.
+
+    Measured before this gate: 40 fast 401s to `/v1/points` beside 7 refused
+    `/v1/search` gave `attempts 47, total 7, share 0.149 -> 200` over a refusing
+    plane. A public API is scanned continuously, so that is ordinary noise.
+    """
+    async def unauthorised(scope, receive, send):
+        await send({"type": "http.response.start", "status": 401,
+                    "headers": [(b"content-type", b"application/json")]})
+        await send({"type": "http.response.body", "body": b'{"detail":"no"}'})
+
+    mw = ha.WaitBoundMiddleware(unauthorised)
+    for _ in range(40):
+        rec = await _drive(mw, _scope("/v1/points"))
+        assert rec.status == 401
+
+    hanging = ha.WaitBoundMiddleware(_slow_app(10.0))
+    for _ in range(7):
+        await _breach(hanging, "/v1/search")
+
+    window = refusal_window.wait_bound_breach_window()
+    assert window["attempts"] == 7, (
+        "a 401 never reached the data plane, so it is not demand to divide by",
+        window)
+    assert window["share"] == 1.0
+    assert window["refusing"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_404_IS_counted_because_the_plane_answered(
+        fast_bound, refusal_window):
+    """The negative control for the test above: a plane's "not found" is demand."""
+    async def not_found(scope, receive, send):
+        await send({"type": "http.response.start", "status": 404,
+                    "headers": [(b"content-type", b"application/json")]})
+        await send({"type": "http.response.body", "body": b'{"detail":"nope"}'})
+
+    mw = ha.WaitBoundMiddleware(not_found)
+    rec = await _drive(mw, _scope("/v1/points/p1"))
+    assert rec.status == 404
+    window = refusal_window.wait_bound_breach_window()
+    assert window["attempts"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_during_a_one_time_embedder_load_is_not_the_verdict(
+        fast_bound, refusal_window, monkeypatch):
+    """A machine that is merely WARMING must not fail its own deploy.
+
+    The pre-warm holds `EmbeddingModel._lock` for the whole load (~57 s measured,
+    300 s cap), so concurrent requests are refused by a bound they never had a
+    chance to meet — five of them in a window is `share 1.0` ⇒ red. Fly's
+    `grace_period` is 180 s and the load can exceed it.
+    """
+    monkeypatch.setattr(ha, "_embedder_load_in_flight", lambda: True)
+    hanging = ha.WaitBoundMiddleware(_slow_app(10.0))
+    for _ in range(6):
+        await _breach(hanging, "/v1/search")
+
+    window = refusal_window.wait_bound_breach_window()
+    # the refusals are still OBSERVED (cumulative), and kept out of the verdict
+    assert refusal_window.wait_bound_breach_counts()["total"] >= 6
+    assert window["total"] == 0, (
+        "a cold-start refusal is not evidence the plane is failing", window)
+    assert window["refusing"] is False, window
+
+    # …and once the load finishes, the very same traffic IS the verdict
+    monkeypatch.setattr(ha, "_embedder_load_in_flight", lambda: False)
+    for _ in range(6):
+        await _breach(hanging, "/v1/search")
+    window = refusal_window.wait_bound_breach_window()
+    assert window["total"] >= 6
+    assert window["refusing"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_router_miss_is_not_demand_the_plane_saw(monkeypatch, refusal_window):
+    """A scanner's stray 404s must not hold the check green.
+
+    Measured before this gate: 40 stray `GET /wp-login-*.php` (404 from the
+    router, no route matched) beside 7 refused `/v1/search` gave
+    `attempts 47, total 7, share 0.149 -> 200` over a fully refusing plane — the
+    same fail-open the 401 filter closed, reached with no credential at all, and
+    at no cost to an attacker (the bound itself rate-limits the refused calls).
+
+    The bound is left GENEROUS here: this test is about the denominator, and a
+    refused router miss would be a separate (and correct) breach.
+    """
+    from starlette.applications import Starlette
+    from starlette.responses import JSONResponse
+    from starlette.routing import Route
+    from starlette.testclient import TestClient
+
+    async def ok(request):
+        return JSONResponse({"ok": True})
+
+    async def missing(request):
+        return JSONResponse({"detail": "Point not found"}, status_code=404)
+
+    monkeypatch.setattr(ha._mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 60.0)
+    app = Starlette(routes=[Route("/v1/search", ok),
+                            Route("/v1/points/{point_id}", missing)])
+    app.add_middleware(ha.WaitBoundMiddleware)
+    client = TestClient(app)
+    for i in range(40):
+        assert client.get(f"/wp-login-{i}.php").status_code == 404
+    assert refusal_window.wait_bound_breach_window()["attempts"] == 0, (
+        "router misses never reached the plane, so they are not demand")
+
+    # the control: a MATCHED route answering 404 IS the plane answering, whether
+    # or not it was slow — a route that can miss a point needed the plane
+    assert client.get("/v1/points/p1").status_code == 404
+    assert refusal_window.wait_bound_breach_window()["attempts"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_long_route_whose_own_timeout_exceeds_the_bound_is_not_the_gate(
+        fast_bound, refusal_window):
+    """A slow THIRD PARTY must not fail an unrelated deploy.
+
+    `/v1/graphs/trash/{id}/restore` waits up to 300 s on the per-org sweep lock by
+    design and answers `503 Retry-After: 300`; signup/claim wait up to 15 s on
+    Supabase. Measured before this fix: 5 refused restores in a window gave
+    `share 1.0 -> 503`.
+
+    `/v1/session/login` was the member of that family the list missed (#12477
+    review round 14): `_session_login_exchange` awaits up to three `timeout=15.0`
+    GoTrue calls, and the route is in `SKIP_AUTH`, so any caller reaches it —
+    measured, five refused logins gave `share 1.0 -> 503` on the real listener.
+    """
+    hanging = ha.WaitBoundMiddleware(_slow_app(10.0))
+    for path, method in (
+        ("/v1/graphs/trash/g-1/restore", "POST"),
+        ("/v1/agent/signup", "POST"),
+        ("/v1/signup/email", "POST"),
+        ("/v1/claim/email", "POST"),
+        ("/v1/user/identity", "GET"),
+        ("/v1/user/identity/link-intent", "POST"),
+        ("/v1/user/identity/link-commit", "POST"),
+        ("/v1/user/identity/resend-confirmation", "POST"),
+        ("/v1/user/identity/unlink", "POST"),
+        ("/v1/session/login", "POST"),
+        ("/v1/onboarding/github/repos", "GET"),
+        ("/v1/onboarding/github/status", "GET"),
+        ("/v1/index/github", "POST"),
+    ):
+        for _ in range(6):
+            await _breach(hanging, path, method=method)
+    window = refusal_window.wait_bound_breach_window()
+    assert window["total"] == 0, (
+        "a designed long wait or a slow upstream is not the data plane failing",
+        window)
+    # NOT DECIDED, not "green by absence": with no data traffic in the window
+    # there is nothing for the share to be a share OF (`None`, never False).
+    assert window["refusing"] is None
+
+
+def test_the_cold_start_predicate_reads_the_lock_that_actually_blocks(monkeypatch):
+    """The carve-out must read the state that makes requests WAIT.
+
+    Round 6 measured the pre-fix predicate against a real background load: it
+    returned False on a machine whose `EmbeddingModel._lock` WAS held and whose
+    requests WERE blocking, because the hosted pre-warm runs `get()` inside
+    `background_load()` — which SUPPRESSES the one-time Event — and never sets
+    `_warm_up_thread` (only `start_warm_up` does). It appeared to work only
+    because `TortoiseSDK._get_proj()` happens to call `start_warm_up()`. Remove
+    or gate that call and the deploy-gate carve-out silently stops existing,
+    with no test to notice.
+    """
+    from tortoise.embeddings import EmbeddingModel
+
+    monkeypatch.setattr(EmbeddingModel, "one_time_setup_in_progress",
+                        staticmethod(lambda: False))
+    monkeypatch.setattr(EmbeddingModel, "_warm_up_thread", None, raising=False)
+    lock = EmbeddingModel._lock
+    if lock.locked():  # a peer test holds it; the negative half is unmeasurable
+        pytest.skip("the embedder lock is held elsewhere")
+    assert ha._embedder_load_in_flight() is False
+    lock.acquire()
+    try:
+        assert ha._embedder_load_in_flight() is True, (
+            "the lock IS the thing that blocks, so it is the thing to read")
+    finally:
+        lock.release()
+    assert ha._embedder_load_in_flight() is False
+
+
+@pytest.mark.asyncio
+async def test_a_refused_health_ready_probe_is_NOT_a_control_refusal(
+        fast_bound, refusal_window):
+    """`/health/ready` does a DB round trip, so it is data-plane evidence.
+
+    The control arm's whole justification is "a healthy box cannot fail to run a
+    no-I/O poll in 10 s". `/health/ready` runs `_READY_PROBE` and
+    `_CONTROL_PLANE_PROBE` — the prefix list matched it anyway, so a merely SLOW
+    store red'd the check through an arm that promises it does no I/O, and
+    independently of the data plane's own staleness window (#12477 review round
+    6). It stays counted as DATA plane evidence, which is what it is.
+    """
+    hanging = ha.WaitBoundMiddleware(_slow_app(10.0))
+    for _ in range(8):
+        await _breach(hanging, "/health/ready")
+    window = refusal_window.wait_bound_breach_window()
+    assert window["control_refusals"] == 0
+    assert window["total"] == 8 and window["attempts"] == 8
+    assert window["refusing"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", [
+    "/.well-known/oauth-authorization-server",
+    "/.well-known/mcp/oauth-protected-resource",
+    "/oauth/authorize",
+    "/health/ready",
+    "/health/security",
+    "/v1/version",
+    "/mcp",                      # the metadata GET only; a POST there is a tool call
+])
+async def test_a_lane_free_route_is_not_data_plane_demand(
+        path, fast_bound, refusal_window):
+    """The round-7 P0: a served 200 on a route that never needs the plane is not demand.
+
+    Measured on the real app before this gate: 7 refusals (the incident shape)
+    beside 8 served `GET /.well-known/oauth-authorization-server` gave
+    `attempts 15, share 0.467 -> 200` over a fully refusing plane — and RFC
+    8414/9728 discovery is public BY CONSTRUCTION, so that dilution needs no
+    credential and no attacker at all.
+
+    ⛔ The FIRST fix for this was a LATENCY floor (count a served request only if
+    it spent >=10% of the bound in the app) and round 8 measured it wrong in the
+    opposite direction, which is why this is a ROUTE rule and not a timing rule:
+    since a refusal always stamps its own attempt, the floor degenerated to
+    `refusals / (refusals + slow_served)`, so five refusals in 120 s — the
+    designed ~2.1% rate reaches that on any busy minute — made a HEALTHY box red,
+    and every MCP call (served in ~12 ms, SSE starts before the tool dispatches)
+    became a numerator with no denominator. See `_WAIT_BOUND_NO_PLANE_ROUTES`.
+    """
+    served = ha.WaitBoundMiddleware(_slow_app(0.001))
+    hanging = ha.WaitBoundMiddleware(_slow_app(10.0))
+    for _ in range(12):
+        assert (await _drive(served, _scope(path))).status == 200
+    for _ in range(7):
+        await _breach(hanging, "/v1/search")
+    window = refusal_window.wait_bound_breach_window()
+    assert window["attempts"] == 7, (
+        "a route the app serves without the plane is not data-plane demand", window)
+    assert window["share"] == 1.0
+    assert window["refusing"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_FAST_served_data_request_is_still_demand(fast_bound, refusal_window):
+    """The other half, and the reason a latency floor was the wrong fix.
+
+    A healthy box serves most data requests in milliseconds. If only slow serves
+    counted, the share would be `refusals / (refusals + slow_served)` and any
+    minute with five refusals — the designed ~2.1% rate — would red it.
+    """
+    ok = ha.WaitBoundMiddleware(_slow_app(0.001))
+    hanging = ha.WaitBoundMiddleware(_slow_app(10.0))
+    for _ in range(200):
+        assert (await _drive(ok, _scope("/v1/search"))).status == 200
+    for _ in range(5):
+        await _breach(hanging, "/v1/search")
+    window = refusal_window.wait_bound_breach_window()
+    assert window["attempts"] == 205, window
+    assert window["share"] == pytest.approx(5 / 205)
+    assert window["refusing"] is False, (
+        "a healthy box at the designed breach rate must stay green", window)
+
+
+@pytest.mark.asyncio
+async def test_a_SERVED_mcp_call_enters_the_denominator(fast_bound, refusal_window):
+    """Round 8 P0-2: MCP refusals had a numerator and no denominator.
+
+    Streamable-HTTP starts the SSE response BEFORE it dispatches the tool
+    (vendored `mcp/server/streamable_http.py`: "Start the SSE response (this will
+    send headers immediately)"), so an MCP exchange is SERVED in ~12 ms while the
+    dispatch seam counts its breach. With the (removed) latency floor, 500
+    refused MCP calls measured `attempts 0, total 500, share None` — `/healthz`
+    200 over a door refusing everything, the exact defect #12477 is about.
+    """
+    served = ha.WaitBoundMiddleware(_slow_app(0.001))
+    for _ in range(20):
+        # `scope["path"]` is what the outermost layer sees: the canonicalizer
+        # COPIES the scope before rewriting `/mcp` -> `/mcp/`
+        rec = await _drive(served, _scope("/mcp", method="POST"))
+        assert rec.status == 200
+    for _ in range(6):
+        await _breach(ha.WaitBoundMiddleware(_slow_app(10.0)), "/v1/search")
+    window = refusal_window.wait_bound_breach_window()
+    assert window["attempts"] == 26, (
+        "an MCP call that was served is data-plane demand", window)
+    assert window["refusing"] is False
+
+
+def test_the_mcp_surface_is_reachable_for_the_denominator():
+    """`/mcp` is rewritten from a scope COPY, so `endpoint` never reaches here.
+
+    Measured on the real app: `GET /mcp` -> 200 with `endpoint=None` while
+    `GET /mcp/` -> 200 with an endpoint, because
+    `McpPathCanonicalizerMiddleware` copies the scope before rewriting it. `/mcp`
+    is the canonical connector URL clients are handed, so every real MCP call
+    was invisible to the denominator while the dispatch seam counted its
+    breaches — a healthy MCP-heavy deployment read `share 1.0` and failed its
+    own Fly check (#12477 review round 7).
+    """
+    # a copied scope (no endpoint, an app that DOES declare routes): only a POST
+    # to the mount root is a tool call — round 9 measured `OPTIONS /mcp`,
+    # `DELETE /mcp` and `POST /mcp/<junk>` all being admitted by the first
+    # version of this escape, 8 free preflights turning 7 refusals into 200.
+    scope = {"type": "http", "path": "/mcp", "method": "POST", "app": ha.app}
+    assert ha._exchange_reached_a_route(scope) is True
+    assert ha._exchange_reached_a_route(dict(scope, path="/mcp/")) is True
+    for other in ("GET", "OPTIONS", "DELETE"):
+        assert ha._exchange_reached_a_route(dict(scope, method=other)) is False
+    assert ha._exchange_reached_a_route(dict(scope, path="/mcp/junk")) is False
+    # the sibling is not the surface, and a real router miss stays a miss
+    assert ha._exchange_reached_a_route(dict(scope, path="/mcpfoo")) is False
+    assert ha._exchange_reached_a_route(dict(scope, path="/wp-login.php")) is False
+
+
+@pytest.mark.asyncio
+async def test_a_CORS_preflight_is_never_demand(fast_bound, refusal_window):
+    """`OPTIONS` is answered from configuration — before auth, before routing.
+
+    Measured (#12477 review round 9): 8 × `OPTIONS /mcp` (a browser can be made
+    to send them) beside 7 refused `/v1/search` gave `attempts 15, share 0.4667`,
+    and the real 9090 listener answered **200** with `reasons: []` over a fully
+    refusing plane — the #12477 shape, end to end, at HEAD.
+    """
+    preflight = ha.WaitBoundMiddleware(_slow_app(0.001))
+    hanging = ha.WaitBoundMiddleware(_slow_app(10.0))
+    for _ in range(8):
+        rec = await _drive(preflight, _scope("/mcp", method="OPTIONS"))
+        assert rec.status == 200
+    for _ in range(7):
+        await _breach(hanging, "/v1/search")
+    window = refusal_window.wait_bound_breach_window()
+    assert window["attempts"] == 7, ("a preflight is not data-plane demand", window)
+    assert window["refusing"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_DELETE_or_a_junk_POST_on_mcp_is_not_demand(fast_bound, refusal_window):
+    """`DELETE /mcp` tears down an in-memory stream; `POST /mcp/x` is a sub-app 404."""
+    mw = ha.WaitBoundMiddleware(_slow_app(0.001))
+    for _ in range(4):
+        assert (await _drive(mw, _scope("/mcp", method="DELETE"))).status == 200
+    for _ in range(4):
+        assert (await _drive(mw, _scope("/mcp/junk", method="POST"))).status == 200
+    assert refusal_window.wait_bound_breach_window()["attempts"] == 0
+
+
+def test_an_MCP_refusal_during_a_cold_start_is_not_the_verdict(refusal_window,
+                                                              monkeypatch):
+    """The carve-out must reach BOTH counting sites.
+
+    #12477 review round 6 built it into the REST arm only. Round 9 measured the
+    MCP arm (`mcp_server`'s dispatch seam) on a warming box — the model lock held
+    by a pre-warm — `attempts 5, total 5, share 1.0, refusing True` → 503, while
+    the REST arm recorded `total 0` at the same instant. Both arms stamp through
+    `monitoring.record_wait_bound_breach`, so the predicate is consulted there.
+    """
+    from tortoise import monitoring
+
+    monitoring.set_cold_start_source(lambda: True)
+    try:
+        for _ in range(5):
+            monitoring.record_wait_bound_attempt("mcp")
+            monitoring.record_wait_bound_breach("mcp")   # the dispatch seam's call
+        window = refusal_window.wait_bound_breach_window()
+        assert window["total"] == 0, ("a warming machine is not a failing plane", window)
+        assert window["attempts"] == 5
+        assert window["refusing"] is False
+    finally:
+        monitoring.set_cold_start_source(None)
+
+    # …and the same refusals DO count once the load is over
+    for _ in range(5):
+        monitoring.record_wait_bound_attempt("mcp")
+        monitoring.record_wait_bound_breach("mcp")
+    window = refusal_window.wait_bound_breach_window()
+    assert window["total"] == 5 and window["refusing"] is True
+
+
+@pytest.mark.asyncio
+async def test_the_oauth_control_plane_is_not_the_data_plane(fast_bound, refusal_window):
+    """A grant waits on a THIRD PARTY, with no seam bound, for longer than the bound.
+
+    `_oauth_token` is awaited WITHOUT a wait bound ("its own httpx phase timeouts
+    bound it"), and those phase timeouts sum above it (`cimd.FETCH_MAX_S = 6.0`,
+    `supabase_control` 5 s per phase). Measured: five refused `/oauth/token` gave
+    `share 1.0 -> 503` with no other traffic.
+    """
+    hanging = ha.WaitBoundMiddleware(_slow_app(10.0))
+    for path, method in (("/oauth/token", "POST"), ("/oauth/register", "POST"),
+                         ("/register", "POST")):
+        for _ in range(5):
+            await _breach(hanging, path, method=method)
+    window = refusal_window.wait_bound_breach_window()
+    assert window["total"] == 0 and window["attempts"] == 0
+    assert window["refusing"] is None
+
+
+def test_the_org_mint_lock_answers_before_the_transport_bound():
+    """An invariant nothing pinned (#12477 review round 9).
+
+    The lock's own answer is `503 Retry-After: 5` — "busy, not an outage" — and
+    the transport bound measures the SAME request from arrival. At 10 s the two
+    deadlines collide and the designed 503 can never be delivered; a mutation
+    restoring 10.0 was caught by NOTHING (both tests that touch the constant
+    patch it to 0.25). Measured with the lock held: a delivered 503 at 8.08 s.
+    """
+    from tortoise import mcp_auth as _ma
+
+    assert ha._ORG_MINT_LOCK_TIMEOUT_S < _ma._TRANSPORT_WAIT_BOUND_S, (
+        "the mint lock must answer before the transport bound does, or its own "
+        "503 is undeliverable and a concurrent mint is scored as a plane breach")
+
+
+@pytest.mark.asyncio
+async def test_a_validation_422_is_not_demand(fast_bound, refusal_window):
+    """A `422` never reached the plane: FastAPI validation fails before the handler.
+
+    Measured (#12477 review round 10): 6 unauthenticated `GET /v1/invites/info`
+    (no token → `422`) beside 5 refused requests gave
+    `attempts 11, share 0.4545` → the real listener answered **200** with
+    `reasons: []` over a fully refusing plane. 422 joins the auth/rate-limit
+    gates in `_WAIT_BOUND_NON_DATA_STATUSES`.
+    """
+    # ⚠️ a DATA route with a bad body (`POST /v1/points {}`), not the invite
+    # preview — that one is excluded on its own (see the test above), which would
+    # make this vacuous and let the mutant through (it did, first attempt)
+    invalid = ha.WaitBoundMiddleware(_slow_app(0.001, status=422))
+    hanging = ha.WaitBoundMiddleware(_slow_app(10.0))
+    for _ in range(6):
+        rec = await _drive(invalid, _scope("/v1/points", method="POST"))
+        assert rec.status == 422
+    for _ in range(5):
+        await _breach(hanging, "/v1/search")
+    window = refusal_window.wait_bound_breach_window()
+    assert window["attempts"] == 5, ("a validation error is not demand", window)
+    assert window["refusing"] is True
+
+
+@pytest.mark.asyncio
+async def test_the_invite_preview_is_out_of_the_share_on_BOTH_sides(
+        fast_bound, refusal_window):
+    """It reads PostgREST, not the graph — and it needs no credential.
+
+    A serving-only exclusion (round 9's shape for `/v1/invites/info`) would leave
+    its refusal in the numerator, the one-sidedness round 9 fixed for `/oauth/*`.
+    """
+    for path, verb in (("/v1/invites/info", "GET"), ("/v1/invites/info", "POST")):
+        for _ in range(6):
+            await _breach(ha.WaitBoundMiddleware(_slow_app(10.0)), path, method=verb)
+    window = refusal_window.wait_bound_breach_window()
+    assert window["total"] == 0 and window["attempts"] == 0
+    assert window["refusing"] is None
