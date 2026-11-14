@@ -1,0 +1,9 @@
+{"start": {"redis_version": "8.6.3", "graph_module": 42006, "graph_path": "/var/lib/falkordb/bin/falkordb.so", "thread_count": null, "graph_module_args": ["THREAD_COUNT", "8", "TIMEOUT_MAX", "30000"], "persistence": {"save": "", "appendonly": "no"}, "port": 16422}}
+{"case": "zero", "scores_distinct": [0, 1, 2, 3], "nodes": 5, "index_documents_before": 5, "window_before": 5, "window_after": 3, "nodes_after": 5, "index_documents_after": 5, "index_inverted_bytes_before": 9, "index_inverted_bytes_after": 5, "delta": 2}
+{"case": "high", "scores_distinct": [100, 101, 102, 103, 104, 105], "nodes": 3000, "index_documents_before": 3000, "window_before": 3000, "window_after": 3000, "nodes_after": 3000, "index_documents_after": 3000, "index_inverted_bytes_before": 11811, "index_inverted_bytes_after": 11811, "delta": 0}
+{"case": "bounds", "window_ge_0": 3, "window_ge_-1": 3, "window_gt_-1": 3, "indexed_lookup_score_eq_0": 0, "nodes_by_id": 5, "score_of_node_0": [[0]]}
+
+value-0 case: window 5 -> 3 (2 rows lost); count(n) stays 5 and node id=0 STILL HOLDS score 0 — the data is intact, the index is not
+the index's own arithmetic agrees: numDocuments 5 -> 5 (documents registered) but inverted bytes 9 -> 5, i.e. exactly the 2 zero-valued postings are missing
+minimum-value control (100..3099): 3000 -> 3000 (0 lost) — NOT a lower-bound artifact
+bounds after the kept restore: >=0 3, >=-1 3, >-1 3 — a looser bound does not recover them, so the entries are ABSENT from the index; an equality lookup (score = 0) finds 0 of the 2

@@ -2622,7 +2622,7 @@ to answer.
   per §8's rule for *any* edit to this file.
 - **§10.29 succeeds this entry**, and it re-measures the same values: `34bb716315`'s `+9`
   insert was removed again by `391313ca9a`, so nothing below moved. The entry that carries
-  a `LIVE for the merged tree` bullet is §10.31, not this one.
+  a `LIVE for the merged tree` bullet is §10.32, not this one.
 
 ### 10.29 — the §11/§9 cite block re-derived for THIS branch's delta, round 15's code included (2026-11-13, `#12067`)
 
@@ -2704,8 +2704,9 @@ to answer.
   at `070d97360c` and stays a faithful record of that head. ⛔ For the `edges.py` windows the live
   carriers are §3.4/§3.7/§7 (this entry names them); for `record_projection.py:4996-4999` this entry
   is still the ONLY carrier, and it stays correct. **The §9/§11 cite block and the `#10360`
-  read-back for THIS branch's merged tree are §10.36's** (that tree sits a further `+90` above
-  `070d97360c` on that file), and the `#548` window is §10.35's.
+  read-back for THIS branch's merged tree are §10.37's** (that tree sits a further `+90` above
+  `070d97360c` on that file), and the `#548` window is §10.36's. The entry that carries a `LIVE for
+  the merged tree` bullet is §10.32, and then this branch's §10.33–§10.38.
 
 ### 10.30 — the §11/§9 cite block re-derived on `main` after the post-§10.29 merge wave (2026-11-13, `#12266`)
 
@@ -2809,13 +2810,73 @@ to answer.
   same commit that did the `extractor_v2.py` insert, which is why the two moved together. (An
   earlier draft of §10.30 attributed this move to `d63caecf56`/`#12338`; that commit never touches
   `projection/__init__.py`, and `d63caecf56^` already reads `14272` — measured, not inferred.)
-- **This entry was LIVE for the merged tree until §10.32**, and its `sdk.py` values are still the
-  LIVE ones: no later entry re-derives them (this branch never touches `tortoise/sdk.py`), and the
-  merge with `main` `6916a6cd89d7` left every one of them opening on the content it claims —
-  §10.37 measures that carrier by carrier. The `#548` window this entry carries is §10.35's, and
-  the §9/§11 cite block is §10.36's.
+- **This entry was LIVE for the merged tree until §10.32** (main's `sdk.py`-carrier entry, which
+  re-derives them for the head it names) **and then by this branch's §10.33**; its `sdk.py` values
+  are still the live ones on the FILE — this branch never touches `tortoise/sdk.py`, so no entry of
+  this branch's re-measures them from this side — and §10.38 measures that carrier by carrier. The
+  `#548` window this entry carries is §10.36's, and the §9/§11 cite block is §10.37's.
 
-### 10.32 — the `#10360` read-back re-pointed for this branch's own `+83` (2026-11-13, `#12295`)
+### 10.32 — the `sdk.py` carriers re-derived after this branch's own `+8` (2026-11-13, `#11859`, PR #12478)
+
+> **A successor entry, not an edit to §10.31.** §10.31 recorded the values at `main`
+> `6916a6cd89` and stays true to that head. The branch that carries this entry
+> (`fix/11859-journal-pins-and-prose`) edits `tortoise/sdk.py` itself — **10 insertions, 2
+> deletions** above `_extract_session_v2`, a net **`+8`** — so on the tree that merges `main`
+> every `sdk.py` carrier below it moves by exactly `+8` from the `main` it merges. Measured:
+> `def _extract_session_v2(` is `18025` at `main` `6916a6cd89`, `18082` at the merge base
+> `30c9e7c4d3`, and `18090` on this merged tree.
+>
+> ⚠️ **TWO movements, and the mapping states both.** The branch's OWN edit moved every carrier
+> below it by `+8`; `main` then moved the same region by `+57` (its own `18025`→`18082`)
+> before the merge that makes this entry live. So the "new" column is `+65` from §10.31's
+> numbers, not `+8` — and the `old` column stays against `6916a6cd89` because that is the head
+> §10.31 is true to, not the tip this entry is measured on.
+>
+> **The mapping**, all twelve, old (at `6916a6cd89`) → new (the tree that merges `main`
+> `c1db6f3df2`, the head this entry is LIVE for):
+> `_extract_session_v2` `18025`→`18090`; `proj.link_source_to_event(` `19452`→`19517`;
+> `relation_write = apply_relation_edges(` `19012`→`19077`; `from tortoise.relation_write import
+> apply_relation_edges` `19011`→`19076`; the `#10999` TRANSPORT-ONLY comment `18999`→`19064`;
+> `"stats": _capture_stats_with_step_witness(...)` `19054`→`19119`;
+> `bind_point_subjects(proj, self, point_id=pid,` `18659`→`18724`;
+> `The v2 path reports` `16458`→`16523`; `"extraction_mode": "llm:<route>"` `16459`→`16524`;
+> `extracted, meta = self._extract_session_v2(` `16914`→`16979`;
+> `declared = declared_relation_predicates()` `25396`→`25461`; the kind→label write seam
+> `18206-18230`→`18271-18295` (`18271` = `_ekind = _payload_entity_kind(e)`, `18295` = the
+> OBJECT arm's `is_episodic=False)` — the subject arm's closes at `18290`).
+> ⛔ Each value was re-derived by OPENING THE LINE on that merged tree, never by arithmetic: the
+> offset here is `+65`, which is exactly what makes adding eight *tempting* and wrong. This
+> column was briefly `old + 8` — true of the branch's own edit and false of the tree — and the
+> correction is recorded rather than absorbed, because a mapping whose method sentence says one
+> thing and whose numbers do another is how the next reader re-stales it.
+>
+> **What did NOT move, and stays with §10.31:** `tortoise/extractor_v2.py`,
+> `tortoise/projection/` and `tortoise/pi-hooks/tortoise-capture.ts` are untouched by this
+> branch, so §10.31's `12730`, `15149`, `15277`, `15302`, `15611`, `15621`, `17804` and its
+> `#548` window `projection/__init__.py:14272-14274` keep their numbers there — that entry is
+> still their live carrier. `tortoise/search_engine.py`'s `6637` likewise stays with §10.31.
+>
+> **What moved: the citations, and nothing that is a protocol value.** No metric, denominator,
+> threshold, class set or corpus pin changes; `document_sha256` is re-cut in the same commit,
+> per §8.
+>
+> ⛔ **§10.1–§10.31 stay HISTORY.** §10.31's `18022`/`18025` chain and the rest are a per-commit
+> record of ITS head and must keep those numbers even though they name different lines on this
+> tree — that is the whole point of recording a head.
+>
+> ⚠️ **Why this entry exists at all, stated plainly:** nothing pins §10.31's live values. The
+> live-cite gates strip `§10.x` from their population, `PRE-REGISTRATION.md` is forbidden from
+> carrying `sdk.py:<n>` (so `_BUNDLE_CITE` never sees these), and the newest-entry pin checks
+> only the `extractor_v2.py` obligations. So a branch that inserts lines into `sdk.py` re-stales
+> this entry SILENTLY, and the only thing that catches it is a reviewer opening it. That is a
+> real gap in the pin set, recorded here rather than papered over; adding the pin is a separate
+> change, not this one.
+>
+> ⛔ **Superseded for the merged tree by §10.38** — the entries below this one carry this branch's
+> re-derivations, and the newest of them measures the tree this branch ships. This entry's own numbers
+> stay a faithful record of the head it names (§10.19/§10.22/§10.24); they are not re-pointed in place.
+
+### 10.33 — the `#10360` read-back re-pointed for this branch's own `+83` (2026-11-13, `#12295`)
 
 > **A successor entry, not an edit to §10.29.** §10.29's numbers are a faithful record of the
 > `#12067` head it names, per §10.19/§10.22/§10.24 — re-numbering a history entry in place would be
@@ -2853,26 +2914,26 @@ to answer.
   threshold, class set or corpus pin is changed — every §1–§9 criterion VALUE and the E4
   denominator are the ones this record froze. `document_sha256` is re-cut in this same commit, per
   §8's rule for *any* edit to this file, and the bundle README's present-tense digest with it.
-- **This entry was LIVE for the merged tree until §10.33**, and is superseded on ALL of its own
-  numbers by §10.34 — not because they were wrong, but because they were measured at `b6a630d` and
+- **This entry was LIVE for the merged tree until §10.34**, and is superseded on ALL of its own
+  numbers by §10.35 — not because they were wrong, but because they were measured at `b6a630d` and
   a later rebase+merge (`bb88463894f5`, onto `main` `ca74f2375ef4`) moved every one of them. The
-  three numbers it owns, `:10619`/`:14359`/`:14512`, were correct at that head; §10.34 re-derives
+  three numbers it owns, `:10619`/`:14359`/`:14512`, were correct at that head; §10.35 re-derives
   them for the shipping tree (`:11451`/`:15191`/`:15344`).
 
-### 10.33 — §10.32's declared follow-up: `_collect_classify_items`, the fail-open pair, and §9/§11's carriers (2026-11-13, `#12295`)
+### 10.34 — §10.33's declared follow-up: `_collect_classify_items`, the fail-open pair, and §9/§11's carriers (2026-11-13, `#12295`)
 
-> **A successor entry, not an edit to §10.32.** §10.32 closed by declaring its own scope
+> **A successor entry, not an edit to §10.33.** §10.33 closed by declaring its own scope
 > (*"the pin's cite, and the two gate lines this entry names — nothing else … Those are carried as
 > a follow-up rather than widened into this commit"*) and by stating it has no successor. Its
 > numbers — `:10619`, `:14359`, `:14512` — were correct at `b6a630d`; this entry does not supersede
-> them, it discharges the follow-up §10.32 named, which is why the two gate lines are not restated
-> here (§10.32 owns them). ⛔ §10.34 supersedes THIS entry's numbers too: the `+83` it measured was
+> them, it discharges the follow-up §10.33 named, which is why the two gate lines are not restated
+> here (§10.33 owns them). ⛔ §10.35 supersedes THIS entry's numbers too: the `+83` it measured was
 > the branch's own, and the rebase+merge onto `main` `ca74f2375ef4` then moved them again. What was
-> deferred is exactly what §10.32 listed:
+> deferred is exactly what §10.33 listed:
 > `_collect_classify_items`, the two fail-open `except` arms, and the §9 row / §11.1 / §11.3
 > carriers that quote them.
 
-- **Why this entry exists now and not earlier.** §10.32 left the remaining cites in the same `+83`
+- **Why this entry exists now and not earlier.** §10.33 left the remaining cites in the same `+83`
   band re-derived by a follow-up, on the reading that a deferred re-derivation costs nothing. It
   costs a RED SUITE: `tests/test_7949_capstone_measure.py::test_the_pre_registration_cites_the_classify_sites_the_tree_actually_has`
   derives the collector from the tree and requires every LIVE carrier to cite it, so the deferred
@@ -2900,20 +2961,20 @@ to answer.
   denominator are the ones this record froze. `document_sha256` is re-cut in this same commit, per
   §8's rule for *any* edit to this file, and the bundle README's present-tense digest with it.
 
-### 10.34 — the rebase+merge onto `main` `ca74f2375ef4`: every §10.29–§10.33 cite re-derived (2026-11-13, `#12295`)
+### 10.35 — the rebase+merge onto `main` `ca74f2375ef4`: every §10.29–§10.34 cite re-derived (2026-11-13, `#12295`)
 
-> **A successor entry, not an edit to §10.32 or §10.33.** Both are faithful records of the head they
+> **A successor entry, not an edit to §10.33 or §10.34.** Both are faithful records of the head they
 > measured; re-numbering either in place would be the false record §10.19/§10.22/§10.24 forbid. This
 > entry supersedes both on every number they own, and is the newest entry, so the live-cite pins read
 > IT.
 
 - **Why it exists.** `#12304` was `CONFLICTING`, was rebased and then merged onto `main`
   `ca74f2375ef4` (`bb88463894f5`). Main had itself moved these lines (`#12348`'s rewrite of
-  `extractor_v2.py`, then `#12426`/`#12481`/`#12268`), so the `+83` band §10.32/§10.33 measured is no
-  longer the shift this tree carries. The deferral §10.32 declared and §10.33 claimed to discharge
+  `extractor_v2.py`, then `#12426`/`#12481`/`#12268`), so the `+83` band §10.33/§10.34 measured is no
+  longer the shift this tree carries. The deferral §10.33 declared and §10.34 claimed to discharge
   did NOT survive that: `tests/test_7949_capstone_measure.py::
   test_the_pre_registration_cites_the_classify_sites_the_tree_actually_has` and
-  `::test_the_newest_change_control_entry_describes_the_shipped_tree` both red on the head §10.33
+  `::test_the_newest_change_control_entry_describes_the_shipped_tree` both red on the head §10.34
   claimed to discharge. A follow-up recorded as done while the pin that reads it is red is a false
   claim, so the numbers are re-derived here instead of restated.
 - **New values — each MEASURED at `bb88463894f5` by opening the line, not by adding an offset:**
@@ -2931,30 +2992,30 @@ to answer.
   all three); `:11451` carries the receiving variable `_value_fidelity_judged`, not the `def`
   (`:5793`) and not the `armed =` site (`:5883`).
 - **Carriers updated, all LIVE:** §11's `steps:` condition, §9's provenance row, and §11.1's and
-  §11.3's prose — the four `_live_blocks` carriers the pin binds. §10.29's, §10.32's and §10.33's own
+  §11.3's prose — the four `_live_blocks` carriers the pin binds. §10.29's, §10.33's and §10.34's own
   bodies are NOT touched: they are change-control history, `_without_change_history` strips them, and
   they stay as the record of what each head measured.
 - **What moved: citations and nothing that is a protocol value.** No metric, denominator, threshold,
   class set or corpus pin is changed — every §1–§9 criterion VALUE and the E4 denominator are the
   ones this record froze. `document_sha256` is re-cut in this same commit, per §8's rule for *any*
   edit to this file, and the bundle README's present-tense digest with it.
-- ⛔ **Superseded for THIS tree by §10.35 — on the `#548` blank-`pointKind` window only.** Every
+- ⛔ **Superseded for THIS tree by §10.36 — on the `#548` blank-`pointKind` window only.** Every
   other number this entry re-derived is still the live one; the window this tree carries is
   `projection/__init__.py:14272-14274`, not the `:14265-14267` asserted in §10.27's supersede
   statements.
 - **This entry was LIVE for the merged tree at the head it shipped at** — it now has a successor, so
   the supersede marker above is the record of what moved.
 
-### 10.35 — the `#548` blank-`pointKind` window re-pointed, so the probe and this record agree again (2026-11-13, `#12295`)
+### 10.36 — the `#548` blank-`pointKind` window re-pointed, so the probe and this record agree again (2026-11-13, `#12295`)
 
 > **A successor entry, not an edit to §10.27 or §10.29.** Both are faithful records of the heads they
 > measured; re-numbering either in place would be the false record §10.19/§10.22/§10.24 forbid. This
 > entry supersedes them on the `#548` blank-`pointKind` window and on nothing else — every other
-> number §10.29 owns is §10.34's.
+> number §10.29 owns is §10.35's.
 >
-> ⛔ **And it supersedes §10.34 on that ONE window**, which is why §10.34 carries a supersede
+> ⛔ **And it supersedes §10.35 on that ONE window**, which is why §10.35 carries a supersede
 > marker in the second-to-last of its closing bullets (the last one records that it now has a
-> successor): §10.34's live-for-the-merged-tree claim was true of the head it shipped at, and its
+> successor): §10.35's live-for-the-merged-tree claim was true of the head it shipped at, and its
 > own numbers are untouched here.
 
 - **Why it exists.** The `#12304` cite sweep found `probes/capstone_measure.py:3317` citing
@@ -2973,8 +3034,8 @@ to answer.
   measured, and not one it can vouch for. Every place this record ASSERTS it as a window is inside
   §10.27 — its opening callout (`:2530`) and its closing supersede bullet (`:2555`) — and both
   attribute it to §10.29, whose own body carries neither the number nor a `pointKind` mention. The
-  only other mentions are §10.34's inheritance of that attribution and this entry's own discussion
-  of it. So it reaches §10.34 as a broadcast attribution, not as a measurement this record can
+  only other mentions are §10.35's inheritance of that attribution and this entry's own discussion
+  of it. So it reaches §10.35 as a broadcast attribution, not as a measurement this record can
   re-derive; that is why this entry records the three lines above instead of carrying the number
   forward again.
 - **Verified by content, not arithmetic.** The window is confirmed by the anchor's own three lines
@@ -2984,15 +3045,15 @@ to answer.
   are the ones this record froze. `document_sha256` is re-cut in this same commit, per §8's rule for
   *any* edit to this file, and the bundle README's present-tense digest with it.
 - **This entry was LIVE for the merged tree at the head it shipped at** — it now has a successor
-  (§10.36), which re-derives the same carriers onto the tree that merges `main` `2dbfb046d`. Its own
+  (§10.37), which re-derives the same carriers onto the tree that merges `main` `2dbfb046d`. Its own
   numbers are untouched here, and the supersede marker above is the record of what moved.
 
-### 10.36 — the merge with `main` `2dbfb046d` re-derives §9/§11's carriers again, and those carriers only (2026-11-13, `#12295`)
+### 10.37 — the merge with `main` `2dbfb046d` re-derives §9/§11's carriers again, and those carriers only (2026-11-13, `#12295`)
 
-> **A successor entry, not an edit to §10.32, §10.34 or §10.35.** Each of those measured its own
+> **A successor entry, not an edit to §10.33, §10.35 or §10.36.** Each of those measured its own
 > head, and re-numbering any of them in place would be the false record §10.19/§10.22/§10.24 forbid.
-> This entry supersedes them on the four LIVE carriers and on nothing else — §10.32's
-> `:10619`/`:14359`/`:14512`, §10.34's `bb88463894f5` set and §10.35's `14272-14274` window stay
+> This entry supersedes them on the four LIVE carriers and on nothing else — §10.33's
+> `:10619`/`:14359`/`:14512`, §10.35's `bb88463894f5` set and §10.36's `14272-14274` window stay
 > exactly as those entries measured them.
 
 - **Why it exists.** `#12304` went `CONFLICTING` while this lane was open: `main` landed `#11739`'s
@@ -3015,7 +3076,7 @@ to answer.
   `:11499` carries the receiving variable `_value_fidelity_judged`, not the `def` (`:5841`) and not
   the `armed =` site (`:5931`).
 - **Carriers updated, all LIVE:** §11's `steps:` condition, §9's provenance row, and §11.1's and
-  §11.3's prose — the four `_live_blocks` carriers the pin binds. §10.32's, §10.34's and §10.35's own
+  §11.3's prose — the four `_live_blocks` carriers the pin binds. §10.33's, §10.35's and §10.36's own
   bodies are NOT touched: they are change-control history, `_without_change_history` strips them, and
   they stay as the record of what each head measured.
 - **What moved: citations and nothing that is a protocol value.** No metric, denominator, threshold,
@@ -3023,12 +3084,12 @@ to answer.
   this record froze. `document_sha256` is re-cut in this same commit, per §8's rule for *any* edit to
   this file, and the bundle README's present-tense digest with it.
 - **This entry was LIVE for the merged tree at the head it shipped at** — it now has a successor
-  (§10.37), which re-derives the same carriers onto the tree that merges `main` `6916a6cd89d7`. Its
+  (§10.38), which re-derives the same carriers onto the tree that merges `main` `6916a6cd89d7`. Its
   own numbers are untouched here, and the supersede marker above is the record of what moved.
 
-### 10.37 — the merge with `main` `6916a6cd89d7`: what moved, and the three carriers that did not (2026-11-14, `#12295`)
+### 10.38 — the merge with `main` `6916a6cd89d7`: what moved, and the three carriers that did not (2026-11-14, `#12295`)
 
-> **A successor entry, not an edit to §10.31 or §10.36.** §10.31 measured its own head and §10.36
+> **A successor entry, not an edit to §10.31 or §10.37.** §10.31 measured its own head and §10.37
 > measured this branch's; both stay exactly as written, because a number belongs to the head it was
 > opened on (§10.19/§10.22/§10.24). This entry records what the MERGE does to them, which is the one
 > thing neither parent could measure: the merged tree is neither parent.
@@ -3050,12 +3111,12 @@ to answer.
   carriers open on their content without any re-derivation. The `#12492` `+3` is a separate fact and
   is already on this branch (`_extract_session_v2` at `18025` on `6e9ef2caae0c`). So taking either
   side wholesale would have published a number measured on a tree this one is not.
-- **`tortoise/extractor_v2.py` did NOT move, so §10.36's numbers are the live ones.** The MERGED
+- **`tortoise/extractor_v2.py` did NOT move, so §10.37's numbers are the live ones.** The MERGED
   file is byte-identical to this branch's pre-merge tree at `6e9ef2caae0c` (`git hash-object` on both
   sides: `c8f83ed4e77b…`), because `main` never touched that file between this branch's base
   `070d97360c` and `6916a6cd89d7` — `git diff --numstat 070d97360c 6916a6cd89d7 --
-  tortoise/extractor_v2.py` is empty. So the `+90` band §10.36 measured is the band this tree
-  carries, and every cite it owns still opens on the content it claims; §10.36 is not re-stated
+  tortoise/extractor_v2.py` is empty. So the `+90` band §10.37 measured is the band this tree
+  carries, and every cite it owns still opens on the content it claims; §10.37 is not re-stated
   here, because a second unpinned copy of a number is a place to disagree.
 - **`tortoise/sdk.py` moved no cited line either, so §10.31's twelve carriers are the live ones.** It
   is NOT unchanged — `#12485` (`6efb1c3f7294`) rewrote the `#2498` residual comment line-neutrally,
