@@ -252,8 +252,9 @@ class TestEverySurfaceAgreesWithTheDeclaration:
 #:       * `The Builder plan exists` — the AFFIRMATIVE (cycle 2). A denial regex
 #:         whose `no` is optional matches the sentence a correct doc must write;
 #:         `no` is therefore mandatory in every pattern that spells it.
-#:   * **False negatives — MEASURED, not assumed, and stated so the next author does
-#:     not mistake this for a prover.** A green run is not a proof of prose
+#:   * **False negatives — MEASURED, not assumed: this file's OPEN-residual and
+#:     false-negative REGISTER, which the comments below call "the register above".**
+#:     A green run is not a proof of prose
 #:     correctness; these shapes are known to escape:
 #:       * a denial whose CONTINUATION LINE STARTS A NEW BLOCK — `>` in a blockquote,
 #:         `-`/`*` in a list, `|` in a table (`_doc_sentences` opens a fragment there, so
@@ -567,7 +568,7 @@ _INTENSIFIER = (r"(?:\s*['\"\u201d\u2019]?\s+" + _INTENSIFIER_WORDS + r")?")
 #: (cycle-6 P1): they are NOT terminal either, and their pinned comma twins proved each
 #: one a false block. So the strict set is terminal punctuation and an issue citation —
 #: and NOT a comma, dash or semicolon, whose cost is stated as a false NEGATIVE in the
-#: class docstring above rather than paid for with a false block.
+#: register above rather than paid for with a false block.
 #: ⛔ THE SET STILL CARRIED THE SEMICOLON (cycle-11 P2, measured), so this comment
 #: contradicted the regex underneath it and the `;` twin of the scope-qualifier class
 #: was RED on one separator while its `,` and `—` twins were pinned green. `;` is now
@@ -633,7 +634,7 @@ _DENIAL_PATTERNS = (
     #: flagged (true on `origin/main` too — pre-existing, fixed here because it is the
     #: class this file's own doctrine calls the expensive half). Both arms now end their
     #: clause and carry the intensifier twin every other arm has; the cost is the
-    #: documented miss in the class docstring (a denial continued past its predicate:
+    #: documented miss in the register above (a denial continued past its predicate:
     #: `The Builder tier does not exist because it was merged into Team.`).
     re.compile(r"\bno\s+(?:such\s+(?:thing\s+as\s+(?:a\s+)?)?)?" + _BUILDER_PLAN +
                r"\s+exists\b" + _CLAUSE_END, re.I),
@@ -802,7 +803,7 @@ _QUOTE_PAIRS = (('"', '"'), ('`', '`'), ('\u201c', '\u201d'), ('\u2018', '\u2019
 #: mixed-mark mention is NOT a false positive, which an earlier revision of this comment
 #: claimed: the unclosed span the typographic mark opens is accepted by
 #: `_quotes_the_whole_denial`, so it is EXEMPT here and at `origin/main` (cycle-20 round 3,
-#: measured — see the class docstring bullet). Repairing it properly means a scanner that
+#: measured — see the register's bullet). Repairing it properly means a scanner that
 #: pairs an opening mark with the NEAREST mark from its own closer set, which is a change
 #: to `_quoted_span_offsets`'
 #: contract and belongs in its own cycle with its own pins, not bolted onto this one.
@@ -958,7 +959,7 @@ def _quotes_the_denial(sentence: str) -> bool:
             #   customers' rows are wrong.
             #
             # is exempt here AND at `origin/main` (pre-existing, not a regression). It is
-            # listed in the class docstring's MEASURED false negatives. The CUE-FREE
+            # listed in the register's MEASURED false negatives. The CUE-FREE
             # mention path does NOT have this hole: it requires the denial to OPEN the
             # span, which a pseudo-span of that shape fails.
             # ⛔ NOTHING OUTSIDE THE QUOTATIONS MAY BE A DENIAL — enforced ONCE, in
@@ -1089,10 +1090,11 @@ _YET_AGAIN = re.compile(r"^\s*yet\s+again\s*", re.I)
 #: lists the heads that have been MEASURED (`is`, `was`, `were`, `'s`/`’s`, `means`,
 #: `proves`, `would`, `has`, `makes`), and an unlisted demonstrative head still exempts —
 #: `that shows …`, `that explains …`, `that suggests …`, `that clearly is …` are EXEMPT
-#: here and FLAGGED at `origin/main`. Listed as an OPEN residual in the class docstring
-#: rather than replaced by a different vocabulary test (an allowlist of the reported
-#: clause's own subjects is the only other candidate and it is a wider question this file
-#: does not answer here); every listed head is pinned.
+#: here and FLAGGED at `origin/main`. Listed as an OPEN residual in this file's
+#: OPEN-residual register above (the module-level `#:` list, `an UNLISTED DEMONSTRATIVE
+#: HEAD after a leading pair`) rather than replaced by a different vocabulary test (an
+#: allowlist of the reported clause's own subjects is the only other candidate and it is a
+#: wider question this file does not answer here); every listed head is pinned.
 _RESUMES_WITH_THAT = re.compile(
     r"^[\s,]*(?:yet\s+again\s+)?that\b(?!\s*(?:is|was|were|['\u2019]s|means|proves|would|has|makes)\b)",
     re.I)
@@ -1586,7 +1588,7 @@ class TestNoDocDeniesABuilderPlanExists:
             "The **Builder** plan exists and is called `pro`.",
             # ⛔ THE AFFIRMATIVE IN BARE FORM (cycle-8 P1, measured): an OPTIONAL negation
             # in the negated-auxiliary arm made `There is a Builder plan.` a denial — the
-            # exact sentence the class docstring says must stay writable.
+            # exact sentence the register says must stay writable.
             "There is a Builder plan.",
             "There is a Builder plan, and a Team plan.",
             "There is a Builder tier, which is the `pro` tier.",
@@ -1794,7 +1796,7 @@ class TestNoDocDeniesABuilderPlanExists:
             'corrected it.',
             # ⛔ THE DASH TWIN MUST STAY EXEMPT (cycle-20 round 5, measured): the round-4
             # CUE gate blocked these while `origin/main` exempts them, and a later
-            # revision of the class docstring claimed the class was pre-existing when it
+            # revision of the register claimed the class was pre-existing when it
             # was introduced here. Position — a pair that LEADS the reported material — is
             # what makes them asides.
             'Previously the doc claimed — wrongly — that there is no Builder plan; '
@@ -1975,7 +1977,7 @@ class TestNoDocDeniesABuilderPlanExists:
                 # exempt_a_denial` says it must.
                 "The docs are stale: the page says there is no Builder plan.\n",
                 "The stale `org` wording says there is no Builder plan.\n",
-                # …and the report-then-re-assert shape the class docstring used to list as
+                # …and the report-then-re-assert shape the register used to list as
                 # an escape: the citation requirement added in cycle 12 closed it, so it
                 # is a live denial now and belongs HERE, not on the miss list
                 # (cycle-13 P2, measured).
@@ -2158,7 +2160,7 @@ class TestNoDocDeniesABuilderPlanExists:
                 # (cycle-20 round 9, measured): rounds 6/7 keyed the strip on the pair's
                 # CONTENT, which cannot separate `-- until #12444 corrected it --` from
                 # `-- the page was never fixed --` — both are subject+verb — so this shape
-                # lived in the class docstring as an accepted residual and read EXEMPT
+                # lived in the register as an accepted residual and read EXEMPT
                 # here while `origin/main` FLAGS it. The discriminator is the RESUME, not
                 # the content: a pair sits inside the reported material only when a `that`
                 # complement follows it, and this one is followed by a new assertion.
@@ -2178,18 +2180,30 @@ class TestNoDocDeniesABuilderPlanExists:
                 # a bare `^…that\b` resume test exempted a live denial ONE WORD away from
                 # the pinned shape above — `that IS WHY …` / `that MEANS …` / `that PROVES
                 # …` / `that's …` all read EXEMPT here while `origin/main` FLAGS every one.
-                # A demonstrative `that` is followed by a copula or a verb of evidence; the
-                # complementizer is followed by the reported clause's own subject.
+                # ⚠️ THERE IS NO CONTENT RULE BEHIND THE EXCLUSION (round-9 review cycle 4,
+                # measured): round 9 wrote one here — "a demonstrative `that` is followed by
+                # a copula or a verb of evidence" — and it is FALSE for `that SHOWS …`,
+                # `that EXPLAINS …`, `that SUGGESTS …`, `that CLEARLY IS …`, which are
+                # exempt here and FLAGGED at `origin/main`. What discriminates is the
+                # ENUMERATION of measured heads at `_RESUMES_WITH_THAT`; nothing wider has
+                # been measured, so nothing wider is claimed.
                 "Until #12444 the doc said -- the page was never fixed -- that is why there "
                 "is no Builder plan.\n",
                 "Until #12444 the doc said -- the page was never fixed -- that proves there "
                 "is no Builder plan.\n",
-                # ⛔ EVERY MEASURED HEAD OF THE EXCLUSION IS PINNED (round-9 review cycle 3,
-                # P2, measured): six of its eight members could be deleted with the suite at
-                # `19 passed` while each deletion turned a FLAGGED denial exempt — the same
-                # one-for-one rule this commit applied to `:` and to `so`/`yet`. The set is
-                # an ENUMERATION of measured heads, not a closed class; that is stated at
-                # the constant and listed as an OPEN residual above.
+                # ⛔ EVERY MEASURED HEAD OF THE EXCLUSION IS PINNED (round-9 review cycles
+                # 3 and 4, measured): knocking out one alternative at a time at `168c4b72`,
+                # the tree cycle 3 measured over, SEVEN of the nine left the suite at `19
+                # passed` — `was`, `were`, `'s`, `means`, `would`, `has`, `makes` — while
+                # each deletion turned a FLAGGED denial exempt. That is the same one-for-one
+                # rule this commit applied to `:` and to `so`/`yet`, and cycle 3's own note
+                # undercounted it as six. Cycle 3 pinned six; cycle 4 measured the last two:
+                # `were`, which no row used, and the STRAIGHT-apostrophe spelling, of which
+                # only `that’s` was pinned. All nine are now pinned, each reddening its own
+                # row. The constant holds NINE alternatives — `is`, `was`, `were`, `['’]s`
+                # (one alternative in TWO spellings), `means`, `proves`, `would`, `has`,
+                # `makes`. The set is an ENUMERATION of measured heads, not a closed class;
+                # that is stated at the constant and listed as an OPEN residual above.
                 "Until #12444 the doc said -- the page was never fixed -- that was why "
                 "there is no Builder plan.\n",
                 "Until #12444 the doc said -- the page was never fixed -- that means there "
@@ -2201,6 +2215,16 @@ class TestNoDocDeniesABuilderPlanExists:
                 "Until #12444 the doc said -- the page was never fixed -- that has "
                 "established there is no Builder plan.\n",
                 "Until #12444 the doc said -- the page was never fixed -- that\u2019s why "
+                "there is no Builder plan.\n",
+                # ⛔ `were` AND THE STRAIGHT APOSTROPHE ARE LOAD-BEARING (round-9 review
+                # cycle 4, P2/P3, measured): deleting `were` from the exclusion left the
+                # suite at `19 passed` while exempting a denial `origin/main` FLAGS, and
+                # dropping the straight-apostrophe half of `['’]s` did the same — only the
+                # typographic `that’s` was pinned. Both spellings are the same alternative,
+                # so both are asserted.
+                "Until #12444 the doc said -- the page was never fixed -- that were the "
+                "reasons there is no Builder plan.\n",
+                "Until #12444 the doc said -- the page was never fixed -- that's why "
                 "there is no Builder plan.\n",
                 # ⛔ `:` IS A MEMBER OF `_ASIDE_INNER_BREAK` AND IS LOAD-BEARING (round-9
                 # review cycle 2, P2, measured): deleting it left the suite at `19 passed`
