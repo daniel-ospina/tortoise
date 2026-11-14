@@ -531,11 +531,13 @@ def latest_version(index_doc: dict[str, Any]) -> str:
 #: this API response" (docs.pypi.org/api/json) — so a missing key is the absence of an ANSWER
 #: about installable files, not an answer that there are none (#12525).
 #:
-#: ⛔ THE NAME IS NARROWER THAN THE TOKEN'S USE, and the alert renders the token VERBATIM into a
-#: filed issue: an operator reading ``(releases-absent)`` over ``"releases": []`` who is pointed
-#: at PyPI's deprecation is being pointed AWAY from the shape actually served. This comment is
-#: the definition the token is read against, so it names every shape that produces it (#12590
-#: review note, fixed here rather than left to drift).
+#: ⛔ THE NAME IS NARROWER THAN THE TOKEN'S USE, and the token is rendered to an operator in the
+#: STEP SUMMARY table and the ``--json`` payload: someone reading ``(releases-absent)`` over
+#: ``"releases": []`` who is pointed at PyPI's deprecation is being pointed AWAY from the shape
+#: actually served. This comment is the definition the token is read against, so it names every
+#: shape that produces it (#12590 review note, fixed here rather than left to drift).
+#: ⚠️ NOT the alert issue's body: that body is `$why` + `tail -n 40` of the TRANSCRIPT file, and
+#: carries no arm detail or token (measured — see the same note beside ``engine-init``).
 RELEASES_ABSENT = "releases-absent"
 
 
@@ -632,37 +634,81 @@ def resolvable_releases(index_doc: dict[str, Any]) -> tuple[list[str], str]:
     resolvable: list[str] = []
     reason = ""
     for version, files in releases.items():
-        entries, partial = readable_entries(files)
-        if partial:
+        installable, unreadable = judged_value(files)
+        if unreadable:
             # Not readable (in whole or in part): it can neither establish nor withdraw the
             # existential OK claim by itself, but the entries that WERE read still can.
             reason = RELEASES_UNREADABLE
-        # ⛔ AN ENTRY IS NOT CONSULTED UNTIL IT CARRIES WHAT MAKES IT A FILE (#12589 review
-        # rounds 3 and 4). Round 3 caught the FLAG and round 4 caught the OTHER field, which had
-        # never been read at all:
-        #   * an entry with no `yanked` at all (`{}`) read as "not yanked" and GREENED the arm on
-        #     a value nothing was read FROM;
-        #   * a mirror emitting `"yanked": "false"` (a truthy STRING) read as yanked and reported
-        #     "NO installable file in ANY release" — FAIL, exit 1, the release order;
-        #   * `{"yanked": False}` with NO `filename` was called installable — a false PASS off an
-        #     object that is not a file record.
-        # PyPI documents each entry as a file object carrying `filename` + a boolean `yanked`,
-        # so anything else is a shape outside the contract: drop the entry and mark the reading
-        # PARTIAL, which lets it neither green nor red the arm by itself. NOTE this is the ONE
-        # place that needs either field — `release_files`/`upload_time` enumerate and timestamp,
-        # and neither activity consults `yanked` or needs a filename.
-        judged = [
-            entry
-            for entry in entries
-            if isinstance(entry.get("yanked"), bool)
-            and isinstance(entry.get("filename"), str)
-            and entry["filename"]
-        ]
-        if len(judged) != len(entries):
-            reason = RELEASES_UNREADABLE
-        if any(not entry.get("yanked") for entry in judged):
+        if installable:
             resolvable.append(version)
     return resolvable, reason
+
+
+def judged_value(files: Any) -> tuple[bool, bool]:
+    """``(has_installable_file, unreadable)`` for ONE version's value. THE one definition.
+
+    ⛔ AN ENTRY IS NOT CONSULTED UNTIL IT CARRIES WHAT MAKES IT A FILE (#12589 review rounds 3, 4
+    and 7). Round 3 caught the FLAG, round 4 the OTHER field (never read at all), and round 7
+    caught that a caller had re-derived the question with a WEAKER reader:
+
+      * an entry with no `yanked` (`{}`) read as "not yanked" and GREENED the arm on a value
+        nothing was read FROM;
+      * `"yanked": "false"` (a truthy STRING) read as yanked and reported "NO installable file in
+        ANY release" — FAIL, exit 1, the release order;
+      * `{"yanked": False}` with no `filename` was called installable — a false PASS off an object
+        that is not a file record.
+
+    PyPI documents each entry as a file object carrying `filename` + a boolean `yanked`, so
+    anything else is a shape outside the contract: the entry is dropped and ``unreadable`` is set,
+    which lets the value neither establish nor withdraw the existential OK claim by itself.
+
+    ⛔ ONE DEFINITION, because the OK detail ALSO asks this question about ONE version ("is the
+    advertised release installable?") and re-deriving it from ``release_files`` — which only sees
+    STRUCTURAL unreadability — classified a field-level drop as the decisive "not resolvable",
+    i.e. the exact artifact claim from a non-reading this issue removes. NOTE this is the only
+    place that needs either field: ``release_files``/``upload_time`` enumerate and timestamp, and
+    neither activity consults `yanked` or needs a filename.
+    """
+    entries, partial = readable_entries(files)
+    judged = [
+        entry
+        for entry in entries
+        if isinstance(entry.get("yanked"), bool)
+        and isinstance(entry.get("filename"), str)
+        and entry["filename"]
+    ]
+    return any(not entry.get("yanked") for entry in judged), partial or len(judged) != len(entries)
+
+
+#: ``installability`` results — three states, so a caller cannot fold "could not read" into
+#: "read and negative" (#12589 review round 7, P2).
+INSTALLABLE = "installable"
+NOT_INSTALLABLE = "not-installable"
+INSTALLABILITY_UNKNOWN = "unreadable"
+
+
+def installability(index_doc: dict[str, Any], version: str) -> str:
+    """Whether ``version`` has an installable file: INSTALLABLE / NOT_INSTALLABLE / UNKNOWN.
+
+    The same question, asked about ONE version, through the SAME reader ``resolvable_releases``
+    uses — see ``judged_value``. A caller that instead asks ``release_files(...) is None`` gets a
+    weaker answer: that reader only sees STRUCTURAL unreadability, so a value whose entries were
+    dropped for an unreadable ``yanked``/``filename`` looks READ and NEGATIVE, and the OK arm would
+    print "not resolvable for an unpinned install here" about a listing it never read (#12589
+    review round 7, P2).
+
+    An ABSENT version key in a READABLE map is NOT_INSTALLABLE — that IS an answer ("no such
+    release"), the same split ``release_files`` makes. An unreadable MAP is UNKNOWN.
+    """
+    releases = releases_map(index_doc)
+    if releases is None:
+        return INSTALLABILITY_UNKNOWN
+    if version not in releases:
+        return NOT_INSTALLABLE
+    installable, unreadable = judged_value(releases[version])
+    if installable:
+        return INSTALLABLE
+    return INSTALLABILITY_UNKNOWN if unreadable else NOT_INSTALLABLE
 
 
 def missing_version_arm(
@@ -982,7 +1028,11 @@ def build_report(
                 #     is what makes an unpinned requirement skip it).
                 if client_version in resolvable:
                     advertised = f"advertised latest {client_version} is installable"
-                elif release_files(client_doc, client_version) is None:
+                elif installability(client_doc, client_version) != NOT_INSTALLABLE:
+                    # ONE definition of "read" — `installability`, not `release_files` (#12589
+                    # review round 7, P2): a value whose entries were dropped for an unreadable
+                    # `yanked`/`filename` is UNREADABLE here too, and must not be reported as the
+                    # decisive negative.
                     advertised = f"advertised latest {client_version} could not be READ here"
                 else:
                     advertised = (

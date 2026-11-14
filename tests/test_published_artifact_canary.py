@@ -3924,10 +3924,12 @@ def test_the_UNREADABLE_reason_names_every_cause_the_code_can_produce():
 
     # ⛔ AND THE `releases-absent` DETAIL MUST STILL NAME EVERY SHAPE THAT PRODUCES IT (#12589
     # round 5, P3). #12589's comment 1 recorded that the token is defined as "the key is ABSENT"
-    # while being emitted for present-but-wrong-typed maps too — the alert renders the token
-    # VERBATIM to an operator, so the narrow wording points them at PyPI's deprecation instead of
-    # at the shape served. This pin is the one that was missing: the detail can no longer be
-    # narrowed back silently.
+    # while being emitted for present-but-wrong-typed maps too. The token reaches an operator in
+    # the STEP SUMMARY table and the `--json` payload (⚠️ NOT the alert issue's body, which is
+    # `$why` + `tail -n 40` of the transcript — measured; an earlier revision of this comment
+    # claimed the alert rendered it verbatim, which that script does not do). The narrow wording
+    # points an operator at PyPI's deprecation instead of the shape served, so this pin keeps the
+    # detail from being narrowed back silently.
     for absent in (None, [], "0.3.0", 0):
         report = _client_report(
             {"info": {"version": "0.3.0"}, "releases": absent}
@@ -3979,6 +3981,65 @@ def test_the_UNREADABLE_reason_names_every_cause_the_code_can_produce():
     assert "uploaded unknown" not in rendered, rendered
     # NOW is 2026-11-13 and the fixture's only readable stamp is 2026-08-08 -> 97d.
     assert "97d" in rendered, rendered
+
+
+def test_installability_is_ONE_definition_of_the_installable_question():
+    """Three states, one reader — a caller cannot fold "could not read" into "read and negative".
+
+    (#12589 review round 7, P2.) The OK arm asks "is the ADVERTISED release installable?" to decide
+    which sentence to print. It first asked `release_files(...) is None`, which only sees
+    STRUCTURAL unreadability — so a value whose entries were dropped for an unreadable
+    `yanked`/`filename` (or an empty `filename`) looked READ and NEGATIVE, and the arm printed the
+    decisive "not resolvable for an unpinned install here" about a listing it had never read.
+    """
+    doc = {"info": {"version": "0.3.0"}}
+    good = {**_CLIENT_GOOD, "filename": "tortoise_client-0.3.0-py3-none-any.whl"}
+    yanked = {**good, "yanked": True}
+
+    assert canary.installability({**doc, "releases": {"0.3.0": [good]}}, "0.3.0") == (
+        canary.INSTALLABLE
+    )
+    # ANSWERS.
+    for answered in ({"0.3.0": []}, {"0.3.0": [yanked]}, {}):
+        assert canary.installability({**doc, "releases": answered}, "0.3.0") == (
+            canary.NOT_INSTALLABLE
+        ), answered
+    assert canary.installability({**doc, "releases": {"0.2.0": [good]}}, "0.3.0") == (
+        canary.NOT_INSTALLABLE
+    )  # absent version key in a readable map IS an answer
+    # NON-READINGS — including the field-level drops that `release_files` cannot see.
+    for unreadable in (
+        {"0.3.0": {}},
+        {"0.3.0": ["junk"]},
+        {"0.3.0": [{**good, "yanked": "false"}]},
+        {"0.3.0": [{**good, "filename": ""}]},
+        {"0.3.0": [{"yanked": False}]},
+    ):
+        assert canary.installability({**doc, "releases": unreadable}, "0.3.0") == (
+            canary.INSTALLABILITY_UNKNOWN
+        ), unreadable
+    assert canary.installability({**doc, "releases": "x"}, "0.3.0") == (
+        canary.INSTALLABILITY_UNKNOWN
+    )
+
+    # AND THE ARM: a mixed map whose ADVERTISED value was dropped at field level must take the
+    # "could not be READ" sentence, not the decisive negative (which is reserved for a complete
+    # read). This is the shape the round-7 finding reproduced.
+    for field_shape in (
+        {"filename": "tortoise_client-0.3.0-py3-none-any.whl", "yanked": "false"},
+        {"yanked": False},
+        {"filename": ""},
+    ):
+        report = _client_report(
+            {**doc, "releases": {"0.2.0": [_CLIENT_GOOD], "0.3.0": [field_shape]}}
+        )
+        arm = report.get("client-published")
+        assert arm.status == canary.OK, (field_shape, arm.status, arm.detail)
+        assert "advertised latest 0.3.0 could not be READ here" in arm.detail, (
+            field_shape,
+            arm.detail,
+        )
+        assert "not resolvable for an unpinned install" not in arm.detail, arm.detail
 
 
 def test_a_non_STRING_version_is_the_same_class_one_key_further_in():
