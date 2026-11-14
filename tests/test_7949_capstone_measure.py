@@ -6104,8 +6104,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `@app.post("/v1/sessions")`: successive re-points walked the number forward onto
         # the sibling, so the capture route is now cited by hand and pinned exactly.
         ("00-align.md", "`llm:deepseek-direct` is what", (
-            ("18743", ("exact", '@app.post("/v1/sessions")')),
-            ("21298", '@app.post("/v1/sessions/install-probe")'),
+            ("18744", ("exact", '@app.post("/v1/sessions")')),
+            ("21299", '@app.post("/v1/sessions/install-probe")'),
         ), "hosted_api"),
         # ⛔ The four repairs `#12587` round 2 made, each given the reader it lacked.
         # Every one was measured UNPINNED first (revert -> 776 passed), which is the
@@ -6115,7 +6115,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # LINE as the cite (`_pin_row_failures` scopes to one line, not a paragraph),
         # so it is the clause after the number, not the heading above it.
         ("00-plan.md", 'returns `"v2"` **unless**', (
-            ("18880", "def _capture_lane() -> str:"),
+            ("18881", "def _capture_lane() -> str:"),
         ), "hosted_api"),
         ("00-plan.md", "**default-ON**: `TORTOISE_S4_DELTA`", (
             ("1174", 'env_flag("TORTOISE_S4_DELTA", True)'),
@@ -6195,15 +6195,15 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         #
         # The anchor is `quota_refusal_payload(QuotaExceededError(`, not the bare
         # `quota_refusal_payload(`, because the OLD anchor's `detail=quota_refusal_payload(`
-        # form occurs at THREE lines (`:10576`, `:19472`, `:19534`) — and the bare
+        # form occurs at THREE lines (`:10576`, `:19473`, `:19535`) — and the bare
         # call occurs at four (`:10158` is `return quota_refusal_payload(`): a
-        # `(document, pin)` pair moved together onto `:19534` — the `CohortCostCap`
+        # `(document, pin)` pair moved together onto `:19535` — the `CohortCostCap`
         # arm, the WRONG refusal — would satisfy the bare anchor and stay green.
         # The hardened form occurs exactly once in the file, so a re-point onto a
         # sibling arm now reds.
         ("03-test-design.md", "the A-corpus capture", (
-            ("19447", "if count + est > max_points:"),
-            ("19472", "quota_refusal_payload(QuotaExceededError("),
+            ("19448", "if count + est > max_points:"),
+            ("19473", "quota_refusal_payload(QuotaExceededError("),
         ), "hosted_api"),
         # ⛔ THE LINE THAT *QUOTES* :82's NUMBER (#12462 review). `03-test-design.md:236`
         # re-states `hosted_api.py:19447` as the same guard read at an older head, so it is
@@ -6213,7 +6213,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # current-head number is pinned: the `:18205` beside it is a STAMP read at
         # `a577d0e25c` and does NOT resolve here, so pinning it would red a true record.
         ("03-test-design.md", "`:82`'s `hosted_api.py:", (
-            ("19447", "if count + est > max_points:"),
+            ("19448", "if count + est > max_points:"),
         ), "hosted_api"),
         # ⛔ `05-verify.md` D5's own "Measured at" sentence (#12462 review). The row whose
         # SUBJECT is that line numbers rot carried NINE this-head cites and no reader at
@@ -6221,8 +6221,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # is unique in the file. The first cut pinned only three of the nine, and review measured the
         # residual by mutating the rest — the rest of the file GREEN — so they are pinned too.
         ("05-verify.md", "Measured at `d05688df5990`", (
-            ("19340", "``body.harness`` only ever introduces a harness on a session the server"),
-            ("19447", "if count + est > max_points:"),
+            ("19341", "``body.harness`` only ever introduces a harness on a session the server"),
+            ("19448", "if count + est > max_points:"),
         ), "hosted_api"),
         ("05-verify.md", "Measured at `d05688df5990`", (
             ("10037", "_registry_cache = PackRegistry(packs_dir)"),
@@ -6305,7 +6305,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # ABOVE it, and a phrase that binds the wrong line is the failure `_pin_row_failures`
         # reports rather than hides).
         ("00-plan.md", "returns `\"v2\"`", (
-            ("18880", "def _capture_lane() -> str:"),
+            ("18881", "def _capture_lane() -> str:"),
         ), "hosted_api"),
         # ⛔ `04-plan.md` I7's `org_info` RANGE (#12462 review cycle 3, P2): re-pointed to
         # `:14465-14542` and unread, so both endpoints could move silently. Only the START

@@ -713,14 +713,16 @@ receipt, not on the status code:**
 ⛔⛔ **P1 from the `duplication-architecture` review: the first version INVERTED this contract.** It said "retry with
 a **fresh** `session_id`" — which **discards the door's own convergence machinery and mints a second session's
 points**, double-minting silently. The door already owns the retry semantics: a same-session re-POST on a convergent
-lane is the TRUE retry (`hosted_api.py:18131` assigns `retry_failed_capture`, `:18159` consumes it; blocked for `m2`);
+lane is the TRUE retry (`hosted_api.py:18131` assigns `retry_failed_capture`, `:18159` consumes it at `a577d0e25c`, the head this
+section's numbers are stamps of — at this head they are `:19374`/`:19402`; blocked for `m2`);
 a **replay** fires only when `capture_ok` is `True`/legacy-`None` and returns `mode: "replayed"`
-(`hosted_api.py:18717`); and `#3129`'s abandoned marker writes `capture_ok=false` **precisely so that** a same-session
+(`hosted_api.py:18717` at `a577d0e25c`; `:19971` here); and `#3129`'s abandoned marker writes `capture_ok=false` **precisely so that** a same-session
 retry is a true retry. ⚠️ §5.4's citation (`:17212-17217`) was wrong, and the correction to it was RIGHT when
 written: the range did hold `_SESSION_CAPTURED_AT_SOURCE_VALUES` and `class SessionRequest` at `a577d0e25c`
 (`:17212`/`:17216`). The NUMBER then rotted — at this head (`5843fdf234`, and already at `d05688df59`, the base it
 grew from) `:17212-17217` is a **422** branch,
-which is what F3 records there, and those two symbols are at `:18298`/`:18302`. Neither the range nor the
+which is what F3 records there, and those two symbols are at `:18299`/`:18303` (`#12438` moved them by one line
+when it archived four tools above them). Neither the range nor the
 correction named the replay path. **The retry contract is the door's; the plan declares it, it does not restate a different one.**
 
 ---
