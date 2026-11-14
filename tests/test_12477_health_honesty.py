@@ -379,7 +379,7 @@ def test_a_process_past_the_bound_with_NO_probe_result_is_a_FAILURE():
     assert verdict["detail"]["uptime_s"] > 0
 
 
-def test_the_boot_clock_is_a_float_and_not_the_identity_string():
+def test_the_probe_epoch_is_a_float_and_not_the_identity_string():
     """A name collision made a healthy cold start fail its own deploy gate.
 
     Round 12 added the uptime bound on a global called `_PROCESS_STARTED_AT` — the
@@ -397,12 +397,23 @@ def test_the_boot_clock_is_a_float_and_not_the_identity_string():
     guarantee is `test_a_cold_start_with_no_probe_result_does_not_fail_the_deploy_gate`;
     this one asserts the DEFINITION exists under its own name, so a future rename
     cannot silently re-collide.
+
+    ⛔ AND IT MATCHES A WHOLE LINE, NOT A SUBSTRING (review P2, round 2). `_lifespan`
+    re-assigns this name 900 lines below, INDENTED; `"<name> = time.monotonic()" in
+    source` is satisfied by that indented copy, so the module-level definition — the
+    one the verdict reads, outside every `try` — could be deleted or renamed with this
+    test still green. Measured: renaming only the module-level definition left
+    `pytest tests/test_12477_health_honesty.py` at 16 passed. A member of
+    `source.splitlines()` is a start-of-line match, so the indented assignment cannot
+    stand in for it.
     """
     import inspect
 
     source = inspect.getsource(hosted_api)
-    assert "_HEALTH_PROBE_EPOCH_MONOTONIC = time.monotonic()" in source, (
-        "the boot clock must be DEFINED as a monotonic float under its own name")
+    assert "_HEALTH_PROBE_EPOCH_MONOTONIC = time.monotonic()" in source.splitlines(), (
+        "the probe epoch must be DEFINED at MODULE scope, as a monotonic float under "
+        "its own name — the indented re-assignment in `_lifespan` cannot stand in "
+        "for the definition the verdict reads")
     assert isinstance(hosted_api._PROCESS_STARTED_AT, str), (
         "_PROCESS_STARTED_AT is the ISO string `_build_identity()` publishes; if "
         "it is ever a float, an uptime subtraction has been pointed at it again")
