@@ -346,7 +346,9 @@ _vet_enabled() or _value_gate_enabled())` assignment (`extractor_v2.py:11731-117
 `extractor_v2.py:1185` is the **`TORTOISE_VET` toggle** on this tree
 (`return is_truthy(os.environ.get("TORTOISE_VET")) or _s2_seam_armed()`, `def _vet_enabled` at
 `:1177`), still OFF by default — cite it for that and nothing else. ⚠️ It was `:1183` only on the
-2026-11-09→11-12 commits, and a blank line on every sha this paragraph names below — which is the
+2026-11-09→11-13 commits — through `576524d0c0`, its last mainline carrier, and `#12348`'s
+`42409813a7` is the commit that moved it to `:1185` — and a blank line on every sha this paragraph
+names below — which is the
 trap this very sentence is about: an unbased toggle number is safe at one head and wrong at the next. ⚠️ **A line cite is pinned to a base, and cites drift SITE BY SITE.** Three points, each
 named by the sha it is true at, so every delta has a reproducible operand: `:11351-11352` / `:1153` at
 **`aa414b4d5`** (the `#11211` landing — ⚠️ the immediate parent of the next point, `80c912244^`, holds
