@@ -2643,6 +2643,11 @@ def test_wheel_mode_fail_names_a_build_defect_not_a_release():
     assert "BUILT wheel fails" in summary
     assert "re-dispatch this publish" in summary
     assert "needs a release" not in summary
+    # ⛔ AND THE TAIL'S CLASSIFICATION BELONGS TO THE ARM THAT ESTABLISHED THE CLAIM (#12589 review
+    # round 13, P3): "This is a code defect" was attached to every branch, including the one that
+    # says it could not attribute the failure. A wrong `named_it` must not be able to hide here.
+    assert "re-dispatch this publish" in summary, summary
+    assert "wheel-mode wiring problem" not in summary, summary
 
     # ⛔ AND A GATED ARM THAT IS NOT THE WHEEL'S COMMAND MAY NOT INHERIT THE CLAIM (#12589 review
     # round 12, P3). The pre-fix tail published "fails its documented first command" on `else:`,
@@ -2659,6 +2664,11 @@ def test_wheel_mode_fail_names_a_build_defect_not_a_release():
     assert "fails its documented first command" not in foreign_summary, foreign_summary
     assert "documented-command" in foreign_summary, foreign_summary
     assert "is NOT judged by this summary" in foreign_summary, foreign_summary
+    # ...and the branch that could not attribute the failure may not CLASSIFY it either: no
+    # "re-dispatch this publish" instruction (that sentence carries the code-defect verdict), and
+    # the honest alternative instead.
+    assert "re-dispatch this publish" not in foreign_summary, foreign_summary
+    assert "wheel-mode wiring problem" in foreign_summary, foreign_summary
 
 
 def test_an_EMPTY_wheel_argument_is_refused_not_downgraded_to_index_mode(monkeypatch, capsys):
@@ -3906,6 +3916,22 @@ def test_an_UNPARSEABLE_release_VALUE_is_UNKNOWN_and_never_orders_a_release():
     assert "any release" not in arm.detail.lower(), arm.detail
 
 
+def test_the_non_reading_tokens_are_pinned_by_their_PUBLISHED_TEXT():
+    """⛔ A TOKEN PINNED ONLY BY REFERENCE TO ITS OWN CONSTANT IS A TAUTOLOGY (#12589 review round
+    13, P3).
+
+    Every assertion elsewhere reads `assert canary.INFO_UNREADABLE in arm.detail`, which holds for
+    ANY value of the constant — including `""`. Mutating each constant to `""` (or renaming
+    `RELEASES_UNREADABLE`) left all 87 tests green, so the four tokens an operator actually SEES —
+    in the summary and in the alert's `$why` — were never verified. One literal assertion per token
+    closes that; the constant-form assertions stay as the mechanism check.
+    """
+    assert canary.INFO_UNREADABLE == "info-unreadable"
+    assert canary.VERSION_UNREADABLE == "version-unreadable"
+    assert canary.RELEASES_UNREADABLE == "releases-unreadable"
+    assert canary.RELEASES_ABSENT == "releases-absent"
+
+
 def test_a_non_object_info_is_a_LEGIBLE_NON_READING_on_BOTH_arms():
     """`info` present but not an object: no traceback, UNKNOWN — and the exit code SPLITS (#12589).
 
@@ -3938,6 +3964,11 @@ def test_a_non_object_info_is_a_LEGIBLE_NON_READING_on_BOTH_arms():
         assert arm.status == canary.UNKNOWN, (doc, arm.status, arm.detail)
         assert canary.INFO_UNREADABLE in arm.detail, arm.detail
         assert "not a reason to cut a release" in arm.detail.lower(), arm.detail
+        # ⛔ THE NEGATIVE ASSERTION BELONGS ON BOTH ARMS, AND IN THE GENERAL FORM (#12589 review
+        # round 13, P3). The client arm's phrase-specific check let a shared UNKNOWN detail that
+        # re-asserts the artifact claim ("… carries no latest version — the document's `info` is
+        # …") pass 87/87.
+        assert "carries no" not in arm.detail, arm.detail
         assert "carries no published version" not in arm.detail, arm.detail
         assert report.exit_code == 2, (doc, report.exit_code)
         # engine arm — the one a naive fix would have flipped from exit 2 to exit 1
@@ -3948,6 +3979,7 @@ def test_a_non_object_info_is_a_LEGIBLE_NON_READING_on_BOTH_arms():
         arm = report.get("engine-index")
         assert arm.status == canary.UNKNOWN, (doc, arm.status, arm.detail)
         assert canary.INFO_UNREADABLE in arm.detail, arm.detail
+        assert "carries no" not in arm.detail, arm.detail
         assert report.exit_code == 2, (doc, report.exit_code)
 
 

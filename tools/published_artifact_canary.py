@@ -1262,31 +1262,44 @@ def render_summary(report: Report) -> str:
             # asks the operator to read it.
             step = next((arm for arm in report.arms if arm.gated and arm.status == FAIL), None)
             detail = step.detail if step is not None else ""
+            named_it = False
             if detail.startswith("the BUILT wheel") and "failed to install" in detail:
                 what = "does not install"
+                named_it = True
             elif "console script" in detail:
                 what = "installs but ships no `tortoise` console script, so the documented first command cannot run"
+                named_it = True
             elif step is not None and step.name in WHEEL_COMMAND_ARMS:
                 # The arm that RUNS the built wheel's documented command — the only one whose
                 # failure establishes this sentence (`test_wheel_mode_fail_names_a_build_defect_
                 # not_a_release` is this shape: the wheel installs, `tortoise init` exits 1).
                 what = "fails its documented first command"
-            elif step is None:
-                what = (
-                    "is red, but no single arm names the failure — read the table above and "
-                    "treat this as a canary defect"
-                )
+                named_it = True
             else:
+                # ⛔ AND THE FALLBACK CLAIMS NOTHING BEYOND ITS OWN READING (#12589 review rounds
+                # 12 and 13). Round 12 made this branch name the arm, but left the shared tail
+                # sentence "fix the tree … a code defect, not a release-owed finding" attached to
+                # it — a CLASSIFICATION this branch has just said it cannot establish. The arm
+                # label below degrades to "no arm reported" rather than taking a dead `elif step
+                # is None:` branch: `Report.verdict == FAIL` implies a gated red arm exists, so
+                # that branch could never run and no test can reach it (round 13).
                 what = (
-                    f"is NOT judged by this summary: the failing arm is `{step.name}` "
-                    f"({step.detail}) — read it, because that arm does not establish that the "
-                    f"built wheel fails its documented command"
+                    f"is NOT judged by this summary: the failing arm is "
+                    f"`{step.name if step is not None else 'no arm reported'}` "
+                    f"({detail or 'no detail'}) — read it, because that arm does not establish "
+                    f"that the built wheel fails its documented command"
                 )
             lines += [
                 "",
-                f"The BUILT wheel {what}. Nothing has been "
-                "uploaded: fix the tree and re-dispatch this publish. This is a code "
-                "defect, not a release-owed finding. See #12363.",
+                f"The BUILT wheel {what}. Nothing has been uploaded. "
+                + (
+                    "Fix the tree and re-dispatch this publish: this is a code defect, not a "
+                    "release-owed finding. See #12363."
+                    if named_it
+                    else "Read that arm before deciding whether this is a code defect or a "
+                    "wheel-mode wiring problem — the summary cannot tell you which. "
+                    "See #12363."
+                ),
             ]
         else:
             lines += [
