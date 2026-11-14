@@ -2386,6 +2386,13 @@ surfaces:
   # `test_ci_selection.py` pins in `test-slow`), and a diff to this file must
   # select `core`, where it runs.
   - test_12500_query_args_dropped.py
+  # #12477: the health surfaces must not read green over a failing data plane
+  # (the `/health` body's verdict and the 9090 listener's registration). Landed in
+  # `main` UNREGISTERED — `manifest-integrity` runs after the merge, so `main` was
+  # red on `integrity()` and every PR's merge ref inherited it (the class recorded
+  # on #11978). Registered here so the recovery travels with the next PR that
+  # touches this file.
+  - test_12477_health_honesty.py
   - test_candidate_recall_11901.py
   - test_journal_segments.py
   - test_journal_segments_falsifier.py

@@ -4026,8 +4026,11 @@ def tortoise_query(kind: str | None = None,
     # ── #12372: `entity_type` was DROPPED on every arm except `text=` ────────
     # The signature has always taken `entity_type`, but only the `text=` arm
     # forwarded it (into `sdk.tortoise_fts_query`, which honours it). The tag
-    # arm documents that it ignores the argument; the paginated arm and the
-    # plain structural arm call `sdk.paginated_query(kind, skip, limit, …)`,
+    # arm USED to document that it ignores the argument (that sentence was itself
+    # replaced by #12372 — the served tag bullet now says a non-Point
+    # `entity_type` is REFUSED there, and `ToolDefinition.description` does not
+    # mention the argument at all; round-23 P2 1, measured). The paginated arm and
+    # the plain structural arm call `sdk.paginated_query(kind, skip, limit, …)`,
     # which has no `entity_type` parameter at all — it is a Point reader by
     # construction (`MATCH (n:Point) …`). Measured against live-v4 on
     # 2026-11-13: `entity_type="operator", offset=0, limit=5` answered
@@ -4126,7 +4129,10 @@ def tortoise_query(kind: str | None = None,
     # same `tag=`-first precedence those arms use (`_arm` below), so a caller
     # passing both keeps a message about the arm that ACTUALLY answers — there is
     # no separate "precedence split" above this point (round-17 P2 2: the comment
-    # claimed one that did not exist; the tag branch is 200-odd lines below).
+    # claimed one that did not exist; the tag branch is `if tag is not None:`,
+    # far below — named, not counted, because a line count inside the block it
+    # measures drifts with every edit above it (round-23 P2 4: it was 245 at r17
+    # and 282 at r22, with nothing red when it passed "200-odd").
     # TRUTHINESS, not `is not None` (round-1 P1, measured): this arm's own
     # semantics define the falsy values as ABSENT — the `text=` call below
     # normalises with `min_confidence or 0.0` and `order_by or "relevance"`, and
@@ -4450,7 +4456,7 @@ def tortoise_query(kind: str | None = None,
         # a caller who asked for tombstoned rows got them excluded with no
         # signal. The fts leg already has the knob (`include_terminal`, an
         # EXISTING parameter — no surface change), and its documented semantics
-        # are exactly this flag (sdk.py:40823).
+        # are exactly this flag (sdk.py:40915-40924).
         return _safe(_get_org_sdk().tortoise_fts_query, text, kind=kind,
                      entity_type=entity_type, limit=eff_limit,
                      min_confidence=min_confidence or 0.0,

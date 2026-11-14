@@ -862,7 +862,7 @@ _DOCSTRING_FALSE = (
 def test_the_tool_docstring_never_restates_a_falsified_claim() -> None:
     """The false claims this PR shipped, pinned so they cannot come back.
 
-    Both are wrap-insensitive (whitespace-collapsed), because a re-wrap must not
+    Each is wrap-insensitive (whitespace-collapsed), because a re-wrap must not
     silently disarm the pin — the `#12455` lesson. Fails if any reappears in
     `tortoise_query.__doc__`.
     """
