@@ -67,24 +67,29 @@ class _StubSDK:
         self.calls.append(("tortoise_fts_query", query, kind, {
             "min_confidence": min_confidence, "order_by": order_by,
             "limit": limit, "include_terminal": include_terminal, **kwargs}))
-        # FIXTURE FIDELITY (round-26 P2 1): the real SDK JUDGES the floor before
-        # any retrieval (`sdk.py:41222-41223` range-check it), so a stub that
-        # merely records it cannot tell a route that terminates from one that
+        # FIXTURE FIDELITY (round-26 P2 1): the real SDK JUDGES both of these
+        # before any retrieval (`sdk.py:41222-41223` range-checks the floor,
+        # `sdk.py:41228` vocabulary-checks the order), so a stub that merely
+        # records them cannot tell a route that terminates from one that
         # dead-ends in the caller's next call — the exact blind spot that let the
         # structural/tag routes promise `pass text=` for `min_confidence=1.5`.
-        # The floor half is the one the PRODUCT can reach: every arm refuses an
-        # out-of-domain floor rather than passing it on. The SDK's other
-        # pre-retrieval judgment, the `order_by` vocabulary check
-        # (`sdk.py:41228`), is deliberately NOT mirrored here — an out-of-domain
-        # `order_by` is refused on every arm too, so a check for it in this stub
-        # could never fire, and an unfireable check is a claim the fixture makes
-        # about itself that no case can hold (round-33 P2 3, measured: the branch
-        # was reported uncovered and deleting it left the file green).
+        # BOTH halves are reachable, because the `text=` arm FORWARDS both
+        # arguments instead of refusing them: an out-of-domain value on that arm
+        # arrives HERE and is refused here, exactly as the real SDK refuses it
+        # (round-26: the floor; round-34 P2 1: the order). The structural and tag
+        # arms refuse these values at the tool boundary and never reach this
+        # stub. Round 33 deleted the `order_by` half as "refused on every arm
+        # too, so a check for it … could never fire" — false for `text=`,
+        # measured: `tortoise_query(text="x", order_by="garbage")` was served
+        # as `order_by='garbage'`. `test_the_stub_judges_order_by_…` pins it.
         if not isinstance(min_confidence, (int, float)):
             raise TypeError("'<=' not supported between 'float' and "
                             f"'{type(min_confidence).__name__}'")
         if not (0.0 <= min_confidence <= 1.0):
             raise ValueError(f"min_confidence must be 0.0-1.0, got {min_confidence}")
+        if order_by not in ("relevance", "confidence", "graph"):
+            raise ValueError("order_by must be 'relevance', 'confidence', or "
+                             f"'graph', got {order_by!r}")
         return self.rows
 
     def paginated_query(self, kind=None, skip=0, limit=20, **kwargs):
@@ -605,6 +610,41 @@ def test_an_unusable_floor_is_left_to_the_sdk_to_refuse(stub) -> None:
     )
 
 
+def test_the_stub_judges_order_by_the_way_the_sdk_does(stub) -> None:
+    """The `text=` arm FORWARDS `order_by`, and the real SDK judges it there.
+
+    `sdk.py:41228` vocabulary-checks `order_by` BEFORE any retrieval, and `text=`
+    is the one arm that forwards the value instead of refusing it (#12500 refuses
+    it at the tool boundary on the structural and tag arms), so a record-only stub
+    SERVES a call the product rejects: measured at round 34,
+    `tortoise_query(text="x", order_by="garbage")` reached this accessor as
+    `order_by='garbage'` and returned rows. Round 33 removed the mirror because
+    "an out-of-domain `order_by` is refused on every arm too" — false for `text=`,
+    the one arm whose route promises `pass text=`; restoring it is round-34 P2 1.
+
+    Fails if the stub stops judging the value (the call is then SERVED, and the
+    route's own `pass text=` promise is checked against a fixture that cannot
+    honour the SDK's contract), or if the tool starts intercepting it with a
+    `#12500` paragraph — on this arm the value belongs to the SDK, exactly as the
+    floor above does.
+    """
+    from tortoise.mcp_server import tortoise_query
+
+    result = tortoise_query(text="x", order_by="garbage")
+
+    fts = [c for c in stub.calls if c[0] == "tortoise_fts_query"]
+    assert fts and fts[-1][3]["order_by"] == "garbage", (
+        f"order_by never reached the accessor, so this fixture cannot judge it: "
+        f"{result} / {fts}"
+    )
+    assert "#12500" not in str(result), (
+        f"the text= arm answered for a value the SDK judges: {result}"
+    )
+    assert "must be 'relevance'" in str(result), (
+        f"expected the SDK's own vocabulary refusal, got: {result}"
+    )
+
+
 def test_the_text_arm_still_applies_the_floor_to_POINTS(stub) -> None:
     """The control for the branch above: `entity_type="point"` is the default.
 
@@ -1105,7 +1145,7 @@ def test_a_graph_ordering_with_no_signal_is_refused_not_silently_reordered(
 #: The POSITIVE behaviour sentences in the same bullets — the ones a route reader
 #: acts on, and the ones this PR spent rounds re-pointing citations FOR. Each was
 #: measured unpinned at round 33: inverted in turn, the whole five-file gate set
-#: stayed green (260 passed, 16 skipped), because nothing else anywhere asserts
+#: stayed green (262 passed, 16 skipped), because nothing else anywhere asserts
 #: on `tortoise_query.__doc__` (`grep -rln 'tortoise_query.__doc__' tests/` finds
 #: only this file). They are presence checks, wrap-insensitive, like
 #: `_REFUSAL_CLAIMS` — they cannot re-red a true sentence.
@@ -1321,7 +1361,7 @@ def test_every_alternative_of_a_paged_text_route_terminates(stub) -> None:
     # alternative from the route (keeping only `order_by='relevance'` — a
     # terminating alternative in its own right, applied to every type, so nothing
     # noticed its twin disappearing) left this FILE green (round-25 P2, measured:
-    # 87 passed here; the five-file gate set was 250 passed / 16 skipped — the count
+    # 87 passed here; the five-file gate set was 251 passed / 16 skipped — the count
     # is quoted per population because round-29 found it mislabelled as the set).
     assert "pass entity_type='point'" in order_only, order_only
     assert "or order_by='relevance'" in order_only, order_only
