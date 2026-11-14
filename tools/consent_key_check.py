@@ -148,14 +148,17 @@ REASON_CODES = frozenset(
 )
 
 #: ⛔ THE SPLIT REMEDY IS NOT ONE SENTENCE, and this set is what decides which one is true. A SPLIT
-#: means one half is dark, but it does NOT mean that half is EMPTY. Four of the six `reason` codes
-#: describe a value the dark half already HOLDS and finds unusable — `padded`, `reused_credential`,
-#: `too_short`, `not_utf8` — and for those "copy the live half's value onto the dark half" is
-#: at best a guess: the reading compares fingerprints only, so it cannot tell whether the live value
-#: itself clears the dark half's refusal. One fresh key on BOTH halves is the only repair that always
-#: works.
+#: means one half is dark, but it does NOT mean that half is EMPTY. FOUR of the six `reason` codes
+#: describe a value the dark half already HOLDS and refuses — `padded`, `reused_credential`,
+#: `too_short`, `not_utf8` — and for those "copy the live half's value onto the dark half" is at best
+#: a guess: the reading compares fingerprints only, so it cannot tell whether the live value itself
+#: clears the dark half's refusal. It MAY clear it (Fly holds " key\n" as `padded` while Pages holds
+#: the clean `key`) and it MAY reproduce it (both halves given the same unusable value). One fresh key
+#: on BOTH halves is the only repair that always works — and stating the copy as IMPOSSIBLE instead is
+#: what pushed an operator whose copy WOULD have worked into rotating the production signing key on
+#: both halves.
 #:
-#: REACHABLE, not theoretical (measured at this head): the Pages half has NO length floor
+#: REACHABLE, not theoretical (measured): the Pages half has NO length floor
 #: (`consent-bridge.ts::consentKeyFingerprint` guards only `if (!secret)`), while `consent_token.py`
 #: refuses anything under `_MIN_SECRET_BYTES` (32) with `too_short`. So an operator who sets the SAME
 #: 20-byte key on BOTH halves gets `configured: true` from Pages and `configured: false,
@@ -163,6 +166,8 @@ REASON_CODES = frozenset(
 #: `too_short` for as long as they keep following it.
 #:
 #: The two absence codes are the ones where copying IS the repair: nothing is there to copy from.
+#: ⚠️ The AS's floors still apply to whatever is copied in — see the `api`-dark arm of `_fix_hint`,
+#: whose source (Pages) enforces none of them.
 #: ⛔ FOUR value-fault codes, TWO absence codes — the counts are asserted in the suite. (An earlier cut
 #: of this comment said "five of the six" beside a list of four; the sentence, not only the note
 #: about it, is what the next reader acts on.)
@@ -512,10 +517,14 @@ def _fix_hint(verdict: Verdict) -> str:
             "reconcile and a one-sided rotation would CREATE the split this check exists to catch. "
             "Set the SAME value the LIVE half (`app`) already holds in the GITHUB REPO SECRET "
             "(`gh secret set CONSENT_TOKEN_SECRET`), then land (or `workflow_dispatch`) the "
-            "`deploy-hosted` run so Fly is staged from it. ⛔ Do NOT hand-set it with "
-            "`fly secrets set`: `.github/scripts/fly-managed-secrets.txt` declares the binding "
-            "`gh-secret:`, so every `deploy-hosted` run re-stages the repo value and silently reverts "
-            "a hand-set Fly value — after you had seen AGREE. §2.5."
+            "`deploy-hosted` run so Fly is staged from it. ⚠️ The AS enforces floors the Pages half "
+            "does NOT (Pages accepts any non-empty string), so a copy can still be refused: if that "
+            "value is under 32 bytes, padded, not UTF-8, or a reused credential, the check stays "
+            "SPLIT with a `too_short`/`padded`/`not_utf8`/`reused_credential` reason — in that case "
+            "rotate BOTH halves instead. ⛔ Do NOT hand-set it with `fly secrets set`:"
+            "`.github/scripts/fly-managed-secrets.txt` declares the binding `gh-secret:`, so every "
+            "`deploy-hosted` run re-stages the repo value and silently reverts a hand-set Fly value "
+            "— after you had seen AGREE. §2.5."
         )
     if verdict.verdict == "MISMATCH":
         return (

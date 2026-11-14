@@ -683,6 +683,18 @@ def test_an_api_dark_SPLIT_sends_the_operator_to_the_REPO_SECRET_not_fly_secrets
     assert "fly secrets set" in hint and "reverts" in hint, (
         f"the api-dark hint must warn that the direct Fly write is reverted: {hint!r}"
     )
+    # ⛔ The SOURCE of the copied value (Pages) enforces NONE of the AS's floors, so the api-dark arm
+    # must state the precondition and the fallback: without them the operator performs the prescribed
+    # write, the AS refuses the short/padded value, and the monitor re-reds with a VALUE-FAULT reason
+    # whose remedy ("do NOT rotate"/copy) is the opposite of the one just followed.
+    assert "Pages accepts any non-empty string" in hint, (
+        f"the api-dark hint must warn that the Pages source enforces no floors: {hint!r}"
+    )
+    assert "rotate BOTH halves instead" in hint, (
+        f"the api-dark hint must name the fallback when the copied value fails the AS's floors: {hint!r}"
+    )
+    for code in ("too_short", "padded", "not_utf8", "reused_credential"):
+        assert code in hint, f"the api-dark hint no longer names the floor it can fail (`{code}`)"
     assert "do NOT rotate" in hint, f"a one-sided copy is the repair here, not a rotation: {hint!r}"
     assert "TWO-SIDED" not in hint, f"a rotation is the needless repair here: {hint!r}"
 
@@ -754,6 +766,17 @@ def test_a_value_fault_SPLIT_never_tells_the_operator_to_copy_the_working_value(
             f"reproduces the same refusal: {hint!r}"
         )
         assert "REDEPLOY" in hint and "§2.5" in hint, reason
+        # ⛔ AND IT MUST NOT BE A CERTAINTY. The tool compares FINGERPRINTS only, so it cannot see
+        # whether the working half holds a DIFFERENT usable value (a copy would clear the fault) or
+        # the same unusable one (a copy reproduces it). Claiming the latter is what pushed an operator
+        # whose copy would have WORKED into rotating the production signing key on both halves.
+        assert "MIGHT" in hint, (
+            f"the `{reason}` hint states the copy as impossible; it can only say it MAY reproduce the "
+            f"refusal, because a copy might also clear it: {hint!r}"
+        )
+        assert "always works" in hint, (
+            f"the `{reason}` hint must justify the rotation as the repair that ALWAYS works: {hint!r}"
+        )
         # ⛔ It must still forbid the HALF-rotation, which is the harm this arm also has to prevent.
         assert "Never set only ONE half" in hint, f"{reason}: the one-sided prohibition is gone"
 
