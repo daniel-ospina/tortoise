@@ -591,6 +591,83 @@ def test_the_hosted_health_body_publishes_the_clamp_counter(monkeypatch):
         "first curl would read healthy forever while the degradation went uncounted")
 
 
+def test_the_hosted_health_body_survives_a_monitoring_module_without_the_counter(monkeypatch):
+    """A MISSING attribute, not a raising call — the one failure the callee cannot guard.
+
+    ``health_setup_clamped_count`` never raises (pinned directly above), so wrapping the CALL looks
+    like belt-and-braces. It is not (fresh review, P3): a stale or partially written ``monitoring``
+    module has no such attribute at all, and an unguarded ``_monitoring.health_setup_clamped_count()``
+    then raises ``AttributeError`` out of ``health()`` — measured, over a body whose own docstring
+    promises "it never 5xxes: a dead DB is 'degraded', never a killed process". Every sibling read
+    on that body is wrapped for this exact reason.
+
+    The published shape is ``int | null``, so ``null`` is inside the contract: a read that could not
+    happen reports nothing measured, never a fabricated ``0`` (which is the HEALTHY reading).
+    """
+    import asyncio
+
+    from tortoise import hosted_api
+
+    monkeypatch.delattr(monitoring, "health_setup_clamped_count")
+    body = asyncio.run(hosted_api.health())
+
+    assert body["health_setup_clamped"] is None, (
+        f"an unreadable counter was published as {body['health_setup_clamped']!r}; only None "
+        "means 'nothing measured' — 0 is a measured zero and is the healthy reading")
+    assert "status" in body, "the health body lost its `status` key on the unreadable-counter path"
+
+
+def test_a_stale_quota_module_cannot_turn_the_health_answer_into_an_error(monkeypatch):
+    """Planning-time imports must be as forgivable as the ``#11892`` block's guarded one.
+
+    ``_health_tail_reserve`` and ``_health_quota_budget`` each read ``quota.QUOTA_STATE_TIMEOUT``,
+    and both run OUTSIDE any ``try`` in ``tortoise_health``'s tail (fresh review, P3). A bare
+    ``from tortoise.quota import QUOTA_STATE_TIMEOUT`` at a stale module therefore raised
+    ``ImportError``, which ``_safe`` turned into an error payload with **no ``status`` key at all** —
+    the clamp's own arithmetic fail-closing on the instrument that reports whether the product is up,
+    on a box where the pre-fix code answered normally. Measured on the reviewer's head.
+    """
+    import sys
+    import types
+
+    stale = types.ModuleType("tortoise.quota")
+    stale.run_bounded_quota_state = quota.run_bounded_quota_state
+    monkeypatch.setitem(sys.modules, "tortoise.quota", stale)
+
+    # Both PLANNING sites first: they are the unguarded ones the finding names, and they run
+    # outside any `try` in the handler's tail.
+    reserve = mcp_server._health_tail_reserve()
+    assert reserve == pytest.approx(
+        monitoring.PROBE_TIMEOUT + monitoring.GRAPH_SIZE_TIMEOUT
+        + mcp_server._QUOTA_STATE_TIMEOUT_FALLBACK_S + mcp_server._HEALTH_TAIL_MARGIN_S), (
+        "the reserve did not fall back to the documented quota constant")
+
+    token = mcp_server._WAIT_BOUND_DEADLINE.set(time.monotonic() + 10.0)
+    try:
+        _capture(monkeypatch)
+        report = mcp_server.tortoise_health()
+    finally:
+        mcp_server._WAIT_BOUND_DEADLINE.reset(token)
+
+    assert isinstance(report, dict) and "status" in report, (
+        "a stale `tortoise.quota` cost the health answer its `status` key — the clamp's "
+        f"planning imports are unguarded: {report!r}")
+
+
+def test_the_quota_timeout_fallback_is_the_documented_constant():
+    """The fallback must not drift away from the value it stands in for.
+
+    ``_QUOTA_STATE_TIMEOUT_FALLBACK_S`` is a literal (3.0) used only when ``tortoise.quota`` cannot
+    be imported, so no ordinary test reaches it and a retune of ``quota.QUOTA_STATE_TIMEOUT`` would
+    leave the broken-deploy path reserving the wrong phase bound forever. This is the pin that makes
+    the duplication safe; it is deliberately NOT a claim that the literal is a second source of
+    truth.
+    """
+    assert pytest.approx(quota.QUOTA_STATE_TIMEOUT) == mcp_server._QUOTA_STATE_TIMEOUT_FALLBACK_S, (
+        "the stale-quota fallback no longer equals quota.QUOTA_STATE_TIMEOUT — retune it in the "
+        "same commit that moves the constant")
+
+
 def test_the_quota_deadline_reaches_the_bound_that_enforces_it(monkeypatch):
     """The quota budget must arrive at `run_bounded_quota_state`, not just beside it.
 
@@ -969,7 +1046,14 @@ def test_a_clamped_count_budget_actually_starves_the_real_count(monkeypatch):
         "the probe never answered, so the COUNT phase was not reached and this test would pass "
         "for the wrong reason")
     assert report["graph_size"] == 0
-    assert "exceeded its 0.0s budget" in (report["graph_size_error"] or ""), (
+    # ⛔ THE FRAGMENT STARTS AT `graph_size count` ON PURPOSE (fresh review, P2): `docs/infra-runbook.md`
+    # §4.1.1a tells an operator to match on `count exceeded its`, "because there is no bare
+    # `graph_size exceeded its` in the payload" — and every assertion here used to start one token
+    # later, at `exceeded its`, which BOTH spellings satisfy. Measured: mutating the producer to the
+    # pre-fix bare `graph_size exceeded its` left this file 44/44 green, so the one anchor the
+    # runbook relies on was pinned by nothing. Shortening these literals re-opens that gap.
+    assert "graph_size count exceeded its 0.0s budget" in (
+        report["graph_size_error"] or ""), (
         f"a 0.0 count budget did not fail the count: {report['graph_size_error']!r} — a constant "
         "passed instead of the seam would have counted the graph here")
     assert counted == [], (
@@ -989,7 +1073,8 @@ def test_a_clamped_count_budget_actually_starves_the_real_count(monkeypatch):
     monkeypatch.setattr(monitoring, "GRAPH_SIZE_TIMEOUT", 0.2)
     unclamped = monitoring.metrics(sdk=StalledCount(), setup_timeout=5.0)
 
-    assert "exceeded its 0.2s budget" in (unclamped["graph_size_error"] or "")
+    assert "graph_size count exceeded its 0.2s budget" in (
+        unclamped["graph_size_error"] or "")
     assert counted == [1], (
         "an overrun of the count's OWN full budget stopped counting as an error — the gate is "
         "supposed to drop only the clamp-starved case")
@@ -1002,7 +1087,8 @@ def test_a_clamped_count_budget_actually_starves_the_real_count(monkeypatch):
     counted.clear()
     explicit_full = monitoring.metrics(sdk=StalledCount(), setup_timeout=5.0,
                                       graph_size_timeout=monitoring.GRAPH_SIZE_TIMEOUT)
-    assert "exceeded its 0.2s budget" in (explicit_full["graph_size_error"] or "")
+    assert "graph_size count exceeded its 0.2s budget" in (
+        explicit_full["graph_size_error"] or "")
     assert counted == [1], (
         "an EXPLICIT full-constant budget (exactly what the handler passes at a full transport "
         "bound) overran and did not count — the gate keys on the kwarg's presence instead of on "
@@ -1011,7 +1097,8 @@ def test_a_clamped_count_budget_actually_starves_the_real_count(monkeypatch):
     counted.clear()
     reduced = monitoring.metrics(sdk=ObservedProbe(), setup_timeout=5.0,
                                 graph_size_timeout=0.1)
-    assert "exceeded its 0.1s budget" in (reduced["graph_size_error"] or "")
+    assert "graph_size count exceeded its 0.1s budget" in (
+        reduced["graph_size_error"] or "")
     assert counted == [], (
         "a budget the deadline REDUCED below the constant still moved the generic `errors` "
         "counter — NO aggregate counts this shape (`health_setup_clamped` requires an UNOBSERVED "

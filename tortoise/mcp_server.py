@@ -692,6 +692,36 @@ def _mcp_remaining_wait_bound() -> float | None:
                - (_time.monotonic() - arrival))
 
 
+#: The documented per-phase bound for the ``quota`` block (``quota.QUOTA_STATE_TIMEOUT``).
+#: ⛔ A FALLBACK, never a second source of truth — ``_quota_state_timeout`` reads the real constant
+#: whenever the module can supply it, and ``tests/test_10749_health_tail_under_transport_bound.py``
+#: pins this figure equal to ``quota.QUOTA_STATE_TIMEOUT`` so the two cannot drift apart silently.
+_QUOTA_STATE_TIMEOUT_FALLBACK_S = 3.0
+
+
+def _quota_state_timeout() -> float:
+    """``quota.QUOTA_STATE_TIMEOUT``, or its documented default when the module cannot supply it.
+
+    ⛔ NEVER RAISES, and that is the whole point (#12482 fresh review, P3). Both callers are
+    PLANNING sites in ``tortoise_health``'s tail, reached outside any ``try``: a bare ``from
+    tortoise.quota import QUOTA_STATE_TIMEOUT`` at a stale or partially-written module raised
+    ``ImportError``, which ``_safe`` turned into an error payload carrying **no ``status`` key at
+    all** — i.e. the clamp's own safety arithmetic fail-closed on the instrument that reports
+    whether the product is up, on a box where ``/health`` on main answered normally. The ``#11892``
+    block below imports ``tortoise.quota`` INSIDE its own ``try`` for exactly this reason; this
+    helper is that rule applied to the two planning sites that run BEFORE it.
+
+    Over-reserving only shortens the allowance and can never widen the tail, so the fallback is the
+    constant's own documented value rather than ``0.0``: a phase whose bound cannot be read is
+    still planned for, conservatively.
+    """
+    try:
+        from tortoise.quota import QUOTA_STATE_TIMEOUT
+    except Exception:  # a planning read must never turn the health answer into an error
+        return _QUOTA_STATE_TIMEOUT_FALLBACK_S
+    return float(QUOTA_STATE_TIMEOUT)
+
+
 def _health_tail_reserve() -> float:
     """Everything ``tortoise_health`` spends AFTER its cold-start allowance (#10749).
 
@@ -710,10 +740,8 @@ def _health_tail_reserve() -> float:
     phases ran. If the deadline is shorter than this figure the allowance floors at 0.0 and the
     later phases would otherwise still spend their full constants.
     """
-    from tortoise.quota import QUOTA_STATE_TIMEOUT
-
     return (monitoring.PROBE_TIMEOUT + monitoring.GRAPH_SIZE_TIMEOUT
-            + QUOTA_STATE_TIMEOUT + _HEALTH_TAIL_MARGIN_S)
+            + _quota_state_timeout() + _HEALTH_TAIL_MARGIN_S)
 
 
 def _health_setup_allowance(remaining: float) -> float:
@@ -819,12 +847,10 @@ def _health_quota_budget() -> float | None:
     keeps both properties: the total still fits (this is the last phase, so a smaller budget can
     only shorten it) and the documented 3.0 s stays true.
     """
-    from tortoise.quota import QUOTA_STATE_TIMEOUT
-
     remaining = _mcp_remaining_wait_bound()
     if remaining is None:
         return None
-    return min(QUOTA_STATE_TIMEOUT, max(0.0, remaining - _HEALTH_TAIL_MARGIN_S))
+    return min(_quota_state_timeout(), max(0.0, remaining - _HEALTH_TAIL_MARGIN_S))
 
 
 def _wait_bound_refused() -> bool:
