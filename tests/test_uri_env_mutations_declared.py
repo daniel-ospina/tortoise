@@ -251,9 +251,13 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # while `git show a808f9f8ba:…` → **2**, and `#12555`'s own diff ADDS the
     # "MAINLINE TRIAGE, not a site this PR added" key. So the base already held
     # `#12588`'s row and `#12555` re-declared it anyway. (Its BRANCH head
-    # `ee1942914a` did not contain `#12588`'s squash `0f7f21c342` — the squash carries
-    # its parent's tree, which is why `merge-base --is-ancestor` and a head-level grep
-    # answer different questions here. Do not cite either one alone.) And `#12422`'s
+    # `ee1942914a` did not contain `#12588`'s squash `0f7f21c342` (`merge-base
+    # --is-ancestor 0f7f21c342 ee1942914a` → no: the branch was cut before it), while the
+    # merged squash `a808f9f8ba` does — its parent is `76b25fcfd1`, already a descendant
+    # of `0f7f21c342`. Ancestry and tree-content are different instruments: a grep of the
+    # squash's tree finds both rows because that tree is the parent's tree plus the
+    # branch diff, which says nothing about what the branch saw. Do not cite either one
+    # alone.) And `#12422`'s
     # canary had in fact merged at 01:32:47Z, hours BEFORE the triage at 05:13:00Z —
     # not after it. A later literal key SILENTLY REPLACES an earlier one at runtime, so
     # the rows looked additive and were not. `ruff`'s F601 reads the repeat as a lint
