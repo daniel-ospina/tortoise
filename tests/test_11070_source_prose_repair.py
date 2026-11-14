@@ -3020,6 +3020,22 @@ def test_a_LONE_UNDERSCORE_probe_is_REFUSED(monkeypatch, capsys):
     # punctuated sibling whose index run is `__`, which IS reachable — refusing it
     # on the `!_` story would be exactly the false block this test's arm (3)
     # exists to prevent.
+    #
+    # ⛔ AND THE PREDICATE IS `all`, NOT `any` (#12368 review round 18, found by
+    # the mutation pass). A token with SEVERAL index runs, one of them `_`, is
+    # accepted — `probe_phrase_rejection('a!_')` is None, and that is right: the
+    # read sends `a!_` as one literal, the index splits it at `!` and reaches `a`,
+    # so the probe is ANSWERED (it over-matches, which is #12535's disclosed
+    # residual and not this guard's class). Under `any` it would be REFUSED — a
+    # false block of an answerable probe. MEASURED live: records named `a!_` and
+    # `a zz` both written, index reporting 2 documents, and `run_fts_query('a!_')`
+    # returns BOTH (`['o-1', 'o-0']`), exactly as `run_fts_query('a')` does. Pinned
+    # here because `any` reads like a harmless simplification of `all` and no
+    # other row can tell them apart.
+    assert probe_phrase_rejection("a!_") is None, (
+        "a multi-run token whose runs INCLUDE a bare `_` was refused — its read "
+        "reaches a non-`_` term, so it is answerable (it over-matches, #12535) "
+        "and refusing it is a false block")
     for accepted in ("__", "___", "____", "_____", "_a", "a_", "_1", "1_",
                      "_a_", "a__b", "0_", "a_b", "a_bc", "x_axis", "A_B",
                      "!__"):
