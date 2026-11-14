@@ -600,13 +600,48 @@ def _dry_run(db, graph_name: str, labels: list[str], *,
     operator's counts-first gate promised a repair the live pass could not
     perform.
 
-    The two passes measure reachability by DIFFERENT means — this one by
-    ``IS NOT NULL`` on the key, the live one by what the write's own
-    ``RETURN`` reports it matched — and they coincide because the write MATCHes
-    each row on the key value that row was read FROM, so a non-NULL key always
-    finds its own node. ``dry_total == updated`` is pinned as a test
-    (``test_dry_run_discloses_but_never_counts_an_unreachable_row``) rather
-    than left as an argument.
+    The two passes answer the SAME two questions by means that coincide, and it
+    is worth being exact about which is which after #12496:
+
+    * **is the row REACHABLE?** This pass asks ``n.<id_prop> IS NOT NULL``; the
+      live pass asks ``row[0] is None`` over the rows it selected. Same
+      question, same key, one predicate text — so at ``limit=0`` `unreachable`
+      agrees between the two by construction, not by a test that happens to
+      match. ⚠️ **``--limit`` breaks that too**, in the same way it breaks
+      ``dry_total == updated``: ``limit`` bounds the live pass (`rows_all =
+      rows_all[:limit]`) and this function takes no ``limit`` at all, so the
+      live run never sees a keyless row outside the window — measured, one
+      reachable + one keyless Point with ``--limit 1`` -> dry
+      ``unreachable=1``, live ``unreachable=0``.
+
+      `test_unreachable_agrees_between_dry_and_live_when_the_encoder_declines`
+      pins the agreement, and it is a ``limit=0`` test.
+    * **did the row get WRITTEN?** Only the live pass can answer that, and it
+      answers it from the write's own ``RETURN`` — not from the key.
+
+    ⚠️ ``dry_total == updated`` is NOT an invariant of this file, and this
+    change does not make it one. It holds for **a reachable row whose text this
+    store can encode**, and it is pinned there by a test
+    (``test_dry_run_discloses_but_never_counts_an_unreachable_row``). It still
+    does not hold — measured, pre-existing, and unchanged by #12496 — for:
+
+    * **an encoder-declined row** — a keyed row the store's width guard refuses
+      (``encode_for_store`` -> ``None``) is counted here and skipped live (#4289);
+    * **a text-less row on a surface with no ``text_pred``** — ``Source``,
+      ``Object``, ``Subject`` and BOTH ``Event`` branches gate on ``IS NOT NULL``
+      only, and ``''`` is non-NULL in Cypher, so an empty-text row is counted
+      here and skipped live (residual (a) above);
+    * **whitespace-only text in the ``trim()``/``strip()`` gap** — a tab, NBSP or
+      em-space value is counted here even on a ``text_pred`` surface and dropped
+      live (residual (b) above);
+    * **a ``--limit``-bounded run** — ``limit`` bounds the live pass; this
+      function has no ``limit`` parameter at all, so it always counts the whole
+      graph. That is why the marker carries the run's ``limit``: a non-zero
+      ``residual_missing`` is only an assertion on an unbounded run.
+
+    ``_residual_missing`` is the backstop for exactly those populations: it
+    reads the graph afterwards, so it says what is still missing whatever the
+    counters claim.
     """
     g = db.select_graph(graph_name)
     total = 0
@@ -681,20 +716,27 @@ def _backfill_graph(db, graph_name: str, labels: list[str],
 
     Returns stats: scanned/updated/skipped counts, per_label updated counts,
     agent_sessions sub-count (Event surface only), and ``unreachable`` — the
-    BATCHED rows carrying no key, which the write's ``MATCH`` therefore cannot
-    find (#12496). ``unreachable`` is a BREAKDOWN of ``skipped``, not a
-    disjoint bucket: those rows are counted in both.
+    rows the surface predicate SELECTED that carry no key, so the write's
+    ``MATCH`` can never find them (#12496).
+
+    ⚠️ Counted over the selected rows (``chunk``), NOT over the write batch: a
+    keyless row declined before it is batched (text-less, or encoder-declined)
+    can never be repaired either, and counting the batch missed exactly those.
+    ``unreachable`` is a BREAKDOWN of ``skipped``, not a disjoint bucket: those
+    rows are counted in both.
     """
     g = db.select_graph(graph_name)
 
     from tortoise.embeddings import encode_for_store
 
     total = updated = skipped = 0
-    # #12496: the rows that REACHED the write and were declined — no key means
-    # the MATCH matches nothing. Counted in ``skipped`` (they were not
-    # repaired) and reported on their own, because unlike a text-less row they
-    # can never converge: every re-run batches them again and skips them again
-    # until someone supplies the key.
+    # #12496: the rows the write cannot REACH — no key means the MATCH matches
+    # nothing, so the row can never be repaired by this sweep or any later one.
+    # ⚠️ It is NOT the only non-converging cause: a row whose text is empty (on
+    # the surfaces that carry no ``text_pred``) or which the store's width guard
+    # declines is equally permanent, and those stay only in ``skipped``. What
+    # distinguishes ``unreachable`` is who can clear it: a human must supply a
+    # key, whereas the other causes need new text or a new embedder.
     unreachable = 0
     # Seed ALL 6 surface keys at 0 so the completeness marker is unambiguous:
     # a zero-count surface means "no rows re-embedded", not "never processed".
@@ -731,6 +773,18 @@ def _backfill_graph(db, graph_name: str, labels: list[str],
         # Compute + write in batches. UNWIND avoids N+1 SET queries.
         for start in range(0, len(rows_all), batch_size):
             chunk = rows_all[start:start + batch_size]
+            # #12496: the keyless population is counted over ``chunk`` — the
+            # rows the surface predicate SELECTED — because that is the same
+            # population `_dry_run` counts, so the two agree BY CONSTRUCTION.
+            # Counting it over ``batch`` instead (review finding, measured) lost
+            # every keyless row declined BEFORE the batch: a keyless row whose
+            # encoder returns ``None`` on a width-guarded store gave dry
+            # ``unreachable=1`` and live ``unreachable=0`` — the live headline
+            # claiming ``0 unreachable`` over a row no re-run can reach.
+            # ``unreachable`` stays a subset of ``skipped``: whichever way the
+            # row is declined (text-less, encoder, or the write's MATCH), it is
+            # counted in ``skipped`` too.
+            unreachable += sum(1 for _branch, row in chunk if row[0] is None)
             batch: list[dict] = []
             for branch, row in chunk:
                 text = _row_text(label, branch, row)
@@ -776,17 +830,11 @@ def _backfill_graph(db, graph_name: str, labels: list[str],
                 label_updated += n_written
                 # A submitted row the write did not match was NOT repaired, so
                 # it belongs in ``skipped`` — never in ``updated``. This is the
-                # ONLY place either number is decided: a keyless row is batched
-                # like any other, the write declines to match it, and the
-                # difference between what was submitted and what the write
-                # reports is what lands in ``skipped``.
+                # only place ``updated`` is decided: a row is batched like any
+                # other, the write declines to match it, and the difference
+                # between what was submitted and what the write reports is what
+                # lands in ``skipped``.
                 skipped += len(batch) - n_written
-                # The REASON, for the one skip cause no re-run can clear: a row
-                # with no key can never be matched, by this run or any other.
-                # (A keyed row the write still failed to match is possible only
-                # by construction error — it lands in ``skipped`` and never in
-                # ``updated``, which is the safe direction.)
-                unreachable += sum(1 for item in batch if item["id"] is None)
 
             if total and total % 25 == 0:
                 print(f"    ... {total} processed")
@@ -830,15 +878,54 @@ def _residual_missing(g, label: str) -> tuple[int, int]:
     makes a false PASS need to fool two things instead of one — so the marker
     carries this alongside them.
 
-    Returns ``(missing, keyless)``: rows that should have a vector and still do
-    not, and how many of those are keyless (the population no re-run can
-    reach). ``missing - keyless`` is therefore the number a healthy run should
-    have driven to 0.
+    Returns ``(missing, keyless)``: the rows the surface's NULL-only predicate
+    still selects whose embedding is still NULL, and how many of those carry no
+    key (the population no re-run can reach).
+
+    ⚠️ ``missing`` is NOT "rows that should have a vector". For the surfaces
+    with no ``text_pred`` — ``Source``, ``Object``, ``Subject`` and BOTH
+    ``Event`` branches — it includes rows the live guard legitimately declines
+    (bullet 2 below), so read ``missing`` as "still selected and still
+    missing", not as damage.
+
+    ⚠️ **Non-zero is not by itself a failure**, and this is measured, not
+    conceded: the file has four healthy-run populations that stay residual.
+
+    1. **A ``--limit``-bounded run.** ``_backfill_graph`` is capped, this reads
+       the whole graph — 6 healthy keyed Points with ``--limit 2`` measured
+       ``residual_missing=4, residual_keyless=0``. The marker carries the run's
+       ``limit`` for exactly this reason: the field is an assertion only when
+       ``limit == 0``.
+    2. **Empty text on a surface with no ``text_pred``.** Only ``Point`` and
+       ``Document`` gate on non-empty text. The other four ROW SOURCES —
+       ``Source`` (text is ``n.url``), ``Object``/``Subject`` (``n.name``) and
+       BOTH ``Event`` branches — gate on ``IS NOT NULL`` alone, so ``''``
+       (non-NULL in Cypher) is selected and the live guard drops it: residual
+       forever. Measured on healthy keyed rows: ``Object{name:''}`` -> ``(1, 0)``
+       and ``Source{url:''}`` -> ``(1, 0)``.
+    3. **Whitespace-only text the predicate accepts and the guard drops.** This
+       one reaches the GATED surfaces too, so "has a ``text_pred``" is not
+       immunity: Cypher ``trim()`` strips SPACES only, while the live guard is
+       Python ``str.strip()``, which also strips tab, NBSP and em-space. Measured
+       just now — two keyed ``:Point`` rows with ``content`` ``"\t"`` and
+       ``"\u00a0"``, ``limit=0``, full sweep: ``updated=0, skipped=2,
+       unreachable=0`` and ``_residual_missing`` -> ``(2, 0)``. (Same class as
+       ``_dry_run``'s residual (b).)
+    4. **A row the store's width guard declines** (#4289) — still missing
+       afterwards, keyed, and skipped live.
+
+    The field reads 0 only when ALL FOUR of those are absent: an unbounded run,
+    every selected row keyed, every selected text embeddable, and no text in the
+    ``trim()``/``strip()`` gap. What it cannot do on its own is tell "nothing to
+    do" from "nothing I could reach" — that is what ``keyless``, ``unreachable``
+    and ``limit`` are for.
 
     ⚠️ The predicate is taken from :func:`_label_branches` with ``force=False``
     — the SAME text the NULL-only repair pass reads, not a second spelling that
-    can drift (#5126). Text-less rows are excluded by that predicate, so they
-    are not reported as residual: they are legitimately not embeddable.
+    can drift (#5126). #12496 does NOT add a non-empty-text predicate to the
+    ungated surfaces (``Source``, ``Object``, ``Subject``, both ``Event``
+    branches): that would change which rows those surfaces sweep, a separate
+    decision with its own evidence — see #12572.
     """
     cfg = _require_surface(label)
     missing = keyless = 0
@@ -863,6 +950,9 @@ def _merge_stats(agg: dict, stats: dict) -> dict:
     agg["unreachable"] += stats["unreachable"]
     agg["residual_missing"] += stats.get("residual_missing", 0)
     agg["residual_keyless"] += stats.get("residual_keyless", 0)
+    # #12496: one cap for the whole run — not a sum (a sum would multiply it by
+    # the tenant count and read as a different bound).
+    agg["limit"] = stats.get("limit", 0)
     agg["agent_sessions"] += stats["agent_sessions"]
     agg["meeting_purged"] += stats["meeting_purged"]
     agg["repair_skipped"] += stats["repair_skipped"]
@@ -919,6 +1009,13 @@ def _force_reembed_graph(db, graph_name: str, labels: list[str],
         # (``skipped`` keeps its pre-existing summed shape because
         # ``repair_skipped`` is recorded separately for exactly that overlap.)
         "unreachable": force["unreachable"],
+        # #12496 review P1: the run's cap, so ``residual_*`` is interpretable.
+        # ``_backfill_graph`` is bounded by ``limit`` and ``_residual_missing``
+        # reads the WHOLE graph, so a bounded run leaves a non-zero residual that
+        # is not damage (measured: 6 healthy Points with ``--limit 2`` ->
+        # ``residual_missing=4, residual_keyless=0``). One value, not a sum: the
+        # same cap applies to every graph in an ``--all-tenants`` run.
+        "limit": limit,
         "residual_missing": residual_missing,
         "residual_keyless": residual_keyless,
         "per_label": force["per_label"],
@@ -937,9 +1034,11 @@ def _print_completeness(stats: dict) -> None:
     tooling in the PR2 evidence.
 
     #12496 adds three fields, because every count above is the RUN's own
-    account of itself: ``unreachable`` (batched rows no re-run can MATCH) and
+    account of itself: ``unreachable`` (rows no re-run can MATCH) and
     ``residual_missing`` / ``residual_keyless``, read back from the GRAPH after
     the sweep. A false PASS now has to contradict the graph as well as the run.
+    ``limit`` rides along, because a bounded run leaves a non-zero residual that
+    is not damage — see `_residual_missing`.
     """
     marker = {
         "labels": stats.get("per_label", {}),
@@ -949,17 +1048,21 @@ def _print_completeness(stats: dict) -> None:
         "repair_updated": stats.get("repair_updated", 0),
         # #12496: the population NO re-run can repair — the predicate selected
         # these rows and the write could not MATCH them because they carry no
-        # key. Named on its own rather than left as a slice of ``skipped``,
-        # because every other skip cause converges on the next run and this one
-        # never does.
+        # key. ⚠️ It is not the ONLY non-converging cause (empty text on a
+        # surface with no ``text_pred``, and an encoder-declined row, are equally
+        # permanent and stay only in ``skipped``), but it is the one that needs a
+        # HUMAN to supply a key, so it is the one worth naming on its own.
         "unreachable": stats.get("unreachable", 0),
         # #12496: read back from the GRAPH after the sweep, so the marker is not
-        # only its own account of itself. ``residual_missing`` counts rows that
-        # should have a vector and still do not; ``residual_keyless`` is the
-        # part no re-run can reach, so ``residual_missing - residual_keyless``
-        # is what an operator should see at 0 on a healthy run.
+        # only its own account of itself. ``residual_missing`` counts rows the
+        # NULL-only predicate still selects; ``residual_keyless`` is the part no
+        # re-run can reach. ⚠️ The field is an ASSERTION only when ``limit`` is 0
+        # — a bounded run reads the whole graph here and leaves a residual that
+        # is not damage (see `_residual_missing`'s docstring for all FOUR
+        # healthy-run populations).
         "residual_missing": stats.get("residual_missing", 0),
         "residual_keyless": stats.get("residual_keyless", 0),
+        "limit": stats.get("limit", 0),
     }
     print("COMPLETENESS " + json.dumps(marker, sort_keys=True))
 
@@ -1118,6 +1221,7 @@ def main(argv: list[str] | None = None) -> int:
         stats = {"scanned": 0, "updated": 0, "skipped": 0, "per_label": {},
                  "unreachable": 0,
                  "residual_missing": 0, "residual_keyless": 0,
+                 "limit": args.limit,
                  "agent_sessions": 0, "meeting_purged": 0,
                  "repair_skipped": 0, "repair_updated": 0}
         if args.all_tenants:
