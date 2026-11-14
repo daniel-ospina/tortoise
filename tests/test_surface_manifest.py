@@ -327,6 +327,31 @@ def test_the_owner_facing_docs_present_tense_counts_are_the_derived_ones():
             f"{live} + {retired} = {live + retired}"
         )
 
+    # 4. The vision doc's SDK count, in EVERY phrasing it states it. One narrow pattern is not a
+    #    fix: at the head that added the first arm, FIVE sibling sentences each still stated 124
+    #    while `counts.sdk_public_methods` derived 125 — the doc stated 125 nowhere, and one
+    #    sentence cites `tools/surface-guard.py`, which prints 125 — and the suite was green
+    #    because no arm read those sentences. A guard matching only one phrasing certifies green
+    #    over a self-contradicting artifact. Requiring each sentence to EXIST keeps every arm
+    #    non-vacuous: deleting a claim must not be a way to pass.
+    sdk = _manifest()["counts"]["sdk_public_methods"]
+    sdk_phrasings = {
+        "the present-tense method count": r"the SDK \*\*(\d+) methods\*\*",
+        "the reconciliation heading's 'now measures'": r"it now measures \*\*(\d+)\*\*",
+        "the __all__ row's 'today' count": (
+            r"(\d+) today — `tools/surface-guard\.py` is the live count"
+        ),
+        "the beta-sdk-surface row's 'over N'": r"40 methods\*\* over (\d+)",
+        "the canonical-sdk-methods row's inventory": r"inventory of all (\d+)",
+    }
+    for phrasing, pattern in sdk_phrasings.items():
+        claims = [int(n) for n in re.findall(pattern, vision)]
+        assert claims, f"the vision doc stopped stating {phrasing}"
+        assert claims == [sdk] * len(claims), (
+            f"vision-mcp-sdk-surface.md states {claims[0]} in {phrasing}; "
+            f"config/surface-manifest.yml derives counts.sdk_public_methods = {sdk}"
+        )
+
 
 def test_the_two_canonical_documents_table_lists_every_document_it_defers_to():
     """The vision doc's `## The two canonical documents` table must list every document the same
@@ -1226,9 +1251,10 @@ def test_the_guard_reds_when_the_live_surface_grows_past_the_high_water_pin(tmp_
     doc = _manifest()
     # The pin is set ONE BELOW the live count so the run must red: the property
     # under test is "growth past the pin reds", not any particular number. The live count
-    # moved twice again in the merge — #4282's container (81 -> 77) and #4282 Phase 3.2's
-    # `run_onboarding` retirement (77 -> 72) — so the pin follows to 72 - 1.
-    doc["high_water_counts"] = {"tools": 71, "sdk_public_methods": 150}
+    # moved again after the merge — #4282's container (81 -> 77), #4282 Phase 3.2's
+    # `run_onboarding` retirement (77 -> 72) and #11609 batch 1's four archived
+    # no-destination tools (72 -> 68) — so the pin follows to 68 - 1.
+    doc["high_water_counts"] = {"tools": 67, "sdk_public_methods": 150}
     result = _run("tools/surface-guard.py", "--manifest", _write(doc, tmp_path))
     assert result.returncode == 1, "growth past the frozen pin did not red the gate"
     assert "high-water pin" in result.stdout, result.stdout
@@ -4177,15 +4203,15 @@ def test_check_reds_when_a_recorded_field_is_not_anchored_to_the_surface(tmp_pat
 
 
 def test_check_accepts_a_recorded_field_anchored_to_a_real_endpoint(tmp_path, monkeypatch):
-    """The anchor property must accept the real shape — `tortoise_analyze` is a live row."""
+    """The anchor property must accept the real shape — `tortoise_search` is a live row."""
     sm = _load_manifest_tool()
     doc = _manifest()
     doc["response_fields"] = [
-        {"response": "tortoise_analyze", "field": "why", "emitted_when": "truthy", "unchanged_when_off": "yes"}
+        {"response": "tortoise_search", "field": "ep.informed_order", "emitted_when": "always", "unchanged_when_off": "yes"}
     ]
     monkeypatch.setattr(sm, "MANIFEST_FILE", _manifest_at(sm, doc, tmp_path, "anchored.yml"))
     monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(doc))
-    assert sm.cmd_check(argparse.Namespace()) == 0, "the live `tortoise_analyze` row anchors the entry"
+    assert sm.cmd_check(argparse.Namespace()) == 0, "the live `tortoise_search` row anchors the entry"
 
 
 def test_check_anchor_sees_an_sdk_endpoint_row_not_just_tool_rows(tmp_path, monkeypatch):
@@ -4290,6 +4316,58 @@ def test_a_recut_carries_the_committed_observed_usage_forward(tmp_path, monkeypa
             f"{carried[key]!r} != {tool[key]!r}")
     assert derived[exempt["name"]]["exemption"] is True, (
         "a re-cut reset a recorded `exemption` — the human recording the guard judges")
+
+
+def test_an_UNREADABLE_corpus_does_not_erase_a_recorded_label(tmp_path, monkeypatch):
+    """A `used_by` label must survive a re-cut on a box that cannot read its corpus.
+
+    #11609 batch 1 cut the manifest on a Linux box where the repo's `skills/`
+    symlink
+    points at a macOS path: `usage_index()`'s `skill-docs` corpus came back EMPTY, so
+    every row re-derived WITHOUT that label and 38 untouched `sdk:` rows silently
+    lost it. Nothing reded — `used_by` is in `NON_DERIVABLE_ROW_KEYS`, so `check`
+    never compares it — and the only symptom was the render no longer matching the
+    committed document.
+
+    The distinction the fix turns on: an empty corpus is UNREADABLE, not evidence of
+    absence. Two arms, so neither can pass alone:
+
+    * a label whose corpus is empty AND recorded on the committed row is CARRIED;
+    * with the corpus present, the label is still DERIVED (a name removed from the
+      skills tree drops out), so this is not a freeze.
+    """
+    sm = _load_manifest_tool()
+    doc = _manifest()
+    exempt = next(r for r in doc["rows"] if str(r["name"]).startswith("sdk:"))
+    exempt["used_by"] = "tooling, skill-docs, docs"
+    monkeypatch.setattr(sm, "MANIFEST_FILE",
+                        _manifest_at(sm, doc, tmp_path, "unreadable-corpus.yml"))
+    empty_home = tmp_path / "home"
+    empty_home.mkdir()
+    monkeypatch.setenv("HOME", str(empty_home))
+
+    real_usage_index = sm.usage_index
+    empty_skills = dict(real_usage_index())
+    empty_skills["skill-docs"] = ""
+    monkeypatch.setattr(sm, "usage_index", lambda: empty_skills)
+    derived = {r["name"]: r for r in sm.build_doc()["rows"]}
+    assert "skill-docs" in derived[exempt["name"]]["used_by"], (
+        "a re-cut dropped a recorded `skill-docs` label because the corpus was "
+        "unreadable on this box — the exact silent loss #11609 batch 1 measured")
+
+    # ...and it is NOT a freeze: with the corpus readable, a name that is no longer
+    # mentioned anywhere in it drops the label (that is what makes the column a
+    # measurement rather than a copied cell).
+    monkeypatch.setattr(sm, "usage_index", real_usage_index)
+    readable = dict(real_usage_index())
+    for label in readable:
+        readable[label] = ""
+    readable["skill-docs"] = "a skills tree that does not mention this method"
+    monkeypatch.setattr(sm, "usage_index", lambda: readable)
+    derived2 = {r["name"]: r for r in sm.build_doc()["rows"]}
+    assert "skill-docs" not in derived2[exempt["name"]]["used_by"], (
+        "the label survived a READABLE corpus that does not mention the name — the "
+        "carry-forward turned the column into a frozen cell")
 
 
 def test_a_recut_does_not_stamp_a_new_row_as_called_by_agents(tmp_path, monkeypatch):
@@ -4733,7 +4811,7 @@ def test_the_live_surface_is_the_baseline_the_guard_froze():
     # landed container batch until the approved 27 is reached. #4282 Phase 3.2 (main) then
     # removes the five `run_onboarding` tools — a disjoint name set — so the merged
     # surface is 72, not either side's own figure.
-    assert live["mcp"] == manifest["counts"]["tools"] == 72
+    assert live["mcp"] == manifest["counts"]["tools"] == 68
     # #4282 Phase 2.2 (#10053): 149 -> 150, the three approved-but-absent names now
     # having a `def` (+3) less `main`'s two retirements in #10012 (`graph_count` →
     # `_graph_count`, `org_list` deleted) (−2). The manifest pin records the same
@@ -6381,7 +6459,7 @@ def test_an_archive_entry_without_its_FIELDS_is_not_a_RECORD(tmp_path):
     sm = _load_manifest_tool()
     path = tmp_path / "MANIFEST.json"
 
-    real = _real_archive_entry()
+    real = _real_archive_entry("module")
     for missing in ("batch", "reason", "file"):
         entry = copy.deepcopy(real)
         del entry[missing]
@@ -6509,7 +6587,7 @@ def _real_archive_surface():
     return archive_surface
 
 
-def _real_archive_entry() -> dict:
+def _real_archive_entry(kind: str | None = None) -> dict:
     """The committed manifest's own row — a file, its blocks and its anchor all real.
 
     A fixture that invents `{"kind": …, "symbol": …, "file": "archive/MANIFEST.json"}` pins
@@ -6517,9 +6595,18 @@ def _real_archive_entry() -> dict:
     while `archive_surface.py check` reds it on every other arm. Mutating the real row keeps
     each arm "the one field that is wrong" instead of "wrong everywhere", which is what makes
     a refusal test discriminate (review of PR #12313, round 9).
+
+    `kind` selects a row of that kind — needed since #11609 batch 1 appended four `mcp-tool`
+    rows to a manifest that used to hold one `module` row, so "the first entry" no longer
+    means "the module entry" and a test whose premise is a MODULE row must say so.
     """
     entries = _real_archive_surface().load_manifest()["entries"]
     assert entries, "the committed archive is empty — this fixture would prove nothing"
+    if kind is not None:
+        rows = [e for e in entries if e.get("kind") == kind]
+        assert rows, (
+            f"the committed archive carries no {kind!r} entry — the fixture would prove nothing")
+        return copy.deepcopy(rows[0])
     return copy.deepcopy(entries[0])
 
 

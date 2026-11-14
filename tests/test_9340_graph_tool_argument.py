@@ -998,10 +998,25 @@ def test_the_handler_signatures_are_unchanged():
     dispatch point; adding it to the handler signature would re-stamp every
     row of `config/surface-manifest.yml` for one uniform argument.
     """
-    for name in ("tortoise_query", "tortoise_create_point", "tortoise_packs_list"):
+    for name in ("tortoise_query", "tortoise_create_point"):
         fn = getattr(mcp_server, name)
         assert "graph" not in inspect.signature(fn).parameters, (
             f"{name}'s signature grew a `graph` parameter")
+    # ⛔ `tortoise_packs_list` was the third arm of this baseline and is ARCHIVED in
+    # #11609 batch 1. Its signature is pinned on the archive record instead (the
+    # restore path has to keep the same shape), since the live name no longer
+    # exists to `getattr`:
+    import ast as _ast
+    import pathlib as _pathlib
+    _rec = (_pathlib.Path(__file__).resolve().parent.parent
+            / "archive/mcp-tools/b1-removed-no-destination/tortoise_packs_list.py")
+    _src = _rec.read_text(encoding="utf-8")
+    _fn = next(n for n in _ast.parse(_src[_src.index("def tortoise_packs_list("):]).body
+               if isinstance(n, _ast.FunctionDef))
+    _params = {a.arg for a in _fn.args.args} | {a.arg for a in _fn.args.kwonlyargs}
+    assert "graph" not in _params, (
+        "the archived `tortoise_packs_list` grew a `graph` parameter — a restore "
+        "would re-stamp every `served_attributes` row for one uniform argument")
 
 
 # ── the argument must be HONOURED where it is advertised ───────────────────
@@ -1101,40 +1116,42 @@ def test_the_caller_cannot_name_the_namespace_itself(monkeypatch, _http_workspac
         "a caller-supplied graph_name selected the graph on the HTTP lane")
 
 
-def test_analyze_derives_its_anchors_from_the_selected_graph(
-        monkeypatch, _http_workspace):
-    """The anchor set and the analysis must read the SAME graph.
+def test_analyze_anchors_route_through_the_dispatch_GRAPH_SELECTION_ARCHIVED():
+    """The archived handler derives its anchors from the SELECTED graph.
 
-    `tortoise_analyze` derives `entity_subgraph_ids` from a profile and then
-    runs `analyze()` on the selected projection. Deriving the anchors from the
-    workspace default while analysing the selected graph means an entity that
-    exists only in the selected graph yields an empty anchor set, and the
-    surrounding `except Exception: pass` silently widens the call to a
-    full-graph analysis — a different question answered than the one asked.
+    ⛔ `tortoise_analyze` is ARCHIVED in #11609 batch 1 (no destination in the
+    approved surface), so this can no longer drive a live call: the handler is
+    gone from `mcp_server`, and reinstating a door to keep an assertion is the tail
+    wagging the dog. The property is still worth pinning on the FROZEN copy,
+    because that file is the restore path — the defect it guards is silent and
+    severe: anchors from the workspace default while the analysis runs on the
+    selected graph yields an empty anchor set, and the surrounding
+    `except Exception: pass` widens the call to a full-graph analysis, i.e. a
+    different question answered than the one asked.
+
+    The live subjects of the same property (`tortoise_entity_profile`,
+    `tortoise_traverse`) are driven end-to-end by the tests above.
     """
-    import tortoise.analyze as analyze_mod
-    import tortoise.navigation as navigation
+    import pathlib
+    import re
 
-    seen = {}
-
-    def _capture(db, graph_name, entity_id, hops=2):
-        seen["graph_name"] = graph_name
-        return {"entity": {"id": entity_id}, "connected": {"points": [{"id": "p1"}]}}
-
-    monkeypatch.setattr(navigation, "entityProfile", _capture)
-    monkeypatch.setattr(analyze_mod, "analyze",
-                        lambda *a, **kw: {"answer": "ok", "raw": []})
-    monkeypatch.setattr(mcp_server, "_analyze_llm_budget_available", lambda: False)
-
-    ns = mcp_auth._current_graph_namespace.set(FUND_A["namespace"])
-    try:
-        mcp_server.tortoise_analyze("where is the disagreement?", entityId="e1")
-    finally:
-        mcp_auth._current_graph_namespace.reset(ns)
-
-    assert seen.get("graph_name") == FUND_A["namespace"], (
-        f"the anchors came from {seen.get('graph_name')!r} while the analysis "
-        f"ran on {FUND_A['namespace']!r}")
+    frozen = (pathlib.Path(__file__).resolve().parent.parent
+              / "archive/mcp-tools/b1-removed-no-destination/tortoise_analyze.py")
+    text = frozen.read_text(encoding="utf-8")
+    at = text.index("def tortoise_analyze(")
+    segment = text[at:]
+    assert "_dispatch_graph_name(" in segment, (
+        "the archived analyze handler stopped reading the dispatch's graph "
+        "selection — a restore would anchor the entity profile on the workspace "
+        "default while analysing the selected graph")
+    assert "entityProfile(" in segment, (
+        "the archived analyze handler no longer derives anchors from an entity "
+        "profile — the assertion above would be vacuous")
+    # ... and the name it derives from must be BOUND to a local, so the analyze
+    # path reuses the dispatch's selection instead of deriving a second one.
+    assert re.search(r"gname\s*=\s*\(_dispatch_graph_name\(", segment), (
+        "the archived handler no longer binds the dispatch selection to a local "
+        "that the analyze call can reuse")
 
 
 def test_no_advertised_handler_names_the_workspace_default_itself():
@@ -1172,10 +1189,14 @@ def test_no_advertised_handler_names_the_workspace_default_itself():
     assert not offenders, (
         "these tools advertise `graph` and then name the workspace default "
         f"graph themselves, so the selection is silently ignored: {offenders}")
-    assert routed >= {"tortoise_entity_profile", "tortoise_traverse",
-                      "tortoise_analyze"}, (
+    assert routed >= {"tortoise_entity_profile", "tortoise_traverse"}, (
         "a graph-naming handler stopped reading the dispatch's selection: "
         f"{sorted(routed)}")
+    # ⛔ `tortoise_analyze` was the third member and is ARCHIVED in #11609 batch 1 —
+    # it is no longer advertised, so it cannot be an arm here. Its routing is pinned
+    # against the frozen copy in `test_analyze_anchors_route_through_the_dispatch_
+    # GRAPH_SELECTION_ARCHIVED` below, so the restore path still cannot reintroduce
+    # the workspace-default bug.
 
 
 # ── #9762: the resolution rides the DISPATCH TASK, not the wrapper ─────────

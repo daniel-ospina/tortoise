@@ -76,7 +76,7 @@
 # only asks that question calls it fine — which is why this record also asks about ancestry).
 manifest_version: 1
 issue: 3863
-cut_at_commit: 7fca4494fa8bad8a82fd9ebac9f810cff0656b02
+cut_at_commit: 30c9e7c4d397aa12876d215d64c92e4640e91429
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -103,14 +103,24 @@ response_fields:
   unchanged_when_off: yes — additive; ordering and every other field unchanged
 - response: tortoise_search
   field: ep.ep_state
-  emitted_when: 'ALWAYS on a Point hit that carries an `ep` block — the #11702 state NAME for the belief beside it,
-    one of "measured" (a READABLE belief this claim MEASURED — the α predicate `posterior_alpha IS NOT NULL OR (ep_alpha IS NOT NULL AND NOT baseline_set)` is true, spelled out because `baseline_set` gates the `ep_alpha` arm ONLY; a direct update_point(…) writes a `posterior_alpha` too, so the token is NOT proof of an EP pass), "baseline" (a READABLE belief EP has not measured: the belief comes from the `n.confidence` mirror, from a declared baseline, or from a terminal claim whose posterior decayed), or "absent" (NO readable belief — the value is null). The three tokens are decided by TWO RULES, never by a list of shapes: the VALUE rule (the `n.confidence` mirror when it is a readable probability, else α/(α+β) when both operands are readable, non-negative and sum to > 0, else null) decides absent-vs-present, then the α predicate decides measured-vs-baseline, and THEN the #2490 fold turns `measured` into `baseline` for a TERMINAL claim; so "absent" is exactly "the value is null" at the `ep` block. It is the key that makes `ep.confidence_mean` readable:
-    the value is `null` if and only if the state is "absent", so a consumer never has to infer the state from the
-    number. It is emitted from the same `EpBreakdown` the `ep` block is serialised from, with the SAME mirror-first
-    precedence as every other surface (the `n.confidence` mirror leads, then posterior_alpha/beta, then ep_alpha/beta)
-    and the SAME value rule (a half pair, a degenerate α+β of 0, a negative operand and an unreadable operand all carry no belief — unless a `n.confidence` mirror supplies one, because the mirror leads). The three tokens are shared
-    with recall_ranking.ep_state, gaps_ranking.ep_state, graph_ranking.ep_state and the SubgraphExpander node
-    payload, so all of them join on one vocabulary. #11702.'
+  emitted_when: 'ALWAYS on a Point hit that carries an `ep` block — the #11702 state NAME for the belief beside
+    it, one of "measured" (a READABLE belief this claim MEASURED — the α predicate `posterior_alpha IS NOT NULL
+    OR (ep_alpha IS NOT NULL AND NOT baseline_set)` is true, spelled out because `baseline_set` gates the `ep_alpha`
+    arm ONLY; a direct update_point(…) writes a `posterior_alpha` too, so the token is NOT proof of an EP pass),
+    "baseline" (a READABLE belief EP has not measured: the belief comes from the `n.confidence` mirror, from a declared
+    baseline, or from a terminal claim whose posterior decayed), or "absent" (NO readable belief — the value is
+    null). The three tokens are decided by TWO RULES, never by a list of shapes: the VALUE rule (the `n.confidence`
+    mirror when it is a readable probability, else α/(α+β) when both operands are readable, non-negative and sum
+    to > 0, else null) decides absent-vs-present, then the α predicate decides measured-vs-baseline, and THEN the
+    #2490 fold turns `measured` into `baseline` for a TERMINAL claim; so "absent" is exactly "the value is null"
+    at the `ep` block. It is the key that makes `ep.confidence_mean` readable: the value is `null` if and only if
+    the state is "absent", so a consumer never has to infer the state from the number. It is emitted from the same
+    `EpBreakdown` the `ep` block is serialised from, with the SAME mirror-first precedence as every other surface
+    (the `n.confidence` mirror leads, then posterior_alpha/beta, then ep_alpha/beta) and the SAME value rule (a
+    half pair, a degenerate α+β of 0, a negative operand and an unreadable operand all carry no belief — unless
+    a `n.confidence` mirror supplies one, because the mirror leads). The three tokens are shared with recall_ranking.ep_state,
+    gaps_ranking.ep_state, graph_ranking.ep_state and the SubgraphExpander node payload, so all of them join on
+    one vocabulary. #11702.'
   unchanged_when_off: 'NO — additive key on an existing `ep` block, so the key set grows by one on every Point hit
     that carries one (the values are the #11702 contract change; the field itself is additive). Not flag-gated'
 - response: tortoise_recall
@@ -122,39 +132,41 @@ response_fields:
   unchanged_when_off: NO — additive key on an existing `ep` block (see tortoise_search / ep.ep_state). Not flag-gated
 - response: sdk:recall_subgraph
   field: nodes[].ep_state
-  emitted_when: 'ALWAYS on every `Point` node in `nodes[]` — the same #11702 three-token state as
-    `ep.ep_state` ("measured" / "baseline" / "absent"), paired with `nodes[].confidence`, which is `null` if and
-    only if the state is "absent". A non-Point node carries NEITHER key — not `ep_state` and not
-    `confidence` — because a belief is not that surface''s to report (`SubgraphExpander._enrich` writes both
-    inside one `if state:` gate, so an absent key set is the shape, not a `null` value; #2294 treats
-    null-vs-absent as meaningful, so a consumer must read the key, not only its value). The display read used to
-    coalesce the absence to 0.5, which is the second path §6.3 names. #11702.'
+  emitted_when: 'ALWAYS on every `Point` node in `nodes[]` — the same #11702 three-token state as `ep.ep_state`
+    ("measured" / "baseline" / "absent"), paired with `nodes[].confidence`, which is `null` if and only if the state
+    is "absent". A non-Point node carries NEITHER key — not `ep_state` and not `confidence` — because a belief is
+    not that surface''s to report (`SubgraphExpander._enrich` writes both inside one `if state:` gate, so an absent
+    key set is the shape, not a `null` value; #2294 treats null-vs-absent as meaningful, so a consumer must read
+    the key, not only its value). The display read used to coalesce the absence to 0.5, which is the second path
+    §6.3 names. #11702.'
   unchanged_when_off: 'NO — additive key, so on each POINT node payload the key set grows by one (the values are
     the #11702 contract change); a non-Point node payload is byte-identical. Not flag-gated'
 - response: sdk:get_organisation_account
   field: plan.limit
-  emitted_when: 'PRESENCE is the contract, and it has three states because a missing key and a null
-    one mean different things (#10015). A number = a bounded allowance. null = UNLIMITED — the encoding
-    `quota.resolve_org_limits` documents for a key that is PRESENT with no value (`billing.apply_limits`
-    writes NULL for exactly that). The key is ABSENT when the limit could not be read — the shape
-    `enforce_org_limit` treats as fail-closed — because `null` would read as unlimited and tell a capped
-    account it has no cap. A consumer must read the KEY, never only its value: `plan.limit` omitted is
-    UNKNOWN, not unlimited, and not 0.'
-  unchanged_when_off: 'n/a — not flag-gated. This is a NEW endpoint (approved SDK row 28), so there is no
-    prior response body to keep byte-identical; the three states above are its initial contract.'
+  emitted_when: 'PRESENCE is the contract, and it has three states because a missing key and a null one mean different
+    things (#10015). A number = a bounded allowance. null = UNLIMITED — the encoding `quota.resolve_org_limits`
+    documents for a key that is PRESENT with no value (`billing.apply_limits` writes NULL for exactly that). The
+    key is ABSENT when the limit could not be read — the shape `enforce_org_limit` treats as fail-closed — because
+    `null` would read as unlimited and tell a capped account it has no cap. A consumer must read the KEY, never
+    only its value: `plan.limit` omitted is UNKNOWN, not unlimited, and not 0.'
+  unchanged_when_off: n/a — not flag-gated. This is a NEW endpoint (approved SDK row 28), so there is no prior response
+    body to keep byte-identical; the three states above are its initial contract.
 - response: sdk:get_organisation_account
   field: plan.at_cap
-  emitted_when: 'PRESENT only when the answer is knowable: `true` when `used >= limit` (the predicate
-    `enforce_org_limit` itself refuses on, so the read and the 402 agree) and `false` when the plan is
-    unlimited. ABSENT when `used` could not be counted under a bounded limit — a `false` there would be
-    the falsely reassuring answer #4331 forbids on /v1/team. At-cap is a STATE in this reply, never an
-    exception: the account is held at its cap on purpose (#10175) and must read as held.'
-  unchanged_when_off: 'n/a — not flag-gated; PAIRED with `plan.used`, which is null (never a false 0)
-    when the count failed.'
-- response: tortoise_analyze
-  field: why
-  emitted_when: TORTOISE_W4_ENRICHMENT is truthy (1/true/yes/on; unset or 0 means off)
-  unchanged_when_off: yes — the response is byte-identical when the flag is off
+  emitted_when: 'PRESENT only when the answer is knowable: `true` when `used >= limit` (the predicate `enforce_org_limit`
+    itself refuses on, so the read and the 402 agree) and `false` when the plan is unlimited. ABSENT when `used`
+    could not be counted under a bounded limit — a `false` there would be the falsely reassuring answer #4331 forbids
+    on /v1/team. At-cap is a STATE in this reply, never an exception: the account is held at its cap on purpose
+    (#10175) and must read as held.'
+  unchanged_when_off: n/a — not flag-gated; PAIRED with `plan.used`, which is null (never a false 0) when the count
+    failed.
+# ⛔ The `tortoise_analyze` / `why` row lived here and LEFT with #11609 batch 1, which
+# ARCHIVED the tool (no destination in the approved surface): a `response_fields` row must
+# be anchored to a live surface (`check` refuses one whose `response:` is not a tool or
+# endpoint in this manifest — it caught this row when a forward merge carried main's copy
+# in). The row returns with the tool: restore the block from
+# `archive/mcp-tools/b1-removed-no-destination/tortoise_analyze.py` and put this row back,
+# which is why it is recorded here rather than merely deleted.
 - response: tortoise_search
   field: status
   emitted_when: the hosted GET /v1/search response, when TORTOISE_READ_STATUS is truthy (1/true/yes/on; unset or
@@ -310,15 +322,15 @@ response_fields:
   unchanged_when_off: n/a — not gated by a flag; it is a receipt field, not a response-shape change (#4911)
 - response: tortoise_session_capture
   field: stats.step_witness
-  emitted_when: "always on the v2 capture path — the eight per-stage witness blocks (#9116), copied from the extractor's
-    own return (reader/story/map/vet/classify_later/search/merge/commit), each carrying that stage's counts. Recorded
-    because this receipt is caller-facing on both served surfaces, and the witness cannot drift between
-    them — they all read the SAME `meta['stats']` that `_extract_session_v2`'s meta fold produces. The MCP tool and
-    the hosted `POST /v1/sessions` body share `_capture_session_impl`'s receipt literal, so this key is identical on
-    both. `TortoiseSDK.capture_session` was the third binding — it assembled its own `resp` from that same `meta` —
-    and #4282 retired that PUBLIC name on 2026-10-27; the body survives as the private
-    `TortoiseSDK._capture_session` (still assembling its own `resp` from the same `meta`), so the SDK receipt is
-    live and a field added to `_capture_session_impl`'s literal alone still misses it"
+  emitted_when: 'always on the v2 capture path — the eight per-stage witness blocks (#9116), copied from the extractor''s
+    own return (reader/story/map/vet/classify_later/search/merge/commit), each carrying that stage''s counts. Recorded
+    because this receipt is caller-facing on both served surfaces, and the witness cannot drift between them — they
+    all read the SAME `meta[''stats'']` that `_extract_session_v2`''s meta fold produces. The MCP tool and the hosted
+    `POST /v1/sessions` body share `_capture_session_impl`''s receipt literal, so this key is identical on both.
+    `TortoiseSDK.capture_session` was the third binding — it assembled its own `resp` from that same `meta` — and
+    #4282 retired that PUBLIC name on 2026-10-27; the body survives as the private `TortoiseSDK._capture_session`
+    (still assembling its own `resp` from the same `meta`), so the SDK receipt is live and a field added to `_capture_session_impl`''s
+    literal alone still misses it'
   unchanged_when_off: yes — a flag-gated stage still emits its block with `enabled` false, so the shape never moves
     with a flag; the seam forwards COUNTS only (the VET gate's per-candidate `decisions` text stays on the extractor's
     return), and the replay/M2 lanes never reach this fold, so their receipt is unchanged
@@ -387,20 +399,19 @@ response_fields:
 - response: sdk:get_historical_knowledge
   field: current.status / current.terminal
   emitted_when: '#11826 — ALWAYS, on every reply that has a chain (both keys sit in the `current` block, which is
-    the CHAIN HEAD: the point the walk STARTED from, which for a superseded predecessor IS that predecessor).
-    `current.status` is the STORED status rendered as every other read surface renders it (an absent status reads
-    `live` — live.status_as_reported, #9974 R1); `current.terminal` is live.is_terminal_status (the terminal
-    vocabulary OR the legacy outdated=true flag), i.e. the predicate EP itself applies. Before #11826 the block
-    carried only id + content, so a superseded predecessor was served as the current claim with nothing a consumer
-    could branch on'
+    the CHAIN HEAD: the point the walk STARTED from, which for a superseded predecessor IS that predecessor). `current.status`
+    is the STORED status rendered as every other read surface renders it (an absent status reads `live` — live.status_as_reported,
+    #9974 R1); `current.terminal` is live.is_terminal_status (the terminal vocabulary OR the legacy outdated=true
+    flag), i.e. the predicate EP itself applies. Before #11826 the block carried only id + content, so a superseded
+    predecessor was served as the current claim with nothing a consumer could branch on'
   unchanged_when_off: 'NO — not flag-gated. Every reply that reaches the chain gains both keys, so no pre-#11826
     reply that carried `current` is byte-identical (the keys are always present, never omitted). The other reply
     branches (a missing asked point) return BEFORE the chain is built and carry no `current` at all, unchanged.
     ⛔ `current.status` and the reply-level `status` are DIFFERENT closed vocabularies in one payload (lifecycle
     word vs found|ambiguous|absent) — never mirror the handling of the reply-level one onto the nested one. The
-    pair can also disagree BY DESIGN: a legacy `outdated=true` point with no stored status reads
-    `status="live"` beside `terminal=true`, because `status` is the stored word (the #9974 R1 rendering rule)
-    and `terminal` is the predicate.'
+    pair can also disagree BY DESIGN: a legacy `outdated=true` point with no stored status reads `status="live"`
+    beside `terminal=true`, because `status` is the stored word (the #9974 R1 rendering rule) and `terminal` is
+    the predicate.'
 # ⛔ FOUR rows stood here until #4282 deleted their carriers (2026-10-27), and they are recorded
 # here rather than dropped silently, because each named a REAL emitted field:
 #   • `sdk:capture_session` / `graph_ops` (#3561) — the capture's measured graph-operation count.
@@ -422,7 +433,8 @@ response_fields:
 # Restoring either as a declared surface is a SURFACE CHANGE and needs owner approval (#4282).
 - response: tortoise_traverse
   field: idx
-  emitted_when: "always, on every hop in nodes[] — the traversed edge's idx (the same value the #4282-deleted `sdk:traverse` returned) (#6101)"
+  emitted_when: 'always, on every hop in nodes[] — the traversed edge''s idx (the same value the #4282-deleted `sdk:traverse`
+    returned) (#6101)'
   unchanged_when_off: n/a — not flag-gated; additive key on each nodes[] entry, present (null where the edge carries
     no idx), and node/relationship/depth are unchanged
 - response: tortoise_entity_profile
@@ -445,36 +457,46 @@ response_fields:
 - response: tortoise_recall
   field: recall_ranking.ep_state
   emitted_when: 'ALWAYS on every row of mode=state and mode=custom — the #11702 state NAME for the belief behind
-    the row: "measured" (a READABLE belief this claim MEASURED — the α predicate `posterior_alpha IS NOT NULL OR (ep_alpha IS NOT NULL AND NOT baseline_set)` is true, spelled out because `baseline_set` gates the `ep_alpha` arm ONLY; a direct update_point(…) writes a `posterior_alpha` too, so the token is NOT proof of an EP pass), "baseline" (a READABLE belief EP has not measured: the belief comes from the `n.confidence` mirror, from a declared baseline, or from a terminal claim whose posterior decayed), or "absent" (NO readable belief — the value is null). The three tokens are decided by TWO RULES, never by a list of shapes: the VALUE rule (the `n.confidence` mirror when it is a readable probability, else α/(α+β) when both operands are readable, non-negative and sum to > 0, else null) decides absent-vs-present, then the α predicate decides measured-vs-baseline, and THEN the #2490 fold turns `measured` into `baseline` for a TERMINAL claim; so "absent" is exactly "the value is null" at the `ep` block — but on THIS ranker row the #2598 DRAFT display gate can withhold a value the row HOLDS, so a null here is "absent" OR "withheld", and `ep_state` is what tells them apart. It is the key that makes recall_ranking.confidence readable: null
-    means the belief is ABSENT, **or** that this row withholds a belief it has. `ep_state` is the AUTHORITY on
-    which: "absent" means there is no belief, "baseline"/"measured" mean there is one. A #2598 DRAFT row reports
-    `confidence: null` with `confidence_source: "uncomputed"` and its REAL state, because the draft gate
-    suppresses the DISPLAY value and not the state (its `belief_informed_order` stays true — the belief did move
-    the order, via `base_score`). Note that `"uncomputed"` alone does NOT disambiguate: a draft with no belief at
-    all is `uncomputed` + "absent" too. So read `ep_state` for absent-vs-present and `confidence_source` for
-    why the value is missing — never infer the state from the number. The same three tokens are emitted by the `ep` block of a
-    search hit, by gaps_ranking.ep_state, by graph_ranking.ep_state and by the SubgraphExpander node payload, so
-    all of them join on one vocabulary. No stored shape THIS REPO HAS MEASURED splits it — a measurement, not a
-    proof, because the unconditional version of that sentence was falsified three times: the class was declared
+    the row: "measured" (a READABLE belief this claim MEASURED — the α predicate `posterior_alpha IS NOT NULL OR
+    (ep_alpha IS NOT NULL AND NOT baseline_set)` is true, spelled out because `baseline_set` gates the `ep_alpha`
+    arm ONLY; a direct update_point(…) writes a `posterior_alpha` too, so the token is NOT proof of an EP pass),
+    "baseline" (a READABLE belief EP has not measured: the belief comes from the `n.confidence` mirror, from a declared
+    baseline, or from a terminal claim whose posterior decayed), or "absent" (NO readable belief — the value is
+    null). The three tokens are decided by TWO RULES, never by a list of shapes: the VALUE rule (the `n.confidence`
+    mirror when it is a readable probability, else α/(α+β) when both operands are readable, non-negative and sum
+    to > 0, else null) decides absent-vs-present, then the α predicate decides measured-vs-baseline, and THEN the
+    #2490 fold turns `measured` into `baseline` for a TERMINAL claim; so "absent" is exactly "the value is null"
+    at the `ep` block — but on THIS ranker row the #2598 DRAFT display gate can withhold a value the row HOLDS,
+    so a null here is "absent" OR "withheld", and `ep_state` is what tells them apart. It is the key that makes
+    recall_ranking.confidence readable: null means the belief is ABSENT, **or** that this row withholds a belief
+    it has. `ep_state` is the AUTHORITY on which: "absent" means there is no belief, "baseline"/"measured" mean
+    there is one. A #2598 DRAFT row reports `confidence: null` with `confidence_source: "uncomputed"` and its REAL
+    state, because the draft gate suppresses the DISPLAY value and not the state (its `belief_informed_order` stays
+    true — the belief did move the order, via `base_score`). Note that `"uncomputed"` alone does NOT disambiguate:
+    a draft with no belief at all is `uncomputed` + "absent" too. So read `ep_state` for absent-vs-present and `confidence_source`
+    for why the value is missing — never infer the state from the number. The same three tokens are emitted by the
+    `ep` block of a search hit, by gaps_ranking.ep_state, by graph_ranking.ep_state and by the SubgraphExpander
+    node payload, so all of them join on one vocabulary. No stored shape THIS REPO HAS MEASURED splits it — a measurement,
+    not a proof, because the unconditional version of that sentence was falsified three times: the class was declared
     closed at cycle 26 for one shape (a legacy belief OPERAND stored as a hex-float literal, `posterior_alpha =
     "0x1p4"`, readable to the store — the Cypher presence predicate the rankers read reported "measured" — and not
-    to this process, whose `ep` block reported "absent"), and cycles 27 and 28 then found three more INSIDE it: an
-    exact float32 subnormal (`0x1p-127`) refused by a decimal-shaped underflow rule; a hex literal past a float32
-    midpoint (`0x1.0000010000000001p0`) that the 53-bit double rounded ONTO the midpoint; and a NEGATIVE exact
-    midpoint (`-1.0000000596046448`), where the ULP step read the sign-magnitude bit pattern as an integer so its
-    neighbour sat on the wrong side and the branch answered "not a midpoint". Issue 11897 then found a FIFTH shape, in
-    a FOURTH class of defect — the BOUND rather than the grammar: a 4,000-bit mantissa CANCELS a `p-4100`, so
-    `"0x" + format((2**24+1) * 2**4076, "x") + "p-4100"` is exactly 1 + 2⁻²⁴ — served by the store — and the guard
-    refused it for having an exponent past 4096; it now bounds the value''s MAGNITUDE, which is what the cost follows.
-    All five agree on state AND value now,
-    and `confidence_source: "unreadable"` remains as a DEFENSIVE label for a future undecodable spelling'
+    to this process, whose `ep` block reported "absent"), and cycles 27 and 28 then found three more INSIDE it:
+    an exact float32 subnormal (`0x1p-127`) refused by a decimal-shaped underflow rule; a hex literal past a float32
+    midpoint (`0x1.0000010000000001p0`) that the 53-bit double rounded ONTO the midpoint; and a NEGATIVE exact midpoint
+    (`-1.0000000596046448`), where the ULP step read the sign-magnitude bit pattern as an integer so its neighbour
+    sat on the wrong side and the branch answered "not a midpoint". Issue 11897 then found a FIFTH shape, in a FOURTH
+    class of defect — the BOUND rather than the grammar: a 4,000-bit mantissa CANCELS a `p-4100`, so `"0x" + format((2**24+1)
+    * 2**4076, "x") + "p-4100"` is exactly 1 + 2⁻²⁴ — served by the store — and the guard refused it for having
+    an exponent past 4096; it now bounds the value''s MAGNITUDE, which is what the cost follows. All five agree
+    on state AND value now, and `confidence_source: "unreadable"` remains as a DEFENSIVE label for a future undecodable
+    spelling'
   unchanged_when_off: NO — additive key on an existing payload, so the key set grows by one on every row (the values
     are the contract change; the field itself is additive). Not flag-gated
 - response: tortoise_recall
   field: recall_ranking.belief_informed_order
   emitted_when: 'ALWAYS on every row of mode=state and mode=custom — false when the row''s ORDER came from relevance/
-    centrality alone because it has no belief (ep_state "absent"), true otherwise. It is the documented reading of
-    base_score/final_score: a multiplicative gate cannot express "absent" as a factor (`conf**exp` ranges over
+    centrality alone because it has no belief (ep_state "absent"), true otherwise. It is the documented reading
+    of base_score/final_score: a multiplicative gate cannot express "absent" as a factor (`conf**exp` ranges over
     (0, 1], so the identity 1.0 the absent row uses is that axis''s MAXIMUM), so the refusal is a SORT TIER — every
     absent row sorts after every row with a belief — and this flag says when that tier applied. base_score/final_score
     of an absent row are its non-belief factors and are therefore NOT comparable with a belief-informed row''s'
@@ -482,33 +504,34 @@ response_fields:
 - response: tortoise_recall
   field: gaps_ranking.ep_state
   emitted_when: 'mode=gaps ONLY: the same three-token #11702 state as recall_ranking.ep_state, on the gaps ranker''s
-    own rows (it reads its own signal query). An absent gap carries confidence null + ep_state "absent" and is
-    ordered by STRUCTURE alone — the gaps score is load/(1+support), so a belief never participates in the gaps order and an absent gap is NOT demoted relative to a belief-carrying one (unlike recall_ranking, which has the
-    absent tier). This key is NOT an ordering guarantee on mode=gaps. The recall_ranking.ep_state draft exception
-    applies verbatim: a DRAFT row carrying a persisted prior emits confidence null (the #2598 staging gate) beside
-    ep_state "baseline" and confidence_source "uncomputed"'
+    own rows (it reads its own signal query). An absent gap carries confidence null + ep_state "absent" and is ordered
+    by STRUCTURE alone — the gaps score is load/(1+support), so a belief never participates in the gaps order and
+    an absent gap is NOT demoted relative to a belief-carrying one (unlike recall_ranking, which has the absent
+    tier). This key is NOT an ordering guarantee on mode=gaps. The recall_ranking.ep_state draft exception applies
+    verbatim: a DRAFT row carrying a persisted prior emits confidence null (the #2598 staging gate) beside ep_state
+    "baseline" and confidence_source "uncomputed"'
   unchanged_when_off: NO — additive key on an existing payload. Not flag-gated
 - response: tortoise_search
   field: graph_ranking.confidence
-  emitted_when: 'order_by="graph" ONLY: the hit''s belief VALUE as the GraphRanker read it — `float | null`. `null` is
-    the #11702 absent state (`graph_ranking.ep_state` is "absent" beside it), never a neutral 0.5; the value follows
-    the mirror-first precedence (`n.confidence`, the #2206 served belief) with the persisted α/β mean as the fallback
-    for a node the flush never reached. Present only when the signal read answered for this id (a hit absent from the
-    read emits neither key). This is the field the pre-#11702 payload left out entirely, so a consumer could not tell
-    "no evidence" from "neutral evidence" on this surface at all'
+  emitted_when: 'order_by="graph" ONLY: the hit''s belief VALUE as the GraphRanker read it — `float | null`. `null`
+    is the #11702 absent state (`graph_ranking.ep_state` is "absent" beside it), never a neutral 0.5; the value
+    follows the mirror-first precedence (`n.confidence`, the #2206 served belief) with the persisted α/β mean as
+    the fallback for a node the flush never reached. Present only when the signal read answered for this id (a hit
+    absent from the read emits neither key). This is the field the pre-#11702 payload left out entirely, so a consumer
+    could not tell "no evidence" from "neutral evidence" on this surface at all'
   unchanged_when_off: NO — additive key on an existing payload. Not flag-gated
 - response: tortoise_search
   field: graph_ranking.ep_state
   emitted_when: 'order_by="graph" ONLY (the graph_ranking block is the GraphRanker''s own payload): the same three-token
-    #11702 state — "measured" | "baseline" | "absent". Emitted together with graph_ranking.confidence so the pair is
-    always readable; a hit whose belief is absent carries confidence null and the belief TERM is dropped from its
-    boost (the remaining term keeps its own weight, so absence never scores above a measured 0.5)'
+    #11702 state — "measured" | "baseline" | "absent". Emitted together with graph_ranking.confidence so the pair
+    is always readable; a hit whose belief is absent carries confidence null and the belief TERM is dropped from
+    its boost (the remaining term keeps its own weight, so absence never scores above a measured 0.5)'
   unchanged_when_off: NO — additive key on an existing payload. Not flag-gated
 - response: tortoise_search
   field: graph_ranking.belief_informed_order
   emitted_when: 'order_by="graph" ONLY: false when this hit has no belief, i.e. its boost was computed from the
-    structural term alone and no confidence entered its score. Present so the ORDER can be explained without
-    re-deriving it from confidence being null'
+    structural term alone and no confidence entered its score. Present so the ORDER can be explained without re-deriving
+    it from confidence being null'
   unchanged_when_off: NO — additive key on an existing payload. Not flag-gated
 - response: tortoise_recall
   field: recall_ranking.draft
@@ -529,31 +552,29 @@ response_fields:
     them after every live row'
   unchanged_when_off: 'NO for an unmeasured draft, yes for everything else — deliberately not flag-gated. This is
     a value change on an existing key, scoped to rows whose rendered number was never measured. Live rows: identical
-    number, identical key set, identical order. ⚠️ #11702 CHANGED THE LIVE-ROW RULE: an uncalibrated LIVE row now carries
-    null + ep_state "absent" instead of the neutral-0.5 convention this supersedes (no recorded decision stood behind it), and the
-    absent row is placed AFTER every row that has a
-    belief. `docs/architecture/SEARCH-ARCHITECTURE.md` §6.3 is the recorded decision (PR #11481) that supersedes the
-    neutral-0.5 carve-out this row used to state — OVERRIDES: the neutral-0.5 fallback for a claim with no persisted
-    belief, because 0.5 is the maximum-entropy value and made "no evidence" order exactly as a measured symmetric coin
-    flip. min_confidence: an absent row fails any floor ABOVE 0.0 and is kept by the 0.0 default'
+    number, identical key set, identical order. ⚠️ #11702 CHANGED THE LIVE-ROW RULE: an uncalibrated LIVE row now
+    carries null + ep_state "absent" instead of the neutral-0.5 convention this supersedes (no recorded decision
+    stood behind it), and the absent row is placed AFTER every row that has a belief. `docs/architecture/SEARCH-ARCHITECTURE.md`
+    §6.3 is the recorded decision (PR #11481) that supersedes the neutral-0.5 carve-out this row used to state —
+    OVERRIDES: the neutral-0.5 fallback for a claim with no persisted belief, because 0.5 is the maximum-entropy
+    value and made "no evidence" order exactly as a measured symmetric coin flip. min_confidence: an absent row
+    fails any floor ABOVE 0.0 and is kept by the 0.0 default'
 - response: tortoise_recall
   field: recall_ranking.confidence_source
   emitted_when: the same rows as recall_ranking.confidence becomes null — the source reads "uncomputed" instead
     of "neutral", so a consumer can tell "no belief was computed for this staged row" from "a live row nobody measured"
-    without knowing the status vocabulary. A live row whose belief EXISTS but whose stored spelling this process cannot
-    decode (ep_state "baseline"/"measured", value null) reads "unreadable" — never "absent", which would deny the
-    state beside it. No stored shape this repo has MEASURED reaches it today, and the qualifier is the finding — the
-    class was closed at cycle 26 for one shape, a belief OPERAND written as a hex-float literal
-    (`posterior_alpha = "0x1p4"`), which the Python coercion now reads too (`float.fromhex`, 16.0 as the store does)
-    — and cycles 27/28 then found an exact float32 subnormal (`0x1p-127`) and a hex literal past a float32 midpoint
-    (`0x1.0000010000000001p0`) still splitting it, and issue 11897 found a fourth in the exponent BOUND (a mantissa that
-    cancels its `p` exponent is in band and served, and the bound called it absent). All now read on both twins. A
-    hex-float MIRROR
-    (`n.confidence = "0x1p4"`) never reached it — the served-belief band rejects 16.0 on both twins, so that row
-    reads "absent"
+    without knowing the status vocabulary. A live row whose belief EXISTS but whose stored spelling this process
+    cannot decode (ep_state "baseline"/"measured", value null) reads "unreadable" — never "absent", which would
+    deny the state beside it. No stored shape this repo has MEASURED reaches it today, and the qualifier is the
+    finding — the class was closed at cycle 26 for one shape, a belief OPERAND written as a hex-float literal (`posterior_alpha
+    = "0x1p4"`), which the Python coercion now reads too (`float.fromhex`, 16.0 as the store does) — and cycles
+    27/28 then found an exact float32 subnormal (`0x1p-127`) and a hex literal past a float32 midpoint (`0x1.0000010000000001p0`)
+    still splitting it, and issue 11897 found a fourth in the exponent BOUND (a mantissa that cancels its `p` exponent
+    is in band and served, and the bound called it absent). All now read on both twins. A hex-float MIRROR (`n.confidence
+    = "0x1p4"`) never reached it — the served-belief band rejects 16.0 on both twins, so that row reads "absent"
   unchanged_when_off: NO for an unmeasured draft, yes for everything else — the same scoping as recall_ranking.confidence;
-    every live row keeps its "posterior"/"neutral" verdict EXCEPT an uncalibrated one, which now reads "absent" (#11702 —
-    see recall_ranking.confidence above) and an unreadable-spelling one, which reads "unreadable"
+    every live row keeps its "posterior"/"neutral" verdict EXCEPT an uncalibrated one, which now reads "absent"
+    (#11702 — see recall_ranking.confidence above) and an unreadable-spelling one, which reads "unreadable"
 - response: tortoise_recall
   field: gaps_ranking.draft
   emitted_when: 'mode=gaps ONLY: the row is a Point with status `draft` — present only when true (the #1353 D8 /
@@ -570,26 +591,25 @@ response_fields:
     keeps its measured number: the number is real, only the staging is the news. A draft gap also sorts after every
     live gap (an explicit status tiebreaker — its structural score is not an acceptable basis for placing it first)'
   unchanged_when_off: 'NO for an unmeasured draft, yes for everything else — deliberately not flag-gated. Live gaps:
-    identical number, identical key set, identical order. ⚠️ #11702 CHANGED THE LIVE-ROW RULE: an uncalibrated LIVE gap
-    now carries null + ep_state "absent" instead of the neutral-0.5 convention this supersedes (see
-    recall_ranking.confidence above —
-    SEARCH-ARCHITECTURE.md §6.3 is the superseding decision). This key is NOT an ordering guarantee on mode=gaps: the
-    gaps score is load/(1+support) and a belief never enters it, so an absent gap is ordered by STRUCTURE alone —
-    exactly as gaps_ranking.ep_state states. (Cycle 3 removed this same "placed after every gap that has a belief"
+    identical number, identical key set, identical order. ⚠️ #11702 CHANGED THE LIVE-ROW RULE: an uncalibrated LIVE
+    gap now carries null + ep_state "absent" instead of the neutral-0.5 convention this supersedes (see recall_ranking.confidence
+    above — SEARCH-ARCHITECTURE.md §6.3 is the superseding decision). This key is NOT an ordering guarantee on mode=gaps:
+    the gaps score is load/(1+support) and a belief never enters it, so an absent gap is ordered by STRUCTURE alone
+    — exactly as gaps_ranking.ep_state states. (Cycle 3 removed this same "placed after every gap that has a belief"
     claim from the ep_state row; it had survived here)'
 - response: tortoise_recall
   field: gaps_ranking.confidence_source
   emitted_when: the same rows as gaps_ranking.confidence becomes null — the source reads "uncomputed" instead of
     "neutral", so a consumer can tell "no belief was computed for this staged row" from "a live gap nobody measured"
-    without knowing the status vocabulary. A live gap whose belief EXISTS but whose stored spelling this process cannot
-    decode (ep_state "baseline"/"measured", value null) reads "unreadable", exactly as recall_ranking.confidence_source
-    states — never "absent" beside a non-absent state. The shape that used to reach it — a belief OPERAND stored as a
-    hex-float literal — no longer does (the Python coercion reads hex now), and neither does a hex operand whose `p`
-    exponent exceeds the old bound while its mantissa cancels it back into band (#11897 — the bound now measures the
-    value's magnitude); a hex-float MIRROR is out of band and reads "absent" on both twins
+    without knowing the status vocabulary. A live gap whose belief EXISTS but whose stored spelling this process
+    cannot decode (ep_state "baseline"/"measured", value null) reads "unreadable", exactly as recall_ranking.confidence_source
+    states — never "absent" beside a non-absent state. The shape that used to reach it — a belief OPERAND stored
+    as a hex-float literal — no longer does (the Python coercion reads hex now), and neither does a hex operand
+    whose `p` exponent exceeds the old bound while its mantissa cancels it back into band (#11897 — the bound now
+    measures the value's magnitude); a hex-float MIRROR is out of band and reads "absent" on both twins
   unchanged_when_off: NO for an unmeasured draft, yes for everything else — the same scoping as gaps_ranking.confidence;
-    every live gap keeps its "posterior"/"neutral" verdict EXCEPT an uncalibrated one, which now reads "absent" (#11702)
-    and an unreadable-spelling one, which reads "unreadable"
+    every live gap keeps its "posterior"/"neutral" verdict EXCEPT an uncalibrated one, which now reads "absent"
+    (#11702) and an unreadable-spelling one, which reads "unreadable"
 - response: sdk:create_operator
   field: direction_basis
   emitted_when: 'always, on every operator created through the #7852 W1 write path — the basis the recorded direction
@@ -626,41 +646,33 @@ response_fields:
     stays byte-identical
 - response: tortoise_create_entity
   field: kind_redirect
-  emitted_when: >-
-    a write whose NAME matches a declared common confusion in the per-kind guard table (#12060) —
-    {from: {kind, layer}, to: {kind, layer}, rule, reason, override, undo, degraded, message}. The node was
-    written at the redirected kind/layer, and the caller is told what changed, why (a stable rule id), the
-    exact override (`intent="as_declared"`) and how to undo — so a client branches on DATA and never on
-    English. A redirect whose target namespace is not installed in this graph degrades to the guard's
-    declared CORE fallback and reports `degraded: true` here, alongside `kind_redirect_skipped` naming the
-    target it could not use. Two sibling fields ride the same feature: `kind_redirect_skipped`
-    {rule, target, reason} when the guard ABSTAINED (the write is UNCHANGED — a write must never fail
-    because of which packs are installed), and `kind_guard_overridden` {rule, target, declaredKind,
-    declaredLayer} when the caller passed `intent="as_declared"` — the caller's intent is never silently
-    overruled, and a guard that is wrong becomes countable. A guard NEVER refuses a write (#1934
-    warn-not-block, and the feature's own defining rule: a guard may never refuse a case whose right home
-    is known).
-  unchanged_when_off: >-
-    n/a — not flag-gated; all three keys are ABSENT when no guard matched, so an unguarded write's response
-    is byte-identical to before
+  emitted_when: 'a write whose NAME matches a declared common confusion in the per-kind guard table (#12060) — {from:
+    {kind, layer}, to: {kind, layer}, rule, reason, override, undo, degraded, message}. The node was written at
+    the redirected kind/layer, and the caller is told what changed, why (a stable rule id), the exact override (`intent="as_declared"`)
+    and how to undo — so a client branches on DATA and never on English. A redirect whose target namespace is not
+    installed in this graph degrades to the guard''s declared CORE fallback and reports `degraded: true` here, alongside
+    `kind_redirect_skipped` naming the target it could not use. Two sibling fields ride the same feature: `kind_redirect_skipped`
+    {rule, target, reason} when the guard ABSTAINED (the write is UNCHANGED — a write must never fail because of
+    which packs are installed), and `kind_guard_overridden` {rule, target, declaredKind, declaredLayer} when the
+    caller passed `intent="as_declared"` — the caller''s intent is never silently overruled, and a guard that is
+    wrong becomes countable. A guard NEVER refuses a write (#1934 warn-not-block, and the feature''s own defining
+    rule: a guard may never refuse a case whose right home is known).'
+  unchanged_when_off: n/a — not flag-gated; all three keys are ABSENT when no guard matched, so an unguarded write's
+    response is byte-identical to before
 - response: tortoise_create_subject
   field: kind_redirect
-  emitted_when: >-
-    the same three keys on the alias door (#12060) — this door now surfaces them, where it used to unwrap
-    `result["node"]` and drop every top-level key (the same #8171 P2 the `advisories` row above records).
-    Additive; the node and every pre-existing property keep their value. A redirect can change the node
-    LABEL as well as the kind, so `issue:<repo>#<n>` written here without a kind lands as an `:Object`
-    (objectKind `core:WorkItem`) and reports the rule that did it.
-  unchanged_when_off: >-
-    n/a — not flag-gated; the keys are ABSENT when no guard matched
+  emitted_when: 'the same three keys on the alias door (#12060) — this door now surfaces them, where it used to
+    unwrap `result["node"]` and drop every top-level key (the same #8171 P2 the `advisories` row above records).
+    Additive; the node and every pre-existing property keep their value. A redirect can change the node LABEL as
+    well as the kind, so `issue:<repo>#<n>` written here without a kind lands as an `:Object` (objectKind `core:WorkItem`)
+    and reports the rule that did it.'
+  unchanged_when_off: n/a — not flag-gated; the keys are ABSENT when no guard matched
 - response: tortoise_create_object
   field: kind_redirect
-  emitted_when: >-
-    the same three keys on the object alias door (#12060), including the kind-only case — a write that is
-    already on the right LAYER but names no kind (or the NIL `other`) can still be re-filed by a guard, and
-    the message then reads "Object kind (unnamed) → core:WorkItem" rather than a no-op arrow.
-  unchanged_when_off: >-
-    n/a — not flag-gated; the keys are ABSENT when no guard matched
+  emitted_when: the same three keys on the object alias door (#12060), including the kind-only case — a write that
+    is already on the right LAYER but names no kind (or the NIL `other`) can still be re-filed by a guard, and the
+    message then reads "Object kind (unnamed) → core:WorkItem" rather than a no-op arrow.
+  unchanged_when_off: n/a — not flag-gated; the keys are ABSENT when no guard matched
 - response: tortoise_create_document
   field: advisories
   emitted_when: the same condition on the alias door — this door always materializes a declared extractedFrom as
@@ -720,14 +732,14 @@ response_fields:
     an evidence-bearing re-run keeps its source. All of these codes ride the SAME key on the dedup-hit return, so
     a re-run reports them together rather than dropping one'
   unchanged_when_off: n/a — not flag-gated; the key is PRESENT on EVERY one of the FOUR codes `emitted_when` lists
-    above, and each is a presence condition in its own right rather than a single "no source" rule — (1) `no_source` —
-    the write carries no source and no authored word (a materialized `extractedFrom`, or an authored `credibility=`,
-    makes it absent); (2) `temporal_not_applied` — a temporal prop arrived on a dedup target that is already a
-    TERMINAL claim, which reports REGARDLESS of source and of an authored word, because the whole fold is dropped and
-    nothing was applied; (3) `kind_other_layer` — the declared kind is declared only on another layer; (4)
-    `terminal_fold_refused` — the fold DEDUP-hits a TERMINAL claim and would write anything else (a caller prop and/or
-    an authored word) with NO temporal prop, which is why a word-bearing write is not absent by itself. A write that
-    trips none of the four codes keeps its byte-identical response
+    above, and each is a presence condition in its own right rather than a single "no source" rule — (1) `no_source`
+    — the write carries no source and no authored word (a materialized `extractedFrom`, or an authored `credibility=`,
+    makes it absent); (2) `temporal_not_applied` — a temporal prop arrived on a dedup target that is already a TERMINAL
+    claim, which reports REGARDLESS of source and of an authored word, because the whole fold is dropped and nothing
+    was applied; (3) `kind_other_layer` — the declared kind is declared only on another layer; (4) `terminal_fold_refused`
+    — the fold DEDUP-hits a TERMINAL claim and would write anything else (a caller prop and/or an authored word)
+    with NO temporal prop, which is why a word-bearing write is not absent by itself. A write that trips none of
+    the four codes keeps its byte-identical response
 - response: tortoise_check_structure
   field: _meta.tortoise_error
   emitted_when: 'only for the transport wait-bound refusal — the ONE producer whose failure payload is a `{code,
@@ -743,12 +755,6 @@ response_fields:
     text in `content`'
   unchanged_when_off: yes — a successful call's `structured_content` and `_meta` are byte-identical
 - response: tortoise_list_batches
-  field: _meta.tortoise_error
-  emitted_when: 'the same #8482 repair on this tool''s wrap envelope. `_meta.tortoise_error` is set ONLY by the
-    transport wait-bound refusal; a `_safe` failure is dropped from `structured_content` and survives as the JSON
-    text in `content`'
-  unchanged_when_off: yes — a successful call's `structured_content` and `_meta` are byte-identical
-- response: tortoise_packs_list
   field: _meta.tortoise_error
   emitted_when: 'the same #8482 repair on this tool''s wrap envelope. `_meta.tortoise_error` is set ONLY by the
     transport wait-bound refusal; a `_safe` failure is dropped from `structured_content` and survives as the JSON
@@ -916,30 +922,41 @@ approval_status: approved
 approval_principal: daniel-ospina
 approval_pr: '4120'
 approval_date: '2026-09-18'
-# ⚠️ `counts` is DERIVED by `render`, and `cut_at_commit` above is the provenance of
-# the ORIGINAL cut — the two no longer describe the same snapshot: #4282 deleted 26
-# dead public SDK methods at `45eefb26c`, so `sdk_public_methods` was 124 here while
-# `d05370918` held 150 — and it is 125 since #10015 implemented approved row 28
-# (`get_organisation_account`). The `counts:` value is DERIVED and moves whenever a
-# row does; read the live number beside it, not here. Re-cutting is the durable fix and is deliberately NOT done
-# here: `cut` is owner-gated per this tool's own docstring ("ask Daniel FIRST, before
-# the re-cut") because it re-derives every row from the declaration. Until then, read
-# the count as "at this head" and the sha as "when the rows were cut".
+# ⚠️ `counts` is DERIVED by `cut` (and re-derived by `check`) from the TREE the cut ran in;
+# `cut_at_commit` records the commit passed to `cut --commit` (defaulting to the worktree HEAD,
+# which the provenance property then reds — RESOLVE **and** SURVIVE — once a lane head is
+# rebased away), which must be a DEFAULT-BRANCH sha so the citation survives a squash-merge
+# (#11057 review F1). So the two describe DIFFERENT trees and can legitimately disagree, and
+# they are graded by different properties: `counts` is compared by the DERIVATION property,
+# while `cut_at_commit` is excluded from that drift check and graded only by the provenance
+# property. This baseline is such a case — #11609 batch 1 removed four no-destination MCP
+# tools in the tree it cut, and recorded `origin/main` as the base, so the counts below read
+# 68 while `30c9e7c4d`'s own tree still holds those four and reads 72. That four-tool
+# difference is the ARCHIVE's; no property compares the two numbers to each other.
+# The same holds for `render`: the numbers it prints are this manifest's derivation, not a
+# copy of the base tree's. Precedents where they diverged: #4282 deleted 26 dead public SDK
+# methods at `45eefb26c` (`sdk_public_methods` fell from 150 at its parent `13e6856e4` to
+# 124), and it is 125 since #10015 implemented approved row 28
+# (`get_organisation_account`).
+# ⛔ A hand-edited `counts` reds `check` — re-cut instead
+# (`cut --commit $(git rev-parse origin/main)`), and never paste a number in. `cut` is
+# OWNER-GATED per this tool's own docstring ("ask Daniel FIRST, before the re-cut") because
+# it re-derives every row from the declaration, so a re-cut needs his word first.
 counts:
-  tools: 72
+  tools: 68
   sdk_public_methods: 125
   retired: 23
   keyword_distribution:
     fetch: 14
-    create: 15
+    create: 14
     update: 8
     delete: 6
-    list: 8
-    find: 5
+    list: 7
+    find: 4
     trace: 2
     check: 5
     link: 4
-    operate: 5
+    operate: 4
 high_water_counts:
   tools: 72
   sdk_public_methods: 150
@@ -1069,7 +1086,9 @@ rows:
   # this cell), because `cut` is owner-gated ("ask Daniel FIRST, before the re-cut",
   # tools/surface_manifest.py) and this change adds/removes/renames NO tool or method.
   # A full `cut` was measured on this box and DELIBERATELY NOT committed: with `skills/`
-  # dangling it drops `skill-docs` from 38 SDK `used_by` cells, and it DROPS every body
+  # dangling it dropped `skill-docs` from 38 SDK `used_by` cells — a cost THIS BRANCH HAS
+  # REMOVED (`CARRIED_SDK_ROW_KEYS` now carries `used_by`, so a re-cut re-derives zero
+  # skill-docs evidence and erases none) — and it DROPS every body
   # rationale comment (`cut` re-emits only `MANIFEST_HEADER` verbatim, so the header
   # survives and this note does not — no head-specific count belongs here, it moves with
   # every line anyone adds). Both kinds are `NON_DERIVABLE` evidence a digest refresh
@@ -1118,8 +1137,7 @@ rows:
   cluster: null
   canonical: null
   job: Dated, ordered belief chain for a topic — decision Points with validFrom, NAND/CORRECTS links, superseded
-    priors visible. Returns an object envelope whose `result` key holds the rows — see the wrapper's note
-    (#12364).
+    priors visible. Returns an object envelope whose `result` key holds the rows — see the wrapper's note (#12364).
   dependency: declares TortoiseSDK.belief_timeline (resolves)
   lifecycle: active
   used_by: never called, tooling, docs
@@ -1271,16 +1289,20 @@ rows:
   approval: null
   class: agent-reachable
   cluster_canonical: null
-# #12297: SPLICED, not re-cut — and the two reasons are the REAL costs of a cut,
+# #12297: SPLICED, not re-cut — and the reasons below are the REAL costs of a cut,
 # not a claim that a cut would lose hand-curated cells (it would not:
 # `CARRIED_TOOL_ROW_KEYS` in tools/surface_manifest.py carries `used_by` /
 # `recommendation` / `basis` / `reason` / `exemption` forward from the committed
 # manifest, and a cut reproduces this tool row byte-for-byte). The costs it does
 # have: (1) `cut --commit` must be handed a DEFAULT-BRANCH sha (#11057 review F1)
-# — cut at a lane head, `provenance_report` reds — and (2) a cut re-derives EVERY
-# `sdk:` row's `used_by` cell (124 rows, all 124 carrying one; `CARRIED_SDK_ROW_KEYS`
-# is just `exemption`), churning a diff this change has nothing to do with.
-# ⛔ That 124 is re-derivable from this file: `rows` whose `name` starts `sdk:`.
+# — cut at a lane head, `provenance_report` reds — and (2) `cut` re-emits only
+# `MANIFEST_HEADER`, so every body comment in this file (this note included) is
+# lost. The `used_by` LABELS a cut once re-derived are now carried forward for any
+# label whose corpus came back UNREADABLE (`CARRIED_SDK_ROW_KEYS` gained `used_by`
+# on this branch; `used_by_with_unreadable_corpora` still re-derives every label it
+# CAN read) — so on a box whose `skills/` dangles, that churn is no longer a cost,
+# and neither is the `skill-docs` label. `cut` is also owner-gated.
+# ⛔ That 125 is re-derivable from this file: `rows` whose `name` starts `sdk:`.
 # So exactly one derived cell moves, to the value `check` itself derives from the
 # declaration (`_code_digest`; verified `aae4bf5f5ceffe7c` for the tool body as it
 # stands on this branch, after the owner's 2239f94ff6 and c82c0337a4 rewrote the
@@ -1969,9 +1991,9 @@ rows:
   keyword_rank: 2
   cluster: null
   canonical: null
-  job: 'Create an operator connecting Points. op_type: IMPL, NAND, coherence, composedOf, decomposesInto, contains, wraps.
-    semantics: the Layer-2 meaning (addresses, supports, refutes, mutuallyExclusive, hasPart, related, …) — it resolves
-    the direction.'
+  job: 'Create an operator connecting Points. op_type: IMPL, NAND, coherence, composedOf, decomposesInto, contains,
+    wraps. semantics: the Layer-2 meaning (addresses, supports, refutes, mutuallyExclusive, hasPart, related, …)
+    — it resolves the direction.'
   dependency: declares TortoiseSDK.create_operator (resolves)
   lifecycle: active
   used_by: never called, tooling, docs
@@ -2279,32 +2301,6 @@ rows:
   job: Fast one-hop neighbor enumeration for an entity — quick discovery and navigation. Use for shallow context;
     for multi-hop filtered BFS use tortoise_entity_profile.
   dependency: declares TortoiseSDK.list_topics (resolves)
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: keep
-  basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
-- name: tortoise_analyze
-  served_from: tortoise/mcp_server.py:d01328faeb18c368
-  served_attributes: 0b934dac2f43c7b6
-  family: reasoning
-  family_rank: 3
-  served: http
-  sdk_method: ''
-  group_source: mapped
-  keyword: find
-  keyword_rank: 6
-  cluster: null
-  canonical: null
-  job: 'Answer natural language questions about the Tortoise epistemic graph. Ask things like: ''where is the disagreement?''
-    ''what supports claim X?'''
-  dependency: 'handler-served: no declared SDK link'
   lifecycle: active
   used_by: never called, tooling, docs
   recommendation: keep
@@ -2654,31 +2650,6 @@ rows:
   approval: null
   class: agent-reachable
   cluster_canonical: null
-- name: tortoise_backfill_v25
-  served_from: tortoise/mcp_server.py:11a11ccddfc39a61
-  served_attributes: b2ccff9a3ef0cde7
-  family: admin
-  family_rank: 5
-  served: stdio-only
-  sdk_method: backfill_v25
-  group_source: mapped
-  keyword: create
-  keyword_rank: 2
-  cluster: null
-  canonical: null
-  job: Backfill database to ONTOLOGY v2.5 schema. EXCLUDED from tenant HTTP — schema-level migration (operator-only).
-  dependency: declares TortoiseSDK.backfill_v25 (resolves)
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: keep
-  basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
 - name: tortoise_org_create
   served_from: tortoise/mcp_server.py:e457a262c42b17dc
   served_attributes: 1b06f44dc97e7126
@@ -2694,63 +2665,6 @@ rows:
   job: Create isolated team graph via FalkorDB select_graph. EXCLUDED from tenant HTTP — provisioning belongs to
     /internal/provision behind FASTAPI_INTERNAL_KEY.
   dependency: declares TortoiseSDK.org_create (resolves)
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: keep
-  basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
-- name: tortoise_packs_list
-  served_from: tortoise/mcp_server.py:a3c7704fb7eadce7
-  served_attributes: d1d847feeecfe0de
-  family: admin
-  family_rank: 5
-  served: http
-  sdk_method: ''
-  group_source: mapped
-  keyword: list
-  keyword_rank: 5
-  cluster: null
-  canonical: null
-  job: 'List this team''s active packs (#318): the shared pack catalog joined with the tenant graph''s PackInstall
-    activation records. NOT a pure read: when the graph carries no PackInstall record at all, the handler re-seeds
-    the starter set before it answers (one MERGE per starter namespace), so a graphs:read caller can cause a write.
-    The re-seed is skipped when the graph''s pack set was deliberately configured (#8648). Empty result when nothing
-    is installed (existence masking — another tenant''s packs are never observable).'
-  dependency: 'handler-served: no declared SDK link'
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: keep
-  basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
-- name: tortoise_pack_install
-  served_from: tortoise/mcp_server.py:15c0f0832479a167
-  served_attributes: edc1d2043e67e989
-  family: admin
-  family_rank: 5
-  served: http
-  sdk_method: ''
-  group_source: explicit
-  keyword: operate
-  keyword_rank: 10
-  cluster: null
-  canonical: null
-  job: 'Install a custom expansion pack on the HOSTED surface (#1935): validates against the shared registry + tenant
-    policy (reserved starter namespace, ontology-only v1), stores the manifest in the tenant graph and activates
-    it. Deployment- gated: on self-host this is an actionable stub (use the filesystem packs dir + tortoise pack
-    CLI).'
-  dependency: 'handler-served: no declared SDK link'
   lifecycle: active
   used_by: never called, tooling, docs
   recommendation: keep
@@ -3015,8 +2929,8 @@ rows:
   keyword_rank: 5
   cluster: null
   canonical: null
-  job: Review queue for dedup/temporal candidates (candidate_type=content|temporal|entity). Returns an object
-    envelope whose `result` key holds the rows — see the wrapper's note (#12364).
+  job: Review queue for dedup/temporal candidates (candidate_type=content|temporal|entity). Returns an object envelope
+    whose `result` key holds the rows — see the wrapper's note (#12364).
   dependency: declares TortoiseSDK.list_dedup_candidates (resolves)
   lifecycle: active
   used_by: never called, tooling, docs
@@ -3280,16 +3194,16 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.backfill_v25.
-  dependency: 'reached by 1 registered tool(s): tortoise_backfill_v25'
+  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
   lifecycle: active
   used_by: tooling, docs
-  recommendation: keep
-  reason: reached by 1 registered tool(s)
+  recommendation: review
+  reason: no MCP tool binds it, and no caller outside tests was found
   recommended_family: null
   proposed: false
   exemption: false
   approval: null
-  class: agent-reachable
+  class: no-caller-found
 - name: sdk:belief_timeline
   method: belief_timeline
   approved: false
@@ -4434,7 +4348,7 @@ rows:
   job: Public SDK method TortoiseSDK.invalidate_point.
   dependency: 'reached by 1 registered tool(s): tortoise_invalidate'
   lifecycle: active
-  used_by: tooling, skill-docs, docs
+  used_by: eval-harness, tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -4873,7 +4787,7 @@ rows:
   lifecycle: active
   used_by: tooling, docs
   recommendation: review
-  reason: 'no MCP tool binds it; callers: none outside tests'
+  reason: no MCP tool binds it, and no caller outside tests was found
   recommended_family: null
   proposed: false
   exemption: false

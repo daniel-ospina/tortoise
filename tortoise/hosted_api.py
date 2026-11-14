@@ -14912,9 +14912,9 @@ async def upload_pack_manifest(
     deferred-terminal doctrine — the budget is charged once at the terminal
     outcome (success / 4xx), and a server fault (5xx/503) passes through
     uncharged, so an outage cannot mask itself with a stale 429. The MCP
-    install tool
-    (tortoise_pack_install) calls upsert_tenant_manifest in-process and
-    is NOT covered by this REST budget (tracked separately).
+    install tool (tortoise_pack_install) used to call upsert_tenant_manifest
+    in-process, outside this REST budget; #11609 batch 1 ARCHIVED it, so this
+    route is now the operation's only door and the only place it is charged.
 
     Response matrix: no auth → 401; request body over the wire cap
     (~397KB — checked BEFORE any parse) → 413 "manifest request body
@@ -14929,7 +14929,8 @@ async def upload_pack_manifest(
     """
     _reject_graph_bound_org_surface(org, "pack catalog upload")
     # C5 #2114 (re-review P1): the upload MERGEs :PackManifest/:PackInstall
-    # into the DEFAULT graph — REST twin of tortoise_pack_install (write).
+    # into the DEFAULT graph — it WAS the REST twin of tortoise_pack_install
+    # (write); since #11609 batch 1 archived that tool, this is the only door.
     _require_scope(org, "graphs:write", "pack manifest upload")
     org_id = org.get("org_id")
     if not org_id:

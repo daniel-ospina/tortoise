@@ -96,7 +96,9 @@ accepted — an unrecorded residual is how a guard silently stops guarding:
 
 2. ``hosted_only`` DECLARED BUT UNWIRED — ACCEPTED (owner: the #1935 wiring
    change). ``ToolDefinition.hosted_only`` is declared (``tool_registry.py``) and
-   set on ``tortoise_pack_install``; NOTHING reads it, so every registry entry is
+   WAS set on ``tortoise_pack_install`` until #11609 batch 1 archived that tool —
+   after which NO entry sets it, so the residual is now unexercised as well as
+   unwired: NOTHING reads the flag, so every registry entry is
    registered on every surface and the both-direction equality in
    ``test_live_mcp_surface_registers_every_entry`` is the correct assertion
    TODAY. The moment #1935 wires the flag, a self-host run legitimately serves

@@ -3532,8 +3532,9 @@ def _is_safe_root_file(path: str) -> bool:
 # The membership test is the CONTENT-READER census, NOT a mention: a doc a guard
 # READS stays out. `README.md` (tests/test_embedded_durability_claim.py:62,
 # tests/test_capacity_page.py:40), `AGENTS.md` (the base-subset pin),
-# `.gitignore` (tests/test_kind_index.py:302) and `.env.example` are therefore
-# NOT here.
+# `.gitignore` (tests/test_kind_index.py:302 —
+# `TestMemoizationAndLazy::test_gitignored_cache_dir`) and `.env.example` are
+# therefore NOT here.
 #
 # ⛔ `CONTRIBUTING.md` IS NO LONGER HERE, and the reason it once was is worth
 # keeping. It was left out of #6786's two-file reprieve on a MENTION census
@@ -3599,6 +3600,19 @@ def _is_safe_root_file(path: str) -> bool:
 # comment credited `#12443`, which is the ISSUE, and an issue removes nothing.
 # Re-derive the reader census before re-admitting it; do not
 # re-admit it on the older mention census, which is what produced the red.
+#
+# The reader is `test_surface_manifest.py::test_the_REMOVAL_docs_do_not_name_a_route_the_writer_REFUSES`
+# (#12237), which reads CONTRIBUTING's "**To REMOVE a symbol**" paragraph and reds if it names a
+# removal route the archive writer refuses. Measured before the removal: the ratchet
+# `test_non_code_doc_paths_have_no_content_reader` was RED at `origin/main` and on the PR that
+# carried the entry, i.e. it had been stale since #12313 landed. Reprieving a file a guard reads is
+# the silent-hole class — it drops the changed path to the tier-1 smoke, so the guard never runs on
+# the PR that edits the paragraph it pins. (Two lanes fixed this independently; the blocks are
+# merged here rather than left as two rulings on one rule.)
+#
+# The three remaining members — `.github/pull_request_template.md`, `CHANGELOG.md`, `CLAUDE.md` —
+# keep the reprieve, and `test_non_code_docs_select_tier1_not_full` (whose monkeypatched arm is the
+# non-vacuity pin) is what keeps the reprieve from silently emptying into "nothing is reprieved".
 #
 # Ratchets: `test_non_code_doc_paths_exist` (liveness) and
 # `test_non_code_doc_paths_have_no_content_reader` (the read census).

@@ -1008,10 +1008,15 @@ NON_DERIVABLE_ROW_KEYS = frozenset(
 # purpose and CONTRIBUTING.md makes that reset the control — carrying it would silently
 # reverse a recorded decision.
 CARRIED_TOOL_ROW_KEYS = ("used_by", "recommendation", "basis", "reason", "exemption")
-# An `sdk:` row carries no observed-usage columns, and its `reason` is DERIVED from the
-# caller scan (it must follow the code, so freezing it would report a stale call graph
-# forever). Only the human recording travels.
-CARRIED_SDK_ROW_KEYS = ("exemption",)
+# An `sdk:` row's `reason` is DERIVED from the caller scan (it must follow the code, so
+# freezing it would report a stale call graph forever). `used_by` is NOT derivable the
+# same way for these rows: it comes from `usage_index()`, whose `skills/**` corpus is a
+# REAL tree only where the repo's `skills/` symlink resolves. On a box where it does not
+# (macOS-authored symlink read on Linux), a re-cut re-derived ZERO skill-docs evidence
+# and silently erased it from 38 `sdk:` rows — measured in #11609 batch 1, where the
+# render then disagreed with the committed document. So the observed-usage cell travels
+# with the row; only `reason` is left to follow the code.
+CARRIED_SDK_ROW_KEYS = ("used_by", "exemption")
 NON_DERIVABLE_DOC_KEYS = frozenset(
     {
         "cut_at_commit",
@@ -1468,6 +1473,48 @@ def used_by(name: str, corpora: dict[str, str], called: bool | None) -> str:
     return ", ".join(hits) if hits else "— nothing found"
 
 
+def used_by_with_unreadable_corpora(derived: str, committed: str | None,
+                                    unreadable: set[str]) -> str:
+    """Re-attach a label whose corpus could not be READ on this box (#11609 batch 1).
+
+    `used_by` answers "is this name used by an eval / skill / doc / tooling?" by
+    substring-searching four corpora. An EMPTY corpus is not evidence of absence:
+    `skills/**` is a gitignored symlink into the agent-infra checkout, so on a box
+    where it does not resolve `usage_index()` returns `""` for that leg and every row
+    silently loses `skill-docs` — measured in #11609 batch 1, where a re-cut erased
+    that label from 38 untouched `sdk:` rows and the render then disagreed with the
+    committed document.
+
+    So a label that (a) sits on a corpus that came back EMPTY and (b) the committed
+    row already records is CARRIED, while every label the derivation could actually
+    read is still re-derived. `--refresh-observations` remains the deliberate way to
+    drop it — that path passes no committed evidence.
+    """
+    if not unreadable or not committed:
+        return derived
+    have = [part.strip() for part in derived.split(",") if part.strip()]
+    recorded = [part.strip() for part in committed.split(",") if part.strip()]
+    carried = [part for part in recorded if part in unreadable and part not in have]
+    if not carried:
+        return derived
+    if not have or have == ["— nothing found"]:
+        # Nothing was FOUND anywhere readable. Keep only the labels we could not
+        # read — carrying the whole committed cell here would freeze a label whose
+        # corpus WAS readable and simply does not mention the name.
+        unread = [part for part in recorded if part in unreadable]
+        return ", ".join(unread) if unread else "— nothing found"
+    # ORDER follows the DERIVATION's own vocabulary (the `called` prefix labels,
+    # then `usage_index()`'s corpus order), never the committed cell's order — so a
+    # re-cut on a box with an unreadable corpus reproduces the same column the box
+    # WITH the corpus would produce, instead of preserving whatever order the
+    # churned file happens to hold.
+    order = ("agents", "never called", "eval-harness", "tooling", "skill-docs", "docs")
+    kept = set(have) | set(carried)
+    merged = [label for label in order if label in kept]
+    merged += sorted(kept - set(merged))
+    return ", ".join(merged)
+
+
 def recommend_tool(row: dict, called: bool | None, used_by_str: str, canonical: str | None) -> tuple[str, str]:
     """A PROPOSAL, not a verdict. The owner decides; this is the evidence laid
     out so the decision is cheap. Vocabulary is deliberately small:
@@ -1731,6 +1778,11 @@ def build_doc(commit: str | None = None, refresh_observations: bool = False) -> 
         {t.name for t in TOOL_REGISTRY} | {t.name for t in RETIRED_TOOL_REGISTRY},
     )
     corpora = usage_index()
+    # A corpus that came back EMPTY is UNREADABLE, not absent: see
+    # `used_by_with_unreadable_corpora`. `skills/` is a gitignored symlink, so a box
+    # that has not materialised it would otherwise re-derive 38 rows to "no
+    # skill-docs" and the render would stop matching the committed document.
+    unreadable_corpora = {label for label, blob in corpora.items() if not blob.strip()}
     called_names = telemetry_tools()
     clusters = seed_clusters()
     # The COMMITTED observed-usage evidence, carried forward into this derivation (#10914
@@ -1835,7 +1887,11 @@ def build_doc(commit: str | None = None, refresh_observations: bool = False) -> 
             called = (entry.name in called_names) if called_names else None
         else:
             called = False
-        used_by_str = used_by(entry.name, corpora, called)
+        used_by_str = used_by_with_unreadable_corpora(
+            used_by(entry.name, corpora, called),
+            committed.get("used_by") if committed else None,
+            unreadable_corpora,
+        )
         lifecycle = "deprecated alias" if entry.name in DEPRECATED_ALIASES else "active"
         # The full description, verbatim. An earlier cut took the first sentence,
         # which truncated "…incl. provenance, …" to "…incl" — a sentence split is
@@ -1953,7 +2009,11 @@ def build_doc(commit: str | None = None, refresh_observations: bool = False) -> 
                     else f"reached by no registered MCP tool; caller categories: {', '.join(reached_paths) or 'none outside tests'}"
                 ),
                 "lifecycle": "active",
-                "used_by": used_by(name, corpora, None),
+                "used_by": used_by_with_unreadable_corpora(
+                    used_by(name, corpora, None),
+                    sdk_committed.get("used_by"),
+                    unreadable_corpora,
+                ),
                 "recommendation": ("keep" if reached else "review"),
                 # Sentence must agree with the `dependency` column beside it. It previously
                 # hardcoded "no CLI verb calls it", which was FALSE for the five SDK methods
@@ -3176,7 +3236,10 @@ def cmd_render(args: argparse.Namespace) -> int:
     add("# The agent-facing surface — for review")
     add("")
     add(f"Cut against `{doc['cut_at_commit'][:9]}`, the default-branch commit this baseline "
-        f"was cut from. **{len(tools)} MCP tools · {len(sdk)} SDK methods.**")
+        f"was cut from — the ROWS' provenance. The counts are this baseline's own and need "
+        f"not match that commit (four no-destination MCP tools are archived under "
+        f"`archive/mcp-tools/`, so they count there and not here): "
+        f"**{len(tools)} MCP tools · {len(sdk)} SDK methods.**")
     add("")
     add("Generated from `config/surface-manifest.yml`. **Do not edit this file** — change the manifest.")
     add("")
@@ -3262,11 +3325,12 @@ def cmd_render(args: argparse.Namespace) -> int:
     add("**What is not a gate failure: an added field on an existing response.** A field that is off")
     add("by default, and leaves the response unchanged when it is off, is neither a new tool nor a new")
     add("endpoint, so it is not a name-level change and does not gate **as an addition**. The precedent")
-    add("is in the tree: the W4 why-layer key on the `tortoise_analyze` response is written only when")
-    add("`TORTOISE_W4_ENRICHMENT` is truthy (1/true/yes/on; unset or `0` means off) — and every")
-    add("other field stays byte-identical when it is absent (`tortoise/mcp_server.py`,")
-    add("`tortoise/why.py`). That is a different `why` key from")
-    add("the one on `volunteer_context`, which is present by default.")
+    add("is in the tree: the W4 why-layer key on the `tortoise_search` / `tortoise_query` response")
+    add("is written only when `TORTOISE_W4_ENRICHMENT` is truthy (1/true/yes/on; unset or `0` means")
+    add("off) — and every other field stays byte-identical when it is absent (`tortoise/why.py`).")
+    add("(The example used to be `tortoise_analyze`, whose door #11609 batch 1 ARCHIVED — a")
+    add("generated doc must not teach a reader a call that answers \"Unknown tool\".) That is a")
+    add("different `why` key from the one on `volunteer_context`, which is present by default.")
     add("")
     add("**One qualification, because the gate also fingerprints implementations.** The gate records a")
     add("digest of each registered tool's own code object, so a field added *inside a tool's handler*")

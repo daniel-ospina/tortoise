@@ -2448,6 +2448,12 @@ surfaces:
   # the recovery travels with the next PR that touches this file.
   - test_12477_health_honesty.py
   - test_candidate_recall_11901.py
+  # ⛔ `test_env_file_divergence.py` is registered ABOVE, in `core`, with its
+  # `durations:` weight (#11892 option (3)'s row there) — the re-pointed copy
+  # that lived here was dropped by the
+  # forward merge of `origin/main`: both branches had added the row for the same
+  # reason, and `--integrity` refuses a duplicate (`duplicate entry
+  # 'test_env_file_divergence.py' at .surfaces.core[]`).
   - test_journal_segments.py
   - test_journal_segments_falsifier.py
   # #12298 M3 (the measurement PR #12349): the brief's tables must equal the

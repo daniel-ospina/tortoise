@@ -32,10 +32,12 @@ to ``_served_apps`` — pinned by
 
 The predicate is a DERIVATION, not a ledger of offenders: a GET operation whose handler
 names a declared read-through writer may not claim read-only. The declared set is
-``tests/tool_surface_capabilities.READ_THROUGH_WRITE_METHODS`` / ``NON_SDK_READ_BINDINGS``
-— the same authority #4122 uses — so a NEW GET that fronts one of those writers fails
-here without anyone remembering this test exists, and there is no second ledger to fall
-out of date. Reachability is read off the handler's CODE (the docstring is excluded: the
+``tests/tool_surface_capabilities``' three maps — ``READ_THROUGH_WRITE_METHODS`` and
+``NON_SDK_READ_BINDINGS`` (the same authority #4122 uses), plus
+``REST_READ_THROUGH_WRITERS`` for a writer whose MCP door was archived while its REST
+route stayed live (``get_tenant_packs`` / ``GET /v1/packs``) — so a NEW GET that fronts
+one of those writers fails here without anyone remembering this test exists, and there is
+no second ledger to fall out of date. Reachability is read off the handler's CODE (the docstring is excluded: the
 claim lives in the docstring, the reach lives in the body), via ``ast``, so a mention in
 prose does not manufacture an offender.
 
@@ -80,12 +82,21 @@ def _claim_in(description: str) -> str | None:
 
 
 def _declared_read_through_writers() -> set[str]:
-    """The declared reads that WRITE — one authority, shared with #4122/#9575."""
+    """The declared reads that WRITE — one authority, shared with #4122/#9575.
+
+    ``REST_READ_THROUGH_WRITERS`` is the REST-side remainder: #11609 batch 1 archived
+    ``tortoise_packs_list`` (the only MCP door to ``get_tenant_packs``), which emptied the
+    two MCP maps and, with them, this gate's coverage of ``GET /v1/packs`` — the writer
+    and the route both stayed live, so the declaration now names the route's side too. Its
+    home is the shared module, not this test: one authority, no second ledger.
+    """
     from tool_surface_capabilities import (
         NON_SDK_READ_BINDINGS,
         READ_THROUGH_WRITE_METHODS,
+        REST_READ_THROUGH_WRITERS,
     )
-    return set(READ_THROUGH_WRITE_METHODS) | set(NON_SDK_READ_BINDINGS)
+    return (set(READ_THROUGH_WRITE_METHODS) | set(NON_SDK_READ_BINDINGS)
+            | set(REST_READ_THROUGH_WRITERS))
 
 
 def _names_reached(source: str, declared: set[str]) -> set[str]:

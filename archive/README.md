@@ -4,12 +4,16 @@
 it was a mistake — read back. It is not a "maybe later" holding area, and nothing here is a
 candidate for restoration without a **new** surface decision.
 
-Owner ruling, 2026-11-17 (comment [`6831894340`](https://github.com/daniel-ospina/tortoise/issues/11609#issuecomment-6831894340)):
+Owner ruling, 2026-11-12 (comment [`6831894340`](https://github.com/daniel-ospina/tortoise/issues/11609#issuecomment-6831894340)):
 
 > **"there is no per-tool destination. We simply end with the target ones and nothing more.
 > Anything outside the target gets removed — archived code, so not available; we archive it in
 > case we made a mistake and want to check what we had, but ultimately outside the product
 > because we don't want it."**
+
+⚠ The comment's own TITLE reads "2026-11-17"; GitHub's `created_at`/`updated_at` are
+`2026-11-12T18:09:02Z`, and that is the date cited here. Four files said `2026-11-17` before
+this was settled — do not "correct" them back from the title alone.
 
 The target itself is owner-approved in
 [`docs/product/canonical-mcp-tools.md`](../docs/product/canonical-mcp-tools.md) — **27 MCP

@@ -1237,7 +1237,8 @@ LIMITATIONS: tuple[str, ...] = (
     "unpack, a conditional) — would be invisible to it and to a `status` "
     "filter alike; no served tool answers that way at this writing — the last one "
     "(`tortoise_pack_install`'s rejected manifest, `{'installed': false, "
-    "'validation_errors': [...]}`) is answered as an `_SafeError` too. A row "
+    "'validation_errors': [...]}` — a tool ARCHIVED in #11609 batch 1) is "
+    "answered as an `_SafeError` too. A row "
     "recorded BEFORE that deploy still "
     "reads `ok` — this stage never re-classifies history. Either way THIS "
     "stage reads `result_count` alone, so the row refuses here regardless.)",

@@ -215,7 +215,19 @@ def test_every_advertising_tool_keeps_graph_optional_and_a_string():
     to what the surface accepts."""
     advertised = _advertised()
     advertising = sorted(set(advertised) - GRAPH_ARGUMENT_EXCLUDED)
-    assert len(advertising) > 60, "the argument stopped being injected wholesale"
+    # This is a FLOOR, not a count: it exists so the loop below cannot pass by
+    # advertising `graph` on a handful of tools. It moved from `> 60` to `> 55` with
+    # #11609 batch 1, which ARCHIVED four no-destination tools. TWO of the four
+    # (`tortoise_analyze`, `tortoise_backfill_v25`) were in the measured population;
+    # the other two (`tortoise_packs_list`, `tortoise_pack_install`) were already
+    # members of `GRAPH_ARGUMENT_EXCLUDED`, and `_with_graph_argument` leaves an
+    # excluded tool untouched — so the population fell 66 → 64, not by four.
+    # No number is quoted as "this head" on purpose: the assertion message below is
+    # derived from `len(advertising)`, so the live count is always in the failure and
+    # never re-stales in a comment that a neighbouring edit cannot update.
+    assert len(advertising) > 55, (
+        f"the argument stopped being injected wholesale — only {len(advertising)} "
+        "tool(s) advertise `graph`")
     for name in advertising:
         schema = advertised[name]
         props = schema.get("properties") or {}
