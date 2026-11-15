@@ -1955,7 +1955,24 @@ def test_the_record_can_clear_the_carriers_it_can_set():
     at this head: refused (`'superseded' is TERMINAL for a :Object`), journal
     delta 0 — where the carriers stay set and the record keeps reading
     `superseded` against a live graph. The guard refuses every dead →
-    non-terminal WORD, not just `live`. The BARE CLEAR also still reaches this
+    non-terminal WORD, not just `live` — and the admitted shape is EXACTLY the
+    coherent one, so the three neighbours a reader is most likely to infer
+    wrongly are named here, each with the pin that decides it:
+
+        status='live' + ONE carrier cleared — REFUSED: the fold is
+            `superseded_by IS NOT NULL OR superseded_at IS NOT NULL`, so half a
+            clear is not an un-supersede (`test_10371_nonpoint_lifecycle_
+            guard.py::test_a_PARTIAL_carrier_clear_is_still_refused`).
+        status='live' + the SNAKE pair cleared — REFUSED: this door writes
+            `SET n += $props` literally, so `superseded_by=None` clears a shadow
+            property and leaves `supersededBy` set, and admitting it would
+            resurrect the row while the cache still derived `superseded`
+            (#12782; `…::test_the_snake_spelling_cannot_un_supersede_yet`).
+        a CARRIER-LESS `superseded -> live` — REFUSED: there is nothing to
+            withdraw, so it is not a withdrawal
+            (`…::test_a_carrier_less_supersession_is_not_un_superseded`).
+
+    The BARE CLEAR also still reaches this
     mapping: measured,
     `update_entity(obj, supersededBy=None, supersededAt=None)` on a superseded
     row is ACCEPTED and journals
