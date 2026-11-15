@@ -94,20 +94,19 @@ NAIVE_RETURNING = {
 
 
 class _FakeCursor:
-    def __init__(self, value, fail_on: str | None = None):
+    def __init__(self, value, fail_on: str | tuple[str, ...] | None = None):
         self.value = value
-        #: Raise on the statement whose SQL contains this token — the seam a
-        #: fault test needs (`ROLLBACK TO SAVEPOINT` must still be issued
+        #: Raise on any statement whose SQL contains one of these tokens — the
+        #: seam a fault test needs (`ROLLBACK TO SAVEPOINT` must still be issued
         #: AFTER the failing statement, so the double cannot simply refuse
-        #: everything).
+        #: everything). SEVERAL tokens are allowed because a test that wants the
+        #: RECOVERY to fail must fail the read FIRST (to enter the recovery) and
+        #: the rollback second; one token cannot express both.
         self.fail_on = fail_on
         self.calls = []
 
     def execute(self, sql, params=None):
         self.calls.append((sql, params))
-        # `fail_on` may name several tokens: a test that wants the RECOVERY to
-        # fail has to fail the read FIRST (to enter the recovery) and the
-        # ROLLBACK second, which one token cannot express.
         tokens = (self.fail_on,) if isinstance(self.fail_on, str) else (
             self.fail_on or ())
         for token in tokens:
@@ -142,7 +141,7 @@ class _FakeConn:
 
     autocommit = True
 
-    def __init__(self, value, fail_on: str | None = None):
+    def __init__(self, value, fail_on: str | tuple[str, ...] | None = None):
         self.cur = _FakeCursor(value, fail_on=fail_on)
 
     def cursor(self):

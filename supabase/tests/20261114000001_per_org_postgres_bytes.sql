@@ -413,14 +413,15 @@ END $$;
 -- disappears while the door reports `APPLIED`.
 --
 -- The savepoint is only SAFE because it sits AFTER the insert, and that
--- ordering is the fix's entire justification, so it is pinned where a red can
--- fire instead of in prose:
+-- ordering is the fix's entire justification. What THIS section pins is the
+-- SEMANTICS of both orderings — each where a red can fire instead of in prose:
 --     (a) insert -> SAVEPOINT -> read  => rows 1  (the shipped order)
 --     (b) SAVEPOINT -> insert -> read  => rows 0  (the hazard)
 -- (b) is the migration header's "under a SAVEPOINT it under-counts" clause —
 -- still TRUE of a subtransaction that itself WRITES, which is exactly why the
--- savepoint must never move before the insert. Without (a) a later reader can
--- "tidy" it earlier and under-meter every org with the suite still green.
+-- savepoint must never move before the insert.
+-- ⚠️ This script CANNOT pin the Python's call order — it never calls the
+-- module. See the note at case (b) for that half and where it is pinned.
 --
 -- ⛔ TOP-LEVEL, NOT INSIDE `DO $$`: PL/pgSQL refuses transaction control
 -- (`SAVEPOINT` / `RELEASE`) with "unsupported transaction command in PL/pgSQL",
