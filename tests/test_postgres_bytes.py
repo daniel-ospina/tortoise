@@ -119,12 +119,19 @@ class _FakeCursor:
 
 
 class _FakeConn:
-    """A connection in AUTOCOMMIT — the audit/read shape.
+    """A connection in AUTOCOMMIT — a HYPOTHETICAL caller, not this repo's.
 
     Deliberately `autocommit = True`: a failure cannot poison a transaction no
-    one owns, so the meter takes no savepoint here. `_TxFakeConn` below models
-    the WRITE path, where the caller owns the transaction and the savepoint is
-    load-bearing.
+    one owns, so the meter takes no savepoint here. ⛔ NO IN-REPO CALLER HANDS
+    THE METER THIS SHAPE: the audit path goes through `per_org_bytes` ->
+    `cp.rpc_value(AUDIT_RPC, ...)` and never touches the meter, and the meter's
+    only caller is `record_writer._measure_written_bytes`, whose connection is
+    `_TxFakeConn` below (`_default_connect` deliberately never turns autocommit
+    on). The arm is still worth pinning — `measure_written_rows` is a public
+    seam and a duck-typed caller could be autocommit — but a positive
+    measurement pin must NOT live here alone, or it grades the branch the
+    record door never takes: see
+    `test_the_seam_MEASURES_and_does_not_write_the_ledger`, which runs on both.
     """
 
     autocommit = True
@@ -585,7 +592,18 @@ def test_the_figure_carries_its_method_and_its_exclusions():
 # ══════════════════════════════════════════════════════════════════════════
 
 
-def test_the_seam_MEASURES_and_does_not_write_the_ledger(monkeypatch):
+@pytest.mark.parametrize("conn_shape", [_FakeConn, _TxFakeConn],
+                         ids=["autocommit", "caller-transaction"])
+def test_the_seam_MEASURES_and_does_not_write_the_ledger(monkeypatch, conn_shape):
+    """⛔ BOTH ARMS, because only ONE of them is the shipped path (#12781 review).
+
+    `record_writer._default_connect` never turns autocommit on, so the meter's
+    real caller is the `caller-transaction` shape — the one that now takes the
+    savepoint. A positive-measurement pin that ran only on `_FakeConn` would
+    grade the branch the record write door never takes, and the savepoint arm
+    (whose attribution correctness is the whole reason a savepoint was chosen
+    over a second connection) would be asserted nowhere.
+    """
     from tortoise import record_writer as rw
 
     calls = []
@@ -593,11 +611,19 @@ def test_the_seam_MEASURES_and_does_not_write_the_ledger(monkeypatch):
         metering, "record_postgres_bytes_written",
         lambda *a, **k: calls.append((a, k)))
 
+    conn = conn_shape(STORED_VECTOR)
     written = rw._measure_written_bytes(
-        _FakeConn(STORED_VECTOR), org_id="o", graph_id="g",
+        conn, org_id="o", graph_id="g",
         first_seq=7, n_records=1, position=True)
 
     assert written is not None and written.row_bytes == 7_241
+    # The read really happened on THIS arm, carrying its params — otherwise a
+    # `written` figure could come from anywhere and this pin would be vacuous.
+    assert any(
+        ROWS_RPC in str(sql).lower() and params == ("o", "g", [7])
+        for sql, params in conn.cur.calls), (
+        f"the meter reported {written.row_bytes}B without issuing its read "
+        f"with these params on this arm: {conn.cur.calls}")
     assert calls == [], (
         "the seam must MEASURE only: a ledger increment here is made on "
         "another store before the caller's commit, so a rolled-back write "

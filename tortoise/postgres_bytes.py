@@ -336,9 +336,16 @@ def measure_written_rows(
     header of `supabase/migrations/20261114000001_per_org_postgres_bytes.sql`
     still says *"Under a SAVEPOINT the row's xmin is the sub-transaction's, so
     the filter UNDER-counts … and the record write path takes no savepoints
-    today"*. Both halves are now false — this door takes a savepoint on every
-    armed write, and the savepoint sits AFTER the insert, so the subtransaction
-    writes nothing and the top-level xid is preserved (measured above). The
+    today"*. The **second** half is now false: this door takes a savepoint on
+    every armed, positioned write. The **first** half is still TRUE as a
+    statement about PostgreSQL — it describes a savepoint that CONTAINS the
+    insert — and that is precisely why the savepoint here sits AFTER the insert,
+    so the subtransaction writes nothing and the top-level xid is preserved
+    (measured above). ⛔ Both orderings are pinned, so neither half is a claim
+    you have to take on trust:
+    `supabase/tests/20261114000001_per_org_postgres_bytes.sql` §7b asserts
+    `rows: 1` for savepoint-after-insert and `rows: 0` for
+    savepoint-before-insert. The
     migration files are APPEND-ONLY (`check-migration-append-only` refuses a
     modified `supabase/migrations/*.sql`), so that sentence cannot be corrected
     where it lives; this paragraph and

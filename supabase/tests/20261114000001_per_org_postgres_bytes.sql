@@ -43,13 +43,15 @@
 INSERT INTO public.organizations (id, name, graph_name) VALUES
     ('org_12762_a', 'per-org-bytes-a', 'per-org-bytes-a'),
     ('org_12762_b', 'per-org-bytes-b', 'per-org-bytes-b'),
-    ('org_12762_c', 'per-org-bytes-c', 'per-org-bytes-c')
+    ('org_12762_c', 'per-org-bytes-c', 'per-org-bytes-c'),
+    ('org_12762_d', 'per-org-bytes-d', 'per-org-bytes-d')
 ON CONFLICT (id) DO NOTHING;
 
 INSERT INTO public.graphs (id, org_id, name, namespace) VALUES
     ('g_12762_a', 'org_12762_a', 'per-org-bytes-a', 'org_org_12762_a_g_12762_a'),
     ('g_12762_b', 'org_12762_b', 'per-org-bytes-b', 'org_org_12762_b_g_12762_b'),
-    ('g_12762_c', 'org_12762_c', 'per-org-bytes-c', 'org_org_12762_c_g_12762_c')
+    ('g_12762_c', 'org_12762_c', 'per-org-bytes-c', 'org_org_12762_c_g_12762_c'),
+    ('g_12762_d', 'org_12762_d', 'per-org-bytes-d', 'org_org_12762_d_g_12762_d')
 ON CONFLICT (id) DO NOTHING;
 
 -- A record committed in an EARLIER transaction at seq 1 — the "already there"
@@ -401,6 +403,91 @@ BEGIN
     END;
 END $$;
 
+-- ── 7b. ⛔ THE SAVEPOINT, PINNED BOTH WAYS (#12781) ─────────────────────────
+-- `postgres_bytes.measure_written_rows` runs its read under
+-- `SAVEPOINT tortoise_byte_meter` whenever the connection joins a transaction
+-- the CALLER owns — the record write door's shape, since
+-- `record_writer._default_connect` deliberately never turns autocommit on —
+-- because a failed statement otherwise leaves that transaction ABORTED, so the
+-- door's succeeding `commit()` becomes a ROLLBACK and the whole record write
+-- disappears while the door reports `APPLIED`.
+--
+-- The savepoint is only SAFE because it sits AFTER the insert, and that
+-- ordering is the fix's entire justification, so it is pinned where a red can
+-- fire instead of in prose:
+--     (a) insert -> SAVEPOINT -> read  => rows 1  (the shipped order)
+--     (b) SAVEPOINT -> insert -> read  => rows 0  (the hazard)
+-- (b) is the migration header's "under a SAVEPOINT it under-counts" clause —
+-- still TRUE of a subtransaction that itself WRITES, which is exactly why the
+-- savepoint must never move before the insert. Without (a) a later reader can
+-- "tidy" it earlier and under-meter every org with the suite still green.
+--
+-- ⛔ TOP-LEVEL, NOT INSIDE `DO $$`: PL/pgSQL refuses transaction control
+-- (`SAVEPOINT` / `RELEASE`) with "unsupported transaction command in PL/pgSQL",
+-- so the savepoint stays outside and only the assertion lives in the block.
+-- And the harness runs this file statement-by-statement in AUTOCOMMIT
+-- ("SAVEPOINT can only be used in transaction blocks"), so each case opens its
+-- own explicit transaction and ROLLS BACK — the pin is the assertion, not the
+-- residue, and a rollback keeps later sections' row counts unchanged.
+--
+-- (a) THE SHIPPED ORDER — the row is written BEFORE the savepoint, so the
+--     subtransaction performs no write and keeps the TOP-LEVEL xid the meter
+--     filters on (`xmin = pg_current_xact_id()`).
+BEGIN;
+INSERT INTO public.journal_event (org_id, graph_id, seq, event_type, payload) VALUES
+    ('org_12762_d', 'g_12762_d', 20, 'PointAdded',
+     '{"type":"PointAdded","props":{"marker":"written-before-the-savepoint"}}'::jsonb);
+
+SAVEPOINT t12762_meter_order_a;
+DO $$
+DECLARE
+    m jsonb;
+BEGIN
+    m := public.journal_event_bytes_for_rows(
+            'org_12762_d', 'g_12762_d', ARRAY[20::bigint]);
+    IF m IS NULL THEN
+        RAISE EXCEPTION '#12781: the meter returned NULL inside a savepoint';
+    END IF;
+    IF (m ->> 'rows')::bigint <> 1 THEN
+        RAISE EXCEPTION '#12781: the meter UNDER-counted a row written BEFORE '
+            'a savepoint (rows=%). The record write door takes a savepoint on '
+            'every armed write, so this is the shipped path: moving the '
+            'savepoint before the insert silently under-meters every org.',
+            m ->> 'rows';
+    END IF;
+END $$;
+RELEASE SAVEPOINT t12762_meter_order_a;
+ROLLBACK;
+
+-- (b) THE HAZARD, asserted so it cannot be introduced quietly: a savepoint
+--     that CONTAINS the insert performs a write, so the row carries the SUBxid
+--     as `xmin` and the top-level filter misses it. If this ever starts
+--     counting, the behaviour changed upstream and this pin must be re-derived
+--     rather than deleted.
+BEGIN;
+SAVEPOINT t12762_meter_order_b;
+INSERT INTO public.journal_event (org_id, graph_id, seq, event_type, payload) VALUES
+    ('org_12762_d', 'g_12762_d', 21, 'PointAdded',
+     '{"type":"PointAdded","props":{"marker":"written-inside-the-savepoint"}}'::jsonb);
+DO $$
+DECLARE
+    m jsonb;
+BEGIN
+    m := public.journal_event_bytes_for_rows(
+            'org_12762_d', 'g_12762_d', ARRAY[21::bigint]);
+    IF m IS NULL THEN
+        RAISE EXCEPTION '#12781: the meter returned NULL for a row written '
+            'inside a savepoint';
+    END IF;
+    IF (m ->> 'rows')::bigint <> 0 THEN
+        RAISE EXCEPTION '#12781: a row written INSIDE a savepoint was metered '
+            '(rows=%). The savepoint must stay AFTER the insert — see (a).',
+            m ->> 'rows';
+    END IF;
+END $$;
+RELEASE SAVEPOINT t12762_meter_order_b;
+ROLLBACK;
+
 -- ── 8. The ledger increment accumulates, and refuses corruption ─────────────
 DO $$
 DECLARE
@@ -485,6 +572,6 @@ END $$;
 -- from `public.organizations` is designed to ride.
 SET app.record_journal_purge = 'on';
 DELETE FROM public.organizations WHERE id IN
-    ('org_12762_a', 'org_12762_b', 'org_12762_c');
+    ('org_12762_a', 'org_12762_b', 'org_12762_c', 'org_12762_d');
 RESET app.record_journal_purge;
 DROP TABLE IF EXISTS t12762_returning;

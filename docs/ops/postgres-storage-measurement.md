@@ -214,9 +214,22 @@ APPEND-ONLY (`check-migration-append-only` refuses a modified migration) and
 therefore cannot be corrected in place: this document and
 `postgres_bytes.measure_written_rows`'s docstring are the correction, and neither
 the header's "takes no savepoints today" nor its "under-counts" clause is a
-reason to remove the savepoint.) An **autocommit** connection
+reason to remove the savepoint.) **Both orderings are pinned, not argued**:
+`supabase/tests/20261114000001_per_org_postgres_bytes.sql` §7b asserts `rows: 1`
+for savepoint-after-insert (the shipped order) and `rows: 0`
+for savepoint-before-insert (the hazard), so moving the savepoint earlier reds
+instead of silently under-metering. An **autocommit** connection
 takes no savepoint: each statement is its own transaction, so a failure there
 aborts nothing the caller owns.
+
+**Cost, stated so it is not re-derived as waste.** A metered write becomes THREE
+statements where it was one (`SAVEPOINT` + the read + `RELEASE`), i.e. **+2 round
+trips per metered segment**. The live door commits once per record
+(`write_records([record], …)`, `tortoise/record_writer.py:2468`), so that is +2
+per record — on the same path whose per-record latency the connection pool was
+introduced to cut (18.9–20.1 ms → 3.82–3.91 ms; `record_writer._default_connect`).
+The delta is inherent to protecting the write and is the right trade, but ⛔ it is
+NOT a reason to delete the savepoint: that re-creates #12781.
 
 **Measured, then RECORDED after the commit.** `RecordWriter.write` only
 *measures*; the ledger increment happens where the commit is known
