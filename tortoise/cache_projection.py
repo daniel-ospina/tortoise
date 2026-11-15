@@ -807,8 +807,9 @@ FOLD_ON_CREATE_DEFAULTS: dict[str, dict[str, Any]] = {
 #:   `(None, None)` — `tests/test_cache_projection.py`'s
 #:   `test_the_record_can_clear_the_carriers_it_can_set` pins that SQL — so a
 #:   rebuild derives nothing **from the carriers**. ⛔ AND THAT IS NOT
-#:   AGREEMENT BY ITSELF: the SUPERSESSION word survives a rebuild only where the
-#:   stream itself carries it — `state.status` on an `EntityMutated`, or the
+#:   AGREEMENT BY ITSELF: once the carriers are cleared, the SUPERSESSION word
+#:   survives a rebuild only where the stream itself carries it — `state.status`
+#:   on an `EntityMutated`, or the
 #:   creation record's `payload.status` (the #9974 birth leg), or a
 #:   connector/pack `status_folds` event — and a carrier-only supersession
 #:   carries it in NONE of them: `commit_ops.apply_supersessions` journals
@@ -840,8 +841,9 @@ FOLD_ON_CREATE_DEFAULTS: dict[str, dict[str, Any]] = {
 #:   status as current, so the graph then serves the row as LIVE while
 #:   `DERIVED_FROM_RECORD` still folds `superseded` from the retained carrier
 #:   pair — the residual this bound already states below (the `status=None`
-#:   shape, #9974). So an un-supersede is WRITABLE today and NOT recorded today;
-#:   the two halves of that sentence are different defects, and #12592 is the
+#:   shape, #9974). So an un-supersede is WRITABLE today and NOT MODELLED as a
+#:   removal today; the two halves of that sentence are different defects, and
+#:   #12592 is the
 #:   missing SDK *supersede* verb for an Object/Subject, not the un-supersede
 #:   route.
 #: * **⚠️ ONCE SOUND TO FAIL: a CARRIER SET WITHOUT THE STATUS FOLD — a

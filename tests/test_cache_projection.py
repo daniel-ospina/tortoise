@@ -1935,7 +1935,8 @@ def test_the_record_can_clear_the_carriers_it_can_set():
     cannot express un-superseded". What it pins is the record MAPPING: an
     `EntityMutated op=supersede` carrying a null carrier state maps to a
     mutation that writes BOTH columns, so a later rebuild derives nothing FROM
-    THE CARRIERS. ⛔ That is not agreement by itself — the supersession word
+    THE CARRIERS. ⛔ That is not agreement by itself — once the carriers are
+    cleared, the supersession word
     survives a rebuild only where the stream carries it (`state.status` on an
     `EntityMutated`, the creation record's `payload.status`, or a connector/pack
     `status_folds` event), and a carrier-only supersession carries it in none of
@@ -1947,8 +1948,9 @@ def test_the_record_can_clear_the_carriers_it_can_set():
     ⛔ WHAT #12745 REMOVED IS THE `status='live'` VARIANT, NOT THE NULL-CARRIER
     SHAPE. `update_entity(status='live', supersededBy=None, supersededAt=None)`
     on a superseded row is REFUSED (`superseded` is terminal for an Object;
-    measured at this head: refused, journal delta 0) — and that is the ONLY SDK
-    route it closes. The bare CLEAR still reaches this mapping: measured,
+    measured at this head: refused, journal delta 0) — and that is the only
+    UN-SUPERSEDE route it closes (the guard refuses every dead → non-terminal
+    WORD, not just `live`). The bare CLEAR still reaches this mapping: measured,
     `update_entity(obj, supersededBy=None, supersededAt=None)` on a superseded
     row is ACCEPTED and journals
     `EntityMutated op=supersede state={'supersededBy': None, 'supersededAt': None}`
