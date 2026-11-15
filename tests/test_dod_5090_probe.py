@@ -7268,10 +7268,16 @@ def _doc_section(text: str, start: str, end: str) -> str:
 # added the round-9/10/11 rows, because the counts above are inputs and a stale
 # input misreports coverage even when the verdict is right (#11437 review, P3).
 # The `must_red` set is **63** at this head, not the 29 those rounds inherited: the
-# four verdicts reproduced unchanged at 63/19/34/34 — window 0 leaks 0/63 and reds
+# four verdicts reproduced unchanged at 63/20/34/33 — window 0 leaks 0/63 and reds
 # 10/34 `declared_open`; window 1 reds 4/34 (the same four identities named
 # above); window 3 opens exactly the two rows named and wrongly GREENs exactly
-# 1/34 `declared_blocks` (`coverage verb outside the walk/visit/reach/report`).
+# 1/33 `declared_blocks` (`coverage verb outside the walk/visit/reach/report`).
+# ⛔ THE `must_stay_green` / `declared_blocks` PAIR HERE WAS STALE for one commit
+# (#11541 review, round 4 F1): this is the THIRD place the file states a set size,
+# and round 3's emphasis row MOVED one row from `declared_blocks` (34->33) to
+# `must_stay_green` (19->20) without this sentence being re-derived — it stood at
+# 63/19/34/34, thirty lines above a sweep table that said `/33`. Now re-derived by
+# measurement and agreeing with both the census tuple and the sweep.
 # ⛔ Round 12 added seven rows of `must_red` (the six cue-only pseudo-negations and
 # `_DEFEATED`'s `incorrect`), round 13 six more (the `un…` privative alternation's
 # unrowed words) and round 14 nine more (two `must_red`, six `declared_open` and
@@ -7579,8 +7585,9 @@ _AFFIRMED = re.compile(
 # `\s*`, so it admitted only whitespace and EVERY form that puts the SUBJECT in
 # between was ACCEPTED: nine shapes measured GREEN, and none had a row in any of
 # the four sets — a false PASS in the direction this artifact exists to prevent.
-# The gap is bounded `(?:\s+\w+){0,3}?` now (the same bounded-word-gap shape
-# `_NEGATION_GOVERNS` uses). Four `must_red` rows execute it, one per (boundary
+# The gap is bounded `(?:\s+(?!(?:not|never)\b)\w+){0,3}?` now (the same
+# bounded-word-gap shape `_NEGATION_GOVERNS` uses, plus the negation guard that
+# keeps an honest EMPHASIS GREEN — see `declared_blocks` below). Four `must_red` rows execute it, one per (boundary
 # kind x subject width), and the price the bound buys is rowed in
 # `declared_blocks`. Measured, both directions:
 #   "…, but it actually does report them" / "…; they actually are visited"   RED (wanted)
@@ -8091,7 +8098,9 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
     tree, outside the `if declared is None` branch — measured, deleting §3's
     residual clause reds both that test and this one. This test still earns its
     keep: the doc pin's ability to FAIL is what the mutations at the end of THIS
-    TEST pin (not at the end of the file — eight unrelated tests follow it), and
+    TEST pin (not at the end of the file — FIFTEEN unrelated tests follow it —
+    `test_the_census_doc_collects_what_the_file_collects` first at the time of
+    writing), and
     a row set that names the measured defeats is what keeps the helper's declared
     surface honest. The sets cover every shape four review rounds have measured,
     plus the residuals deliberately left open in both directions.
@@ -8429,7 +8438,7 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
         # boundary. Every NATURAL form puts the SUBJECT in between, and all of them
         # were ACCEPTED — a false PASS in the direction this artifact exists to
         # prevent, with no row in any of the four sets. The gap is bounded
-        # `(?:\s+\w+){0,3}?` now, the same bounded-word-gap shape
+        # `(?:\s+(?!(?:not|never)\b)\w+){0,3}?` now, the same bounded-word-gap shape
         # `_NEGATION_GOVERNS` uses for its window, and these FOUR rows execute it —
         # one per (boundary kind x subject width):
         #   pronoun + `but`   | plural pronoun + `;`
@@ -8649,9 +8658,14 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
     declared_open = {
         # ⛔ THE `actually` ARM'S OWN RESIDUAL, and the reason its bound is NOT claimed
         # to close the class (#11541 review, F1, P2). The gap is
-        # `(?:\s+\w+){0,3}?`, so it reaches a THREE-word subject and no further, and
-        # a subject carrying punctuation it cannot span (an apostrophe, a hyphen, a
-        # backticked word — this doc's own register) is not reached at any width.
+        # `(?:\s+(?!(?:not|never)\b)\w+){0,3}?`, so it reaches a THREE-word subject
+        # and no further, and a subject carrying punctuation it cannot span (an
+        # apostrophe, a hyphen, a backticked word — this doc's own register) is not
+        # reached at any width. ⛔ THREE SITES STATED THIS GAP WITHOUT THE NEGATION
+        # GUARD, i.e. as the SUBJECT-BLIND `(?:\s+\w+){0,3}?` that does NOT ship and
+        # that measurably REDS one of this file's own `must_stay_green` rows
+        # (#11541 review, round 4 F3). Corrected here and at the two `must_red`
+        # comments above.
         # Measured GREEN at this head, every one of them:
         #   ", but the enclosing body walk actually does report them"      (4 words)
         #   ", but the enclosing method body walk actually does report them" (5 words)
@@ -8816,11 +8830,16 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
         # statement. ⚠️ Said "the three new markers" until round 4 of the review:
         # two of the three were measured BACK OUT, so that sentence described a
         # revision that is not this one.
-        # ⛔ WHY THEY STAY OPEN RATHER THAN ONE MORE MARKER EACH: every marker in
-        # `_DEFEATED` is a REFUTATION VERB PHRASE — except the one terminator-
-        # scoped ADVERB (`actually`), which is why the "unbounded supply" argument
-        # below is about the VERB arm and not the whole pattern (round-4 F8a: the
-        # sentence said "every marker", which the adverb makes false) — and English
+        # ⛔ WHY THEY STAY OPEN RATHER THAN ONE MORE MARKER EACH: TWO of the five
+        # markers in `_DEFEATED` are REFUTATION VERB PHRASES (`is false`,
+        # `incorrect`); ONE is the terminator-scoped ADVERB arm (`actually`), which
+        # this paragraph is about; and TWO are NOT verb phrases at all — `\bin fact\b`
+        # is an ADVERBIAL PHRASE and `\bif\b` is a CONDITIONALISER, which the docstring
+        # lists as its own shape class alongside the quote-and-refute and the
+        # self-contradiction. That is why the "unbounded supply" argument below is
+        # about the VERB arm and not the whole pattern (round-4 F8a said "every
+        # marker", which the adverb alone makes false; round 4 F4 caught that
+        # `in fact` and `if` made the narrowed version false too) — and English
         # supplies an unbounded supply of them (`is mistaken`, `is misleading`,
         # `is superseded`, `no longer holds`, `is a misreading`). Closing them one at a time is the
         # non-converging list this file has now recorded in three places for the
@@ -9066,16 +9085,22 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
         # the EMPHASIS price that was fourteenth is a `must_stay_green` row now,
         # because the negation-aware gap buys it back (#11541 review, F2).
         # ⛔ THE CONJUNCTION SPELLINGS (`but|yet|and|however|while` + `actually`)
-        # are the one member set NOT separately rowed: same ASIDE family. Its
-        # INVERSE direction IS covered, and it is covered in BOTH positions now —
-        # `inverse: refutation — , but actually it does visit them` for the
-        # clause-initial spelling, and `inverse: subject-interposed actually —
-        # , but it actually does` / `, but the body walk actually does` for the
-        # subject-interposed ones. ⛔ THAT SENTENCE USED TO SAY "so its direction is
-        # covered" over the clause-initial row ALONE, while the subject-interposed
-        # twin was ACCEPTED — a false claim of coverage sitting at the exact
-        # sentence that told the next editor no row was needed, which is why F2 was
-        # upgraded from P3 to P2 (#11541 review).
+        # are the one member set NOT separately rowed: same ASIDE family. ⚠️ AND ONLY
+        # `but` IS ROWED — an earlier version of this sentence said the inverse
+        # direction "IS covered, and it is covered in BOTH positions", which was true
+        # of `but` and FALSE of its four siblings (#11541 review, round 4 F2).
+        # Measured by per-member ablation at this head, every other marker intact:
+        # deleting `but` flips TWO rows (the clause-initial `inverse: refutation —
+        # , but actually it does visit them` and the subject-interposed twin
+        # `, but the body walk actually does`), while deleting `yet`, `and`, `however`
+        # or `while` flips ZERO rows in any of the four sets. THEY ARE NOT VACUOUS,
+        # which is why they stay: each deletion re-opens a REAL false PASS —
+        # `…are not reported by this walk however it actually does visit them` is RED
+        # as shipped and GREEN with `however` removed, and the whole suite stays green
+        # through that removal because no row spells it (same shape measured for `and`,
+        # `while`, `yet`). So the four unrowed members are retained on the same stated
+        # BELT argument this file records for the zero-closing terminators (`:`, `–`,
+        # `-`), and are DECLARED here instead of being implied to be rowed.
         "false block: an honest ASIDE using `actually`":
             "a nested `def`'s decorators and parameter defaults are not reported "
             "by this walk; actually the outer method does evaluate them",
