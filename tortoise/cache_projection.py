@@ -814,9 +814,10 @@ FOLD_ON_CREATE_DEFAULTS: dict[str, dict[str, Any]] = {
 #:   ⛔ THE WRITE DOOR ADMITS THIS SHAPE, AND ONLY THIS SHAPE (#12786). A
 #:   terminal-Object guard (#12745) briefly refused EVERY departure from
 #:   `superseded`, which made this bullet's measured shape unexpressible and
-#:   reddened `test_status_projection.py::test_clearing_a_supersession_is_still
-#:   _writable`. `sdk._write_clears_every_lifecycle_carrier` restores it under the
-#:   coherence condition this derivation needs — the row HELD a carrier and the
+#:   reddened `tests/test_status_projection.py::TestLifecycleCarrierCoherence::`
+#:   `test_clearing_a_supersession_is_still_writable`. The write door restores it
+#:   under the coherence condition this derivation needs — the row HELD a carrier
+#:   and the
 #:   write leaves NONE (`DERIVED_FROM_RECORD`, above, is what it reads) — so a
 #:   status-only `live`, a PARTIAL clear, and a carrier-less `superseded` stay
 #:   refused, and `archived`/`deprecated`/`retracted` never become recoverable.

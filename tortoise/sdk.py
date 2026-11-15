@@ -5620,6 +5620,37 @@ def _carrier_prop_named_by(key, props_read: tuple[str, ...]) -> str | None:
     return None
 
 
+def _status_key_leaves_the_dead_state(props: dict) -> bool:
+    """Does EVERY key naming ``status`` actually WRITE it, in both channels?
+
+    The allowance below rests on a premise — *this write LEAVES the dead state* —
+    and premise and write must be the same event. ``lifecycle_props_by_rendering``
+    answers the PRESENCE question over the RENDERER UNION (its own docstring: read
+    it to ANSWER something, never to conclude that the write applies), while the
+    live transport applies ``SET n += $props`` by ``str(key)`` and the journal
+    keeps the CONTENT (``tortoise/live.py``'s two-renderer contract). So a ``str``
+    SUBCLASS whose content is ``status`` but whose ``__str__`` differs is *seen* as
+    a status write and *applied* as a property with some other name: the row never
+    leaves ``superseded``, yet the carriers are cleared — a success report on a
+    carrier wipe, and the graph/record disagreement this guard exists to refuse
+    (measured; the mirror of :func:`_carrier_prop_named_by`, where "both renderers
+    must name it" guards the carrier side of the same allowance).
+
+    BOTH renderings are required, for the same reason: live-only would let the
+    record's own status write miss the column, which is the same divergence from
+    the other side. A non-``str`` key cannot be a property name, so it refuses.
+    """
+    keys = keys_rendering_as(props, {"status"})
+    if not keys:
+        return False
+    for key in keys:
+        if not isinstance(key, str):
+            return False
+        if str(key) != "status" or str.__str__(key) != "status":
+            return False
+    return True
+
+
 def _write_clears_every_lifecycle_carrier(props: dict, stored: dict[str, tuple],
                                           label: str) -> bool:
     """Is this write the RECORD-CARRIED un-supersede — a supersession cleared?
@@ -49045,8 +49076,15 @@ class TortoiseSDK:
                     _prop: (_np_row[2 + _i] or ())
                     for _i, _prop in enumerate(_np_carrier_props)}
                 # The ONE recoverable dead word, under the record's own
-                # coherence condition — see the block comment above.
+                # coherence condition — see the block comment above. The status
+                # premise is checked SEPARATELY (review cycle 2, P1) because a
+                # presence test over the renderer union is not a statement that
+                # the write applies: a `str` subclass whose content is `status`
+                # and whose `__str__` differs was admitted as an un-supersede
+                # while the live write never touched `status`, clearing the
+                # carriers off a row that stayed `superseded` (measured).
                 if (_np_dead == [_SUPERSEDED_STATUS]
+                        and _status_key_leaves_the_dead_state(props)
                         and _write_clears_every_lifecycle_carrier(
                             props, _np_carriers, _np_label)):
                     continue
@@ -49057,12 +49095,22 @@ class TortoiseSDK:
                 # supersession and a mixed dead set get no prescription they
                 # cannot follow. `status='live'` is an EXAMPLE: a pack kind's
                 # current word goes there instead, and the sentence says so.
+                # ⛔ AND THE PACK-WORD ALTERNATIVE IS OBJECT-ONLY (review cycle 2,
+                # P2): pack kinds declare Object words, while a :Subject's status
+                # vocabulary is CLOSED (`commit_ops.SUBJECT_STATUS_VALUES` — the
+                # #1423 guard below refuses `active` outright), so offering "this
+                # kind's own current word" on the Subject arm would prescribe a
+                # call that raises. The `status='live'` form is performable for
+                # both families, so it is always offered.
+                _np_pack_word_clause = (
+                    ", or this kind's own current word in place of `'live'`"
+                    if _np_label == "Object" else "")
                 _np_unsupersede_hint = (
                     " ⛔ If the SUPERSESSION itself was wrong, clear it "
                     "COHERENTLY in this same call — "
                     "`update_entity(<id>, status='live', supersededBy=None, "
-                    "supersededAt=None)`, or this kind's own current word in "
-                    "place of `'live'` — the record-carried un-supersede "
+                    "supersededAt=None)`"
+                    f"{_np_pack_word_clause} — the record-carried un-supersede "
                     "(`tortoise/cache_projection.py`, NOT MONOTONE): both "
                     "carriers go NULL, so a rebuild derives nothing and "
                     "agrees with the live graph. A status-ONLY `live` is "

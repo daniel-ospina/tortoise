@@ -444,16 +444,23 @@ def test_a_PARTIAL_carrier_clear_is_still_refused(sdk, cleared):
 def test_an_empty_string_carrier_is_not_a_clear(sdk):
     """`''` is NOT NULL to the record's view, so it keeps the row terminal.
 
-    The CARRIER door refuses this write first (a carrier with `status='live'`),
-    and the transition guard would refuse it too: `''` is not a clear, so the
-    row's carrier would survive. Pinned at the end-to-end level because either
-    door refusing is the outcome that matters.
+    ⛔ AND THE PIN MUST NAME WHICH DOOR REFUSED (review cycle 2, P2). Measured:
+    this write is refused by the CARRIER door, before the transition guard ever
+    runs — so asserting only `pytest.raises(ValueError)` cannot see a widening of
+    the transition allowance's own falsy rule (`value is None`, not truthiness).
+    The allowance's branch is defence in depth rather than the live refusal here
+    (a non-`None` carrier with `status='live'` never reaches it — the carrier door
+    refuses first), so the assertion pins the door that DOES decide it.
     """
     node = _superseded_with_carriers(sdk, _object)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError) as exc:
         sdk.update_entity(node, status="live", supersededBy="",
                           supersededAt=None)
+    assert "lifecycle CARRIER" in str(exc.value), \
+        "`''` is a carrier, not a clear — the CARRIER door is what refuses it"
     assert _stored(sdk, node)["status"] == "superseded"
+    assert _carriers(sdk, node) == ("v2", "2026-01-01T00:00:00Z"), \
+        "a refused write must store nothing"
 
 
 def test_a_carrier_less_supersession_is_not_un_superseded(sdk):
@@ -497,16 +504,93 @@ def test_a_mixed_dead_set_gets_no_un_supersede_hint(sdk):
         g.query("MATCH (n:Object {id:$id}) DELETE n", params={"id": shared})
 
 
-def test_a_key_that_renders_differently_does_not_clear_a_carrier(sdk):
-    """⛔ BOTH renderers must name the carrier (review cycle 1, P1).
+@pytest.mark.parametrize("maker,label,offers_pack_word", [
+    (_object, "Object", True),
+    (_subject, "Subject", False),
+])
+def test_only_the_object_hint_offers_a_pack_word(sdk, maker, label,
+                                                offers_pack_word):
+    """AX rule 2: a prescription must be PERFORMABLE on this family (cycle 2, P2).
+
+    Pack kinds declare Object words (`packs/venture/manifest.yaml`: `active`,
+    `prospective`, `invested`, …), so on an Object "this kind's own current word"
+    is a real alternative to `'live'`. A :Subject's vocabulary is CLOSED
+    (`commit_ops.SUBJECT_STATUS_VALUES` — the #1423 guard below refuses `active`
+    outright), so offering it there prescribes a call that raises. The
+    `status='live'` form is performable for BOTH families and is always offered.
+    """
+    node = _superseded_with_carriers(sdk, maker)
+    with pytest.raises(ValueError) as exc:
+        sdk.update_entity(node, status="live")
+    message = str(exc.value)
+    assert "supersededBy=None" in message, \
+        "the coherent clear IS performable on both families — always name it"
+    assert ("own current word" in message) is offers_pack_word, \
+        f"the pack-word clause is unperformable on a {label}"
+    if label == "Subject":
+        # The reason it is unperformable, asserted rather than asserted-about.
+        with pytest.raises(ValueError):
+            sdk.update_entity(node, status="active", supersededBy=None,
+                              supersededAt=None)
+        assert _stored(sdk, node)["status"] == "superseded"
+
+
+@pytest.mark.parametrize("content,rendering", [
+    ("supersededBy", "junk"),   # CONTENT names the carrier, the LIVE write does not
+    ("zzz", "supersededBy"),    # LIVE write names the carrier, the JOURNAL does not
+])
+def test_a_key_that_renders_differently_does_not_clear_a_carrier(
+        sdk, content, rendering):
+    """⛔ BOTH renderers must name the carrier (review cycle 1, P1; 2, P2).
 
     The live writer files a property by `str(key)`, the journal keeps its CONTENT
     (`tortoise/live.py`'s two-renderer contract — the asymmetry #9649 review 13
-    closed on `status`). A `str` subclass whose content is `supersededBy` but
-    whose `__str__` differs is written live under the `__str__` name, so the
-    carrier SURVIVES in the graph while the journal would carry the stale value
-    into the record — measured. Testing content alone admitted exactly that
-    divergence; the allowance now requires both renderings, so nothing is written.
+    closed on `status`). A `str` subclass whose two renderings disagree is
+    therefore written to a DIFFERENT property than the journal records —
+    measured. Testing one rendering alone admits that divergence from one side or
+    the other, so BOTH directions are pinned:
+
+    * content `supersededBy`, `__str__` `junk` — the carrier SURVIVES in the graph
+      while the journal carries the stale value into the record;
+    * content `zzz`, `__str__` `supersededBy` — the carrier is cleared in the
+      graph while the journal writes a key that is no column, so the record keeps
+      `superseded_by` and rebuilds the row TERMINAL against a live graph.
+
+    The first direction alone is refused even by a live-only rule, so it cannot
+    discriminate on its own; the second is the direction that resurrects the
+    record side, and it is refused only because the rule requires both.
+    """
+    class _Shadow(str):
+        __hash__ = str.__hash__
+
+        def __str__(self) -> str:
+            return rendering
+
+    node = _superseded_with_carriers(sdk, _object)
+    with pytest.raises(ValueError) as exc:
+        sdk.update_entity(node, status="live", supersededAt=None,
+                          **{_Shadow(content): None})
+    assert "'superseded' -> 'live'" in str(exc.value)
+    assert _stored(sdk, node)["status"] == "superseded"
+    assert _carriers(sdk, node) == ("v2", "2026-01-01T00:00:00Z"), \
+        "a refused write must clear nothing"
+
+
+@pytest.mark.parametrize("maker,label", [(_object, "Object"),
+                                         (_subject, "Subject")])
+def test_a_status_key_whose_live_rendering_differs_is_not_an_un_supersede(
+        sdk, maker, label):
+    """⛔ THE ADMISSION'S PREMISE MUST BE THE WRITE THAT HAPPENS (cycle 2, P1).
+
+    `lifecycle_props_by_rendering` answers the PRESENCE question over the renderer
+    UNION, while the live transport applies `SET n += $props` by `str(key)` and
+    the journal keeps the CONTENT. So a `str` subclass whose content is `status`
+    and whose `__str__` differs is SEEN as a status write and APPLIED as a
+    property with another name: the row never leaves `superseded`, yet the
+    carriers are cleared. Measured before the fix on an Object — status stayed
+    `superseded`, the carriers went NULL, `junk` was set — i.e. a success report
+    on a carrier wipe, which is the #10192 graph/record disagreement this guard
+    exists to refuse. Pinned on BOTH families because the allowance is shared.
     """
     class _Shadow(str):
         __hash__ = str.__hash__
@@ -514,13 +598,15 @@ def test_a_key_that_renders_differently_does_not_clear_a_carrier(sdk):
         def __str__(self) -> str:
             return "junk"
 
-    node = _superseded_with_carriers(sdk, _object)
+    node = _superseded_with_carriers(sdk, maker)
     with pytest.raises(ValueError) as exc:
-        sdk.update_entity(node, status="live", supersededAt=None,
-                          **{_Shadow("supersededBy"): None})
+        sdk.update_entity(node, supersededBy=None, supersededAt=None,
+                          **{_Shadow("status"): "live"})
     assert "'superseded' -> 'live'" in str(exc.value)
-    assert _stored(sdk, node)["status"] == "superseded"
-    assert _carriers(sdk, node) == ("v2", "2026-01-01T00:00:00Z")
+    assert _stored(sdk, node)["status"] == "superseded", \
+        f"the write never applies `status` on a {label} — it must not be admitted"
+    assert _carriers(sdk, node) == ("v2", "2026-01-01T00:00:00Z"), \
+        "a refused write must clear nothing"
 
 
 def test_an_archived_row_is_not_resurrected_by_clearing_a_legacy_carrier(sdk):
