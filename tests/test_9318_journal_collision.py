@@ -276,14 +276,124 @@ def test_a_re_derived_record_is_not_reportable_as_two_records() -> None:
 
 
 def test_two_payloads_with_no_comparable_identity_say_so() -> None:
-    """`unknown` is an answer, not a guess — a different type still collides."""
-    conn = Absorbed(stored=("PointAdded", {"body": "no id anywhere"}))
+    """`unknown` is an answer, not a guess — a difference still collides."""
+    # NEITHER side carries an identity key, so `unknown` is the honest answer
+    # (`one_sided` is the answer when only one of them does — asserted below).
+    # `IngestStarted` is a declared `NoRecordEffect` type (audit-only run
+    # marker), so its record carries no node identity at all — the one shape in
+    # which NO identity is comparable on both sides.
+    anonymous = {"type": "IngestStarted", "ts": "2026-11-15T00:00:00Z",
+                 "run": 1}
+    conn = Absorbed(stored=("IngestStarted", {"run": 2}))
+
+    with pytest.raises(rp.JournalPositionCollision) as excinfo:
+        rp.replay([anonymous], conn, org_id=ORG, graph_id=GRAPH)
+
+    assert excinfo.value.identity_state == "unknown"
+    assert "no record identity could be compared" in str(excinfo.value)
+    assert "DIFFERENT records" not in str(excinfo.value), (
+        "a state with no comparable identity may not assert a cause")
+
+
+def test_a_shared_NODE_id_with_two_record_types_is_not_one_record() -> None:
+    """A shared id is a NODE id, so two record types are two records (#9318 R2).
+
+    Cycle 2 of review found the first cut of the identity verdict returned
+    `same` on any shared id: `ObjectRegistered` vs `EntityMutated` about one
+    object came back as "the SAME record", which is the cycle-1 defect mirrored
+    — a cause asserted that the evidence cannot support, and every collision
+    origin omitted from the sentence. The state is `same_node`, and its text
+    names the collision origins.
+    """
+    conn = Absorbed(stored=("EntityMutated", _payload_of(RECORD_A)))
 
     with pytest.raises(rp.JournalPositionCollision) as excinfo:
         rp.replay([RECORD_A], conn, org_id=ORG, graph_id=GRAPH)
 
-    assert excinfo.value.identity_state == "unknown"
-    assert "no record identity could be compared" in str(excinfo.value)
+    assert excinfo.value.identity_state == "same_node"
+    message = str(excinfo.value)
+    assert "SAME NODE" in message
+    assert "second durable journal" in message
+    assert "SAME record" not in message
+
+
+def test_a_NESTED_payload_identity_is_read() -> None:
+    """The dominant shape is nested, and a top-level-only read is blind to it.
+
+    `PointAdded` carries its snapshot under `point` (`sdk._rec_point_id` reads
+    `rec["point"]["id"]`, and `consistency.py` normalises `{"type": …,
+    "point": {…}}` for exactly this reason). Reading the top level alone reported
+    "no identity comparable" for every `PointAdded` — i.e. exactly where the
+    re-derivation residual lives — while both payloads carried `point.id`.
+    """
+    nested = {"type": "PointAdded", "ts": "2026-11-15T00:00:00Z",
+              "point": {"id": "p1", "content": "a claim"}}
+    stored_nested = {"point": {"id": "p1", "content": "a claim, re-derived"}}
+    conn = Absorbed(stored=("PointAdded", stored_nested))
+
+    with pytest.raises(rp.JournalPositionCollision) as excinfo:
+        rp.replay([nested], conn, org_id=ORG, graph_id=GRAPH)
+
+    assert excinfo.value.identity_state == "same"
+    assert "point.id=p1" in str(excinfo.value), (
+        "the identity was not read from the nested snapshot — a PointAdded's id "
+        "lives under `point`, and reporting 'unknown' for it tells an operator "
+        "the payloads carry no identity when both do")
+
+
+def test_a_one_sided_identity_is_reported_not_discarded() -> None:
+    """A field ADDED since the row was written is the re-derivation signature."""
+    conn = Absorbed(stored=("ObjectRegistered", {"name": "no id here"}))
+
+    with pytest.raises(rp.JournalPositionCollision) as excinfo:
+        rp.replay([RECORD_A], conn, org_id=ORG, graph_id=GRAPH)
+
+    assert excinfo.value.identity_state == "one_sided"
+    message = str(excinfo.value)
+    assert "only this write names id=obj-a" in message
+
+
+def test_the_identity_values_are_BOUNDED_like_every_other_log_value() -> None:
+    """An `id` is caller-chosen, so it may not size the log line (#9318 R2).
+
+    `add_object(..., id=…)` / a source keyed by its URL makes `id` arbitrary
+    caller data. The record's own `_record_identity` bounds the same datum at
+    `_ATTRIBUTION_VALUE_LIMIT`; a second half of the same log line that did not
+    would be the shape the #10648 review recorded for this exact line.
+    """
+    huge = "x" * 300
+    conn = Absorbed(stored=("ObjectRegistered", {"id": "obj-a", "name": huge}))
+
+    with pytest.raises(rp.JournalPositionCollision) as excinfo:
+        rp.replay([{"type": "ObjectRegistered", "id": huge}], conn,
+                  org_id=ORG, graph_id=GRAPH)
+
+    message = str(excinfo.value)
+    assert huge not in message
+    assert "chars)" in message, (
+        "the identity value was not truncated with the record's own bound marker"
+    )
+
+
+def test_the_identity_keys_are_ids_only_and_a_subset_of_the_writers() -> None:
+    """A second list must not drift into printing content (#9318 review note).
+
+    `_IDENTITY_KEYS` is a deliberate SUBSET of
+    `record_writer._RECORD_IDENTITY_KEYS` (that module applies it to the record
+    it holds; this one applies it to a durable JSON payload). Neither may name a
+    content-bearing column — a source's `name` is its document title — and the
+    writer's list is itself pinned as a subset of `_CONTENT_COLUMNS` by
+    `test_record_searchkeys_10620`. Pinned here because a key added to THIS list
+    alone would have nothing red.
+    """
+    assert set(rp._IDENTITY_KEYS) <= set(rw._RECORD_IDENTITY_KEYS)
+    assert not set(rp._IDENTITY_KEYS) & rp._CONTENT_COLUMNS, (
+        f"identity key(s) {sorted(set(rp._IDENTITY_KEYS) & rp._CONTENT_COLUMNS)} "
+        f"are content columns — they would be printed verbatim into the log")
+    # `event_id` is stripped by ENVELOPE_KEYS before the durable payload is
+    # built, so it can never appear on either side of the comparison.
+    assert "event_id" not in rp._IDENTITY_KEYS
+    assert "event_id" in rp.ENVELOPE_KEYS
 
 
 def test_a_different_event_type_alone_is_a_collision() -> None:
