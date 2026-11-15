@@ -205,8 +205,8 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 > 'archived' -> 'live' on Object '…': 'archived' is TERMINAL for a :Object (ONTOLOGY §4.3)`, and likewise for
 > `status='dead'`.
 >
-> ⛔ **The refusal is NARROWER than "a lifecycle write on a terminal row"** — the phrase this file uses for the
-> Point arm above, where it also covers the validity window. The `:Object`/`:Subject` guard keys on the status
+> ⛔ **The refusal is NARROWER than "a lifecycle write on a terminal Point"** — the phrase the Point correction
+> above uses, where it also covers the validity window. The `:Object`/`:Subject` guard keys on the status
 > word ALONE, so measured at the same head on an `archived` Object, `validTo='2026-02-02'` -> ACCEPTED,
 > `status='archived'` beside a `title` edit -> ACCEPTED (an entailed status is not a transition; the guard's own
 > `#9649` F4-2 note says so, because a generic tenant PUT is a read-modify-write), and `status='superseded'`
