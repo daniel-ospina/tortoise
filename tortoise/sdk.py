@@ -49048,7 +49048,7 @@ class TortoiseSDK:
         #
         # The target word is still never inspected (a pack kind's word for
         # "current" is not `live`), which is this guard's own rule. What stays
-        # refused, unchanged: any `archived`/`deprecated`/`retracted` origin, a
+        # refused IN ONE CALL: any `archived`/`deprecated`/`retracted` origin, a
         # MIXED dead set across the bound rows, and the status-ONLY
         # `superseded -> live` — that one leaves the carriers set, so the record
         # would still read `'superseded'` against a live graph, which is the
@@ -49058,6 +49058,21 @@ class TortoiseSDK:
         # `test_clearing_a_supersession_is_still_writable` when #12745 tripped it,
         # and the name moved twice since; #12745's own suite pins the status-only
         # refusal.)
+        #
+        # ⛔ WHAT "IN ONE CALL" CONCEDES — measured, and NOT closed here (#12908).
+        # The dead→dead arm below admits `archived|deprecated|retracted ->
+        # superseded` while the SAME call carries a successor, and the coherent
+        # allowance above then withdraws that supersession — so the resurrection
+        # the single call refuses lands in two accepted calls. Measured at this
+        # head: `('archived', None, None)` -> `status='superseded',
+        # supersededBy='succ-1'` (ACCEPTED) -> `status='live'` with both carriers
+        # cleared (ACCEPTED) -> `('live', None, None)`, and the row is recalled
+        # again after `rebuild_all`. Pre-existing (both arms predate this PR), and
+        # closing it is a §4.3 DECISION, not a patch: refuse the reclassification
+        # outright, or track the supersession's provenance so only a supersession
+        # that was minted on a live row can be withdrawn. FILED, not fixed here —
+        # #12908 carries the measurement and both options. So do NOT read the
+        # paragraph above as "the origin is closed": it is closed in one call.
         #
         # ⛔ THE WRITE IS THE ROW SET, so the READ is too. The per-label loop
         # below binds `MATCH (n:<label> {match_prop:$id}) SET n += $props` — every node
@@ -49101,12 +49116,17 @@ class TortoiseSDK:
         # (`_assert_lifecycle_guard` refuses on the stored terminal marker). Two
         # different mechanisms, neither of them this arm's.
         #
-        # ⚠️ RESIDUAL, on the STORED side and NOT closed here: this fix guards the
-        # TARGET's hashability, not a stored value's. A row whose stored `status`
-        # is a list (reachable because a LIVE row accepts `status=['live']` —
-        # #10371's vocabulary hole) makes `s in _np_terminal` raise
-        # `TypeError: unhashable type: 'list'` on the NEXT lifecycle write, so the
-        # caller sees a traceback instead of a refusal. Filed as #12869.
+        # ⚠️ RESIDUAL, on the STORED side, and NARROWED BY THIS PR (#12896 review,
+        # P2) rather than left as it was: this fix guards the TARGET's type and
+        # hashability. A row whose stored `status` is a list is reachable at all
+        # only because a LIVE row accepts `status=['live']` (#10371's vocabulary
+        # hole). Before the P2 above, that stored shape made the dead-set build
+        # raise `TypeError: unhashable type: 'list'` on the NEXT lifecycle write;
+        # the dead set now takes `str` stored values only, so NO traceback escapes
+        # here (measured: stored `['live']`, then `'live'`/`['live']`/`123`/`None`
+        # all ACCEPTED, row intact). What is left is the VOCABULARY hole, not a
+        # traceback — #12869's wording predates this narrowing and should be
+        # re-measured there before it is restated.
         #
         # The remedy is deliberately NOT `supersede()`: that door routes to
         # `supersede_point`/`invalidate_point`, which are `:Point`-only and raise
