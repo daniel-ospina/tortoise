@@ -399,6 +399,23 @@ def _lambda_is_row_predicate(lam: ast.Lambda) -> bool:
                           if isinstance(n, ast.Name)})
 
 
+def _foldable_number(node) -> float | None:
+    """The value of a NUMERIC literal (optionally signed), else ``None``.
+
+    Only literals: a name is a runtime value an AST cannot evaluate, and
+    pretending otherwise would unarm a site over a binding it never read.
+    """
+    sign = 1.0
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        sign = -1.0 if isinstance(node.op, ast.USub) else 1.0
+        node = node.operand
+    if (isinstance(node, ast.Constant)
+            and isinstance(node.value, (int, float))
+            and not isinstance(node.value, bool)):
+        return sign * float(node.value)
+    return None
+
+
 def _until_is_armed(call, ctx=None) -> bool:
     """Does this `index_rows_after_settle(...)` call pass a USABLE `until`?
 
@@ -429,6 +446,17 @@ def _until_is_armed(call, ctx=None) -> bool:
         tuple literal, an `IfExp`, a `Subscript`, a module-level `def`/`lambda`
         named as the value — is UNARMED.
 
+    ⛔ AND THE BOUND IS PART OF THE ARMAMENT, not a separate argument: the
+    helper builds `deadline = now + timeout` and returns on
+    `settled or now >= deadline`, so `timeout=0` hands back the FIRST read
+    whatever predicate the call passes — `until=None` one keyword to the right.
+    Measured at #12859's review by adding `timeout=0` to BOTH waits of the red
+    this PR fixes: 44 passed, byte-identical to the baseline, on a read that
+    returns before the indexer applies the drop. A DECIDABLE bound of zero or
+    less is therefore UNARMED; a runtime bound (`timeout=bound_s`, a name whose
+    value is not in the source) stays armed — an AST cannot evaluate it, and
+    that is the same accident-guard posture as the rest of this rule.
+
     ⛔ SO A MODULE-LEVEL `def`/`lambda`/REBINDING IS NOT A ROUTE IN AT ALL: only a
     literal lambda or a documented predicate can arm a site. That is why the
     scope-blindness that used to launder a name (`ALWAYS = lambda r: True`, then a
@@ -453,6 +481,11 @@ def _until_is_armed(call, ctx=None) -> bool:
     ctx = ctx or {}
     aliases = ctx.get("aliases", {})
     module_aliases = ctx.get("module_aliases", frozenset())
+    for kw in call.keywords:
+        if kw.arg == "timeout":
+            bound = _foldable_number(kw.value)
+            if bound is not None and bound <= 0:
+                return False
     for kw in call.keywords:
         if kw.arg != "until":
             continue
@@ -965,6 +998,46 @@ def test_the_arming_rule_is_structural_not_a_deny_list(tmp_path):
              for (name, _expr, want), line in zip(_ARMING_CASES, rows, strict=True)
              if (line not in unarmed) != want}
     assert not wrong, f"the arming rule disagrees with _ARMING_CASES: {wrong}"
+
+
+def test_an_expired_bound_is_unarmed_whatever_the_predicate(tmp_path):
+    """`timeout=0` is `until=None` ONE KEYWORD TO THE RIGHT.
+
+    `index_rows_after_settle` builds `deadline = time.monotonic() + timeout` and
+    returns on `settled or time.monotonic() >= deadline`, so a bound of zero (or
+    a negative one) hands back the FIRST catalogue read no matter what `until`
+    says. Measured at #12859's review: adding `timeout=0` to BOTH waits of the
+    red this PR fixes left 44 passed, byte-identical to the baseline — the pin
+    never read the keyword, so the sole detector for the pre-drop race went
+    green over the exact read it exists to forbid. This is the same decidable
+    one-keyword shape as `until=None` and `until=lambda r: True`.
+
+    ⛔ NOT a refusal of bounds in general: `timeout=120` is the shipped default
+    and `timeout=bound_s` is a RUNTIME value this scan cannot evaluate (the real
+    site at `tests/test_9079_handle_write_authority.py` passes exactly that), so
+    both stay ARMED. Only a DECIDABLE bound of zero or less reds.
+    """
+    mod = tmp_path / "test_expired_bounds.py"
+    mod.write_text(
+        "from tests._index_settle import index_rows_after_settle\n"
+        "from tests._index_settle import index_kind_absent\n"
+        "BOUND_S = 120.0\n"
+        "def test_zero(proj):\n"
+        "    index_rows_after_settle(proj, until=index_kind_absent, timeout=0)\n"
+        "def test_zero_float(proj):\n"
+        "    index_rows_after_settle(proj, until=index_kind_absent, timeout=0.0)\n"
+        "def test_negative(proj):\n"
+        "    index_rows_after_settle(proj, until=index_kind_absent, timeout=-1)\n"
+        "def test_default_bound(proj):\n"
+        "    index_rows_after_settle(proj, until=index_kind_absent, timeout=120)\n"
+        "def test_runtime_bound(proj):\n"
+        "    index_rows_after_settle(proj, until=index_kind_absent, timeout=BOUND_S)\n"
+        "def test_no_bound(proj):\n"
+        "    index_rows_after_settle(proj, until=index_kind_absent)\n",
+        encoding="utf-8")
+    call_sites, missing = _settle_call_sites([mod])
+    assert call_sites == {"test_expired_bounds.py": [5, 7, 9, 11, 13, 15]}, call_sites
+    assert missing == {"test_expired_bounds.py": [5, 7, 9]}, missing
 
 
 def test_two_waits_on_one_line_are_counted_as_two(tmp_path):
