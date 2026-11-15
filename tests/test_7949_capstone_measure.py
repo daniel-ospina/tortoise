@@ -6077,6 +6077,10 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # re-derived no cite, so the pair is **`:1023`/`:1015`** here — measured at
         # this head (`grep -nF 'export function postCapture(' …`) and repaired at
         # this head rather than carried, because a red on `main` blocks every head.
+        # ⛔ THAT REPAIR IS PAIR-SCOPED and the file is not green: the rows above still
+        # red at this head on inherited `sdk.py` drift this lane does not own (`main` is
+        # red for them too, and `tortoise/` is untouched here), so read "repaired" as
+        # "this pair is re-pointed", never as "the row passes".
         # The two `def`s are always
         # **8 apart** in this file, and that is exactly the trap: an offset read off
         # a stale pair re-derives `948` → `957`, which WAS `postCapture`'s parameter

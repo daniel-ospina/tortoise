@@ -22247,9 +22247,14 @@ def test_the_health_honesty_suite_is_selected_on_BOTH_halves_of_its_module_pair(
     ⚠️ So `config/ci-surfaces.yml`'s note applies here too, rather than being a different
     claim: a duplicate ROW is not evidence that union ran, because rows appended at
     different anchors survive as two rows with the attribute set or unset (#12464/#12640,
-    69 s apart — `main`'s original pair, no conflict involved). What union changes is only
-    whether the merge STOPS; it never reconciles the rows, which is why nothing but a pin on
-    the dual registration notices the lost arm.
+    69 s apart — `main`'s original pair, no conflict involved). What union changed in THIS
+    replay is only whether the merge STOPS: each conflicted region already had one side
+    empty, so it never had two rows of its own to keep. ⛔ Do NOT generalise that —
+    `.gitattributes:10-12` is explicit that union keeps BOTH sides' lines, which is why a
+    duplicate mapping key or a duplicate entry can come out of it, and why
+    `duplicate_entries()` exists to catch one. The narrower true statement is that union
+    never RECONCILES rows: it is why nothing but a pin on the dual registration notices the
+    lost arm.
 
     `integrity()` is not a substitute for this pin, and that is the point: it answers ONE
     question — is every `tests/**/test_*.py` classified SOMEWHERE — so a file that keeps
