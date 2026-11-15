@@ -231,7 +231,7 @@ aborts nothing the caller owns.
 **Cost, stated so it is not re-derived as waste.** A metered write becomes THREE
 statements where it was one (`SAVEPOINT` + the read + `RELEASE`), i.e. **+2 round
 trips per metered segment**. The live door commits once per record
-(`write_records([record], …)`, `tortoise/record_writer.py:2468`), so that is +2
+(`write_records([record], …)`, `record_writer.write_records`), so that is +2
 per record — on the same path whose per-record latency the connection pool was
 introduced to cut (18.9–20.1 ms → 3.82–3.91 ms; `record_writer._default_connect`).
 The delta is inherent to protecting the write and is the right trade, but ⛔ it is
