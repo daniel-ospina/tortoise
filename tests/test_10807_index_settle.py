@@ -313,6 +313,47 @@ _ROW_PREDICATES = frozenset({
 _PREDICATE_BODY = (ast.Call, ast.Compare, ast.BoolOp, ast.IfExp, ast.Name,
                    ast.Attribute, ast.Subscript, ast.Await)
 
+#: CALLS that FOLD the waited-on collection into a boolean. `all(...)`/`any(...)`
+#: read the ELEMENTS, so their result varies with the rows even when the argument
+#: is a helper call. ⛔ `bool(...)` IS NOT ONE OF THEM: `bool(collection)` is True
+#: for any NON-EMPTY collection, which is the same vacuity as writing the
+#: collection itself (measured at #12859's review).
+_FOLD_CALLS = frozenset({"all", "any"})
+
+
+def _call_forms_a_predicate(call: ast.Call, params: set[str]) -> bool:
+    """Does this CALL's own result vary with the rows? (#12859's review)
+
+    ⛔ A CALL IS NOT A PREDICATE BECAUSE IT MENTIONS ITS ARGUMENT. On FORM alone
+    (`_PREDICATE_BODY` + a row parameter) the rule certified
+    ``lambda rows: _point_indexes(index_cells(rows))`` ARMED — and
+    `_point_indexes` returns a two-tuple, non-empty hence TRUTHY whatever its two
+    booleans say — so the wait released on the FIRST catalogue read while every
+    arm of the floor stayed green (measured at `eb3463d611`). The very same value
+    written as a TUPLE LITERAL was correctly UNARMED, so the exclusion the rule
+    already documents was missing only for the call spelling, and getting there
+    takes deleting `all(` and `)` at a real documented site.
+
+    Two routes, each requiring evidence in the CALL itself:
+      * ``all(...)``/``any(...)`` — a fold the CALLER applies to the collection
+        the wait reads, and its argument must mention a row parameter so
+        ``all((True,))`` cannot ride in on the wrapper;
+      * a documented row predicate, called directly (`index_kind_absent(rows, …)`).
+    An ``Attribute`` callee is refused here: `_lambda_is_row_predicate` has no
+    import context, and certifying `other.index_kind_absent` on a name collision
+    is the hole `_until_is_armed` closes with its `module_aliases` arm. Nothing
+    else is ARMED, so an unlisted call form reds the pin loudly instead of
+    passing — the same fail-closed fallthrough the rest of the rule uses.
+    """
+    func = call.func
+    names = {n.id for n in ast.walk(call) if isinstance(n, ast.Name)}
+    mentions_rows = bool(params & names)
+    if not mentions_rows:
+        return False
+    if isinstance(func, ast.Name):
+        return func.id in _FOLD_CALLS or func.id in _ROW_PREDICATES
+    return False
+
 
 def _lambda_is_row_predicate(lam: ast.Lambda) -> bool:
     """Is this lambda a predicate OVER ITS ROWS, or a truthy constant wearing one?
@@ -347,6 +388,12 @@ def _lambda_is_row_predicate(lam: ast.Lambda) -> bool:
     negated = (isinstance(lam.body, ast.UnaryOp)
                and isinstance(lam.body.op, ast.Not))
     if not (negated or isinstance(lam.body, _PREDICATE_BODY)):
+        return False
+    # ⛔ A CALL BODY NEEDS ITS CALLEE EXAMINED, not just its shape: the form rule
+    # alone certified a helper returning a non-empty tuple (truthy on the first
+    # read) as a predicate, because it mentioned its `rows` argument.
+    if isinstance(lam.body, ast.Call) and not _call_forms_a_predicate(
+            lam.body, params):
         return False
     return bool(params & {n.id for n in ast.walk(lam.body)
                           if isinstance(n, ast.Name)})
@@ -779,6 +826,13 @@ _ARMING_CASES = (
     ("lambda_call", "lambda r: index_kind_absent(r, 'Event', 'id', 'RANGE')",
      True),
     ("lambda_all", "lambda rows: all(rows)", True),
+    # A FOLD over a helper call is a predicate: `all(...)` reads the ELEMENTS, so
+    # the result varies with the rows even though `_point_indexes(index_cells(
+    # rows))` on its own does not (it is a non-empty tuple, always truthy).
+    ("lambda_all_of_helper",
+     "lambda rows: all(_point_indexes(index_cells(rows)))", True),
+    ("lambda_any_of_helper",
+     "lambda rows: any(_point_indexes(index_cells(rows)))", True),
     ("lambda_compare", "lambda r: 'quote' in (r or set())", True),
     ("lambda_subscript", "lambda r: r[0]", True),
     ("lambda_not_call",
@@ -806,6 +860,19 @@ _ARMING_CASES = (
     ("lambda_bool_call", "lambda r: bool(1)", False),
     ("lambda_compare_constant", "lambda r: bool(1) >= 0", False),
     ("lambda_ifexp_constant", "lambda r: True if True else False", False),
+
+    # ── UNARMED: a CALL whose own value does not vary with the rows ────────
+    # The tuple-literal exclusion above is the same defect one spelling over: a
+    # helper returning a non-empty collection is TRUTHY whatever the rows say,
+    # and `all(` / `)` around it is one character of slip from a vacuous wait.
+    # Measured at #12859's review, over the real site at
+    # `test_9079_handle_write_authority.py:870`.
+    ("lambda_helper_tuple",
+     "lambda rows: _point_indexes(index_cells(rows))", False),
+    ("lambda_bool_of_collection",
+     "lambda rows: bool(_point_indexes(index_cells(rows)))", False),
+    ("lambda_all_constant_arg", "lambda rows: all((True,))", False),
+    ("lambda_module_helper", "lambda rows: index_cells(rows)", False),
 
     # ── SHORT-CIRCUITING OPERANDS decide the expression on their own ───────
     # `and`/`or` evaluate left to right and stop at a deciding operand, so the
