@@ -80,6 +80,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from tortoise import (  # noqa: E402
     cache_projection,
     monitoring,
+    postgres_bytes,
     record_projection,
     record_writer,
 )
@@ -2448,6 +2449,75 @@ def test_the_public_capture_path_writes_the_epistemic_layer(capture_sdk,
         _capture(capture_sdk, monkeypatch, tenant)
         assert _count(conn, "point", tenant) >= 1, (
             "the epistemic layer received no row from the capture")
+    finally:
+        conn.close()
+
+
+def test_a_failing_byte_meter_cannot_roll_back_a_record_write(monkeypatch, tenant):
+    """A METERING fault must never destroy the write it measures (#12762/#12764).
+
+    `main` at `9e934efad5` was RED with TEN failures across four files and ONE
+    root: every armed record leg found an EMPTY record. `#12762`'s meter runs
+    inside the write's OWN transaction (deliberately — it attributes rows by
+    `xmin`), and its exception is swallowed as "non-fatal" — but a failed
+    statement leaves a PostgreSQL transaction ABORTED, so the door's succeeding
+    `commit()` becomes a ROLLBACK and the whole record write disappears while
+    `write_live_record` returns `APPLIED` with no counter moved. MEASURED on
+    PG16 with the meter refused (`InsufficientPrivilege`): 0 rows committed
+    without the savepoint, 1 row with it.
+
+    The CI trigger is reproduced here, and it is mundane: the metering migration
+    is not part of the record schema (`RECORD_MIGRATIONS` is name-gated on
+    `_record_`), so a fixture-armed database has no such function at all
+    (`UndefinedFunction`). A NAME is pointed at a missing function rather than a
+    privilege revoked, so this leg needs no DDL and cannot leak into a sibling.
+
+    Falsifier: remove the savepoint guard in
+    `postgres_bytes.measure_written_rows` → the row below never commits and the
+    count assertion reds. The write must ALSO stay a success (the record landed)
+    and must NOT be counted as a `write_failed` — a meter fault is not a write
+    fault, and charging it to that counter is what would send an operator to the
+    wrong subsystem.
+    """
+    conn = _record_db()
+    try:
+        _ensure_record_schema(conn)
+        _seed_tenant(conn, tenant)
+        monkeypatch.setenv(record_writer.RECORD_DSN_ENV,
+                           _app_role_dsn(os.environ[RECORD_DB_ENV]))
+        monkeypatch.setattr(
+            postgres_bytes, "ROWS_RPC",
+            f"{postgres_bytes.ROWS_RPC}_absent_on_this_schema")
+        before = _count(conn, "session", tenant)
+        failures_before = dict(monitoring.record_write_failure_counts())
+        session_id = f"sess-meter-{uuid.uuid4().hex[:8]}"
+        record = {"type": "SessionRecorded", "ts": "2026-11-06T00:00:00Z",
+                  "id": session_id, "turn_count": 2, "is_episodic": True,
+                  "capture_redactions": 0}
+        with use_record_tenant(*tenant):
+            write = record_writer.write_live_record(record, seq=1)
+
+        assert write is not None and write.applied, (
+            "the write was not reported as applied on a metering fault: "
+            f"{write!r}")
+        assert (write.written_bytes, write.written_rows) == (0, 0), (
+            "an unmeasurable write must report NO bytes rather than a "
+            f"fabricated figure: {write.written_bytes}B/{write.written_rows}r")
+        after = _count(conn, "session", tenant)
+        assert after == before + 1, (
+            "the meter's failure rolled the record write back — the row this "
+            f"write reported APPLIED is not in Postgres ({before} -> {after}). "
+            "A metering fault must never destroy a record: the meter is "
+            "best-effort, the record is the truth")
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) FROM public.session "
+                "WHERE org_id=%s AND graph_id=%s AND id=%s", (*tenant, session_id))
+            assert int(cur.fetchone()[0]) == 1, (
+                "the committed session row is not the one this write carried")
+        assert dict(monitoring.record_write_failure_counts()) == failures_before, (
+            "a metering fault was charged to `record_write_failures` — that "
+            "counter names a WRITE that did not land, and this write did")
     finally:
         conn.close()
 

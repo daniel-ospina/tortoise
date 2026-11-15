@@ -258,6 +258,42 @@ def parse_written_rows(payload: Any) -> WrittenRows:
     )
 
 
+#: The savepoint the meter runs under inside a caller's transaction.
+#: One name: the meter is called once per write segment and never nested.
+_METER_SAVEPOINT = "tortoise_byte_meter"
+
+
+def _in_caller_transaction(conn: Any) -> bool:
+    """Does a statement here JOIN a transaction the CALLER will commit?
+
+    ``False`` under ``autocommit`` (each statement is its own transaction, so a
+    failing one aborts nothing the caller owns). ``True`` otherwise — and there
+    the savepoint is load-bearing, because psycopg2/psycopg both leave the
+    transaction ABORTED after a failed statement and the caller's ``commit()``
+    then silently becomes a ROLLBACK.
+
+    Read from the driver's own flag rather than from a cursor, so it holds for
+    both psycopg2 and psycopg3 and for any duck-typed test double that models
+    ``autocommit`` (a double without the attribute is treated as 
+    transactional — the safe default, since a savepoint on a connection that
+    cannot hold one is itself caught by the caller's ``except``).
+    """
+    return not bool(getattr(conn, "autocommit", False))
+
+
+def _read_written_rows(
+    cur: Any, *, org_id: str, graph_id: str, positions: list[int]
+) -> WrittenRows:
+    cur.execute(
+        f"SELECT public.{ROWS_RPC}(%s, %s, %s)",
+        (org_id, graph_id, positions),
+    )
+    row = cur.fetchone()
+    if not row:
+        raise ValueError(f"{ROWS_RPC} returned no row")
+    return parse_written_rows(row[0])
+
+
 def measure_written_rows(
     conn: Any,
     *,
@@ -274,6 +310,29 @@ def measure_written_rows(
     record, a missing function on an older schema, a malformed reply), logging
     at DEBUG: a metering fault must never change a write's outcome.
 
+    ⛔ "NEVER CHANGE A WRITE'S OUTCOME" IS ENFORCED HERE, NOT INTENDED (#12762
+    follow-up, `main` red at `9e934efad5`). Swallowing the exception was NOT
+    enough: the meter runs inside the caller's transaction, and in PostgreSQL a
+    failed statement leaves that transaction ABORTED — so the caller's
+    succeeding `commit()` becomes a ROLLBACK and the whole record write is
+    destroyed, silently, while the writer reports ``APPLIED``. MEASURED on PG16
+    with the meter refused (``InsufficientPrivilege``): without a savepoint the
+    inserted row is gone after `commit()`; with `SAVEPOINT` +
+    `ROLLBACK TO SAVEPOINT` it is present. That is the difference between a
+    metering fault and data loss, and every trigger of it is mundane — the
+    metering migration not yet applied on a fixture database
+    (``UndefinedFunction``), the app role missing ``EXECUTE``
+    (``InsufficientPrivilege``, which #12764 shipped), a lock timeout.
+
+    The savepoint does NOT skew the measurement, which is why it is a savepoint
+    and not a second connection: the function attributes rows by
+    ``xmin = pg_current_xact_id()``, and for a subtransaction that performs NO
+    WRITE — the meter is a read — PostgreSQL keeps the TOP-LEVEL xid. MEASURED
+    on PG16: inside the savepoint `pg_current_xact_id()` returned the same
+    ``919`` as before it, and the function still reported ``rows: 1`` for the
+    row inserted before the savepoint. (The migration header's "under a
+    SAVEPOINT it UNDER-counts" describes a subtransaction that itself writes.)
+
     ``seqs`` is a sequence of journal positions — one indexed read per segment,
     not one per record.
     """
@@ -284,14 +343,22 @@ def measure_written_rows(
         if conn is None:
             raise ValueError("no record connection supplied")
         with conn.cursor() as cur:
-            cur.execute(
-                f"SELECT public.{ROWS_RPC}(%s, %s, %s)",
-                (org_id, graph_id, positions),
-            )
-            row = cur.fetchone()
-        if not row:
-            raise ValueError(f"{ROWS_RPC} returned no row")
-        return parse_written_rows(row[0])
+            if not _in_caller_transaction(conn):
+                # autocommit: a failure aborts nothing the caller owns.
+                return _read_written_rows(
+                    cur, org_id=org_id, graph_id=graph_id, positions=positions)
+            cur.execute(f"SAVEPOINT {_METER_SAVEPOINT}")
+            try:
+                measured = _read_written_rows(
+                    cur, org_id=org_id, graph_id=graph_id, positions=positions)
+            except Exception:
+                # Undo ONLY the failed read, so the caller's transaction is
+                # usable and its rows — inserted BEFORE this savepoint — commit.
+                cur.execute(f"ROLLBACK TO SAVEPOINT {_METER_SAVEPOINT}")
+                cur.execute(f"RELEASE SAVEPOINT {_METER_SAVEPOINT}")
+                raise
+            cur.execute(f"RELEASE SAVEPOINT {_METER_SAVEPOINT}")
+        return measured
     except Exception:  # a meter must never break the write
         _logger.debug("postgres byte measurement failed (non-fatal)", exc_info=True)
         return None
