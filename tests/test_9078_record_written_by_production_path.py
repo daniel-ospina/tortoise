@@ -2124,14 +2124,23 @@ def _ensure_metering_schema(conn) -> None:
     """Apply the ledger + the meter; SKIP only when the meter is genuinely absent.
 
     ⛔ THE SKIP IS GATED ON THE FUNCTION ITSELF, NOT ON THE APPLY SUCCEEDING
-    (#12784 review, measured). The first version skipped whenever an apply raised,
-    and on a REUSED container — the shape `_record_db` explicitly supports, where
-    a previous run already created the ledger — `0014` raises `DuplicateObject` on
-    its own `CREATE POLICY` and the failure was read as "this fixture cannot carry
-    a meter". It could: `journal_event_bytes_for_rows` was already there and the
-    positive leg silently skipped on the one database that could answer it. So the
-    probe decides, and an apply failure is only fatal when the function is absent
-    afterwards.
+    (#12784 review, measured). Skipping whenever an apply raised was wrong TWICE
+    over on a REUSED container — the shape `_record_db` explicitly supports:
+
+      - the meter may ALREADY be there (`journal_event_bytes_for_rows` present,
+        while `0014` re-raises `DuplicateObject` on its own UNGUARDED
+        `CREATE POLICY`, migration line 24), and
+      - the LEDGER may be there while the meter is NOT: `0014` then dies on that
+        same policy BEFORE the meter file runs, so a whole-block ``try`` leaves
+        the function absent and this leg skips on the one database that could
+        answer it. Measured: applying `20261114000001` alone to that shape
+        creates the function, and this leg then passes.
+
+    So each file is applied in its OWN transaction — a colliding earlier file
+    must not deny a later one, and a file that DID apply must not be rolled back
+    by a later failure — and the probe is the only verdict on whether the meter
+    exists. That is `_ensure_record_schema`'s own convention one function up:
+    presence is decided by inspection, never inferred from an apply succeeding.
     """
     probe = ("SELECT to_regprocedure('public."
              f"{postgres_bytes.ROWS_RPC}(text,text,bigint[])')")
@@ -2139,20 +2148,25 @@ def _ensure_metering_schema(conn) -> None:
         cur.execute(probe)
         if cur.fetchone()[0] is not None:
             return
-    with conn.cursor() as cur:
+    failure = None
+    for statement in (_METERING_PREAMBLE, *(path.read_text(encoding="utf-8")
+                                           for path in METERING_MIGRATION_FILES)):
         try:
-            cur.execute(_METERING_PREAMBLE)
-            for path in METERING_MIGRATION_FILES:
-                cur.execute(path.read_text(encoding="utf-8"))
-        except Exception as exc:  # a fixture: the probe below decides, not this
+            with conn.cursor() as cur:
+                cur.execute(statement)
+            conn.commit()          # durable: a later file's failure cannot undo it
+        except Exception as exc:   # a fixture: the probe below decides, not this
             conn.rollback()
-            with conn.cursor() as check:
-                check.execute(probe)
-                if check.fetchone()[0] is None:
-                    pytest.skip(
-                        "this database cannot carry the byte meter "
-                        f"({type(exc).__name__}: {exc}) — there is no positive "
-                        "figure to assert without it, and none is claimed")
+            failure = failure or exc
+    with conn.cursor() as check:
+        check.execute(probe)
+        if check.fetchone()[0] is None:
+            detail = (f"{type(failure).__name__}: {failure}" if failure
+                      else "the migrations applied but the function is absent")
+            pytest.skip(
+                f"this database cannot carry the byte meter ({detail}) — "
+                "there is no positive figure to assert without it, and none is "
+                "claimed")
 
 
 def _seed_tenant(conn, tenant: tuple[str, str]) -> None:
@@ -2646,10 +2660,13 @@ def test_the_meter_reports_a_POSITIVE_figure_from_a_real_meter_rpc(tenant):
             "the meter returned None against a database that HAS the function "
             "and a row this transaction inserted — a metering fault must not "
             "be the answer here, or the positive half is unpinned again")
-        assert measured.rows >= 1, (
-            "the meter attributed no row to this transaction: "
-            f"{measured.rows} row(s), {measured.row_bytes}B. This is the "
-            "silent-zero shape the savepoint ordering exists to avoid")
+        assert measured.rows == 1, (
+            "exactly one row was inserted by this transaction, so the meter "
+            f"must attribute exactly one — it attributed {measured.rows} "
+            f"row(s) / {measured.row_bytes}B. 0 is the silent-zero shape the "
+            "savepoint ordering exists to avoid; >1 is the DOUBLE COUNT the "
+            "migration header names as the trap that is LIVE, and "
+            "`parse_written_rows` will not refuse it")
         assert measured.row_bytes > 0, (
             f"the meter reported a zero figure ({measured.row_bytes}B) for a "
             "row it did count — `parse_written_rows` read a real reply into 0, "
