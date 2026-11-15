@@ -43,9 +43,12 @@ lane did not do.
 
 **The population, and the rule that defines it — stated first, because every number below depends on it.**
 Every row of `docs/00_index.md` contributes **one member**: the first backticked path in that row's path
-column that names a file which **exists in the tree**. A row that names only a directory, or a path that is
-not tracked, contributes no member. Stated that way the population is a function of two files and is
-reproducible without trusting this document's arithmetic.
+column that names a **`.md` file which exists in the tree**. A row that names only a directory, a non-markdown
+artifact (a `.py`, a `.jsonl`), or a path that is not tracked contributes no member — four rows are excluded
+that way (`docs/00_index.md:59`, `:85`, `:148`, `:190`, whose first existing path is a tool, a package file, a
+JSONL and a script). Stated that way the population is a function of two files and is reproducible without
+trusting this document's arithmetic; **stated without the `.md` restriction it reproduces 179 / 154 / 102 / 50
+instead, which is how an earlier revision of this table went wrong.**
 
 | | count |
 |---|---|
@@ -214,7 +217,9 @@ can reproduce it without trusting a count:
 
 **103 + 2 + 0 = 105. 105 + 48 = 153.** ✅
 
-**Named individually (48) — in-scope by path, not read, with the reason.** These are the entries whose
+**Named individually (48) — in-scope by path, not read, with the reason.** (Two `#7951` increment plans —
+`2026-10-17-7951-update-point-outbox.md` and `2026-10-18-7951-delete-point-outbox.md` — appeared in this table
+in an earlier revision and are **read**: they are `§A1.1` rows 21 and 22. Nothing in the 48 is read.) These are the entries whose
 prefix does not match an exclusion rule, so each needs its own stated reason. (Three further documents were
 in this list in an earlier revision and are **read** now — `docs/evidence/10000-turns-bytes/README.md`,
 `docs/evidence/9558-record-write-cost/README.md`, `docs/evidence/7950-capstone/README.md`; they are counted
@@ -226,9 +231,7 @@ in `§A1.0`'s 45 and the reason each was read late is in `§12`.)
 | `docs/epics/2026-10-10-7879-postgres-record/03-schema.md`, `06-cache-projection.md` | **Read** (they are in `§A1.1`; listed here only because they are absent from the index). |
 | `docs/evidence/7949-capstone/*` (6 files), `docs/epics/2026-11-04-7949-extractor-v4-capstone/` | The extractor-v4 capstone. Storage appears only as a cost basis; the storage conclusions live in `§17` of the architecture doc, which was read. |
 | `docs/evidence/10976-licence`, `7846-indexed-graph-restore`, `7983-cost-magnitudes`, `8503`, `8607-w1b`, `11083`, `11086`, `11739-*`, `4623-*`, `2026-10-21-shared-coordination-memory` | **Partially read via `§A1.2`'s issue census** and each is a *measurement of a different question* (eviction licence, RESTORE wedge, cost magnitudes, operator edges, legacy ids, pack census, write-rate gates, quote population, cohort cap, fleet coordination). `11821-journal-encoding` is **not** in this list: it is one of the three evidence records **read** in `§A1.1` row 40, which is where its 9,176 → 5,423 B figures come from — an earlier revision of this row wrongly said it was not opened, and wrongly attributed it to D-09 (D-09 is the missing journal bound; it names `#9025` and `#5612`). |
-| `docs/evidence/7949-capstone/*` (6 files) | The extractor-v4 capstone's own evidence records. Storage appears only as a cost basis; the storage conclusions live in `§17` of the architecture doc, which was read. |
 | `docs/ops/multi-graph-migration-runbook.md`, `CONTRIBUTING.md` | Neither asserts anything about the journal/record shape. The runbook moves a **graph key** between stores and its storage claims delegate to `durability-posture.md` (the full reason is `§A1.1` row 38); `CONTRIBUTING.md` carries the finding-provenance gate, which is process. |
-| `docs/plans/2026-10-17-7951-update-point-outbox.md`, `2026-10-18-7951-delete-point-outbox.md` | **Named in `§A1.2` as increments 2a/4a**; I read the `#7951` atomic-write plan (`2026-10-14`), not these two increments. Their per-door detail is what `§A5`'s "already exists" table summarises at one remove. |
 | `docs/plans/2026-10-09-5362-retroactive-correction`, `2026-10-10-3644-source-version-window`, `2026-10-11-1990-diff-boundary-invariant`, `2026-10-16-8056-class-plural-enumeration`, `2026-10-18-8882-phase0-1-census`, `2026-11-04-5087-epic-decomposition`, `2026-11-09-11656-endpoint-kind-binding` | Each is a **per-door or per-mechanism** plan: back-dating, `:Source` version windows, the DIFF cursor boundary, temporal enumeration, graph census, the extractor epic, endpoint-kind binding. They change *what* is written, not the storage shape that carries it. `3644` and `1990` are the two I would read next, because `:Source` versioning and the cursor boundary are the two payload-level invariants `§A7` touches. |
 | `docs/architecture/ENTITY-VERDICT-BANDS`, `S2-DECISION-SEAM`, `CURATION-11469`, `INGEST_CONTRACT`, `client-server-split`, `docs/epics/2026-11-04-5090-vector-layer/TEST-DESIGN-surface-map`, `docs/registry-graph-schema` | Decision/contract surfaces above the storage layer. `ENTITY-VERDICT-BANDS` is the one that matters most to `§A6` (it is the policy `_POINT_DENY` implements, D-17) and **I did not open it**; that is a stated gap, not a satisfied one. |
 | `docs/runbook/2578-*`, `2655-*`, `2684-*`, `2886-*`, `2976-*`, `4107-*`, `4210-*` | Temporal/retrieval/preference measurement runbooks. Reading surfaces only. |
@@ -983,11 +986,17 @@ two were partly false and are recorded as such.**
 entry and 5 of those already carry a C1 prefix, so C2 is **2** and only the *sentence* beside it was broken.
 
 **Cycle 3**, fresh-context again, ran against cycle 2's fixes and found 4 more (1 P1, 3 P2) — including that
-cycle 2's own replacement table was reproducible only under a membership rule it had not stated. That is the
-honest shape of this section: **the arithmetic in `§A1` took three cycles to become reproducible, and each
-cycle's failure is a different failure** — first a row/path conflation, then two conventions in one table, then
-a partition whose rules were printed but whose population was not. Rows from all three cycles are in the table
-below, in the order they were found.
+cycle 2's own replacement table was reproducible only under a membership rule it had not stated.
+
+**Cycle 4**, fresh-context, ran against cycle 3's fixes and found 5 (2 P1, 3 P2): the stated rule omitted the
+`.md` restriction so it reproduced different numbers than the table, two documents were listed as unread that
+`§A1.1` records as read, and three rows of cycle 3's own audit were wrong (a mis-attributed fix, a stale
+matcher figure, and a duplicated named row).
+
+That is the honest shape of this section: **the arithmetic in `§A1` took four cycles to become reproducible,
+and each cycle's failure is a different failure** — first a row/path conflation, then two conventions in one
+table, then a partition whose rules were printed but whose population was not, then a rule that did not say
+which artifacts it counted. Rows from every cycle are in the table below, in the order they were found.
 
 | what the reviewer found | verified? | what changed |
 |---|---|---|
@@ -1010,10 +1019,14 @@ below, in the order they were found.
 | `:GraphEventMeta` "appears at **44** sites" | ❌ **wrong by 17 sites** — reported 44, measured **61** (`rg -n 'GraphEventMeta' tortoise/ \| wc -l`; 61 at the measured base too, by `git grep -c`), of which 50 spell `` `:GraphEventMeta` `` | count corrected in §A2.4 and §A2.5, with the command printed beside it |
 | three cross-references pointed at sections that do not say it: `§A7.0` (no such section), `§A4` for the 32,032 figure (it is `§A2.6`), and "**five** durable surfaces" above a six-item list the next sentence calls "six statements" | ✅ (`grep '^#\\+ '` has A7.1–A7.7 only; `32,032` occurs at `:156`, `:365`, `:561`, `:374`, never in §A4) | `§A7.0` → `§A7.5`; `§A4` → `§A2.6`; `five` → `six` |
 | the `read_all` census excerpt pasted three output lines as if they were the command's contiguous head, when `rg`'s parallel walk makes the file order unstable between runs | ✅ (re-running the command returns a different file order; the **39** total is stable) | the block now pastes the real contiguous head and **says** the order is not stable, instead of implying an excerpt that reproduces |
-| **the partition was still not reproducible**: the C1 prefix list yields 103 or 104 depending on the membership rule, the named table named only 40 of the 48, and `docs/ops/multi-graph-migration-runbook.md` was in the unread set with its reason living in `§A1.1` row 38 | ✅ **re-derived**: with the rule stated in `§A1.0`, C1 = **103**, C2 = **2**, C3 = 0, named = **48**, and 103 + 2 + 48 = 153 ✓. Two documents had no named row at all — the runbook and `CONTRIBUTING.md` — and both now do | named table extended; the rule, not just the totals, is what changed |
+| **the partition was still not reproducible**: the C1 prefix list yields 103 or 104 depending on the membership rule, and `docs/ops/multi-graph-migration-runbook.md` was in the unread set with its reason living in `§A1.1` row 38 | ✅ **re-derived**: with the rule stated in `§A1.0`, C1 = **103**, C2 = **2**, C3 = 0, named = **48**, and 103 + 2 + 48 = 153 ✓. Two documents had no named row at all — the runbook and `CONTRIBUTING.md` — and both now do | named table extended; the rule, not just the totals, is what changed |
 | **three §A2 census blocks presented curated regroupings as raw `rg` output** (one pasted `:13495 / :13695 capture → reestablish` — a line `rg` cannot print; one claimed 15 lines and pasted 8; one claimed 11 and pasted 9) | ✅ (re-ran all three: **11**, **13** and **15** lines respectively) | all three now paste the **real, complete** output with its line count, so a reader diffing their own run against the block sees the same thing |
 | `§A1.4` said `11821-journal-encoding` was not opened and was "named in D-09", while `§A1.1` row 40 records it as **READ** and D-09 names `#9025`/`#5612` | ✅ (`§A1.1` row 40; D-09 at `:568`) | the row now records it as read and the D-09 attribution is withdrawn |
-| `§A1.1`'s heading claimed "41 documents, each `READ`" over a table containing one `NOT READ` row | ✅ (row 38) | heading now says 41 numbered rows: 40 `READ`, 1 declared `NOT READ` |
+| `§A1.1`'s heading claimed "41 documents, each `READ`" over a table containing one `NOT READ` row (**fixed in cycle 2's commit, recorded here for completeness** — it was not a cycle-3 finding) | ✅ (row 38) | heading now says 41 numbered rows: 40 `READ`, 1 declared `NOT READ` |
+| **`§A1.0`'s rule omitted the `.md` restriction**, so as printed it reproducibly gave 179 / 154 / 102 / 50 while the table said 178 / 153 / 103 / 48; the four rogues are the rows whose first existing path is `tools/finding_provenance.py`, `tortoise/__all__.py`, a JSONL and a script | ✅ (re-derived both variants: with `.md` → 180 / 178 / 153 / C1 103 / 2 / 48; without → 180 / 179 / 154 / 102 / 50) | the rule now names `.md`, lists the four excluded rows, and states the wrong variant's numbers so the next reader can tell which rule they reproduced |
+| **two `#7951` increment plans were listed as "not read"** in `§A1.4` while `§A1.1` rows 21 and 22 record both as READ with section-level detail (and `§11` names one as a late read) | ✅ (`§A1.1` rows 21/22; `2026-10-18-7951-delete-point-outbox.md:14-17` carries the `#9207` ordering reversal the row cites) | the row is gone; a note under the heading records that both are read and that nothing in the 48 is |
+| cycle 3's row for the `§A1.1` heading described a **cycle-2** change, and its "named only 40 of the 48" was a bad matcher's artefact (the measured gap was **two**) | ✅ (`git diff ff98ab6bad..7f735b3130` contains no heading change; a fresh coverage pass finds 0 unnamed) | the heading row is labelled as cycle 2's, and the 40/48 figure is removed |
+| cycle 3 **added a duplicate** `docs/evidence/7949-capstone/*` row to the named table, which already had one for the same six files | ✅ (two identical rows in `7f735b3130`) | the duplicate is removed |
 
 ⛔ **The most important thing this cycle did was make the shape harder, not easier.** Two findings (D-25,
 D-26) are cases A7.5 had **assumed away in both directions** — a record write with no journal position, and a
