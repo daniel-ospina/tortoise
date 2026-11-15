@@ -1271,20 +1271,6 @@ SOURCE_PATTERNS = {
             # #2938/#3154/#4367 silent-drop class).
             "tortoise/selfhost_backup.py",
             "tortoise/retrieval_metering.py",
-            # #12764: the per-org Postgres-bytes meter. Naming the source ROUTES
-            # a meter-only diff to `api` — the surface that owns `metering.py` and
-            # `supabase_control.py` above, i.e. the writers of the figure this
-            # module reads — instead of the `core` fallback. The guard
-            # (tests/test_postgres_bytes.py) is DUAL-registered `api` + `core`, so
-            # it is selected either way; what this row buys is that an
-            # `api`-relevant diff runs `api`'s arm rather than the whole `core`
-            # surface. Measured: without this row
-            # `select(['tortoise/postgres_bytes.py'])` -> surfaces=['core'], guard
-            # present; with it -> surfaces=['api'], guard present. Naming the
-            # source REPLACES the `core` fallback and loses no other guard:
-            # `tests/test_postgres_bytes.py` is the ONLY test that reads this
-            # module, and it is registered on both surfaces.
-            "tortoise/postgres_bytes.py",
             "tortoise/transport.py",
             # #2938: EventAPI — the append surface `ingest.py`, `mining.py`,
             # `extractor.py`, `m0.py` and `__main__.py` all write through.

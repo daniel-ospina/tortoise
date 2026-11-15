@@ -911,22 +911,23 @@ surfaces:
   # `test_integrity_covers_all_test_files` fails (every tests/**/test_*.py must
   # be classified — the scope-v5 drift trap).
   - test_retrieval_metering.py
-  # #12764: per-org Postgres bytes MEASURED from what we write. The subjects that
-  # are `api` patterns — `tortoise/postgres_bytes.py` (the meter + audit wrapper),
-  # `tortoise/metering.py` (`record_postgres_bytes_written`) and
-  # `tortoise/supabase_control.py` (the increment) — so `api` must run it. Its
-  # fourth subject, the ledger writer `tortoise/record_writer.py`, is NOT an
-  # `api` pattern (measured: select(['tortoise/record_writer.py']) -> ['core']),
-  # which is why this file is DUAL-REGISTERED on `core` too, on the same #3981
-  # precedent as `test_retrieval_metering.py` and
-  # `test_4242_metering_period_end_refresh.py` above. The SOURCE_PATTERNS row for
-  # `tortoise/postgres_bytes.py` is added with this registration so a meter-only
-  # diff ROUTES to `api` — the surface owning the two meters and the control
-  # plane — instead of the `core` fallback. The guard is selected either way now
-  # that the `core` half exists (measured: without the row -> ['core'], guard
-  # present; with it -> ['api'], guard present). Unregistered on `main`, where it
-  # reds the REQUIRED `manifest-integrity` leg and every PR's `python-ci-gate`
-  # inherits the red (#11978/#11049).
+  # #12764: per-org Postgres bytes MEASURED from what we write. Two of its four
+  # subjects ARE exact `api` SOURCE_PATTERNS — `tortoise/metering.py`
+  # (`record_postgres_bytes_written`) and `tortoise/supabase_control.py` (the
+  # increment) — and an exact match REPLACES the `core` fallback, so an
+  # `api`-only diff touching those would never run this file without this row.
+  # The other two subjects — `tortoise/postgres_bytes.py` (the meter + audit
+  # wrapper) and the ledger writer `tortoise/record_writer.py` — match no
+  # SOURCE_PATTERN and fall to `core`, which is why the file is DUAL-REGISTERED
+  # there too, on the same #3981 precedent as `test_retrieval_metering.py` and
+  # `test_4242_metering_period_end_refresh.py` above. Measured on this tree:
+  # `--changed-files tortoise/metering.py` -> ['api'],
+  # `--changed-files tortoise/postgres_bytes.py` -> ['core'], and
+  # `--changed-files tortoise/record_writer.py` -> ['core'] — so neither arm is
+  # redundant and a meter-only or writer-only diff reaches the file through the
+  # `core` half. Unregistered on `main`, where it reds the REQUIRED
+  # `manifest-integrity` leg and every PR's `python-ci-gate` inherits the red
+  # (#11978/#11049).
   - test_postgres_bytes.py
   # #3981: dual-registered with `core` for the same reason as test_boot_regressions.py
   # above. `api` is an exact-surface match that REPLACES the `core` fallback, so a
