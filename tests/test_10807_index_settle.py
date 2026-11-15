@@ -276,22 +276,66 @@ def _foldable_bool(node) -> tuple[bool, bool | None]:
     return False, None
 
 
-def _own_returns(node) -> list[ast.Return]:
-    """The `return` statements of ONE function — nested scopes excluded.
+#: The ONLY `until` values armed WITHOUT further evidence: the documented row
+#: predicates. ⛔ `dir(tests._index_settle)` IS NOT THIS SET (measured at
+#: #12856's review): it also holds `INDEX_SETTLE_TIMEOUT_S` (the float 120.0),
+#: `INDEX_SETTLE_POLL_S`, `POINT_RANGE_FIELD`, `POINT_FULLTEXT_FIELDS`,
+#: `index_cells`, `index_rows_after_settle`, `time` and `annotations` — every one
+#: of which is truthy on the first catalogue read, so `until=index_cells` and
+#: `until=_index_settle.INDEX_SETTLE_TIMEOUT_S` were certified ARMED while being
+#: constant-vacuous. The list is spelled out because a predicate set that grows
+#: by ``import *`` is a predicate set nobody reviewed.
+_ROW_PREDICATES = frozenset({
+    "index_kind_present",
+    "index_kind_absent",
+    "point_index_drops_visible",
+})
 
-    A nested `def`/`lambda`/class has its own exits; attributing those to the
-    parent would let an inner constant-true predicate unarm an outer real one
-    (and vice versa).
+#: The expression FORMS a row predicate's body may take. Anything outside this
+#: set is truthy regardless of the rows it is handed — a tuple/list/set/dict
+#: literal, an f-string, a negative literal — and so releases on the FIRST read.
+#: `lambda r: (True,)` and the one-character slip
+#: `lambda r: (index_kind_absent(r, …),)` are both in this exclusion.
+_PREDICATE_BODY = (ast.Call, ast.Compare, ast.BoolOp, ast.IfExp, ast.Name,
+                   ast.Attribute, ast.Subscript, ast.Await)
+
+
+def _lambda_is_row_predicate(lam: ast.Lambda) -> bool:
+    """Is this lambda a predicate OVER ITS ROWS, or a truthy constant wearing one?
+
+    ⛔ "NOT CONSTANT-FOLDABLE" IS NOT THE TEST, and reading it as one is how this
+    pin kept certifying vacuous waits (#12856's review, two independent reviewers,
+    converging): `_foldable_bool` decides literals/`not`/`and`-`or`, so every form
+    it does not know — a tuple, a list, an f-string, a negative literal, a
+    `bool(1)` call — came back "undecidable" and was therefore treated as "reads
+    `rows`". Measured: `lambda r: (True,)` and
+    `lambda r: (index_kind_absent(r, "Event", "id", "RANGE"),)` were both ARMED,
+    and the second is TRUTHY over a PRE-DROP catalogue — the exact defect this
+    pin exists to forbid, one bracket away from a correct site.
+
+    Two conditions, both necessary:
+      1. the body is one of `_PREDICATE_BODY`'s forms (a container literal, an
+         f-string or an arithmetic expression is dismissed here); and
+      2. the body MENTIONS one of the declared row parameters (a body that reads
+         only literals — `bool(1)`, `bool(1) >= 0`, `True if True else False` —
+         is constant whatever form it takes).
+    A FOLDABLE body is decided first, so `lambda r: True` is refused while
+    `lambda r: False` stays armed: it waits out the deadline and reds the caller's
+    own assertion, which is fail-closed.
     """
-    out: list[ast.Return] = []
-    for child in ast.iter_child_nodes(node):
-        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef,
-                              ast.Lambda, ast.ClassDef)):
-            continue
-        if isinstance(child, ast.Return) and child.value is not None:
-            out.append(child)
-        out.extend(_own_returns(child))
-    return out
+    params = {a.arg for a in (*lam.args.posonlyargs, *lam.args.args,
+                              *lam.args.kwonlyargs)} - {"_"}
+    if not params:
+        return False  # not a predicate over rows at all
+    ok, constant = _foldable_bool(lam.body)
+    if ok:
+        return not constant
+    negated = (isinstance(lam.body, ast.UnaryOp)
+               and isinstance(lam.body.op, ast.Not))
+    if not (negated or isinstance(lam.body, _PREDICATE_BODY)):
+        return False
+    return bool(params & {n.id for n in ast.walk(lam.body)
+                          if isinstance(n, ast.Name)})
 
 
 def _until_is_armed(call, ctx=None) -> bool:
@@ -309,50 +353,58 @@ def _until_is_armed(call, ctx=None) -> bool:
     spells is a deny-list, and a deny-list only ever covers the spellings
     somebody thought of.
 
-    ⛔ SO THE RULE IS AN ALLOW-LIST: a call is armed only when the scan can show
-    the value is a PREDICATE OVER ROWS.
-      * a lambda whose body is not constant-foldable → armed (it reads `rows`);
-      * a name imported from `tests._index_settle` → armed (the documented
-        predicates), or a module-level `def` whose body is not a constant
-        `return`, or a module-level name bound to an armed-shaped value;
-      * a module-qualified `_index_settle.<predicate>` → armed.
-    Everything else — a bare builtin (`bool`, `any`), a truthy constant, or a
-    name the scan cannot resolve — is UNARMED, so the pin REDS and asks for a
-    declaration instead of certifying a read it cannot vouch for.
+    ⛔ SO THE DECISION IS STRUCTURAL, NOT SPELLED. Four arms, and the FALLTHROUGH
+    IS UNARMED — that is what makes an unlisted form fail closed instead of
+    passing:
+      * `Lambda` → `_lambda_is_row_predicate` (form + reads a row parameter);
+      * `Constant` → armed unless it is `None` (`until=True` is not callable, so
+        it raises at the first read — loud, not silent);
+      * `Name` → armed only for one of `_ROW_PREDICATES`, directly or through an
+        `ImportFrom` alias;
+      * `Attribute` → armed only for `_ROW_PREDICATES` reached through a name
+        bound to the `tests._index_settle` MODULE, so `other.index_kind_absent`
+        and `Helpers.index_kind_absent` are not certified by a name collision;
+      * everything else — a `Call` (`make_always()`, `(lambda: True)()`)…, a
+        tuple literal, an `IfExp`, a `Subscript`, a module-level `def`/`lambda`
+        named as the value — is UNARMED.
+
+    ⛔ SO A MODULE-LEVEL `def`/`lambda`/REBINDING IS NOT A ROUTE IN AT ALL: only a
+    literal lambda or a documented predicate can arm a site. That is why the
+    scope-blindness that used to launder a name (`ALWAYS = lambda r: True`, then a
+    later in-function `ALWAYS = index_kind_absent`) cannot arise — there is no
+    name resolution to launder.
 
     ⛔ THE RESIDUAL, STATED AS MEASURED SO IT CANNOT BE MISTAKEN FOR COVERAGE: a
-    value the scan cannot evaluate at all — a `Call` (`until=make_always()`), an
-    `IfExp`/`Compare`/`Subscript` — stays ARMED through the final fallback, and
-    so does a foreign attribute whose name merely collides with a documented
-    predicate (`until=other.point_index_drops_visible`). Those are the honest
-    limit of an AST pin. What is NOT residual (measured fail-closed, so it needs
-    no allowance): a name imported from another test module
-    (`from tests.test_x import _always as P`) and an in-function rebinding — both
-    are absent from the allow-list and therefore RED the pin. A
-    `**{"until": None}` splat is likewise reported UNARMED.
+    lambda that DOES take a row parameter, DOES return an allowed form, and still
+    happens to be constant — `lambda r: r[0] or True` — stays armed. Whether an
+    arbitrary expression's truth actually varies with its argument is not
+    decidable from an AST, and this pin is an accident guard, not a prover: the
+    aim is that every PLausible and every LAZY spelling reds (they do — see
+    `test_the_arming_rule_is_structural_not_a_deny_list`), not that no
+    adversarial expression can ever be written. A `**{"until": None}` splat is
+    reported UNARMED.
     """
     ctx = ctx or {}
     aliases = ctx.get("aliases", {})
-    predicate_names = ctx.get("predicate_names", frozenset())
-    settle_names = ctx.get("settle_names", frozenset())
+    module_aliases = ctx.get("module_aliases", frozenset())
     for kw in call.keywords:
         if kw.arg != "until":
             continue
         value = kw.value
         if isinstance(value, ast.Lambda):
-            if not (value.args.args or value.args.posonlyargs
-                    or value.args.kwonlyargs):
-                return False  # not a predicate over rows at all
-            ok, constant = _foldable_bool(value.body)
-            return not constant if ok else True
+            return _lambda_is_row_predicate(value)
         if isinstance(value, ast.Constant):
             return value.value is not None  # `until=True` raises at runtime: loud
         if isinstance(value, ast.Name):
-            return (value.id in predicate_names or value.id in settle_names
-                    or aliases.get(value.id) in settle_names)
+            return (value.id in _ROW_PREDICATES
+                    or aliases.get(value.id) in _ROW_PREDICATES)
         if isinstance(value, ast.Attribute):
-            return value.attr in settle_names
-        return True
+            return (value.attr in _ROW_PREDICATES
+                    and isinstance(value.value, ast.Name)
+                    and value.value.id in module_aliases)
+        # ⛔ THE FALLTHROUGH IS THE POINT: an unlisted form reds instead of
+        # passing. `return True` here was five of the nine measured escapes.
+        return False
     return False
 
 
@@ -394,51 +446,18 @@ def _settle_call_sites(paths) -> tuple[dict[str, list[int]], dict[str, list[int]
                 continue
             for alias in node.names:
                 aliases[alias.asname or alias.name] = alias.name
-        # The documented predicates, by their public names — the module under
-        # test is imported by this pin, so `dir()` IS the list. Used for a
-        # module-qualified `_index_settle.<name>` and for a name imported from it.
-        settle_names = {n for n in dir(_settle) if not n.startswith("_")}
-        # The ALLOW-LIST evidence for `_until_is_armed`, gathered from THIS
-        # file: which names are predicates over rows. A module-level `def` whose
-        # body is not a constant `return`, plus a module-level name bound to a
-        # lambda that reads its argument (or to another armed name), plus every
-        # public name of `tests._index_settle` (the documented predicates that a
-        # module-qualified `_index_settle.<name>` names).
-        predicate_names: set[str] = set()
-        assigned: dict[str, ast.expr] = {}
+        # Names bound to the `tests._index_settle` MODULE (`import tests._index_
+        # settle as _index_settle`, or any alias of it). Only these may carry a
+        # `_ROW_PREDICATES` attribute: matching the attribute NAME alone would
+        # certify `other.index_kind_absent` and `Helpers.index_kind_absent` — a
+        # name collision is not a predicate (#12856's review).
+        module_aliases: set[str] = set()
         for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                # ⛔ THE `def` ARM MIRRORS THE LAMBDA ARM, because a deny-list
-                # spelled once per node kind is how five previous spellings got
-                # through: `def _A(rows): return not False` is
-                # `lambda r: not False` with a name (measured, review cycle 8).
-                # `_foldable_bool` already decides both.
-                folds = [_foldable_bool(r.value) for r in _own_returns(node)]
-                constant_true = (bool(folds)
-                                 and all(ok for ok, _ in folds)
-                                 and any(v for _, v in folds))
-                if not constant_true:
-                    predicate_names.add(node.name)
-            elif isinstance(node, ast.Assign):
-                for target in node.targets:
-                    if isinstance(target, ast.Name):
-                        assigned[target.id] = node.value
-            elif (isinstance(node, ast.AnnAssign)
-                  and isinstance(node.target, ast.Name) and node.value is not None):
-                assigned[node.target.id] = node.value
-        for name, value in assigned.items():
-            if isinstance(value, ast.Lambda):
-                if not (value.args.args or value.args.posonlyargs
-                        or value.args.kwonlyargs):
-                    continue
-                ok, constant = _foldable_bool(value.body)
-                if not ok or not constant:
-                    predicate_names.add(name)
-            elif (isinstance(value, ast.Name)
-                  and (value.id in predicate_names or value.id in settle_names)):
-                predicate_names.add(name)
-        ctx = {"predicate_names": predicate_names,
-               "settle_names": settle_names, "aliases": aliases}
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name.endswith("_index_settle"):
+                        module_aliases.add(alias.asname or alias.name)
+        ctx = {"aliases": aliases, "module_aliases": module_aliases}
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
@@ -730,50 +749,118 @@ def test_the_scan_sees_a_module_prefixed_call_and_its_missing_until(tmp_path):
         "test_synthetic_consumer.py": [6, 12, 18, 20, 22]}, missing
 
 
-def test_the_arming_rule_is_an_allow_list_not_a_deny_list(tmp_path):
-    """Every spelling review cycles 6-9 measured GREEN is now UNARMED.
+#: `(case name, `until=` expression source, armed?)` — the arming rule's whole
+#: contract. `test_the_arming_rule_is_structural_not_a_deny_list` turns each row
+#: into its own function in a synthetic module, so every row is a measurement
+#: rather than a claim in a docstring.
+_ARMING_CASES = (
+    # ── ARMED: a real predicate over the rows ──────────────────────────────
+    ("documented_name", "index_kind_absent", True),
+    ("module_qualified", "_index_settle.index_kind_absent", True),
+    ("lambda_call", "lambda r: index_kind_absent(r, 'Event', 'id', 'RANGE')",
+     True),
+    ("lambda_all", "lambda rows: all(rows)", True),
+    ("lambda_compare", "lambda r: 'quote' in (r or set())", True),
+    ("lambda_subscript", "lambda r: r[0]", True),
+    ("lambda_not_call",
+     "lambda r: not index_kind_present(r, 'Event', 'id', 'RANGE')", True),
+    # `until=True` is not callable, so it raises at the first read: loud, and
+    # refusing it would be a false red on a value that cannot pass silently.
+    ("constant_true_is_loud", "True", True),
+    ("lambda_falsy_stays_armed", "lambda r: False", True),
 
-    `until=bool`, `until=any`, `lambda r: not False`, `lambda r: True or False`,
-    a module-level `ALWAYS = lambda r: True`, and `def _ALWAYS(rows): return True`
-    each returned on the FIRST catalogue read (the quiescence-only defect) while
-    a deny-list certified them armed — one new spelling per cycle. The rule is now
-    an allow-list, so these are unarmed by construction rather than enumerated;
-    the last case keeps it non-vacuous (a real predicate over `rows` is armed).
+    # ── UNARMED: the class measured GREEN by review cycles 6-9 ─────────────
+    ("none", "None", False),
+    ("builtin_bool", "bool", False),
+    ("builtin_all", "all", False),
+    ("lambda_constant_true", "lambda r: True", False),
+    ("lambda_not_false", "lambda r: not False", False),
+    ("lambda_boolop_constant", "lambda r: True or False", False),
+    ("lambda_no_rows_param", "lambda: True", False),
+    ("lambda_default_only", "lambda rows=(): True", False),
+
+    # ── UNARMED: every form whose TRUTH does not vary with the rows ───────
+    ("lambda_tuple_literal", "lambda r: (True,)", False),
+    ("lambda_list_literal", "lambda r: [1]", False),
+    ("lambda_fstring", "lambda r: f'ready'", False),
+    ("lambda_negative_int", "lambda r: -1", False),
+    ("lambda_bool_call", "lambda r: bool(1)", False),
+    ("lambda_compare_constant", "lambda r: bool(1) >= 0", False),
+    ("lambda_ifexp_constant", "lambda r: True if True else False", False),
+    # ⛔ THE WORST CASE: a one-character slip that WRAPS a real predicate. The
+    # tuple is truthy even when the predicate is False, so it releases on the
+    # pre-drop read — and "mentions a row parameter" alone does NOT catch it.
+    ("lambda_tuple_wraps_real",
+     "lambda r: (index_kind_absent(r, 'Event', 'id', 'RANGE'),)", False),
+
+    # ── UNARMED: values the scan cannot vouch for (fallthrough reds) ──────
+    ("call_make_always", "make_always()", False),
+    ("call_iife", "(lambda: True)()", False),
+    ("tuple_value", "(True,)", False),
+    ("subscript_value", "r[0]", False),
+    ("foreign_attribute", "other.point_index_drops_visible", False),
+    ("class_attribute", "Helpers.index_kind_absent", False),
+    # Names that ARE in `dir(tests._index_settle)` and are truthy on the first
+    # read — the reason the predicate set is spelled out instead of imported.
+    ("module_constant", "_index_settle.INDEX_SETTLE_TIMEOUT_S", False),
+    ("module_helper", "_index_settle.index_cells", False),
+    ("imported_from_other_module", "_always", False),
+    # A module-level binding is not a route in at all, so there is no scope to
+    # launder a name through (the `ALWAYS = lambda r: True` then in-function
+    # `ALWAYS = index_kind_absent` shape both reviewers measured).
+    ("module_level_lambda", "ALWAYS", False),
+    ("module_level_def", "_REAL_ROWS", False),
+)
+
+
+def test_the_arming_rule_is_structural_not_a_deny_list(tmp_path):
+    """Every form whose truth does not vary with the rows is UNARMED — and the
+    real predicates are not.
+
+    Two independent reviewers converged on the same root at `da9ddfe`: "body is
+    not constant-foldable" was being read as "this reads `rows`", so every form
+    `_foldable_bool` did not know — a tuple, a list, an f-string, a `bool(1)`
+    call, `index_cells` from `dir(_index_settle)` — came out ARMED while being
+    truthy on the FIRST catalogue read. One of them measured
+    `lambda r: (index_kind_absent(r, …),)`: a real predicate in a tuple, TRUTHY
+    over a PRE-DROP catalogue, certified ARMED by the pin. The rule is now
+    structural (`_lambda_is_row_predicate` + `_ROW_PREDICATES` + an UNARMED
+    fallthrough), so these are refused by construction; the ARMED rows above
+    keep it non-vacuous, and they are the shapes the repo's 15 real sites use.
+
+    ⛔ The rows are MEASURED, not read: each becomes a function in a synthetic
+    module and the row's line is put in the expected `missing` set, so a row that
+    claims UNARMED and is certified armed reds here by line number.
     """
-    mod = tmp_path / "test_denylist_shapes.py"
-    mod.write_text(
-        "from tests._index_settle import index_rows_after_settle\n"
-        "ALWAYS = lambda r: True\n"
-        "def _ALWAYS(rows):\n"
-        "    return True\n"
-        "def test_builtin(proj):\n"
-        "    index_rows_after_settle(proj, until=bool)\n"
-        "def test_not_false(proj):\n"
-        "    index_rows_after_settle(proj, until=lambda r: not False)\n"
-        "def test_boolop(proj):\n"
-        "    index_rows_after_settle(proj, until=lambda r: True or False)\n"
-        "def test_named_lambda(proj):\n"
-        "    index_rows_after_settle(proj, until=ALWAYS)\n"
-        "def test_named_def(proj):\n"
-        "    index_rows_after_settle(proj, until=_ALWAYS)\n"
-        "def test_real_predicate(proj):\n"
-        "    index_rows_after_settle(proj, until=lambda r: r[0])\n"
-        "def _NOT_FALSE(rows):\n"
-        "    return not False\n"
-        "def _BODY_OP(rows):\n"
-        "    x = 1\n"
-        "    return True or False\n"
-        "def test_def_not_false(proj):\n"
-        "    index_rows_after_settle(proj, until=_NOT_FALSE)\n"
-        "def test_def_boolop(proj):\n"
-        "    index_rows_after_settle(proj, until=_BODY_OP)\n"
-        "def _REAL(rows):\n"
-        "    return any(rows)\n"
-        "def test_def_real(proj):\n"
-        "    index_rows_after_settle(proj, until=_REAL)\n",
-        encoding="utf-8")
-    _call, missing = _settle_call_sites([mod])
-    assert missing == {"test_denylist_shapes.py": [6, 8, 10, 12, 14, 23, 25]}, missing
+    lines = [
+        "from tests._index_settle import index_rows_after_settle",
+        "from tests._index_settle import index_kind_present, index_kind_absent",
+        "import tests._index_settle as _index_settle",
+        "from tests.test_x import _always",
+        "ALWAYS = lambda r: True",
+        "def _REAL_ROWS(rows):",
+        "    return any(rows)",
+        "class Helpers:",
+        "    index_kind_absent = staticmethod(lambda rows: True)",
+        "other = object()",
+    ]
+    expected_missing: list[int] = []
+    for name, expr, armed in _ARMING_CASES:
+        lines.append(f"def test_{name}(proj):")
+        lines.append(f"    index_rows_after_settle(proj, until={expr})")
+        if not armed:
+            expected_missing.append(len(lines))
+    mod = tmp_path / "test_arming_cases.py"
+    mod.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    call_sites, missing = _settle_call_sites([mod])
+    rows = call_sites["test_arming_cases.py"]
+    assert len(rows) == len(_ARMING_CASES), (
+        "every row must be recognised as a call site, or its verdict is untested")
+    unarmed = set(missing.get("test_arming_cases.py", []))
+    wrong = {name: ("UNARMED" if line in unarmed else "ARMED")
+             for (name, _expr, want), line in zip(_ARMING_CASES, rows, strict=True)
+             if (line not in unarmed) != want}
+    assert not wrong, f"the arming rule disagrees with _ARMING_CASES: {wrong}"
 
 
 def test_two_waits_on_one_line_are_counted_as_two(tmp_path):
