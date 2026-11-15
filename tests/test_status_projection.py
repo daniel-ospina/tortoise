@@ -1329,18 +1329,32 @@ class TestLifecycleCarrierCoherence:
             "write public.object.superseded_by without a status (#10192)")
 
     def test_the_mirror_shape_is_not_refused(self, tmp_path):
-        """`status='superseded'` with NO carrier is OUT of scope, by decision.
+        """`status='superseded'` with NO carrier: OUT of the CARRIER guard's
+        scope, and REFUSED by the #12592 dual.
 
-        It makes a rebuild REVIVE a node rather than bury a live one, it is a
-        shape in use, and it is already named as #9974's window. Refusing it
-        here would be the over-block the change's scope contract forbids.
+        ⛔ Two different rules, and this case exists to keep them apart.
+        #10192's guard asks "does a CARRIER have the status it implies" — it kept
+        this mirror shape out of scope by decision, and it STILL does (the refusal
+        below is not its message). What refuses it now is the dual rule
+        ONTOLOGY §4.3 states for the word itself: *"`superseded` means replaced:
+        it names the successor"*, so a row that says the word and names nothing is
+        a state the model does not have — #12592. The write is refused ATOMICALLY,
+        so the shape cannot be minted through this door at all; a graph that
+        already holds it (an older SDK, a raw producer, a pre-guard journal) is
+        untouched, and the REPLAY half of §4.3 still restores it (pinned in
+        `tests/test_12592_supersede_door.py`).
         """
         sdk = TortoiseSDK(str(tmp_path / "t10192m.db"))
         try:
             oid = _make_carrier_entity(sdk, "Subject", "delta")
-            sdk.update_entity(oid, status="superseded")
-            assert _carrier_row(sdk, "Subject", "delta")[1:] == (
-                "superseded", None, None)
+            before = _carrier_row(sdk, "Subject", "delta")
+            with pytest.raises(ValueError) as exc:
+                sdk.update_entity(oid, status="superseded")
+            # ⛔ NOT the carrier guard's message: that rule is untouched here.
+            assert "lifecycle CARRIER" not in str(exc.value), str(exc.value)
+            assert "no successor" in str(exc.value), str(exc.value)
+            assert _carrier_row(sdk, "Subject", "delta") == before, (
+                "the refused write moved the row")
         finally:
             sdk.close()
 

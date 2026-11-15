@@ -1546,9 +1546,19 @@ class TestTheBundleValidationDoor:
 # ── T5: no over-block on the other labels ───────────────────────────────────
 
 class TestTheGuardDoesNotOverBlock:
+    """#11825's guard is about :Events; it must not narrow the other labels.
+
+    ⛔ #12592 narrowed ONE thing these cases touch: a bare
+    ``status='superseded'`` is now refused on every label (ONTOLOGY §4.3 — the
+    word names its successor), so the `superseded` control names its partner.
+    The #11825 question is unchanged: the label still takes a terminal status, it
+    is only the partnerless spelling that stopped landing.
+    """
+
     def test_a_point_still_takes_a_terminal_status(self, sdk):
         pid = sdk.create_point("statement", "a claim", status="live")["id"]
-        sdk.update_entity(pid, status="superseded")
+        sdk.update_entity(pid, status="superseded",
+                          supersededBy="the successor")
         row = sdk._get_proj().g.query(
             "MATCH (n:Point {id:$id}) RETURN n.status", params={"id": pid}
         ).result_set
@@ -1563,7 +1573,7 @@ class TestTheGuardDoesNotOverBlock:
     def test_a_subject_still_takes_a_terminal_status(self, sdk):
         """`#1423`'s `:Subject` vocabulary is its own arm and is untouched."""
         sid = sdk.create_entity("subject", "Acme Corp", subjectKind="organization")["node"]["id"]
-        sdk.update_entity(sid, status="superseded")
+        sdk.update_entity(sid, status="superseded", supersededBy="Acme Corp II")
         row = sdk._get_proj().g.query(
             "MATCH (n:Subject {id:$id}) RETURN n.status", params={"id": sid}
         ).result_set
@@ -1571,11 +1581,34 @@ class TestTheGuardDoesNotOverBlock:
 
     def test_an_object_still_takes_a_terminal_status(self, sdk):
         oid = sdk.create_entity("object", "PolicyV1", objectKind="policy")["node"]["id"]
-        sdk.update_entity(oid, status="superseded")
+        sdk.update_entity(oid, status="superseded", supersededBy="PolicyV2")
         row = sdk._get_proj().g.query(
             "MATCH (n:Object {id:$id}) RETURN n.status", params={"id": oid}
         ).result_set
         assert row[0][0] == "superseded"
+
+    @pytest.mark.parametrize("label", ["Point", "Object", "Subject"])
+    def test_a_bare_superseded_is_the_one_terminal_status_refused(self, sdk, label):
+        """#12592's delta, pinned HERE beside the case it narrows.
+
+        The non-vacuity control above must not be read as "every terminal word is
+        the same": `superseded` is the one the model defines by its partner, so
+        it is the one this door refuses without one.
+        """
+        if label == "Point":
+            node = sdk.create_point("statement", "bare", status="live")["id"]
+        elif label == "Object":
+            node = sdk.create_entity("object", "BarePolicy",
+                                     objectKind="policy")["node"]["id"]
+        else:
+            node = sdk.create_entity("subject", "Bare Team",
+                                     subjectKind="organization")["node"]["id"]
+        with pytest.raises(ValueError, match="no successor"):
+            sdk.update_entity(node, status="superseded")
+        row = sdk._get_proj().g.query(
+            "MATCH (n {id:$id}) RETURN n.status", params={"id": node}
+        ).result_set
+        assert row[0][0] != "superseded"
 
     def test_a_legacy_terminal_event_can_still_be_repaired(self, sdk):
         """The repair route a denylist (unlike an allowlist) preserves.

@@ -154,24 +154,30 @@ def test_the_refusal_names_the_family_section_of_the_model(sdk):
 
 
 def test_the_named_repair_is_performable(sdk):
-    """⛔ The message must NOT offer `supersede()`.
+    """⛔ The message must NOT offer `supersede()` as the way back.
 
-    `TortoiseSDK.supersede` routes to `supersede_point`/`invalidate_point`, both
-    `:Point`-only, and raises `No point <id>` for an Object. Naming it would be an
-    unperformable prescription — the AX-rule-2 defect #10183 exists to stop. The
-    real route today is the record path, and the missing SDK verb is #12592.
+    `TortoiseSDK.supersede` now DISPATCHES for an Object/Subject (#12592) — the
+    missing verb this test used to name — but a supersession is written from the
+    LIVE side: that door runs the family lifecycle guard and refuses a TERMINAL
+    source (#2498, terminalization is one-way). So it is still not the repair for
+    a dead row, and naming it here would be an unperformable prescription — the
+    AX-rule-2 defect #10183 exists to stop. The route that exists is minting the
+    replacement, and that is what the message names.
     """
     node = _object(sdk, "archived")
     with pytest.raises(ValueError) as exc:
         sdk.update_entity(node, status="live")
     message = str(exc.value)
-    assert "supersede()" not in message, \
-        "that door raises No point <id> for an Object — do not prescribe it"
     assert "apply_supersessions" in message
+    assert "supersede()" not in message, \
+        "that door refuses a terminal source — do not prescribe it"
     # And the prescription that IS named really exists:
     from tortoise.commit_ops import apply_supersessions  # noqa: F401
-    with pytest.raises(ValueError, match="No point"):
-        sdk.supersede(node, "some-successor")   # Point-only, as the message says
+    # ⛔ #12592: the door EXISTS for this label now, and still refuses the dead
+    # row — the refusal is the one-way rule, never `No point` (which is what this
+    # assertion pinned before the family path existed).
+    with pytest.raises(ValueError, match="already terminal"):
+        sdk.supersede(node, "some-successor")
 
 
 # ── NOT a vocabulary: a pack/connector word is accepted ──

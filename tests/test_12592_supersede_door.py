@@ -43,6 +43,13 @@ What this suite pins (each row names the mutation that reds it):
   pointer every reader resolves absent).
 * A STAMP / an empty name is not a name. Mutation: drop the blank/NULL test in
   ``_successor_named_by`` -> the ``supersededAt``-only and ``''`` cases red.
+* A POINT's successor may be NAMED BY THE EDGE: ``supersede_point`` writes
+  `status` + `outdated` + `(new)-[:CORRECTS]->(old)` and NO ``supersededBy``, so
+  judging a Point by the property alone would refuse the idempotent echo of a
+  correctly-superseded claim (and reverse #3305's preserved capability).
+  Mutation: drop the edge probe -> `test_a_point_superseded_the_documented_way_*
+  reds (this over-block was MEASURED by ``test_a_rendered_ECHO_of_the_stored_*
+  status_is_still_entailed`` in the 9649 suite, which is why both exist).
 * The verdict is over EVERY bound row (#7822). Mutation: read one row
   (``rows[0]``) instead of the row-count-vs-named-count pair -> the fan-out case
   reds.
@@ -196,6 +203,33 @@ def test_a_carried_row_may_restate_its_status(sdk, label):
     assert _row(sdk, label, node) == before
 
 
+def test_a_point_superseded_the_documented_way_may_restate_its_status(sdk):
+    """§5 names a POINT's successor with the CORRECTS edge, not a property.
+
+    ``supersede_point`` writes `status` + `outdated` + ``(new)-[:CORRECTS]->(old)``
+    and NO ``supersededBy`` (measured on this head). So a Point superseded exactly
+    as the model says to has a successor and an EMPTY property — and judging it by
+    the property alone refuses the idempotent echo of a correctly-superseded
+    claim, reversing the declared-preserved read-modify-write capability (#3305).
+
+    ⛔ This over-block was real: it redded
+    ``test_9649_update_entity_point_lifecycle.py::test_a_rendered_ECHO_of_the_*
+    stored_status_is_still_entailed`` on the first cut of this change. Mutation:
+    drop the CORRECTS probe from ``_assert_supersession_names_a_successor`` ->
+    this reds.
+    """
+    old = _make(sdk, "Point", "edge-old")
+    new = _make(sdk, "Point", "edge-new")
+    sdk.supersede_point(old, new)
+    before = _row(sdk, "Point", old)
+    assert before[1] is None, (
+        "fixture drifted: `supersede_point` is expected to name the successor "
+        f"by the EDGE, not the property: {before}")
+    sdk.update_entity(old, status="superseded")
+    assert _row(sdk, "Point", old) == before, (
+        "the echo of a correctly-superseded Point must be a no-op, not a refusal")
+
+
 @pytest.mark.parametrize("carriers", [
     pytest.param({"superseded_by": "shadow-v2"}, id="snake-shadow"),
     pytest.param({"supersededAt": "2026-01-01T00:00:00Z"}, id="stamp-only"),
@@ -227,8 +261,8 @@ def test_the_verdict_is_over_every_bound_row(sdk):
     """#7822's fan-out rule on the successor question.
 
     Two Objects share an id; ONE carries a successor. The write binds both, so
-    the row that names nothing is the reason to refuse. Mutation: read a single
-    row instead of the row/named PAIR -> this reds (the carried row would
+    the row that names nothing is the reason to refuse. Mutation: consult a
+    single row instead of every bound row -> this reds (the carried row would
     authorise the write).
     """
     g = sdk._get_proj().g

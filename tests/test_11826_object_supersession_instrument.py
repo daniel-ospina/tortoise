@@ -106,6 +106,23 @@ def _supersede_object(sdk, old_name: str, new_name: str) -> None:
         session_id="sess_11826_supersede")
 
 
+def _legacy_successorless_supersede(sdk, node_id: str) -> None:
+    """Write the SUCCESSORLESS superseded shape the way an EXISTING graph holds it.
+
+    ⛔ #12592 CLOSED THE DOOR THAT USED TO MINT THIS. ``update_entity(obj,
+    status='superseded')`` is now REFUSED (ONTOLOGY §4.3: the word names its
+    successor), so this shape can no longer be produced by the SDK — but it is
+    still IN every graph an older SDK or a raw producer wrote, and this check
+    exists to find it. Writing it raw is therefore the honest fixture: it measures
+    the LEGACY STATE the instrument must repair, not a state the engine can still
+    create. (Before #12592 these three cases drove the generic door and their
+    docstrings cited #11824's AX table for the acceptance; that table's entry is
+    reversed, and the fixture is what has to move with it.)
+    """
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.status = 'superseded'",
+       {"i": node_id})
+
+
 # ── 1. the measured defect gets an instrument ─────────────────────
 
 
@@ -224,13 +241,19 @@ def test_the_check_exists_even_when_it_finds_nothing(sdk):
 
 
 def test_a_successorless_supersede_still_gets_a_performable_repair(sdk):
-    """The anchor is ``status='superseded'``, and the GENERIC door reaches that
-    status with no successor at all.
+    """The anchor is ``status='superseded'``, and a graph can hold that status
+    with no successor at all.
 
-    ``#11824``'s AX table records that ``update_entity(object,
-    status='superseded')`` is accepted ON PURPOSE (the mirror shape is out of the
-    guard — refusing it would over-block), so this is a state the engine produces,
-    not a hypothetical. The emitted repair must then name the step that can
+    ``#11824``'s AX table recorded that ``update_entity(object,
+    status='superseded')`` was accepted ON PURPOSE. ⛔ ``#12592`` REVERSED that
+    half — ONTOLOGY §4.3 says the word names its successor, so the live door
+    refuses the bare status — but the STATE is unchanged for real graphs: rows
+    written by an older SDK, a raw producer, or a pre-guard journal still carry it,
+    which is exactly the population this check exists for. The fixture therefore
+    writes the shape RAW (:func:`_legacy_successorless_supersede`) instead of
+    through the door.
+
+    The emitted repair must then name the step that can
     actually be taken: a successor "named by its supersededBy" does not exist in
     this state, so the plain transfer wording would be an unperformable repair
     (#7819's rule) — and ``archived`` must NOT be offered as the repair, because
@@ -241,11 +264,10 @@ def test_a_successorless_supersede_still_gets_a_performable_repair(sdk):
     v1 = _obj(sdk, "PolicyV1")
     op = sdk.create_operator("IMPL", p["id"], [v1["id"]])
 
-    # The door the code deliberately permits (measured on this head).
-    sdk.update_entity(v1["id"], status="superseded")
+    _legacy_successorless_supersede(sdk, v1["id"])
     assert _q(sdk, "MATCH (o:Object {id:$i}) RETURN o.status, o.supersededBy",
               {"i": v1["id"]}) == [["superseded", None]], \
-        "fixture drifted: this door no longer produces a successorless supersede"
+        "fixture drifted: the legacy shape must be a successorless supersede"
 
     issues = [i for i in _issues(sdk, "superseded_object_active_edges")
               if i.node_id == v1["id"]]
@@ -1388,7 +1410,7 @@ def test_a_shaped_endpoint_with_no_successor_gets_no_edge_rewrite(sdk):
     v1 = _obj(sdk, "PolicyV1")
     sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
     sdk.update_entity(actor["id"], is_operator=True)
-    sdk.update_entity(v1["id"], status="superseded")  # NO successor at all
+    _legacy_successorless_supersede(sdk, v1["id"])  # NO successor at all
     assert _q(sdk, "MATCH (o:Object {id:$i}) RETURN o.supersededBy",
               {"i": v1["id"]}) == [[None]], "fixture drifted"
 
@@ -2075,7 +2097,7 @@ def test_the_successorless_shaped_arm_does_not_promise_the_flag_restores(sdk):
     v1 = _obj(sdk, "PolicyV1")
     sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
     sdk.update_entity(actor["id"], is_operator=True)
-    sdk.update_entity(v1["id"], status="superseded")  # NO successor
+    _legacy_successorless_supersede(sdk, v1["id"])  # NO successor
     assert _q(sdk, "MATCH (o:Object {id:$i}) RETURN o.supersededBy",
               {"i": v1["id"]}) == [[None]], "fixture drifted"
 

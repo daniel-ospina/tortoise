@@ -48326,36 +48326,57 @@ class TortoiseSDK:
         if _successor_named_by(props):
             return
         proj = self._get_proj()
-        probes: list[tuple[str, str, dict]] = []
-        # ``collect`` DROPS nulls, so the row count and the collected non-null
-        # values are read as a PAIR: ``rows - non_blank`` is the number of bound
-        # rows that name nothing (a NULL or a blank). Reading only the collected
-        # list cannot tell "no row" from "every row nameless" — the misread that
-        # made #10192's first cut skip its own guard.
-        for label in ("Object", "Subject"):
-            probes.append((
-                label,
-                f"MATCH (n:{label} {{id:$id}}) RETURN count(n) AS rows, "
-                "collect(n.supersededBy) AS succs",
-                {"id": id_val},
-            ))
-        if point_ids:
-            probes.insert(0, (
-                "Point",
-                "MATCH (n:Point) WHERE n.id IN $ids RETURN count(n) AS rows, "
-                "collect(n.supersededBy) AS succs",
-                {"ids": list(point_ids)},
-            ))
         nameless: list[str] = []
-        for label, cypher, params in probes:
-            rows = proj.g.query(cypher, params=params).result_set
-            if not rows or not rows[0][0]:
-                continue                 # no row of this label is bound
-            stored = list(rows[0][1] or ())
-            blanks = sum(1 for v in stored
-                         if v is None or (isinstance(v, str) and not v.strip()))
-            if rows[0][0] > len(stored) - blanks:
+        # ⛔ §5 NAMES A POINT'S SUCCESSOR WITH THE EDGE, not (only) with a
+        # property: `supersede_point` writes `status='superseded'` + `outdated` +
+        # `(new)-[:CORRECTS]->(old)` and NO `supersededBy` (measured on this head).
+        # So a Point that was superseded the way the model says to has a
+        # successor and an EMPTY property — and judging it by the property alone
+        # would refuse an idempotent echo of a correctly-superseded claim, i.e.
+        # reverse the declared-preserved read-modify-write capability (#3305).
+        # The two answers are read separately and UNIONED (ids, not values):
+        # `collect` drops NULLs, so one query cannot answer both "how many rows"
+        # and "how many name nothing".
+        for label in ("Object", "Subject"):
+            rows = proj.g.query(
+                f"MATCH (n:{label} {{id:$id}}) "
+                "RETURN n.id AS id, n.supersededBy AS succ",
+                params={"id": id_val},
+            ).result_set
+            if not rows:
+                continue             # no row of this label is bound
+            if any(v is None or (isinstance(v, str) and not v.strip())
+                   for _id, v in rows):
                 nameless.append(label)
+        if point_ids:
+            rows = proj.g.query(
+                "MATCH (n:Point) WHERE n.id IN $ids "
+                "RETURN n.id AS id, n.supersededBy AS succ",
+                params={"ids": list(point_ids)},
+            ).result_set
+            unresolved = [str(r[0]) for r in rows
+                          if r[1] is None
+                          or (isinstance(r[1], str) and not r[1].strip())]
+            if unresolved:
+                # The successor edge — `INCOMING`, because the SDK spells it
+                # `MERGE (new)-[:CORRECTS]->(old)` (a superseded node has no
+                # outgoing CORRECTS whatever its state, so an OUTGOING read is
+                # unfalsifiable: the same direction note
+                # `tests/test_9649_update_entity_point_lifecycle.py` pins).
+                # ⛔ `WITH n` IS LOAD-BEARING, not style: on the canonical
+                # 6.0.1 instance a `WHERE n.id IN $ids` followed by a
+                # re-binding `MATCH (n)…` has its predicate DROPPED, so the
+                # query would answer about OTHER points' edges (#6976, and the
+                # rail `tests/test_relationships_bounded.py` caught this exact
+                # line when it was first written without the barrier).
+                edged = {str(r[0]) for r in proj.g.query(
+                    "MATCH (n:Point) WHERE n.id IN $ids WITH n "
+                    "MATCH (n)<-[:CORRECTS]-(:Point) "
+                    "RETURN DISTINCT n.id AS id",
+                    params={"ids": unresolved},
+                ).result_set}
+                if any(node_id not in edged for node_id in unresolved):
+                    nameless.append("Point")
         if not nameless:
             # Every bound row ALREADY names a successor: the pair is coherent
             # before this write, so re-stating the status is idempotent (the
@@ -49598,8 +49619,11 @@ class TortoiseSDK:
                     f"create door for that label and record the replacement "
                     f"through the supersession path "
                     f"(`commit_ops.apply_supersessions` / the "
-                    f"`ObjectSuperseded` fold); this door has no SDK "
-                    f"supersede verb for an Object or a Subject yet (#12592). "
+                    f"`ObjectSuperseded` fold). A supersession is written from "
+                    f"the LIVE side and is one-way, so it is not a route back "
+                    f"for a dead row either (#12592 gave the Object/Subject "
+                    f"families their own supersede path, and it refuses a "
+                    f"terminal source for this same reason). "
                     f"Content and metadata revisions are still accepted on the "
                     f"dead row (this refusal is the `status` field only)."
                     f"{_np_unsupersede_hint}"
