@@ -488,10 +488,23 @@ class RecordWrite:
     #: WHY an ARMED call did not write — one of the tokens
     #: ``monitoring.metrics()["record_write_failures"]`` / ``["record_non_journal_skips"]``
     #: is counted under (``malformed_dsn``, ``no_durable_journal``, ``no_tenant``,
-    #: ``no_tenant_carried``, ``circuit_open``, ``write_failed``), else ``None``.
+    #: ``no_tenant_carried``, ``circuit_open``, ``write_failed``,
+    #: ``journal_collision``), else ``None``.
     #: The SAME vocabulary as the counters on purpose (#8447): a caller that
     #: reports the refusal and an operator reading the metric are naming one
     #: thing, and a second word list is a second thing to drift.
+    #:
+    #: ⛔ ``journal_collision`` IS THE ONE POST-WRITE TOKEN (#9318). Every other
+    #: value is decided before a socket is opened (`_live_write_verdict`) or by
+    #: a failed statement; this one is a VERDICT on a conflict: the position row
+    #: was absorbed by a DIFFERENT record, which
+    #: `record_projection.JournalPositionCollision` detected by comparing the
+    #: surviving row's content. It is not in ``LIVE_WRITE_REFUSALS`` for that
+    #: reason — that tuple is what the PRE-write verdict can return — and a
+    #: consumer switching on this field must accept it. Nothing is lost (the
+    #: journal holds the record); what is refused is indexing it under a position
+    #: that names another event, which the record cannot fix while its key
+    #: carries no journal identity (#12894).
     #:
     #: ⛔ ``no_tenant_carried`` IS A SIXTH TOKEN ON PURPOSE (#10021 review P3).
     #: The live door splits the nil tenant from a MALFORMED CARRIED pair — one is
@@ -512,12 +525,13 @@ class RecordWrite:
         The one check a caller needs. ``False`` means *nothing was written* —
         for ``NOT_ARMED`` it is not an error (an unarmed deployment is a
         supported state); a ``REFUSED`` call was armed and did not write, and
-        :attr:`refusal` says WHY, but the SIX refusal tokens are not one
+        :attr:`refusal` says WHY, but the SEVEN refusal tokens are not one
         severity: ``malformed_dsn`` / ``no_tenant`` / ``no_tenant_carried`` /
-        ``circuit_open`` / ``write_failed`` are FAILURES, all five counted on
-        ``record_write_failures`` (BOTH ``no_tenant`` arms count — the nil tenant
-        and the malformed CARRIED pair, which is why the token list is one longer
-        than the counter set), while ``no_durable_journal`` is a
+        ``circuit_open`` / ``write_failed`` / ``journal_collision`` are
+        FAILURES, all six counted on ``record_write_failures`` (BOTH
+        ``no_tenant`` arms count — the nil tenant and the malformed CARRIED
+        pair, which is why the token list is one longer than the counter set),
+        while ``no_durable_journal`` is a
         healthy-armed DECLINE counted on ``record_non_journal_skips`` — that lane
         has no journal by design, so nothing a replay could restore is missing
         (#9231 review P2, and the vocabulary note in
@@ -2267,6 +2281,36 @@ def _report_live_write_refusal(reason: str, record_type: Any,
         f"{', '.join(LIVE_WRITE_REFUSALS)})")
 
 
+def _journal_collision_cause(
+        exc: BaseException | None,
+        depth: int = 4,
+) -> record_projection.JournalPositionCollision | None:
+    """The COLLISION buried in a wrapped failure, or ``None`` (#9318).
+
+    `RecordWriter.write` wraps every projection failure in `RecordWriteError`
+    (``from exc``), so the live door — which catches that wrapper — cannot tell
+    a collision from a lost write by the exception it holds. It has to look
+    through the chain, and it must do so by TYPE rather than by the message: a
+    string match would also fire on a record whose payload happens to contain
+    the words, and a guard that mis-classifies is worse than one that does not
+    classify at all.
+
+    ``__cause__`` first, ``__context__`` second (an implicit chain is still a
+    chain), and the walk is BOUNDED with a visited set: a self-referential or
+    pathologically deep chain cannot make this loop, which matters because this
+    runs inside the door's failure path where an exception would replace the
+    failure being reported.
+    """
+    seen: set[int] = set()
+    while exc is not None and depth > 0 and id(exc) not in seen:
+        if isinstance(exc, record_projection.JournalPositionCollision):
+            return exc
+        seen.add(id(exc))
+        exc = exc.__cause__ or exc.__context__
+        depth -= 1
+    return None
+
+
 def write_live_record(record: Mapping[str, Any], *,
                       durable: bool = True,
                       seq: int | None = None,
@@ -2408,16 +2452,30 @@ def write_live_record(record: Mapping[str, Any], *,
     TWO durable journals. "One record one number by
     construction" holds per JOURNAL FILE, while `journal_event`'s key is per
     `(org_id, graph_id, seq)`: two durable journals under one tenant each number
-    their records from 1, so the second journal's rows are absorbed by
-    `ON CONFLICT (org_id, graph_id, seq) DO NOTHING` and the existing row keeps
-    the OTHER journal's `event_type`/`payload` while the layer row underneath
-    belongs to a different record. That was reachable before this change only
-    replay-vs-replay; the live path now participates, so it is stated here
-    rather than left to be rediscovered (#9307 review P2 — tracked on #9318).
-    The fix is journal IDENTITY in the key (a column identifying the
+    their records from 1, so the second journal's rows collide with the first's
+    at `ON CONFLICT (org_id, graph_id, seq) DO NOTHING` (and the existing row
+    keeps the OTHER journal's `event_type`/`payload` while the layer row
+    underneath belongs to a different record). That was reachable before the
+    live path existed only replay-vs-replay; the live path now participates,
+    which is why it is stated here rather than left to be rediscovered (#9307
+    review P2 — tracked on #9318).
+
+    ⛔ SINCE #9318 IT IS NO LONGER SILENT, and still not REPAIRED. The fold's
+    statement loop asks the cursor's affected-row count, and when the position
+    row was absorbed it asks the database whether the surviving row's content
+    DIFFERS (`record_projection._refuse_a_journal_collision`, in Postgres's own
+    jsonb equality). Same content ⇒ a genuine replay ⇒ silent no-op, unchanged.
+    Different content ⇒ `JournalPositionCollision`, reported HERE as the
+    ``journal_collision`` refusal — the same counter, the same WARNING, the same
+    ``RecordWrite`` shape every other refusal uses — with a message naming the
+    position and both records by digest.
+
+    The REPAIR is journal IDENTITY in the key (a column identifying the
     journal, or a per-tenant ordinal allocator), not a number this door can
     derive — do NOT paper it over by declining position rows on the live path,
-    which is the #9190 defect this door exists to close.
+    which is the #9190 defect this door exists to close. That decision is
+    `#12894`'s; when it lands, a collision cannot occur, every conflict is a
+    replay, and the detector never fires — retire it then.
 
     ``tenant`` is the ``(org_id, graph_id)`` the CALLER already resolved for
     this write — carried explicitly by a lane that cannot hold the ambient scope
@@ -2506,6 +2564,27 @@ def write_live_record(record: Mapping[str, Any], *,
             return replace(write, last_seq=write.first_seq - 1)
         return write
     except Exception as exc:
+        collision = _journal_collision_cause(exc)
+        if collision is not None:
+            # ⛔ A COLLISION, NOT A LOST WRITE (#9318). The row at this position
+            # belongs to a DIFFERENT record, so writing the layer rows under it
+            # would index them by another record's event — refused rather than
+            # shipped. Nothing is lost: the journal holds the record and the
+            # message names both sides. Now made LOUD on the SAME
+            # refused-write channel every other arm uses (one counter, one
+            # WARNING, one `RecordWrite(refusal=…)`) with its own reason token,
+            # so an operator can tell it from `write_failed`. It does NOT trip
+            # the breaker: the connection was fine.
+            _count_write_failure("journal_collision")
+            _logger.warning(
+                "the record write was REFUSED (journal_collision) — the "
+                "journal holds the record but the record's position row is "
+                "occupied by a DIFFERENT record (a second journal, a restore, "
+                "a rotation, or a rebuild numbering below the high-water "
+                "mark); a replay cannot heal it while the key carries no "
+                "journal identity (#12894): %s", collision,
+            )
+            return _refused("journal_collision", seq)
         if isinstance(exc, RecordConnectError):
             # Unreachable RIGHT NOW (not a refusal of this one record): bound the
             # cost of the rest of the capture. A totality or statement failure

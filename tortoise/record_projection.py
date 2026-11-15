@@ -144,6 +144,7 @@ and `test_two_tenants_through_the_seam_never_cross_write`.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import threading
@@ -171,6 +172,7 @@ __all__ = [
     "TURNS_SNAPSHOT_KEYS",
     "TURNS_SNAPSHOT_OPTIONAL_KEYS",
     "TURNS_SNAPSHOT_UNATTESTABLE_KEYS",
+    "JournalPositionCollision",
     "RecordProjectionError",
     "RecordStatementError",
     "RefusedJournalOperation",
@@ -871,6 +873,73 @@ class RefusedJournalOperation(RecordProjectionError):
     fact from an **undeclared** type, and collapsing the two would hide which
     one a new producer tripped.
     """
+
+
+class JournalPositionCollision(RecordProjectionError):
+    """Two DIFFERENT records claimed ONE position in the record (#9318).
+
+    `public.journal_event` is keyed `(org_id, graph_id, seq)`, and the schema
+    calls that key *"the idempotency key: applying a position twice is a
+    no-op"*. That is true of a **replay** — the same record, numbered the same
+    way — and false of a **collision**. The ordinal is a fact of ONE journal
+    FILE (`EventLog.append`, #9190) while the key is per `(org, graph)`: a
+    tenant holding two durable journals numbers each from 1, so their positions
+    land on each other. So does any journal whose numbering resumes below the
+    tenant's existing high-water mark — a restore, a rotation, a truncation, a
+    rebuild (`#9318`'s reachability comment, `tortoise/backup.py:638`).
+
+    The table is append-only by TRIGGER, so the row that arrived first KEEPS the
+    key and the later record's layer rows are written underneath a position row
+    naming a different event. Before this class existed that was silent: the
+    live write reported `applied`, the wiring gate printed `WIRED`, and no
+    counter moved. A mis-index is not a gap — the record then answers questions
+    about position N with another journal's record.
+
+    ⛔ WHAT THIS IS NOT: a violation of idempotency. Re-applying the SAME
+    position with the SAME content is a replay, stays a SILENT no-op, and never
+    raises this (`replay()` asks Postgres to compare the surviving row's
+    `event_type`/`payload` with what it was about to write, and only a
+    DIFFERENCE is a collision). A guard that turned every replay into an error
+    would be a worse defect than the one it fixes, which is why the comparison
+    is content, not merely "the key was taken".
+
+    ⛔ AND IT RETIRES. This is a DETECTOR, not the repair: the fix is journal
+    IDENTITY in the key — a journal column, or a per-tenant ordinal allocator —
+    which is `#12894`'s schema decision and deliberately NOT taken here (two
+    designs of one ordinal is the duplication this lane refuses to add). Once
+    the key carries the journal, two journals cannot collide, every conflict is
+    a replay, and this guard simply never fires — delete it then, and no caller's
+    behaviour changes.
+
+    The message names the position and BOTH records by `event_type`, payload
+    digest and payload size. It does not name a journal, because the row carries
+    no journal identity to name — that absence is precisely what `#12894`
+    decides. It also quotes no payload text: the record's own failure lines
+    withhold content, and a payload can carry the tenant's own words.
+    """
+
+    def __init__(self, *, org_id: str, graph_id: str, seq: int,
+                 event_type: Any, payload_digest: str, payload_bytes: int,
+                 stored_event_type: Any, stored_payload_digest: str,
+                 stored_payload_bytes: int) -> None:
+        self.org_id = org_id
+        self.graph_id = graph_id
+        self.seq = seq
+        self.event_type = event_type
+        self.payload_digest = payload_digest
+        self.stored_event_type = stored_event_type
+        self.stored_payload_digest = stored_payload_digest
+        super().__init__(
+            f"journal position {seq} of ({org_id!r}, {graph_id!r}) already "
+            f"holds {stored_event_type!r} ({stored_payload_digest}, "
+            f"{stored_payload_bytes} B of payload) while this write is "
+            f"{event_type!r} ({payload_digest}, {payload_bytes} B) — two "
+            f"DIFFERENT records claimed one position, so every row written "
+            f"under it would be indexed by another record's event. The "
+            f"journal still holds this record; the position row cannot be "
+            f"repaired while the key carries no journal identity (#12894), "
+            f"and `journal_event` is append-only by trigger."
+        )
 
 
 
@@ -6000,6 +6069,15 @@ def _journal_row(record: Mapping[str, Any], seq: int, org_id: str,
     idempotency key: applying a position twice is a no-op"*. `ON CONFLICT DO
     NOTHING` because the table is append-only by TRIGGER: an update would be
     refused, and correctly so — a consumed position is not revisable.
+
+    ⛔ THE STATEMENT IS UNCHANGED BY #9318, and that is deliberate. The guard
+    that tells a REPLAY from a COLLISION reads the cursor's affected-row count
+    and, only when it is zero, asks the database whether the surviving row's
+    content differs (:func:`_refuse_a_journal_collision`). Rewriting this INSERT
+    (a `RETURNING`, a `DO UPDATE`, a probe in the `VALUES` list) would change the
+    plan every replay, seam and PGlite caller materializes — and the `#9187`
+    snapshot pin (`tests/test_record_writer_seam.py`) exists to notice exactly
+    that. The verdict belongs beside the statement, not inside it.
     """
     return Statement(
         "INSERT INTO public.journal_event "
@@ -6011,6 +6089,145 @@ def _journal_row(record: Mapping[str, Any], seq: int, org_id: str,
             json.dumps({k: v for k, v in record.items() if k not in ENVELOPE_KEYS}),
             record.get("ts"),
         ),
+    )
+
+
+#: The ONE question that separates an idempotent REPLAY from a COLLISION (#9318).
+#:
+#: It is asked only when the position row was ABSORBED (`ON CONFLICT DO NOTHING`
+#: affected no row), and it is asked of the DATABASE rather than of Python for
+#: one reason: `payload` is `jsonb`, and Postgres's own structural equality is
+#: the only comparison that cannot disagree with it. A Python re-normalisation
+#: (a `json.dumps` on each side, a numeric coercion, a key-order guess) is a
+#: second opinion about the same bytes, and its failure mode is the one a guard
+#: like this may never have: a RE-APPLIED SAME POSITION reported as a collision.
+#: `IS DISTINCT FROM` (not `<>`) because the row's payload is `NOT NULL` but the
+#: CAST parameters are not, so a NULL-vs-something comparison must still answer
+#: "different" instead of "unknown".
+_JOURNAL_CONFLICT_CONTENT_SQL = (
+    "SELECT event_type, payload FROM public.journal_event "
+    "WHERE org_id = %s AND graph_id = %s AND seq = %s "
+    "AND (event_type IS DISTINCT FROM %s::text "
+    "     OR payload IS DISTINCT FROM %s::jsonb)"
+)
+
+
+def _affected_rows(cursor: Any) -> int | None:
+    """The cursor's affected-row count for the statement it just ran, or None.
+
+    ``None`` means *this cursor cannot answer*, and it is the ONLY value that
+    skips the collision check (#9318). It is not a hypothetical: the DB-free
+    halves of this suite drive `replay()` through recording fakes, and a fake
+    that never sets ``rowcount`` must keep behaving exactly as before — a guard
+    that invented a refusal from an unreadable cursor would be a new source of
+    false alarms on every lane that does not have a database.
+
+    ``bool`` is excluded because it is an ``int`` subclass: a cursor reporting
+    ``True`` means nothing about row counts, and reading it as ``1`` would let a
+    boolean coincidence silence the guard.
+    """
+    rowcount = getattr(cursor, "rowcount", None)
+    if isinstance(rowcount, int) and not isinstance(rowcount, bool):
+        return rowcount
+    return None
+
+
+def _payload_digest(payload: Any) -> tuple[str, int]:
+    """``(sha256:<12 hex>, payload bytes)`` of a payload's CANONICAL json.
+
+    The collision message names its two records by this instead of quoting them:
+    the record's own failure lines withhold content (`_CONTENT_COLUMNS`), and a
+    payload can carry the tenant's own words. Canonical form is
+    ``sort_keys``/compact so the SAME content hashes the same whichever side of
+    the comparison it came from — which is what lets a reader see at a glance
+    that the two digests differ because the RECORDS differ, not because one side
+    was re-serialised.
+
+    Unparseable/unserialisable input still yields a digest string rather than
+    raising: this function only ever runs on a collision path, and turning a
+    diagnostic into an exception there would replace one silent failure with a
+    confusing one.
+    """
+    if isinstance(payload, (bytes, bytearray)):
+        raw = bytes(payload)
+    elif isinstance(payload, str):
+        raw = payload.encode("utf-8")
+    else:
+        raw = b""
+    if isinstance(payload, (str, bytes, bytearray)):
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            return f"sha256(unparseable:{len(raw)}B)", len(raw)
+    try:
+        body = json.dumps(payload, sort_keys=True, separators=(",", ":"),
+                          default=str)
+    except (TypeError, ValueError):
+        return f"sha256(unserialisable:{type(payload).__name__})", 0
+    encoded = body.encode("utf-8")
+    return ("sha256:" + hashlib.sha256(encoded).hexdigest()[:12], len(encoded))
+
+
+def _refuse_a_journal_collision(cursor: Any, statement: Statement, index: int,
+                                total: int) -> None:
+    """Fail LOUDLY when an absorbed position holds a DIFFERENT record (#9318).
+
+    THE ONE CALL SITE is :func:`replay`'s statement loop, which every
+    journal-position insert already passes through — the live door, a full
+    replay, the reconciler, the backfill tools. Putting the verdict anywhere
+    else (a caller, a second chokepoint) is how two writers come to disagree
+    about what the record holds.
+
+    THREE OUTCOMES, and the distinction is the whole point of the change:
+
+    * the INSERT affected a row ⇒ nothing to decide, return;
+    * it affected none, and the surviving row's content MATCHES ⇒ a genuine
+      REPLAY. Return in SILENCE — no exception, no counter, no log line. The
+      schema's *"applying a position twice is a no-op"* is preserved exactly;
+    * it affected none, and the content DIFFERS ⇒ a COLLISION. Raise
+      :class:`JournalPositionCollision`.
+
+    ⚠️ A cursor that cannot report ``rowcount``, or a conflict query that
+    somehow returns no row, also returns silently: the guard may only fire on
+    POSITIVE evidence that a different record owns the position. Its job is to
+    make an existing silent failure loud, never to become a new silent one or a
+    new false alarm.
+
+    ⛔ THE READ IS TENANT-SCOPED. The conflict query runs after
+    :func:`scope_connection` set the tenant GUC on this same connection, so RLS
+    returns only this tenant's rows — a position occupied by ANOTHER tenant is
+    not visible here, and could not collide anyway (it is part of the key).
+    """
+    if _affected_rows(cursor) != 0:
+        return
+    org_id, graph_id, seq, event_type, payload = statement.params[:5]
+    try:
+        cursor.execute(_JOURNAL_CONFLICT_CONTENT_SQL,
+                       (org_id, graph_id, seq, event_type, payload))
+        stored = cursor.fetchone()
+    except Exception as exc:
+        # Attributed like any other plan statement: a failure to ASK is a
+        # failure to know, and it must name the position it could not check
+        # rather than escaping as a bare driver error.
+        raise RecordStatementError(
+            _failure_line(
+                _statement_attribution(statement, index, total),
+                _driver_fault(exc),
+            )
+        ) from exc
+    if stored is None:
+        return
+    if isinstance(stored, Mapping):
+        stored_type, stored_payload = stored["event_type"], stored["payload"]
+    else:
+        stored_type, stored_payload = stored[0], stored[1]
+    digest, size = _payload_digest(payload)
+    stored_digest, stored_size = _payload_digest(stored_payload)
+    raise JournalPositionCollision(
+        org_id=org_id, graph_id=graph_id, seq=seq,
+        event_type=event_type, payload_digest=digest, payload_bytes=size,
+        stored_event_type=stored_type, stored_payload_digest=stored_digest,
+        stored_payload_bytes=stored_size,
     )
 
 
@@ -6486,6 +6703,14 @@ def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,
                     _driver_fault(exc),
                 )
             ) from exc
+        if _JOURNAL_INSERT_PREFIX in statement.sql:
+            # ⛔ THE ONE CALL SITE (#9318). Everything that writes layer 1 — the
+            # live door, a full replay, the reconciler, the backfill tools —
+            # executes its position row HERE, so the replay-vs-collision verdict
+            # cannot be forgotten by a caller and cannot be spelled twice. It
+            # costs one `rowcount` read on the insert path, and one extra
+            # tenant-scoped SELECT only when the insert was ABSORBED.
+            _refuse_a_journal_collision(cursor, statement, index, total)
     report = ReplayReport(events=len(records), statements=0)
     for statement in plan:
         if _JOURNAL_INSERT_PREFIX in statement.sql:
