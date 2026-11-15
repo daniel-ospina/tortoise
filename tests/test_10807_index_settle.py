@@ -377,16 +377,25 @@ def _rebound_names(tree: ast.AST) -> set[str]:
         MODULE name when the body executes.
         """
         out.add(cls.name)
+        # ⛔ ONE `ast.walk`, NOT `cls.body`: a `def`/`class` inside a COMPOUND
+        # statement in the class body (`class O: if True: def m…`, `class O:
+        # with …: class I: def m…`) is not a direct member, so the first version
+        # of this loop skipped it and left the same fail-open one statement
+        # deeper (measured at #12859's review). The `global`/`nonlocal` arm
+        # already walked the whole subtree for exactly this reason; the asymmetry
+        # was accidental. Walking the subtree never touches the body's ASSIGNMENTS
+        # — only the node KINDS named here are collected — so the
+        # `class Helpers: index_kind_absent = staticmethod(…)` control is still
+        # preserved.
         for sub in ast.walk(cls):
             if isinstance(sub, (ast.Global, ast.Nonlocal)):
                 out.update(sub.names)
-        for sub in cls.body:
-            if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            elif isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 out.add(sub.name)
                 add_args(sub.args)
                 visit(sub)
             elif isinstance(sub, ast.ClassDef):
-                add_class(sub)
+                out.add(sub.name)
 
     def visit(node: ast.AST) -> None:
         for child in ast.iter_child_nodes(node):
@@ -559,8 +568,8 @@ def _foldable_number(node) -> float | None:
     return None
 
 
-def _numeric_bindings(tree: ast.AST) -> dict[str, float]:
-    """Every name this module binds to a FOLDABLE NUMBER, as that number.
+def _numeric_bindings(tree: ast.AST) -> tuple[dict[str, float], dict[str, set[float]]]:
+    """Names this module binds to a FOLDABLE NUMBER, and the AMBIGUOUS ones.
 
     ⛔ A DECIDABLE ZERO STORED IN A NAME IS STILL A DECIDABLE ZERO. Measured
     at #12859's review: `ZERO = 0` at module level with `timeout=ZERO` on BOTH
@@ -571,13 +580,20 @@ def _numeric_bindings(tree: ast.AST) -> dict[str, float]:
     `until=NONE` is UNARMED), so the bound resolving it too is the same rule, not
     a new one.
 
-    A name bound to two DIFFERENT numbers is left UNRESOLVED on purpose: which
-    binding is live at call time is a runtime question, and guessing would unarm
-    a correct site. That is the same posture this module already takes for
-    `timeout=bound_s`, which really is a runtime value.
+    ⛔ AND AN AMBIGUOUS NAME IS NOT A FREE PASS EITHER — it is returned as a SET
+    of its folded values so the caller can decide in the SAFE direction. The
+    first draft left it unresolved on the grounds that "guessing would unarm a
+    correct site"; a reviewer measured that it therefore certified two
+    zero-second waits ARMED on the REAL tree (one unrelated `ZERO = 5` was all it
+    took), which is not a safe direction at all. A name with NO non-positive
+    binding still arms, so a correct positive site is not reddened.
+
+    Returns ``(resolved, ambiguous)``: ``resolved`` has one value per name bound
+    consistently; ``ambiguous`` has every folded value of a name bound more than
+    one way, and such a name is absent from ``resolved``.
     """
     out: dict[str, float] = {}
-    ambiguous: set[str] = set()
+    seen: dict[str, set[float]] = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
             targets, value = node.targets, node.value
@@ -592,12 +608,12 @@ def _numeric_bindings(tree: ast.AST) -> dict[str, float]:
         for target in targets:
             if not isinstance(target, ast.Name):
                 continue
-            if target.id in out and out[target.id] != folded:
-                ambiguous.add(target.id)
-            out[target.id] = folded
-    for name in ambiguous:
-        out.pop(name, None)
-    return out
+            seen.setdefault(target.id, set()).add(folded)
+    for name, values in seen.items():
+        if len(values) == 1:
+            out[name] = next(iter(values))
+    ambiguous = {name: values for name, values in seen.items() if name not in out}
+    return out, ambiguous
 
 
 def _until_is_armed(call, ctx=None) -> bool:
@@ -695,6 +711,7 @@ def _until_is_armed(call, ctx=None) -> bool:
     module_aliases = ctx.get("module_aliases", frozenset())
     module_roots = ctx.get("module_roots", frozenset())
     numeric = ctx.get("numeric", {})
+    ambiguous = ctx.get("ambiguous", {})
     for kw in call.keywords:
         # ⛔ A `**` SPLAT HIDES THE BOUND, so it cannot be SHOWN usable. The
         # `until` side already answers exactly this way — a `**{"until": None}`
@@ -707,8 +724,18 @@ def _until_is_armed(call, ctx=None) -> bool:
         if kw.arg != "timeout":
             continue
         bound = _foldable_number(kw.value)
-        if bound is None and isinstance(kw.value, ast.Name):
-            bound = numeric.get(kw.value.id)
+        name = kw.value.id if isinstance(kw.value, ast.Name) else None
+        if bound is None and name is not None:
+            bound = numeric.get(name)
+        # ⛔ AN AMBIGUOUS NAME IS JUDGED BY ITS WORST FOLDED BINDING: if ANY of
+        # them is non-positive, a live one may be, so the call is UNARMED. This is
+        # decidable, and a name with no non-positive binding still arms — measured
+        # at #12859's review, where leaving ambiguity "unresolved" certified two
+        # zero-second waits ARMED on the REAL tree because one unrelated
+        # `ZERO = 5` existed.
+        if (bound is None and name is not None
+                and any(v <= 0 for v in ambiguous.get(name, ()))):
+            return False
         if bound is not None and bound <= 0:
             return False
         # ⛔ AN EXPRESSION IS NOT A BOUND THE SCAN CAN PROVE, and the
@@ -829,9 +856,10 @@ def _settle_call_sites(paths) -> tuple[dict[str, list[int]], dict[str, list[int]
                 for alias in node.names:
                     if alias.name == "_index_settle":
                         module_aliases.add(alias.asname or alias.name)
+        numeric, ambiguous = _numeric_bindings(tree)
         ctx = {"aliases": aliases, "module_aliases": module_aliases,
                "module_roots": module_roots,
-               "numeric": _numeric_bindings(tree),
+               "numeric": numeric, "ambiguous": ambiguous,
                "rebound": _rebound_names(tree)}
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
@@ -1500,25 +1528,27 @@ def test_a_foreign_module_cannot_lend_a_predicate_name(tmp_path):
         f"a rebound `tests` must not resolve through the module root — {missing}")
 
 
-def test_an_ambiguous_bound_name_stays_armed(tmp_path):
-    """A bound name with TWO different numbers is a runtime value, not a zero.
+def test_an_ambiguous_bound_is_judged_by_its_worst_binding(tmp_path):
+    """A bound name with TWO numbers is UNARMED if ANY of them is non-positive.
 
-    ⛔ THE CONTRACT, PINNED SO THE DOCSTRINGS CANNOT DRIFT APART (#12859's review):
-    the first draft of `_until_is_armed`'s bound paragraph claimed this shape was
-    UNARMED while `_numeric_bindings` said the opposite and the measurement said
-    ARMED. Guessing the LIVE binding from an AST is not possible, so the shape
-    joins `timeout=bound_s` in the runtime bucket and stays ARMED — which is the
-    safe direction for a FOLD (the deadline logic still reds the caller), and the
-    honest one for a reader.
+    \u26d4 THE FIRST DRAFT OF THIS PIN ASSERTED THE OPPOSITE, AND ITS RATIONALE WAS
+    FALSIFIED BY THE REVIEWER WHO MEASURED IT (#12859's review). It said an
+    ambiguous bound "stays ARMED — which is the safe direction for a FOLD (the
+    deadline logic still reds the caller)". Measured on the REAL tree: the red's
+    two waits rewritten to `timeout=ZERO`, with `ZERO = 0` at module level and one
+    unrelated function containing `ZERO = 5`, left the pin GREEN (21 passed) and
+    the deadline logic did NOT red the caller — that read is the flake this PR
+    exists to remove. One unrelated assignment of the same name was enough.
+
+    The rule now decides in the safe direction, and it is still decidable: a name
+    whose folded bindings are ALL positive keeps arming, so a correct `timeout=120`
+    written through a name is not reddened. Both halves are asserted below, because
+    a rule that unarmed every ambiguous name would be a false red on that shape.
     """
-    mod = tmp_path / "test_ambiguous_bound.py"
-    mod.write_text(
+    bad = tmp_path / "test_ambiguous_zero.py"
+    bad.write_text(
         "from tests._index_settle import index_rows_after_settle\n"
         "from tests._index_settle import index_kind_absent\n"
-        "# ⛔ ORDER MATTERS FOR THIS PIN: the module-level binding is the REAL one\n"
-        "# and the function-local shadow is the zero. A resolver that kept the LAST\n"
-        "# folded value would unarm this call, so the row reds when the ambiguity\n"
-        "# branch is removed (measured).\n"
         "BOUND_S = 120.0\n"
         "def test_elsewhere(proj):\n"
         "    BOUND_S = 0\n"
@@ -1526,10 +1556,29 @@ def test_an_ambiguous_bound_name_stays_armed(tmp_path):
         "    index_rows_after_settle(proj, until=index_kind_absent,"
         " timeout=BOUND_S)\n",
         encoding="utf-8")
-    _, missing = _settle_call_sites([mod])
+    _, missing = _settle_call_sites([bad])
+    assert missing == {"test_ambiguous_zero.py": [7]}, (
+        "an ambiguous bound containing a non-positive binding must be UNARMED — "
+        f"a live one may be zero; got {missing}")
+
+    # ⛔ THE CONTROL: every folded binding positive, so there is nothing to unarm.
+    # Without this the rule above could be satisfied by refusing every ambiguous
+    # name, which would red a legitimate `timeout=BOUND_S` bound to two real values.
+    good = tmp_path / "test_ambiguous_positive.py"
+    good.write_text(
+        "from tests._index_settle import index_rows_after_settle\n"
+        "from tests._index_settle import index_kind_absent\n"
+        "BOUND_S = 120.0\n"
+        "def test_elsewhere(proj):\n"
+        "    BOUND_S = 30\n"
+        "def test_wait(proj):\n"
+        "    index_rows_after_settle(proj, until=index_kind_absent,"
+        " timeout=BOUND_S)\n",
+        encoding="utf-8")
+    _, missing = _settle_call_sites([good])
     assert missing == {}, (
-        "an AMBIGUOUS bound name is a runtime value and stays ARMED — only a "
-        f"single foldable number is judged; got {missing}")
+        "an ambiguous bound whose bindings are ALL positive stays ARMED — the "
+        f"rule judges the worst one, it does not refuse the shape; got {missing}")
 
 
 #: `(case name, `until=` expression source, armed?)` for the RESOLUTION half of the
