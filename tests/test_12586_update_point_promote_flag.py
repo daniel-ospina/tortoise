@@ -49,6 +49,7 @@ Runnable (the lane's own engine, no container needed):
 from __future__ import annotations
 
 import json
+import logging
 import types
 import uuid
 
@@ -453,6 +454,55 @@ def test_an_operator_fan_out_beside_a_dead_row_is_not_a_false_success(env):
     with pytest.raises(ValueError):
         _raise_update_point_status_error(
             sdk._get_proj(), twin, status_only=True, present=True)
+
+
+def test_the_temporal_probe_names_the_row_the_shared_key_picks(env, caplog):
+    """`promote_point`'s temporal probe picks with the ONE shared picker.
+
+    The same `min`-by-stable-key scan existed a THIRD time, hand-inlined at the
+    temporal-target probe (#12586 review cycle 3, P2) — so `first_terminal_row`
+    was documented as "the ONE place a caller asks which row made this terminal"
+    while this site did the same pick inline. The swap is behaviour-identical for
+    the WIRE (a dead target skips either way); what it changes is WHICH row the
+    warning names, and that is the property worth pinning: the pick is the shared
+    stable key (status word, then the flag), NOT server row order.
+
+    FALSIFIABLE: replace the picker with a first-match scan
+    (`next((… ) for r in trows if is_terminal_status(...))`) and the warning
+    names `superseded` (created first) instead of `retracted` (stable-key first).
+    """
+    prior_live = "tgtdead-" + uuid.uuid4().hex
+    # ⛔ ORDER IS THE MUTATION SENSOR: two TERMINAL rows in one fan-out, created
+    # in the order server iteration returns them. A first-match scan names
+    # `superseded` (created first); the shared stable key names `retracted`.
+    sdk, _ = env
+    sdk._get_proj().g.query(
+        "CREATE (:Point {id:$id, status:'superseded', outdated:false})",
+        params={"id": prior_live})
+    sdk._get_proj().g.query(
+        "CREATE (:Point {id:$id, status:'retracted', outdated:false})",
+        params={"id": prior_live})
+
+    cid = sdk.create_point("decision", "promote over a split prior",
+                           status="draft")["id"]
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) "
+        "SET n.temporal_candidate = true, n.temporal_reviewed = 'merge', "
+        "n.temporal_target_ids = [$tgt]",
+        params={"id": cid, "tgt": prior_live})
+
+    caplog.set_level(logging.WARNING, logger="tortoise.sdk")
+    res = sdk.promote_point(cid)
+
+    assert res["promoted"] is True, res
+    # A dead sibling means the prior is NOT live: no wire, no supersession.
+    assert not res.get("temporal_wired"), res
+    assert res.get("superseded") is not True, res
+    text = "\n".join(r.getMessage() for r in caplog.records
+                      if r.name == "tortoise.sdk")
+    assert prior_live in text, text
+    assert "is retracted — skipping the wire" in text, text
+    assert "is superseded" not in text, text
 
 
 @pytest.mark.parametrize("dead_first", [True, False])
