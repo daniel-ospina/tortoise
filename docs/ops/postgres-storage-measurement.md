@@ -208,7 +208,13 @@ inside the savepoint `pg_current_xact_id()` returned the same `919` as before it
 the row's `xmin` stayed `919`, and `journal_event_bytes_for_rows` still reported
 `rows: 1`. (The earlier wording here — *"under a SAVEPOINT it under-counts"* —
 is true only of a subtransaction that itself WRITES, i.e. of a savepoint placed
-BEFORE the insert, which is not what this does.) An **autocommit** connection
+BEFORE the insert, which is not what this does. ⛔ The same sentence still stands
+in the header of `20261114000001_per_org_postgres_bytes.sql`, which is
+APPEND-ONLY (`check-migration-append-only` refuses a modified migration) and
+therefore cannot be corrected in place: this document and
+`postgres_bytes.measure_written_rows`'s docstring are the correction, and neither
+the header's "takes no savepoints today" nor its "under-counts" clause is a
+reason to remove the savepoint.) An **autocommit** connection
 takes no savepoint: each statement is its own transaction, so a failure there
 aborts nothing the caller owns.
 

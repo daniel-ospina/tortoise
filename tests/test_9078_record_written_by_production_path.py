@@ -2462,9 +2462,20 @@ def test_a_failing_byte_meter_cannot_roll_back_a_record_write(monkeypatch, tenan
     `xmin`), and its exception is swallowed as "non-fatal" — but a failed
     statement leaves a PostgreSQL transaction ABORTED, so the door's succeeding
     `commit()` becomes a ROLLBACK and the whole record write disappears while
-    `write_live_record` returns `APPLIED` with no counter moved. MEASURED on
-    PG16 with the meter refused (`InsufficientPrivilege`): 0 rows committed
-    without the savepoint, 1 row with it.
+    `write_live_record` returns `APPLIED`. MEASURED on PG16 with the meter
+    refused (`InsufficientPrivilege`): 0 rows committed without the savepoint, 1
+    row with it.
+
+    ⛔ THE SIGNATURE OF A RECURRENCE, stated exactly because "no counter moved"
+    is the WRONG tell (measured): `record_write_failures` stays EMPTY, but
+    `record_write_applied` **INCREMENTS**, because the client's `commit()`
+    RETURNS OK on a transaction Postgres turns into a ROLLBACK — so
+    `_count_write_applied`'s own "called AFTER the commit, so a discarded write
+    cannot be counted" reasoning does not hold for this failure either. An
+    applied counter that climbs while the record stays empty is this class;
+    look for rows, not for a failure counter. (Pinned by this leg, not by an
+    assertion on the counter: after the fix the write genuinely commits, so the
+    increment there is correct.)
 
     The CI trigger is reproduced here, and it is mundane: the metering migration
     is not part of the record schema (`RECORD_MIGRATIONS` is name-gated on
