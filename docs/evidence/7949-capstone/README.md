@@ -223,9 +223,10 @@ them.** That log renders, for the capture path's `proj.link_source_to_event` cal
 `tortoise/sdk.py` line 15506, and for `_TURN_WRITE_CYPHER` the number `tortoise/sdk.py` line 2408
 — written here WITHOUT the `file:line` form on purpose, because these are not live cites and must
 not be read as such. At the base it ships from (`9152448d7`) those lines are exactly those symbols;
-at THIS head neither number resolves: measured, `15506` is the closing `)` of an unrelated
-`_logger.warning(...)` call and `2408` is a `#:` comment line (the one that records *"Do NOT
-reintroduce a literal tuple at this site"*). `sdk.py` has moved many times since — `git log
+at THIS head neither number resolves: measured, `15506` is `_missing: list[str] = []` in
+`create_point` (`:14716`) and `2408` is a docstring line (`the caller passes.`) in
+`_capture_turn_texts_with_redactions` (`:2368`); the `#:` comment recording *"Do NOT
+reintroduce a literal tuple at this site"* now sits at `:2491`. `sdk.py` has moved many times since — `git log
 9152448d7..HEAD -- tortoise/sdk.py` lists every mover at this head, `main`'s and this PR's alike, and
 this paragraph deliberately quotes NO count of them: a number here is one more thing that goes stale
 — so the symbols no longer sit at the numbers the log renders. **§E3 — the census** below is where
