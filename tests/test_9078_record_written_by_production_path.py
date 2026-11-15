@@ -2121,7 +2121,7 @@ def _ensure_record_schema(conn) -> None:
 
 
 def _ensure_metering_schema(conn) -> None:
-    """Apply the ledger + the meter; SKIP only when the meter is genuinely absent.
+    """Apply the ledger + the meter on EVERY run; SKIP only when it is absent.
 
     ⛔ THE SKIP IS GATED ON THE FUNCTION ITSELF, NOT ON THE APPLY SUCCEEDING
     (#12784 review, measured). Skipping whenever an apply raised was wrong TWICE
@@ -2136,6 +2136,18 @@ def _ensure_metering_schema(conn) -> None:
         answer it. Measured: applying `20261114000001` alone to that shape
         creates the function, and this leg then passes.
 
+    ⛔ AND PRESENT IS NOT "PRESENT AS THIS TREE SHIPS IT" (#12784 review P2,
+    measured). The first version returned the moment the probe found the
+    function, so on a container that already carried it a CHANGE to the metering
+    migration was invisible and this leg PASSED while certifying a meter the
+    tree does not ship — measured: moving the attribution filter to `AND false`
+    (the `xref` predicate in `20261114000001_per_org_postgres_bytes.sql`) PASSES
+    on a container that already has the function, and REDS once the function is
+    dropped first. CI is fresh per run and was never affected; a local re-run
+    against `_record_db`'s reused container was. So the files are re-applied on
+    every run, the way `_ensure_record_schema`'s `RECORD_REAPPLY_STEPS`
+    re-applies the record files it can: presence is not a verdict on CONTENT.
+
     So each file is applied in its OWN transaction — a colliding earlier file
     must not deny a later one, and a file that DID apply must not be rolled back
     by a later failure — and the probe is the only verdict on whether the meter
@@ -2144,10 +2156,6 @@ def _ensure_metering_schema(conn) -> None:
     """
     probe = ("SELECT to_regprocedure('public."
              f"{postgres_bytes.ROWS_RPC}(text,text,bigint[])')")
-    with conn.cursor() as cur:
-        cur.execute(probe)
-        if cur.fetchone()[0] is not None:
-            return
     failure = None
     for statement in (_METERING_PREAMBLE, *(path.read_text(encoding="utf-8")
                                            for path in METERING_MIGRATION_FILES)):
@@ -2639,9 +2647,25 @@ def test_the_meter_reports_a_POSITIVE_figure_from_a_real_meter_rpc(tenant):
     shape, so the savepoint arm is the one under test), and asserts the figure
     is POSITIVE — never merely present.
 
-    Falsifier: point `ROWS_RPC` at a function that does not exist (the fault
-    arm's own mutant) and this reds at `measured is None`; return the row from a
-    row set instead of the jsonb value and `parse_written_rows` refuses it.
+    Falsifier — the one that DISCRIMINATES, measured: break the attribution in
+    the migration (add `AND false` to the `xref` filter of
+    `20261114000001_per_org_postgres_bytes.sql`) and this reds at
+    `measured.rows == 1` with `it attributed 0 row(s)` — the silent-zero shape
+    the savepoint ordering exists to avoid. Returning the row from a row set
+    instead of the jsonb value is the second arm: `parse_written_rows` refuses
+    it.
+
+    ⛔ THE OBVIOUS MUTANT IS NOT ONE, and it is named here because it reads like
+    a falsifier and is not (#12784 review P2, measured). Pointing `ROWS_RPC` at
+    a function that does not exist does NOT red this leg — it SKIPS it.
+    `_ensure_metering_schema` builds its probe from that same constant
+    (`to_regprocedure('public.{ROWS_RPC}(…)')`), so the renamed name is missing
+    from the probe too, the apply then creates the REAL name, the closing probe
+    still misses, and the leg skips on "this database cannot carry the byte
+    meter" before `measured` is ever read. In CI that skip is a RED
+    (`.github/scripts/record-postgres-leg-gate.py` fails the job on any skip), so
+    the leg is not silently absent where it counts — but the mutant does not
+    test what it looks like it tests, and a local run reads as green.
     """
     conn = _record_db()
     try:
