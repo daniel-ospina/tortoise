@@ -403,9 +403,11 @@ REMOVED_SDK_METHODS: dict[str, str] = {
         "#12901 wave 1 (2026-11-15): DELETED. It listed the pack-declared relation "
         "declarations and had no caller ON THE SDK — the same-named methods elsewhere "
         "(`pack_registry.list_relations`, reached as `registry.list_relations()`) are "
-        "DIFFERENT objects and survive untouched. The beta `r6_canon` region records "
-        "`graph_overview` as its destination, which has no `def` today — so no hint is "
-        "emitted, because a hint must name something a caller can actually call. "
+        "DIFFERENT objects and survive untouched. The CANONICAL `r6_canon` region (row "
+        "R6) records `graph_overview` as its destination, which has no `def` today — so "
+        "no hint is emitted, because a hint must name something a caller can actually "
+        "call. The beta tables never recorded a target for this name, so the canonical "
+        "row is the whole of the destination record. "
         "`TortoiseSDK._resolve_traversal_path` still reads the registry call."
     ),
     "quarantine_batch": (
@@ -438,8 +440,10 @@ REMOVED_SDK_METHODS: dict[str, str] = {
     ),
     "membership_get": (
         "#12901 wave 1 (2026-11-15): DELETED. It read one membership row by id and had "
-        "no PRODUCTION caller — the only call sites were tests, re-pointed at the "
-        "registry read; the console reads memberships through the approved "
+        "no PRODUCTION caller — the only call sites were two tests "
+        "(`test_membership_get_returns_membership` / `..._returns_none_for_missing`), "
+        "which were DELETED with it because the empty branch they exercised went too. "
+        "The console reads memberships through the approved "
         "`list_members` surface instead. The beta `n1_console` region rules this class "
         "`Console plumbing` and puts no tenancy administration on the SDK, so there is "
         "**no** recorded destination to name."

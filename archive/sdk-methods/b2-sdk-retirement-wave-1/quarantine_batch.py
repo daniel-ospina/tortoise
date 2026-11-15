@@ -1,7 +1,7 @@
 # Archived sdk-method `quarantine_batch` — REMOVED from the product surface (#11609).
 #
 # batch:   b2-sdk-retirement-wave-1
-# reason:  Thin SDK delegate to tortoise.mining.quarantine_batch (which stays); zero SDK callers. Beta w11_lifecycle records update_knowledge as destination.
+# reason:  Thin SDK delegate to tortoise.mining.quarantine_batch (which stays). No PRODUCTION caller: the only call sites were tests, re-pointed at tortoise.mining.quarantine_batch, which is exactly what the delegate called. Beta w11_lifecycle records update_knowledge as destination.
 # source:  tortoise/sdk.py @ 32011c4dad4b42364868cb0810ad8e7317a7dfb6
 #
 # This file IS the source of record. To restore: copy each block below back into the

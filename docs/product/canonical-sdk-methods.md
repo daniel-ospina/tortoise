@@ -118,7 +118,7 @@ of these to the public surface is a **new** surface change and needs the owner a
 
 `test_guard` is **not** in this list and was **not** deleted: `beta-sdk-surface.md` rules it *"Kept
 and relocated … it guards the production-wipe incident, so the code must survive"*. ⚠️ **But it is
-still ON the public surface today** — it is one of the 125 (`config/sdk-surface.json`,
+still ON the public surface today** — it is one of the 120 (`config/sdk-surface.json`,
 `sdk.py::TortoiseSDK.test_guard`), and `tools/sdk_surface.py --check` counts it. The
 `beta-sdk-surface.md` ruling is about the approved 40-method TARGET, where it is relocated rather
 than deleted; on the live surface it remains a *removal candidate* (see the "Candidates for
@@ -138,9 +138,12 @@ in every case; the capability survives in the one case that was still wired to s
 has a CONSTRUCTOR CALL for a receiver, not a name, so a walk keyed on `sdk.<name>` /
 `self.<name>` reports zero callers and is wrong. Match the ATTRIBUTE, then judge the receiver.
 
-The remaining four `callers: engine` cells the manifest recorded are `scan_callers`' DOCUMENTED
-receiver-blind name collisions (`registry.list_relations()`,
-`from .mining import quarantine_batch`) — different objects, not calls on the SDK. All code is
+The remaining `callers: engine` cells the manifest recorded are **three, of two kinds**: two are
+`scan_callers`' DOCUMENTED receiver-blind name collisions (`registry.list_relations()`,
+`from .mining import quarantine_batch`) — different objects, not calls on the SDK — and the third
+was `calibration_passed`'s **real** caller in `tortoise/gates.py`, which is exactly why that one's
+body went private rather than simply out. Sweeping all three into the "collision" bucket is the
+error this paragraph exists to prevent. All code is
 archived under `archive/sdk-methods/b2-sdk-retirement-wave-1/` and every departure is recorded
 in `tortoise/sdk_retired.py::REMOVED_SDK_METHODS`.
 

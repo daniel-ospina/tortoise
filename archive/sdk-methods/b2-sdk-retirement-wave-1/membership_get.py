@@ -1,7 +1,7 @@
 # Archived sdk-method `membership_get` — REMOVED from the product surface (#11609).
 #
 # batch:   b2-sdk-retirement-wave-1
-# reason:  Read one membership row by id; zero SDK callers. Beta n1_console: console plumbing, tenancy admin is not on the SDK. No recorded destination.
+# reason:  Read one membership row by id. No PRODUCTION caller: the only call sites were two tests (test_membership_get_returns_membership / _returns_none_for_missing), DELETED with it because the empty branch they exercised went too. Beta n1_console: console plumbing, tenancy admin is not on the SDK. No recorded destination.
 # source:  tortoise/sdk.py @ 32011c4dad4b42364868cb0810ad8e7317a7dfb6
 #
 # This file IS the source of record. To restore: copy each block below back into the

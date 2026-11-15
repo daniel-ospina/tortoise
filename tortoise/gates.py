@@ -103,7 +103,7 @@ def check_gates(child_issue: str | int,
     if not calibration_passed:
         reasons.append(
             "gate B calibration milestone not recorded "
-            "(calibration_passed() is False)")
+            "(the calibration-milestone marker is absent)")
 
     return {
         "child_issue": int(child_issue),
