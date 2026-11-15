@@ -32,10 +32,14 @@ What this suite pins:
   flag-dead between the pre-write reads and the guarded ``SET`` takes the same
   refusal through ``_promote_witness`` instead of retrying an unmatchable write
   out to the 7-14 s window and surfacing a graph abort;
-* the SAME root on the other promote door: ``promote_point`` promoted a
-  ``draft + outdated=true`` row (invalidated before it was ever promoted) to
-  ``['live', outdated=true]``, because its terminality test was the local
-  ``status != 'draft'`` reading. It now consults the shared predicate.
+* what this change did NOT touch, stated so the next reader is not misled: the
+  SAME root is live on ``promote_point`` — a ``draft + outdated=true`` row
+  (invalidated before it was ever promoted) is promoted to
+  ``['live', outdated=true]`` there, because that door's terminality test is the
+  local ``status != 'draft'`` reading. Measured; recorded at the door and on
+  #12586 as a separate change, because fixing it rewrites a second verb's return
+  contract and ``test_6239_promote_after_supersede.py``'s raw-restatus fixture.
+  The two pins at the bottom of this file only prove that door is UNCHANGED.
 
 Runnable (the lane's own engine, no container needed):
 
@@ -288,6 +292,12 @@ def test_a_terminal_status_with_the_legacy_flag_keeps_the_status_message(env):
     flag-only refusal must not swallow it, because on this row the #432 remedy
     (mint a new Point, then the verb) IS performable.
 
+    ⚠️ SINGLE-row shape. On a mixed fan-out the refusal's row is chosen by
+    ``live.first_terminal_row``'s stable key (status text, then flag) — the same
+    rule the rest of ``sdk.py`` uses, NOT a status-word precedence invented for
+    this message — so a flag-dead ``draft`` beside a ``retracted`` sibling names
+    the flag. That is pinned separately, as "refused", below.
+
     FALSIFIABLE: drop the ``_dead_status not in TERMINAL_EXCLUDED_STATUSES``
     guard from the flag-only arm and this fails on the flag message.
     """
@@ -298,6 +308,45 @@ def test_a_terminal_status_with_the_legacy_flag_keeps_the_status_message(env):
     with pytest.raises(ValueError, match="Illegal status transition"):
         sdk.update_point(pid, status="live")
     assert _row(sdk, pid) == ("superseded", True)
+
+
+def test_a_mixed_fan_out_is_refused_without_a_partial_promote(env):
+    """Two nodes share the id; one is flag-dead, one is terminal by status.
+
+    Neither is promotable, so the call must raise and NEITHER row may move — a
+    per-row WHERE could otherwise promote the promotable-looking sibling and
+    leave the pair disagreeing. The message is whichever row the shared picker
+    selects (stable key, not position); this pin asserts the refusal and the
+    untouched rows, not the sentence.
+
+    FALSIFIABLE: drop the flag conjunct and the ``draft``+flag row promotes,
+    leaving ``('live', True)`` on a row this test says must not move.
+    """
+    sdk, _ = env
+    twin = "twin-" + uuid.uuid4().hex
+    a = sdk.create_point("statement", "twin A", status="draft",
+                         id=twin, dedup=False)["id"]
+    b = sdk.create_point("statement", "twin B", status="draft",
+                         id=twin, dedup=False)
+    assert b["id"] == a, "the fixture failed to mint a duplicate id"
+    # One row per statement, keyed by content: the fan-out is what makes the id
+    # ambiguous, so each row must be addressed by something unambiguous.
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) WHERE n.content = 'twin A' "
+        "SET n.outdated = true", params={"id": twin})
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) WHERE n.content = 'twin B' "
+        "SET n.status = 'retracted'", params={"id": twin})
+
+    with pytest.raises(ValueError):
+        sdk.update_point(twin, status="live")
+
+    rows = sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.status, n.outdated",
+        params={"id": twin}).result_set
+    assert sorted((st, bool(od)) for st, od in rows) == [
+        ("draft", True), ("retracted", False)], (
+        f"a mixed fan-out was partially promoted: {rows!r}")
 
 
 @pytest.mark.parametrize("status", ["retracted", "superseded", "outdated",
@@ -325,8 +374,13 @@ def test_a_terminal_status_keeps_its_illegal_transition_message(env, status):
 def test_an_already_live_status_only_promote_is_still_the_noop(env):
     """#1088: already-live is an idempotent success, not a refusal.
 
-    FALSIFIABLE: make the new dead-check run before the already-live arm and
-    this raises instead of returning.
+    A REGRESSION pin on the pre-write probe (``update_point``'s
+    ``if _cur_status[0][0] == 'live'`` early return), not a mutation target for
+    the new refusal: the probe returns before any promote statement or
+    diagnostic runs, so no reordering inside ``_raise_update_point_status_error``
+    can reach this call. What it protects is the ORDER — a future edit that puts
+    the new dead-check ahead of that probe would make an idempotent re-promote
+    raise, and this goes red.
     """
     sdk, _ = env
     pid = sdk.create_point("statement", "already live", dedup=False)["id"]

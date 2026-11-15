@@ -142,6 +142,7 @@ from .entity_identity import (  # #3633 route-then-refuse identity resolution
     resolve_document_target_id, resolve_entity_id_same_entity)
 from .live import _terminal_expression  # #3142 shared Cypher terminal predicate (POSITIVE direction)
 from .live import is_terminal_status  # #2498 shared terminal predicate (Python mirror)
+from .live import first_terminal_row  # #12586 "which row made this terminal?", one picker
 from .live import classify_lifecycle_fanout  # #7822 fan-out-wide lifecycle verdict
 from .live import LIFECYCLE_FANOUT_QUERY  # #7822 the shared fan-out statement
 from .live import EPISTEMIC_LABELS  # #7902 epistemic-label write widening (shared with #7853 read widening)
@@ -6671,26 +6672,39 @@ def _raise_update_point_status_error(proj, id: str, *,
     # reporting an illegal transition would contradict the door's own contract
     # — but ONLY for a status-only promote (see `status_only` above).
     status = proj.g.query(
-        "MATCH (n:Point {id:$id}) RETURN n.status, n.outdated",
-        params={"id": id},
+        LIFECYCLE_FANOUT_QUERY, params={"id": id},
     ).result_set
-    # #12586: the terminality answer comes from the SHARED predicate
-    # (``live.is_terminal_status``, the Python mirror of the very
-    # ``_terminal_excluded`` the promote arm's WHERE now ANDs in), so this
-    # diagnostic cannot name a reason the write did not apply. It is read over
-    # the WHOLE fan-out and with a STABLE key, never ``rows[0]``: point ids are
-    # not unique and server row order is not a contract (#7822).
-    ordered = sorted(status, key=lambda r: (str(r[0] or ""), bool(r[1])))
-    dead = next(((st, od) for st, od in ordered
-                 if is_terminal_status(st, od)), None)
+    # #12586: the terminality answer comes from the SHARED instruments, not a
+    # local scan of a local query — ``first_terminal_row`` for "which row made
+    # this terminal?" (the pair reaches the message, and a second picker is how
+    # the same fan-out gets explained two ways) and ``is_terminal_status``
+    # inside it, the Python mirror of the very ``_terminal_excluded`` the
+    # promote arm's WHERE now ANDs in. Over the WHOLE fan-out with a STABLE key,
+    # never ``rows[0]``: point ids are not unique and server row order is not a
+    # contract (#7822).
+    # ⚠️ The two readings agree on every IN-CONTRACT value. ``outdated`` is
+    # contractually a boolean (#2491, enforced by ``_sanitize_props`` and the
+    # journal fold); on a hand-edited numeric ``0``/``0.0`` or ``""`` the Cypher
+    # half excludes the row while ``is_terminal_status`` (``bool()``) calls it
+    # live, so such a row is refused with the #432 sentence instead of the flag
+    # one. That divergence is documented on both declarations (#7075) and no
+    # in-repo writer can produce it; the refusal is still fail-closed.
+    dead = first_terminal_row(status)
     if dead is not None:
         _dead_status, _dead_flag = dead
         if _dead_flag and _dead_status not in TERMINAL_EXCLUDED_STATUSES:
-            # The flag-ONLY shape: no terminal status word to blame, so the
-            # #432 sentence ("use retract_point()/supersede_point()") would
-            # name a verb that itself refuses this row — an unperformable
+            # The flag-ONLY shape: no terminal status word on the selected row,
+            # so the #432 sentence ("use retract_point()/supersede_point()")
+            # would name a verb that itself refuses the row — an unperformable
             # repair. AX rule 2's three parts (#10183): what was refused, why,
             # and a route the caller can actually take.
+            # WHICH row is selected is ``first_terminal_row``'s stable key, the
+            # same rule the rest of this file uses — NOT a status-word
+            # precedence invented here: on a mixed fan-out (a flag-dead `draft`
+            # beside a `retracted` sibling) the key picks the flag row, because
+            # `draft` sorts first. Every single-row shape — including the
+            # `superseded` + flag row `supersede_point` actually writes — gets
+            # the #432 sentence, which is the case that has to be right.
             raise ValueError(
                 f"update_point refused to promote Point {id!r} to "
                 f"status='live': its legacy `outdated=true` flag marks it "
@@ -6711,7 +6725,10 @@ def _raise_update_point_status_error(proj, id: str, *,
             f"draft→live; use retract_point()/supersede_point() for "  # noqa: F541
             f"lifecycle transitions"  # noqa: F541
         )
-    node_status = ordered[0][0] if ordered else None
+    # No terminal row: the classify verdict's representative state is the
+    # #1088 already-live answer's input. Read from the SAME rows and the SAME
+    # stable key (the classifier sorts a copy), not from a second statement.
+    node_status = classify_lifecycle_fanout(status)[1]
     if node_status == 'live':
         if status_only:
             return True
@@ -20915,11 +20932,20 @@ class TortoiseSDK:
         # `live._terminal_excluded` in the WHERE and `live.is_terminal_status`
         # in the diagnostic — one predicate, the same one `update_entity`'s
         # guard already applied, so the two Point doors now agree on this row.
-        # The CLI backfill is untouched: a NULL-status point WITHOUT the flag is
-        # still promoted (the flag conjunct is the only added condition), which
-        # is what ONTOLOGY §5's "CLI backfill promotes NULL-status legacy points
-        # to `live`" requires. History: the residual was recorded in
-        # `docs/ONTOLOGY-CHANGELOG.md` v3.35 when it came out of the model file.
+        # ⚠️ The "CLI backfill" is NOT this arm, and this change does not touch
+        # it: `_cmd_backfill` and the repair sweep backfill with RAW Cypher
+        # (`MATCH (p:Point) WHERE p.status IS NULL SET p.status = 'live'`, no
+        # flag conjunct), so ONTOLOGY §5's "CLI backfill promotes NULL-status
+        # legacy points to `live`" holds because its statement is untouched —
+        # not because this arm behaves like it. What this arm must keep is the
+        # narrow version of the same property: a NULL-status point WITHOUT the
+        # flag still promotes (the flag conjunct is the only condition added),
+        # pinned by `test_the_cli_backfill_shape_still_promotes`. The bulk
+        # migration doors are a SEPARATE instance of this same root (#12586's
+        # thread carries the measurement: they lift flag-dead NULL-status rows
+        # in bulk, and changing them would rewrite a recorded §5 statement).
+        # History: the residual was recorded in `docs/ONTOLOGY-CHANGELOG.md`
+        # v3.35 when it came out of the model file.
         # ── #10119: the ABSENT arm takes no receipt, and now no WORK ──────────
         # Measured on the pre-fix tree: `update_point("no-such-point-9202",
         # confidence=0.5)` returned `{}` — the documented absent-id contract —
@@ -22389,11 +22415,10 @@ class TortoiseSDK:
             # Picked by the classifier's OWN stable key, never by position:
             # `classify_lifecycle_fanout` sorts a copy, so the rows here are
             # still in server order, and this value reaches both the refusal
-            # message and the dedup WARNING.
-            hit = min(((st, od) for _op, st, od in rows
-                       if is_terminal_status(st, od)),
-                      key=lambda r: (str(r[0] or ""), bool(r[1])),
-                      default=None)
+            # message and the dedup WARNING. The picker is
+            # `live.first_terminal_row` — ONE home, shared with
+            # `_raise_update_point_status_error`'s diagnostic (#12586).
+            hit = first_terminal_row(rows)
             if hit is None:
                 return None
             status, outdated = hit
@@ -49039,10 +49064,12 @@ class TortoiseSDK:
                 # status) given `status='live'` — is NOT carried over: the guard
                 # above reads the legacy flag, so that shape is REFUSED here
                 # (pinned by `test_the_legacy_outdated_flag_alone_makes_the_point_dead`).
-                # It was the same lag on `update_point`'s promote arm (and on
-                # `promote_point`, whose status-only test let a draft point that
-                # had been invalidated come back live); #12586 closed both, so the
-                # three doors now answer this row the same way.
+                # It was the same lag on `update_point`'s promote arm; #12586
+                # closed it THERE. `promote_point` still decides from the local
+                # `status != 'draft'` reading, so a draft invalidated before it
+                # was ever promoted can still be re-livened through that door —
+                # a measured, recorded residual at that method (#12586's
+                # thread), not a decision that the shape is fine.
                 # The TERMINAL half is already answered above by the shared guard,
                 # which also covers what the map cannot (`deprecated`, the legacy
                 # `outdated=true` flag, an operator fan-out) — that is why this

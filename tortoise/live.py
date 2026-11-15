@@ -430,6 +430,29 @@ def classify_lifecycle_fanout(rows) -> tuple:
     return ("ok", rows[0][1], rows[0][2])
 
 
+def first_terminal_row(rows) -> tuple | None:
+    """The ``(status, outdated)`` pair of the FIRST terminal row, or ``None``.
+
+    The ONE place a caller that needs the offending ROW (not a verdict) asks a
+    ``LIFECYCLE_FANOUT_QUERY`` result "which row made this terminal?" — because
+    the pair reaches a refusal MESSAGE, and two callers picking it their own way
+    is how the same fan-out comes to be explained two different ways.
+
+    Selected by the SAME stable key ``classify_lifecycle_fanout`` sorts with
+    (status text, then flag), never by position: point ids are not unique and
+    server row order is not a contract (#7822).
+
+    ⚠️ Only ever called on a fan-out the caller has already found terminal: it
+    keeps no operator precedence (``classify_lifecycle_fanout`` ranks
+    ``operator`` ABOVE ``terminal``, so its verdict alone cannot answer this
+    question on a mixed operator+terminal fan-out — that is why the pair is read
+    from the rows rather than from the classifier's ``status``).
+    """
+    return min(((st, od) for _is_op, st, od in rows
+                if is_terminal_status(st, od)),
+               key=lambda r: (str(r[0] or ""), bool(r[1])), default=None)
+
+
 def _live_only(clause: str, include_draft: bool = False) -> str:
     """Return a Cypher predicate excluding draft AND terminal nodes.
 
