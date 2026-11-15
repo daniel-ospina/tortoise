@@ -254,6 +254,28 @@ def test_index_kind_present_reads_the_kinds_map_and_fails_closed():
         "FULLTEXT") is True
 
 
+def _until_is_armed(call) -> bool:
+    """Does this `index_rows_after_settle(...)` call pass a USABLE `until`?
+
+    ⛔ A PRESENT KEYWORD IS NOT AN ARMED WAIT: `until=None` is the function's own
+    default — the quiescence-only read this pin exists to forbid — so the
+    syntactic `kw.arg == "until"` test certified exactly the defect it names
+    (measured at #12856's review cycle 6: rewriting both waits in the named red
+    as `until=None` left every check green). The VALUE is judged, not the
+    keyword.
+
+    Matched against the literal only: a caller that computes a predicate
+    dynamically is out of reach of an AST pin, and this docstring says so rather
+    than implying coverage.
+    """
+    for kw in call.keywords:
+        if kw.arg != "until":
+            continue
+        return not (isinstance(kw.value, ast.Constant)
+                    and kw.value.value is None)
+    return False
+
+
 def _settle_call_sites(paths) -> tuple[dict[str, list[int]], dict[str, list[int]]]:
     """Every `index_rows_after_settle(...)` call under `paths`: sites, and the
     ones missing their `until`.
@@ -306,7 +328,7 @@ def _settle_call_sites(paths) -> tuple[dict[str, list[int]], dict[str, list[int]
             if not named:
                 continue
             call_sites.setdefault(path.name, []).append(node.lineno)
-            if not any(kw.arg == "until" for kw in node.keywords):
+            if not _until_is_armed(node):
                 missing.setdefault(path.name, []).append(node.lineno)
     return call_sites, missing
 
@@ -398,9 +420,10 @@ def test_every_consumer_passes_the_caller_precondition():
         "is one the floor cannot protect, so removing it later would leave the "
         f"pin green: add them to `_DOCUMENTED_SITES`: {sorted(undeclared)}")
     assert not missing, (
-        "these `index_rows_after_settle` calls pass no `until`, so a stale "
-        "pre-drop read (idle, no `UNDER CONSTRUCTION`) is returned on the first "
-        f"read and the caller's guard can refuse a GOOD fixture: {missing}")
+        "these `index_rows_after_settle` calls pass no usable `until` (absent, or "
+        "the literal `until=None`, which IS the quiescence-only default), so a "
+        "stale pre-drop read (idle, no `UNDER CONSTRUCTION`) is returned on the "
+        f"first read and the caller's guard can refuse a GOOD fixture: {missing}")
 
 
 def _undeclared_sites(by_function, documented_modules,
@@ -465,6 +488,10 @@ def test_the_scan_sees_a_module_prefixed_call_and_its_missing_until(tmp_path):
     the `Name(id=…)` and `Attribute(attr=…)` arms, so an alias was a free pass past
     the pin. `test_f` is the control that keeps the alias map from being a name
     match: importing a DIFFERENT symbol from the same module is not a call site.
+
+    ⛔ `test_g` is the #12856 shape: `until=None` PRESENTS the keyword while
+    asking for the quiescence-only read, so it must land in `missing` (measured
+    at #12856's review cycle 6: this exact edit left every check green).
     """
     mod = tmp_path / "test_synthetic_consumer.py"
     mod.write_text(
@@ -482,11 +509,13 @@ def test_the_scan_sees_a_module_prefixed_call_and_its_missing_until(tmp_path):
         "def test_e(proj):\n"
         "    settle(proj, until=lambda rows: True)\n"
         "def test_f(proj):\n"
-        "    visible(proj)\n",
+        "    visible(proj)\n"
+        "def test_g(proj):\n"
+        "    index_rows_after_settle(proj, until=None)\n",
         encoding="utf-8")
     call_sites, missing = _settle_call_sites([mod])
-    assert call_sites == {"test_synthetic_consumer.py": [5, 7, 9, 11, 13]}, call_sites
-    assert missing == {"test_synthetic_consumer.py": [5, 11]}, missing
+    assert call_sites == {"test_synthetic_consumer.py": [5, 7, 9, 11, 13, 17]}, call_sites
+    assert missing == {"test_synthetic_consumer.py": [5, 11, 17]}, missing
 
 
 def test_index_cells_flattens_every_row():
