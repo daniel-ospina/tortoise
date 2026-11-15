@@ -5820,9 +5820,13 @@ def _refuse_bare_lifecycle_carrier(props: dict, *, label: str, surface: str,
 
 #: The property that NAMES the successor — the other half of ONTOLOGY §4.3's
 #: sentence (*"`superseded` means replaced: it names the successor"*) and of
-#: §4.2's Subject row (*"successor NAME (stored verbatim)"*). Points carry it as
-#: a plain property too (`supersede_point` writes it beside the `CORRECTS` edge
-#: and `outdated`), so ONE name answers for all three labels.
+#: §4.2's Subject row (*"successor NAME (stored verbatim)"*). ⛔ A POINT'S
+#: SUCCESSOR IS THE `CORRECTS` EDGE, not this property: ``supersede_point``
+#: writes ``status``/``outdated``/the temporal stamps and MERGEs the edge, and
+#: writes NO ``supersededBy`` (measured at this head). This property is still
+#: WRITABLE on a Point through ``update_entity`` (the door refuses no label
+#: here), which is why the guard reads BOTH channels for a Point — but nothing
+#: in the SDK's own supersession path puts the name there.
 _SUCCESSOR_PROP = "supersededBy"
 
 #: The dead sets the supersession DOORS consult, per label — the family's OWN
@@ -48445,9 +48449,20 @@ class TortoiseSDK:
             # the reviewed head: two `:Point {id:'pf'}` nodes, an edge into one
             # only -> `update_entity('pf', status='superseded')` ACCEPTED and both
             # rows left naming nobody.
+            # ⛔ THE NAME IS JUDGED AFTER THE WRITE, not as it is stored (#12592
+            # cycle-3 P1): a Point carrying `supersededBy` as a PLAIN PROPERTY
+            # (mintable through this very door — the docstring's own table says
+            # `update_entity(<either>, status='superseded', supersededBy='v2')`
+            # is ACCEPTED) loses that name to a same-call clear, and the Point arm
+            # was reading the stored value while the Object/Subject arm was not.
+            # Measured shape: `update_entity(<Point superseded, supersededBy='v2'>,
+            # status='superseded', supersededBy=None)` was admitted and left the
+            # row saying the word with no property and no edge.
             unresolved = [r[1] for r in rows
                           if (word_after or r[2]) == _SUPERSEDED_STATUS
-                          and not (isinstance(r[3], str) and r[3].strip())]
+                          and (carrier_cleared
+                               or not (isinstance(r[3], str)
+                                       and r[3].strip()))]
             if unresolved:
                 # The successor edge — `INCOMING`, because the SDK spells it
                 # `MERGE (new)-[:CORRECTS]->(old)` (a superseded node has no
@@ -49382,20 +49397,22 @@ class TortoiseSDK:
             # `id`, `eventId` or `url`; the non-Point arms bind `{id: $id}`.
             self._assert_supersession_names_a_successor(
                 id_val, props, _lifecycle_ids)
-        elif keys_rendering_as(props, {_SUCCESSOR_PROP}):
-            # ⛔ A CARRIER-ONLY WRITE IS A LIFECYCLE WRITE HERE (#12592 review
-            # P0, second form). `_lifecycle_fields` is empty when no guarded
-            # lifecycle prop is supplied, so `update_entity(<superseded row>,
-            # supersededBy=None)` never reached the guard at all — measured on
-            # the reviewed head, it stored `[['superseded', None]]`: the word
-            # left standing with nobody named, by a call that is not a status
-            # write. The invariant is about the WORD's coherence, so the guard
-            # is entered on either half of the pair being written. `()` for the
-            # Point ids is safe rather than narrow: a Point's successor is the
-            # CORRECTS edge (§5), so clearing a `supersededBy` property cannot
-            # strip its carrier — only the Object/Subject arms can be split this
-            # way, and those bind `{id: $id}`.
-            self._assert_supersession_names_a_successor(id_val, props, ())
+            # ⛔ THE CARRIER-ONLY CLEAR IS DELIBERATELY OUT OF SCOPE, and this
+            # is a DECISION, not an omission (#12882 review F2, re-pinned in
+            # `tests/test_status_projection.py::
+            # test_a_coherent_un_supersede_lifts_the_row_and_a_status_only_write_cannot`
+            # as "the bare carrier CLEAR is still ACCEPTED on a superseded row and
+            # leaves the row TERMINAL: with no status named there is no transition
+            # to ask about"). A cycle-2 review proposed refusing it here as the
+            # same defect; that would reverse a recorded decision taken by the
+            # lane that owns the un-supersede contract, so it is NOT adopted —
+            # it is reported as a residual instead (#12592 comment): after a bare
+            # clear the row DOES sit in the incoherent state §4.3 says the model
+            # does not have, and closing that needs a decision about the record's
+            # expression route (`cache_projection`'s NOT MONOTONE bullet), not a
+            # guard in this door. What IS refused here is the same-call SPLIT —
+            # `status='superseded'` together with a carrier clear — because no
+            # decision covers it and the write itself splits the pair.
         # ⛔ A REFUSAL MUST NOT COST A WRITE (#12222, review cycle 10 P1). The
         # rename-ambiguity guard lives BELOW, inside its lock and ahead of the
         # label write loop — but the Point STATUS arm below writes

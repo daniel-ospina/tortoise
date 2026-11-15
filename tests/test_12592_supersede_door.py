@@ -563,6 +563,25 @@ def test_a_hybrid_row_nameless_as_object_is_prescribed_the_point_remedy(sdk):
 
 # ── 6. The CLEAR and the per-node verdict (cycle-2 review P0 + P1) ────────
 
+def test_a_point_named_by_the_property_loses_it_to_a_same_call_clear(sdk):
+    """The Point arm must judge the POST-write name, like the property arm does.
+
+    A Point can carry `supersededBy` as a plain property (this very door admits
+    `status='superseded', supersededBy='v2'` on it — see the module table), so a
+    same-call clear strips the only name it had and leaves no `CORRECTS` edge.
+    Measured on the cycle-2 head: admitted, by reading the STORED value while the
+    Object/Subject arm read the write's RESULT.
+
+    Mutation: drop ``carrier_cleared or`` from the Point arm's unresolved test ->
+    this reds, because the call is accepted.
+    """
+    node = _make(sdk, "Point", "pointprop")
+    sdk.update_entity(node, status="superseded", supersededBy="pointprop-v2")
+    with pytest.raises(ValueError, match="CLEARS `supersededBy`"):
+        sdk.update_entity(node, status="superseded", supersededBy=None)
+    assert _row(sdk, "Point", node)[1] == "pointprop-v2", (
+        "a refused clear still moved the row")
+
 def test_clearing_the_carrier_in_the_same_call_as_the_word_is_refused(sdk):
     """A `supersededBy=None` beside the word splits the pair by the WRITE itself.
 
@@ -584,24 +603,30 @@ def test_clearing_the_carrier_in_the_same_call_as_the_word_is_refused(sdk):
 
 
 @pytest.mark.parametrize("label", ["Object", "Subject"])
-def test_clearing_the_carrier_ALONE_on_a_superseded_row_is_refused(sdk, label):
-    """No `status` key at all: the row is stored 'superseded' and loses its name.
+def test_a_bare_carrier_clear_stays_ACCEPTED_and_leaves_the_row_dead(sdk, label):
+    """…but the CARRIER-ONLY clear is OUT of this guard's scope, by DECISION.
 
-    Measured on the cycle-1 head: ``update_entity(o, supersededBy=None)`` was
-    never even looked at, because the guard was only entered on a status write.
-    The word is what must not stand without its partner, so the guard reads the
-    STORED status when the call does not set one.
+    ⛔ This is a pin of somebody else's ruling, not of a preference: a cycle-2
+    review proposed refusing this shape too (it does leave the row saying
+    'superseded' with nobody named), and that would have reversed **#12882 review
+    F2**, which re-pinned it in `tests/test_status_projection.py::
+    test_a_coherent_un_supersede_lifts_the_row_and_a_status_only_write_cannot`
+    as *"the bare carrier CLEAR is still ACCEPTED on a superseded row and leaves
+    the row TERMINAL: with no status named there is no transition to ask about"*.
+    The residual is disclosed on #12592 rather than tightened here.
 
-    Mutation: gate the whole guard on ``status_value == 'superseded'`` instead of
-    ``status_value in (None, 'superseded')`` -> red.
+    Mutation: refuse a carrier-only clear (an `elif` arm on the successor key) ->
+    red — and #12882's own test reds with it, which is the point of keeping the
+    decision in one place.
     """
-    node = _make(sdk, label, f"clearalone-{label.lower()}")
+    node = _make(sdk, label, f"bareclear-{label.lower()}")
     sdk.update_entity(node, status="superseded",
-                      supersededBy=f"clearalone-{label.lower()}-v2")
-    with pytest.raises(ValueError, match="CLEARS `supersededBy`"):
-        sdk.update_entity(node, supersededBy=None)
-    assert _row(sdk, label, node)[1] == f"clearalone-{label.lower()}-v2", (
-        "a refused clear still moved the row")
+                      supersededBy=f"bareclear-{label.lower()}-v2")
+    sdk.update_entity(node, supersededBy=None)
+    row = _row(sdk, label, node)
+    assert row[0] == "superseded", (
+        f"a bare carrier clear must leave the row dead (#12882 F2): {row}")
+    assert row[1] is None, row
 
 
 def test_clearing_the_carrier_is_still_allowed_when_the_call_leaves_the_word(sdk):
