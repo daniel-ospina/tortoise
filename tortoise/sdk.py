@@ -49116,8 +49116,81 @@ class TortoiseSDK:
                 # holds no status — the legacy shape, which reads as live and is
                 # the backfill's business, not this guard's.
                 _np_stored = tuple(_np_row[1] or ())
+                # ── #12869: the OBJECT family's one declared constraint ──────
+                # §4.3 declares `status` as a STRING, and this family
+                # deliberately has NO closed word set — `#10371` keeps the
+                # vocabulary half OPEN because "pack-declared kinds validate
+                # against their own declared words" (§4.3, exercised by
+                # `packs/venture`). That leaves exactly ONE thing undeclared for
+                # EVERY Object kind: a NON-STRING. `['live']` / `123` / `True`
+                # are not words under any kind, so refusing them is not a
+                # vocabulary narrowing — arbitrary STRINGS stay accepted.
+                # The `:Subject` and `:Point` families already refuse a
+                # non-string downstream (the `#1423` guard below, and
+                # `POINT_STATUS_VALUES` in the Point arm), which is why this
+                # check lives on the Object arm alone.
+                # ⛔ IT MUST RUN BEFORE the `_np_stored` test. The row this most
+                # often refuses is the row with NO stored status at all
+                # (`create_object` seeds none, `#9974` R1), so gating the check
+                # on a stored value would let the FIRST non-string write through
+                # — measured, and that is exactly how the row in this issue's
+                # repro was made: a LIVE never-statused Object accepted
+                # `status=['live']` and stored the list verbatim.
+                # ⚠️ `None` is NOT refused: it is the documented CLEAR (`a null
+                # status reads live`, `#9974` R1), and the bare-carrier guard
+                # below is the one that must speak to a null status — refusing it
+                # here would answer a carrier question with a type message and
+                # turn `_BARE_CARRIER_SHAPES`' null arms into a false positive.
+                if (_np_label == "Object"
+                        and _np_status is not None
+                        and not isinstance(_np_status, str)):
+                    raise ValueError(
+                        f"update_entity refused a non-string status write on "
+                        f"Object {id_val!r}: {_np_status!r} is "
+                        f"{type(_np_status).__name__}, not a `str`. ONTOLOGY "
+                        f"§4.3 declares `status` as a STRING, and the Object "
+                        f"family's word set is deliberately OPEN — a pack kind "
+                        f"validates against its own declared words (#10371), so "
+                        f"arbitrary STRINGS stay accepted. A non-string is not "
+                        f"a declared word under ANY kind, and storing one makes "
+                        f"the row unaddressable: the next lifecycle write must "
+                        f"hash the stored value to ask whether the row is "
+                        f"terminal, and an unhashable one raised `TypeError` out "
+                        f"of this guard instead of refusing. Pass `status` as a "
+                        f"plain str (or `None` to clear it)."
+                    )
                 if not _np_stored:
                     continue
+                # ── #12869 (the STORED side): fail CLOSED, never raise ───────
+                # A row that ALREADY holds a non-scalar — written by a pre-fix
+                # SDK, a raw Cypher producer, or a JSONL replay of either — must
+                # be REFUSED, not raised at. Building the dead set with
+                # `isinstance`-gated membership also removes the `TypeError`,
+                # but it does so by reading an unreadable row as LIVE (dead set
+                # empty -> the write is `continue`d), which is the fail-OPEN
+                # direction: it lets a status write through a lifecycle check
+                # that never actually ran. The guard cannot answer "is this row
+                # dead?" from a value that is not a word, and it will not guess.
+                # `None` cannot appear here (`collect` DROPS nulls) and would not
+                # be foreign if it did: an ABSENT status reads live (#9974 R1).
+                _np_foreign = [s for s in _np_stored
+                               if s is not None and not isinstance(s, str)]
+                if _np_foreign:
+                    raise ValueError(
+                        f"update_entity refused the status write "
+                        f"{_np_status!r} on {_np_label} {id_val!r}: this row's "
+                        f"STORED status is {_np_foreign[0]!r} "
+                        f"({type(_np_foreign[0]).__name__}), which is not a "
+                        f"lifecycle word. ONTOLOGY {_np_section} declares "
+                        f"`status` as a STRING, so this guard cannot tell "
+                        f"whether the row is dead — and it will not guess by "
+                        f"treating an unreadable value as current. Repair the "
+                        f"row by writing a declared word onto it: the create and "
+                        f"update doors refuse a non-string since #12869, so this "
+                        f"row predates that guard, was written by a raw Cypher "
+                        f"producer, or was replayed from a journal recording "
+                        f"one."
+                    )
                 if not isinstance(_np_status, str):
                     continue            # a non-string cannot be a dead WORD
                 if all(s == _np_status for s in _np_stored):
@@ -49862,6 +49935,50 @@ class TortoiseSDK:
                 from .entity_resolver import wire_holds_role
                 wire_holds_role(self, _role_holder, _subject_id)
         elif t == "object":
+            # ⛔ #12869: this was the row's MINTING door and it carried NO status
+            # check at all — not a vocabulary one (correctly: §4.3 leaves the
+            # word set OPEN per kind, #10371) and not even a TYPE one. So
+            # `create_object('Held', status=['live'])` stored the list verbatim
+            # on a live row, and EVERY later lifecycle write on that row raised
+            # `TypeError: unhashable type: 'list'` out of the guard instead of
+            # refusing — the row became unaddressable by the one guard that
+            # exists to protect its lifecycle. Guarding only `update_entity`
+            # would have left the defect one call away, exactly as the `#1423`
+            # Subject twin records for its own door (`create_entity`'s subject
+            # arm validates too, and says why).
+            # §4.3 declares the property's type as `string`, so a NON-STRING is
+            # the one value undeclared for every Object kind; arbitrary STRINGS
+            # still ride the open vocabulary. `None` stays legal and is a no-op
+            # here (an absent status reads live, `#9974` R1).
+            # ⛔ THE PRESENCE TEST IS SHAPE-INDEPENDENT (`lifecycle_props_by_
+            # rendering`), the same one the update door's guard uses: a `str`
+            # SUBCLASS key that overrides `__hash__` is missed by
+            # `"status" in props` while the write still files it under `status`
+            # (`live.lifecycle_props_by_rendering`'s docstring records the
+            # measured #11825 round-4/8 case). FIRST-WINS, so an ordinary plain
+            # `str` key makes this identical to `props["status"]`.
+            # ⛔ `type` IS A PARAMETER HERE (`type: str`), so `type(x)` would
+            # call the string. `__class__.__name__` is the shadow-free spelling.
+            _obj_status = lifecycle_props_by_rendering(props, {"status"})
+            if _obj_status:
+                _obj_word = _obj_status["status"]
+                if _obj_word is not None and not isinstance(_obj_word, str):
+                    raise ValueError(
+                        f"create_entity(type='object') refused a non-string "
+                        f"status for {name!r}: {_obj_word!r} is "
+                        f"{_obj_word.__class__.__name__}, not a `str`. ONTOLOGY "
+                        f"§4.3 declares `status` as a STRING, and the Object "
+                        f"family's word set is deliberately OPEN — a pack kind "
+                        f"validates against its own declared words (#10371), so "
+                        f"arbitrary STRINGS stay accepted and are not narrowed "
+                        f"here. A non-string is not a declared word under ANY "
+                        f"kind, and it cannot be stored: `:Object.status` is "
+                        f"what the lifecycle guard hashes to decide whether a "
+                        f"row is terminal, so a non-scalar stored here makes "
+                        f"every later lifecycle write on this row fail instead "
+                        f"of being answered (#12869). Pass `status` as a plain "
+                        f"str. Nothing was written."
+                    )
             from .entity_identity import entity_create_lock
             with entity_create_lock("Object", name):
                 node = self._create_entity(
