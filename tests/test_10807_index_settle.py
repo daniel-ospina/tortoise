@@ -276,6 +276,24 @@ def _foldable_bool(node) -> tuple[bool, bool | None]:
     return False, None
 
 
+def _own_returns(node) -> list[ast.Return]:
+    """The `return` statements of ONE function — nested scopes excluded.
+
+    A nested `def`/`lambda`/class has its own exits; attributing those to the
+    parent would let an inner constant-true predicate unarm an outer real one
+    (and vice versa).
+    """
+    out: list[ast.Return] = []
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef,
+                              ast.Lambda, ast.ClassDef)):
+            continue
+        if isinstance(child, ast.Return) and child.value is not None:
+            out.append(child)
+        out.extend(_own_returns(child))
+    return out
+
+
 def _until_is_armed(call, ctx=None) -> bool:
     """Does this `index_rows_after_settle(...)` call pass a USABLE `until`?
 
@@ -302,12 +320,16 @@ def _until_is_armed(call, ctx=None) -> bool:
     name the scan cannot resolve — is UNARMED, so the pin REDS and asks for a
     declaration instead of certifying a read it cannot vouch for.
 
-    ⛔ THE RESIDUAL, STATED SO IT CANNOT BE MISTAKEN FOR COVERAGE: a predicate
-    reached through indirection OUTSIDE this file is out of reach — imported from
-    another test module (`from tests.test_x import _always as P; until=P`), or
-    rebound inside the function. Those stay armed and are the honest limit of an
-    AST pin; the `**{"until": None}` splat is reported UNARMED (it reds the pin
-    rather than passing it).
+    ⛔ THE RESIDUAL, STATED AS MEASURED SO IT CANNOT BE MISTAKEN FOR COVERAGE: a
+    value the scan cannot evaluate at all — a `Call` (`until=make_always()`), an
+    `IfExp`/`Compare`/`Subscript` — stays ARMED through the final fallback, and
+    so does a foreign attribute whose name merely collides with a documented
+    predicate (`until=other.point_index_drops_visible`). Those are the honest
+    limit of an AST pin. What is NOT residual (measured fail-closed, so it needs
+    no allowance): a name imported from another test module
+    (`from tests.test_x import _always as P`) and an in-function rebinding — both
+    are absent from the allow-list and therefore RED the pin. A
+    `**{"until": None}` splat is likewise reported UNARMED.
     """
     ctx = ctx or {}
     aliases = ctx.get("aliases", {})
@@ -386,13 +408,16 @@ def _settle_call_sites(paths) -> tuple[dict[str, list[int]], dict[str, list[int]
         assigned: dict[str, ast.expr] = {}
         for node in ast.walk(tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                body = [s for s in node.body
-                        if not (isinstance(s, ast.Expr)
-                                and isinstance(s.value, ast.Constant))]
-                constant_return = (
-                    len(body) == 1 and isinstance(body[0], ast.Return)
-                    and isinstance(body[0].value, ast.Constant))
-                if not constant_return:
+                # ⛔ THE `def` ARM MIRRORS THE LAMBDA ARM, because a deny-list
+                # spelled once per node kind is how five previous spellings got
+                # through: `def _A(rows): return not False` is
+                # `lambda r: not False` with a name (measured, review cycle 8).
+                # `_foldable_bool` already decides both.
+                folds = [_foldable_bool(r.value) for r in _own_returns(node)]
+                constant_true = (bool(folds)
+                                 and all(ok for ok, _ in folds)
+                                 and any(v for _, v in folds))
+                if not constant_true:
                     predicate_names.add(node.name)
             elif isinstance(node, ast.Assign):
                 for target in node.targets:
@@ -693,10 +718,23 @@ def test_the_arming_rule_is_an_allow_list_not_a_deny_list(tmp_path):
         "def test_named_def(proj):\n"
         "    index_rows_after_settle(proj, until=_ALWAYS)\n"
         "def test_real_predicate(proj):\n"
-        "    index_rows_after_settle(proj, until=lambda r: r[0])\n",
+        "    index_rows_after_settle(proj, until=lambda r: r[0])\n"
+        "def _NOT_FALSE(rows):\n"
+        "    return not False\n"
+        "def _BODY_OP(rows):\n"
+        "    x = 1\n"
+        "    return True or False\n"
+        "def test_def_not_false(proj):\n"
+        "    index_rows_after_settle(proj, until=_NOT_FALSE)\n"
+        "def test_def_boolop(proj):\n"
+        "    index_rows_after_settle(proj, until=_BODY_OP)\n"
+        "def _REAL(rows):\n"
+        "    return any(rows)\n"
+        "def test_def_real(proj):\n"
+        "    index_rows_after_settle(proj, until=_REAL)\n",
         encoding="utf-8")
     _call, missing = _settle_call_sites([mod])
-    assert missing == {"test_denylist_shapes.py": [6, 8, 10, 12, 14]}, missing
+    assert missing == {"test_denylist_shapes.py": [6, 8, 10, 12, 14, 23, 25]}, missing
 
 
 def test_two_waits_on_one_line_are_counted_as_two(tmp_path):
