@@ -417,14 +417,29 @@ def test_both_daemons_report_at_boot(module):
 
 
 def test_the_pre_merge_check_runs_in_ci():
-    """A check nobody runs is the defect this issue is about, one level up."""
-    workflow = (REPO_ROOT / ".github/workflows/python-ci.yml").read_text(encoding="utf-8")
-    assert "tools/embed_switch_gate.py" in workflow, (
-        "the pre-merge check is not wired into python-ci.yml — nothing refuses an omission"
+    """A check nobody runs is the defect this issue is about, one level up.
+
+    Read from the PARSED workflow, not a substring offset: the gate must be invoked by the same
+    step `run:` that already validates the compose file (the step `#12926` extends), and a
+    mention in a comment is not an invocation.
+    """
+    yaml = pytest.importorskip("yaml")
+    workflow = yaml.safe_load(
+        (REPO_ROOT / ".github/workflows/python-ci.yml").read_text(encoding="utf-8")
     )
-    compose_step = workflow.index("docker compose config -q")
-    assert workflow.index("tools/embed_switch_gate.py") > compose_step, (
-        "the gate belongs beside the compose validation it extends, not in some other job"
+    wired = [
+        (job_name, step.get("run") or "")
+        for job_name, job in (workflow.get("jobs") or {}).items()
+        for step in (job.get("steps") or [])
+        if "embed_switch_gate.py" in str(step.get("run") or "")
+    ]
+    assert wired, (
+        "no step RUNS tools/embed_switch_gate.py — a comment that names the check is not an "
+        "invocation, and nothing would refuse an omission"
+    )
+    assert any("docker compose config" in run for _job, run in wired), (
+        "the gate belongs in the step that validates the compose file (the one #12926 extends); "
+        f"it runs in {[job for job, _run in wired]} instead"
     )
 
 

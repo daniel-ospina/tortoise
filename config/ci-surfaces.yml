@@ -7428,6 +7428,18 @@ surfaces:
   # builds its store by path (the `test_update_point_content_embedding_4208.py`
   # pattern), which runs on any lane.
   - test_embed_gate_5008.py
+  # #12926: the PRE-MERGE refusal of a shipped deployment config that omits either embedding
+  # switch, plus the startup line that states both EFFECTIVE values. Three source surfaces at
+  # once, and none of them is a `tortoise/*.py` module some other pattern already owns:
+  # `tools/embed_switch_gate.py` (the check CI runs), `tortoise/gate_visibility.py` (the boot
+  # report, reached through `core`'s fallback) and `tortoise/embed_gate.py` /
+  # `tortoise/value_gate.py` (whose two OPPOSITE defaults it pins as unchanged — the reopen guard).
+  # It also reads the deployment channels themselves (`docker-compose.yml`, `fly.toml`, both
+  # `Dockerfile`s, `entrypoint.sh`) and `python-ci.yml`'s wiring, so it is registered beside its
+  # #5008 / #11445 siblings rather than under a lane of its own. `core`: it writes no graph, opens
+  # no connection, needs no model — the compose arm shells out to `docker compose config`, and
+  # SKIPS (with the reason) where no docker CLI exists.
+  - test_embed_switch_gate_12926.py
   # #11086: the EMBED decision's STEP (v4 §4.3 G2, now `S6a EMBED-DECISION`) and the
   # ordering that makes it correct. Guards three source surfaces at once: `tortoise/embeddings.py`
   # (the submission seam) is an `eval` SOURCE_PATTERN that REPLACES the `core` fallback, while
