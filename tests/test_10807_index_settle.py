@@ -380,6 +380,16 @@ def _rebound_names(tree: ast.AST) -> set[str]:
                         out.add(sub.name)
                         add_args(sub.args)
                         visit(sub)
+                # ⛔ AND A `global`/`nonlocal` DECLARATION IN THE CLASS BODY BINDS
+                # THE MODULE NAME: the comment above says a class body binds
+                # attributes, which is true of a plain assignment and FALSE under
+                # `global` — `class H: global index_kind_absent; …=lambda …: True`
+                # rebinds the module name when the body executes, and the skip
+                # meant it was never seen, so the bare-name arm certified it
+                # ARMED (measured at #12859's review).
+                for sub in ast.walk(child):
+                    if isinstance(sub, (ast.Global, ast.Nonlocal)):
+                        out.update(sub.names)
                 continue
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 out.add(child.name)
@@ -425,7 +435,8 @@ def _is_settle_module(node: ast.AST, module_aliases, module_roots=frozenset()) -
 _FOLD_CALLS = frozenset({"all", "any"})
 
 
-def _call_forms_a_predicate(call: ast.Call, params: set[str]) -> bool:
+def _call_forms_a_predicate(call: ast.Call, params: set[str],
+                            ctx=None) -> bool:
     """Does this CALL's own result vary with the rows? (#12859's review)
 
     ⛔ A CALL IS NOT A PREDICATE BECAUSE IT MENTIONS ITS ARGUMENT. On FORM alone
@@ -454,12 +465,32 @@ def _call_forms_a_predicate(call: ast.Call, params: set[str]) -> bool:
     mentions_rows = bool(params & names)
     if not mentions_rows:
         return False
+    ctx = ctx or {}
+    rebound = ctx.get("rebound", ())
     if isinstance(func, ast.Name):
-        return func.id in _FOLD_CALLS or func.id in _ROW_PREDICATES
+        # ⛔ THE CALLEE IS RESOLVED, NOT SPELLED — the same rule as the `until`
+        # NAME arm. Matching `func.id in _ROW_PREDICATES` meant a consumer's own
+        # `def index_kind_absent(rows, l, f, k): return True` certified the
+        # lambda ARMED and the wait returned the PRE-DROP read on the first read,
+        # measured on the REAL tree at #12859's review. `all` is resolved too: a
+        # module-level `def all(x): return True` shadowed the folder.
+        if func.id in rebound:
+            return False
+        if func.id in _FOLD_CALLS:
+            return True
+        return ctx.get("aliases", {}).get(func.id) in _ROW_PREDICATES
+    if isinstance(func, ast.Attribute):
+        # ⛔ AND A MODULE-QUALIFIED CALLEE IS A CORRECT SPELLING the old code
+        # refused outright, so `lambda r: _settle.index_kind_absent(r, …)` was a
+        # FALSE RED (measured at #12859's review).
+        return (func.attr in _ROW_PREDICATES
+                and _is_settle_module(func.value,
+                                      ctx.get("module_aliases", frozenset()),
+                                      ctx.get("module_roots", frozenset())))
     return False
 
 
-def _lambda_is_row_predicate(lam: ast.Lambda) -> bool:
+def _lambda_is_row_predicate(lam: ast.Lambda, ctx=None) -> bool:
     """Is this lambda a predicate OVER ITS ROWS, or a truthy constant wearing one?
 
     ⛔ "NOT CONSTANT-FOLDABLE" IS NOT THE TEST, and reading it as one is how this
@@ -497,7 +528,7 @@ def _lambda_is_row_predicate(lam: ast.Lambda) -> bool:
     # alone certified a helper returning a non-empty tuple (truthy on the first
     # read) as a predicate, because it mentioned its `rows` argument.
     if isinstance(lam.body, ast.Call) and not _call_forms_a_predicate(
-            lam.body, params):
+            lam.body, params, ctx):
         return False
     return bool(params & {n.id for n in ast.walk(lam.body)
                           if isinstance(n, ast.Name)})
@@ -686,7 +717,7 @@ def _until_is_armed(call, ctx=None) -> bool:
             continue
         value = kw.value
         if isinstance(value, ast.Lambda):
-            return _lambda_is_row_predicate(value)
+            return _lambda_is_row_predicate(value, ctx)
         if isinstance(value, ast.Constant):
             return value.value is not None  # `until=True` raises at runtime: loud
         if isinstance(value, ast.Name):
@@ -1481,6 +1512,73 @@ def test_a_predicate_name_must_RESOLVE_not_merely_be_spelled(tmp_path):
              for (name, _expr, want), line in zip(_SHADOW_CASES, rows, strict=True)
              if (line not in unarmed) != want}
     assert not wrong, f"the resolution rule disagrees with _SHADOW_CASES: {wrong}"
+
+
+#: `(case name, lambda-body source, armed?)` for the CALLEE half of the rule: a
+#: call inside a lambda is only a predicate if its callee RESOLVES to a documented
+#: predicate (or to `all`/`any` unshadowed). Measured on the REAL tree at
+#: #12859's review: a consumer's own `def index_kind_absent(rows, l, f, k):
+#: return True` certified the lambda ARMED and the wait returned the PRE-DROP read
+#: on the first read, while an `ARMED` verdict for
+#: `lambda r: _settle.index_kind_absent(r, …)` was wrongly refused (false red).
+_CALLEE_CASES = (
+    # ARMED: every correct spelling of a real predicate.
+    ("aliased_import", "lambda r: OK(r, 'Event', 'id', 'RANGE')", True),
+    ("from_tests_module_attr",
+     "lambda r: _settle.index_kind_absent(r, 'Event', 'id', 'RANGE')", True),
+    ("import_as_module_attr",
+     "lambda r: direct.index_kind_absent(r, 'Event', 'id', 'RANGE')", True),
+    # (an UNSHADOWED `lambda r: all(r)` is the `lambda_all` control in
+    # `_ARMING_CASES`; this file shadows `all` on purpose.)
+    # UNARMED: the spelling is right and the RESOLUTION is not.
+    ("rebound_callee", "lambda r: P(r, 'Event', 'id', 'RANGE')", False),
+    ("consumer_def_callee",
+     "lambda r: index_kind_present(r, 'Event', 'id', 'RANGE')", False),
+    ("shadowed_all", "lambda r: all(r)", False),
+)
+
+
+def test_a_lambda_body_callee_must_RESOLVE_too(tmp_path):
+    """A call inside a lambda is a predicate only if its CALLEE resolves.
+
+    ⛔ MEASURED DEFECT (#12859's review, on the REAL tree): `_call_forms_a_predicate`
+    matched the callee on its NAME STRING, so the consumer's own
+    `def index_kind_absent(rows, label, field, kind): return True` — the exact
+    second-definition `tests/_index_settle.py` forbids — certified the lambda
+    ARMED. Injected into `tests/test_indexes.py` the pin stayed green while the
+    call returned `proj.reads == 1` with the PRE-DROP rows. `all` was shadowable
+    the same way.
+
+    ⛔ AND THE SAME ARM PRODUCED A FALSE RED: a module-qualified callee
+    (`lambda r: _settle.index_kind_absent(r, …)`) was refused outright because the
+    arm only handled `ast.Name`. All three correct spellings are ARMED above, so
+    the arm cannot over-red.
+    """
+    lines = [
+        "from tests._index_settle import index_rows_after_settle",
+        "from tests._index_settle import index_kind_absent as OK",
+        "from tests._index_settle import index_kind_absent as P",
+        "from tests import _index_settle as _settle",
+        "import tests._index_settle as direct",
+        "P = lambda rows, label, field, kind: True",
+        "def index_kind_present(rows, label, field, kind):",
+        "    return True",
+        "def all(rows):  # noqa: A001 - the point of the case",
+        "    return True",
+    ]
+    for name, expr, _armed in _CALLEE_CASES:
+        lines.append(f"def test_{name}(proj):")
+        lines.append(f"    index_rows_after_settle(proj, until={expr})")
+    mod = tmp_path / "test_callee_cases.py"
+    mod.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    call_sites, missing = _settle_call_sites([mod])
+    rows = call_sites["test_callee_cases.py"]
+    unarmed = set(missing.get("test_callee_cases.py", []))
+    assert len(rows) == len(_CALLEE_CASES)
+    wrong = {name: ("UNARMED" if line in unarmed else "ARMED")
+             for (name, _expr, want), line in zip(_CALLEE_CASES, rows, strict=True)
+             if (line not in unarmed) != want}
+    assert not wrong, f"the callee rule disagrees with _CALLEE_CASES: {wrong}"
 
 
 def test_two_waits_on_one_line_are_counted_as_two(tmp_path):
