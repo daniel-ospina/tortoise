@@ -1579,8 +1579,19 @@ class TestNonScalarStatus12869:
         The refusal is therefore scoped by "would this LAND?", the same question
         `sdk._status_is_stored_unhashable` asks.
 
-        FALSIFIABLE BY: dropping the `_is_persistable_prop_value` conjunct from
-        either door reds this arm with the non-string refusal.
+        FALSIFIABLE BY: replacing the `_value_ok(word)` scope with an
+        unconditional refusal reds every arm here (mutation M9/M10).
+
+        ⛔ The first cut of this docstring said "dropping the
+        `_is_persistable_prop_value` conjunct reds this arm". MEASURED FALSE: the
+        predicate was that conjunct OR the transport gate, and reducing it to the
+        transport gate alone reds NOTHING (34 passed) — because the conjunct only
+        ever ADDED refusals, for values the transport drops anyway (`['a\x00b']`:
+        fold True, gate False, node stores nothing). So the REVIEW was right that
+        the claim was false, and the conjunct was the over-block: the predicate is
+        now the transport gate alone. `_DROPPED` also gained `bytes`,
+        `bytearray`, `frozenset` — all four are measured ACCEPTED-and-absent on
+        `main`, at the doors that do not journal.
         """
         sdk = TortoiseSDK(str(tmp_path / "t12869drop.db"))
         try:
@@ -1610,9 +1621,12 @@ class TestNonScalarStatus12869:
         refused AFTER `_adopt_idless_holder` had already written the stamp — a
         refusal that costs a write.
 
-        FALSIFIABLE BY: removing the `if not _obj_exists:` gate reds both arms
-        (MEASURED); the adopt arm also then leaves the id stamped, which is the
-        atomicity half.
+        FALSIFIABLE BY: making the `lands=` thunk unconditional reds BOTH arms
+        (mutation M7, MEASURED: "1 failed, 33 passed" for the whole class before
+        the review round widened it); the adopt arm also then leaves the id
+        stamped, which is the atomicity half. (The first cut of this docstring
+        named an `_obj_exists` gate that does not exist anywhere in the tree —
+        the mechanism is the thunk passed to the helper. Corrected.)
         """
         sdk = TortoiseSDK(str(tmp_path / "t12869merge.db"))
         try:
@@ -1646,8 +1660,8 @@ class TestNonScalarStatus12869:
         """Atomicity: the refusal precedes every write, including the id stamp.
 
         FALSIFIABLE BY: moving the raise AFTER `_create_entity` reds this (the
-        node count becomes 1) — and moving it before `_obj_exists` while keying
-        on `created` reds the adopt arm above.
+        node count becomes 1) — and moving it before `resolve_or_mint`'s
+        `_obj_created` gate while keying on `created` reds the adopt arm above.
         """
         sdk = TortoiseSDK(str(tmp_path / "t12869atomic.db"))
         try:
@@ -1806,6 +1820,161 @@ class TestNonScalarStatus12869:
         finally:
             sdk.close()
 
+    def test_TWO_keys_rendering_as_status_are_refused_at_EVERY_door(
+            self, tmp_path):
+        """A first-wins READ over a last-wins WRITE is a bypass, not an edge case.
+
+        `lifecycle_props_by_rendering` is FIRST-wins over the renderer union
+        (its own docstring) while the live map write applies `str(key)`. So a
+        call carrying TWO keys that render as `status` is READ as the first and
+        LANDED as the second. MEASURED through the create door before this
+        check, with a `str` subclass whose `__hash__` sends it to a different
+        bucket so it survives alongside the literal key:
+
+            create_object(name, kind,
+                **{"status": None, KHash("status"): ["live"]})
+            -> ACCEPTED, node stored ['live']
+
+        i.e. a `None` key HIDING a non-scalar produced the exact unaddressable
+        row #12869 exists to remove — through the guard added to prevent it. The
+        update door already refused this (`_status_write_is_ambiguous`, `#12786`
+        rounds 2-3); the other doors did not. It now lives in the shared helper,
+        so a fourth door cannot miss it.
+
+        FALSIFIABLE BY: removing the `_status_write_is_ambiguous` call from
+        `_refuse_non_string_object_status` reds every arm (the create arm then
+        stores `['live']`).
+        """
+        class KHash(str):
+            def __hash__(self):          # a different bucket, same rendering
+                return 424242
+
+        sdk = TortoiseSDK(str(tmp_path / "t12869amb.db"))
+        try:
+            # (a) create door
+            with pytest.raises(ValueError, match="CONFLICTING status write"):
+                sdk.create_object("pair-obj", "core:strategy",
+                                  **{"status": None, KHash("status"): ["live"]})
+            assert _carrier_row(sdk, "Object", "pair-obj") is None, (
+                "a refused conflicting create left a node behind")
+            # (b) update door — sends the pair at an EXISTING row
+            sdk.create_object("pair-obj2", "core:strategy", status="live")
+            oid = _carrier_row(sdk, "Object", "pair-obj2")[0]
+            with pytest.raises(ValueError, match="CONFLICTING status write"):
+                sdk.update_entity(oid, **{"status": "live",
+                                          KHash("status"): ["live"]})
+            assert _carrier_row(sdk, "Object", "pair-obj2")[1] == "live", (
+                "a refused conflicting update changed the row")
+            # (c) the third door
+            from tortoise.api import EventAPI
+            from tortoise.log import EventLog
+            api = EventAPI(EventLog(str(tmp_path / "amb.jsonl")),
+                           initiated_by="user", projection=sdk._get_proj())
+            with pytest.raises(ValueError):
+                api.add_object("pair-obj3", "core:strategy",
+                               **{"status": None, KHash("status"): ["live"]})
+            # (d) ONE key is still fine: the helper is not a blanket refusal.
+            sdk.update_entity(oid, status="archived")
+            assert _carrier_row(sdk, "Object", "pair-obj2")[1] == "archived"
+        finally:
+            sdk.close()
+
+    def test_a_PROJECTION_LESS_lane_still_accepts(self, tmp_path):
+        """`EventAPI` without a projection is a documented, supported lane.
+
+        It journals only — `_registration_id` and `_emit` both branch on it
+        (`getattr(self.projection, "g", None)`), and `api.py` documents the
+        `__main__`/`m0.py` demo mode. NOTHING can land there, so the door's own
+        "would this land?" question answers NO and the write must be accepted.
+
+        FALSIFIABLE BY: dropping the `_lands is not None` guard from
+        `add_object` reds this (MEASURED: `AttributeError: 'NoneType' object has
+        no attribute 'g'`, where `origin/main` accepted and journaled — a
+        regression the first cut of this guard shipped, caught by review).
+        """
+        from tortoise.api import EventAPI
+        from tortoise.log import EventLog
+        log_path = tmp_path / "journalonly.jsonl"
+        api = EventAPI(EventLog(str(log_path)), initiated_by="user")
+        assert getattr(api, "projection", None) is None, (
+            "the fixture is supposed to be projection-less")
+        oid = api.add_object("logonly", "core:strategy", status=["live"])
+        assert isinstance(oid, str) and oid, "the journal-only lane refused"
+        assert log_path.exists() and log_path.stat().st_size > 0, (
+            "nothing was journaled — the write did not happen at all")
+
+    def test_a_str_subclass_that_cannot_be_HASHED_is_refused_not_crashed(
+            self, tmp_path):
+        """The residual `TypeError` of the same shape, one input class over.
+
+        The guard tests `_np_status in _np_terminal` — a `frozenset` membership,
+        which HASHES. A `str` subclass with `__hash__ = None` passes the
+        `isinstance(word, str)` check and then raises `TypeError: unhashable
+        type` out of `_update_entity` (MEASURED on a dead row, and on
+        `origin/main` too). That is the identical failure the issue exists to
+        replace with a refusal, so it is refused here rather than left as a
+        crash the tests bless by admitting `str` subclasses.
+
+        FALSIFIABLE BY: removing the `hash(word)` probe reds this with the bare
+        `TypeError`.
+        """
+        class UnhashableStr(str):
+            __hash__ = None
+
+        sdk = TortoiseSDK(str(tmp_path / "t12869hash.db"))
+        try:
+            sdk.create_object("dead-h", "core:strategy", status="superseded")
+            oid = _carrier_row(sdk, "Object", "dead-h")[0]
+            with pytest.raises(ValueError, match="UNREADABLE status"):
+                sdk.update_entity(oid, status=UnhashableStr("live"))
+            assert _carrier_row(sdk, "Object", "dead-h")[1] == "superseded", (
+                "the refused unhashable word changed the dead row")
+            # …and a HASHABLE subclass is still a word (no over-refusal).
+            class Fine(str):
+                pass
+            sdk.create_object("live-h", "core:strategy")
+            oid2 = _carrier_row(sdk, "Object", "live-h")[0]
+            sdk.update_entity(oid2, status=Fine("archived"))
+            assert _carrier_row(sdk, "Object", "live-h")[1] == "archived"
+        finally:
+            sdk.close()
+
+    @pytest.mark.parametrize("bad", [b"live", bytearray(b"x"), frozenset({"a"})])
+    def test_the_JOURNAL_door_refuses_what_the_ENCODER_cannot_carry(
+            self, tmp_path, bad):
+        """`dropped` is a claim about the NODE, and it is not true of the RECORD.
+
+        At `EventAPI.add_object` every write is appended as JSON. A value the
+        `#7369` gate drops from the node (`bytes`, `bytearray`, `frozenset`) has
+        no JSON form, so `EventLog.append` raises
+        `TypeError: Object of type bytes is not JSON serializable` — MEASURED,
+        AFTER `_registration_id` had stamped an id onto an adopted holder, with
+        zero journal lines: a write with no record behind it, the `#3590`
+        live-without-durable class. The caller got the bare traceback #12869
+        exists to replace. `dict` DOES have a JSON form and stays accepted.
+
+        FALSIFIABLE BY: dropping the `journals` argument from `add_object`, or
+        moving the encoder check below the `_value_ok` early return, reds every
+        arm (MEASURED: `TypeError: Object of type bytes is not JSON
+        serializable`).
+        """
+        from tortoise.api import EventAPI
+        from tortoise.log import EventLog
+        sdk = TortoiseSDK(str(tmp_path / "t12869json.db"))
+        try:
+            log_path = tmp_path / "enc.jsonl"
+            api = EventAPI(EventLog(str(log_path)), initiated_by="user",
+                           projection=sdk._get_proj())
+            with pytest.raises(ValueError, match=r"no JSON form|non-string"):
+                api.add_object("enc-obj", "core:strategy", status=bad)
+            assert _carrier_row(sdk, "Object", "enc-obj") is None
+            # …a dict IS encodable, so it is still dropped-and-accepted.
+            api.add_object("enc-dict", "core:strategy", status={"a": 1})
+            assert _carrier_row(sdk, "Object", "enc-dict")[1] is None
+            assert log_path.exists()
+        finally:
+            sdk.close()
+
     @pytest.mark.parametrize("target,expected", _STORED_TARGETS)
     def test_a_row_that_ALREADY_holds_a_non_scalar_is_REFUSED_not_crashed(
             self, tmp_path, target, expected):
@@ -1894,14 +2063,19 @@ class TestNonScalarStatus12869:
         (`_BARE_CARRIER_SHAPES`' `null-status-with-pointer`) with a TYPE message
         and turn two correct `"lifecycle CARRIER"` refusals into false positives.
 
-        FALSIFIABLE BY: removing BOTH allowances — the `is not None` conjunct
-        AND the `_is_persistable_prop_value` scope — reds this arm and
-        `[null-clear-target]` (both MEASURED; that mutation is `M5'`). ⚠️ Removing
-        `is not None` ALONE reds nothing, and that is measured too: `None` is not
-        persistable, so the scope already excludes it. The conjunct is kept as an
-        explicit statement of the rule (`None` is the CLEAR, `#9974` R1), not as
-        the mechanism — the docstring says so rather than claiming a falsifier
-        that does not fire.
+        FALSIFIABLE BY: removing the `word is None` disjunct ALONE reds this arm
+        and `[null-clear-target]` and the repair pin (MEASURED: "3 failed, 31
+        passed"). The disjunct IS the mechanism, not a restatement of the rule:
+        the scope is the transport gate, and `_value_ok(None)` is **True**
+        (a live write of null clears the property), so without the disjunct
+        `status=None` would be REFUSED.
+
+        ⛔ The first cut of this docstring claimed the opposite — "removing
+        `is not None` ALONE reds nothing, `None` is not persistable". That was
+        true of the predicate it was written against (the fold filter answers
+        False for `None`) and became FALSE when the scope was widened to the
+        transport gate. The review caught it; the claim was measured and
+        corrected, not reworded.
         """
         sdk = TortoiseSDK(str(tmp_path / "t12869n.db"))
         try:
@@ -1969,6 +2143,18 @@ class TestNonScalarStatus12869:
         `_np_dead == [_SUPERSEDED_STATUS]` / `_status_key_leaves_the_dead_state` /
         `_write_clears_every_lifecycle_carrier` block) reds this arm — MEASURED
         (`M11`).
+
+        ⛔ THIS ARM AND `TestLifecycleCarrierCoherence::
+        test_clearing_a_supersession_cannot_lift_a_dead_row` ASSERT OPPOSITE
+        CONTRACTS for the same call, and that contradiction is NOT this PR's to
+        settle. <RED> is red here AND on `origin/main` (`58f904ccf793`, MEASURED
+        on a pristine `git archive`): `#12745` landed a refusal, `#12825` landed
+        the allowance, and the older pin was never updated. The allowance is what
+        the guard now does, which is what this arm pins; the stale pin is owned by
+        OPEN PR #12882 ("un-red main's un-supersede pin"), which is where the
+        authority question is being answered. This note exists so the file says
+        which side is authoritative instead of leaving two green/red siblings
+        looking like one bug.
         """
         sdk = TortoiseSDK(str(tmp_path / "t12869u2.db"))
         try:

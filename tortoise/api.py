@@ -2882,12 +2882,25 @@ class EventAPI:
             # drops, and refusing after a stamp this door does not raise on is
             # why the question is existence rather than `created`).
             from .sdk import _refuse_non_string_object_status
+            # ⛔ `getattr(…, "g", None)` because a projection-less EventAPI is a
+            # DOCUMENTED lane (journal-only — `__main__`/`m0.py; see
+            # `_registration_id`'s own `getattr` and `_emit`'s branch below), and
+            # nothing can land on it: the answer is False, not an
+            # `AttributeError`. Measured: the first cut of this call raised
+            # `'NoneType' object has no attribute 'g'` where `main` accepted and
+            # journaled the call.
+            # `journals=True` because THIS door always appends a record:
+            # a value the node would drop (`bytes`, `frozenset`) has no JSON
+            # form, and the encoder would raise AFTER `_registration_id` stamped
+            # an id onto an adopted holder (measured: `TypeError: Object of type
+            # bytes is not JSON serializable`, zero journal lines).
+            _lands = getattr(self.projection, "g", None)
             _refuse_non_string_object_status(
-                props, door="add_object", target=name,
-                lands=lambda: not self.projection.g.query(
+                props, door="add_object", target=name, journals=True,
+                lands=(lambda: not _lands.query(
                     "MATCH (n:Object {id:$id}) RETURN count(n)",
                     params={"id": oid},
-                ).result_set[0][0])
+                ).result_set[0][0]) if _lands is not None else (lambda: False))
             from .entity_resolver import normalize_entity_name
             props.setdefault("canonical_name", normalize_entity_name(name))
             ev: dict = {"id": oid, "name": name, "createdAt": now_iso(), **props}

@@ -8673,7 +8673,7 @@ def _status_is_stored_unhashable(value: object) -> bool:
 
 
 def _refuse_non_string_object_status(props, *, door: str, target: object,
-                                    lands=None) -> None:
+                                    lands=None, journals: bool = False) -> None:
     """#12869 — refuse a PERSISTABLE NON-STRING Object ``status`` at a write door.
 
     ⛔ THIS IS NOT A VOCABULARY. ONTOLOGY §4.3 declares the property's TYPE as
@@ -8689,31 +8689,70 @@ def _refuse_non_string_object_status(props, *, door: str, target: object,
     and refusing it "would reject a write the writer performs", the recorded
     ``#7925`` review-round-4 decision.
 
-    ⛔ THE PREDICATE IS "WOULD THE FOLD OR THE TRANSPORT KEEP IT?", NOT
-    ``_is_persistable_prop_value`` ALONE — and that distinction is MEASURED, not
-    stylistic. The FOLD's filter under-approximates what the engine actually
-    stores: scoping on it alone let ``create_object(status=np.int64(5))`` through
-    and the node **stored 5** (measured on this head) — the exact poisoning
-    `#12869` exists to stop, one library type over. The transport's predicate
-    (``projection._value_ok``, the ``#7369`` gate) is the half that catches it.
-    So the test is the OR of the two: either writer keeping the value means it
-    lands.
+    ⛔ THE PREDICATE IS THE TRANSPORT GATE ITSELF — ``projection._value_ok``,
+    the ``#7369`` check that decides whether the value reaches the node — because
+    that IS the landing question. It was first written as the OR of that gate and
+    the FOLD's own filter (``_is_persistable_prop_value``), on the theory that
+    either writer keeping the value means it lands. Measured, that OR is wrong in
+    BOTH directions and the review caught it:
 
-    ⛔ AND IT IS DELIBERATELY NOT ``live._status_is_discarded_by_every_writer``,
-    whose THIRD clause is the JOURNAL ENCODER. That clause is right for its own
-    caller (``refuse_terminal_event_state``, whose record rides ``_emit``'s JSON
-    append) and wrong here: measured on ``main``, ``create_object(status=b'live')``
-    — and ``bytearray``, ``frozenset``, ``dict`` — is ACCEPTED and stored as
-    ABSENT, because this path's ``#7369`` gate nulls it and nothing in the record
-    append chokes. Using that helper made all four of those REFUSE, an over-block
-    on writes the writer performs (the ``#7925`` round-4 class).
+    * the fold filter UNDER-approximates: ``np.int64`` is not an ``int`` subclass,
+      so it answers False while the node really stores the value. (The transport
+      gate answers True for it, which is why the gate alone still catches it.)
+    * the fold filter OVER-approximates too: ``['a\x00b']`` answers True for the
+      fold and False for the transport, and the node stores NOTHING. So the fold
+      half added exactly one thing over the gate — a refusal of a write the
+      writer performs, which is the over-block this docstring opens by refusing.
+      It was unpinned: reducing the predicate to the gate reds no arm at all
+      (measured).
+
+    One predicate, and it is the one that measures the actual event.
+
+    ⛔ AND IT IS DELIBERATELY NOT ``live._status_is_discarded_by_every_writer``.
+    That helper's THIRD clause is the JOURNAL ENCODER, and this door's framing is
+    the LIVE write; measured on ``main``, ``create_object(status=b'live')`` — and
+    ``bytearray``, ``frozenset``, ``dict`` — is ACCEPTED and stored as ABSENT.
+    Using that helper made all four REFUSE, an over-block (the ``#7925``
+    round-4 class). ⚠️ But "dropped" is a claim about THIS write only, and the
+    review was right that it does not hold for the RECORD: see ``journals``.
+
+    ⛔ ONE KEY, OR NO ANSWER — the ambiguity refusal. ``lifecycle_props_by_rendering``
+    is FIRST-wins over the renderer union (its own docstring), while the live map
+    write applies ``str(key)`` and the journal keeps the content, so a call
+    carrying TWO keys that render as ``status`` makes "what the guard reads" and
+    "what the writer keeps" different keys. Measured through the create door
+    before this check: ``create_object(name, kind, **{"status": None,
+    <str subclass, __hash__→424242>("status"): ["live"]})`` was read as the CLEAR
+    and the node stored ``['live']`` — the unaddressable row ``#12869`` exists to
+    remove, minted by the guard's own blind spot. The update door already refused
+    this (``_status_write_is_ambiguous``, ``#12786`` rounds 2-3); the other two
+    did not, which is the same two-doors-one-gap shape as the guard itself. It
+    lives HERE now so a fourth door cannot miss it.
 
     ⛔ AND ``lands`` IS THE DOOR'S OWN LANDING TEST. ``status`` is written
     ``ON CREATE`` only, so a write that MERGES onto (or ADOPTS) an existing node
     drops it — and refusing there is an over-block (``#7925``: a bundle's array
     refusal fires only at the item that MINTS the name). It is a THUNK so the
     doors that need a graph read pay for it ONLY when a refusal is on the table;
-    an ordinary create issues exactly the queries it did before.
+    an ordinary create issues exactly the queries it did before. ⚠️ A door with
+    NO GRAPH (``EventAPI`` built without a projection — the documented
+    journal-only ``__main__``/``m0.py`` lane, ``api.py``'s own ``_registration_id``
+    and ``_emit`` branches) can never land anything, so its ``lands`` must answer
+    False rather than dereference a ``None`` handle: that lane accepted this call
+    before ``#12869`` and must keep accepting it (the review measured an
+    ``AttributeError`` here, a regression this helper introduced).
+
+    ⛔ ``journals`` — "DROPPED" IS NOT TRUE OF THE RECORD. A non-persistable value
+    is dropped from the NODE, but at a door that appends a record the same value
+    is handed to the JSON encoder, which does NOT drop it: measured,
+    ``add_object(…, status=b'live')`` raised ``TypeError: Object of type bytes is
+    not JSON serializable`` out of ``EventLog.append`` — a bare traceback from the
+    very method this guard was added to, after ``_registration_id`` had already
+    stamped an id onto an adopted holder (a write with no record behind it, the
+    ``#3590`` live-without-durable class). ``bytes``/``bytearray``/``frozenset``
+    have no JSON form; ``dict`` does, and stays accepted. So a journaling door
+    refuses a status the encoder cannot carry, and says so instead of letting the
+    encoder be the thing that reports it.
 
     ⛔ ONE HELPER, THREE CALLERS (``create_entity(type='object')``,
     ``update_entity``'s Object arm, and ``EventAPI.add_object``). A rule stated
@@ -8722,16 +8761,71 @@ def _refuse_non_string_object_status(props, *, door: str, target: object,
     door precisely because it splats a caller's dict onto a journal envelope.
     """
     from .projection import _value_ok
-    from .projection.entities import _is_persistable_prop_value
 
     declared = lifecycle_props_by_rendering(props, {"status"})
     if not declared:
         return
+    # ⛔ BEFORE reading the value: two keys rendering as `status` make the read
+    # below (FIRST-wins) and the write (LAST-wins) different keys, so ANY value
+    # this function concludes about is not the value that lands. Measured: a
+    # `None` first key hid a `['live']` second key at the create door.
+    if _status_write_is_ambiguous(props):
+        raise ValueError(
+            f"{door} refused a CONFLICTING status write for {target!r}: more "
+            f"than one key in this call renders as `status`. A `str` subclass "
+            f"whose content and `__str__` differ is filed under one name by "
+            f"the live write and the other by the journal, so which value "
+            f"lands cannot be known here — and reading the first one allowed a "
+            f"`None` key to hide a non-scalar behind it (#12869). Pass `status` "
+            f"ONCE, as a plain str."
+        )
     word = declared["status"]
-    if word is None or isinstance(word, str):
-        return                                      # the CLEAR, or a word
-    if not (_is_persistable_prop_value(word) or _value_ok(word)):
-        return                                      # BOTH drop it: never stored
+    # ⛔ `word is None` IS load-bearing, not a restatement: `_value_ok(None)` is
+    # True (a live write of null CLEARS the property), so dropping this disjunct
+    # REFUSES `status=None` — the documented clear (#9974 R1). Measured: removing
+    # it reds `test_a_NULL_status_still_CLEARS_an_Object`, the
+    # `[null-clear-target]` arm and the repair pin.
+    if word is None:
+        return                                      # the documented CLEAR
+    if isinstance(word, str):
+        # ⛔ A `str` SUBCLASS that cannot be hashed is a word this guard cannot
+        # evaluate: `_np_status in _np_terminal` hashes it, so it raised
+        # `TypeError: unhashable type` out of the lifecycle guard — the residual
+        # of the very failure #12869 is about, one input class over (measured on
+        # a dead row, and on `origin/main` too). Refuse rather than crash.
+        try:
+            hash(word)
+        except TypeError:
+            raise ValueError(
+                f"{door} refused an UNREADABLE status for {target!r}: "
+                f"{word!r} is a `str` subclass whose `__hash__` is disabled, so "
+                f"the lifecycle guard cannot compare it with a declared word and "
+                f"would raise `TypeError` instead of answering (#12869). Pass "
+                f"`status` as a plain str."
+            ) from None
+        return                                      # a word
+    # ⛔ ASKED BEFORE the landing scope below, and the ORDER is the whole point:
+    # a value the NODE drops is exactly the value this check exists for, so
+    # gating it on `_value_ok` would let `bytes` return early and the encoder be
+    # the thing that reports it (measured — the first cut did precisely that).
+    if journals:
+        # See `journals` above: the NODE drops this value, the RECORD cannot
+        # encode it, and the encoder's own `TypeError` is reported from inside
+        # `EventLog.append` after the id has been stamped.
+        import json as _json
+        try:
+            _json.dumps(word)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"{door} refused a non-string status for {target!r}: {word!r} "
+                f"is {word.__class__.__name__}, which has no JSON form, and this "
+                f"door records every write. The NODE would drop the value "
+                f"(#7369) but the record cannot carry it, so the write would "
+                f"fail inside the event log after this door had already "
+                f"stamped an id (#12869). Pass `status` as a plain str."
+            ) from None
+    if not _value_ok(word):
+        return                                      # the #7369 gate drops it
     if lands is not None and not lands():
         return                                      # ON CREATE only: not stored
     # ⛔ `type(word)` would be fine here, but `type` is a PARAMETER name at one
@@ -50108,8 +50202,11 @@ class TortoiseSDK:
             # the one question that is true exactly when the status would land.
             # ⚠️ A non-persistable shape (dict/set/bytes) is DROPPED by the
             # writer and never stored (#7369), so it cannot be a value this
-            # refuses — the same `#7925` round-4 decision, which is why the check
-            # is `_is_persistable_prop_value` and not "not a string".
+            # refuses — the same `#7925` round-4 decision, which is why the test
+            # is the transport gate (`_value_ok`) and not "not a string". It is
+            # `True` there so a `bytes`/`frozenset` status is refused instead of
+            # being handed to the JSON encoder when this SDK has a journal (see
+            # the helper's `journals`).
             from .entity_identity import entity_create_lock, resolve_or_mint
             with entity_create_lock("Object", name):
                 _obj_target, _obj_created = resolve_or_mint(
@@ -50119,6 +50216,7 @@ class TortoiseSDK:
                     _refuse_non_string_object_status(
                         props, door="create_entity(type='object')",
                         target=name,
+                        journals=bool(self._event_log_path),
                         lands=lambda: not self._get_proj().g.query(
                             "MATCH (n:Object {id:$id}) RETURN count(n)",
                             params={"id": _obj_target},
