@@ -7263,10 +7263,10 @@ def _doc_section(text: str, start: str, end: str) -> str:
 # added the round-9/10/11 rows, because the counts above are inputs and a stale
 # input misreports coverage even when the verdict is right (#11437 review, P3).
 # The `must_red` set is **56** at this head, not the 29 those rounds inherited: the
-# four verdicts reproduced unchanged at 56/19/29/22 — window 0 leaks 0/56 and reds
+# four verdicts reproduced unchanged at 56/19/29/24 — window 0 leaks 0/56 and reds
 # 10/29 `declared_open`; window 1 reds 4/29 (the same four identities named
 # above); window 3 opens exactly the two rows named and wrongly GREENs exactly
-# 1/22 `declared_blocks` (`coverage verb outside the walk/visit/reach/report`).
+# 1/24 `declared_blocks` (`coverage verb outside the walk/visit/reach/report`).
 # ⛔ Round 12 added seven rows of `must_red` (the six cue-only pseudo-negations and
 # `_DEFEATED`'s `incorrect`), round 13 six more (the `un…` privative alternation's
 # unrowed words) and round 14 nine more (two `must_red`, six `declared_open` and
@@ -7293,10 +7293,10 @@ def _doc_section(text: str, start: str, end: str) -> str:
 # ARE pinned by the `N `must_red` rows` sentence, but the verdicts read off them
 # were not, in the paragraph whose whole purpose is to record why 2 is the only
 # clean window. Edit a figure here and the pin reds; re-derive it by measurement:
-#   window 0: must_red leak 0/56; declared_open wrongly red 10/30; declared_blocks wrongly green 0/22; real doc HIT
-#   window 1: must_red leak 0/56; declared_open wrongly red 4/30; declared_blocks wrongly green 0/22; real doc HIT
-#   window 2: must_red leak 0/56; declared_open wrongly red 0/30; declared_blocks wrongly green 0/22; real doc HIT
-#   window 3: must_red leak 2/56; declared_open wrongly red 0/30; declared_blocks wrongly green 1/22; real doc HIT
+#   window 0: must_red leak 0/56; declared_open wrongly red 10/30; declared_blocks wrongly green 0/24; real doc HIT
+#   window 1: must_red leak 0/56; declared_open wrongly red 4/30; declared_blocks wrongly green 0/24; real doc HIT
+#   window 2: must_red leak 0/56; declared_open wrongly red 0/30; declared_blocks wrongly green 0/24; real doc HIT
+#   window 3: must_red leak 2/56; declared_open wrongly red 0/30; declared_blocks wrongly green 1/24; real doc HIT
 # ⛔ COST, taken deliberately: window 2 makes "…are never TOUCHED by the walk"
 # RED, because `touched` is not in the coverage list — a false block bought for
 # that false pass, which is the trade this predicate always takes.
@@ -7335,8 +7335,8 @@ _NEGATION_GOVERNS = re.compile(
     r"(?:walk|visit|reach|report)(?:s|es|ed|ing)?\b")
 # ⛔ `_COVERAGE` is RETAINED DELIBERATELY AND IS CURRENTLY IMPLIED, and saying so
 # is the point (#11437 review, P3). Measured: `_NEGATION_GOVERNS` already requires
-# one of the same four verbs AFTER the negation, so on all 160 candidate sentences
-# (the 127 rows across the four sets — 56 / 19 / 30 / 22 — plus the 33 sentences of
+# one of the same four verbs AFTER the negation, so on all 162 candidate sentences
+# (the 129 rows across the four sets — 56 / 19 / 30 / 24 — plus the 33 sentences of
 # the real §3 under
 # this predicate's own `split(". ")` segmentation) there is no case where the
 # governance test hits and this one does not — dropping the term from
@@ -7544,8 +7544,15 @@ _AFFIRMED = re.compile(
 # Both were HIT before this change and RED with the marker in. `under-report` is
 # §3's own vocabulary for the consequence (measured: the doc uses
 # "under-reports" in §3), so the marker was fighting the register it protects.
-# Both are now `open refutation:` ROWS in `declared_open` below, and each has an
-# honest twin in `must_stay_green` so a future re-add reds instead of reopening.
+# ⛔ AND THEY ARE NOT DECLARED IDENTICALLY, which this sentence claimed until round
+# 5 (#11541 review, round-5 F1 — the round-2/round-4 correction landed at the
+# `declared_open` site and in the docstring but NOT here, so the file carried both
+# statements at once): `is|was wrong` is an `open refutation:` row below, while
+# `would under-report` has NO row because it is not an open residual at all — that
+# sentence PRESUPPOSES the claim, so accepting it is CORRECT. Both keep an honest
+# twin in `must_stay_green`, which is what stops a future re-add landing silently.
+# ⚠️ A reader who "restored" the matching row to satisfy the old sentence would be
+# restoring the cry-wolf marker this branch measured back out.
 # ⛔ AND `actually` IS SCOPED TO A CLAUSE-INITIAL POSITION, not left bare (#11541
 # review, finding 1): a bare `\bactually\b` reds the plainest honest EMPHASIS of
 # the claim ("the walk does not actually visit …", measured RED under the bare
@@ -8821,13 +8828,15 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
         # rejected: the same trade, and the same shape, as `except that` and
         # `inside the walk's` above. Pinned as rows for the same reason those are —
         # the price is a measured result, not something the next editor discovers.
-        # ⛔ AND THE PRICE IS PINNED PER TERMINATOR SPELLING, because the class
-        # carries six plus the conjunctions, and a spelling whose price is unrowed
-        # is folklore (#11541 review, round 4 F5 measured four of them RED and
-        # unrowed). Five rows follow: `;`, `,`, `(` and `:`, plus the honest PAUSE.
-        # The em-dash and the conjunction spellings (`but|yet|and|however|while
-        # actually`) are the same ASIDE family and are NOT separately rowed — that
-        # is a declared limit of this block, stated rather than implied.
+        # ⛔ AND THE PRICE IS PINNED PER TERMINATOR SPELLING, because a spelling
+        # whose price is unrowed is folklore (#11541 review: round 4 F5 measured
+        # four RED and unrowed, round 5 F2 measured the class as SEVEN punctuation
+        # members and found two more). SEVEN rows follow — `;`, `,`, `(`, `:`, the
+        # em dash, the en dash, the hyphen — plus the honest PAUSE. ⛔ THE
+        # CONJUNCTION SPELLINGS (`but|yet|and|however|while` + `actually`) are the
+        # one member set NOT separately rowed: same ASIDE family, and the `, but
+        # actually` INVERSE is a `must_red` row, so its direction is covered. That
+        # is this block's declared limit, stated rather than implied.
         "false block: an honest ASIDE using `actually`":
             "a nested `def`'s decorators and parameter defaults are not reported "
             "by this walk; actually the outer method does evaluate them",
@@ -8849,6 +8858,19 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
         "false block: an honest ASIDE after a COLON using `actually`":
             "a nested `def`'s decorators and parameter defaults are not "
             "reported by this walk: actually the outer method does evaluate them",
+        # ⛔ AND THE TWO DASH SPELLINGS, which were neither rowed nor declared
+        # (#11541 review, round-5 F2 measured the class as SEVEN punctuation
+        # members — `,` `;` `:` `—` `–` `-` `(` — and named only four in the block
+        # above plus a declared limit that skipped these two). Both red an honest
+        # aside, so both are rows: the rule this block states is that a spelling
+        # whose price is unrowed is folklore.
+        "false block: an honest ASIDE after an EN DASH using `actually`":
+            "a nested `def`'s decorators and parameter defaults are not "
+            "reported by this walk – actually the outer method does "
+            "evaluate them",
+        "false block: an honest ASIDE after a HYPHEN using `actually`":
+            "a nested `def`'s decorators and parameter defaults are not "
+            "reported by this walk - actually the outer method does evaluate them",
         # ⛔ THE CUE'S CONTRACTION CLASS, EXECUTED (#11541 A, the cited standard's
         # own termset). The DOCSTRING bullet above says "`cannot` (or a
         # contraction)" — not the `cannot` row's label, which names only `cannot`
