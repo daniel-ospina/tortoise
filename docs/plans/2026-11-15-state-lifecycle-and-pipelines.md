@@ -153,7 +153,7 @@ This is what makes the model customisable without becoming a configuration langu
 | field | lives on | values | written by |
 |---|---|---|---|
 | `status` | every kind **except events** | `draft` · `live` · `deprecated` · `superseded` | a verb (§3.1) |
-| `supersededBy`, `supersededAt` | wherever **`status`** is `superseded` | the successor's identity + when | the replace verb, in the same write as `superseded` |
+| `supersededBy`, `supersededAt` | **Object and Subject only** — a Point names its successor by the `CORRECTS` edge, not by a property (`ONTOLOGY.md` §4.7: a Point carries `status='superseded'` and has no `supersededAt`) | the successor's identity + when | the replace verb, in the same write as `superseded` |
 | `pipelineStageId` (+ `pipelineSlot`) | kinds whose pack declares a pipeline | a stage `id` from that kind's declaration | the stage-advance verb, or an event the pack folds onto the stage |
 | `pipelineOutcome`, `isClosed` | same | the `outcome` of the terminal stage reached | the same write that moves into a terminal stage |
 | `goalState` | goals | `met` · `unmet` · `blocked` · `abandoned` · `active` · `guideline` · `superseded` | the goal's own writer (unchanged) |
