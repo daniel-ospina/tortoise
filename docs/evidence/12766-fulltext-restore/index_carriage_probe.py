@@ -34,9 +34,8 @@ import json
 import sys
 import uuid
 
-import redis
-
 import fulltext_restore_cost as H
+import redis
 
 DEFAULT_NODES = 5000
 
