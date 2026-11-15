@@ -393,7 +393,7 @@ the delivery feed has the most machinery and no replay.**
 
 ⛔ **Two corrections to this census, from review, both of which make the population larger:**
 
-- **A reader was missing.** `tortoise/journal_segments.py:913` `read_all_segments` → `:938`
+- **A reader was missing.** `tortoise/journal_segments.py:914` `read_all_segments` (the `def`; `:913` is blank) → `:938`
   `records.extend(read_for_replay(log))` is a **replay-order reader that spans segments**, with its own
   salvage contract (*"⛔ **STRICT BY DEFAULT.** `read_for_replay` salvages … a skipped line is a REFUSAL
   here"*, `:920-928`). It was inside the 39-line `rg` that was run. **It is not cosmetic:** it is the one
@@ -481,7 +481,7 @@ over three alternatives, and **`MAX(seq)+1` was rejected by name** (`log.py:836-
 - **Not** an identity. The row's identity is `(org_id, graph_id, seq)`; the *record's* content identity is its
   `event_id` / `ts` / `type`.
 - **An assertion about what the record consumed**: "this record was the N-th record the replay reader would
-  see". The schema calls it *"the idempotency key: applying a seq twice is a no-op"* (`03-schema.md:86`,
+  see". The schema calls it *"`seq` is the idempotency key: applying a position twice is a no-op"* (`03-schema.md:86`,
   `record_projection.py:5999-6003`).
 - **Per-graph**, and valid as such **only because one graph = one journal file** (`record_writer.py:2409`
   states the coupling: *"construction holds per JOURNAL FILE, while `journal_event`'s key is per"*).
@@ -607,7 +607,7 @@ marked ⚑ are named by **no document** and were found by reading code in this l
 | D-14 | **`apply-first` is a declared class of eight unjournalled writer lanes** | `STORAGE-ARCHITECTURE.md:1672-1698` | **O** | Declared, pinned per lane (`tests/test_9206_apply_first_lane.py` + the census). It is a *declaration of where writes live*, and the doc says so: *"a declaration names where the write lives; it does not make the write replayable."* |
 | D-15 | **The JSONL is a PARTIAL WAL** — a delta cannot reproduce an entity whose creation was never journaled; a raw-Cypher or no-base-dir write journals nothing | `2026-09-22-unjournaled-mutation-class:1250` | **B** | §3 says *"journal completeness is a PRECONDITION"*. This is the precondition being false in named places. It is why "delete the file" is unsafe **today** and why A7.5 sequences the change. |
 | D-16 | **Torn-tail tolerance is an allow-list of additive types** | `log.py` seal + `read_all(salvage=True)`; `#5917`; `#9254` | **O** | Correctly scoped: a `EntityMutated` op=delete dropped by a replay is **resurrection, not an exception** (`STORAGE-ARCHITECTURE.md:361`). Its existence is a *constraint on any new ordinal* — a torn tail must not shift a position. |
-| D-17 | **`_NO_PROJECTION_FOLD`** declares **eight** types whose replay materialises no node | `projection/__init__.py:8029-8052`; `SessionNarrated` `#9555`, `TurnsRecorded` `#10017` R2 | **O** | A decision the dispatcher *states* (`STORAGE-ARCHITECTURE.md:361` calls it "a declared exception"). The undercount mattered to the argument: the first draft said "two", which framed it as a narrow special case, when in fact **six of the eight long predate the two it names** — `IngestStarted`, `BatchIdStamped`, `CalibrationRecorded`, `DedupeRecorded`, `DedupeRejected`, `EntityBindingRefused`, `SessionNarrated`, `TurnsRecorded`. So "declared no-op" is an **established pattern**, and *that* is what made `derived = replay(journal)` approximate long before `#10017` used it to falsify §3's promise. |
+| D-17 | **`_NO_PROJECTION_FOLD`** declares **eight** types whose replay materialises no node | `projection/__init__.py:8029-8080`; `SessionNarrated` `#9555`, `TurnsRecorded` `#10017` R2 | **O** | A decision the dispatcher *states* (`STORAGE-ARCHITECTURE.md:361` calls it "a declared exception"). The undercount mattered to the argument: the first draft said "two", which framed it as a narrow special case, when in fact **six of the eight long predate the two it names** — `IngestStarted`, `BatchIdStamped`, `CalibrationRecorded`, `DedupeRecorded`, `DedupeRejected`, `EntityBindingRefused`, `SessionNarrated`, `TurnsRecorded`. So "declared no-op" is an **established pattern**, and *that* is what made `derived = replay(journal)` approximate long before `#10017` used it to falsify §3's promise. |
 | D-18 | **`#10017` remains a no-op on a one-sided measurement** — closed as no-op locally, reopen condition = hosted armed, and the hosted arm has since reported `record.armed=true` | `#10017` closure + the later comment | **B** | The purge question is live again on a deployment nobody has measured. This lane does not reopen it (#9025/#10017 are explicitly out of scope) but the map must say the "no-op" reading is local-only. |
 | D-19 | **The `:GraphEvent` mirror rents 32,032 B/session for a watermark** — and the premise is now stale | `#11821` body; removed by `#10017`'s carrier on the armed lane | **R** (the *premise*), **B** (the allocator) | Retire the **premise**, keep the store (owner-closed `NOT_PLANNED`), fix the **allocator** (D-07). Three distinct fates for one paragraph. |
 | D-20 ⚑ | **`record_read.py` never reads `journal_event`** — the transcript is served from `public.session_narrative`/turn rows, so the record's *read* path does not depend on the journal table at all | `record_read.py:34` | **O** | A positive finding: it means the record's read surface is already journal-independent, which is a precondition A7 does not have to build. |
@@ -1006,19 +1006,23 @@ reproducible, and each cycle's failure is a different failure** — first a row/
 table, then a partition whose rules were printed but whose population was not, then a rule that did not say
 which artifacts it counted, then an explanation of that rule that cited the wrong examples.
 
-**Cycle 7**, fresh-context, ran against cycle 6's fixes and found 2 more, both P2 and both pointers again: the
-§12 cell that recorded "cite sections, not line numbers" was **itself** carrying four line numbers of this
-document (already stale at the head that wrote them), and D-23's "corrects them 40 lines later in the same cell"
-described a distance that cannot exist — that index cell is a single 1,931-character line, and the correction is
-~300 characters further on. Both fixed by removing the number. **A section that audits its own accuracy has to
-obey the rule it is auditing**, which is the third time in this table that a correction paragraph was the
-defect.
-
 **Cycle 6**, fresh-context, ran against cycle 5's fixes and found 3 more, all P2 and all **pointers**: the
 enumeration of the 19 no-row documents still named the phantom `per-org-bytes` and omitted four real ones, two
 §12 cells cited this document's own line numbers (which drift on every edit), and D-24 quoted
 `record_writer.py:2412-2413` for a sentence at `2408-2410`. No substantive claim changed. **The lesson the
-sixth cycle teaches is the one worth keeping: cite sections and row titles, never your own line numbers.** Rows from every cycle are in the table below, in the order they were found.
+sixth cycle teaches is the one worth keeping: cite sections and row titles, never your own line numbers.**
+
+**Cycle 7**, fresh-context, ran against cycle 6's fixes and found 2 more, both P2 and both pointers again: the
+§12 cell that recorded "cite sections, not line numbers" was **itself** carrying four line numbers of this
+document (already stale at the head that wrote them), and D-23's "corrects them 40 lines later in the same cell"
+described a distance that cannot exist — that index cell is a single markdown line, and the correction is ~300
+characters further on. Both fixed by removing the number. **A section that audits its own accuracy has to obey
+the rule it is auditing**, which is the third time in this table that a correction paragraph was the defect.
+
+**Cycle 8**, fresh-context, ran against cycle 7's fixes and found 4, all P2 and all provenance: two rows of this
+table still carried the audit's own drift (a citation range that stopped mid-set, a rewritten quote whose nouns
+had swapped, a pointer at a blank line), and cycle 7's own fix had no row. The corrections are in the table
+below, which now holds a row for every cycle and every fix it claims. Rows from every cycle are in the table below, in the order they were found.
 
 | what the reviewer found | verified? | what changed |
 |---|---|---|
@@ -1028,10 +1032,10 @@ sixth cycle teaches is the one worth keeping: cite sections and row titles, neve
 | A7.2 kept the "no sequence in the record schema" claim that A7.5 corrects | ✅ (the `rg` does return a `nextval` comment line) | parenthetical replaced with the narrow true statement |
 | A7.5's "lateral move in concurrency" + unspecified seed | ✅ (`log.py:625-633`; `MAX(seq)+1` rejected at `:835-838`) | false equivalence **removed and stated as a real new bottleneck**; the seeding rule written |
 | "three monotonic counters" vs the document's own fourth | ✅ (`20261012000003:167`) | **A4.3 is now four rows**, and says why the fourth is a surrogate |
-| the reader census omits `journal_segments.read_all_segments`; the table sums to 13 | ✅ (`journal_segments.py:913`) | reader added; total corrected to **12**; the consequence for D-24 stated |
+| the reader census omits `journal_segments.read_all_segments`; the table sums to 13 | ✅ (`journal_segments.py:914`) | reader added; total corrected to **12**; the consequence for D-24 stated |
 | `#9390` (OPEN) falsifies A7.5's "cannot happen" row | ✅ (`#9390` OPEN) | **new debt row D-26** + two rows added to A7.5's window table |
 | §17.1 names "four further OPEN blockers" | ❌ **partly false** — `#9252` and `#9390` are OPEN, but **`#9350` is CLOSED, `#9213` MERGED, `#9391` CLOSED** | only the two genuinely open ones were added; **the other three were not**, and this is recorded rather than quietly dropped |
-| `_NO_PROJECTION_FOLD` declares 8 types, not 2 | ✅ (`projection/__init__.py:8029-8052`) | D-17 corrected, and the undercount is now part of the argument |
+| `_NO_PROJECTION_FOLD` declares 8 types, not 2 | ✅ (`projection/__init__.py:8029-8080`) | D-17 corrected, and the undercount is now part of the argument |
 | block quote alters "a seq" → "a position" | ✅ (`log.py:832-833`) | restored |
 | `sdk.py:5653-5683` is a stale range lifted from the plan | ✅ (it is now the `status`-key refusal) | re-resolved to `sdk.py:13832-13833`/`:14008` |
 | A6's tally (13/8/3) did not match its own table | ✅ (it was 14/8/2) | recount published, and **26 rows now** after D-25/D-26 |
@@ -1055,6 +1059,12 @@ sixth cycle teaches is the one worth keeping: cite sections and row titles, neve
 | the enumeration of the **19** read documents with no index row still named `per-org-bytes` (a document that does not exist) and omitted four that do — the same defect cycle 5 fixed in `§A1.1` row 16, left standing six lines above it | ✅ (re-derived from the tree: 3 migrations, 2 governing docs, 5 journal plans, the unjournalled-mutation plan, the `#7951` plan, `03-schema.md`, `06-cache-projection.md`, the `#2313` scoping, the changelog, `docs/00_index.md` itself, `9025-journal-bound`, `record-capstone.md` = 19) | the list now names all 19 and records that the phantom was removed |
 | two §12 cells cited the document's **own** line numbers for the `32,032` figure and for D-09, none of which resolve after later edits | ✅ (`32,032` occurs only in `§A1.2`, `§A2.6` and `§A6`'s D-19 row; D-09 is the `§A6` row "The journal has no bound of any kind") | both cells now cite *sections and row titles*, which is the only form that survives an edit — **including this cell, which a later cycle caught still carrying four line numbers of its own** |
 | D-24 quoted `record_writer.py:2412-2413` for a sentence that is at **2408-2410** (`§A4.2` already cited it correctly as `:2409`) | ✅ (`awk 'NR>=2406 && NR<=2414'`) | the citation is corrected to `2408-2410` |
+| cycle 6's own evidence cell cited four of this document's line numbers for `32,032`, already stale at the head that wrote them | ✅ (`32,032` occurs only in `§A1.2`, `§A2.6` and `§A6`'s D-19 row; D-09 is the `§A6` row "The journal has no bound of any kind") | both cells cite sections and row titles; §12 re-audited so no `:NNN` in it points at this document |
+| D-23 said the index cell "corrects them 40 lines later"; that cell is one markdown line | ✅ (`docs/00_index.md:153` is a single 1,931-character line; the correction begins ~300 characters after the stale figure) | stated in characters, with the one-line fact named |
+| D-17's "eight types" cited `projection/__init__.py:8029-8052`, a range that stops before `SessionNarrated` and `TurnsRecorded` — both of which the row names as members | ✅ (the set closes at `:8080`; the cited 23-line range shows 6) | range widened to `:8029-8080` |
+| the schema quote had its nouns swapped — the schema says *"`seq` is the idempotency key: applying a position twice is a no-op"* | ✅ (`03-schema.md:86`) | quoted verbatim; the paraphrase that had travelled through `log.py:832` is no longer presented as the schema's words |
+| the `#9390`/reader row cited `journal_segments.py:913`, a blank line; `read_all_segments` is at `:914` | ✅ (`sed -n '911,916p'`) | corrected in both places it appears |
+| §12's preamble printed cycle 7 before cycle 6, and the claim "rows from every cycle" was false for cycle 7 | ✅ (heading order `grep -n '^\*\*Cycle'`) | cycles are in order and every cycle, including this one, has a row |
 
 ⛔ **The most important thing this cycle did was make the shape harder, not easier.** Two findings (D-25,
 D-26) are cases A7.5 had **assumed away in both directions** — a record write with no journal position, and a
