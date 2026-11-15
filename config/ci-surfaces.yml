@@ -877,6 +877,20 @@ surfaces:
   - test_delivery_tenancy.py  # C6 #2115: delivery-shape tenancy + session_recording per-graph override
   - test_metering_period_window.py
   - test_metering_window_admission.py  # #3981: the seven swallow sites report the dropped increment (caller-level; the coverage is the proof)
+  # #12762/#12764: per-org Postgres bytes MEASURED from what we WRITE. DUAL-
+  # REGISTERED with `core` (its arm is in that block) and both arms are
+  # load-bearing, two of the file's four subjects each: `tortoise/metering.py`
+  # (the ledger writer `record_postgres_bytes_written`) and
+  # `tortoise/supabase_control.py` (the RPC wrappers) are `api` SOURCE_PATTERNS,
+  # so an `api`-only diff selects this surface and REPLACES the `core` fallback;
+  # `tortoise/postgres_bytes.py` (the meter) and the `record_writer.py` seam
+  # match no SOURCE_PATTERN and fall to `core`. Without ONE row per surface, a
+  # diff touching only one of those four modules runs no leg of the file (the
+  # #1349/#2938/#3154/#4367 silent-drop class).
+  # ⛔ REGISTRATION, not a test change: the suite landed in #12764
+  # (`0a79c026b3`) with no manifest row, which is half of the
+  # `--integrity` `manifest drift` on `main` repaired here.
+  - test_postgres_bytes.py
   # #4779 (leg 2 of #3981): the durable representation of a dropped increment,
   # asserted against the frozen migration + the fake control plane. `api` is the
   # surface that owns every source it pins — tortoise/metering.py,
@@ -911,29 +925,6 @@ surfaces:
   # `test_integrity_covers_all_test_files` fails (every tests/**/test_*.py must
   # be classified — the scope-v5 drift trap).
   - test_retrieval_metering.py
-  # #12764: per-org Postgres bytes MEASURED from what we write. THREE of its four
-  # subjects ARE `api` patterns — `tortoise/postgres_bytes.py` (the meter + audit
-  # wrapper), `tortoise/metering.py` (`record_postgres_bytes_written`, the LEDGER
-  # WRITER that accumulates the figure) and `tortoise/supabase_control.py` (the
-  # increment) — so `api` must run it. Its fourth subject, the write-seam wiring
-  # `tortoise/record_writer.py` (`_measure_written_bytes` → `_record_written_bytes`,
-  # which says of itself "⛔ IT DOES NOT WRITE THE LEDGER"), is NOT an `api`
-  # pattern (measured: select(['tortoise/record_writer.py']) -> ['core']), which
-  # is why this file is DUAL-REGISTERED on `core` too — exactly ONE subject falls
-  # through — on the same #3981 precedent as `test_retrieval_metering.py` and
-  # `test_4242_metering_period_end_refresh.py` above. The SOURCE_PATTERNS row for
-  # `tortoise/postgres_bytes.py` is added with this registration so a meter-only
-  # diff ROUTES to `api` — the surface owning the two meters and the control
-  # plane — instead of the `core` fallback. The guard is selected either way now
-  # that the `core` half exists (measured: without the row -> ['core'], guard
-  # present; with it -> ['api'], guard present). Unregistered on `main`, where it
-  # reds the REQUIRED `manifest-integrity` leg and every PR's `python-ci-gate`
-  # inherits the red (#11978/#11049). ~4s, hermetic — no Docker, no network.
-  # ⚠️ Two lanes each appended a copy of this comment and both sections were
-  # merged in; the stale copy claimed "two of its subjects" and "the two subjects
-  # that only fall through". Collapsed to one block with the counts measured on
-  # this tree: 3 subjects -> `api`, 1 -> `core`.
-  - test_postgres_bytes.py
   # #3981: dual-registered with `core` for the same reason as test_boot_regressions.py
   # above. `api` is an exact-surface match that REPLACES the `core` fallback, so a
   # tortoise/hosted_api.py-only change would otherwise never run this file — which
@@ -4418,20 +4409,6 @@ surfaces:
   - test_cmux_dispatch.py
   - test_embed_metering.py   # #4488: the tally/middleware/hook + the registry-lane writer/reader (dual with `api`/`eval`)
   - test_retrieval_metering.py   # #4489: the tally/middleware/hook + the registry-lane writer/reader (dual with `api`)
-  # #12764: the `core` half of the dual registration (see the `api` entry). The
-  # only subject that selects `core` and nothing else is the write seam
-  # `tortoise/record_writer.py` (`_measure_written_bytes` → `_record_written_bytes`
-  # — measurement only; the LEDGER WRITER is `metering.record_postgres_bytes_written`)
-  # (measured on this tree: `--changed-files tortoise/record_writer.py -> ['core']`),
-  # so the `api` half alone would leave that seam's guard asleep on a
-  # record_writer.py-only diff.
-  # ⚠️ `tortoise/postgres_bytes.py` does NOT belong in this row's justification:
-  # it has its own SOURCE_PATTERNS entry (`tools/ci_selection.py`) and selects
-  # `api` (measured: `--changed-files tortoise/postgres_bytes.py -> ['api']`).
-  # Two lanes merged here and each brought this comment; their duplicate ROW was
-  # collapsed but both blocks survived, and the survivor asserted `['core']` —
-  # a figure this head falsifies. Corrected rather than carried.
-  - test_postgres_bytes.py
   - test_embedder_provision.py
   # #3990: the why block must name the operator that mediates a support (id +
   # type + Layer-3 label) plus any mitigation on it. `tortoise/why.py` selects
@@ -4446,15 +4423,6 @@ surfaces:
   - test_installer_preserves_foreign_skill_content.py
   - test_installer_agents_block_3429.py  # #3429: block version + upgrade path (dual: installer-only surface above)
   - test_lifecycle_guards.py        # #2498: shared lifecycle guard — also runs on a tortoise/live.py-only change (terminal vocabulary pin)
-  # #10371: `update_entity`'s Object and Subject arms get their OWN guard inside
-  # `_update_entity` (`tortoise/sdk.py`), because `_assert_lifecycle_guard` is
-  # `:Point`-hardcoded and those arms never reach it. `core` is the arm that owns
-  # the change: `tortoise/commit_ops.py` (where the per-family terminal sets live)
-  # selects `core`, and `tortoise/sdk.py` is a SHARED_MODULE (already the full
-  # matrix). The sibling `test_9649_update_entity_point_lifecycle.py` is `core`
-  # too. Unregistered on `main`, where it reds the REQUIRED `manifest-integrity`
-  # leg and every PR's `python-ci-gate` inherits the red (#11978).
-  - test_10371_nonpoint_lifecycle_guard.py
   - test_7902_write_path_label_widening.py  # #7902: the epistemic-label declaration lives in tortoise/live.py (core fallback) — keep the write-path widening guard awake on a live.py-only change
   - test_7927_epistemic_read_surfaces.py  # #7927: the residual :Point-only epistemic READS (analyze BFS, sdk selection, ranking, audit scope, SVBP) admit all four labels — the same live.py declaration, read side
   - test_about_edges.py
@@ -6353,6 +6321,18 @@ surfaces:
   # and the production call sites it verifies live in metering.py / hosted_api.py
   # (see that surface's entry).
   - test_cost_dimensions.py
+  # #12762/#12764: the per-org Postgres-BYTE meter. DUAL-REGISTERED with `api`
+  # (see that surface's entry) — one row per surface, never one row for both.
+  # THIS arm is the one that carries a core-only diff: TWO of the four subjects
+  # select no named surface — measured `--changed-files
+  # tortoise/postgres_bytes.py` -> ['core'] and `--changed-files
+  # tortoise/record_writer.py` -> ['core'] (and the `tests/` fallback in
+  # `select()` is `core`), while the other two (`tortoise/metering.py`,
+  # `tortoise/supabase_control.py`) select `api`. Hermetic: no Docker, no
+  # network, no model call — the SQL half lives in
+  # `supabase/tests/20261114000001_per_org_postgres_bytes.sql`, so this file
+  # needs no `uri_requiring` declaration.
+  - test_postgres_bytes.py
   # #4051: the capture/extraction dimension's READER (`metering.get_capture_usage`)
   # and the binding that re-points `capture_extraction` at it — dual-registered
   # with `api` (see that surface's entry). THIS arm is the one that carries a
@@ -7263,6 +7243,28 @@ surfaces:
   # subpackage, and `integrity()` requires every `tests/**/test_*.py` to be
   # classified.
   - test_9649_update_entity_point_lifecycle.py
+  # #10371: the SAME door, its OTHER two labels. #9649 closed `update_entity`'s
+  # `:Point` arm, but `_assert_lifecycle_guard` is `:Point`-hardcoded
+  # (`point_id`, `MATCH (n:Point …)`), so the Object and Subject arms never
+  # reached it and a prop edit RESURRECTED a terminal row (measured on `main`
+  # at `6916a6cd89`). `core` for THIS row's own reason, and it is ONE reason:
+  # `tortoise/commit_ops.py` matches no SOURCE_PATTERN and falls to `core`, so a
+  # `commit_ops.py`-only diff selects this file only through this row. ⛔ The
+  # `tortoise/sdk.py` half does NOT come from this row: `sdk.py` is a
+  # SHARED_MODULE, so a diff touching it forces the FULL matrix and reaches the
+  # file with no surface entry at all (measured: with this row removed, an
+  # `sdk.py`-only diff still runs it). The second reason is the manifest's own:
+  # `integrity()` requires every `tests/**/test_*.py` to be classified.
+  # ⛔ This row is a REGISTRATION, not a test change: the suite landed on `main`
+  # in #12745 (`52c8b8f413`) with no manifest row — that diff carried the test
+  # and the two sources and nothing else — so `tools/ci_selection.py
+  # --integrity` refused every tree carrying it with
+  # `manifest drift: ['test_10371_nonpoint_lifecycle_guard.py',
+  # 'test_postgres_bytes.py']`, and the REQUIRED `manifest-integrity` leg went
+  # red on `main`. An UNREGISTERED file is not merely an untidy manifest: it is
+  # a case NO shard is told to run, which is the coverage hole `integrity()`
+  # exists to refuse.
+  - test_10371_nonpoint_lifecycle_guard.py
   - test_uri_env_mutations_declared.py
   # #8066: the served-skill relay ratchet. Its SUBJECT is every
   # `tests/**/*.py`, so it must be registered on every surface such a file can
@@ -10275,6 +10277,29 @@ slow_files:
 # which is why the five `eval/…` entries below can stay here while running no
 # pre-merge leg. Removing them from the list would delete their weights and
 # their classification, and the next eval run would have no committed cost.
+# #10371: DB-backed — the cases that drive the door mint their own throwaway
+# engine (`TortoiseSDK(str(tmp_path / "t10371.db"))`) and assert what the write
+# LEFT in the graph, so it cannot be a fast-pool unit file. Same shape, same
+# reason and the same defect family as the #9649 row below; NOT `carve_out` (no
+# module-level `embedded_only`, and it tolerates the URI redirect — measured
+# `48 passed` embedded and `48 passed` against a real docker FalkorDB, so its
+# stub is not in `tests/_embedded.TEST_NO_REDIRECT_STEMS`) and NOT
+# `uri_requiring` (on a URI-less lane it builds its own engine rather than
+# needing a configured one). ⛔ Not EVERY case mints one: two of its test
+# functions (`test_the_guard_uses_the_family_terminal_sets_that_already_exist`,
+# `test_completed_and_in_progress_are_not_dead_for_an_object`) read the
+# family's declared terminal sets off the module and construct nothing — the
+# clause above is written for the cases that make it a graph file, and is not
+# copied from the sibling row's `every case`. ⛔ This ENTRY is what moved
+# `docs/ops/ci-wall-clock.md`'s slow projection, by taking the file out of the
+# fast pool — NOT the `durations` row below, which is the flat
+# `DEFAULT_FAST_WEIGHT` (`2.0`) and therefore packs identically to no row at all
+# (measured: `slow_wall_projection` is `8.66 / 17.31` both with and without it,
+# `8.64 / 17.28` with neither entry). The `durations` row still has to exist —
+# "a default is not a reading" (#3400/#4348): it is what records the file in the
+# map that `ci_timing --refresh-durations` re-bases, and a `slow_files` entry
+# that is absent from `durations` is a file nothing has ever weighed.
+- test_10371_nonpoint_lifecycle_guard.py
 - test_3311_multilabel_status_vocab.py
 # #9649: DB-backed — every case mints its own throwaway engine
 # (`TortoiseSDK(str(tmp_path / ...), event_log_path=...)`) and asserts what the
@@ -10872,6 +10897,8 @@ durations_floors:
   test_calibration.py: {value: 355.0, pinned: true}
   eval/write_path/test_write_path_operator_lane.py: {value: 355.0, pinned: true}
 durations:
+  test_postgres_bytes.py: 2.0  # new in #12762/#12764, REGISTERED in the repair that followed them — a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `api`/`core` rows above put the file in `fast_pool()`, and `--integrity` stays green either way (the 0.90 coverage ratio has headroom), so only this row records the weight. ⛔ No local timing is quoted beside this weight, on purpose — a seconds figure copied next to a shard-layout input re-stales against the run it came from; the readings live in `WORKTREE-REPORT.md` beside the verbatim commands. What the weight covers: the meter's stored-size ARM against figures captured from real engines (PG 16.9 / 17.12 / 18.3) and the two REFUSALS the parser must make — a `RETURNING`-shaped payload larger than the row that contains it, and the row+chunks DOUBLE COUNT — plus the ledger writer (`record_postgres_bytes_written`: non-fatal on a failed RPC, the self-host/missing-org skip, the corrupt-count refusal, the increment AFTER the commit and never on a replay) and the `record_writer._measure_written_bytes` seam. Hermetic: no Docker, no network, no model call, no `gh`. ⛔ The CASE COUNT is deliberately not quoted as a weight input (`tools/ci_selection.py --integrity` is the authority; `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it).
+  test_10371_nonpoint_lifecycle_guard.py: 2.0  # new in #10371 (PR #12745), REGISTERED in the repair that followed it — same #3400/#4348 basis as the row above: PR-added, so flat `DEFAULT_FAST_WEIGHT`, no local reading. The row must EXIST, not merely default ("a default is not a reading"): it is what records the file in the map `tools/ci_timing.py --refresh-durations` re-bases, and `tools/ci_selection.py --integrity`'s coverage ratio cannot police one missing row. ⛔ The VALUE moves no packing — `2.0` IS `DEFAULT_FAST_WEIGHT`, so the slow pool packs identically with and without it (measured); what moved `docs/ops/ci-wall-clock.md`'s projection is the `slow_files` ENTRY, which takes the file out of the fast pool. `tools/ci_timing.py --refresh-durations` replaces the value from the first push-to-main junit sweep that includes the file. What the weight covers: the two arms `update_entity` was missing — an Object and a Subject, under BOTH dead sets the family declares (`commit_ops.OBJECT_TERMINAL_STATUSES` / `SUBJECT_TERMINAL_STATUSES`, read from the module and never re-spelled as a literal) — each driven through the real door and asserted on what the write LEFT in the graph; the ANTI-REGRESSION arms (pack/connector words are NOT refused for being undeclared — the closed-`OBJECT_STATUS_VALUES` vocabulary that was drafted and dropped, so a re-introduced allowlist reds here); and the over-block pins (a live row still takes every one of those words). ⛔ It does NOT pin the JSONL journal: the fixture builds `TortoiseSDK(str(tmp_path / "t10371.db"))` with no `event_log_path`, so the journal half is the SIBLING's coverage (`tests/test_9649_update_entity_point_lifecycle.py`, which wires `event_log_path` and asserts a refused call journals nothing) and must not be claimed here. ⛔ Its engine is EMBEDDED on the URI-LESS lane only, and this row must not say otherwise: on a URI-set lane (the slow/docker leg this file now runs on) the projection's test redirect DISCARDS the `tmp_path` argument — this stem is NOT in `tests/_embedded.TEST_NO_REDIRECT_STEMS` (`tortoise/projection/__init__.py`: the redirect fires when `_caller_stem not in _no_redirect`), so the same cases run against the configured server. The `slow_files` comment above records the measurement that establishes both lanes: `48 passed` embedded and `48 passed` against a real docker FalkorDB. No model call on either lane. ⛔ The CASE COUNT is deliberately not quoted: it is the file's own business and it moves whenever a review round adds a pin — `tools/ci_selection.py --integrity` is the authority.
   test_consent_key_check.py: 2.0  # new in #10488 — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the durations refresher samples push-to-main runs only), so it takes the flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core`/`api` registrations above put it in `fast_pool()`, and `--integrity` stays green either way, so only this row records the weight. ⛔ No local timing and no CASE COUNT are quoted on purpose — a figure beside a weight re-stales against the run it came from, and the count is `tools/ci_selection.py --integrity`'s business; `tools/ci_timing.py --refresh-durations` replaces this from the first push-to-main junit sweep that includes the file. What the weight covers: the checker AND the workflow it feeds — the exit-code table, the fingerprint and closed-set `reason` gates, the fail-closed `configured` states, and the alert body's arms EXECUTED end to end against a stubbed `auto-file-issue.sh`, each pin checked against the mutation it names. Hermetic: the transport is a fake `urlopen`, no docker, no graph, no network, no model call.
   test_consent_key_fingerprint_10488.py: 2.0  # new in #10488 — same #3400/#4348 basis as the row above: PR-added, so flat `DEFAULT_FAST_WEIGHT`, no local reading. DUAL-REGISTERED (`api` + `core`), and both registrations are what put it in `fast_pool()`. What the weight covers: the two implementations must agree BYTE-FOR-BYTE — the Python `consent_key_fingerprint` against the shape the TS twin computes, the `\Z` anchor (a trailing newline must not pass), the whitespace/padding arms, and the rule that a fingerprint is derived from the same bytes the HMAC signs and never from a normalised value. ⛔ The CASE COUNT is deliberately not quoted (`tools/ci_selection.py --integrity` is the authority).
   test_consent_key_runbook_10488.py: 2.0  # new in #10488 — same #3400/#4348 basis: PR-added, flat `DEFAULT_FAST_WEIGHT`, no local reading. What the weight covers: the OPERATOR table in `docs/infra-runbook.md` §4.4 — its heading, the three field names (`key_fingerprint`/`configured`/`reason`), the closed six-code `reason` vocabulary, the `null`-is-not-`false` misread, `MISMATCH`-during-a-rotation reading as the rotation, the `fly secrets set`-alone-is-reverted warning, the `sha256sum | cut -c1-12` reproduce one-liner, and the `gh workflow disable consent-key-drift` off-switch. ⛔ NOT the `\Z` anchor and NOT a `gh secret set` invocation: those are §2.5 pins, they live in `test_consent_key_fingerprint_10488.py`, and the row above already describes them — THIS row used to copy that description verbatim, so it claimed coverage that did not exist and a rewrite of §4.4's shape to `sha256(key)[:12]` in uppercase stayed green. The clause is now enumerated from the file it annotates. Documentation pins only: no docker, no graph, no network, no model call. ⛔ The CASE COUNT is deliberately not quoted (`tools/ci_selection.py --integrity` is the authority).
