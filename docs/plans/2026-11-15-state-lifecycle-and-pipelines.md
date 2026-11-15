@@ -166,6 +166,7 @@ Every field is **optional**. A thing with no `status` reads as `live` — create
 ## 6. The one rule every reader follows
 
 This is the whole architecture in one decision. Anything that needs to know "does this still count" asks **one** question, from **two** sources of meaning:
+
 ```mermaid
 flowchart TD
     Q{Does this still count?}
