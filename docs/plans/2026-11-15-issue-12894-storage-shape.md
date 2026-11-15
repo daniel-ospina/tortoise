@@ -24,8 +24,11 @@ related:
 (A7), for Stage A of `#12894`.
 
 **Measured at:** `main` @ `58f904ccf793` (this worktree, `.worktrees/12894-storage-archaeology`).
-Every count in §A2 comes from a `tools/worktree_report.py run --cmd` log committed with the worktree
-report; the commands are reproduced verbatim where the count appears.
+Every count in §A2 is **re-derivable from the command printed beside it** — the census blocks reproduce the
+command verbatim and, where the output is long, its contiguous head. ⛔ **`WORKTREE-REPORT.md` is NOT
+committed** (`.gitignore:158-159`), so no stored log can be retrieved and none is cited as if it could be:
+the commands in this document are the artifact, and a reader re-runs them. Where a count below has no
+command beside it, that is a defect in this document, not a pointer to a log.
 
 **How to read this document.** §A1 is the completeness artifact and is the one to grade. §A2–§A5 are the
 map. §6 resolves the recorded tension the issue names, in words. §A7 is the ideal, and §A7.4 is the
@@ -38,21 +41,34 @@ lane did not do.
 
 ### A1.0 What the population is, and how it was closed
 
-**The population is 182 entries / 181 distinct paths** (`registry-graph-schema.md` is listed twice) — and the
-honest accounting of what was **read** is not a partition of that list, because most of what had to be read
-**is not in the list at all**:
+**The population is 182 entries / 180 distinct paths** — two paths are each listed twice:
+`docs/registry-graph-schema.md` (`:73`, `:74`) and `docs/product/sdk-surface-declaration.md` (`:85`, `:87`) —
+and the honest accounting of what was **read** is not a partition of that list, because most of what had to
+be read **is not in the list at all**:
 
 | | count |
 |---|---|
 | index entries | **182** |
-| distinct paths | **181** |
-| documents **read** for this map (`§A1.1`) | **41** |
-| …of those, present as index entries | **22** |
-| …of those, **absent from the index entirely** | **19** |
-| index paths **not read** | **159** |
+| distinct paths | **180** |
+| documents **read** for this map | **45** |
+| …of those, present as index entries | **25** |
+| …of those, **absent from the index entirely** | **20** |
+| index paths **not read** | **155** |
 
-⛔ **And that is the finding, stated as arithmetic rather than as an impression: 19 of the 41 documents
-this map needed — 46 % of the read set — have no index row.** They are the three record migrations, the
+**How each number is obtained, so it can be checked rather than trusted.** The population is every row of
+`docs/00_index.md` whose path cell carries a backticked path (247 lines, 182 such rows); the two duplicate
+paths above are found by grouping on that path. The read set is **45 documents**: the **42** that occupy
+`§A1.1`'s **40 `READ` rows** (41 numbered rows, one of which is declared **NOT READ**; row 40 bundles three
+evidence records) plus the **3** read after the first draft (`§12`). **25** of the 45 are index entries and
+**20** are not, which is 45. **25** index paths were read, so **155** of the 180 were not, which is 180.
+
+⛔ **An earlier revision of this table said 41 / 22 / 19 / 159, and the arithmetic in it did not close:** it
+counted *rows* as documents (so the three-record row counted once, hiding 2 paths inside it), it counted the
+row declared **NOT READ** as read, and it left the three late reads inside the "not read" population while
+naming them in `§A1.4`. The row and path levels are stated separately above for that reason.
+
+⛔ **And that is the finding, stated as arithmetic rather than as an impression: 20 of the 45 documents
+this map needed — 44 % of the read set — have no index row.** They are the three record migrations, the
 two governing documents (`STORAGE-ARCHITECTURE.md`, `event-catalog.md`), all five journal-mutation plan
 docs (`#2194`/`#2295`/`#2488`/`#3689`/`#2814`), the unjournalled-mutation class plan, the `#7951` atomic-write
 plan, the record schema and cache-projection epics, `per-org-bytes`, the `#2313` backups scoping and the
@@ -91,7 +107,7 @@ are indexed. The scope below is therefore the union of (a) the index's own entri
 a **defect to file**, not a convenience: a lane starting from the index alone would not find the document
 that governs the subject. (Filed as its own item in §A6, debt row D-22.)
 
-### A1.1 In scope — 41 documents, each `READ` with the section or line taken
+### A1.1 In scope — 41 numbered rows: 40 `READ`, 1 declared `NOT READ`
 
 | # | Document | Status | What was taken from it (section / line) |
 |---|---|---|---|
@@ -175,30 +191,30 @@ numbered sections and no §12.1c. **§12.1c is `STORAGE-ARCHITECTURE.md:1115`** 
 "RESOLVED 2026-11-07"). Both were read. Recorded here because a lane that trusts the brief's section number
 will read the wrong document and conclude the section is missing.
 
-### A1.4 Not read — 159 index paths, by declared class, and 54 named individually
+### A1.4 Not read — 155 index paths, by declared class, and 50 named individually
 
-`docs/00_index.md` is **247 lines carrying 182 entries / 181 distinct paths**. Of those, **22 were read**
-(`§A1.1`) and **159 were not**. The 159 are accounted for as **105 by an exclusion rule** and **54 named
-individually with a reason** — so there is no unclassified remainder, and the two claims are separate:
-a rule is checkable in bulk, and a named reason is checkable one at a time.
+`docs/00_index.md` is **247 lines carrying 182 entries / 180 distinct paths**. Of those, **25 were read**
+(`§A1.1`, plus the three late reads recorded in `§12`) and **155 were not**. The 155 are accounted for as
+**105 by an exclusion rule** and **50 named individually with a reason** — so there is no unclassified
+remainder, and the two claims are separate: a rule is checkable in bulk, and a named reason is checkable one
+at a time.
 
-**By rule (105).** Each class is a **path-prefix rule**, evaluated over the 159 unread paths, so any reader
+**By rule (105).** Each class is a **path-prefix rule**, evaluated over the 155 unread paths, so any reader
 can reproduce it without trusting a count:
 
 | Class | Rule (path prefixes) | Count |
 |---|---|---|
 | **C1 — another subsystem, asserts nothing about the storage shape** | `docs/quickstart-*`, `docs/beta-feedback`, `docs/infra-runbook`, `docs/ops/ci-*`, `docs/ops/batch-*`, `docs/ops/container-lifetime`, `docs/ops/BATCH-REVIEW`, `docs/ops/abuse-flag`, `docs/ops/ISSUE-WORKING`, `docs/blog-authoring`, `docs/auth-architecture`, `docs/authorization-architecture`, `docs/engineering/auth/`, `docs/oauth-mcp`, `docs/adr/ADR-010`, `docs/adr/ADR-012`, `product/competition`, `docs/product/`, `docs/ax/`, `docs/scoping/`, `docs/research/2026-08*`, `docs/research/2026-09-0*`, `docs/research/2026-09-1*`, `docs/research/2026-09-25-4503`, `docs/research/2026-10-15-2427`, `docs/research/memory-attribution`, `docs/research/2026-11-08-1779`, `docs/ci/`, `docs/ci-timing`, `tools/ci_check_repair`, `docs/plans/2026-09-10-2789`, `docs/plans/2026-09-22-3525`, `docs/plans/2026-10-11-2081`, `docs/plans/2026-10-18-8098`, `docs/plans/2026-10-16-8051`, `docs/plans/2026-10-22-1402`, `docs/epics/2026-11-07-2281`, `docs/runbook/4220`, `docs/runbook/3514`, `docs/runbook/b7-*`, `docs/runbook/3806`, `docs/runbook/1987`, `benchmarks/`, `docs/benchmarks/comparison*`, `docs/benchmarks/1144*`, `docs/adr/ADR-009`, `docs/adr/ADR-011`, `docs/experiments/`, `docs/scoping-2600`, `docs/evidence/3589`, `docs/evidence/1789`, `docs/evidence/9664`, `docs/evidence/3770`, `docs/evidence/10137` | **103** |
-| **C2 — process, or observability of the machinery** | `docs/ops/batch-integration`, `tools/run_affected`, `tools/batch_review`, `docs/infra/tmpdir-sweep`, `docs/scoping/2026-09-18-4098`, `docs/scoping/2026-09-20-4408`, `docs/runbook/4408`, `docs/scoping/2026-09-01-2090`, `docs/scoping/2026-09-02-2127` (**all but the first six already counted in C1**, hence **2**) | **2** |
+| **C2 — process, or observability of the machinery** | `docs/ops/batch-integration`, `tools/run_affected`, `tools/batch_review`, `docs/infra/tmpdir-sweep`, `docs/scoping/2026-09-18-4098`, `docs/scoping/2026-09-20-4408`, `docs/runbook/4408`, `docs/scoping/2026-09-01-2090`, `docs/scoping/2026-09-02-2127` — **7 of the 9 prefixes match an entry, and 5 of those 7 already carry a C1 prefix** (`docs/ops/batch-integration` and the four `docs/scoping/…`), while `tools/run_affected` and `tools/batch_review` match no entry at all; the class is therefore **2**: `docs/infra/tmpdir-sweep.md`, `docs/runbook/4408-branch-reaper.md`) | **2** |
 | **C3 — reads a storage surface, asserts nothing about its shape** | none unread: every such entry was **read** instead (see `§A1.1` rows for `#4503`, `#11083`, `#11469`, `#8607`, `#1779`, `#1402`). **The class is empty by construction here, and saying so is the point** — this was the class the first draft used to *exclude* documents it had not opened. | **0** |
 
-**103 + 2 + 0 = 105. 105 + 54 = 159.** ✅
+**103 + 2 + 0 = 105. 105 + 50 = 155.** ✅
 
-**Named individually (54) — in-scope by path, not read, with the reason.** These are the entries whose
-prefix does not match an exclusion rule, so each needs its own stated reason. **Read *after* the first
-draft, because this review demanded they be accounted for:** `docs/evidence/10000-turns-bytes/README.md`
-(the armed-capture measurement — see `§A2.6`), `docs/evidence/9558-record-write-cost/README.md` (record
-write cost: 3.75–3.84 ms/record median, `:118-119`), `docs/evidence/7950-capstone/README.md` (the S1–S6
-verdict table — see `§A7.0`).
+**Named individually (50) — in-scope by path, not read, with the reason.** These are the entries whose
+prefix does not match an exclusion rule, so each needs its own stated reason. (Three further documents were
+in this list in an earlier revision and are **read** now — `docs/evidence/10000-turns-bytes/README.md`,
+`docs/evidence/9558-record-write-cost/README.md`, `docs/evidence/7950-capstone/README.md`; they are counted
+in `§A1.0`'s 45 and the reason each was read late is in `§12`.)
 
 | Not read | Why not |
 |---|---|
@@ -212,8 +228,8 @@ verdict table — see `§A7.0`).
 | `docs/runbook/2578-*`, `2655-*`, `2684-*`, `2886-*`, `2976-*`, `4107-*`, `4210-*` | Temporal/retrieval/preference measurement runbooks. Reading surfaces only. |
 | `docs/ops/669-post-flip-verification`, `cost-allocation`, `extraction-cost-metrics`, `docs/infra/pytest-timeout-guard`, `tools/finding_provenance.py`, `tortoise/__all__.py`, `docs/research/2026-10-19-8709-member-own-key-surface`, `docs/research/2026-11-09-11656-kindpair-enforcement` | Verification procedure, cost *policy*, test-infrastructure, and two non-storage research docs. |
 
-⛔ **The honest summary of this section:** 22 of 181 index paths were read (12 %), and **the reason that is
-not a scandal is only that the index does not contain the governing documents** — 19 of the 41 documents
+⛔ **The honest summary of this section:** 25 of 180 index paths were read (14 %), and **the reason that is
+not a scandal is only that the index does not contain the governing documents** — 20 of the 45 documents
 that were read are invisible to it. Both halves of that sentence are defects and neither is a defence of the
 other.
 
@@ -246,9 +262,9 @@ journal has *one* write primitive while the cache has none (§A6 D-01).
 ```console
 $ rg -n "log\.read_all\(|read_all\(salvage=True\)|read_for_replay" tortoise/     # 39 lines
 tortoise/m0.py:38:    points = fold(log.read_all())
+tortoise/m0.py:44:    print(f"events     : {len(log.read_all())}  → {args.log}")
 tortoise/log.py:841:# among the records a REPLAY would read — `read_all(salvage=True)`, the ONE
-tortoise/log.py:1210:def read_for_replay(log) -> list[dict]:
-… (39 lines in total)
+… (36 more; `rg` walks the tree in parallel, so the FILE order differs between runs — the COUNT does not)
 ```
 
 Production call sites that parse journal records (excluding docstring references and the embedded
@@ -315,25 +331,26 @@ tortoise/projection/__init__.py:18902            reestablish_watermark (engine 5
 ```
 
 `_GRAPH_EVENT_TYPES` has **11 members** (`sdk.py:4671`), and the set is **defined by the store boundary**, not
-by a list (`sdk.py:4658-4660`, `#12458` gate 1's verified quote). `:GraphEventMeta` appears at **44** sites in
-`tortoise/` (recorded run `A4-GraphEventMeta-sites`), of which the allocator is `next_seq`'s `MERGE` at
-`event_store.py:491` and the carries are `capture_watermark:557` / `reestablish_watermark:657`,`:738` /
-`hosted_backup.py:842`,`:914` / `webhook_delivery.py:1052` / `sdk.py:13582` (`first_seq` for the 410).
+by a list (`sdk.py:4658-4660`, `#12458` gate 1's verified quote). `GraphEventMeta` appears at **61** sites in
+`tortoise/` (`rg -n 'GraphEventMeta' tortoise/ | wc -l`; **50** of them spell it `` `:GraphEventMeta` ``), of
+which the allocator is `next_seq`'s `MERGE` at `event_store.py:491` and the carries are
+`capture_watermark:557` / `reestablish_watermark:657`,`:738` / `hosted_backup.py:842`,`:914` /
+`webhook_delivery.py:1052` / `sdk.py:13582` (`first_seq` for the 410).
 
 ### A2.5 The reconciliation
 
 | population | count | source |
 |---|---|---|
-| journal append call sites | **3** | recorded run `A2-journal-append-sites` |
+| journal append call sites | **3** | §A2.1 (the command is reproduced there) |
 | journal replay engines | **5** (4 journal + 1 record) | §A2.2 table |
 | journal readers, production parse sites | **12** + 4 bypass | §A2.2 table, §A2.6 |
 | `journal_event` writers | **1** | §A2.3 |
 | `journal_event` folding readers | **1** | §A2.3 |
 | `journal_event` byte-meter readers | **2** (py) + 1 RPC + 1 migration fn | §A2.3 |
 | `_GRAPH_EVENT_TYPES` members | **11** | `sdk.py:4671` |
-| `event_store` allocator call sites | **1** (`sdk.py:13832`) | recorded run `A2-event-store-callsites` |
-| `event_store` feed read sites | **3** (`sdk.py:13587`, `webhook_delivery.py:1300`, `why_snapshot.py:526`) | same run |
-| `:GraphEventMeta` mentions in `tortoise/` | **44** | recorded run `A4-GraphEventMeta-sites` |
+| `event_store` allocator call sites | **1** (`sdk.py:13832`) | §A2.4 (command reproduced there) |
+| `event_store` feed read sites | **3** (`sdk.py:13587`, `webhook_delivery.py:1300`, `why_snapshot.py:526`) | same block |
+| `GraphEventMeta` mentions in `tortoise/` | **61** (50 spell `` `:GraphEventMeta` ``) | `rg -n 'GraphEventMeta' tortoise/ \| wc -l`, §A2.4 |
 
 **The number that reconciles the shape: the journal has 1 write primitive and 5 replay engines; the record has
 1 write path and 1 folding reader; `:GraphEvent` has 2 stores' worth of bookkeeping and 1 allocator that is the
@@ -372,7 +389,7 @@ consequences this map must carry:
 1. **A7's "the graph is a derived cache of the record" is, on the armed lane, "the graph is a per-turn
    `:GraphEvent` carrier that duplicates a `journal_event` row"** — a third copy of the same decision, not a
    cache of it. That is the store D-19 retires the *premise* for, and it is why D-19's 32,032 B/session figure
-   is the *surviving* residue rather than the graph's cost (§A4 already says the figure is the mirror's).
+   is the *surviving* residue rather than the graph's cost (§A2.6 already says the figure is the mirror's).
 2. **The document states its own limit, which must be quoted with the number:** the committed figure's
 text-scan covers three properties (`n.c`, `n.content`, `n.text`); the `payload`/`props` half is pinned
 separately by `tests/test_10000_turns_record_only.py` on a **2-turn** capture, not on this corpus — and
@@ -614,7 +631,7 @@ contradicted one is the crux.
 
 ### A7.4 The "three stores" framing is an undercount, and that changes the target
 
-The issue says "no app-written file as a **third** store". The live `create_point` path touches **five**
+The issue says "no app-written file as a **third** store". The live `create_point` path touches **six**
 independent durable surfaces per logical write, in this order (`2026-10-14-7951:§3` + `sdk.py`):
 
 1. `:EpMeta.ep_version` — a graph counter (MERGE, unjournalled, declared `#9123`)
@@ -868,7 +885,7 @@ than re-deriving it.
 | The transactional outbox exists to prevent the dual-write failure (commit-then-publish-fails, or publish-then-rollback), and delivery is normally **at least once** so consumers need durable event IDs and idempotent handlers | Debezium's outbox documentation (`debezium.io/documentation/reference/stable/integrations/outbox.html`) | **YES, in this repo's own vocabulary**: `journal_event` keys `(org_id, graph_id, seq)` as *"the idempotency key: applying a position twice is a no-op"* (`record_projection.py:5999`), and `ON CONFLICT DO NOTHING` is the idempotent handler. The record **is** an outbox under this definition. |
 | Same-transaction projection is the right choice **only** when the projection is local, small and operationally essential — otherwise it couples every schema change to the write path and multiplies lock contention | same | **PARTIALLY**: this repo already pays that cost knowingly — the record's plan emits layer rows *and* the position row from **one** plan (`replay_plan`). The map records the cost as `ρ` (§17.4), measured. No new claim is made from this. |
 | PostgreSQL sequences are **nontransactional**: `nextval()` advances immediately, is not rolled back, and concurrent callers do not wait — so a sequence cannot provide a gapless or **commit-ordered** ordinal, and a consumer seeing 11 may wait forever for 10 | `postgresql.org/docs/current/sql-createsequence.html`, `…/functions-sequence.html` | **PARTIALLY, and my first pass got this wrong** (corrected in place rather than restated): I claimed the record schema had *no sequence at all*; it **has one** — `public.relation.id` is `bigint GENERATED ALWAYS AS IDENTITY` (`20261012000003:167`), whose ACL split is documented at `20261025000001:205-212`. What is true is narrower and is the load-bearing half: **`journal_event` has no sequence and no id column** — its key is the journal's position — and the one sequence the record does carry is a **surrogate**, where gaps are harmless, which is exactly the property `seq` cannot have. The claim that a sequence is nontransactional is PostgreSQL's own documented behaviour and is **not** independently re-measured here — stated as external. |
-| A **transactional counter row** (`UPDATE … SET c = c + 1 RETURNING`) gives gapless committed numbering by serialising on one row, at a throughput cost | same | **YES for the cost analogue**: the journal already serialises per graph on one file handle (`thread lock + flock + one write(2)`, `log.py:820-826`), so the per-graph serialisation is a lateral move. The row-lock semantics themselves are not measured here (no Postgres bench was run — a bench is a real cost and A7.5 is a proposal, not a landing). |
+| A **transactional counter row** (`UPDATE … SET c = c + 1 RETURNING`) gives gapless committed numbering by serialising on one row, at a throughput cost | same | **PARTIALLY — and the cost half is NOT a lateral move** (corrected in place, `§A7.5`): the journal does serialise per graph on one file handle (`thread lock + flock + one write(2)`, `log.py:594-620`), but `flock` covers only the seal read-modify-write plus one `write(2)` and is released before the API, record and cache legs, and it is **abandoned** after a 5 s timeout (`_FLOCK_TIMEOUT_S`, `log.py:625-633`). A row lock held until `COMMIT` across six statements is therefore a **new** bottleneck, not an equivalent one — quoting this row as reassurance re-asserts the equivalence `§A7.5` removes. The row-lock **semantics** remain unmeasured here (no Postgres bench was run — a bench is a real cost and A7.5 is a proposal, not a landing). |
 | Migrating an app-written WAL into the store: deploy the **new reader first**, backfill, dual-write, reconcile by event identity, cut readers, then writers, then retire; and state whether the order is **allocation**, **commit** or **publication** order because they are not interchangeable | OpenSearch migration-assistant architecture; Kafka topic-migration practice (`acemq.com/guides/kafka-migration-guide`); `architecture-weekly.com/p/the-write-ahead-log-a-foundation` | **YES, and it maps onto choices this repo already made**: `#12459` plans exactly this shape for a format change (readers before writers, per-record dispatch, append-only ⇒ both shapes readable forever, `:824`'s silent-drop warning is the falsifier); `#8526` is the reader-first arm for the self-host wiring gap. The paper trail is in-tree, not imported. |
 | Stored vectors: pgvector and every comparable delegate the vector to a store rather than a versioned on-disk format | (carried from `#12459`'s own survey, cited not re-run) | **YES**: `20261109000001_record_embedding_vector.sql` + `#11642` — the `embedding_vec vector(384)` GENERATED column is exactly that delegation. |
 
@@ -906,7 +923,7 @@ correct artifact — is the one that propagates, and because the near-miss is th
   regex over source, they count resolved call sites), so the honest output is "the denominator is unknown
   and one command shows it", not "the answer is 458".
 - **`docs/ops/multi-graph-migration-runbook.md` not read**, with the reason stated in A1.1 row 38.
-- **159 index paths not read**: 105 by a stated exclusion rule, **54 named individually with a reason** in
+- **155 index paths not read**: 105 by a stated exclusion rule, **50 named individually with a reason** in
   A1.4. The first draft claimed a 41/141 partition that did not survive its own lists (36 entries in no
   class); that is corrected rather than restated, and A1.0 records what the wrong version said.
 
@@ -928,17 +945,23 @@ stronger than any claim I could make from a missing test).
 
 ---
 
-## 12 — The review cycle, and what it changed (the honest version)
+## 12 — The review cycles, and what they changed (the honest version)
 
-A fresh-context reviewer was dispatched against this document **after** its first committed form, with the
+**Cycle 1.** A fresh-context reviewer was dispatched against this document **after** its first committed form, with the
 explicit instruction to hunt for false citations, unsupported counts, and unexamined surface. **It found 16
 issues (1 P0, 8 P1, 7 P2) and every finding below was re-verified against the source before being applied;
 two were partly false and are recorded as such.**
 
+**Cycle 2**, also fresh-context, ran against the commit that cleared the required `docs` check. It found 7 more
+(3 P1, 4 P2). Every one was re-measured before being applied, and **one was partly false**: the claim that
+`§A1.4`'s C2 class is 4 rather than 2 does not survive the population — 7 of C2's 9 prefixes match an index
+entry and 5 of those already carry a C1 prefix, so C2 is **2** and only the *sentence* beside it was broken.
+Rows from both cycles are in the table below, in the order they were found.
+
 | what the reviewer found | verified? | what changed |
 |---|---|---|
 | **P0 — the unproven-position class (`#9252`) is entirely absent**, and the document quotes the 974 MB journal that makes it bite | ✅ **verbatim** (`log.py:1503-1530`, `monitoring.py:1459-1466`) | **new debt row D-25**, plus the strongest evidence *for* A7.5; D-09 and A7.6 now connect to it |
-| A1's partition is arithmetically false — 36 entries in no class, `C2 ⊂ C1` | ✅ **re-derived** (C1 = 145 not 128, union 146 not 141, 36 uncovered) | **A1.0/A1.4 rewritten**: the key is now the **path**, never a position number; 105 by rule + **54 named with a reason** |
+| A1's partition is arithmetically false — 36 entries in no class, `C2 ⊂ C1` | ✅ **re-derived** (C1 = 145 not 128, union 146 not 141, 36 uncovered) | **A1.0/A1.4 rewritten**: the key is now the **path**, never a position number; 105 by rule + named with a reason (the count was 54 here and is **50** after the second cycle below, when the three late reads left the unread population) |
 | D-24 is a duplicate of open **`#9318`**, stated 4 lines below the quote that names it | ✅ **verbatim** (`record_writer.py:2412-2425`) | ⚑ removed from D-24, the tracker cited, and the argument demoted to "the reachable trigger" — which is all it ever added |
 | A7.2 kept the "no sequence in the record schema" claim that A7.5 corrects | ✅ (the `rg` does return a `nextval` comment line) | parenthetical replaced with the narrow true statement |
 | A7.5's "lateral move in concurrency" + unspecified seed | ✅ (`log.py:625-633`; `MAX(seq)+1` rejected at `:835-838`) | false equivalence **removed and stated as a real new bottleneck**; the seeding rule written |
@@ -950,6 +973,12 @@ two were partly false and are recorded as such.**
 | block quote alters "a seq" → "a position" | ✅ (`log.py:832-833`) | restored |
 | `sdk.py:5653-5683` is a stale range lifted from the plan | ✅ (it is now the `status`-key refusal) | re-resolved to `sdk.py:13832-13833`/`:14008` |
 | A6's tally (13/8/3) did not match its own table | ✅ (it was 14/8/2) | recount published, and **26 rows now** after D-25/D-26 |
+| **§A1.0's coverage arithmetic did not close** — 22 indexed + 19 absent = 41 read, but one of the 41 rows is declared NOT READ, row 40 bundles three documents, and the three late reads were counted as unread while §A1.4 named them | ✅ **re-measured**: 182 entry rows are **180 distinct** paths (two paths listed twice); the read set is **45** documents across **40** `READ` rows; **25 / 20 / 155** partition at path level. `§A1.4`'s **2** for C2 **survives** — 7 of its 9 prefixes match an entry and 5 of those already carry a C1 prefix — so only the 155/50 denominators moved | A1.0/A1.4 restated at path level, the old row/path confusion recorded rather than overwritten, and the three late reads moved out of the unread population |
+| **§9.2 re-asserted the cost equivalence `§A7.5` had just removed** ("the per-graph serialisation is a lateral move"), and cited `log.py:820-826`, which is `_read_exact`, not the lock seam | ✅ (`log.py:594-620` is the seam; `:625-633` is its 5 s abandonment; `:820-826` is the tail read) | §9.2's row now says the opposite, cites the seam, and names the row as a place that would re-assert the removed claim |
+| **`§A2` claimed a stored-log provenance that cannot be retrieved** — "every count comes from a `worktree_report.py run` log committed with the worktree report", while `.gitignore:158-159` ignores both the report and its logs | ✅ (`.gitignore:158-159`, `git check-ignore -v`) | provenance restated: the **command** beside each count is the artifact, and the `:GraphEventMeta` count has one now |
+| `:GraphEventMeta` "appears at **44** sites" | ❌ **wrong by 17 sites** — reported 44, measured **61** (`rg -n 'GraphEventMeta' tortoise/ \| wc -l`; 61 at the measured base too, by `git grep -c`), of which 50 spell `` `:GraphEventMeta` `` | count corrected in §A2.4 and §A2.5, with the command printed beside it |
+| three cross-references pointed at sections that do not say it: `§A7.0` (no such section), `§A4` for the 32,032 figure (it is `§A2.6`), and "**five** durable surfaces" above a six-item list the next sentence calls "six statements" | ✅ (`grep '^#\\+ '` has A7.1–A7.7 only; `32,032` occurs at `:156`, `:365`, `:561`, `:374`, never in §A4) | `§A7.0` → `§A7.5`; `§A4` → `§A2.6`; `five` → `six` |
+| the `read_all` census excerpt pasted three output lines as if they were the command's contiguous head, when `rg`'s parallel walk makes the file order unstable between runs | ✅ (re-running the command returns a different file order; the **39** total is stable) | the block now pastes the real contiguous head and **says** the order is not stable, instead of implying an excerpt that reproduces |
 
 ⛔ **The most important thing this cycle did was make the shape harder, not easier.** Two findings (D-25,
 D-26) are cases A7.5 had **assumed away in both directions** — a record write with no journal position, and a
