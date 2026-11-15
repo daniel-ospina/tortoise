@@ -143,7 +143,7 @@ def test_a_new_source_records_its_window_start(src):
     window" had nothing behind it.
     """
     events, sdk = src
-    sdk.create_source(_URL, "document", title="v0", contentHash="h-0")
+    sdk.register_source(_URL, "document", title="v0", contentHash="h-0")
 
     p = _props(sdk, _URL)
     assert "validFrom" in p, "the created source carries no window start"
@@ -165,7 +165,7 @@ def test_the_window_start_is_the_recorded_instant_not_the_replay_clock(src):
     the fold's own `_now_iso()` — the #5024 `updatedAt`/`ingestedAt` class.
     """
     events, sdk = src
-    sdk.create_source(_URL, "document", title="v0", contentHash="h-0")
+    sdk.register_source(_URL, "document", title="v0", contentHash="h-0")
     live = _props(sdk, _URL)["validFrom"]
 
     sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
@@ -187,8 +187,8 @@ def test_a_transition_opens_the_new_window_and_closes_the_prior_one(src):
     carried no window facts, and the node's `validFrom` never moved.
     """
     events, sdk = src
-    sdk.create_source(_URL, "document", title="v0", contentHash="h-0")
-    sdk.create_source(_URL, "document", title="v1", contentHash="h-1")
+    sdk.register_source(_URL, "document", title="v0", contentHash="h-0")
+    sdk.register_source(_URL, "document", title="v1", contentHash="h-1")
 
     t = _of_type(events, "SourceVersioned")
     assert len(t) == 1
@@ -219,13 +219,13 @@ def test_a_noop_recheck_moves_neither_the_window_nor_the_journal(src):
     found.
     """
     events, sdk = src
-    sdk.create_source(_URL, "document", title="doc", contentHash="h-0",
+    sdk.register_source(_URL, "document", title="doc", contentHash="h-0",
                       summary="s-0")
     before = _props(sdk, _URL)
     n_before = len(_records(events))
 
     for _ in range(5):
-        sdk.create_source(_URL, "document", title="doc", contentHash="h-0",
+        sdk.register_source(_URL, "document", title="doc", contentHash="h-0",
                           summary="s-0")
 
     assert _props(sdk, _URL) == before, (
@@ -243,10 +243,10 @@ def test_a_same_hash_write_with_new_extras_does_not_move_the_window(src):
     cannot be "did we journal"; it must be the stored-hash difference.
     """
     _events, sdk = src
-    sdk.create_source(_URL, "document", title="v0", contentHash="h-0",
+    sdk.register_source(_URL, "document", title="v0", contentHash="h-0",
                       summary="before")
     before = _props(sdk, _URL)["validFrom"]
-    sdk.create_source(_URL, "document", title="v0", contentHash="h-0",
+    sdk.register_source(_URL, "document", title="v0", contentHash="h-0",
                       summary="after")
     assert _props(sdk, _URL)["summary"] == "after"
     assert _props(sdk, _URL)["validFrom"] == before, (
@@ -256,11 +256,11 @@ def test_a_same_hash_write_with_new_extras_does_not_move_the_window(src):
 def test_a_hashless_write_does_not_move_the_window(src):
     """The preserve-everything arm must preserve the window too."""
     _events, sdk = src
-    sdk.create_source(_URL, "document", title="v0", contentHash="h-0")
+    sdk.register_source(_URL, "document", title="v0", contentHash="h-0")
     before = _props(sdk, _URL)["validFrom"]
     # No contentHash: the ON MATCH clause preserves hash/version/updatedAt —
     # and the window.
-    sdk.create_source(_URL, "document", title="retitle")
+    sdk.register_source(_URL, "document", title="retitle")
     p = _props(sdk, _URL)
     assert p["contentHash"] == "h-0"
     assert p["validFrom"] == before, (
@@ -278,7 +278,7 @@ def test_the_window_timeline_is_recoverable_from_the_journal_alone(src):
     """
     events, sdk = src
     for i in range(4):
-        sdk.create_source(_URL, "document", title=f"v{i}",
+        sdk.register_source(_URL, "document", title=f"v{i}",
                           contentHash=f"h-{i}")
     live_from = _props(sdk, _URL)["validFrom"]
     sdk.close()  # the graph is not consulted below
@@ -306,7 +306,7 @@ def test_a_chain_of_transitions_stays_contiguous(src):
     """Pairwise contiguity across a longer chain, live and replayed."""
     events, sdk = src
     for i in range(6):
-        sdk.create_source(_URL, "document", title=f"v{i}",
+        sdk.register_source(_URL, "document", title=f"v{i}",
                           contentHash=f"h-{i}")
     transitions = _of_type(events, "SourceVersioned")
     # Each record closes the window it opens (one minted instant, two names) ...
@@ -421,8 +421,8 @@ def test_the_transition_payload_does_not_leak_onto_the_node(src):
     record's own payload).
     """
     events, sdk = src
-    sdk.create_source(_URL, "document", title="v0", contentHash="h-0")
-    sdk.create_source(_URL, "document", title="v1", contentHash="h-1")
+    sdk.register_source(_URL, "document", title="v0", contentHash="h-0")
+    sdk.register_source(_URL, "document", title="v1", contentHash="h-1")
     leaked = {"previousContentHash", "previousValidTo"}
     assert not (leaked & set(_props(sdk, _URL))), (
         f"journal-only keys leaked onto the node: "
@@ -440,8 +440,8 @@ def test_the_transition_record_still_carries_no_redundant_derivations(src):
     deliberately withheld (`at`, `version`) stay withheld.
     """
     events, sdk = src
-    sdk.create_source(_URL, "document", title="v0", contentHash="h-0")
-    sdk.create_source(_URL, "document", title="v1", contentHash="h-1")
+    sdk.register_source(_URL, "document", title="v0", contentHash="h-0")
+    sdk.register_source(_URL, "document", title="v1", contentHash="h-1")
     t = _of_type(events, "SourceVersioned")[0]
     assert "at" not in t
     assert "version" not in t
@@ -459,7 +459,7 @@ def test_the_window_start_cannot_be_forged_through_the_entity_surface(src):
     transition produced — the trap #5196 round 3 found for `__runId`.
     """
     _events, sdk = src
-    sdk.create_source(_URL, "document", title="v0", contentHash="h-0")
+    sdk.register_source(_URL, "document", title="v0", contentHash="h-0")
     minted = _props(sdk, _URL)["validFrom"]
     with pytest.raises(ValueError, match="server-managed"):
         sdk.update_entity(_URL, validFrom="2020-01-01T00:00:00+00:00")
@@ -484,7 +484,7 @@ def test_a_stalled_clock_cannot_open_a_zero_width_window(src, monkeypatch):
                         raising=False)
 
     for i in range(3):
-        sdk.create_source(_URL, "document", title=f"v{i}",
+        sdk.register_source(_URL, "document", title=f"v{i}",
                           contentHash=f"h-{i}")
 
     create = _of_type(events, "SourceCreated")[0]
@@ -522,7 +522,7 @@ def test_a_backward_clock_step_cannot_invert_the_window(src, monkeypatch):
                         raising=False)
 
     for i in range(3):
-        sdk.create_source(_URL, "document", title=f"v{i}",
+        sdk.register_source(_URL, "document", title=f"v{i}",
                           contentHash=f"h-{i}")
 
     create = _of_type(events, "SourceCreated")[0]
@@ -557,7 +557,7 @@ def test_a_caller_asserted_window_or_transition_key_is_refused(src):
     _events, sdk = src
     for key in _WINDOW_KEYS:
         with pytest.raises(ValueError, match="server-managed"):
-            sdk.create_source(_URL, "document", contentHash="h-0",
+            sdk.register_source(_URL, "document", contentHash="h-0",
                               **{key: "2020-01-01T00:00:00+00:00"})
     # fail-closed: nothing was written before the refusal
     assert sdk._get_proj().g.query(
@@ -569,7 +569,7 @@ def test_a_caller_asserted_window_or_transition_key_is_refused(src):
 def test_the_entity_surface_refuses_window_and_transition_keys(src):
     """The same keys are unwritable through `update_entity` (write filter)."""
     _events, sdk = src
-    sdk.create_source(_URL, "document", title="v0", contentHash="h-0")
+    sdk.register_source(_URL, "document", title="v0", contentHash="h-0")
     for key in _WINDOW_KEYS:
         with pytest.raises(ValueError, match="server-managed"):
             sdk.update_entity(_URL, **{key: "2020-01-01T00:00:00+00:00"})
@@ -691,7 +691,7 @@ def test_the_mcp_source_route_still_refuses_a_forged_window(mcp_sdk):
         params={"u": _URL}).result_set[0][0] == 0, (
         "a refused MCP create_source still landed a :Source")
 
-    sdk.create_source(_URL, "document", contentHash="h-0")
+    sdk.register_source(_URL, "document", contentHash="h-0")
     minted = _props(sdk, _URL)["validFrom"]
     for key in ("validFrom", "validTo", "valid_to"):
         out = mcp_server.tortoise_update_entity(
@@ -740,7 +740,7 @@ def test_pinned_gap__upsert_document_moves_the_anchor_without_the_window(src):
     silently and is inverted when #3644 closes it.
     """
     _events, sdk = src
-    sdk.create_source(_URL, "document", contentHash="h-1", title="d1")
+    sdk.register_source(_URL, "document", contentHash="h-1", title="d1")
     before = _props(sdk, _URL)["validFrom"]
     sdk._get_proj()._upsert_document(
         {"id": _URL, "contentHash": "h-2", "title": "d2"})
@@ -765,7 +765,7 @@ def test_pinned_gap__session_capture_moves_the_anchor_without_the_window(src):
     """
     _events, sdk = src
     url = "session:pinned-gap-3644"
-    sdk.create_source(url, "agentSession", contentHash="h-1")
+    sdk.register_source(url, "agentSession", contentHash="h-1")
     before = _props(sdk, url)["validFrom"]
     sdk._materialize_session_source(
         "pinned-gap-3644", None, "2026-01-02T00:00:00+00:00",

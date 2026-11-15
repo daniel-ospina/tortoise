@@ -145,7 +145,7 @@ class TestReadPathPremise:
         ``s.id = coalesce($id, $url)`` ON CREATE, so it is id-addressable."""
         sdk, _ = env
         url = "https://example.com/keyed"
-        sdk.create_source(url, "document")
+        sdk.register_source(url, "document")
         node_id, _ = _stub(sdk._get_proj(), url)
         assert node_id == url
 
@@ -698,7 +698,7 @@ class TestNoRegressionOnExistingShapes:
         ``create_source`` sets ``id = url``, the ambiguous shape."""
         sdk, events = env
         url = "https://example.com/keyed"
-        sdk.create_source(url, "document")
+        sdk.register_source(url, "document")
 
         sdk.update_entity(url, status="retired")
 
@@ -712,7 +712,7 @@ class TestNoRegressionOnExistingShapes:
         journal two delete records."""
         sdk, events = env
         url = "https://example.com/keyed"
-        sdk.create_source(url, "document")
+        sdk.register_source(url, "document")
 
         assert sdk.delete(url) is True
         recs = [r for r in _mutations(events)

@@ -913,7 +913,7 @@ def test_direct_route_non_point_endpoints_still_rejected(sdk):
     epistemic side, see test_direct_route_event_endpoint_accepted) — the pin
     is re-specified, never silently deleted."""
     pa = sdk.create_point("statement", "A")["id"]
-    src = sdk.create_source("https://pre.example/s", "report")
+    src = sdk.register_source("https://pre.example/s", "report")
     bundle = {
         "points": [{"ref": "pO", "kind": "statement", "content": "op-shaped",
                     "is_operator": True}],

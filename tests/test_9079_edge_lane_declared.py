@@ -177,7 +177,7 @@ def _endpoints(sdk) -> dict:
     second = sdk.create_point("statement", "edge-lane target 9195")
     third = sdk.create_point("statement", "edge-lane wrapper entity 9195")
     fourth = sdk.create_point("statement", "edge-lane wrapper subject 9195")
-    sdk.create_source(DOC_URL, "web", documentKind="page")
+    sdk.register_source(DOC_URL, "web", documentKind="page")
 
     def _id(p):
         return p["id"] if isinstance(p, dict) else p

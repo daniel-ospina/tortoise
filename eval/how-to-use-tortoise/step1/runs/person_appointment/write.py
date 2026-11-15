@@ -40,7 +40,7 @@ def point(content: str, key: str, **props) -> str:
 
 
 # --- Source (provenance) ----------------------------------------------------
-src = sdk.create_source(
+src = sdk.register_source(
     NOTE_URL,
     "note",
     title=NOTE_TITLE,

@@ -4928,7 +4928,7 @@ def test_the_tenant_route_cannot_put_the_narrative_back_on_a_source(client):
     sdk = _team_sdk()
     url = f"session:narr-route-{content_hash('narrative-route-probe')[:12]}"
     try:
-        sdk.create_source(url, "agentSession", contentHash="h1")
+        sdk.register_source(url, "agentSession", contentHash="h1")
 
         with pytest.raises(ValueError, match="server-managed on a :Source"):
             sdk.update_entity(url, story_arc="NARRATIVE-ZEBRA prose must not land")

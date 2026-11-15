@@ -205,7 +205,7 @@ class TestCreateSourceBypassIsClosed:
             TortoiseSDK, "_create_entity", autospec=True
         ) as create:
             with pytest.raises(ValueError) as exc:
-                TortoiseSDK.create_source(
+                TortoiseSDK.register_source(
                     sdk, "https://example.test/p", "web", v=value
                 )
             assert "'v'" in str(exc.value), str(exc.value)
@@ -228,7 +228,7 @@ class TestCreateSourceBypassIsClosed:
             TortoiseSDK, "_create_entity", autospec=True
         ) as create:
             with pytest.raises(ValueError) as exc:
-                TortoiseSDK.create_source(
+                TortoiseSDK.register_source(
                     sdk, "https://example.test/p", "web", sourceDate=2**70
                 )
             assert "'sourceDate'" in str(exc.value), str(exc.value)

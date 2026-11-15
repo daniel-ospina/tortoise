@@ -214,7 +214,7 @@ def test_a_source_that_derived_nothing_is_unknown_not_current():
     sdk = TortoiseSDK(_tmp("test.db"))
     try:
         proj = sdk._get_proj()
-        sdk.create_source("https://ex.com/nothing", "corpus", contentHash="h1")
+        sdk.register_source("https://ex.com/nothing", "corpus", contentHash="h1")
 
         sweep = source_staleness(proj.g, "https://ex.com/nothing")
         assert sweep["current"] == "h1"
@@ -867,7 +867,7 @@ def test_a_link_with_no_anchor_against_a_versioned_source_reads_unknown():
         # link first (auto-created stub, no hash), materialize the source after
         p = sdk.create_point("statement", "linked before materialization",
                              extractedFrom="late.txt")
-        sdk.create_source("late.txt", "document", contentHash="h1")
+        sdk.register_source("late.txt", "document", contentHash="h1")
 
         edge = proj.g.query(
             "MATCH (p:Point {id:$pid})-[r:extractedFrom]->(s:Source {url:'late.txt'}) "
@@ -970,7 +970,7 @@ def test_a_whitespace_only_version_is_absent_not_an_operand():
         proj = sdk._get_proj()
         proj.g.query("CREATE (ev:Event {id:'ev-ws', eventId:'ev-ws', "
                      "name:'W', eventKind:'meeting'})")
-        sdk.create_source("https://ws.example/doc", "document",
+        sdk.register_source("https://ws.example/doc", "document",
                           contentHash="   ")
         sdk.link_source_to_entity("https://ws.example/doc", "ev-ws", "Event")
         anchored = proj.g.query(

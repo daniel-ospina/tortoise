@@ -1545,6 +1545,102 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         rest_spec=RestSpec(method="POST", path="/v1/index/github"),
     ),
 
+    # ── #4282 Phase 2 — the SOURCES / MINE / SESSION containers ──────
+    #
+    # ⛔ APPENDED AT THE END OF THE LIST ON PURPOSE. Every entry above keeps its
+    # line number, so the ~20 files that cite `tool_registry.py:NNNN` (including
+    # `tools/surface_manifest.py` and the #9664 capstone pin) are NOT re-staled
+    # by this batch. Inserting in the middle of the list is a cite migration,
+    # not a feature, and it costs a whole repair round.
+    #
+    # Each name is an OWNER-APPROVED target row (`tortoise/__all__.py`). The
+    # members they absorb were moved to `RETIRED_USE_INSTEAD` below in the SAME
+    # change (#3883): they leave `tools/list` and still answer through the
+    # warning shim with their original bodies. `sdk_method` names the SDK method
+    # the container dispatches through — a binding that RESOLVES now (Part C1's
+    # finding was that these rows had no `def` at all).
+    ToolDefinition(
+        name="tortoise_register_source",
+        id="surface.register_source",
+        description="Declare a source exists — the URL is its identity (#4282 row 14). "
+                    "Absorbs tortoise_create_source. `tier` (T0-T4) overrides the tier "
+                    "the source KIND derives; `sourceDate` is the evidence-age clock. "
+                    "An existing Source (URL collision) is never re-kinded.",
+        risk="write",
+        idempotent=True,
+        http_policy=True,
+        sdk_method="register_source",
+    ),
+    ToolDefinition(
+        name="tortoise_manage_source_trust",
+        id="surface.manage_source_trust",
+        description="Set how far a source is trusted (#4282 row 18). Dispatch is BY "
+                    "ARGUMENT: `tier=` (T0-T4) sets the credibility tier; `score=` with "
+                    "`assessor=` and `rationale=` records an assessment (a "
+                    "reputation-weighted Statement Point). Passing both is refused — "
+                    "they are different writes. Absorbs tortoise_assess_source and "
+                    "tortoise_set_source_tier. Reads: "
+                    "tortoise_graph_overview(section='sources').",
+        risk="destructive",
+        http_policy=True,
+        sdk_method="manage_source_trust",
+    ),
+    ToolDefinition(
+        name="tortoise_index_sources_from_directory",
+        id="surface.index_sources_from_directory",
+        description="Register a directory's files as sources — NOTHING is extracted "
+                    "(#4282 row 15). Absorbs tortoise_index_files, plus "
+                    "tortoise_index_sessions (`file_type='agent_session'`) and "
+                    "tortoise_ingest_corpus (`file_type='doc'`). `file_type`: auto | "
+                    "agent_session | meeting | doc. Batched and resumable "
+                    "(progress_file). EXCLUDED from tenant HTTP — walks the server "
+                    "filesystem with a caller-supplied path.",
+        risk="destructive",
+        http_policy=False,
+        sdk_method="index_sources_from_directory",
+    ),
+    ToolDefinition(
+        name="tortoise_mine_knowledge_from_session",
+        id="surface.mine_knowledge_from_session",
+        description="Mine ONE session (#4282 row 16). Dispatch is BY ARGUMENT: "
+                    "`conversation=` files an agent session (turns become episodic "
+                    "Points, LLM extraction produces epistemic Points; the backend is "
+                    "the target graph's configuration) — same door and gates as "
+                    "tortoise_session_capture; `items=` files an already-distilled batch "
+                    "({wing, room, content}) with two-tier dedup. Passing both is "
+                    "refused. Absorbs tortoise_checkpoint and tortoise_session_capture.",
+        risk="destructive",
+        http_policy=True,
+        sdk_method="mine_knowledge_from_session",
+    ),
+    ToolDefinition(
+        name="tortoise_mine_knowledge_from_directory",
+        id="surface.mine_knowledge_from_directory",
+        description="Mine a FOLDER of files, each by its own content type (#4282 row "
+                    "17) — the batch form of tortoise_mine_knowledge_from_session, not a "
+                    "kind of indexing: this call EXTRACTS, "
+                    "tortoise_index_sources_from_directory does not. Absorbs "
+                    "tortoise_mine_conversations. EXCLUDED from tenant HTTP — walks the "
+                    "server filesystem.",
+        risk="destructive",
+        http_policy=False,
+        sdk_method="mine_knowledge_from_directory",
+    ),
+    ToolDefinition(
+        name="tortoise_check_connection",
+        id="surface.check_connection",
+        description="What does this credential reach? (#4282 row 40 — programmatic, "
+                    "returns a result, NOT a wizard). Omit key_id: connectivity, the "
+                    "resolved graph + namespace, and this caller's own account. Pass "
+                    "key_id: one credential's declared reach (graph, scopes, delegation "
+                    "depth, revocation, expiry). Read-only. A key belonging to another "
+                    "account and a key that does not exist give the SAME answer, so this "
+                    "cannot be used to probe another tenant's key ids.",
+        risk="read",
+        http_policy=True,
+        sdk_method="check_connection",
+    ),
+
 ]
 
 
@@ -2028,6 +2124,16 @@ GROUP_BY_NAME: dict[str, str] = {
     "tortoise_manage_sources": "onboarding",
     "tortoise_onboarding_session_recording": "onboarding",
     "tortoise_onboarding_github_index": "onboarding",
+    # #4282 Phase 2 — the SOURCES / MINE / SESSION containers. Same families as
+    # the members they absorbed, so a curated view keeps the shape its readers
+    # already navigate by (the absorbed names keep THEIR entries below/above — a
+    # retired entry still renders).
+    "tortoise_register_source": "sources",
+    "tortoise_manage_source_trust": "sources",
+    "tortoise_index_sources_from_directory": "sources",
+    "tortoise_mine_knowledge_from_session": "sessions",
+    "tortoise_mine_knowledge_from_directory": "mining",
+    "tortoise_check_connection": "onboarding",
 }
 
 
@@ -2134,6 +2240,44 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     "tortoise_onboarding_session_recording":
         'tortoise_manage_sources(action="enable" or "disable", '
         'source="agent_sessions")',
+
+    # ── #4282 Phase 2 — the SOURCES / MINE / SESSION members ──────────────────
+    #
+    # The seven names the containers above absorb. Each pointer RESOLVES in one
+    # hop (the same rule the `graph_overview` block states: aliases are not
+    # transitive, and a chain would send a caller to a name that is itself
+    # retired), and each SHOWS the discriminator the container dispatches on —
+    # dropping it would silently change what the caller gets, which is the #8447
+    # shape: a familiar name, a narrower answer, no way to tell.
+    #
+    # NB: no `|` in these values (see the note above — these are rendered into
+    # markdown table cells).
+    "tortoise_create_source":
+        "tortoise_register_source(url, sourceKind, tier=...)",
+    "tortoise_assess_source":
+        'tortoise_manage_source_trust(url, score=..., assessor=..., rationale=...)',
+    "tortoise_set_source_tier":
+        'tortoise_manage_source_trust(url, tier="T0"-"T4")',
+    # `file_type` and `progress_file` are shown for the same reason `days`/`limit`
+    # are shown on `tortoise_stale`: the door took them, and a migrating caller
+    # that omits `file_type` silently changes which files are indexed as what.
+    "tortoise_index_files":
+        'tortoise_index_sources_from_directory(directory, file_type=..., '
+        'progress_file=...)',
+    # `items`/`agent_name`/`threshold` are the batch arm's own knobs: a caller
+    # that drops `threshold` gets the 0.95 near-identical bar instead of its own.
+    "tortoise_checkpoint":
+        'tortoise_mine_knowledge_from_session(items=..., agent_name=..., '
+        'threshold=...)',
+    # The session arm keeps the server's own gates (429 capacity, 409 duplicate /
+    # recording-off, 400 turn cap, 422 empty transcript, 402 quota) — which is
+    # why the pointer names `conversation`/`session_id` and not a knob.
+    "tortoise_session_capture":
+        'tortoise_mine_knowledge_from_session(conversation=..., '
+        'harness=..., session_id=...)',
+    "tortoise_mine_conversations":
+        "tortoise_mine_knowledge_from_directory(directory=..., "
+        "extract_entities=...)",
 }
 
 

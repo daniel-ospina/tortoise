@@ -177,7 +177,7 @@ def test_create_operator_still_rejects_missing_endpoint(sdk):
 def test_create_operator_still_rejects_source_endpoint(sdk):
     """A :Source is NOT an epistemic node — the widening is not a blanket."""
     a = _point(sdk, "A")
-    src = sdk.create_source("https://pre.example/7902", "report")
+    src = sdk.register_source("https://pre.example/7902", "report")
     src_id = src.get("id") or src.get("url")
     with pytest.raises(ValueError, match="do not exist"):
         sdk.create_operator("IMPL", a, [src_id])
@@ -235,7 +235,7 @@ def test_create_direct_edge_point_path_unchanged(sdk):
 def test_create_direct_edge_still_rejects_source_endpoint(sdk):
     """A :Source endpoint stays rejected — the policy widening is epistemic-only."""
     a = _point(sdk, "A")
-    src = sdk.create_source("https://pre.example/7902b", "report")
+    src = sdk.register_source("https://pre.example/7902b", "report")
     src_id = src.get("id") or src.get("url")
     with pytest.raises(ValueError, match="does not exist or is not an epistemic"):
         sdk.create_direct_edge("IMPL", a, src_id)

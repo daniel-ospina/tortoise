@@ -135,7 +135,7 @@ def test_scalar_ref_records_the_version_on_the_edge_and_the_transit(prov):
     character-wise.
     """
     sdk, _events, _log = prov
-    sdk.create_source(DOC, "document", contentHash="h1")
+    sdk.register_source(DOC, "document", contentHash="h1")
     p = sdk.create_point("statement", "claim", extractedFrom=DOC)
 
     proj = _proj(sdk)
@@ -154,7 +154,7 @@ def test_rebuild_preserves_the_anchor_byte_for_byte(prov):
     Source and disagrees with the live value.
     """
     sdk, events, _log = prov
-    sdk.create_source(DOC, "document", contentHash="h1")
+    sdk.register_source(DOC, "document", contentHash="h1")
     p = sdk.create_point("statement", "claim", extractedFrom=DOC)
 
     proj = _proj(sdk)
@@ -178,10 +178,10 @@ def test_source_revision_after_the_read_does_not_change_the_anchor(prov):
     the rebuild; only the Point's own snapshot may decide the anchor.
     """
     sdk, events, _log = prov
-    sdk.create_source(DOC, "document", contentHash="h1")
+    sdk.register_source(DOC, "document", contentHash="h1")
     p = sdk.create_point("statement", "claim", extractedFrom=DOC)
 
-    sdk.create_source(DOC, "document", contentHash="h2")  # journaled revision
+    sdk.register_source(DOC, "document", contentHash="h2")  # journaled revision
 
     proj = _rebuilt(sdk, events)
     key = proj.g.query(
@@ -203,8 +203,8 @@ def test_list_refs_survive_rebuild_with_their_versions(prov):
     same hash) or if only the node transit is restored.
     """
     sdk, events, _log = prov
-    sdk.create_source(DOC, "document", contentHash="h1")
-    sdk.create_source(DOC2, "document", contentHash="h2")
+    sdk.register_source(DOC, "document", contentHash="h1")
+    sdk.register_source(DOC2, "document", contentHash="h2")
     p = sdk.create_point("statement", "claim", extractedFrom=[DOC, DOC2])
 
     live = (_edge_version(_proj(sdk), p["id"], DOC),
@@ -234,7 +234,7 @@ def test_url_variant_ref_keeps_the_anchor_across_rebuild(prov):
     it entails — not the key alone.
     """
     sdk, events, _log = prov
-    sdk.create_source(DOC, "document", contentHash="h1")
+    sdk.register_source(DOC, "document", contentHash="h1")
     variant = "HTTPS://Doc.Example/a/?utm_source=x"
     p = sdk.create_point("statement", "variant claim", extractedFrom=variant)
 
@@ -273,7 +273,7 @@ def test_variant_ref_after_an_unjournaled_stub_keeps_the_anchor(prov):
     # 2. the Source lands on the VARIANT spelling (ON MATCH of that stub live,
     #    but a fresh record at replay pass-1, where the stub is absent).
     variant = "HTTPS://Doc.Example/a/?utm_source=x"
-    sdk.create_source(variant, "document", contentHash="h1")
+    sdk.register_source(variant, "document", contentHash="h1")
     # 3. a second Point linked through the variant ref.
     p = sdk.create_point("statement", "second", extractedFrom=variant)
 
@@ -303,7 +303,7 @@ def test_source_with_no_hash_gets_no_anchor(prov):
     Source's ``''`` and reads as a false CURRENT (the #5199 rule).
     """
     sdk, _events, _log = prov
-    sdk.create_source(DOC, "document", contentHash="")
+    sdk.register_source(DOC, "document", contentHash="")
     p = sdk.create_point("statement", "claim", extractedFrom=DOC)
 
     proj = _proj(sdk)
@@ -327,7 +327,7 @@ def test_whitespace_hash_gets_no_anchor_and_survives_rebuild(prov):
     would anchor) or if the replay drops what live wrote (live≠replay).
     """
     sdk, events, log_path = prov
-    sdk.create_source(DOC, "document", contentHash="   ")
+    sdk.register_source(DOC, "document", contentHash="   ")
     p = sdk.create_point("statement", "claim", extractedFrom=DOC)
 
     proj = _proj(sdk)
@@ -386,7 +386,7 @@ def test_non_string_content_hash_is_honest_absent_not_a_crash(prov):
     plain SDK call, brought down by a value the SDK itself accepted.
     """
     sdk, _events, _log = prov
-    sdk.create_source(DOC, "document", contentHash=5)
+    sdk.register_source(DOC, "document", contentHash=5)
     p = sdk.create_point("statement", "claim", extractedFrom=DOC)
 
     proj = _proj(sdk)
@@ -409,7 +409,7 @@ def test_transit_is_a_pair_list_for_a_hash_bearing_source(prov):
     transit. ``EventAPI``'s ingest-connection leg is out of scope here.)
     """
     sdk, _events, _log = prov
-    sdk.create_source(DOC, "document", contentHash="h1")
+    sdk.register_source(DOC, "document", contentHash="h1")
     p = sdk.create_point("statement", "claim", extractedFrom=DOC)
 
     proj = _proj(sdk)
@@ -437,7 +437,7 @@ def test_relink_does_not_advance_the_recorded_version(prov):
     expose would read as CURRENT (the #5199 rule).
     """
     sdk, _events, _log = prov
-    sdk.create_source(DOC, "document", contentHash="h1")
+    sdk.register_source(DOC, "document", contentHash="h1")
     p = sdk.create_point("statement", "claim", extractedFrom=DOC)
 
     _proj(sdk)._link_source(p["id"], DOC, source_versions={DOC: "h2"})
@@ -462,7 +462,7 @@ def test_recreated_point_does_not_inherit_the_node_transit(prov):
     as a residual of this change and not introduced here.
     """
     sdk, events, _log = prov
-    sdk.create_source(DOC, "document", contentHash="h1")
+    sdk.register_source(DOC, "document", contentHash="h1")
     p = sdk.create_point("statement", "first life", extractedFrom=DOC)
     pid = p["id"]
     # A JOURNALED hard delete (``EntityMutated op=delete``) is what makes the
@@ -570,7 +570,7 @@ def test_eventapi_add_point_anchors_the_version(prov):
     anchor survives a rebuild of that lane's record.
     """
     sdk, events, log_path = prov
-    sdk.create_source(DOC, "document", contentHash="h1")
+    sdk.register_source(DOC, "document", contentHash="h1")
     api = EventAPI(EventLog(log_path), initiated_by="extractor",
                    projection=_proj(sdk))
     pid = api.add_point("claim from a doc",
@@ -649,7 +649,7 @@ def test_create_source_rejects_a_forged_source_version(prov):
     sdk, _events, _log = prov
     for key in ("sourceVersion", "sourceVersions", "sourceVersionTransit"):
         with pytest.raises(ValueError, match="server-managed provenance"):
-            sdk.create_source(DOC, "document", **{key: "h9"})
+            sdk.register_source(DOC, "document", **{key: "h9"})
     assert _proj(sdk).g.query(
         "MATCH (s:Source) RETURN count(s)").result_set[0][0] == 0
 
@@ -666,7 +666,7 @@ def test_supersede_transfer_carries_no_anchor(prov):
     link — the successor would then claim a read it never made.
     """
     sdk, events, _log = prov
-    sdk.create_source(DOC, "document", contentHash="h1")
+    sdk.register_source(DOC, "document", contentHash="h1")
     old = sdk.create_point("statement", "predecessor", extractedFrom=DOC)
     new = sdk.create_point("statement", "successor")
     sdk.supersede_point(old["id"], new["id"])
@@ -799,8 +799,8 @@ def test_carrier_keeps_only_the_points_own_refs(prov):
     fold reads the same payload, so the two writers must agree it is absent).
     """
     sdk, events, log_path = prov
-    sdk.create_source(DOC, "document", contentHash="h1")
-    sdk.create_source(DOC2, "document", contentHash="h2")
+    sdk.register_source(DOC, "document", contentHash="h1")
+    sdk.register_source(DOC2, "document", contentHash="h2")
     sdk.create_point("statement", "plain")
     with open(log_path, "a", encoding="utf-8") as fh:
         fh.write(json.dumps({
@@ -831,8 +831,8 @@ def test_carrier_with_only_foreign_keys_is_not_written(prov):
     change uses (absent is the missing property, never ``''`` and never ``[]``).
     """
     sdk, events, log_path = prov
-    sdk.create_source(DOC, "document", contentHash="h1")
-    sdk.create_source(DOC2, "document", contentHash="h2")
+    sdk.register_source(DOC, "document", contentHash="h1")
+    sdk.register_source(DOC2, "document", contentHash="h2")
     sdk.create_point("statement", "plain")
     with open(log_path, "a", encoding="utf-8") as fh:
         fh.write(json.dumps({
@@ -899,7 +899,7 @@ def test_link_source_accepts_a_registry_keyed_by_the_resolved_url(prov):
     exists.
     """
     sdk, _events, _log = prov
-    sdk.create_source(DOC, "document", contentHash="h1")
+    sdk.register_source(DOC, "document", contentHash="h1")
     p = sdk.create_point("statement", "no source")
 
     variant = "HTTPS://Doc.Example/a/?utm_source=x"
@@ -932,7 +932,7 @@ def test_consistency_gate_compares_the_transit(prov):
     from tortoise.consistency import check_consistency
 
     sdk, events, log_path = prov
-    sdk.create_source(DOC, "document", contentHash="h1")
+    sdk.register_source(DOC, "document", contentHash="h1")
     p = sdk.create_point("statement", "claim", extractedFrom=DOC)
     sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
 
@@ -1016,8 +1016,8 @@ def test_consistency_gate_compares_the_folded_set(prov):
     # The END-TO-END half: a faithful rebuild of a folded claim is green and
     # carries the set, so a tampered graph is the only way to red it.
     sdk, events, log_path = prov
-    sdk.create_source(alpha, "document")
-    sdk.create_source(beta, "document")
+    sdk.register_source(alpha, "document")
+    sdk.register_source(beta, "document")
     content = "one claim, two sources — the fold's own case"
     pid = sdk.create_point("statement", content, extractedFrom=alpha,
                            dedup=True)["id"]
@@ -1079,8 +1079,8 @@ def test_a_capture_style_re_emit_keeps_the_folded_set_green(prov):
 
     sdk, events, log_path = prov
     alpha, beta = ("https://doc.example/alpha", "https://doc.example/beta")
-    sdk.create_source(alpha, "document")
-    sdk.create_source(beta, "document")
+    sdk.register_source(alpha, "document")
+    sdk.register_source(beta, "document")
     content = "one claim, two sources — re-emitted without the ref keys"
     pid = sdk.create_point("statement", content, extractedFrom=alpha,
                            dedup=True)["id"]

@@ -16567,7 +16567,7 @@ def _cmd_index_directory(args) -> int:
         else:
             sdk = TortoiseSDK(db_path=target)
         sdk._proj = _projection_for(target)
-        report = sdk.index_directory(
+        report = sdk.index_sources_from_directory(
             corpus_dir,
             extract_metadata=bool(args.metadata),
             corpus_name=args.corpus_name,

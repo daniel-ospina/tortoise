@@ -717,10 +717,10 @@ class TestDocumentsQuota:
             # genre, so admitting the snake form would hide the same demotion
             # one document-path write later.
             attempts = {
-                "create_source/documentKind": (lambda: tenant.create_source(
+                "create_source/documentKind": (lambda: tenant.register_source(
                     "doc_0", "document", documentKind="transcript"),
                     "metered `documents` set"),
-                "create_source/document_kind": (lambda: tenant.create_source(
+                "create_source/document_kind": (lambda: tenant.register_source(
                     "doc_1", "document", document_kind="transcript"),
                     "inert second spelling"),
                 "update_entity/documentKind": (lambda: tenant.update_entity(
@@ -751,7 +751,7 @@ class TestDocumentsQuota:
                     lambda: tenant.update_entity("doc_6", document_kind=None),
                     "inert second spelling"),
                 "create_source/document_kind='report' (2nd home)": (
-                    lambda: tenant.create_source(
+                    lambda: tenant.register_source(
                         "doc_7", "document", document_kind="report"),
                     "inert second spelling"),
             }
@@ -777,12 +777,12 @@ class TestDocumentsQuota:
             # no-op for the genre axis. (a) one metered genre -> another still
             # lands, and (b) SETTING a genre where none is stored is how a
             # document `:Source` is minted through these surfaces at all.
-            tenant.create_source("doc_0", "document", documentKind="brief")
+            tenant.register_source("doc_0", "document", documentKind="brief")
             assert tenant._get_proj().g.query(
                 "MATCH (s:Source {url:'doc_0'}) RETURN s.documentKind"
             ).result_set[0][0] == "brief"
             self._seed_doc(tenant, 20, kind=None)   # provenance Source
-            tenant.create_source("doc_20", "document", documentKind="report")
+            tenant.register_source("doc_20", "document", documentKind="report")
             assert tenant._get_proj().g.query(
                 "MATCH (s:Source {url:'doc_20'}) RETURN s.documentKind"
             ).result_set[0][0] == "report"
@@ -938,14 +938,14 @@ class TestDocumentsQuota:
 
         monkeypatch.setattr(TortoiseSDK, "_stored_source_document_kinds", spy)
         try:
-            tenant.create_source("plain_src", "web")
-            tenant.create_source("plain_src_2", "web", raw_state="present")
+            tenant.register_source("plain_src", "web")
+            tenant.register_source("plain_src_2", "web", raw_state="present")
             assert reads == [], (
                 f"the genre guard read the graph for writes that carry no "
                 f"genre: {reads}")
             # …and it IS engaged when the key is present (the gate is a gate,
             # not a disable).
-            tenant.create_source("doc_g", "document", documentKind="report")
+            tenant.register_source("doc_g", "document", documentKind="report")
             assert reads == ["doc_g"], reads
             assert count_org_usage(tid, "documents", sdk=tenant) == 1
         finally:
@@ -1051,7 +1051,7 @@ class TestDocumentsQuota:
         try:
             sid, cap = "sess_clamp_5140", "2026-02-03T04:05:06Z"
             did = f"doc_{content_hash(f'{sid}:{cap}')}"
-            tenant.create_source(did, "document", documentKind="report")
+            tenant.register_source(did, "document", documentKind="report")
             assert count_org_usage(tid, "documents", sdk=tenant) == 1
 
             payload, plan = _transcript_commit(sid, cap, summary="clamped")

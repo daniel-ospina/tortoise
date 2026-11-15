@@ -660,7 +660,7 @@ def mine_docs(sdk, directory: str | Path, *,
 
     ingest = {}
     if index_first:
-        ingest = sdk.index_directory(directory, corpus_name=corpus_name,
+        ingest = sdk.index_sources_from_directory(directory, corpus_name=corpus_name,
                                      progress_file=progress_file)
         result["indexed"] = ingest.get("indexed", 0)
         for err in ingest.get("errors", []):
