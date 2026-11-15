@@ -741,8 +741,14 @@ client holds is the second one:
 
 **So `:GraphEvent` keeps keeping its positions.** A7 changes *who owns the record's ordinal*, and §A7.5 is the
 only place the coordinate changes. Anything else — D-07's second allocator, the `:GraphEvent` mirror, the
-cursor encoding — is **out of this design**, and §A7.7 therefore keeps D-07 at step 4 with **no cursor
-migration** (the values do not change, only who mints them).
+cursor encoding — is **out of this design**, and §A7.7 therefore **removes D-07 from the sequence entirely**
+(`next_seq` stays, every issued cursor stays valid; D-07 waits for its own reopen). ⛔ **An earlier draft of
+this paragraph said the opposite — that step 4 *keeps* D-07 "with no cursor migration (the values do not change,
+only who mints them)" — and the round-2 review of the revision caught the two sentences standing side by side.**
+That phrasing is the condemned instruction: "only who mints them" is adoption, and adoption breaks every stored
+cursor. The sentence is recorded rather than deleted, because **this is the second time in this document that
+the adoption argument has been written down and had to be withdrawn** — a reader who finds it anywhere else in
+the plan should treat it as wrong.
 
 ### A7.2 What the map contradicts in the hypothesis
 
@@ -899,20 +905,32 @@ RETURNING seq;                                                -- block written; 
 allowed in RETURNING`). The block's bounds come from `alloc.first_seq` — which the statement already knows — or
 from a wrapping CTE, and the point is only that **they are returned, not predicted** (M9).
 
-⛔ **The allocation must FAIL OPEN, NOT CLOSED — and the first version of this CTE failed CLOSED, which is the
-worst shape in the design (found by the Stage-B round-2 review of this revision).** If the `UPDATE` matches **no
-row**, `INSERT … SELECT … FROM alloc` inserts **zero rows and raises nothing**: the write commits with no
-position row and no ordinal, in a design whose entire premise is that a position always exists. Three ways to
-match no row, and two of them are ordinary: the graph was never seeded; a mistyped key; and — the one that will
-actually happen — **RLS `FORCE ROW LEVEL SECURITY` with `app.current_org_id` unset**, where
-`current_setting('app.current_org_id', true)` returns NULL, the policy matches nothing, and the UPDATE silently
-touches zero rows (§A7.8 item 2's policy is exactly that predicate). **So the statement is followed by an
-assertion, and it is part of the mechanism, not of the test:**
+⛔ **The allocation must FAIL CLOSED — i.e. it must RAISE when it cannot allocate — and the first version of this
+CTE failed OPEN, which is the worst shape in the design (found by the Stage-B round-2 review of this revision).**
+If the `UPDATE` matches **no row**, `INSERT … SELECT … FROM alloc` inserts **zero rows and raises nothing**: the
+write commits with no position row and no ordinal, in a design whose entire premise is that a position always
+exists. Three ways to match no row, and two of them are ordinary: the graph was never seeded (or is `seeded`,
+not yet `allocating`); a mistyped key; and — the one that will actually happen — **RLS `FORCE ROW LEVEL SECURITY`
+with `app.current_org_id` unset**, where `current_setting('app.current_org_id', true)` returns NULL, the policy
+matches nothing, and the UPDATE silently touches zero rows (§A7.8 item 2's policy is exactly that predicate).
+**So the statement is followed by an assertion, and it is part of the mechanism, not of the test — and the
+assertion must NAME which of the three it hit**, because "refused" and "diverged" and "not armed" send the
+operator to three different places (§A7.5.5, §A7.5.11, and nothing at all):
 
 ```text
 rows_written = <the INSERT's rowcount>
-if rows_written != N:  RAISE  -- no position row was written; the transaction must not commit
+if rows_written != N:
+    if no record_cursor row for (org, graph):        RAISE  "not cut over — no counter row"
+    elif mode != 'allocating':                       RAISE  "mode=<mode> — not the allocator"
+    elif seq < max(journal_event.seq):               RAISE  "DIVERGED — counter behind the table; see A7.5.11"
+    else:                                            RAISE  "allocation matched no row (RLS GUC unset?)"
 ```
+
+⛔ **And the `UPDATE` carries a `mode = 'allocating'` predicate, which the first version omitted — that omission
+made the `mode` column inert and made falsifier 17(b) red against this very SQL** (round-2 review of the
+revision). A `seeded` or `halted` graph must **match no row and therefore raise**, not silently allocate: that
+is what makes "halted" a state a rollback can actually enter (§A7.5.11) and what makes 6.3's transition
+meaningful (§A7.7).
 
 §A7.6 falsifier 17 is its executable form, and the RLS-GUC-unset shape is one of its three cases.
 
@@ -970,9 +988,19 @@ And **absorption stops being a policy**:
   re-enumerates from 1 onto occupied numbers (D-28) therefore passes the numeric check and its retained
   `ON CONFLICT DO NOTHING` **absorbs a different record**. So the replay's conflict becomes a **refusal unless
   the existing row's `event_id` matches**, which makes **§A7.8 item 6 (the envelope widening) a PRECONDITION of
-  this rule, not a separate nicety of §A7.5.8** — a dependency the first version left unstated. Until item 6
-  lands, the replay guard is *numbers-only* and must be labelled as incomplete in the code, not shipped as a
-  guard.
+  this rule, not a separate nicety of §A7.5.8** — a dependency the first version left unstated.
+
+  ⛔ **And there is a NULL rule, which the first version of this bullet did not have and which would have made
+  the guard refuse all of history (round-2 review of this revision):** `_journal_row` never inserted `event_id`,
+  so **every row written before item 6 has `event_id IS NULL`.** "Refuses unless it matches" would therefore
+  refuse every historical row and break both the `#9187` tail replay and §A7.6 falsifier 4. The rule is:
+
+  | the existing row's `event_id` | what the guard does |
+  |---|---|
+  | **non-NULL and equal** | proceed — same record at the same position |
+  | **non-NULL and different** | **REFUSE** — same position, different record. This is the D-28 case |
+  | **NULL** (pre-widening) | **proceed, and COUNT it** (`tortoise_record_position_unidentified_total`). The comparison is not available, and "unknown" must not read as "different" — a guard that fails closed over history is a guard that cannot be rolled out. The backfill is §A7.8 item 6's second half: join the journal line at that `seq` and populate the column, after which the counter must be **zero** for the graph to claim the strict guard. |
+
 - Replay also takes `SELECT … FOR UPDATE` on the `record_cursor` row, so the two paths cannot allocate
   concurrently (§A7.5.3's fourth precondition).
 - **`_JOURNAL_INSERT_PREFIX` (D-02)** must stop recognising the statement by SQL string prefix in the same
@@ -995,8 +1023,13 @@ FLOOR.**
 BEGIN;
   SET LOCAL statement_timeout = '30s';
 
-  -- (0) refuse if this graph is already cut over: never re-seed a live counter
-  SELECT 1 FROM public.record_cursor WHERE org_id = $1 AND graph_id = $2;   -- if a row exists: ROLLBACK + REFUSE
+  -- (0) refuse if this graph is already cut over — and note the exact predicate: a row in mode
+  --     'allocating' or 'halted' is cut over; a row in 'seeded' is NOT, and MUST be re-seedable, because
+  --     §A7.7 6.3's remedy for a graph that resumed writing before the cutover is "re-run 6.2".
+  SELECT mode FROM public.record_cursor WHERE org_id = $1 AND graph_id = $2;
+  --     mode IN ('allocating','halted') → ROLLBACK + REFUSE (never re-seed a live/halted counter)
+  --     mode = 'seeded'                → permitted: recompute both floors and re-seed below
+  --     no row                          → the normal first-cutover case
 
   -- (1) the record's floor
   SELECT COALESCE(max(seq), 0) FROM public.journal_event WHERE org_id = $1 AND graph_id = $2;  -- $record_floor
@@ -1039,6 +1072,21 @@ D-25 heal is CONDITIONAL, and the condition is evidence the replacement cannot p
 **If any of the three fails, treat it as case 1 and REFUSE.** §A7.6 falsifier 18 asserts the replacement case
 specifically — the review is right that a seed which cannot tell a healed tail from a swapped journal is the
 same silent-loss class as the bug it fixes.
+
+⛔ **But condition (iii) has no data source today, and the round-2 review of this revision is right about that —
+so case 2 REFUSES BY DEFAULT.** (i) and (ii) both hold for a **longer replacement**: its tail positions all have
+records, and the missing rows really are absent. Everything therefore rests on (iii) *"the same journal
+identity"* — and the record carries **no journal identity**: D-24 is a *guard* (a one-test change), not a per-row
+identity, `#9318`'s identity-in-the-key is **unbuilt**, and §A6's own D-28 records that `st_dev`/`st_ino`/size/
+`mtime_ns` **cannot** verify it. **An agreed-on condition that cannot be evaluated is not a condition, it is a
+form of words** — so the honest rule is:
+
+> **Case 2 (`record_floor < enumerated_floor`) REFUSES unless an operator supplies the journal identity out of
+> band — and until `#9318` lands, it always refuses.** The D-25 tail heal is therefore **deferred**, not
+> implemented: those graphs stay uncut (and keep working on today's allocator), which is a **cost**, stated
+> plainly, and much cheaper than mixing two journals into one coordinate space with no error anywhere.
+> ⛔ **This is a reduction in what B1 claims, and it is the correct reduction:** the seed's job is to be right,
+> and a lift it cannot justify is a lift it must not take.
 
 **Three outcomes, and the operator action for each:**
 
@@ -1222,7 +1270,13 @@ sets it and then deletes the whole **org** (`20261012000005:22-35`).
    recognise as burned (§A7.5.6's third row) or it blocks there forever. **The first version wrote the manual
    bump and called its cost `cursor > max` forever — which does not follow, because the next write makes them
    equal. That claim is withdrawn.** This rung is **still recommended**, on the strength of the
-   decision-not-to-act reading.
+   decision-not-to-act reading — ⛔ **and its applicability is narrower than "a bad row exists" (round-2
+   review of this revision, which is right):** it is the rung for a **wrongly-NAMED row with a healthy
+   counter**. For the other state — `cursor < max(seq)`, which the allocator now **refuses on** (§A7.5.2) —
+   *"no action"* would mean **every write raises forever**, and the only action that clears it is a bump, i.e.
+   the variant this section calls worse. **So rung 1 and the refusal arm must not be read together:** the
+   refusal arm's remedy is rung 2 or 3 (or restoring the counter from the table, which is what rung 3's dump
+   does), and §A8.2 records that no clean rung exists for it — that gap is the finding, not an omission.
 2. **A documented operator DELETE** — `BEGIN; SET LOCAL app.record_journal_purge = 'on'; DELETE FROM
    public.journal_event WHERE org_id = $1 AND graph_id = $2 AND seq = $3; COMMIT;`
    ⛔ **Blast radius, stated exactly, because this is the GUC path and it is worse than it looks:**
@@ -1266,6 +1320,21 @@ what each means:
 | `allocating` | the `record_cursor` row | **removed only here** (§A7.7 6.5) |
 | `halted` | **nobody** — the rollback state (§A7.5.11's "stop allocating") | present (a halted graph is exactly the graph whose carried numbers must keep being readable) |
 
+⛔ **The transitions are the mechanism, and leaving them implicit was the round-2 review's P1.** A mode column
+whose writers are unspecified is a column that drifts: `seeded` and `halted` both mean "nobody allocates", so a
+writer that sets the wrong one silently moves a graph between two states with opposite remedies. Only these
+four transitions exist, each with exactly one writer:
+
+| from → to | who writes it | when |
+|---|---|---|
+| *(no row)* → `seeded` | **the seed SQL** (§A7.5.5), in the same transaction as the `INSERT … SELECT` | the cutover step 6.2 |
+| `seeded` → `allocating` | **the 6.3 arming step** — a single `UPDATE … SET mode='allocating' WHERE mode='seeded'`, guarded by the quiescence assertion | §A7.7 step 6.3, *after* the backfill, never before |
+| `allocating` → `halted` | **the rollback ladder** (§A7.5.11) — rung 2's bump and rung 3's restore are the only writers | an operator-initiated rollback; **`halted` is never entered automatically** |
+| `halted` → *(never back)* | — | a halted graph is re-cut by a **fresh seed**, never re-armed: re-arming a graph whose carried numbers were already consumed is how the same ordinal gets issued twice |
+
+**`mode` is machine-readable on purpose** — §A7.7 step 6.5 gates the removal of the enumeration fallback on
+`mode = 'allocating'`, so the classification is a column read, not a log-and-hope.
+
 | lane | allocator | what carries the number | mode |
 |---|---|---|---|
 | hosted, record armed | the `record_cursor` row (per graph, in-transaction, held to COMMIT) | `journal_event.seq` **and** the journal export line (`seq` field, new) | `allocating` |
@@ -1290,6 +1359,12 @@ Stage C needs these, so A7 states them rather than leaving Stage B to invent the
 above had the reviewer's question applied to it — *"if this step is done wrong, does anything go red?"* — and a
 blocking answer with no falsifier was treated as not answered.** The table's last column is what does NOT go red
 before the falsifier exists, i.e. why the row is here rather than in a test file.
+
+⛔ **There are eighteen LIVE falsifiers — and #19 is a hole, not a typo.** #19 ("the cutover must be refused on a
+non-quiesced graph") was withdrawn by this revision's own review because the seed has no mechanism to detect
+quiescence and no lock to take, so the test could only pass vacuously or fail against its own spec. **The number
+is deliberately not reused:** a renumbered list would hide the withdrawal, and the withdrawn promise is now
+§A8.2 item 7. Everything else below is live.
 
 1. **Two journal files for one graph** must be **refused**, or the position must carry the journal's identity
    (D-24 / `#9318`). The reachable trigger is not exotic — **changing `TORTOISE_EVENT_LOG_BASE_DIR` on a live
@@ -1362,13 +1437,22 @@ before the falsifier exists, i.e. why the row is here rather than in a test file
     no commit**: (a) no `record_cursor` row; (b) `record_cursor.mode = 'halted'`; (c) **`app.current_org_id`
     unset under `FORCE ROW LEVEL SECURITY`**, where the UPDATE matches zero rows and — without §A7.5.2's
     rowcount assertion — `INSERT … SELECT … FROM alloc` writes **nothing and raises nothing**.
-18. **A journal REPLACED BY A LONGER ONE must not be seeded as a D-25 tail (P1, round-2 review).** Restore a
-    newer journal over a graph whose counter exists, then run the seed: it must **REFUSE**, not lift. *The
-    first version's case-2 rule would have healed it, mixing two journals into one coordinate space with no
-    error anywhere.*
-19. **The cutover must be refused on a non-quiesced graph.** Write concurrently with the seed and assert the
-    seed refuses (or takes a lock that blocks the writer). *Two floors read either side of a live write is the
-    sharpest silent failure in §A7.5.5, and nothing in the codebase measures quiescence today.*
+18. **A journal REPLACED BY A LONGER ONE must not be seeded as a D-25 tail (P1, round-2 review).** Two cases,
+    because the first version tested only the vacuous one. **(a)** A graph whose counter row is in `seeded` mode
+    (the only state in which the seed may re-run, §A7.5.5 step 0) and whose journal was replaced by a longer
+    one: the re-seed must **REFUSE**, and refuse with the *tail-evidence* error, not with "already seeded".
+    **(b)** A graph with **no** counter row (a first cutover — the only time the seed normally runs) whose
+    journal is a longer replacement: `record_floor > enumerated_floor` ⇒ **case 1 refuses**. *A falsifier that
+    only exercises (b) proves nothing about (i)–(iii), since step 0 refuses before they are evaluated — which
+    is exactly the defect the round-2 review found in the earlier wording.*
+19. **⛔ WITHDRAWN — "the cutover must be refused on a non-quiesced graph" was not implementable (round-2
+    review, and the withdrawal is the honest outcome).** The seed takes no lock a journal writer contends
+    (there is no per-graph record row before one is created, and the journal is a file), so "refuses" had no
+    detection path and "takes a lock that blocks the writer" named a mechanism that exists nowhere in
+    §A7.5.5. **A falsifier that must either go red against the spec or always pass is not a falsifier**, so it
+    is removed rather than relaxed, and the precondition it was standing in for is promoted where it belongs:
+    **QUIESCENCE IS AN OPERATOR-ASSERTED PRECONDITION, not an enforced one**, recorded as unresolved in §A8.2.
+    The number is left as a hole so the next reader sees the withdrawal rather than a silent renumbering.
 
 **Why this list is longer than the last one, and why that is the correct direction.** The round-1 list was six
 falsifiers for a design with seven blocking defects — the count was the symptom. Every blocking answer now
@@ -1514,7 +1598,7 @@ is the step that changes it — not a drive-by.
 | **B2** | no rollback path; append-only trigger makes a mis-numbered row unrepairable | **§A7.5.11** — *stop allocating, keep the carried numbers, never return a graph to enumeration*, with a per-graph exemption requiring a **proof predicate**; the repair ladder priced rung by rung; the GUC path and its blast radius named; recreate-the-graph excluded with the reason | **§A7.6 #8** — the rollback must be refused for a graph with a hole, not silently renumber |
 | **B3** | `record_cursor` absent from the record's table registry → restore restarts the allocator at zero | **§A7.8** — the full deliverable list (table, RLS `USING` **and** `WITH CHECK`, `GRANT SELECT, INSERT, UPDATE` and **no DELETE**, `THE_RECORD_TABLES`, `RECORD_MIGRATIONS` both directions) + the **first-updatable-record-table** rationale + the purge decision; **§A7.8** falsifier: restore a dump, assert the next write is `max(seq)+1` | **§A7.8** (three sub-assertions: table present, counter ≥ max, restore **refuses** when it is not) |
 | **B4** | the arm is never stated; both arms break a guarantee | **§A7.5.6** — **AFTER COMMIT**, with the three-way argument (before / after / staging-is-not-a-third-arm), the contiguous-prefix export that re-serialises into seq order, and the admitted price: **the per-graph lock returns on the export path**; §A7.5.1 supplies the lock fact that makes it safe | **§A7.6 #9** — commit 5 and 6 out of arrival order; the file must still read 5,6 |
-| **B5** | a stale counter becomes permanent silent loss | **§A7.5.2** (the allocation is `cursor + N`; **`cursor < max(seq)` RAISES** — `GREATEST` lives only in the seed, because on the hot path it silently repaired the very divergence the refusal arm exists to surface) · **§A7.5.4** (the live path **drops** `ON CONFLICT DO NOTHING`; the replay path refuses on `event_id`, `§A7.8` item 6 being its precondition) · **§A7.5.2**'s **rowcount assertion**, without which the CTE fails open | **§A7.6 #12** (reconciliation **armed**) and **#17** (the three no-row cases, including the RLS-GUC-unset shape) |
+| **B5** | a stale counter becomes permanent silent loss | **§A7.5.2** (the allocation is `cursor + N`; **`cursor < max(seq)` RAISES** — `GREATEST` lives only in the seed, because on the hot path it silently repaired the very divergence the refusal arm exists to surface) · **§A7.5.4** (the live path **drops** `ON CONFLICT DO NOTHING`; the replay path refuses on `event_id` **when it is non-NULL, counts when NULL pre-widening, and refuses only on a non-NULL mismatch** — the NULL rule is round 2's fix, since the first version would have refused all of history) · **§A7.5.2**'s **rowcount assertion**, without which the CTE fails open | **§A7.6 #12** (reconciliation **armed**) and **#17** (the three no-row cases, including the RLS-GUC-unset shape) |
 | **B6** | cursors ARE `:GraphEvent.seq`, so §A7.1 and §A4.5 cannot both be built | **§A7.1** — corrected to *"`:GraphEvent` keeps its own positions"*, with the two-coordinate table, the bounded `MAX_SEQ` domain and `first_seq`-purge-maintained facts; **§A7.7** now **removes D-07 from the sequence entirely** (the round-1 step 4 instruction — *"the record mints the value that goes into `:GraphEvent`"* — was adoption by another name and could not be built; `next_seq` stays, D-07 waits for its own reopen) | **§A7.6 #16** — a cursor captured **before** the change must still land on the same `:GraphEvent` rows after it. **Falsifier #4 does NOT cover this** and the round-2 review was right that the earlier row over-claimed |
 | **B7** | `journal_event` is the only carrier of `Object.status`/`Subject.status` | **§A6 D-27** (new row: the terminal-fold stickiness makes a bound a **resurrection** bug) + **§A7.5.12** (the bound stays out) + **§A7.7 step 7** (the bound is the FILE only; a table bound is a different decision); §A2.8/D-30 give the in-tree precedent (`#3870`) | **§A7.6 #12**'s P0 arm + §A7.8 item 7 (the purge is extended only if a ruling says so) |
 
@@ -1577,6 +1661,31 @@ with **the coordinate it reconciles on** stated in bold: `journal_event.seq`, an
    drop an `op=restatus` row for a node whose later rows remain) — which may make the bound *unimplementable*
    rather than merely dangerous. That is a finding for whoever rules on `#9025`, and I have not proven either
    way.
+7. **⛔ Quiescence at cutover is OPERATOR-ASSERTED, not enforced, and that is the largest thing this revision
+   stopped pretending to have solved.** The first version promised the seed would *refuse on a non-quiesced
+   graph* and a falsifier (#19) asserted it. It cannot: the seed takes no lock a journal writer contends, the
+   journal is a **file**, and before the cutover there is no per-graph record row to lock. **So the falsifier
+   was withdrawn (§A7.6 #19, number left as a hole) rather than relaxed, and quiescence is a precondition the
+   runbook must state and an operator must satisfy.** The residual risk is exactly the one the withdrawal
+   admits: two floors read either side of a live write. **The only mechanical mitigation this design offers is
+   the post-seed assertion (§A7.5.5 step 4), which turns a wrong floor into a REFUSAL — after the fact.** A
+   genuine fix needs a write-path coordination point this design does not have, and naming that gap is more
+   useful than a promise the code cannot keep.
+8. **⛔ A `cursor < max(seq)` state has NO clean repair rung (round-2 review of this revision — the finding is
+   the gap, not an omission).** The allocator now **refuses** on it (§A7.5.2), which is correct but leaves the
+   graph unable to allocate; rung 1's *"no action"* is a decision not to act and does **not** clear a refusal;
+   rung 2's bump is the variant §A7.5.11's own text calls **worse** (it re-issues burned numbers or skips
+   them); rung 3's restore needs a dump **no schedule takes**. **So the state is detected, refused and
+   unrepairable by the plan's own tools** — an operator's only real routes are a manual counter correction
+   against `journal_event`, or restoring the whole graph. ⛔ **This is a consequence of choosing refusal over
+   silent reuse, and refusing is still right** — but a design that refuses must say what the road back is, and
+   today the road back is manual. Whoever implements §A7.5.11 should expect to build rung 4.
+9. **⛔ Case 2 of the seed (the D-25 tail heal) is DEFERRED, not implemented.** §A7.5.5's case 2 needs a journal
+   identity the record does not carry (D-24 is a guard, `#9318` is unbuilt, D-28 shows `stat` fields cannot
+   supply it), so **the seed refuses by default and D-25's `None`-position graphs stay uncut**. Stated as
+   deferred rather than solved because the alternative — lifting on two of three conditions — is the same
+   silent-loss class as the bug being fixed. **The unblocking dependency is `#9318`**, and until it lands, B1's
+   claim is narrower than round 1's text made it.
 
 ### A8.3 The revision reviewed itself, and the review found five — recorded because the finding class is the point
 
@@ -1605,6 +1714,29 @@ because the revision had attached B5's most important half to a section that doe
 **What the reader should conclude from §A8.3 existing at all:** the revision is not claimed clean. It is claimed
 *reviewed by an instrument that could fail it* — and the next round's most useful target is the part of this
 document that no falsifier reaches: the **operator-facing** decisions in §A8.2.
+
+#### A8.3.1 The third pass: the fixes were checked, and three of them were not fixes
+
+The second review fixed eleven findings. The third pass asked only *"is each fix actually a fix?"* — and found
+that **three had been applied as words rather than as mechanism**, which is the failure mode this document keeps
+naming one level down:
+
+| found | why the "fix" did not fix it | what it is now |
+|---|---|---|
+| **P0** | §A7.1 had been corrected to remove D-07 from §A7.7, but the same paragraph still said §A7.7 *"keeps D-07 at step 4"* — the withdrawn sentence was left standing beside its own correction | corrected in place, and **the withdrawn phrasing is quoted as withdrawn** rather than deleted, so a reader comparing rounds sees the contradiction resolved rather than erased |
+| **P0** | the replay guard's *"refuses unless `event_id` matches"* would have **refused every row written before the envelope widening** (`event_id IS NULL`) — breaking the `#9187` tail replay and falsifier 4, i.e. the fix introduced exactly the outage class it was meant to prevent | an explicit **NULL rule**: non-NULL-equal proceeds, non-NULL-different refuses, NULL **proceeds and counts** a named metric; the backfill is §A7.8 item 6's second half and the counter must reach zero before the strict guard is claimed |
+| **P0** | the seed's three tail-evidence conditions included *"the same journal identity"* — and **no per-row journal identity exists** (D-24 is a guard, `#9318` is unbuilt, D-28 shows `stat` cannot supply it). Condition (iii) was **not evaluable**, so case 2 would have lifted on two of three conditions | **case 2 REFUSES by default**; the D-25 tail heal is **DEFERRED, not implemented**, and §A8.2 item 9 says so. A narrower claim that is true beats a broader one that needs a condition nothing can check |
+
+**And two falsifiers did not survive the same question.** #19 asserted the seed refuses on a non-quiesced graph —but
+the seed takes no lock a writer contends and has no detection path, so the test could only pass vacuously or fail
+against the spec. **It was withdrawn and its number left as a hole** (§A7.6 intro), and the promise became §A8.2
+item 7 (*quiescence is operator-asserted*). The withdrawal is the outcome, not a gap in it: **a falsifier that
+cannot fire is worse than no falsifier**, because it converts unverified into verified.
+
+⛔ **What the third pass proves about the process: a review that only asks "was the finding addressed?" cannot
+distinguish a mechanism from a sentence.** All three P0s above had a fix that *read* as responsive and changed
+nothing mechanically. The question that found them is one line — *"what does this do when it runs?"* — and it
+belongs in the next round's brief rather than being rediscovered each time.
 
 ---
 
@@ -1733,8 +1865,10 @@ correct artifact — is the one that propagates, and because the near-miss is th
 
 ## 10 — What this lane did not do
 
-- **No product code.** No migration, no allocator, no test was written or edited. The nineteen falsifiers in
-  §A7.6 are specified, not implemented.
+- **No product code.** No migration, no allocator, no test was written or edited. The **eighteen live**
+  falsifiers in §A7.6 are specified, not implemented — **#19 is withdrawn and its number left as a hole**, which
+  is itself part of what this lane did: a falsifier that could only pass or go red against its own spec was
+  removed rather than relaxed (§A8.2 item 7).
 - **No reopen filed, and the distinction now matters (Stage B round 2).** The **allocator** reopen is **already
   RULED by the owner** (`#9190` comment `6902871297`), so A7.5 implements it on paper. The **two reopens this
   revision newly identifies** — `record_writer.py:78-101` decision 3 + the live door's `OVERRIDES` (M7-a) and
