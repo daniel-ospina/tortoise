@@ -38,9 +38,9 @@ What this suite pins (each row names the mutation that reds it):
 * The successor channel is the CAMEL property in BOTH renderings. Mutation:
   pass the full carrier set (``_LIFECYCLE_CARRIER_COLUMNS``-derived) instead of
   ``(_SUCCESSOR_PROP,)`` to ``_carrier_prop_named_by`` in
-  ``_successor_named_by`` -> ``test_a_shadow_spelling_does_not_name_a_successor``
-  reds (and ``superseded_by`` would then leave the row `superseded` with the
-  pointer every reader resolves absent).
+  ``_successor_named_by`` -> ``test_a_carrier_named_by_a_shadow_spelling_does
+  _not_satisfy_the_guard`` reds (and ``superseded_by`` would then leave the row
+  `superseded` with the pointer every reader resolves absent).
 * A STAMP / an empty name is not a name. Mutation: drop the blank/NULL test in
   ``_successor_named_by`` -> the ``supersededAt``-only and ``''`` cases red.
 * A POINT's successor may be NAMED BY THE EDGE: ``supersede_point`` writes
@@ -50,9 +50,10 @@ What this suite pins (each row names the mutation that reds it):
   Mutation: drop the edge probe -> `test_a_point_superseded_the_documented_way_*
   reds (this over-block was MEASURED by ``test_a_rendered_ECHO_of_the_stored_*
   status_is_still_entailed`` in the 9649 suite, which is why both exist).
-* The verdict is over EVERY bound row (#7822). Mutation: read one row
-  (``rows[0]``) instead of the row-count-vs-named-count pair -> the fan-out case
-  reds.
+* The verdict is over EVERY bound row (#7822), PER NODE. Mutation: read one row
+  (``rows[0]``) instead of the per-row loop -> the fan-out case reds; key the
+  Point edge probe on ``n.id`` instead of ``ID(n)`` ->
+  ``test_a_nameless_twin_is_not_authorised_by_its_siblings_corrects_edge`` reds.
 * ``sdk.supersede()`` dispatches on the OLD node's label: Point unchanged,
   Object/Subject write the coherent triple (status + successor NAME + instant)
   in ONE journaled write. Mutation: dispatch on nothing (today's Point-only
@@ -609,10 +610,11 @@ def test_a_bare_carrier_clear_stays_ACCEPTED_and_leaves_the_row_dead(sdk, label)
     ⛔ This is a pin of somebody else's ruling, not of a preference: a cycle-2
     review proposed refusing this shape too (it does leave the row saying
     'superseded' with nobody named), and that would have reversed **#12882 review
-    F2**, which re-pinned it in `tests/test_status_projection.py::
-    test_a_coherent_un_supersede_lifts_the_row_and_a_status_only_write_cannot`
-    as *"the bare carrier CLEAR is still ACCEPTED on a superseded row and leaves
-    the row TERMINAL: with no status named there is no transition to ask about"*.
+    F2**, which re-pins it — in that PR's
+    `test_a_coherent_un_supersede_lifts_the_row_and_a_status_only_write_cannot`,
+    which lands WITH #12882 and is therefore not on this branch — as *"the bare
+    carrier CLEAR is still ACCEPTED on a superseded row and leaves the row
+    TERMINAL: with no status named there is no transition to ask about"*.
     The residual is disclosed on #12592 rather than tightened here.
 
     Mutation: refuse a carrier-only clear (an `elif` arm on the successor key) ->
@@ -668,3 +670,48 @@ def test_a_nameless_twin_is_not_authorised_by_its_siblings_corrects_edge(sdk):
     ).result_set
     assert [r[0] for r in stored] == ["live", "live"], (
         f"a nameless sibling rode its twin's edge: {stored}")
+
+
+def test_the_SNAKE_spelling_of_a_same_call_clear_is_the_same_split(sdk):
+    """`superseded_by` is the SAME record column, so it is the same split.
+
+    `_split_properties` files `snake(key)` into the column, so `superseded_by` and
+    `supersededBy` write ONE column while `keys_rendering_as` sees only the camel
+    key: measured ``keys_rendering_as({'superseded_by': None}, {'supersededBy'})
+    == []``. On the cycle-3 head that let
+    ``update_entity(<superseded Object, supersededBy='acme-v2'>,
+    status='superseded', superseded_by=None)`` through — the graph kept the name
+    every reader resolves while the record's `superseded_by` went NULL, so the
+    record derived the word from a column the caller had just cleared.
+
+    Mutation: key `carrier_cleared` on `keys_rendering_as` (the camel spelling)
+    instead of the record COLUMN -> this reds, because the call is accepted.
+
+    The snake SET is the other half and gets its own wording: it is not a clear,
+    it is a name in a channel no reader resolves (#12782), so the repair is the
+    camel spelling rather than "name someone".
+    """
+    node = _make(sdk, "Object", "snakesplit")
+    sdk.update_entity(node, status="superseded", supersededBy="snakesplit-v2")
+    with pytest.raises(ValueError, match="CLEARS `supersededBy`"):
+        sdk.update_entity(node, status="superseded", superseded_by=None)
+    assert _row(sdk, "Object", node)[1] == "snakesplit-v2", (
+        "a refused snake clear still moved the row")
+
+    other = _make(sdk, "Object", "snakeset")
+    with pytest.raises(ValueError, match="NO READER RESOLVES"):
+        sdk.update_entity(other, status="superseded", superseded_by="snakeset-v2")
+    assert _row(sdk, "Object", other) == [None, None, None], (
+        "a refused shadow-spelled name still moved the row")
+
+
+def test_a_snake_key_beside_the_camel_key_is_the_conflict(sdk):
+    """Two spellings, one column: which value survives is not knowable here.
+
+    Mutation: count only the camel keys for the conflict test -> red (the call is
+    accepted and the fold's iteration order decides the column).
+    """
+    node = _make(sdk, "Object", "snakeconflict")
+    with pytest.raises(ValueError, match="CONFLICTING successor write"):
+        sdk.update_entity(node, status="superseded", supersededBy="snakeconflict-v2",
+                          superseded_by=None)

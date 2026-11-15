@@ -5829,6 +5829,12 @@ def _refuse_bare_lifecycle_carrier(props: dict, *, label: str, surface: str,
 #: in the SDK's own supersession path puts the name there.
 _SUCCESSOR_PROP = "supersededBy"
 
+#: …and the RECORD column it folds into (``record_projection.snake``), because the
+#: guarded surface is the record's COLUMNS: ``superseded_by`` and ``supersededBy``
+#: are one column, so a clear through either spelling splits the same pair
+#: (#12592 cycle-4; #12782 for the shadow-property class).
+_SUCCESSOR_COLUMN = "superseded_by"
+
 #: The dead sets the supersession DOORS consult, per label — the family's OWN
 #: recorded read vocabulary (`commit_ops`), never a literal here: the same
 #: declaration #10371's transition guard takes its dead set from, so the two
@@ -48353,17 +48359,40 @@ class TortoiseSDK:
         # does on the same asymmetry, and say which keys were involved.
         _carrier_keys = sorted(
             str(k) for k in keys_rendering_as(props, {_SUCCESSOR_PROP}))
-        if len(_carrier_keys) > 1:
+        # ⛔ THE CARRIER IS THE RECORD'S COLUMN, NOT A SPELLING (#12592 cycle-4
+        # P1, and the same class #12782 measured). `_split_properties` files
+        # ``snake(key)`` into the record column, so ``superseded_by`` and
+        # ``supersededBy`` are ONE column while ``keys_rendering_as`` sees only
+        # the camel key: measured, ``keys_rendering_as({'superseded_by': None},
+        # {'supersededBy'})`` is EMPTY. So a spelling-keyed check missed the clear
+        # AND the conflict, and
+        # ``update_entity(<superseded Object, supersededBy='acme-v2'>,
+        # status='superseded', superseded_by=None)`` was ADMITTED: the graph kept
+        # the camel name every reader resolves while the record's `superseded_by`
+        # column went NULL, so the record derived the word from a column the
+        # caller had just cleared.
+        from tortoise.record_projection import snake  # local: avoids import weight
+        _name_keys = [k for k in props if snake(str(k)) == _SUCCESSOR_COLUMN]
+        _name_values = [props[k] for k in _name_keys]
+        # ⛔ COUNTED BY KEY OBJECT, not by rendered name (#12592 cycle-4): a
+        # `str` subclass with a colliding `__hash__` renders as the SAME name as
+        # the plain key, so a set of rendered strings collapses the two and the
+        # conflict goes unseen — which is exactly the shape this refusal exists
+        # for (the earlier list form counted them; a set does not).
+        _all_carrier_keys = [k for k in props
+                             if str(k) in set(_carrier_keys) or k in _name_keys]
+        if len(_all_carrier_keys) > 1:
             raise ValueError(
                 f"update_entity refused a CONFLICTING successor write on "
-                f"{id_val!r}: {len(_carrier_keys)} keys in this call name "
-                f"`{_SUCCESSOR_PROP}` ({', '.join(_carrier_keys)}), and they "
-                f"land on ONE property, so which value survives is not "
+                f"{id_val!r}: this call writes the `{_SUCCESSOR_COLUMN}` column "
+                f"through more than one key "
+                f"({', '.join(sorted({str(k) for k in _all_carrier_keys}))}), and "
+                f"they land on ONE property, so which value survives is not "
                 f"knowable here. A key whose spellings disagree is filed under "
                 f"one name by the live write and another by the journal, and a "
                 f"`None` beside a value can store the CLEAR while the guard "
-                f"reads the name. Pass `{_SUCCESSOR_PROP}` ONCE, as a plain "
-                f"str, with the word you mean."
+                f"reads the name. Pass `{_SUCCESSOR_PROP}` ONCE, as a plain str, "
+                f"with the word you mean."
             )
         # A named successor in the CALL is sufficient — the write applies it to
         # every bound row (``SET n += $props``), so no row is left nameless.
@@ -48384,7 +48413,7 @@ class TortoiseSDK:
         # guard was only entered on a status write). The stored-value allowance
         # below reads the PRE-write row, so it must never license a call that
         # removes the very value it is reading.
-        carrier_cleared = bool(_carrier_keys)
+        carrier_cleared = bool(_name_keys)
         proj = self._get_proj()
         # `bound` is every label this id actually binds; `nameless` is the
         # subset that fails. The PRESCRIPTION is chosen from `bound`, not from
@@ -48580,16 +48609,32 @@ class TortoiseSDK:
                 f"supersededBy=<successor name>)`")
         verb = (f"`supersede({id_val!r}, <successor id>)` {carrier_clause}")
         if carrier_cleared:
-            repair = (
-                f"⛔ This call CLEARS `{_SUCCESSOR_PROP}` (a `None` — or a "
-                f"blank/non-string — value), so the write ITSELF would split the "
-                f"pair. Name the successor — {pair}, or {verb}; if the stored "
-                f"replacement was WRONG, replace the NAME rather than remove it. "
-                f"To stop claiming a replacement at all, move the row OFF the "
-                f"word in the same call: `update_entity({id_val!r}, "
-                f"status='live', supersededBy=None, supersededAt=None)` is "
-                f"#12825's coherent un-supersede, and {retirement_word} is the "
-                f"successorless retirement; ")
+            _shadow_only = any(isinstance(v, str) and v.strip()
+                               for v in _name_values)
+            if _shadow_only:
+                # A value IS supplied — under a spelling no reader resolves
+                # (`superseded_by`, #12782). Not a clear, and not a name either.
+                repair = (
+                    f"⛔ This call supplies the successor under a spelling NO "
+                    f"READER RESOLVES "
+                    f"({', '.join(sorted({str(k) for k in _name_keys}))}): "
+                    f"`supersededBy` is the property every reader keys on, and "
+                    f"the snake form writes a SHADOW column the graph does not "
+                    f"hold (#12782). Pass the CAMEL spelling — {pair}, or "
+                    f"{verb}; otherwise move the row OFF the word in the same "
+                    f"call ({retirement_word} is the successorless retirement); ")
+            else:
+                repair = (
+                    f"⛔ This call CLEARS `{_SUCCESSOR_PROP}` (a `None` — or a "
+                    f"blank/non-string — value), so the write ITSELF would split "
+                    f"the pair. Name the successor — {pair}, or {verb}; if the "
+                    f"stored replacement was WRONG, replace the NAME rather than "
+                    f"remove it. To stop claiming a replacement at all, move the "
+                    f"row OFF the word in the same call: "
+                    f"`update_entity({id_val!r}, status='live', "
+                    f"supersededBy=None, supersededAt=None)` is #12825's "
+                    f"coherent un-supersede, and {retirement_word} is the "
+                    f"successorless retirement; ")
         elif dead_seen is not None:
             repair = (
                 f"Name the successor — {pair} is the write that works here, "
