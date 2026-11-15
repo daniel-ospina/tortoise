@@ -1515,11 +1515,16 @@ def test_an_ambiguous_bound_name_stays_armed(tmp_path):
     mod.write_text(
         "from tests._index_settle import index_rows_after_settle\n"
         "from tests._index_settle import index_kind_absent\n"
-        "ZERO = 0\n"
+        "# ⛔ ORDER MATTERS FOR THIS PIN: the module-level binding is the REAL one\n"
+        "# and the function-local shadow is the zero. A resolver that kept the LAST\n"
+        "# folded value would unarm this call, so the row reds when the ambiguity\n"
+        "# branch is removed (measured).\n"
+        "BOUND_S = 120.0\n"
         "def test_elsewhere(proj):\n"
-        "    ZERO = 5\n"
+        "    BOUND_S = 0\n"
         "def test_wait(proj):\n"
-        "    index_rows_after_settle(proj, until=index_kind_absent, timeout=ZERO)\n",
+        "    index_rows_after_settle(proj, until=index_kind_absent,"
+        " timeout=BOUND_S)\n",
         encoding="utf-8")
     _, missing = _settle_call_sites([mod])
     assert missing == {}, (
