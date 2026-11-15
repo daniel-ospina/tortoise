@@ -482,11 +482,13 @@ from tortoise.sdk import _get_kind_expander
 _get_kind_expander().list_relations()  # returns fromKind/toKind/mechanism triplets
 
 # What kinds does a pack declare (including subclass/equivalence expansion)?
-sdk.expand_kind("WorkItem")  # returns ["WorkItem", "dev:issue", "pm:issue", ...]
+_get_kind_expander().expand_kind("WorkItem")  # returns ["WorkItem", "dev:issue", "pm:issue", ...]
 ```
 
-`_get_kind_expander()` is the cached registry the SDK itself reads (`_resolve_traversal_path`
-uses it). `expand_kind()` above is a live PUBLIC method — it is the supported door.
+Both are `PackRegistry` methods, reached through the cached expander the SDK itself uses.
+⚠️ Neither is a public SDK door: `list_relations()` was retired in #12901 wave 1, and
+`expand_kind` exists on `TortoiseSDK` only as the PRIVATE `_expand_kind` — so a literal
+`sdk.expand_kind(...)` (as this doc previously showed) raises `AttributeError`.
 
 ## Discovery Checklist
 
