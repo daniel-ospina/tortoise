@@ -6289,22 +6289,38 @@ def _payload_object(payload: Any) -> Any:
 
 
 def _identity_value(value: Any) -> Any:
-    """The value if it can be an id, else ``None`` (#9318 review 3, note 1).
+    """The value if it can be an id, else ``None`` (#9318 reviews 3 and 4).
 
     An identity key is caller-settable, so its VALUE is caller data: a mapping or
     a list under `id` would be rendered into the failure line as its repr, which
     is how a document title reaches a log line the class docstring promises is
-    content-free. `record_writer._record_identity` accepts `str` only for the
-    same reason; `int` is admitted here because a jsonb round-trip preserves
-    numeric ids and `bool` is excluded because it is an `int` subclass. Anything
-    else is not an id, so it answers nothing rather than printing itself.
+    content-free. `record_writer._record_identity` accepts a NON-EMPTY `str` for
+    the same reason, and the empty string is admitted by neither: a blank
+    defaulted field is not a coordinate, and counting it as one made two blanks
+    "agree" (`same`, from no evidence) and a blank against a real id "disagree"
+    (`different`, i.e. the collision claim from a re-derivation signature).
+    `int` is admitted because a jsonb round-trip preserves numeric ids, and
+    `bool` is excluded because it is an `int` subclass. Anything else is not an
+    id, so it answers nothing rather than printing itself.
     """
     if isinstance(value, bool):
         return None
-    return value if isinstance(value, (str, int)) else None
+    if isinstance(value, str):
+        return value if value else None
+    return value if isinstance(value, int) else None
 
 
-def _identity_pairs(payload: Any) -> list[tuple[str, str, Any]]:
+#: The payload sections whose contents are a record SNAPSHOT, and therefore the
+#: only ones whose nested keys may be read as coordinates. It is exactly the
+#: fold's own entity-snapshot table (`_ENTITY_MATCH_COLUMNS`), NOT every mapping
+#: in the payload: `props` is a WITHHELD column, and a walk that visited it
+#: printed tenant text (`props.id` → "Q3 pricing memo — confidential") onto a log
+#: line this class promises is content-free (review cycle 4). A section added
+#: here must be one the fold itself resolves a node from.
+_IDENTITY_SECTIONS: frozenset[str] = frozenset(_ENTITY_MATCH_COLUMNS)
+
+
+def _identity_pairs(payload: Any) -> list[tuple[str, str, str, Any]]:
     """``(key, label, value)`` identity pairs the payload carries (#9318).
 
     TWO LEVELS, because the dominant shape is NESTED and a top-level-only read
@@ -6316,25 +6332,28 @@ def _identity_pairs(payload: Any) -> list[tuple[str, str, Any]]:
     `point.id`. `record_writer._record_identity` walks the sub-dicts for the same
     reason, so this is the record's existing convention, not a new one.
 
-    ``label`` is what the failure line prints (`id` on the top level,
+    Each pair is ``(key, scope, label, value)``. ``scope`` is what makes pairs
+    COMPARABLE — `""` for the top level, the section name for a snapshot — so the
+    same key at two levels is not silently compared against itself in the wrong
+    scope. ``label`` is what the failure line prints (`id` on the top level,
     `point.id` when nested), so an operator can see WHERE the identity came from.
     Values that cannot be an id (:func:`_identity_value`) are omitted entirely.
     """
     obj = _payload_object(payload)
     if not isinstance(obj, Mapping):
         return []
-    pairs: list[tuple[str, str, Any]] = []
+    pairs: list[tuple[str, str, str, Any]] = []
     for key in _IDENTITY_KEYS:
         value = _identity_value(obj.get(key))
         if value is not None:
-            pairs.append((key, key, value))
+            pairs.append((key, "", key, value))
     for section, inner in obj.items():
-        if not isinstance(inner, Mapping):
+        if section not in _IDENTITY_SECTIONS or not isinstance(inner, Mapping):
             continue
         for key in _IDENTITY_KEYS:
             value = _identity_value(inner.get(key))
             if value is not None:
-                pairs.append((key, f"{section}.{key}", value))
+                pairs.append((key, section, f"{section}.{key}", value))
     return pairs
 
 
@@ -6384,22 +6403,36 @@ def _identity_verdict(attempted: Any, stored: Any, attempted_type: Any,
     if not ours and not theirs:
         return "unknown", None
     if ours and not theirs:
-        _key, label, value = ours[0]
+        _key, _scope, label, value = ours[0]
         return "one_sided", (
             f"only this write names {label}="
             f"{_bounded(str(value), _ATTRIBUTION_VALUE_LIMIT)}")
     if theirs and not ours:
-        _key, label, value = theirs[0]
+        _key, _scope, label, value = theirs[0]
         return "one_sided", (
             f"only the surviving row names {label}="
             f"{_bounded(str(value), _ATTRIBUTION_VALUE_LIMIT)}")
 
+    #: Pair LIKE WITH LIKE: a key in the same scope is the comparison; a key that
+    #: exists at one level on each side is comparable ONLY when each side carries
+    #: exactly one pair for it (otherwise a payload naming `id` both at the top
+    #: level and inside its snapshot would compare the wrong two values, and the
+    #: message would print a counterpart it never compared — review cycle 4).
     shared: list[tuple[str, str, Any, Any]] = []
-    for key, label, value in ours:
-        match = next((candidate for candidate in theirs
-                      if candidate[0] == key), None)
-        if match is not None:
-            shared.append((key, label, value, match[2]))
+    for key, scope, label, value in ours:
+        same_scope = [candidate for candidate in theirs
+                      if candidate[0] == key and candidate[1] == scope]
+        if same_scope:
+            candidates = same_scope
+        else:
+            our_count = sum(1 for pair in ours if pair[0] == key)
+            their_count = sum(1 for pair in theirs if pair[0] == key)
+            if our_count != 1 or their_count != 1:
+                continue
+            candidates = [candidate for candidate in theirs
+                          if candidate[0] == key]
+        for candidate in candidates:
+            shared.append((key, label, value, candidate[3]))
     if not shared:
         # Both sides carry identities, but none of them is a key both sides
         # speak — nothing is comparable, and saying so is the honest answer.

@@ -454,6 +454,95 @@ def test_a_number_typed_id_is_compared_by_type_not_by_stringification() -> None:
     assert state == "different"
 
 
+def test_a_WITHHELD_section_is_never_read_for_an_identity() -> None:
+    """The nested walk may visit SNAPSHOTS, not every dict (#9318 review cycle 4).
+
+    The first nested cut iterated every mapping in the payload, `props`
+    included — and `props` is a withheld column. `{"props": {"id": "Q3 pricing
+    memo — confidential"}}` was printed verbatim into the diagnosis, and the
+    class docstring promises it "quotes no payload text". The walk is now bounded
+    to the fold's own entity-snapshot sections; the pin below keeps a content
+    column from being added to that set.
+    """
+    assert rp._identity_pairs({"props": {"id": "secret"}}) == []
+    assert rp._identity_pairs({"aboutObject": {"id": "obj-9"}}) == []
+    assert frozenset(rp._ENTITY_MATCH_COLUMNS) == rp._IDENTITY_SECTIONS, (
+        "the snapshot sections are the fold's own table — a second list would "
+        "let the reader and the projection disagree about what a snapshot is")
+    # `props` is the WITHHELD tail, and the one section name that is content by
+    # definition. (`object`/`subject` are also COLUMN names in `_CONTENT_COLUMNS`,
+    # but as payload sections they are node snapshots the fold resolves ids
+    # from — the withheld thing is a section's free-text, not its `id`.)
+    assert "props" not in rp._IDENTITY_SECTIONS
+
+
+def test_an_instruction_like_subdict_does_not_move_the_verdict() -> None:
+    """A sibling sub-dict is not a second identity (#9318 review cycle 4).
+
+    Pairing was by KEY alone, so `{"id": "p1", "aboutObject": {"id": "obj-9"}}`
+    compared our top-level id against a nested one and reported `different` — the
+    cycle-1 false certainty back again, with a counterpart the message had not
+    actually compared. Only declared snapshot sections are read now, so the
+    shared top-level id decides.
+    """
+    state, detail = rp._identity_verdict(
+        {"id": "p1", "aboutObject": {"id": "obj-9"}}, {"id": "p1"},
+        "PointRevised", "PointRevised")
+
+    assert state == "same"
+    assert detail == "id=p1"
+
+
+def test_a_key_present_in_TWO_scopes_is_not_compared_across_them() -> None:
+    """Two ids on one side, one on the other: nothing is comparable (#9318 R4).
+
+    With the key present twice on this side, a key-only fallback would pick one
+    of them arbitrarily and print a counterpart it never compared. The pair is
+    skipped, and the same-scope agreement still decides.
+    """
+    state, detail = rp._identity_verdict(
+        {"id": "p1", "point": {"id": "p9"}}, {"id": "p1"},
+        "PointRevised", "PointRevised")
+
+    assert state == "same"
+    assert detail == "id=p1"
+
+
+def test_a_BLANK_identity_is_not_an_agreeing_coordinate() -> None:
+    """`""` is a defaulted field, not evidence (#9318 review cycle 4).
+
+    The previous cut admitted the empty string, so two blanks "agreed" (`same`
+    from no evidence) and a blank against a real id "disagreed" — the collision
+    claim, from the re-derivation signature that `one_sided` exists to report.
+    `record_writer._record_identity` requires a non-empty string for the same
+    reason.
+    """
+    assert rp._identity_verdict({"id": ""}, {"id": ""}, "A", "A") == (
+        "unknown", None)
+    state, detail = rp._identity_verdict({"id": ""}, {"id": "obj-a"}, "A", "A")
+    assert state == "one_sided"
+    assert detail == "only the surviving row names id=obj-a"
+
+
+def test_the_identity_values_are_BOUNDED_like_every_other_log_value() -> None:
+    """An `id` is caller-chosen, so it may not size the log line (#9318 R2).
+
+    `add_object(..., id=…)` / a source keyed by its URL makes `id` arbitrary
+    caller data. The record's own `_record_identity` bounds the same datum at
+    `_ATTRIBUTION_VALUE_LIMIT`; a second half of the same log line that did not
+    would be the shape the #10648 review recorded for this exact line.
+    """
+    huge = "x" * 300
+    state, detail = rp._identity_verdict(
+        {"id": huge}, {"id": "b"}, "ObjectRegistered", "ObjectRegistered")
+
+    assert state == "different"
+    assert huge not in (detail or "")
+    assert "chars)" in (detail or ""), (
+        "the identity value was not truncated with the same bound marker the "
+        "record's own identity line uses")
+
+
 def test_the_identity_keys_are_ids_only_and_a_subset_of_the_writers() -> None:
     """A second list must not drift into printing content (#9318 review note).
 
