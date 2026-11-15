@@ -7242,9 +7242,9 @@ def _doc_section(text: str, start: str, end: str) -> str:
 # Window measured at THIS head over all 60 `must_red` rows: 0 and 2 leave the
 # must_red set fully RED (0/60 leak) and keep the real doc a HIT; **3 opens 2 of
 # 60**, starting with "are not missed by the walk". ⛔ Window 0 is not free
-# either, one set over: it wrongly REDS **10** of the 32 `declared_open` rows.
+# either, one set over: it wrongly REDS **10** of the 33 `declared_open` rows.
 # And since #11437's round-6 clause-scope rows landed, **window 1 is no longer
-# clean at all** — it wrongly REDS 4 of the 32: the two PSEUDO-CLEFT rows (`walk` is
+# clean at all** — it wrongly REDS 4 of the 33: the two PSEUDO-CLEFT rows (`walk` is
 # itself a coverage word, so the cleft's own SUBJECT satisfies the window and the
 # predicate needs the second word to find the real verb), the `only ever` ADVERB
 # row, and the NOUN complement (`not only the walk's business`). ⚠️ The double-negation and `without`-framed rows are GREEN at window
@@ -7257,16 +7257,16 @@ def _doc_section(text: str, start: str, end: str) -> str:
 # `declared_blocks` row (`coverage verb outside the walk/visit/reach/report`). So
 # at this head **2 is the ONLY clean window**: 0 and 1 each cost `declared_open`
 # rows, 3 costs `must_red` rows. (An earlier draft cited "13/13 inverse rows";
-# the row set has since grown to 32, and the denominator re-derived against it —
+# the row set has since grown to 33, and the denominator re-derived against it —
 # #11437 review, P3, re-measured round 8.)
 # ⛔ EVERY figure in this paragraph was re-derived by MEASUREMENT at the head that
 # added the round-9/10/11 rows, because the counts above are inputs and a stale
 # input misreports coverage even when the verdict is right (#11437 review, P3).
 # The `must_red` set is **60** at this head, not the 29 those rounds inherited: the
-# four verdicts reproduced unchanged at 60/19/32/27 — window 0 leaks 0/60 and reds
-# 10/32 `declared_open`; window 1 reds 4/32 (the same four identities named
+# four verdicts reproduced unchanged at 60/19/33/28 — window 0 leaks 0/60 and reds
+# 10/33 `declared_open`; window 1 reds 4/33 (the same four identities named
 # above); window 3 opens exactly the two rows named and wrongly GREENs exactly
-# 1/27 `declared_blocks` (`coverage verb outside the walk/visit/reach/report`).
+# 1/28 `declared_blocks` (`coverage verb outside the walk/visit/reach/report`).
 # ⛔ Round 12 added seven rows of `must_red` (the six cue-only pseudo-negations and
 # `_DEFEATED`'s `incorrect`), round 13 six more (the `un…` privative alternation's
 # unrowed words) and round 14 nine more (two `must_red`, six `declared_open` and
@@ -7293,10 +7293,10 @@ def _doc_section(text: str, start: str, end: str) -> str:
 # ARE pinned by the `N `must_red` rows` sentence, but the verdicts read off them
 # were not, in the paragraph whose whole purpose is to record why 2 is the only
 # clean window. Edit a figure here and the pin reds; re-derive it by measurement:
-#   window 0: must_red leak 0/60; declared_open wrongly red 10/32; declared_blocks wrongly green 0/27; real doc HIT
-#   window 1: must_red leak 0/60; declared_open wrongly red 4/32; declared_blocks wrongly green 0/27; real doc HIT
-#   window 2: must_red leak 0/60; declared_open wrongly red 0/32; declared_blocks wrongly green 0/27; real doc HIT
-#   window 3: must_red leak 2/60; declared_open wrongly red 0/32; declared_blocks wrongly green 1/27; real doc HIT
+#   window 0: must_red leak 0/60; declared_open wrongly red 10/33; declared_blocks wrongly green 0/28; real doc HIT
+#   window 1: must_red leak 0/60; declared_open wrongly red 4/33; declared_blocks wrongly green 0/28; real doc HIT
+#   window 2: must_red leak 0/60; declared_open wrongly red 0/33; declared_blocks wrongly green 0/28; real doc HIT
+#   window 3: must_red leak 2/60; declared_open wrongly red 0/33; declared_blocks wrongly green 1/28; real doc HIT
 # ⛔ COST, taken deliberately: window 2 makes "…are never TOUCHED by the walk"
 # RED, because `touched` is not in the coverage list — a false block bought for
 # that false pass, which is the trade this predicate always takes.
@@ -7335,8 +7335,8 @@ _NEGATION_GOVERNS = re.compile(
     r"(?:walk|visit|reach|report)(?:s|es|ed|ing)?\b")
 # ⛔ `_COVERAGE` is RETAINED DELIBERATELY AND IS CURRENTLY IMPLIED, and saying so
 # is the point (#11437 review, P3). Measured: `_NEGATION_GOVERNS` already requires
-# one of the same four verbs AFTER the negation, so on all 171 candidate sentences
-# (the 138 rows across the four sets — 60 / 19 / 32 / 27 — plus the 33 sentences of
+# one of the same four verbs AFTER the negation, so on all 173 candidate sentences
+# (the 140 rows across the four sets — 60 / 19 / 33 / 28 — plus the 33 sentences of
 # the real §3 under
 # this predicate's own `split(". ")` segmentation) there is no case where the
 # governance test hits and this one does not — dropping the term from
@@ -7580,6 +7580,14 @@ _AFFIRMED = re.compile(
 # `declared_blocks`. Measured, both directions:
 #   "…, but it actually does report them" / "…; they actually are visited"   RED (wanted)
 #   "…, and the census actually says so"   (an honest ASIDE, two-word subject)  RED (the price)
+# ⛔ THE BOUND IS A REACH, NOT A CLOSURE, and the difference is ROWED: a subject
+# gap wider than three words, or one carrying punctuation `\w+` cannot cross
+# (apostrophe, hyphen, backtick), is still ACCEPTED. That is a `declared_open` row
+# with `#11541` as its owner (`open: `actually` inverse with a SUBJECT GAP WIDER
+# than the bound`) — declared rather than chased, because every width leaves a
+# longer subject GREEN (the non-converging-list argument this file records for the
+# marker list). Read the arm as "boundary + a subject of up to three words", never
+# as "every subject-interposed form".
 # ⛔ AND THE CLASS CARRIES THE COMMA AND THE OPENING PAREN, which are the commonest
 # within-sentence clause boundaries and were EACH an accepted false PASS until
 # rounds 2 and 3 of the same review:
@@ -8388,10 +8396,19 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
         # prevent, with no row in any of the four sets. The gap is bounded
         # `(?:\s+\w+){0,3}?` now, the same bounded-word-gap shape
         # `_NEGATION_GOVERNS` uses for its window, and these FOUR rows execute it —
-        # one per (boundary kind x subject width), so the bound's upper edge is
-        # pinned rather than the first spelling anyone happened to write:
+        # one per (boundary kind x subject width):
         #   pronoun + `but`   | plural pronoun + `;`
         #   determiner+noun + `yet` | THREE-word subject + `but`
+        # ⛔ WHAT THESE FOUR ROWS PIN IS REACH, NOT CLOSURE. They prove the gap
+        # SPANS a subject of up to three words; they do NOT prove three is enough.
+        # Measured at this head, the class continues past the bound — a four-word
+        # subject, and any subject carrying punctuation `\w+` cannot cross (an
+        # apostrophe, a hyphen, a backticked word), are still ACCEPTED. That
+        # residual is a `declared_open` ROW
+        # (`open: `actually` inverse with a SUBJECT GAP WIDER than the bound`),
+        # because widening the bound does not converge — an earlier draft of this
+        # comment said "the bound's upper edge is pinned", which the rows do not
+        # verify and which the row now makes false (#11541 review, F1, P2).
         # ⚠️ The price of the bound is real and is rowed in `declared_blocks` below
         # (`false block: an honest ASIDE with a SUBJECT`): an honest sentence that
         # names a third party and uses `actually` as an aside now reds. That is the
@@ -8514,8 +8531,12 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
             "reach",
         # ⛔ AND THE HONEST EMPHASIS, the clause-scope control for `actually`
         # (#11541 review, finding 1). Measured RED under a BARE `\bactually\b` and
-        # GREEN under the clause-initial form that ships: the emphasis sits INSIDE
-        # the negation's scope, where the refutation starts a new clause.
+        # GREEN under the form that ships: the emphasis sits INSIDE the negation's
+        # scope, where the refutation starts a new clause. ⚠️ THIS SAID "GREEN under
+        # the clause-initial form that ships", which the shipped arm is NOT — the gap
+        # is a bounded subject gap, not a position (#11541 review, F3, P3), and an
+        # emphasis placed AFTER a terminator is now RED, which is why that shape is
+        # a `declared_blocks` row rather than a claim about clause position.
         "honest: EMPHASIS `does not actually visit` (inside the negation's scope)":
             "the walk does not actually visit a nested `def`'s decorators and "
             "parameter defaults",
@@ -8553,6 +8574,27 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
     # docstring gets updated — the point being that a residual nobody can see is
     # indistinguishable from a fix.
     declared_open = {
+        # ⛔ THE `actually` ARM'S OWN RESIDUAL, and the reason its bound is NOT claimed
+        # to close the class (#11541 review, F1, P2). The gap is
+        # `(?:\s+\w+){0,3}?`, so it reaches a THREE-word subject and no further, and
+        # a subject carrying punctuation it cannot span (an apostrophe, a hyphen, a
+        # backticked word — this doc's own register) is not reached at any width.
+        # Measured GREEN at this head, every one of them:
+        #   ", but the enclosing body walk actually does report them"      (4 words)
+        #   ", but the enclosing method body walk actually does report them" (5 words)
+        #   ", and the whole closure body actually does"                    (3 words + "whole")
+        #   ", but the body walk's visitor actually does report them"        (apostrophe)
+        #   ", but the read-only walk actually does report them"            (hyphen)
+        #   ", but the `body` walk actually does report them"               (backticks)
+        # DECLARED and not closed, because widening the bound does not converge —
+        # every width leaves a longer subject GREEN, which is the same
+        # non-converging-list argument this file records for the marker list. A row
+        # is what makes the residual visible; a wider `{0,N}` would only move the
+        # edge and hide it again. Owner: `#11541`. The sentence below is the 4-word
+        # member, the first width the shipped bound does NOT reach.
+        "open: `actually` inverse with a SUBJECT GAP WIDER than the bound":
+            "a nested `def`'s decorators and parameter defaults are not reported "
+            "by this walk, but the enclosing body walk actually does report them",
         "decoy: retrieval walk":
             "parameter defaults and decorators are not reported against the "
             "retrieval walk",
@@ -8745,7 +8787,9 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
         # honest twin, which is what stops a future re-add landing silently.
         # ⛔ AND THE SELF-CONTRADICTION'S OWN RESIDUAL (#11541 review, round 6 F3).
         # The docstring called the self-contradiction a shape the predicate CLOSES;
-        # that is true of the MARKERED forms (`in fact`, clause-initial `actually`)
+        # that is true of the MARKERED forms (`in fact`, and `actually` after a
+        # clause boundary within a bounded subject gap — NOT "clause-initial" only;
+        # #11541 review, F3, P3)
         # and untrue of the class. Measured HIT at this head — an inverse with no
         # marker at all:
         #   "…; it does visit them" / "— it does visit them" / ", but it does visit them"
@@ -8800,7 +8844,8 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
         # honest "when the outer method runs, …" uses the same words), and this
         # file's rule is that a measured shape with no row is a shape the next
         # editor deletes as a contradiction. Owner: `#11541`; a lane that widens the
-        # marker to the class, or scopes it to a clause-initial position, retires it.
+        # marker to the class, or that narrows the `actually` marker back to a
+        # clause-initial POSITION, retires it.
         "open: a conditional spelled without `if` (a premise, not a refutation)":
             "assuming the walk does not visit a nested `def`'s decorators and "
             "parameter defaults, the census under-reports",
@@ -8917,10 +8962,12 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
         # whose price is unrowed is folklore (#11541 review: round 4 F5 measured
         # four RED and unrowed, round 5 F2 measured the class as SEVEN punctuation
         # members and found two more, and round 6 found the em-dash row the
-        # sentence below CLAIMED was present and was not). TEN rows follow —
+        # sentence below CLAIMED was present and was not). ELEVEN rows follow —
         # `;`, `,`, `(`, `:`, the em dash, the en dash, the hyphen, the honest
-        # PAUSE, and the TWO the subject-interposed bound bought (a two-word and a
-        # THREE-word subject — the same ASIDE family one widening over).
+        # PAUSE, the TWO the subject-interposed bound bought (a two-word and a
+        # THREE-word subject — the same ASIDE family one widening over), and the
+        # bound's EMPHASIS price (a `does not actually` placed after a terminator,
+        # which the bounded gap now spans).
         # ⛔ THE CONJUNCTION SPELLINGS (`but|yet|and|however|while` + `actually`)
         # are the one member set NOT separately rowed: same ASIDE family. Its
         # INVERSE direction IS covered, and it is covered in BOTH positions now —
@@ -8947,6 +8994,19 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
         "false block: an honest PAUSE inside the clause (`the walk, actually, does not`)":
             "the walk, actually, does not visit a nested `def`'s decorators "
             "and parameter defaults",
+        # ⛔ AND THE BOUND'S OWN NEW FALSE BLOCK ON THE *EMPHASIS* READING (#11541
+        # review, F2, P3). The terminator is what separates the two readings — a
+        # refutation starts a NEW clause, an emphasis sits INSIDE the negation's
+        # scope — but the bounded gap now spans the `not` that carries the emphasis,
+        # so an honest EMPHASIS placed after a terminator reds too. Measured: GREEN
+        # under the old `\s*` gap, RED under `(?:\s+\w+){0,3}?`. Honest (it
+        # restates the exclusion) and previously unrowed, which is the folklore this
+        # block exists to prevent. ⚠️ It is DECLARED rather than narrowed: narrowing
+        # back to `\s*` re-opens the four subject-interposed `must_red` rows, so the
+        # file takes the false block, as it does at every other widening.
+        "false block: honest EMPHASIS `does not actually` AFTER a terminator":
+            "a nested `def`'s decorators and parameter defaults are not reported "
+            "by this walk, and it does not actually visit them",
         "false block: an honest ASIDE in a PARENTHETICAL using `actually`":
             "a nested `def`'s decorators and parameter defaults are not "
             "reported by this walk (actually the outer method does evaluate them)",
@@ -9466,14 +9526,24 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
     # the tolerance is pinned against synthetic spellings here rather than left as
     # folklore, in both directions: it MUST span a raw newline, and it must NOT
     # span a COMMENT line boundary (newline + `# `), which is why the figure stays
-    # on one line at each site.
+    # on one line at each site. ⛔ THE FIXTURES ARE ASSEMBLED FROM PARTS, on this
+    # file's own recorded rule — a fixture written as ONE literal is found by the
+    # `findall(_own_source)` below and counted as a third SITE, which would make the
+    # "both" above false and let a fixture stand in for a real figure.
     _wrap_tolerance = re.compile(r"the (\w+)[ \n]*`open refutation:`[ \n]*rows")
-    assert _wrap_tolerance.findall("the SEVEN `open refutation:` rows") == ["SEVEN"]
-    assert _wrap_tolerance.findall("the SEVEN\n`open refutation:`\nrows") == ["SEVEN"], (
+    _fix_word = "SEV" + "EN"
+    _fix_noun = "`open refutation:`"
+    assert _wrap_tolerance.findall("the " + _fix_word + " " + _fix_noun + " rows") == [
+        "SEVEN"], (
+        "the tolerance no longer matches the UNWRAPPED spelling, so the figure it "
+        "is kept for could not be read at all")
+    assert _wrap_tolerance.findall(
+        "the " + _fix_word + "\n" + _fix_noun + "\nrows") == ["SEVEN"], (
         "the `[ \\n]*` tolerance no longer spans a raw newline, so a WRAPPED site "
         "would silently not be counted and the figure would be read off ONE site "
         "while the paragraph claims both")
-    assert _wrap_tolerance.findall("the SEVEN\n# `open refutation:` rows") == [], (
+    assert _wrap_tolerance.findall(
+        "the " + _fix_word + "\n# " + _fix_noun + " rows") == [], (
         "the tolerance now spans a COMMENT line boundary, which the sentence "
         "above says it cannot — a `# ` between the figure and the noun would let "
         "a comment's own wording be read as the figure")
