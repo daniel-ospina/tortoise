@@ -7602,9 +7602,10 @@ def _residual_sentences(s3: str) -> list[str]:
       sentence (#11541 B): it used to be prose that named a worked example
       (`"…, so the earlier wording was wrong"`) which `#11541` B then CLOSED with
       a marker, leaving the prose claiming a residual nothing carried. The
-      remaining shapes (`was mistaken`, `no longer true`, `has been corrected`)
-      are the `open refutation:` rows in `declared_open` below, with `#11541` as
-      their owner;
+      remaining shapes are the FIVE `open refutation:` rows in `declared_open`
+      below (`was mistaken`, `no longer true`, `has been corrected`,
+      `which is not correct`, `is misleading`), plus `whenever` among the temporal
+      scope rows, all with `#11541` as their owner;
     * a CONCESSION whose cue is a synonym the arm does not list — CLOSED for
       `solely` by `#11541` A (the arm now reads
       `only|merely|just|simply|solely`), and no longer a residual for any of the
