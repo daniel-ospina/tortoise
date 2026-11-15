@@ -913,25 +913,26 @@ surfaces:
   - test_retrieval_metering.py
   # #12764: per-org Postgres bytes MEASURED from what we write. THREE of its four
   # subjects ARE `api` patterns — `tortoise/postgres_bytes.py` (the meter + audit
-  # wrapper), `tortoise/metering.py` (`record_postgres_bytes_written`) and
-  # `tortoise/supabase_control.py` (the increment) — so `api` must run it. Its
-  # fourth subject, the ledger writer `tortoise/record_writer.py`, is NOT an
-  # `api` pattern (measured: select(['tortoise/record_writer.py']) -> ['core']),
-  # which is why this file is DUAL-REGISTERED on `core` too — exactly ONE subject
-  # falls through — on the same #3981 precedent as `test_retrieval_metering.py`
-  # and `test_4242_metering_period_end_refresh.py` above. The SOURCE_PATTERNS row
-  # for `tortoise/postgres_bytes.py` is added with this registration so a
-  # meter-only diff ROUTES to `api` — the surface owning the two meters and the
-  # control plane — instead of the `core` fallback. The guard is selected either
-  # way now that the `core` half exists (measured: without the row -> ['core'],
-  # guard present; with it -> ['api'], guard present). Unregistered on `main`,
-  # where it reds the REQUIRED `manifest-integrity` leg and every PR's
-  # `python-ci-gate` inherits the red (#11978/#11049). ~4s, hermetic — no Docker,
-  # no network.
-  # ⚠️ Two lanes each appended a copy of this comment; both were merged in and the
-  # stale copy said "two of its subjects", called `metering.py` the ledger writer,
-  # and claimed "the two subjects that only fall through". Collapsed to one block
-  # with the counts measured on this tree: 3 subjects -> `api`, 1 -> `core`.
+  # wrapper), `tortoise/metering.py` (`record_postgres_bytes_written`, the LEDGER
+  # WRITER that accumulates the figure) and `tortoise/supabase_control.py` (the
+  # increment) — so `api` must run it. Its fourth subject, the write-seam wiring
+  # `tortoise/record_writer.py` (`_measure_written_bytes` → `_record_written_bytes`,
+  # which says of itself "⛔ IT DOES NOT WRITE THE LEDGER"), is NOT an `api`
+  # pattern (measured: select(['tortoise/record_writer.py']) -> ['core']), which
+  # is why this file is DUAL-REGISTERED on `core` too — exactly ONE subject falls
+  # through — on the same #3981 precedent as `test_retrieval_metering.py` and
+  # `test_4242_metering_period_end_refresh.py` above. The SOURCE_PATTERNS row for
+  # `tortoise/postgres_bytes.py` is added with this registration so a meter-only
+  # diff ROUTES to `api` — the surface owning the two meters and the control
+  # plane — instead of the `core` fallback. The guard is selected either way now
+  # that the `core` half exists (measured: without the row -> ['core'], guard
+  # present; with it -> ['api'], guard present). Unregistered on `main`, where it
+  # reds the REQUIRED `manifest-integrity` leg and every PR's `python-ci-gate`
+  # inherits the red (#11978/#11049). ~4s, hermetic — no Docker, no network.
+  # ⚠️ Two lanes each appended a copy of this comment and both sections were
+  # merged in; the stale copy claimed "two of its subjects" and "the two subjects
+  # that only fall through". Collapsed to one block with the counts measured on
+  # this tree: 3 subjects -> `api`, 1 -> `core`.
   - test_postgres_bytes.py
   # #3981: dual-registered with `core` for the same reason as test_boot_regressions.py
   # above. `api` is an exact-surface match that REPLACES the `core` fallback, so a
@@ -4418,11 +4419,12 @@ surfaces:
   - test_embed_metering.py   # #4488: the tally/middleware/hook + the registry-lane writer/reader (dual with `api`/`eval`)
   - test_retrieval_metering.py   # #4489: the tally/middleware/hook + the registry-lane writer/reader (dual with `api`)
   # #12764: the `core` half of the dual registration (see the `api` entry). The
-  # only subject that selects `core` and nothing else is the ledger writer
-  # `tortoise/record_writer.py`'s `_measure_written_bytes` seam (measured on this
-  # tree: `--changed-files tortoise/record_writer.py -> ['core']`), so the `api`
-  # half alone would leave that seam's guard asleep on a record_writer.py-only
-  # diff.
+  # only subject that selects `core` and nothing else is the write seam
+  # `tortoise/record_writer.py` (`_measure_written_bytes` → `_record_written_bytes`
+  # — measurement only; the LEDGER WRITER is `metering.record_postgres_bytes_written`)
+  # (measured on this tree: `--changed-files tortoise/record_writer.py -> ['core']`),
+  # so the `api` half alone would leave that seam's guard asleep on a
+  # record_writer.py-only diff.
   # ⚠️ `tortoise/postgres_bytes.py` does NOT belong in this row's justification:
   # it has its own SOURCE_PATTERNS entry (`tools/ci_selection.py`) and selects
   # `api` (measured: `--changed-files tortoise/postgres_bytes.py -> ['api']`).
