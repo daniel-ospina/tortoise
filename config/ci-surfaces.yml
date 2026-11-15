@@ -877,20 +877,6 @@ surfaces:
   - test_delivery_tenancy.py  # C6 #2115: delivery-shape tenancy + session_recording per-graph override
   - test_metering_period_window.py
   - test_metering_window_admission.py  # #3981: the seven swallow sites report the dropped increment (caller-level; the coverage is the proof)
-  # #12762/#12764: per-org Postgres bytes MEASURED from what we WRITE. DUAL-
-  # REGISTERED with `core` (its arm is in that block) and both arms are
-  # load-bearing, two of the file's four subjects each: `tortoise/metering.py`
-  # (the ledger writer `record_postgres_bytes_written`) and
-  # `tortoise/supabase_control.py` (the RPC wrappers) are `api` SOURCE_PATTERNS,
-  # so an `api`-only diff selects this surface and REPLACES the `core` fallback;
-  # `tortoise/postgres_bytes.py` (the meter) and the `record_writer.py` seam
-  # match no SOURCE_PATTERN and fall to `core`. Without ONE row per surface, a
-  # diff touching only one of those four modules runs no leg of the file (the
-  # #1349/#2938/#3154/#4367 silent-drop class).
-  # ⛔ REGISTRATION, not a test change: the suite landed in #12764
-  # (`0a79c026b3`) with no manifest row, which is half of the
-  # `--integrity` `manifest drift` on `main` repaired here.
-  - test_postgres_bytes.py
   # #4779 (leg 2 of #3981): the durable representation of a dropped increment,
   # asserted against the frozen migration + the fake control plane. `api` is the
   # surface that owns every source it pins — tortoise/metering.py,
@@ -6367,18 +6353,6 @@ surfaces:
   # and the production call sites it verifies live in metering.py / hosted_api.py
   # (see that surface's entry).
   - test_cost_dimensions.py
-  # #12762/#12764: the per-org Postgres-BYTE meter. DUAL-REGISTERED with `api`
-  # (see that surface's entry) — one row per surface, never one row for both.
-  # THIS arm is the one that carries a core-only diff: TWO of the four subjects
-  # select no named surface — measured `--changed-files
-  # tortoise/postgres_bytes.py` -> ['core'] and `--changed-files
-  # tortoise/record_writer.py` -> ['core'] (and the `tests/` fallback in
-  # `select()` is `core`), while the other two (`tortoise/metering.py`,
-  # `tortoise/supabase_control.py`) select `api`. Hermetic: no Docker, no
-  # network, no model call — the SQL half lives in
-  # `supabase/tests/20261114000001_per_org_postgres_bytes.sql`, so this file
-  # needs no `uri_requiring` declaration.
-  - test_postgres_bytes.py
   # #4051: the capture/extraction dimension's READER (`metering.get_capture_usage`)
   # and the binding that re-points `capture_extraction` at it — dual-registered
   # with `api` (see that surface's entry). THIS arm is the one that carries a
@@ -7289,28 +7263,6 @@ surfaces:
   # subpackage, and `integrity()` requires every `tests/**/test_*.py` to be
   # classified.
   - test_9649_update_entity_point_lifecycle.py
-  # #10371: the SAME door, its OTHER two labels. #9649 closed `update_entity`'s
-  # `:Point` arm, but `_assert_lifecycle_guard` is `:Point`-hardcoded
-  # (`point_id`, `MATCH (n:Point …)`), so the Object and Subject arms never
-  # reached it and a prop edit RESURRECTED a terminal row (measured on `main`
-  # at `6916a6cd89`). `core` for THIS row's own reason, and it is ONE reason:
-  # `tortoise/commit_ops.py` matches no SOURCE_PATTERN and falls to `core`, so a
-  # `commit_ops.py`-only diff selects this file only through this row. ⛔ The
-  # `tortoise/sdk.py` half does NOT come from this row: `sdk.py` is a
-  # SHARED_MODULE, so a diff touching it forces the FULL matrix and reaches the
-  # file with no surface entry at all (measured: with this row removed, an
-  # `sdk.py`-only diff still runs it). The second reason is the manifest's own:
-  # `integrity()` requires every `tests/**/test_*.py` to be classified.
-  # ⛔ This row is a REGISTRATION, not a test change: the suite landed on `main`
-  # in #12745 (`52c8b8f413`) with no manifest row — that diff carried the test
-  # and the two sources and nothing else — so `tools/ci_selection.py
-  # --integrity` refused every tree carrying it with
-  # `manifest drift: ['test_10371_nonpoint_lifecycle_guard.py',
-  # 'test_postgres_bytes.py']`, and the REQUIRED `manifest-integrity` leg went
-  # red on `main`. An UNREGISTERED file is not merely an untidy manifest: it is
-  # a case NO shard is told to run, which is the coverage hole `integrity()`
-  # exists to refuse.
-  - test_10371_nonpoint_lifecycle_guard.py
   - test_uri_env_mutations_declared.py
   # #8066: the served-skill relay ratchet. Its SUBJECT is every
   # `tests/**/*.py`, so it must be registered on every surface such a file can
