@@ -47,6 +47,7 @@ superuser would red on the role gate instead of testing anything.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 from pathlib import Path
@@ -218,9 +219,11 @@ def test_an_absorbed_position_with_the_same_content_stays_a_silent_no_op() -> No
 def test_an_absorbed_position_with_different_content_raises_and_names_both() -> None:
     """THE COLLISION: same position, different content ⇒ refuse, naming both.
 
-    The message must identify BOTH records without quoting either: the record's
-    own failure lines withhold payload text (`_CONTENT_COLUMNS`), and a payload
-    can carry the tenant's words.
+    The message must identify BOTH records without quoting their CONTENT: the
+    record's own failure lines withhold payload text (`_CONTENT_COLUMNS`), and a
+    payload can carry the tenant's words. An ID is not content — the failure
+    lines already print ids, and the id is the one thing that tells an operator
+    which two records met — so the identity is named and the title is not.
     """
     conn = Absorbed(stored=("ObjectRegistered", _payload_of(RECORD_A)))
 
@@ -233,13 +236,54 @@ def test_an_absorbed_position_with_different_content_raises_and_names_both() -> 
     assert "sha256:" in message
     # Two DIFFERENT digests: the payloads differ, so the digests disagree.
     assert excinfo.value.payload_digest != excinfo.value.stored_payload_digest
-    # …and neither payload's text appears in the report.
+    # …the two records are NAMED by identity, …
+    assert excinfo.value.identity_state == "different"
+    assert "obj-a" in message and "obj-b" in message
+    # …and neither payload's CONTENT (a document title) appears.
     for record in (RECORD_A, RECORD_B):
         assert record["name"] not in message
-        assert record["id"] not in message
     assert excinfo.value.seq == 1
     assert excinfo.value.event_type == "ObjectRegistered"
     assert excinfo.value.stored_event_type == "ObjectRegistered"
+
+
+def test_a_re_derived_record_is_not_reportable_as_two_records() -> None:
+    """The diagnosis must not assert a cause the verdict cannot know (#9318 R1).
+
+    The compared payload is a snapshot of a DERIVATION (`_journal_row` strips
+    `ENVELOPE_KEYS`), so a change to that derivation makes an old row's content
+    differ from what this tree would write for the SAME record at the SAME
+    position. The refusal is still right — the record may not absorb the
+    difference — but the MESSAGE must not send an operator hunting a second
+    journal that does not exist. It reports the shared identity instead, and
+    says so in a distinguishable way.
+    """
+    re_derived = dict(_payload_of(RECORD_A))
+    re_derived["name"] = "corpus A document (re-derived)"
+    conn = Absorbed(stored=("ObjectRegistered", re_derived))
+
+    with pytest.raises(rp.JournalPositionCollision) as excinfo:
+        rp.replay([RECORD_A], conn, org_id=ORG, graph_id=GRAPH)
+
+    assert excinfo.value.identity_state == "same"
+    message = str(excinfo.value)
+    assert "SAME record" in message
+    assert "re-derivation" in message
+    # The collision claim is NOT made: no "different records" diagnosis.
+    assert "DIFFERENT records" not in message
+    # …and, as ever, no payload content.
+    assert "corpus A document" not in message
+
+
+def test_two_payloads_with_no_comparable_identity_say_so() -> None:
+    """`unknown` is an answer, not a guess — a different type still collides."""
+    conn = Absorbed(stored=("PointAdded", {"body": "no id anywhere"}))
+
+    with pytest.raises(rp.JournalPositionCollision) as excinfo:
+        rp.replay([RECORD_A], conn, org_id=ORG, graph_id=GRAPH)
+
+    assert excinfo.value.identity_state == "unknown"
+    assert "no record identity could be compared" in str(excinfo.value)
 
 
 def test_a_different_event_type_alone_is_a_collision() -> None:
@@ -275,6 +319,13 @@ def test_the_position_statement_carries_no_schema_ask() -> None:
     # The conflict question names only columns the migration already carries.
     assert "event_type IS DISTINCT FROM" in rp._JOURNAL_CONFLICT_CONTENT_SQL
     assert "payload IS DISTINCT FROM" in rp._JOURNAL_CONFLICT_CONTENT_SQL
+    # ⛔ AND THE GUARD READS THIS PARAMETER ORDER. `_refuse_a_journal_collision`
+    # unpacks `statement.params[:5]` as `(org, graph, seq, type, payload)`; a
+    # reorder here would make its SELECT name a position that does not exist,
+    # which is a SILENT MISS — the one failure mode a guard may not have
+    # unobserved. Pinned where the order is defined, so the two cannot drift.
+    assert statement.params[:4] == (ORG, GRAPH, 1, "ObjectRegistered")
+    assert json.loads(statement.params[4]) == _payload_of(RECORD_A)
 
 
 # ════════════════════════════════════════════════════════════════════════════

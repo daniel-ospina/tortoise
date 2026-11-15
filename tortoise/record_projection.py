@@ -916,26 +916,84 @@ class JournalPositionCollision(RecordProjectionError):
     no journal identity to name — that absence is precisely what `#12894`
     decides. It also quotes no payload text: the record's own failure lines
     withhold content, and a payload can carry the tenant's own words.
+
+    ⚠️ RESIDUAL — WHAT THE VERDICT CANNOT KNOW, stated rather than implied
+    (#9318 review cycle 1, P2). The comparison is between the durable payload
+    and the payload THIS TREE derives now, and the durable one is a snapshot of
+    a derivation (`_journal_row` strips `ENVELOPE_KEYS`; that set is an actively
+    argued surface, not a constant — see its own note about `agent_id`). So a
+    future change to payload derivation makes an OLD row's content differ from
+    what this tree would write for the SAME record at the SAME position, and a
+    replay of that segment reports this class. Two things follow, and both are
+    deliberate:
+
+    * the refusal is still CORRECT — the record's own copy of that position is
+      not what this tree would write, and silently absorbing the difference is
+      the mis-index this class exists to stop;
+    * the DIAGNOSIS must therefore not assert one cause. The message names BOTH
+      possibilities (a different record claimed the position — two journals, a
+      restore, a rotation, a rebuild — OR this record's payload derivation
+      changed since the row was written) and reports whether the two payloads
+      share the record's identity, which is the one signal it can actually read.
+      A message that said only "two DIFFERENT records" would send an operator
+      hunting a second journal that does not exist, on a record whose only fault
+      is that its rows predate a deploy.
+
+    What would remove the residual rather than describe it: a derivation-version
+    discriminator INSIDE the durable payload (`projection_version` is stripped
+    by `ENVELOPE_KEYS` today, so it is invisible to the row). That is a payload
+    shape change with its own blast radius and is NOT taken here — it belongs
+    with `#12894`, whose key decision retires the detector entirely.
     """
 
     def __init__(self, *, org_id: str, graph_id: str, seq: int,
                  event_type: Any, payload_digest: str, payload_bytes: int,
                  stored_event_type: Any, stored_payload_digest: str,
-                 stored_payload_bytes: int) -> None:
+                 stored_payload_bytes: int,
+                 identity_state: str = "unknown",
+                 identity_detail: str | None = None) -> None:
         self.org_id = org_id
         self.graph_id = graph_id
         self.seq = seq
         self.event_type = event_type
         self.payload_digest = payload_digest
+        self.payload_bytes = payload_bytes
         self.stored_event_type = stored_event_type
         self.stored_payload_digest = stored_payload_digest
+        self.stored_payload_bytes = stored_payload_bytes
+        #: ``"same"`` / ``"different"`` / ``"unknown"`` — what the two payloads'
+        #: record IDENTITIES say (:func:`_identity_verdict`). Reported, never used
+        #: to change the verdict: a same-identity pair is still a difference the
+        #: record may not absorb, and a different-identity pair is the collision
+        #: this class is named for.
+        self.identity_state = identity_state
+        if identity_state == "same":
+            diagnosis = (
+                f"both payloads name the SAME record ({identity_detail}), so "
+                f"this may be a re-derivation of one record rather than two "
+                f"records — the record cannot tell the two apart, and it may "
+                f"not absorb the difference either way"
+            )
+        elif identity_state == "different":
+            diagnosis = (
+                f"the two payloads name DIFFERENT records ({identity_detail}) "
+                f"— a second durable journal, a restore, a rotation, or a "
+                f"rebuild numbering below the high-water mark"
+            )
+        else:
+            diagnosis = (
+                "no record identity could be compared between the two "
+                "payloads, so a different record and a re-derivation of this "
+                "one are equally possible"
+            )
         super().__init__(
             f"journal position {seq} of ({org_id!r}, {graph_id!r}) already "
             f"holds {stored_event_type!r} ({stored_payload_digest}, "
             f"{stored_payload_bytes} B of payload) while this write is "
-            f"{event_type!r} ({payload_digest}, {payload_bytes} B) — two "
-            f"DIFFERENT records claimed one position, so every row written "
-            f"under it would be indexed by another record's event. The "
+            f"{event_type!r} ({payload_digest}, {payload_bytes} B). "
+            f"The surviving row's content is not what this write would "
+            f"produce — {diagnosis} — so every row written under it would be "
+            f"indexed by another record's event. The "
             f"journal still holds this record; the position row cannot be "
             f"repaired while the key carries no journal identity (#12894), "
             f"and `journal_event` is append-only by trigger."
@@ -6158,14 +6216,65 @@ def _payload_digest(payload: Any) -> tuple[str, int]:
         try:
             payload = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, ValueError):
-            return f"sha256(unparseable:{len(raw)}B)", len(raw)
+            return f"sha256:unparseable-{len(raw)}B", len(raw)
     try:
         body = json.dumps(payload, sort_keys=True, separators=(",", ":"),
                           default=str)
     except (TypeError, ValueError):
-        return f"sha256(unserialisable:{type(payload).__name__})", 0
+        return f"sha256:unserialisable-{type(payload).__name__}", 0
     encoded = body.encode("utf-8")
     return ("sha256:" + hashlib.sha256(encoded).hexdigest()[:12], len(encoded))
+
+
+#: The payload keys that IDENTIFY a record, ids only. `name` is deliberately
+#: absent: a source's `name` is its document title, which the record's own
+#: failure lines withhold as content, and it is not an identity a reader could
+#: rely on anyway (it is mutable).
+_IDENTITY_KEYS: tuple[str, ...] = (
+    "eventId", "node_key", "session_id", "event_id", "id",
+)
+
+
+def _payload_object(payload: Any) -> Any:
+    """`payload` as parsed JSON when it arrived as text, else unchanged."""
+    if isinstance(payload, (str, bytes, bytearray)):
+        try:
+            return json.loads(payload.decode("utf-8")
+                              if isinstance(payload, (bytes, bytearray))
+                              else payload)
+        except (UnicodeDecodeError, ValueError):
+            return None
+    return payload
+
+
+def _identity_verdict(attempted: Any,
+                      stored: Any) -> tuple[str, str | None]:
+    """``("same"|"different"|"unknown", detail)`` for two payloads (#9318).
+
+    REPORTED, NEVER DECIDING. The verdict is content difference, and this cannot
+    change it: two payloads naming the same record still differ, and the record
+    may not absorb the difference. What this answers is the ONE question a
+    reader of the failure needs and the exception otherwise could not answer —
+    *is this a second record, or my own row written by an older derivation of
+    the same record?* — which is the difference between an operator hunting a
+    journal that does not exist and one who knows a payload-shaping change
+    landed. See :class:`JournalPositionCollision`'s residual note.
+
+    ``"unknown"`` is a real answer (payloads with no comparable identity key),
+    never a fallback to a guess: an identity this function invented would be
+    exactly the false certainty the residual note exists to prevent.
+    """
+    left, right = _payload_object(attempted), _payload_object(stored)
+    if not isinstance(left, Mapping) or not isinstance(right, Mapping):
+        return "unknown", None
+    for key in _IDENTITY_KEYS:
+        ours, theirs = left.get(key), right.get(key)
+        if ours in (None, "") or theirs in (None, ""):
+            continue
+        if str(ours) == str(theirs):
+            return "same", f"{key}={ours!r}"
+        return "different", f"{key}: {ours!r} vs {theirs!r}"
+    return "unknown", None
 
 
 def _refuse_a_journal_collision(cursor: Any, statement: Statement, index: int,
@@ -6200,6 +6309,11 @@ def _refuse_a_journal_collision(cursor: Any, statement: Statement, index: int,
     """
     if _affected_rows(cursor) != 0:
         return
+    # ⚠️ THIS PAIRING IS `_journal_row`'s PARAMETER ORDER, and it is pinned by
+    # `tests/test_9318_journal_collision.py` for exactly that reason: a reorder
+    # there would make this SELECT name a position that does not exist, which is
+    # a silent MISS (never a false alarm — see the helper's docstring), i.e. the
+    # one failure mode a guard cannot be allowed to have unobserved.
     org_id, graph_id, seq, event_type, payload = statement.params[:5]
     try:
         cursor.execute(_JOURNAL_CONFLICT_CONTENT_SQL,
@@ -6223,11 +6337,13 @@ def _refuse_a_journal_collision(cursor: Any, statement: Statement, index: int,
         stored_type, stored_payload = stored[0], stored[1]
     digest, size = _payload_digest(payload)
     stored_digest, stored_size = _payload_digest(stored_payload)
+    identity_state, identity_detail = _identity_verdict(payload, stored_payload)
     raise JournalPositionCollision(
         org_id=org_id, graph_id=graph_id, seq=seq,
         event_type=event_type, payload_digest=digest, payload_bytes=size,
         stored_event_type=stored_type, stored_payload_digest=stored_digest,
         stored_payload_bytes=stored_size,
+        identity_state=identity_state, identity_detail=identity_detail,
     )
 
 

@@ -2581,10 +2581,13 @@ def write_live_record(record: Mapping[str, Any], *,
             _logger.warning(
                 "the record write was REFUSED (journal_collision) — the "
                 "journal holds the record but the record's position row is "
-                "occupied by a DIFFERENT record (a second journal, a restore, "
-                "a rotation, or a rebuild numbering below the high-water "
-                "mark); a replay cannot heal it while the key carries no "
-                "journal identity (#12894): %s", collision,
+                "occupied by content this write would not produce (a "
+                "different record — a second journal, a restore, a rotation, "
+                "a rebuild numbering below the high-water mark — or this "
+                "record's payload re-derived since that row was written); a "
+                "replay cannot heal it while the key carries no journal "
+                "identity (#12894): record=%s %s: %s",
+                record.get("type"), _record_identity(record), collision,
             )
             return _refused("journal_collision", seq)
         if isinstance(exc, RecordConnectError):
