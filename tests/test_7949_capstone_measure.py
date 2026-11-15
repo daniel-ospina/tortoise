@@ -6280,8 +6280,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("1418", "| **D6** | **Two distinct connection sets**"),
         ), "extractor_v4_arch"),
         # ⛔ THE TWO THIS-HEAD NUMBERS TWO EARLIER CUTS LEFT UNREAD (#12569 review), and the
-        # count that hid one of them. D5's row states NINE distinct this-head numbers:
-        # `19341`, `19448`, `10037`, `10064`, `10117`, `1186`, `1194`, `1400`, `1418`. The
+        # count that hid one of them. D5's row states NINE distinct this-head numbers: `19406`,
+        # `19513`, `10223`, `10250`, `10303`, `1186`, `1194`, `1400`, `1418`. The
         # counts in the comments above said SEVEN, then EIGHT, and each time the number left
         # out was green under mutation: `:1418` (in the "Measured at" continuation) and
         # `:1194` — which is stated one clause EARLIER on the same markdown line, in the
