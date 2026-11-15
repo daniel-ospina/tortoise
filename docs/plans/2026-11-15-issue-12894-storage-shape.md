@@ -122,7 +122,7 @@ that governs the subject. (Filed as its own item in §A6, debt row D-22.)
 | I1 | `#2194` | CLOSED/COMPLETED (PR #2309) | `ObjectRegistered` journaling: the replay consumer pre-existed, the **producer** was missing; emission is **post-apply** and **best-effort** |
 | I2 | `#2295` | CLOSED/COMPLETED (PR #2359) | The Subject twin; **`SubjectAdded ∉ _GRAPH_EVENT_TYPES` → JSONL-only**; *"vanish silently on rebuild"* |
 | I3 | `#3895` | CLOSED/COMPLETED (PR #3921) | The dump's edge export was unfiltered (node loop filtered, edge loop not) → 313/10,000 edges unreferenced → restore refused. `_EXPORT_SKIP_LABELS` excludes `GraphEventMeta`/`TeamMeta`/`EpMeta` |
-| I4 | `#4240` | CLOSED/COMPLETED (PR #5632) | **Rejected promoting `EntityLinked` into `_GRAPH_EVENT_TYPES`**; one file per graph (`<base>/<graph>/events.jsonl`); *"the JSONL is **never** the durability mechanism"*; and the **inversion**: *"the journal append IS the commit point on `create_point`"* |
+| I4 | `#4240` | CLOSED/COMPLETED (PR #5632) | **Rejected promoting `EntityLinked` into `_GRAPH_EVENT_TYPES`**; one file per graph (`<base>/<graph>/events.jsonl`); *"the JSONL is **never** the durability mechanism"*; and **the ordering supersession** — a 2026-10-15 comment (daniel-ospina, `IC_kwDOToroq88AAAABcKuJBw`) records that *"the journal append IS the commit point on `create_point`: a failed append means the `CREATE` is skipped, so nothing persists"*, that this **supersedes F1's fail-soft outcome** (*"The premise the outcome half rested on is gone"*), and that departing from it *"requires an exception in §17.1 … the `OVERRIDES:` route — not a test flip"*. **This comment, not any document, is where Q3 lives** (§6) |
 | I5 | `#4492` | CLOSED/COMPLETED (PR #8744) | The unit ruling (**bytes, not nodes**); `analytics_events` has **no** retention path; retention itself is out of that issue's scope |
 | I6 | `#5004` | CLOSED/COMPLETED (PR #5071) | The journal **stripped** `embedding`, so `derived = replay(journal)` was false for the largest cost lever; *"if the journal doesn't carry it, it isn't derived — it is primary"*; R1 (embedding STORES, never regenerated) |
 | I7 | `#5612` | CLOSED/COMPLETED — **but item 2 (the bound) was never delivered** | The growth measurement (9,176 B creating record, 8,414 B vector); **the only `seq` in the issue corpus is `max(:GraphEvent.seq)`**; **P1 recommends moving the watermark *read* to the record — a read relocation, not an allocation decision**; the retention ruling (*"do not bound until checkpoint/truncate exists"*, *"the owner's"*) |
@@ -464,7 +464,7 @@ marked ⚑ are named by **no document** and were found by reading code in this l
 | D-21 ⚑ | **`journal_event` retention has no ruling anywhere.** `#3843`/`#3853` bind `analytics_events`; `#12762` says so explicitly | `#12762` body | **B** | The record table gets the journal's growth **in addition to** the journal, forever, with no decision on pruning it. `#9025`'s bound decision, whenever it lands, will be about the file only. |
 | D-22 ⚑ | **The governing documents are not registered in `docs/00_index.md`**: `STORAGE-ARCHITECTURE.md` has no index row; `event-catalog.md` has **0** mentions; the `#7951` atomic-write plan has **0** | §A1.0 | **B** | A lane proving completeness from the index — as this mandate instructs — **cannot find the document that governs the subject**. This is the same class as the `#10114` lesson: a green check that answers a different question. |
 | D-23 ⚑ | **`docs/00_index.md`'s `#5612` cell still presents the pre-`#11821` vector figures as the current cost** in its first clause, then corrects them 40 lines later in the same cell | `docs/00_index.md:153` | **O** | Deferred to the doc's own errata discipline; noted so Stage D does not re-derive it as a new finding. |
-| D-24 | **`record_writer.py:2409` states the construction coupling in a comment only**: the ordinal's validity holds *"per JOURNAL FILE, while `journal_event`'s key is per"* | `record_writer.py:2409` | **B** | It is the single sentence that makes the whole shape hang together, and nothing tests it: a deployment with two journal files for one graph would issue colliding positions and `ON CONFLICT DO NOTHING` would hide it. **No such pin exists** — check `tests/` for one in Stage B. |
+| D-24 ⚑ | **The ordinal's validity rests on one invariant that nothing enforces: ONE journal file per graph, forever.** `record_writer.py:2409` states the coupling in a comment (*"construction holds per JOURNAL FILE, while `journal_event`'s key is per"*); `config._resolve_event_log_path` (`config.py:92-128`) derives the path **deterministically** from the SDK's own `namespace/graph_name → graph` derivation, which is why it holds *today* | `record_writer.py:2409`, `config.py:92`, `log.py:1393` | **B** | ⚑ **The failure is silent and it is reachable by configuration alone.** Change `TORTOISE_EVENT_LOG_BASE_DIR` on a live deployment and the same graph gets a **new, empty** journal, so `EventLog.append` restarts at position **1** — and every new `journal_event` insert collides with a position the record already holds and is **swallowed by `ON CONFLICT (org_id, graph_id, seq) DO NOTHING`** (`record_projection.py:6005-6009`). The record then holds the *old* records under those numbers and silently discards the new ones. **No error, no count, no degraded state** — the class `#9078` exists to remove. Nothing refuses a base-dir change; `rg` over `tests/` finds no guard (*closest*: `tests/test_journal_growth.py:252` asserts the base-dir **layout** `‹graph›/events.jsonl` for the growth tool, not that `‹graph›` is stable). **Falsifier for Stage C:** two different base dirs for one graph must refuse to write `journal_event`, or the position row must carry the journal's identity (a file id / base-dir hash) so a mismatch is detectable. |
 
 **24 rows: 13 block, 8 orthogonal, 3 must be retired.** The three must-retire rows are each a *premise* or a
 *string coupling*, not a code path — which is itself the finding: **almost nothing in this shape has to be
@@ -583,7 +583,11 @@ the transactional counter row, **not** a sequence: same table, opposite requirem
 ⛔ **And the ordering must flip, which is the real work.** Today: journal → record → cache. After: record
 (+ordinal) → cache, with the journal **exported** from the record. That flip is a *reversal of the ordering
 `#9078` recorded* and of `#4240`'s *"the journal append IS the commit point"*. It is therefore a **second
-reopen**, and it must be argued where those decisions live — not slipped in under the ordinal change.
+reopen**, and it must be argued where those decisions live — the `#4240` comment already names the route
+verbatim: *"an exception in §17.1 (a direct cache write on an uncommitted record) — the `OVERRIDES:` route —
+not a test flip"*. ⚠️ Note what that sentence reveals: the route it names is for going **backwards** (letting
+the cache lead). A7.5 needs the opposite — the **record** leading — which is not an `OVERRIDES:` of §17.1 at
+all but a **rewrite of Q3's unrecorded rule**. That is why §6 says Q3 must have a recorded home first.
 
 **The embedded / self-host lanes, which have no record.** The allocator becomes a **declared mode**, not a
 replacement:
@@ -604,8 +608,11 @@ addendum rather than a re-derivation.
 
 Stage C needs these, so A7 states them rather than leaving Stage B to invent them:
 
-1. **Two journal files for one graph** must be **refused** before any position is issued (`record_writer.py:2409`
-   says the coupling; nothing tests it — D-24). *Red today: no such guard exists.*
+1. **Two journal files for one graph** must be **refused**, or the position must carry the journal's identity. The
+   reachable trigger is not exotic — **changing `TORTOISE_EVENT_LOG_BASE_DIR` on a live deployment** gives the
+   graph a fresh journal that numbers from 1 while the record keeps the old rows, and
+   `ON CONFLICT DO NOTHING` swallows every new position silently (D-24). *Red today: no such guard exists and no
+   test covers it.*
 2. **A rolled-back record transaction must not burn a position**: allocate in a rolled-back transaction, then
    assert the next committed record's `seq` is the successor. *A `nextval()` implementation goes red on this
    one* — which is why it is the falsifier that distinguishes the two allocator designs.
@@ -652,7 +659,7 @@ different questions and each is using the word "authority" for its own.**
 |---|---|---|---|
 | **Q1 — durability** | *What survives the loss of the machine, the volume, or the app-written state?* | **The store's own persistence plus an off-box copy of it. Nothing else.** | `durability-posture.md:41-60`. The journal **is not** it (`:48`), because it is written outside the store's transaction, is incomplete in three named ways, and would be a dual-write hazard. |
 | **Q2 — reconstruction** | *What makes the derived layer regenerable?* | **The journal** — it reconstructs a projection under changed fold logic, migrates engines, and audits beyond `:GraphEvent`'s 30-day window (`durability-posture.md:44-47`). | `STORAGE-ARCHITECTURE.md:316` (`derived = replay(journal)`), scoped at `:285`. |
-| **Q3 — commit ordering** | *What does a live write commit to first?* | **The journal append.** `#4240`: *"the journal append IS the commit point on `create_point`"*; §17.1's `apply-first` lanes are the declared exceptions. | `STORAGE-ARCHITECTURE.md` §17.1 (`:1664-1698`), `2026-10-14-7951:§3`. |
+| **Q3 — commit ordering** | *What does a live write commit to first?* | **The journal append.** `#9078`: *"The journal append is the commit point (§17.1) and it is a file append"*; `#4240`'s 2026-10-15 supersession comment: *"the journal append IS the commit point on `create_point`: a failed append means the `CREATE` is skipped, so nothing persists"*; §17.1's `apply-first` lanes are the declared exceptions. | **Nowhere durable.** §17.1 (`:1664-1698`) states the *rule* (`every write goes to the truth store first`), and its eight `apply-first` rows are the declared *departures* — but the sentence that fixes the order of the **journal append vs the record write** exists only as a supersession comment on an issue about a different defect. |
 
 **These are three different predicates over the same object, and every recorded position is true within its
 own:**
@@ -683,6 +690,11 @@ rather than an ambiguity:
    in `#4240`'s comment thread** — a plan document and an issue, for a rule that governs every write in the
    product. **That is the actual defect:** the axis with the most operational consequence has the weakest
    recorded home, so it is the one that gets re-decided per lane.
+   ⚠️ **And the comment itself says so**, which is why this is a finding rather than a complaint: it records
+   that it had to *supersede another issue's test assertion* to make the ordering true, and that any
+   departure *"requires an exception in §17.1 … the `OVERRIDES:` route — not a test flip"*. **That is the
+   route A7.5's reopening must take** — and it is the reason Q3 needs a recorded home *before* the ordering
+   changes, not after.
 
 **The resolution, in one sentence, to be carried into whichever document claims the vocabulary next:**
 
@@ -763,11 +775,12 @@ refusal is argued — and which changed A4.4's cursor table), `docs/verify/2026-
 **reversal** of the delete ordering contradicted the ordering A7.5 initially assumed — the single most
 consequential late read in this lane).
 
-**What I could still be wrong about, named rather than implied:** whether a guard against two journal files
-per graph exists in tests (D-24 is stated as *"check in Stage B"* because I did not finish that search — my
-`rg` for one returned nothing, which is not the same as proving its absence); and the exact current site
-count for D-01 (two published numbers disagree and I did not re-measure). One item from the first draft is
-now **closed rather than carried**: I had flagged that I might have missed an `ORDER BY` in
-`cache_projection`'s `journal_event` select. I read the builder end to end — the statement carries no
-`ORDER BY` and no cursor, and its header says *"`seq` orders it"* at `:2952`, so the ordering is the
-consumer's. That changes A4.5's reasoning in one place and it is corrected there rather than here.
+**What I could still be wrong about, named rather than implied:** the exact current site count for D-01 (two
+published numbers disagree and I did not re-measure), and whether a *record-side* guard exists on a path other
+than the one I searched — D-24 is now stated concretely (base-dir change → silent position collision, no guard
+in `tests/`), which is stronger than the first draft's "check in Stage B", but "I found no guard" is still an
+absence of evidence. One item from the first draft is now **closed rather than carried**: I had flagged that I
+might have missed an `ORDER BY` in `cache_projection`'s `journal_event` select. I read the builder end to end —
+the statement carries no `ORDER BY` and no cursor, and its header says *"`seq` orders it"* at `:2952`, so the
+ordering is the consumer's. That changes A4.5's reasoning in one place and it is corrected there rather than
+here.
