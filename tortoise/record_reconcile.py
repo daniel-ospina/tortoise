@@ -85,9 +85,10 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   LABEL-DEPENDENT: on an ``:Object`` ``update_entity(…, status=None)`` is applied
   as ``SET n += {status: null}``, a REMOVAL, **only while the row is NOT
   terminal** — since #12882 a non-string status out of a DEAD state is REFUSED
-  (it was the resurrection hole: the target is not a dead WORD, so a dead row was
-  LIFTED instead of skipped), so the ``:Object`` clear is NOT a route for the
-  TERMINAL case this repair exists for; on a ``:Subject`` the SAME call is
+  **when the call names the status ALONE** (it was the resurrection hole: the
+  target is not a dead WORD, so a dead row was LIFTED instead of skipped), so the
+  ``:Object`` clear is NOT a route for the TERMINAL case this repair exists for;
+  on a ``:Subject`` the SAME call is
   REFUSED — ``sdk._update_entity``'s Subject status door validates against
   ``_SUBJECT_STATUS_VALUES``, and ``None`` is not one of them (the missing SDK
   door is `#11271`) — so a ``:Subject``'s clear is the graph-side ``REMOVE
@@ -109,7 +110,16 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   read "carrier-less" as "irreparable" and reach for a whole-graph restore — the
   wipe below is the last resort, not this one. Every OTHER terminal word has no
   SDK route at all (#12592), so naming the clear there would prescribe a call
-  that raises (AX rule 2). ⛔ Neither is
+  that raises (AX rule 2).
+  ⚠️ ONE COMPOSED SHAPE IS STILL ADMITTED AND IS NOT A REPAIR: naming a
+  non-word (``status=None``, ``123``, ``['live']``) TOGETHER WITH both carrier
+  clears passes the coherent allowance (it keys on the carrier clear and, through
+  ``_status_key_leaves_the_dead_state``, on the KEYS supplied — never on the value
+  written), so the graph goes CURRENT on a word nobody can read while this
+  module's rebuild keeps the ``superseded`` an earlier record folded (#9974's
+  damage direction, one composed call away). Measured; pre-existing acceptance,
+  named here rather than repaired; the state-machine question is tracked on
+  `#12856`. ⛔ Neither is
   a record-sourced re-projection, which is ADDITIVE (``MERGE … SET n += $props``,
   no REMOVE pass) and would leave the value in place — and a clear writes
   ``state.status = null`` into the record, which the state-op leg's
@@ -702,8 +712,9 @@ def reconcile_record_and_cache(
     untrustworthy value
     and is LABEL-DEPENDENT: ``update_entity(…, status=None)``, ``SET n +=
     {status: null}``, a REMOVAL, on an **non-terminal** ``:Object`` (since
-    #12882 a non-string status out of a DEAD state is REFUSED, so it is not a
-    route for the terminal case); on a ``:Subject`` that call
+    #12882 a non-string status out of a DEAD state is REFUSED when the call
+    names the status ALONE, so it is not a route for the terminal case); on a
+    ``:Subject`` that call
     is REFUSED (#1423's status door accepts only ``SUBJECT_STATUS_VALUES``, and
     ``None`` is not one of them), so a Subject's clear is the graph-side
     ``REMOVE n.status`` — and a clear makes a TERMINAL entity read LIVE. For a

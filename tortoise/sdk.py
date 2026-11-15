@@ -49167,7 +49167,18 @@ class TortoiseSDK:
                 # unhashable target (`status=['live']`, `status={'a': 1}`) raised
                 # `TypeError: unhashable type` out of `in`, so the caller got a
                 # traceback instead of this guard's AX three-part refusal
-                # (measured). Non-strings now fall THROUGH to the refusal.
+                # (measured). Non-strings now fall THROUGH to the refusal —
+                # ⚠️ EXCEPT when the same call ALSO clears both carriers: the
+                # coherence allowance below keys on `_status_key_leaves_the_dead
+                # _state` (the KEYS supplied) and on the two carriers being NULL,
+                # never on the value written, so `status=None` / `123` / `True` /
+                # `['live']` + both clears is ADMITTED and lands the row CURRENT
+                # with a non-word (measured: `(123, None, None)`, `(None, None,
+                # None)`). That is a RESIDUAL of this guard, not of the fix above:
+                # it predates the change (the old skip let the same write through)
+                # and it is tracked on #12856 — narrowing the allowance
+                # (`isinstance(_np_status, str)` there, which no dead target word
+                # can reach) is that issue's decision, not taken in this one.
                 if isinstance(_np_status, str) and _np_status in _np_terminal:
                     continue            # dead->dead is legal for these families
                 # The carriers this row holds, keyed by the SAME declared
