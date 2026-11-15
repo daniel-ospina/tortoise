@@ -351,6 +351,80 @@ REMOVED_SDK_METHODS: dict[str, str] = {
         "#4282 (2026-10-27): DELETED. Account closure is a console operation in the "
         "approved tenancy block; **no** recorded destination."
     ),
+    # ── #12901 wave 1 (2026-11-15) — the retirement wave ─────────────────
+    #
+    # The MEMBERSHIP RULE for this block, so a later reader can re-derive it rather
+    # than trust it: a name qualifies only when it is (a) NOT on `tortoise/__all__.py`
+    # (the owner's approved list), (b) bound by NO entry in
+    # `tortoise/tool_registry.py` — live OR retired, since a retired tool still answers
+    # through the #3883 shim — and (c) called by NO production code in `tortoise/`.
+    # (c) is the one that does the work, and it is MEASURED, not asserted: a receiver-
+    # aware AST walk over `tortoise/`, `tests/` and `tools/` for `sdk.<name>` /
+    # `self.<name>` / a bare attribute reference (`asyncio.to_thread(sdk.<name>, …)`
+    # is such a reference, and a `(`-anchored grep misses it) / `getattr(sdk, "<name>")`.
+    #
+    # WHY (c) IS A CONDITION AND NOT A COURTESY. The owner's #3836 (c) ruling retires a
+    # name by FAILING and naming its replacement — no alias layer, no warning shim — and
+    # its stated reason is that with zero users there is no caller to protect. A
+    # deprecation window is what protects callers (PEP 387: an incompatible change only
+    # after a documented deprecation; SemVer 2.0.0 rule 8: a MAJOR bump). So the ruling is
+    # only legitimate over names that HAVE no caller: a name with a production caller is
+    # not eligible for this block at all, deprecation window or not. That is the gate.
+    #
+    # DEFERRED, with the reason, so the next wave does not re-derive it: `recall_gaps` and
+    # `recall_subgraph` have zero production callers BUT are invoked dynamically by name
+    # from `tests/test_time_aware_sdk_2520.py`'s `_RE_OWNING_LANES` (a string tuple, so a
+    # receiver-based scan cannot see it), and both wrap live `ranking` machinery
+    # (`GapsRanker`, `SubgraphExpander`). `test_guard` has zero production callers but the
+    # beta ledger's `r6_test_guard` region rules it **Kept and relocated** — it guards the
+    # production-wipe incident, so the CODE must survive and move to test infrastructure
+    # rather than be deleted. It needs its own wave.
+    "backfill_v25": (
+        "#12901 wave 1 (2026-11-15): DELETED. A one-shot ONTOLOGY v2.5 migration "
+        "(status/pointKind backfill) written against a schema several versions old, "
+        "with zero callers in `tortoise/`, `tests/` or `tools/`. The beta ledger's "
+        "`w8_backfill` region rules the class `One-shot migrations. Run once, then "
+        "dead code carrying a public promise.`, and the rename table's own disposition "
+        "is ARCHIVE -> DISCARDED. **No** recorded destination: nothing migrates to it, "
+        "and it migrates to nothing."
+    ),
+    "list_relations": (
+        "#12901 wave 1 (2026-11-15): DELETED. It listed the pack-declared relation "
+        "declarations and had zero callers. The beta `r6_canon` region records "
+        "`graph_overview` as its destination, which has no `def` today — so no hint is "
+        "emitted, because a hint must name something a caller can actually call. The "
+        "capability is not lost: `_get_kind_expander().list_relations()` is the live "
+        "registry call and survives, and `TortoiseSDK._resolve_traversal_path` still "
+        "reads it."
+    ),
+    "quarantine_batch": (
+        "#12901 wave 1 (2026-11-15): DELETED. A thin delegate to "
+        "`tortoise.mining.quarantine_batch`, which STAYS — batch lifecycle state lives "
+        "on :Batch marker nodes, so the capability was never the delegate, and the "
+        "delegate had zero callers on the SDK. The beta `w11_lifecycle` region records "
+        "`update_knowledge` as the destination (quarantine is a FIELD on the partial "
+        "update, not a verb). It is recorded here in prose and NOT in "
+        "`SURPLUS_DELETION_DESTINATIONS`, which is the CLOSED #4282 block. It is "
+        "UNHINTED even though `update_knowledge` is live: the approving region names "
+        "TWO targets (`update_knowledge` and `list_knowledge`), so the derived-ordinal "
+        "arm refuses to pick a winner between them, and a hint would record a judgement "
+        "no source makes."
+    ),
+    "calibration_passed": (
+        "#12901 wave 1 (2026-11-15): DELETED. The Gate B calibration-milestone reader, "
+        "with zero callers on the SDK — `check_gates` takes that state as a PARAMETER "
+        "and never read it from here. The beta `r3` region records `check_confidence` as "
+        "its destination, which has no `def` today, so no hint is emitted. "
+        "`_CALIBRATION_MARKER_KEY` deliberately STAYS on the class: the projection's "
+        "config-reset preservation reads it, so the constant outlives the reader."
+    ),
+    "membership_get": (
+        "#12901 wave 1 (2026-11-15): DELETED. It read one membership row by id and had "
+        "zero callers on the SDK; the console reads memberships through the approved "
+        "`list_members` surface instead. The beta `n1_console` region rules this class "
+        "`Console plumbing` and puts no tenancy administration on the SDK, so there is "
+        "**no** recorded destination to name."
+    ),
 }
 
 #: retired name -> the owner-approved region of `docs/product/beta-sdk-surface.md`

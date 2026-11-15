@@ -9,13 +9,19 @@ and they split in two — which is why the ledger records three and REBUILDS two
 
 - **Rebuilt (2)** — `test_calibration_passed_false_then_true` and
   `test_calibration_marker_persists_across_restart` were tests OF the
-  ``calibration_passed()`` accessor, which SURVIVES (`tortoise/sdk.py`, pinned as
-  surface row `sdk:calibration_passed`). They drove ``record_calibration`` only
+  ``calibration_passed()`` accessor. They drove ``record_calibration`` only
   as ARRANGEMENT, so they are restored below with the arrangement written as the
   marker node the record writer itself creates (the raw-Cypher form already used
   by `tests/test_rebuild_config_preservation.py`), with the marker KEY's value
   pinned by literal — deriving it from the class attribute the accessor also
   reads would make a rename invisible.
+  ⛔ **#12901 wave 1 retired the accessor itself.** The two tests are re-pointed
+  at the marker NODE (`_calibration_marker_present`, the same raw read the
+  accessor performed) instead of at a public method that no longer exists — the
+  durable contract was always "the writer stores the marker and a fresh SDK
+  still sees it", never "there is a public reader for it".
+  `_CALIBRATION_MARKER_KEY` STAYS on the class: the projection's config-reset
+  preservation reads it.
 - **Recorded as removed (3)** — `test_record_calibration_validation`,
   `test_record_calibration_enforces_gate_targets` and
   `test_record_calibration_is_idempotent` assert behaviour OF
@@ -253,11 +259,25 @@ def _store_calibration_marker(sdk, **props) -> None:
         params={"key": TortoiseSDK._CALIBRATION_MARKER_KEY, "props": props})
 
 
+def _calibration_marker_present(sdk) -> bool:
+    """Is the Gate B calibration-milestone marker stored? (the retired reader's own query)
+
+    #12901 wave 1 retired the public `TortoiseSDK.calibration_passed()` accessor;
+    this is the RAW read it performed, kept here so the WRITER's durable contract
+    is still covered. It deliberately does not reintroduce a public door.
+    """
+    rows = sdk._get_proj().g.query(
+        "MATCH (m:Meta {key:$key}) RETURN m.recordedAt",
+        params={"key": TortoiseSDK._CALIBRATION_MARKER_KEY},
+    ).result_set
+    return bool(rows)
+
+
 def test_calibration_marker_key_is_the_persisted_literal():
     """The marker key is DATA already written into shipped graphs — pin its value.
 
-    `_CALIBRATION_MARKER_KEY` is read by ``calibration_passed()`` and was written
-    by the retired ``record_calibration``. Pinning it only against itself is
+    `_CALIBRATION_MARKER_KEY` was read by ``calibration_passed()`` (retired by #12901
+    wave 1) and was written by the retired ``record_calibration``. Pinning it only
     vacuous: a rename moves writer and reader together, every test stays green,
     and every EXISTING graph — whose marker sits under the literal
     ``calibration_milestone``, the key `tortoise/hosted_backup.py` and
@@ -273,39 +293,41 @@ def test_calibration_marker_key_is_the_persisted_literal():
     assert TortoiseSDK._CALIBRATION_MARKER_KEY == "calibration_milestone"
 
 
-def test_calibration_passed_false_then_true(sdk):
-    """The accessor reads the marker: absent ⇒ False, present ⇒ True.
+def test_calibration_marker_recorded_then_read(sdk):
+    """The marker node round-trips: absent ⇒ False, present ⇒ True.
 
-    #4282: rebuilt on ``calibration_passed()`` (which survives) after its
-    arrangement, ``record_calibration``, was retired. FAILS IF the accessor
-    stops reading the marker key, or reports True before anything recorded it.
+    #12901 wave 1: rebuilt on the marker NODE, because the ``calibration_passed()``
+    accessor this originally drove left the public surface. FAILS IF the marker
+    node stops being written where a reader looks for it, or is reported present
+    before anything recorded it.
     """
-    assert sdk.calibration_passed() is False
+    assert _calibration_marker_present(sdk) is False
     _store_calibration_marker(
         sdk, precision=0.73, sample_size=50, mean_grounding_delta=0.012,
         notes="50-session human review, 3 reviewers")
-    assert sdk.calibration_passed() is True
+    assert _calibration_marker_present(sdk) is True
 
 
 def test_calibration_marker_persists_across_restart(tmp_path):
     """Marker is stored in the graph DB (:Meta node), not process memory —
     a fresh SDK on the same DB still reads it (survives restarts).
 
-    #4282: rebuilt on ``calibration_passed()``; the arrangement is the marker
-    node itself. FAILS IF the reader ever answers from process state instead of
-    the graph.
+    #4282: rebuilt on the calibration marker; #12901 wave 1 re-pointed it at the
+    # marker NODE after ``calibration_passed()`` left the public surface. The
+    # arrangement is the marker node itself. FAILS IF the marker ever answers
+    # from process state instead of the graph.
     """
     db_path = str(tmp_path / "persist.db")
     sdk1 = TortoiseSDK(db_path=db_path)
     try:
-        assert sdk1.calibration_passed() is False
+        assert _calibration_marker_present(sdk1) is False
         _store_calibration_marker(
             sdk1, precision=0.70, sample_size=50, mean_grounding_delta=0.02)
     finally:
         sdk1.close()
     sdk2 = TortoiseSDK(db_path=db_path)  # fresh instance, same DB file
     try:
-        assert sdk2.calibration_passed() is True
+        assert _calibration_marker_present(sdk2) is True
     finally:
         sdk2.close()
 

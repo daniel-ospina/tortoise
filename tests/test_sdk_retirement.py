@@ -381,6 +381,37 @@ def test_a_name_that_was_never_public_gets_no_retirement_claim() -> None:
     )
 
 
+def test_a_removed_name_fails_with_the_documented_error() -> None:
+    """Every REMOVED name must FAIL — and must not claim a migration it does not have.
+
+    #12901 wave 1. The suite pinned record→surface and surface→record, but not the
+    BEHAVIOUR of a removal: a name could leave `TortoiseSDK` and still answer through
+    some inherited attribute with every record-side assertion green. `__getattr__` is
+    the one place a departure becomes a documented error, so it is exercised here for
+    every removed name — and, unlike a retirement, the error must NOT say "retired",
+    because a removal has no replacement to name.
+    """
+    from tortoise.sdk import TortoiseSDK
+    from tortoise.sdk_retired import REMOVED_SDK_METHODS
+
+    sdk = object.__new__(TortoiseSDK)  # no `__init__`: no graph, no DB, no fixture
+    resolved: list[str] = []
+    for name in REMOVED_SDK_METHODS:
+        try:
+            getattr(sdk, name)
+        except AttributeError as exc:
+            assert "retired" not in str(exc).lower(), (
+                f"`TortoiseSDK.{name}` is REMOVED (no replacement recorded) but its "
+                f"error claims a retirement: {exc}"
+            )
+        else:
+            resolved.append(name)
+    assert not resolved, (
+        f"declared REMOVED but still resolve on `TortoiseSDK`: {sorted(resolved)}. "
+        "A removal is a departure — the name must not answer."
+    )
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # #4282 surplus block (#10226 review, P2) — the RECORDED DESTINATION is a claim
 # ══════════════════════════════════════════════════════════════════════════

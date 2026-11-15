@@ -24745,16 +24745,6 @@ class TortoiseSDK:
             promoted.append(oid)
         return promoted
 
-    def quarantine_batch(self, batch_id: str, *, reason: str) -> dict:
-        """Quarantine a batch (W-3 fail path) — blocks promote_point on its
-        Points until a re-run passes (plan §6.1 pinned SDK signature).
-
-        Thin delegate to tortoise.mining.quarantine_batch — batch lifecycle
-        state lives on :Batch marker nodes (operational metadata).
-        """
-        from .mining import quarantine_batch as _qb
-        return _qb(self._get_proj(), batch_id, reason=reason)
-
     # ── Temporal belief timeline (W-4, #786, DE2E-6) ───────────────
 
     def belief_timeline(self, topic: str, limit: int = 50) -> list[dict]:
@@ -33246,15 +33236,6 @@ class TortoiseSDK:
             operation=operation,
             **kwargs,
         )
-
-    def list_relations(self) -> list[dict]:
-        """List all relation declarations across installed packs.
-
-        Returns [{"pack": ..., "predicate": ..., "fromKind": ..., "toKind": ...,
-        "mechanism": ...}]. Pack relations describe valid edge types between
-        entity kinds — use for schema discovery.
-        """
-        return _get_kind_expander().list_relations()
 
     def _atexit_close(self) -> None:
         """#1371: atexit seam — collect ephemeral test servers so interpreter
@@ -46299,14 +46280,6 @@ class TortoiseSDK:
                      resource_type="membership", resource_id=mid)
         return {"id": mid, "org_id": org_id, "user_id": user_id, "role": role}
 
-    def membership_get(self, membership_id: str) -> dict | None:
-        """Get a membership by ID."""
-        reg = self._get_registry()
-        rows = reg.query(
-            "MATCH (m:Membership {id:$id}) RETURN properties(m)",
-            params={"id": membership_id},
-        ).result_set
-        return rows[0][0] if rows else None
     # ── Control Plane: APIKey CRUD ─────────────────────────────────
 
     def _verify_hashed_lookup(self, label: str, prop: str, plaintext: str) -> list[dict]:
@@ -54300,60 +54273,17 @@ class TortoiseSDK:
         from .ids import ulid as _ulid
         return _ulid()
 
-    # ── Source Node Completion ────────────────────────────────────
-    # ── Backfill Migration ────────────────────────────────────────
-
-    def backfill_v25(self, dry_run: bool = False) -> dict:
-        """Backfill existing tortoise.db to ONTOLOGY v2.5 schema."""
-        proj = self._get_proj()
-        report = {"dry_run": dry_run, "actions": []}
-
-        # 1. Backfill status on Points
-        r = proj.g.query("MATCH (n:Point) WHERE n.status IS NULL RETURN count(n)")
-        missing_status = r.result_set[0][0]
-        if missing_status > 0:
-            report["actions"].append(f"status_backfill: {missing_status} Points")
-            if not dry_run:
-                proj.g.query(f"MATCH (n:Point) WHERE n.status IS NULL SET n.status = 'live'")  # noqa: F541
-
-        # 2. Backfill pointKind
-        r = proj.g.query("MATCH (n:Point) WHERE n.pointKind IS NULL RETURN count(n)")
-        missing_kind = r.result_set[0][0]
-        if missing_kind > 0:
-            report["actions"].append(f"pointKind_backfill: {missing_kind} Points")
-            if not dry_run:
-                proj.g.query("MATCH (n:Point) WHERE n.pointKind IS NULL SET n.pointKind = 'statement'")
-
-        # 3. Count existing edges
-        r = proj.g.query("MATCH ()-[r]->() RETURN count(r)")
-        report["edge_count"] = r.result_set[0][0]
-
-        # 4. Verify Point count unchanged
-        r = proj.g.query("MATCH (n:Point) RETURN count(n)")
-        report["point_count"] = r.result_set[0][0]
-
-        return report
-
     # ── Gate B Calibration Milestone (epic-264 #779) ───────────────
 
     _CALIBRATION_MARKER_KEY = "calibration_milestone"
     # Gate B criterion (epic-264 align): ≥70% human-reviewed precision.
     # ⛔ NOT enforced at this head: #4282 retired `record_calibration`, its only
     # reader, so this constant RECORDS the criterion, it no longer gates a write.
+    # ⛔ #12901 wave 1: the READER `calibration_passed()` also left the public
+    # surface. `_CALIBRATION_MARKER_KEY` survives because the projection's
+    # config-reset preservation reads it (`tortoise/projection/__init__.py`),
+    # not because a public method still does.
     _CALIBRATION_PRECISION_TARGET = 0.70
-    def calibration_passed(self) -> bool:
-        """True once the Gate B calibration milestone marker is stored.
-
-        Local SDK contract (DE2E-7, epic-264 §6.3): no GitHub dependency —
-        the workflow-layer ``check_gates`` helper composes this with #320's
-        state. #787 re-uses this reader; it does NOT re-implement it.
-        """
-        proj = self._get_proj()
-        rows = proj.g.query(
-            "MATCH (m:Meta {key:$key}) RETURN m.recordedAt",
-            params={"key": self._CALIBRATION_MARKER_KEY},
-        ).result_set
-        return bool(rows)
 
     # ── #2814: rebuild config third state ─────────────────────────
     # PRIVATE on purpose: `tools/sdk_rename_table.py::_validate` fails any

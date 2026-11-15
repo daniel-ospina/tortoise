@@ -7,13 +7,15 @@ approval record in `docs/product/canonical-mcp-tools.md`, PR 4120). It is
 derivable from code.
 
 WHAT IS NOT IN HERE, AND WHY THAT IS THE POINT
-    **125** public methods are live on `TortoiseSDK` today and 40 are approved, but the two
-    sets only overlap in 13: 13 approved methods are implemented and stay, so **112 of the
+    **120** public methods are live on `TortoiseSDK` today and 40 are approved, but the two
+    sets only overlap in 13: 13 approved methods are implemented and stay, so **107 of the
     live methods are off the approved surface** — those are what Phase 2 of #4282 REMOVES.
+    (Was 125/112 until #12901 wave 1 retired the first five off-surface methods that no
+    production code called; the list below is UNCHANGED by that wave.)
     Phase 2 IMPLEMENTS the remaining **26** methods — the count the gate prints for approved
     methods it cannot resolve on the live class. The row-1 `Tortoise(...)` is NOT one of
     them: it names the `TortoiseSDK` class rather than a method on it, so it already
-    resolves and needs no implementation. Those 112 off-surface methods are deliberately
+    resolves and needs no implementation. Those 107 off-surface methods are deliberately
     NOT declared in this module: a declaration that also lists everything that exists cannot
     hold a line, because the gate then answers "the surface is what the surface is" and
     every surplus method is blessed instead of caught.
@@ -38,10 +40,10 @@ THE GATE
     dropped from here) and against the live class in both directions (a public method that
     is not on the approved surface; an approved method that does not exist on the SDK).
     Both gap directions FAIL by design while the migration is open: the honest reading of
-    this declaration today is "40 approved, 125 live, 13 of the approved implemented and 112
-    live-but-unapproved" — never "green". (125 − 40 = 85 is only the DELTA to the target
+    this declaration today is "40 approved, 120 live, 13 of the approved implemented and 107
+    live-but-unapproved" — never "green". (120 − 40 = 80 is only the DELTA to the target
     count, which is a different measurement from the set that has to be removed; the
-    removals are the 112.)
+    removals are the 107.)
 
     Adding or removing a name here is a **surface change** and needs Daniel's approval FIRST
     (`AGENTS.md` → "MCP/SDK Surface Approval"). The gate makes such a change VISIBLE; it
