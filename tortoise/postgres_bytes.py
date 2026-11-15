@@ -74,7 +74,14 @@ owner-gated change.
 
 FAIL-SOFT. :func:`measure_written_rows` and :func:`read_per_org_bytes` are
 TOTAL on the live path — never raise, never change a write's outcome; a fault
-is logged and reported as ``None`` / ``ok=False``. The pure parsers
+is logged and reported as ``None`` / ``ok=False``. ⚠️ SCOPED TO THE METER'S OWN
+FAULTS, and the scope is load-bearing rather than pedantic: the meter's
+bookkeeping statements are what hold that promise up, so when they themselves
+cannot be issued (``25P02`` on an already-aborted transaction, ``25P01`` outside
+a block, a dead session) the caller's transaction is left ABORTED and its
+``commit()`` still rolls the record write back. That arm is DISCLOSED —
+:func:`_meter_statement` says so at WARNING — and NOT repaired; see
+:func:`measure_written_rows` for the whole statement. The pure parsers
 (:func:`parse_written_rows`, :func:`parse_per_org_bytes`) DO raise, so a
 malformed payload fails its reading instead of masquerading as a zero — a
 failed reading's zeros are PLACEHOLDERS, never a measured zero.

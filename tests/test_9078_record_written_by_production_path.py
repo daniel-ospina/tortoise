@@ -2158,9 +2158,22 @@ def _ensure_metering_schema(conn) -> None:
     """
     probe = ("SELECT to_regprocedure('public."
              f"{postgres_bytes.ROWS_RPC}(text,text,bigint[])')")
+    meter_path = METERING_MIGRATION_FILES[-1]
     failure = None
-    for statement in (_METERING_PREAMBLE, *(path.read_text(encoding="utf-8")
-                                           for path in METERING_MIGRATION_FILES)):
+    #: ⛔ A FAILED APPLY IS NOT EXCUSED BY A FUNCTION BEING THERE. On a reused
+    #: container the meter may be present from an EARLIER run, so "the probe found
+    #: it" cannot distinguish "this tree's migration applied" from "this tree's
+    #: migration RAISED and an older function survived" — and the leg would then
+    #: grade a stranger and PASS (#12784 review P2, measured: a syntax error added
+    #: to the meter file still gave `1 passed` on a container that already carried
+    #: the function). CI provisions fresh, so this is the local/reused path — the
+    #: exact path the re-apply loop above was written for, which is why the failure
+    #: of THIS file is fatal rather than tolerated.
+    meter_failure = None
+    statements = [((_METERING_PREAMBLE,), None)]
+    statements += [((path.read_text(encoding="utf-8"),), path)
+                   for path in METERING_MIGRATION_FILES]
+    for (statement,), path in statements:
         try:
             with conn.cursor() as cur:
                 cur.execute(statement)
@@ -2177,15 +2190,24 @@ def _ensure_metering_schema(conn) -> None:
             # ONLY annotation a skip produces, and a skip reds the required
             # `test-record-postgres` check via `record-postgres-leg-gate.py`.
             failure = exc
+            if path == meter_path:
+                meter_failure = exc
     with conn.cursor() as check:
         check.execute(probe)
-        if check.fetchone()[0] is None:
-            detail = (f"{type(failure).__name__}: {failure}" if failure
-                      else "the migrations applied but the function is absent")
-            pytest.skip(
-                f"this database cannot carry the byte meter ({detail}) — "
-                "there is no positive figure to assert without it, and none is "
-                "claimed")
+        present = check.fetchone()[0] is not None
+    if present and meter_failure is not None:
+        pytest.fail(
+            "this tree's metering migration does not apply "
+            f"({type(meter_failure).__name__}: {meter_failure}), so the "
+            "`journal_event_bytes_for_rows` present here is NOT the one this "
+            "tree ships — the positive leg would grade a stranger and pass it")
+    if not present:
+        detail = (f"{type(failure).__name__}: {failure}" if failure
+                  else "the migrations applied but the function is absent")
+        pytest.skip(
+            f"this database cannot carry the byte meter ({detail}) — "
+            "there is no positive figure to assert without it, and none is "
+            "claimed")
 
 
 def _seed_tenant(conn, tenant: tuple[str, str]) -> None:

@@ -199,7 +199,12 @@ becomes a ROLLBACK and the whole record write disappears while the door reports
 `ROLLBACK TO SAVEPOINT` undoes only the failed read and the rows — inserted
 BEFORE the savepoint — still commit. MEASURED on PG16 with the meter refused
 (`InsufficientPrivilege`): **0 rows** committed without the savepoint, **1 row**
-with it.
+with it. ⚠️ **NOT when the savepoint bookkeeping itself cannot be issued**
+(`25P02` on an already-aborted transaction, `25P01` outside a block, a dead
+session): the transaction is unusable at that point, its `commit()` still rolls
+the write back, and `_meter_statement` says so at WARNING rather than at DEBUG —
+DISCLOSED, not repaired. Nothing in the meter can repair it; only the caller
+knows whether its transaction is still worth committing.
 
 The savepoint does **not** skew attribution, which is why it is a savepoint and
 not a second connection: the meter is a READ, and PostgreSQL keeps the
