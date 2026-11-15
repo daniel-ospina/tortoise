@@ -479,3 +479,83 @@ def test_a_status_only_lift_is_still_refused(sdk):
         sdk.update_entity(node, status="live")
     assert _row(sdk, "Object", node)[0] == "superseded", (
         "a refused status-only lift still moved the row")
+
+
+# ── 5. The allowance is NARROW: the review's three bypasses ───────────────
+# Each of these was measured on the first cut of this guard and ADMITTED.
+# They are the difference between "supplies the missing half" and "mentions a
+# property called supersededBy", which is the only thing §4.3 forbids.
+
+def test_two_keys_naming_the_carrier_are_refused_as_conflicting(sdk):
+    """Two props landing on ONE property: which value survives is unknowable.
+
+    A ``str`` subclass overriding ``__hash__`` is a SECOND dict entry with the
+    same content, so ``{K('supersededBy'): 'v2', 'supersededBy': None}`` passes a
+    per-KEY check while the live write applies both to ``supersededBy`` — a row
+    can end ``superseded`` naming nobody with the guard reporting satisfied.
+    Same asymmetry ``_status_write_is_ambiguous`` exists for on ``status``.
+
+    Mutation: drop the ``len(_carrier_keys) > 1`` refusal (restore
+    ``if _successor_named_by(props): return`` as the first check) -> this reds,
+    because the call is then ACCEPTED and stores a value nobody named.
+    """
+
+    class _K(str):
+        __hash__ = lambda self: 424242          # noqa: E731 — collision on purpose
+
+    node = _make(sdk, "Object", "ambiguous")
+    with pytest.raises(ValueError, match="CONFLICTING successor write"):
+        sdk.update_entity(node, status="superseded",
+                          **{_K("supersededBy"): "amb-v2",
+                             "supersededBy": None})
+    assert _row(sdk, "Object", node) == [None, None, None], (
+        "a refused conflicting write still moved the row")
+
+
+@pytest.mark.parametrize("carrier", [0, False, [], 123])
+def test_a_non_string_carrier_names_nobody_and_is_refused(sdk, carrier):
+    """A successor resolves through name readers — ``0``/``False``/``[]`` do not.
+
+    Mutation: admit any non-``None`` value (the first cut's ``return True``) ->
+    these four red, each storing a value no successor probe can resolve while the
+    row claims the word. This is the docstring's own stated defect ("the
+    successor a reader resolves is the empty string") in another spelling.
+    """
+    node = _make(sdk, "Object", f"nonstr-{type(carrier).__name__}-{carrier!r}")
+    with pytest.raises(ValueError, match="no successor"):
+        sdk.update_entity(node, status="superseded", supersededBy=carrier)
+    assert _row(sdk, "Object", node)[0] is None
+
+
+def test_a_hybrid_row_nameless_as_object_is_prescribed_the_point_remedy(sdk):
+    """The repair must be performable on EVERY label it is spoken from.
+
+    ``:Point:Object`` with the Point arm satisfied by an incoming CORRECTS edge
+    and the Object arm nameless: the prescription must be the Point one
+    (``retract_point``, or the edge ``supersede()`` writes on that path).
+    ``archived`` is RESERVED on Points (§5) and this door REFUSES it there, so
+    the Object-first wording would prescribe an unperformable repair.
+
+    Mutation: choose the wording from ``nameless[0]`` instead of from the BOUND
+    labels -> the message prescribes ``status='archived'`` and offers
+    ``supersede()`` as the route, and this reds. Second mutation: drop
+    ``mixed_clause`` -> the last assertion reds.
+    """
+    node = _make(sdk, "Point", "hybrid-12592")
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) SET n:Object",
+        params={"id": node})
+    successor = _make(sdk, "Point", "hybrid-12592-v2")
+    sdk.supersede(node, successor)          # Point path: CORRECTS edge, no prop
+    sdk._get_proj().g.query(
+        "MATCH (o:Object {id:$id}) REMOVE o.supersededBy", params={"id": node})
+    with pytest.raises(ValueError) as exc:
+        sdk.update_entity(node, status="superseded")
+    message = str(exc.value)
+    assert "retract_point" in message and "RESERVED" in message, (
+        "a hybrid nameless as an Object was prescribed a Point-illegal "
+        f"'archived': {message}")
+    assert "status='archived'" not in message, message
+    assert "binds :Object and :Point at once" in message, (
+        f"a hybrid id was handed a route that cannot serve it: {message}")
+    assert "is NOT the route here" in message, message

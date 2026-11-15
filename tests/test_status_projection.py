@@ -1328,7 +1328,7 @@ class TestLifecycleCarrierCoherence:
             f"the guard does not treat {spelling!r} as a carrier; it would "
             "write public.object.superseded_by without a status (#10192)")
 
-    def test_the_mirror_shape_is_not_refused(self, tmp_path):
+    def test_the_mirror_shape_is_not_refused_by_the_carrier_guard(self, tmp_path):
         """`status='superseded'` with NO carrier: OUT of the CARRIER guard's
         scope, and REFUSED by the #12592 dual.
 

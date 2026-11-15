@@ -5850,16 +5850,17 @@ def _successor_named_by(props: dict) -> bool:
 
     A blank value names nobody: the property exists, so #10192's record fold still
     derives `'superseded'`, but the successor a reader resolves is the empty
-    string. `None` is the documented CLEAR and is not a name either.
+    string. `None` is the documented CLEAR and is not a name either, and a
+    NON-STRING is not a name at all — a successor resolves through
+    `_as_str`-style readers, so `0`/`False`/`[]` would be admitted here and
+    resolve to nothing (measured before this clause existed: all three returned
+    `True`). The production callers all pass a string; the requirement is what
+    the readers actually consume, not a type preference.
     """
     for key, value in props.items():
         if _carrier_prop_named_by(key, (_SUCCESSOR_PROP,)) is None:
             continue
-        if value is None:
-            continue
-        if isinstance(value, str) and not value.strip():
-            continue
-        return True
+        return isinstance(value, str) and bool(value.strip())
     return False
 
 
@@ -48321,11 +48322,40 @@ class TortoiseSDK:
         if lifecycle_props_by_rendering(props, {"status"}).get("status") \
                 != _SUPERSEDED_STATUS:
             return
+        # ⛔ MORE THAN ONE KEY NAMING THE CARRIER IS NOT A CALL THIS GUARD CAN
+        # ANSWER (#12592 review P1, and the class #12786 measured on `status`).
+        # `_successor_named_by` decides per KEY, and the live write applies EVERY
+        # prop entry to ONE property name — so `{<KHash('supersededBy')>: 'v2',
+        # 'supersededBy': None}` is two dict entries that both land on
+        # `supersededBy`, with an engine-defined winner: admitted here as naming
+        # a successor, it can store `None` and leave the row claiming the word
+        # with nobody named. Fail closed, exactly as the sibling status guard
+        # does on the same asymmetry, and say which keys were involved.
+        _carrier_keys = sorted(
+            str(k) for k in keys_rendering_as(props, {_SUCCESSOR_PROP}))
+        if len(_carrier_keys) > 1:
+            raise ValueError(
+                f"update_entity refused a CONFLICTING successor write on "
+                f"{id_val!r}: {len(_carrier_keys)} keys in this call name "
+                f"`{_SUCCESSOR_PROP}` ({', '.join(_carrier_keys)}), and they "
+                f"land on ONE property, so which value survives is not "
+                f"knowable here. A key whose spellings disagree is filed under "
+                f"one name by the live write and another by the journal, and a "
+                f"`None` beside a value can store the CLEAR while the guard "
+                f"reads the name. Pass `{_SUCCESSOR_PROP}` ONCE, as a plain "
+                f"str, with the word you mean."
+            )
         # A named successor in the CALL is sufficient — the write applies it to
         # every bound row (``SET n += $props``), so no row is left nameless.
         if _successor_named_by(props):
             return
         proj = self._get_proj()
+        # `bound` is every label this id actually binds; `nameless` is the
+        # subset that fails. The PRESCRIPTION is chosen from `bound`, not from
+        # `nameless`: a `:Point:Object` hybrid whose Object arm is nameless is
+        # still an id on which `archived` is refused (the Point arm owns that
+        # rule), so the repair offered must be one this door can perform.
+        bound: list[str] = []
         nameless: list[str] = []
         # ⛔ §5 NAMES A POINT'S SUCCESSOR WITH THE EDGE, not (only) with a
         # property: `supersede_point` writes `status='superseded'` + `outdated` +
@@ -48345,6 +48375,7 @@ class TortoiseSDK:
             ).result_set
             if not rows:
                 continue             # no row of this label is bound
+            bound.append(label)
             if any(v is None or (isinstance(v, str) and not v.strip())
                    for _id, v in rows):
                 nameless.append(label)
@@ -48354,6 +48385,8 @@ class TortoiseSDK:
                 "RETURN n.id AS id, n.supersededBy AS succ",
                 params={"ids": list(point_ids)},
             ).result_set
+            if rows:
+                bound.append("Point")
             unresolved = [str(r[0]) for r in rows
                           if r[1] is None
                           or (isinstance(r[1], str) and not r[1].strip())]
@@ -48386,7 +48419,16 @@ class TortoiseSDK:
             # that echoes the status back would otherwise start failing.
             return
         labels = "/".join(f":{name}" for name in nameless)
-        first = nameless[0]
+        # ⛔ POINT WINS THE WORDING, not the first nameless row (#12592 review
+        # P2). `nameless` is built Object→Subject→Point, so a `:Point:Object`
+        # hybrid whose Object arm is nameless while its Point arm is satisfied
+        # would otherwise be told to `archived` — a word §5 declares RESERVED on
+        # Points and that this door REFUSES on the Point arm — while the
+        # recovery actually available to it (`retract_point`, or the CORRECTS
+        # edge `supersede()` writes through the Point path) is not offered. The
+        # prescription must be performable on every label it is spoken from.
+        first = "Point" if "Point" in bound else nameless[0]
+        mixed = len(bound) > 1
         section = "§5" if first == "Point" else (
             "§4.2" if first == "Subject" else "§4.3")
         # AX rule 2 (#10183): the repair must be PERFORMABLE from where the
@@ -48406,10 +48448,19 @@ class TortoiseSDK:
                 "RESERVED on Points — ONTOLOGY §5: no v1 write path). ")
             retirement = (
                 f"or, if nothing replaced it, `retract_point({id_val!r})`.")
-            edge_clause = (
-                " — and, on a Point, the CORRECTS edge and the `outdated` flag "
-                "too, which is what makes `query()` and every retrieval leg "
-                "stop treating it as current")
+            # ⛔ THE CARRIER CLAUSE IS LABEL-CONDITIONAL, because the carrier IS.
+            # `supersede_point` writes `status`, `outdated`, the temporal stamps
+            # and MERGEs `(new)-[:CORRECTS]->(old)` — it writes NO
+            # `supersededBy` and no `supersededAt` (measured, sdk.py's
+            # supersede_point SET), and on a Point the EDGE is the successor
+            # (§5). A message that promised `supersededBy` here would be the one
+            # thing AX rule 2 must not do: prescribe a repair whose result the
+            # caller cannot verify against the promise.
+            carrier_clause = (
+                "writes status, `outdated` and the CORRECTS edge in ONE "
+                "guarded call on a Point — and on a Point that edge IS the "
+                "successor (§5), which is what makes `query()` and every "
+                "retrieval leg stop treating it as current")
         else:
             model_clause = (
                 "That is not a supersession at all: a retirement with no "
@@ -48418,7 +48469,21 @@ class TortoiseSDK:
             retirement = (
                 f"or, if nothing replaced it, "
                 f"`update_entity({id_val!r}, status='archived')`.")
-            edge_clause = ""
+            carrier_clause = (
+                "writes status, `supersededBy` (the successor's NAME, §4.2) "
+                "and `supersededAt` in ONE atomic write")
+        # A hybrid id gets an extra sentence, because the leading verb is NOT
+        # performable on it: `supersede()` dispatches to the Point path, and a
+        # Point that is already terminal refuses a second supersession — so the
+        # explicit pair (which satisfies every arm at once) is what the caller
+        # must reach for.
+        mixed_clause = (
+            f" ⛔ This id binds {' and '.join(f':{n}' for n in bound)} at once, "
+            f"so `supersede()` is NOT the route here (it dispatches to the Point "
+            f"path, one-way): the `update_entity(...)` pair above is the ONE "
+            f"write that satisfies every arm, and it needs only the successor's "
+            f"NAME. "
+        ) if mixed else ""
         raise ValueError(
             f"update_entity refused status='superseded' on {labels} "
             f"{id_val!r} with no successor: 'superseded' MEANS replaced "
@@ -48426,11 +48491,10 @@ class TortoiseSDK:
             f"says 'superseded' and names nothing asserts a replacement that "
             f"does not exist. {model_clause}"
             f"Name the successor — `supersede({id_val!r}, <successor id>)` "
-            f"writes status, `supersededBy` and `supersededAt` in ONE atomic "
-            f"write on every label{edge_clause}; "
+            f"{carrier_clause}; "
             f"`update_entity({id_val!r}, status='superseded', "
             f"supersededBy=<successor name>)` is the same pair spelled out; "
-            f"{retirement} (A JOURNAL REBUILD is unchanged: ONTOLOGY {section} "
+            f"{retirement}{mixed_clause} (A JOURNAL REBUILD is unchanged: ONTOLOGY {section} "
             f"keeps restoring a supersession recorded without a successor — "
             f"this refusal is the live write door only, where you can still "
             f"supply the missing half.)"
