@@ -25067,7 +25067,7 @@ class TortoiseSDK:
                 "deferred_live_prior": deferred,
                 "boundary_blocked": boundary_blocked}
 
-    def list_dedup_candidates(self, candidate_type: str = "content",
+    def _list_dedup_candidates(self, candidate_type: str = "content",
                               limit: int = 50) -> list[dict]:
         """Review queue for dedup candidates (plan §6.1, DE2E-3/DE2E-2).
 
@@ -27010,21 +27010,21 @@ class TortoiseSDK:
                     sec, days=days, limit=limit, point_kinds=point_kinds)
             return combined
         if section == "taxonomy":
-            return self.taxonomy()
+            return self._taxonomy()
         if section == "structure":
             return self.summarize_structure()
         if section == "structure_check":
             return self.check_structure()
         if section == "pointkinds":
-            return self.list_pointkinds()
+            return self._list_pointkinds()
         if section == "tags":
-            return self.list_tags()
+            return self._list_tags()
         if section == "sources":
-            return self.list_sources()
+            return self._list_sources()
         if section == "namespaces":
-            return self.list_namespaces()
+            return self._list_namespaces()
         if section == "status":
-            return self.status()
+            return self._status()
         if section == "stale":
             return self.stale_points(days=days, limit=limit)
         if section == "dream_health":
@@ -27034,7 +27034,7 @@ class TortoiseSDK:
                 raise ValueError(
                     "graph_overview(section='validate_domain') requires domain= "
                     "— name the domain whose validators to run")
-            return self.validate_domain(domain)
+            return self._validate_domain(domain)
         if section == "audit":
             return self.audit(point_kinds=point_kinds)
         if section == "topics":
@@ -27042,7 +27042,7 @@ class TortoiseSDK:
                 raise ValueError(
                     "graph_overview(section='topics') requires entity_id= "
                     "— name the entity whose topics to read")
-            return self.list_topics(entity_id)
+            return self._list_topics(entity_id)
         raise ValueError(
             f"graph_overview: unknown section {section!r}. Valid sections: "
             f"{', '.join(self.GRAPH_OVERVIEW_SECTIONS)}")
@@ -27133,7 +27133,7 @@ class TortoiseSDK:
                 raise ValueError(
                     "search_knowledge(mode='sessions') requires query= — the "
                     "session search is text-driven")
-            return self.search_sessions(
+            return self._search_sessions(
                 query, agent=agent, topics=topics, after=after, before=before,
                 limit=10 if limit is None else limit, offset=offset)
         if mode == "entry_points":
@@ -27141,7 +27141,7 @@ class TortoiseSDK:
                 raise ValueError(
                     "search_knowledge(mode='entry_points') requires query= — "
                     "entity resolution is text-driven")
-            return self.suggest_entry_points(
+            return self._suggest_entry_points(
                 query, limit=5 if limit is None else limit, kind_filter=kind)
         # mode == "issue_insight"
         subject = title or query
@@ -27205,7 +27205,7 @@ class TortoiseSDK:
                 kind=point_kind, skip=offset, limit=limit,
                 include_retracted=include_retracted, **filters)
         if kind == "source":
-            return self.list_sources()
+            return self._list_sources()
         if kind == "source_reliability":
             if not url:
                 raise ValueError(
@@ -27217,19 +27217,19 @@ class TortoiseSDK:
                 return self.list_batch(id)
             return self.list_batches(limit=limit)
         if kind == "namespace":
-            return self.list_namespaces()
+            return self._list_namespaces()
         if kind == "topic":
             if not entity_id:
                 raise ValueError(
                     "list_knowledge(kind='topic') requires entity_id= — the "
                     "topic profile is per entity")
-            return self.list_topics(entity_id)
+            return self._list_topics(entity_id)
         # kind == "diary"
         if not agent:
             raise ValueError(
                 "list_knowledge(kind='diary') requires agent= — the diary is "
                 "read per author")
-        return self.diary_read(agent, last_n=limit, wing=wing)
+        return self._diary_read(agent, last_n=limit, wing=wing)
 
     def check_confidence(self, claim_id: str | None = None, *,
                          topic: str | None = None,
@@ -27266,7 +27266,7 @@ class TortoiseSDK:
                 return view
             return {
                 "confidence": view,
-                "provenance": self.provenance(claim_id),
+                "provenance": self._provenance(claim_id),
             }
         if topic:
             return self.belief_timeline(topic, limit=limit)
@@ -27304,7 +27304,7 @@ class TortoiseSDK:
                 "explore_connections requires node_id= (walk from this node) or "
                 "query= (resolve a name, then walk from it)")
         if not node_id:
-            hits = self.suggest_entry_points(query, limit=1)
+            hits = self._suggest_entry_points(query, limit=1)
             if not hits:
                 return {"error": f"explore_connections: query {query!r} matched "
                                  "no node to walk from", "results": []}
@@ -27312,7 +27312,7 @@ class TortoiseSDK:
             if node_id and isinstance(node_id, dict):  # pragma: no cover - shape guard
                 node_id = node_id.get("id")
         if include_content:
-            return self.expand_relationships(node_id)
+            return self._expand_relationships(node_id)
         from .navigation import entityProfile
         proj = self._get_proj()
         return entityProfile(
@@ -27355,7 +27355,7 @@ class TortoiseSDK:
         if kind == "connections":
             return self.review_connections(mode=mode, scope=scope)
         if kind == "dedup":
-            return self.list_dedup_candidates(
+            return self._list_dedup_candidates(
                 candidate_type=candidate_type, limit=limit)
         return self.get_cross_lens_candidates(
             threshold=DEFAULT_THRESHOLD if threshold is None else threshold)
@@ -27380,7 +27380,7 @@ class TortoiseSDK:
             "product-strategy", proj)
         return to_legacy_shape(violations)
 
-    def validate_domain(self, domain: str) -> dict:
+    def _validate_domain(self, domain: str) -> dict:
         """Run a domain's graph-surface validators (issue #405) — advisory,
         read-only, on-demand. Returns
         ``{domain, ok, violations, drift}`` where violations are enriched,
@@ -27493,12 +27493,12 @@ class TortoiseSDK:
 
     # ── Taxonomy ─────────────────────────────────────────────────
 
-    def taxonomy(self) -> dict[str, int]:
+    def _taxonomy(self) -> dict[str, int]:
         """Count entities by node label. Returns {Point: N, Event: N, ...}."""
         from .taxonomy import taxonomy as _taxonomy
         return _taxonomy(self._get_proj())
 
-    def list_pointkinds(self) -> list[dict]:
+    def _list_pointkinds(self) -> list[dict]:
         """All pointKinds present in the graph with counts. Returns [{kind, count, pack}].
 
         #2205: same non-operator predicate as summarize_structure (absence-or-
@@ -27523,7 +27523,7 @@ class TortoiseSDK:
             result.append({"kind": kind, "count": count, "pack": pack})
         return result
 
-    def list_sources(self) -> list[dict]:
+    def _list_sources(self) -> list[dict]:
         """All PROVENANCE Sources with point counts.
 
         Returns [{url, sourceKind, points}]. D10 (ONTOLOGY v3.15 §4.4): a
@@ -27548,7 +27548,7 @@ class TortoiseSDK:
             for row in rows
         ]
 
-    def list_tags(self) -> list[dict]:
+    def _list_tags(self) -> list[dict]:
         """All Tag names with count of tagged Points. Returns [{name, count}].
 
         Orphaned :Tag nodes (no TAGGED edges) are garbage-collected when
@@ -27585,7 +27585,7 @@ class TortoiseSDK:
             _ledger_record("Point", points)  # #7983: a product read of these keys
         return points
 
-    def list_namespaces(self) -> list[dict]:
+    def _list_namespaces(self) -> list[dict]:
         """Installed pack namespaces with kind counts. Returns [{namespace, name, kind_count}]."""
         registry = _get_kind_expander()
         packs = registry.list_packs()
@@ -27598,7 +27598,7 @@ class TortoiseSDK:
             for p in packs
         ]
 
-    def list_topics(self, entity_id: str) -> dict:
+    def _list_topics(self, entity_id: str) -> dict:
         """entityProfile lite for an entity. Returns {id, pointKind, context, neighbors, neighborCounts}."""
         from .taxonomy import list_topics as _list_topics
         return _list_topics(self._get_proj(), entity_id)
@@ -33747,7 +33747,7 @@ class TortoiseSDK:
             return None
         return raw_entry(rows[0][0], source_id=(rows[0][0] or {}).get("url"))
 
-    def provenance(self, point_id: str) -> dict:
+    def _provenance(self, point_id: str) -> dict:
         """Provenance chain — "Who decided this?" Point → Subject → delegation."""
         point = self.get_point(point_id)
         if not point:
@@ -39957,7 +39957,7 @@ class TortoiseSDK:
             props["wing"] = wing
         return self.create_point("diary", entry, **props)
 
-    def diary_read(self, agent_name: str, last_n: int = 10,
+    def _diary_read(self, agent_name: str, last_n: int = 10,
                    wing: str | None = None) -> list[dict]:
         """Read recent diary entries for an agent, newest first."""
         proj = self._get_proj()
@@ -39977,7 +39977,7 @@ class TortoiseSDK:
             ).result_set
         return [r[0] for r in rows]
 
-    def status(self) -> dict:
+    def _status(self) -> dict:
         """Graph health + entity counts + FalkorDB connectivity.
 
         Returns {connected, counts: {Point, Event, ...}, total_entities}.
@@ -39989,7 +39989,7 @@ class TortoiseSDK:
             connected = True
         except Exception:
             pass
-        counts = self.taxonomy()
+        counts = self._taxonomy()
         total = sum(counts.values())
         result = {"connected": connected, "counts": counts, "total_entities": total}
         if self._namespace:
@@ -40595,7 +40595,7 @@ class TortoiseSDK:
 
     # ── Entity Resolution (GAP-01 #6987) ──────────────────────
 
-    def suggest_entry_points(self, query: str, *, limit: int = 5,
+    def _suggest_entry_points(self, query: str, *, limit: int = 5,
                              kind_filter: str | None = None,
                              graph_ranker=None) -> list[dict]:
         """Entity resolution — NL query → matching entities from the graph.
@@ -44692,7 +44692,7 @@ class TortoiseSDK:
         merged.extend((pid, s) for pid, s in vector_hits if pid not in seen)
         return merged
 
-    def expand_relationships(self, point_id: str) -> list[dict]:
+    def _expand_relationships(self, point_id: str) -> list[dict]:
         """Full relationship payload for a single Point, incl. related_content (#1353 D14).
 
         The expand side of the list/expand split: search list view carries bounded
@@ -51074,7 +51074,7 @@ class TortoiseSDK:
         from .session_indexer import compute_session_embedding
         return compute_session_embedding(name, summary, keywords, topics)
 
-    def search_sessions(self, query: str, *, agent: str | None = None,
+    def _search_sessions(self, query: str, *, agent: str | None = None,
                         topics: list[str] | None = None,
                         after: "datetime | str | None" = None,  # noqa: F821, UP037
                         before: "datetime | str | None" = None,  # noqa: F821, UP037

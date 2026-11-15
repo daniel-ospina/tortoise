@@ -1252,9 +1252,12 @@ def test_the_guard_reds_when_the_live_surface_grows_past_the_high_water_pin(tmp_
     # The pin is set ONE BELOW the live count so the run must red: the property
     # under test is "growth past the pin reds", not any particular number. The live count
     # moved again after the merge — #4282's container (81 -> 77), #4282 Phase 3.2's
-    # `run_onboarding` retirement (77 -> 72) and #11609 batch 1's four archived
-    # no-destination tools (72 -> 68) — so the pin follows to 68 - 1.
-    doc["high_water_counts"] = {"tools": 67, "sdk_public_methods": 150}
+    # `run_onboarding` retirement (77 -> 72), #11609 batch 1's four archived
+    # no-destination tools (72 -> 68) and #11609 Phase 2's nine retired members
+    # (68 -> 64) — so the pin follows to 64 - 1. Derived from the manifest rather than
+    # typed, so the next movement does not need this comment edited to stay honest.
+    doc["high_water_counts"] = {"tools": doc["counts"]["tools"] - 1,
+                                "sdk_public_methods": 150}
     result = _run("tools/surface-guard.py", "--manifest", _write(doc, tmp_path))
     assert result.returncode == 1, "growth past the frozen pin did not red the gate"
     assert "high-water pin" in result.stdout, result.stdout
@@ -4811,7 +4814,8 @@ def test_the_live_surface_is_the_baseline_the_guard_froze():
     # landed container batch until the approved 27 is reached. #4282 Phase 3.2 (main) then
     # removes the five `run_onboarding` tools — a disjoint name set — so the merged
     # surface is 72, not either side's own figure.
-    assert live["mcp"] == manifest["counts"]["tools"] == 68
+    # #11609 Phase 2: 68 -> 64 (nine members retired into five new containers).
+    assert live["mcp"] == manifest["counts"]["tools"] == 64
     # #4282 Phase 2.2 (#10053): 149 -> 150, the three approved-but-absent names now
     # having a `def` (+3) less `main`'s two retirements in #10012 (`graph_count` →
     # `_graph_count`, `org_list` deleted) (−2). The manifest pin records the same
@@ -4821,7 +4825,11 @@ def test_the_live_surface_is_the_baseline_the_guard_froze():
     # The approved 40 did not grow — the approval (`#10015` comment `6863608333`) delivers a
     # name that was already approved and unshipped, the same move PR #10053 made for three
     # rows — so `high_water_counts` (150) does not move; only the frozen ROW SET does.
-    assert live["sdk"] == manifest["counts"]["sdk_public_methods"] == 125
+    # #11609 Phase 2 moved it 125 → 117: SIX read containers arrived and FOURTEEN member
+    # methods were re-privatised behind them (125 + 6 − 14 = 117). The approved 40 did not
+    # grow, and the pin beside it in the manifest was LOWERED to 117 for the reason that
+    # block states — slack in a growth pin is the thing the pin exists to stop.
+    assert live["sdk"] == manifest["counts"]["sdk_public_methods"] == 117
 
 
 def test_the_sdk_count_the_sequencing_list_types_is_the_measured_one():

@@ -5099,7 +5099,7 @@ def tortoise_validate_domain(domain: str) -> dict:
     actionable violations ({rule, kind, ref, message, fix}) plus drift
     warnings for manifest chains with no registered validator. Never
     modifies the graph; violations are warnings, not blocks."""
-    return _safe(_get_org_sdk().validate_domain, domain)
+    return _safe(_get_org_sdk().graph_overview, "validate_domain", domain=domain)
 
 
 def tortoise_audit(point_kinds: list[str] | None = None) -> dict:
@@ -5124,19 +5124,19 @@ def tortoise_summarize_structure() -> dict:
 def tortoise_list_pointkinds() -> list[dict]:
     """List all pointKinds present in the graph with counts. What EXISTS.
     Alias → graph_overview(section='pointkinds') (epic #888 W3)."""
-    return _safe(_get_org_sdk().list_pointkinds)
+    return _safe(_get_org_sdk().graph_overview, "pointkinds")
 
 
 def tortoise_list_sources() -> list[dict]:
     """List all Sources with point counts. Where data came FROM.
     Alias → graph_overview(section='sources') (epic #888 W3)."""
-    return _safe(_get_org_sdk().list_sources)
+    return _safe(_get_org_sdk().graph_overview, "sources")
 
 
 def tortoise_list_namespaces() -> list[dict]:
     """List installed pack namespaces.
     Alias → graph_overview(section='namespaces') (epic #888 W3)."""
-    return _safe(_get_org_sdk().list_namespaces)
+    return _safe(_get_org_sdk().graph_overview, "namespaces")
 
 
 def tortoise_list_batch(batch_id: str) -> dict:
@@ -5152,7 +5152,7 @@ def tortoise_list_batches(limit: int = 20) -> list[dict]:
 def tortoise_list_tags() -> list[dict]:
     """List all Tag names with count of tagged Points. Where tags are USED.
     Alias → graph_overview(section='tags') (epic #888 W3)."""
-    return _safe(_get_org_sdk().list_tags)
+    return _safe(_get_org_sdk().graph_overview, "tags")
 
 
 def tortoise_query_points_by_tag(tag: str) -> list[dict]:
@@ -5316,7 +5316,8 @@ def tortoise_expand_relationships(point_id: str) -> list[dict]:
     use this to read a single point's complete relationships, including the
     related points' full text, on demand (single-point fan-out is trivially cheap).
     """
-    return _safe(_get_org_sdk().expand_relationships, point_id)
+    return _safe(_get_org_sdk().explore_connections, point_id,
+                 include_content=True)
 
 
 # ── Recall — epistemic intents (epic #898) ─────────────────────
@@ -5982,8 +5983,11 @@ def tortoise_diary_write(agent_name: str, entry: str,
 
 def tortoise_diary_read(agent_name: str, last_n: int = 10,
                         wing: str | None = None) -> list[dict]:
-    """Read recent diary entries for an agent, newest first."""
-    return _safe(_get_org_sdk().diary_read, agent_name, last_n, wing=wing)
+    """Read recent diary entries for an agent, newest first.
+
+    Alias → list_knowledge(kind='diary', agent=...) (#4282 row 4)."""
+    return _safe(_get_org_sdk().list_knowledge, "diary", agent=agent_name,
+                 limit=last_n, wing=wing)
 
 
 def tortoise_list_graphs() -> list[str]:
@@ -6029,7 +6033,7 @@ def tortoise_status() -> dict:
     Returns {connected, counts: {Point, Event, ...}, total_entities}.
     Alias → graph_overview(section='status') (epic #888 W3).
     """
-    return _safe(_get_org_sdk().status)
+    return _safe(_get_org_sdk().graph_overview, "status")
 
 
 def _org_quota_block(sdk=None, timeout: float | None = None) -> dict:
@@ -6354,13 +6358,13 @@ def tortoise_taxonomy() -> dict[str, int]:
     """Count entities by node label. Returns {Point: N, Event: N, Subject: N,
     Object: N, Source: N} (D10: a document is a Source, not a :Document node).
     Alias → graph_overview(section='taxonomy') (epic #888 W3)."""
-    return _safe(_get_org_sdk().taxonomy)
+    return _safe(_get_org_sdk().graph_overview, "taxonomy")
 
 
 def tortoise_list_topics(entity_id: str) -> dict:
     """entityProfile lite for an entity. Returns {id, pointKind, neighbors, neighborCounts}.
     Alias → graph_overview(section='topics', entity_id=...) (epic #888 W3)."""
-    return _safe(_get_org_sdk().list_topics, entity_id)
+    return _safe(_get_org_sdk().graph_overview, "topics", entity_id=entity_id)
 
 
 def tortoise_topic_summarize(topic: str,
@@ -6399,7 +6403,7 @@ def tortoise_topic_summarize(topic: str,
 def tortoise_stale(days: int = 30, limit: int = 50) -> dict:
     """Find Points not updated in N days. Returns {stale, count, cutoff, limit}.
     Alias → graph_overview(section='stale', days=, limit=) (epic #888 W3)."""
-    return _safe(_get_org_sdk().stale_points, days=days, limit=limit)
+    return _safe(_get_org_sdk().graph_overview, "stale", days=days, limit=limit)
 
 
 def tortoise_review_connections(mode: str = "both", scope: str | None = None) -> dict:
@@ -6455,10 +6459,26 @@ def tortoise_find_cross_lens_candidates(
 
 def tortoise_provenance(point_id: str) -> dict:
     """Provenance chain — "Who decided this?" Follows authoredBy → Subject → delegation."""
-    return _safe(_get_org_sdk().provenance, point_id)
+    return _safe(_check_confidence_provenance, point_id)
 
 
 # ── Multi-tenancy (#7001) ────────────────────────────────────
+
+
+def _check_confidence_provenance(point_id: str) -> dict:
+    """The provenance chain alone, read through the `check_confidence` container.
+
+    `TortoiseSDK.provenance` was retired into `check_confidence` (#4282 row 5), so a
+    caller of the RETIRED `tortoise_provenance` tool (the #3883 shim) must reach the
+    chain through the container rather than through the name that no longer resolves.
+    The container's claim arm returns `{"confidence": …, "provenance": …}`; this peels
+    the chain off and keeps the answer byte-identical to the live tool's.
+    """
+    payload = _safe(_get_org_sdk().check_confidence, point_id,
+                    include_provenance=True)
+    if isinstance(payload, _SafeError):
+        return payload
+    return (payload or {}).get("provenance", {}) if isinstance(payload, dict) else payload
 
 def tortoise_org_create(name: str) -> dict:
     """Create isolated org graph via FalkorDB select_graph.
@@ -6688,8 +6708,9 @@ def tortoise_search_sessions(query: str, agent: str | None = None, topics: Any =
         topics_list = topics
     else:
         topics_list = None
-    return _safe(_get_org_sdk().search_sessions, query, agent=agent, topics=topics_list,
-                 after=after, before=before, limit=limit, offset=offset)
+    return _safe(_get_org_sdk().search_knowledge, query, mode="sessions",
+                 agent=agent, topics=topics_list, after=after, before=before,
+                 limit=limit, offset=offset)
 
 def tortoise_create_document(title: str, documentKind: str, props: Any = None) -> dict:
     """Create a document — a :Source keyed by url (research, planDoc,
@@ -7279,9 +7300,128 @@ def tortoise_graph_overview(section: str | None = None,
                              point_kinds=point_kinds)
 
 
+# ── #11609 Phase 2 — the READ/QUERY containers (#4282) ────────────────────────
+#
+# Each handler is a DOOR onto its SDK container and nothing else: the discriminator
+# dispatch, the closed value sets and every refusal message live in
+# `tortoise/sdk.py` (`search_knowledge`, `list_knowledge`, `check_confidence`,
+# `explore_connections`, `review_link_candidates`). Re-deciding any of it here would
+# be a second dispatch table that can disagree with the SDK's — which is the drift
+# Part C1 of `docs/product/bridge-table.md` exists to catch. The `mode=`/`kind=`
+# enum is a closed set on both sides: an unknown value REFUSES with the valid set
+# named (AIP-193), never silently falls through to a default.
+
+
+def tortoise_search_knowledge(query: str | None = None, mode: str = "hybrid",
+                              kind: str | None = None,
+                              tag: str | None = None,
+                              entity_type: str = "point",
+                              limit: int | None = None,
+                              offset: int = 0,
+                              include_retracted: bool = False,
+                              min_confidence: float = 0.0,
+                              order_by: str = "relevance",
+                              threshold: float = 0.0,
+                              relationship_filter: str | None = None,
+                              traversal_path: str | None = None,
+                              agent: str | None = None,
+                              topics: list[str] | None = None,
+                              after: str | None = None,
+                              before: str | None = None,
+                              title: str | None = None,
+                              body: str | None = None,
+                              repo: str | None = None) -> Any:
+    """Find things by text — full-text and hybrid (#4282 row 3).
+
+    One search door; `mode` selects the question (hybrid | full_text | tag |
+    sessions | entry_points | issue_insight). Every arm answers with the rows its
+    own read returned, and an unknown mode refuses naming the valid set.
+    """
+    return _safe(
+        _get_org_sdk().search_knowledge, query, mode, kind=kind, tag=tag,
+        entity_type=entity_type, limit=limit, offset=offset,
+        include_retracted=include_retracted, min_confidence=min_confidence,
+        order_by=order_by, threshold=threshold,
+        relationship_filter=relationship_filter,
+        traversal_path=traversal_path, agent=agent, topics=topics, after=after,
+        before=before, title=title, body=body, repo=repo)
+
+
+def tortoise_list_knowledge(kind: str = "claim",
+                            point_kind: str | None = None,
+                            id: str | None = None,
+                            url: str | None = None,
+                            entity_id: str | None = None,
+                            agent: str | None = None,
+                            wing: str | None = None,
+                            limit: int = 20,
+                            offset: int = 0,
+                            include_retracted: bool = False) -> Any:
+    """One list method; `kind` selects the collection (#4282 row 4).
+
+    kind: claim | source | source_reliability | batch | namespace | topic | diary.
+    Browse and filter without a text search; an unknown kind refuses naming the
+    valid set.
+    """
+    return _safe(
+        _get_org_sdk().list_knowledge, kind, point_kind=point_kind, id=id,
+        url=url, entity_id=entity_id, agent=agent, wing=wing, limit=limit,
+        offset=offset, include_retracted=include_retracted)
+
+
+def tortoise_check_confidence(claim_id: str | None = None,
+                              topic: str | None = None,
+                              session: bool = False,
+                              calibrate: bool = False,
+                              include_provenance: bool = False,
+                              limit: int = 50,
+                              require_calibration: bool | None = None) -> Any:
+    """How confident the graph is — the confidence view only (#4282 row 5).
+
+    Dispatch by argument: claim_id | topic | session | calibrate (the default
+    when nothing is named). It never recomputes or writes a belief.
+    """
+    return _safe(
+        _get_org_sdk().check_confidence, claim_id, topic=topic, session=session,
+        calibrate=calibrate, include_provenance=include_provenance,
+        limit=limit, require_calibration=require_calibration)
+
+
+def tortoise_explore_connections(node_id: str | None = None,
+                                 query: str | None = None,
+                                 hops: int = 2,
+                                 include_content: bool = False,
+                                 point_kind: str | None = None,
+                                 confidence_min: float | None = None) -> Any:
+    """Walk outward from a node through its links (#4282 row 8).
+
+    node_id | node_id + include_content (the expand payload) | query (resolve a
+    name, then walk from it). `hops` bounds the walk.
+    """
+    return _safe(
+        _get_org_sdk().explore_connections, node_id, query=query, hops=hops,
+        include_content=include_content, point_kind=point_kind,
+        confidence_min=confidence_min)
+
+
+def tortoise_review_link_candidates(kind: str = "connections",
+                                    mode: str = "both",
+                                    scope: str | None = None,
+                                    candidate_type: str = "content",
+                                    limit: int = 50,
+                                    threshold: float | None = None) -> Any:
+    """Connections found but not made — READ-ONLY (#4282 row 10).
+
+    kind: connections | dedup | cross_lens. Nothing here writes; accepting a
+    candidate is `link_entities` with its two endpoints.
+    """
+    return _safe(
+        _get_org_sdk().review_link_candidates, kind, mode=mode, scope=scope,
+        candidate_type=candidate_type, limit=limit, threshold=threshold)
+
+
 _GET_TYPES = ("point", "operator", "entity", "event", "session",
               "events", "governance")
-
 
 def _get_auto_detect(id: str) -> dict:
     """Resolve a node id to its properties without a type hint.
@@ -7428,7 +7568,7 @@ def tortoise_list_dedup_candidates(candidate_type: str = "content",
     and not data-dependent. Enveloping the rows keeps the served declaration
     byte-identical (no owner approval owed) and gives the client one shape.
     """
-    rows = _safe(_get_org_sdk().list_dedup_candidates,
+    rows = _safe(_get_org_sdk().review_link_candidates, "dedup",
                  candidate_type=candidate_type, limit=limit)
     if isinstance(rows, _SafeError):
         return rows  # the failure channel stays _safe's, never an envelope

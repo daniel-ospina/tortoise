@@ -66,19 +66,19 @@ def _bare_sdk(monkeypatch, doors, reached):
 
 # ── row 6 — graph_overview, section= ──────────────────────────────────
 GRAPH_OVERVIEW_DOORS = {
-    "taxonomy": "taxonomy",
+    "taxonomy": "_taxonomy",
     "structure": "summarize_structure",
     "structure_check": "check_structure",
-    "pointkinds": "list_pointkinds",
-    "tags": "list_tags",
-    "sources": "list_sources",
-    "namespaces": "list_namespaces",
-    "status": "status",
+    "pointkinds": "_list_pointkinds",
+    "tags": "_list_tags",
+    "sources": "_list_sources",
+    "namespaces": "_list_namespaces",
+    "status": "_status",
     "stale": "stale_points",
-    "validate_domain": "validate_domain",
+    "validate_domain": "_validate_domain",
     "audit": "audit",
     "dream_health": "dream_health_check",
-    "topics": "list_topics",
+    "topics": "_list_topics",
 }
 
 
@@ -139,8 +139,8 @@ class TestGraphOverview:
 SEARCH_KNOWLEDGE_DOORS = {
     "hybrid": "tortoise_fts_query",
     "tag": "query_points_by_tag",
-    "sessions": "search_sessions",
-    "entry_points": "suggest_entry_points",
+    "sessions": "_search_sessions",
+    "entry_points": "_suggest_entry_points",
     "issue_insight": "issue_insight",
 }
 
@@ -215,11 +215,11 @@ class TestSearchKnowledge:
 # ── row 4 — list_knowledge, kind= ─────────────────────────────────────
 LIST_KNOWLEDGE_DOORS = {
     "claim": "paginated_query",
-    "source": "list_sources",
+    "source": "_list_sources",
     "source_reliability": "get_source_reliability",
-    "namespace": "list_namespaces",
-    "topic": "list_topics",
-    "diary": "diary_read",
+    "namespace": "_list_namespaces",
+    "topic": "_list_topics",
+    "diary": "_diary_read",
 }
 
 
@@ -291,7 +291,7 @@ class TestCheckConfidence:
         sdk = _bare_sdk(
             monkeypatch,
             {"get_confidence", "belief_timeline", "session_context",
-             "calibrate_summary", "provenance", "compute_confidence"},
+             "calibrate_summary", "_provenance", "compute_confidence"},
             reached)
         sdk.check_confidence(**kwargs)
         assert [r[0] for r in reached] == [door]
@@ -313,19 +313,19 @@ class TestCheckConfidence:
     def test_provenance_rides_the_claim_arm_only_when_asked(self, monkeypatch):
         reached: list = []
         sdk = _bare_sdk(monkeypatch,
-                        {"get_confidence", "provenance"}, reached)
+                        {"get_confidence", "_provenance"}, reached)
         sdk.check_confidence(claim_id="point-1")
         assert [r[0] for r in reached] == ["get_confidence"]
         out = sdk.check_confidence(claim_id="point-1", include_provenance=True)
         assert [r[0] for r in reached] == ["get_confidence", "get_confidence",
-                                           "provenance"]
+                                           "_provenance"]
         assert set(out) == {"confidence", "provenance"}
 
 
 # ── row 8 — explore_connections, dispatch by argument ─────────────────
 class TestExploreConnections:
     def test_no_selector_refuses(self, monkeypatch):
-        sdk = _bare_sdk(monkeypatch, {"suggest_entry_points", "expand_relationships"},
+        sdk = _bare_sdk(monkeypatch, {"_suggest_entry_points", "_expand_relationships"},
                         [])
         with pytest.raises(ValueError) as exc:
             sdk.explore_connections()
@@ -333,16 +333,16 @@ class TestExploreConnections:
 
     def test_include_content_takes_the_expand_door(self, monkeypatch):
         reached: list = []
-        sdk = _bare_sdk(monkeypatch, {"expand_relationships"}, reached)
+        sdk = _bare_sdk(monkeypatch, {"_expand_relationships"}, reached)
         sdk.explore_connections("point-1", include_content=True)
-        assert [r[0] for r in reached] == ["expand_relationships"]
+        assert [r[0] for r in reached] == ["_expand_relationships"]
 
     def test_a_query_resolves_then_walks(self, monkeypatch):
         """`traverse` was DELETED with `explore_connections` as its destination and no
         implementation (#4282), so this arm is the only way back to the walk."""
         asked: list = []
         monkeypatch.setattr(
-            TortoiseSDK, "suggest_entry_points",
+            TortoiseSDK, "_suggest_entry_points",
             lambda self, q, **kw: asked.append(q) or [{"id": "point-9"}])
         sdk = TortoiseSDK.__new__(TortoiseSDK)
         sdk._proj = SimpleNamespace(db="db", graph_name="g")
@@ -359,7 +359,7 @@ class TestExploreConnections:
         assert out == {"ok": True}
 
     def test_a_query_matching_nothing_says_so(self, monkeypatch):
-        monkeypatch.setattr(TortoiseSDK, "suggest_entry_points",
+        monkeypatch.setattr(TortoiseSDK, "_suggest_entry_points",
                             lambda self, q, **kw: [])
         sdk = TortoiseSDK.__new__(TortoiseSDK)
         out = sdk.explore_connections(query="nothing at all")
@@ -369,7 +369,7 @@ class TestExploreConnections:
 # ── row 10 — review_link_candidates, dispatch by argument ─────────────
 REVIEW_LINK_DOORS = {
     "connections": "review_connections",
-    "dedup": "list_dedup_candidates",
+    "dedup": "_list_dedup_candidates",
     "cross_lens": "get_cross_lens_candidates",
 }
 

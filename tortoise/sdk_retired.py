@@ -94,6 +94,35 @@ RETIRED_SDK_METHODS: dict[str, str] = {
     # names exactly one approved target), which is why nothing is invented here — see
     # `tests/test_sdk_retirement.py::_approved_replacements`' derived-ordinal arm.
     "get_provenance_chain": "get_entity",
+    # ── #11609 Phase 2 (read/query family) ────────────────────────────────────
+    # Every name below left the surface in the SAME PR that landed the container
+    # covering it, which is what makes each hint true rather than aspirational: a
+    # retired name FAILS and names a replacement that RESOLVES (#3836 (c)).
+    # `stale_points` is deliberately NOT here: the owner's narrow-alias row names
+    # `stale` (the MCP tool), not this method name, so no approving region of
+    # `docs/product/beta-sdk-surface.md` authorises ITS retirement — it stays
+    # public and is reached through `graph_overview(section='stale')`.
+    "taxonomy": "graph_overview",
+    "list_pointkinds": "graph_overview",
+    "list_tags": "graph_overview",
+    "status": "graph_overview",
+    "list_topics": "graph_overview",
+    "list_namespaces": "graph_overview",
+    "validate_domain": "graph_overview",
+    "list_sources": "list_knowledge",
+    "diary_read": "list_knowledge",
+    "search_sessions": "search_knowledge",
+    "suggest_entry_points": "search_knowledge",
+    "provenance": "check_confidence",
+    "expand_relationships": "explore_connections",
+    "list_dedup_candidates": "review_link_candidates",
+    # #11609 Phase 2 completes two departures that had nowhere to point until now:
+    # both left the surface in #4282's surplus block with `explore_connections`
+    # recorded as their destination, and that destination had NO `def` — so they
+    # carried a record and no hint. The container lands here, so the hint is free
+    # and #3836 (c)'s "fail and name the replacement" finally holds for them.
+    "traverse": "explore_connections",
+    "get_org_structure": "explore_connections",
 }
 
 #: The RECORDED destination of every name in the #4282 surplus block — one machine-readable
@@ -159,6 +188,25 @@ SURPLUS_DELETION_DESTINATIONS: dict[str, tuple[str, ...]] = {
 #: rather than an omission — `tests/test_sdk_retirement.py` reds both on a live destination
 #: that is neither hinted nor declared here, and on an entry here that has stopped being live.
 UNHINTED_LIVE_DESTINATIONS: dict[str, str] = {
+    # #11609 Phase 2: two more recorded destinations became LIVE when the read
+    # containers landed, and neither can be awarded a hint by the approving-region
+    # parser. Declared here rather than quietly skipped (#3836 (c)).
+    "retrieval_legs": (
+        "Recorded destination `check_confidence` is LIVE since #11609 Phase 2, but no "
+        "region of `docs/product/beta-sdk-surface.md` names `retrieval_legs` — the "
+        "owner's ledger row says `recall_legs` — so no approving region authorises a "
+        "rename and a hint cannot be minted. The capability is reachable at "
+        "`check_confidence`; reconciling the two spellings is #4282 review work."
+    ),
+    "list_drafts": (
+        "Recorded destination `list_knowledge` is LIVE since #11609 Phase 2, but the "
+        "ledger row that names this method (`promote_point`, `set_point_baseline`, "
+        "`list_drafts`, `quarantine_batch`) names TWO targets and no row ordinal — "
+        "`update_knowledge` for the lifecycle FIELD and `list_knowledge` for the draft "
+        "QUEUE — so the parser cannot award a single approved replacement. The queue is "
+        "`list_knowledge(kind=…, status=…)`; choosing between the two records is the "
+        "owner's, not a build step."
+    ),
     "create_or_update_point": (
         "two records name two different destinations, so a hint would pick a winner nobody "
         "recorded: the canonical inventory's column says `create_entity`, while the owner's "
@@ -241,14 +289,10 @@ REMOVED_SDK_METHODS: dict[str, str] = {
         "#4282 (2026-10-27): DELETED. Recorded destination `check_confidence`; the "
         "retrieval-leg breakdown is not a customer verb."
     ),
-    "traverse": (
-        "#4282 (2026-10-27): DELETED. Recorded destination `explore_connections`, "
-        "approved with no `def` today — so the graph walk is unreachable from the SDK "
-        "until Phase 2 lands that target."
-    ),
-    "get_org_structure": (
-        "#4282 (2026-10-27): DELETED. Recorded destination `explore_connections`."
-    ),
+    # `traverse` moved OUT of this table in #11609 Phase 2: `explore_connections`
+    # now HAS a `def`, so the departure is a #3836 (c) retirement with a real hint
+    # and it lives in RETIRED_SDK_METHODS. A departure has ONE shape.
+    # `get_org_structure` likewise moved to RETIRED_SDK_METHODS in #11609 Phase 2.
     "backfill_about_entities": (
         "#4282 (2026-10-27): DELETED. **No** recorded destination: the ledger rules the "
         "four backfills (this, `backfill_sources`, `backfill_v25`, `reconcile_sessions`) "
@@ -376,6 +420,46 @@ REMOVED_SDK_METHODS: dict[str, str] = {
 #: cell is not decoration: a range alone would admit a DESTRUCTIVE mis-target
 #: (`"graph_list": "delete_memory_graph"` sits inside rows 30–33), whose hint
 #: would send every caller to the eraser with a green run.
+#: The approving regions shared by more than one #11609 retirement — each quoted
+#: VERBATIM from `docs/product/beta-sdk-surface.md`, one cell so a group of names that
+#: the owner's ledger retires in ONE row does not carry N hand-typed copies of it.
+_GRAPH_OVERVIEW_ALIAS_ROW = (
+    "| narrow aliases absorbed by `graph_overview` — `taxonomy`, `list_pointkinds`, "
+    "`list_tags`, `list_namespaces`, `list_graphs`, `status`, `stale`, "
+    "`check_structure`, `list_topics` | **Deleted, not folded.** The approved list "
+    "contains the container and not the aliases; shipping both is the merge failing at "
+    "its own goal. |"
+)
+_VALIDATE_DOMAIN_ROW = (
+    "| `audit`, `validate_domain`, `summarize_structure`, `dream_health_check`, "
+    "`dream_health_state` | ~5 | → `graph_overview` where they are orientation. The "
+    "diagnostics are the held question above. |"
+)
+_LIST_SOURCES_ROW = (
+    "| `list_sources` | **Not discarded.** Present at `tortoise/sdk.py` with an MCP tool "
+    "and a CLI command (`tortoise/__main__.py`), and it is covered by "
+    "`tests/test_enumeration_surfaces.py` and `tests/test_connector_sources.py`. It folds "
+    "into **row 4 `list_knowledge(kind='source')`** — the *question* it asks stays "
+    "first-class and gains the credibility tier; it no longer needs its own method. |"
+)
+#: The journal paragraph (owner ruling **#4667**) states each of the three names retires
+#: into a NAMED replacement; this is the `diary_read` clause of that sentence. It names no
+#: row NUMBER, so the derived arm resolves it against the single approved target it names.
+_DIARY_READ_CLAUSE = "`diary_read` into `list_knowledge`"
+_SEARCH_GROUP_ROW = (
+    "| `search_sessions`, `suggest_entry_points`, `topic_summarize`, `issue_insight`, "
+    "`annotate_ask_hits` | 5 | → `search_knowledge`. |"
+)
+_EXPAND_RELATIONSHIPS_ROW = (
+    "| `traverse`, `expand_relationships`, `get_org_structure` | 3 | → "
+    "`explore_connections`. |"
+)
+_DEDUP_ROW = (
+    "| `review_connections`, `get_cross_lens_candidates`, `list_dedup_candidates` | 3 | → "
+    "`review_link_candidates`. |"
+)
+
+
 RETIRED_SDK_APPROVALS: dict[str, str] = {
     "events_poll": "| `events_poll` | → row 11 `poll_events`. |",
     "restore_point_at": (
@@ -411,6 +495,42 @@ RETIRED_SDK_APPROVALS: dict[str, str] = {
         "`get_provenance_chain`, …) | ~8 | → `get_entity`, except where a genuinely "
         "different shape is returned. |"
     ),
+    # ── #11609 Phase 2 (read/query family) ────────────────────────────────────
+    # ONE region per retirement, quoted from the owner's ledger. The seven
+    # `graph_overview` aliases share the ledger's own group row: it names no target
+    # row NUMBER, so the approved set is the single target it names — which is why
+    # `_approved_replacements`' derived-ordinal arm reads them, and why the ordinal
+    # cell below records row 9 for each.
+    "taxonomy": _GRAPH_OVERVIEW_ALIAS_ROW,
+    "list_pointkinds": _GRAPH_OVERVIEW_ALIAS_ROW,
+    "list_tags": _GRAPH_OVERVIEW_ALIAS_ROW,
+    "status": _GRAPH_OVERVIEW_ALIAS_ROW,
+    "list_topics": _GRAPH_OVERVIEW_ALIAS_ROW,
+    "list_namespaces": _GRAPH_OVERVIEW_ALIAS_ROW,
+    "validate_domain": _VALIDATE_DOMAIN_ROW,
+    "list_sources": _LIST_SOURCES_ROW,
+    "diary_read": _DIARY_READ_CLAUSE,
+    # `expand_relationships`' region names one target and no ordinal, so it derives.
+    "search_sessions": _SEARCH_GROUP_ROW,
+    "suggest_entry_points": _SEARCH_GROUP_ROW,
+    # ⚠️ The provenance/confidence region has TWO clauses and names a target in each
+    # (`check_confidence` for the confidence view, `poll_events` for the timeline). The
+    # quote below is the CONFIDENCE clause only, and the clause it stops before is
+    # stated here rather than dropped: `poll_events` is the TIMELINE destination, and
+    # `provenance` is confidence context, which is the arm `check_confidence` answers.
+    # Both owner records agree on that (this ledger's clause and
+    # `docs/product/bridge-table.md` §D1's citation for the same row), so nothing is
+    # edited to agree with the destination — the destination is what both record.
+    "provenance": (
+        "| `provenance`, `belief_timeline`, `session_context`, `volunteer_context` | 4 | "
+        "→ `check_confidence` where they are confidence context;"
+    ),
+    "expand_relationships": _EXPAND_RELATIONSHIPS_ROW,
+    "list_dedup_candidates": _DEDUP_ROW,
+    # Same region: it retires `traverse` and `get_org_structure` into the same target
+    # in the same row, which is why the three share one quoted region.
+    "traverse": _EXPAND_RELATIONSHIPS_ROW,
+    "get_org_structure": _EXPAND_RELATIONSHIPS_ROW,
 }
 
 #: retired name -> the ONE target-row ordinal its replacement was chosen from.
@@ -432,6 +552,27 @@ RETIRED_SDK_APPROVAL_ROWS: dict[str, int] = {
     # Derived, not chosen: the approving region names exactly one approved target
     # (`get_entity`), and that name occupies exactly one numbered target row.
     "get_provenance_chain": 6,
+    # ── #11609 Phase 2 — the read/query family ───────────────────────────────
+    # Every ordinal below is DERIVED (the approving region names exactly one approved
+    # target), except `provenance`, whose region names two clauses and therefore two
+    # targets — there the clause recorded in :data:`RETIRED_SDK_APPROVALS` IS the choice
+    # (the confidence clause), and row 5 is the row that clause names.
+    "taxonomy": 9,
+    "list_pointkinds": 9,
+    "list_tags": 9,
+    "status": 9,
+    "list_topics": 9,
+    "list_namespaces": 9,
+    "validate_domain": 9,
+    "list_sources": 4,
+    "diary_read": 4,
+    "search_sessions": 3,
+    "suggest_entry_points": 3,
+    "provenance": 5,
+    "expand_relationships": 8,
+    "list_dedup_candidates": 10,
+    "traverse": 8,
+    "get_org_structure": 8,
 }
 
 
