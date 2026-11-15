@@ -199,7 +199,12 @@ becomes a ROLLBACK and the whole record write disappears while the door reports
 `ROLLBACK TO SAVEPOINT` undoes only the failed read and the rows — inserted
 BEFORE the savepoint — still commit. MEASURED on PG16 with the meter refused
 (`InsufficientPrivilege`): **0 rows** committed without the savepoint, **1 row**
-with it.
+with it. ⚠️ **NOT when the savepoint bookkeeping itself cannot be issued**
+(`25P02` on an already-aborted transaction, `25P01` outside a block, a dead
+session): the transaction is unusable at that point, its `commit()` still rolls
+the write back, and `_meter_statement` says so at WARNING rather than at DEBUG —
+DISCLOSED, not repaired. Nothing in the meter can repair it; only the caller
+knows whether its transaction is still worth committing.
 
 The savepoint does **not** skew attribution, which is why it is a savepoint and
 not a second connection: the meter is a READ, and PostgreSQL keeps the
@@ -214,9 +219,28 @@ APPEND-ONLY (`check-migration-append-only` refuses a modified migration) and
 therefore cannot be corrected in place: this document and
 `postgres_bytes.measure_written_rows`'s docstring are the correction, and neither
 the header's "takes no savepoints today" nor its "under-counts" clause is a
-reason to remove the savepoint.) An **autocommit** connection
+reason to remove the savepoint.) **Both orderings are pinned, not argued** — and
+by TWO artifacts, because neither alone closes the loop:
+`supabase/tests/20261114000001_per_org_postgres_bytes.sql` §7b pins
+PostgreSQL's **semantics** (`rows: 1` for savepoint-after-insert, the shipped
+order; `rows: 0` for savepoint-before-insert, the hazard), while
+the **shipped CALL ORDER** — that the meter runs after the insert it measures —
+is pinned on the source by
+`tests/test_postgres_bytes.py::test_the_meter_call_lands_AFTER_the_insert_it_measures`.
+§7b is a static script and never calls the module, so it stays green if the
+Python ordering inverts; the source pin is what reds then. An **autocommit**
+connection
 takes no savepoint: each statement is its own transaction, so a failure there
 aborts nothing the caller owns.
+
+**Cost, stated so it is not re-derived as waste.** A metered write becomes THREE
+statements where it was one (`SAVEPOINT` + the read + `RELEASE`), i.e. **+2 round
+trips per metered segment**. The live door commits once per record
+(`write_records([record], …)`, `record_writer.write_records`), so that is +2
+per record — on the same path whose per-record latency the connection pool was
+introduced to cut (18.9–20.1 ms → 3.82–3.91 ms; `record_writer._default_connect`).
+The delta is inherent to protecting the write and is the right trade, but ⛔ it is
+NOT a reason to delete the savepoint: that re-creates #12781.
 
 **Measured, then RECORDED after the commit.** `RecordWriter.write` only
 *measures*; the ledger increment happens where the commit is known
