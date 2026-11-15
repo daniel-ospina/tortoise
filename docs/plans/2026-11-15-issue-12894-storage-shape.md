@@ -124,16 +124,16 @@ that governs the subject. (Filed as its own item in §A6, debt row D-22.)
 
 | # | Document | Status | What was taken from it (section / line) |
 |---|---|---|---|
-| 1 | `docs/durability-posture.md` (936 lines) | **READ (full)** | §The rule `:41`; `:48` *"It is never the durability mechanism"*; `:59` *":GraphEvent is the 30-day delivery/audit stream, not a backup"*; §Authoritative node classes `:73`; §The one carried high-water mark `:264` (the whole `:GraphEventMeta` block `:264-380`: the `last_seq` allocator, `MAX_SEQ = 2**53-1`, `first_seq` never carried, `reestablish_watermark`, the "**A rebuild still requires a QUIESCED graph**" residual); §Per-deployment posture `:471` incl. the five deployment rows `:500-560` and the record's own row + §The record's posture `:583`; §Why this document exists `:660` (the gate's claim shapes, `#9867`'s blind wordings); §Open items `:710` |
+| 1 | `docs/durability-posture.md` (936 lines) | **READ (full)** | §The rule `:41`; `:48` *"It is never the durability mechanism"*; `:59` *":GraphEvent is the 30-day delivery/audit stream, not a backup"*; §Authoritative node classes `:73`; §The one carried high-water mark `:264` (the whole `:GraphEventMeta` block `:264-470`: the `last_seq` allocator, `MAX_SEQ = 2**53-1`, `first_seq` never carried, `reestablish_watermark`, the "**A rebuild still requires a QUIESCED graph**" residual); §Per-deployment posture `:471` incl. the five deployment rows `:500-560` and the record's own row + §The record's posture `:583`; §Why this document exists `:660` (the gate's claim shapes, `#9867`'s blind wordings); §Open items `:710` |
 | 2 | `docs/architecture/STORAGE-ARCHITECTURE.md` (2099) | **READ (§1, §2, §2.0, §2.1, §2.2, §3, §5, §5.1, §5.2, §6, §6.1, §12.1c, §14.1, §17.1–§17.4.6)** | `:104` §1 the problem; `:116` §2.0 the owner ruling **and its 2026-11-07 SPLIT + the `OVERRIDES:` line**; `:173` §2.1 what FalkorDB charges for; `:217` §3 the split; `:236` *"READ THE AUTHORITY COLUMN AS AUTHORITY, NOT AS LOCATION"*; `:243` the per-write truth test; `:275` *"journal completeness is a PRECONDITION"*; `:285` **§ "The journal's scope: REBUILD, not durability"**; `:316` the invariant `derived tables = replay(the journal) NOT recompute(the sources)`; `:342` *"ONE ATOMIC WRITE … may be an outbox … **This is the whole answer**"* and *"**The current JSONL cannot do (1)**"*; `:361` *"They are also recorded in the journal, which is truth"*; `:427` §5.2 measured growth (and the per-capture total `#9025`); `:450` §6 the split does not fix volume; `:1115` §12.1c (vector index decision — **this, not SEARCH §12.1c, is where §12.1c lives**; see A1.3); `:1546` §14.1 decisions; `:1664` §17.1; `:1700` the 387-site measurement; `:1702` §17.2; `:1822` §17.4.2; `:2090` §17.5 |
 | 3 | `docs/architecture/SEARCH-ARCHITECTURE.md` (566) | **READ (§3, §4, §7)** | `:157` §3 "What runs where" (writes/projections/backup-restore stay in FalkorDB; the graph stays a *derived copy*); `:205` §4 "Authority (unchanged, cited not restated)"; `:361` §7 "The window" (why a complete cache is 193 % of the storage target and the window is not yet armed) |
-| 4 | `docs/ONTOLOGY.md` (1561) | **READ (§2, §4.2, §4.7, §5 headings)** | `:61` §2 the Four-Ontology Model table — the layer vocabulary used verbatim below; `:71` the Procedural row (`Object.status` is a **write-through cache** and *"the journal/event stream is the reconstruction source"*); `:75-97` the state-centric model (*"the Episodic layer's events are the truth; status is a fold cache over the events — never the truth itself"*); `:638` §4.7 temporal model; §5's kind vocabularies (read for the `decision`/`statement` split only) |
+| 4 | `docs/ONTOLOGY.md` (1561) | **READ (§2, §4.2, §4.7, §5 headings)** | `:61` §2 the Four-Ontology Model table — the layer vocabulary used verbatim below; `:70` the Procedural row (`Object.status` is a **write-through cache** and *"the journal/event stream is the reconstruction source"*); `:75-97` the state-centric model (*"the Episodic layer's events are the truth; status is a fold cache over the events — never the truth itself"*); `:638` §4.7 temporal model; §5's kind vocabularies (read for the `decision`/`statement` split only) |
 | 5 | `docs/event-catalog.md` (330) | **READ (full)** | `:89-92` *"The JSONL rebuild journal that `rebuild_all` replays is a second, differently-shaped store"*; `:100-101` the `__TornTailSealed__` seal shifts no record index; `:263-266` **no down-version guarantee**; `:286` `seq` = *"Per-graph monotonic, atomic in-graph counter (`GraphEventMeta.last_seq`)"* — i.e. the catalogue documents the **`:GraphEvent`** counter, not `journal_event.seq`; `:305-307` the 30-day/500k retention |
 | 6 | `docs/00_index.md` (247) | **READ (full)** | The population proof above; and the absence finding (`STORAGE-ARCHITECTURE` and `event-catalog` unregistered) |
 | 7 | `docs/retention-and-deletion.md` (606) | **READ** | `:30-34` *"This is the canonical document … link here and do not restate the number"*; `:41-42` the promise; `:73-75` *"Restore window ≠ retention window"*; `:92-97` no per-entity purge inside a live graph |
 | 8 | `docs/data-safety.md` (53) | **READ (full)** | `:15` retention is delegated here; `:36` graph content is **infrastructure-level encryption only**; `:37` control-plane audit events go Postgres-first with a local JSONL fallback — a **different** dual-write seam from the journal's |
 | 9 | `docs/ops/registry-backup-dr.md` (1233) | **READ (§1–§4, the retention and tombstone sections)** | `:17` retention windows delegated; `:76` *"Cadence is HOURLY, not daily"*; `:380` the per-graph artifact path `backups/{org_id}/{graph}/{ts}_{rnd}/dump.enc` |
-| 10 | `docs/scoping-2313-per-graph-backups.md` (234) | **READ (full)** | `:17` the pre-fix shape (one graph per team — custom graphs unbacked); `:130` the pool-competition bug; `:206`/`:211` the owner's Q1/Q4 rulings |
+| 10 | `docs/scoping-2313-per-graph-backups.md` (234) | **READ (full)** | `:17` the pre-fix shape (one graph per team — custom graphs unbacked); `:65` the pool-competition bug (*"Pool-level retention competition is latent today"*); `:226`/`:229` the owner's Q1/Q4 rulings |
 | 11 | `docs/capacity.md` | **READ (write-concurrency and storage-footprint rows)** | the per-deployment write-concurrency row (embedded single-writer; Docker 5 writer processes) — the basis of A3's rows |
 | 12 | `docs/ops/postgres-storage-measurement.md` | **READ** | `postgres_storage_footprint()` / `analytics_events_rows_by_org()`; the TOAST/double-count traps; the explicit **retention finding**: `analytics_events` has no prune path |
 | 13 | `docs/architecture/SUBSTRATE-REBUILD-MAP.md` (527) | **READ** | `:86` **E6 `#7879` OPEN and unowned**; `:94-96` *"E2 is CLOSED with an interpreter-level invariant still stated as its goal … a claim about the cache, and the 2026-10-08 hybrid ruling made the record authoritative"*; `:244-246` the replay keys; `:339` *"#7879 (the record) ────► everything: the cache is derived, the record is truth"* |
@@ -178,11 +178,11 @@ that governs the subject. (Filed as its own item in §A6, debt row D-22.)
 | I6 | `#5004` | CLOSED/COMPLETED (PR #5071) | The journal **stripped** `embedding`, so `derived = replay(journal)` was false for the largest cost lever; *"if the journal doesn't carry it, it isn't derived — it is primary"*; R1 (embedding STORES, never regenerated) |
 | I7 | `#5612` | CLOSED/COMPLETED — **but item 2 (the bound) was never delivered** | The growth measurement (9,176 B creating record, 8,414 B vector); **the only `seq` in the issue corpus is `max(:GraphEvent.seq)`**; **P1 recommends moving the watermark *read* to the record — a read relocation, not an allocation decision**; the retention ruling (*"do not bound until checkpoint/truncate exists"*, *"the owner's"*) |
 | I8 | `#8526` | **PR, MERGED** (not an issue) | Self-host journal arming: `derived = replay(journal)` was **false on every shipped self-hosted deployment** — a **wiring** gap; *"Arming the journal buys REBUILDABILITY, not DURABILITY"*; **"Ship Postgres to self-host now" — parked by the owner** |
-| I9 | `#9025` | **OPEN** | The journal's growth is still unbounded; the live census: volume **974 MB, 652 MB used, ~4 days of headroom at ~50 MB/day**; recommends *keep everything* + the non-destructive segmentation plumbing (`journal_segments.py`) |
+| I9 | `#9025` | **OPEN** | The journal's growth is still unbounded; the live census: volume **974 MB, 700 MB used (78 %)**, of which the events directory is **652 MB (93 % of it)**, ~4 days of headroom at ~50 MB/day; recommends *keep everything* + the non-destructive segmentation plumbing (`journal_segments.py`) |
 | I10 | `#9078` | CLOSED/COMPLETED | The record had **zero production callers**; landed **three journal doors → one seam** (`record_writer.write_live_record`), **after** the append and **before** the fold: **journal → record → cache**. And the deferral that becomes `#9190`: *"The live path has no ordinal … writing it here would fabricate a position a later replay would collide with or duplicate."* |
 | I11 | `#9190` | CLOSED/COMPLETED (PR #9216, hardened #9277) | **The ordinal's owner and its reasons.** `MAX(seq)+1` **rejected**; a **sidecar counter inside the append's existing critical section**; the count is *"defined by the replay's own reader"*; and *"`event_store.next_seq` / `:GraphEventMeta` — a **different** seq over a different population"* |
 | I12 | `#10017` | CLOSED/**NOT_PLANNED** (a no-op locally; reopen condition = hosted armed) | **R2**: a journal entry whose replay materialises **no graph node** (`TurnsRecorded`); the §3 falsification — *"a journal rebuild today produces a graph the running deployment does not have"*; and *"`:GraphEvent` is **not** projected from the record — it is written by the **journal** path"* |
-| I13 | `#11821` | CLOSED/COMPLETED (**P0 only**) | The vector width: 9,176 → 5,423 B; the `:GraphEvent` mirror at **32,032 B/session** *"rented for a watermark"*; P1 → `#12458`, P2 → `#12459` |
+| I13 | `#11821` | CLOSED/COMPLETED (**P0 only**) | The vector width: 9,176 → 5,423 B; the `:GraphEvent` mirror at **32,032 B/session** — its own words: *"ours is read for `max(:GraphEvent.seq)` — a **watermark**, not provenance — so it rents RAM for a counter"*; P1 → `#12458`, P2 → `#12459` |
 | I14 | `#12458` | CLOSED/**NOT_PLANNED** | **Read in full, including the closure and the audit comment.** The audit classifies **20 `:GraphEvent` sites**; the closure is a **REVERSAL finding** (P1 deletes the medium `_GRAPH_EVENT_TYPES` is defined *by*), plus the size premise already removed by `#10017`. **It leaves one defect standing: the `next_seq` second allocator** |
 | I15 | `#12762` | CLOSED/COMPLETED | Per-org bytes from what we WRITE (`journal_event_bytes_by_org` / `_for_rows`); the TOAST findings; **`#3843`/`#3853` bind `analytics_events`, not `journal_event`** — so `journal_event` retention has **no ruling** |
 | I16 | `#12894` | OPEN | This mandate |
@@ -492,7 +492,7 @@ over three alternatives, and **`MAX(seq)+1` was rejected by name** (`log.py:836-
 `:GraphEventMeta{last_seq, first_seq}` is the allocator for **`:GraphEvent`**, the graph-resident
 30-day delivery/audit stream. `next_seq` (`event_store.py:427`, `MERGE` at `:491`) mints it; `MAX_SEQ =
 2**53 - 1` (`:381`) because FalkorDB compares numeric ranges in double precision and `read_after`'s
-`WHERE e.seq > $after` **silently drops** rows above `2**53` (`durability-posture.md:264-380`).
+`WHERE e.seq > $after` **silently drops** rows above `2**53` (`durability-posture.md:264-470`; the QUIESCED precondition is at `:403`).
 
 `#9190` refused it as the source, verbatim:
 
@@ -599,7 +599,7 @@ marked ⚑ are named by **no document** and were found by reading code in this l
 | D-06 | **`rebuild_all` does not replay `:GraphEvent` rows at all** | `#4664`, consolidated into `#5048`, unfixed | **B** | So `:GraphEvent` is neither a cache nor a durable log today: it survives no rebuild, and its counter has to be **carried** by hand (`#4653`). |
 | D-07 | **`:GraphEventMeta` is a *second* allocator over a different population** | `event_store.py:427`, `#12458` left standing | **B** | `#12458`'s own closure says it is *"a real defect independent of the mirror's fate, and it is the part worth a ticket"*. No ticket exists. |
 | D-08 ⚑ | **`:EpMeta.ep_version` is a third monotonic counter, unjournalled, reset by a rebuild, with a documented late-sweep consequence** | `projection/__init__.py`, `#9123` lane, `#5166` | **O** | It is an EP ordering *bound*, not a storage ordinal. Declared, pinned, and its consequence (`_sweep_dirty_roots` cannot clear flags until the epoch re-climbs) is recorded. Not in this shape's path. |
-| D-09 | **The journal has no bound of any kind** — no rotation, compaction, retention. The live volume is 974 MB at 78 %, ~4 days of headroom at ~50 MB/day | `#9025` **OPEN**; `#5612` item 2 never delivered | **B** | Not because a bound is needed for atomicity, but because the journal is the very thing the ideal shape keeps for the no-record lanes. A capacity failure converts a rebuild source into an outage. **Owner decision; this lane does not choose one.** |
+| D-09 | **The journal has no bound of any kind** — no rotation, compaction, retention. The live volume is 974 MB with **700 MB used (78 %)** — the events directory alone is 652 MB — ~4 days of headroom at ~50 MB/day | `#9025` **OPEN**; `#5612` item 2 never delivered | **B** | Not because a bound is needed for atomicity, but because the journal is the very thing the ideal shape keeps for the no-record lanes. A capacity failure converts a rebuild source into an outage. **Owner decision; this lane does not choose one.** |
 | D-10 | **The vector payload was widened to float64 decimal text** (P0 landed) and the **base64 step is blocked** | `#11821` P0 landed; `#12459` **blocked** — its `P1` gate points at `#12458`, which closed `NOT_PLANNED` | **O** | It changes bytes, not shape. But it is **blocked on a released dependency**, which is a process debt: `#11821`'s rule ("P1 merged and measured") can never be met, and `#12459` says so itself (`:777`). |
 | D-11 | **A build rollback over a frame-bearing journal drops vectors silently and reports success** | `2026-11-13-12459:824` | **O** | A migration hazard for a format change, not a shape defect. Its remedy (readers ship before writers) is the same discipline A7.6 asks for. |
 | D-12 | **Three doors gate on a shared `_journal_write_failures` counter delta**, which a concurrent writer can move | `#7951` residual 10; `#5612` | **B** | `create_point` was moved to the per-call outcome (`True`/`False`/`None`); the siblings were not. A commit point decided by a shared counter is a racy commit point. |
@@ -727,7 +727,7 @@ be initialised on an existing deployment holding 974 MB of journal, and the only
 under D-24's two-journal case. A7.5 argues that replay must *read* the number rather than derive it and then
 seeds the allocator by deriving it. **The rule must be stated:** a one-time locked
 `SELECT max(seq) … FOR UPDATE` at cutover, **refused** if a second journal is detected (D-24 / `#9318`),
-run only on a quiesced graph (the same precondition `durability-posture.md:264-380` already imposes on a
+run only on a quiesced graph (the same precondition `durability-posture.md:403` already imposes on a
 rebuild).
 
 ⚠️ **This is not a novel proposal, and presenting it as one would be the lane's worst failure.** `#7950`'s
@@ -1019,10 +1019,24 @@ described a distance that cannot exist — that index cell is a single markdown 
 characters further on. Both fixed by removing the number. **A section that audits its own accuracy has to obey
 the rule it is auditing**, which is the third time in this table that a correction paragraph was the defect.
 
-**Cycle 8**, fresh-context, ran against cycle 7's fixes and found 4, all P2 and all provenance: two rows of this
-table still carried the audit's own drift (a citation range that stopped mid-set, a rewritten quote whose nouns
-had swapped, a pointer at a blank line), and cycle 7's own fix had no row. The corrections are in the table
-below, which now holds a row for every cycle and every fix it claims. Rows from every cycle are in the table below, in the order they were found.
+**Cycle 8**, fresh-context, ran against cycle 7's fixes and found 4, all P2 and all provenance: three rows of this
+table still carried the audit's own drift — a citation range that stopped mid-set, a rewritten quote whose nouns
+had swapped, a pointer at a blank line — and a fourth recorded that cycle 7's own fix had no row. The corrections are in the table
+below, which now holds a row for every cycle and every fix it claims.
+
+**Cycle 9**, fresh-context, asked to open every quotation this time, found 6 more, all P2 — and five were
+**citation defects in §A1, not in this audit table**: a pointer at a blank line (`ONTOLOGY.md` row 4), a
+decision-bearing pointer aimed at a ratings table instead of the owner's rulings (`scoping-2313` row 10), a
+mid-set range that excludes the very precondition A7.5 depends on (`durability-posture.md`), a quote whose
+wording exists in no cited source (`#11821`), and a census that labelled the events directory as the volume's
+"used" (974 MB volume / 700 MB used / 652 MB events — `#9025`). The sixth was this table's own count of its
+cycle-8 rows.
+
+**The cumulative lesson is worth stating plainly, because it is the artifact's own thesis:** an archaeology
+document is only as good as its pointers, and pointers decay the moment you edit the document around them.
+Nine cycles found no change to the *shape* the map describes; they found that roughly one in ten of the
+`file:line` citations was off — a blank line, a mid-set range, a quote with a swapped noun. That is a fair
+estimate of the defect rate to expect in any un-reviewed citation layer. Rows from every cycle are in the table below, in the order they were found.
 
 | what the reviewer found | verified? | what changed |
 |---|---|---|
@@ -1065,6 +1079,12 @@ below, which now holds a row for every cycle and every fix it claims. Rows from 
 | the schema quote had its nouns swapped — the schema says *"`seq` is the idempotency key: applying a position twice is a no-op"* | ✅ (`03-schema.md:86`) | quoted verbatim; the paraphrase that had travelled through `log.py:832` is no longer presented as the schema's words |
 | the `#9390`/reader row cited `journal_segments.py:913`, a blank line; `read_all_segments` is at `:914` | ✅ (`sed -n '911,916p'`) | corrected in both places it appears |
 | §12's preamble printed cycle 7 before cycle 6, and the claim "rows from every cycle" was false for cycle 7 | ✅ (heading order `grep -n '^\*\*Cycle'`) | cycles are in order and every cycle, including this one, has a row |
+| `§A1.1` row 4 pointed at `docs/ONTOLOGY.md:71` for the Procedural row; `:71` is blank, the row is `:70` | ✅ (`awk 'NR==70'` / `NR==71`) | corrected — a blank-line pointer, the same class cycle 8 fixed in `journal_segments.py` |
+| `§A1.1` row 10 pointed at `:130` for the pool-competition bug and `:206`/`:211` for the owner's Q1/Q4 rulings; `:130` and `:206` are blank and `:207-211` is a ratings table | ✅ (the finding is `:65`; Q1 is `:226`, Q4 `:229`) | re-pointed at the three lines that carry them |
+| `durability-posture.md:264-380` was cited twice, and A7.5 depends on the QUIESCED precondition inside it; the `:GraphEventMeta` block runs to `:470` and the precondition is at `:403` | ✅ (`sed -n '264p;403p;470,471p'`) | range corrected to `:264-470`, and the cutover row now cites `:403` directly |
+| `#11821` was quoted as *"rented for a watermark"*; its body says *"so it rents RAM for a counter"* | ✅ (`gh issue view 11821`, body) | quoted verbatim, including its "watermark, not provenance" clause |
+| the `#9025` census was printed as "974 MB, 652 MB used"; 652 MB is the EVENTS DIRECTORY, the volume's used space is 700 MB (78 %) | ✅ (`gh issue view 9025`, comment 6867080064: `/dev/vdc 974M 700M used … 78%`, `/data/events 652M`) | corrected in §A1.2 and in D-09, which now agree |
+| §12's cycle-8 sentence said "two rows" and then listed three | ✅ (the table carries three drift rows plus the cycle-7 row) | corrected to three plus one |
 
 ⛔ **The most important thing this cycle did was make the shape harder, not easier.** Two findings (D-25,
 D-26) are cases A7.5 had **assumed away in both directions** — a record write with no journal position, and a
