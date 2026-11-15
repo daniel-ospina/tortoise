@@ -71,7 +71,7 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 > prose names no PR, issue or build status as history. The rule is scoped to new prose because the file
 > retains references that record where a term or a decision lives; sweeping those is a separate change.
 > The `Convention` line loses its `(v3.6, #909)` version-and-ticket tail for the same reason.
-
+>
 > **Changelog v3.34 (2026-11-12 — issue #11824 — the successor clause becomes a definition of the word):**
 >
 > **Owner approval of the exact changes** is on record on #11824 (comment `6815950417`, the decision relay:
