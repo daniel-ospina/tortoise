@@ -294,6 +294,37 @@ def _read_written_rows(
     return parse_written_rows(row[0])
 
 
+def _meter_statement(cur: Any, statement: str, *, why: str) -> None:
+    """Issue one savepoint statement, or SAY the transaction may now be dirty.
+
+    ⛔ THE RECOVERY IS THE SAFETY PROPERTY, SO ITS OWN FAILURE MUST NOT LOOK LIKE
+    THE HARMLESS ONE. ``measure_written_rows`` is total — every failure is logged
+    at DEBUG and returns ``None`` — and that is right for *reading* the meter.
+    It is wrong for the savepoint bookkeeping: if ``ROLLBACK TO SAVEPOINT`` or a
+    ``RELEASE`` cannot be issued, the caller's transaction is left **ABORTED**,
+    which is the exact #12781 state — its ``commit()`` then rolls the record
+    write back. Logging that at DEBUG as ``measurement failed (non-fatal)``,
+    beside the benign case it must never be confused with, is how a data-loss
+    path hides inside a warning-free log.
+
+    So this raises *after* naming the consequence at WARNING, distinct from the
+    outer handler's DEBUG skip. Nothing here can repair it from the inside —
+    only the caller knows whether its transaction is still worth committing —
+    and the outer ``except`` still returns ``None`` so the meter stays total.
+    """
+    try:
+        cur.execute(statement)
+    except Exception:
+        _logger.warning(
+            "the byte meter could not issue `%s` (%s) — the caller's transaction "
+            "may now be ABORTED, so its commit() would roll the record write "
+            "back (#12781). This is NOT the harmless 'measurement skipped' "
+            "path: the meter is best-effort, the record is not.",
+            statement, why, exc_info=True,
+        )
+        raise
+
+
 def measure_written_rows(
     conn: Any,
     *,
@@ -342,10 +373,14 @@ def measure_written_rows(
     insert — and that is precisely why the savepoint here sits AFTER the insert,
     so the subtransaction writes nothing and the top-level xid is preserved
     (measured above). ⛔ Both orderings are pinned, so neither half is a claim
-    you have to take on trust:
-    `supabase/tests/20261114000001_per_org_postgres_bytes.sql` §7b asserts
-    `rows: 1` for savepoint-after-insert and `rows: 0` for
-    savepoint-before-insert. The
+    you have to take on trust — by TWO artifacts, because one cannot answer the
+    other's question:
+    `supabase/tests/20261114000001_per_org_postgres_bytes.sql` §7b pins the
+    SEMANTICS (`rows: 1` for savepoint-after-insert, `rows: 0` for
+    savepoint-before-insert) but is a static script and never calls this module;
+    `tests/test_postgres_bytes.py::test_the_meter_call_lands_AFTER_the_insert_it_measures`
+    pins the SHIPPED CALL ORDER on the source, which is what reds if the meter
+    is moved before the insert. The
     migration files are APPEND-ONLY (`check-migration-append-only` refuses a
     modified `supabase/migrations/*.sql`), so that sentence cannot be corrected
     where it lives; this paragraph and
@@ -367,17 +402,24 @@ def measure_written_rows(
                 # autocommit: a failure aborts nothing the caller owns.
                 return _read_written_rows(
                     cur, org_id=org_id, graph_id=graph_id, positions=positions)
-            cur.execute(f"SAVEPOINT {_METER_SAVEPOINT}")
+            _meter_statement(
+                cur, f"SAVEPOINT {_METER_SAVEPOINT}", why="opening the meter's savepoint")
             try:
                 measured = _read_written_rows(
                     cur, org_id=org_id, graph_id=graph_id, positions=positions)
             except Exception:
                 # Undo ONLY the failed read, so the caller's transaction is
                 # usable and its rows — inserted BEFORE this savepoint — commit.
-                cur.execute(f"ROLLBACK TO SAVEPOINT {_METER_SAVEPOINT}")
-                cur.execute(f"RELEASE SAVEPOINT {_METER_SAVEPOINT}")
+                _meter_statement(
+                    cur, f"ROLLBACK TO SAVEPOINT {_METER_SAVEPOINT}",
+                    why="recovering a failed meter read")
+                _meter_statement(
+                    cur, f"RELEASE SAVEPOINT {_METER_SAVEPOINT}",
+                    why="after the rollback")
                 raise
-            cur.execute(f"RELEASE SAVEPOINT {_METER_SAVEPOINT}")
+            _meter_statement(
+                cur, f"RELEASE SAVEPOINT {_METER_SAVEPOINT}",
+                why="after a successful meter read")
         return measured
     except Exception:  # a meter must never break the write
         _logger.debug("postgres byte measurement failed (non-fatal)", exc_info=True)

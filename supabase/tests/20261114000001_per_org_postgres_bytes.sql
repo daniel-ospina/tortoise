@@ -425,11 +425,19 @@ END $$;
 -- ⛔ TOP-LEVEL, NOT INSIDE `DO $$`: PL/pgSQL refuses transaction control
 -- (`SAVEPOINT` / `RELEASE`) with "unsupported transaction command in PL/pgSQL",
 -- so the savepoint stays outside and only the assertion lives in the block.
--- And the harness runs this file statement-by-statement in AUTOCOMMIT
--- ("SAVEPOINT can only be used in transaction blocks"), so each case opens its
--- own explicit transaction and ROLLS BACK — the pin is the assertion, not the
--- residue, and a rollback keeps later sections' row counts unchanged.
 --
+-- ⛔ AND THE `COMMIT` BELOW IS LOAD-BEARING, NOT DECORATION. The pglite
+-- harness runs this whole file through ONE `db.exec(sql)` (validate.mjs), and a
+-- multi-statement simple query executes as a SINGLE IMPLICIT TRANSACTION
+-- block — so an in-file `BEGIN` is a NO-OP and an in-file `ROLLBACK` unwinds
+-- back to the last real `COMMIT` (the seed's, above). Without the `COMMIT` here
+-- that rollback would discard §0–§7's fixtures: §1's seq-10 rows for orgs
+-- a/b/c and the `t12762_returning` temp table. It is green either way — §8 and
+-- §9 are self-contained — which is exactly why the boundary is stated instead
+-- of inherited. MEASURED: the same shape in pglite leaves 1 row, not 3.
+COMMIT;
+
+
 -- (a) THE SHIPPED ORDER — the row is written BEFORE the savepoint, so the
 --     subtransaction performs no write and keeps the TOP-LEVEL xid the meter
 --     filters on (`xmin = pg_current_xact_id()`).
@@ -464,6 +472,14 @@ ROLLBACK;
 --     as `xmin` and the top-level filter misses it. If this ever starts
 --     counting, the behaviour changed upstream and this pin must be re-derived
 --     rather than deleted.
+--     ⚠️ WHAT THIS PAIR DOES AND DOES NOT GUARD. §7b pins POSTGRESQL'S
+--     SEMANTICS — that savepoint-after-insert attributes and
+--     savepoint-before-insert does not. It does NOT reach the Python: this is a
+--     static script and never calls `postgres_bytes.measure_written_rows`. The
+--     claim that the SHIPPED ordering is safe is pinned separately, on the
+--     source, by
+--     `tests/test_postgres_bytes.py::test_the_meter_call_lands_AFTER_the_insert_it_measures`.
+--     Together they close the loop; neither alone does.
 BEGIN;
 SAVEPOINT t12762_meter_order_b;
 INSERT INTO public.journal_event (org_id, graph_id, seq, event_type, payload) VALUES

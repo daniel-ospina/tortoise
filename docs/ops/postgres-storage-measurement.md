@@ -214,11 +214,17 @@ APPEND-ONLY (`check-migration-append-only` refuses a modified migration) and
 therefore cannot be corrected in place: this document and
 `postgres_bytes.measure_written_rows`'s docstring are the correction, and neither
 the header's "takes no savepoints today" nor its "under-counts" clause is a
-reason to remove the savepoint.) **Both orderings are pinned, not argued**:
-`supabase/tests/20261114000001_per_org_postgres_bytes.sql` §7b asserts `rows: 1`
-for savepoint-after-insert (the shipped order) and `rows: 0`
-for savepoint-before-insert (the hazard), so moving the savepoint earlier reds
-instead of silently under-metering. An **autocommit** connection
+reason to remove the savepoint.) **Both orderings are pinned, not argued** — and
+by TWO artifacts, because neither alone closes the loop:
+`supabase/tests/20261114000001_per_org_postgres_bytes.sql` §7b pins
+PostgreSQL's **semantics** (`rows: 1` for savepoint-after-insert, the shipped
+order; `rows: 0` for savepoint-before-insert, the hazard), while
+the **shipped CALL ORDER** — that the meter runs after the insert it measures —
+is pinned on the source by
+`tests/test_postgres_bytes.py::test_the_meter_call_lands_AFTER_the_insert_it_measures`.
+§7b is a static script and never calls the module, so it stays green if the
+Python ordering inverts; the source pin is what reds then. An **autocommit**
+connection
 takes no savepoint: each statement is its own transaction, so a failure there
 aborts nothing the caller owns.
 
