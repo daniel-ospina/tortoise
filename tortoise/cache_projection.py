@@ -811,6 +811,19 @@ FOLD_ON_CREATE_DEFAULTS: dict[str, dict[str, Any]] = {
 #:   a literal `SET node_key = node_key`), so only that shape leaves an
 #:   un-supersede unrecorded. Do not generalise one shape into "the record cannot
 #:   express un-superseded"; it can, via the carriers.
+#:   ⛔ THE WRITE DOOR ADMITS THIS SHAPE, AND ONLY THIS SHAPE (#12786). A
+#:   terminal-Object guard (#12745) briefly refused EVERY departure from
+#:   `superseded`, which made this bullet's measured shape unexpressible and
+#:   reddened `test_status_projection.py::test_clearing_a_supersession_is_still
+#:   _writable`. `sdk._write_clears_every_lifecycle_carrier` restores it under the
+#:   coherence condition this derivation needs — the row HELD a carrier and the
+#:   write leaves NONE (`DERIVED_FROM_RECORD`, above, is what it reads) — so a
+#:   status-only `live`, a PARTIAL clear, and a carrier-less `superseded` stay
+#:   refused, and `archived`/`deprecated`/`retracted` never become recoverable.
+#:   That is the rule this bullet states ("the record CAN express it, via the
+#:   carriers") becoming executable at the door rather than a promise the graph
+#:   could not keep. The SNAKE spelling does not reach the node property yet
+#:   (#12782), so it stays refused rather than admitted as a shadow write.
 #: * **⚠️ ONCE SOUND TO FAIL: a CARRIER SET WITHOUT THE STATUS FOLD — a
 #:   LIVE-WRITER divergence, measured under and CLOSED AT THE WRITE DOOR by
 #:   #10192.** A carrier present does NOT by itself imply the node's `status` is

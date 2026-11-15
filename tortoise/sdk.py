@@ -5571,6 +5571,120 @@ def _lifecycle_carrier_keys(props: dict) -> dict[str, str]:
     return out
 
 
+def _lifecycle_carrier_graph_props(label: str) -> tuple[str, ...]:
+    """The GRAPH properties the cache derives this label's status from.
+
+    Read from ``cache_projection.DERIVED_FROM_RECORD`` rather than restated: that
+    table is the fold's own declaration of "status is derived when ANY of these
+    properties is present and non-empty", so the door cannot spell the carrier
+    differently from the derivation it is trying to keep coherent.
+    """
+    from tortoise.cache_projection import DERIVED_FROM_RECORD
+
+    for prop, sources, _value in DERIVED_FROM_RECORD.get(label, ()):
+        if prop == "status":
+            return tuple(sources)
+    return ()
+
+
+def _carriers_are_present(stored: dict[str, tuple]) -> bool:
+    """Does ANY row the write binds still carry a supersession?
+
+    ``stored`` is ``{property: distinct stored values}`` as the Cypher
+    ``collect(DISTINCT …)`` returns it — nulls already dropped, so this asks
+    whether any value survived. An empty string COUNTS: the record's view reads
+    ``IS NOT NULL``.
+    """
+    return any(v is not None for values in stored.values() for v in values)
+
+
+def _carrier_prop_named_by(key, props_read: tuple[str, ...]) -> str | None:
+    """The carrier PROPERTY this props key writes, or ``None``.
+
+    BOTH renderers must name it, because the two channels disagree on how a key
+    is rendered and this predicate guards an ALLOWANCE: the live writer files by
+    ``str(key)``, the journal keeps the CONTENT (``tortoise/live.py`` —
+    ``keys_rendering_as``, and #9649 review 13 for the same asymmetry on
+    ``status``). A ``str`` subclass whose content is ``supersededBy`` but whose
+    ``__str__`` returns something else is written live under the ``__str__`` name,
+    so the carrier SURVIVES in the graph while the record writes the stale value —
+    the divergence class this guard exists to refuse. Requiring both renderings to
+    name the carrier is the NARROW direction; the refusal side keeps the wide
+    union (every channel that can SET the column, #10192's review P1).
+    """
+    if not isinstance(key, str):
+        return None                  # a non-str cannot file a property name
+    live, journal = str(key), str.__str__(key)
+    if live in props_read and journal in props_read:
+        return live
+    return None
+
+
+def _write_clears_every_lifecycle_carrier(props: dict, stored: dict[str, tuple],
+                                          label: str) -> bool:
+    """Is this write the RECORD-CARRIED un-supersede — a supersession cleared?
+
+    #12786. The cache derives an Object's/Subject's status from the carrier
+    PROPERTIES alone (``cache_projection.DERIVED_FROM_RECORD``: any of
+    ``supersededBy``/``supersededAt`` present -> ``'superseded'``), so clearing
+    them is the only way an un-supersede stays coherent across the graph and the
+    record — ``tortoise/cache_projection.py``'s NOT MONOTONE bullet measures
+    exactly this shape (``update_entity(obj, status='live', supersededBy=None,
+    supersededAt=None)`` clears both, and a rebuild then derives nothing).
+
+    BOTH halves are required, and the first is what keeps this narrow rather
+    than a hole: the row must HAVE carried a supersession (so there is one to
+    withdraw) AND the write must leave none. That excludes the carrier-LESS
+    ``status='superseded' -> 'live'`` shape, which stays refused — it withdraws
+    nothing, and it is the mirror shape #10192 deliberately left outside the
+    guard's scope rather than a recovery this door can be asked to make coherent.
+
+    ⛔ THE SURFACE HERE IS THE **GRAPH PROPERTY**, not the record column, and the
+    asymmetry with :func:`_refuse_bare_lifecycle_carrier` is deliberate: a
+    REFUSAL must cover every channel that can set the column (a guard that misses
+    one protects nothing — #10192's review P1), while an ALLOWANCE must be narrow
+    enough to be true of the write that actually happens. This door writes
+    ``SET n += $props`` LITERALLY, so ``superseded_by=None`` clears a shadow
+    property the fold never reads and leaves ``supersededBy`` intact — measured
+    (#12782). Admitting that spelling here would resurrect the row while the
+    cache still derived ``'superseded'``: the divergence class this guard exists
+    to stop. It is refused until #12782 makes the snake clear reach the node
+    property.
+
+    ``stored`` is ``{property: distinct stored values}`` for every row the write
+    binds. A property the write does not NAME keeps its stored value (``props`` is
+    a partial update, not a replacement). A present ``None`` is the documented
+    CLEAR (#10192), so it removes the carrier; an empty string, ``0`` or ``False``
+    is NOT a clear — the record's view reads ``IS NOT NULL``, so it still derives
+    ``'superseded'`` there, and a write the two sides disagree about is exactly
+    what this guard refuses.
+
+    ⛔ A KEY CLEARS A CARRIER ONLY UNDER **BOTH** RENDERERS (review cycle 1, P1).
+    The live writer files a property by ``str(key)`` while the journal keeps its
+    CONTENT (``tortoise/live.py``'s two-renderer contract, ``keys_rendering_as``;
+    the same asymmetry #9649 review 13 closed on the status key). A ``str``
+    SUBCLASS whose content is ``supersededBy`` but whose ``__str__`` differs is
+    written live as the ``__str__`` name — so the carrier survives in the graph —
+    while the journaled state carries ``supersededBy`` and the record writes the
+    stale carrier. Testing CONTENT alone would admit precisely that divergence
+    (measured), so :func:`_carrier_prop_named_by` requires both.
+
+    Conservative by construction where the write binds several rows (#7822
+    fan-out): a carrier left on ANY of them means the cache can still read
+    ``'superseded'``, so it is not a clear.
+    """
+    props_read = _lifecycle_carrier_graph_props(label)
+    if not props_read or not _carriers_are_present(stored):
+        return False                 # no declared carrier, or nothing carried
+    after = {prop: [v for v in stored.get(prop, ()) if v is not None]
+             for prop in props_read}
+    for key, value in props.items():
+        prop = _carrier_prop_named_by(key, props_read)
+        if prop is not None:
+            after[prop] = [] if value is None else [value]
+    return not any(after.values())
+
+
 def _refuse_bare_lifecycle_carrier(props: dict, *, label: str, surface: str,
                                    stored_status: str | None = None) -> None:
     """Refuse a lifecycle CARRIER whose node is not (becoming) ``superseded``.
@@ -48845,6 +48959,32 @@ class TortoiseSDK:
         # (`tortoise/audit.py` says so in its own docstring), so it is not
         # offered as a repair anywhere.
         #
+        # ⛔ ONE DEAD WORD IS RECOVERABLE, AND ONLY ONE (#12786). `superseded`
+        # is not a retirement: ONTOLOGY §4.3 says *"`superseded` means replaced:
+        # it names the successor; a retirement with no successor is `archived`;
+        # `deprecated` is an independent terminal state"* — it is the ONE dead
+        # word whose cause (a successor) can be withdrawn, and the record has a
+        # measured door for withdrawing it (`cache_projection`'s NOT MONOTONE
+        # bullet: the carriers go NULL and a rebuild derives nothing). Refusing
+        # it as if it were `archived` made an un-supersede UNEXPRESSIBLE: the
+        # cleared carriers alone leave `status='superseded'`, and every read
+        # surface still drops the row, so a fact that was superseded BY MISTAKE
+        # could not be restored at all. So the DOOR admits it — under exactly
+        # the coherence condition the record needs, and no wider:
+        #
+        #     the ONLY dead status bound is `superseded`, AND
+        #     the row HELD a carrier, AND the write leaves NONE set
+        #
+        # The target word is still never inspected (a pack kind's word for
+        # "current" is not `live`), which is this guard's own rule. What stays
+        # refused, unchanged: any `archived`/`deprecated`/`retracted` origin, a
+        # MIXED dead set across the bound rows, and the status-ONLY
+        # `superseded -> live` — that one leaves the carriers set, so the record
+        # would still read `'superseded'` against a live graph, which is the
+        # #9974/#10192 divergence class rather than a recovery. (The test
+        # `test_clearing_a_supersession_is_still_writable` is the pin that caught
+        # the over-block; #12745's own suite pins the status-only refusal.)
+        #
         # ⛔ THE WRITE IS THE ROW SET, so the READ is too. The per-label loop
         # below binds `MATCH (n:<label> {match_prop:$id}) SET n += $props` — every node
         # carrying the id — so `row[0]` here would let a live sibling authorise a
@@ -48871,10 +49011,15 @@ class TortoiseSDK:
                 ("Subject", _SUBJECT_TERMINAL_STATUSES, "§4.2"),
                 ("Object", _OBJECT_TERMINAL_STATUSES, "§4.3"),
             ):
+                _np_carrier_props = _lifecycle_carrier_graph_props(_np_label)
+                _np_carrier_select = "".join(
+                    f", collect(DISTINCT n.{_prop}) AS carrier{_i}"
+                    for _i, _prop in enumerate(_np_carrier_props))
                 _np_row = proj.g.query(
                     f"MATCH (n:{_np_label} {{id:$id}}) "
                     "RETURN count(n) AS hits, "
-                    "collect(DISTINCT n.status) AS statuses",
+                    "collect(DISTINCT n.status) AS statuses"
+                    f"{_np_carrier_select}",
                     params={"id": id_val},
                 ).result_set[0]
                 if not _np_row or not _np_row[0]:
@@ -48892,6 +49037,41 @@ class TortoiseSDK:
                 _np_dead = sorted(s for s in _np_stored if s in _np_terminal)
                 if not _np_dead or _np_status in _np_terminal:
                     continue            # nothing dead, or dead->dead (legal here)
+                # The carriers this row holds, keyed by the SAME declared
+                # properties the derivation reads (`DERIVED_FROM_RECORD`) —
+                # derived, never a literal pair, so a third declared source
+                # cannot be silently left out of the coherence test.
+                _np_carriers = {
+                    _prop: (_np_row[2 + _i] or ())
+                    for _i, _prop in enumerate(_np_carrier_props)}
+                # The ONE recoverable dead word, under the record's own
+                # coherence condition — see the block comment above.
+                if (_np_dead == [_SUPERSEDED_STATUS]
+                        and _write_clears_every_lifecycle_carrier(
+                            props, _np_carriers, _np_label)):
+                    continue
+                # ⛔ THE HINT MUST BE PERFORMABLE OR ABSENT (review cycle 1, P1;
+                # AX rule 2 / #10183). It is emitted ONLY where the call it
+                # prescribes would actually be ADMITTED — the row is a carried
+                # `superseded` row and nothing else is dead — so the carrier-less
+                # supersession and a mixed dead set get no prescription they
+                # cannot follow. `status='live'` is an EXAMPLE: a pack kind's
+                # current word goes there instead, and the sentence says so.
+                _np_unsupersede_hint = (
+                    " ⛔ If the SUPERSESSION itself was wrong, clear it "
+                    "COHERENTLY in this same call — "
+                    "`update_entity(<id>, status='live', supersededBy=None, "
+                    "supersededAt=None)`, or this kind's own current word in "
+                    "place of `'live'` — the record-carried un-supersede "
+                    "(`tortoise/cache_projection.py`, NOT MONOTONE): both "
+                    "carriers go NULL, so a rebuild derives nothing and "
+                    "agrees with the live graph. A status-ONLY `live` is "
+                    "refused because it leaves the carriers set, and the "
+                    "record would then still read 'superseded' against a live "
+                    "graph."
+                    if (_np_dead == [_SUPERSEDED_STATUS]
+                        and _carriers_are_present(_np_carriers)) else ""
+                )
                 raise ValueError(
                     f"update_entity refused the status transition "
                     f"{_np_dead[0]!r} -> {_np_status!r} on {_np_label} "
@@ -48907,6 +49087,7 @@ class TortoiseSDK:
                     f"supersede verb for an Object or a Subject yet (#12592). "
                     f"Content and metadata revisions are still accepted on the "
                     f"dead row (this refusal is the `status` field only)."
+                    f"{_np_unsupersede_hint}"
                 )
 
         # ── #1423 (unchanged by #10371): the Subject VOCABULARY guard ──
