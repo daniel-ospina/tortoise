@@ -74,7 +74,14 @@ owner-gated change.
 
 FAIL-SOFT. :func:`measure_written_rows` and :func:`read_per_org_bytes` are
 TOTAL on the live path — never raise, never change a write's outcome; a fault
-is logged and reported as ``None`` / ``ok=False``. The pure parsers
+is logged and reported as ``None`` / ``ok=False``. ⚠️ SCOPED TO THE METER'S OWN
+FAULTS, and the scope is load-bearing rather than pedantic: the meter's
+bookkeeping statements are what hold that promise up, so when they themselves
+cannot be issued (``25P02`` on an already-aborted transaction, ``25P01`` outside
+a block, a dead session) the caller's transaction is left ABORTED and its
+``commit()`` still rolls the record write back. That arm is DISCLOSED —
+:func:`_meter_statement` says so at WARNING — and NOT repaired; see
+:func:`measure_written_rows` for the whole statement. The pure parsers
 (:func:`parse_written_rows`, :func:`parse_per_org_bytes`) DO raise, so a
 malformed payload fails its reading instead of masquerading as a zero — a
 failed reading's zeros are PLACEHOLDERS, never a measured zero.
@@ -274,7 +281,7 @@ def _in_caller_transaction(conn: Any) -> bool:
 
     Read from the driver's own flag rather than from a cursor, so it holds for
     both psycopg2 and psycopg3 and for any duck-typed test double that models
-    ``autocommit`` (a double without the attribute is treated as 
+    ``autocommit`` (a double without the attribute is treated as
     transactional — the safe default, since a savepoint on a connection that
     cannot hold one is itself caught by the caller's ``except``).
     """
@@ -294,6 +301,46 @@ def _read_written_rows(
     return parse_written_rows(row[0])
 
 
+def _meter_statement(cur: Any, statement: str, *, why: str) -> None:
+    """Issue one savepoint statement, or SAY the transaction may now be dirty.
+
+    ⛔ THE RECOVERY IS THE SAFETY PROPERTY, SO ITS OWN FAILURE MUST NOT LOOK LIKE
+    THE HARMLESS ONE. ``measure_written_rows`` is total — every failure is logged
+    at DEBUG and returns ``None`` — and that is right for *reading* the meter.
+    It is wrong for the savepoint bookkeeping: if ``ROLLBACK TO SAVEPOINT`` or a
+    ``RELEASE`` cannot be issued, the caller's transaction is left **ABORTED**,
+    which is the exact #12781 state — its ``commit()`` then rolls the record
+    write back. Logging that at DEBUG as ``measurement failed (non-fatal)``,
+    beside the benign case it must never be confused with, is how a data-loss
+    path hides inside a warning-free log.
+
+    So this raises *after* naming the consequence at WARNING, distinct from the
+    outer handler's DEBUG skip. Nothing here can repair it from the inside —
+    only the caller knows whether its transaction is still worth committing —
+    and the outer ``except`` still returns ``None`` so the meter stays total.
+
+    ⛔ THAT MAKES THIS ARM DISCLOSED, NOT REPAIRED, and it is stated here so the
+    code is not read as more than it is: a caller that commits into a
+    transaction this arm could not recover still rolls its rows back. The
+    realistic triggers (``25P02`` on an already-aborted transaction, ``25P01``
+    outside a block, a dead connection) all mean that write was already doomed
+    before the meter ran, so no new loss is introduced — but the WARNING is the
+    whole of the protection in this branch, which is why it may never be
+    downgraded to the DEBUG skip.
+    """
+    try:
+        cur.execute(statement)
+    except Exception:
+        _logger.warning(
+            "the byte meter could not issue `%s` (%s) — the caller's transaction "
+            "may now be ABORTED, so its commit() would roll the record write "
+            "back (#12781). This is NOT the harmless 'measurement skipped' "
+            "path: the meter is best-effort, the record is not.",
+            statement, why, exc_info=True,
+        )
+        raise
+
+
 def measure_written_rows(
     conn: Any,
     *,
@@ -310,8 +357,9 @@ def measure_written_rows(
     record, a missing function on an older schema, a malformed reply), logging
     at DEBUG: a metering fault must never change a write's outcome.
 
-    ⛔ "NEVER CHANGE A WRITE'S OUTCOME" IS ENFORCED HERE, NOT INTENDED (#12762
-    follow-up, `main` red at `9e934efad5`). Swallowing the exception was NOT
+    ⛔ "NEVER CHANGE A WRITE'S OUTCOME" IS ENFORCED FOR THE METER'S OWN
+    FAILURES — AND ONLY FOR THOSE (#12762 follow-up, `main` red at
+    `9e934efad5`). Swallowing the exception was NOT
     enough: the meter runs inside the caller's transaction, and in PostgreSQL a
     failed statement leaves that transaction ABORTED — so the caller's
     succeeding `commit()` becomes a ROLLBACK and the whole record write is
@@ -332,13 +380,37 @@ def measure_written_rows(
     ``919`` as before it, and the function still reported ``rows: 1`` for the
     row inserted before the savepoint.
 
+    ⛔ THE RESIDUAL ARM, NAMED SO THE CLAIM IS NOT WIDER THAN THE CODE. The
+    savepoint makes the meter's *own* failure — the read, the refusal, the lock
+    timeout — unable to abort the caller's transaction. It does NOT rescue a
+    transaction that is ALREADY unusable: if the ``SAVEPOINT``/``RELEASE``
+    bookkeeping itself cannot be issued (``25P02``
+    in-failed-sql-transaction, ``25P01`` outside a block, a dead connection),
+    ``_meter_statement`` discloses it at WARNING and this function is still
+    total, so a caller that commits anyway still rolls its rows back. That arm
+    is DISCLOSED, not repaired — nothing here can repair it. It is also not a
+    new loss path: those triggers mean the write was already doomed by whatever
+    aborted or dropped the session, which is precisely why the disclosure is a
+    WARNING and not the DEBUG skip the benign case gets.
+
     ⛔ SUPERSEDED CONTRACT TEXT, NAMED SO IT IS NOT RE-DERIVED WRONGLY. The
     header of `supabase/migrations/20261114000001_per_org_postgres_bytes.sql`
     still says *"Under a SAVEPOINT the row's xmin is the sub-transaction's, so
     the filter UNDER-counts … and the record write path takes no savepoints
-    today"*. Both halves are now false — this door takes a savepoint on every
-    armed write, and the savepoint sits AFTER the insert, so the subtransaction
-    writes nothing and the top-level xid is preserved (measured above). The
+    today"*. The **second** half is now false: this door takes a savepoint on
+    every armed, positioned write. The **first** half is still TRUE as a
+    statement about PostgreSQL — it describes a savepoint that CONTAINS the
+    insert — and that is precisely why the savepoint here sits AFTER the insert,
+    so the subtransaction writes nothing and the top-level xid is preserved
+    (measured above). ⛔ Both orderings are pinned, so neither half is a claim
+    you have to take on trust — by TWO artifacts, because one cannot answer the
+    other's question:
+    `supabase/tests/20261114000001_per_org_postgres_bytes.sql` §7b pins the
+    SEMANTICS (`rows: 1` for savepoint-after-insert, `rows: 0` for
+    savepoint-before-insert) but is a static script and never calls this module;
+    `tests/test_postgres_bytes.py::test_the_meter_call_lands_AFTER_the_insert_it_measures`
+    pins the SHIPPED CALL ORDER on the source, which is what reds if the meter
+    is moved before the insert. The
     migration files are APPEND-ONLY (`check-migration-append-only` refuses a
     modified `supabase/migrations/*.sql`), so that sentence cannot be corrected
     where it lives; this paragraph and
@@ -360,17 +432,24 @@ def measure_written_rows(
                 # autocommit: a failure aborts nothing the caller owns.
                 return _read_written_rows(
                     cur, org_id=org_id, graph_id=graph_id, positions=positions)
-            cur.execute(f"SAVEPOINT {_METER_SAVEPOINT}")
+            _meter_statement(
+                cur, f"SAVEPOINT {_METER_SAVEPOINT}", why="opening the meter's savepoint")
             try:
                 measured = _read_written_rows(
                     cur, org_id=org_id, graph_id=graph_id, positions=positions)
             except Exception:
                 # Undo ONLY the failed read, so the caller's transaction is
                 # usable and its rows — inserted BEFORE this savepoint — commit.
-                cur.execute(f"ROLLBACK TO SAVEPOINT {_METER_SAVEPOINT}")
-                cur.execute(f"RELEASE SAVEPOINT {_METER_SAVEPOINT}")
+                _meter_statement(
+                    cur, f"ROLLBACK TO SAVEPOINT {_METER_SAVEPOINT}",
+                    why="recovering a failed meter read")
+                _meter_statement(
+                    cur, f"RELEASE SAVEPOINT {_METER_SAVEPOINT}",
+                    why="after the rollback")
                 raise
-            cur.execute(f"RELEASE SAVEPOINT {_METER_SAVEPOINT}")
+            _meter_statement(
+                cur, f"RELEASE SAVEPOINT {_METER_SAVEPOINT}",
+                why="after a successful meter read")
         return measured
     except Exception:  # a meter must never break the write
         _logger.debug("postgres byte measurement failed (non-fatal)", exc_info=True)
