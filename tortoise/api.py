@@ -2864,6 +2864,30 @@ class EventAPI:
         from .entity_identity import entity_create_lock
         with entity_create_lock("Object", name):
             oid = self._registration_id("Object", name, explicit_id=id)
+            # ⛔ #12869: THIS IS THE THIRD OBJECT WRITE DOOR, and a rule stated
+            # at two doors and silently absent at the third is the defect
+            # `#11835` review round 4 and `#11948` each measured — the latter in
+            # this very method's own docstring, one family over. `**props` is
+            # splatted onto the `ObjectRegistered` envelope and `_upsert_object`
+            # writes `status` ON CREATE, so without this line
+            # `add_object(…, status=['live'])` mints exactly the unaddressable
+            # row #12869 is about — after the other two doors started refusing
+            # it. Measured before this line: `status=123` / `['live']` / `True`
+            # all ACCEPTED here and stored.
+            # The landing question is the same one the other two arms ask — an
+            # adopted or merged node keeps its status (`ON CREATE` only) — so it
+            # is answered by the target's own existence, INSIDE the lock and
+            # AFTER `_registration_id` (which may stamp an id onto an adopted
+            # id-less holder: refusing before it would refuse a value the writer
+            # drops, and refusing after a stamp this door does not raise on is
+            # why the question is existence rather than `created`).
+            from .sdk import _refuse_non_string_object_status
+            _refuse_non_string_object_status(
+                props, door="add_object", target=name,
+                lands=lambda: not self.projection.g.query(
+                    "MATCH (n:Object {id:$id}) RETURN count(n)",
+                    params={"id": oid},
+                ).result_set[0][0])
             from .entity_resolver import normalize_entity_name
             props.setdefault("canonical_name", normalize_entity_name(name))
             ev: dict = {"id": oid, "name": name, "createdAt": now_iso(), **props}

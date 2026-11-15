@@ -1471,23 +1471,31 @@ class TestNonScalarStatus12869:
     #: The NON-persistable shape. `#7369` degrades it to null before dispatch, so
     #: the node never carries it and the row is never poisoned — which is the
     #: recorded `#7925` round-4 reason it must stay ACCEPTED rather than refused.
-    _DROPPED = pytest.param({"a": 1}, id="dict")
+    _DROPPED = (
+        pytest.param({"a": 1}, id="dict"),
+        pytest.param(b"live", id="bytes"),
+        pytest.param(bytearray(b"x"), id="bytearray"),
+        pytest.param(frozenset({"a"}), id="frozenset"),
+    )
 
     @pytest.mark.parametrize("bad", _REFUSED)
     def test_the_OBJECT_update_door_refuses_a_non_string_status(
             self, tmp_path, bad):
         """Refused with the guard's own `ValueError` — never a `TypeError`.
 
-        FALSIFIABLE BY: reverting the Object arm of `update_entity`'s family
-        loop reds every arm but `list` (which reds as the recorded defect:
-        `TypeError: unhashable type`), because `int`/`bool` were stored happily
-        and `dict` was degraded to null by `#7369`.
+        FALSIFIABLE BY: deleting the Object arm of `update_entity`'s family loop
+        reds all four arms — each as `DID NOT RAISE ValueError`, because this
+        fixture mints a row with NO stored status, so nothing is hashed and no
+        `TypeError` can occur (MEASURED). The `TypeError` half of the original
+        defect is pinned instead by
+        `test_a_row_that_ALREADY_holds_a_non_scalar_is_REFUSED_not_crashed`, which
+        is the only place a stored non-scalar exists to hash.
         """
         sdk = TortoiseSDK(str(tmp_path / "t12869u.db"))
         try:
             oid = _make_carrier_entity(sdk, "Object", "upsilon")
             before = _carrier_row(sdk, "Object", "upsilon")
-            with pytest.raises(ValueError, match="non-string status write"):
+            with pytest.raises(ValueError, match="refused a non-string status"):
                 sdk.update_entity(oid, status=bad)
             assert _carrier_row(sdk, "Object", "upsilon") == before, (
                 "the refused write was not atomic — the row changed: "
@@ -1537,7 +1545,7 @@ class TestNonScalarStatus12869:
         try:
             sdk.create_object("rho", "core:strategy")
             oid = _carrier_row(sdk, "Object", "rho")[0]
-            with pytest.raises(ValueError, match="non-string status write"):
+            with pytest.raises(ValueError, match="refused a non-string status"):
                 sdk.update_entity(oid, status=["live"])
             assert _carrier_row(sdk, "Object", "rho")[1] is None, (
                 "the list reached the row — the stored side is unprotected")
@@ -1554,10 +1562,10 @@ class TestNonScalarStatus12869:
     _STORED_TARGETS = (
         pytest.param("live", "STORED status is", id="string-target"),
         pytest.param(None, "STORED status is", id="null-clear-target"),
-        pytest.param(123, "non-string status write", id="non-string-target"),
+        pytest.param(123, "refused a non-string status", id="non-string-target"),
     )
 
-    @pytest.mark.parametrize("bad", [_DROPPED])
+    @pytest.mark.parametrize("bad", _DROPPED)
     def test_a_NON_PERSISTABLE_status_is_still_DROPPED_not_refused(
             self, tmp_path, bad):
         """`#7925` round 4 — the over-rejection this change must not ship.
@@ -1699,6 +1707,102 @@ class TestNonScalarStatus12869:
             with pytest.raises(ValueError, match="is TERMINAL for a :Object"):
                 sdk.update_entity(oid, status="live", supersededBy=None,
                                   supersededAt=None)
+        finally:
+            sdk.close()
+
+    def test_a_hashable_non_string_that_STILL_LANDS_is_refused(self, tmp_path):
+        """The fold's filter under-approximates what the engine stores.
+
+        `np.int64` is NOT an `int` subclass, so `_is_persistable_prop_value`
+        (the FOLD's filter) answers False for it — while the engine really does
+        store it. Scoping on that predicate alone let
+        `create_object(status=np.int64(5))` through and the node **stored 5**: the
+        exact poisoning #12869 exists to stop, one library type over. The
+        transport's predicate (`projection._value_ok`, the `#7369` gate) is the
+        half that catches it, so the refusal is the OR of the two.
+
+        FALSIFIABLE BY: returning to `_is_persistable_prop_value` alone reds this
+        arm (the value is accepted and 5 lands on the node).
+        """
+        np = pytest.importorskip("numpy")
+        sdk = TortoiseSDK(str(tmp_path / "t12869np.db"))
+        try:
+            with pytest.raises(ValueError, match="refused a non-string"):
+                sdk.create_object("np-obj", "core:strategy",
+                                  status=np.int64(5))
+            assert _carrier_row(sdk, "Object", "np-obj") is None
+            sdk.create_object("np-obj2", "core:strategy")
+            oid = _carrier_row(sdk, "Object", "np-obj2")[0]
+            with pytest.raises(ValueError, match="refused a non-string"):
+                sdk.update_entity(oid, status=np.int64(7))
+            assert _carrier_row(sdk, "Object", "np-obj2")[1] is None
+        finally:
+            sdk.close()
+
+    @pytest.mark.parametrize("bad", _REFUSED)
+    def test_the_THIRD_object_door_add_object_refuses_too(self, tmp_path, bad):
+        """`EventAPI.add_object` splats caller props onto `ObjectRegistered`.
+
+        It is the THIRD Object write door, and `_upsert_object` writes `status`
+        ON CREATE — so without the shared helper `add_object(..., status=[...])`
+        mints exactly the unaddressable row this issue is about, after the other
+        two doors started refusing it. A rule stated at two doors and silently
+        absent at the third is the defect `#11835` round 4 and `#11948` each
+        measured — the latter in this method's own docstring.
+
+        FALSIFIABLE BY: removing the helper call from `add_object` reds every arm
+        (the row stores the list/int/bool, and the next status write then refuses
+        or raises `TypeError`).
+        """
+        from tortoise.api import EventAPI
+        from tortoise.log import EventLog
+        sdk = TortoiseSDK(str(tmp_path / "t12869ao.db"))
+        try:
+            api = EventAPI(EventLog(str(tmp_path / "ao.jsonl")),
+                           initiated_by="user", projection=sdk._get_proj())
+            with pytest.raises(ValueError, match="add_object refused"):
+                api.add_object("ao-obj", "core:strategy", status=bad)
+            assert _carrier_row(sdk, "Object", "ao-obj") is None, (
+                "a refused add_object left a node behind")
+            # ...and a STRING is still accepted (the vocabulary stays open).
+            oid = api.add_object("ao-ok", "core:strategy", status="banana")
+            assert _carrier_row(sdk, "Object", "ao-ok")[1] == "banana"
+            assert isinstance(oid, str)
+        finally:
+            sdk.close()
+
+    def test_an_ingest_bundle_is_refused_at_PHASE_1_not_mid_write(self, tmp_path):
+        """The door's refusal must be mirrored by the bundle validator.
+
+        `_validate_bundle` is a SEPARATE authority from `create_entity`, and a
+        Phase-1 gap means step 3 raises with the earlier items already committed
+        — the #2422/#7925 partial-mutation class that sweep exists to close.
+
+        FALSIFIABLE BY: removing the Object arm from the Phase-1 sweep reds this
+        (the bundle validates clean, then `ingest` raises after `good-first` is
+        written).
+        """
+        sdk = TortoiseSDK(str(tmp_path / "t12869bundle.db"))
+        try:
+            bundle = {"entities": [
+                {"ref": "g", "type": "object", "name": "good-first",
+                 "status": "live"},
+                {"ref": "p", "type": "object", "name": "poison-second",
+                 "status": 123}]}
+            violations = sdk._validate_bundle(bundle)
+            assert violations, (
+                "a non-string Object status passed Phase 1 — ingest would then "
+                "abort mid-write with good-first already committed")
+            assert violations[0]["section"] == "entities"
+            assert violations[0]["index"] == 1
+            # Nothing was written, because nothing was attempted.
+            assert sdk._get_proj().g.query(
+                "MATCH (n:Object {name:'good-first'}) RETURN count(n)"
+            ).result_set[0][0] == 0
+            # A dict status is DROPPED by the writer, so it stays accepted.
+            assert sdk._validate_bundle({"entities": [
+                {"ref": "o", "type": "object", "name": "dict-ok",
+                 "status": {"a": 1}}]}) == []
         finally:
             sdk.close()
 
