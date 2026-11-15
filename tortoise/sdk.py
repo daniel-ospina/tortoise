@@ -49186,6 +49186,12 @@ class TortoiseSDK:
             # decides with `isinstance` + `not in`, so a `str` subclass with a
             # colliding `__hash__`/`__eq__` still stores an UNDECLARED Subject word
             # there (measured on a live Subject; pre-existing, filed as #12905).
+            # `_refuse_bare_lifecycle_carrier` (`sdk.py:5792`) is the same shape
+            # one guard over: it compares `status == _SUPERSEDED_STATUS` on the
+            # caller's value, so a `str` subclass whose `__eq__` answers `True`
+            # passes the carrier coherence test and lands `['banana', '<carrier>']`
+            # on a live row while plain `'banana'` is refused (measured;
+            # pre-existing, filed as #12903).
             # This normalisation is scoped to the transition guard.
             # ⛔ `issubclass(type(x), str)`, NOT `isinstance(x, str)`: an object
             # can claim `__class__ = str` and `isinstance` believes it, while

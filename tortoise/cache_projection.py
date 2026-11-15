@@ -870,7 +870,14 @@ FOLD_ON_CREATE_DEFAULTS: dict[str, dict[str, Any]] = {
 #:   and the
 #:   write leaves NONE (`DERIVED_FROM_RECORD`, above, is what it reads) — so a
 #:   status-only `live`, a PARTIAL clear, and a carrier-less `superseded` stay
-#:   refused, and `archived`/`deprecated`/`retracted` never become recoverable.
+#:   refused, and `archived`/`deprecated`/`retracted` never become recoverable
+#:   THIS WAY. ⚠️ Not "never recoverable, full stop": a TWO-call
+#:   reclassification (`archived -> superseded` naming a successor, then this
+#:   coherent clear) does lift them — measured, the row is recalled again after
+#:   `rebuild_all`. That is the fail-open filed as #12908 (the gate's answer
+#:   depends on how many calls a caller spends), and it is NOT licensed here:
+#:   it fabricates the supersession this bullet's coherence condition exists to
+#:   withdraw.
 #:   That is the rule this bullet states ("the record CAN express it, via the
 #:   carriers") becoming executable at the door rather than a promise the graph
 #:   could not keep. The SNAKE spelling does not reach the node property yet

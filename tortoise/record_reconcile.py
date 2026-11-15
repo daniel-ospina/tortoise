@@ -109,8 +109,13 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   ``status='live'`` with both carriers null, so graph and record agree. ⛔ Do NOT
   read "carrier-less" as "irreparable" and reach for a whole-graph restore — the
   wipe below is the last resort, not this one. Every OTHER terminal word has no
-  SDK route at all (#12592), so naming the clear there would prescribe a call
-  that raises (AX rule 2).
+  SDK route **in one accepted call** (#12592), so naming the clear there would
+  prescribe a call that raises (AX rule 2). ⚠️ Do NOT read that as "irreparable
+  some other way": `archived`/`deprecated`/`retracted` DO lift in TWO accepted
+  calls — reclassify to `superseded` with a successor, then the coherent clear
+  above — which is the fail-open filed as #12908 (measured; the guard's answer
+  then depends on how many calls a caller spends). It is NOT offered here as a
+  repair: it fabricates the supersession it withdraws.
   ⛔ A COMPOSED NON-WORD IS NOT A REPAIR EITHER, AND IT IS NOW REFUSED: naming a
   non-word (``status=None``, ``123``, ``['live']``, ``True``) TOGETHER WITH both
   carrier clears USED to pass the coherent allowance — it keys on the carrier
@@ -726,7 +731,8 @@ def reconcile_record_and_cache(
     same call, #12825). ⛔ NOT the stored word: ``status='superseded'`` beside the
     two clears is ACCEPTED by the entailed short-circuit and leaves the row
     terminal with its carriers gone (measured). Every other terminal word has no
-    SDK route (#12592). Clear,
+    SDK route in ONE accepted call (#12592); a two-call reclassification does
+    lift them, and that is #12908's fail-open, not a repair. Clear,
     or the wipe, but ⛔ NOT a record-sourced re-projection, which is ADDITIVE and
     leaves the value in place — see the module docstring's (5)),
     a record-sourced clear IN PLACE for the declined pair —
