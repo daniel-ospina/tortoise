@@ -351,23 +351,95 @@ def test_derive_queries_emits_one_object_query_per_entity_name():
     assert queries["object"] == ["the plan doc", "the timeout command"]
 
 
-def test_the_matcher_is_exact_norm_equality_plus_kind():
-    """§4/§5's premise: a surface variant is invisible to phase 1.
+def test_the_matcher_is_norm_exact_AND_gains_the_folded_rung_12295():
+    """§4/§5's premise, RESTATED — and the pin that moved is named (#12295).
 
-    ``_norm`` is whitespace-collapse + lowercase and nothing else, so a mention
-    differing by an article or a separator does not match even when the node is
-    in the window — which is why the fold belongs in the comparison and NOT in
-    ``_norm`` (whose other consumers assume exactly this narrow contract).
+    ``_norm`` is whitespace-collapse + lowercase and nothing else. That stays
+    true, and it must: ``_norm``'s other consumers assume exactly this narrow
+    contract, which is why the fold belongs in the COMPARISON and not in
+    ``_norm``.
+
+    What changed: phase 1 now tries the comparison-side fold (`#12295`,
+    ``entity_blocking.attach_matches``) after the exact arms miss, so a surface
+    variant IS visible to phase 1. ⚠️ The committed artifacts
+    (``measurement.json`` / ``measurement-fts-only.json``) were taken BEFORE
+    this rung landed, so their ``attached: 0`` arm describes the pre-#12295
+    matcher — the ``docs/research/2026-11-12-12295-*`` measurement is the
+    before/after that supersedes it. This test pins both halves so neither can
+    drift silently in the "0 %" direction (the arm the brief's headline rests on)
+    or in the "it always worked" direction.
     """
     from tortoise.extractor_v2 import _find_existing_entity, _norm
 
     assert _norm("The  Plan-Doc") == "the plan-doc"
     existing = [{"id": "obj-1", "name": "the plan doc", "kind": "core:other"}]
     assert _find_existing_entity(existing, "the plan doc", "core:other")[1] == "exact"
+
+    # The old arms are byte-identical, so the pre-#12295 number is reproducible:
+    # `_norm` still folds nothing here, i.e. the EXACT arm still misses.
     for variant in ("plan doc", "the-plan-doc", "the plan-doc"):
+        assert _norm(variant) != _norm("the plan doc"), (
+            f"{variant!r} is now folded by _norm — the fold escaped the comparison")
         ex, mode = _find_existing_entity(existing, variant, "core:other")
-        assert ex is None, f"{variant!r} resolved — the brief's 0% arm is stale"
-        assert mode == "none"
+        assert mode not in ("exact", "bare"), (
+            f"{variant!r} bound through the pre-#12295 arm ({mode}) — the folded "
+            "rung's contribution would be hidden")
+    # …and the #12295 folded rung binds them, on the SAME node (id, not name):
+    for variant in ("plan doc", "the plan-doc"):
+        ex, mode = _find_existing_entity(existing, variant, "core:other")
+        assert ex is not None and ex["id"] == "obj-1", (
+            f"{variant!r} did not resolve via the folded rung — #11901's 0 %/419 "
+            "arm is only beaten if this binds")
+        assert mode == "folded"
+
+    # ⛔ THE RESIDUAL, pinned so it cannot be mistaken for coverage.
+    # ``the-plan-doc`` keeps its article: ``normalize_entity_name`` anchors the
+    # article strip on a real whitespace boundary BEFORE folding punctuation
+    # (#12047 round-4 finding 5 — the fix that stopped ``a-b`` folding to
+    # ``b``). So an article + separator variant of a ``the …`` name does NOT
+    # bind, and the measurement must say so rather than imply the whole
+    # separator class moved.
+    ex, mode = _find_existing_entity(existing, "the-plan-doc", "core:other")
+    assert ex is None and mode == "none", (
+        "the-plan-doc now binds — if that is a deliberate new comparison key it "
+        "must arrive with its own precision pin for 'a-b' vs 'b' (#12047 R4F5)")
+
+
+def test_the_article_anchor_decision_is_not_reversed():
+    """#12047 round-4 finding 5, pinned from the outside (#12295 touches the
+    comparison and must not re-open the fold): `a-b` is NOT `b`."""
+    from tortoise.extractor_v2 import _find_existing_entity
+
+    existing = [{"id": "obj-b", "name": "b", "kind": "core:other"}]
+    ex, mode = _find_existing_entity(existing, "a-b", "core:other")
+    assert ex is None and mode == "none", f"'a-b' folded onto 'b' as {mode}"
+
+
+def test_a_different_noun_never_binds_through_the_folded_rung():
+    """The fold must not become a fuzzy matcher (#2730 §6.7: a false merge is
+    invisible and hard to undo). No similarity, no threshold — so a near-miss
+    stays a near-miss."""
+    from tortoise.extractor_v2 import _find_existing_entity
+
+    existing = [{"id": "obj-1", "name": "the plan doc", "kind": "core:other"}]
+    for other in ("the play doc", "plan", "the plan docs", "the doc"):
+        ex, mode = _find_existing_entity(existing, other, "core:other")
+        assert ex is None and mode == "none", f"{other!r} bound as {mode} — too fuzzy"
+
+
+def test_the_folded_rung_refuses_an_ambiguous_collision():
+    """Two live carriers of one fold is legal since #3590 — never guess.
+
+    §4.4 I1: an unresolved identity is NEVER asserted `new`, so the caller holds
+    it. Returning either id would be a silent pick (`entity_identity`'s own
+    route-then-refuse rule).
+    """
+    from tortoise.extractor_v2 import _find_existing_entity
+
+    existing = [{"id": "obj-1", "name": "the plan doc", "kind": "core:other"},
+                {"id": "obj-2", "name": "plan-doc", "kind": "core:other"}]
+    ex, mode = _find_existing_entity(existing, "plan_doc", "core:other")
+    assert ex is None and mode == "ambiguous"
 
 
 def test_the_variant_classes_are_the_ones_norm_does_not_fold():
@@ -895,22 +967,42 @@ class _FakeProj:
         self._stored = stored_names
         self.g = self
 
+    def _rows(self) -> list[dict]:
+        """The population in the STORE row shape the real leg returns.
+
+        ⛔ ONE minting source for BOTH surfaces this fake exposes: `g.query` (the
+        #8919 stale-name read) and `tortoise_fts_query` (the k-window). Minting
+        the ids twice lets the fake answer about ids `run()` never wrote, and a
+        window row whose id does not match the population row silently scores as
+        a MISS — a fixture that measures nothing while looking healthy.
+        """
+        return [{"id": f"obj-11901{i:06d}", "content": n,
+                 "point_kind": "core:other"}
+                for i, n in enumerate(self._stored)]
+
     def query(self, *_a, **_k):
-        return _FakeQuery([(f"obj-11901{i:06d}", n)
-                           for i, n in enumerate(self._stored)])
+        return _FakeQuery([(r["id"], r["content"]) for r in self._rows()])
 
     def _upsert_object(self, _row):
         return None
 
 
 def _drive(tool_mod, monkeypatch, tmp_path, *, stored_names, trace_maker, argv=None,
-           pop=None, rows_maker=None):
+           pop=None, rows_maker=None, window_returns_stored=False):
     """Run `main()` against a fake SDK; return (exit code, out path).
 
     ``rows_maker`` is optional and defaults to the refusing tests' behaviour (no
     rows at all). Pass it to drive the SUCCESS path: the arms' accounting only
     exercises its found-the-canonical branches when the leg returns a row, and
     `tests/test_name_entropy_12294.py` pins the predicate, not the accounting.
+
+    ``window_returns_stored`` is the OTHER way to reach that branch, and it is
+    kept beside ``rows_maker`` rather than folded into it because the two are
+    used by different guards: ``False`` is the shape every pre-existing driver
+    here relies on ("every sampled name misses"); ``True`` makes the fake leg
+    RETURN the stored population rows (from `_FakeProj._rows`, so the ids are the
+    run's own), which is what the #12295 blocking/dedupe pins need. When both are
+    supplied ``rows_maker`` wins, so an existing caller's behaviour is unchanged.
     """
     monkeypatch.setenv("TORTOISE_DB_URI",
                        "docker://:falkordb@localhost:6379/recall_unit")
@@ -943,7 +1035,13 @@ def _drive(tool_mod, monkeypatch, tmp_path, *, stored_names, trace_maker, argv=N
             trace = kw.get("leg_trace")
             if trace is not None:
                 trace.append(trace_maker())
-            return rows_maker(q) if rows_maker is not None else []
+            if rows_maker is not None:
+                return rows_maker(q)
+            if not window_returns_stored:
+                return []
+            # The leg's own width: a k=3 query cannot return 4 rows.
+            limit = int(kw.get("limit") or len(self._proj._rows()))
+            return [dict(r) for r in self._proj._rows()][:limit]
 
         def close(self):
             return None
@@ -1157,11 +1255,27 @@ def test_the_12294_gate_arms_reconcile_against_a_driven_run(tool_mod, monkeypatc
         # 157/1676 (9.4 %) instead of 157/419 (37.5 %) on the corpus.
         assert vg["pairs"] == arms["variant"]["3"]["pairs"] == 36, (p, vg)
         assert vg["gated_pairs"] == _EXACT_GATED[p], (p, vg)
-        # EXACTLY ONE gated pair binds today (the `#2258` -> `2258` mention).
-        # Inverting the per-PAIR accumulator reports every NON-binding pair
-        # instead (35); accumulating it per (pair x k) over-reports it 4x.
-        assert vg["would_attach_before"] == 1, (p, vg)
-        assert vg["would_attach_before_any_k"] == 1, (p, vg)
+        # ⛔ EIGHT, NOT ONE, AND THE DIFFERENCE IS #12295'S FOLD. On main's
+        # matcher exactly ONE gated pair bound in this fixture (the `#2258` ->
+        # `2258` hash-dropped mention) — the number #12294's decline quoted as
+        # "the gate trades measured recall for zero duplicate reduction". #12295
+        # ships the comparison-side fold in `_find_existing_entity`, so a gated
+        # VARIANT surface now binds to its own canonical, and every one of this
+        # fixture's 8 in-window gated pairs attaches. The cost side of the gate is
+        # therefore REAL and 8x larger here, which is exactly why the frozen
+        # control sits beside it: `arms["variant"]["3"]["attached_norm_only"]` is
+        # 1, i.e. pre-#12295 behaviour, recomputed in the same run.
+        # ⛔ Still discriminating, and these two figures are MEASURED by mutation
+        # (mutation applied to `run()`, this single test re-run, the tool restored
+        # by `cp` with `git diff --quiet` confirming a clean tree):
+        #   inverting the per-PAIR accumulator  -> 28  (= 36 pairs - 8 that attach;
+        #       the inverted loop walks EVERY pair, gated or not, so the arithmetic
+        #       is NOT `gated_pairs - 8`, which is what this comment first claimed)
+        #   accumulating it per (pair x k)      -> 32  (= 4 windows x 8)
+        # Both red `would_attach_before_any_k == 8`; neither equals 8.
+        assert vg["would_attach_before"] == 8, (p, vg)
+        assert vg["would_attach_before_any_k"] == 8, (p, vg)
+        assert arms["variant"]["3"]["attached_norm_only"] == 1, arms["variant"]
         assert 0 <= vg["would_attach_before"] <= vg["in_window_before"] \
             <= vg["gated_pairs"] <= vg["pairs"], (p, vg)
 
@@ -1383,6 +1497,322 @@ def test_the_artifact_records_every_miss_so_a_cap_cannot_return(tool_mod, monkey
         f"total={arms['exact_misses_total']} vs "
         f"recorded={arms['exact_misses_recorded']}: with no cap these are equal")
 
+
+def test_a_degenerate_run_publishes_None_not_a_zero_figure(tool_mod, monkeypatch, tmp_path):
+    """A run that measured nothing must not publish `0.0` as if it measured zero.
+
+    ⛔ MEASURED BEFORE THE FIX: a one-name population (so every pooled group falls
+    below 2 and the blocker has no pair to reduce) published
+    `reduction_ratio: 0.0` — and, through the same `or 0.0` shape, `0.0` for both
+    pooled cost fields. `0.0` reads as "the blocker proposed zero pairs" and "a
+    capture sees zero candidates", which the run never observed: it is the
+    flattering-half false label `entity_blocking.reduction_ratio` returns `None`
+    to prevent, and `pooled_candidates_per_capture` is exactly the figure a brief
+    compares against the blocker. Restoring `or 0.0` (or any `0.0` default) reds
+    this test and nothing else.
+    """
+    rc, out = _drive(tool_mod, monkeypatch, tmp_path,
+                     stored_names=["the alpha"],
+                     trace_maker=lambda: {"leg": "vector", "ran": True,
+                                          "degraded": False},
+                     pop=[{"cls": "definite", "name": "the alpha"}],
+                     argv=["--population", "1", "--sample", "1",
+                           "--captures", "2", "--out", str(tmp_path / "artifact.json")])
+    assert rc == 0, f"a one-name run was refused (rc={rc})"
+    rep = json.loads(out.read_text())
+    mk = rep["arms"]["blocking"]["multikey"]
+    #: The population is below 2, so `reduction_ratio` has nothing to measure.
+    assert mk["reduction_ratio"] is None, (
+        f"reduction_ratio is {mk['reduction_ratio']!r} on a run with no pair to "
+        "reduce — a `0.0` here reads as 'the blocker proposed zero pairs'")
+    #: Zero capture groups reached the window, so NO pooled set was measured.
+    pooled = next(iter(rep["arms"]["pooled"].values()))
+    assert pooled["captures"] == 0, f"expected no capture group, got {pooled['captures']}"
+    fts = rep["arms"]["blocking"]["fts_only"]
+    assert fts["pooled_candidates_per_capture"] is None, (
+        f"pooled_candidates_per_capture is {fts['pooled_candidates_per_capture']!r} "
+        "with zero capture groups — that is a measurement the run never made")
+    assert fts["pooled_candidates_per_mention"] is None, (
+        f"pooled_candidates_per_mention is {fts['pooled_candidates_per_mention']!r} "
+        "with zero capture groups")
+
+
+# ── ARM-4's two computations, extracted so they can be pinned ────────────────
+# ⛔ Why these tests exist: the round-2 B3 fix (the numerator must be computed
+# over the POPULATION the denominator names, not over the variant sample) and the
+# ARM-4 pair-completeness numerator (`in_mk_block`) had NO test that reds if
+# either regresses. The only pre-existing `reduction_ratio` assertion is
+# `test_a_degenerate_run_publishes_None_not_a_zero_figure`, whose one-name
+# population returns `None` before any pair set is formed, and everything else
+# reads the committed artifact's numbers back instead of the computation.
+
+
+def test_the_blocked_pair_set_is_computed_over_the_whole_population(tool_mod):
+    """`_blocked_pair_set` covers EVERY row it is given, not a sample of them.
+
+    ⛔ MEASURED before the extraction: narrowing the loop to the 300-row variant
+    sample (`for _row in sample:`) instead of the population published a
+    reduction ratio ~3x cheaper than the quantity its own definition names
+    (`#12295` round-2 B3), and NOTHING red. A 4-member fixture pins the property
+    without a graph: the expectation is recomputed here from `index.candidates`,
+    so a `_blocked_pair_set` that looks at a SAMPLE of its rows cannot match it.
+    """
+    from tortoise.entity_blocking import BlockIndex
+
+    #: `o0` is unrelated to everything, so it contributes no pair. That is
+    #: load-bearing: it makes "the pairs proposed by the whole population" differ
+    #: from "the pairs proposed by rows[:1]" (which is empty), so a function that
+    #: silently narrowed to a sample reds on the equality below.
+    names = ["zebra quux", "the project alpha", "project alpha zeta",
+             "configuration guide"]
+    rows = [{"id": f"o{i}", "name": name} for i, name in enumerate(names)]
+    index = BlockIndex.from_rows([dict(row, label="Object") for row in rows])
+
+    expected: set[frozenset[str]] = set()
+    for row in rows:
+        for cid in index.candidates(row["name"], label="Object"):
+            if cid != row["id"]:                   # a self-hit is not a pair
+                expected.add(frozenset((row["id"], cid)))
+
+    got = tool_mod._blocked_pair_set(index, rows)
+    assert expected, (
+        "the fixture proposes NO pair, so this test could not discriminate a "
+        "sample-restricted numerator — re-pick the names")
+    assert got == expected, (
+        f"the blocked pair set is {sorted(map(sorted, got))!r}, expected "
+        f"{sorted(map(sorted, expected))!r} from index.candidates over ALL "
+        f"{len(rows)} rows — computing it over a sample reds here")
+    #: …and the sample-only computation is genuinely different, so the equality
+    #: above is not satisfiable by a `rows[:1]`-style denominator.
+    assert got != tool_mod._blocked_pair_set(index, rows[:1]), (
+        "a one-member subset proposes the same pair set as the whole population — "
+        "the fixture cannot detect a sample-restricted numerator")
+
+
+def test_in_block_is_true_only_for_a_canonical_the_blocker_reaches(tool_mod):
+    """`_in_block` is the ARM-4 numerator: TRUE for the indexed canonical, FALSE
+    for a name sharing no key.
+
+    ⛔ A hardcoded `True` (or a `return member_id in blocked_ids` where
+    `blocked_ids` is the mention's own id list built wrongly) would credit every
+    pair as reachable and publish a pair completeness of 1.0 that no blocker
+    produced. Pinned from BOTH directions, so neither arm can be faked.
+    """
+    from tortoise.entity_blocking import BlockIndex
+
+    index = BlockIndex.from_rows([
+        {"id": "o1", "name": "the project alpha", "label": "Object"},
+        {"id": "o2", "name": "configuration guide", "label": "Object"},
+    ])
+    assert tool_mod._in_block(index, "o1", "project alpha") is True, (
+        "the blocker did not propose the indexed canonical for a word-order "
+        "variant of its name — a `False` here would under-report pair "
+        "completeness, and a test that only checked the other direction would "
+        "pass on a hardcoded `True`")
+    assert tool_mod._in_block(index, "o1", "zzzz qqqq wwww") is False, (
+        "a mention sharing NO key with the member was reported reachable — a "
+        "`True` here is the hardcoded-`True` regression this test exists for")
+
+
+# ── the two CALL SITES inside `run()` that no test could see ─────────────────
+# ⛔ Why these exist: a 30-mutant battery run against #12304's head found two
+# substitutions in `run()` that left the whole suite GREEN (72 passed). Both
+# helpers are pinned above, and both CALL SITES were invisible — every other
+# `_drive` fixture here uses `--population N --sample N` (so the two arguments
+# to `_blocked_pair_set` are the same list) and an EMPTY fake window (so the two
+# matchers see `[]` and agree on `None`). A helper pinned while its call site is
+# free to pass the wrong corpus is a guard that does not guard.
+
+
+def test_the_reduction_ratio_denominator_is_the_POPULATION_not_the_sample(
+        tool_mod, monkeypatch, tmp_path):
+    """`_mk_pairs` is computed over `pop`, and NOTHING at the call site said so.
+
+    ⛔ MEASURED (mutation battery on #12304): changing
+    `_mk_pairs = _blocked_pair_set(index, pop)` to `(index, sample)` left every
+    test GREEN. `test_the_blocked_pair_set_is_computed_over_the_whole_population`
+    pins only that the HELPER covers every row it is GIVEN, and every other
+    `_drive` fixture below uses `--population N --sample N`, so at the call site
+    the two arguments are the same list and the substitution is invisible. That
+    is the round-2 B3 defect (`#12295`) walking back in with a green suite: the
+    published ratio would be cheaper than the quantity its own denominator
+    (`C(population, 2)`) names.
+
+    The fixture makes the two arguments DIFFERENT: population 4, sample 1. The
+    sampled row (`pop[0]`, "the zzz qqq") shares no block key with the other
+    three, so a numerator taken over the sample is EMPTY — `0.0`, which the run
+    must never publish for a population whose blocker does propose a pair.
+    """
+    from tortoise.entity_blocking import BlockIndex, reduction_ratio
+
+    #: Rows 1 and 2 are one fold-equal pair (separator + article), so the FULL
+    #: population proposes exactly one pair while row 0 proposes none. That
+    #: asymmetry is load-bearing: it is what makes the sample-only numerator 0.0
+    #: and the population numerator non-zero.
+    pop_names = ["the zzz qqq", "the rail one", "the railone", "the gamma delta"]
+    pop = [{"cls": "definite", "name": n} for n in pop_names]
+
+    rc, out = _drive(tool_mod, monkeypatch, tmp_path,
+                     stored_names=pop_names,
+                     trace_maker=lambda: {"leg": "vector", "ran": True,
+                                          "degraded": False},
+                     pop=pop,
+                     argv=["--population", "4", "--sample", "1",
+                           "--captures", "2", "--out", str(tmp_path / "artifact.json")])
+    assert rc == 0, f"a 4-name population sampled at 1 was refused (rc={rc})"
+    assert out.exists(), "the run published no artifact to read the ratio from"
+
+    mk = json.loads(out.read_text())["arms"]["blocking"]["multikey"]
+    rr = mk["reduction_ratio"]
+
+    #: The defined quantity, recomputed HERE from `BlockIndex` — not read back
+    #: from the tool. `run()` mints the ids, so the same scheme is minted here.
+    rows = [{"id": f"obj-11901{i:06d}", "name": n} for i, n in enumerate(pop_names)]
+    index = BlockIndex.from_rows([dict(row, label="Object") for row in rows])
+    pairs: set[frozenset[str]] = set()
+    for row in rows:
+        for cid in index.candidates(row["name"], label="Object"):
+            if cid != row["id"]:                   # a self-hit is not a pair
+                pairs.add(frozenset((row["id"], cid)))
+    assert pairs, (
+        "the fixture population proposes NO pair, so it cannot discriminate a "
+        "sample-restricted numerator — re-pick the names")
+    expected = round(reduction_ratio(pairs, len(pop)), 4)
+
+    assert rr is not None and rr != 0.0, (
+        f"reduction_ratio is {rr!r} on a 4-name population sampled at 1 — over ONE "
+        "row of a population whose blocker proposes a pair it can only be 0.0/None, "
+        "so this is the sample substituted for the population at the call site")
+    assert rr == expected, (
+        f"reduction_ratio is {rr!r}, but the quantity its own denominator "
+        f"(`C({len(pop)}, 2)`) names is {expected!r} — recomputed from "
+        f"BlockIndex over the same {len(pop)}-row population")
+
+
+def test_the_frozen_norm_only_control_does_not_use_the_folded_rung(
+        tool_mod, monkeypatch, tmp_path):
+    """`attached_norm_only` must be the FROZEN pre-#12295 arm, not the shipped one.
+
+    ⛔ MEASURED (mutation battery on #12304): replacing
+    `legacy = _norm_only_match(rows, surface, "core:other")` with the LIVE matcher
+    (`_find_existing_entity(...)[0]`) left every test GREEN. Nothing pinned that
+    the "before" of this PR's before/after is actually the before — so the whole
+    control could be silently replaced by the treatment and the artifact would
+    still report a comparison: the change measured against itself.
+
+    The fixture is a surface the folded rung BINDS and `_norm` cannot: the stored
+    name is `"the plan doc"` and `variants()` proposes the article-drop surface
+    `"plan doc"`, which `#12295`'s comparison-side fold resolves (`mode ==
+    "folded"`) while `_norm` equality misses. So at k=3 the SHIPPED arm must
+    count it and the FROZEN arm must not.
+
+    ⛔ The fixture reaches the window: `window_returns_stored=True` makes the fake
+    leg return the population row, and `in_window >= 1` is asserted below — so
+    `attached == 0` could never be mistaken for "no row arrived", and the two
+    arms are distinguished by the MATCHER rather than by an empty window.
+    """
+    stored = "the plan doc"
+    rc, out = _drive(tool_mod, monkeypatch, tmp_path,
+                     stored_names=[stored],
+                     trace_maker=lambda: {"leg": "vector", "ran": True,
+                                          "degraded": False},
+                     pop=[{"cls": "definite", "name": stored}],
+                     window_returns_stored=True,
+                     argv=["--population", "1", "--sample", "1",
+                           "--captures", "2", "--out", str(tmp_path / "artifact.json")])
+    assert rc == 0, f"a one-name variant run was refused (rc={rc})"
+
+    v3 = json.loads(out.read_text())["arms"]["variant"]["3"]
+    assert v3["in_window"] >= 1, (
+        "the article-drop surface never reached the k=3 window — the fixture "
+        "measured nothing, so the two arms below cannot be distinguished")
+    assert v3["attached"] >= 1, (
+        "the SHIPPED matcher did not bind the article-drop variant through the "
+        "folded rung — this fixture no longer separates the two arms")
+    assert v3["attached_norm_only"] == 0, (
+        f"attached_norm_only is {v3['attached_norm_only']} at k=3: the FROZEN "
+        "pre-#12295 control bound a variant only the folded rung can bind, i.e. "
+        "it is the live matcher — the before/after this artifact publishes would "
+        "be the change measured against itself")
+
+
+def test_the_frozen_norm_only_control_can_actually_match(tool_mod):
+    """The frozen control must BIND by `_norm`, not merely abstain.
+
+    ⛔ MEASURED (#12304, dead arm): `_norm_only_match` used to be NESTED inside
+    `run()`, and the only thing pinning it was
+    `test_the_frozen_norm_only_control_does_not_use_the_folded_rung`'s
+    `attached_norm_only == 0`. That value is **entailed by the harness
+    invariant** — every surface `variants()` generates is `_norm`-different from
+    its stored name, by construction — so the assertion is satisfied by a
+    function that can never match anything. Replacing the entire body with
+    `return None` left **74 passed**: an inert arm and the faithful frozen
+    control were observationally identical, and the "before" half of this PR's
+    before/after could have been a stub with every published number unchanged.
+
+    So this pins the function DIRECTLY (extracted to module scope), in BOTH
+    directions: a `_norm`-equal row BINDS (identity by `id`), and the two
+    surface families only the #12295 FOLD reaches — separator/case variant and
+    article drop — are REFUSED. The kind arms are pinned too: an exact-kind hit
+    outranks a bare-kind hit (the bare carrier is listed FIRST, so returning
+    `rows[0]` fails here), and two bare-kind carriers are ambiguous.
+
+    No graph, no `_drive`: this is the control's own contract, not the arm.
+    """
+    stored = {"id": "obj-1", "name": "the plan doc", "kind": "core:other"}
+
+    # 1. It BINDS. `_norm` equality (case + whitespace collapse) is the arm, so
+    #    a merely re-spaced/re-cased surface must still find the row.
+    hit = tool_mod._norm_only_match([stored], "the plan doc", "core:other")
+    assert hit is not None, (
+        "the frozen control did not bind a `_norm`-equal mention of the stored "
+        "name — a control that can never match makes the published "
+        "`attached_norm_only` an artifact of the function being inert")
+    assert hit["id"] == "obj-1", (
+        f"bound the wrong row ({hit!r}) — identity is `id`, not name")
+    spaced = tool_mod._norm_only_match([stored], "The   Plan Doc", "core:other")
+    assert spaced is not None and spaced["id"] == "obj-1", (
+        "a case/whitespace variant of the stored name is `_norm`-equal, so the "
+        "frozen arm must bind it — `None` here means the arm is comparing raw "
+        "strings and is not the pre-#12295 phase 1 it claims to be")
+
+    # 2. It REFUSES what only the FOLD folds. These are the #12295 classes: a
+    #    comparison-side fold binds both, `_norm` binds neither.
+    hyphen = tool_mod._norm_only_match([stored], "The  Plan-Doc", "core:other")
+    assert hyphen is None, (
+        f"the frozen pre-#12295 control bound the separator variant "
+        f"({hyphen!r}) — `_norm` does not fold `-`, so this arm includes "
+        "#12295's rung and the before/after is the change against itself")
+    article = tool_mod._norm_only_match([stored], "plan doc", "core:other")
+    assert article is None, (
+        f"the frozen pre-#12295 control bound the article-drop variant "
+        f"({article!r}) — dropping `the` is the folded rung, not phase 1")
+
+    # 3. It honours its kind arms. The bare-kind carrier is FIRST in the list so
+    #    a `rows[0]` stub is not mistaken for a kind-aware match.
+    bare = {"id": "obj-bare", "name": "the plan doc", "kind": "doc:other"}
+    exact = {"id": "obj-exact", "name": "the plan doc", "kind": "core:other"}
+    won = tool_mod._norm_only_match([bare, exact], "the plan doc", "core:other")
+    assert won is not None and won["id"] == "obj-exact", (
+        f"the exact-kind hit did not outrank the bare-kind carrier ({won!r}) — "
+        "phase 1 tries exact kind BEFORE bare kind, and a bare-first reply "
+        "would attach across kinds")
+    # …and the bare arm is `_norm`-keyed too: ONE bare-kind carrier is the
+    # positive side of the ambiguity rule, so it must bind a re-spaced surface.
+    # ⛔ Without this, making the bare arm compare RAW names leaves every
+    # assertion above green (measured on this fixture) — the same dead-arm class
+    # this test exists to close, one arm down.
+    lone = tool_mod._norm_only_match([bare], "The  Plan Doc", "core:other")
+    assert lone is not None and lone["id"] == "obj-bare", (
+        f"a single bare-kind carrier did not bind a `_norm`-equal surface "
+        f"({lone!r}) — the bare-kind arm is comparing raw strings, so the "
+        "frozen control's second arm is unpinned")
+    ambiguous = tool_mod._norm_only_match(
+        [bare, {"id": "obj-bare-2", "name": "the plan doc", "kind": "other"}],
+        "the plan doc", "core:other")
+    assert ambiguous is None, (
+        f"two bare-kind carriers returned {ambiguous!r} — phase 1 is ambiguous "
+        "on a bare-kind collision and must abstain rather than pick one")
 
 # ── #12297 residual 1: the LEXICAL BASELINE CONTROL ──────────────────────────
 #

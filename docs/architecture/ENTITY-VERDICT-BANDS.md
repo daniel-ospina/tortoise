@@ -185,7 +185,7 @@ still a dedup candidate. Two reasons it is not a verdict value here:
 2. ⛔ **Writing `dedup_reviewed='link'` is worse than inert — it silently
    DEQUEUES.** The write is one call (`sdk.update_entity` → `_update_entity`'s `SET n
    += $props`), but the content review queue filters `dedup_reviewed IS NULL`
-   (`sdk.py:24507`), so any non-NULL value removes the row from review with
+   (`sdk.py:24856`), so any non-NULL value removes the row from review with
    **no verdict applied**. A `link` band that shipped only its writer would delete
    a review nobody counts.
 
@@ -276,7 +276,8 @@ is evaluable here; the targeted form is honoured by the merge verb
 
 **Phase 1 applies `target_retired` only.** It binds on an exactly-equal folded
 name+kind *or* on a spelling the survivor's `aliases[]` already records
-(`mode: "alias"`), and on that alias path the three SPELLING vetoes are stood
+(`mode: "alias"`), and — since `#12295` — on a folded-key equality as its LAST two
+rungs (`mode: "folded"` / `"folded_bare"`). On that alias path the three SPELLING vetoes are stood
 down on purpose: `aliases[]` is the reviewer's record that these two are one
 entity, and `kind_conflict` in particular would fire on the retired variant's kind
 namespace (`extractor_v2.py` passes `mention_is_alias` when `mode == "alias"`
@@ -286,11 +287,13 @@ On the exact/bare rungs the
 spellings are `_norm`-equal and the kind already matched, so none of the three can
 fire there either. ⛔ That `_norm` equality is #11901's decision, not an oversight:
 a surface variant (article, separator, punctuation) is deliberately INVISIBLE to
-phase 1, because the candidate-recall harness measures the fallback's contribution
-from exactly that gap (`test_the_matcher_is_exact_norm_equality_plus_kind` pins it).
-Widening the name comparison to the fold would make the variant bind deterministically
-here — a round-6 review proposed it — but it CONTRADICTS that recorded conclusion, so
-it is refused; the variant's home is the write door's fold
+**the NAME and ALIAS arms**, because the candidate-recall harness measures the
+fallback's contribution from exactly that gap (`test_the_matcher_is_norm_exact_AND_gains_the_folded_rung_12295` pins it).
+⛔ The fold is NOT refused as a wider comparison of THESE arms — #12295 ships it as the LAST rung
+(`_find_by_folded_key`), after every name and alias arm has declined, so the variant still binds
+only when nothing more exact claims it. What stays refused is widening the NAME arms themselves: a
+round-6 review proposed that, and it CONTRADICTS the recorded #11901 conclusion; the variant's own
+home is the write door's fold
 (`entity_identity.resolve_or_mint`). What phase 1 never skips is `retired` — D-1's second door. `group_join` is
 deliberately NOT applied in phase 1: an exactly-equal spelling, or one the merge
 recorded as an alias, is the strongest evidence the tree has, and the merge

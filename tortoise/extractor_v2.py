@@ -6190,6 +6190,49 @@ def _find_existing_entity(entities: list[dict], name: str, kind: str) -> tuple[d
     `normalize_entity_name` fold, which is what `apply_entity_merge` wrote them
     with; the mode is reported as ``alias`` so a record never claims an exact
     name match that did not happen.
+
+    ⛔ #12295 — THE FOLDED RUNG, and why it is a SECOND arm rather than a
+    replacement. ``_norm`` (cited by SYMBOL, not line — it was ``:4232`` before
+    #12348's insertion and a line cite had already rotted once) is whitespace
+    collapse + lowercase only;
+    it is byte-identical to Zep's ``_normalize_string_exact``
+    (``dedup_helpers.py``), i.e. the exact rung of the field's ladder. `#11901`
+    measured what that costs: **0 of 419 real surface variants attach at every
+    ``k`` in both retrieval modes**, while 62 % of them are already INSIDE the
+    window — so the loss is in the comparison, not in the retrieval or the
+    width.
+
+    The folded arm compares :func:`tortoise.entity_blocking.key_of`, which is
+    ``entity_resolver.normalize_entity_name`` — the key every write door already
+    stores as ``canonical_name`` since `#12047` (cited by SYMBOL, the rule in
+    ``entity_blocking.py``: ``sdk.SDK._create_entity``'s funnel fill, ``api``'s
+    ``add_subject``/``add_object`` name arms, ``sdk.SDK._update_entity``'s
+    real-rename stamp; ``projection/entities.py``: Objects ON CREATE at
+    ``:5094``). It differs from ``_norm``
+    exactly where the measured variant classes live: it drops a leading article
+    and folds every punctuation run to a space, so ``the plan-doc``,
+    ``The Plan Doc`` and ``the plan doc`` share one key.
+
+    ⛔ It is EQUALITY, never a similarity score — no threshold, no second
+    constant (`#2730` §6.7 refused one; a false merge is invisible, a false split
+    is cheap). ⛔ The classes the FOLD cannot decide are the ones the
+    non-injective key is for, and a leading ``#`` is NOT one of them: the fold
+    already absorbs it (``#12295`` and ``12295`` both fold to ``12295``, so that
+    class travels the ordinary ``E`` key — see
+    ``entity_blocking.py``'s `key_of` note). ⛔ The NON-injective classes are
+    both real, and only ONE of them is held by an ambiguity rule: a path
+    BASENAME never decides on THIS path at all (this caller does not pass
+    ``complete=True``, and ``attach_matches`` refuses a basename candidate on
+    anything less than a complete population with exactly one carrier), while the
+    ``E`` FOLD is non-injective, DOES attach alone, and is the class this rung
+    newly binds — ``C++``, ``C#`` and ``C`` all fold to ``c``, so a capture window
+    holding exactly one of them binds the other (measured:
+    ``_find_existing_entity([{"id": "obj-csharp", "name": "C#", "kind": "core:other"}],
+    "C++", "core:other")`` returns ``("obj-csharp", "folded")``; pinned at
+    ``tests/test_12295_entity_blocking.py`` and declared as invariant 3 in
+    ``entity_blocking.py``). Do NOT read this rung as safe-except-basenames.
+    ``name`` is never rewritten; the key is derived for the comparison
+    and discarded.
     """
     norm_name = _norm(name)
     alias_name = normalize_entity_name(name)
@@ -6197,15 +6240,17 @@ def _find_existing_entity(entities: list[dict], name: str, kind: str) -> tuple[d
 
     def _name_hit(e: dict) -> bool:
         # ⛔ `_norm` ONLY — deliberately NOT `normalize_entity_name`. A surface
-        # variant (article, separator, punctuation) is INVISIBLE to phase 1 by
-        # #11901's decision: the candidate-recall harness measures the fallback's
-        # contribution FROM that gap, and its 0% arm is pinned by
-        # `tests/test_candidate_recall_11901.py::test_the_matcher_is_exact_norm_equality_plus_kind`.
-        # Round 6 proposed folding this comparison to make a variant bind
+        # variant (article, separator, punctuation) is INVISIBLE to the NAME arms
+        # by #11901's decision: the candidate-recall harness measures the
+        # fallback's contribution FROM that gap, and its 0% arm is pinned by
+        # `tests/test_candidate_recall_11901.py::test_the_matcher_is_norm_exact_AND_gains_the_folded_rung_12295`.
+        # ⛔ #12295 does NOT widen this comparison — the fold arrives as the LAST
+        # rung, in `_find_by_folded_key`, AFTER every name and alias arm has
+        # declined. Round 6 proposed folding THESE arms to make a variant bind
         # deterministically here; that CONTRADICTS the recorded #11901 conclusion,
-        # so it is refused and recorded rather than adopted. The variant's home is
-        # the write door's fold (`entity_identity.resolve_or_mint`), which folds on
-        # `canonical_name`, so no duplicate node is created.
+        # so it is still refused and recorded rather than adopted. The variant's
+        # home is the write door's fold (`entity_identity.resolve_or_mint`), which
+        # folds on `canonical_name`, so no duplicate node is created.
         return _norm(e.get("name", "")) == norm_name
 
     def _alias_hit(e: dict) -> bool:
@@ -6275,6 +6320,47 @@ def _find_existing_entity(entities: list[dict], name: str, kind: str) -> tuple[d
     if len(aliased_any) == 1:
         return aliased_any[0], "alias"
     if len(aliased_any) > 1:
+        return None, "ambiguous"
+    return _find_by_folded_key(entities, name, kind_folded, bare)
+
+
+def _find_by_folded_key(entities: list[dict], name: str, kind_folded: str,
+                        bare: str) -> tuple[dict | None, str]:
+    """#12295: the comparison-side fold, tried only after the exact arms miss.
+
+    Two arms, mirroring the two above (kind-preserved, then bare-kind):
+
+    * ``folded``     — one candidate folds to the mention's key, same kind;
+    * ``folded_bare`` — same, across namespace-folded kinds, only when unique;
+    * ``ambiguous``  — the fold collides **within one arm**: two of the same kind
+      (``folded``), or two of the same namespace-folded kind (``folded_bare``).
+      The two callers differ, and both are deliberate: ``resolve_entities`` HOLDS
+      it (an unresolved identity is never asserted ``new`` — §4.4 I1, ``#11653``);
+      the capture create path persists it under the EXPLICIT kind and warns. Neither
+      guesses which of the colliding carriers was meant.
+
+    The non-injective keys are checked in ``entity_blocking.attach_matches``,
+    which refuses to pick between two basename carriers.
+    """
+    from .entity_blocking import attach_matches, key_of
+
+    if not key_of(name):
+        return None, "none"
+    ranked = attach_matches(name, entities)
+    if not ranked:
+        return None, "none"
+    by_id = {str(e.get("id") or ""): e for e in entities}
+    hits = [by_id[m["id"]] for m in ranked if m["id"] in by_id]
+    same_kind = [e for e in hits
+                 if str(e.get("kind", "")).strip().lower() == kind_folded]
+    if len(same_kind) == 1:
+        return same_kind[0], "folded"
+    if len(same_kind) > 1:
+        return None, "ambiguous"
+    same_bare = [e for e in hits if _norm_kind(e.get("kind", "")) == bare]
+    if len(same_bare) == 1:
+        return same_bare[0], "folded_bare"
+    if len(same_bare) > 1:
         return None, "ambiguous"
     return None, "none"
 
@@ -6513,9 +6599,12 @@ def resolve_entities(entity_refs: list[dict], search: dict,
 
     Phase 1 (deterministic): ``_find_existing_entity`` for every ref — no model
     call. Its ladder is exact-kind NAME → bare-kind NAME → exact-kind ALIAS →
-    bare-kind ALIAS → kind-agnostic ALIAS (each alias rung unique-or-ambiguous;
-    name always outranks alias), so a spelling the merge RECORDED in a survivor's
-    ``aliases[]`` binds here, with ``mode: "alias"``.
+    bare-kind ALIAS → kind-agnostic ALIAS → folded → folded_bare → ``ambiguous``:
+    each alias rung is unique-or-ambiguous and NAME always outranks ALIAS (a
+    spelling the merge RECORDED in a survivor's ``aliases[]`` therefore binds
+    here, with ``mode: "alias"`` — `#12296`), and the two folded arms are the
+    `#12295` comparison-side key (`mode: "folded"` / `"folded_bare"`), tried
+    LAST because the non-injective fold is the widest net on the ladder.
     Phase 2 (LLM fallback): fires ONLY when ``model`` is set AND the search
     has entity candidates AND >=1 ref is unmatched/ambiguous. ONE
     ``_complete`` call (existing 600s wall-clock bound; temperature 0.0 via
@@ -11002,7 +11091,8 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         else:
             if match_mode == "ambiguous":
                 warnings.append(f"entity '{name[:60]}' kind '{kind}' is ambiguous "
-                                "across namespaces in the existing graph — "
+                                "in the existing graph (two or more candidates "
+                                "matched its normalised name or kind namespace) — "
                                 "created with the explicit kind (link-before-"
                                 "create cannot disambiguate)")
             link_before_create.append(_failure_policy.created_record(
