@@ -94,12 +94,19 @@ NAIVE_RETURNING = {
 
 
 class _FakeCursor:
-    def __init__(self, value):
+    def __init__(self, value, fail_on: str | None = None):
         self.value = value
+        #: Raise on the statement whose SQL contains this token — the seam a
+        #: fault test needs (`ROLLBACK TO SAVEPOINT` must still be issued
+        #: AFTER the failing statement, so the double cannot simply refuse
+        #: everything).
+        self.fail_on = fail_on
         self.calls = []
 
-    def execute(self, sql, params):
+    def execute(self, sql, params=None):
         self.calls.append((sql, params))
+        if self.fail_on and self.fail_on in sql:
+            raise RuntimeError(f"fixture fault: {self.fail_on}")
 
     def fetchone(self):
         return (self.value,)
@@ -112,11 +119,32 @@ class _FakeCursor:
 
 
 class _FakeConn:
-    def __init__(self, value):
-        self.cur = _FakeCursor(value)
+    """A connection in AUTOCOMMIT — the audit/read shape.
+
+    Deliberately `autocommit = True`: a failure cannot poison a transaction no
+    one owns, so the meter takes no savepoint here. `_TxFakeConn` below models
+    the WRITE path, where the caller owns the transaction and the savepoint is
+    load-bearing.
+    """
+
+    autocommit = True
+
+    def __init__(self, value, fail_on: str | None = None):
+        self.cur = _FakeCursor(value, fail_on=fail_on)
 
     def cursor(self):
         return self.cur
+
+
+class _TxFakeConn(_FakeConn):
+    """A connection in a CALLER-OWNED transaction (`autocommit = False`).
+
+    This is the shape `record_writer._default_connect` really hands the meter
+    (it deliberately never turns autocommit on), so a failure here would abort
+    the write's transaction and its `commit()` would silently ROLL BACK.
+    """
+
+    autocommit = False
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -246,6 +274,63 @@ def test_measure_written_rows_is_TOTAL():
 
     assert measure_written_rows(Boom(None), org_id="o", graph_id="g",
                                 seqs=[1]) is None
+
+
+def test_the_meter_runs_under_a_savepoint_inside_a_caller_transaction():
+    """The meter must not be able to ABORT the transaction it measures (#12762).
+
+    `main` at `9e934efad5` was red because swallowing the exception was not
+    enough: a failed statement leaves the caller's transaction ABORTED, so the
+    write's own `commit()` becomes a ROLLBACK and every record row disappears
+    while the door reports `APPLIED`. MEASURED on PG16: 0 rows committed
+    without the savepoint, 1 with it.
+
+    The order is the mechanism, so the order is what is asserted: SAVEPOINT,
+    then the read, then RELEASE. A `try` around a bare read leaves the
+    transaction poisoned no matter what it returns.
+    """
+    conn = _TxFakeConn(json.dumps(STORED_VECTOR))
+    written = measure_written_rows(conn, org_id="o", graph_id="g", seqs=[1, 2])
+
+    assert written is not None and written.row_bytes == 7_241
+    verbs = [str(sql).strip().upper() for sql, _ in conn.cur.calls]
+    assert len(verbs) == 3, verbs
+    assert verbs[0].startswith("SAVEPOINT "), (
+        "the meter read a caller-owned transaction without a savepoint, so a "
+        f"failed read would abort it: {verbs}")
+    assert ROWS_RPC in verbs[1].lower(), verbs
+    assert verbs[2].startswith("RELEASE SAVEPOINT "), verbs
+
+
+def test_a_failed_measure_rolls_BACK_TO_ITS_SAVEPOINT_so_the_write_survives():
+    """A failed read is undone LOCALLY — the caller's rows still commit.
+
+    This is the data-loss falsifier at the seam: the assertion is not "the
+    failure is caught" (it always was — that is what made the loss silent) but
+    "`ROLLBACK TO SAVEPOINT` was issued", because that is the only statement
+    that returns an ABORTED transaction to a usable one.
+    """
+    conn = _TxFakeConn(None, fail_on=ROWS_RPC)
+    assert measure_written_rows(
+        conn, org_id="o", graph_id="g", seqs=[1]) is None
+
+    verbs = [str(sql).strip().upper() for sql, _ in conn.cur.calls]
+    assert verbs[0].startswith("SAVEPOINT "), verbs
+    assert any(v.startswith("ROLLBACK TO SAVEPOINT ") for v in verbs), (
+        "the failed read was swallowed without rolling back to its savepoint, "
+        "so the caller's transaction is left ABORTED and its commit() becomes "
+        f"a ROLLBACK — the record write is lost silently: {verbs}")
+    assert verbs[-1].startswith("RELEASE SAVEPOINT "), verbs
+
+
+def test_an_autocommit_connection_is_not_wrapped_in_a_savepoint():
+    """Nothing to protect: under autocommit each statement is its own txn."""
+    conn = _FakeConn(json.dumps(STORED_VECTOR))
+    assert measure_written_rows(
+        conn, org_id="o", graph_id="g", seqs=[1]) is not None
+    verbs = [str(sql).strip().upper() for sql, _ in conn.cur.calls]
+    assert not any(v.startswith("SAVEPOINT") for v in verbs), (
+        f"an autocommit connection was given a savepoint: {verbs}")
 
 
 def test_chunk_detail_unavailable_is_NULL_never_zero():

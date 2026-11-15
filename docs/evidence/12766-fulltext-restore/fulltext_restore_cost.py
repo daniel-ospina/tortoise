@@ -78,7 +78,13 @@ INDEX_READY_BOUND_S = 1800.0
 #: LIST-valued ``search_keys`` is NOT indexed by FalkorDB's fulltext index, so writing a
 #: list would produce an index populated with half the text and a run that understates
 #: the thing it claims to measure.
-_WORDS = ["the", "river", "audit", "found", "three", "discrepancies", "in", "the", "ledger", "and", "the", "custodian", "agreed", "to", "reconcile", "them", "before", "the", "quarter", "closed", "while", "the", "board", "reviewed", "the", "schedule", "of", "payments", "and", "the", "auditor", "noted", "that", "the", "evidence", "was", "consistent", "with", "the", "claim"]
+_WORDS = [
+    "the", "river", "audit", "found", "three", "discrepancies", "in", "the",
+    "ledger", "and", "the", "custodian", "agreed", "to", "reconcile", "them",
+    "before", "the", "quarter", "closed", "while", "the", "board", "reviewed",
+    "the", "schedule", "of", "payments", "and", "the", "auditor", "noted",
+    "that", "the", "evidence", "was", "consistent", "with", "the", "claim",
+]
 SEARCH_KEY_TOKENS = 4
 BATCH = 500
 
@@ -229,7 +235,7 @@ def create_index(client, graph, kind):
         try:
             _rows(client, graph, form)
             return form
-        except Exception as exc:
+        except Exception as exc:  # the fallback IS the point
             errors.append(f"{form}: {exc}")
     raise RuntimeError(f"no supported {kind} index creation form: " + "; ".join(errors))
 
@@ -470,6 +476,10 @@ def engine_header(client):
         if isinstance(module, dict):
             tokens = list(module.items())
         else:
+            # strict=False keeps the harness's existing reading: a RESP2 `MODULE LIST`
+            # reply is a flat name/value array, so the two slices are equal by
+            # construction and `strict=True` would add a new failure mode to a
+            # measurement path rather than describe the one it already has.
             tokens = list(zip(
                 [module[i] for i in range(0, len(module), 2)],
                 [module[i] for i in range(1, len(module), 2)],
