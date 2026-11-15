@@ -16,13 +16,15 @@ governingAgreement: "#11824"
 
 This is the **target model** for how anything in the graph that has a state says where it is. It states what we want, not what is built. It contains no migration, no changelog and no implementation plan — those are separate documents.
 
-**Issue of record:** #11824 · **Supersedes the design of:** §4.3 Object status, §5 Point status, `goalState` (§4.3), pack `statuses`/`folds` (§9), pipeline stages.
+**Issue of record:** #11824 · **Supersedes the design of:** §4.2 Subject status, §4.3 Object status, §5 Point status, `goalState` (§4.3), pack `statuses`/`folds` (§9), pipeline stages.
+
+> **OVERRIDES:** the extractor's recorded removal-from-recall target (`EXTRACTOR-V4-ARCHITECTURE.md:1084`, 2026-10-26: a journaled `restatus` to **`archived`**) and the `archived` word in `SUBJECT_STATUS_VALUES` (`commit_ops.py:123-124`) — this model ends a thing with no successor by `deprecated`, and makes filing-away a visibility **flag** rather than a lifecycle word, because a word that means both *ended* and *hidden from a view* is the collision §2 exists to remove. That decision is reopened here, on #11824, and not adopted quietly.
 
 ---
 
 ## 1. The problem in one paragraph
 
-Today "status" answers at least three unrelated questions at once. One word can mean *does this claim still count as a belief*, or *what state is this customer record in*, or *did this goal work out*. Because the word is shared, the meaning is not: the list of words lives in one place, and the rule for what "finished" means lives somewhere else — in hardcoded lists that only contain built-in words. There are **at least eight** such lists (`live.py`, `commit_ops.py`, `assembly.py`, `sdk.py`), four of them of sizes 1/5/4/2 and the rest differing from those in content. So anything with a word outside a given list is **treated as current by everything that reads that list**, which is the same as saying it never ends. Nine declarations across our packs use thirty words; one of them is in the built-in list.
+Today "status" answers at least three unrelated questions at once. One word can mean *does this claim still count as a belief*, or *what state is this customer record in*, or *did this goal work out*. Because the word is shared, the meaning is not: the **words** are declared per-kind and per-pack — which is correct, and a single shared list is foreclosed (`commit_ops.py`: "a shared `OBJECT_STATUS_VALUES` would refuse real words and narrow the door") — while the **rule** for what "finished" means is duplicated across the codebase. There are **at least eight** such lists (`live.py`, `commit_ops.py`, `assembly.py`, `sdk.py`), four of them of sizes 1/5/4/2 and the rest differing from those in content. So anything with a word outside a given list is **treated as current by everything that reads that list**, which is the same as saying it never ends. Nine declarations across our packs use thirty words; one of them is in the built-in list.
 
 ---
 
@@ -75,7 +77,7 @@ A *verb* is what someone does; a *word* is what the record then says. Several ve
 | verb | resulting word |
 |---|---|
 | promote | `live` |
-| retire, withdraw, archive, retract, reject, invalidate | `deprecated` |
+| retire, withdraw, retract, reject, invalidate | `deprecated` |
 | replace, supersede, correct | `superseded` (successor named) |
 
 This is why the current five extra words are not needed — `retracted`, `outdated`, `archived`, `in_progress`, `completed`: each of them is a verb's name leaking into the state vocabulary. Keeping verbs separate from states means a new verb never grows the vocabulary. `deprecated` is the one word in the base set that is not a removal: it is already declared for Objects and Subjects and already read for legacy Points, so promoting it introduces no word. (A family's **read delta**, §6, may still *retain* one of these as a word its readers must treat as ended — what is removed is its standing as a **write** word a verb can produce.)
@@ -149,11 +151,13 @@ This is what makes the model customisable without becoming a configuration langu
 | `pipelineOutcome` | same | the `outcome` of the terminal stage reached | the same write that moves into a terminal stage |
 | `goalState` | goals | `met` · `unmet` · `blocked` · `abandoned` · `active` · `guideline` · `superseded` | the goal's own writer (unchanged) |
 
-`supersededBy`/`supersededAt` are not a fourth kind of state — they are what the `status` word obliges you to record. They bind to **`status`**, not to `goalState`: a goal whose `goalState` is `superseded` records its successor on its `status` (a goal is an Object, and the carriers are gated to Object and Subject — `sdk.py`'s `_LIFECYCLE_CARRIER_LABELS`), which is also what the reader rule in §6 consults. The three state fields are `status`, `pipelineStage` (with its `outcome`) and `goalState`.
+`supersededBy`/`supersededAt` are not a fourth kind of state — they are what the `status` word obliges you to record. They bind to **`status`**, not to `goalState`, because a goal is an Object and the carriers are gated to Object and Subject (`sdk.py`'s `_LIFECYCLE_CARRIER_LABELS`) — and `sdk.py` refuses a carrier write unless the same write sets `status='superseded'`. The three state fields are `status`, `pipelineStage` (with its `outcome`) and `goalState`.
+
+**A goal that retires crosses both axes in one write.** `superseded` and `abandoned` are the two `goalState` words that mean the goal is no longer a pursued commitment (`derived_invalidation.RETIRED_GOAL_STATES`); the other five describe a *live* commitment. So a goal that retires also sets `status` in the same write — `superseded`, naming its successor, or `deprecated` where there is none. The axes stay independent for the other five words, and the coupling runs in one direction only: `goalState` never reads `status` back.
 
 `superseded` is the one word that carries the same meaning on two axes, and that is correct rather than a collision: on both, it means *replaced by a named successor*. What differs is **what** was replaced — a claim, or a commitment — and saying which is the axis's job. If the two ever come to mean different things, that is when one of them must be renamed.
 
-`blocked` is one of the words that appears more than once, and it is not the `superseded` case: as a `goalState` value it is a *recorded fact about achievement*, while as a stage name it is only a label on a `suspended`-slot stage. `active` likewise names both a slot **role** and a `goalState` value. Neither collides, because **slot ids are their own namespace**: a reader resolves a stage by its slot (§4.1) and a goal's achievement by `goalState`, and nothing reads a stage's *name*. Only a **value on two axes** (`superseded`) needs the explanation above.
+`blocked` and `active` are values that appear on two axes as well, and neither is the `superseded` case. `active` names a **slot role** (§4) and a `goalState` value; `blocked` is only ever a stage *name* and a `goalState` value. They cannot collide because **the slot field is its own namespace**, distinct from stage `id`, `label` and `order`: a reader resolves a stage by its `slot` (§4.1), never by any of the stage's names. `superseded` is the only word whose *meaning* has to be reconciled across two **fields a reader reads**, which is why it is the one that needs the explanation above.
 
 Every field is **optional**. A thing with no `status` reads as `live` — created and current is the ordinary case, and it must not require a write. A thing with no pipeline has no position, and that is not a defect.
 
@@ -162,7 +166,6 @@ Every field is **optional**. A thing with no `status` reads as `live` — create
 ## 6. The one rule every reader follows
 
 This is the whole architecture in one decision. Anything that needs to know "does this still count" asks **one** question, from **two** sources of meaning:
-
 ```mermaid
 flowchart TD
     Q{Does this still count?}
@@ -177,11 +180,13 @@ flowchart TD
 - **Position** answers it too, because a `terminal` slot is an end.
 - Nothing else does. A stage in `active` or `suspended` is never an ending; a missing stage is never an ending.
 
+The question is **"is this still served as current?"**, deliberately not "is this counted as a belief?". Those are different, and `draft` is the difference: it is **current** (not retired — it is served, and a reader renders it) yet **not in force** (inert for belief computation, excluded from EP factor extraction). A reader that needs the second answer asks a second question; no reader is allowed to answer "not current" as a shorthand for "not in force", because that is exactly how a word becomes dead to one surface and alive to another.
+
 There is **one** implementation of this rule, and every reader uses it: search, retrieval, ranking, belief, audit, export. Today at least eight different lists implement it with different contents, which is why a word can be dead to one reader and alive to another.
 
-The rule reads the **base** set plus any **delta** the family declares — it is not one collapsed list. Two families legitimately answer different questions, and #11824 recorded the shape this model must keep: *"one base set plus named, declared deltas"*, because *"collapsing them would be a reopen"*. `commit_ops.py:61-65` says the same — *"Do not unify the two blindly: they answer different questions"* — and `assembly.py`'s resolver narrowing is the live example of a delta: it resolves a **wider** set on purpose (superseded/deprecated/archived Objects must resolve to render their own state), and its own comment warns that re-pointing it at the canonical set stops the current-state question firing. A delta is therefore **declared and named**, never a divergence discovered later.
+The rule reads the **base** set plus any **delta** the family declares — it is not one collapsed list. Two families legitimately answer different questions, and #11824 recorded the shape this model must keep: *"one base set plus named, declared deltas"*, because *"collapsing them would be a reopen"*. `commit_ops.py:61-65` says the same — *"Do not unify the two blindly: they answer different questions"* — and `assembly.py`'s resolver narrowing is the live example: it declares a **narrower** set than the read-surface vocabulary on purpose, so that a superseded/deprecated/archived Object still **resolves** to render its own state, and its own comment warns that re-pointing it at the canonical set is what stops the current-state question firing. A delta is therefore **declared and named**, never a divergence discovered later.
 
-A delta is a **read-side** declaration: which words a family's readers must treat as no longer current. It **never adds a lifecycle word** — the write vocabulary stays one closed set of four (§3), so a delta cannot mint a state no verb can produce.
+A delta is a **read-side** declaration: the set of words a family's readers treat as **ended**. It may **widen** the base (adding a legacy word its stored data still contains) or **narrow** it (withholding a base ending from a particular reader, as the resolver does) — the direction is part of the declaration, not an accident of it. It **never adds a write word**: the write vocabulary stays one closed set of four (§3), so a delta cannot mint a state no verb can produce.
 
 ---
 
@@ -206,7 +211,7 @@ These are recorded decisions, not preferences. The model above is designed to si
 | requirement | source | how this model respects it |
 |---|---|---|
 | **An event has no lifecycle.** An event is a dated fact; a later event does not rewrite an earlier one. | #11825 / #12108 | Events take no lifecycle word. If an event must be withdrawn, that is a claim about it, not a state on it. |
-| **Achievement is its own axis.** Goal outcome is not promotion. | #7856 | `goalState` stays separate, with its own closed set, and nothing reconciles it into `status`. |
+| **Achievement is its own axis.** Goal outcome is not promotion. | #7856 | `goalState` keeps its own closed set; it is never derived from `status`. The coupling runs one way only, for the two retirement words — a goal that retires also sets `status` in the same write (§5) — because the successor carriers and the reader rule are bound to `status`. |
 | **A pack owns its kind's words.** | #2729; *Foreclosed* in `EXTRACTOR-V4-ARCHITECTURE.md` ("pack lifecycles own their words") | Packs declare stages; the engine never imposes stage names. |
 | **One base set, plus named declared deltas — never one collapsed set.** | #11824's contradiction test; `commit_ops.py:61-65` "Do not unify the two blindly: they answer different questions"; the `assembly.py` resolver narrowing; the Object/Point vocabulary divergence in #3308 / PR #6955 | The four words are the **base** and the only write vocabulary. A family that must answer a different question declares its delta explicitly and names it; a delta is never a quiet divergence, and never a list to be re-pointed at the base. |
 | **The claim family's "no longer counts" flag is load-bearing.** | #2498 | The flag's *effect* is preserved as the `deprecated`/`superseded` words; the mechanism is not removed by fiat. |
