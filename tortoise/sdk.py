@@ -5799,7 +5799,12 @@ def _refuse_bare_lifecycle_carrier(props: dict, *, label: str, surface: str,
     if not carriers:
         return
     status = props.get("status", stored_status)
-    if status == _SUPERSEDED_STATUS:
+    # Base content, for the reason the supersession guard states (#12592
+    # cycle-7): `lifecycle_props_by_rendering` hands back the caller's object, and
+    # a `str` subclass can answer `==` however it likes while the wire renders the
+    # word. Both guards must read the same word the driver writes (#12907).
+    if (str.__str__(status) if isinstance(status, str) else status) \
+            == _SUPERSEDED_STATUS:
         return
     named = ", ".join(f"{key!r} (record column {column!r})"
                      for key, column in carriers)
@@ -5899,8 +5904,17 @@ def _successor_named_by(props: dict) -> bool:
         # record agrees with the row instead of exposing it). `live.py` states the
         # rule for the whole seam — "the VALUE keeps its base content
         # (``str.__str__``)" — and this is the ALLOWANCE side, so it reads the same
-        # way: base content, then the base `strip`.
-        return isinstance(value, str) and bool(str.strip(str.__str__(value)))
+        # way.
+        # ⛔ SO THE TYPE MUST BE EXACT (#12592 cycle-7 P2): reading the base
+        # content is not enough, because the LIVE WIRE is rendered by METHOD
+        # LOOKUPS on the caller's object (`falkordb.helpers.quote_string` calls
+        # `len(v)` and `v.replace`). Measured: ``class Len0(str): __len__ =
+        # lambda s: 0`` and ``class Rep0(str): replace = lambda s, *a, **k: ''``
+        # both render ``'""'`` for content ``'v2'`` while the journal keeps
+        # ``'v2'`` and this predicate answered True — a graph naming nobody with
+        # the record disagreeing. With an exact ``str`` no override can exist, so
+        # the guard, the journal and the wire agree by construction.
+        return type(value) is str and bool(value.strip())
     return False
 
 
@@ -48427,7 +48441,19 @@ class TortoiseSDK:
         if _successor_named_by(props):
             return
         status_value = lifecycle_props_by_rendering(props, {"status"}).get("status")
-        if status_value is not None and status_value != _SUPERSEDED_STATUS:
+        # ⛔ THE WORD IS COMPARED AT ITS BASE CONTENT, never through the caller's
+        # `__eq__`/`__ne__` (#12592 cycle-7 P1). `lifecycle_props_by_rendering`
+        # hands back the CALLER'S OBJECT, and `!=` is a method lookup on it:
+        # measured, ``class Liar(str): __eq__ = lambda s, o: False; __ne__ =
+        # lambda s, o: True`` makes ``Liar('superseded') != 'superseded'`` TRUE
+        # while the wire renders ``"superseded"`` — so the guard returned here as
+        # "moves the row OFF the word" and the write stored exactly the row §4.3
+        # forbids. `tortoise/live.py` states the seam's rule ("the VALUE keeps its
+        # base content"), and the same normalisation is what #12907 pins for the
+        # Point arm, so this is that rule applied to the comparison, once.
+        status_word = (str.__str__(status_value)
+                       if isinstance(status_value, str) else status_value)
+        if status_word is not None and status_word != _SUPERSEDED_STATUS:
             # The call moves the row OFF the word (#12825's coherent lift CLEARS
             # the carriers; a retirement to `archived`/`deprecated` needs none).
             # §4.3's sentence is about the word, not about a clear.
@@ -48451,7 +48477,7 @@ class TortoiseSDK:
         bound: list[str] = []
         nameless: list[str] = []
         dead_seen: str | None = None
-        word_after = (_SUPERSEDED_STATUS if status_value == _SUPERSEDED_STATUS
+        word_after = (_SUPERSEDED_STATUS if status_word == _SUPERSEDED_STATUS
                       else None)      # None -> the row's own stored status stands
         # ⛔ §5 NAMES A POINT'S SUCCESSOR WITH THE EDGE, not (only) with a
         # property: `supersede_point` writes `status='superseded'` + `outdated` +
@@ -49471,10 +49497,12 @@ class TortoiseSDK:
             self._assert_supersession_names_a_successor(
                 id_val, props, _lifecycle_ids)
             # ⛔ THE CARRIER-ONLY CLEAR IS DELIBERATELY OUT OF SCOPE, and this
-            # is a DECISION, not an omission (#12882 review F2, re-pinned in
-            # `tests/test_status_projection.py::
-            # test_a_coherent_un_supersede_lifts_the_row_and_a_status_only_write_cannot`
-            # as "the bare carrier CLEAR is still ACCEPTED on a superseded row and
+            # is a DECISION, not an omission: PR #12882's review F2 re-pinned it,
+            # and THIS branch pins the same behaviour from its own side in
+            # `tests/test_12592_supersede_door.py::
+            # test_a_bare_carrier_clear_stays_ACCEPTED_and_leaves_the_row_dead`
+            # (#12882's own arm of the pin lands with that PR). The ruling reads
+            # "the bare carrier CLEAR is still ACCEPTED on a superseded row and
             # leaves the row TERMINAL: with no status named there is no transition
             # to ask about"). A cycle-2 review proposed refusing it here as the
             # same defect; that would reverse a recorded decision taken by the

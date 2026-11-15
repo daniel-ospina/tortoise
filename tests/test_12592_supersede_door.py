@@ -770,3 +770,59 @@ def test_a_value_that_lies_about_being_blank_does_not_name_a_successor(sdk):
         sdk.update_entity(node, status="superseded", supersededBy=BlankLies(""))
     assert _row(sdk, "Object", node) == [None, None, None], (
         "a refused lie still moved the row")
+
+
+def test_a_status_word_that_lies_about_equality_is_still_the_word(sdk):
+    """The comparison reads the word's BASE content, not the caller's `__eq__`.
+
+    `lifecycle_props_by_rendering` hands back the CALLER'S object, so
+    ``Liar('superseded') != 'superseded'`` — True, once `__ne__` is overridden —
+    made the guard return as "this call moves the row OFF the word" while the wire
+    rendered `"superseded"`: the write stored the word with no successor
+    (measured on the cycle-6 head). The mirror direction was an over-block: the
+    LEGITIMATE `status=Liar('superseded'), supersededBy='v2'` was refused.
+
+    Mutation: compare `status_value` itself (or compare before normalising) ->
+    both halves red.
+    """
+
+    class Liar(str):
+        __eq__ = lambda s, other: False        # noqa: E731 — the lie IS the fixture
+        __ne__ = lambda s, other: True         # noqa: E731
+
+    node = _make(sdk, "Object", "eqliar")
+    with pytest.raises(ValueError, match="no successor"):
+        sdk.update_entity(node, status=Liar("superseded"))
+    assert _row(sdk, "Object", node) == [None, None, None], (
+        "a refused lying word still moved the row")
+
+    # …and the coherent pair through the same object is still admitted.
+    sdk.update_entity(node, status=Liar("superseded"), supersededBy="eqliar-v2")
+    assert _row(sdk, "Object", node)[:2] == ["superseded", "eqliar-v2"]
+
+
+def test_a_value_whose_rendering_blanks_the_wire_is_not_a_name(sdk):
+    """An exact `str` is required: the LIVE wire is rendered by method lookups.
+
+    `falkordb.helpers.quote_string` calls `len(v)` and `v.replace(...)` on the
+    caller's object, so a subclass renders `""` for content `'v2'` while the
+    journal keeps `'v2'`. Measured on the cycle-6 head: admitted, storing
+    `supersededBy=''` in the graph with the record disagreeing.
+
+    Mutation: accept any `isinstance(value, str)` -> both cases red (the call is
+    accepted and the graph names nobody).
+    """
+
+    class Len0(str):
+        __len__ = lambda s: 0                  # noqa: E731
+
+    class Rep0(str):
+        def replace(self, *args, **kwargs):
+            return ""
+
+    for name, value in (("len0", Len0("v2")), ("rep0", Rep0("v2"))):
+        node = _make(sdk, "Object", f"wirelie-{name}")
+        with pytest.raises(ValueError, match="no successor"):
+            sdk.update_entity(node, status="superseded", supersededBy=value)
+        assert _row(sdk, "Object", node) == [None, None, None], (
+            f"a refused {name} value still moved the row")
