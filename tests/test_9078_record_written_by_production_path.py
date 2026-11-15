@@ -2121,24 +2121,38 @@ def _ensure_record_schema(conn) -> None:
 
 
 def _ensure_metering_schema(conn) -> None:
-    """Apply the ledger + the meter, or SKIP when the fixture cannot carry them.
+    """Apply the ledger + the meter; SKIP only when the meter is genuinely absent.
 
-    ⚠️ A SKIP IS NOT A PASS — it is the honest answer to "this database has no
-    meter", which is the fault arm's fixture, not this one's. This leg's
-    subject is a POSITIVE figure from a real `journal_event_bytes_for_rows`;
-    where the function cannot exist there is no positive claim left to make, so
-    nothing is claimed.
+    ⛔ THE SKIP IS GATED ON THE FUNCTION ITSELF, NOT ON THE APPLY SUCCEEDING
+    (#12784 review, measured). The first version skipped whenever an apply raised,
+    and on a REUSED container — the shape `_record_db` explicitly supports, where
+    a previous run already created the ledger — `0014` raises `DuplicateObject` on
+    its own `CREATE POLICY` and the failure was read as "this fixture cannot carry
+    a meter". It could: `journal_event_bytes_for_rows` was already there and the
+    positive leg silently skipped on the one database that could answer it. So the
+    probe decides, and an apply failure is only fatal when the function is absent
+    afterwards.
     """
+    probe = ("SELECT to_regprocedure('public."
+             f"{postgres_bytes.ROWS_RPC}(text,text,bigint[])')")
     with conn.cursor() as cur:
-        cur.execute(_METERING_PREAMBLE)
-        for path in METERING_MIGRATION_FILES:
-            try:
+        cur.execute(probe)
+        if cur.fetchone()[0] is not None:
+            return
+    with conn.cursor() as cur:
+        try:
+            cur.execute(_METERING_PREAMBLE)
+            for path in METERING_MIGRATION_FILES:
                 cur.execute(path.read_text(encoding="utf-8"))
-            except Exception as exc:  # a fixture, and a skip claims nothing
-                conn.rollback()
-                pytest.skip(
-                    f"the metering fixture cannot be applied here "
-                    f"({path.name}): {exc}")
+        except Exception as exc:  # a fixture: the probe below decides, not this
+            conn.rollback()
+            with conn.cursor() as check:
+                check.execute(probe)
+                if check.fetchone()[0] is None:
+                    pytest.skip(
+                        "this database cannot carry the byte meter "
+                        f"({type(exc).__name__}: {exc}) — there is no positive "
+                        "figure to assert without it, and none is claimed")
 
 
 def _seed_tenant(conn, tenant: tuple[str, str]) -> None:
