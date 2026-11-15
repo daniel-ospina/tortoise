@@ -7628,8 +7628,10 @@ _AFFIRMED = re.compile(
 #   "the walk does not visit … (actually it does visit them)"               GREEN -> RED
 # A `;`/`—`-only class leaves BOTH GREEN. ⚠️ What each widening costs, stated
 # honestly rather than as "moves 0 rows" (#11541 review, round 3, F3 CORRECTS the
-# earlier wording: no PRE-EXISTING row moved, but each spelling CLOSES one new
-# false PASS and BUYS one new false block, and both are now rows):
+# earlier wording: no PRE-EXISTING row moved, but each spelling CLOSES at least
+# one new false PASS and BUYS at least one new false block, and both are rows —
+# ⛔ the COMMA buys TWO, as the per-member table below states and as this
+# generalisation contradicted until #11541 review round 5 F4):
 #   closes -> `must_red` "`, actually they are reported`" / "(actually it does …)"
 #   buys   -> `declared_blocks` "comma clause, honest PAUSE" — `the walk,
 #             actually, does not visit …` — and the ASIDE family, which now
@@ -8625,9 +8627,13 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
         # GREEN under the form that ships: the emphasis sits INSIDE the negation's
         # scope, where the refutation starts a new clause. ⚠️ THIS SAID "GREEN under
         # the clause-initial form that ships", which the shipped arm is NOT — the gap
-        # is a bounded subject gap, not a position (#11541 review, F3, P3), and an
-        # emphasis placed AFTER a terminator is now RED, which is why that shape is
-        # a `declared_blocks` row rather than a claim about clause position.
+        # is a bounded subject gap, not a position (#11541 review, F3, P3). ⛔ AN
+        # EMPHASIS PLACED AFTER A TERMINATOR IS **GREEN**, NOT RED, and is the
+        # `must_stay_green` row 13 lines below (#11541 review, round 5 F2 — this
+        # sentence said "now RED, which is why that shape is a `declared_blocks` row",
+        # which round 3's negation guard had already made false when it bought that
+        # price back. Corrected at its SIBLING site, which is the defect of one round
+        # earlier surviving into the next).
         "honest: EMPHASIS `does not actually visit` (inside the negation's scope)":
             "the walk does not actually visit a nested `def`'s decorators and "
             "parameter defaults",
@@ -8981,8 +8987,12 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
         # honest "when the outer method runs, …" uses the same words), and this
         # file's rule is that a measured shape with no row is a shape the next
         # editor deletes as a contradiction. Owner: `#11541`; a lane that widens the
-        # marker to the class, or that narrows the `actually` marker back to a
-        # clause-initial POSITION, retires it.
+        # marker to the class (`suppose`, `assuming`, `should`, `when`) retires it.
+        # ⛔ AND THAT IS THE ONLY EDIT THAT CAN RETIRE IT — an earlier version also
+        # invited "narrowing the `actually` marker back to a clause-initial POSITION",
+        # which is a NO-OP here: this row's sentence carries no `actually` at all and
+        # measures GREEN with the ENTIRE `actually` arm removed from `_DEFEATED`
+        # (#11541 review, round 5 F5).
         "open: a conditional spelled without `if` (a premise, not a refutation)":
             "assuming the walk does not visit a nested `def`'s decorators and "
             "parameter defaults, the census under-reports",
@@ -8992,7 +9002,8 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
         # by rows in `must_red` above; a closing QUOTE, `?`, `!`, `|` and `/` are
         # the same clause boundary and are all still ACCEPTED — each measured
         # GREEN at this head. DECLARED rather than closed because a quote
-        # character is also an OPENING one (`zsh") and because the remaining four
+        # character is also an OPENING one (`"the walk does not visit them`) and
+        # because the remaining four
         # are not prose clause separators at all, so adding them would red the
         # cry-wolf direction this file refuses to take unmeasured. ⚠️ THIS ROW IS
         # ONE ROW FOR THE WHOLE FAMILY, so it does not read as "everything else is
@@ -9128,15 +9139,27 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
         # direction "IS covered, and it is covered in BOTH positions", which was true
         # of `but` and FALSE of its four siblings (#11541 review, round 4 F2).
         # Measured by per-member ablation at this head, every other marker intact:
-        # deleting `but` flips TWO rows (the clause-initial `inverse: refutation —
-        # , but actually it does visit them` and the subject-interposed twin
-        # `, but the body walk actually does`), while deleting `yet`, `and`, `however`
-        # or `while` flips ZERO rows in any of the four sets. THEY ARE NOT VACUOUS,
+        # deleting `but` flips TWO rows — the subject-interposed `must_red` twin
+        # `inverse: subject-interposed actually — , but the body walk actually does`
+        # AND the `declared_blocks` price `false block: an honest ASIDE with a
+        # THREE-word SUBJECT using actually` — while deleting `yet`, `and`, `however`
+        # or `while` flips ZERO rows in any of the four sets. ⛔ NOT the clause-initial
+        # `inverse: refutation — , but actually it does visit them`: that row stays RED
+        # with the ENTIRE conjunction group removed, because the COMMA terminator plus
+        # the gap spans `but`, so it is evidence for `,` and not for `but` (#11541
+        # review, round 5 F1 — the earlier wording credited `but` with it and omitted
+        # the price row it does carry). THEY ARE NOT VACUOUS,
         # which is why they stay: each deletion re-opens a REAL false PASS —
         # `…are not reported by this walk however it actually does visit them` is RED
-        # as shipped and GREEN with `however` removed, and the whole suite stays green
+        # as shipped and GREEN with `however` removed, and NOT ONE ROW VERDICT flips
         # through that removal because no row spells it (same shape measured for `and`,
-        # `while`, `yet`). So the four unrowed members are retained on the same stated
+        # `while`, `yet`). ⛔ BUT THE SUITE DOES NOT STAY GREEN, and the earlier wording
+        # here said it did (#11541 review, round 5 F3): `_defeated_markers` copies this
+        # arm verbatim and `assert _marker in _pinned_defeated.pattern` reds the moment
+        # a member leaves the pattern. So a ONE-PLACE deletion IS caught — by the
+        # marker-presence pin rather than by any row — and only a two-place edit (the
+        # pattern AND the tuple) is silent. That is the honest version of the belt
+        # argument, and it is also what makes the tuple worth maintaining. So the four unrowed members are retained on the same stated
         # BELT argument this file records for the zero-closing terminators (`:`, `–`,
         # `-`), and are DECLARED here instead of being implied to be rowed.
         "false block: an honest ASIDE using `actually`":
