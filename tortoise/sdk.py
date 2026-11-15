@@ -5515,9 +5515,17 @@ def _entity_door_props(kind_key: str, name: str, props: dict) -> dict:
 # a bare carrier.
 #
 # ⛔ The MIRROR shape (``status='superseded'`` with NO carrier) is deliberately
-# OUT of this guard: it makes a rebuild REVIVE a node rather than bury a live
-# one, it is a shape in use (``update_entity(subject, status='superseded')``),
-# and it is already named as #9974's window. Refusing it would be an over-block.
+# OUT of *this* guard: it makes a rebuild REVIVE a node rather than bury a live
+# one, and refusing it here would conflate two questions. ⚠️ It is no longer
+# ACCEPTED anywhere, though: #12592 added the DUAL rule at the same door
+# (``_assert_supersession_names_a_successor``, ONTOLOGY §4.3 — the word MEANS
+# replaced, so it names the successor), and that rule refuses the mirror shape on
+# every label. So this paragraph is a statement about THIS guard's scope, not
+# about what the door accepts: the #9974 window it names is now closed by the
+# dual, and the two messages are deliberately distinguishable (one speaks of the
+# CARRIER, the other of the missing successor) —
+# ``tests/test_status_projection.py::TestLifecycleCarrierCoherence::
+# test_the_mirror_shape_is_not_refused_by_the_carrier_guard`` pins the difference.
 #
 # ⛔ THE GUARDED SURFACE IS THE RECORD'S CARRIER *COLUMNS*, NOT A HAND-WRITTEN
 # PAIR OF PROP NAMES (review P1 — measured on the pre-fix head: the camel-only
@@ -49621,9 +49629,13 @@ class TortoiseSDK:
         # (`_ALLOWED_TRANSITIONS`): a dead claim is answered only by minting a
         # successor. An Object's dead words are bookkeeping. `main` moves them —
         # `tests/test_11826_object_supersession_instrument.py` takes a
-        # `superseded` Object to `archived` inside its test body (the supersede at
-        # `:245`, the archived write at `:290`, the assertion it justifies from
-        # `:291`) — and that module reds if this refuses it. Note what that
+        # `superseded` Object to `archived` inside its test body
+        # (`test_a_successorless_supersede_still_gets_a_performable_repair`; its
+        # docstring and a comment on the write explain WHY it is written raw —
+        # the audit exists to find that legacy shape, which no door can mint any
+        # more, #12592) — and that module reds if this refuses it. Named by TEST
+        # rather than by line: the fixture sweep in #12592 moved those numbers,
+        # and a comment that points at a stale line is worse than no pointer. Note what that
         # assertion actually says: archiving SILENCES the
         # `superseded_object_active_edges` finding without clearing the deficit
         # (`tortoise/audit.py` says so in its own docstring), so it is not
