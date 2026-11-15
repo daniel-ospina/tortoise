@@ -7293,10 +7293,10 @@ def _doc_section(text: str, start: str, end: str) -> str:
 # ARE pinned by the `N `must_red` rows` sentence, but the verdicts read off them
 # were not, in the paragraph whose whole purpose is to record why 2 is the only
 # clean window. Edit a figure here and the pin reds; re-derive it by measurement:
-#   window 0: must_red leak 0/54; declared_open wrongly red 10/28; declared_blocks wrongly green 0/18; real doc HIT
-#   window 1: must_red leak 0/54; declared_open wrongly red 4/28; declared_blocks wrongly green 0/18; real doc HIT
-#   window 2: must_red leak 0/54; declared_open wrongly red 0/28; declared_blocks wrongly green 0/18; real doc HIT
-#   window 3: must_red leak 2/54; declared_open wrongly red 0/28; declared_blocks wrongly green 1/18; real doc HIT
+#   window 0: must_red leak 0/54; declared_open wrongly red 10/29; declared_blocks wrongly green 0/18; real doc HIT
+#   window 1: must_red leak 0/54; declared_open wrongly red 4/29; declared_blocks wrongly green 0/18; real doc HIT
+#   window 2: must_red leak 0/54; declared_open wrongly red 0/29; declared_blocks wrongly green 0/18; real doc HIT
+#   window 3: must_red leak 2/54; declared_open wrongly red 0/29; declared_blocks wrongly green 1/18; real doc HIT
 # ⛔ COST, taken deliberately: window 2 makes "…are never TOUCHED by the walk"
 # RED, because `touched` is not in the coverage list — a false block bought for
 # that false pass, which is the trade this predicate always takes.
@@ -7335,8 +7335,8 @@ _NEGATION_GOVERNS = re.compile(
     r"(?:walk|visit|reach|report)(?:s|es|ed|ing)?\b")
 # ⛔ `_COVERAGE` is RETAINED DELIBERATELY AND IS CURRENTLY IMPLIED, and saying so
 # is the point (#11437 review, P3). Measured: `_NEGATION_GOVERNS` already requires
-# one of the same four verbs AFTER the negation, so on all 152 candidate sentences
-# (the 119 rows across the four sets — 54 / 19 / 28 / 18 — plus the 33 sentences of
+# one of the same four verbs AFTER the negation, so on all 153 candidate sentences
+# (the 120 rows across the four sets — 54 / 19 / 29 / 18 — plus the 33 sentences of
 # the real §3 under
 # this predicate's own `split(". ")` segmentation) there is no case where the
 # governance test hits and this one does not — dropping the term from
@@ -7635,10 +7635,12 @@ def _residual_sentences(s3: str) -> list[str]:
       RESIDUAL IS SEVEN ROWS NOW, not this sentence (#11541 B): it used to be prose
       that named a worked example (`"…, so the earlier wording was wrong"`),
       leaving the prose claiming a residual nothing carried. The
-      remaining shapes are the SIX `open refutation:` rows in `declared_open`
+      remaining shapes are the SEVEN `open refutation:` rows in `declared_open`
       below (`was mistaken`, `no longer true`, `has been corrected`,
       `which is not correct`, `is misleading`, `the earlier wording was wrong`,
-      `would under-report`), all with `#11541` as their owner. ⚠️ `whenever` was
+      `the refutation is in the NEXT sentence`), all with `#11541` as their owner.
+      ⚠️ `would under-report` is NOT one of them: it PRESUPPOSES the claim, so the
+      predicate ACCEPTING it is correct — it is a `must_stay_green` row. ⚠️ `whenever` was
       rowed there too and was WRONG (it is a universal, so it states the exclusion):
       it is a `must_stay_green` row now (#11541 review, finding 7);
     * a CONCESSION whose cue is a synonym the arm does not list — CLOSED for
@@ -8621,6 +8623,25 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
         # assertion RED — i.e. to reinstate exactly the false block the previous
         # commit measured and backed the marker out for. Its honest twin is the
         # `must_stay_green` row above, and that is where the verdict belongs.
+        #
+        # ⛔ THE HOUSE-STYLE TWO-SENTENCE FORM, and the one shape this list missed
+        # (#11541 review, P1). `_residual_sentences` splits §3 on `". "` and applies
+        # `_DEFEATED` PER SENTENCE, so a revision note that QUOTES the old claim in
+        # one sentence and refutes it in the NEXT is accepted: the quote is judged
+        # alone (it carries the negation and the coverage verb), and the refutation
+        # sits in a separate sentence that carries no negation+coverage pair at all.
+        # Measured at this head: the ONE-sentence form is RED, this TWO-sentence form
+        # is a HIT (pin GREEN). It is not hypothetical — §3.1 is written in exactly
+        # this form ("An earlier draft of this document … **That is false**"), which
+        # is also the construction `_DEFEATED`'s own comment names as its motivation.
+        # DECLARED rather than closed: the fix is a paragraph-scoped `_DEFEATED`, and
+        # `#11541` puts "a full assertion-structure parse" out of scope by its own
+        # text. Owner: `#11541`; a lane that ever scopes the defeater to the
+        # paragraph retires this row.
+        "open refutation: the refutation is in the NEXT sentence":
+            "an earlier draft of this document said the walk does not visit a "
+            "nested `def`'s decorators and parameter defaults. that is false, "
+            "and it is the one reach",
     }
     for label, sentence in declared_open.items():
         assert sentence != original, f"decoy row {label!r} merely restates the claim"
