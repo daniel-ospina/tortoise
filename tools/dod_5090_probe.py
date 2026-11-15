@@ -2560,9 +2560,9 @@ def _compose_channel(path: Path, flag: str | None, is_truthy) -> dict:
     out: dict = {"channel": "compose", "resolver": COMPOSE_RESOLVER,
                  "ok": False, "reason": run["reason"], "scopes": {},
                  "verdict": "UNRESOLVED", "mentioned": False,
-                 "armed": [], "off": [], "unresolved": [], "novalue": [],
-                 "falsy": [], "outside_runtime": [], "build_refs": [],
-                 "entrypoints": [], "warnings": []}
+                 "armed": [], "off": [], "silent_scopes": [], "unresolved": [],
+                 "novalue": [], "falsy": [], "outside_runtime": [],
+                 "build_refs": [], "entrypoints": [], "warnings": []}
     if not run["ok"]:
         return out
     try:
@@ -2594,11 +2594,18 @@ def _compose_channel(path: Path, flag: str | None, is_truthy) -> dict:
         if flag in env:
             out["mentioned"] = True
         if flag not in env:
-            # This service's own environment declares NOTHING. It is not a disarm:
-            # the image's `ENV` is inherited (the per-file caveat states the bound).
+            # ⛔ This service's own environment declares NOTHING — it is SILENT, not a
+            # contrary reading. ⛔ THE DISTINCTION DECIDES WHETHER THE ROW IS REACHABLE:
+            # a multi-service compose file routinely carries a SIDECAR (`falkordb` in
+            # this repo's own file) that will never set this flag, and counting a silent
+            # sibling as a disagreement would make `deployment["on"]` unreachable on
+            # every tree with a sidecar — a DECLARED false hold, the mirror of the false
+            # PASS this lane removes. Only an EXPLICIT contrary value (a non-truthy one,
+            # or an entry with no value) disagrees with an armed sibling.
             scope["verdict"] = "NOT_ARMED"
             scope["reason"] = "declares no value of its own"
             out["off"].append(name)
+            out["silent_scopes"].append(name)
         elif env[flag] is None:
             # ⛔ MEASURED (`#12549`): compose resolves a value-less `environment:`
             # entry to `null` — a PASS-THROUGH from the environment `docker compose`
@@ -2663,7 +2670,10 @@ def _compose_channel(path: Path, flag: str | None, is_truthy) -> dict:
         out["verdict"] = "UNRESOLVED"
         out["reason"] = "; ".join(
             f"{svc}: {out['scopes'][svc]['reason']}" for svc in out["unresolved"])
-    elif out["armed"] and out["off"]:
+    elif out["armed"] and (out["falsy"] or out["novalue"]):
+        # ⛔ A DISAGREEMENT needs an EXPLICIT contrary value — see the silent-scope arm
+        # above. `app=FLAG:1 / worker=FLAG:0` is the shape the brief names; `app=FLAG:1`
+        # beside a sidecar that sets nothing is simply an armed file.
         out["verdict"] = "DISAGREE"
         out["reason"] = ", ".join(
             f"{svc}={out['scopes'][svc]['verdict']}" for svc in sorted(out["scopes"]))

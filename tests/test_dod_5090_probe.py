@@ -11799,3 +11799,35 @@ def test_12549_an_env_file_and_a_non_truthy_env_value_are_both_read(
     note = _gate_note(shipped)
     assert "values that OVERRIDE it OFF: [" in note, note
     assert "fly.toml: [env].TORTOISE_EMBED_GATE" in note, note
+
+
+def test_12549_a_SILENT_sidecar_service_is_not_a_disagreement(tmp_path, monkeypatch):
+    """A sibling that declares nothing does not make an armed file a DISAGREEMENT.
+
+    ⛔ The boundary of defect 2's fix, and the one that decides whether the row is
+    REACHABLE: a multi-service compose file routinely carries a sidecar (this repo's own
+    file carries `falkordb`) that will never set this flag. Counting a SILENT sibling as
+    a disagreement would hold the row on every tree with a sidecar — a declared false
+    hold, the mirror of the false PASS this lane removes. Only an EXPLICIT contrary
+    value disagrees; this arm pins both sides of that line.
+    """
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n"
+        "  tortoise:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"1\"\n"
+        "  falkordb:\n    image: falkordb/falkordb-server\n    environment:\n"
+        "      REDIS_ARGS: \"--appendonly yes\"\n", encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"] == {"docker-compose.yml": "ON"}, shipped["deployment"]
+    assert shipped["deployment"]["on"] is True, shipped["deployment"]
+
+    # …and an EXPLICIT contrary value on the sibling IS a disagreement.
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n"
+        "  tortoise:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"1\"\n"
+        "  worker:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"0\"\n", encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"] == {"docker-compose.yml": "DISAGREE"}, shipped

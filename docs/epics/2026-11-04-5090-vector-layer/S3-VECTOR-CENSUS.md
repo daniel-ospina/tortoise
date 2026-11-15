@@ -321,11 +321,11 @@ assertion measures.
 ```text
 $ uv run python tools/test_lane.py run -- tests/test_dod_5090_probe.py -q
 121 passed, 1 skipped in 42.50s   # the #11088 transcript this row was cut from
-                                 # this tree: 227 collected
-                                 # (docker lane: 226 passed, 1 skipped)
+                                 # this tree: 228 collected
+                                 # (docker lane: 227 passed, 1 skipped)
 ```
 
-(115 collected before #11088's round 7; the file collects **227 in the tree this document sits in** —
+(115 collected before #11088's round 7; the file collects **228 in the tree this document sits in** —
 nine added by #11337 over the then-122 baseline, nineteen by `#11444`'s writer-register falsifiers, one
 by `#11471`'s GATED-writer bypass arm, fourteen by `#11492`, one by `#11437`, five by `#11747`
 (which brought the cache projection into row 2's served-set comparison — the write path the source
@@ -405,8 +405,8 @@ falsifier a later review measured at this head (PR #12474, P2) — that the `UNM
 one ordering it does not cover, since a LATER resolvable assignment still decides the file while the
 unresolvable line stays REPORTED in `indeterminate` in both orders; shown RED by reverting its own fix,
 with the phrase pin normalising the docstring's whitespace so a reflow cannot red it)
-(`122 + 9 + 19 + 1 + 14 + 1 + 5 + 7 + 1 + 1 + 3 + 4 + 27 + 1 + 12 = 227`).
-The `12` are `#12549`'s channel-resolver falsifiers: both orderings of a per-service
+(`122 + 9 + 19 + 1 + 14 + 1 + 5 + 7 + 1 + 1 + 3 + 4 + 27 + 1 + 13 = 228`).
+The `13` are `#12549`'s channel-resolver falsifiers: both orderings of a per-service
 compose disagreement, a flow mapping, an anchor+merge key, a resolver that REFUSES
 (`UNRESOLVED`, never an answer), an unset interpolation that must not read as an
 explicit empty, the ambient environment that must not arm a compose default, the Fly
@@ -414,7 +414,9 @@ explicit empty, the ambient environment that must not arm a compose default, the
 discovered channel with NO reader holding the row, the computed population plus the
 declared-harmless `Procfile`, the two declared bounds phase 1 does not convert, a
 platform resolver whose output is not TOML falling back to the file, and `env_file:`
-expansion plus a non-truthy `[env]` value as the disarming direction. The final `1` is PR #12474's
+expansion plus a non-truthy `[env]` value as the disarming direction, and the
+silent-sidecar boundary (a sibling that declares nothing is not a disagreement — else
+the row would be unreachable on every tree with a sidecar). The final `1` is PR #12474's
 row-1 falsifier for the `DISARMS it` leading clause — a compose `environment: [- FLAG, - FLAG=1]`
 REPORTS the value-less entry and ends `ON`, so a tree whose only disarmed file was a SILENT sibling
 published a false cause for its own OFF; the test reds against the pre-fix tool and greens after,
@@ -459,7 +461,7 @@ under
 `tests/_live_utils.py`'s live-graph fixture, which only the docker lane satisfies, so the
 LASTING statement is the invariant rather than either figure: the carve-out lane reads one more
 skip and one fewer pass than the docker lane, and at any one tree the two splits add to that tree's
-collected count — `226 passed, 1 skipped` and `225 passed, 2 skipped` here, both adding to the same `227` the pin re-derives, while the `eee465029a` pair quoted above (`185/1` and `184/2`) adds to the
+collected count — `227 passed, 1 skipped` and `226 passed, 2 skipped` here, both adding to the same `228` the pin re-derives, while the `eee465029a` pair quoted above (`185/1` and `184/2`) adds to the
 `186` THAT tree collects. Neither figure is therefore stale: a carve-out run that
 "corrects" 186/1 to 185/2 rewrites a true record into a false one, and the pin deliberately does
 not cover the split for exactly that reason. ⚠️ The COUNT is bound to THIS TREE, never to a branch
