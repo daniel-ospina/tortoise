@@ -185,7 +185,7 @@ class _CollidingHash(str):
     def __hash__(self) -> int:
         return hash("live")
 
-    def __eq__(self, other) -> bool:  # noqa: D105 — the lie IS the fixture
+    def __eq__(self, other) -> bool:  # the lie IS the fixture
         return True
 
 
@@ -275,6 +275,95 @@ def test_a_null_status_legacy_point_can_still_be_given_one(env):
 
     sdk.update_entity(pid, status="live")
     assert _row(sdk, pid)["status"] == "live"
+
+
+# ══════════════════════════════════════════════════════════════════════
+# #12907 cycle 1 — the Point ARM's own two doors (exactness + rendering)
+# ══════════════════════════════════════════════════════════════════════
+
+class _Impostor:
+    """Claims `__class__ = str` — `isinstance` believes it, `type()` does not.
+
+    The normalisation the Point arm applies is gated on
+    `issubclass(type(x), str)`, so it correctly SKIPS this object (a real
+    `str.__str__` on it raises). That left `isinstance(_status, str)` as the
+    only type test, and the impostor passes it while its `__hash__`/`__eq__`
+    collide with the LEGAL word `'live'` — so the vocabulary test admitted an
+    object whose `replace()` the driver then rendered as `'archived'`: a §5
+    TERMINAL word written onto a live Point, with no journal record at all.
+    """
+
+    __class__ = str
+
+    def __eq__(self, other) -> bool:  # the lie IS the fixture
+        return True
+
+    def __hash__(self) -> int:
+        return hash("live")
+
+    def __contains__(self, item) -> bool:
+        return False
+
+    def __iter__(self):
+        return iter(())
+
+    def encode(self, *args):
+        return b"archived"
+
+    def __len__(self) -> int:
+        return 8
+
+    def replace(self, *args):
+        return "archived"
+
+    def __str__(self) -> str:
+        return "archived"
+
+
+class _HostileRepr:
+    """A caller operand whose `__repr__` raises (#12907 cycle 1, P3)."""
+
+    def __repr__(self) -> str:
+        raise RuntimeError("repr-boom")
+
+
+def test_an_impostor_cannot_write_a_terminal_word_on_a_live_point(env):
+    """#12907: the vocabulary test must be EXACT-type, not `isinstance`.
+
+    Mutant that reddens: restore `not isinstance(_status, str)` and this call
+    is ACCEPTED, storing `('archived')` on a live Point with zero journal
+    records — the graph/record divergence `rebuild_all` reverts.
+    """
+    sdk, events = env
+    pid = _live(sdk)
+    before = _row(sdk, pid)
+    assert before["status"] == "live"
+
+    with pytest.raises(ValueError, match="Invalid status"):
+        sdk.update_entity(pid, status=_Impostor())
+
+    assert _row(sdk, pid) == before, (
+        "an impostor must not move a live Point, let alone to a terminal word: "
+        + repr(_row(sdk, pid)))
+    assert "restatus" not in json.dumps(_mutations(events, pid)), (
+        "a refused write must journal nothing: " + repr(_mutations(events, pid)))
+
+
+def test_a_hostile_repr_cannot_replace_a_point_refusal(env):
+    """#12907: the refusal's contract is the CLASS — `ValueError`, always.
+
+    Mutant that reddens: render the operand with the raw `!r` and this raises
+    `RuntimeError: repr-boom` instead (row unchanged either way, so this is a
+    contract break rather than a fail-open).
+    """
+    sdk, _ = env
+    pid = _live(sdk)
+    before = _row(sdk, pid)
+
+    with pytest.raises(ValueError, match="Invalid status"):
+        sdk.update_entity(pid, status=_HostileRepr())
+
+    assert _row(sdk, pid) == before
 
 
 # ══════════════════════════════════════════════════════════════════════

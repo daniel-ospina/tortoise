@@ -11829,6 +11829,24 @@ def _live_operator_mechanism_pairs(proj, ids):
     return priced_out
 
 
+def _refusal_repr(value) -> str:
+    """`repr` for a caller-controlled operand in a REFUSAL message.
+
+    A refusal's contract is the exception CLASS — `ValueError` — so a
+    `__repr__` that raises would replace it with its own class (measured:
+    `RuntimeError: repr-boom`), turning a refusal into an unspecified failure
+    for the caller (#12907 review cycle 1, P3, both `update_entity` arms).
+
+    ONE definition for EVERY refusal that names a caller operand, module-level
+    so an arm added before a local helper exists cannot fall back to the raw
+    `!r` — the exact gap the #12907 Point arm carried.
+    """
+    try:
+        return repr(value)
+    except Exception:  # noqa: BLE001, RUF100 — a hostile `__repr__` is the point
+        return f"<{type(value).__name__}>"
+
+
 class TortoiseSDK:
     """Layer 1 facade for Tortoise epistemic graph interaction.
 
@@ -48841,13 +48859,26 @@ class TortoiseSDK:
             if issubclass(type(_status), str):
                 _status = str.__str__(_status)
             if _lifecycle_ids:
-                if (not isinstance(_status, str)
-                        or _status not in POINT_STATUS_VALUES):
+                # ⛔ `type(...) is str`, NOT `isinstance` (#12907 review cycle 1,
+                # P2). The normalisation above SKIPS an object that claims
+                # `__class__ = str` — it is not a `str` subclass, and
+                # `str.__str__` on it RAISES — so an `isinstance` test believed
+                # the impostor and the membership test below hashed/compared it:
+                # measured on a LIVE Point, `status=<impostor>` (__hash__ =
+                # hash('live'), __eq__ -> True, replace() -> 'archived') was
+                # ACCEPTED and stored `archived` — a §5 terminal word, on a live
+                # Point, with NO journal record (`_journal_entity_mutation`
+                # returned False on the non-serialisable value): a graph/record
+                # divergence. Every legitimate shape is exact-str here, because a
+                # real `str` subclass was just normalised to its exact content.
+                if type(_status) is not str or _status not in POINT_STATUS_VALUES:
                     # Same refusal `update_point` issues (#3311 defect 1). The
                     # raise precedes every write, so a refused status leaves
-                    # the node untouched.
+                    # the node untouched. The operand is rendered through
+                    # `_refusal_repr` so a hostile `__repr__` cannot replace the
+                    # promised `ValueError` with its own class.
                     raise ValueError(
-                        f"Invalid status {_status!r}. "
+                        f"Invalid status {_refusal_repr(_status)}. "
                         f"Must be one of: {', '.join(sorted(POINT_STATUS_VALUES))}"
                     )
                 # ── #9649: the DECLARED transition, from `_ALLOWED_TRANSITIONS` ──
@@ -48906,7 +48937,12 @@ class TortoiseSDK:
                 # refusal below as "the verbs are optional": it fires only for
                 # UNdeclared targets.
                 for _stored in _pt_statuses or ():
-                    if not isinstance(_stored, str) or _stored == _status:
+                    # ⛔ `str.__eq__` on the CONTENT, never `_stored == _status`
+                    # (#12907 review cycle 1, P2): the LEFT operand's type decides
+                    # who answers, so a stored subclass could answer `True` and
+                    # skip the transition check entirely.
+                    if (type(_stored) is not str
+                            or str.__eq__(_stored, _status) is True):
                         continue
                     _declared = _ALLOWED_TRANSITIONS.get(_stored)
                     if _declared is None or _status in _declared:
@@ -48945,21 +48981,22 @@ class TortoiseSDK:
                     _named_id = _lifecycle_ids[0]
                     _addressed_as = (
                         "" if _named_id == id_val
-                        else f" (addressed as {id_val!r})")
+                        else f" (addressed as {_refusal_repr(id_val)})")
                     raise ValueError(
                         f"update_entity refused the status transition "
-                        f"{_stored!r} -> {_status!r} on Point "
-                        f"{_named_id!r}{_addressed_as}: "
+                        f"{_refusal_repr(_stored)} -> "
+                        f"{_refusal_repr(_status)} on Point "
+                        f"{_refusal_repr(_named_id)}{_addressed_as}: "
                         f"this door's declared Point transitions from "
-                        f"{_stored!r} are {{{_declared_text}}} "
+                        f"{_refusal_repr(_stored)} are {{{_declared_text}}} "
                         f"(`_ALLOWED_TRANSITIONS` — ONTOLOGY §5's table, plus "
                         f"#432's decision that a draft may terminalize before it "
-                        f"is ever live), so {_status!r} is not a declared "
-                        f"transition through this door.{_reserved} Use a "
-                        f"declared transition, or — "
+                        f"is ever live), so {_refusal_repr(_status)} is not a "
+                        f"declared transition through this door.{_reserved} Use "
+                        f"a declared transition, or — "
                         f"if the claim itself changed — mint a new Point and "
                         f"supersede this one with "
-                        f"`supersede_point({_named_id!r}, <new_id>)`."
+                        f"`supersede_point({_refusal_repr(_named_id)}, <new_id>)`."
                     )
                 # Write FIRST, journal SECOND, gated on the write having
                 # MATCHED (a missed/no-op write must never leave a phantom
@@ -49161,10 +49198,7 @@ class TortoiseSDK:
                 and not a fail-open). ONE helper for BOTH operands, so a later
                 refusal cannot be added with the raw `!r` again.
                 """
-                try:
-                    return repr(_value)
-                except Exception:  # noqa: BLE001, RUF100 — a hostile `__repr__` is the point
-                    return f"<{type(_value).__name__}>"
+                return _refusal_repr(_value)
 
             # ⛔ BEFORE any transition reasoning: a status write whose renderings
             # disagree has no knowable landing word (review round 2, P1 —
