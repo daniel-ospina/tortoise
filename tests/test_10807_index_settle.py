@@ -310,7 +310,15 @@ _ROW_PREDICATES = frozenset({
 #: literal, an f-string, a negative literal — and so releases on the FIRST read.
 #: `lambda r: (True,)` and the one-character slip
 #: `lambda r: (index_kind_absent(r, …),)` are both in this exclusion.
-_PREDICATE_BODY = (ast.Call, ast.Compare, ast.BoolOp, ast.IfExp, ast.Name,
+#:
+#: ⛔ A BARE `Name` IS DELIBERATELY NOT IN THE SET: `lambda rows: rows` is the
+#: catalogue rows themselves, and a non-empty `result_set` is TRUTHY, so that
+#: body releases on the FIRST read — the same vacuity as the tuple, one word
+#: long. It was an uncovered allow-list entry (no `_ARMING_CASES` row noticed its
+#: removal, measured at #12859's review), and its only unique effect was to
+#: certify that shape. A predicate is still spelled `until=the_name` (the `Name`
+#: ARM, which resolves it) or `lambda r: the_name(r)` (a `Call`, still allowed).
+_PREDICATE_BODY = (ast.Call, ast.Compare, ast.BoolOp, ast.IfExp,
                    ast.Attribute, ast.Subscript, ast.Await)
 
 #: The ONLY module whose attributes may name a row predicate. Matched exactly:
@@ -900,7 +908,17 @@ def test_every_consumer_passes_the_caller_precondition():
     two must now AGREE, and the scope must be non-empty.
     """
     here = Path(__file__).resolve()
-    paths = [p for p in here.parent.glob("test_*.py") if p.name != here.name]
+    # ⛔ EVERY MODULE UNDER `tests/`, not only `test_*.py`: the `missing` arm below
+    # is deliberately GLOBAL (an unarmed wait in a test module nobody documented
+    # still reds), and a shared fixture module is the natural home for an
+    # "await the catalogue" helper — `tests/conftest.py`,
+    # `tests/_live_utils.py`, `tests/epic903_fixtures.py`. A `test_*.py`-only glob
+    # left a wait added to any of those uncounted, unchecked and undeclarable, so
+    # the pre-drop race re-opened there with the pin reading green (measured at
+    # #12859's review). `_settle_call_sites` pre-filters on the symbol NAME, so
+    # widening the walk costs the pin no parse for the ~1,300 modules that do not
+    # mention it.
+    paths = [p for p in here.parent.rglob("*.py") if p != here]
     call_sites, missing = _settle_call_sites(paths)
     required = set(_settle._DOCUMENTED_CONSUMERS)
     expected_consumers = {
@@ -1111,6 +1129,11 @@ _ARMING_CASES = (
     ("lambda_bool_call", "lambda r: bool(1)", False),
     ("lambda_compare_constant", "lambda r: bool(1) >= 0", False),
     ("lambda_ifexp_constant", "lambda r: True if True else False", False),
+    # The body is the rows THEMSELVES: a non-empty `result_set` is truthy, so
+    # `lambda rows: rows` releases on the first read. This is the case that made
+    # `ast.Name` an uncovered allow-list entry (removing it red nothing).
+    ("lambda_rows_body", "lambda r: r", False),
+    ("lambda_bare_name_body", "lambda r: index_kind_absent", False),
 
     # ── UNARMED: a CALL whose own value does not vary with the rows ────────
     # The tuple-literal exclusion above is the same defect one spelling over: a
