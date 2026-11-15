@@ -83,12 +83,22 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   bound, `#9974`), not a red, so the value remains cache-only.
   ⛔ A CLEAR is the route only where the value is not trustworthy, and it is
   LABEL-DEPENDENT: on an ``:Object`` ``update_entity(…, status=None)`` is applied
-  as ``SET n += {status: null}``, a REMOVAL; on a ``:Subject`` the SAME call is
+  as ``SET n += {status: null}``, a REMOVAL, **only while the row is NOT
+  terminal** — since #12882 a non-string status out of a DEAD state is REFUSED
+  (it was the resurrection hole: the target is not a dead WORD, so a dead row was
+  LIFTED instead of skipped), so the ``:Object`` clear is NOT a route for the
+  TERMINAL case this repair exists for; on a ``:Subject`` the SAME call is
   REFUSED — ``sdk._update_entity``'s Subject status door validates against
   ``_SUBJECT_STATUS_VALUES``, and ``None`` is not one of them (the missing SDK
   door is `#11271`) — so a ``:Subject``'s clear is the graph-side ``REMOVE
   n.status`` or the wipe below, and it makes a TERMINAL entity read LIVE
-  (``live._terminal_excluded`` reads an absent ``status`` as live). ⛔ Neither is
+  (``live._terminal_excluded`` reads an absent ``status`` as live).
+  ⛔ WHAT IS PERFORMABLE ON A TERMINAL ``:Object`` TODAY is the COHERENT
+  un-supersede only, and only for a ``superseded`` row: ``update_entity(…,
+  status=<the row's current word>, supersededBy=None, supersededAt=None)`` —
+  both carriers cleared in the SAME call, which #12825 restored and #12882
+  pinned. Every OTHER terminal word has no SDK route at all (#12592), so naming
+  the clear there would prescribe a call that raises (AX rule 2). ⛔ Neither is
   a record-sourced re-projection, which is ADDITIVE (``MERGE … SET n += $props``,
   no REMOVE pass) and would leave the value in place — and a clear writes
   ``state.status = null`` into the record, which the state-op leg's
@@ -680,10 +690,16 @@ def reconcile_record_and_cache(
     ``clean``. A CLEAR is only for an
     untrustworthy value
     and is LABEL-DEPENDENT: ``update_entity(…, status=None)``, ``SET n +=
-    {status: null}``, a REMOVAL, on an ``:Object``; on a ``:Subject`` that call
+    {status: null}``, a REMOVAL, on an **non-terminal** ``:Object`` (since
+    #12882 a non-string status out of a DEAD state is REFUSED, so it is not a
+    route for the terminal case); on a ``:Subject`` that call
     is REFUSED (#1423's status door accepts only ``SUBJECT_STATUS_VALUES``, and
     ``None`` is not one of them), so a Subject's clear is the graph-side
-    ``REMOVE n.status`` — and a clear makes a TERMINAL entity read LIVE. Clear,
+    ``REMOVE n.status`` — and a clear makes a TERMINAL entity read LIVE. For a
+    TERMINAL ``:Object`` the only performable route is the COHERENT un-supersede
+    of a ``superseded`` row (``status=<current word>`` with BOTH carriers cleared
+    in the same call, #12825); every other terminal word has no SDK route
+    (#12592). Clear,
     or the wipe, but ⛔ NOT a record-sourced re-projection, which is ADDITIVE and
     leaves the value in place — see the module docstring's (5)),
     a record-sourced clear IN PLACE for the declined pair —

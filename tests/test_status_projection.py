@@ -1340,6 +1340,20 @@ class TestLifecycleCarrierCoherence:
         sdk = TortoiseSDK(str(tmp_path / "t10192v.db"))
         try:
             oid = _make_carrier_entity(sdk, "Object", "epsilon")
+            # ⛔ THE ROW MUST CARRY A STORED WORD, or this pin proves NOTHING
+            # (#12882 review R1). `_make_carrier_entity` mints an Object with no
+            # `status` key at all, and the guard exits at `if not _np_stored:
+            # continue` BEFORE the dead-set comparison — so the write below was
+            # accepted because there was no word to compare, not because a live
+            # word is excluded from the dead set. Measured: the mutant that
+            # refuses a non-string when the stored word is not dead (the #10371
+            # live-row hole this pin claims to keep open) left the unseeded pin
+            # GREEN, and a `status='live'`-seeded control row was refused by that
+            # same mutant. The seed makes the assertion discriminating: the
+            # stored word is `live`, it is NOT in the family's dead set, so the
+            # write must still be accepted.
+            sdk.update_entity(oid, status="live")
+            assert _carrier_row(sdk, "Object", "epsilon")[1] == "live"
             sdk.update_entity(oid, status=["live"])
             assert _carrier_row(sdk, "Object", "epsilon")[1] == ["live"]
         finally:
