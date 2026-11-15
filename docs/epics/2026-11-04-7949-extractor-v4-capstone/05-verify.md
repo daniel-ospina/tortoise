@@ -144,7 +144,7 @@ merge, because a typed list of paths rots exactly the way a typed line number do
 | `tools/ci_selection.py` | `CONTRIBUTING.md` leaves `NON_CODE_DOC_PATHS` — `tests/test_surface_manifest.py::test_the_REMOVAL_docs_do_not_name_a_route_the_writer_REFUSES` reads that file's TEXT, so the exemption would have dropped a guard from the PR editing the file it guards | **CI effect: a `CONTRIBUTING.md`-only PR now runs the full matrix instead of tier-1 smoke.** This is deliberate and it FIXES a red on `main` (`test_non_code_doc_paths_have_no_content_reader`) |
 | `tests/test_ci_selection.py` | the arms over that list | none beyond the row above |
 
-So the PR body's *"no runtime behaviour change"* holds — every module edit is comment text — while its shorter *"no code"* does not, and the one consequence a merger should have weighed was the `tools/ci_selection.py` row — ⚠️ absorbed by the forward merges since, so at this head there is nothing left to weigh and the sentence is history, not a warning: a `CONTRIBUTING.md`-only PR stops taking the tier-1 shortcut.
+So the PR body's *"no runtime behaviour change"* holds at this head — and so does its shorter *"no code"*: `git diff --name-only origin/main...HEAD -- '*.py' '*.yml' '*.yaml' '*.ts' '*.js'` is EMPTY, which is the two markdown files above, nothing else. The one consequence a merger HAD to weigh was the `tools/ci_selection.py` row, ⚠️ and it is INHERITED, not contributed: `#12783`'s squash-merge `bf800e2f9b` already carries it on `main`, and the forward merges absorbed this branch's copy — so at this head there is nothing left to weigh, and the sentence is history, not a warning: a `CONTRIBUTING.md`-only PR stops taking the tier-1 shortcut, by that inherited change.
 
 ---
 
