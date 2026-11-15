@@ -884,8 +884,16 @@ WITH floor AS (
 )
 INSERT INTO public.journal_event (org_id, graph_id, seq, event_type, payload, recorded_at, node_label, node_key)
 SELECT $1, $2, a.first_seq + i.ord - 1, ..., FROM alloc a, generate_series(1, $3) AS i(ord)
-RETURNING min(seq), max(seq);                                 -- threaded back AFTER execution
+RETURNING seq;                                                -- block written; min/max taken by the caller
+                                                             -- (an aggregate is NOT legal in INSERT … RETURNING —
+                                                             --  wrap it: WITH ins AS (INSERT … RETURNING seq)
+                                                             --  SELECT min(seq), max(seq) FROM ins)
 ```
+
+⚠️ **The `RETURNING` line above is deliberately the plain column form**: a first draft of this section wrote
+`RETURNING min(seq), max(seq)` on the INSERT itself, which PostgreSQL rejects (`aggregate functions are not
+allowed in RETURNING`). The block's bounds come from `alloc.first_seq` — which the statement already knows — or
+from a wrapping CTE, and the point is only that **they are returned, not predicted** (M9).
 
 - **`GREATEST(cursor, max(seq)) + N`** is B5's allocation statement: the counter can never fall behind the
   table, so a stale counter cannot hand out a number that is already taken. (Why it can be *needed* at all is
@@ -1010,6 +1018,20 @@ per-graph serialisation, weaker than the transaction's — a wedged exporter del
 and the export is not the truth store. That asymmetry is the whole reason the arm is post-commit: **the thing
 that must be ordered is the transaction; the thing that must be ordered second is the file, and only because
 replay reads it.**
+
+⛔ **And the drainer has a liveness hole that must be closed by instrumentation, not by hope — this is the
+revision's own new silent-failure candidate, found by applying the reviewer's question to itself.** A hole in
+`journal_event` fills when the transaction that owns it commits **or rolls back**; but a transaction that
+neither commits nor rolls back (a hung writer, an abandoned connection holding the row lock) leaves the hole
+open **forever**, and every later position for that graph then waits behind it. Nothing in the write path goes
+red — the *commits* keep succeeding; only the **export** stalls, and an export that is behind is
+indistinguishable from one that is idle. **Two guards are therefore part of the deliverable, not of the
+runbook:** (a) the connection must carry `statement_timeout` **and** `idle_in_transaction_session_timeout`, so
+the hole's owner is killed and the transaction rolls back (restoring the counter — no position burned); (b) the
+export lag must be **armed** — a gauge `tortoise_journal_export_lag_seq{graph}` and an alarm on **its age**, not
+its value, because the failure mode is 
+"no progress", which no threshold on the value detects. §A7.6 falsifier 15 asserts the alarm fires; an unarmed
+gauge here would be the same class of defect as the capstone's S2 ("no schedule drives either verb yet").
 
 #### A7.5.7 Fail-hard on the ordinal path, and the breaker becomes fail-fast (M10)
 
@@ -1225,10 +1247,14 @@ before the falsifier exists, i.e. why the row is here rather than in a test file
 14. **M5 — a serializable DSN must be REFUSED at arming**, with the refusal naming the setting. *Red today:
     nothing reads `transaction_isolation`, and a DSN carrying `-c default_transaction_isolation=serializable`
     arms happily and then raises `40001` on the first contended allocation, where no retry exists.*
+15. **A stalled export must be VISIBLE** (§A7.5.6). Hold a position's transaction open past every timeout and
+    assert (a) it is killed by `idle_in_transaction_session_timeout` and its counter rolls back, and (b) the
+    export-lag **age** alarm fires while later commits keep succeeding. *Red today: nothing measures export
+    lag at all, and "stalled" is indistinguishable from "idle" — the S2 shape the capstone measured.*
 
 **Why this list is longer than the last one, and why that is the correct direction.** The round-1 list was six
 falsifiers for a design with seven blocking defects — the count was the symptom. Every blocking answer now
-carries a falsifier, and the four rows added for `M1`/`M8`/`M15`/`M5` are there because those findings are
+carries a falsifier, and the five rows added for `M1`/`M8`/`M15`/`M5`/export-lag are there because those findings are
 *mechanism* findings whose failure mode is **silence**, not an exception.
 
 ### A7.7 What Stage C must do first, in order — including the step that does not exist today
@@ -1539,7 +1565,7 @@ correct artifact — is the one that propagates, and because the near-miss is th
 
 ## 10 — What this lane did not do
 
-- **No product code.** No migration, no allocator, no test was written or edited. The fourteen falsifiers in
+- **No product code.** No migration, no allocator, no test was written or edited. The fifteen falsifiers in
   §A7.6 are specified, not implemented.
 - **No reopen filed, and the distinction now matters (Stage B round 2).** The **allocator** reopen is **already
   RULED by the owner** (`#9190` comment `6902871297`), so A7.5 implements it on paper. The **two reopens this
