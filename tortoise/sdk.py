@@ -5627,14 +5627,13 @@ def _carrier_prop_named_by(key, props_read: tuple[str, ...]) -> str | None:
     return None
 
 
-def _status_values_disagree(props: dict) -> bool:
-    """Do two keys that both render as ``status`` ask for DIFFERENT words?
+def _status_write_is_ambiguous(props: dict) -> bool:
+    """Does MORE THAN ONE key in this call render as ``status``?
 
-    A write that applies ``status`` twice with different values is not a
-    transition this door can reason about, and guessing is a BYPASS (#12786
-    review round 2, P1). The guard reads ONE value —
-    :func:`lifecycle_props_by_rendering` is first-wins over the renderer union —
-    while the live map write applies ``str(key)``, so
+    A write that applies ``status`` twice is not a transition this door can
+    reason about, and guessing is a BYPASS (#12786 review rounds 2-3, P1). The
+    guard reads ONE value — :func:`lifecycle_props_by_rendering` is first-wins
+    over the renderer union — while the live map write applies ``str(key)``, so
 
         ``{<content 'superseded', __str__ 'status'>: 'superseded',
            'status': 'live'}``
@@ -5642,13 +5641,23 @@ def _status_values_disagree(props: dict) -> bool:
     was read as ``dead -> dead`` (legal, so the guard ``continue``d) and LANDED
     ``live`` on a ``superseded`` row with its carriers intact — a resurrection
     past #12745's own pin, measured. The asymmetry is `tortoise/live.py`'s
-    two-renderer contract again, this time on the VALUE. Fail closed instead of
-    picking a winner: no legitimate call writes `status` twice, so the only calls
-    refused here are ones whose landing word cannot be known.
+    two-renderer contract again, this time on the VALUE.
+
+    ⛔ THE TEST IS A COUNT, NEVER A VALUE COMPARISON (review round 3, P1). The
+    first cut compared the words by ``repr()`` — a THIRD rendering neither
+    channel uses — so a value whose ``__repr__`` lied was still admitted while
+    the write landed the other word (measured: a dead row became ``live`` with
+    its carriers intact). ``==``/``hash`` are the same trap from the other side
+    (a crafted ``__eq__``). Ownership of the landing word therefore cannot be
+    decided by comparing values at all: two status keys is already a call this
+door cannot answer, whatever the two values say.
+
+    No legitimate call writes `status` twice — the generic tenant PUT sends one
+    field — so the only calls refused here are ones whose landing word cannot be
+    known.
     """
     ids = {id(key) for key in keys_rendering_as(props, {"status"})}
-    values = [value for key, value in props.items() if id(key) in ids]
-    return len({repr(value) for value in values}) > 1
+    return sum(1 for key in props if id(key) in ids) > 1
 
 
 def _status_key_leaves_the_dead_state(props: dict) -> bool:
@@ -49073,7 +49082,7 @@ class TortoiseSDK:
             # measured: `{<content 'superseded', __str__ 'status'>: 'superseded',
             # 'status': 'live'}` was read as dead->dead and landed `live` on a
             # `superseded` row). Fail closed rather than guess.
-            if _status_values_disagree(props):
+            if _status_write_is_ambiguous(props):
                 raise ValueError(
                     f"update_entity refused a CONFLICTING status write on "
                     f"{id_val!r}: more than one key in this call renders as "

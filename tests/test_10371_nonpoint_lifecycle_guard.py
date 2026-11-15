@@ -655,10 +655,14 @@ def test_a_key_that_renders_differently_does_not_clear_a_carrier(
         "a refused write must clear nothing"
 
 
+@pytest.mark.parametrize("content,rendering", [
+    ("status", "junk"),   # journal names it, the LIVE write does not
+    ("junk", "status"),   # LIVE write names it, the journal does not
+])
 @pytest.mark.parametrize("maker,label", [(_object, "Object"),
                                          (_subject, "Subject")])
 def test_a_status_key_whose_live_rendering_differs_is_not_an_un_supersede(
-        sdk, maker, label):
+        sdk, maker, label, content, rendering):
     """⛔ THE ADMISSION'S PREMISE MUST BE THE WRITE THAT HAPPENS (cycle 2, P1).
 
     `lifecycle_props_by_rendering` answers the PRESENCE question over the renderer
@@ -670,22 +674,55 @@ def test_a_status_key_whose_live_rendering_differs_is_not_an_un_supersede(
     `superseded`, the carriers went NULL, `junk` was set — i.e. a success report
     on a carrier wipe, which is the #10192 graph/record disagreement this guard
     exists to refuse. Pinned on BOTH families because the allowance is shared.
+
+    ⛔ BOTH DIRECTIONS ARE PINNED (review round 3, P2): the first is refused by a
+    content-only rule as well, so on its own it cannot see the LIVE-only drift —
+    the second is the direction where a live-only rule admits the write (status
+    lands `live`, the journal files `junk`) and the record keeps deriving
+    `'superseded'` for a live row.
     """
     class _Shadow(str):
         __hash__ = str.__hash__
 
         def __str__(self) -> str:
-            return "junk"
+            return rendering
 
     node = _superseded_with_carriers(sdk, maker)
     with pytest.raises(ValueError) as exc:
         sdk.update_entity(node, supersededBy=None, supersededAt=None,
-                          **{_Shadow("status"): "live"})
+                          **{_Shadow(content): "live"})
     assert "'superseded' -> 'live'" in str(exc.value)
     assert _stored(sdk, node)["status"] == "superseded", \
         f"the write never applies `status` on a {label} — it must not be admitted"
     assert _carriers(sdk, node) == ("v2", "2026-01-01T00:00:00Z"), \
         "a refused write must clear nothing"
+
+
+def test_a_value_whose_repr_lies_cannot_disguise_a_conflicting_status_write(sdk):
+    """⛔ OWNERSHIP IS DECIDED BY THE KEY COUNT, NOT BY COMPARING VALUES (r3, P1).
+
+    The first cut compared the two status words by `repr()` — a rendering NEITHER
+    channel uses — so a value whose `__repr__` echoed the dead word passed the
+    comparison while the write landed the other word. Measured before the fix:
+    the row went `superseded` -> `live` with both carriers still set, i.e. a
+    resurrection past #12745's pin with a record that still derives
+    `'superseded'`. `==`/`__hash__` are the same trap from the other side, which
+    is why the check counts keys instead of comparing anything about the values.
+    """
+    class _LiarRepr(str):
+        __hash__ = str.__hash__
+
+        def __repr__(self) -> str:
+            return repr("superseded")
+
+    node = _superseded_with_carriers(sdk, _object)
+    with pytest.raises(ValueError) as exc:
+        sdk.update_entity(node, **{_alias_key("superseded", "status"):
+                                   "superseded",
+                                   "status": _LiarRepr("live")})
+    assert "CONFLICTING status write" in str(exc.value)
+    assert _stored(sdk, node)["status"] == "superseded"
+    assert _carriers(sdk, node) == ("v2", "2026-01-01T00:00:00Z")
 
 
 def test_an_archived_row_is_not_resurrected_by_clearing_a_legacy_carrier(sdk):
