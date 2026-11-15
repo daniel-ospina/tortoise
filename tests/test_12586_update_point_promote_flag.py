@@ -455,6 +455,41 @@ def test_an_operator_fan_out_beside_a_dead_row_is_not_a_false_success(env):
             sdk._get_proj(), twin, status_only=True, present=True)
 
 
+@pytest.mark.parametrize("dead_first", [True, False])
+def test_a_live_row_beside_a_dead_sibling_is_refused_in_either_order(
+        env, dead_first):
+    """``{live + flag, retracted}`` on one id — refused, in BOTH row orders.
+
+    The `live` carve-out that keeps the #1088 answer for a SINGLE invalidated
+    live row must be per-ROW: carved out per FAN-OUT it let this shape fall
+    through to the ``live`` branch and report an idempotent success for a
+    promote that matched nothing beside a ``retracted`` sibling — because
+    ``live`` sorts first, in every row order.
+
+    Row order is forced by INSERTION order here, and asserted, so a green run
+    cannot come from the server happening to be kind.
+
+    FALSIFIABLE: scope the carve-out to the selected row
+    (``dead[0] != 'live'``) and the diagnostic returns ``True`` instead of
+    raising on this shape.
+    """
+    sdk, _ = env
+    twin = "livedead-" + uuid.uuid4().hex
+    first, second = ((("live", True), ("retracted", False)) if dead_first
+                     else (("retracted", False), ("live", True)))
+    for st, od in (first, second):
+        sdk._get_proj().g.query(
+            "CREATE (n:Point {id:$id, status:$st, outdated:$od})",
+            params={"id": twin, "st": st, "od": od})
+
+    # The pin targets the DIAGNOSTIC: `update_point`'s pre-write #1088 probe is
+    # single-row (a pre-existing shape this change does not touch), so on this
+    # fan-out a door-level assertion would depend on which row that probe sees.
+    with pytest.raises(ValueError):
+        _raise_update_point_status_error(
+            sdk._get_proj(), twin, status_only=True, present=True)
+
+
 def test_a_flag_dead_row_keeps_its_non_status_revision_capability(env):
     """#7819's scope: a NON-temporal, non-status revision of a dead claim stays
     writable — the fix must not become a blanket refusal of every write to a

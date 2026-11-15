@@ -6689,21 +6689,27 @@ def _raise_update_point_status_error(proj, id: str, *,
     # live, so such a row is refused with the #432 sentence instead of the flag
     # one. That divergence is documented on both declarations (#7075) and no
     # in-repo writer can produce it; the refusal is still fail-closed.
-    dead = first_terminal_row(status)
-    # ⛔ A ``live`` row is NOT answered by this block, flag or no flag.
-    # ``invalidate_point`` sets the flag and leaves the status alone, so
-    # ``live`` + flag is an ORDINARY shape, and a status-only promote of it is
-    # the #1088 idempotent NO-OP this function must keep returning ``True`` for
-    # (its docstring's "the ONE outcome that does not raise"). Answering "mint it
-    # again" would refuse a call that writes nothing and tell a caller their
-    # current-but-invalidated point is dead. Every OTHER terminal row is refused
-    # here, and the fall-through raise at the end is NOT redundant with this one:
-    # on an OPERATOR fan-out ``classify_lifecycle_fanout`` reports the operator's
-    # own status, which may be ``live`` — so falling through would take the #1088
-    # branch and report SUCCESS for a promote that matched nothing beside a dead
-    # sibling (pinned by
-    # `test_an_operator_fan_out_beside_a_dead_row_is_not_a_false_success`).
-    if dead is not None and dead[0] != 'live':
+    # ⛔ A ``live`` row does not answer THIS question, flag or no flag. It is the
+    # #1088 branch's answer: ``invalidate_point`` sets the flag and leaves the
+    # status alone, so ``live`` + flag is an ORDINARY shape, and a status-only
+    # promote of it is the idempotent NO-OP this function must keep returning
+    # ``True`` for (its docstring's "the ONE outcome that does not raise").
+    # So the rows offered to the picker are the ones whose STATUS is not
+    # ``live`` — per ROW, not per fan-out: carving out only the SELECTED row
+    # (an earlier cut of this) let ``{live+flag, retracted}`` fall through to the
+    # ``live`` branch and report SUCCESS for a promote that matched nothing
+    # beside a retracted sibling, purely because ``live`` sorts first. A fan-out
+    # whose dead rows are ALL ``live`` still falls through, which is correct —
+    # there is no dead claim to refuse.
+    # The fall-through raise at the end is NOT redundant with this block: on an
+    # OPERATOR fan-out ``classify_lifecycle_fanout`` reports the operator's own
+    # status, which may be ``live`` — so a fan-out with no non-live dead row
+    # skips this block by design, and one WITH such a row must be refused here
+    # rather than reported as success (pinned by
+    # `test_an_operator_fan_out_beside_a_dead_row_is_not_a_false_success` and
+    # `test_a_live_row_beside_a_dead_sibling_is_refused_in_either_order`).
+    dead = first_terminal_row([row for row in status if row[1] != 'live'])
+    if dead is not None:
         _dead_status, _dead_flag = dead
         if _dead_flag and _dead_status not in TERMINAL_EXCLUDED_STATUSES:
             # The flag-ONLY shape: no terminal status word on the selected row,
@@ -6715,9 +6721,12 @@ def _raise_update_point_status_error(proj, id: str, *,
             # same rule the rest of this file uses — NOT a status-word
             # precedence invented here: on a mixed fan-out (a flag-dead `draft`
             # beside a `retracted` sibling) the key picks the flag row, because
-            # `draft` sorts first. Every single-row shape — including the
-            # `superseded` + flag row `supersede_point` actually writes — gets
-            # the #432 sentence, which is the case that has to be right.
+            # `draft` sorts first. What decides the SENTENCE is the selected
+            # row's status, and for a single row that means: a terminal status
+            # WORD (including the `superseded` + flag row `supersede_point`
+            # actually writes) keeps the #432 sentence, while a NULL or `draft`
+            # row dead only by the flag gets the sentence above — which is the
+            # shape this arm exists to refuse.
             raise ValueError(
                 f"update_point refused to promote Point {id!r} to "
                 f"status='live': its legacy `outdated=true` flag marks it "
@@ -24738,17 +24747,19 @@ class TortoiseSDK:
                         "promote_point: temporal target %s for %s no longer "
                         "exists — skipping the wire", tgt, point_id)
                     continue
-                dead = sorted(
-                    ((r[1], bool(r[2])) for r in trows
-                     if is_terminal_status(r[1], bool(r[2]))),
-                    key=lambda s: (str(s[0] or ""), s[1]))
-                if not dead:
+                # #12586: the picker is `live.first_terminal_row` — the ONE
+                # home for "which row made this fan-out terminal?". This probe
+                # had the third hand-rolled copy of that `min`-by-stable-key
+                # (sorted(...)[0] selects the same element), which is how the
+                # same row comes to be named two ways in two messages.
+                hit = first_terminal_row(trows)
+                if hit is None:
                     live_targets.append(tgt)
                 else:
                     _logger.warning(
                         "promote_point: temporal target %s for %s is %s — "
                         "skipping the wire", tgt, point_id,
-                        dead[0][0] or "live")
+                        hit[0] or "live")
         if live_targets and point.get("temporal_replacement"):
             for tgt in live_targets:
                 try:

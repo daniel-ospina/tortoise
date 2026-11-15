@@ -403,8 +403,10 @@ _UNRESOLVED = {
     # `_lifecycle_terminal_marker` above (same constant, same reason). Checked
     # by hand: `MATCH (n:Point {id:$id}) RETURN n.is_operator, n.status,
     # coalesce(n.outdated, false)` — no CREATE/MERGE/SET/DELETE/REMOVE, no write
-    # procedure — and the function appends no record; it only RAISES. The
-    # existence probe above it (`RETURN count(n)`) is a resolved read.
+    # procedure — and the function appends no record: it RAISES, or returns
+    # `True` on the #1088 status-only already-live no-op (which writes and
+    # appends nothing either). The existence probe above it (`RETURN count(n)`)
+    # is a resolved read.
     "_raise_update_point_status_error",
     "_window_closure",
     "expand_relationships",
