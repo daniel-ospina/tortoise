@@ -261,6 +261,15 @@ def _foldable_bool(node) -> tuple[bool, bool | None]:
     ``not``, and ``and``/``or`` chains of already-foldable parts. This is what
     lets the arming rule be an ALLOW-LIST without blessing `lambda r: not
     False`, `lambda r: True or False`, or a name bound to either.
+
+    ⛔ AND `and`/`or` SHORT-CIRCUIT, so ONE operand decides the whole expression
+    no matter what the others read: `False and X` is False, `X or True` is True.
+    Requiring EVERY operand to fold instead reported those as undecidable, and
+    the structural rule reads "undecidable" as "an allowed form that mentions
+    `rows`, so it is a predicate" — so `lambda r: True or <predicate>` and
+    `lambda r: r[0] or True` were ARMED while returning on the FIRST catalogue
+    read (#12859's review, measured at `cd7a4b3f31`: rewriting a real documented
+    site to `until=lambda rows: True or index_kind_absent(...)` left 14 passed).
     """
     if isinstance(node, ast.Constant):
         return True, bool(node.value)
@@ -269,10 +278,15 @@ def _foldable_bool(node) -> tuple[bool, bool | None]:
         return (True, not value) if ok else (False, None)
     if isinstance(node, ast.BoolOp):
         parts = [_foldable_bool(v) for v in node.values]
+        is_and = isinstance(node.op, ast.And)
+        if is_and and any(ok and value is False for ok, value in parts):
+            return True, False
+        if not is_and and any(ok and value is True for ok, value in parts):
+            return True, True
         if not all(ok for ok, _ in parts):
             return False, None
         values = [v for _, v in parts]
-        return True, (all(values) if isinstance(node.op, ast.And) else any(values))
+        return True, (all(values) if is_and else any(values))
     return False, None
 
 
@@ -375,14 +389,19 @@ def _until_is_armed(call, ctx=None) -> bool:
     name resolution to launder.
 
     ⛔ THE RESIDUAL, STATED AS MEASURED SO IT CANNOT BE MISTAKEN FOR COVERAGE: a
-    lambda that DOES take a row parameter, DOES return an allowed form, and still
-    happens to be constant — `lambda r: r[0] or True` — stays armed. Whether an
-    arbitrary expression's truth actually varies with its argument is not
-    decidable from an AST, and this pin is an accident guard, not a prover: the
-    aim is that every PLausible and every LAZY spelling reds (they do — see
+    lambda that DOES take a row parameter, DOES return an allowed form, and is
+    still constant in a way the FOLDER cannot see — `lambda r: bool(r) >= 0`,
+    `lambda r: len(r) >= 0` — stays armed. Whether an arbitrary expression's
+    truth actually varies with its argument is not decidable from an AST, and
+    this pin is an accident guard, not a prover: the aim is that every PLAUSIBLE
+    and every LAZY spelling reds (they do — see
     `test_the_arming_rule_is_structural_not_a_deny_list`), not that no
-    adversarial expression can ever be written. A `**{"until": None}` splat is
-    reported UNARMED.
+    adversarial expression can ever be written. ⛔ A SHORT-CIRCUITING OPERAND IS
+    NOT PART OF THIS RESIDUAL: `and`/`or` fold one deciding operand, so
+    `lambda r: True or r[0]`, `lambda r: r[0] or True` and
+    `lambda r: True or index_kind_absent(...)` are UNARMED, while a constant-FALSE
+    predicate (`lambda r: False and r[0]`) stays ARMED because it fails closed.
+    A `**{"until": None}` splat is reported UNARMED.
     """
     ctx = ctx or {}
     aliases = ctx.get("aliases", {})
@@ -787,6 +806,24 @@ _ARMING_CASES = (
     ("lambda_bool_call", "lambda r: bool(1)", False),
     ("lambda_compare_constant", "lambda r: bool(1) >= 0", False),
     ("lambda_ifexp_constant", "lambda r: True if True else False", False),
+
+    # ── SHORT-CIRCUITING OPERANDS decide the expression on their own ───────
+    # `and`/`or` evaluate left to right and stop at a deciding operand, so the
+    # whole expression is a constant whatever the other operands read. Reading
+    # "some operand does not fold" as "undecidable, therefore a predicate"
+    # certified all of `True or r[0]`, `r[0] or True` and `True or
+    # <predicate>` ARMED; the last is how a human disables a hanging wait and it
+    # released on the pre-drop read with every arm of the floor green.
+    ("lambda_or_true_left", "lambda r: True or r[0]", False),
+    ("lambda_or_true_right", "lambda r: r[0] or (not False)", False),
+    ("lambda_or_true_wraps_real",
+     "lambda r: True or index_kind_absent(r, 'Event', 'id', 'RANGE')", False),
+    # Controls, so the new branch cannot unarm every `and`: a constant-FALSE
+    # predicate stays ARMED — it never becomes truthy, so the wait runs to its
+    # deadline and the caller's own assertion reds (fail-closed).
+    ("lambda_and_false_left", "lambda r: False and r[0]", True),
+    ("lambda_and_false_after_real",
+     "lambda r: index_kind_absent(r, 'Event', 'id', 'RANGE') and False", True),
     # ⛔ THE WORST CASE: a one-character slip that WRAPS a real predicate. The
     # tuple is truthy even when the predicate is False, so it releases on the
     # pre-drop read — and "mentions a row parameter" alone does NOT catch it.
