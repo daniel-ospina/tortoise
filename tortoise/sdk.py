@@ -5889,7 +5889,18 @@ def _successor_named_by(props: dict) -> bool:
     for key, value in props.items():
         if _carrier_prop_named_by(key, (_SUCCESSOR_PROP,)) is None:
             continue
-        return isinstance(value, str) and bool(value.strip())
+        # ⛔ THE VALUE IS READ AT ITS BASE CONTENT, never through the caller's
+        # overrides (#12592 cycle-6 P1). `value.strip()` is a METHOD LOOKUP, so a
+        # `str` subclass can answer it while its content is empty — measured:
+        # ``class BlankLies(str): strip = lambda *a, **k: 'v2'`` makes
+        # ``_successor_named_by({'supersededBy': BlankLies('')})`` return True,
+        # and the write stores the base content ``''``: the exact state this guard
+        # refuses (the record then reads `IS NOT NULL` and folds the word, so the
+        # record agrees with the row instead of exposing it). `live.py` states the
+        # rule for the whole seam — "the VALUE keeps its base content
+        # (``str.__str__``)" — and this is the ALLOWANCE side, so it reads the same
+        # way: base content, then the base `strip`.
+        return isinstance(value, str) and bool(str.strip(str.__str__(value)))
     return False
 
 
@@ -48379,7 +48390,8 @@ class TortoiseSDK:
         # ``str.__str__(key)``. A ``str`` subclass whose CONTENT is
         # ``superseded_by`` and whose ``__str__`` is something else is therefore a
         # carrier to the record and invisible to a ``str(k)``-only test — the same
-        # class ``_carrier_prop_named_by`` documents nine hundred lines above, and
+        # class ``_carrier_prop_named_by`` documents (its own docstring carries the
+        # measured shape), and
         # the sibling carrier guard already reads the content rendering
         # (``column = snake(key)``). Measured: ``snake(str(K))`` gave the
         # ``__str__`` word while ``snake(str.__str__(K))`` gave the column, so a

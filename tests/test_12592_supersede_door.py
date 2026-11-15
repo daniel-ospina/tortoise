@@ -746,3 +746,27 @@ def test_a_key_whose_RENDERING_hides_the_column_is_still_the_split(sdk):
     with pytest.raises(ValueError, match="CONFLICTING successor write"):
         sdk.update_entity(other, status="superseded", supersededBy="renderconflict-v2",
                           **{_K("superseded_by"): None})
+
+
+def test_a_value_that_lies_about_being_blank_does_not_name_a_successor(sdk):
+    """The ALLOWANCE reads the value's BASE content, never the caller's override.
+
+    A `str` subclass can answer `strip()` while its content is empty; the write
+    stores the base content, so the row would end `superseded` naming nobody and
+    the record (reading `IS NOT NULL`) would agree with it. Measured on the
+    cycle-5 head: admitted. `live.py` states the rule for the seam — "the VALUE
+    keeps its base content (`str.__str__`)".
+
+    Mutation: call the caller's `value.strip()` instead of
+    `str.strip(str.__str__(value))` -> this reds, because the call is accepted.
+    """
+
+    class BlankLies(str):
+        def strip(self, *args, **kwargs):
+            return "v2"           # the lie; the CONTENT is ''
+
+    node = _make(sdk, "Object", "blanklies")
+    with pytest.raises(ValueError, match="no successor"):
+        sdk.update_entity(node, status="superseded", supersededBy=BlankLies(""))
+    assert _row(sdk, "Object", node) == [None, None, None], (
+        "a refused lie still moved the row")
