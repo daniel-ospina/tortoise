@@ -2157,7 +2157,16 @@ def _ensure_metering_schema(conn) -> None:
             conn.commit()          # durable: a later file's failure cannot undo it
         except Exception as exc:   # a fixture: the probe below decides, not this
             conn.rollback()
-            failure = failure or exc
+            # ⛔ THE **LAST** FAILURE WINS, NOT THE FIRST. `0014`'s
+            # `DuplicateObject` on its unguarded `CREATE POLICY` is the benign
+            # collision this function exists to survive — naming it would send an
+            # operator to the one error that provably does NOT deny the meter,
+            # while the meter file's own failure (the one that decides) went
+            # unsurfaced. The meter file is applied last, so keeping the last
+            # failure names the file the probe is asking about. That string is the
+            # ONLY annotation a skip produces, and a skip reds the required
+            # `test-record-postgres` check via `record-postgres-leg-gate.py`.
+            failure = exc
     with conn.cursor() as check:
         check.execute(probe)
         if check.fetchone()[0] is None:
