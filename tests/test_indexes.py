@@ -1139,8 +1139,12 @@ def test_schema_probe_is_true_only_on_a_complete_schema(graph_factory):
         "the guard would skip the very DDL that recreates it (#4465)")
 
     proj._ensure_indexes()
-    # → and the RECREATE is queued too (#10807), so the graph is not "current"
-    # until the indexer has built the index the sweep just asked for.
+    # → and the RECREATE is not done when the sweep returns: its DEFINITION is
+    # registered synchronously but its POPULATION is queued, so the graph is not
+    # "current" until the indexer has built the index the sweep just asked for.
+    # The wait below covers that populate window (the `UNDER CONSTRUCTION` leg);
+    # the KIND is asserted too so a field still carried under another kind cannot
+    # release it.
     index_rows_after_settle(
         proj,
         until=lambda rows: index_kind_present(
@@ -1158,8 +1162,10 @@ def test_schema_probe_rejects_the_boolean_is_operator_index(graph_factory):
     """
     proj = graph_factory()
     proj.g.query("CREATE INDEX FOR (n:Point) ON (n.is_operator)")
-    # A CREATE is queued the same way as a drop (#10807) — a read taken first
-    # sees a catalogue without the poisoned index and the probe answers True.
+    # The created KIND must be visible before the probe reads: a read naming the
+    # field under a DIFFERENT kind must not release the wait. (A create's
+    # definition is registered synchronously — only its POPULATION is queued —
+    # so this is about KIND exactness, not about waiting out the DDL.)
     index_rows_after_settle(
         proj,
         until=lambda rows: index_kind_present(
@@ -1168,10 +1174,13 @@ def test_schema_probe_rejects_the_boolean_is_operator_index(graph_factory):
         "a boolean is_operator index must fail the probe (#3154)")
 
     proj._ensure_indexes()
-    # The sweep's #3154 PURGE is a `DROP INDEX` — queued like any other DDL — so
-    # a read taken straight after the sweep still sees the poisoned index and
-    # the probe (correctly) answers NOT current. Wait for the purge to land and
-    # grade the assertion below on the SAME settled read.
+    # The sweep's #3154 PURGE is a `DROP INDEX` — deferred on the indexer thread
+    # like any other drop — so a read taken straight after the sweep still sees
+    # the poisoned index and the probe (correctly) answers NOT current. Wait for
+    # the purge to land, then grade the PURGE assertion below on that settled
+    # read. ⛔ The line above it (`_schema_is_current()`) issues its OWN catalogue
+    # read (`tortoise/projection/__init__.py:20442`) and is NOT graded on `rows`;
+    # only the `is_operator` assertion is.
     rows = index_rows_after_settle(
         proj,
         until=lambda r: index_kind_absent(r, "Point", "is_operator", "RANGE"))

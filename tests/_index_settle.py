@@ -140,9 +140,21 @@ def index_kind_present(rows, label: str, field: str, kind: str) -> bool:
 
     The positive counterpart of :func:`index_kind_absent`, and it exists for the
     same reason: a KIND-BLIND predicate can release a wait before the index its
-    caller asserts about exists. ``CREATE INDEX`` is queued exactly as a drop is
-    (FalkorDB ``Indexer_PopulateIndex`` -> ``INDEXER_IDX_POPULATE``), so a caller
-    asserting ``RANGE`` must wait on ``RANGE``, not merely on the field name.
+    caller asserts about exists.
+
+    ⛔ WHAT THIS BUYS — KIND EXACTNESS AND FAIL-CLOSEDNESS, NOT CREATE LATENCY.
+    A create is NOT deferred the way a drop is: its DEFINITION (this kinds map)
+    is registered synchronously, and only the POPULATION is queued
+    (``Indexer_PopulateIndex`` -> ``INDEXER_IDX_POPULATE``; the row then reads
+    ``[Indexing] N/M: UNDER CONSTRUCTION`` with the kinds map ALREADY present).
+    Measured: an immediate catalogue read 5.7 ms after ``CREATE INDEX FOR
+    (n:Point) ON (n.lastDreamedAt)`` already names ``lastDreamedAt: [RANGE]``
+    with status ``OPERATIONAL``. So the wait that actually removes lateness is
+    the one on the DROP side, and ``index_rows_after_settle``'s
+    ``UNDER CONSTRUCTION`` leg is what covers the populate window. What THIS
+    predicate adds is that a field already present under a DIFFERENT kind must
+    not release the wait (a kind-blind predicate would), and that a row which
+    cannot be read keeps the wait closed.
 
     A row whose kinds map is MISSING answers False: a catalogue that cannot
     prove the create must not certify it, so the caller keeps waiting (bounded,
