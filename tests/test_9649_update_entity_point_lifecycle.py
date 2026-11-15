@@ -330,9 +330,12 @@ class _HostileRepr:
 def test_an_impostor_cannot_write_a_terminal_word_on_a_live_point(env):
     """#12907: the vocabulary test must be EXACT-type, not `isinstance`.
 
-    Mutant that reddens: restore `not isinstance(_status, str)` and this call
-    is ACCEPTED, storing `('archived')` on a live Point with zero journal
-    records — the graph/record divergence `rebuild_all` reverts.
+    Mutant that reddens: restore `not isinstance(_status, str)`. Measured, the
+    pin REDS on the refusal it actually receives: the impostor reaches the
+    DECLARED-TRANSITION refusal (`'live' -> <_Impostor …>`), because the loop's
+    content comparison still holds. `ACCEPTED` + a stored `'archived'` is what
+    the PARENT does with BOTH pre-fix clauses restored — the graph/record
+    divergence (`journal delta 0`) `rebuild_all` reverts.
     """
     sdk, events = env
     pid = _live(sdk)

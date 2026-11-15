@@ -48937,12 +48937,22 @@ class TortoiseSDK:
                 # refusal below as "the verbs are optional": it fires only for
                 # UNdeclared targets.
                 for _stored in _pt_statuses or ():
-                    # ⛔ `str.__eq__` on the CONTENT, never `_stored == _status`
-                    # (#12907 review cycle 1, P2): the LEFT operand's type decides
-                    # who answers, so a stored subclass could answer `True` and
-                    # skip the transition check entirely.
-                    if (type(_stored) is not str
-                            or str.__eq__(_stored, _status) is True):
+                    # ⛔ Normalise the STORED side to its exact content, then
+                    # compare with `str.__eq__` — never `_stored == _status`
+                    # (#12907 review cycle 1, P2). The LEFT operand's type
+                    # decides who answers, so a stored `str` subclass could
+                    # answer `True` and skip the transition check entirely.
+                    # ⛔ NOT `type(_stored) is not str: continue` (review cycle
+                    # 2, P3): that SKIPPED the check for every stored subclass,
+                    # which is a guard-STRENGTH regression against the parent
+                    # (it checked them). Normalising keeps the check. A genuine
+                    # non-str (a stored list/int) and an impostor claiming
+                    # `__class__ = str` still defer — the former has no declared
+                    # row to ask about, and the engine cannot return either.
+                    if not issubclass(type(_stored), str):
+                        continue
+                    _stored = str.__str__(_stored)
+                    if str.__eq__(_stored, _status) is True:
                         continue
                     _declared = _ALLOWED_TRANSITIONS.get(_stored)
                     if _declared is None or _status in _declared:
@@ -48979,8 +48989,16 @@ class TortoiseSDK:
                     # named id is real; the typed address is kept as a separate
                     # clause so the caller can still recognise its own call.
                     _named_id = _lifecycle_ids[0]
+                    # ⛔ No raw `_named_id == id_val` (review cycle 2, P3): the
+                    # RIGHT operand's `__eq__` answers for a `str` subclass, so a
+                    # raising one turned this refusal into `RuntimeError:
+                    # eq-boom` (measured). Content comparison with the resolved
+                    # id (a plain str) on the LEFT cannot reach the caller.
+                    _addressed_same = (
+                        issubclass(type(id_val), str)
+                        and str.__eq__(_named_id, str.__str__(id_val)) is True)
                     _addressed_as = (
-                        "" if _named_id == id_val
+                        "" if _addressed_same
                         else f" (addressed as {_refusal_repr(id_val)})")
                     raise ValueError(
                         f"update_entity refused the status transition "
