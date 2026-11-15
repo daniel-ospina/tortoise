@@ -3029,6 +3029,14 @@ def test_the_write_path_vocabulary_names_every_refusal_the_door_returns():
     # `write_failed` is the attempt's own arm, so it is not in the pre-socket
     # tuple but IS a refusal a consumer must branch on.
     returned.append("write_failed")
+    # ⛔ #9318: `journal_collision` is the POST-WRITE arm — the record was
+    # reached and refused to index this record under a position another record
+    # already owns — so it is not in the pre-socket tuple either, and it is a
+    # refusal a consumer must branch on for exactly the reason `write_failed`
+    # is. Naming it here is what keeps this pin's SET equal to what the door
+    # returns: leave it out and the vocabulary map may spell a size one short
+    # (the #10021 defect this pin exists for) without reddening.
+    returned.append("journal_collision")
     missing = [t for t in returned if t not in doc]
     assert not missing, (
         f"`record_writer` can return refusal={missing} and "
