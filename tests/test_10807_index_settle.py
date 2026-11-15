@@ -393,7 +393,7 @@ def test_every_consumer_passes_the_caller_precondition():
 
     ⛔ AND IT IS SET EQUALITY OVER THE DOCUMENTED MODULES, not `declared ⊆ armed`.
     A one-way check protects the pairs somebody remembered to list: measured at
-    #12856's review cycle 5, SIX of the ELEVEN armed functions in these four
+    #12856's review cycle 5, FIVE of the TEN armed functions in these four
     modules were undeclared, so each could have lost its wait with this pin
     green — the same vacuity the pair granularity was added to close, one level
     down. Declaring a site is now part of arming a wait in a documented module.
@@ -449,7 +449,7 @@ def test_the_floor_reds_on_an_armed_wait_it_does_not_declare():
 
     ⛔ Pre-fix the floor was `declared ⊆ armed` only, so an armed wait missing
     from `_DOCUMENTED_SITES` was invisible: measured at #12856's review cycle 5,
-    SIX of the ELEVEN armed functions in the four documented modules were
+    FIVE of the TEN armed functions in the four documented modules were
     undeclared and every one of them could have lost its wait with this pin
     green. The clean case is asserted too, so the arm cannot be a constant-red.
     """

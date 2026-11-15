@@ -123,10 +123,19 @@ _DOCUMENTED_CONSUMERS = {
 #: ⛔ THIS SET IS THE WHOLE ARMAMENT OF EVERY ``_DOCUMENTED_CONSUMERS`` MODULE,
 #: not a sample of it: the pin asserts set EQUALITY over those modules, so an
 #: armed wait that is missing here reds instead of sitting outside the floor.
-#: Measured at #12856's review cycle 5 — with a `required <= armed` floor, SIX of
-#: the ELEVEN armed functions were undeclared across those four modules and each
+#: Measured at #12856's review cycle 5 — with a `required <= armed` floor, FIVE
+#: of the TEN armed functions were undeclared across those four modules and each
 #: could have lost its wait with the pin green. Declaring one and waiting for the
 #: next review to find the next one is the whack-a-mole this closes.
+#:
+#: ⚠️ THE FIGURE IS RE-DERIVABLE, so re-derive it before quoting it: at
+#: `12d8541791` `_DOCUMENTED_SITES` held 5 entries and `_settle_site_functions`
+#: reported 10 armed functions in these modules, leaving the 5 undeclared: both
+#: `test_11682_quote_indexed.py` sites, `test_9079…._await_point_indexes`,
+#: `test_indexes.test_schema_probe_is_per_graph_not_per_process`, and
+#: `TestR2OrUnionAndSearchKeys.test_fts_leg_trace_index_missing_live`. The first
+#: draft of this comment said "six of eleven" — written from memory rather than
+#: from that measurement, and wrong on both numerals.
 #:
 #: A HELPER counts: `test_9079_handle_write_authority.
 #: _await_point_indexes` is where that module's wait lives, so it is the pair a
