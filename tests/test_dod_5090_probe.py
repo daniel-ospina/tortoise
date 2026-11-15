@@ -7242,9 +7242,9 @@ def _doc_section(text: str, start: str, end: str) -> str:
 # Window measured at THIS head over all 63 `must_red` rows: 0 and 2 leave the
 # must_red set fully RED (0/63 leak) and keep the real doc a HIT; **3 opens 2 of
 # 63**, starting with "are not missed by the walk". ⛔ Window 0 is not free
-# either, one set over: it wrongly REDS **10** of the 33 `declared_open` rows.
+# either, one set over: it wrongly REDS **10** of the 34 `declared_open` rows.
 # And since #11437's round-6 clause-scope rows landed, **window 1 is no longer
-# clean at all** — it wrongly REDS 4 of the 33: the two PSEUDO-CLEFT rows (`walk` is
+# clean at all** — it wrongly REDS 4 of the 34: the two PSEUDO-CLEFT rows (`walk` is
 # itself a coverage word, so the cleft's own SUBJECT satisfies the window and the
 # predicate needs the second word to find the real verb), the `only ever` ADVERB
 # row, and the NOUN complement (`not only the walk's business`). ⚠️ The double-negation and `without`-framed rows are GREEN at window
@@ -7257,8 +7257,13 @@ def _doc_section(text: str, start: str, end: str) -> str:
 # `declared_blocks` row (`coverage verb outside the walk/visit/reach/report`). So
 # at this head **2 is the ONLY clean window**: 0 and 1 each cost `declared_open`
 # rows, 3 costs `must_red` rows. (An earlier draft cited "13/13 inverse rows";
-# the row set has since grown to 33, and the denominator re-derived against it —
-# #11437 review, P3, re-measured round 8.)
+# the row set has since grown to 34, and the denominator re-derived against it —
+# #11437 review, P3, re-measured round 8. ⛔ AND THAT FIGURE IS DERIVED NOW (#11541
+# review, round 3 F1): it was the THIRD place the paragraph stated a size and the
+# only one nothing read, so this commit's own 34th `declared_open` row left it at
+# 33 while the sweep table 13 lines below said 34/34 — one paragraph, two sizes
+# for one set, the exact asymmetric-history defect the `N rows of `must_red``
+# convention exists to make visible. The pin below reads it.)
 # ⛔ EVERY figure in this paragraph was re-derived by MEASUREMENT at the head that
 # added the round-9/10/11 rows, because the counts above are inputs and a stale
 # input misreports coverage even when the verdict is right (#11437 review, P3).
@@ -7601,6 +7606,17 @@ _AFFIRMED = re.compile(
 #   buys   -> `declared_blocks` "comma clause, honest PAUSE" — `the walk,
 #             actually, does not visit …` — and the ASIDE family, which now
 #             includes the comma and the parenthetical spellings.
+# ⛔ AND THREE MEMBERS CLOSE **ZERO** MEASURED FALSE PASSES, stated here because
+# the sentence above reads as if every member pays for itself (#11541 review,
+# round 3 F5). Per-member ablation at this head: `,` closes 1 / buys 2, `;` 2/1,
+# `—` 1/1, `(` 1/1, `)` 1/1, `]` 1/1, `…` 1/1 — while `:` closes **0** / buys 1,
+# `–` **0**/1 and `-` **0**/1. They are retained on a stated BELT argument, not a
+# measured closure: each is the same terminating punctuation in a register this
+# doc does not currently use ("the walk does not visit them: actually it does"),
+# and the OR-side cost of keeping them is one rowed false block that the ASIDE
+# family already pays. Stated rather than silently shipped, because an arm whose
+# only measured effect is a false block is the vacuous shape this file reds
+# elsewhere — here it is a measured, rowed price rather than an unmeasured claim.
 # ⚠️ So the scoping is not free and the price is PINNED, not folklore: the honest
 # ASIDE after a terminator ("…; actually the outer method does evaluate them",
 # "…, actually …", "(actually …)") reds, and so does an honest PAUSE inside the
@@ -7667,8 +7683,15 @@ def _residual_sentences(s3: str) -> list[str]:
       ONLY FOR THE SPELLING `if` (#11541 review, P1): `_DEFEATED` carries `\bif\b`
       and no other conditionaliser, so `assuming` / `suppose` / `should` / `when`
       are ACCEPTED (measured HITs at this head) and are DECLARED as a
-      `declared_open` row with an owner. Of these three, the QUOTE-AND-REFUTE and
-      the MARKERED forms of the self-contradiction are what the predicate CLOSES;
+      `declared_open` row with an owner. Of these three, what the predicate
+      CLOSES is the MARKERED form of each — the MARKERED QUOTE-AND-REFUTE and the
+      MARKERED self-contradiction (⛔ NOT the Q&R class: SIX of the seven
+      `open refutation:` rows are Q&R shapes and they are GREEN, so an
+      unqualified "the QUOTE-AND-REFUTE is closed" stands over six still-open
+      rows — #11541 review, round 3 F2; `_DEFEATED` carries a MARKER list, so a
+      refutation spelled `was mistaken` / `has been corrected` / `which is not
+      correct` / `is misleading` / `the earlier wording was wrong` / `the
+      refutation is in the NEXT sentence` is invisible to it);
       the CONDITIONAL and the MARKERLESS self-contradiction are half-closed, each
       with its own `open:` row below (round 6 F3 measured the markerless one a
       HIT — "…; it does visit them" — with no row anywhere) — and the docstring
@@ -7706,10 +7729,12 @@ def _residual_sentences(s3: str) -> list[str]:
       `only|merely|just|simply|solely`), so it is no longer a residual **of
       synonymy** for any of the five. ⛔ THAT IS A NARROWER CLAIM THAN "no longer a
       residual for any of the five", which this line made until review F1: the
-      cue's WORD ORDER is a separate residual and it is still open — three of the
+      cue's WORD ORDER is a separate residual and it is still open — FOUR of the
       SIX `open concessive:` rows below carry `only` itself (`does not only ever
-      visit …; it also reports them`, `not only the walk's business`, `does not
-      visit only …`), all three measured GREEN. ⚠️ An unlisted synonym of `not
+      visit …; it also reports them`, `not only outside … — they are reported by
+      it`, `not only the walk's business`, `does not visit only …`), all four
+      measured GREEN (⛔ THREE was the count here until review round 3 F3: the
+      `reverser complement` row was missed, and nothing derives this figure). ⚠️ An unlisted synonym of `not
       only` remains the arm's list-shaped residual, on the same footing as the
       marker list above;
     * a HEDGE whose cue is outside `_AFFIRMED`'s pseudo-negation termset. The
@@ -8873,16 +8898,19 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
         "open: a conditional spelled without `if` (a premise, not a refutation)":
             "assuming the walk does not visit a nested `def`'s decorators and "
             "parameter defaults, the census under-reports",
-        # ⛔ AND THE ONE TERMINATOR THE `actually` CLASS STILL DOES NOT CARRY
-        # (#11541 review, F4). `)` `]` and the ellipsis are closed by rows in
-        # `must_red` above; a closing QUOTE is the same clause boundary and is
-        # still ACCEPTED — measured GREEN at this head. DECLARED rather than
-        # closed because a quote character is also an OPENING one (`zsh") and
-        # adding it would red an honest sentence that merely quotes a word
-        # mid-clause, the cry-wolf direction this file refuses to take unmeasured.
-        # Owner: `#11541`; a lane that scopes the arm to a CLOSING quote, or pairs
-        # the quote with a following punctuation check, retires this row.
-        "open: an `actually` after a QUOTE terminator (a closing quote is a boundary too)":
+        # ⛔ AND THE TERMINATORS THE `actually` CLASS STILL DOES NOT CARRY — the
+        # class is PUNCTUATION-NON-CONVERGENT, not one gap away from closed
+        # (#11541 review, F4 and round 3 F4). `)` `]` and the ellipsis are closed
+        # by rows in `must_red` above; a closing QUOTE, `?`, `!`, `|` and `/` are
+        # the same clause boundary and are all still ACCEPTED — each measured
+        # GREEN at this head. DECLARED rather than closed because a quote
+        # character is also an OPENING one (`zsh") and because the remaining four
+        # are not prose clause separators at all, so adding them would red the
+        # cry-wolf direction this file refuses to take unmeasured. ⚠️ THIS ROW IS
+        # ONE ROW FOR THE WHOLE FAMILY, so it does not read as "everything else is
+        # closed". Owner: `#11541`; a lane that scopes the arm to a CLOSING quote,
+        # or states which of the four are prose-native, retires this row.
+        "open: an `actually` after a terminator the class does not carry (QUOTE, `?`, `!`, `|`, `/`)":
             "the doc called the decorators and defaults 'not reported by the "
             "walk' actually it does visit them",
     }
@@ -9238,6 +9266,26 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
             f"its verdicts ('3 opens 2 of N', '0/N leak') are read off this "
             f"count, so re-measure the sweep at {len(must_red)} before "
             f"restating it")
+
+    # ⛔ AND THE `declared_open` DENOMINATOR, which was the THIRD size the window
+    # paragraph stated and the only one nothing read (#11541 review, round 3 F1).
+    # Measured on a COPY under `~/.probes/`: `**10** of the 34` -> `33 of the 99`,
+    # `grown to 34` -> `99`, `REDS 4 of the 34` -> `99` each left the whole file
+    # GREEN — while the paragraph carried TWO sizes for one set the moment a
+    # `declared_open` row was added (this commit's own 34th row left the sentence
+    # at 33 beside a sweep table saying 34/34). That is the asymmetric-history
+    # defect the paragraph itself names, so the figure is derived from the set now.
+    _stated_declared_open = re.findall(r"(\d+) `declared_open` rows", _own_source)
+    assert _stated_declared_open, (
+        "no sentence states 'N `declared_open` rows', so the window paragraph's "
+        "denominator for that set is unpinned — restore it or retire this pin "
+        "deliberately")
+    for _figure in _stated_declared_open:
+        assert int(_figure) == len(declared_open), (
+            f"a sentence in this file states {_figure} `declared_open` rows and "
+            f"the set holds {len(declared_open)}. The window sweep's denominators "
+            f"are read off this count, so re-measure the sweep at "
+            f"{len(declared_open)} before restating it")
 
     # ⛔ THE WINDOW SWEEP IS RE-RUN HERE, AND THE PARAGRAPH IS READ AS A RESULT
     # (#11437 review, round 14, P2 — category A, a false PASS on the record that
