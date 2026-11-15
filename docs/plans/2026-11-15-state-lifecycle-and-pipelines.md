@@ -16,9 +16,11 @@ governingAgreement: "#11824"
 
 This is the **target model** for how anything in the graph that has a state says where it is. It states what we want, not what is built. It contains no migration, no changelog and no implementation plan — those are separate documents.
 
-**Issue of record:** #11824 · **Supersedes the design of:** §4.2 Subject status, §4.3 Object status, §5 Point status, `goalState` (§4.3), pack `statuses`/`folds` (§9), pipeline stages.
+**Issue of record:** #11824 · **Supersedes the design of:** the **status / lifecycle vocabulary** only — §4.2 Subject status, §4.3 Object status, §5 Point status, `goalState` (§4.3), and pack `statuses`/`folds` (§9). The **pipeline** slot model is **not** superseded: it is already shipped (`#2792`, `tortoise/pipeline.py`) and §4 restates it rather than redefining it.
 
-> **OVERRIDES:** three recorded positions this model deliberately reverses, all named here so the departure is findable rather than read as history — (1) `docs/ONTOLOGY.md` §4.3 (`:449`, owner-approved text under that file's CRITICAL RULE at `:41`): *"a retirement with no successor is `archived`"*; (2) the same clause's *"pack-declared kinds validate against their own declared words"*, which `commit_ops.py:116-122` records as a RECORDED constraint (*"a single shared `OBJECT_STATUS_VALUES` would refuse real words and narrow the door … a shared set is foreclosed"*); and (3) the extractor's recorded removal-from-recall target (`EXTRACTOR-V4-ARCHITECTURE.md:1084`, 2026-10-26: a journaled `restatus` to **`archived`**), plus `archived` in `SUBJECT_STATUS_VALUES` (`commit_ops.py:123-124`). What replaces them: a thing with no successor ends by `deprecated`, filing-away becomes a visibility **flag**, and a pack's own words become that kind's **pipeline stages** (§3, §4.2) rather than status values. The reason is the collision §2 exists to remove — a word that means both *ended* and *hidden from a view*, and a word that means both *how far along* and *whether it still stands*. **These are reversals of owner-approved text, so PR #12895's approval by the owner is the ruling**; until it is given, the recorded positions stand.
+**What is actually new here** is therefore narrow, and worth stating plainly so a reader does not rebuild what exists: (a) one closed four-word **lifecycle** vocabulary for every kind except events, with `archived` retired and the successorless case moved onto `deprecated`; (b) **one reader rule** — *is this still served as current?* — that every read surface implements once, instead of at least eight divergent lists; and (c) the **base-set-plus-declared-deltas** shape that keeps a family's legitimate divergence explicit rather than silent. Everything the pipeline sections describe is the existing shipped model.
+
+> **OVERRIDES:** four recorded positions this model deliberately reverses, all named here so the departure is findable rather than read as history — (1) `docs/ONTOLOGY.md` §4.3 (`:449`, owner-approved text under that file's CRITICAL RULE at `:41`): *"a retirement with no successor is `archived`"*; (2) the same clause's *"pack-declared kinds validate against their own declared words"* as applied to the **status** vocabulary — `commit_ops.py:114-122` records that a single shared status set was **foreclosed** because `packs/venture` exercises its own words, and this model answers that by moving those words onto the position axis rather than by widening the status list (a pack still validates against its own declaration — the declaration changes axis, it is not dropped); (3) the extractor's recorded removal-from-recall target (`EXTRACTOR-V4-ARCHITECTURE.md:1084`, 2026-10-26: a journaled `restatus` to **`archived`**); and (4) `archived` in `SUBJECT_STATUS_VALUES` (`commit_ops.py:123-124`). What replaces them: a thing with no successor ends by `deprecated`, and filing-away becomes a visibility **flag**. The reason is the collision §2 exists to remove — a word that means both *ended* and *hidden from a view*. **These are reversals of owner-approved text, so PR #12895's approval by the owner is the ruling**; until it is given, the recorded positions stand.
 
 ---
 
@@ -93,7 +95,7 @@ This is why the current five extra words are not needed — `retracted`, `outdat
 | "in-progress", "completed" | position in a process | a pipeline stage |
 | "outdated" | the past name of the Point "no longer counts" mechanism | the `deprecated`/`superseded` words above |
 | "blocked", "paused", "waiting" | an interruption, not an ending | a stage in the `suspended` slot — and for a **goal**, `blocked` is also one of its `goalState` values. The two do not collide: the stage is read by its **slot**, never its name (§4.1) |
-| "met", "unmet", "abandoned" | how the goal worked out | `goalState` |
+| "met", "unmet", "abandoned" | how the **goal** worked out | `goalState` — which is meaningful only on `goal`/`target`/`strategy`/`plan`. On any other kind the word is progress, so it becomes a pipeline stage: `packs/venture`'s `condition` (`statuses: [unmet, met]`) is not a goal, and its words are stages |
 
 ---
 
@@ -111,7 +113,7 @@ A pipeline is a short ordered list of **stages**. Each stage declares:
 | `slot` | which of four roles it plays — see below |
 | `outcome` | for a terminal stage only: how it ended |
 
-The **slot** is the field that carries the meaning, and it is the piece today's model is missing:
+The **slot** is the field that carries the meaning — and **it is already shipped**, not proposed here: `tortoise/pipeline.py` (#2792, closed) declares `PIPELINE_SLOTS` and `PIPELINE_OUTCOMES`, validates both, and stores the current stage on the Object as `pipelineStageId` / `pipelineSlot` / `pipelineOutcome` / `pipelineStageSince` / `isClosed`, with a pack opting in through `kindDefs[<kind>].pipeline`. That module also states the separation this document depends on: *"`Object.status` keeps its existence-axis meaning (`live`/`superseded`); the pipeline stage is a separate property"*. This section therefore **restates the shipped shape rather than introducing it**, and cites the module so a reader does not rebuild it.
 
 | slot | means | examples of the role |
 |---|---|---|
@@ -138,20 +140,20 @@ Because a stage's *name* is the most customisable thing in the system — a pack
 
 A pack declares pipelines for its own kinds. A graph with no pack still works: a core kind has no pipeline **until a default is declared for it**, and its state is the lifecycle word alone.
 
-This is what makes the model customisable without becoming a configuration language: **the shape is fixed (four slots, ordered stages, one outcome on a terminal stage); the contents are declared per kind.** A CRM funnel, a work item's flow and a goal's outcome are all the same shape with different stage names.
+This is what makes the model customisable without becoming a configuration language: **the shape is fixed (four slots, ordered stages, one outcome on a terminal stage); the contents are declared per kind** — which is exactly the two-tier split `tortoise/pipeline.py` already ships (canonical slots in core, tenant stages declared per graph). A CRM funnel, a work item's flow and a goal's outcome are all the same shape with different stage names.
 
 ---
 
 ## 5. The data model
 
-**Three state fields** — `status`, `pipelineStage` (with its `pipelineOutcome`), and `goalState` — **plus the successor bookkeeping that the `status` word obliges when it is `superseded`.** No others.
+**Three state fields** — `status`, the pipeline stage (`pipelineStageId` + `pipelineSlot`, with `pipelineOutcome` and `isClosed`), and `goalState` — **plus the successor bookkeeping that the `status` word obliges when it is `superseded`.** No others, and the pipeline field names are the shipped ones (#2792) rather than new spellings.
 
 | field | lives on | values | written by |
 |---|---|---|---|
 | `status` | every kind **except events** | `draft` · `live` · `deprecated` · `superseded` | a verb (§3.1) |
 | `supersededBy`, `supersededAt` | wherever **`status`** is `superseded` | the successor's identity + when | the replace verb, in the same write as `superseded` |
-| `pipelineStage` | kinds whose pack declares a pipeline | a stage `id` from that kind's declaration | the stage-advance verb, or an event the pack folds onto the stage |
-| `pipelineOutcome` | same | the `outcome` of the terminal stage reached | the same write that moves into a terminal stage |
+| `pipelineStageId` (+ `pipelineSlot`) | kinds whose pack declares a pipeline | a stage `id` from that kind's declaration | the stage-advance verb, or an event the pack folds onto the stage |
+| `pipelineOutcome`, `isClosed` | same | the `outcome` of the terminal stage reached | the same write that moves into a terminal stage |
 | `goalState` | goals | `met` · `unmet` · `blocked` · `abandoned` · `active` · `guideline` · `superseded` | the goal's own writer (unchanged) |
 
 `supersededBy`/`supersededAt` are not a fourth kind of state — they are what the `status` word obliges you to record. They bind to **`status`**, not to `goalState`, because a goal is an Object and the carriers are gated to Object and Subject (`sdk.py`'s `_LIFECYCLE_CARRIER_LABELS`) — and `sdk.py` refuses a carrier write unless the same write sets `status='superseded'`. The three state fields are `status`, `pipelineStage` (with its `outcome`) and `goalState`.
@@ -220,7 +222,7 @@ These are recorded decisions, not preferences. The model above is designed to si
 | **One base set, plus named declared deltas — never one collapsed set.** | #11824's contradiction test; `commit_ops.py:61-65` "Do not unify the two blindly: they answer different questions"; the `assembly.py` resolver narrowing; the Object/Point vocabulary divergence in #3308 / PR #6955 | The four words are the **base** and the only write vocabulary. A family that must answer a different question declares its delta explicitly and names it; a delta is never a quiet divergence, and never a list to be re-pointed at the base. |
 | **The claim family's "no longer counts" flag is load-bearing.** | #2498 | The flag's *effect* is preserved as the `deprecated`/`superseded` words; the mechanism is not removed by fiat. |
 | **What a reader hides is wider than what a writer may create.** | #2977 | Readers must still be able to treat a word as dead that no verb currently produces — the net stays wider than the door. |
-| **A single shared list cannot cover pack words.** | #2729, and Foreclosed in `EXTRACTOR-V4-ARCHITECTURE.md` ("pack lifecycles own their words") | There is no shared *stage* list. The lifecycle **base** set is shared for the lifecycle axis only, and it is small enough to be closed; pack words live on the position axis. |
+| **A single shared list cannot cover pack words.** | #2729, and Foreclosed in `EXTRACTOR-V4-ARCHITECTURE.md` ("pack lifecycles own their words") | The shared **stage** list is the shipped four-slot vocabulary (#2792), and it covers only *roles*, never names — so no pack word is refused. Pack words live on the position axis. |
 | **A word with no reader is not added.** | the withdrawal of `stale`, #11824 | This model introduces no new word and removes **five** — `retracted`, `outdated`, `archived`, `in_progress`, `completed` — leaving a base set of four. |
 
 ---
