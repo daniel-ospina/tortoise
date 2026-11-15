@@ -311,6 +311,15 @@ def _meter_statement(cur: Any, statement: str, *, why: str) -> None:
     outer handler's DEBUG skip. Nothing here can repair it from the inside —
     only the caller knows whether its transaction is still worth committing —
     and the outer ``except`` still returns ``None`` so the meter stays total.
+
+    ⛔ THAT MAKE THIS ARM DISCLOSED, NOT REPAIRED, and it is stated here so the
+    code is not read as more than it is: a caller that commits into a
+    transaction this arm could not recover still rolls its rows back. The
+    realistic triggers (``25P02`` on an already-aborted transaction, ``25P01``
+    outside a block, a dead connection) all mean that write was already doomed
+    before the meter ran, so no new loss is introduced — but the WARNING is the
+    whole of the protection in this branch, which is why it may never be
+    downgraded to the DEBUG skip.
     """
     try:
         cur.execute(statement)
@@ -341,8 +350,9 @@ def measure_written_rows(
     record, a missing function on an older schema, a malformed reply), logging
     at DEBUG: a metering fault must never change a write's outcome.
 
-    ⛔ "NEVER CHANGE A WRITE'S OUTCOME" IS ENFORCED HERE, NOT INTENDED (#12762
-    follow-up, `main` red at `9e934efad5`). Swallowing the exception was NOT
+    ⛔ "NEVER CHANGE A WRITE'S OUTCOME" IS ENFORCED FOR THE METER'S OWN
+    FAILURES — AND ONLY FOR THOSE (#12762 follow-up, `main` red at
+    `9e934efad5`). Swallowing the exception was NOT
     enough: the meter runs inside the caller's transaction, and in PostgreSQL a
     failed statement leaves that transaction ABORTED — so the caller's
     succeeding `commit()` becomes a ROLLBACK and the whole record write is
@@ -362,6 +372,19 @@ def measure_written_rows(
     on PG16: inside the savepoint `pg_current_xact_id()` returned the same
     ``919`` as before it, and the function still reported ``rows: 1`` for the
     row inserted before the savepoint.
+
+    ⛔ THE RESIDUAL ARM, NAMED SO THE CLAIM IS NOT WIDER THAN THE CODE. The
+    savepoint makes the meter's *own* failure — the read, the refusal, the lock
+    timeout — unable to abort the caller's transaction. It does NOT rescue a
+    transaction that is ALREADY unusable: if the ``SAVEPOINT``/``RELEASE``
+    bookkeeping itself cannot be issued (``25P02``
+    in-failed-sql-transaction, ``25P01`` outside a block, a dead connection),
+    ``_meter_statement`` discloses it at WARNING and this function is still
+    total, so a caller that commits anyway still rolls its rows back. That arm
+    is DISCLOSED, not repaired — nothing here can repair it. It is also not a
+    new loss path: those triggers mean the write was already doomed by whatever
+    aborted or dropped the session, which is precisely why the disclosure is a
+    WARNING and not the DEBUG skip the benign case gets.
 
     ⛔ SUPERSEDED CONTRACT TEXT, NAMED SO IT IS NOT RE-DERIVED WRONGLY. The
     header of `supabase/migrations/20261114000001_per_org_postgres_bytes.sql`
