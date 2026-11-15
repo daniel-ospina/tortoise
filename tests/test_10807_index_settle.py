@@ -28,10 +28,12 @@ import ast
 from pathlib import Path
 from types import SimpleNamespace
 
+from tests import _index_settle as _settle
 from tests._index_settle import (
     INDEX_SETTLE_TIMEOUT_S,
     index_cells,
     index_kind_absent,
+    index_kind_present,
     index_rows_after_settle,
     point_index_drops_visible,
 )
@@ -211,6 +213,40 @@ def test_index_kind_absent_reads_the_kinds_map_and_fails_closed():
         "FULLTEXT") is False
 
 
+def test_index_kind_present_reads_the_kinds_map_and_fails_closed():
+    """The positive predicate's own shapes, INCLUDING the ones that must not
+    certify a create.
+
+    Mirror of `test_index_kind_absent_reads_the_kinds_map_and_fails_closed`:
+    `index_kind_present` gates a wait that RELEASES an assertion, so a predicate
+    that answered True on a row it cannot read would let the caller assert about
+    a create the engine has not applied. Added at #12856, where the predicate
+    became a consumer-facing requirement rather than a local convenience.
+    """
+    assert index_kind_present(_OBJECT_WITH_FULLTEXT, "Object", "name",
+                              "FULLTEXT") is True
+    assert index_kind_present(_OBJECT_WITHOUT_FULLTEXT, "Object", "name",
+                              "FULLTEXT") is False
+    # A row for ANOTHER label says nothing about this one.
+    assert index_kind_present(_OBJECT_WITH_FULLTEXT, "Point", "name",
+                              "FULLTEXT") is False
+    # A kinds map that is absent (or not a map) cannot prove the create.
+    assert index_kind_present([["Object", ["name"], None]], "Object", "name",
+                              "FULLTEXT") is False
+    assert index_kind_present([["Object"]], "Object", "name", "FULLTEXT") is False
+    # The field present under a DIFFERENT kind is not this kind.
+    assert index_kind_present([["Object", ["name"], {"name": ["RANGE"]}]],
+                              "Object", "name", "FULLTEXT") is False
+    # The engine has spelled a single kind as a bare string; accept both.
+    assert index_kind_present(
+        [["Object", ["name"], {"name": "FULLTEXT"}]], "Object", "name",
+        "FULLTEXT") is True
+    # Case is the engine's to choose; the comparison is kind, not spelling.
+    assert index_kind_present(
+        [["Object", ["name"], {"name": ["fulltext"]}]], "Object", "name",
+        "FULLTEXT") is True
+
+
 def _settle_call_sites(paths) -> tuple[dict[str, list[int]], dict[str, list[int]]]:
     """Every `index_rows_after_settle(...)` call under `paths`: sites, and the
     ones missing their `until`.
@@ -292,7 +328,7 @@ def test_every_consumer_passes_the_caller_precondition():
     here = Path(__file__).resolve()
     call_sites, missing = _settle_call_sites(
         p for p in here.parent.glob("test_*.py") if p.name != here.name)
-    required = {"test_9079_handle_write_authority.py", "test_search_engine.py"}
+    required = set(_settle._DOCUMENTED_CONSUMERS)
     assert required <= set(call_sites), (
         "the scan must find the call site in each module this file documents — a "
         f"missing one means the pin went vacuous (a rename?): {sorted(call_sites)}")

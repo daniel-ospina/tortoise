@@ -80,31 +80,54 @@ def index_cells(rows) -> set[str]:
     return {str(cell) for row in rows for cell in row}
 
 
+def _row_reports_kind(row, field: str, kind: str) -> bool | None:
+    """Does this catalogue row report ``field`` under ``kind``?
+
+    ``None`` means the row CANNOT ANSWER — an absent/short row, or a kinds map
+    that is not a map. Kept as ONE reader because the two predicates below are
+    that same question with opposite polarity on the unanswerable case ("keep
+    waiting" for a create, "do not certify" for a drop); two copies of the
+    kind-extraction would drift silently — the divergence this module's own
+    header forbids.
+    """
+    if not row or len(row) < 3 or not isinstance(row[2], dict):
+        return None
+    kinds = row[2].get(field) or ()
+    if isinstance(kinds, str):
+        kinds = [kinds]
+    return kind.upper() in {str(k).upper() for k in kinds}
+
+
+#: The consumers this module documents, and whose "wait" call sites the
+#: structural pin therefore REQUIRES (`test_every_consumer_passes_the_caller_
+#: precondition`): a rename or a dropped wait in any of them keeps a count-based
+#: floor green, so the floor names modules rather than a number. `test_indexes.py`
+#: joined at #12856 — its index-requirement test read the catalogue straight
+#: after the DDL and red on a LANDED drop.
+_DOCUMENTED_CONSUMERS = {
+    "test_9079_handle_write_authority.py",
+    "test_search_engine.py",
+    "test_indexes.py",
+}
+
+
 def index_kind_present(rows, label: str, field: str, kind: str) -> bool:
     """Does SOME catalogue row for ``label`` report ``field`` as ``kind`` yet?
 
     The positive counterpart of :func:`index_kind_absent`, and it exists for the
     same reason: a KIND-BLIND predicate can release a wait before the index its
     caller asserts about exists. ``CREATE INDEX`` is queued exactly as a drop is
-    (FalkorDB ``Indexer_PopulateIndex`` -> ``INDEXER_IDX_POPULATE``), and the
-    catalogue's first report of a FIELD can precede the kind the caller needs —
-    so a caller asserting ``RANGE`` must wait on ``RANGE``, not merely on the
-    field name.
+    (FalkorDB ``Indexer_PopulateIndex`` -> ``INDEXER_IDX_POPULATE``), so a caller
+    asserting ``RANGE`` must wait on ``RANGE``, not merely on the field name.
 
     A row whose kinds map is MISSING answers False: a catalogue that cannot
     prove the create must not certify it, so the caller keeps waiting (bounded,
     fail-closed) instead of asserting about a read that never answered.
     """
-    wanted = kind.upper()
     for row in rows:
         if not row or str(row[0]) != label:
             continue
-        if len(row) < 3 or not isinstance(row[2], dict):
-            continue
-        kinds = row[2].get(field) or ()
-        if isinstance(kinds, str):
-            kinds = [kinds]
-        if wanted in {str(k).upper() for k in kinds}:
+        if _row_reports_kind(row, field, kind) is True:
             return True
     return False
 
@@ -121,16 +144,11 @@ def index_kind_absent(rows, label: str, field: str, kind: str) -> bool:
     prove the drop must not certify it, so the caller waits (bounded,
     fail-closed) instead of asserting about a read that never answered.
     """
-    wanted = kind.upper()
     for row in rows:
         if not row or str(row[0]) != label:
             continue
-        if len(row) < 3 or not isinstance(row[2], dict):
-            return False
-        kinds = row[2].get(field) or ()
-        if isinstance(kinds, str):
-            kinds = [kinds]
-        if wanted in {str(k).upper() for k in kinds}:
+        reports = _row_reports_kind(row, field, kind)
+        if reports is None or reports:
             return False
     return True
 
