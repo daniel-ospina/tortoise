@@ -102,19 +102,19 @@ def test_the_reason_set_is_closed_and_every_reason_is_reachable(sdk):
     # goal-retired
     i, t, g = _world(sdk, tag="reason-goal")
     _judge(sdk, i, t, g)
-    sdk.update_entity(g["id"], goalState="abandoned")
+    sdk.update_knowledge(g["id"], goalState="abandoned")
     reachable["goal-retired"] = _only(verdicts(sdk, goal_id=g["id"])).invalidation.reason
 
     # target-retired
     i, t, g = _world(sdk, tag="reason-target")
     _judge(sdk, i, t, g)
-    sdk.update_entity(t["id"], status="superseded")
+    sdk.update_knowledge(t["id"], status="superseded")
     reachable["target-retired"] = _only(verdicts(sdk, goal_id=g["id"])).invalidation.reason
 
     # indicator-retired
     i, t, g = _world(sdk, tag="reason-indicator")
     _judge(sdk, i, t, g)
-    sdk.update_entity(i["id"], status="superseded")
+    sdk.update_knowledge(i["id"], status="superseded")
     reachable["indicator-retired"] = _only(verdicts(sdk, goal_id=g["id"])).invalidation.reason
 
     # definition-changed
@@ -126,7 +126,7 @@ def test_the_reason_set_is_closed_and_every_reason_is_reachable(sdk):
     # target-revised
     i, t, g = _world(sdk, tag="reason-revised")
     _judge(sdk, i, t, g)
-    sdk.update_entity(t["id"], threshold=12.0)
+    sdk.update_knowledge(t["id"], threshold=12.0)
     reachable["target-revised"] = _only(verdicts(sdk, goal_id=g["id"])).invalidation.reason
 
     assert set(reachable) == set(STALE_REASONS), (
@@ -184,7 +184,7 @@ def test_a_healthy_judgement_is_not_stale_and_retires_nothing(sdk):
 def test_revising_any_field_of_the_bar_retires_the_state(sdk, change, expected):
     i, t, g = _world(sdk, tag=f"bar-{'-'.join(change)}")
     _judge(sdk, i, t, g)
-    sdk.update_entity(t["id"], **change)
+    sdk.update_knowledge(t["id"], **change)
     v = _only(verdicts(sdk, goal_id=g["id"]))
     if expected is None:
         assert v.invalidation is None, v.invalidation
@@ -200,7 +200,7 @@ def test_the_headline_case_a_goal_cannot_sit_at_met_after_the_threshold_moves(sd
     i, t, g = _world(sdk, tag="headline")
     made = _judge(sdk, i, t, g)
     assert sdk.get_entity(g["id"])["goalState"] == "met"
-    sdk.update_entity(t["id"], threshold=8.0)  # the very same 9-minute reading now fails
+    sdk.update_knowledge(t["id"], threshold=8.0)  # the very same 9-minute reading now fails
     report = invalidate_stale(sdk, goal_id=g["id"])
     assert report["counts"]["retired"] == 1
     claim = sdk.get_entity(made["point_id"])
@@ -227,7 +227,7 @@ def test_a_removed_threshold_is_a_revision_not_a_crash(sdk):
     NOT: a bar that was deleted is exactly the change to report."""
     i, t, g = _world(sdk, tag="removed-bar")
     _judge(sdk, i, t, g)
-    sdk.update_entity(t["id"], threshold=None)
+    sdk.update_knowledge(t["id"], threshold=None)
     v = _only(verdicts(sdk, goal_id=g["id"]))
     assert v.invalidation.reason == "target-revised"
     assert "unreadable" in v.invalidation.detail
@@ -241,7 +241,7 @@ def test_a_superseded_target_retires_the_state_it_judged(sdk):
     successor = sdk.create_object("CI <= 8m [target-superseded]",
                                   objectKind="target", comparator="<=",
                                   threshold=8.0)
-    sdk.update_entity(t["id"], status="superseded", supersededBy=successor["id"])
+    sdk.update_knowledge(t["id"], status="superseded", supersededBy=successor["id"])
     v = _only(verdicts(sdk, goal_id=g["id"]))
     assert v.invalidation.reason == "target-retired"
     assert "superseded" in v.invalidation.detail
@@ -263,7 +263,7 @@ def test_a_target_that_no_longer_exists_is_retired_state(sdk):
 def test_a_retired_indicator_retires_the_state_derived_from_its_readings(sdk):
     i, t, g = _world(sdk, tag="indicator-retired")
     made = _judge(sdk, i, t, g)
-    sdk.update_entity(i["id"], status="superseded")
+    sdk.update_knowledge(i["id"], status="superseded")
     v = _only(verdicts(sdk, goal_id=g["id"]))
     assert v.invalidation.reason == "indicator-retired"
     invalidate_stale(sdk, goal_id=g["id"])
@@ -287,7 +287,7 @@ def test_the_LEGACY_outdated_WORD_retires_an_input_like_the_recall_lane(sdk, ret
     ⛔ Measured RED before this case existed: `_retirement` tested the narrower
     `commit_ops.OBJECT_TERMINAL_STATUSES`, which OMITS `outdated`, so an input
     retired with the legacy word returned ``None`` — HEALTHY — and the derived
-    state kept counting. `sdk.update_entity(<object>, status='outdated')` is an
+    state kept counting. `sdk.update_knowledge(<object>, status='outdated')` is an
     accepted public write, and #11825 measured that the SDK accepts terminal
     statuses on Objects — so this is the issue's own headline ("a conclusion
     whose justification is gone"), reachable through a public door, not a
@@ -307,7 +307,7 @@ def test_the_LEGACY_outdated_WORD_retires_an_input_like_the_recall_lane(sdk, ret
     i, t, g = _world(sdk, tag=f"legacy-outdated-{retire}")
     made = _judge(sdk, i, t, g)
     node = {"target": t, "indicator": i, "goal": g}[retire]
-    sdk.update_entity(node["id"], status="outdated")
+    sdk.update_knowledge(node["id"], status="outdated")
     # the write landed; this assertion is what the sweep will read back
     assert sdk.get_entity(node["id"])["status"] == "outdated"
     v = _only(verdicts(sdk, goal_id=g["id"]))
@@ -420,7 +420,7 @@ def test_a_definite_bar_revision_OUTRANKS_an_undecidable_scope(sdk):
     assert sdk.get_entity(made["point_id"])["status"] == "live"
 
     # now the BAR moves: a definite finding, and it must not be shielded
-    sdk.update_entity(t["id"], threshold=8.0)
+    sdk.update_knowledge(t["id"], threshold=8.0)
     v = _only(verdicts(sdk, goal_id=g["id"]))
     assert v.invalidation is not None, (
         "an unplaceable scope shielded a claim whose bar visibly moved: "
@@ -459,7 +459,7 @@ def test_the_OTHER_scope_guards_also_defer_to_a_definite_finding(sdk, missing):
     assert v.undecidable is not None
 
     if missing == "goalId":
-        sdk.update_entity(t["id"], threshold=8.0)
+        sdk.update_knowledge(t["id"], threshold=8.0)
         expected = "target-revised"
     else:
         mark_definition_change(sdk, i["id"], at="2026-11-12T00:00:00+00:00")
@@ -562,7 +562,7 @@ def test_the_success_arm_reconciles_the_goal_the_CLAIM_names(sdk):
     made = _judge(sdk, i, t, g)
     assert sdk.get_entity(g["id"])["goalState"] == "met"
     # the claim is LIVE and stale: the bar moved above the recorded reading
-    sdk.update_entity(t["id"], threshold=8.0)
+    sdk.update_knowledge(t["id"], threshold=8.0)
     finding = Invalidation(judgement_id=made["point_id"], reason="target-revised",
                            detail="threshold moved")
     result = invalidate(sdk, finding)
@@ -595,7 +595,7 @@ def test_the_CLAIMS_goal_wins_when_the_caller_names_a_DIFFERENT_one(sdk):
     _judge(sdk, i2, t2, g2)
     assert sdk.get_entity(g1["id"])["goalState"] == "met"
     assert sdk.get_entity(g2["id"])["goalState"] == "met"
-    sdk.update_entity(t1["id"], threshold=8.0)  # g1's claim goes stale, still live
+    sdk.update_knowledge(t1["id"], threshold=8.0)  # g1's claim goes stale, still live
     finding = Invalidation(judgement_id=made["point_id"], reason="target-revised",
                            detail="threshold moved", goal_id=g2["id"])
     result = invalidate(sdk, finding)
@@ -674,7 +674,7 @@ def test_the_PRECEDENCE_holds_in_the_POST_EXCEPTION_arm(sdk, monkeypatch):
     g2 = _a_second_goal(sdk, "prec-post-exception-other")
 
     def retired_by_a_PEER(point_id, **_kwargs):
-        sdk.update_entity(point_id, status="retracted")
+        sdk.update_knowledge(point_id, status="retracted")
         raise ValueError("already terminal")
 
     monkeypatch.setattr(sdk, "retract_point", retired_by_a_PEER)
@@ -717,7 +717,7 @@ def test_a_claim_that_NAMES_NO_goal_falls_back_to_the_CALLERs(sdk, monkeypatch,
         "the fixture's premise: the claim names no goal at all")
 
     if shape == "success":
-        sdk.update_entity(t["id"], threshold=8.0)  # live, and stale
+        sdk.update_knowledge(t["id"], threshold=8.0)  # live, and stale
     elif shape == "terminal":
         sdk._get_proj().g.query(
             "MATCH (p:Point {id:$id}) SET p.outdated = 'true'",
@@ -725,11 +725,11 @@ def test_a_claim_that_NAMES_NO_goal_falls_back_to_the_CALLERs(sdk, monkeypatch,
         )
     elif shape == "post-exception":
         def retired_by_a_PEER(point_id, **_kwargs):
-            sdk.update_entity(point_id, status="retracted")
+            sdk.update_knowledge(point_id, status="retracted")
             raise ValueError("already terminal")
         monkeypatch.setattr(sdk, "retract_point", retired_by_a_PEER)
     else:
-        sdk.update_entity(t["id"], threshold=8.0)  # live, and stale
+        sdk.update_knowledge(t["id"], threshold=8.0)  # live, and stale
 
         def vanish_during_retract(point_id, **_kwargs):
             sdk.delete_entity(point_id)
@@ -753,7 +753,7 @@ def test_the_PRECEDENCE_holds_when_the_claim_VANISHES(sdk, monkeypatch):
     i, t, g1 = _world(sdk, tag="prec-vanish")
     made = _judge(sdk, i, t, g1)
     g2 = _a_second_goal(sdk, "prec-vanish-other")
-    sdk.update_entity(t["id"], threshold=8.0)  # live, and stale
+    sdk.update_knowledge(t["id"], threshold=8.0)  # live, and stale
 
     def vanish_during_retract(point_id, **_kwargs):
         sdk.delete_entity(point_id)
@@ -980,7 +980,7 @@ def test_the_boundary_is_read_from_the_NODE_already_fetched(sdk):
 def test_retiring_the_goal_retires_the_states_derived_from_it(sdk, retirement):
     i, t, g = _world(sdk, tag=f"goal-{'-'.join(retirement)}")
     made = _judge(sdk, i, t, g)
-    sdk.update_entity(g["id"], **retirement)
+    sdk.update_knowledge(g["id"], **retirement)
     v = _only(verdicts(sdk, goal_id=g["id"]))
     assert v.invalidation.reason == "goal-retired"
     invalidate_stale(sdk, goal_id=g["id"])
@@ -994,7 +994,7 @@ def test_a_live_goal_state_is_never_read_as_a_retirement(sdk, state):
     Reading any of them as retirement would retire every blocked goal's evidence."""
     i, t, g = _world(sdk, tag=f"live-{state}")
     _judge(sdk, i, t, g)
-    sdk.update_entity(g["id"], goalState=state)
+    sdk.update_knowledge(g["id"], goalState=state)
     v = _only(verdicts(sdk, goal_id=g["id"]))
     assert v.invalidation is None, v.invalidation
 
@@ -1011,7 +1011,7 @@ def test_a_goal_retired_by_its_STATUS_does_not_keep_a_derived_word(sdk):
     i, t, g = _world(sdk, tag="goal-status-word")
     _judge(sdk, i, t, g)
     assert sdk.get_entity(g["id"])["goalState"] == "met"
-    sdk.update_entity(g["id"], status="archived")
+    sdk.update_knowledge(g["id"], status="archived")
     report = invalidate_stale(sdk, goal_id=g["id"])
     assert report["counts"]["retired"] == 1
     assert report["invalidated"][0]["cache"]["cleared"] is True
@@ -1026,8 +1026,8 @@ def test_a_word_this_engine_never_wrote_is_PRESERVED_by_a_retirement(sdk, word):
     says it prevents."""
     i, t, g = _world(sdk, tag=f"preserve-{word}")
     _judge(sdk, i, t, g)
-    sdk.update_entity(g["id"], goalState=word)
-    sdk.update_entity(t["id"], threshold=8.0)
+    sdk.update_knowledge(g["id"], goalState=word)
+    sdk.update_knowledge(t["id"], threshold=8.0)
     report = invalidate_stale(sdk, goal_id=g["id"])
     assert report["counts"]["retired"] == 1
     assert report["invalidated"][0]["cache"] == {
@@ -1042,7 +1042,7 @@ def test_a_retired_goal_keeps_its_own_word_and_the_cache_never_overwrites_it(sdk
     inversion #11822's `GOAL_STATE_CACHE` rule exists to prevent."""
     i, t, g = _world(sdk, tag="goal-word")
     _judge(sdk, i, t, g)
-    sdk.update_entity(g["id"], goalState="abandoned")
+    sdk.update_knowledge(g["id"], goalState="abandoned")
     report = invalidate_stale(sdk, goal_id=g["id"])
     assert report["counts"]["retired"] == 1
     assert report["invalidated"][0]["cache"]["preserved"] is True
@@ -1221,7 +1221,7 @@ def test_a_claim_that_records_NO_reading_instant_is_UNDECIDABLE_not_healthy(sdk)
     assert sdk.get_entity(made["point_id"])["status"] == "live"
     # ⛔ and the OTHER retirement reasons still work on that same legacy claim — an
     # undecidable DEFINITION check must not shield a revised bar.
-    sdk.update_entity(t["id"], threshold=8.0)
+    sdk.update_knowledge(t["id"], threshold=8.0)
     v = _only(verdicts(sdk, goal_id=g["id"]))
     assert v.invalidation is not None, (
         "an unplaceable definition boundary suppressed the bar check — a stale "
@@ -1326,7 +1326,7 @@ def test_an_unreadable_boundary_is_UNDECIDABLE_never_silently_clean(sdk):
     that cannot be made must not fire one."""
     i, t, g = _world(sdk, tag="bad-boundary")
     made = _judge(sdk, i, t, g)
-    sdk.update_entity(i["id"], **{DEFINITION_BOUNDARY_PROP: "TBD"})
+    sdk.update_knowledge(i["id"], **{DEFINITION_BOUNDARY_PROP: "TBD"})
     report = invalidate_stale(sdk, goal_id=g["id"])
     assert report["stale"] == []
     assert len(report["undecidable"]) == 1
@@ -1372,7 +1372,7 @@ def test_an_UNORDERABLE_stored_boundary_is_REPAIRED_forward_not_stuck(sdk):
     happened."""
     i, _t, _g = _world(sdk, tag="repair-stamp")
     # an outside write is the only way to reach this state now (see the door test)
-    sdk.update_entity(i["id"], **{DEFINITION_BOUNDARY_PROP: "TBD"})
+    sdk.update_knowledge(i["id"], **{DEFINITION_BOUNDARY_PROP: "TBD"})
     repaired = mark_definition_change(sdk, i["id"], at="2026-11-12T00:00:00+00:00")
     assert repaired["repaired"] is True
     assert repaired["previous"] == "TBD"
@@ -1395,7 +1395,7 @@ def test_marking_a_boundary_on_a_missing_indicator_is_refused(sdk):
 def test_the_retirement_is_reported_in_full_and_is_IDEMPOTENT(sdk):
     i, t, g = _world(sdk, tag="idempotent")
     made = _judge(sdk, i, t, g)
-    sdk.update_entity(t["id"], threshold=8.0)
+    sdk.update_knowledge(t["id"], threshold=8.0)
     first = _only([v.invalidation for v in verdicts(sdk, goal_id=g["id"])
                    if v.invalidation])
     retired = invalidate(sdk, first, at="2026-11-12T12:00:00+00:00")
@@ -1457,7 +1457,7 @@ def test_the_VANISH_BETWEEN_READ_AND_RETIREMENT_reconciles_the_CLAIMS_goal(sdk, 
     i, t, g = _world(sdk, tag="vanish-before-retirement")
     made = _judge(sdk, i, t, g)
     assert sdk.get_entity(g["id"])["goalState"] == "met"
-    sdk.update_entity(t["id"], threshold=8.0)  # live, and stale
+    sdk.update_knowledge(t["id"], threshold=8.0)  # live, and stale
 
     def vanish_during_retract(point_id, **_kwargs):
         sdk.delete_entity(point_id)  # gone between the read and the write
@@ -1490,7 +1490,7 @@ def test_a_claim_that_VANISHES_mid_sweep_lands_in_a_counts_bucket(sdk, monkeypat
     """
     i, t, g = _world(sdk, tag="vanish-mid-sweep")
     made = _judge(sdk, i, t, g)
-    sdk.update_entity(t["id"], threshold=12.0)  # a real stale finding
+    sdk.update_knowledge(t["id"], threshold=12.0)  # a real stale finding
 
     from tortoise import derived_invalidation as di
 
@@ -1569,7 +1569,7 @@ def test_an_ALREADY_TERMINAL_claim_also_reconciles_the_goal_word(sdk):
     i, t, g = _world(sdk, tag="terminal-reconciles")
     made = _judge(sdk, i, t, g)
     assert sdk.get_entity(g["id"]).get("goalState") == "met"
-    sdk.update_entity(made["point_id"], status="retracted")  # out of band
+    sdk.update_knowledge(made["point_id"], status="retracted")  # out of band
 
     report = invalidate(sdk, Invalidation(judgement_id=made["point_id"],
                                           goal_id=g["id"],
@@ -1591,7 +1591,7 @@ def test_an_absent_claim_whose_GOAL_is_gone_lands_in_GONE_too(sdk, monkeypatch):
     """
     i, t, g = _world(sdk, tag="vanish-goal-gone")
     _judge(sdk, i, t, g)
-    sdk.update_entity(t["id"], threshold=12.0)  # a real stale finding
+    sdk.update_knowledge(t["id"], threshold=12.0)  # a real stale finding
 
     from tortoise import derived_invalidation as di
 
@@ -1627,7 +1627,7 @@ def test_the_POST_EXCEPTION_terminal_arm_reconciles_too(sdk, monkeypatch):
     assert sdk.get_entity(g["id"]).get("goalState") == "met"
 
     def retired_by_a_PEER(point_id, **_kwargs):
-        sdk.update_entity(point_id, status="retracted")
+        sdk.update_knowledge(point_id, status="retracted")
         raise ValueError("already terminal")
 
     monkeypatch.setattr(sdk, "retract_point", retired_by_a_PEER)
@@ -1696,7 +1696,7 @@ def test_a_claim_that_vanishes_BEFORE_the_retirement_lands_is_alreadyRetired(
     # arm is only reachable with a claim that was STALE when the scan read it.
     i2, t2, g2 = _world(sdk, tag="vanish-before-retract-sweep")
     _judge(sdk, i2, t2, g2)
-    sdk.update_entity(t2["id"], threshold=12.0)  # a real stale finding
+    sdk.update_knowledge(t2["id"], threshold=12.0)  # a real stale finding
     report2 = invalidate_stale(sdk, goal_id=g2["id"])
     counts = report2["counts"]
     assert counts["stale"] == 1, counts
@@ -1728,7 +1728,7 @@ def test_a_reconcile_that_RAISES_is_reported_not_raised(sdk, monkeypatch):
     """
     i, t, g = _world(sdk, tag="reconcile-raises")
     _judge(sdk, i, t, g)
-    sdk.update_entity(t["id"], threshold=12.0)  # a real stale finding
+    sdk.update_knowledge(t["id"], threshold=12.0)  # a real stale finding
 
     from tortoise import derived_invalidation as di
 
@@ -1736,7 +1736,7 @@ def test_a_reconcile_that_RAISES_is_reported_not_raised(sdk, monkeypatch):
         raise RuntimeError("graph read exploded")
 
     def retired_by_a_PEER(point_id, **_kwargs):
-        sdk.update_entity(point_id, status="retracted")
+        sdk.update_knowledge(point_id, status="retracted")
         raise ValueError("already terminal")
 
     monkeypatch.setattr(di, "latest_judgement", boom)
@@ -1774,7 +1774,7 @@ def test_the_derived_state_stops_feeding_the_goal(sdk):
     before = sdk.compute_confidence()
     assert before["confidences"][g["id"]]["mean"] > 0.5
     assert before["confidences"][made["point_id"]]["mean"] > 0.5
-    sdk.update_entity(t["id"], threshold=8.0)
+    sdk.update_knowledge(t["id"], threshold=8.0)
     invalidate_stale(sdk, goal_id=g["id"])
     after = sdk.compute_confidence()
     assert g["id"] not in after["confidences"], (
@@ -1813,7 +1813,7 @@ def test_the_retirement_leaves_the_DURABILITY_gate_clean(tmp_path):
     try:
         indicator, target, goal = _world(sdk, tag="durable")
         made = _judge(sdk, indicator, target, goal)
-        sdk.update_entity(target["id"], threshold=8.0)
+        sdk.update_knowledge(target["id"], threshold=8.0)
         assert invalidate_stale(sdk, goal_id=goal["id"])["counts"]["retired"] == 1
         proj = sdk._get_proj()
         first = check_consistency(log, proj)   # adopts the baseline on a healthy run
@@ -1855,7 +1855,7 @@ def test_the_retirement_is_journalled_so_a_rebuild_cannot_resurrect_it(sdk):
     from tortoise.live import TERMINAL_EXCLUDED_STATUSES
     i, t, g = _world(sdk, tag="journal")
     made = _judge(sdk, i, t, g)
-    sdk.update_entity(t["id"], threshold=8.0)
+    sdk.update_knowledge(t["id"], threshold=8.0)
     invalidate_stale(sdk, goal_id=g["id"])
     claim = sdk.get_entity(made["point_id"])
     assert claim["status"] in TERMINAL_EXCLUDED_STATUSES
@@ -1874,7 +1874,7 @@ def test_a_failed_cache_reconcile_is_reported_and_the_retirement_still_lands(sdk
     repair route is a second call."""
     i, t, g = _world(sdk, tag="cache-fail")
     _judge(sdk, i, t, g)
-    sdk.update_entity(t["id"], threshold=8.0)
+    sdk.update_knowledge(t["id"], threshold=8.0)
     finding = _only([v.invalidation for v in verdicts(sdk, goal_id=g["id"])
                      if v.invalidation])
 
@@ -1907,7 +1907,7 @@ def test_a_failed_cache_write_counts_as_a_FAILED_sweep(sdk):
     contradict the nested key."""
     i, t, g = _world(sdk, tag="cache-fail-count")
     _judge(sdk, i, t, g)
-    sdk.update_entity(t["id"], threshold=8.0)
+    sdk.update_knowledge(t["id"], threshold=8.0)
     real_update = sdk.update_entity
 
     def failing(node_id, **props):
@@ -1937,7 +1937,7 @@ def test_one_refused_retirement_does_not_discard_the_rest_of_the_sweep(sdk):
     findings = []
     for i, t, g in worlds:
         _judge(sdk, i, t, g)
-        sdk.update_entity(t["id"], threshold=8.0)
+        sdk.update_knowledge(t["id"], threshold=8.0)
         findings.append((i, t, g))
     import tortoise.derived_invalidation as _mod
 
@@ -2002,7 +2002,7 @@ def test_one_refused_retirement_does_not_discard_the_rest_of_the_sweep(sdk):
 def test_dry_run_writes_nothing_and_names_what_it_would_retire(sdk):
     i, t, g = _world(sdk, tag="dry-run")
     made = _judge(sdk, i, t, g)
-    sdk.update_entity(t["id"], threshold=8.0)
+    sdk.update_knowledge(t["id"], threshold=8.0)
     report = invalidate_stale(sdk, goal_id=g["id"], dry_run=True)
     assert report["dryRun"] is True
     assert report["counts"]["stale"] == 1
@@ -2025,7 +2025,7 @@ def test_the_sweep_does_NOT_re_derive(sdk):
     ``judge_and_record``."""
     i, t, g = _world(sdk, tag="no-rederive")
     _judge(sdk, i, t, g)
-    sdk.update_entity(t["id"], threshold=8.0)
+    sdk.update_knowledge(t["id"], threshold=8.0)
     report = invalidate_stale(sdk, goal_id=g["id"])
     assert report["counts"]["retired"] == 1
     assert live_judgements(sdk, goal_id=g["id"]) == []
@@ -2035,7 +2035,7 @@ def test_an_unscoped_sweep_covers_every_goal_and_reports_truncation(sdk):
     worlds = [_world(sdk, tag=f"unscoped-{n}") for n in range(3)]
     for i, t, g in worlds:
         _judge(sdk, i, t, g)
-        sdk.update_entity(t["id"], threshold=8.0)
+        sdk.update_knowledge(t["id"], threshold=8.0)
     full = invalidate_stale(sdk, dry_run=True)
     assert full["counts"]["scanned"] == 3
     assert full["counts"]["stale"] == 3
@@ -2092,7 +2092,7 @@ def test_the_claim_survives_with_a_SECOND_live_judgement_taking_over_the_cache(s
     assert second["judged"]["state"] == "met"
     assert sdk.get_entity(g["id"])["goalState"] == "met"
     # revise the FIRST target's bar: its judgement goes, the other target's stands
-    sdk.update_entity(t["id"], threshold=13.0)
+    sdk.update_knowledge(t["id"], threshold=13.0)
     report = invalidate_stale(sdk, goal_id=g["id"])
     assert report["counts"]["retired"] == 1
     assert sdk.get_entity(g["id"])["goalState"] == "met"
@@ -2121,13 +2121,13 @@ def test_ANOTHER_claims_stale_finding_clears_the_word_an_out_of_band_retirement_
 
     # OUT OF BAND: a direct status write retires the NEWEST claim, so no door runs
     # and no reconcile happens — the word still names the claim that just left.
-    sdk.update_entity(second["point_id"], status="retracted")
+    sdk.update_knowledge(second["point_id"], status="retracted")
     assert sdk.get_entity(g["id"])["goalState"] == "met"
 
     # Now the FIRST claim's own justification goes (its target's bar moved). The
     # goal's LAST claim is therefore gone, and this finding's step-4 reconcile is
     # the automatic repair the docstring names — no manual call below.
-    sdk.update_entity(t["id"], threshold=13.0)
+    sdk.update_knowledge(t["id"], threshold=13.0)
     report = invalidate_stale(sdk, goal_id=g["id"])
     assert report["counts"]["retired"] == 1
     assert [f["judgementId"] for f in report["stale"]] == [first["point_id"]]
@@ -2420,7 +2420,7 @@ def test_ROUTE_B_a_claim_retired_OUT_OF_BAND_is_invisible_to_the_sweep(sdk):
     i, t, g = _world(sdk, tag="route-b")
     made = _judge(sdk, i, t, g)
     _derived_word_standing(sdk, g)
-    sdk.update_entity(made["point_id"], status="retracted")
+    sdk.update_knowledge(made["point_id"], status="retracted")
     report = invalidate_stale(sdk, goal_id=g["id"])
     assert report["scanned"] == 0, report
     assert latest_judgement(sdk, goal_id=g["id"]) is None
@@ -2451,7 +2451,7 @@ def test_the_repair_sweep_clears_a_word_whose_claim_was_RETIRED_OUT_OF_BAND(sdk)
     i, t, g = _world(sdk, tag="sweep-route-b")
     made = _judge(sdk, i, t, g)
     _derived_word_standing(sdk, g)
-    sdk.update_entity(made["point_id"], status="retracted")
+    sdk.update_knowledge(made["point_id"], status="retracted")
     report = reconcile_goal_states(sdk)
     assert report["counts"]["repaired"] == 1, report
     assert sdk.get_entity(g["id"]).get("goalState") is None
@@ -2520,7 +2520,7 @@ def test_a_goal_whose_word_THIS_ENGINE_never_wrote_is_not_even_a_CANDIDATE(
     measured — and `superseded`/`abandoned` (the RETIRED_GOAL_STATES) are
     lifecycle decisions, not derived cache values."""
     _i, _t, g = _world(sdk, tag=f"sweep-human-{word}")
-    sdk.update_entity(g["id"], goalState=word)
+    sdk.update_knowledge(g["id"], goalState=word)
     report = reconcile_goal_states(sdk)
     assert report["counts"]["scanned"] == 0, report
     assert report["counts"]["repaired"] == 0, report
@@ -2649,7 +2649,7 @@ def test_the_NON_OBJECT_repair_is_JOURNALLED_too(tmp_path):
                           namespace=namespace, event_log_path=log)
     try:
         subject = durable.create_subject("team probe [sweep-durable-subject]")
-        durable.update_entity(subject["id"], goalState="met")
+        durable.update_knowledge(subject["id"], goalState="met")
         before = _records(events)
         report = reconcile_goal_states(durable)
         assert report["counts"]["cleared"] == 1, report
@@ -2701,7 +2701,7 @@ def test_a_goal_on_a_NON_OBJECT_label_is_swept_too(sdk):
     this shape is reachable without anyone typing a label.
     """
     subject = sdk.create_subject("team probe [sweep-subject]")
-    sdk.update_entity(subject["id"], goalState="met")
+    sdk.update_knowledge(subject["id"], goalState="met")
     assert sdk.get_entity(subject["id"])["goalState"] == "met"
     report = reconcile_goal_states(sdk)
     assert report["counts"]["scanned"] == 1, (
@@ -3072,7 +3072,7 @@ def test_a_probe_that_cannot_run_is_REPORTED_on_its_goal_and_the_sweep_survives(
     # ⛔ RETRACTED CLAIM (#12457 review, cycle 5): an earlier version of this comment
     # said the assertion "cannot vary" and deleted it. That was measured against a
     # mutant in the `present` branch, which is UNREACHABLE when the probe raises — the
-    # generalisation was false. MEASURED here: `sdk.update_entity(goal_id,
+    # generalisation was false. MEASURED here: `sdk.update_knowledge(goal_id,
     # goalState=None)` placed at the TOP of the `gone` arm, before the probe, reds
     # this row while every counter assertion above stays green, so this is the only
     # row that observes it.

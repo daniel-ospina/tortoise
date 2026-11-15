@@ -328,7 +328,7 @@ def test_a_mention_written_by_update_entity_survives_a_rebuild(env):
                            status="draft")["id"]
     assert _node_prop(sdk, pid) is None
 
-    sdk.update_entity(pid, mentions=MENTIONS)
+    sdk.update_knowledge(pid, mentions=MENTIONS)
     live = _node_prop(sdk, pid)
     assert live is not None, (
         "the generic `update_entity` surface did not store the record live")

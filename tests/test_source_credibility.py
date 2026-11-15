@@ -568,7 +568,7 @@ class TestBaselineProvenance:
         with pytest.raises(ValueError, match="credibility"):
             sdk.update_point(p, credibility="gold")
         with pytest.raises(ValueError, match="credibility"):
-            sdk.update_entity(p, credibility="banana")
+            sdk.update_knowledge(p, credibility="banana")
         with pytest.raises(ValueError, match="credibility"):
             sdk.create_entity("subject", "generic cred", credibility="gold")
         assert sdk.get_point(p).get("credibility") is None, (
@@ -605,7 +605,7 @@ class TestBaselineProvenance:
             with pytest.raises(ValueError, match=key):
                 sdk.create_point("statement", f"forged {key} birth", **{key: val})
         with pytest.raises(ValueError, match="baseline_source"):
-            sdk.update_entity(p, baseline_source="system-default")
+            sdk.update_knowledge(p, baseline_source="system-default")
         with pytest.raises(ValueError, match="ep_alpha"):
             sdk.create_entity("subject", "generic baseline", ep_alpha=0.4)
         # The whole quartet at once (the measured forgery) and the forged

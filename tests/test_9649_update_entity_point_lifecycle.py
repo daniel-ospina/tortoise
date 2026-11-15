@@ -128,7 +128,7 @@ def test_probe_1_a_superseded_point_cannot_be_resurrected(env):
     assert before["status"] == "superseded", before
 
     with pytest.raises(ValueError) as exc:
-        sdk.update_entity(old, status="live")
+        sdk.update_knowledge(old, status="live")
 
     text = str(exc.value)
     assert "terminal" in text and "superseded" in text, (
@@ -149,7 +149,7 @@ def test_probe_1_every_terminal_status_resists_every_live_status(env, dead):
 
     for target in ("live", "draft"):
         with pytest.raises(ValueError, match="terminal"):
-            sdk.update_entity(pid, status=target)
+            sdk.update_knowledge(pid, status=target)
 
     assert _row(sdk, pid) == before
 
@@ -164,7 +164,7 @@ def test_the_legacy_outdated_flag_alone_makes_the_point_dead(env):
         params={"id": pid})
 
     with pytest.raises(ValueError, match="terminal"):
-        sdk.update_entity(pid, status="live")
+        sdk.update_knowledge(pid, status="live")
     assert _row(sdk, pid)["status"] is None
 
 
@@ -185,7 +185,7 @@ def test_deprecated_is_terminal_even_though_the_map_has_no_key(env):
         "this arm is only non-vacuous while the map carries no `deprecated` key")
 
     with pytest.raises(ValueError, match="terminal"):
-        sdk.update_entity(pid, validTo="2030-01-01T00:00:00Z")
+        sdk.update_knowledge(pid, validTo="2030-01-01T00:00:00Z")
     assert _row(sdk, pid) == before
 
 
@@ -201,7 +201,7 @@ def test_a_null_status_legacy_point_can_still_be_given_one(env):
     sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) SET n.status=NULL", params={"id": pid})
 
-    sdk.update_entity(pid, status="live")
+    sdk.update_knowledge(pid, status="live")
     assert _row(sdk, pid)["status"] == "live"
 
 
@@ -227,7 +227,7 @@ def test_probe_2_a_terminal_points_temporal_record_is_refused(env, prop, value):
     before = _row(sdk, old)
 
     with pytest.raises(ValueError) as exc:
-        sdk.update_entity(old, **{prop: value})
+        sdk.update_knowledge(old, **{prop: value})
 
     text = str(exc.value)
     assert prop in text, (
@@ -243,7 +243,7 @@ def test_probe_2_a_retracted_point_refuses_the_window_too(env):
     before = _row(sdk, pid)
 
     with pytest.raises(ValueError, match="terminal"):
-        sdk.update_entity(pid, validTo="2030-01-01T00:00:00Z")
+        sdk.update_knowledge(pid, validTo="2030-01-01T00:00:00Z")
     assert _row(sdk, pid) == before
 
 
@@ -267,7 +267,7 @@ def test_the_refusal_carries_the_three_parts(env):
     old, new = _superseded(sdk)
 
     with pytest.raises(ValueError) as exc:
-        sdk.update_entity(old, status="live")
+        sdk.update_knowledge(old, status="live")
     text = str(exc.value)
 
     # 1. that it refused
@@ -331,7 +331,7 @@ def test_a_content_revision_of_a_terminal_point_stays_legal(env):
     sdk, _ = env
     old, _new = _superseded(sdk)
 
-    sdk.update_entity(old, content="a corrected reading of the dead claim")
+    sdk.update_knowledge(old, content="a corrected reading of the dead claim")
     assert sdk.get_point(old)["content"] == \
         "a corrected reading of the dead claim"
     assert _row(sdk, old)["status"] == "superseded", (
@@ -343,10 +343,10 @@ def test_a_live_point_keeps_its_window_and_its_nulls(env):
     still writable, including a NULL end (the documented clear)."""
     sdk, _ = env
     pid = _live(sdk)
-    sdk.update_entity(pid, validFrom="2026-01-01T00:00:00Z",
+    sdk.update_knowledge(pid, validFrom="2026-01-01T00:00:00Z",
                       validFromPrecision="day")
     assert _row(sdk, pid)["validFrom"] == "2026-01-01T00:00:00Z"
-    sdk.update_entity(pid, validTo=None)
+    sdk.update_knowledge(pid, validTo=None)
     assert _row(sdk, pid)["validTo"] is None
 
 
@@ -355,7 +355,7 @@ def test_a_draft_point_still_promotes_through_this_door(env):
     that ``draft`` is an explicit, honoured mode depends on it working."""
     sdk, _ = env
     pid = sdk.create_point("statement", "d", dedup=False, status="draft")["id"]
-    sdk.update_entity(pid, status="live")
+    sdk.update_knowledge(pid, status="live")
     assert _row(sdk, pid)["status"] == "live"
 
 
@@ -378,12 +378,12 @@ def test_an_undeclared_transition_from_live_is_refused(env, target):
     declared = _ALLOWED_TRANSITIONS["live"]
 
     if target in declared:
-        sdk.update_entity(pid, status=target)
+        sdk.update_knowledge(pid, status=target)
         assert _row(sdk, pid)["status"] == target
         return
 
     with pytest.raises(ValueError) as exc:
-        sdk.update_entity(pid, status=target)
+        sdk.update_knowledge(pid, status=target)
     text = str(exc.value)
     assert target in text and "transition" in text.lower(), (
         f"the refusal must name the target status and the transition: {text!r}")
@@ -394,7 +394,7 @@ def test_restating_the_same_status_is_a_no_op_not_a_refusal(env):
     """Identical status is not a transition — idempotent re-writes stay legal."""
     sdk, _ = env
     pid = _live(sdk)
-    sdk.update_entity(pid, status="live", content="same status, new content")
+    sdk.update_knowledge(pid, status="live", content="same status, new content")
     assert _row(sdk, pid)["status"] == "live"
     assert sdk.get_point(pid)["content"] == "same status, new content"
 
@@ -412,7 +412,7 @@ def test_a_refused_call_writes_nothing_and_journals_nothing(env):
     # "no record was added" is satisfied by a reader that always returns [].
     # A declared transition on a HEALTHY point is the control.
     _control = _live(sdk, "a healthy control claim")
-    sdk.update_entity(_control, status="retracted")
+    sdk.update_knowledge(_control, status="retracted")
     assert _mutations(events, _control), (
         "the journal reader saw no record for a re-status that MUST be "
         "journaled — the atomicity assertion below would be vacuous")
@@ -420,9 +420,9 @@ def test_a_refused_call_writes_nothing_and_journals_nothing(env):
     before_recs = _mutations(events, old)
 
     with pytest.raises(ValueError):
-        sdk.update_entity(old, status="live")
+        sdk.update_knowledge(old, status="live")
     with pytest.raises(ValueError):
-        sdk.update_entity(old, validTo="2030-01-01T00:00:00Z")
+        sdk.update_knowledge(old, validTo="2030-01-01T00:00:00Z")
 
     assert _row(sdk, old) == before, "a refused call moved the graph"
     assert _mutations(events, old) == before_recs, (
@@ -440,18 +440,18 @@ def test_the_generic_door_still_serves_the_other_labels(env):
     every one of them (``missing_ok`` exists for exactly this)."""
     sdk, _ = env
     obj = sdk.create_object("Widget", kind="core:entity")["id"]
-    sdk.update_entity(obj, status="archived")
+    sdk.update_knowledge(obj, status="archived")
     assert sdk.get_entity(obj)["status"] == "archived"
 
     subj = sdk.create_subject("team-x")["id"]
-    sdk.update_entity(subj, status="superseded")
+    sdk.update_knowledge(subj, status="superseded")
     assert sdk.get_entity(subj)["status"] == "superseded"
 
 
 def test_an_absent_id_is_still_the_documented_empty_reply(env):
     """A typo must not become a lifecycle refusal (the #10119 absent contract)."""
     sdk, _ = env
-    assert sdk.update_entity("no-such-point-9649", status="live") == {}
+    assert sdk.update_knowledge("no-such-point-9649", status="live") == {}
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -479,7 +479,7 @@ def test_a_point_addressed_by_its_event_id_is_guarded_too(env):
                   {"when": "2031-01-01T00:00:00Z"},
                   {"status": "live"}):
         with pytest.raises(ValueError, match="terminal"):
-            sdk.update_entity("evt-review-9649", **props)
+            sdk.update_knowledge("evt-review-9649", **props)
     assert _row(sdk, old) == before, (
         "the eventId-addressed write must leave the dead claim alone")
 
@@ -494,7 +494,7 @@ def test_a_point_addressed_by_its_url_is_guarded_too(env):
     before = _row(sdk, old)
 
     with pytest.raises(ValueError, match="terminal"):
-        sdk.update_entity("src://review-9649", status="live")
+        sdk.update_knowledge("src://review-9649", status="live")
     assert _row(sdk, old) == before
 
 
@@ -516,7 +516,7 @@ def test_one_row_is_not_the_fan_out_for_the_transition_check(env):
     assert sorted(r[0] for r in _fan(sdk, pid)) == ["draft", "live"]
 
     with pytest.raises(ValueError) as exc:
-        sdk.update_entity(pid, status="draft")
+        sdk.update_knowledge(pid, status="draft")
     text = str(exc.value)
     assert "transition" in text.lower() and "live" in text, (
         f"the refusal must name the row it would demote: {text!r}")
@@ -548,7 +548,7 @@ def test_an_id_less_terminal_point_is_refused_not_skipped(env):
         params={"u": "src://idless-9649"}).result_set
 
     with pytest.raises(ValueError, match="carries no `id`"):
-        sdk.update_entity("src://idless-9649", status="live")
+        sdk.update_knowledge("src://idless-9649", status="live")
     after = sdk._get_proj().g.query(
         "MATCH (n:Point) WHERE n.url=$u RETURN n.status, n.validTo",
         params={"u": "src://idless-9649"}).result_set
@@ -578,7 +578,7 @@ def test_a_points_provenance_event_id_does_not_guard_an_event_write(env):
     # pin #11825's rule instead of this one. `live` rides the prop lane #2788
     # leaves open, and the address read still has to NOT find the retracted
     # provenance Point — which is the whole claim under test.
-    sdk.update_entity("ev-9649-prov", status="live")
+    sdk.update_knowledge("ev-9649-prov", status="live")
     assert sdk.get_entity("ev-9649-prov")["status"] == "live"
 
 
@@ -608,9 +608,9 @@ def test_a_hybrid_point_status_write_is_validated_and_journals_the_POINT(env):
         params={"id": pid, "eid": "evt-hybrid-9649"})
 
     with pytest.raises(ValueError, match="transition"):
-        sdk.update_entity("evt-hybrid-9649", status="draft")
+        sdk.update_knowledge("evt-hybrid-9649", status="draft")
     with pytest.raises(ValueError, match="Invalid status"):
-        sdk.update_entity("evt-hybrid-9649", status="garbage")
+        sdk.update_knowledge("evt-hybrid-9649", status="garbage")
     assert _row(sdk, pid)["status"] == "live", (
         "a refused hybrid status write must not touch the row")
 
@@ -619,7 +619,7 @@ def test_a_hybrid_point_status_write_is_validated_and_journals_the_POINT(env):
     sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) SET n:Event, n.eventId=$eid",
         params={"id": draft_pid, "eid": "evt-hybrid-draft-9649"})
-    sdk.update_entity("evt-hybrid-draft-9649", status="live")
+    sdk.update_knowledge("evt-hybrid-draft-9649", status="live")
     assert _row(sdk, draft_pid)["status"] == "live"
     recs = _mutations(events, draft_pid)
     assert recs, "the declared transition must be journaled against the POINT id"
@@ -651,7 +651,7 @@ def test_a_source_keyed_by_id_is_not_blocked_by_a_hybrid_point_url(env):
         "MATCH (n:Point:Source) WHERE n.url=$u RETURN n.status",
         params={"u": "X-9649"}).result_set
 
-    sdk.update_entity("X-9649", status="retired")
+    sdk.update_knowledge("X-9649", status="retired")
     assert sdk._get_proj().g.query(
         "MATCH (s:Source {id:'X-9649'}) RETURN s.status",
     ).result_set == [["retired"]]
@@ -677,11 +677,11 @@ def test_a_null_status_point_still_validates_and_journals_its_status(env):
         "MATCH (n:Point {id:$id}) SET n.status=NULL", params={"id": pid})
 
     with pytest.raises(ValueError, match="Invalid status"):
-        sdk.update_entity(pid, status="garbage")
+        sdk.update_knowledge(pid, status="garbage")
     assert _row(sdk, pid)["status"] is None, (
         "a refused vocabulary must not store anything")
 
-    sdk.update_entity(pid, status="live")
+    sdk.update_knowledge(pid, status="live")
     assert _row(sdk, pid)["status"] == "live"
     recs = _mutations(events, pid)
     assert [r.get("label") for r in recs] == ["Point"], (
@@ -703,13 +703,13 @@ def test_a_read_modify_write_of_the_unchanged_status_still_lands(env):
     stored = sdk.get_point(pid)["status"]
     assert stored == "retracted"
 
-    sdk.update_entity(pid, status=stored, content="read-modify-write revision")
+    sdk.update_knowledge(pid, status=stored, content="read-modify-write revision")
     assert sdk.get_point(pid)["content"] == "read-modify-write revision"
     assert _row(sdk, pid)["status"] == "retracted", (
         "the revision must not disturb the terminal status")
 
     with pytest.raises(ValueError, match="terminal"):
-        sdk.update_entity(pid, status="live", content="a resurrection attempt")
+        sdk.update_knowledge(pid, status="live", content="a resurrection attempt")
 
 
 def test_the_entailed_status_exemption_is_narrow(env):
@@ -726,7 +726,7 @@ def test_the_entailed_status_exemption_is_narrow(env):
     t = _live(sdk, "entailed+temporal")
     sdk.retract_point(t)
     with pytest.raises(ValueError, match="terminal"):
-        sdk.update_entity(t, status="retracted", validTo="2030-01-01T00:00:00Z")
+        sdk.update_knowledge(t, status="retracted", validTo="2030-01-01T00:00:00Z")
     assert _row(sdk, t)["validTo"] != "2030-01-01T00:00:00Z", (
         "the temporal half must be refused even when the status is entailed")
 
@@ -740,7 +740,7 @@ def test_the_entailed_status_exemption_is_narrow(env):
         "CREATE (n:Point {id:$id, content:'legacy null row'})",
         params={"id": f2})
     with pytest.raises(ValueError, match="terminal"):
-        sdk.update_entity(f2, status="retracted")
+        sdk.update_knowledge(f2, status="retracted")
 
     # (c) EVERY bound row must hold it — "any" resurrects a terminal sibling.
     f = _live(sdk, "fan terminal")
@@ -748,7 +748,7 @@ def test_the_entailed_status_exemption_is_narrow(env):
     sdk.create_point("statement", "fan live twin", dedup=False,
                      status="live", id=f)
     with pytest.raises(ValueError, match="terminal"):
-        sdk.update_entity(f, status="retracted")
+        sdk.update_knowledge(f, status="retracted")
     assert sorted(r[0] for r in _fan(sdk, f)) == ["live", "retracted"], (
         "the refused call must leave both rows as they were")
 
@@ -775,7 +775,7 @@ def test_the_entailed_status_exemption_reads_the_write_row_set(env):
     assert before == ["deprecated", "live"], before
 
     with pytest.raises(ValueError, match="terminal"):
-        sdk.update_entity("evt-twin-9649", status="live")
+        sdk.update_knowledge("evt-twin-9649", status="live")
     assert sorted(r[0] for r in _fan(sdk, pid)) == before, (
         "the unaddressed terminal twin must not be resurrected")
 
@@ -798,9 +798,9 @@ def test_a_falsy_non_null_id_is_still_guarded(env):
         "validTo:'2020-01-01T00:00:00Z'})")
 
     with pytest.raises(ValueError, match="terminal"):
-        sdk.update_entity(0, status="live")
+        sdk.update_knowledge(0, status="live")
     with pytest.raises(ValueError, match="terminal"):
-        sdk.update_entity(0, validTo="2031-01-01T00:00:00Z")
+        sdk.update_knowledge(0, validTo="2031-01-01T00:00:00Z")
     assert sdk._get_proj().g.query(
         "MATCH (n:Point {id:0}) RETURN n.status, n.validTo").result_set == [
             ["superseded", "2020-01-01T00:00:00Z"]], (
@@ -819,7 +819,7 @@ def test_operator_points_keep_their_documented_lifecycle(env):
     a = _live(sdk, "op src")
     b = _live(sdk, "op tgt")
     live_op = sdk.create_operator("IMPL", a, [b])["id"]
-    sdk.update_entity(live_op, status="retracted")
+    sdk.update_knowledge(live_op, status="retracted")
     assert _row(sdk, live_op)["status"] == "retracted"
 
     dead_op = sdk.create_operator("NAND", a, [b])["id"]
@@ -827,9 +827,9 @@ def test_operator_points_keep_their_documented_lifecycle(env):
         "MATCH (n:Point {id:$id}) SET n.status='superseded'",
         params={"id": dead_op})
     with pytest.raises(ValueError, match="terminal"):
-        sdk.update_entity(dead_op, status="live")
+        sdk.update_knowledge(dead_op, status="live")
     with pytest.raises(ValueError, match="terminal"):
-        sdk.update_entity(dead_op, validTo="2031-01-01T00:00:00Z")
+        sdk.update_knowledge(dead_op, validTo="2031-01-01T00:00:00Z")
     assert _row(sdk, dead_op)["status"] == "superseded"
 
 
@@ -852,13 +852,13 @@ def test_the_guard_is_asked_with_the_doors_own_permissions(env, monkeypatch):
 
     monkeypatch.setattr(sdk, "_assert_lifecycle_guard", spy)
 
-    sdk.update_entity(pid, validTo="2030-01-01T00:00:00Z")
+    sdk.update_knowledge(pid, validTo="2030-01-01T00:00:00Z")
     assert [s[0] for s in seen] == [pid], seen
     assert seen[0][1].get("missing_ok") is True, seen[0][1]
     assert seen[0][1].get("allow_operator") is True, seen[0][1]
 
     seen.clear()
-    assert sdk.update_entity("no-such-point-9649", status="live") == {}
+    assert sdk.update_knowledge("no-such-point-9649", status="live") == {}
     assert seen == [], (
         "an absent id must not reach the guard — the loop's emptiness is the "
         "absent contract, not the parameter")
@@ -880,9 +880,9 @@ def test_a_map_less_stored_status_still_defers(env):
     assert "current" not in _ALLOWED_TRANSITIONS, (
         "this arm is only non-vacuous while the map has no 'current' key")
 
-    sdk.update_entity(pid, status="live")
+    sdk.update_knowledge(pid, status="live")
     assert _row(sdk, pid)["status"] == "live"
-    sdk.update_entity(pid, status="retracted")
+    sdk.update_knowledge(pid, status="retracted")
     assert _row(sdk, pid)["status"] == "retracted"
 
 
@@ -906,7 +906,7 @@ def test_two_address_arms_resolving_one_id_journal_one_record(env):
     # an `:Event` is refused before this arm (measured), and this test is about
     # the dedupe, not that rule. The promotion is a declared, non-terminal
     # transition that still journals exactly one `restatus`.
-    sdk.update_entity(pid, status="live")
+    sdk.update_knowledge(pid, status="live")
     recs = [r for r in _mutations(events, pid) if r.get("op") == "restatus"]
     assert len(recs) == 1, f"one intent must journal one record: {recs}"
 
@@ -933,7 +933,7 @@ def test_a_write_that_matches_no_row_journals_nothing(env, monkeypatch):
     monkeypatch.setattr(sdk, "_assert_lifecycle_guard", spy)
     # ⚠️ a DECLARED transition, not an entailed one: an entailed status skips the
     # guard loop entirely (that is its purpose), so it would not run the spy.
-    sdk.update_entity(pid, status="retracted")
+    sdk.update_knowledge(pid, status="retracted")
     restatus = [r for r in _mutations(events, pid) if r.get("op") == "restatus"]
     assert restatus == [], (
         f"a write that matched no row must not journal a restatus: {restatus}")
@@ -973,7 +973,7 @@ def test_a_declared_terminalizing_transition_carries_none_of_the_verbs_effects(e
     before = _row(sdk, pid)
     assert before["validTo"] is None, before
 
-    sdk.update_entity(pid, status="superseded")
+    sdk.update_knowledge(pid, status="superseded")
 
     after = _row(sdk, pid)
     assert after["status"] == "superseded", after
@@ -1050,7 +1050,7 @@ def test_the_refusal_also_names_the_route_for_a_read_modify_write(env):
     stored = sdk.get_point(old)
 
     with pytest.raises(ValueError) as exc:
-        sdk.update_entity(old, validTo=stored["validTo"],
+        sdk.update_knowledge(old, validTo=stored["validTo"],
                           content="a re-sent, corrected reading")
     text = str(exc.value)
     assert "WITHOUT the temporal fields" in text, (
@@ -1059,7 +1059,7 @@ def test_the_refusal_also_names_the_route_for_a_read_modify_write(env):
         f"the message must say what IS still accepted: {text!r}")
 
     # ...and the route it names really works (non-vacuity: this half must pass).
-    sdk.update_entity(old, content="a re-sent, corrected reading")
+    sdk.update_knowledge(old, content="a re-sent, corrected reading")
     assert sdk.get_point(old)["content"] == "a re-sent, corrected reading"
     assert _row(sdk, old)["validTo"] == stored["validTo"], (
         "the revision must not disturb the window the supersession closed")
@@ -1090,7 +1090,7 @@ def test_the_transition_refusal_names_the_RESOLVED_id_not_the_typed_address(env)
         params={"id": pid, "url": "src://round12-9649"})
 
     with pytest.raises(ValueError) as exc:
-        sdk.update_entity("src://round12-9649", status="draft")
+        sdk.update_knowledge("src://round12-9649", status="draft")
     text = str(exc.value)
 
     assert f"supersede_point({pid!r}" in text, (
@@ -1158,7 +1158,7 @@ def test_a_hash_overriding_status_key_cannot_resurrect_a_dead_claim(env):
     before = _row(sdk, old)
 
     with pytest.raises(ValueError, match="superseded"):
-        sdk.update_entity(old, **{_KHash("status"): "live"})
+        sdk.update_knowledge(old, **{_KHash("status"): "live"})
 
     after = _row(sdk, old)
     assert after == before, f"the refusal must leave the row untouched: {after}"
@@ -1174,7 +1174,7 @@ def test_a_str_rendered_status_key_cannot_resurrect_a_dead_claim(env):
     before = _row(sdk, old)
 
     with pytest.raises(ValueError, match="superseded"):
-        sdk.update_entity(old, **{_KStr("q"): "live"})
+        sdk.update_knowledge(old, **{_KStr("q"): "live"})
 
     assert _row(sdk, old) == before
     assert _mutations(env[1], old) == [], "nothing may be journaled for a refusal"
@@ -1188,7 +1188,7 @@ def test_a_hash_overriding_window_key_cannot_rewrite_a_closed_window(env):
     assert before["validTo"], "the fixture must be a CLOSED window"
 
     with pytest.raises(ValueError, match="validTo"):
-        sdk.update_entity(old, **{_KHash("validTo"): "2030-01-01T00:00:00Z"})
+        sdk.update_knowledge(old, **{_KHash("validTo"): "2030-01-01T00:00:00Z"})
 
     assert _row(sdk, old) == before, "the closed window must survive the refusal"
 
@@ -1199,7 +1199,7 @@ def test_a_hash_overriding_status_key_cannot_store_an_undeclared_word(env):
     pid = _live(sdk, "a live claim")
 
     with pytest.raises(ValueError, match="Invalid status"):
-        sdk.update_entity(pid, **{_KHash("status"): "garbage"})
+        sdk.update_knowledge(pid, **{_KHash("status"): "garbage"})
 
     assert _row(sdk, pid)["status"] == "live", (
         "an undeclared status word must never reach the node, whichever name it "
@@ -1214,14 +1214,14 @@ def test_a_plain_status_key_still_gets_the_documented_answer(env):
     sdk, _ = env
     pid = _live(sdk, "a live claim")
 
-    sdk.update_entity(pid, status="superseded")
+    sdk.update_knowledge(pid, status="superseded")
     assert _row(sdk, pid)["status"] == "superseded", (
         "a DECLARED transition must still land — the arm is not simply closed")
 
     # ...and the plain spelling is then refused on the SAME guarantee the exotic
     # keys were refused on, so the family is one rule and not two.
     with pytest.raises(ValueError, match="superseded"):
-        sdk.update_entity(pid, status="live")
+        sdk.update_knowledge(pid, status="live")
 
 
 def test_a_rendered_status_key_is_dropped_before_the_sibling_arm(env):
@@ -1240,7 +1240,7 @@ def test_a_rendered_status_key_is_dropped_before_the_sibling_arm(env):
     sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) SET n:Object", params={"id": pid})
 
-    sdk.update_entity(pid, **{_KStr("q"): "superseded"})
+    sdk.update_knowledge(pid, **{_KStr("q"): "superseded"})
 
     recs = _mutations(events, pid)
     assert len(recs) == 1, (
@@ -1265,7 +1265,7 @@ def test_a_rendered_status_key_is_validated_against_the_SUBJECT_vocabulary(env):
     sid = sdk.create_entity("subject", "Rendered Key Co")["node"]["id"]
 
     with pytest.raises(ValueError, match="Invalid status"):
-        sdk.update_entity(sid, **{_KHash("status"): "dead"})
+        sdk.update_knowledge(sid, **{_KHash("status"): "dead"})
 
     row = sdk._get_proj().g.query(
         "MATCH (n:Subject {id:$id}) RETURN n.status",
@@ -1288,7 +1288,7 @@ def test_a_rendered_ECHO_of_the_stored_status_is_still_entailed(env):
     before = _row(sdk, old)
     records_before = len(_mutations(events, old))
 
-    sdk.update_entity(old, **{_KHash("status"): "superseded"})
+    sdk.update_knowledge(old, **{_KHash("status"): "superseded"})
 
     assert _row(sdk, old) == before, (
         "an entailed echo must leave the row exactly as it was")
@@ -1313,7 +1313,7 @@ def test_the_id_less_refusal_prescribes_no_unperformable_route(env):
         "status:'superseded'})")
 
     with pytest.raises(ValueError) as exc:
-        sdk.update_entity("src://idless-9649-msg", status="retracted")
+        sdk.update_knowledge("src://idless-9649-msg", status="retracted")
     text = str(exc.value)
     assert "update_point(" not in text, (
         f"the refusal must not prescribe an id-keyed call for a node with no "

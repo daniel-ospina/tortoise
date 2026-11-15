@@ -1084,7 +1084,7 @@ class TestLifecycleCarrierCoherence:
             before_row = _carrier_row(sdk, label, "zeta")
             before = len(_records(journal))
             with pytest.raises(ValueError) as exc:
-                sdk.update_entity(oid, **carriers)
+                sdk.update_knowledge(oid, **carriers)
             msg = str(exc.value)
             carrier_keys = sorted(k for k in carriers if k.startswith("superseded"))
             assert carrier_keys[0] in msg, (
@@ -1181,7 +1181,7 @@ class TestLifecycleCarrierCoherence:
                           event_log_path=str(journal))
         try:
             oid = _make_carrier_entity(sdk, label, "alpha")
-            sdk.update_entity(oid, status="superseded", supersededBy="alpha-v2",
+            sdk.update_knowledge(oid, status="superseded", supersededBy="alpha-v2",
                               supersededAt="2026-01-01T00:00:00Z")
             row = _carrier_row(sdk, label, "alpha")
             assert row[1:] == ("superseded", "alpha-v2",
@@ -1246,7 +1246,7 @@ class TestLifecycleCarrierCoherence:
                           event_log_path=str(journal))
         try:
             oid = _make_carrier_entity(sdk, "Object", "beta")
-            sdk.update_entity(oid, status="superseded", supersededBy="beta-v2",
+            sdk.update_knowledge(oid, status="superseded", supersededBy="beta-v2",
                               supersededAt="2026-01-01T00:00:00Z")
             superseded_row = _carrier_row(sdk, "Object", "beta")
             assert superseded_row[1:] == ("superseded", "beta-v2",
@@ -1254,7 +1254,7 @@ class TestLifecycleCarrierCoherence:
                 superseded_row)
             journal_before = len(_records(journal))
             with pytest.raises(ValueError, match="is TERMINAL for a :Object"):
-                sdk.update_entity(oid, status="live", supersededBy=None,
+                sdk.update_knowledge(oid, status="live", supersededBy=None,
                                   supersededAt=None)
             assert _carrier_row(sdk, "Object", "beta") == superseded_row, (
                 "a REFUSED un-supersede still moved the row — the refusal must "
@@ -1266,7 +1266,7 @@ class TestLifecycleCarrierCoherence:
             # The CLEAR itself is still not a carrier: with no `status` in the
             # call there is no transition to ask about, so it is accepted — and
             # the row stays terminal, which is the point.
-            sdk.update_entity(oid, supersededBy=None, supersededAt=None)
+            sdk.update_knowledge(oid, supersededBy=None, supersededAt=None)
             cleared = _carrier_row(sdk, "Object", "beta")
             assert cleared[1:] == ("superseded", None, None), (
                 f"the bare carrier CLEAR did not clear both columns while "
@@ -1274,7 +1274,7 @@ class TestLifecycleCarrierCoherence:
             # …and the SNAKE spelling of a clear is accepted too (`None` is not a
             # carrier under either spelling). Its effect is NOT pinned here: a
             # snake carrier SET is what writes the shadow property (#12782).
-            sdk.update_entity(oid, superseded_by=None, superseded_at=None)
+            sdk.update_knowledge(oid, superseded_by=None, superseded_at=None)
         finally:
             sdk.close()
 
@@ -1289,16 +1289,16 @@ class TestLifecycleCarrierCoherence:
         sdk = TortoiseSDK(str(tmp_path / "t10192s.db"))
         try:
             oid = _make_carrier_entity(sdk, "Object", "gamma")
-            sdk.update_entity(oid, status="superseded", supersededBy="gamma-v2")
+            sdk.update_knowledge(oid, status="superseded", supersededBy="gamma-v2")
             assert _carrier_row(sdk, "Object", "gamma")[1:] == ("superseded",
                                                                 "gamma-v2",
                                                                 None)
-            sdk.update_entity(oid, supersededAt="2026-02-02T00:00:00Z")
+            sdk.update_knowledge(oid, supersededAt="2026-02-02T00:00:00Z")
             assert _carrier_row(sdk, "Object", "gamma")[1:] == (
                 "superseded", "gamma-v2", "2026-02-02T00:00:00Z")
             # Same under the snake spelling: the guard reads the RESULT status,
             # so it is a coherence guard and not a ban on a property name.
-            sdk.update_entity(oid, superseded_by="gamma-v3")
+            sdk.update_knowledge(oid, superseded_by="gamma-v3")
             assert _carrier_row(sdk, "Object", "gamma")[1:] == (
                 "superseded", "gamma-v2", "2026-02-02T00:00:00Z")
         finally:
@@ -1338,7 +1338,7 @@ class TestLifecycleCarrierCoherence:
         sdk = TortoiseSDK(str(tmp_path / "t10192m.db"))
         try:
             oid = _make_carrier_entity(sdk, "Subject", "delta")
-            sdk.update_entity(oid, status="superseded")
+            sdk.update_knowledge(oid, status="superseded")
             assert _carrier_row(sdk, "Subject", "delta")[1:] == (
                 "superseded", None, None)
         finally:
@@ -1421,13 +1421,13 @@ class TestLifecycleCarrierCoherence:
         try:
             oid = _make_carrier_entity(sdk, "Object", "epsilon")
             with pytest.raises(ValueError, match="lifecycle CARRIER"):
-                sdk.update_entity(oid, supersededBy="v2")
+                sdk.update_knowledge(oid, supersededBy="v2")
             assert _carrier_row(sdk, "Object", "epsilon")[1] is None, (
                 "the graph's reading of the refused node must stay LIVE "
                 "(#9974 R1: an absent status IS live, and a stored 'live' "
                 "would mean something DID fabricate one)")
             with pytest.raises(ValueError, match="lifecycle CARRIER"):
-                sdk.update_entity(oid, superseded_by="v2")
+                sdk.update_knowledge(oid, superseded_by="v2")
             assert _carrier_row(sdk, "Object", "epsilon")[1] is None, (
                 "a snake-spelled carrier was ACCEPTED on a live node — the "
                 "guard is inert against it (review P1)")

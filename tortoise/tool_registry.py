@@ -692,7 +692,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "(#9202).",
         risk="destructive",
         http_policy=True,
-        sdk_method="update_point",
+        sdk_method="update_knowledge",  # #11609 lane B: the SDK name retired into the container
     ),
     # ── Operators ─────────────────────────────────────────────────
     ToolDefinition(
@@ -764,7 +764,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "Creates decision + options + evidence + IMPL edges atomically.",
         risk="write",
         http_policy=True,
-        sdk_method="file_decision",
+        sdk_method="write_question",  # #11609 lane B: retired into the container
     ),
     ToolDefinition(
         name="tortoise_file_human_approval",
@@ -775,7 +775,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "(label approvedBy) so dependent claims strengthen.",
         risk="write",
         http_policy=True,
-        sdk_method="file_human_approval",
+        sdk_method="record_decision",  # #11609 lane B: retired into the container
     ),
     # ── Deletion / Invalidation ───────────────────────────────────
     ToolDefinition(
@@ -807,7 +807,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "dry_run=True previews exactly which edges would transfer and changes nothing.",
         risk="destructive",
         http_policy=True,
-        sdk_method="supersede",
+        sdk_method="supersede_knowledge",  # #11609 lane B: retired into the container
     ),
     # ── Subscriptions / claim lifecycle (#432) ─────────────────────
     ToolDefinition(
@@ -1340,7 +1340,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         description="Update any entity's properties.",
         risk="destructive",
         http_policy=True,
-        sdk_method="update_entity",
+        sdk_method="update_knowledge",  # #11609 lane B: retired into the container
     ),
     ToolDefinition(
         name="tortoise_delete_entity",
@@ -1466,6 +1466,131 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         risk="read",
         http_policy=True,
         sdk_method="",  # custom handler in mcp_server.py (dispatches to legacy tools)
+    ),
+    # ── The WRITE/MUTATE containers (#4282 Phase 2, #11609 lane B) ──────
+    # Six approved target names (`tortoise/__all__.py` rows 20-26) as ONE tool each,
+    # dispatching on the discriminator `docs/product/bridge-table.md` Part A records.
+    # Every member keeps its handler FUNCTION and its `sdk_method` binding; only the
+    # NAME retires (#3883), so a caller of a retired name still resolves through the
+    # warning shim and gets exactly what it got before, plus the redirect.
+    #
+    # ⛔ THE RULE THAT KEEPS THIS HONEST: a member is retired only because its
+    # container's handler DELEGATES to that member's handler. Each container body
+    # below calls the legacy tool function, so the two doors cannot disagree about
+    # behaviour — the same rule `tortoise_graph_overview` states for its sections.
+    #
+    # ⚠️ THREE of the recorded beta rows name TWO destinations for one group
+    # (`update_knowledge` for the state, `list_knowledge` for the filter;
+    # `adjust_relationship` for strength, `update_knowledge` for annotation), so the
+    # SDK-level retirement of `promote_point` / `set_point_baseline` /
+    # `annotate_operator` / `mitigate_operator` cannot cite a single approved
+    # replacement and stays OPEN (bridge-table.md §D2c, sdk-rename-table.md §C3b).
+    # Their MCP names retire here regardless: the bridge map is owner-approved and
+    # places each of them in exactly one container.
+    ToolDefinition(
+        name="tortoise_update_knowledge",
+        id="surface.update_knowledge",
+        description="Change what a stored thing says — ONE revise verb for a Point, an "
+                    "entity or an epistemic link — or retract it. Dispatches on WHICH "
+                    "FIELDS are set: props → a property update (point-lifecycle for a "
+                    "Point, plain properties for an entity); annotation={bias,precision,"
+                    "consistency,directness} → annotate the link; invalid_at=/valid_until="
+                    " (+ corrected_by_id=) → retract, or invalidate against a successor. "
+                    "Retraction is a TEMPORAL FIELD here, not a separate verb. One arm per "
+                    "call: a keyword the chosen arm cannot record is refused, never dropped.",
+        risk="destructive",
+        http_policy=True,
+        sdk_method="update_knowledge",
+    ),
+    ToolDefinition(
+        name="tortoise_supersede_knowledge",
+        id="surface.supersede_knowledge",
+        description="Replace a node with a successor, keeping the history. Dispatches on the "
+                    "LINK POLICY: transfer_edges=True (default) → full supersede — CORRECTS "
+                    "edge, outdated flag, and every edge moves from old to new; "
+                    "transfer_edges=False → invalidate only — mark outdated with a CORRECTS "
+                    "edge and transfer nothing. dry_run=True previews the edge transfer and "
+                    "changes nothing.",
+        risk="destructive",
+        http_policy=True,
+        sdk_method="supersede_knowledge",
+    ),
+    ToolDefinition(
+        name="tortoise_adjust_relationship",
+        id="surface.adjust_relationship",
+        description="Adjust an existing epistemic link. Dispatches on the ADJUSTMENT: "
+                    "reason=/strength= → mitigate the edge (a graded dampener, strength "
+                    "0.10-0.50); bias/precision/consistency/directness → annotate its four "
+                    "epistemic dimensions; action=mitigate|annotate keeps the legacy "
+                    "spelling. Annotating a link is `update_knowledge` on it — this verb "
+                    "is the one for STRENGTH.",
+        risk="destructive",
+        http_policy=True,
+        # #4282 Phase 2, SPLIT (disclosed): the container ships now, its SDK `def` does
+        # NOT. `annotate_operator` and `mitigate_operator` cannot be retired yet — the
+        # beta row that authorises them names TWO destinations ("`adjust_relationship`
+        # for strength, `update_knowledge` for annotation"), so
+        # `tests/test_sdk_retirement.py` cannot derive a single approved replacement for
+        # either, and retiring a live name with a hint the owner never approved is the
+        # one thing that gate exists to refuse. So this row is a CUSTOM HANDLER, the
+        # shape `tortoise_graph_overview` uses: it dispatches to the member handlers and
+        # declares no SDK binding it cannot honour.
+        sdk_method="",  # custom handler in mcp_server.py (dispatches per adjustment)
+    ),
+    ToolDefinition(
+        name="tortoise_refresh_confidence",
+        id="surface.refresh_confidence",
+        description="Recompute or seed a belief's confidence. Dispatches on SCOPE: "
+                    "scope='dirty' (default) → dream the accumulated dirty subgraph; "
+                    "scope='full' → whole-graph stabilization; scope='promote' → the "
+                    "reviewer-gated draft→live promotion of point_id; "
+                    "scope='baseline' → set point_id's Beta prior (alpha, beta). The two "
+                    "scopes are stated as a parameter, never chosen silently.",
+        risk="destructive",
+        # #329, carried over with the container: whole-graph EP is CPU-heavy, so the
+        # MCP surface excludes it for tenants and the REST route below is the
+        # separately-budgeted path (MAX_DREAM_FULL_PER_HOUR, hosted_api). The policy
+        # is the STRICTEST member's: `tortoise_dream` was `http_policy=False` and a
+        # container that reaches it must be too. Disclosed consequence of the
+        # #11609 lane B consolidation: `promote`/`baseline` are no longer ADVERTISED
+        # over tenant HTTP MCP (they were) — the handler still answers them by name,
+        # and the dream arms refuse over HTTP exactly as `tortoise_dream` did.
+        http_policy=False,
+        # SPLIT (disclosed), same reason as `tortoise_adjust_relationship`:
+        # `promote_point` / `set_point_baseline` sit on a beta row that names two
+        # destinations, so the SDK `def` waits on that ruling and this row is a custom
+        # handler over the member handlers (`graph_overview`'s shape).
+        sdk_method="",  # custom handler in mcp_server.py (dispatches per scope)
+
+        # The REST route survives the container: this is the one HTTP door to whole-
+        # graph EP and it is BUDGETED at the hosted layer, so retiring the tool row
+        # must not retire the route with it.
+        rest_spec=RestSpec(method="POST", path="/v1/dream"),
+    ),
+    ToolDefinition(
+        name="tortoise_write_question",
+        id="surface.write_question",
+        description="File a QUESTION with its options and the evidence behind them — not a "
+                    "decision. Creates the question, its option Points, the evidence Points "
+                    "and the IMPL edges atomically. options: option descriptions; evidence: "
+                    "evidence statements; choice: 0-indexed preferred option. Returns "
+                    "{decision_id, option_ids, evidence_ids}.",
+        risk="write",
+        http_policy=True,
+        sdk_method="write_question",
+    ),
+    ToolDefinition(
+        name="tortoise_record_decision",
+        id="surface.record_decision",
+        description="Record that a question was resolved — a human approval of a planning "
+                    "artifact: an Event (eventKind humanApproval) with full provenance, a "
+                    "decision Point carrying an EP evidence prior, and unidirectional IMPL "
+                    "(approvedBy) edges to the approved claims so dependent claims "
+                    "strengthen. Returns {event_id, decision_point_id, impl_operator_ids, "
+                    "confidence_delta}.",
+        risk="write",
+        http_policy=True,
+        sdk_method="record_decision",
     ),
     # ⛔ `tortoise_backfill_v25` is REMOVED from the MCP surface (#11609 batch 1, owner
     # ruling comment 6831894340): it targets ONTOLOGY v2.5 against a v3.13 schema, has no
@@ -1987,6 +2112,16 @@ GROUP_BY_NAME: dict[str, str] = {
     "tortoise_stale": "reasoning", "tortoise_dream": "reasoning",
     "tortoise_review_connections": "reasoning",
     "tortoise_find_cross_lens_candidates": "reasoning",
+    # ── The WRITE/MUTATE containers (#4282 Phase 2, #11609 lane B) ────────────
+    # Each is grouped where its absorbed members already sat, so a role-scoped
+    # server that served `tortoise_update_point` still serves the container that
+    # now answers for it.
+    "tortoise_update_knowledge": "memory",
+    "tortoise_supersede_knowledge": "memory",
+    "tortoise_adjust_relationship": "graph",
+    "tortoise_refresh_confidence": "reasoning",
+    "tortoise_write_question": "journal",
+    "tortoise_record_decision": "journal",
     # graph
     "tortoise_create_operator": "graph", "tortoise_annotate_operator": "graph",
     "tortoise_get_operator": "graph", "tortoise_mitigate_operator": "graph",
@@ -2134,6 +2269,43 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     "tortoise_onboarding_session_recording":
         'tortoise_manage_sources(action="enable" or "disable", '
         'source="agent_sessions")',
+    # ── #4282 Phase 2 WRITE/MUTATE containers (#11609 lane B) ────────────────
+    # ONE hop to a LIVE name in every pointer below (GitHub's own
+    # `DeprecatedToolAliases` limit: aliases are not transitive), and the container
+    # delegates to the very handler this name still runs through the shim — so a
+    # migrating caller lands on the same body, not a re-implementation.
+    #
+    # Arguments are shown where the door took them (`props=`, `days=`,
+    # `point_kinds=` precedent): a caller who drops `transfer_edges=False` gets a
+    # FULL supersede — it moves every edge — which is a different operation, not a
+    # smaller one.
+    "tortoise_update": 'tortoise_update_knowledge(id, props=...)',
+    "tortoise_update_point": 'tortoise_update_knowledge(id, props=...)',
+    "tortoise_update_entity": 'tortoise_update_knowledge(id, props=...)',
+    # The retraction is a TEMPORAL FIELD on the container (Zep's shape,
+    # `beta-sdk-surface.md`): `invalid_at`/`valid_until` is the instant the claim
+    # stopped holding, and omitting it retains the `now` default the old door had.
+    "tortoise_retract_point": 'tortoise_update_knowledge(id, invalid_at=...)',
+    # `transfer_edges=False` is the INVALIDATE arm; it is named explicitly because
+    # the default is the full supersede and the two differ in what they destroy.
+    "tortoise_supersede": 'tortoise_supersede_knowledge(old_id, new_id, transfer_edges=...)',
+    "tortoise_invalidate":
+        'tortoise_supersede_knowledge(id, corrected_by_id, transfer_edges=False)',
+    "tortoise_annotate_operator":
+        'tortoise_adjust_relationship(id, bias=..., precision=..., consistency=..., '
+        'directness=...)',
+    "tortoise_mitigate_operator":
+        'tortoise_adjust_relationship(id, reason=..., strength=..., credibility=...)',
+    "tortoise_operator_action": 'tortoise_adjust_relationship(id, action="mitigate"|"annotate", ...)',
+    # `scope` names the arm: dream's two scopes, the reviewer-gated promotion, and
+    # the Beta prior are DIFFERENT writes behind one verb, so the pointer names it.
+    "tortoise_dream": 'tortoise_refresh_confidence(scope="dirty"|"full", ...)',
+    "tortoise_promote_point": 'tortoise_refresh_confidence(scope="promote", point_id=...)',
+    "tortoise_set_point_baseline":
+        'tortoise_refresh_confidence(scope="baseline", point_id=..., alpha=..., beta=...)',
+    "tortoise_file_decision": 'tortoise_write_question(options, evidence, choice)',
+    "tortoise_file_human_approval":
+        'tortoise_record_decision(approver_id, artifact_id, point_ids, decision_content=...)',
 }
 
 

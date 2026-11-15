@@ -16,9 +16,10 @@ aboutObjects: [tortoise-mcp, tortoise-sdk]
 ## The vision, in one paragraph
 
 **A developer should be able to read our entire surface in a sitting and know what to call.**
-Today they cannot: the MCP server serves **91 tools** (68 of them advertised — the `graph_overview`
-container retired five names into one, #4282 Phase 3.2 deleted five `run_onboarding` tools, and the
-batch-1 archives of #11609 removed four no-destination tools), and the SDK **125 methods** (26 surplus names deleted by `#4282`), with five
+Today they cannot: the MCP server serves **97 tools** (60 of them advertised — the `graph_overview`
+container retired five names into one, #4282 Phase 3.2 deleted five `run_onboarding` tools, the
+batch-1 archives of #11609 removed four no-destination tools, and six #11609 Phase 2 WRITE/MUTATE
+containers retired fourteen more into them), and the SDK **124 methods** (26 surplus names deleted by `#4282`), with five
 overlapping ways to search, four ways to revise, seven ways to create a node, and a
 lifecycle nobody owns. The target is a surface small enough to hold in your head, where every
 name says what it does, every operation says what it will do to your data, and

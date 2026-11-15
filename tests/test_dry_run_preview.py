@@ -364,7 +364,7 @@ class TestBlastRadius:
         preview = _preview_supersede(sdk, old, new)
         assert preview["edges_transferred_from_old"] == 2
         assert preview["edges_created_at_new"] == 1
-        real = sdk.supersede(old, new)
+        real = sdk.supersede_knowledge(old, new)
         # ⛔ The field that mirrors the writer is `edges_transferred_from_old`,
         # NOT `edges_created_at_new`. The writer's `edges_transferred` is its
         # OLD-SIDE row count — it books the second parallel edge even though the
@@ -417,7 +417,7 @@ class TestBlastRadius:
         preview = _preview_supersede(sdk, old, new)
         assert preview["edges_created_at_new"] == 4, preview
         assert preview["edges_transferred_from_old"] == 2, preview
-        real = sdk.supersede(old, new)
+        real = sdk.supersede_knowledge(old, new)
         assert real["edges_transferred"] == 2
         typed = [e for e in preview["edges"]
                  if e["type"] == "IMPL" and e["from"] == op["id"]]
@@ -441,7 +441,7 @@ class TestBlastRadius:
         from tortoise.mcp_server import _preview_supersede
         before = _edge_keys_at(sdk, new)
         preview = _preview_supersede(sdk, old, new)
-        real = sdk.supersede(old, new)
+        real = sdk.supersede_knowledge(old, new)
         net_new = _edge_keys_at(sdk, new) - before
         assert preview["edges_created_at_new"] == len(net_new), (
             preview, real, net_new)
@@ -609,7 +609,7 @@ class TestBlastRadius:
         assert preview["edges_created_at_new"] == 0, preview
         # Parity: the writer's own end-state agrees with the preview — no
         # self-edge on any successor node, no transferred aboutPoint edge.
-        sdk.supersede(old, "newdup7822")
+        sdk.supersede_knowledge(old, "newdup7822")
         assert proj.g.query(
             "MATCH (a:Point {id:'newdup7822'})-[:aboutPoint]->"
             "(b:Point {id:'newdup7822'}) RETURN count(*)").result_set[0][0] == 0
@@ -684,7 +684,7 @@ class TestBlastRadius:
 
         before_keys = _edge_keys_at(sdk, new)
         preview = _preview_supersede(sdk, old, new)
-        real = sdk.supersede(old, new)
+        real = sdk.supersede_knowledge(old, new)
 
         net_new = _edge_keys_at(sdk, new) - before_keys
         assert preview["edges_created_at_new"] == len(net_new), (
@@ -761,7 +761,7 @@ class TestBlastRadius:
 
         before = _edge_keys_at(sdk, new)
         preview = _preview_supersede(sdk, old, new)
-        real = sdk.supersede(old, new)
+        real = sdk.supersede_knowledge(old, new)
         net_new = _edge_keys_at(sdk, new) - before
 
         # 1. the transfer is NOT a drop — pre-fix this list held the edge.
@@ -836,7 +836,7 @@ class TestBlastRadius:
         new = _seed_point(sdk, "new-context")
         before = _edge_keys_at(sdk, new)
         preview = _preview_supersede(sdk, mit["id"], new)
-        real = sdk.supersede(mit["id"], new)
+        real = sdk.supersede_knowledge(mit["id"], new)
         net_new = _edge_keys_at(sdk, new) - before
         assert preview["edges_created_at_new"] == len(net_new), (
             f"preview said {preview['edges_created_at_new']} net-new, "
@@ -955,7 +955,7 @@ class TestBlastRadius:
         from tortoise.mcp_server import _preview_supersede
 
         preview = _preview_supersede(sdk, old, new)
-        real = sdk.supersede(old, new)
+        real = sdk.supersede_knowledge(old, new)
 
         assert preview["edges_transferred_from_old"] == real["edges_transferred"], (
             "a pre-existing repoint target makes the writer's out-pass MERGE a "
@@ -988,7 +988,7 @@ class TestBlastRadius:
         from tortoise.mcp_server import _preview_supersede
 
         preview = _preview_supersede(sdk, old, new)
-        real = sdk.supersede(old, new)
+        real = sdk.supersede_knowledge(old, new)
 
         p, w = preview["edges_transferred_from_old"], real["edges_transferred"]
         assert p == 3, ("preview: self-loop dropped + old->x merged + the "
@@ -1028,7 +1028,7 @@ class TestBlastRadius:
 
         before_at_old = _edge_keys_at(sdk, old)
         preview = _preview_supersede(sdk, old, new)
-        real = sdk.supersede(old, new)
+        real = sdk.supersede_knowledge(old, new)
         after_at_old = _edge_keys_at(sdk, old)
 
         # GROUND TRUTH: two edges were incident to `old` (the self-loop and the
@@ -1066,7 +1066,7 @@ class TestBlastRadius:
         assert preview["edges_transferred_from_old"] == 2, preview
         assert preview["edges_remaining_at_old"] == 1, preview
 
-        sdk.supersede(old, new)
+        sdk.supersede_knowledge(old, new)
         remaining = _edge_keys_at(sdk, old)  # excludes the CORRECTS edge
         assert len(remaining) == preview["edges_remaining_at_old"], remaining
         assert any(rtype == "related" for _, rtype, _, _ in remaining), remaining

@@ -19851,7 +19851,7 @@ class TortoiseSDK:
             return {}
         if resolved[0]["label"] == "Point":
             return self.update_point(id, **props)
-        return self.update_entity(id, **props)
+        return self._update_entity_any(id, **props)
 
     def delete(self, id: str) -> bool:
         """One delete for a Point OR an entity (epic #888 W2).
@@ -21654,7 +21654,7 @@ class TortoiseSDK:
         # tests/test_lifecycle_guards.py) — and that path writes NOTHING. Shaping
         # still ran from the caller's props, so `_end_receipt` is non-None, and
         # attaching it turned `{}` into truthy `{'valid_to_shaped': …}`: a caller
-        # checking `if not sdk.update_point(id, …)` to detect a missing id now
+        # checking `if not sdk.update_knowledge(id, …)` to detect a missing id now
         # silently passes, and the receipt reports a shaping that was never
         # stored. Same class as the refused-fold branch above: a receipt may
         # only report an end that reached the STORED record.
@@ -22559,23 +22559,64 @@ class TortoiseSDK:
     # full transfer (supersede_point) or the invalidate behavior
     # (invalidate_point). Legacy methods remain the implementations.
 
-    def supersede(self, old_id: str, new_id: str,
-                  transfer_edges: bool = True) -> dict:
-        """Unified supersede / invalidate (epic #888 W2, PR #912).
+    def supersede_knowledge(self, old_id: str, new_id: str,
+                            transfer_edges: bool = True, *,
+                            valid_from: str | None = None,
+                            valid_to_precision: str | None = None) -> dict:
+        """Replace a node with a successor — dispatching on the LINK POLICY (#4282 row 23).
 
-        transfer_edges=True  → full supersede (supersede_point): CORRECTS edge
-        + outdated flag + ALL edges transferred from old to new.
-        transfer_edges=False → invalidate behavior (invalidate_point): mark
-        old outdated + CORRECTS edge only, NO edge transfer. This absorbs the
-        legacy invalidate surface.
+        ``beta-sdk-surface.md`` row 23 states the discriminator as part of the verb:
+        *"Carries an explicit link policy — whether the old node's links follow the
+        successor"*. That is ``transfer_edges``:
+
+          transfer_edges=True  (default) → FULL SUPERSEED. CORRECTS edge + outdated
+                              flag + ALL edges transferred from old to new.
+                              Absorbs ``supersede_point`` — and with it the
+                              bi-temporal window kwargs below, which the old
+                              ``supersede`` delegator silently DROPPED (the
+                              disagreement ``beta-sdk-surface.md`` records:
+                              "``supersede_point`` carries a ``valid_from`` the
+                              other silently drops"). Dropping a caller's
+                              ``valid_from`` is the same "returned success having
+                              recorded part of it" class this surface refuses
+                              everywhere else, so the kwargs are carried here.
+          transfer_edges=False → INVALIDATE ONLY. Outdated flag + a CORRECTS edge,
+                              NO edge transfer. Absorbs the ``supersede(...,
+                              transfer_edges=False)`` arm; ``invalidate_point``
+                              itself STAYS public, because its
+                              ``valid_to_precision='unknown'`` state (the
+                              "ended, but I cannot date it" window, #2350) has no
+                              home on ``update_knowledge`` and retiring it would
+                              delete that capability rather than rename it.
 
         Returns {invalidated, id, corrected_by} (+ edges_transferred when
         transfer_edges=True). Raises ValueError on missing/self/terminal input
-        (both legs now route through the ONE shared lifecycle guard, #2498).
+        (both legs route through the ONE shared lifecycle guard, #2498).
         """
-        if transfer_edges:
-            return self.supersede_point(old_id, new_id)
-        return self.invalidate_point(old_id, new_id)
+        if not transfer_edges:
+            # The window kwargs are SUPERSEED facts (the predecessor's end is the
+            # successor's start; the precision marker closes its window). The
+            # invalidate arm writes its own window end and can carry neither, so
+            # passing one here is refused rather than dropped — the caller would
+            # otherwise get an invalidation that recorded none of what they asked.
+            refused = sorted(
+                name for name, value in (
+                    ("valid_from", valid_from),
+                    ("valid_to_precision", valid_to_precision),
+                ) if value is not None
+            )
+            if refused:
+                raise ValueError(
+                    f"supersede_knowledge: transfer_edges=False is the INVALIDATE "
+                    f"arm, which transfers no edges and carries no successor "
+                    f"window — it cannot record {', '.join(refused)}. Pass "
+                    f"transfer_edges=True for a full supersede, or call "
+                    f"invalidate_point(id, corrected_by_id) for the window-agnostic "
+                    f"invalidation."
+                )
+            return self.invalidate_point(old_id, new_id)
+        return self.supersede_point(old_id, new_id, valid_from=valid_from,
+                                    valid_to_precision=valid_to_precision)
 
     @_declares_live_write_lane("supersede_point")
     def supersede_point(self, old_id: str, new_id: str,
@@ -25421,7 +25462,7 @@ class TortoiseSDK:
                 write["dedup_rejected_targets"] = new_targets
             if target_id is not None:
                 write["dedup_target_id"] = target_id
-            self.update_entity(candidate_id, dedup_reviewed="reject",
+            self._update_entity_any(candidate_id, dedup_reviewed="reject",
                                reviewed=True,
                                **write)
             return {"candidate_id": candidate_id, "action": "reject",
@@ -26330,9 +26371,6 @@ class TortoiseSDK:
         return result
 
     # ── Operator action consolidation (epic #888 W2) ──────────────────
-    # mitigate_operator/annotate_operator are the operator write entry points.
-    # The unified operator_action() wrapper that sat in front of them was
-    # deleted in #4282; do not reintroduce a pointer to it here.
     def annotate_operator(self, id: str, bias: float, precision: float,
                           consistency: float, directness: float) -> dict:
         """Annotate an operator Point with structured epistemic dimensions.
@@ -32994,8 +33032,31 @@ class TortoiseSDK:
             params={"id": op_id, "now": _now_iso()},
         )
 
-    def file_decision(self, options: list[str], evidence: list[str],
-                      choice: int) -> dict:
+    def write_question(self, options: list[str], evidence: list[str],
+                       choice: int) -> dict:
+        """File a QUESTION with its options and the evidence behind them (#4282 row 20).
+
+        ``beta-sdk-surface.md`` row 20: *"**File a question with its options and the
+        evidence behind them.** Not a decision — a decision happens later, or not at
+        all"*. The old name was ``file_decision``, and it filed a *question* while
+        calling it a decision (row 20's own note: "It was filing a question and
+        calling it a decision").
+
+        What it writes is unchanged, because the body is unchanged: a question Point,
+        one Point per option, one per evidence statement, and the IMPL edges between
+        them — atomically, under the same batch caps.
+
+        Args:
+            options: list of option descriptions (e.g. ["JSON", "YAML"])
+            evidence: list of evidence statements behind the choice
+            choice: 0-indexed index into options (the preferred option)
+
+        Returns {decision_id, option_ids: [...], evidence_ids: [...]}.
+        """
+        return self._file_decision(options, evidence, choice)
+
+    def _file_decision(self, options: list[str], evidence: list[str],
+                       choice: int) -> dict:
         """File a simple decision directly to the graph — no EP, no calibration,
         no research cycles. Creates decision + options + evidence + IMPL edges
         atomically. For low-stakes decisions where the answer is clear (#133).
@@ -33050,9 +33111,28 @@ class TortoiseSDK:
             "evidence_ids": evidence_ids,
         }
 
-    def file_human_approval(self, approver_id: str, artifact_id: str,
-                            point_ids: list[str],
-                            decision_content: str | None = None) -> dict:
+    def record_decision(self, approver_id: str, artifact_id: str,
+                        point_ids: list[str],
+                        decision_content: str | None = None) -> dict:
+        """Record that a question was resolved — the human approval (#4282 row 21).
+
+        ``beta-sdk-surface.md`` row 21: *"**Record that a question was resolved**, by
+        this choice, at this time"*. The approved MCP row's absorber is this verb, so
+        ``file_human_approval`` retires into it.
+
+        The body is unchanged (`_file_human_approval`): an Event
+        (``eventKind: humanApproval``) carrying full provenance, a decision Point
+        (``pointKind: humanApproval``) that seeds grounding and receives an EP
+        evidence prior, and unidirectional IMPL (``approvedBy``) edges to the
+        approved claims. Returns
+        ``{event_id, decision_point_id, impl_operator_ids, confidence_delta}``.
+        """
+        return self._file_human_approval(approver_id, artifact_id, point_ids,
+                                         decision_content)
+
+    def _file_human_approval(self, approver_id: str, artifact_id: str,
+                             point_ids: list[str],
+                             decision_content: str | None = None) -> dict:
         """Record a human approval of a planning artifact (#531).
 
         Canonical approval pattern (research #421): an Event
@@ -54118,9 +54198,17 @@ class TortoiseSDK:
     def get_entity(self, id_val: str) -> dict:
         return self._get_entity(id_val)
 
-    def update_entity(self, id_val: str, **props) -> dict:
+    def _update_entity_any(self, id_val: str, **props) -> dict:
         """Update any entity's properties. Implementation behind
-        update(id, ...) — the consolidated Point/entity update (epic #888 W2)."""
+        update(id, ...) — the consolidated Point/entity update (epic #888 W2).
+
+        #4282 Phase 2: this was the PUBLIC ``update_entity``, retired into
+        ``update_knowledge`` (``beta-sdk-surface.md``: "| `update_point`,
+        `update_entity` | 2 | → `update_knowledge`. |"). It is the RELAY that
+        normalises the props (nested ``props=`` flattening, reserved-name strip)
+        before the apply-first write door ``_update_entity``, so it is kept
+        INTERNAL rather than inlined: the door's own contract does not include
+        that intake, and a caller reaching the door directly would skip it."""
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
         # #2296 review: strip the `_emit_event`-owned names BEFORE the relay.
         # `_update_entity`'s first parameter is `self`, so a `self` key (reachable

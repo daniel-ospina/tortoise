@@ -885,7 +885,7 @@ def advance_stage(sdk, object_ref: str, pipeline_key: str, stage_ref: str, *,
         # pair — ``pipelineStageKey`` stays the pipeline of the CURRENT stage,
         # or the guards below could not be evaluated against it (P1).
         raw = stage_ref.strip()
-        sdk.update_entity(oid, pipelineStagePending=raw,
+        sdk.update_knowledge(oid, pipelineStagePending=raw,
                           pipelineStagePendingAt=stage_ts,
                           pipelineStagePendingKey=pipeline_key)
         return StageMove(applied=False, reason="unknown-stage", pending=raw)
@@ -965,7 +965,7 @@ def advance_stage(sdk, object_ref: str, pipeline_key: str, stage_ref: str, *,
         props["pipelineStageSource"] = source
     if reason:
         props["pipelineStageReason"] = reason
-    sdk.update_entity(oid, **props)
+    sdk.update_knowledge(oid, **props)
     return StageMove(applied=True, stage=target)
 
 

@@ -646,12 +646,18 @@ def test_the_reason_dependency_cross_check_can_fail():
     been burned by before.
     """
     doc = copy.deepcopy(_manifest())
-    row = next(r for r in doc["rows"] if r.get("name") == "sdk:supersede_point")
-    row["reason"] = "no MCP tool binds it; callers: engine, other-tooling, tenant-rest"
+    # A TWO-SIDED row — `_caller_lists` only compares a row that carries a caller list in
+    # BOTH columns — selected by that SHAPE rather than by a name a later batch may retire
+    # (`sdk:supersede_point` was this row until #11609 lane B retired it).
+    row = next(r for r in doc["rows"]
+               if str(r.get("name", "")).startswith("sdk:")
+               and "caller categories:" in str(r.get("dependency", ""))
+               and "callers:" in str(r.get("reason", "")))
+    row["reason"] = "no MCP tool binds it; callers: zzz_one, zzz_two"
     compared, mismatched, one_sided = _caller_lists(doc)
     assert compared >= 40, f"the cross-check reads only {compared} rows on a doctored copy"
     assert not one_sided, f"a two-sided row was reported as one-sided: {one_sided}"
-    assert [name for name, _dep, _reason in mismatched] == ["sdk:supersede_point"], (
+    assert [name for name, _dep, _reason in mismatched] == [row["name"]], (
         f"a one-sided edit to `reason` did not red the cross-check: {mismatched}"
     )
 
@@ -659,19 +665,25 @@ def test_the_reason_dependency_cross_check_can_fail():
     # on the absence of a list, the row left the comparison altogether, and the aggregate
     # floor still cleared at 41 -> 40 (measured before this pin).
     doc = copy.deepcopy(_manifest())
-    row = next(r for r in doc["rows"] if r.get("name") == "sdk:supersede_point")
+    row = next(r for r in doc["rows"]
+               if str(r.get("name", "")).startswith("sdk:")
+               and "caller categories:" in str(r.get("dependency", ""))
+               and "callers:" in str(r.get("reason", "")))
     row["reason"] = "no MCP tool binds it"
     compared, _mismatched, one_sided = _caller_lists(doc)
-    assert [entry.split(": ", 1)[0] for entry in one_sided] == ["sdk:supersede_point"], (
+    assert [entry.split(": ", 1)[0] for entry in one_sided] == [row["name"]], (
         "deleting the `callers:` clause from `reason` exempted the row instead of reding it: "
         f"one_sided={one_sided}, compared={compared}"
     )
 
     doc = copy.deepcopy(_manifest())
-    row = next(r for r in doc["rows"] if r.get("name") == "sdk:supersede_point")
+    row = next(r for r in doc["rows"]
+               if str(r.get("name", "")).startswith("sdk:")
+               and "caller categories:" in str(r.get("dependency", ""))
+               and "callers:" in str(r.get("reason", "")))
     row["dependency"] = "no caller categories recorded"
     _compared, _mismatched, one_sided = _caller_lists(doc)
-    assert [entry.split(": ", 1)[0] for entry in one_sided] == ["sdk:supersede_point"], (
+    assert [entry.split(": ", 1)[0] for entry in one_sided] == [row["name"]], (
         "deleting the `caller categories:` clause from `dependency` exempted the row "
         f"instead of reding it: one_sided={one_sided}"
     )
@@ -1250,11 +1262,11 @@ def test_the_guard_reds_when_the_live_surface_grows_past_the_high_water_pin(tmp_
     """
     doc = _manifest()
     # The pin is set ONE BELOW the live count so the run must red: the property
-    # under test is "growth past the pin reds", not any particular number. The live count
-    # moved again after the merge — #4282's container (81 -> 77), #4282 Phase 3.2's
-    # `run_onboarding` retirement (77 -> 72) and #11609 batch 1's four archived
-    # no-destination tools (72 -> 68) — so the pin follows to 68 - 1.
-    doc["high_water_counts"] = {"tools": 67, "sdk_public_methods": 150}
+    # under test is "growth past the pin reds", not any particular number — so it is
+    # READ from the live count instead of being re-typed on every surface move (#11609
+    # lane B moved it 68 -> 60 and found this literal had been hand-carried twice).
+    doc["high_water_counts"] = {"tools": doc["counts"]["tools"] - 1,
+                                "sdk_public_methods": 150}
     result = _run("tools/surface-guard.py", "--manifest", _write(doc, tmp_path))
     assert result.returncode == 1, "growth past the frozen pin did not red the gate"
     assert "high-water pin" in result.stdout, result.stdout
@@ -3251,7 +3263,13 @@ def test_the_exemption_control_is_usable_without_reding_the_drift_check(checker,
     `FAIL row 'sdk:annotate_ask_hits' was hand-edited — exemption: recorded {True}, derived {False}`.
     """
     doc = _manifest()
-    row = next(r for r in doc["rows"] if str(r["name"]).startswith("sdk:"))
+    # A row that is NOT bound by a registered tool: `surface-guard` refuses an
+    # exemption on a bound row ("an exemption records a fact that is no longer
+    # true"), and #11609 lane B bound the first `sdk:` rows, so the population is
+    # selected by that property instead of by position.
+    row = next(r for r in doc["rows"]
+               if str(r["name"]).startswith("sdk:")
+               and "0 registered tool(s)" in str(r.get("dependency", "")))
     row["exemption"] = True
     result = _run("tools/surface-guard.py", "--manifest", _write(doc, tmp_path))
     assert result.returncode == 0, f"a recorded exemption is refused: {result.stdout}"
@@ -4811,7 +4829,10 @@ def test_the_live_surface_is_the_baseline_the_guard_froze():
     # landed container batch until the approved 27 is reached. #4282 Phase 3.2 (main) then
     # removes the five `run_onboarding` tools — a disjoint name set — so the merged
     # surface is 72, not either side's own figure.
-    assert live["mcp"] == manifest["counts"]["tools"] == 68
+    # #11609 lane B (#4282 Phase 2): 68 -> 60 — fourteen WRITE/MUTATE doors retired into
+    # six approved containers (68 − 14 + 6). The retired names still ANSWER (#3883), so
+    # the SERVED surface is unchanged; this pin is the ADVERTISED one.
+    assert live["mcp"] == manifest["counts"]["tools"] == 60
     # #4282 Phase 2.2 (#10053): 149 -> 150, the three approved-but-absent names now
     # having a `def` (+3) less `main`'s two retirements in #10012 (`graph_count` →
     # `_graph_count`, `org_list` deleted) (−2). The manifest pin records the same
@@ -4821,7 +4842,14 @@ def test_the_live_surface_is_the_baseline_the_guard_froze():
     # The approved 40 did not grow — the approval (`#10015` comment `6863608333`) delivers a
     # name that was already approved and unshipped, the same move PR #10053 made for three
     # rows — so `high_water_counts` (150) does not move; only the frozen ROW SET does.
-    assert live["sdk"] == manifest["counts"]["sdk_public_methods"] == 125
+    # 125 -> 124 (#11609 lane B): five approved targets implemented (`supersede_knowledge`,
+    # `write_question`, `record_decision`, `adjust_relationship`, `refresh_confidence`) and
+    # SIX stated renames retired (`supersede`, `supersede_point` -> `supersede_knowledge`;
+    # `update_point`, `update_entity` -> `update_knowledge`; `file_decision` ->
+    # `write_question`; `file_human_approval` -> `record_decision`). The net is NEGATIVE by
+    # the batch's own rule: a container may not add surface without retiring at least as
+    # much of what it absorbs.
+    assert live["sdk"] == manifest["counts"]["sdk_public_methods"] == 124
 
 
 def test_the_sdk_count_the_sequencing_list_types_is_the_measured_one():

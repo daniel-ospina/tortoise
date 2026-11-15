@@ -298,7 +298,7 @@ def test_update_entity_point_branch_verbatim_embedding_is_dense_readable(tmp_pat
         try:
             pid = sdk.create_point("statement", "alpha text")["id"]
             caller_vec = [_CALLER_VALUE] * DIM
-            sdk.update_entity(pid, embedding=caller_vec)
+            sdk.update_knowledge(pid, embedding=caller_vec)
             assert _typeof(sdk, pid) == "List", (
                 "premise: update_entity's Point branch stores verbatim")
             hits, reason = _dense(sdk, caller_vec)

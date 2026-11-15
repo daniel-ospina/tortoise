@@ -66,7 +66,7 @@ def test_goal_state_invalid_value_refused_on_create_object(sdk):
 def test_goal_state_invalid_value_refused_on_update_entity(sdk):
     goal = sdk.create_object("REVENUE", objectKind="goal", goalState="active")
     with pytest.raises(ValueError, match="goalState"):
-        sdk.update_entity(goal["id"], goalState="in-flight")
+        sdk.update_knowledge(goal["id"], goalState="in-flight")
     # The refused write did not land.
     assert sdk.get_entity(goal["id"])["goalState"] == "active"
 
@@ -87,7 +87,7 @@ def test_goal_state_invalid_value_refused_on_update_point(sdk):
 
 def test_goal_state_none_clears_without_error(sdk):
     goal = sdk.create_object("REVENUE", objectKind="goal", goalState="met")
-    sdk.update_entity(goal["id"], goalState=None)
+    sdk.update_knowledge(goal["id"], goalState=None)
     assert sdk.get_entity(goal["id"]).get("goalState") is None
 
 

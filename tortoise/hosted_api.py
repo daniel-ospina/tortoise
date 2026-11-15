@@ -22742,7 +22742,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                     "(#3366)",
                     resolved_pid, _succ_state[0], _succ_state[1])
             else:
-                sdk.supersede_point(pr.existing_id, resolved_pid)
+                sdk.supersede_knowledge(pr.existing_id, resolved_pid)
         else:
             point_props = {}
             if pr.point.when:

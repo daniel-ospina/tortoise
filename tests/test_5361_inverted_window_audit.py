@@ -320,7 +320,7 @@ def test_documented_fix_does_not_prescribe_a_refused_call(sdk):
     # ...and the sibling door is closed too (#9649), which is what makes the
     # SDK-wide claim in the advertised text true rather than an over-statement.
     with pytest.raises(ValueError, match="terminal"):
-        sdk.update_entity(pids[0], validTo="2031-06-01")
+        sdk.update_knowledge(pids[0], validTo="2031-06-01")
     assert sdk.get_point(pids[0])["validTo"] == "2020-06-01", (
         "#9649: the refused call must leave the planted window untouched")
 

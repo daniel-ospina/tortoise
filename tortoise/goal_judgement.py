@@ -2018,14 +2018,14 @@ def record_judgement(
         try:
             if reading_at:
                 try:
-                    sdk.supersede_point(previous_point_id, point_id,
+                    sdk.supersede_knowledge(previous_point_id, point_id,
                                         valid_from=str(reading_at))
                     superseded_id, window_from = previous_point_id, "reading"
                 except ValueError:
-                    sdk.supersede_point(previous_point_id, point_id)
+                    sdk.supersede_knowledge(previous_point_id, point_id)
                     superseded_id = previous_point_id
             else:
-                sdk.supersede_point(previous_point_id, point_id)
+                sdk.supersede_knowledge(previous_point_id, point_id)
                 superseded_id = previous_point_id
         except Exception as exc:
             # ⛔ A REFUSED SUPERSESSION MUST NOT LEAVE A SECOND LIVE CLAIM. The

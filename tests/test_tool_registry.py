@@ -75,7 +75,7 @@ class TestRegistryEquivalence:
         )
 
     def test_registry_count(self):
-        """68 live tools = 98 − 16 owner-approved retirements (#3863) − 1 − 5 + 1 − 5 − 4.
+        """60 live tools = 98 − 16 owner-approved retirements (#3863) − 1 − 5 + 1 − 5 − 4 − 8.
 
         The −1 is #3540 ruling B: the two per-source switches were consolidated into
         `tortoise_manage_sources`, which is the ruling's own requirement ("the surface
@@ -108,15 +108,21 @@ class TestRegistryEquivalence:
         above — no replacement NAME to redirect to. 72 − 4 = **68** live, 23 retired;
         the archival is its own move, disjoint from both above, which is why this
         docstring's arithmetic has to name it.
+
+        #11609 lane B (#4282 Phase 2, the WRITE/MUTATE containers): FOURTEEN advertised
+        names retire into SIX approved containers and the six containers arrive —
+        68 − 14 + 6 = **60** live, 23 + 14 = **37** retired. The move is a net −8 and it
+        is the approved direction; every retired name still ANSWERS through the #3883
+        shim, so the SERVED set is unchanged at 97 and no capability is lost.
         """
         from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
-        assert len(TOOL_REGISTRY) == 68, f"Expected 68, got {len(TOOL_REGISTRY)}"
+        assert len(TOOL_REGISTRY) == 60, f"Expected 60, got {len(TOOL_REGISTRY)}"
         names = {t.name for t in TOOL_REGISTRY}
         # The 16 #3863 retirements, the 2 per-source switches #3540 ruling B
-        # consolidated and the 5 #4282 container members are NOT live, and each one is
-        # declared retired (#3883).
+        # consolidated, the 5 #4282 container members and the 14 #11609 lane B
+        # WRITE/MUTATE members are NOT live, and each one is declared retired (#3883).
         retired = {t.name for t in RETIRED_TOOL_REGISTRY}
-        assert len(retired) == 23, f"Expected 23 retired, got {len(retired)}"
+        assert len(retired) == 37, f"Expected 37 retired, got {len(retired)}"
         assert not (retired & names), f"Retired names still live: {retired & names}"
         # #405's `validate_domain` capability is not lost: #4282 retired the door into the
         # `graph_overview` container, which dispatches `section="validate_domain"`. Asserting
@@ -147,10 +153,16 @@ class TestRegistryEquivalence:
             assert gone not in names, (
                 f"{gone} is back on the served surface — #4282 Phase 3.2 removed it and "
                 "the owner's 2026-09-22 ruling keeps `run_onboarding` off the MCP")
-        assert "tortoise_file_human_approval" in names, "Missing #531 human-approval tool"
+        # #531's human-approval write, reached through its #11609 lane B container:
+        # the door retired (into the #3883 shim) and `tortoise_record_decision` is the
+        # name that resolves now.
+        assert "tortoise_record_decision" in names, "Missing the record_decision container"
         assert "tortoise_review_connections" in names, "Missing #913 review_connections tool"
         assert "tortoise_events_poll" in names, "Missing #432 poll_events tool"
-        assert "tortoise_retract_point" in names, "Missing #432 retract_point tool"
+        # #432's retraction, reached through `tortoise_update_knowledge`: retraction is a
+        # TEMPORAL FIELD on the revise verb (#11609 lane B), so the door retired and the
+        # container is what resolves.
+        assert "tortoise_update_knowledge" in names, "Missing the update_knowledge container"
         assert "tortoise_find_cross_lens_candidates" in names, "Missing #438 cross-lens tool"
         # #348's audit capability, reached through the #4282 container: the door retired and
         # `graph_overview(section="audit")` is the name that resolves now.
@@ -162,19 +174,25 @@ class TestRegistryEquivalence:
         # (owner decision, docs/product/canonical-mcp-tools.md @ approval_pr 4120).
         # `tortoise_overview` left this set when #4282 retired it into
         # `tortoise_graph_overview` — the container is the W3 consolidation now.
-        w_consolidations = {"tortoise_recall", "tortoise_update", "tortoise_delete",
-                            "tortoise_operator_action", "tortoise_create_edge",
+        w_consolidations = {"tortoise_recall", "tortoise_delete",
+                            "tortoise_create_edge",
                             "tortoise_graph_overview", "tortoise_get_entity",
-                            "tortoise_ingest"}
+                            "tortoise_ingest",
+                            # #11609 lane B: W2's update/operator_action arms moved
+                            # into the approved WRITE/MUTATE containers.
+                            "tortoise_update_knowledge",
+                            "tortoise_adjust_relationship"}
         assert w_consolidations <= names, (
             f"Missing W1–W4 tools: {w_consolidations - names}")
         # #454-era surface tools covered by this PR's tests
         for name in ("tortoise_query", "tortoise_suggest_entry_points",
                      "tortoise_graph_overview"):
             assert name in names, f"Missing tool: {name}"
-        # Phase-4 mining/promotion/dedup/timeline surface (#787)
+        # Phase-4 mining/promotion/dedup/timeline surface (#787). `tortoise_promote_point`
+        # retired into the `tortoise_refresh_confidence` container (#11609 lane B,
+        # `scope="promote"`) — the capability assertion follows the container.
         phase4 = {"tortoise_mine_conversations", "tortoise_list_dedup_candidates",
-                  "tortoise_approve_merge", "tortoise_promote_point",
+                  "tortoise_approve_merge", "tortoise_refresh_confidence",
                   "tortoise_belief_timeline"}
         assert phase4 <= names, f"Missing #787 tools: {phase4 - names}"
 
@@ -217,9 +235,21 @@ class TestCurationGroups:
     """
 
     def test_retract_point_explicitly_in_memory(self):
-        from tortoise.tool_registry import TOOL_REGISTRY
-        entry = next(t for t in TOOL_REGISTRY if t.name == "tortoise_retract_point")
+        """#432's retraction stays in "memory" through its #11609 lane B container.
+
+        The DOOR retired (retraction is a temporal field on the revise verb), so
+        this follows the capability rather than re-asserting the removed name: the
+        container that now answers for it carries the same group, and the retired
+        entry keeps it too (a shim serving a name the role-filter dropped would be a
+        capability loss wearing a rename).
+        """
+        from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
+        entry = next(t for t in TOOL_REGISTRY
+                     if t.name == "tortoise_update_knowledge")
         assert entry.group == "memory", f"got {entry.group}"
+        retired = next(t for t in RETIRED_TOOL_REGISTRY
+                       if t.name == "tortoise_retract_point")
+        assert retired.group == "memory", f"got {retired.group}"
 
     def test_poll_events_in_sessions_group(self):
         from tortoise.tool_registry import TOOL_REGISTRY
@@ -258,7 +288,10 @@ class TestCurationGroups:
         """tools_by_group / tool_groups expose the corrected groups (#523)."""
         from tortoise.tool_registry import tools_by_group, tool_groups  # noqa: I001
         memory = {t.name for t in tools_by_group("memory")}
-        assert "tortoise_retract_point" in memory
+        # #432's retraction is a temporal field on the revise verb (#11609 lane B):
+        # the DOOR retired, so the capability assertion follows the container that
+        # now serves it rather than re-asserting the removed name.
+        assert "tortoise_update_knowledge" in memory
         groups = tool_groups()
         assert "tortoise_events_poll" in groups["sessions"]
 
@@ -2197,9 +2230,16 @@ class TestToolIdentity:
         # #11609 batch 1 then ARCHIVED two served writers — `tortoise_pack_install`
         # and `tortoise_backfill_v25` — with no destination (owner ruling), so
         # SERVED 45 -> 43 and LIVE 41 -> 39.
-        assert len(WRITE_TOOL_NAMES) == 43, f"write census moved: {len(WRITE_TOOL_NAMES)}"
+        # #11609 lane B (#4282 Phase 2): the WRITE/MUTATE containers add SIX
+        # destructive rows and retire FOURTEEN (twelve destructive, two write) into
+        # them. get_write_tool_names covers TOOL_REGISTRY **and**
+        # RETIRED_TOOL_REGISTRY (a shim still WRITES, #3883), so the SERVED number
+        # moves 43 → 49 (43 + 6) while the ADVERTISED (live) number moves 39 → 31
+        # (39 − 14 + 6). A change to either is a permission change and needs the
+        # owner's eye, not a test edit.
+        assert len(WRITE_TOOL_NAMES) == 49, f"write census moved: {len(WRITE_TOOL_NAMES)}"
         live = frozenset(t.name for t in TOOL_REGISTRY if t.writes)
-        assert len(live) == 39, f"live write census moved: {len(live)}"
+        assert len(live) == 31, f"live write census moved: {len(live)}"
 
     def test_gate_refuses_read_scope_for_every_writer_annotated_entry(self):
         """#4474: a `graphs:read`-only key is REFUSED for EVERY entry that writes.
@@ -2227,9 +2267,10 @@ class TestToolIdentity:
 
         served = [*TOOL_REGISTRY, *RETIRED_TOOL_REGISTRY]
         writers = sorted(e.name for e in served if e.writes)
-        # 43 = the served writer census (39 live + 4 retired shims). Pinned
-        # here so the derived loop below can never pass by covering nothing.
-        assert len(writers) == 43, writers
+        # 49 = the served writer census (31 live + 18 retired shims; #11609 lane B
+        # moved the advertised number and left the served one larger than 43).
+        # Pinned here so the derived loop below can never pass by covering nothing.
+        assert len(writers) == 49, writers
         for name in ("tortoise_index_files", "tortoise_dream",
                      "tortoise_index_sessions", "tortoise_ingest_corpus",
                      "tortoise_org_create"):

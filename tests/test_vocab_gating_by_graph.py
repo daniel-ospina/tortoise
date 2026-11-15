@@ -1704,7 +1704,7 @@ class TestUpdateDoorsRefuseUnapprovedPacks5475:
         assert before == frozenset({DEV}), "fixture: a dev-only graph"
 
         with pytest.raises(ValueError) as excinfo:
-            sdk.update_entity(node["id"], **{prop: kind})
+            sdk.update_knowledge(node["id"], **{prop: kind})
 
         assert pack_ns in str(excinfo.value)
         assert graph_installed_namespaces(sdk) == before
@@ -1721,7 +1721,7 @@ class TestUpdateDoorsRefuseUnapprovedPacks5475:
         node = sdk.create_object("update-door-batch", objectKind="other")
         before = graph_installed_namespaces(sdk)
         with pytest.raises(ValueError) as excinfo:
-            sdk.update_entity(node["id"], objectKind="dev:epic",
+            sdk.update_knowledge(node["id"], objectKind="dev:epic",
                               subjectKind="marketing:persona")
         assert MARKETING in str(excinfo.value)
         assert graph_installed_namespaces(sdk) == before
@@ -1783,7 +1783,7 @@ class TestUpdateDoorsRefuseUnapprovedPacks5475:
         sdk.update_point(point["id"], pointKind=MARKETING_POINT)
         node = sdk.create_object("historical-namespace object",
                                  objectKind="other")
-        sdk.update_entity(node["id"], objectKind=MARKETING_OBJECT)
+        sdk.update_knowledge(node["id"], objectKind=MARKETING_OBJECT)
         assert sdk.get_point(point["id"]).get("pointKind") == MARKETING_POINT
 
 

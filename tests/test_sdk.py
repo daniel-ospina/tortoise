@@ -920,11 +920,11 @@ class TestSanitizeProps:
         doc = sdk.create_document("Upd", "planDoc")
         did = doc["id"]
         with pytest.raises(ValueError, match="server-managed"):
-            sdk.update_entity(did, sourcePath="/etc/passwd")
+            sdk.update_knowledge(did, sourcePath="/etc/passwd")
         with pytest.raises(ValueError, match="server-managed"):
-            sdk.update_entity(did, source_path="/etc/passwd")
+            sdk.update_knowledge(did, source_path="/etc/passwd")
         with pytest.raises(ValueError, match="server-managed"):
-            sdk.update_entity(did, id="evil")
+            sdk.update_knowledge(did, id="evil")
 
     def test_update_point_rejects_id_and_sourcepath(self, sdk):
         p = sdk.create_point("statement", "A")

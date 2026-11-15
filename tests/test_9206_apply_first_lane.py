@@ -179,7 +179,7 @@ def test_update_entity_writes_and_records_under_the_armed_guard(
     obj = sdk.create_entity("object", "apply-first entity")["node"]["id"]
 
     before = _records_since(sdk).count("EntityMutated")
-    sdk.update_entity(obj, status="active")
+    sdk.update_knowledge(obj, status="active")
     assert _records_since(sdk).count("EntityMutated") == before + 1, (
         "the entity mutation's record did not land")
     assert sdk.get_entity(obj)["status"] == "active"

@@ -977,7 +977,7 @@ class TestGuardIntegrity:
         try:
             g = sdk._get_proj().g
             node = sdk.create_object("legacy-closed", objectKind=KEY)
-            sdk.update_entity(node["id"], isClosed=True)
+            sdk.update_knowledge(node["id"], isClosed=True)
             cur = P.current_stage(g, "legacy-closed")
             assert cur["isClosed"] is True and cur["stageId"] is None, cur
             move = P.advance_stage(sdk, "legacy-closed", KEY, "stg_discussion",
