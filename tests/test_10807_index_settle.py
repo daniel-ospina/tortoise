@@ -381,12 +381,22 @@ def _rebound_names(tree: ast.AST) -> set[str]:
         # statement in the class body (`class O: if True: def m…`, `class O:
         # with …: class I: def m…`) is not a direct member, so the first version
         # of this loop skipped it and left the same fail-open one statement
-        # deeper (measured at #12859's review). The `global`/`nonlocal` arm
-        # already walked the whole subtree for exactly this reason; the asymmetry
-        # was accidental. Walking the subtree never touches the body's ASSIGNMENTS
-        # — only the node KINDS named here are collected — so the
-        # `class Helpers: index_kind_absent = staticmethod(…)` control is still
-        # preserved.
+        # deeper (measured at #12859's review, and PINNED by
+        # `test_a_def_inside_a_compound_class_body_counts_too`). The
+        # `global`/`nonlocal` arm already walked the whole subtree for exactly
+        # this reason; the asymmetry was accidental. Walking the subtree never
+        # touches the body's ASSIGNMENTS — only the node KINDS named here are
+        # collected — so the `class Helpers: index_kind_absent = staticmethod(…)`
+        # control is still preserved.
+        #
+        # ⛔ THE DOCUMENTED OVERSHOOT: a class-body `def` BINDS AN ATTRIBUTE, just
+        # like the assignment form, so counting it treats two spellings of the
+        # same attribute differently — and Python resolves a METHOD BODY past
+        # class scope, so a `until=index_kind_absent` inside a method really does
+        # find the module import. That makes this arm STRICTER than the truth (a
+        # loud red on a correct site), never a green over a broken one, and it is
+        # the direction that cannot let the pre-drop race back in. Stated here
+        # rather than silently carried.
         for sub in ast.walk(cls):
             if isinstance(sub, (ast.Global, ast.Nonlocal)):
                 out.update(sub.names)
@@ -589,8 +599,12 @@ def _numeric_bindings(tree: ast.AST) -> tuple[dict[str, float], dict[str, set[fl
     binding still arms, so a correct positive site is not reddened.
 
     Returns ``(resolved, ambiguous)``: ``resolved`` has one value per name bound
-    consistently; ``ambiguous`` has every folded value of a name bound more than
-    one way, and such a name is absent from ``resolved``.
+    consistently by a plain/annotated/walrus assignment TO A NAME; ``ambiguous``
+    has every folded value of a name bound more than one way, and such a name is
+    absent from ``resolved``. ⛔ A TUPLE-UNPACKED TARGET (`ZERO, ONE = 0, 1`) is in
+    NEITHER map, because the target filter takes `ast.Name` only — so that
+    spelling is a residual, not coverage, and `_until_is_armed` says so where a
+    reader of the bound rule will meet it.
     """
     out: dict[str, float] = {}
     seen: dict[str, set[float]] = {}
@@ -666,12 +680,25 @@ def _until_is_armed(call, ctx=None) -> bool:
     `timeout=ZERO` reds exactly as `timeout=0` does. Both were measured GREEN at
     #12859's review while the call returned on the first catalogue read.
 
-    ⛔ A NAME BOUND TO TWO DIFFERENT NUMBERS STAYS ARMED — stated here because the
-    first draft of this paragraph claimed the opposite and a reviewer measured it
-    (ARMED, with a zero-second wait under it). Which binding is live at call time
-    is a runtime question, so an ambiguous name joins `timeout=bound_s` in the
-    runtime bucket rather than being guessed in either direction;
-    `_numeric_bindings` states the same from the collector's side.
+    ⛔ A NAME BOUND TO TWO DIFFERENT NUMBERS IS JUDGED BY ITS WORST BINDING: if
+    ANY folded binding is non-positive the call is UNARMED, because a live one may
+    be. This paragraph has now carried all three possible claims, so the
+    measurement is stated with it: the first draft said such a name was UNARMED,
+    the second said it stayed ARMED "in the safe direction", and a reviewer
+    falsified the second on the REAL tree (a zero-second wait certified ARMED
+    because one unrelated `ZERO = 5` existed, and the deadline logic did NOT red
+    the caller — on an idle lane that read IS the flake this PR removes).
+    All-POSITIVE bindings still arm, so a legitimate `timeout=BOUND_S` written
+    through a name is not reddened; `test_an_ambiguous_bound_is_judged_by_its_
+    worst_binding` pins both directions.
+
+    ⛔ AND THE BINDING FORMS THIS COLLECTOR CANNOT SEE, stated so the two halves
+    of this rule do not drift apart again: a name bound by TUPLE UNPACKING
+    (`ZERO, ONE = 0, 1`) is absent from BOTH maps, because the collector only
+    accepts `ast.Name` targets — so `timeout=ZERO` there is ARMED, exactly like a
+    name with no binding at all. That is the fail-closed-adjacent direction (the
+    pin cannot see the value, so it does not claim to), and it is a residual, not
+    coverage.
 
     ⛔ THE REMAINING BOUND RESIDUAL, STATED SO IT CANNOT BE MISTAKEN FOR COVERAGE:
     only `<= 0` is judged, because that is the case an AST can decide exactly.
@@ -1450,6 +1477,57 @@ def test_a_class_method_binding_counts_as_a_rebinding(tmp_path):
         encoding="utf-8")
     _, missing = _settle_call_sites([nested])
     assert missing == {"test_nested_class_shadow.py": [7]}, missing
+
+
+def test_a_def_inside_a_compound_class_body_counts_too(tmp_path):
+    """A `def`/`class` under `if`/`with`/`try`/`for` in a class body is still a binding.
+
+    ⛔ MEASURED FAIL-OPEN, AND UNPINNED UNTIL NOW (#12859's review). The
+    class-method fix visited `cls.body` DIRECTLY, so a `def` inside a compound
+    statement was neither a direct member nor reached by the recursion, and the
+    same certification came back one statement deeper. Measured at the parent
+    head: `class O: if True: def index_kind_absent(rows): return True` left the
+    wait certified ARMED.
+
+    ⛔ AND THE FIRST VERSION OF THE FIX WAS NOT PINNED: reverting the loop to its
+    direct-members form left the WHOLE SUITE GREEN (21 passed), because no test in
+    this file writes a compound statement in a class body. That is the
+    un-falsifiable-pin class this PR exists to remove, so each statement kind is
+    asserted here by line number — revert the walk and this test reds.
+    """
+    mod = tmp_path / "test_compound_class_body.py"
+    mod.write_text(
+        "from tests._index_settle import index_rows_after_settle\n"
+        "from tests._index_settle import index_kind_absent\n"
+        "class TestCompound:\n"
+        "    if True:\n"
+        "        def test_if(self, proj):\n"
+        "            index_kind_absent = lambda rows: True\n"
+        "            index_rows_after_settle(proj, until=index_kind_absent)\n"
+        "    with open(__file__):\n"
+        "        def test_with(self, proj):\n"
+        "            index_kind_absent = lambda rows: True\n"
+        "            index_rows_after_settle(proj, until=index_kind_absent)\n"
+        "    try:\n"
+        "        def test_try(self, proj):\n"
+        "            index_kind_absent = lambda rows: True\n"
+        "            index_rows_after_settle(proj, until=index_kind_absent)\n"
+        "    except Exception:\n"
+        "        pass\n"
+        "    for _ in ():\n"
+        "        def test_for(self, proj):\n"
+        "            index_kind_absent = lambda rows: True\n"
+        "            index_rows_after_settle(proj, until=index_kind_absent)\n"
+        "    if True:\n"
+        "        class Inner:\n"
+        "            def test_inner(self, proj):\n"
+        "                index_kind_absent = lambda rows: True\n"
+        "                index_rows_after_settle(proj, until=index_kind_absent)\n",
+        encoding="utf-8")
+    _, missing = _settle_call_sites([mod])
+    assert missing == {"test_compound_class_body.py": [7, 11, 15, 21, 26]}, (
+        "a def/class under ANY compound statement in a class body must count as "
+        f"a rebinding; got {missing}")
 
 
 def test_a_bare_dotted_settle_import_resolves_through_its_root(tmp_path):
