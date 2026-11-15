@@ -737,9 +737,12 @@ def _until_is_armed(call, ctx=None) -> bool:
     of this rule do not drift apart again: a name bound by TUPLE UNPACKING
     (`ZERO, ONE = 0, 1`) is absent from BOTH maps, because the collector only
     accepts `ast.Name` targets — so `timeout=ZERO` there is ARMED, exactly like a
-    name with no binding at all. That is the fail-closed-adjacent direction (the
-    pin cannot see the value, so it does not claim to), and it is a residual, not
-    coverage.
+    name with no binding at all. ⛔ THAT IS THE FAIL-OPEN DIRECTION, and it says so
+    on purpose: `ZERO = 0` with `timeout=ZERO` IS refused, while the same zero
+    written as an unpacked target is certified ARMED — the same hole one spelling
+    out. It is a residual of this collector, NOT coverage, and NOT a stricter
+    direction (this file uses "fail-closed" for a loud red, at :134 / :482 /
+    :535 / :1269, so the words matter here).
 
     ⛔ THE REMAINING BOUND RESIDUAL, STATED SO IT CANNOT BE MISTAKEN FOR COVERAGE:
     only `<= 0` is judged, because that is the case an AST can decide exactly.
@@ -1523,52 +1526,58 @@ def test_a_class_method_binding_counts_as_a_rebinding(tmp_path):
 def test_a_def_inside_a_compound_class_body_counts_too(tmp_path):
     """A `def`/`class` under `if`/`with`/`try`/`for` in a class body is still a binding.
 
-    ⛔ MEASURED FAIL-OPEN, AND UNPINNED UNTIL NOW (#12859's review). The
-    class-method fix visited `cls.body` DIRECTLY, so a `def` inside a compound
-    statement was neither a direct member nor reached by the recursion, and the
-    same certification came back one statement deeper. Measured at the parent
-    head: `class O: if True: def index_kind_absent(rows): return True` left the
-    wait certified ARMED.
+    \u26d4 MEASURED FAIL-OPEN (#12859's review). The class-method fix visited
+    `cls.body` DIRECTLY, so a `def` inside a compound statement was neither a
+    direct member nor reached by the recursion, and the same certification came
+    back one statement deeper: `class O: if True: def index_kind_absent(rows):
+    return True` left the wait certified ARMED.
 
-    ⛔ AND THE FIRST VERSION OF THE FIX WAS NOT PINNED: reverting the loop to its
-    direct-members form left the WHOLE SUITE GREEN (21 passed), because no test in
-    this file writes a compound statement in a class body. That is the
-    un-falsifiable-pin class this PR exists to remove, so each statement kind is
-    asserted here by line number — revert the walk and this test reds.
+    \u26d4 AND EACH KIND IS PINNED SEPARATELY, which the first version of this test
+    was not: it had all five functions shadow the SAME module-level name, and
+    `_rebound_names` returns ONE set per module, so reaching ANY of the five bodies
+    unarmed ALL FIVE call sites — a walk that recovered `if` alone and dropped
+    `with`/`try`/`for`/nested-class read GREEN. Each function now shadows its OWN
+    alias (`P1`..`P5`), so a body that is not walked leaves exactly its own site
+    armed and the assertion names it. Measured: the `if`-only mutant unarms `[11]`
+    only, so this test reds; the full walk unarms all five.
     """
     mod = tmp_path / "test_compound_class_body.py"
     mod.write_text(
         "from tests._index_settle import index_rows_after_settle\n"
-        "from tests._index_settle import index_kind_absent\n"
+        "from tests._index_settle import index_kind_absent as P1\n"
+        "from tests._index_settle import index_kind_absent as P2\n"
+        "from tests._index_settle import index_kind_absent as P3\n"
+        "from tests._index_settle import index_kind_absent as P4\n"
+        "from tests._index_settle import index_kind_absent as P5\n"
         "class TestCompound:\n"
         "    if True:\n"
         "        def test_if(self, proj):\n"
-        "            index_kind_absent = lambda rows: True\n"
-        "            index_rows_after_settle(proj, until=index_kind_absent)\n"
+        "            P1 = lambda rows: True\n"
+        "            index_rows_after_settle(proj, until=P1)\n"
         "    with open(__file__):\n"
         "        def test_with(self, proj):\n"
-        "            index_kind_absent = lambda rows: True\n"
-        "            index_rows_after_settle(proj, until=index_kind_absent)\n"
+        "            P2 = lambda rows: True\n"
+        "            index_rows_after_settle(proj, until=P2)\n"
         "    try:\n"
         "        def test_try(self, proj):\n"
-        "            index_kind_absent = lambda rows: True\n"
-        "            index_rows_after_settle(proj, until=index_kind_absent)\n"
+        "            P3 = lambda rows: True\n"
+        "            index_rows_after_settle(proj, until=P3)\n"
         "    except Exception:\n"
         "        pass\n"
         "    for _ in ():\n"
         "        def test_for(self, proj):\n"
-        "            index_kind_absent = lambda rows: True\n"
-        "            index_rows_after_settle(proj, until=index_kind_absent)\n"
+        "            P4 = lambda rows: True\n"
+        "            index_rows_after_settle(proj, until=P4)\n"
         "    if True:\n"
         "        class Inner:\n"
         "            def test_inner(self, proj):\n"
-        "                index_kind_absent = lambda rows: True\n"
-        "                index_rows_after_settle(proj, until=index_kind_absent)\n",
+        "                P5 = lambda rows: True\n"
+        "                index_rows_after_settle(proj, until=P5)\n",
         encoding="utf-8")
     _, missing = _settle_call_sites([mod])
-    assert missing == {"test_compound_class_body.py": [7, 11, 15, 21, 26]}, (
+    assert missing == {"test_compound_class_body.py": [11, 15, 19, 25, 30]}, (
         "a def/class under ANY compound statement in a class body must count as "
-        f"a rebinding; got {missing}")
+        f"a rebinding, and each KIND must be unarmed by its OWN body; got {missing}")
 
 
 def test_a_bare_dotted_settle_import_resolves_through_its_root(tmp_path):
