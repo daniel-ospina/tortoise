@@ -1500,11 +1500,16 @@ class TestLifecycleCarrierCoherence:
         validates against its own declared words). What this change adds is the
         LIFECYCLE half, not the vocabulary half.
 
-        ⚠️ This pin also documents a RESIDUAL it does not fix: it stores a LIST as
-        the status, so the NEXT lifecycle write on this row raises
-        `TypeError: unhashable type: 'list'` out of the guard's dead-set
-        membership test — the same defect class one layer down (the STORED side),
-        reachable only because this vocabulary hole exists. Filed as #12869.
+        ⚠️ This pin also records the RESIDUAL around it, and one measurement that
+        changed. It stores a LIST as the status, so a LATER lifecycle write on this
+        row used to raise `TypeError: unhashable type: 'list'` out of the guard's
+        dead-set membership test — the same defect class one layer down (the STORED
+        side, #12869), reachable only because this vocabulary hole exists. The dead
+        set is now built from `str` STORED values only, so that traceback is gone
+        at this site: a non-`str` stored value is not a dead WORD, the dead set is
+        empty, and the write is `continue`d. ⛔ #12869 is NOT closed by this —
+        re-measure it there before assuming its symptom is gone; what is pinned
+        here is only that the LIVE-row vocabulary half is unchanged.
         """
         sdk = TortoiseSDK(str(tmp_path / "t10192v.db"))
         try:
@@ -1525,6 +1530,38 @@ class TestLifecycleCarrierCoherence:
             assert _carrier_row(sdk, "Object", "epsilon")[1] == "live"
             sdk.update_entity(oid, status=["live"])
             assert _carrier_row(sdk, "Object", "epsilon")[1] == ["live"]
+        finally:
+            sdk.close()
+
+    @pytest.mark.parametrize("target", [["live"], {"a": 1}, 123], ids=str)
+    def test_a_non_string_stored_status_does_not_crash_the_dead_set(
+            self, tmp_path, target):
+        """A non-`str` STORED value is not a dead WORD, so it must not raise.
+
+        `_np_dead` used to run `s in _np_terminal` over EVERY stored value, so an
+        unhashable one (`['live']`) raised `TypeError: unhashable type: 'list'`
+        out of `update_entity` (#12869). The entailed shortcut had been hiding it
+        for the IDEMPOTENT case only — `['live'] == ['live']` was True, so the
+        write `continue`d — which means tightening that shortcut's type check
+        REVEALED the traceback as a REGRESSION on an idempotent rewrite (measured
+        on `d2872f0967`). The dead set now takes `str` stored values only, so both
+        cases are handled the way they were before the guard looked at types at
+        all: the row holds no dead WORD, so no transition is refused, and no
+        traceback escapes the door.
+
+        ⛔ The assertion is "did not raise, row is intact" — NOT a claim about
+        which word lands. A live row's vocabulary is #10371's business, and a
+        `str` target is not involved here.
+        """
+        sdk = TortoiseSDK(str(tmp_path / "t12869dead.db"))
+        try:
+            oid = _make_carrier_entity(sdk, "Object", "kappa")
+            sdk.update_entity(oid, status=["live"])
+            assert _carrier_row(sdk, "Object", "kappa")[1] == ["live"]
+            # The write under test must complete: `TypeError` out of a door that
+            # promises a refusal is the defect this pins shut.
+            sdk.update_entity(oid, status=target)
+            assert _carrier_row(sdk, "Object", "kappa")[0] == oid
         finally:
             sdk.close()
 

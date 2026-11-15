@@ -49222,7 +49222,25 @@ class TortoiseSDK:
                                 and str.__eq__(s, _np_status) is True
                                 for s in _np_stored)):
                     continue            # entailed: no transition asked for
-                _np_dead = sorted(s for s in _np_stored if s in _np_terminal)
+                # The DEAD set is built from `str` STORED values only, and that
+                # conjunct is a REGRESSION FIX, not decoration (#12896 review,
+                # P2 — measured). Excluding a non-`str` stored value from the
+                # entailed test above (it must never reach `str.__eq__`) means
+                # this line is now REACHED for that shape, and `in` raises
+                # `TypeError: unhashable type` on an unhashable one — so an
+                # IDEMPOTENT rewrite of a stored `['live']` went from CONTINUED
+                # to a traceback out of `update_entity`. It cannot resurrect
+                # anything: a non-`str` stored value is not a dead WORD (a dead
+                # row cannot even be given one — every non-`str` target on a dead
+                # row is REFUSED above), so the dead set is empty and the write
+                # is `continue`d exactly as it was before the guard learned to
+                # look at the target's type. The unhashable-stored shape was
+                # #12869's; this narrows its symptom at this site to nothing (a
+                # traceback is not a protection), and #12869 should be re-measured
+                # before its own claim is restated.
+                _np_dead = sorted(
+                    s for s in _np_stored
+                    if isinstance(s, str) and s in _np_terminal)
                 if not _np_dead:
                     continue            # nothing dead to resurrect
                 # `isinstance` FIRST, and only for the membership test: an
