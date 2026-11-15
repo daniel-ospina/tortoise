@@ -64,17 +64,19 @@ reproducible without trusting this document's arithmetic; **stated without the `
 | index rows | **182** |
 | …that name an existing file (one member each) | **180** |
 | …of those, **distinct** documents (two are listed twice) | **178** |
-| documents **read** for this map | **44** |
-| …of those, with an index row of their own | **25** |
+| documents **read** for this map | **45** |
+| …of those, with an index row of their own | **26** |
 | …of those, **without one** (reachable only by cross-reference) | **19** |
-| index documents **not read** | **153** |
+| index documents **not read** | **152** |
 
 The two documents listed twice are `docs/registry-graph-schema.md` (`:73`, `:74`) and
-`docs/product/sdk-surface-declaration.md` (`:85`, `:87`). The read set is **44**: the **41** that occupy
+`docs/product/sdk-surface-declaration.md` (`:85`, `:87`). The read set is **45**: the **42** that occupy
 `§A1.1`'s **40 `READ` rows** (41 numbered rows, one of them declared **NOT READ**; row 40 bundles three
 evidence records; row 16 records an issue body and its plan comment, not a document — the path an earlier
-revision printed under it does not exist) plus the **3** read after the first draft (`§12`). **25 + 19 = 44**
-and **25 + 153 = 178**, so both partitions close.
+revision printed under it does not exist) plus the **3** read after the first draft (`§12`). One further
+document — `docs/INGEST_CONTRACT.md` — is **read** (Stage B quotes it at `§A7.5`, and it now has `§A1.1`
+row 42), which is why the read set is **45** and not 44. **26 + 19 = 45** and **26 + 152 = 178**, so both
+partitions close.
 
 ⛔ **Two earlier revisions of this table were arithmetically broken, and how they broke is the point.** The
 first said 41 / 22 / 19 / 159: it counted *rows* as documents (so the three-record row counted once, hiding
@@ -84,8 +86,8 @@ only under a *different* membership test (any backticked token anywhere in the c
 rows with — two conventions in one table. **A population whose rule is unstated is not a population**, which
 is why the rule now comes before the numbers.
 
-⛔ **And that is the finding, stated as arithmetic rather than as an impression: 19 of the 44 documents
-this map needed — 43 % of the read set — have no index row of their own.** Named exactly, they are: the three
+⛔ **And that is the finding, stated as arithmetic rather than as an impression: 19 of the 45 documents
+this map needed — 42 % of the read set — have no index row of their own.** Named exactly, they are: the three
 record migrations (`20261012000001`, `20261012000005`, `20261114000001`); the two governing documents
 (`STORAGE-ARCHITECTURE.md`, `event-catalog.md`); all five journal-mutation plans
 (`#2194`/`#2295`/`#2488`/`#3689`/`#2814`); the unjournalled-mutation class plan; the `#7951` atomic-write plan;
@@ -99,7 +101,7 @@ register** — which is exactly what makes D-22 a defect rather than a preferenc
 
 1. **What was read is listed, per document, with the section or line taken** — `§A1.1`, 41 rows. Any reader
    can take a row and go to the line.
-2. **What was *not* read is listed, per document, with the reason it was not needed** — `§A1.4`, 48 documents for
+2. **What was *not* read is listed, per document, with the reason it was not needed** — `§A1.4`, 47 documents for
    the in-scope-and-unread set, plus 105 by exclusion rule. **Nothing is unclassified and nothing is
    unlisted.** A reason can be argued with; a silence cannot.
 
@@ -127,7 +129,7 @@ are indexed. The scope below is therefore the union of (a) the index's own entri
 a **defect to file**, not a convenience: a lane starting from the index alone would not find the document
 that governs the subject. (Filed as its own item in §A6, debt row D-22.)
 
-### A1.1 In scope — 41 numbered rows: 40 `READ`, 1 declared `NOT READ`
+### A1.1 In scope — 42 numbered rows: 41 `READ`, 1 declared `NOT READ`
 
 | # | Document | Status | What was taken from it (section / line) |
 |---|---|---|---|
@@ -172,6 +174,7 @@ that governs the subject. (Filed as its own item in §A6, debt row D-22.)
 | 39 | `docs/architecture/STORAGE-ARCHITECTURE-CHANGELOG.md` | **READ (the entries for §3/§5.2/§17.1)** | confirms which of §3's claims are amendments vs originals, so A7 does not reopen a claim that was already narrowed |
 | 40 | `docs/evidence/5612-journal-growth/README.md` + `docs/evidence/11821-journal-encoding/README.md` + `docs/evidence/9025-journal-bound/` | **READ (the measurement records)** | 9,176 B → 5,423 B per creating record; the two rulers (12.2 vs 13.2 chars/float); 642,952 B per typical capture; 3.01 GB/year per power user |
 | 41 | `docs/verify/2026-10-31-record-capstone.md` | **READ** | the record's declared capstone status — what is proven vs asserted about the record today |
+| 42 | `docs/INGEST_CONTRACT.md` (the durability sections) | **READ (the durability clause)** | `:463-467` *"the default embedded mode has no AOF window, so the JSONL journal is the durability contract"* — the third unqualified statement of the split, and the one A7 must not contradict |
 
 ### A1.2 In scope — the issue population (15 cited + 1 audit comment)
 
@@ -211,15 +214,15 @@ numbered sections and no §12.1c. **§12.1c is `STORAGE-ARCHITECTURE.md:1115`** 
 "RESOLVED 2026-11-07"). Both were read. Recorded here because a lane that trusts the brief's section number
 will read the wrong document and conclude the section is missing.
 
-### A1.4 Not read — 153 index documents, by declared class, and 48 named individually
+### A1.4 Not read — 152 index documents, by declared class, and 47 named individually
 
 `docs/00_index.md` is **247 lines carrying 182 rows**, of which **180 name an existing file** and **178 name
-something distinct** (`§A1.0` states the membership rule). Of those 178, **25 were read** and **153 were
-not**. The 153 are accounted for as **105 by an exclusion rule** and **48 named individually with a reason**
+something distinct** (`§A1.0` states the membership rule). Of those 178, **26 were read** and **152 were
+not**. The 152 are accounted for as **105 by an exclusion rule** and **47 named individually with a reason**
 — so there is no unclassified remainder, and the two claims are separate: a rule is checkable in bulk, and a
 named reason is checkable one at a time.
 
-**By rule (105).** Each class is a **path-prefix rule**, evaluated over the 153 unread documents, so any reader
+**By rule (105).** Each class is a **path-prefix rule**, evaluated over the 152 unread documents, so any reader
 can reproduce it without trusting a count:
 
 | Class | Rule (path prefixes) | Count |
@@ -228,15 +231,15 @@ can reproduce it without trusting a count:
 | **C2 — process, or observability of the machinery** | `docs/ops/batch-integration`, `tools/run_affected`, `tools/batch_review`, `docs/infra/tmpdir-sweep`, `docs/scoping/2026-09-18-4098`, `docs/scoping/2026-09-20-4408`, `docs/runbook/4408`, `docs/scoping/2026-09-01-2090`, `docs/scoping/2026-09-02-2127` — **7 of the 9 prefixes match an entry, and 5 of those 7 already carry a C1 prefix** (`docs/ops/batch-integration` and the four `docs/scoping/…`), while `tools/run_affected` and `tools/batch_review` match no entry at all; the class is therefore **2**: `docs/infra/tmpdir-sweep.md`, `docs/runbook/4408-branch-reaper.md`) | **2** |
 | **C3 — reads a storage surface, asserts nothing about its shape** | none unread: every such entry was **read** instead (see `§A1.1` rows for `#4503`, `#11083`, `#11469`, `#8607`, `#1779`, `#1402`). **The class is empty by construction here, and saying so is the point** — this was the class the first draft used to *exclude* documents it had not opened. | **0** |
 
-**103 + 2 + 0 = 105. 105 + 48 = 153.** ✅
+**103 + 2 + 0 = 105. 105 + 47 = 152.** ✅
 
-**Named individually (48) — in-scope by path, not read, with the reason.** (Two `#7951` increment plans —
+**Named individually (47) — in-scope by path, not read, with the reason.** (Two `#7951` increment plans —
 `2026-10-17-7951-update-point-outbox.md` and `2026-10-18-7951-delete-point-outbox.md` — appeared in this table
 in an earlier revision and are **read**: they are `§A1.1` rows 21 and 22. Nothing in the 48 is read.) These are the entries whose
 prefix does not match an exclusion rule, so each needs its own stated reason. (Three further documents were
 in this list in an earlier revision and are **read** now — `docs/evidence/10000-turns-bytes/README.md`,
 `docs/evidence/9558-record-write-cost/README.md`, `docs/evidence/7950-capstone/README.md`; they are counted
-in `§A1.0`'s 44 and the reason each was read late is in `§12`.)
+in `§A1.0`'s 45 and the reason each was read late is in `§12`.)
 
 **Two further contradictions the Stage-B review (M13) named, checked at head rather than assumed, with the
 result recorded either way:**
@@ -251,17 +254,16 @@ result recorded either way:**
 | Not read | Why not |
 |---|---|
 | `docs/architecture/MEMORY-SUBSTRATE-PROBLEM-MAP.md`, `MEMORY-SUBSTRATE-FINDINGS-LEDGER.md` | Declared status/durability halves of `#2820`/`#2852`; their durability claims delegate to `durability-posture.md`, which was read. **The findings ledger is the one I would read next** — it is the corrections half and may hold an item this map repeats. |
-| `docs/epics/2026-10-10-7879-postgres-record/03-schema.md`, `06-cache-projection.md` | **Removed from this table by the Stage-B review (M13) — both are READ.** They appeared here in an earlier revision with the note *"Read (they are in `§A1.1`; listed here only because they are absent from the index)"*, which is a contradiction in terms: a table headed "not read" cannot carry a row that says "read". Both are `§A1.1` rows and they are **`§A1.0`'s 44**, not this section's 153. Absence-from-the-index is the subject of `§A1.0`'s finding; it is not a reason to list a document as unread. |
 | `docs/evidence/7949-capstone/*` (6 files), `docs/epics/2026-11-04-7949-extractor-v4-capstone/` | The extractor-v4 capstone. Storage appears only as a cost basis; the storage conclusions live in `§17` of the architecture doc, which was read. |
 | `docs/evidence/10976-licence`, `7846-indexed-graph-restore`, `7983-cost-magnitudes`, `8503`, `8607-w1b`, `11083`, `11086`, `11739-*`, `4623-*`, `2026-10-21-shared-coordination-memory` | **Partially read via `§A1.2`'s issue census** and each is a *measurement of a different question* (eviction licence, RESTORE wedge, cost magnitudes, operator edges, legacy ids, pack census, write-rate gates, quote population, cohort cap, fleet coordination). `11821-journal-encoding` is **not** in this list: it is one of the three evidence records **read** in `§A1.1` row 40, which is where its 9,176 → 5,423 B figures come from — an earlier revision of this row wrongly said it was not opened, and wrongly attributed it to D-09 (D-09 is the missing journal bound; it names `#9025` and `#5612`). |
 | `docs/ops/multi-graph-migration-runbook.md`, `CONTRIBUTING.md` | Neither asserts anything about the journal/record shape. The runbook moves a **graph key** between stores and its storage claims delegate to `durability-posture.md` (the full reason is `§A1.1` row 38); `CONTRIBUTING.md` carries the finding-provenance gate, which is process. |
 | `docs/plans/2026-10-09-5362-retroactive-correction`, `2026-10-10-3644-source-version-window`, `2026-10-11-1990-diff-boundary-invariant`, `2026-10-16-8056-class-plural-enumeration`, `2026-10-18-8882-phase0-1-census`, `2026-11-04-5087-epic-decomposition`, `2026-11-09-11656-endpoint-kind-binding` | Each is a **per-door or per-mechanism** plan: back-dating, `:Source` version windows, the DIFF cursor boundary, temporal enumeration, graph census, the extractor epic, endpoint-kind binding. They change *what* is written, not the storage shape that carries it. `3644` and `1990` are the two I would read next, because `:Source` versioning and the cursor boundary are the two payload-level invariants `§A7` touches. |
-| `docs/architecture/ENTITY-VERDICT-BANDS`, `docs/architecture/S2-DECISION-SEAM`, `docs/architecture/CURATION-11469`, `docs/INGEST_CONTRACT.md` (**now read — see below**), `docs/client-server-split.md`, `docs/epics/2026-11-04-5090-vector-layer/TEST-DESIGN-surface-map`, `docs/registry-graph-schema` | Decision/contract surfaces above the storage layer. ⛔ **Two corrections to this row, both from the Stage-B review (M13):** (a) the paths above are now spelled in full — an earlier revision printed these as bare basenames inside a `docs/architecture/…` list, which read as though `INGEST_CONTRACT.md` and `client-server-split.md` lived under `docs/architecture/`; they live at **`docs/` root**; (b) **`docs/INGEST_CONTRACT.md` is no longer "not read"** — the review was right that `:463-467` carries a **durability claim for the embedded lane** (*"the default embedded mode has no AOF window, so the JSONL journal is the durability contract"*), which is a storage-shape assertion at the contract level, not above it. Reading it changes no A-row, but it does mean the map can no longer say the contract surface asserts nothing about durability: **it asserts the opposite of `durability-posture.md:48` for one lane**, and `§6` now records that as a third unqualified sentence alongside `STORAGE-ARCHITECTURE.md:361`. `ENTITY-VERDICT-BANDS` is still unopened and remains a stated gap. |
+| `docs/architecture/ENTITY-VERDICT-BANDS`, `docs/architecture/S2-DECISION-SEAM`, `docs/architecture/CURATION-11469`, `docs/client-server-split.md`, `docs/epics/2026-11-04-5090-vector-layer/TEST-DESIGN-surface-map`, `docs/registry-graph-schema` | Decision/contract surfaces above the storage layer. ⛔ **Two corrections to this row, both from the Stage-B review (M13):** (a) the paths above are now spelled in full — an earlier revision printed these as bare basenames inside a `docs/architecture/…` list, which read as though `INGEST_CONTRACT.md` and `client-server-split.md` lived under `docs/architecture/`; they live at **`docs/` root**; (b) **`docs/INGEST_CONTRACT.md` is no longer "not read"** — the review was right that `:463-467` carries a **durability claim for the embedded lane** (*"the default embedded mode has no AOF window, so the JSONL journal is the durability contract"*), which is a storage-shape assertion at the contract level, not above it. Reading it changes no A-row, but it does mean the map can no longer say the contract surface asserts nothing about durability: **it asserts the opposite of `durability-posture.md:48` for one lane**, and `§6` now records that as a third unqualified sentence alongside `STORAGE-ARCHITECTURE.md:361`. `ENTITY-VERDICT-BANDS` is still unopened and remains a stated gap. |
 | `docs/runbook/2578-*`, `2655-*`, `2684-*`, `2886-*`, `2976-*`, `4107-*`, `4210-*` | Temporal/retrieval/preference measurement runbooks. Reading surfaces only. |
 | `docs/ops/669-post-flip-verification`, `cost-allocation`, `extraction-cost-metrics`, `docs/infra/pytest-timeout-guard`, `tools/finding_provenance.py`, `tortoise/__all__.py`, `docs/research/2026-10-19-8709-member-own-key-surface`, `docs/research/2026-11-09-11656-kindpair-enforcement` | Verification procedure, cost *policy*, test-infrastructure, and two non-storage research docs. |
 
 ⛔ **The honest summary of this section:** 25 of 178 index documents were read (14 %), and **the reason that
-is not a scandal is only that the index does not contain the governing documents** — 19 of the 44 documents
+is not a scandal is only that the index does not contain the governing documents** — 19 of the 45 documents
 that were read are invisible to it. Both halves of that sentence are defects and neither is a defence of the
 other.
 
@@ -336,7 +338,7 @@ tortoise/record_projection.py:6545:            plan.append(_journal_row(record, 
 | `record_projection.py:5995` `_journal_row` → the INSERT at `:6005`, `ON CONFLICT (org_id, graph_id, seq) DO NOTHING` | **the only writer** |
 | `record_projection.py:6499` `_JOURNAL_INSERT_PREFIX` | the same statement recognised **by SQL string prefix** — see §A6 D-09 |
 | `record_projection.py:6545` `replay_plan` | the replay driver: `enumerate(records, start=start_seq)` → `_journal_row` |
-| `record_writer.write_live_record` (`record_writer.py:1541`, `position=` flag) | the **live** writer of the same row, from the append's returned position |
+| `record_writer.write_live_record` (`:2270`) | the **live** writer of the same row, from the append's returned position. ⛔ It takes **no `position=` kwarg** — `write_live_record(record, *, durable, seq, tenant)`; `position=` belongs to `RecordWriter.write` (`:1519`, its `:param` at `:1541`), and `write_live_record` passes `position=seq is not None` (`:2479`) |
 | `cache_projection.py:2952` `_LIFECYCLE_EVENTS_SQL` → `:2988` | the **one reader that folds** it. Its own header says *"`seq` orders it"* (`:2952`) and the ordering is applied by the consumer: the statement as written carries **no `ORDER BY` and no cursor**, and it selects only the lifecycle/state-op/creation classes by predicate. So it is **gap-tolerant** — which matters for A4 — and it does not read the table as a feed |
 | `postgres_bytes.py:118` / `cost_dimensions.py:492` / migration `20261114000001` | the **byte meter**, positioned by `p_seqs` (`#12762`) |
 | `record_read.py:34` | **explicitly does NOT read it** — *"It never reads `public.journal_event`, and it never reads the graph."* |
@@ -609,7 +611,7 @@ things, one of which `#12458` already measured as fatal:
    `start_seq` seam exists precisely to stop a tail replay renumbering to `1..` — it would have to become
    *"read the carried seq"* instead of *"continue the enumeration"*.
 2. **The live path's only ordinal source disappears** unless something replaces it. Today `append` returns
-   it; `write_live_record(position=True)` writes it. With no journal, `position=False` is the shipped shape —
+   it; `RecordWriter.write(..., position=True)` writes it, and `write_live_record` passes `position=seq is not None` (`:2479`). With no journal, `seq=None` — hence `position=False` — is the shipped shape —
    the row is simply omitted (`record_projection.py:6403`).
 3. **The feed's coordinate system is untouched but its *substitute* is not**: `journal_event.seq` is not
    `:GraphEvent.seq`, and `#12458` BK3 says re-pointing cursors is fatal. So a record-allocated ordinal
@@ -686,8 +688,8 @@ marked ⚑ are named by **no document** and were found by reading code in this l
 | D-22 ⚑ | **The governing documents are not registered in `docs/00_index.md`**: `STORAGE-ARCHITECTURE.md` has no index row; `event-catalog.md` has **0** mentions; the `#7951` atomic-write plan has **0** | §A1.0 | **B** | A lane proving completeness from the index — as this mandate instructs — **cannot find the document that governs the subject**. This is the same class as the `#10114` lesson: a green check that answers a different question. |
 | D-23 ⚑ | **`docs/00_index.md`'s `#5612` cell still presents the pre-`#11821` vector figures as the current cost** in its first clause, then corrects them ~300 characters later in the same cell (the cell is **one** 1,931-character markdown line, so a "lines later" distance was never measurable) | `docs/00_index.md:153` | **O** | Deferred to the doc's own errata discipline; noted so Stage D does not re-derive it as a new finding. |
 | D-24 ⚑ | **The ordinal's validity rests on one invariant the code states in a comment rather than enforces: ONE journal file per graph, forever.** `record_writer.py:2408-2410`: *"\"One record one number by construction\" holds per JOURNAL FILE, while `journal_event`'s key is per `(org_id, graph_id, seq)`"* | `record_writer.py:2412`, `config.py:84` | **B** | ⛔ **This is NOT a new finding and the first draft was wrong to present it as one.** The paragraph continues (`:2412-2425`) to state the residual in full — *"a tenant with **TWO durable journals** … the second journal's rows are absorbed by `ON CONFLICT … DO NOTHING`"* — **and tracks it on `#9318` (OPEN)**, whose own text proposes journal identity in the key **"or a per-tenant ordinal allocator"**. So the fix A7.5 argues for is the second of the two fixes already named in the source. **What this map adds is only the reachable trigger**, because the issue is framed abstractly: the concrete way to get two journals is a **`TORTOISE_EVENT_LOG_BASE_DIR` change on a live deployment**, after which the same graph numbers from 1 while the record holds the old rows — silent, count-free, no degraded state. Nothing refuses it. |
-| **D-25** | ⛔ **The ordinal is not merely unowned — on a live-size journal it is intermittently UNPROVABLE, and this is the single most important thing the first draft missed.** `EventLog.append` returns **`None`** rather than a position in two documented, **repeatable** windows: (a) a recount that outlasts a peer's 5 s `_FLOCK_TIMEOUT_S`, which stamps `_FLOCK_UNHEALTHY` for 30 s during which *"every append in that window returns `None`"* — *"the journal past roughly **50 MiB** can outlast a PEER's deadline … a **repeatable recount → degrade cycle**"* (`log.py:1503-1520`); and (b) a sidecar that cannot be written, where `_POSITION_CACHE_DEAD` means *"an append does NOT recount — it reports `None`"* (`log.py:1523-1530`) | `log.py:1503-1530`; `record_writer.py:2396-2407`; `record_projection.py:6402-6407`; `monitoring.py:1459-1466` | **B** | **A `None` position writes NO `journal_event` row** — `write_live_record(position=False)`, *"Such a record writes no position row … the row arrives on a later replay"* — so the record's ordinal is not just unowned, it is **missing for a population of live writes**, and D-03 is right that nothing (`last_applied_seq`) can detect the gap meanwhile. It is **counted, not silent** (`tortoise_record_position_unproven_total`), which is what keeps it out of P0 severity for the product — but the lane's own D-09 quotes the live journal at **974 MB, ~19× the 50 MiB threshold the code names**, on a box where a 20 MiB recount measures ~1.95 s. **Tracker: `#9252` (OPEN)** — *"a sidecar that cannot be written makes every append recount the whole journal under the lock"*, a `#9190` follow-up whose stated fix is *"a checkpointed counter with a tail reader"*. ⛔ **This is also the strongest available evidence FOR A7.5**, and the first draft never argues it: the code's own remedy for the file's position problem is a counter that does not recount. **Falsifier:** a peer append during a recount on a large journal must still yield a `journal_event.seq`. |
-| **D-26** | **A journal record can exist for a write that never landed — the exact inverse of D-25, and it falsifies A7.5's "journal export commits, record fails — cannot happen".** *"a MERGE that aborts after its bounded retries leaves an orphan record … a journal-only rebuild then restores the attribution of the attempt that never wrote a row"* | `STORAGE-ARCHITECTURE.md:1672-1698` | **B** | **`#9390` (OPEN)** — *"replay attribution skew: an orphan `SessionRecorded` from an aborted `:Session` MERGE wins the coalesce fold"*. So the journal is **not** a strict prefix of the record's committed set in either direction: D-25 is a record write with no journal position, D-26 is a journal record with no record row. **Any design that makes one store the total order must say which of the two it resolves**, and A7.5's window table assumed away the second. |
+| **D-25** | ⛔ **The ordinal is not merely unowned — on a live-size journal it is intermittently UNPROVABLE, and this is the single most important thing the first draft missed.** `EventLog.append` returns **`None`** rather than a position in two documented, **repeatable** windows: (a) a recount that outlasts a peer's 5 s `_FLOCK_TIMEOUT_S`, which stamps `_FLOCK_UNHEALTHY` for 30 s during which *"every append in that window returns `None`"* — *"the journal past roughly **50 MiB** can outlast a PEER's deadline … a **repeatable recount → degrade cycle**"* (`log.py:1503-1520`); and (b) a sidecar that cannot be written, where `_POSITION_CACHE_DEAD` means *"an append does NOT recount — it reports `None`"* (`log.py:1523-1530`) | `log.py:1503-1530`; `record_writer.py:2396-2407`; `record_projection.py:6402-6407`; `monitoring.py:1459-1466` | **B** | **A `None` position writes NO `journal_event` row** — `write_live_record(seq=None)` → `position=False` (`:2479`), *"Such a record writes no position row … the row arrives on a later replay"* — so the record's ordinal is not just unowned, it is **missing for a population of live writes**, and D-03 is right that nothing (`last_applied_seq`) can detect the gap meanwhile. It is **counted, not silent** (`tortoise_record_position_unproven_total`), which is what keeps it out of P0 severity for the product — but the lane's own D-09 quotes the live journal at **974 MB, ~19× the 50 MiB threshold the code names**, on a box where a 20 MiB recount measures ~1.95 s. **Tracker: `#9252` (OPEN)** — *"a sidecar that cannot be written makes every append recount the whole journal under the lock"*, a `#9190` follow-up whose stated fix is *"a checkpointed counter with a tail reader"*. ⛔ **This is also the strongest available evidence FOR A7.5**, and the first draft never argues it: the code's own remedy for the file's position problem is a counter that does not recount. **Falsifier:** a peer append during a recount on a large journal must still yield a `journal_event.seq`. |
+| **D-26** | **A record can exist for a write whose graph node never landed — and ⚠️ NOT, as an earlier revision of this row said, "a journal record with no record row".** `sdk._emit_event("SessionRecorded", …)` runs **before** the `:Session` MERGE (`sdk.py:4085` vs `:4154`) and `_emit_event` writes the journal row **and** the record row from the returned position, so `#9390`'s orphan carries both: what is missing is the **graph node**. It is therefore the A7.5.10 row *below* it, not the "journal without record" one, and **the flip does not close it** — the remedy is the fold change `sdk.py:4078-4082` names (tell a LANDED record from an orphan, or make the two one commit point). *"a MERGE that aborts after its bounded retries leaves an orphan record … a journal-only rebuild then restores the attribution of the attempt that never wrote a row"* | `STORAGE-ARCHITECTURE.md:1672-1698` | **B** | **`#9390` (OPEN)** — *"replay attribution skew: an orphan `SessionRecorded` from an aborted `:Session` MERGE wins the coalesce fold"*. So the journal is **not** a strict prefix of the record's committed set in either direction: D-25 is a record write with no journal position, D-26 is a journal record with no record row. **Any design that makes one store the total order must say which of the two it resolves**, and A7.5's window table assumed away the second. |
 
 **30 rows: 19 block, 9 orthogonal, 1 must be retired, 1 carrying two fates.** The tally is counted from the
 class column and **the first draft's `24 / 13 / 8 / 3` did not match its own table** (the true count was 14
@@ -1240,7 +1242,7 @@ it were a description).
 | ordinal allocated, transaction rolls back | n/a (the file's index cannot be taken back, but a torn tail is sealed and shifts no index) | **the counter rolls back too** — no gap, no burned position, and the *next* allocation takes the same number |
 | record commits, journal export fails | n/a | **the record is authoritative**; the export is re-rendered from the record **once M15's widening lands** (§A7.5.8) — before it, this row is a fiction and is labelled as one |
 | record commits, cache write fails | replay heals (`#7951` T5) | unchanged — replay heals |
-| journal export commits, record fails | ⛔ **it DOES happen today** — the append precedes the state write, so an aborted `:Session` MERGE leaves an orphan `SessionRecorded` with no row (`#9390`, OPEN; **D-26**, `STORAGE-ARCHITECTURE.md:1672-1698`). An earlier revision of this row said "cannot happen today" and **D-26 is the row that corrects it** | **cannot happen** by construction — the file gains a line only after COMMIT, so a journal record with no record row has nothing to be a copy of |
+| journal export commits, record fails | ⛔ **it DOES happen today, and trivially: the record leg is a second, fallible step after the append.** `_emit_event` does `log.append(event)` and only then `_write_record_projection(event, seq=seq)` (`sdk.py:14062`), counting failures in `record_write_failures` and healing them on a later replay — so an append whose projection fails leaves a journal record with no row. ⚠️ It is **not** `#9390`, whose orphan carries *both* rows (the append runs before the `:Session` MERGE, and the record row is written from the returned position) — see the next row | **cannot happen** by construction — the file gains a line only after COMMIT, so a journal record with no record row has nothing to be a copy of |
 | ⛔ **the reverse: a journal record for a write that never landed** | **it DOES happen today** — an aborted `:Session` MERGE leaves an orphan `SessionRecorded` that wins the coalesce fold (`#9390`, OPEN; `STORAGE-ARCHITECTURE.md:1672-1698`) | **unchanged by this design** — the flip does not address it, and this table must not claim the journal is a strict prefix |
 | ⛔ **a live write whose position is UNPROVABLE** (`EventLog.append` → `None`) | **it DOES happen today** — a recount past a peer's 5 s deadline, or a sidecar that cannot be written (D-25, `#9252`, OPEN) | **fixed on the record-armed lane**: the counter is the position, so no recount is on the path |
 | ⛔ **pre-transaction `:EpMeta` / `:Source` adopt-on-touch land, then the record rolls back** | **it happens today** — both are written *before* the append (A7.4) | **still happens**: an advanced EP epoch and an adopted `canonicalUrl` for a mutation that never committed. Nothing reconciles it; `#5166` and `source_identity --backfill` are the only repairs. This is the last paragraph of A7.4 stated as a row. |
@@ -1896,7 +1898,7 @@ correct artifact — is the one that propagates, and because the near-miss is th
   regex over source, they count resolved call sites), so the honest output is "the denominator is unknown
   and one command shows it", not "the answer is 458".
 - **`docs/ops/multi-graph-migration-runbook.md` not read**, with the reason stated in A1.1 row 38.
-- **153 index documents not read**: 105 by a stated exclusion rule, **48 named individually with a reason** in
+- **152 index documents not read**: 105 by a stated exclusion rule, **47 named individually with a reason** in
   A1.4. The first draft claimed a 41/141 partition that did not survive its own lists (36 entries in no
   class); that is corrected rather than restated, and A1.0 records what the wrong version said.
 
@@ -2005,21 +2007,6 @@ against the source before it was applied.
 
 **The cumulative lesson is worth stating plainly, because it is the artifact's own thesis:** an archaeology
 document is only as good as its pointers, and pointers decay the moment you edit the document around them.
-Nine cycles found no change to the *shape* the map describes; they found that roughly one in ten of the
-`file:line` citations was off — a blank line, a mid-set range, a quote with a swapped noun. That is a fair
-estimate of the defect rate to expect in any un-reviewed citation layer.
-
-**Cycle 10**, fresh-context, found 4 — and the first one is the only finding in seven cycles that is not a
-pointer: A7.5's window table asserted that **"journal export commits, record fails"** cannot happen today,
-while **D-26** — a row this same document added — exists precisely because `#9390` shows it does (an aborted
-`:Session` MERGE leaves an orphan `SessionRecorded` with no record row). The row is corrected, and the
-correction is now the strongest argument for the flip: the class exists today *because* the append precedes
-the state write, and the flip removes it by construction, the record allocating the position first. The other
-three were the familiar pointer class (`durability-posture.md:500-560` cited twice for material at `:575-581`,
-and two quotes placed one paragraph late).
-
-**The cumulative lesson is worth stating plainly, because it is the artifact's own thesis:** an archaeology
-document is only as good as its pointers, and pointers decay the moment you edit the document around them.
 Ten cycles found exactly one error in the *shape* the map describes (the row above, contradicted by the map's
 own D-26); everything else was citations — a blank line, a mid-set range, a quote with a swapped noun. That
 is a fair estimate of the defect rate to expect in any un-reviewed citation layer, and it is why the map's
@@ -2072,6 +2059,10 @@ claims are worth more than its pointers. Rows from every cycle are in the table 
 | `#11821` was quoted as *"rented for a watermark"*; its body says *"so it rents RAM for a counter"* | ✅ (`gh issue view 11821`, body) | quoted verbatim, including its "watermark, not provenance" clause |
 | the `#9025` census was printed as "974 MB, 652 MB used"; 652 MB is the EVENTS DIRECTORY, the volume's used space is 700 MB (78 %) | ✅ (`gh issue view 9025`, comment 6867080064: `/dev/vdc 974M 700M used … 78%`, `/data/events 652M`) | corrected in §A1.2 and in D-09, which now agree |
 | §12's cycle-8 sentence said "two rows" and then listed three | ✅ (the table carries three drift rows plus the cycle-7 row) | corrected to three plus one |
+
+| cycle 10 attributed the "journal without record" class to `#9390`; that orphan carries **both** rows (the append runs before the `:Session` MERGE) and lacks only the **graph node** | ✅ (`sdk.py:4085` vs `:4154`; `_emit_event` → `_write_record_projection(event, seq=seq)`) | the class is stated for its ordinary cause (a failed projection, counted in `record_write_failures`); `#9390` moves to the row it belongs to and D-26 is corrected with it |
+| `write_live_record` was cited at `record_writer.py:1541` and called with `position=`, which is not its kwarg | ✅ (`write_live_record(record, *, durable, seq, tenant)` at `:2270`; `position=` belongs to `RecordWriter.write` at `:1519`, `:param` at `:1541`) | three call sites and one table row corrected to the real API shape |
+| Stage B's edits left `03-schema.md` / `06-cache-projection.md` as body rows of a table headed "not read" (both are READ) and described `docs/INGEST_CONTRACT.md` as "now read" without counting it | ✅ (both are `§A1.1` rows 30/33; INGEST now has `§A1.1` row 42 and an index row of its own) | accounting re-derived: read **45 = 26 + 19**, unread **152 = 103 + 2 + 0 + 47** |
 | ⛔ **A7.5's window table said "journal export commits, record fails" cannot happen today, while D-26 — this document's own row — exists because `#9390` shows it does** | ✅ (`STORAGE-ARCHITECTURE.md:1672-1698`; `#9390` OPEN; the append precedes the state write) | the row now says it happens today and that the **flip** is what removes the class, which is a stronger argument for A7.5 than the row carried before |
 | `durability-posture.md:500-560` was cited twice for material at `:575-581` (the five-row deployment table; the record's own row is `:577`), and `:500-560` is the embedding rule and the `:Source` field-split table | ✅ (`sed -n '573,584p'`) | both pointers re-pointed at the deployment table and the record's posture section |
 | two quotes in `§A2.6` were placed at `:91-101`; they are at `:85-87`, and `:91` opens the next bullet's subject | ✅ (`sed -n '85,87p'`) | corrected |
