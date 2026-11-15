@@ -7242,9 +7242,9 @@ def _doc_section(text: str, start: str, end: str) -> str:
 # Window measured at THIS head over all 63 `must_red` rows: 0 and 2 leave the
 # must_red set fully RED (0/63 leak) and keep the real doc a HIT; **3 opens 2 of
 # 63**, starting with "are not missed by the walk". ⛔ Window 0 is not free
-# either, one set over: it wrongly REDS **10** of the 34 `declared_open` rows.
+# either, one set over: it wrongly REDS **10** of the 35 `declared_open` rows.
 # And since #11437's round-6 clause-scope rows landed, **window 1 is no longer
-# clean at all** — it wrongly REDS 4 of the 34: the two PSEUDO-CLEFT rows (`walk` is
+# clean at all** — it wrongly REDS 4 of the 35: the two PSEUDO-CLEFT rows (`walk` is
 # itself a coverage word, so the cleft's own SUBJECT satisfies the window and the
 # predicate needs the second word to find the real verb), the `only ever` ADVERB
 # row, and the NOUN complement (`not only the walk's business`). ⚠️ The double-negation and `without`-framed rows are GREEN at window
@@ -7257,7 +7257,7 @@ def _doc_section(text: str, start: str, end: str) -> str:
 # `declared_blocks` row (`coverage verb outside the walk/visit/reach/report`). So
 # at this head **2 is the ONLY clean window**: 0 and 1 each cost `declared_open`
 # rows, 3 costs `must_red` rows. (An earlier draft cited "13/13 inverse rows";
-# the row set has since grown to 34, and the denominator re-derived against it —
+# the row set has since grown to 35, and the denominator re-derived against it —
 # #11437 review, P3, re-measured round 8. ⛔ AND THAT FIGURE IS DERIVED NOW (#11541
 # review, round 3 F1): it was the THIRD place the paragraph stated a size and the
 # only one nothing read, so this commit's own 34th `declared_open` row left it at
@@ -7268,8 +7268,8 @@ def _doc_section(text: str, start: str, end: str) -> str:
 # added the round-9/10/11 rows, because the counts above are inputs and a stale
 # input misreports coverage even when the verdict is right (#11437 review, P3).
 # The `must_red` set is **63** at this head, not the 29 those rounds inherited: the
-# four verdicts reproduced unchanged at 63/20/34/33 — window 0 leaks 0/63 and reds
-# 10/34 `declared_open`; window 1 reds 4/34 (the same four identities named
+# four verdicts reproduced unchanged at 63/20/35/33 — window 0 leaks 0/63 and reds
+# 10/35 `declared_open`; window 1 reds 4/35 (the same four identities named
 # above); window 3 opens exactly the two rows named and wrongly GREENs exactly
 # 1/33 `declared_blocks` (`coverage verb outside the walk/visit/reach/report`).
 # ⛔ THE `must_stay_green` / `declared_blocks` PAIR HERE WAS STALE for one commit
@@ -7303,11 +7303,20 @@ def _doc_section(text: str, start: str, end: str) -> str:
 # 1/15 -> 2/15, 47 -> 48, …) each left the whole file GREEN — the denominators
 # ARE pinned by the `N `must_red` rows` sentence, but the verdicts read off them
 # were not, in the paragraph whose whole purpose is to record why 2 is the only
-# clean window. Edit a figure here and the pin reds; re-derive it by measurement:
-#   window 0: must_red leak 0/63; declared_open wrongly red 10/34; declared_blocks wrongly green 0/33; real doc HIT
-#   window 1: must_red leak 0/63; declared_open wrongly red 4/34; declared_blocks wrongly green 0/33; real doc HIT
-#   window 2: must_red leak 0/63; declared_open wrongly red 0/34; declared_blocks wrongly green 0/33; real doc HIT
-#   window 3: must_red leak 2/63; declared_open wrongly red 0/34; declared_blocks wrongly green 1/33; real doc HIT
+# clean window. ⛔ "EDIT A FIGURE HERE AND THE PIN REDS" IS FALSE FOR MOST OF THIS
+# PARAGRAPH (#11541 review, round 5 F3): the pin reads the four `window N:` lines
+# below, the `opens M of N` figure, the census tuple, `N `must_red` rows`, `N
+# `declared_open` rows`, `N candidate sentences` and `N sentences of` — NOT the
+# hand-measurements that duplicate a sweep line elsewhere in the prose
+# (`it wrongly REDS **10**`, `REDS 4 of the N:`, `Window 3 also wrongly GREENs 1`,
+# `**2 is the ONLY clean window**`). Measured on a copy: `**10** -> **11**`,
+# `4 of the 34:` -> `99 of the 99:`, `GREENs 1 -> 2` and `ONLY clean window**
+# -> **3**` each leave the whole file GREEN. Edit one and you have NOT been
+# checked — re-derive by measurement, and prefer editing the derived shape:
+#   window 0: must_red leak 0/63; declared_open wrongly red 10/35; declared_blocks wrongly green 0/33; real doc HIT
+#   window 1: must_red leak 0/63; declared_open wrongly red 4/35; declared_blocks wrongly green 0/33; real doc HIT
+#   window 2: must_red leak 0/63; declared_open wrongly red 0/35; declared_blocks wrongly green 0/33; real doc HIT
+#   window 3: must_red leak 2/63; declared_open wrongly red 0/35; declared_blocks wrongly green 1/33; real doc HIT
 # ⛔ COST, taken deliberately: window 2 makes "…are never TOUCHED by the walk"
 # RED, because `touched` is not in the coverage list — a false block bought for
 # that false pass, which is the trade this predicate always takes.
@@ -7346,8 +7355,8 @@ _NEGATION_GOVERNS = re.compile(
     r"(?:walk|visit|reach|report)(?:s|es|ed|ing)?\b")
 # ⛔ `_COVERAGE` is RETAINED DELIBERATELY AND IS CURRENTLY IMPLIED, and saying so
 # is the point (#11437 review, P3). Measured: `_NEGATION_GOVERNS` already requires
-# one of the same four verbs AFTER the negation, so on all 183 candidate sentences
-# (the 150 rows across the four sets — 63 / 20 / 34 / 33 — plus the 33 sentences of
+# one of the same four verbs AFTER the negation, so on all 184 candidate sentences
+# (the 151 rows across the four sets — 63 / 20 / 35 / 33 — plus the 33 sentences of
 # the real §3 under
 # this predicate's own `split(". ")` segmentation) there is no case where the
 # governance test hits and this one does not — dropping the term from
@@ -7592,6 +7601,18 @@ _AFFIRMED = re.compile(
 # `declared_blocks`. Measured, both directions:
 #   "…, but it actually does report them" / "…; they actually are visited"   RED (wanted)
 #   "…, and the census actually says so"   (an honest ASIDE, two-word subject)  RED (the price)
+# ⛔ AND THE NEGATION GUARD DOES NOT CLOSE THE `not`-CARRYING GAP — it MOVES the
+# gap, and the moved gap is a FALSE PASS with its own `declared_open` row (#11541
+# review, round 5 F2). `(?!(?:not|never)\b)` refuses a `not` as one of the gap's
+# own words, so `, but it does not actually skip them` — an INVERSE, where the
+# `not` belongs to the reversal rather than to the emphasis — is now ACCEPTED,
+# where the plain `(?:\s+\w+){0,3}?` gap refused it. Measured at this head: six
+# such shapes GREEN (`does not actually skip` / `omit` / `unvisited` / `missing
+# from it`, `never actually left out`, `is not actually blind to them`), and ALL
+# SIX RED at the pre-guard head. The guard is still right for the EMPHASIS reading
+# (`does not actually visit`, where the negation governs the coverage verb); what
+# it cannot do is tell the two apart, so the residual is DECLARED, not claimed
+# closed — see `open: a `not`-carrying gap …` in `declared_open` below.
 # ⛔ THE BOUND IS A REACH, NOT A CLOSURE, and the difference is ROWED: a subject
 # gap wider than three words, or one carrying punctuation `\w+` cannot cross
 # (apostrophe, hyphen, backtick), is still ACCEPTED. That is a `declared_open` row
@@ -8689,6 +8710,23 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
         "open: `actually` inverse with a SUBJECT GAP WIDER than the bound":
             "a nested `def`'s decorators and parameter defaults are not reported "
             "by this walk, but the enclosing body walk actually does report them",
+        # ⛔ AND THE `not`-CARRYING GAP, which the negation guard MOVES rather than
+        # closes (#11541 review, round 5 F2). `(?!(?:not|never)\b)` refuses a `not`
+        # as one of the gap's words, which is what keeps the honest EMPHASIS
+        # (`does not actually visit`) GREEN — but it cannot tell an emphasis from a
+        # REVERSAL, so `does not actually skip them` (where the `not` governs the
+        # reversal, and the sentence therefore asserts coverage) is ACCEPTED here
+        # where the pre-guard gap refused it. Six such shapes measured GREEN at this
+        # head and RED before the guard; the one below is the class's representative
+        # (`does not actually skip` / `omit` / `unvisited` / `missing from it`,
+        # `never actually left out`, `is not actually blind to them`). DECLARED, not
+        # chased: separating the two readings needs the verb after `actually` to be
+        # classified, which is the assertion-structure parse `#11541` puts out of
+        # scope by its own text. Owner: `#11541`; a lane that adds the coverage-verb
+        # lookahead behind the negation retires this row.
+        "open: a `not`-carrying gap — the guard cannot tell EMPHASIS from a REVERSAL":
+            "a nested `def`'s decorators and parameter defaults are not reported "
+            "by this walk, but it does not actually skip them",
         "decoy: retrieval walk":
             "parameter defaults and decorators are not reported against the "
             "retrieval walk",
@@ -9128,7 +9166,14 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
         # subject-interposed rows, so the file takes the false block" — was a FALSE
         # DICHOTOMY, because it considered only the full revert. Refusing a
         # `not`/`never` as one of the gap's words keeps every subject-interposed
-        # inverse RED **and** leaves this honest form GREEN, so no trade was needed.
+        # inverse RED **and** leaves this honest form GREEN. ⛔ BUT IT IS NOT FREE,
+        # and this sentence said "so no trade was needed" until review round 5 F2
+        # measured the trade: the guard also ACCEPTS `, but it does not actually
+        # skip them`, an inverse whose `not` carries the REVERSAL rather than the
+        # emphasis (six such shapes measured GREEN here, all RED before the guard).
+        # The price is ROWED as `open: a `not`-carrying gap …` in `declared_open`
+        # below, and the claim is narrowed to what the mutation measured: the four
+        # subject-interposed rows all have `not`-free gaps, so they stay RED.
         # Re-measured after the change: 0/63 `must_red` leaks, 0 other honest rows
         # newly RED, sweep verdicts unchanged.
         "false block: an honest ASIDE in a PARENTHETICAL using `actually`":
