@@ -5810,6 +5810,59 @@ def _refuse_bare_lifecycle_carrier(props: dict, *, label: str, surface: str,
     )
 
 
+#: The property that NAMES the successor — the other half of ONTOLOGY §4.3's
+#: sentence (*"`superseded` means replaced: it names the successor"*) and of
+#: §4.2's Subject row (*"successor NAME (stored verbatim)"*). Points carry it as
+#: a plain property too (`supersede_point` writes it beside the `CORRECTS` edge
+#: and `outdated`), so ONE name answers for all three labels.
+_SUCCESSOR_PROP = "supersededBy"
+
+#: The dead sets the supersession DOORS consult, per label — the family's OWN
+#: recorded read vocabulary (`commit_ops`), never a literal here: the same
+#: declaration #10371's transition guard takes its dead set from, so the two
+#: questions (*"may this row leave a dead state?"* / *"may it ENTER one?"*) cannot
+#: be answered from two different vocabularies. `live.is_terminal_status` answers
+#: for a Point (the status set PLUS the legacy `outdated` flag), which is why the
+#: Point arm asks that predicate rather than reading this map.
+_SUPERSESSION_DEAD_SETS: dict[str, frozenset[str]] = {
+    "Object": _OBJECT_TERMINAL_STATUSES,
+    "Subject": _SUBJECT_TERMINAL_STATUSES,
+}
+
+
+def _successor_named_by(props: dict) -> bool:
+    """Does this call NAME a successor, in the channel every reader resolves?
+
+    #12592. The dual of :func:`_refuse_bare_lifecycle_carrier`: that one refuses a
+    "CARRIER without the STATUS", this one the STATUS without a carrier.
+
+    ⛔ BOTH renderings must name `supersededBy`, and it must be the CAMEL
+    spelling — the narrow direction, because this predicate is an ALLOWANCE (it
+    lets a `status='superseded'` write through), and an allowance must be true of
+    the write that actually happens. The live write applies `SET n += $props`
+    literally, so `superseded_by` stores a SHADOW property that every camel-keyed
+    reader of the successor ignores (`audit` 4b/4c,
+    `assembly._probe_visible_successors`, the renderer — #12782), while the record
+    column DOES take it: admitting it here would leave a row the record calls
+    `superseded` with the pointer the model reads for "which row replaced this?"
+    written nowhere. A key whose two renderings disagree has the same misread from
+    the other side (`_carrier_prop_named_by` requires them to agree).
+
+    A blank value names nobody: the property exists, so #10192's record fold still
+    derives `'superseded'`, but the successor a reader resolves is the empty
+    string. `None` is the documented CLEAR and is not a name either.
+    """
+    for key, value in props.items():
+        if _carrier_prop_named_by(key, (_SUCCESSOR_PROP,)) is None:
+            continue
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        return True
+    return False
+
+
 # ── #9964: the kind decides the layer ──────────────────────────────────────
 #
 # ONE authority answers "which layer does this kind belong to?"
@@ -22561,21 +22614,205 @@ class TortoiseSDK:
 
     def supersede(self, old_id: str, new_id: str,
                   transfer_edges: bool = True) -> dict:
-        """Unified supersede / invalidate (epic #888 W2, PR #912).
+        """Unified supersede / invalidate, dispatched on the OLD node's LABEL (#12592).
 
-        transfer_edges=True  → full supersede (supersede_point): CORRECTS edge
-        + outdated flag + ALL edges transferred from old to new.
-        transfer_edges=False → invalidate behavior (invalidate_point): mark
-        old outdated + CORRECTS edge only, NO edge transfer. This absorbs the
-        legacy invalidate surface.
+        ``Point`` (today's behaviour, unchanged):
+          transfer_edges=True  → full supersede (supersede_point): CORRECTS edge
+          + outdated flag + ALL edges transferred from old to new.
+          transfer_edges=False → invalidate behavior (invalidate_point): mark
+          old outdated + CORRECTS edge only, NO edge transfer. This absorbs the
+          legacy invalidate surface.
 
-        Returns {invalidated, id, corrected_by} (+ edges_transferred when
-        transfer_edges=True). Raises ValueError on missing/self/terminal input
-        (both legs now route through the ONE shared lifecycle guard, #2498).
+        ``Object`` / ``Subject`` (#12592) → :meth:`_supersede_entity`: the
+        coherent pair ``status='superseded'`` + ``supersededBy=<successor name>``
+        + ``supersededAt`` in ONE journaled write, behind this door's own
+        lifecycle guard. Before this, the unified door READ as generic and was
+        Point-only by implementation: a caller reading the signature could not
+        tell, and an Object/Subject caller got ``No point <id>`` — while the
+        only way to mark one replaced was ``update_entity(status='superseded')``,
+        which stored the word with NO successor (the incoherence ONTOLOGY §4.3
+        defines away, now refused at that door).
+
+        ⛔ NO NEW PUBLIC METHOD (#12592 decision 1). The MCP/SDK surface may not
+        grow without the owner's approval, so the family paths are private and
+        this ONE existing method dispatches. Adding ``supersede_object`` /
+        ``supersede_subject`` would be a surface change and is refused here.
+
+        ⛔ ``transfer_edges=False`` stays POINT-ONLY, and that is the model, not a
+        gap: the invalidate half is ``outdated`` + ``CORRECTS`` — a Point's own
+        machinery (§4.7: an Object's transaction-time expiry is ``expiredAt``,
+        which is a different fact and has no CORRECTS partner). A retirement of
+        an Object/Subject with no successor is ``archived``, which the refusal
+        below prescribes rather than silently reinterpreting the call.
+
+        Returns ``{invalidated, id, corrected_by}`` (+ ``edges_transferred`` when
+        ``transfer_edges=True``) for a Point, and
+        ``{superseded, id, label, superseded_by, superseded_at}`` for an Object
+        or a Subject. Raises ``ValueError`` on missing/self/terminal/cross-family
+        input.
         """
+        label = self._supersession_label(old_id)
+        if label in ("Object", "Subject"):
+            if not transfer_edges:
+                raise ValueError(
+                    f"supersede: transfer_edges=False is the INVALIDATE half, "
+                    f"and it is Point-only — `outdated` + a `CORRECTS` edge are "
+                    f"a Point's machinery (ONTOLOGY §4.7), and {old_id!r} is a "
+                    f":{label}. A :{label} that was retired with NO successor "
+                    f"is 'archived' under §4.3 — `update_entity({old_id!r}, "
+                    f"status='archived')` — or, if it WAS replaced, name the "
+                    f"successor with `supersede({old_id!r}, <successor id>)`."
+                )
+            return self._supersede_entity(label, old_id, new_id)
         if transfer_edges:
             return self.supersede_point(old_id, new_id)
         return self.invalidate_point(old_id, new_id)
+
+    def _supersession_label(self, node_id: str) -> str | None:
+        """The lifecycle label ``node_id`` carries, Point winning a tie (#3311).
+
+        ONE statement over the three labels, each arm on its own index, so the
+        dispatch costs one round trip and a `:Point:Object` cannot resolve to two
+        answers: a node carrying BOTH is the hybrid #3311's ``retype`` and
+        migrated graphs produce, and every other door in this class resolves it by
+        POINT PRECEDENCE (the Point arm validates the status and drops the key
+        before the non-Point arms read it). ``None`` when no node of any of the
+        three labels carries the id — the caller then falls through to the Point
+        doors, which answer ``No point <id>`` exactly as before this change.
+        """
+        rows = self._get_proj().g.query(
+            "MATCH (n:Point {id:$id}) RETURN 1 AS rank, count(n) AS hits "
+            "UNION "
+            "MATCH (n:Object {id:$id}) RETURN 2 AS rank, count(n) AS hits "
+            "UNION "
+            "MATCH (n:Subject {id:$id}) RETURN 3 AS rank, count(n) AS hits",
+            params={"id": node_id},
+        ).result_set
+        best = min((tuple(r) for r in rows if r and r[1]),
+                   key=lambda r: r[0], default=None)
+        if best is None:
+            return None
+        return {1: "Point", 2: "Object", 3: "Subject"}[best[0]]
+
+    def _supersede_entity(self, label: str, old_id: str, new_id: str) -> dict:
+        """The per-family supersession for ``:Object`` / ``:Subject`` (#12592).
+
+        Writes the coherent pair through the ONE entity write path, so the
+        journal, the guard and the replay fold cannot drift from
+        ``update_entity``'s:
+
+            status='superseded' + supersededBy=<successor NAME> + supersededAt
+
+        ⛔ THE CARRIER IS THE SUCCESSOR'S **NAME**, not its id, and that is what
+        the readers require: §4.2/§4.3 define ``supersededBy`` as *"successor
+        NAME (stored verbatim)"*, and every name-keyed reader of it — `audit`
+        4b/4c, `assembly._probe_visible_successors`, the renderer, the
+        `ObjectSuperseded` fold's visible-successor probe — resolves a NAME. The
+        record lane already does this deliberately
+        (``commit_ops._apply_subject_supersession`` stores the successor's
+        SPELLING, not the id); storing an id here would write a pointer no read
+        surface can resolve, i.e. the same defect as storing none. The ARGUMENT is
+        an id (the door must resolve a real node to guard it); the STORED value is
+        its name.
+
+        Guards, in the order the caller can act on them:
+
+        * the successor must be a node of the SAME family — a Subject cannot
+          supersede an Object. Cross-family would store one label's name in
+          another's carrier, which no successor probe would ever match;
+        * ``old_id != new_id`` (a self-replacement names itself as its own
+          successor);
+        * the OLD row must not already be terminal — terminalization is one-way
+          (§5/#2498: a dead row is answered by minting a successor, never by
+          re-terminalizing it), the same refusal ``supersede_point`` makes for its
+          source;
+        * the SUCCESSOR must not be terminal, and must carry a name — a terminal
+          successor buries the old row with nothing current to show, and a nameless
+          successor cannot be named at all (the carrier is the name).
+
+        Returns ``{superseded, id, label, superseded_by, superseded_at}``. The
+        write is checked: a graph write that matched nothing raises rather than
+        reporting a supersession that did not land.
+        """
+        proj = self._get_proj()
+        if old_id == new_id:
+            raise ValueError(
+                f"supersede: old_id and new_id must differ ({old_id!r}) — a "
+                f"row cannot be its own successor")
+
+        def _rows(node_id: str) -> dict:
+            rows = proj.g.query(
+                f"MATCH (n:{label} {{id:$id}}) "
+                "RETURN count(n) AS rows, collect(n.status) AS statuses, "
+                "collect(n.name) AS names",
+                params={"id": node_id},
+            ).result_set
+            if not rows or not rows[0][0]:
+                return {"rows": 0, "statuses": [], "names": []}
+            return {"rows": rows[0][0],
+                    "statuses": list(rows[0][1] or ()),
+                    "names": list(rows[0][2] or ())}
+
+        dead = _SUPERSESSION_DEAD_SETS[label]
+        old = _rows(old_id)
+        if not old["rows"]:
+            raise ValueError(f"No :{label} {old_id!r}")
+        # The verdict is over EVERY bound row (#7822's fan-out rule): a dead
+        # sibling is not made live by the write, so terminalizing the id again
+        # would re-terminalize a dead row.
+        dead_old = sorted({str(s) for s in old["statuses"] if str(s) in dead})
+        if dead_old:
+            raise ValueError(
+                f"supersede: :{label} {old_id!r} is already terminal "
+                f"({dead_old[0]}) — {label} supersession cannot re-terminalize a "
+                f"dead row (#2498: terminalization is one-way). Mint the "
+                f"replacement and let it stand as current; the dead row keeps its "
+                f"recorded successor and instant."
+            )
+        new = _rows(new_id)
+        if not new["rows"]:
+            raise ValueError(
+                f"supersede: no :{label} {new_id!r} — the successor must be a "
+                f"same-family node (a :{label} cannot name a node of another "
+                f"label as its successor: `supersededBy` is read by a "
+                f"per-label successor probe, so a cross-family name would never "
+                f"resolve).")
+        dead_new = sorted({str(s) for s in new["statuses"] if str(s) in dead})
+        if dead_new:
+            raise ValueError(
+                f"supersede: the successor {new_id!r} is itself terminal "
+                f"({dead_new[0]}) — {old_id!r} would be replaced by a dead row, "
+                f"leaving nothing current to show. Name a :{label} that is "
+                f"current, or mint one first."
+            )
+        names = [str(n).strip() for n in new["names"]
+                 if n is not None and str(n).strip()]
+        if not names:
+            raise ValueError(
+                f"supersede: the successor {new_id!r} carries no name — "
+                f"`supersededBy` stores the successor's NAME (§4.2/§4.3: "
+                f"*successor name, stored verbatim*) and every read surface "
+                f"resolves it by name, so an id alone cannot be stored here. "
+                f"Give the node a name (`update_entity({new_id!r}, "
+                f"name=<name>)`), then re-send this call."
+            )
+        successor_name = names[0]
+        from .projection import _now_iso
+        instant = _now_iso()
+        applied = self.update_entity(
+            old_id, status=_SUPERSEDED_STATUS,
+            supersededBy=successor_name, supersededAt=instant)
+        if not applied:
+            # The write path reports `{}` when it matched nothing. A supersession
+            # that did not land must never be reported as one — the phantom-claim
+            # class `supersede_point`'s own count probe guards.
+            raise ValueError(
+                f"supersede: the write on :{label} {old_id!r} matched no row — "
+                f"nothing was superseded (a concurrent delete, or the row moved). "
+                f"Re-read the row and re-send."
+            )
+        return {"superseded": True, "id": old_id, "label": label,
+                "superseded_by": successor_name, "superseded_at": instant}
 
     @_declares_live_write_lane("supersede_point")
     def supersede_point(self, old_id: str, new_id: str,
@@ -48018,6 +48255,166 @@ class TortoiseSDK:
         return resolve_or_mint(self._get_proj().g, label, name,
                                explicit_id=explicit_id)[0]
 
+    def _assert_supersession_names_a_successor(self, id_val: str, props: dict,
+                                               point_ids) -> None:
+        """ONTOLOGY §4.3's invariant at the WRITE door (#12592).
+
+        §4.3 states, for every entity that carries the word:
+
+            ``superseded`` means replaced: it names the successor; a retirement
+            with no successor is ``archived``; ``deprecated`` is an independent
+            terminal state and needs no successor. A journal rebuild is unchanged
+            and still restores a supersession recorded without a successor.
+
+        Measured before this guard (``main`` at 58f904ccf7, embedded engine,
+        throwaway nodes) — the first three rows are the defect, the fourth shows
+        the pair IS expressible through this door once the successor is named::
+
+            update_entity(<Point>,   status='superseded')  -> ACCEPTED  supersededBy=None
+            update_entity(<Object>,  status='superseded')  -> ACCEPTED  supersededBy=None
+            update_entity(<Subject>, status='superseded')  -> ACCEPTED  supersededBy=None
+            update_entity(<either>,  status='superseded', supersededBy='v2') -> ACCEPTED
+
+        A row that says `superseded` while naming nothing is a state the model
+        does not have: the word's MEANING is "replaced by", so with no partner it
+        asserts a replacement that does not exist. That is why this is not a
+        vocabulary question (`#10371` refused to make the Object vocabulary
+        closed) and not the #10192 coherence question (that one guards the
+        carrier's own record column): it is the model's own sentence, enforced at
+        the door that can store the word.
+
+        ⛔ THE ASYMMETRY WITH REPLAY IS DELIBERATE, NOT AN OVERSIGHT. §4.3's own
+        last clause says a journal rebuild still restores a supersession recorded
+        WITHOUT a successor — a legacy/pre-fix journal, or a raw producer, can
+        carry that shape, and a replay fold that refuses it would refuse to
+        rebuild history. So the fold's `SET n += $state` arm is untouched, and
+        the refusal lives HERE, at the live write door, where a caller can still
+        supply the missing half. Do not "fix" this by teaching the fold the same
+        refusal: that would reverse §4.3's recorded clause and drop rows from
+        every rebuild of an existing journal.
+
+        ⛔ NOT #12403. That issue records the wider residual that this door still
+        accepts a DECLARED terminalizing POINT target and writes no
+        `CORRECTS` successor record. This guard closes only the half §4.3 names —
+        the word without a pointer — and says so in the repair, which names
+        :meth:`supersede` (the door that also mints the edge) rather than
+        prescribing the bare pair for a Point.
+
+        ⛔ SCOPE: THE **UPDATE** DOOR, AND THE CREATE DOOR IS A DISCLOSED RESIDUAL.
+        `create_object("X", kind, status='superseded')` / `create_subject(...)`
+        can still mint a born-superseded row naming nothing. That is not an
+        oversight and not silently left: #12592's decided scope is
+        "`update_entity(...)` writing `status='superseded'` with no successor",
+        and the born-superseded shape has a second, legitimate role — a
+        record-sourced rebuild re-creates a row that a journal recorded as
+        superseded (`tortoise/cache_projection.py`'s head comment documents
+        `create_object(name, status='superseded')` among the shapes the cache
+        must tolerate), so closing it here would need the SAME replay
+        carve-out the update door gets from §4.3's last clause, plus a
+        decision on how an ON-MATCH re-create may restate a carried row. Recorded
+        on #12592 rather than guessed at here.
+
+        The verdict is over EVERY row the write binds (#7822's fan-out rule, not
+        Point-specific): a write that leaves ANY bound row naming nothing is the
+        claim this guard exists to refuse.
+        """
+        if lifecycle_props_by_rendering(props, {"status"}).get("status") \
+                != _SUPERSEDED_STATUS:
+            return
+        # A named successor in the CALL is sufficient — the write applies it to
+        # every bound row (``SET n += $props``), so no row is left nameless.
+        if _successor_named_by(props):
+            return
+        proj = self._get_proj()
+        probes: list[tuple[str, str, dict]] = []
+        # ``collect`` DROPS nulls, so the row count and the collected non-null
+        # values are read as a PAIR: ``rows - non_blank`` is the number of bound
+        # rows that name nothing (a NULL or a blank). Reading only the collected
+        # list cannot tell "no row" from "every row nameless" — the misread that
+        # made #10192's first cut skip its own guard.
+        for label in ("Object", "Subject"):
+            probes.append((
+                label,
+                f"MATCH (n:{label} {{id:$id}}) RETURN count(n) AS rows, "
+                "collect(n.supersededBy) AS succs",
+                {"id": id_val},
+            ))
+        if point_ids:
+            probes.insert(0, (
+                "Point",
+                "MATCH (n:Point) WHERE n.id IN $ids RETURN count(n) AS rows, "
+                "collect(n.supersededBy) AS succs",
+                {"ids": list(point_ids)},
+            ))
+        nameless: list[str] = []
+        for label, cypher, params in probes:
+            rows = proj.g.query(cypher, params=params).result_set
+            if not rows or not rows[0][0]:
+                continue                 # no row of this label is bound
+            stored = list(rows[0][1] or ())
+            blanks = sum(1 for v in stored
+                         if v is None or (isinstance(v, str) and not v.strip()))
+            if rows[0][0] > len(stored) - blanks:
+                nameless.append(label)
+        if not nameless:
+            # Every bound row ALREADY names a successor: the pair is coherent
+            # before this write, so re-stating the status is idempotent (the
+            # same allowance the entailed-status arms make). Measured on the
+            # pre-guard tree: `status='superseded'` re-written on a carried row
+            # is accepted today and must stay accepted — a read-modify-write PUT
+            # that echoes the status back would otherwise start failing.
+            return
+        labels = "/".join(f":{name}" for name in nameless)
+        first = nameless[0]
+        section = "§5" if first == "Point" else (
+            "§4.2" if first == "Subject" else "§4.3")
+        # AX rule 2 (#10183): the repair must be PERFORMABLE from where the
+        # caller stands. `supersede(<id>, <successor id>)` is the one door that
+        # writes the whole pair atomically on every label (#12592), so it leads;
+        # the explicit pair is offered second because it is what a caller who
+        # knows only the successor's NAME can send; and the successorless
+        # retirement is named with the word the model gives it — `archived` for
+        # an Object/Subject (§4.3/§4.2), and for a Point `retract_point`, because
+        # §5 declares `archived` RESERVED on Points ("no v1 write path") and
+        # naming it there would advertise a write the model does not offer.
+        if first == "Point":
+            model_clause = (
+                "That is not a supersession at all: a Point retired with no "
+                "successor is 'retracted' (`retract_point`), and 'deprecated' is "
+                "an independent terminal state that needs none (`archived` is "
+                "RESERVED on Points — ONTOLOGY §5: no v1 write path). ")
+            retirement = (
+                f"or, if nothing replaced it, `retract_point({id_val!r})`.")
+            edge_clause = (
+                " — and, on a Point, the CORRECTS edge and the `outdated` flag "
+                "too, which is what makes `query()` and every retrieval leg "
+                "stop treating it as current")
+        else:
+            model_clause = (
+                "That is not a supersession at all: a retirement with no "
+                "successor is 'archived', and 'deprecated' is an independent "
+                "terminal state that needs none. ")
+            retirement = (
+                f"or, if nothing replaced it, "
+                f"`update_entity({id_val!r}, status='archived')`.")
+            edge_clause = ""
+        raise ValueError(
+            f"update_entity refused status='superseded' on {labels} "
+            f"{id_val!r} with no successor: 'superseded' MEANS replaced "
+            f"(ONTOLOGY {section}) — it names the successor, so a row that "
+            f"says 'superseded' and names nothing asserts a replacement that "
+            f"does not exist. {model_clause}"
+            f"Name the successor — `supersede({id_val!r}, <successor id>)` "
+            f"writes status, `supersededBy` and `supersededAt` in ONE atomic "
+            f"write on every label{edge_clause}; "
+            f"`update_entity({id_val!r}, status='superseded', "
+            f"supersededBy=<successor name>)` is the same pair spelled out; "
+            f"{retirement} (A JOURNAL REBUILD is unchanged: ONTOLOGY {section} "
+            f"keeps restoring a supersession recorded without a successor — "
+            f"this refusal is the live write door only, where you can still "
+            f"supply the missing half.)"
+        )
+
     @_declares_apply_first_write_lane("_update_entity")
     def _update_entity(self, id_val: str, *, _reserved_supplied: tuple = (), **props) -> dict:
         # #2296 review: `_reserved_supplied` is the set of reserved names the
@@ -48789,6 +49186,19 @@ class TortoiseSDK:
                         f"(`validFrom`, `validTo`, their precision markers, "
                         f"`expiredAt`, `when`), and the revision lands."
                     ) from None
+            # ── #12592: the WORD needs its partner, at the WRITE door ──────────
+            # ONTOLOGY §4.3: *"`superseded` means replaced: it names the
+            # successor"*. Measured on `main` @ 58f904ccf7: every label accepted
+            # a bare `status='superseded'` and stored `supersededBy=None`.
+            # Placement is load-bearing twice over: AFTER the terminality guard
+            # (so a dead row's refusal keeps naming the dead state first) and
+            # AHEAD of every write below (the Point status arm's `SET` + its
+            # `restatus` journal, and the non-Point label loop) — a refusal that
+            # cost a write is the atomicity defect #9287/#10192 state.
+            # The Point ids are passed because this door addresses a Point by
+            # `id`, `eventId` or `url`; the non-Point arms bind `{id: $id}`.
+            self._assert_supersession_names_a_successor(
+                id_val, props, _lifecycle_ids)
         # ⛔ A REFUSAL MUST NOT COST A WRITE (#12222, review cycle 10 P1). The
         # rename-ambiguity guard lives BELOW, inside its lock and ahead of the
         # label write loop — but the Point STATUS arm below writes
