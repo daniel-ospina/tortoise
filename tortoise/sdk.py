@@ -24487,16 +24487,21 @@ class TortoiseSDK:
         if status == "live":
             return {"id": point_id, "status": "live", "promoted": False,
                     "blocked": False, "reason": "already_live"}
-        # Terminal states cannot be promoted back to live, and #12586: "terminal"
-        # is the SHARED predicate, not this door's local `status != 'draft'`
-        # reading — the legacy `outdated=true` flag is terminal on its own (§5:
-        # "Terminal on every read surface and for every lifecycle transition"),
-        # so a draft point invalidated before it was ever promoted used to come
-        # back as `['live', outdated=true]` through THIS door (measured).
-        # ⛔ The flag is a conjunct of the CAS below, NOT an extra test here: this
-        # read can go stale between it and the write, and the CAS is the one
-        # statement that decides. Its zero-row path is the `raced` branch, which
-        # reports the row accurately (`not_draft`).
+        # Terminal states cannot be promoted back to live.
+        # ⚠️ RESIDUAL, MEASURED, DELIBERATELY NOT FIXED HERE (#12586): the test
+        # below reads ``status`` ALONE, and the legacy ``outdated=true`` flag is
+        # terminal on its own (§5: "Terminal on every read surface and for every
+        # lifecycle transition"). A draft point invalidated before it was ever
+        # promoted (``invalidate_point`` / ``supersede_point`` leave
+        # ``status='draft'`` and set the flag) is therefore promoted to
+        # ``['live', outdated=true]`` through THIS door — the same
+        # two-facts-disagree state #12586 closed on ``update_point``, measured on
+        # the same tree. It is NOT fixed in that change on purpose: this verb is
+        # a separate door with its own return contract (``blocked``, never a
+        # raise) and its own cross-engine parity pin
+        # (``test_6239_promote_after_supersede.py``, whose raw-restatus fixture
+        # writes exactly this row), so the fix belongs to its own change with its
+        # own evidence. #12586's thread carries the measurement.
         if status != "draft":
             return {"id": point_id, "status": status, "promoted": False,
                     "blocked": True, "reason": "not_draft"}
@@ -24541,9 +24546,6 @@ class TortoiseSDK:
             - present, status ``draft`` → False: that does NOT explain a zero
               row, so the re-issue has not landed; keep retrying rather than
               manufacture a refusal for a point that is still promotable.
-              #12586: UNLESS the legacy `outdated` flag is set — the CAS below
-              carries the same flag conjunct, so a flag-dead draft DOES explain
-              the zero row and takes the `raced` branch's accurate answer.
             - present, any other status (a concurrent promote, a terminal
               transition, or a NULL status — `null = 'draft'` is null, not
               true, so it too explains the zero row) → True: the `raced`
@@ -24552,25 +24554,18 @@ class TortoiseSDK:
             if result.result_set:
                 return True
             rows = proj.g.query(
-                "MATCH (n:Point {id:$id}) RETURN n.status, n.outdated",
+                "MATCH (n:Point {id:$id}) RETURN n.status",
                 params={"id": point_id},
             ).result_set
             if not rows:
                 return False
-            status, outdated = rows[0]
-            return status != 'draft' or is_terminal_status(
-                status, bool(outdated))
+            return rows[0][0] != 'draft'
 
         r = self._graph_write_with_retry(
             lambda: proj.g.query(
-                # #12586: the CAS carries the legacy-flag conjunct too — the
-                # entry check above is a read, and a point invalidated between
-                # that read and this write must not be promoted. Composed from
-                # the SHARED predicate, exactly like the arm it mirrors.
-                "MATCH (n:Point {id:$id}) WHERE n.status = 'draft' AND "
-                + _terminal_excluded("n.status") + " "
-                + "SET n.status = 'live', n.reviewed = true, "
-                "n.promotedAt = $now, n.updatedAt = $now RETURN n.id",
+                "MATCH (n:Point {id:$id}) WHERE n.status = 'draft' "
+                "SET n.status = 'live', n.reviewed = true, n.promotedAt = $now, "
+                "n.updatedAt = $now RETURN n.id",
                 params={"id": point_id, "now": now},
             ),
             what="promote_point CAS SET",
@@ -24578,9 +24573,6 @@ class TortoiseSDK:
         )
         if not r.result_set:
             # Raced with a concurrent promote — re-read and report the outcome.
-            # #12586: a zero row here is ALSO the answer for a row the CAS's
-            # terminality conjunct excluded (a draft that went flag-dead), which
-            # is why `_cas_witness` is consulted before the abort is re-raised.
             re = self.get_point(point_id)
             if not re:
                 # The node is GONE (deleted, or a second replacement between

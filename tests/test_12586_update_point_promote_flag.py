@@ -59,8 +59,6 @@ from tortoise.sdk import TortoiseSDK
 #: relies on).
 _PROMOTE_NEEDLE = "n.status = 'live', n.updatedAt = $now, n += $props"
 
-#: ``promote_point``'s CAS tail (``reviewed``/``promotedAt`` are unique to it).
-_PROMOTE_POINT_CAS_NEEDLE = "n.status = 'live', n.reviewed = true"
 
 #: The MEASURED v6 literal (#7685): the store's one sentence for "a rebuild
 #: happened" and "the graph was deleted", which is why the copy below also
@@ -218,13 +216,12 @@ class _AbortOnceThenFlagDead:
     """Abort the promote once AND set the legacy flag — a competing
     ``invalidate_point`` winning between the guard read and the write."""
 
-    def __init__(self, real, needle: str = _PROMOTE_NEEDLE) -> None:
+    def __init__(self, real) -> None:
         self._real = real
-        self._needle = needle
         self.matching = 0
 
     def query(self, cypher, params=None, timeout=None):
-        if self._needle in cypher:
+        if _PROMOTE_NEEDLE in cypher:
             self.matching += 1
             if self.matching == 1:
                 self._real.query("MATCH (n:Point) SET n.outdated = true")
@@ -388,31 +385,19 @@ def test_the_operator_arm_is_untouched(env):
 
 
 # ══════════════════════════════════════════════════════════════════════
-# The same root on the other promote door — `promote_point`
+# The door this change did NOT touch — `promote_point` — stays as it was
+#
+# Same root, MEASURED on this tree, deliberately left to its own change: a
+# draft point invalidated before it was ever promoted (`status='draft'` plus
+# the legacy `outdated=true` flag) is promoted to `['live', outdated=true]`
+# by `promote_point`, because its terminality test is the local
+# `status != 'draft'` reading. Fixing it here would change a second verb's
+# return contract and force a rewrite of
+# `test_6239_promote_after_supersede.py`'s raw-restatus parity fixture, which
+# writes exactly this row as its live-reachable ordering. #12586's thread
+# carries the measurement; these two pins only prove the untouched door still
+# behaves as its own docstring says.
 # ══════════════════════════════════════════════════════════════════════
-
-def test_promote_point_refuses_a_draft_that_is_flag_dead(env):
-    """Measured on the pre-fix tree: a draft point invalidated before it was
-    ever promoted came back ``['live', outdated=true]`` through this door.
-
-    Its docstring already promised "not draft/live (terminal …) → blocked", so
-    this closes the code lag rather than changing the contract — the return
-    shape and the ``not_draft`` reason are unchanged.
-
-    FALSIFIABLE: drop the terminality conjunct from ``promote_point``'s CAS and
-    this fails with ``promoted: True`` over ``('live', True)``.
-    """
-    sdk, _ = env
-    pid = _draft(sdk)
-    _force(sdk, pid, status="draft", outdated=True)
-
-    out = sdk.promote_point(pid)
-
-    assert out["blocked"] is True and out["promoted"] is False
-    assert out["reason"] == "not_draft"
-    assert _row(sdk, pid) == ("draft", True), (
-        "a flag-dead draft was promoted to live beside the flag")
-
 
 def test_promote_point_still_promotes_a_plain_draft(env):
     """The reviewer-gated door's normal route is unchanged.
@@ -442,27 +427,3 @@ def test_promote_point_still_reports_a_live_node_as_already_live(env):
 
     assert out == {"id": pid, "status": "live", "promoted": False,
                    "blocked": False, "reason": "already_live"}
-
-
-def test_promote_point_cas_refuses_a_row_that_goes_flag_dead_in_the_window(
-        env, monkeypatch):
-    """The CAS carries the flag conjunct too — the entry read is not the guard.
-
-    A point invalidated between ``promote_point``'s ``properties(n)`` read and
-    its ``WHERE n.status = 'draft'`` CAS must not be promoted: the ``raced``
-    branch then reports ``not_draft`` against the re-read row.
-
-    FALSIFIABLE: drop the conjunct from the CAS and this fails with
-    ``promoted: True`` over ``('live', True)``.
-    """
-    monkeypatch.setattr("tortoise.retry.time",
-                        types.SimpleNamespace(sleep=lambda _s: None))
-    sdk, _ = env
-    pid = _draft(sdk)
-    proj = sdk._get_proj()
-    proj.g = _AbortOnceThenFlagDead(proj.g, _PROMOTE_POINT_CAS_NEEDLE)
-
-    out = sdk.promote_point(pid)
-
-    assert out["blocked"] is True and out["promoted"] is False, out
-    assert _row(sdk, pid) == ("draft", True)
