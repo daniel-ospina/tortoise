@@ -11831,3 +11831,26 @@ def test_12549_a_SILENT_sidecar_service_is_not_a_disagreement(tmp_path, monkeypa
         "      TORTOISE_EMBED_GATE: \"0\"\n", encoding="utf-8")
     shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
     assert shipped["deployment"]["files"] == {"docker-compose.yml": "DISAGREE"}, shipped
+
+
+def test_12549_a_MIXED_tree_names_the_silent_half_beside_the_disagreement(
+        tmp_path, monkeypatch):
+    """A disagreement must not swallow the OTHER files the same reading measured.
+
+    The DISAGREE sentence is the leading clause a reader quotes, so on a tree that has
+    BOTH a disagreeing compose file and a silent image build file, the silent half is
+    named beside it rather than left to a subordinate clause — the `#12070` item 4 rule
+    (the leading clause carries the whole measured state, never a retracted one).
+    """
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n"
+        "  app:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"1\"\n"
+        "  worker:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"0\"\n", encoding="utf-8")
+    (tmp_path / "Dockerfile.hosted").write_text("FROM python:3.12\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    note = _gate_note(shipped)
+    assert "PER-SERVICE DISAGREEMENT" in note, note
+    assert "other deployment file(s) SILENT: ['Dockerfile.hosted']" in note, note

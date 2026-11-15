@@ -4113,6 +4113,13 @@ def shipped_default_note(shipped: dict, flag: str, ambient: bool) -> str:
                         for posix in deployment["disagreeing"])
             + " — compose defines no override relation between two services, so this "
             "file cannot be reduced to one verdict"
+            # ⛔ A mixed tree must not LOSE the silent half: this sentence is the one a
+            # reader quotes, so anything else the reading measured is named beside it
+            # rather than left to a later clause.
+            + (f"; other deployment file(s) SILENT: {deployment['silent']}"
+               if deployment["silent"] else "")
+            + (f"; UNMEASURED: {deployment['unmeasured']}"
+               if deployment.get("unmeasured") else "")
         )
     elif deployment["on"]:
         deployment_reading = (
