@@ -1459,6 +1459,20 @@ class TestLifecycleCarrierCoherence:
             with pytest.raises(ValueError, match="is TERMINAL for a :Object"):
                 sdk.update_entity(_IdLie(oid), status="live")
             assert _carrier_row(sdk, "Object", "zeta") == before, before
+
+            # ⛔ AND THE CONFLICTING-WRITE door, ONE BRANCH ABOVE it (review cycle
+            # 10 P3): that refusal renders `id_val` too, so the same id object
+            # escaped as `RuntimeError: id-repr-boom` there. One helper for both
+            # doors, so this pins the sibling the earlier fix walked past.
+            class _StatusKey(str):
+                def __str__(self):
+                    return "status"
+
+            with pytest.raises(ValueError, match="CONFLICTING status write"):
+                sdk.update_entity(
+                    _IdLie(oid),
+                    **{_StatusKey("superseded"): "superseded", "status": "live"})
+            assert _carrier_row(sdk, "Object", "zeta") == before, before
         finally:
             sdk.close()
 

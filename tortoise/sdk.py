@@ -49136,6 +49136,23 @@ class TortoiseSDK:
         # / the `ObjectSuperseded` fold); the SDK gap is #12592.
         _nonpoint_status = lifecycle_props_by_rendering(props, {"status"})
         if _nonpoint_status:
+
+            def _np_safe_repr(_value):
+                """`repr` that cannot be hijacked by the caller (review cycle 9/10).
+
+                Both refusals below name caller-controlled operands, and a
+                `__repr__` that raises would turn the promised `ValueError` into
+                that exception class instead (measured, both doors: `RuntimeError:
+                repr-boom` on the target, `RuntimeError: id-repr-boom` on the id;
+                the row is unchanged in both cases, so this is a contract break
+                and not a fail-open). ONE helper for BOTH operands, so a later
+                refusal cannot be added with the raw `!r` again.
+                """
+                try:
+                    return repr(_value)
+                except Exception:  # noqa: BLE001, RUF100 — a hostile `__repr__` is the point
+                    return f"<{type(_value).__name__}>"
+
             # ⛔ BEFORE any transition reasoning: a status write whose renderings
             # disagree has no knowable landing word (review round 2, P1 —
             # measured: `{<content 'superseded', __str__ 'status'>: 'superseded',
@@ -49144,7 +49161,7 @@ class TortoiseSDK:
             if _status_write_is_ambiguous(props):
                 raise ValueError(
                     f"update_entity refused a CONFLICTING status write on "
-                    f"{id_val!r}: more than one key in this call renders as "
+                    f"{_np_safe_repr(id_val)}: more than one key in this call renders as "
                     f"`status` and they ask for different words. A `str` "
                     f"subclass whose content and `__str__` differ is filed "
                     f"under one name by the live write and the other by the "
@@ -49399,17 +49416,8 @@ class TortoiseSDK:
                 # class (measured: a target whose `__repr__` raises `RuntimeError`
                 # escaped as `RuntimeError`, review cycle 8 P3; the row was
                 # unchanged, so this is a contract break and not a fail-open).
-                # ⛔ BOTH operands, not just the target (review cycle 9 P3): the
-                # same f-string interpolates `id_val`, which is caller-controlled
-                # too — `update_entity(<id whose __repr__ raises>, status='live')`
-                # on an `archived` row escaped as the caller's own exception class
-                # (measured: `RuntimeError: id-repr-boom`, row unchanged).
-                def _np_safe_repr(_value):
-                    try:
-                        return repr(_value)
-                    except Exception:  # noqa: BLE001, RUF100 — a hostile `__repr__` is the point
-                        return f"<{type(_value).__name__}>"
-
+                # Both operands, through the one helper hoisted above the
+                # ambiguity door — see `_np_safe_repr`.
                 _np_target_repr = _np_safe_repr(_np_status)
                 _np_id_repr = _np_safe_repr(id_val)
                 raise ValueError(
