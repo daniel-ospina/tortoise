@@ -22,7 +22,7 @@ This is the **target model** for how anything in the graph that has a state says
 
 ## 1. The problem in one paragraph
 
-Today "status" answers at least three unrelated questions at once. One word can mean *does this claim still count as a belief*, or *what state is this customer record in*, or *did this goal work out*. Because the word is shared, the meaning is not: the list of words lives in one place, and the rule for what "finished" means lives somewhere else — in four hardcoded lists that only contain built-in words. So anything with a word outside those lists is **treated as current by everything that reads it**, which is the same as saying it never ends. Nine declarations across our packs use thirty words; one of them is in the built-in list.
+Today "status" answers at least three unrelated questions at once. One word can mean *does this claim still count as a belief*, or *what state is this customer record in*, or *did this goal work out*. Because the word is shared, the meaning is not: the list of words lives in one place, and the rule for what "finished" means lives somewhere else — in hardcoded lists that only contain built-in words. There are **at least eight** such lists (`live.py`, `commit_ops.py`, `assembly.py`, `sdk.py`), four of them of sizes 1/5/4/2 and the rest differing from those in content. So anything with a word outside a given list is **treated as current by everything that reads that list**, which is the same as saying it never ends. Nine declarations across our packs use thirty words; one of them is in the built-in list.
 
 ---
 
@@ -76,7 +76,7 @@ A *verb* is what someone does; a *word* is what the record then says. Several ve
 | retire, withdraw, archive, retract, reject, invalidate | `deprecated` |
 | replace, supersede, correct | `superseded` (successor named) |
 
-This is why the current five extra words are not needed: each of them is a verb's name leaking into the state vocabulary. Keeping verbs separate from states means a new verb never grows the vocabulary.
+This is why the current five extra words are not needed — `retracted`, `outdated`, `archived`, `in_progress`, `completed`: each of them is a verb's name leaking into the state vocabulary. Keeping verbs separate from states means a new verb never grows the vocabulary. `deprecated` is the one word in the base set that is not a removal: it is already declared for Objects and Subjects and already read for legacy Points, so promoting it introduces no word.
 
 ### 3.2 What is deliberately not a lifecycle word
 
@@ -85,7 +85,7 @@ This is why the current five extra words are not needed: each of them is a verb'
 | "archived" | a visibility choice about what you look at | a flag, if and when a surface needs it. Retroactively filing a rejected thing must not erase *why* it ended |
 | "in-progress", "completed" | position in a process | a pipeline stage |
 | "outdated" | the past name of the Point "no longer counts" mechanism | the `deprecated`/`superseded` words above |
-| "blocked", "paused", "waiting" | an interruption, not an ending | a pipeline stage |
+| "blocked", "paused", "waiting" | an interruption, not an ending | a stage in the `suspended` slot — and for a **goal**, `blocked` is also one of its `goalState` values. The two do not collide: the stage is read by its **slot**, never its name (§4.1) |
 | "met", "unmet", "abandoned" | how the goal worked out | `goalState` |
 
 ---
@@ -137,7 +137,7 @@ This is what makes the model customisable without becoming a configuration langu
 
 ## 5. The data model
 
-**Three state fields** — `status`, `pipelineStage` (with its `pipelineOutcome`), and `goalState` — **plus the successor bookkeeping that one of them obliges.** No others.
+**Three state fields** — `status`, `pipelineStage` (with its `pipelineOutcome`), and `goalState` — **plus the successor bookkeeping that `superseded` obliges wherever that word appears.** No others.
 
 | field | lives on | values | written by |
 |---|---|---|---|
@@ -149,7 +149,9 @@ This is what makes the model customisable without becoming a configuration langu
 
 `supersededBy`/`supersededAt` are not a fourth kind of state — they are what the `superseded` word obliges you to record. The three state fields are `status`, `pipelineStage` (with its `outcome`) and `goalState`.
 
-`superseded` is the one word that appears on two axes, and that is correct rather than a collision: on both, it means *replaced by a named successor*. What differs is **what** was replaced — a claim, or a commitment — and saying which is the axis's job. If the two ever come to mean different things, that is when one of them must be renamed.
+`superseded` is the one word that carries the same meaning on two axes, and that is correct rather than a collision: on both, it means *replaced by a named successor*. What differs is **what** was replaced — a claim, or a commitment — and saying which is the axis's job. If the two ever come to mean different things, that is when one of them must be renamed.
+
+`blocked` is the other word that appears more than once, and it is not the same case: as a `goalState` value it is a *recorded fact about achievement*, while as a stage name it is only a label on a `suspended`-slot stage. Nothing reads a stage's name (§4.1), so the two can never be confused by a reader — which is why only a **value on two axes** (`superseded`) needs the explanation above.
 
 Every field is **optional**. A thing with no `status` reads as `live` — created and current is the ordinary case, and it must not require a write. A thing with no pipeline has no position, and that is not a defect.
 
@@ -173,7 +175,9 @@ flowchart TD
 - **Position** answers it too, because a `terminal` slot is an end.
 - Nothing else does. A stage in `active` or `suspended` is never an ending; a missing stage is never an ending.
 
-There is **one** implementation of this rule, and every reader uses it: search, retrieval, ranking, belief, audit, export. Today four different lists implement it with four different contents, which is why a word can be dead to one reader and alive to another.
+There is **one** implementation of this rule, and every reader uses it: search, retrieval, ranking, belief, audit, export. Today at least eight different lists implement it with different contents, which is why a word can be dead to one reader and alive to another.
+
+The rule reads the **base** set plus any **delta** the family declares — it is not one collapsed list. Two families legitimately answer different questions, and #11824 recorded the shape this model must keep: *"one base set plus named, declared deltas"*, because *"collapsing them would be a reopen"*. `commit_ops.py:46-50` says the same — *"Do not unify the two blindly: they answer different questions"* — and `assembly.py`'s resolver narrowing is the live example of a delta: it resolves a **wider** set on purpose (superseded/deprecated/archived Objects must resolve to render their own state), and its own comment warns that re-pointing it at the canonical set stops the current-state question firing. A delta is therefore **declared and named**, never a divergence discovered later.
 
 ---
 
@@ -181,7 +185,7 @@ There is **one** implementation of this rule, and every reader uses it: search, 
 
 | guarantee | why it follows |
 |---|---|
-| **A word means one thing.** | One lifecycle set for every kind that has a lifecycle. The same word cannot be an ending in one place and a current state in another. |
+| **A word means one thing.** | One closed **base** lifecycle set, plus a named delta per family where one is genuinely needed (§6). The same word cannot be an ending in one family and a current state in another without that delta declaring it. |
 | **Every ending is real.** | An ending is either a lifecycle word or a `terminal` slot — and both are declarations, not names a reader has to recognise. |
 | **Customising names cannot break readers.** | Readers read slots and words, never stage names. |
 | **Adding a domain does not touch the engine.** | A new domain is a declared pipeline, not new code. |
@@ -199,11 +203,12 @@ These are recorded decisions, not preferences. The model above is designed to si
 |---|---|---|
 | **An event has no lifecycle.** An event is a dated fact; a later event does not rewrite an earlier one. | #2725, enforced by #12108 | Events take no lifecycle word. If an event must be withdrawn, that is a claim about it, not a state on it. |
 | **Achievement is its own axis.** Goal outcome is not promotion. | #7856 | `goalState` stays separate, with its own closed set, and nothing reconciles it into `status`. |
-| **A pack owns its kind's words.** | #2729 | Packs declare stages; the engine never imposes stage names. |
+| **A pack owns its kind's words.** | #2729; *Foreclosed* in `EXTRACTOR-V4-ARCHITECTURE.md` ("pack lifecycles own their words") | Packs declare stages; the engine never imposes stage names. |
+| **One base set, plus named declared deltas — never one collapsed set.** | #11824's contradiction test; `commit_ops.py:46-50` "Do not unify the two blindly: they answer different questions"; the `assembly.py` resolver narrowing; the Object/Point vocabulary divergence in #3308 / PR #6955 | The four words are the **base**. A family that must answer a different question declares its delta explicitly and names it; a delta is never a quiet divergence, and never a list to be re-pointed at the base. |
 | **The claim family's "no longer counts" flag is load-bearing.** | #2498 | The flag's *effect* is preserved as the `deprecated`/`superseded` words; the mechanism is not removed by fiat. |
 | **What a reader hides is wider than what a writer may create.** | #2977 | Readers must still be able to treat a word as dead that no verb currently produces — the net stays wider than the door. |
-| **A single shared list cannot cover pack words.** | #3308 / PR #6955, and Foreclosed in `EXTRACTOR-V4-ARCHITECTURE.md` | There is no shared *stage* list. Only the lifecycle set is shared, and it is small enough to be closed. |
-| **A word with no reader is not added.** | the withdrawal of `stale`, #11824 | This model adds no word and removes four. |
+| **A single shared list cannot cover pack words.** | #2729, and Foreclosed in `EXTRACTOR-V4-ARCHITECTURE.md` ("pack lifecycles own their words") | There is no shared *stage* list. Only the lifecycle **base** set is shared, and it is small enough to be closed. |
+| **A word with no reader is not added.** | the withdrawal of `stale`, #11824 | This model introduces no new word and removes **five** — `retracted`, `outdated`, `archived`, `in_progress`, `completed` — leaving a base set of four. |
 
 ---
 
@@ -215,10 +220,10 @@ Deliberately absent, and each has its own document:
 - **What the built-in default pipeline for each core kind is.** Worth a research pass on its own; the model does not depend on which stages we ship.
 - **The implementation plan**, the code surfaces, and the test strategy.
 - **Visibility/filing.** Named here because it must not become a status word; no surface needs it yet.
-- **Per-type lifecycle sets.** The model says one set for every kind that has a lifecycle. If a kind genuinely needs a different lifecycle, that is a decision to reopen, not a variation to add quietly.
+- **The deltas themselves.** §6 fixes the *shape* — one base set plus named, declared deltas — but not each family's delta. Which delta a family needs, and what each contains, is part of #11824's ordered removal plan, not this document.
 
 ---
 
 ## 10. The model in one paragraph
 
-Everything in the graph that has a lifecycle — everything **except events** (§8) — has **one** lifecycle word from a set of four, and optionally a **position** in a pipeline its kind declares. The lifecycle word says whether the commitment still stands; the pipeline stage says how far along it is; a goal's outcome is a third field of its own; visibility is a flag and never a word. Every reader asks one question — *does this still count?* — and answers it from exactly two places: the lifecycle word, and whether the stage sits in a `terminal` slot. Words declare their meaning where they are declared, so a pack can invent any stage names it likes and nothing that reads the graph has to learn them.
+Everything in the graph that has a lifecycle — everything **except events** (§8) — has **one** lifecycle word from a closed **base** set of four (plus any delta its family declares explicitly, §6), and optionally a **position** in a pipeline its kind declares. The lifecycle word says whether the commitment still stands; the pipeline stage says how far along it is; a goal's outcome is a third field of its own; visibility is a flag and never a word. Every reader asks one question — *does this still count?* — and answers it from exactly two places: the lifecycle word, and whether the stage sits in a `terminal` slot. Words declare their meaning where they are declared, so a pack can invent any stage names it likes and nothing that reads the graph has to learn them.
