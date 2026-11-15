@@ -58,7 +58,7 @@ note **or a justified skip citing the brief**. Both are **justified skips**, cit
    `:969`, its `attrs` tuple at `:975-976` — keyed by symbol, since this row moved twice), and
    "this batch" vs "a previous batch" is exactly that distinction — so the tier is **reported from `batch_id`**
    and no new edge property is added. A persisted marker would have to update the five MAP-form writers and
-   `sdk.py:19868`'s per-door `_honours` set in the same change, and a free-form `props` key is the branch this
+   `sdk.py:19869`'s per-door `_honours` set in the same change, and a free-form `props` key is the branch this
    scope refuses (`STORAGE-ARCHITECTURE.md` §11.4/§13: an OPEN set no guard bounds).
 4. **A5 evidence** — the `Subject` layer either populated (count + the four subject-edge families + the
    customer-visible readers) **or** the honest finding that it is not, with the reason — *"which of
@@ -128,7 +128,7 @@ note **or a justified skip citing the brief**. Both are **justified skips**, cit
 
 **⛔ Registry statement (required by the architecture review, F3).** C4 builds a **write-path mechanism**
 (A2's attach/resolve half) and `config/v4-mechanisms.yml` — *"the ONE PLACE the declared set lives"* (`#5064`),
-14 rows (13 when this finding was measured; `#11717` added `mention_record`), guarded by `tests/test_v4_declared_mechanisms.py` — has **no row for it**. `failure_policy` owns only
+15 rows, read at `d05688df59` (13 when this finding was measured; `#11717` added `mention_record` and `#11794` `declared_pack_relations`), guarded by `tests/test_v4_declared_mechanisms.py` — has **no row for it**. `failure_policy` owns only
 the HOLD half and is `not-implemented`. So after C4 the write path would implement a mechanism the registry
 cannot see: the `#5064` defect running **inverted**, in the epic whose own instrument extends that registry.
 **The scope requires one of two statements in C4's child, not silence:** (a) C4 adds a row (a new `s3_attach`,
@@ -425,7 +425,9 @@ mechanism).
 one-line risk statement, worth carrying into the plan: *"the instability is in **four declarations that live
 outside the epic bundle** — the verdict gate's closed enum, the corpus pin's three shapes, `RelationUpsert.attrs`'
 writer set, and the registry's 14 rows. Each forks cleanly; none was named in the scope. That is the whole risk,
-and it is cheap to close."*
+and it is cheap to close."* [*Kept as written — it is a quotation, not a citation. Re-read at `d05688df59`, the
+registry holds **15** rows: `#11794` added `declared_pack_relations` after this note was measured, which is the
+whole point of the row above.*]
 
 ---
 
