@@ -4424,17 +4424,17 @@ surfaces:
   - test_embed_metering.py   # #4488: the tally/middleware/hook + the registry-lane writer/reader (dual with `api`/`eval`)
   - test_retrieval_metering.py   # #4489: the tally/middleware/hook + the registry-lane writer/reader (dual with `api`)
   # #12764: the `core` half of the dual registration (see the `api` entry). The
-  # ledger writer this file pins — `tortoise/record_writer.py`'s
-  # `_measure_written_bytes` seam — selects `core` and nothing else (measured), so
-  # the `api` half alone would leave that seam's guard asleep on a
-  # record_writer.py-only diff.
-  # #12764: the `core` half of the dual registration (see the `api` row). The
-  # remaining two subjects fall through to `core` and match no SOURCE_PATTERNS
-  # row: `tortoise/postgres_bytes.py` (the meter + audit wrapper) and
-  # `tortoise/record_writer.py` (the `_measure_written_bytes` seam). Measured on
-  # this tree: `--changed-files tortoise/postgres_bytes.py -> ['core']` and
-  # `tortoise/record_writer.py -> ['core']`, so the `api` half alone would leave
-  # this guard asleep on a meter-only or writer-only diff.
+  # only subject that selects `core` and nothing else is the ledger writer
+  # `tortoise/record_writer.py`'s `_measure_written_bytes` seam (measured on this
+  # tree: `--changed-files tortoise/record_writer.py -> ['core']`), so the `api`
+  # half alone would leave that seam's guard asleep on a record_writer.py-only
+  # diff.
+  # ⚠️ `tortoise/postgres_bytes.py` does NOT belong in this row's justification:
+  # it has its own SOURCE_PATTERNS entry (`tools/ci_selection.py`) and selects
+  # `api` (measured: `--changed-files tortoise/postgres_bytes.py -> ['api']`).
+  # Two lanes merged here and each brought this comment; their duplicate ROW was
+  # collapsed but both blocks survived, and the survivor asserted `['core']` —
+  # a figure this head falsifies. Corrected rather than carried.
   - test_postgres_bytes.py
   - test_embedder_provision.py
   # #3990: the why block must name the operator that mediates a support (id +

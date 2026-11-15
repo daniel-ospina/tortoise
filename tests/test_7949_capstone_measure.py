@@ -6328,9 +6328,9 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `org_info` and `d05688df59` (#12482) added 54 more — so the cited span published
         # NEITHER reader and `test_each_block_arm_reds_on_the_mutation_it_guards` reported
         # "the only failure was a stale TABLE ROW" on every parametrization. The new START
-        # is the `point_count` read the row anchors (`:14465`) and the new END is again the
-        # blank line immediately before `return OrgInfoResponse(` (`:14542`), measured — the
-        # shift is +102 NET (50+54 insertions, one deletion each), never a 104-line offset.
+        # is the `point_count` read the row anchors (`:14530`) and the new END is again the
+        # blank line immediately before `return OrgInfoResponse(` (`:14607`), measured — the
+        # shift is +65 NET at BOTH ends (`d05688df59` reads `:14465`/`:14542` for these lines).
         ("04-plan.md", "**point budget - a POINTER, not a snapshot**", (
             ("14530", "point_count = await asyncio.to_thread("),
         ), "hosted_api"),
