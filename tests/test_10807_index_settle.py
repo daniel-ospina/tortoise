@@ -534,6 +534,17 @@ def test_every_consumer_passes_the_caller_precondition():
     green — the same vacuity the pair granularity was added to close, one level
     down. Declaring a site is now part of arming a wait in a documented module.
 
+    ⛔ AND THE SCOPE ITSELF IS PINNED TO A LITERAL, not merely tied to the
+    ledger. `_undeclared_sites` filters its candidates on
+    `_DOCUMENTED_CONSUMERS`, so emptying that set reports NO undeclared site.
+    The ledger-agreement assertion below closes that for an edit to ONE of the
+    two constants; this closes the remaining pair — a diff that removes a module
+    from BOTH `_DOCUMENTED_CONSUMERS` and every one of its `_DOCUMENTED_SITES`
+    pairs agrees with itself and quietly narrows what the floor speaks for. The
+    modules are therefore named here, where a change to either constant alone
+    cannot satisfy it (measured at #12859's review: `_DOCUMENTED_CONSUMERS =
+    set()` alone left this file green, 44 passed / 4 skipped).
+
     ⛔ AND EACH PAIR DECLARES ITS SETTLE-CALL-SITE COUNT, not merely its
     existence: with a SET of pairs, FIVE of the TEN declared pairs carried TWO
     waits, so removing one of the two — the DROP, keeping its recreate — left the
@@ -556,6 +567,18 @@ def test_every_consumer_passes_the_caller_precondition():
     paths = [p for p in here.parent.glob("test_*.py") if p.name != here.name]
     call_sites, missing = _settle_call_sites(paths)
     required = set(_settle._DOCUMENTED_CONSUMERS)
+    expected_consumers = {
+        "test_9079_handle_write_authority.py",
+        "test_search_engine.py",
+        "test_11682_quote_indexed.py",
+        "test_indexes.py",
+    }
+    assert required == expected_consumers, (
+        "`_DOCUMENTED_CONSUMERS` must name exactly the modules this pin speaks "
+        "for — it IS the filter `_undeclared_sites` applies, so emptying or "
+        "narrowing it (alone, or together with its ledger pairs, which agree "
+        "with themselves) voids the undeclared arm while this file stays "
+        f"green: {sorted(required)}")
     assert required <= set(call_sites), (
         "the scan must find the call site in each module this file documents — a "
         f"missing one means the pin went vacuous (a rename?): {sorted(call_sites)}")
