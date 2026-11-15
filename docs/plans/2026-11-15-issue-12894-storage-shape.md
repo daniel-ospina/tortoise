@@ -131,7 +131,7 @@ that governs the subject. (Filed as its own item in §A6, debt row D-22.)
 
 | # | Document | Status | What was taken from it (section / line) |
 |---|---|---|---|
-| 1 | `docs/durability-posture.md` (936 lines) | **READ (full)** | §The rule `:41`; `:48` *"It is never the durability mechanism"*; `:59` *":GraphEvent is the 30-day delivery/audit stream, not a backup"*; §Authoritative node classes `:73`; §The one carried high-water mark `:264` (the whole `:GraphEventMeta` block `:264-470`: the `last_seq` allocator, `MAX_SEQ = 2**53-1`, `first_seq` never carried, `reestablish_watermark`, the "**A rebuild still requires a QUIESCED graph**" residual); §Per-deployment posture `:471` incl. the five deployment rows `:500-560` and the record's own row + §The record's posture `:583`; §Why this document exists `:660` (the gate's claim shapes, `#9867`'s blind wordings); §Open items `:710` |
+| 1 | `docs/durability-posture.md` (936 lines) | **READ (full)** | §The rule `:41`; `:48` *"It is never the durability mechanism"*; `:59` *":GraphEvent is the 30-day delivery/audit stream, not a backup"*; §Authoritative node classes `:73`; §The one carried high-water mark `:264` (the whole `:GraphEventMeta` block `:264-470`: the `last_seq` allocator, `MAX_SEQ = 2**53-1`, `first_seq` never carried, `reestablish_watermark`, the "**A rebuild still requires a QUIESCED graph**" residual); §Per-deployment posture `:471` incl. the five-row deployment table `:575-581` (the record's own row is `:577`) and §The record's posture `:583`; §Why this document exists `:660` (the gate's claim shapes, `#9867`'s blind wordings); §Open items `:710` |
 | 2 | `docs/architecture/STORAGE-ARCHITECTURE.md` (2099) | **READ (§1, §2, §2.0, §2.1, §2.2, §3, §5, §5.1, §5.2, §6, §6.1, §12.1c, §14.1, §17.1–§17.4.6)** | `:104` §1 the problem; `:116` §2.0 the owner ruling **and its 2026-11-07 SPLIT + the `OVERRIDES:` line**; `:173` §2.1 what FalkorDB charges for; `:217` §3 the split; `:236` *"READ THE AUTHORITY COLUMN AS AUTHORITY, NOT AS LOCATION"*; `:243` the per-write truth test; `:275` *"journal completeness is a PRECONDITION"*; `:285` **§ "The journal's scope: REBUILD, not durability"**; `:316` the invariant `derived tables = replay(the journal) NOT recompute(the sources)`; `:342` *"ONE ATOMIC WRITE … may be an outbox … **This is the whole answer**"* and *"**The current JSONL cannot do (1)**"*; `:361` *"They are also recorded in the journal, which is truth"*; `:427` §5.2 measured growth (and the per-capture total `#9025`); `:450` §6 the split does not fix volume; `:1115` §12.1c (vector index decision — **this, not SEARCH §12.1c, is where §12.1c lives**; see A1.3); `:1546` §14.1 decisions; `:1664` §17.1; `:1700` the 387-site measurement; `:1702` §17.2; `:1822` §17.4.2; `:2090` §17.5 |
 | 3 | `docs/architecture/SEARCH-ARCHITECTURE.md` (566) | **READ (§3, §4, §7)** | `:157` §3 "What runs where" (writes/projections/backup-restore stay in FalkorDB; the graph stays a *derived copy*); `:205` §4 "Authority (unchanged, cited not restated)"; `:361` §7 "The window" (why a complete cache is 193 % of the storage target and the window is not yet armed) |
 | 4 | `docs/ONTOLOGY.md` (1561) | **READ (§2, §4.2, §4.7, §5 headings)** | `:61` §2 the Four-Ontology Model table — the layer vocabulary used verbatim below; `:70` the Procedural row (`Object.status` is a **write-through cache** and *"the journal/event stream is the reconstruction source"*); `:75-97` the state-centric model (*"the Episodic layer's events are the truth; status is a fold cache over the events — never the truth itself"*); `:638` §4.7 temporal model; §5's kind vocabularies (read for the `decision`/`statement` split only) |
@@ -445,7 +445,7 @@ consequences this map must carry:
 text-scan covers three properties (`n.c`, `n.content`, `n.text`); the `payload`/`props` half is pinned
 separately by `tests/test_10000_turns_record_only.py` on a **2-turn** capture, not on this corpus — and
 whether those carriers should leave the graph is explicitly *"a placement decision of their own"* belonging
-to the record→cache seam (`#10070`/`#10017`), *"not claimed here"* (`:91-101`).
+to the record→cache seam (`#10070`/`#10017`), *"not claimed here"* (`:85-87`; `:91` opens the instrument's limits section, which is the next bullet's subject).
 
 ⚠️ **Instrument limit, quoted rather than assumed away:** `GRAPH.MEMORY USAGE` reads whole MB, reads **0** for
 the armed corpus, and is **blind to the HNSW `vectorset` module** (`#5331`) — `used_memory` is the instrument,
@@ -637,7 +637,7 @@ things, one of which `#12458` already measured as fatal:
 | Record **replay** with a `start_seq` watermark seam | **YES** | `record_projection.replay_plan` (`:6505-6545`), `#9187` |
 | **Record → cache** projection (a 5th rebuild engine) | **YES** | `cache_projection.py`, `FalkorProjection.rebuild_from_record` (`projection/__init__.py:19188`) |
 | Record **reconcile** with a production trigger | **YES** | `record_reconcile.py` (`python -m tortoise record-reconcile`), `#9189` |
-| Record **backup / restore** verbs + a drill | **YES (drill not against hosted)** | `record_backup.py`, `record-restore` (`durability-posture.md:500-560`) |
+| Record **backup / restore** verbs + a drill | **YES (drill not against hosted)** | `record_backup.py`, `record-restore` (`durability-posture.md:577`, the hosted-record row of the deployment table; §The record's posture `:583`) |
 | Journal **segments** (manifest + boundary + a raising reconstruction claim) | **YES, writers flag-gated OFF** | `journal_segments.py`, `TORTOISE_JOURNAL_SEGMENTS` |
 | Atomic-write **ordering** on 4 doors | **PARTIALLY** | `create_point` (`#7951` inc 1 — **the record IS the commit point**), `update_point` revision arms (inc 2a), `delete_point` (**order reversed by `#9207`**), onboarding (declared, not journalled) |
 | **`last_applied_seq` on the record** (per-projection watermark) | **NO** — and this is the gap | the only `last_applied_seq` is `consistency.py:1341-1396`, a **file-based** journal↔graph watermark, not a record-side one. `#7951` inc 2's second half is *"STILL OPEN"* |
@@ -1086,7 +1086,7 @@ it were a description).
 | ordinal allocated, transaction rolls back | n/a (the file's index cannot be taken back, but a torn tail is sealed and shifts no index) | **the counter rolls back too** — no gap, no burned position, and the *next* allocation takes the same number |
 | record commits, journal export fails | n/a | **the record is authoritative**; the export is re-rendered from the record **once M15's widening lands** (§A7.5.8) — before it, this row is a fiction and is labelled as one |
 | record commits, cache write fails | replay heals (`#7951` T5) | unchanged — replay heals |
-| journal export commits, record fails | **today's live ordering cannot produce this** (the record is written *after* the append, `#9078`) | **cannot happen** by construction — the file gains a line only after COMMIT |
+| journal export commits, record fails | ⛔ **it DOES happen today** — the append precedes the state write, so an aborted `:Session` MERGE leaves an orphan `SessionRecorded` with no row (`#9390`, OPEN; **D-26**, `STORAGE-ARCHITECTURE.md:1672-1698`). An earlier revision of this row said "cannot happen today" and **D-26 is the row that corrects it** | **cannot happen** by construction — the file gains a line only after COMMIT, so a journal record with no record row has nothing to be a copy of |
 | ⛔ **the reverse: a journal record for a write that never landed** | **it DOES happen today** — an aborted `:Session` MERGE leaves an orphan `SessionRecorded` that wins the coalesce fold (`#9390`, OPEN; `STORAGE-ARCHITECTURE.md:1672-1698`) | **unchanged by this design** — the flip does not address it, and this table must not claim the journal is a strict prefix |
 | ⛔ **a live write whose position is UNPROVABLE** (`EventLog.append` → `None`) | **it DOES happen today** — a recount past a peer's 5 s deadline, or a sidecar that cannot be written (D-25, `#9252`, OPEN) | **fixed on the record-armed lane**: the counter is the position, so no recount is on the path |
 | ⛔ **pre-transaction `:EpMeta` / `:Source` adopt-on-touch land, then the record rolls back** | **it happens today** — both are written *before* the append (A7.4) | **still happens**: an advanced EP epoch and an adopted `canonicalUrl` for a mutation that never committed. Nothing reconciles it; `#5166` and `source_identity --backfill` are the only repairs. This is the last paragraph of A7.4 stated as a row. |
@@ -1161,7 +1161,6 @@ journalled is quoting a description, not a decision — which is why it needs an
 **And the bound (`#9025`) stays OUT.** Nothing in this design bounds the journal, and D-27 now shows why a bound
 on `journal_event` is a resurrection bug rather than a cost decision. `#9025`'s file-only decision cannot be
 extended to the table, and this section does not extend it.
-
 
 ### A7.6 The falsifiers — one per blocking answer, and the reviewer's question applied
 
@@ -1353,7 +1352,7 @@ is the step that changes it — not a drive-by.
 | **B3** | `record_cursor` absent from the record's table registry → restore restarts the allocator at zero | **§A7.8** — the full deliverable list (table, RLS `USING` **and** `WITH CHECK`, `GRANT SELECT, INSERT, UPDATE` and **no DELETE**, `THE_RECORD_TABLES`, `RECORD_MIGRATIONS` both directions) + the **first-updatable-record-table** rationale + the purge decision; **§A7.8** falsifier: restore a dump, assert the next write is `max(seq)+1` | **§A7.8** (three sub-assertions: table present, counter ≥ max, restore **refuses** when it is not) |
 | **B4** | the arm is never stated; both arms break a guarantee | **§A7.5.6** — **AFTER COMMIT**, with the three-way argument (before / after / staging-is-not-a-third-arm), the contiguous-prefix export that re-serialises into seq order, and the admitted price: **the per-graph lock returns on the export path**; §A7.5.1 supplies the lock fact that makes it safe | **§A7.6 #9** — commit 5 and 6 out of arrival order; the file must still read 5,6 |
 | **B5** | a stale counter becomes permanent silent loss | **§A7.5.2** (`GREATEST(cursor, max(seq)) + N`) and **§A7.5.4** (the live path **drops** `ON CONFLICT DO NOTHING`; replay refuses on divergence); **§A7.5.1** states the refusal posture | **§A7.6 #12** — reconciliation as an **armed** check, `cursor < max` **refuses the next write** |
-| **B6** | cursors ARE `:GraphEvent.seq`, so §A7.1 and §A4.5 cannot both be built | **§A7.1** — corrected to *"`:GraphEvent` **keeps its own positions`"*, with the two-coordinate table, the bounded `MAX_SEQ` domain and `first_seq`-purge-maintained facts; **§A7.7 step 4** restates it as a **build instruction** so Stage C cannot delete `next_seq` and write the journal's number into the feed | **§A7.6 #4** (+ §A7.7's step-4 warning) |
+| **B6** | cursors ARE `:GraphEvent.seq`, so §A7.1 and §A4.5 cannot both be built | **§A7.1** — corrected to *"`:GraphEvent` **keeps its own positions**"*, with the two-coordinate table, the bounded `MAX_SEQ` domain and `first_seq`-purge-maintained facts; **§A7.7 step 4** restates it as a **build instruction** so Stage C cannot delete `next_seq` and write the journal's number into the feed | **§A7.6 #4** (+ §A7.7's step-4 warning) |
 | **B7** | `journal_event` is the only carrier of `Object.status`/`Subject.status` | **§A6 D-27** (new row: the terminal-fold stickiness makes a bound a **resurrection** bug) + **§A7.5.12** (the bound stays out) + **§A7.7 step 7** (the bound is the FILE only; a table bound is a different decision); §A2.8/D-30 give the in-tree precedent (`#3870`) | **§A7.6 #12**'s P0 arm + §A7.8 item 7 (the purge is extended only if a ruling says so) |
 
 **Material (M1–M15).** Each is folded into the section it belongs to — and the table is the proof none was dropped.
@@ -1677,7 +1676,23 @@ against the source before it was applied.
 document is only as good as its pointers, and pointers decay the moment you edit the document around them.
 Nine cycles found no change to the *shape* the map describes; they found that roughly one in ten of the
 `file:line` citations was off — a blank line, a mid-set range, a quote with a swapped noun. That is a fair
-estimate of the defect rate to expect in any un-reviewed citation layer. Rows from every cycle are in the table below, in the order they were found.
+estimate of the defect rate to expect in any un-reviewed citation layer.
+
+**Cycle 10**, fresh-context, found 4 — and the first one is the only finding in seven cycles that is not a
+pointer: A7.5's window table asserted that **"journal export commits, record fails"** cannot happen today,
+while **D-26** — a row this same document added — exists precisely because `#9390` shows it does (an aborted
+`:Session` MERGE leaves an orphan `SessionRecorded` with no record row). The row is corrected, and the
+correction is now the strongest argument for the flip: the class exists today *because* the append precedes
+the state write, and the flip removes it by construction, the record allocating the position first. The other
+three were the familiar pointer class (`durability-posture.md:500-560` cited twice for material at `:575-581`,
+and two quotes placed one paragraph late).
+
+**The cumulative lesson is worth stating plainly, because it is the artifact's own thesis:** an archaeology
+document is only as good as its pointers, and pointers decay the moment you edit the document around them.
+Ten cycles found exactly one error in the *shape* the map describes (the row above, contradicted by the map's
+own D-26); everything else was citations — a blank line, a mid-set range, a quote with a swapped noun. That
+is a fair estimate of the defect rate to expect in any un-reviewed citation layer, and it is why the map's
+claims are worth more than its pointers. Rows from every cycle are in the table below, in the order they were found.
 
 | what the reviewer found | verified? | what changed |
 |---|---|---|
@@ -1726,6 +1741,9 @@ estimate of the defect rate to expect in any un-reviewed citation layer. Rows fr
 | `#11821` was quoted as *"rented for a watermark"*; its body says *"so it rents RAM for a counter"* | ✅ (`gh issue view 11821`, body) | quoted verbatim, including its "watermark, not provenance" clause |
 | the `#9025` census was printed as "974 MB, 652 MB used"; 652 MB is the EVENTS DIRECTORY, the volume's used space is 700 MB (78 %) | ✅ (`gh issue view 9025`, comment 6867080064: `/dev/vdc 974M 700M used … 78%`, `/data/events 652M`) | corrected in §A1.2 and in D-09, which now agree |
 | §12's cycle-8 sentence said "two rows" and then listed three | ✅ (the table carries three drift rows plus the cycle-7 row) | corrected to three plus one |
+| ⛔ **A7.5's window table said "journal export commits, record fails" cannot happen today, while D-26 — this document's own row — exists because `#9390` shows it does** | ✅ (`STORAGE-ARCHITECTURE.md:1672-1698`; `#9390` OPEN; the append precedes the state write) | the row now says it happens today and that the **flip** is what removes the class, which is a stronger argument for A7.5 than the row carried before |
+| `durability-posture.md:500-560` was cited twice for material at `:575-581` (the five-row deployment table; the record's own row is `:577`), and `:500-560` is the embedding rule and the `:Source` field-split table | ✅ (`sed -n '573,584p'`) | both pointers re-pointed at the deployment table and the record's posture section |
+| two quotes in `§A2.6` were placed at `:91-101`; they are at `:85-87`, and `:91` opens the next bullet's subject | ✅ (`sed -n '85,87p'`) | corrected |
 
 ⛔ **The most important thing this cycle did was make the shape harder, not easier.** Two findings (D-25,
 D-26) are cases A7.5 had **assumed away in both directions** — a record write with no journal position, and a
