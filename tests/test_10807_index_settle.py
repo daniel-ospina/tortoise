@@ -272,6 +272,13 @@ def _until_is_armed(call, none_names=frozenset()) -> bool:
     pin cannot evaluate those, and they are named here rather than implied to be
     covered. A `**{"until": None}` splat is reported UNARMED, which reds the pin
     rather than passing it.
+    ⛔ AND A CONSTANT-BODIED LAMBDA IS THE SAME VACUOUS READ as `until=None`:
+    `lambda r: True` returns on the FIRST catalogue read, so it satisfies the
+    `missing` arm while re-introducing the pre-drop read this pin exists to
+    forbid (measured at #12856's review cycle 8: rewriting the named red's
+    recreate wait as `until=lambda r: True` left every check green). A FALSY
+    constant is not blessed — it waits out the deadline and reds the caller's
+    assertion, which is fail-closed, so only a truthy constant is refused.
     """
     for kw in call.keywords:
         if kw.arg != "until":
@@ -279,6 +286,8 @@ def _until_is_armed(call, none_names=frozenset()) -> bool:
         value = kw.value
         if isinstance(value, ast.Constant):
             return value.value is not None
+        if isinstance(value, ast.Lambda) and isinstance(value.body, ast.Constant):
+            return not value.body.value
         return not (isinstance(value, ast.Name) and value.id in none_names)
     return False
 
@@ -374,11 +383,15 @@ def _settle_site_functions(paths) -> dict[str, dict[str, int]]:
     """
     out: dict[str, dict[str, int]] = {}
 
-    def _record(path_name: str, lines: set[int], node, prefix: str) -> None:
+    def _record(path_name: str, lines, node, prefix: str) -> None:
         for child in ast.iter_child_nodes(node):
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 name = prefix + child.name
                 end = child.end_lineno or child.lineno
+                # ⛔ COUNT CALLS, NOT DISTINCT LINES: two waits written on one
+                # line are two armed calls, and a `set` of line numbers would
+                # report one — so deleting the second stayed green (measured at
+                # #12856's review cycle 8).
                 count = sum(1 for line in lines
                             if child.lineno <= line <= end)
                 if count:
@@ -392,7 +405,7 @@ def _settle_site_functions(paths) -> dict[str, dict[str, int]]:
         if b"index_rows_after_settle" not in source:
             continue
         call_sites, _missing = _settle_call_sites([path])
-        lines = set(call_sites.get(path.name, []))
+        lines = call_sites.get(path.name, [])
         if not lines:
             continue
         _record(path.name, lines, ast.parse(source), "")
@@ -543,7 +556,10 @@ def test_the_scan_sees_a_module_prefixed_call_and_its_missing_until(tmp_path):
 
     ⛔ `test_h` is the same defect ONE NAME AWAY — `NONE = None` then
     `until=NONE`; a pin that only reads literals certifies it (measured at
-    review cycle 7).
+    review cycle 7). `test_i`/`test_j` are the PREDICATE form: a truthy constant
+    body (`lambda r: True`) returns on the first read and must be reported
+    missing, while a falsy one waits out the deadline and reds the caller
+    (fail-closed) and stays armed (measured at review cycle 8).
     """
     mod = tmp_path / "test_synthetic_consumer.py"
     mod.write_text(
@@ -554,24 +570,49 @@ def test_the_scan_sees_a_module_prefixed_call_and_its_missing_until(tmp_path):
         "def test_a(proj):\n"
         "    _index_settle.index_rows_after_settle(proj)\n"
         "def test_b(proj):\n"
-        "    _index_settle.index_rows_after_settle(proj, until=lambda rows: True)\n"
+        "    _index_settle.index_rows_after_settle(proj, until=visible)\n"
         "def test_c(proj):\n"
-        "    index_rows_after_settle(proj, until=lambda rows: True)\n"
+        "    index_rows_after_settle(proj, until=visible)\n"
         "def test_d(proj):\n"
         "    settle(proj)\n"
         "def test_e(proj):\n"
-        "    settle(proj, until=lambda rows: True)\n"
+        "    settle(proj, until=visible)\n"
         "def test_f(proj):\n"
         "    visible(proj)\n"
         "def test_g(proj):\n"
         "    index_rows_after_settle(proj, until=None)\n"
         "def test_h(proj):\n"
-        "    index_rows_after_settle(proj, until=NONE)\n",
+        "    index_rows_after_settle(proj, until=NONE)\n"
+        "def test_i(proj):\n"
+        "    index_rows_after_settle(proj, until=lambda r: True)\n"
+        "def test_j(proj):\n"
+        "    index_rows_after_settle(proj, until=lambda r: False)\n",
         encoding="utf-8")
     call_sites, missing = _settle_call_sites([mod])
     assert call_sites == {
-        "test_synthetic_consumer.py": [6, 8, 10, 12, 14, 18, 20]}, call_sites
-    assert missing == {"test_synthetic_consumer.py": [6, 12, 18, 20]}, missing
+        "test_synthetic_consumer.py": [6, 8, 10, 12, 14, 18, 20, 22, 24]}, call_sites
+    assert missing == {
+        "test_synthetic_consumer.py": [6, 12, 18, 20, 22]}, missing
+
+
+def test_two_waits_on_one_line_are_counted_as_two(tmp_path):
+    """The per-pair count must count CALLS, not distinct line numbers.
+
+    A `set` of `call_sites` collapsed two waits written on one line into one, so
+    deleting the second matched the declared count and the pin stayed green
+    (measured at #12856's review cycle 8). Every current site is multi-line, so
+    this shape is pinned synthetically rather than waited for.
+    """
+    mod = tmp_path / "test_synthetic_oneline.py"
+    mod.write_text(
+        "from tests._index_settle import index_rows_after_settle, "
+        "point_index_drops_visible as visible\n"
+        "def test_two(proj):\n"
+        "    index_rows_after_settle(proj, until=visible); "
+        "index_rows_after_settle(proj, until=visible)\n",
+        encoding="utf-8")
+    assert _settle_site_functions([mod]) == {
+        "test_synthetic_oneline.py": {"test_two": 2}}
 
 
 def test_index_cells_flattens_every_row():
