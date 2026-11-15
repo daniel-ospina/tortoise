@@ -427,6 +427,47 @@ def _rebound_names(tree: ast.AST) -> set[str]:
     return out
 
 
+def _laundered_imports(tree: ast.AST) -> set[str]:
+    """Local names bound by an import that is NOT the documented one.
+
+    ⛔ AN IMPORT BINDS A NAME WITHOUT A `ast.Name(Store)` NODE, so
+    `_rebound_names` never saw it and a SECOND import of the same name left the
+    documented spelling certified ARMED over a non-blocking runtime binding.
+    Measured at #12859's review on a copy of the real tree, with the waits
+    untouched — only one extra line appended:
+
+        from tests._fake_settle import index_kind_absent   # after the real import
+
+    left the pin GREEN (`21 passed`) while `index_kind_absent` resolved to the
+    fake, which returns True for any rows: the call returned `reads: 1` with the
+    PRE-DROP catalogue. Same for the module-alias spelling
+    (`from tests.fake_index_settle import _settle`). Contrast: the same fake
+    import ALONE reds, because then the name is not in `aliases` at all — so the
+    hole is exactly the two-import shape.
+
+    Every import-bound name counts EXCEPT the documented bindings: a
+    `_ROW_PREDICATES` symbol from this module, or `_index_settle` from `tests`,
+    or the module itself.
+    """
+    out: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            module = (node.module or "").lstrip(".")
+            for alias in node.names:
+                documented = (
+                    (module in (_SETTLE_MODULE, "_index_settle")
+                     and alias.name in _ROW_PREDICATES)
+                    or (module == _SETTLE_PACKAGE and alias.name == "_index_settle"))
+                if not documented:
+                    out.add(alias.asname or alias.name)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                documented = alias.name.lstrip(".") == _SETTLE_MODULE
+                if not documented:
+                    out.add(alias.asname or alias.name.split(".")[0])
+    return out
+
+
 def _is_settle_module(node: ast.AST, module_aliases, module_roots=frozenset()) -> bool:
     """Does `node` name the `tests._index_settle` module itself?
 
@@ -535,7 +576,7 @@ def _lambda_is_row_predicate(lam: ast.Lambda, ctx=None) -> bool:
     own assertion, which is fail-closed.
     """
     params = {a.arg for a in (*lam.args.posonlyargs, *lam.args.args,
-                              *lam.args.kwonlyargs)} - {"_"}
+                              *lam.args.kwonlyargs)}
     if not params:
         return False  # not a predicate over rows at all
     ok, constant = _foldable_bool(lam.body)
@@ -887,7 +928,7 @@ def _settle_call_sites(paths) -> tuple[dict[str, list[int]], dict[str, list[int]
         ctx = {"aliases": aliases, "module_aliases": module_aliases,
                "module_roots": module_roots,
                "numeric": numeric, "ambiguous": ambiguous,
-               "rebound": _rebound_names(tree)}
+               "rebound": _rebound_names(tree) | _laundered_imports(tree)}
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
