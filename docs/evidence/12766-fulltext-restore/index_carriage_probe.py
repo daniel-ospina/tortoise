@@ -34,7 +34,7 @@ import json
 import sys
 import uuid
 
-import fulltext_restore_cost as H
+import fulltext_restore_cost as H  # same directory; the shared client/plumbing helpers
 import redis
 
 DEFAULT_NODES = 5000

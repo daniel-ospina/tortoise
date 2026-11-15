@@ -191,8 +191,32 @@ by position alone would charge the org a **second time**, and no row count
 could reveal it. The meter therefore filters `xmin = pg_current_xact_id()`: measured,
 an own insert matches and a suppressed conflict carries the older xid. It must
 be called **in the write's own transaction** (outside one it reports 0 rows —
-that is the contract, not a bug); under a `SAVEPOINT` it under-counts, which is
-the safe direction and which the audit then reports as `unmetered`.
+that is the contract, not a bug). ⛔ **It runs under a `SAVEPOINT`**, and the
+reason is the one thing swallowing its exception cannot buy: a failed statement
+leaves a PostgreSQL transaction **ABORTED**, so the write's own `commit()`
+becomes a ROLLBACK and the whole record write disappears while the door reports
+`APPLIED` (#12781, `main` red at `9e934efad5` with ten empty-record failures).
+`ROLLBACK TO SAVEPOINT` undoes only the failed read and the rows — inserted
+BEFORE the savepoint — still commit. MEASURED on PG16 with the meter refused
+(`InsufficientPrivilege`): **0 rows** committed without the savepoint, **1 row**
+with it.
+
+The savepoint does **not** skew attribution, which is why it is a savepoint and
+not a second connection: the meter is a READ, and PostgreSQL keeps the
+**top-level** xid for a subtransaction that performs no write. MEASURED on PG16:
+inside the savepoint `pg_current_xact_id()` returned the same `919` as before it,
+the row's `xmin` stayed `919`, and `journal_event_bytes_for_rows` still reported
+`rows: 1`. (The earlier wording here — *"under a SAVEPOINT it under-counts"* —
+is true only of a subtransaction that itself WRITES, i.e. of a savepoint placed
+BEFORE the insert, which is not what this does. ⛔ The same sentence still stands
+in the header of `20261114000001_per_org_postgres_bytes.sql`, which is
+APPEND-ONLY (`check-migration-append-only` refuses a modified migration) and
+therefore cannot be corrected in place: this document and
+`postgres_bytes.measure_written_rows`'s docstring are the correction, and neither
+the header's "takes no savepoints today" nor its "under-counts" clause is a
+reason to remove the savepoint.) An **autocommit** connection
+takes no savepoint: each statement is its own transaction, so a failure there
+aborts nothing the caller owns.
 
 **Measured, then RECORDED after the commit.** `RecordWriter.write` only
 *measures*; the ledger increment happens where the commit is known
