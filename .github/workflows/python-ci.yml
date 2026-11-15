@@ -3095,32 +3095,10 @@ jobs:
           # than from a job-level `env:` block (see the #6253 note on test-slow).
           path: ${{ runner.temp }}/pytest.log
           if-no-files-found: ignore
-      - name: Validate docker-compose.yml (ports + header edits)
-        # T1 Step 6 ships with zero other verification — no workflow validates
-        # compose today. ubuntu-latest has docker + the repo checked out.
-        run: docker compose config -q && echo "compose config OK"
-      - name: Deployment configs STATE both embedding switches (#12926)
-        # `docker compose config -q` above proves the file PARSES; it says nothing
-        # about any environment key. #11445 put the "what earns an embedding"
-        # guarantee in the SHIPPED CONFIG rather than a code default, and #12926
-        # measured that nothing enforced it: the two switches read OPPOSITE ways
-        # when unset (value gate ON, embed gate OFF), so a channel that omits them
-        # silently turns half the rule off with nothing crashing.
-        #
-        # This refuses that BEFORE merge, on the RESOLVED configuration of every
-        # deployment channel the tree ships — each read through its own grammar
-        # owner (`docker compose config --format json`, `fly config show` /
-        # `tomllib`, a strict `ENV`/`export` reader) and DISCOVERED from the tree
-        # rather than listed. A channel it cannot read FAILS; it never passes
-        # quietly. Runs here because this job already has docker + the installed
-        # project (the switch names are imported from the gate modules, so a
-        # rename in code moves the check with it).
-        # ⚠️ NOT a runtime refusal, and NOT a hand-deploy gate: the app runs fine
-        # without the switches, and the owner ruled a hand deploy the operator's
-        # problem (`#12926`).
-        run: |
-          python3 tools/embed_switch_gate.py
-          echo "embedding switches stated in every deployment channel"
+      - name: Validate docker-compose.yml (ports, headers, embedding switches #12926)
+        # `config -q` proves it PARSES; the gate refuses a channel that OMITS either switch —
+        # why, and what it resolves: tools/embed_switch_gate.py. 4 lines on purpose (#12926).
+        run: docker compose config -q && echo "compose config OK" && python3 tools/embed_switch_gate.py
       - name: Docs-consistency guard (embedded must never be "default" again)
         # #942 T1 enforcement: the flipped onboarding surfaces must not regress.
         # Runs even when the pytest step fails (if: always()) — it is the
