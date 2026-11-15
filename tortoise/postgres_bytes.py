@@ -312,7 +312,7 @@ def _meter_statement(cur: Any, statement: str, *, why: str) -> None:
     only the caller knows whether its transaction is still worth committing —
     and the outer ``except`` still returns ``None`` so the meter stays total.
 
-    ⛔ THAT MAKE THIS ARM DISCLOSED, NOT REPAIRED, and it is stated here so the
+    ⛔ THAT MAKES THIS ARM DISCLOSED, NOT REPAIRED, and it is stated here so the
     code is not read as more than it is: a caller that commits into a
     transaction this arm could not recover still rolls its rows back. The
     realistic triggers (``25P02`` on an already-aborted transaction, ``25P01``
