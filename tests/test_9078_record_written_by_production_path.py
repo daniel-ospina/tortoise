@@ -2141,7 +2141,9 @@ def _ensure_metering_schema(conn) -> None:
     function, so on a container that already carried it a CHANGE to the metering
     migration was invisible and this leg PASSED while certifying a meter the
     tree does not ship — measured: moving the attribution filter to `AND false`
-    (the `xref` predicate in `20261114000001_per_org_postgres_bytes.sql`) PASSES
+    (the `t.xmin::text = pg_current_xact_id()::text` predicate in
+    `20261114000001_per_org_postgres_bytes.sql`, the one the header calls "the
+    exact discriminator") PASSES
     on a container that already has the function, and REDS once the function is
     dropped first. CI is fresh per run and was never affected; a local re-run
     against `_record_db`'s reused container was. So the files are re-applied on
@@ -2648,7 +2650,8 @@ def test_the_meter_reports_a_POSITIVE_figure_from_a_real_meter_rpc(tenant):
     is POSITIVE — never merely present.
 
     Falsifier — the one that DISCRIMINATES, measured: break the attribution in
-    the migration (add `AND false` to the `xref` filter of
+    the migration (add `AND false` to the `t.xmin::text = pg_current_xact_id()`
+    predicate — the `journal_event` SELECT's last `WHERE` clause — of
     `20261114000001_per_org_postgres_bytes.sql`) and this reds at
     `measured.rows == 1` with `it attributed 0 row(s)` — the silent-zero shape
     the savepoint ordering exists to avoid. Returning the row from a row set
