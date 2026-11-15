@@ -1945,21 +1945,27 @@ def test_the_record_can_clear_the_carriers_it_can_set():
     — a stale current-reading word, or nothing at all — while the graph holds
     `superseded` (#9974).
 
-    ⛔ WHAT #12745 REMOVED IS THE `status='live'` VARIANT, NOT THE NULL-CARRIER
-    SHAPE. `update_entity(status='live', supersededBy=None, supersededAt=None)`
-    on a superseded row is REFUSED (`superseded` is terminal for an Object;
-    measured at this head: refused, journal delta 0) — and that is the only
-    UN-SUPERSEDE route it closes (the guard refuses every dead → non-terminal
-    WORD, not just `live`). The bare CLEAR still reaches this mapping: measured,
+    ⛔ #12745 GOT THE PREMISE WRONG, NOT THIS MAPPING (#12825 restored it).
+    `update_entity(status='live', supersededBy=None, supersededAt=None)` on a
+    superseded row is **ACCEPTED** — measured at #12882's head: the row goes
+    `('live', None, None)`, so no carrier survives for the cache to re-derive
+    the dead word from and a rebuild derives nothing (`cache_projection`'s NOT
+    MONOTONE bullet), i.e. graph and record AGREE. What the door still REFUSES
+    is the INCOHERENT half: `update_entity(status='live')` **alone** — measured
+    at this head: refused (`'superseded' is TERMINAL for a :Object`), journal
+    delta 0 — where the carriers stay set and the record keeps reading
+    `superseded` against a live graph. The guard refuses every dead →
+    non-terminal WORD, not just `live`. The BARE CLEAR also still reaches this
+    mapping: measured,
     `update_entity(obj, supersededBy=None, supersededAt=None)` on a superseded
     row is ACCEPTED and journals
     `EntityMutated op=supersede state={'supersededBy': None, 'supersededAt': None}`
     — the same `type`/`label`/`op` and an identical `state` mapping as the event
-    below — while leaving the row terminal. So the
-    record can both EXPRESS the clear and RECEIVE it; what it cannot do is make
-    the row current, which is a DOOR decision (`tortoise/cache_projection.py`'s
-    NOT MONOTONE bullet carries the same bound). The assertions below are
-    unchanged: they exercise `mutations_for`, never the SDK.
+    below — while leaving the row terminal. So the record can both EXPRESS the
+    clear and RECEIVE it; what the bare clear cannot do is make the row current,
+    which is a DOOR decision (`tortoise/cache_projection.py`'s NOT MONOTONE
+    bullet carries the same bound). The assertions below are unchanged: they
+    exercise `mutations_for`, never the SDK.
     """
     from tortoise.record_projection import mutations_for
 

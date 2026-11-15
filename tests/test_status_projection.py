@@ -1257,6 +1257,22 @@ class TestLifecycleCarrierCoherence:
             # a carrier under either spelling). Its EFFECT is NOT pinned here: a
             # snake carrier SET is what writes the shadow property (#12782).
             sdk.update_entity(oid, superseded_by=None, superseded_at=None)
+
+            # ── a BARE carrier CLEAR (no `status` key at all) is still ACCEPTED
+            # on a superseded row and leaves the row TERMINAL: with no status
+            # named there is no transition to ask about, so the guard above never
+            # runs — the carriers clear while the row stays dead. Restated from
+            # the assertion #12790 dropped when it rewrote this test: the
+            # BEHAVIOUR never changed, only its pin did (#12882 review F2).
+            bare = _make_carrier_entity(sdk, "Object", "gamma")
+            sdk.update_entity(bare, status="superseded",
+                              supersededBy="gamma-v2",
+                              supersededAt="2026-01-01T00:00:00Z")
+            sdk.update_entity(bare, supersededBy=None, supersededAt=None)
+            cleared = _carrier_row(sdk, "Object", "gamma")
+            assert cleared[1:] == ("superseded", None, None), (
+                "the bare carrier CLEAR did not clear both columns while "
+                f"leaving the row dead: {cleared}")
         finally:
             sdk.close()
 
