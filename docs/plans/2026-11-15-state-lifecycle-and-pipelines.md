@@ -18,7 +18,7 @@ This is the **target model** for how anything in the graph that has a state says
 
 **Issue of record:** #11824 · **Supersedes the design of:** §4.2 Subject status, §4.3 Object status, §5 Point status, `goalState` (§4.3), pack `statuses`/`folds` (§9), pipeline stages.
 
-> **OVERRIDES:** the extractor's recorded removal-from-recall target (`EXTRACTOR-V4-ARCHITECTURE.md:1084`, 2026-10-26: a journaled `restatus` to **`archived`**) and the `archived` word in `SUBJECT_STATUS_VALUES` (`commit_ops.py:123-124`) — this model ends a thing with no successor by `deprecated`, and makes filing-away a visibility **flag** rather than a lifecycle word, because a word that means both *ended* and *hidden from a view* is the collision §2 exists to remove. That decision is reopened here, on #11824, and not adopted quietly.
+> **OVERRIDES:** three recorded positions this model deliberately reverses, all named here so the departure is findable rather than read as history — (1) `docs/ONTOLOGY.md` §4.3 (`:449`, owner-approved text under that file's CRITICAL RULE at `:41`): *"a retirement with no successor is `archived`"*; (2) the same clause's *"pack-declared kinds validate against their own declared words"*, which `commit_ops.py:116-122` records as a RECORDED constraint (*"a single shared `OBJECT_STATUS_VALUES` would refuse real words and narrow the door … a shared set is foreclosed"*); and (3) the extractor's recorded removal-from-recall target (`EXTRACTOR-V4-ARCHITECTURE.md:1084`, 2026-10-26: a journaled `restatus` to **`archived`**), plus `archived` in `SUBJECT_STATUS_VALUES` (`commit_ops.py:123-124`). What replaces them: a thing with no successor ends by `deprecated`, filing-away becomes a visibility **flag**, and a pack's own words become that kind's **pipeline stages** (§3, §4.2) rather than status values. The reason is the collision §2 exists to remove — a word that means both *ended* and *hidden from a view*, and a word that means both *how far along* and *whether it still stands*. **These are reversals of owner-approved text, so PR #12895's approval by the owner is the ruling**; until it is given, the recorded positions stand.
 
 ---
 
@@ -47,7 +47,9 @@ Questions 3 and 4 are **not** lifecycle. Achievement is already its own axis (a 
 
 ## 3. The lifecycle word
 
-Every kind **except events** — claims, entities and sources — uses **one** closed set of four words. Events are the one exclusion, and §8 says why: an event is a dated fact, not a commitment, so it has no lifecycle to be in.
+Every kind **except events** — claims, entities and sources — carries **one** lifecycle word from a closed set of four. Events are the one exclusion, and §8 says why: an event is a dated fact, not a commitment, so it has no lifecycle to be in.
+
+**A pack's own words are not refused by this — they move axis.** A pack declares its words as that kind's **pipeline stages** (§4.2), each carrying a slot, so `prospective`, `invested`, `written-off` become stages of a funnel and the kind's `status` still carries one of the four. This is the one place the model deliberately changes a recorded constraint: `commit_ops.py:116-122` records that a shared status vocabulary was **foreclosed** because `packs/venture` exercises its own words, and the answer here is not a wider status list but the axis the words actually belong to. A pack still validates against its own declaration — the declaration just has a shape now (see the `OVERRIDES` line above).
 
 | word | means | can move to |
 |---|---|---|
@@ -58,7 +60,8 @@ Every kind **except events** — claims, entities and sources — uses **one** c
 
 ```mermaid
 stateDiagram-v2
-    [*] --> draft
+    [*] --> live : created with no status (the ordinary case)
+    [*] --> draft : created as a draft
     draft --> live
     draft --> deprecated : ended before promotion, no successor
     draft --> superseded : replaced before promotion
@@ -96,7 +99,7 @@ This is why the current five extra words are not needed — `retracted`, `outdat
 
 ## 4. The pipeline
 
-A pipeline says where a thing is in a process. It is **not** a lifecycle: a stage says *how far along*, never *whether the commitment still stands*.
+A pipeline says where a thing is in a process. It is **not** a lifecycle: a stage in `entry`, `active` or `suspended` says *how far along*, never *whether the commitment still stands*. The one exception is the `terminal` slot, which is one of the two endings (§6) — and that is exactly why the slot exists rather than a stage name.
 
 A pipeline is a short ordered list of **stages**. Each stage declares:
 
@@ -133,7 +136,7 @@ Because a stage's *name* is the most customisable thing in the system — a pack
 
 ### 4.2 Who declares a pipeline
 
-A pack declares pipelines for its own kinds. A graph with no pack still works: core kinds have no pipeline, and their state is the lifecycle word alone.
+A pack declares pipelines for its own kinds. A graph with no pack still works: a core kind has no pipeline **until a default is declared for it**, and its state is the lifecycle word alone.
 
 This is what makes the model customisable without becoming a configuration language: **the shape is fixed (four slots, ordered stages, one outcome on a terminal stage); the contents are declared per kind.** A CRM funnel, a work item's flow and a goal's outcome are all the same shape with different stage names.
 
@@ -165,11 +168,11 @@ Every field is **optional**. A thing with no `status` reads as `live` — create
 
 ## 6. The one rule every reader follows
 
-This is the whole architecture in one decision. Anything that needs to know "does this still count" asks **one** question, from **two** sources of meaning:
+This is the whole architecture in one decision. Anything that needs to know whether a thing still counts as current asks **one** question, from **two** sources of meaning:
 
 ```mermaid
 flowchart TD
-    Q{Does this still count?}
+    Q{Is this still<br/>served as current?}
     Q --> L{status is<br/>deprecated or superseded?}
     L -->|yes| NO[No — it is over]
     L -->|no| P{is its pipeline stage<br/>in the terminal slot?}
@@ -213,11 +216,11 @@ These are recorded decisions, not preferences. The model above is designed to si
 |---|---|---|
 | **An event has no lifecycle.** An event is a dated fact; a later event does not rewrite an earlier one. | #11825 / #12108 | Events take no lifecycle word. If an event must be withdrawn, that is a claim about it, not a state on it. |
 | **Achievement is its own axis.** Goal outcome is not promotion. | #7856 | `goalState` keeps its own closed set; it is never derived from `status`. The coupling runs one way only, for the two retirement words — a goal that retires also sets `status` in the same write (§5) — because the successor carriers and the reader rule are bound to `status`. |
-| **A pack owns its kind's words.** | #2729; *Foreclosed* in `EXTRACTOR-V4-ARCHITECTURE.md` ("pack lifecycles own their words") | Packs declare stages; the engine never imposes stage names. |
+| **A pack owns its kind's words.** | #2729; *Foreclosed* in `EXTRACTOR-V4-ARCHITECTURE.md` ("pack lifecycles own their words") | Packs declare stages; the engine never imposes stage names. A pack's declared status words are not refused — they become that kind's stage names (§4.2), so the declaration is preserved and only its axis changes. |
 | **One base set, plus named declared deltas — never one collapsed set.** | #11824's contradiction test; `commit_ops.py:61-65` "Do not unify the two blindly: they answer different questions"; the `assembly.py` resolver narrowing; the Object/Point vocabulary divergence in #3308 / PR #6955 | The four words are the **base** and the only write vocabulary. A family that must answer a different question declares its delta explicitly and names it; a delta is never a quiet divergence, and never a list to be re-pointed at the base. |
 | **The claim family's "no longer counts" flag is load-bearing.** | #2498 | The flag's *effect* is preserved as the `deprecated`/`superseded` words; the mechanism is not removed by fiat. |
 | **What a reader hides is wider than what a writer may create.** | #2977 | Readers must still be able to treat a word as dead that no verb currently produces — the net stays wider than the door. |
-| **A single shared list cannot cover pack words.** | #2729, and Foreclosed in `EXTRACTOR-V4-ARCHITECTURE.md` ("pack lifecycles own their words") | There is no shared *stage* list. Only the lifecycle **base** set is shared, and it is small enough to be closed. |
+| **A single shared list cannot cover pack words.** | #2729, and Foreclosed in `EXTRACTOR-V4-ARCHITECTURE.md` ("pack lifecycles own their words") | There is no shared *stage* list. The lifecycle **base** set is shared for the lifecycle axis only, and it is small enough to be closed; pack words live on the position axis. |
 | **A word with no reader is not added.** | the withdrawal of `stale`, #11824 | This model introduces no new word and removes **five** — `retracted`, `outdated`, `archived`, `in_progress`, `completed` — leaving a base set of four. |
 
 ---
@@ -227,7 +230,7 @@ These are recorded decisions, not preferences. The model above is designed to si
 Deliberately absent, and each has its own document:
 
 - **How we get from today to this.** Migration, backfill and re-stamping.
-- **What the built-in default pipeline for each core kind is.** Worth a research pass on its own; the model does not depend on which stages we ship.
+- **Which stages each core kind's default pipeline ships with.** The model does not depend on those names; it depends only on the *shape* (§4.2), so this is a declaration to fill in, not a design question this document settles.
 - **The implementation plan**, the code surfaces, and the test strategy.
 - **Visibility/filing.** Named here because it must not become a status word; no surface needs it yet.
 - **The deltas themselves.** §6 fixes the *shape* — one base set plus named, declared **read** deltas — but not each family's delta. Which delta a family needs, and what each contains, is part of #11824's ordered removal plan, not this document.
@@ -236,4 +239,4 @@ Deliberately absent, and each has its own document:
 
 ## 10. The model in one paragraph
 
-Everything in the graph that has a lifecycle — everything **except events** (§8) — has **one** lifecycle word from a closed set of four, and optionally a **position** in a pipeline its kind declares. A family may declare a **read** delta over which words its readers treat as ended (§6), but never a new write word. The lifecycle word says whether the commitment still stands; the pipeline stage says how far along it is; a goal's outcome is a third field of its own; visibility is a flag and never a word. Every reader asks one question — *does this still count?* — and answers it from exactly two places: the lifecycle word, and whether the stage sits in a `terminal` slot. Words declare their meaning where they are declared, so a pack can invent any stage names it likes and nothing that reads the graph has to learn them.
+Everything in the graph that has a lifecycle — everything **except events** (§8) — has **one** lifecycle word from a closed set of four, and optionally a **position** in a pipeline its kind declares. A family may declare a **read** delta over which words its readers treat as ended (§6), but never a new write word. The lifecycle word says whether the commitment still stands; a pipeline stage says how far along it is, **except** that a stage in the `terminal` slot is itself an ending. A goal's outcome is a third field of its own; visibility is a flag and never a word. Every reader asks one question — *is this still served as current?* — and answers it from exactly two places: the lifecycle word, and whether the stage sits in a `terminal` slot. Words declare their meaning where they are declared, so a pack can invent any stage names it likes and nothing that reads the graph has to learn them.
