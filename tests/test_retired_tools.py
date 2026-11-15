@@ -68,6 +68,9 @@ class TestDeclaration:
         declared surface change". Note that `beta-sdk-surface.md` says of itself, in its
         own header: "This document is a PROPOSAL, and it is NOT the authority for the
         MCP target" — where it and `canonical-mcp-tools.md` differ, canonical governs.
+        #11609 batch 2 then moved it 125 → 124 (SIX approved containers implemented, SEVEN
+        live names retired), and the phase rule is that every batch ends BELOW where it
+        started, which is what makes this pin move DOWN and never up.
         #12521 (`8e4e335b05`) gave it its `def`, approved by daniel-ospina on 2026-11-14
         and recorded at `#10015` comment `6863608333`; `docs/product/beta-sdk-surface.md`
         already reads *"40 methods against **125** today"* and
@@ -115,7 +118,7 @@ class TestDeclaration:
             for n in dir(TortoiseSDK)
             if not n.startswith("_") and callable(getattr(TortoiseSDK, n))
         ]
-        assert len(public) == 125, f"SDK surface changed: {len(public)} != 125"
+        assert len(public) == 124, f"SDK surface changed: {len(public)} != 124"
 
     def test_retired_sdk_bindings_that_resolve_are_still_public(self):
         from tortoise.sdk import TortoiseSDK

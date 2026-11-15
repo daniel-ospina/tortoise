@@ -1253,8 +1253,11 @@ def test_the_guard_reds_when_the_live_surface_grows_past_the_high_water_pin(tmp_
     # under test is "growth past the pin reds", not any particular number. The live count
     # moved again after the merge — #4282's container (81 -> 77), #4282 Phase 3.2's
     # `run_onboarding` retirement (77 -> 72) and #11609 batch 1's four archived
-    # no-destination tools (72 -> 68) — so the pin follows to 68 - 1.
-    doc["high_water_counts"] = {"tools": 67, "sdk_public_methods": 150}
+    # no-destination tools (72 -> 68) and batch 2's SOURCES/MINE/SESSION containers
+    # (68 -> 67) — so the pin follows to 67 - 1. BOTH halves sit below the live count, so
+    # the red is exercised in either direction (a tool added OR an SDK method re-added),
+    # not just on tools.
+    doc["high_water_counts"] = {"tools": 66, "sdk_public_methods": 123}
     result = _run("tools/surface-guard.py", "--manifest", _write(doc, tmp_path))
     assert result.returncode == 1, "growth past the frozen pin did not red the gate"
     assert "high-water pin" in result.stdout, result.stdout
@@ -4810,8 +4813,10 @@ def test_the_live_surface_is_the_baseline_the_guard_froze():
     # live, since it carries the #8482 wrap-envelope repair). The pin moves with every
     # landed container batch until the approved 27 is reached. #4282 Phase 3.2 (main) then
     # removes the five `run_onboarding` tools — a disjoint name set — so the merged
-    # surface is 72, not either side's own figure.
-    assert live["mcp"] == manifest["counts"]["tools"] == 68
+    # surface is 72, not either side's own figure. #11609 batch 2 then landed the
+    # SOURCES/MINE/SESSION containers: SIX approved targets in, SEVEN advertised members
+    # out, so 68 -> 67 — a container batch shrinks the surface by construction.
+    assert live["mcp"] == manifest["counts"]["tools"] == 67
     # #4282 Phase 2.2 (#10053): 149 -> 150, the three approved-but-absent names now
     # having a `def` (+3) less `main`'s two retirements in #10012 (`graph_count` →
     # `_graph_count`, `org_list` deleted) (−2). The manifest pin records the same
@@ -4821,7 +4826,12 @@ def test_the_live_surface_is_the_baseline_the_guard_froze():
     # The approved 40 did not grow — the approval (`#10015` comment `6863608333`) delivers a
     # name that was already approved and unshipped, the same move PR #10053 made for three
     # rows — so `high_water_counts` (150) does not move; only the frozen ROW SET does.
-    assert live["sdk"] == manifest["counts"]["sdk_public_methods"] == 125
+    # 125 -> 124 on 2026-11-14 (#11609 batch 2): the SOURCES/MINE/SESSION containers added
+    # six approved methods and retired SEVEN that were on the surface. The phase rule is
+    # that every batch ends with FEWER public methods than it started with, which is why the
+    # net is -1 rather than -6: a container REPLACES its members, it does not merely delete
+    # them.
+    assert live["sdk"] == manifest["counts"]["sdk_public_methods"] == 124
 
 
 def test_the_sdk_count_the_sequencing_list_types_is_the_measured_one():

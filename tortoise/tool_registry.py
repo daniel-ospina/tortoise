@@ -1608,7 +1608,13 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "the target graph's configuration) — same door and gates as "
                     "tortoise_session_capture; `items=` files an already-distilled batch "
                     "({wing, room, content}) with two-tier dedup. Passing both is "
-                    "refused. Absorbs tortoise_checkpoint and tortoise_session_capture.",
+                    "refused. Absorbs tortoise_checkpoint and tortoise_session_capture. "
+                    "CONSENT (#3662, Option 1): this tool runs server-side and cannot "
+                    "read the caller's TORTOISE_CAPTURE, so calling it with "
+                    "`conversation=` IS the agreement to record the session — tell the "
+                    "user you are filing it BEFORE you call, so they can decline. "
+                    "session_id is the idempotency key; a team that disabled capture "
+                    "gets 409, so do not retry.",
         risk="destructive",
         http_policy=True,
         sdk_method="mine_knowledge_from_session",

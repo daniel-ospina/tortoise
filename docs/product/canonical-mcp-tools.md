@@ -227,7 +227,8 @@ do not: a warning that names nothing serves a caller who does not exist. The **9
 > `tortoise_onboarding_demo_create`, `tortoise_onboarding_github_connect`,
 > `tortoise_onboarding_github_status` are no longer in `TOOL_REGISTRY` (76 live tools then).
 > **This branch's `graph_overview` container then moved the live surface from 76 to 72 at that
-> head**, so 72 was the figure there until #11609 batch 1 took the live surface 72 → 68
+> head**, so 72 was the figure there until #11609 batch 1 removed four more of them (72 → 68),
+> and batch 2's SOURCES/MINE/SESSION containers then **took the live surface 68 → 67**
 > (`uv run python tools/surface_manifest.py check` is the live count).
 > **The five REMOVED tools'** capabilities survive as hand-written REST
 > routes in `tortoise/hosted_api.py` (`POST /v1/demo`, `GET|PATCH /v1/onboarding/state`,
@@ -284,15 +285,26 @@ Any deletion PR must use **26 / 111**.
 status: approved · principal: daniel-ospina · PR #10187 · date: 2026-10-27.
 
 **Amended 2026-11-03** (execution record, #4282): the **first container batch has landed**, so the
-surface was **72 advertised tools** at that head with **23** retired-forward entries — the 18 above
+surface was **72 advertised tools** at that head with 23 retired-forward entries — the 18 above
 plus five more. `tortoise_graph_overview` (row 6) absorbs `tortoise_overview`, `tortoise_summarize_structure`,
 `tortoise_validate_domain`, `tortoise_audit` and `tortoise_dream_health`.
 
 **Amended 2026-11-13** (execution record, #11609 batch 1): the four remaining no-destination tools
 (`tortoise_analyze`, `tortoise_backfill_v25`, `tortoise_packs_list`, `tortoise_pack_install`) were
 REMOVED and their code ARCHIVED under `archive/mcp-tools/b1-removed-no-destination/`, per the owner
-ruling quoted below, so the surface is now **68 advertised tools** with **23** retired-forward
-entries. Nothing was retired-forward into a replacement: a name with no destination gets no shim.
+ruling quoted below, so the surface moved **72 → 68 advertised tools**, carrying the same 23
+retired-forward entries it had at the previous head. Nothing was retired-forward into a replacement: a name with no destination gets no shim.
+
+**Amended 2026-11-14** (execution record, #11609 batch 2 — the SOURCES/MINE/SESSION containers):
+rows 14–18 and row 40 landed as `tortoise_register_source`, `tortoise_manage_source_trust`,
+`tortoise_index_sources_from_directory`, `tortoise_mine_knowledge_from_session`,
+`tortoise_mine_knowledge_from_directory` and `tortoise_check_connection`, and **seven** advertised
+members retired INTO them — `tortoise_create_source`, `tortoise_assess_source`,
+`tortoise_set_source_tier`, `tortoise_index_files`, `tortoise_checkpoint`, `tortoise_session_capture`
+and `tortoise_mine_conversations`. Six in, seven out, so the surface is now **67 advertised tools**
+with **30** retired-forward entries — every one of the seven still ANSWERS
+on its retired name (#3883), which is why the advertised count falls while the served count does
+not, and **none of them is archived** — a name with a destination keeps its shim.
 
 Three consequences for readers of the paragraph below, which is left as written because it records
 the 2026-10-27 ruling, not the current state:
@@ -477,13 +489,19 @@ done by `register_source`; the confidence tools are split across `recall_beliefs
 2. **Publish the bridge table** (MCP `type=`/`mode=` → SDK method).
 3. Implement the MCP list with the **SDK frozen** (method names + capabilities unchanged)
    so the handlers are written once.
-4. Then the **SDK canonical list** (`config/surface-manifest.yml` declares **125** public
+4. Then the **SDK canonical list** (`config/surface-manifest.yml` declares **124** public
    methods — a number DERIVED from the class, never typed; it moved 147 → 150 at #4282
    phase 2.2 because `link_entities`, `update_knowledge` and `delete_knowledge` were
    approved rows with no `def` yet, 150 → 124 on 2026-10-27 when the surplus methods
    nothing calls were deleted under the owner's ruling on this issue (26 methods, code
-   archived at tag `archive/4282-surplus-sdk-methods`), and 124 → 125 on 2026-11-14 when
-   approved row 28 `get_organisation_account` was implemented on #10015 — in none of these
+   archived at tag `archive/4282-surplus-sdk-methods`), 124 → 125 on 2026-11-14 when
+   approved row 28 `get_organisation_account` was implemented on #10015, and 125 → 124 on
+   2026-11-14 by the SOURCES/MINE/SESSION containers (#11609 batch 2), which ADDED six
+   approved methods (`register_source`, `manage_source_trust`,
+   `index_sources_from_directory`, `mine_knowledge_from_session`,
+   `mine_knowledge_from_directory`, `check_connection`) and retired seven
+   (`create_source`, `assess_source`, `set_source_tier`, `index_directory`,
+   `index_sessions`, `mine_corpus`, `checkpoint`) for a net −1 — in none of these
    moves did the declared surface change, so the declaration stays at 40 — and
    `docs/product/canonical-sdk-methods.md` agrees; reconcile the per-name mapping when
    that pass starts). Renames there are mechanical for the

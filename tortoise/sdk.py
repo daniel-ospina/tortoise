@@ -8077,7 +8077,7 @@ def _refuse_document_kind_demotion(stored_kinds, props, *, surface: str,
             f"a caller can un-meter is not a cap). Retarget among metered "
             f"genres is allowed (`report` -> `brief`). To drop a document's "
             f"metering, delete the document; to record that a source became "
-            f"unavailable, use `create_source(..., raw_state=...)`."
+            f"unavailable, use `register_source(..., raw_state=...)`."
         )
 
 
@@ -54488,12 +54488,10 @@ class TortoiseSDK:
                     "an assertion the graph cannot weigh"
                 )
             out = self._assess_source(url, assessor, score, rationale)
-            return {**(out if isinstance(out, dict) else {"result": out}),
-                    "action": "assess"}
+            return out if isinstance(out, dict) else {"result": out}
         if wants_tier:
             out = self._set_source_tier(url, tier)
-            return {**(out if isinstance(out, dict) else {"result": out}),
-                    "action": "tier"}
+            return out if isinstance(out, dict) else {"result": out}
         raise ValueError(
             "manage_source_trust: nothing to write — pass `tier=` to set the "
             "credibility tier, or `score=`/`assessor=`/`rationale=` to record "
@@ -54575,13 +54573,11 @@ class TortoiseSDK:
             )
         if items is not None:
             out = self._checkpoint(items, agent_name=agent_name, threshold=threshold)
-            return {**(out if isinstance(out, dict) else {"result": out}),
-                    "action": "items"}
+            return out if isinstance(out, dict) else {"result": out}
         if conversation is not None:
             out = self._capture_session(conversation, session_id,
                                        max_turns=max_turns, harness=harness)
-            return {**(out if isinstance(out, dict) else {"result": out}),
-                    "action": "session"}
+            return out if isinstance(out, dict) else {"result": out}
         raise ValueError(
             "mine_knowledge_from_session: nothing to mine — pass `conversation=` "
             "for one session transcript, or `items=` for a distilled batch"
@@ -54599,7 +54595,8 @@ class TortoiseSDK:
         `mine_knowledge_from_session`**, not a kind of indexing — which is why
         it is its own row instead of an `file_type` value on
         `index_sources_from_directory`: that name registers sources and
-        extracts nothing, this one extracts and is the expensive call.
+        extracts nothing, this one extracts and is the expensive call. The
+        reply is `_mine_corpus`'s, unchanged.
         """
         return self._mine_corpus(
             directory, extract_entities=extract_entities,
