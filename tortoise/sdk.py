@@ -49194,9 +49194,37 @@ class TortoiseSDK:
             # left untouched and takes the non-`str` path to the AX refusal at the
             # two `type(...) is str` sites below, which is why those are exact-type
             # tests too.
-            # ⚠️ The WRITE still reads `props`; this is the GUARD's view only.
+            # ⛔ AND THE **WRITE** MUST CARRY THAT SAME PLAIN `str` (#12906, review
+            # cycle 8 P1). Normalising the GUARD's copy alone left the two words
+            # free to differ: the driver renders what it is GIVEN, and
+            # `falkordb.helpers.quote_string` calls `len(v)` and `v.replace(...)`
+            # ON THE CALLER'S OBJECT. A `str` subclass whose content IS the stored
+            # word — so the entailed shortcut rightly reads "no transition asked
+            # for" — but whose `replace`/`__len__` render something else therefore
+            # wrote a word the guard never approved. Measured at `70b37dcfc5` on an
+            # `archived` Object, embedded engine:
+            #
+            #     class RSub(str):
+            #         def replace(self, a, b, *c): return 'live'
+            #     update_entity(oid, status=RSub('archived'))
+            #     -> ACCEPTED, stored status became 'live'   (a RESURRECTION)
+            #
+            #     class LSub(str):
+            #         def __len__(self): return 0
+            #     update_entity(oid, status=LSub('archived'))
+            #     -> ACCEPTED, stored status became ''
+            #
+            # So rewrite every key that renders as `status` to the plain content
+            # the guard decided on, before any write sees it. `str.__str__` is this
+            # file's established no-override rendering (see above) and returns the
+            # same content a plain subclass stores today, so no legitimate call
+            # changes behaviour; only a value whose RENDERING disagreed with its
+            # content is affected, and it can no longer disagree.
             if issubclass(type(_np_status), str):
                 _np_status = str.__str__(_np_status)
+                for _np_key in list(keys_rendering_as(props, {"status"})):
+                    if issubclass(type(props[_np_key]), str):
+                        props[_np_key] = str.__str__(props[_np_key])
             for _np_label, _np_terminal, _np_section in (
                 ("Subject", _SUBJECT_TERMINAL_STATUSES, "§4.2"),
                 ("Object", _OBJECT_TERMINAL_STATUSES, "§4.3"),
@@ -49358,9 +49386,20 @@ class TortoiseSDK:
                     if (_np_dead == [_SUPERSEDED_STATUS]
                         and _carriers_are_present(_np_carriers)) else ""
                 )
+                # `_np_status` is a plain `str` by here when the caller sent a
+                # `str` subclass, but a NON-`str` target reaches this message with
+                # its own `__repr__` — and a caller-controlled dunder must not be
+                # able to turn the promised `ValueError` into its own exception
+                # class (measured: a target whose `__repr__` raises `RuntimeError`
+                # escaped as `RuntimeError`, review cycle 8 P3; the row was
+                # unchanged, so this is a contract break and not a fail-open).
+                try:
+                    _np_target_repr = repr(_np_status)
+                except Exception:  # noqa: BLE001, RUF100 — a hostile `__repr__` is the point
+                    _np_target_repr = f"<{type(_np_status).__name__}>"
                 raise ValueError(
                     f"update_entity refused the status transition "
-                    f"{_np_dead[0]!r} -> {_np_status!r} on {_np_label} "
+                    f"{_np_dead[0]!r} -> {_np_target_repr} on {_np_label} "
                     f"{id_val!r}: {_np_dead[0]!r} is TERMINAL for a "
                     f":{_np_label} (ONTOLOGY {_np_section}), so this row cannot be "
                     f"made current again. ⛔ A dead {_np_label} is not resurrected "

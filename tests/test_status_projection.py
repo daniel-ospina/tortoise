@@ -1056,6 +1056,34 @@ class _LyingEq:
         return "_LyingEq()"
 
 
+class _RenderingLie(str):
+    """A `str` whose CONTENT is honest and whose RENDERING lies (#12906).
+
+    The guard normalises the target with `str.__str__`, but the DRIVER renders
+    what it is given: `falkordb.helpers.quote_string` calls `len(v)` and
+    `v.replace(...)` on the CALLER'S object. So a subclass could agree with the
+    stored word by content (the entailed shortcut rightly reads "no transition
+    asked for") and still store a different word. Measured at `70b37dcfc5` on an
+    `archived` Object: `update_entity(oid, status=_RenderingLie('archived'))`
+    returned normally and the row read `live` — a resurrection the guard never saw.
+    """
+
+    def replace(self, *args, **kwargs):
+        return "live"
+
+
+class _ZeroLen(str):
+    """Content honest, `__len__` lying — `quote_string` renders it as `""`.
+
+    Measured at `70b37dcfc5`: `status=_ZeroLen('archived')` on an `archived`
+    Object returned normally and stored `''` (the same rendering hole as
+    `_RenderingLie`, through `quote_string`'s `len(v) == 0` branch).
+    """
+
+    def __len__(self):
+        return 0
+
+
 #: Every carrier shape measured as ACCEPTED (and record-divergent) before the
 #: #10192 guard: a pointer/stamp alone, a BLANK pointer (the record view's
 #: `IS NOT NULL` reads `''` as a carrier), a carrier with an explicit LIVE status,
@@ -1349,6 +1377,77 @@ class TestLifecycleCarrierCoherence:
             assert _carrier_row(sdk, "Object", "delta") == before, (
                 "a refused resurrection moved the row: " +
                 repr(_carrier_row(sdk, "Object", "delta")))
+        finally:
+            sdk.close()
+
+    @pytest.mark.parametrize("target", [_RenderingLie("archived"),
+                                        _ZeroLen("archived")],
+                             ids=["replace-lie", "len-lie"])
+    def test_a_rendering_lie_cannot_move_a_dead_row(self, tmp_path, target):
+        """The guard's word and the WRITTEN word must be the same object (#12906).
+
+        Normalising only the guard's copy left `props` carrying the caller's
+        subclass, and the driver renders that object with its own `replace`/
+        `len` — so a target that AGREES with the stored word by content, and is
+        therefore the no-op re-assert the entailed shortcut knowingly lets
+        through, could still store whatever its rendering produced. Measured on
+        the pre-fix tree (`70b37dcfc5`), both params below were ACCEPTED and
+        MOVED the row: `replace-lie` -> `'live'`, `len-lie` -> `''`.
+
+        The invariant pinned is the ROW, not the outcome: a same-content
+        re-assert is legitimately accepted (it asks for no transition), so this
+        asserts that whatever the door answers, the dead row does not move and
+        never comes back CURRENT.
+        """
+        sdk = TortoiseSDK(str(tmp_path / "t12906.db"))
+        try:
+            oid = _make_carrier_entity(sdk, "Object", "epsilon")
+            sdk._get_proj().g.query(
+                "MATCH (o:Object {id:$id}) SET o.status='archived'",
+                params={"id": oid})
+            before = _carrier_row(sdk, "Object", "epsilon")
+            assert before[1] == "archived", before
+            try:
+                sdk.update_entity(oid, status=target)
+            except ValueError as exc:
+                assert "is TERMINAL for a :Object" in str(exc), exc
+            assert _carrier_row(sdk, "Object", "epsilon") == before, (
+                "a rendering lie moved a DEAD row: "
+                f"{before} -> {_carrier_row(sdk, 'Object', 'epsilon')} — the "
+                "guard approved the CONTENT and the store wrote the RENDERING")
+        finally:
+            sdk.close()
+
+    def test_a_hostile_repr_cannot_replace_the_refusal(self, tmp_path):
+        """A caller-controlled `__repr__` must not escape as its own exception.
+
+        The refusal interpolates the refused target with `!r`. For a non-`str`
+        target that is the CALLER'S `__repr__`, so a target that raises there
+        turned the promised `ValueError` into its own class (measured at
+        `70b37dcfc5`: `RuntimeError` — review cycle 8 P3). Not a fail-open (the
+        refusal still precedes the write and the row was unchanged), but the
+        contract this door advertises is "refuse with ValueError".
+        """
+
+        class _BoomRepr:
+            def __eq__(self, other):
+                return True
+
+            __hash__ = None
+
+            def __repr__(self):
+                raise RuntimeError("repr-boom")
+
+        sdk = TortoiseSDK(str(tmp_path / "t12906r.db"))
+        try:
+            oid = _make_carrier_entity(sdk, "Object", "zeta")
+            sdk._get_proj().g.query(
+                "MATCH (o:Object {id:$id}) SET o.status='archived'",
+                params={"id": oid})
+            before = _carrier_row(sdk, "Object", "zeta")
+            with pytest.raises(ValueError, match="is TERMINAL for a :Object"):
+                sdk.update_entity(oid, status=_BoomRepr())
+            assert _carrier_row(sdk, "Object", "zeta") == before, before
         finally:
             sdk.close()
 
