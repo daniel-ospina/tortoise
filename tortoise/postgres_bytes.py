@@ -330,8 +330,21 @@ def measure_written_rows(
     WRITE — the meter is a read — PostgreSQL keeps the TOP-LEVEL xid. MEASURED
     on PG16: inside the savepoint `pg_current_xact_id()` returned the same
     ``919`` as before it, and the function still reported ``rows: 1`` for the
-    row inserted before the savepoint. (The migration header's "under a
-    SAVEPOINT it UNDER-counts" describes a subtransaction that itself writes.)
+    row inserted before the savepoint.
+
+    ⛔ SUPERSEDED CONTRACT TEXT, NAMED SO IT IS NOT RE-DERIVED WRONGLY. The
+    header of `supabase/migrations/20261114000001_per_org_postgres_bytes.sql`
+    still says *"Under a SAVEPOINT the row's xmin is the sub-transaction's, so
+    the filter UNDER-counts … and the record write path takes no savepoints
+    today"*. Both halves are now false — this door takes a savepoint on every
+    armed write, and the savepoint sits AFTER the insert, so the subtransaction
+    writes nothing and the top-level xid is preserved (measured above). The
+    migration files are APPEND-ONLY (`check-migration-append-only` refuses a
+    modified `supabase/migrations/*.sql`), so that sentence cannot be corrected
+    where it lives; this paragraph and
+    `docs/ops/postgres-storage-measurement.md` are the correction. ⛔ Do NOT
+    read the header as a licence to delete the savepoint: that re-creates
+    #12781 — every record write silently rolled back by a metering fault.
 
     ``seqs`` is a sequence of journal positions — one indexed read per segment,
     not one per record.
