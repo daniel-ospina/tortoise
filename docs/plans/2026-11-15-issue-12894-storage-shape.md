@@ -41,31 +41,35 @@ lane did not do.
 
 ### A1.0 What the population is, and how it was closed
 
-**The population is 182 entries / 180 distinct paths** — two paths are each listed twice:
-`docs/registry-graph-schema.md` (`:73`, `:74`) and `docs/product/sdk-surface-declaration.md` (`:85`, `:87`) —
-and the honest accounting of what was **read** is not a partition of that list, because most of what had to
-be read **is not in the list at all**:
+**The population, and the rule that defines it — stated first, because every number below depends on it.**
+Every row of `docs/00_index.md` contributes **one member**: the first backticked path in that row's path
+column that names a file which **exists in the tree**. A row that names only a directory, or a path that is
+not tracked, contributes no member. Stated that way the population is a function of two files and is
+reproducible without trusting this document's arithmetic.
 
 | | count |
 |---|---|
-| index entries | **182** |
-| distinct paths | **180** |
+| index rows | **182** |
+| …that name an existing file (one member each) | **180** |
+| …of those, **distinct** documents (two are listed twice) | **178** |
 | documents **read** for this map | **45** |
-| …of those, present as index entries | **25** |
-| …of those, **absent from the index entirely** | **20** |
-| index paths **not read** | **155** |
+| …of those, with an index row of their own | **25** |
+| …of those, **without one** (reachable only by cross-reference) | **20** |
+| index documents **not read** | **153** |
 
-**How each number is obtained, so it can be checked rather than trusted.** The population is every row of
-`docs/00_index.md` whose path cell carries a backticked path (247 lines, 182 such rows); the two duplicate
-paths above are found by grouping on that path. The read set is **45 documents**: the **42** that occupy
-`§A1.1`'s **40 `READ` rows** (41 numbered rows, one of which is declared **NOT READ**; row 40 bundles three
-evidence records) plus the **3** read after the first draft (`§12`). **25** of the 45 are index entries and
-**20** are not, which is 45. **25** index paths were read, so **155** of the 180 were not, which is 180.
+The two documents listed twice are `docs/registry-graph-schema.md` (`:73`, `:74`) and
+`docs/product/sdk-surface-declaration.md` (`:85`, `:87`). The read set is **45**: the **42** that occupy
+`§A1.1`'s **40 `READ` rows** (41 numbered rows, one of them declared **NOT READ**; row 40 bundles three
+evidence records) plus the **3** read after the first draft (`§12`). **25 + 20 = 45** and **25 + 153 = 178**,
+so both partitions close.
 
-⛔ **An earlier revision of this table said 41 / 22 / 19 / 159, and the arithmetic in it did not close:** it
-counted *rows* as documents (so the three-record row counted once, hiding 2 paths inside it), it counted the
-row declared **NOT READ** as read, and it left the three late reads inside the "not read" population while
-naming them in `§A1.4`. The row and path levels are stated separately above for that reason.
+⛔ **Two earlier revisions of this table were arithmetically broken, and how they broke is the point.** The
+first said 41 / 22 / 19 / 159: it counted *rows* as documents (so the three-record row counted once, hiding
+2 documents inside it), it counted the row declared **NOT READ** as read, and it left the three late reads
+inside the "not read" population while naming them in `§A1.4`. The second said 180 / 155 and was reproducible
+only under a *different* membership test (any backticked token anywhere in the cell) than the one it counted
+rows with — two conventions in one table. **A population whose rule is unstated is not a population**, which
+is why the rule now comes before the numbers.
 
 ⛔ **And that is the finding, stated as arithmetic rather than as an impression: 20 of the 45 documents
 this map needed — 44 % of the read set — have no index row.** They are the three record migrations, the
@@ -79,7 +83,7 @@ register** — which is exactly what makes D-22 a defect rather than a preferenc
 
 1. **What was read is listed, per document, with the section or line taken** — `§A1.1`, 41 rows. Any reader
    can take a row and go to the line.
-2. **What was *not* read is listed, per document, with the reason it was not needed** — `§A1.4`, 54 rows for
+2. **What was *not* read is listed, per document, with the reason it was not needed** — `§A1.4`, 48 rows for
    the in-scope-and-unread set, plus 105 by exclusion rule. **Nothing is unclassified and nothing is
    unlisted.** A reason can be argued with; a silence cannot.
 
@@ -191,15 +195,15 @@ numbered sections and no §12.1c. **§12.1c is `STORAGE-ARCHITECTURE.md:1115`** 
 "RESOLVED 2026-11-07"). Both were read. Recorded here because a lane that trusts the brief's section number
 will read the wrong document and conclude the section is missing.
 
-### A1.4 Not read — 155 index paths, by declared class, and 50 named individually
+### A1.4 Not read — 153 index documents, by declared class, and 48 named individually
 
-`docs/00_index.md` is **247 lines carrying 182 entries / 180 distinct paths**. Of those, **25 were read**
-(`§A1.1`, plus the three late reads recorded in `§12`) and **155 were not**. The 155 are accounted for as
-**105 by an exclusion rule** and **50 named individually with a reason** — so there is no unclassified
-remainder, and the two claims are separate: a rule is checkable in bulk, and a named reason is checkable one
-at a time.
+`docs/00_index.md` is **247 lines carrying 182 rows**, of which **180 name an existing file** and **178 name
+something distinct** (`§A1.0` states the membership rule). Of those 178, **25 were read** and **153 were
+not**. The 153 are accounted for as **105 by an exclusion rule** and **48 named individually with a reason**
+— so there is no unclassified remainder, and the two claims are separate: a rule is checkable in bulk, and a
+named reason is checkable one at a time.
 
-**By rule (105).** Each class is a **path-prefix rule**, evaluated over the 155 unread paths, so any reader
+**By rule (105).** Each class is a **path-prefix rule**, evaluated over the 153 unread documents, so any reader
 can reproduce it without trusting a count:
 
 | Class | Rule (path prefixes) | Count |
@@ -208,9 +212,9 @@ can reproduce it without trusting a count:
 | **C2 — process, or observability of the machinery** | `docs/ops/batch-integration`, `tools/run_affected`, `tools/batch_review`, `docs/infra/tmpdir-sweep`, `docs/scoping/2026-09-18-4098`, `docs/scoping/2026-09-20-4408`, `docs/runbook/4408`, `docs/scoping/2026-09-01-2090`, `docs/scoping/2026-09-02-2127` — **7 of the 9 prefixes match an entry, and 5 of those 7 already carry a C1 prefix** (`docs/ops/batch-integration` and the four `docs/scoping/…`), while `tools/run_affected` and `tools/batch_review` match no entry at all; the class is therefore **2**: `docs/infra/tmpdir-sweep.md`, `docs/runbook/4408-branch-reaper.md`) | **2** |
 | **C3 — reads a storage surface, asserts nothing about its shape** | none unread: every such entry was **read** instead (see `§A1.1` rows for `#4503`, `#11083`, `#11469`, `#8607`, `#1779`, `#1402`). **The class is empty by construction here, and saying so is the point** — this was the class the first draft used to *exclude* documents it had not opened. | **0** |
 
-**103 + 2 + 0 = 105. 105 + 50 = 155.** ✅
+**103 + 2 + 0 = 105. 105 + 48 = 153.** ✅
 
-**Named individually (50) — in-scope by path, not read, with the reason.** These are the entries whose
+**Named individually (48) — in-scope by path, not read, with the reason.** These are the entries whose
 prefix does not match an exclusion rule, so each needs its own stated reason. (Three further documents were
 in this list in an earlier revision and are **read** now — `docs/evidence/10000-turns-bytes/README.md`,
 `docs/evidence/9558-record-write-cost/README.md`, `docs/evidence/7950-capstone/README.md`; they are counted
@@ -221,15 +225,17 @@ in `§A1.0`'s 45 and the reason each was read late is in `§12`.)
 | `docs/architecture/MEMORY-SUBSTRATE-PROBLEM-MAP.md`, `MEMORY-SUBSTRATE-FINDINGS-LEDGER.md` | Declared status/durability halves of `#2820`/`#2852`; their durability claims delegate to `durability-posture.md`, which was read. **The findings ledger is the one I would read next** — it is the corrections half and may hold an item this map repeats. |
 | `docs/epics/2026-10-10-7879-postgres-record/03-schema.md`, `06-cache-projection.md` | **Read** (they are in `§A1.1`; listed here only because they are absent from the index). |
 | `docs/evidence/7949-capstone/*` (6 files), `docs/epics/2026-11-04-7949-extractor-v4-capstone/` | The extractor-v4 capstone. Storage appears only as a cost basis; the storage conclusions live in `§17` of the architecture doc, which was read. |
-| `docs/evidence/10976-licence`, `7846-indexed-graph-restore`, `7983-cost-magnitudes`, `8503`, `8607-w1b`, `11083`, `11086`, `11739-*`, `11821-journal-encoding`, `4623-*`, `2026-10-21-shared-coordination-memory` | **Partially read via `§A1.2`'s issue census** and each is a *measurement of a different question* (eviction licence, RESTORE wedge, cost magnitudes, operator edges, legacy ids, pack census, write-rate gates, quote population, journal encoding width, cohort cap, fleet coordination). `11821-journal-encoding` is the closest to this subject and **is named in D-09**; I did not open it. |
+| `docs/evidence/10976-licence`, `7846-indexed-graph-restore`, `7983-cost-magnitudes`, `8503`, `8607-w1b`, `11083`, `11086`, `11739-*`, `4623-*`, `2026-10-21-shared-coordination-memory` | **Partially read via `§A1.2`'s issue census** and each is a *measurement of a different question* (eviction licence, RESTORE wedge, cost magnitudes, operator edges, legacy ids, pack census, write-rate gates, quote population, cohort cap, fleet coordination). `11821-journal-encoding` is **not** in this list: it is one of the three evidence records **read** in `§A1.1` row 40, which is where its 9,176 → 5,423 B figures come from — an earlier revision of this row wrongly said it was not opened, and wrongly attributed it to D-09 (D-09 is the missing journal bound; it names `#9025` and `#5612`). |
+| `docs/evidence/7949-capstone/*` (6 files) | The extractor-v4 capstone's own evidence records. Storage appears only as a cost basis; the storage conclusions live in `§17` of the architecture doc, which was read. |
+| `docs/ops/multi-graph-migration-runbook.md`, `CONTRIBUTING.md` | Neither asserts anything about the journal/record shape. The runbook moves a **graph key** between stores and its storage claims delegate to `durability-posture.md` (the full reason is `§A1.1` row 38); `CONTRIBUTING.md` carries the finding-provenance gate, which is process. |
 | `docs/plans/2026-10-17-7951-update-point-outbox.md`, `2026-10-18-7951-delete-point-outbox.md` | **Named in `§A1.2` as increments 2a/4a**; I read the `#7951` atomic-write plan (`2026-10-14`), not these two increments. Their per-door detail is what `§A5`'s "already exists" table summarises at one remove. |
 | `docs/plans/2026-10-09-5362-retroactive-correction`, `2026-10-10-3644-source-version-window`, `2026-10-11-1990-diff-boundary-invariant`, `2026-10-16-8056-class-plural-enumeration`, `2026-10-18-8882-phase0-1-census`, `2026-11-04-5087-epic-decomposition`, `2026-11-09-11656-endpoint-kind-binding` | Each is a **per-door or per-mechanism** plan: back-dating, `:Source` version windows, the DIFF cursor boundary, temporal enumeration, graph census, the extractor epic, endpoint-kind binding. They change *what* is written, not the storage shape that carries it. `3644` and `1990` are the two I would read next, because `:Source` versioning and the cursor boundary are the two payload-level invariants `§A7` touches. |
 | `docs/architecture/ENTITY-VERDICT-BANDS`, `S2-DECISION-SEAM`, `CURATION-11469`, `INGEST_CONTRACT`, `client-server-split`, `docs/epics/2026-11-04-5090-vector-layer/TEST-DESIGN-surface-map`, `docs/registry-graph-schema` | Decision/contract surfaces above the storage layer. `ENTITY-VERDICT-BANDS` is the one that matters most to `§A6` (it is the policy `_POINT_DENY` implements, D-17) and **I did not open it**; that is a stated gap, not a satisfied one. |
 | `docs/runbook/2578-*`, `2655-*`, `2684-*`, `2886-*`, `2976-*`, `4107-*`, `4210-*` | Temporal/retrieval/preference measurement runbooks. Reading surfaces only. |
 | `docs/ops/669-post-flip-verification`, `cost-allocation`, `extraction-cost-metrics`, `docs/infra/pytest-timeout-guard`, `tools/finding_provenance.py`, `tortoise/__all__.py`, `docs/research/2026-10-19-8709-member-own-key-surface`, `docs/research/2026-11-09-11656-kindpair-enforcement` | Verification procedure, cost *policy*, test-infrastructure, and two non-storage research docs. |
 
-⛔ **The honest summary of this section:** 25 of 180 index paths were read (14 %), and **the reason that is
-not a scandal is only that the index does not contain the governing documents** — 20 of the 45 documents
+⛔ **The honest summary of this section:** 25 of 178 index documents were read (14 %), and **the reason that
+is not a scandal is only that the index does not contain the governing documents** — 20 of the 45 documents
 that were read are invisible to it. Both halves of that sentence are defects and neither is a defence of the
 other.
 
@@ -285,16 +291,18 @@ Production call sites that parse journal records (excluding docstring references
 ### A2.3 The Postgres record: `journal_event` has exactly one writer and one reader that folds it
 
 ```console
-$ rg -n "INSERT INTO public\.journal_event|FROM public\.journal_event|journal_event_bytes_for_rows|_journal_row" tortoise/
-tortoise/record_projection.py:5995:def _journal_row(...)
+$ rg -n "INSERT INTO public\.journal_event|FROM public\.journal_event|journal_event_bytes_for_rows|_journal_row" tortoise/     # 11 lines
+tortoise/cost_dimensions.py:492:            "journal_event_bytes_for_rows",
+tortoise/cache_projection.py:2909:#:   the record (`mining.py`, #5475). `_journal_row` strips the envelope keys
+tortoise/cache_projection.py:2988:    "FROM public.journal_event "
+tortoise/postgres_bytes.py:118:ROWS_RPC = "journal_event_bytes_for_rows"
+tortoise/postgres_bytes.py:215:    """Parse a ``journal_event_bytes_for_rows()`` payload. RAISES on malformed."""
+tortoise/record_projection.py:496:    # as a NODE prop: this set is not only a props set — `_journal_row` filters
+tortoise/record_projection.py:5995:def _journal_row(record: Mapping[str, Any], seq: int, org_id: str,
 tortoise/record_projection.py:6005:        "INSERT INTO public.journal_event "
 tortoise/record_projection.py:6499:_JOURNAL_INSERT_PREFIX = "INSERT INTO public.journal_event"
 tortoise/record_projection.py:6513:    THE POSITION WATERMARK (#9187). `_journal_row` keys the consumed position on
 tortoise/record_projection.py:6545:            plan.append(_journal_row(record, seq, org_id, graph_id))
-tortoise/cache_projection.py:2988:    "FROM public.journal_event "
-tortoise/postgres_bytes.py:118:ROWS_RPC = "journal_event_bytes_for_rows"
-tortoise/postgres_bytes.py:215:    """Parse a ``journal_event_bytes_for_rows()`` payload. RAISES on malformed."""
-tortoise/cost_dimensions.py:492:            "journal_event_bytes_for_rows",
 ```
 
 | site | class |
@@ -312,22 +320,39 @@ tortoise/cost_dimensions.py:492:            "journal_event_bytes_for_rows",
 ### A2.4 `:GraphEvent` and `:GraphEventMeta` — the second store and its own allocator
 
 ```console
-$ rg -n "^def (next_seq|capture_watermark|reestablish_watermark|append_event|read_after|purge_expired|purge_overflow|ensure_event_schema|degraded|degraded_graphs|clear_degraded|record_degraded|_refresh_first_seq)" tortoise/event_store.py
-222 record_degraded · 270 degraded · 284 degraded_graphs · 318 clear_degraded
-388 ensure_event_schema · 427 next_seq · 524 capture_watermark · 571 reestablish_watermark
-777 append_event · 922 read_after · 1014 purge_expired · 1038 purge_overflow · 1062 _refresh_first_seq
+$ rg -n "^def (next_seq|capture_watermark|reestablish_watermark|append_event|read_after|purge_expired|purge_overflow|ensure_event_schema|degraded|degraded_graphs|clear_degraded|record_degraded|_refresh_first_seq)" tortoise/event_store.py     # 13 lines
+222:def record_degraded(proj, stage: str, event_type: str, event_id: str | None,
+270:def degraded(proj) -> dict[str, Any] | None:
+284:def degraded_graphs() -> list[dict[str, Any]]:
+318:def clear_degraded(graph_name: str | None = None) -> None:
+388:def ensure_event_schema(proj) -> None:
+427:def next_seq(proj) -> int:
+524:def capture_watermark(proj) -> dict | None:
+571:def reestablish_watermark(proj, carried_last_seq: int | None, *,
+777:def append_event(proj, seq: int, type_: str, payload: dict, event_id: str,
+922:def read_after(proj, after_seq: int, types: list[str] | None = None,
+1014:def purge_expired(proj, retention_days: int = 30) -> int:
+1038:def purge_overflow(proj, max_events: int) -> int:
+1062:def _refresh_first_seq(proj) -> None:
 ```
 
 ```console
-$ rg -n "next_seq\(|append_event\(|read_after\(|capture_watermark\(|reestablish_watermark\(" tortoise/*.py tortoise/projection/*.py | grep -v "^tortoise/event_store.py"     # 15 lines, call sites only
+$ rg -n "next_seq\(|append_event\(|read_after\(|capture_watermark\(|reestablish_watermark\(" tortoise/*.py tortoise/projection/*.py | grep -v "^tortoise/event_store.py"     # 15 lines
+tortoise/projection/__init__.py:2133:    entry = capture_watermark(proj)
+tortoise/projection/__init__.py:4978:    lane is instead handed to `reestablish_watermark(..., restore_reason=...)`,
+tortoise/projection/__init__.py:13495:        carried_watermark = capture_watermark(self)
+tortoise/projection/__init__.py:13695:            restored = reestablish_watermark(self, carried_last_seq)
+tortoise/projection/__init__.py:18902:            restored = reestablish_watermark(
+tortoise/log.py:24:    events = log.read_after()          # all events so far
+tortoise/log.py:28:    new_events = log.read_after(cursor)
+tortoise/log.py:2555:    def read_after(self, cursor: str | None = None) -> list[dict]:
+tortoise/log.py:2579:        ``read_after(token)`` will return all future events).
+tortoise/change_feed.py:73:The fold sees ONE page — the rows ``read_after(..., limit=limit)`` returned —
+tortoise/webhook_delivery.py:1300:            events = read_after(proj, int(sub.get("cursor") or 0), types=types,
+tortoise/why_snapshot.py:526:        events = read_after(proj, int(min_cursor), limit=max(1, int(limit)))
+tortoise/sdk.py:13587:        evs = read_after(proj, after_seq, types=types, limit=limit)
 tortoise/sdk.py:13832:                seq = next_seq(proj)
 tortoise/sdk.py:13833:                append_event(proj, seq, type_, graph_payload, self.ulid())
-tortoise/sdk.py:13587:        evs = read_after(proj, after_seq, types=types, limit=limit)      # poll_events
-tortoise/webhook_delivery.py:1300:    events = read_after(proj, int(sub.get("cursor") or 0), ...)      # the retry sweep
-tortoise/why_snapshot.py:526:        events = read_after(proj, int(min_cursor), limit=...)         # why-block precompute
-tortoise/projection/__init__.py:13495 / :13695    capture → reestablish (engine 2)
-tortoise/projection/__init__.py:2133              capture_watermark (the pre-wipe capture)
-tortoise/projection/__init__.py:18902            reestablish_watermark (engine 5, record-sourced)
 ```
 
 `_GRAPH_EVENT_TYPES` has **11 members** (`sdk.py:4671`), and the set is **defined by the store boundary**, not
@@ -923,7 +948,7 @@ correct artifact — is the one that propagates, and because the near-miss is th
   regex over source, they count resolved call sites), so the honest output is "the denominator is unknown
   and one command shows it", not "the answer is 458".
 - **`docs/ops/multi-graph-migration-runbook.md` not read**, with the reason stated in A1.1 row 38.
-- **155 index paths not read**: 105 by a stated exclusion rule, **50 named individually with a reason** in
+- **153 index documents not read**: 105 by a stated exclusion rule, **48 named individually with a reason** in
   A1.4. The first draft claimed a 41/141 partition that did not survive its own lists (36 entries in no
   class); that is corrected rather than restated, and A1.0 records what the wrong version said.
 
@@ -952,16 +977,22 @@ explicit instruction to hunt for false citations, unsupported counts, and unexam
 issues (1 P0, 8 P1, 7 P2) and every finding below was re-verified against the source before being applied;
 two were partly false and are recorded as such.**
 
-**Cycle 2**, also fresh-context, ran against the commit that cleared the required `docs` check. It found 7 more
+**Cycle 2**, also fresh-context, ran against the commit that cleared the required `docs` check. It found 7
 (3 P1, 4 P2). Every one was re-measured before being applied, and **one was partly false**: the claim that
 `§A1.4`'s C2 class is 4 rather than 2 does not survive the population — 7 of C2's 9 prefixes match an index
 entry and 5 of those already carry a C1 prefix, so C2 is **2** and only the *sentence* beside it was broken.
-Rows from both cycles are in the table below, in the order they were found.
+
+**Cycle 3**, fresh-context again, ran against cycle 2's fixes and found 4 more (1 P1, 3 P2) — including that
+cycle 2's own replacement table was reproducible only under a membership rule it had not stated. That is the
+honest shape of this section: **the arithmetic in `§A1` took three cycles to become reproducible, and each
+cycle's failure is a different failure** — first a row/path conflation, then two conventions in one table, then
+a partition whose rules were printed but whose population was not. Rows from all three cycles are in the table
+below, in the order they were found.
 
 | what the reviewer found | verified? | what changed |
 |---|---|---|
 | **P0 — the unproven-position class (`#9252`) is entirely absent**, and the document quotes the 974 MB journal that makes it bite | ✅ **verbatim** (`log.py:1503-1530`, `monitoring.py:1459-1466`) | **new debt row D-25**, plus the strongest evidence *for* A7.5; D-09 and A7.6 now connect to it |
-| A1's partition is arithmetically false — 36 entries in no class, `C2 ⊂ C1` | ✅ **re-derived** (C1 = 145 not 128, union 146 not 141, 36 uncovered) | **A1.0/A1.4 rewritten**: the key is now the **path**, never a position number; 105 by rule + named with a reason (the count was 54 here and is **50** after the second cycle below, when the three late reads left the unread population) |
+| A1's partition is arithmetically false — 36 entries in no class, `C2 ⊂ C1` | ✅ **re-derived** (C1 = 145 not 128, union 146 not 141, 36 uncovered) | **A1.0/A1.4 rewritten**: the key is now the **path**, never a position number; 105 by rule + named with a reason (the count was 54 here; it is **48** after cycle 2, which also fixed the *membership rule*, so the denominators moved 159 → 153 for that reason and not only because three late reads left the population) |
 | D-24 is a duplicate of open **`#9318`**, stated 4 lines below the quote that names it | ✅ **verbatim** (`record_writer.py:2412-2425`) | ⚑ removed from D-24, the tracker cited, and the argument demoted to "the reachable trigger" — which is all it ever added |
 | A7.2 kept the "no sequence in the record schema" claim that A7.5 corrects | ✅ (the `rg` does return a `nextval` comment line) | parenthetical replaced with the narrow true statement |
 | A7.5's "lateral move in concurrency" + unspecified seed | ✅ (`log.py:625-633`; `MAX(seq)+1` rejected at `:835-838`) | false equivalence **removed and stated as a real new bottleneck**; the seeding rule written |
@@ -973,12 +1004,16 @@ Rows from both cycles are in the table below, in the order they were found.
 | block quote alters "a seq" → "a position" | ✅ (`log.py:832-833`) | restored |
 | `sdk.py:5653-5683` is a stale range lifted from the plan | ✅ (it is now the `status`-key refusal) | re-resolved to `sdk.py:13832-13833`/`:14008` |
 | A6's tally (13/8/3) did not match its own table | ✅ (it was 14/8/2) | recount published, and **26 rows now** after D-25/D-26 |
-| **§A1.0's coverage arithmetic did not close** — 22 indexed + 19 absent = 41 read, but one of the 41 rows is declared NOT READ, row 40 bundles three documents, and the three late reads were counted as unread while §A1.4 named them | ✅ **re-measured**: 182 entry rows are **180 distinct** paths (two paths listed twice); the read set is **45** documents across **40** `READ` rows; **25 / 20 / 155** partition at path level. `§A1.4`'s **2** for C2 **survives** — 7 of its 9 prefixes match an entry and 5 of those already carry a C1 prefix — so only the 155/50 denominators moved | A1.0/A1.4 restated at path level, the old row/path confusion recorded rather than overwritten, and the three late reads moved out of the unread population |
-| **§9.2 re-asserted the cost equivalence `§A7.5` had just removed** ("the per-graph serialisation is a lateral move"), and cited `log.py:820-826`, which is `_read_exact`, not the lock seam | ✅ (`log.py:594-620` is the seam; `:625-633` is its 5 s abandonment; `:820-826` is the tail read) | §9.2's row now says the opposite, cites the seam, and names the row as a place that would re-assert the removed claim |
+| **§A1.0's coverage arithmetic did not close** — 22 indexed + 19 absent = 41 read, but one of the 41 rows is declared NOT READ, row 40 bundles three documents, and the three late reads were counted as unread while §A1.4 named them | ✅ **re-measured twice**: 182 rows → **180** name an existing file → **178 distinct** (two listed twice); read **45** = **25** with an own row + **20** without; unread **153**. `§A1.4`'s **2** for C2 **survives** — 7 of its 9 prefixes match an entry and 5 of those already carry a C1 prefix | A1.0 now states the **membership rule before the numbers** (the cycle-1 attempt was reproducible only under a different rule than it counted rows with, so it was replaced, not patched) |
+| **§9.2 re-asserted the cost equivalence `§A7.5` had just removed** ("the per-graph serialisation is a lateral move"), and cited `log.py:820-826`, which is `_read_exactly` (def at `:806`), not the lock seam | ✅ (`log.py:594-620` is the seam; `:625-633` is its 5 s abandonment; `:820-826` is the tail read) | §9.2's row now says the opposite, cites the seam, and names the row as a place that would re-assert the removed claim |
 | **`§A2` claimed a stored-log provenance that cannot be retrieved** — "every count comes from a `worktree_report.py run` log committed with the worktree report", while `.gitignore:158-159` ignores both the report and its logs | ✅ (`.gitignore:158-159`, `git check-ignore -v`) | provenance restated: the **command** beside each count is the artifact, and the `:GraphEventMeta` count has one now |
 | `:GraphEventMeta` "appears at **44** sites" | ❌ **wrong by 17 sites** — reported 44, measured **61** (`rg -n 'GraphEventMeta' tortoise/ \| wc -l`; 61 at the measured base too, by `git grep -c`), of which 50 spell `` `:GraphEventMeta` `` | count corrected in §A2.4 and §A2.5, with the command printed beside it |
 | three cross-references pointed at sections that do not say it: `§A7.0` (no such section), `§A4` for the 32,032 figure (it is `§A2.6`), and "**five** durable surfaces" above a six-item list the next sentence calls "six statements" | ✅ (`grep '^#\\+ '` has A7.1–A7.7 only; `32,032` occurs at `:156`, `:365`, `:561`, `:374`, never in §A4) | `§A7.0` → `§A7.5`; `§A4` → `§A2.6`; `five` → `six` |
 | the `read_all` census excerpt pasted three output lines as if they were the command's contiguous head, when `rg`'s parallel walk makes the file order unstable between runs | ✅ (re-running the command returns a different file order; the **39** total is stable) | the block now pastes the real contiguous head and **says** the order is not stable, instead of implying an excerpt that reproduces |
+| **the partition was still not reproducible**: the C1 prefix list yields 103 or 104 depending on the membership rule, the named table named only 40 of the 48, and `docs/ops/multi-graph-migration-runbook.md` was in the unread set with its reason living in `§A1.1` row 38 | ✅ **re-derived**: with the rule stated in `§A1.0`, C1 = **103**, C2 = **2**, C3 = 0, named = **48**, and 103 + 2 + 48 = 153 ✓. Two documents had no named row at all — the runbook and `CONTRIBUTING.md` — and both now do | named table extended; the rule, not just the totals, is what changed |
+| **three §A2 census blocks presented curated regroupings as raw `rg` output** (one pasted `:13495 / :13695 capture → reestablish` — a line `rg` cannot print; one claimed 15 lines and pasted 8; one claimed 11 and pasted 9) | ✅ (re-ran all three: **11**, **13** and **15** lines respectively) | all three now paste the **real, complete** output with its line count, so a reader diffing their own run against the block sees the same thing |
+| `§A1.4` said `11821-journal-encoding` was not opened and was "named in D-09", while `§A1.1` row 40 records it as **READ** and D-09 names `#9025`/`#5612` | ✅ (`§A1.1` row 40; D-09 at `:568`) | the row now records it as read and the D-09 attribution is withdrawn |
+| `§A1.1`'s heading claimed "41 documents, each `READ`" over a table containing one `NOT READ` row | ✅ (row 38) | heading now says 41 numbered rows: 40 `READ`, 1 declared `NOT READ` |
 
 ⛔ **The most important thing this cycle did was make the shape harder, not easier.** Two findings (D-25,
 D-26) are cases A7.5 had **assumed away in both directions** — a record write with no journal position, and a
