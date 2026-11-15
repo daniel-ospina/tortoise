@@ -95,10 +95,16 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   (``live._terminal_excluded`` reads an absent ``status`` as live).
   ⛔ WHAT IS PERFORMABLE ON A TERMINAL ``:Object`` TODAY is the COHERENT
   un-supersede only, and only for a ``superseded`` row: ``update_entity(…,
-  status=<the row's current word>, supersededBy=None, supersededAt=None)`` —
-  both carriers cleared in the SAME call, which #12825 restored and #12882
-  pinned. Every OTHER terminal word has no SDK route at all (#12592), so naming
-  the clear there would prescribe a call that raises (AX rule 2). ⛔ Neither is
+  status='live', supersededBy=None, supersededAt=None)`` — a CURRENT-READING
+  word (``'live'`` on a plain kind; a pack kind's own current word goes in its
+  place, as ``sdk.py``'s own refusal hint says) with BOTH carriers cleared in the
+  SAME call, which #12825 restored and #12882 pinned. ⛔ **NOT the row's STORED
+  word:** ``status='superseded'`` beside the two clears is ACCEPTED by the
+  entailed short-circuit (``all(s == _np_status …)``, ``sdk.py``) and leaves the
+  row TERMINAL *with its carriers gone* — the goal unmet, no error reported, and
+  the row now on the carrier-less path, so it can no longer be un-superseded at
+  all (measured). Every OTHER terminal word has no SDK route at all (#12592), so
+  naming the clear there would prescribe a call that raises (AX rule 2). ⛔ Neither is
   a record-sourced re-projection, which is ADDITIVE (``MERGE … SET n += $props``,
   no REMOVE pass) and would leave the value in place — and a clear writes
   ``state.status = null`` into the record, which the state-op leg's
@@ -697,9 +703,12 @@ def reconcile_record_and_cache(
     ``None`` is not one of them), so a Subject's clear is the graph-side
     ``REMOVE n.status`` — and a clear makes a TERMINAL entity read LIVE. For a
     TERMINAL ``:Object`` the only performable route is the COHERENT un-supersede
-    of a ``superseded`` row (``status=<current word>`` with BOTH carriers cleared
-    in the same call, #12825); every other terminal word has no SDK route
-    (#12592). Clear,
+    of a ``superseded`` row (``status='live'`` — a CURRENT-READING word, the pack
+    kind's own word in place of ``'live'`` — with BOTH carriers cleared in the
+    same call, #12825). ⛔ NOT the stored word: ``status='superseded'`` beside the
+    two clears is ACCEPTED by the entailed short-circuit and leaves the row
+    terminal with its carriers gone (measured). Every other terminal word has no
+    SDK route (#12592). Clear,
     or the wipe, but ⛔ NOT a record-sourced re-projection, which is ADDITIVE and
     leaves the value in place — see the module docstring's (5)),
     a record-sourced clear IN PLACE for the declined pair —
