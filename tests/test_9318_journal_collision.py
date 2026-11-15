@@ -237,7 +237,7 @@ def test_an_absorbed_position_with_different_content_raises_and_names_both() -> 
     # Two DIFFERENT digests: the payloads differ, so the digests disagree.
     assert excinfo.value.payload_digest != excinfo.value.stored_payload_digest
     # …the two records are NAMED by identity, …
-    assert excinfo.value.identity_state == "different"
+    assert excinfo.value.identity_state == "disagrees"
     assert "obj-a" in message and "obj-b" in message
     # …and neither payload's CONTENT (a document title) appears.
     for record in (RECORD_A, RECORD_B):
@@ -265,16 +265,13 @@ def test_a_re_derived_record_is_not_reportable_as_two_records() -> None:
     with pytest.raises(rp.JournalPositionCollision) as excinfo:
         rp.replay([RECORD_A], conn, org_id=ORG, graph_id=GRAPH)
 
-    assert excinfo.value.identity_state == "same"
+    assert excinfo.value.identity_state == "agrees"
     message = str(excinfo.value)
-    assert "re-derivation" in message
+    # BOTH causes, unconditionally — so neither can be wrong about the cause.
+    assert "a DIFFERENT record claimed this position" in message
+    assert "payload derivation changed since that row was written" in message
     assert "no record id" in message, (
         "the message must say WHY it cannot tell one record from two")
-    # ⛔ The words that assert a record identity, which the row cannot carry.
-    assert "SAME record" not in message
-    assert "the SAME" not in message
-    # The collision claim is NOT made: no "different records" diagnosis.
-    assert "DIFFERENT records" not in message
     # …and, as ever, no payload content.
     assert "corpus A document" not in message
 
@@ -293,10 +290,8 @@ def test_two_payloads_with_no_comparable_identity_say_so() -> None:
     with pytest.raises(rp.JournalPositionCollision) as excinfo:
         rp.replay([anonymous], conn, org_id=ORG, graph_id=GRAPH)
 
-    assert excinfo.value.identity_state == "unknown"
-    assert "no record identity could be compared" in str(excinfo.value)
-    assert "DIFFERENT records" not in str(excinfo.value), (
-        "a state with no comparable identity may not assert a cause")
+    assert excinfo.value.identity_state == "none"
+    assert "no identity key is comparable between them" in str(excinfo.value)
 
 
 def test_a_shared_NODE_id_with_two_record_types_is_not_one_record() -> None:
@@ -305,20 +300,22 @@ def test_a_shared_NODE_id_with_two_record_types_is_not_one_record() -> None:
     Cycle 2 of review found the first cut of the identity verdict returned
     `same` on any shared id: `ObjectRegistered` vs `EntityMutated` about one
     object came back as "the SAME record", which is the cycle-1 defect mirrored
-    — a cause asserted that the evidence cannot support, and every collision
-    origin omitted from the sentence. The state is `same_coordinate`, and its
-    text names the collision origins.
+    — a cause asserted that the evidence cannot support. No state names a cause
+    now; the message names both causes and the reading says only what the ids
+    do, which here is that the write's payload carries no identity at all.
     """
     conn = Absorbed(stored=("EntityMutated", _payload_of(RECORD_A)))
 
     with pytest.raises(rp.JournalPositionCollision) as excinfo:
         rp.replay([RECORD_A], conn, org_id=ORG, graph_id=GRAPH)
 
-    assert excinfo.value.identity_state == "same_coordinate"
+    # Both sides name the SAME object id, so the ids agree — and the message
+    # still names both causes, because agreement on a node coordinate is not
+    # agreement on a record.
+    assert excinfo.value.identity_state == "agrees"
     message = str(excinfo.value)
-    assert "record TYPES differ" in message
+    assert "they share id=obj-a" in message
     assert "second durable journal" in message
-    assert "SAME record" not in message
 
 
 def test_a_NESTED_payload_identity_is_read() -> None:
@@ -338,7 +335,7 @@ def test_a_NESTED_payload_identity_is_read() -> None:
     with pytest.raises(rp.JournalPositionCollision) as excinfo:
         rp.replay([nested], conn, org_id=ORG, graph_id=GRAPH)
 
-    assert excinfo.value.identity_state == "same"
+    assert excinfo.value.identity_state == "agrees"
     assert "point.id=p1" in str(excinfo.value), (
         "the identity was not read from the nested snapshot — a PointAdded's id "
         "lives under `point`, and reporting 'unknown' for it tells an operator "
@@ -363,13 +360,13 @@ def test_the_SAME_type_at_a_shared_node_id_does_not_claim_one_record() -> None:
     with pytest.raises(rp.JournalPositionCollision) as excinfo:
         rp.replay([payload], conn, org_id=ORG, graph_id=GRAPH)
 
-    assert excinfo.value.identity_state == "same"
+    assert excinfo.value.identity_state == "agrees"
     message = str(excinfo.value)
-    # BOTH possibilities, because the row cannot distinguish them.
-    assert "re-derivation of one record" in message
-    assert "two records about one node" in message
+    # The reading is a fact about the ids, NOT a verdict about the records.
+    assert "they share id=p1" in message
     assert "SAME record" not in message
-    assert "SAME NODE" not in message
+    assert "DIFFERENT records" not in message
+    assert "two records about one node" not in message
 
 
 def test_an_agreeing_coarse_key_cannot_suppress_a_disagreeing_one() -> None:
@@ -379,8 +376,8 @@ def test_an_agreeing_coarse_key_cannot_suppress_a_disagreeing_one() -> None:
     `_IDENTITY_KEYS` order — so an agreeing `session_id` decided the verdict
     before a DISAGREEING `id` was ever read. Caller-set `session_id` rides the
     point snapshot into `PointAdded`/`PointRevised`, so a genuine two-journal
-    collision between two points of one session reported "a re-derivation of one
-    record" while the proof of two records sat in the same payload pair.
+    collision between two points of one session reported the session coordinate
+    while the proof of two nodes sat in the same payload pair.
     """
     ours = {"type": "PointAdded",
             "point": {"id": "p-a", "session_id": "s1", "content": "a"}}
@@ -390,7 +387,7 @@ def test_an_agreeing_coarse_key_cannot_suppress_a_disagreeing_one() -> None:
     with pytest.raises(rp.JournalPositionCollision) as excinfo:
         rp.replay([ours], conn, org_id=ORG, graph_id=GRAPH)
 
-    assert excinfo.value.identity_state == "different"
+    assert excinfo.value.identity_state == "disagrees"
     message = str(excinfo.value)
     assert "point.id: p-a vs p-b" in message, (
         "the disagreeing node id was not the label — a coarse agreeing key "
@@ -407,25 +404,22 @@ def test_an_identity_read_from_a_SUBDICT_matches_a_TOP_LEVEL_one() -> None:
     key would call them incomparable and fall back to `unknown` — losing the one
     signal the class exists to report.
     """
-    state, detail = rp._identity_verdict(
-        {"point": {"id": "p1"}}, {"id": "p1"}, "PointRevised", "PointRevised")
+    state, detail = rp._identity_evidence({"point": {"id": "p1"}}, {"id": "p1"})
 
-    assert state == "same"
+    assert state == "agrees"
     assert detail == "point.id=p1"
 
 
 def test_a_non_scalar_identity_value_is_not_rendered_into_the_log() -> None:
     """An identity VALUE is caller data and may be a whole document (#9318 R3).
 
-    `_identity_pairs` used to accept any non-None value and `_identity_verdict`
+    `_identity_pairs` used to accept any non-None value and `_identity_evidence`
     rendered `str(value)`, so `{"id": {"title": "Q3 pricing memo"}}` put a
     document title on a log line the class docstring promises is content-free.
     `record_writer._record_identity` accepts `str` only; this accepts `str`/`int`
     and drops everything else.
     """
-    state, detail = rp._identity_verdict(
-        {"id": {"title": "Q3 pricing memo"}}, {"id": "obj-a"},
-        "ObjectRegistered", "ObjectRegistered")
+    state, detail = rp._identity_evidence({"id": {"title": "Q3 pricing memo"}}, {"id": "obj-a"})
 
     assert state == "one_sided"
     assert "Q3 pricing memo" not in (detail or "")
@@ -433,9 +427,7 @@ def test_a_non_scalar_identity_value_is_not_rendered_into_the_log() -> None:
 
 def test_the_surviving_row_may_be_the_only_side_naming_an_identity() -> None:
     """The mirror of `one_sided`: a field REMOVED since the row was written."""
-    state, detail = rp._identity_verdict(
-        {"objectKind": "document"}, {"id": "obj-a"},
-        "ObjectRegistered", "ObjectRegistered")
+    state, detail = rp._identity_evidence({"objectKind": "document"}, {"id": "obj-a"})
 
     assert state == "one_sided"
     assert detail == "only the surviving row names id=obj-a"
@@ -448,10 +440,9 @@ def test_a_number_typed_id_is_compared_by_type_not_by_stringification() -> None:
     would call a numeric id and its string form the same record — the same
     over-claim as the coordinate states, one level down.
     """
-    state, _detail = rp._identity_verdict(
-        {"id": "1"}, {"id": 1}, "ObjectRegistered", "ObjectRegistered")
+    state, _detail = rp._identity_evidence({"id": "1"}, {"id": 1})
 
-    assert state == "different"
+    assert state == "disagrees"
 
 
 def test_a_WITHHELD_section_is_never_read_for_an_identity() -> None:
@@ -485,11 +476,9 @@ def test_an_instruction_like_subdict_does_not_move_the_verdict() -> None:
     actually compared. Only declared snapshot sections are read now, so the
     shared top-level id decides.
     """
-    state, detail = rp._identity_verdict(
-        {"id": "p1", "aboutObject": {"id": "obj-9"}}, {"id": "p1"},
-        "PointRevised", "PointRevised")
+    state, detail = rp._identity_evidence({"id": "p1", "aboutObject": {"id": "obj-9"}}, {"id": "p1"})
 
-    assert state == "same"
+    assert state == "agrees"
     assert detail == "id=p1"
 
 
@@ -500,11 +489,9 @@ def test_a_key_present_in_TWO_scopes_is_not_compared_across_them() -> None:
     of them arbitrarily and print a counterpart it never compared. The pair is
     skipped, and the same-scope agreement still decides.
     """
-    state, detail = rp._identity_verdict(
-        {"id": "p1", "point": {"id": "p9"}}, {"id": "p1"},
-        "PointRevised", "PointRevised")
+    state, detail = rp._identity_evidence({"id": "p1", "point": {"id": "p9"}}, {"id": "p1"})
 
-    assert state == "same"
+    assert state == "agrees"
     assert detail == "id=p1"
 
 
@@ -517,9 +504,8 @@ def test_a_BLANK_identity_is_not_an_agreeing_coordinate() -> None:
     `record_writer._record_identity` requires a non-empty string for the same
     reason.
     """
-    assert rp._identity_verdict({"id": ""}, {"id": ""}, "A", "A") == (
-        "unknown", None)
-    state, detail = rp._identity_verdict({"id": ""}, {"id": "obj-a"}, "A", "A")
+    assert rp._identity_evidence({"id": ""}, {"id": ""}) == ("none", None)
+    state, detail = rp._identity_evidence({"id": ""}, {"id": "obj-a"})
     assert state == "one_sided"
     assert detail == "only the surviving row names id=obj-a"
 
@@ -533,10 +519,9 @@ def test_the_identity_values_are_BOUNDED_like_every_other_log_value() -> None:
     would be the shape the #10648 review recorded for this exact line.
     """
     huge = "x" * 300
-    state, detail = rp._identity_verdict(
-        {"id": huge}, {"id": "b"}, "ObjectRegistered", "ObjectRegistered")
+    state, detail = rp._identity_evidence({"id": huge}, {"id": "b"})
 
-    assert state == "different"
+    assert state == "disagrees"
     assert huge not in (detail or "")
     assert "chars)" in (detail or ""), (
         "the identity value was not truncated with the same bound marker the "

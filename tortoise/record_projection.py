@@ -930,21 +930,27 @@ class JournalPositionCollision(RecordProjectionError):
     * the refusal is still CORRECT — the record's own copy of that position is
       not what this tree would write, and silently absorbing the difference is
       the mis-index this class exists to stop;
-    * the DIAGNOSIS must therefore not assert one cause. The message reports
-      which of :func:`_identity_verdict`'s FIVE states the two payloads' record
-      coordinates support — `same` (every shared coordinate agrees, same record
-      type: a re-derivation OR two records about one node), `same_coordinate`
-      (coordinate agrees, record types differ: two records about one node),
-      `different` (a shared coordinate disagrees: the collision), `one_sided`
-      (only one side carries a coordinate at all) or `unknown` (nothing
-      comparable) — and each state's text names the possibilities that state can
-      actually support. A message that said only "two DIFFERENT records" would
-      send an operator hunting a second journal that does not exist, on a record
-      whose only fault is that its rows predate a deploy; and a message that said
-      "the SAME record" on a shared node id would tell an operator "one record"
-      about two, which is the same false certainty in the other direction. The
-      durable payload carries no record id at all (no journal column —
-      `#12894`), which is why no state may claim one.
+    * the DIAGNOSIS must therefore not assert one cause, and it asserts NONE.
+      The message states the two possible causes ONCE, unconditionally — a
+      different record claimed the position (a second durable journal, a restore,
+      a rotation, a rebuild numbering below the high-water mark) OR this record's
+      own payload derivation changed since that row was written — and then
+      appends only the MECHANICAL reading of the two payloads
+      (:func:`_identity_evidence`): whether the identities they both carry agree,
+      disagree, exist on one side only, or are not comparable at all. That
+      reading is a fact about the payloads and supports no cause on its own,
+      which is why it is not allowed to choose one.
+      ⛔ The three earlier cuts of this class let the reading DECIDE the
+      diagnosis instead — "the SAME record", "two DIFFERENT records", "two
+      records about one node" — and each was falsified in review, because the
+      durable payload carries no record id at all (`event_id` is stripped by
+      `ENVELOPE_KEYS`, and there is no journal column): `id`, `node_key` and
+      `session_id` are COORDINATES a record shares with its neighbours, so no
+      combination of them can tell one record from two. A diagnosis built on
+      them is a claim the evidence cannot support whichever way it is phrased.
+      The uniform two-cause sentence cannot be wrong about the cause because it
+      names both possibilities every time; the appended reading is checkable
+      against the payloads themselves.
 
     What would remove the residual rather than describe it: a derivation-version
     discriminator INSIDE the durable payload (`projection_version` is stripped
@@ -957,7 +963,7 @@ class JournalPositionCollision(RecordProjectionError):
                  event_type: Any, payload_digest: str, payload_bytes: int,
                  stored_event_type: Any, stored_payload_digest: str,
                  stored_payload_bytes: int,
-                 identity_state: str = "unknown",
+                 identity_state: str = "none",
                  identity_detail: str | None = None) -> None:
         self.org_id = org_id
         self.graph_id = graph_id
@@ -968,50 +974,30 @@ class JournalPositionCollision(RecordProjectionError):
         self.stored_event_type = stored_event_type
         self.stored_payload_digest = stored_payload_digest
         self.stored_payload_bytes = stored_payload_bytes
-        #: ``same`` / ``same_coordinate`` / ``different`` / ``one_sided`` /
-        #: ``unknown`` — what the two payloads' shared COORDINATES support
-        #: (:func:`_identity_verdict`). Reported, never used to change the
-        #: verdict: a shared-coordinate pair is still a difference the record may
-        #: not absorb, and a disagreeing-coordinate pair is the collision this
-        #: class is named for. No state asserts record identity, because the
-        #: durable payload carries none.
+        #: ``agrees`` / ``disagrees`` / ``one_sided`` / ``none`` — what the
+        #: identities both payloads carry say (:func:`_identity_evidence`). A
+        #: mechanical FACT about the two payloads, appended to a diagnosis that
+        #: names both possible causes unconditionally. Never decides the refusal:
+        #: any content difference refuses, and this only says what the ids look
+        #: like. `agrees` does NOT mean "one record" — a shared `id` is a node
+        #: coordinate (see the class docstring).
         self.identity_state = identity_state
-        if identity_state == "same":
-            diagnosis = (
-                f"both payloads agree on every identity they share "
-                f"({identity_detail}) and carry the same record type — so this "
-                f"is either a re-derivation of one record or two records about "
-                f"one node; the durable payload carries no record id, so the "
-                f"record cannot tell the two apart, and it may not absorb the "
-                f"difference either way"
-            )
-        elif identity_state == "same_coordinate":
-            diagnosis = (
-                f"both payloads agree on the identity they share "
-                f"({identity_detail}), and their record TYPES differ — two "
-                f"records about one node, i.e. a second durable journal, a "
-                f"restore, a rotation, or a rebuild numbering below the "
-                f"high-water mark"
-            )
-        elif identity_state == "different":
-            diagnosis = (
-                f"the two payloads name DIFFERENT records ({identity_detail}) "
-                f"— a second durable journal, a restore, a rotation, or a "
-                f"rebuild numbering below the high-water mark"
-            )
+        if identity_state == "agrees":
+            evidence = f"they share {identity_detail}"
+        elif identity_state == "disagrees":
+            evidence = f"they disagree on {identity_detail}"
         elif identity_state == "one_sided":
-            diagnosis = (
-                f"only one side carries a record identity ({identity_detail}), "
-                f"which is what a payload re-derived since that row was "
-                f"written looks like — but a record whose id only one side "
-                f"names looks the same, and the record may absorb neither"
-            )
+            evidence = identity_detail or "only one side carries an identity"
         else:
-            diagnosis = (
-                "no record identity could be compared between the two "
-                "payloads, so a different record and a re-derivation of this "
-                "one are equally possible"
-            )
+            evidence = "no identity key is comparable between them"
+        diagnosis = (
+            f"either a DIFFERENT record claimed this position — a second "
+            f"durable journal, a restore, a rotation, or a rebuild numbering "
+            f"below the high-water mark — or this record's own payload "
+            f"derivation changed since that row was written. The durable "
+            f"payload carries no record id, so the record cannot tell which; "
+            f"{evidence}"
+        )
         super().__init__(
             f"journal position {seq} of ({org_id!r}, {graph_id!r}) already "
             f"holds {stored_event_type!r} ({stored_payload_digest}, "
@@ -6264,7 +6250,7 @@ def _payload_digest(payload: Any) -> tuple[str, int]:
 #: writer's list, disjoint from `_CONTENT_COLUMNS`), so a future addition here
 #: cannot quietly start printing a title.
 #: ORDERED FINEST FIRST, and the order is load-bearing twice: it is the order
-#: `_identity_pairs` emits, and `_identity_verdict` labels a disagreement with
+#: `_identity_pairs` emits, and `_identity_evidence` labels a disagreement with
 #: the finest key that disagreed.
 _IDENTITY_KEYS: tuple[str, ...] = (
     "eventId", "id", "node_key", "session_id",
@@ -6357,43 +6343,37 @@ def _identity_pairs(payload: Any) -> list[tuple[str, str, str, Any]]:
     return pairs
 
 
-def _identity_verdict(attempted: Any, stored: Any, attempted_type: Any,
-                      stored_type: Any) -> tuple[str, str | None]:
-    """``(state, detail)`` for two payloads — REPORTED, NEVER DECIDING (#9318).
+def _identity_evidence(attempted: Any, stored: Any) -> tuple[str, str | None]:
+    """``(state, detail)`` — a MECHANICAL reading of two payloads (#9318).
 
-    The verdict itself is content difference, and nothing here may change it: two
-    payloads naming the same record still differ, and the record may not absorb
-    the difference. What this answers is the ONE question the exception otherwise
-    could not answer — *is this a second record, or my own row written by an
-    older derivation of the same record?* — which is the difference between an
-    operator hunting a journal that does not exist and one who knows a
-    payload-shaping change landed.
+    This function is deliberately incapable of naming a cause, and that is the
+    fix for a class of review findings rather than one finding (PR #12904 cycles
+    1-4). Three earlier cuts returned a VERDICT — "the SAME record", "two
+    DIFFERENT records", "two records about one node" — and each was falsified,
+    because the durable payload carries no record id: `event_id` is stripped by
+    `ENVELOPE_KEYS`, there is no journal column (`#12894`), and `id`/`node_key`/
+    `session_id` are coordinates a record shares with its neighbours. No reading
+    of coordinates identifies a record, so any sentence that claims one is
+    unsupportable whichever way it is phrased.
 
-    FIVE STATES, because the evidence supports five and not four. ⛔ Every one of
-    them is a statement about a COORDINATE, never about record identity: the
-    durable payload carries no record id (`event_id` is stripped and there is no
-    journal column — `#12894`), so `id`/`node_key`/`session_id` are node and
-    session coordinates a record happens to share. The previous cut returned
-    "the SAME record" whenever a shared `id` was accompanied by the same record
-    TYPE, which is a class, not an identity — two `PointRevised` of one point
-    from two journals are two records, and that message named no collision
-    cause at all (review cycle 3).
+    So the states are FACTS about the payload pair, and the caller's message
+    names both possible causes unconditionally:
 
-    * ``same`` — every identity they BOTH carry agrees, and the record types
-      agree too: a re-derivation of one record, or two records about one node.
-      The text says exactly that, and never "one record";
-    * ``same_coordinate`` — every shared identity agrees but the record TYPES
-      differ: two records about one node (`PointAdded` vs `PointRevised`,
-      `ObjectRegistered` vs `EntityMutated`), so the collision causes are named;
-    * ``different`` — a shared identity DISAGREES: the collision. Evaluated
-      across ALL shared keys, not the first one that matches, so an agreeing
-      coarse `session_id` cannot suppress a disagreeing `id` in the same pair
-      (two points of one capture session are two records, review cycle 3);
-    * ``one_sided`` — only ONE side carries an identity at all, which is the
-      re-derivation signature (a field added since the row was written) and must
-      not be reported as "no identity comparable";
-    * ``unknown`` — nothing comparable. A real answer, never a fallback to a
-      guess.
+    * ``agrees`` — every identity both payloads carry agrees. A shared node id,
+      i.e. the same node seen twice; whether that is one record re-derived or two
+      records about one node is EXACTLY what cannot be decided here;
+    * ``disagrees`` — a shared identity differs. Two different coordinates, so a
+      different record or the same record re-keyed since; again undecidable;
+    * ``one_sided`` — only one payload carries an identity, which is what a field
+      added (or removed) by a derivation change looks like;
+    * ``none`` — nothing comparable, said rather than guessed.
+
+    Pairing is LIKE WITH LIKE: a key is compared within a scope first (`""` =
+    top level, else the snapshot section), and across scopes only when each side
+    carries exactly one pair for it — otherwise a payload naming `id` both at the
+    top level and inside a snapshot would compare the wrong two values and print
+    a counterpart it never compared. All shared pairs are evaluated, so an
+    agreeing coarse key cannot suppress a disagreeing finer one.
 
     Values are BOUNDED (`_ATTRIBUTION_VALUE_LIMIT`): an `id` is caller-chosen
     (`add_object(..., id=…)`, a source keyed by its URL), and this detail lands
@@ -6401,7 +6381,7 @@ def _identity_verdict(attempted: Any, stored: Any, attempted_type: Any,
     """
     ours, theirs = _identity_pairs(attempted), _identity_pairs(stored)
     if not ours and not theirs:
-        return "unknown", None
+        return "none", None
     if ours and not theirs:
         _key, _scope, label, value = ours[0]
         return "one_sided", (
@@ -6413,11 +6393,6 @@ def _identity_verdict(attempted: Any, stored: Any, attempted_type: Any,
             f"only the surviving row names {label}="
             f"{_bounded(str(value), _ATTRIBUTION_VALUE_LIMIT)}")
 
-    #: Pair LIKE WITH LIKE: a key in the same scope is the comparison; a key that
-    #: exists at one level on each side is comparable ONLY when each side carries
-    #: exactly one pair for it (otherwise a payload naming `id` both at the top
-    #: level and inside its snapshot would compare the wrong two values, and the
-    #: message would print a counterpart it never compared — review cycle 4).
     shared: list[tuple[str, str, Any, Any]] = []
     for key, scope, label, value in ours:
         same_scope = [candidate for candidate in theirs
@@ -6434,9 +6409,7 @@ def _identity_verdict(attempted: Any, stored: Any, attempted_type: Any,
         for candidate in candidates:
             shared.append((key, label, value, candidate[3]))
     if not shared:
-        # Both sides carry identities, but none of them is a key both sides
-        # speak — nothing is comparable, and saying so is the honest answer.
-        return "unknown", None
+        return "none", None
 
     def _rank(entry: tuple[str, str, Any, Any]) -> int:
         return _IDENTITY_KEY_RANK.get(entry[0], len(_IDENTITY_KEYS))
@@ -6445,16 +6418,11 @@ def _identity_verdict(attempted: Any, stored: Any, attempted_type: Any,
                      if entry[2] != entry[3] or type(entry[2]) is not type(entry[3])]
     if disagreements:
         _key, label, value, other = min(disagreements, key=_rank)
-        return "different", (
+        return "disagrees", (
             f"{label}: {_bounded(str(value), _ATTRIBUTION_VALUE_LIMIT)} vs "
             f"{_bounded(str(other), _ATTRIBUTION_VALUE_LIMIT)}")
-
     _key, label, value, _other = min(shared, key=_rank)
-    rendered = _bounded(str(value), _ATTRIBUTION_VALUE_LIMIT)
-    if str(attempted_type) == str(stored_type):
-        return "same", f"{label}={rendered}"
-    return "same_coordinate", (
-        f"{label}={rendered}, but {attempted_type!r} vs {stored_type!r}")
+    return "agrees", f"{label}={_bounded(str(value), _ATTRIBUTION_VALUE_LIMIT)}"
 
 
 def _refuse_a_journal_collision(cursor: Any, statement: Statement, index: int,
@@ -6517,8 +6485,7 @@ def _refuse_a_journal_collision(cursor: Any, statement: Statement, index: int,
         stored_type, stored_payload = stored[0], stored[1]
     digest, size = _payload_digest(payload)
     stored_digest, stored_size = _payload_digest(stored_payload)
-    identity_state, identity_detail = _identity_verdict(
-        payload, stored_payload, event_type, stored_type)
+    identity_state, identity_detail = _identity_evidence(payload, stored_payload)
     raise JournalPositionCollision(
         org_id=org_id, graph_id=graph_id, seq=seq,
         event_type=event_type, payload_digest=digest, payload_bytes=size,
