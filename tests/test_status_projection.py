@@ -1322,6 +1322,48 @@ class TestLifecycleCarrierCoherence:
         finally:
             sdk.close()
 
+    @pytest.mark.parametrize("target", [["live"], {"a": 1}, 123, True, None])
+    def test_a_composed_non_string_status_is_refused_too(self, tmp_path, target):
+        """The allowance is a COHERENCE test, not a licence for any value.
+
+        The three conjuncts that admit the un-supersede read the KEY supplied
+        (`_status_key_leaves_the_dead_state`) and the carriers the call CLEARS —
+        never the value written. So a non-string target that also clears both
+        carriers rode the coherent shape into the row, measured at the head
+        before this pin existed:
+
+            status=123     + both clears -> (123, None, None)
+            status=['live'] + both clears -> (['live'], None, None)
+            status=None    + both clears -> (None, None, None)
+            status={'a':1} + both clears -> (None, None, None)   (#7369)
+
+        — i.e. the row went CURRENT on a word nobody can read, and for the two
+        null shapes the record kept folding `superseded` against a current graph
+        (#9974's damage direction, one call away). The settled decision on
+        #12827 licenses exactly ONE shape (`status='live'` with both carriers
+        cleared), so the allowance now requires a `str` target.
+
+        ⛔ This is NOT a vocabulary check: an undeclared STRING word is still
+        accepted (#10371 / #8166 — an `:Object`'s status is unvalidated). Only the
+        non-string half is pinned here.
+        """
+        sdk = TortoiseSDK(str(tmp_path / "t12882c.db"))
+        try:
+            oid = _make_carrier_entity(sdk, "Object", "zeta")
+            sdk.update_entity(oid, status="superseded",
+                              supersededBy="zeta-v2")
+            assert _carrier_row(sdk, "Object", "zeta")[1:] == (
+                "superseded", "zeta-v2", None)
+            before = _carrier_row(sdk, "Object", "zeta")
+            with pytest.raises(ValueError, match="is TERMINAL for a :Object"):
+                sdk.update_entity(oid, status=target,
+                                  supersededBy=None, supersededAt=None)
+            assert _carrier_row(sdk, "Object", "zeta") == before, (
+                "a refused composed write moved the row: "
+                + repr(_carrier_row(sdk, "Object", "zeta")))
+        finally:
+            sdk.close()
+
     def test_a_non_string_status_on_a_LIVE_row_is_still_the_undeclared_word_hole(
             self, tmp_path):
         """The sibling pin, so the guard above is not read as a vocabulary.

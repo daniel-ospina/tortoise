@@ -49170,18 +49170,29 @@ class TortoiseSDK:
                 # unhashable target (`status=['live']`, `status={'a': 1}`) raised
                 # `TypeError: unhashable type` out of `in`, so the caller got a
                 # traceback instead of this guard's AX three-part refusal
-                # (measured). Non-strings now fall THROUGH to the refusal —
-                # ⚠️ EXCEPT when the same call ALSO clears both carriers: the
-                # coherence allowance below keys on `_status_key_leaves_the_dead
+                # (measured). Non-strings now fall THROUGH to the refusal.
+                # ⛔ AND THE COHERENCE ALLOWANCE BELOW RE-CHECKS IT (review cycle
+                # 5, P1). That allowance keys on `_status_key_leaves_the_dead
                 # _state` (the KEYS supplied) and on the two carriers being NULL,
-                # never on the value written, so `status=None` / `123` / `True` /
-                # `['live']` + both clears is ADMITTED and lands the row CURRENT
-                # with a non-word (measured: `(123, None, None)`, `(None, None,
-                # None)`). That is a RESIDUAL of this guard, not of the fix above:
-                # it predates the change (the old skip let the same write through)
-                # and it is tracked on #12856 — narrowing the allowance
-                # (`isinstance(_np_status, str)` there, which no dead target word
-                # can reach) is that issue's decision, not taken in this one.
+                # and it never read the VALUE written — so a non-string target
+                # TOGETHER WITH both carrier clears was ADMITTED, landing the row
+                # CURRENT on a word nobody can read (measured at the head review
+                # cycle 5: `(123, None, None)`, `(True, None, None)`,
+                # `(['live'], None, None)`, and `(None, None, None)` for `None`
+                # and for `{'a': 1}` through #7369), and for the null shapes the
+                # record kept folding `superseded` against a current graph
+                # (#9974's damage direction). It predates this branch, but #12856
+                # — which held the decision — closed without it, and a decision
+                # that licenses "exactly one shape" cannot be implemented by a
+                # door that admits eight, so the allowance now requires a `str`
+                # target: the licensed `status='live'` + both clears is
+                # untouched, and every non-string + clears is REFUSED (measured,
+                # row unchanged, journal delta 0).
+                # ⚠️ What this does NOT validate is the WORD itself: a `str` this
+                # family never declared (`status='banana'` + both clears) is still
+                # accepted and stores an undeclared word. That is the PRE-EXISTING
+                # Object-vocabulary hole (#10371, #8166 — a `:Subject` is validated,
+                # an `:Object` is not), not this guard's.
                 if isinstance(_np_status, str) and _np_status in _np_terminal:
                     continue            # dead->dead is legal for these families
                 # The carriers this row holds, keyed by the SAME declared
@@ -49200,6 +49211,11 @@ class TortoiseSDK:
                 # while the live write never touched `status`, clearing the
                 # carriers off a row that stayed `superseded` (measured).
                 if (_np_dead == [_SUPERSEDED_STATUS]
+                        # A `str` target ONLY (review cycle 5, P1): the three
+                        # conjuncts below read the KEY supplied and the carriers
+                        # cleared, never the value, so without this a non-string
+                        # target rode the coherent shape into the row.
+                        and isinstance(_np_status, str)
                         and _status_key_leaves_the_dead_state(props)
                         and _write_clears_every_lifecycle_carrier(
                             props, _np_carriers, _np_label)):

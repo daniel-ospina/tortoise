@@ -111,15 +111,17 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   wipe below is the last resort, not this one. Every OTHER terminal word has no
   SDK route at all (#12592), so naming the clear there would prescribe a call
   that raises (AX rule 2).
-  ⚠️ ONE COMPOSED SHAPE IS STILL ADMITTED AND IS NOT A REPAIR: naming a
-  non-word (``status=None``, ``123``, ``['live']``) TOGETHER WITH both carrier
-  clears passes the coherent allowance (it keys on the carrier clear and, through
-  ``_status_key_leaves_the_dead_state``, on the KEYS supplied — never on the value
-  written), so the graph goes CURRENT on a word nobody can read while this
-  module's rebuild keeps the ``superseded`` an earlier record folded (#9974's
-  damage direction, one composed call away). Measured; pre-existing acceptance,
-  named here rather than repaired; the state-machine question is tracked on
-  `#12856`. ⛔ Neither is
+  ⛔ A COMPOSED NON-WORD IS NOT A REPAIR EITHER, AND IT IS NOW REFUSED: naming a
+  non-word (``status=None``, ``123``, ``['live']``, ``True``) TOGETHER WITH both
+  carrier clears USED to pass the coherent allowance — it keys on the carrier
+  clear and, through ``_status_key_leaves_the_dead_state``, on the KEYS supplied,
+  never on the value written — so the graph went CURRENT on a word nobody can
+  read and, for the null shapes, this module's rebuild kept the ``superseded`` an
+  earlier record folded (#9974's damage direction). Measured, and pre-existing;
+  the allowance now requires a ``str`` target (review cycle 5), so those calls
+  raise with the row unchanged. What is still unvalidated is an undeclared STRING
+  word (``status='banana'``) — the ``:Object`` vocabulary hole, `#10371` /
+  `#8166`. ⛔ Neither is
   a record-sourced re-projection, which is ADDITIVE (``MERGE … SET n += $props``,
   no REMOVE pass) and would leave the value in place — and a clear writes
   ``state.status = null`` into the record, which the state-op leg's
