@@ -313,6 +313,76 @@ _ROW_PREDICATES = frozenset({
 _PREDICATE_BODY = (ast.Call, ast.Compare, ast.BoolOp, ast.IfExp, ast.Name,
                    ast.Attribute, ast.Subscript, ast.Await)
 
+#: The ONLY module whose attributes may name a row predicate. Matched exactly:
+#: `alias.name.endswith("_index_settle")` also certified
+#: `import tests.fake_index_settle as z` → `until=z.index_kind_absent`.
+_SETTLE_MODULE = "tests._index_settle"
+_SETTLE_PACKAGE = "tests"
+
+
+def _rebound_names(tree: ast.AST) -> set[str]:
+    """Every name this module BINDS itself — `def`s, assignments, params.
+
+    ⛔ THE SPELLING IS NOT THE PREDICATE (#12856's review, measured on the real
+    tree). `_ROW_PREDICATES` is a set of NAME STRINGS, so a bare
+    `until=index_kind_absent` was certified ARMED with NO import at all: writing
+    `def index_kind_absent(rows): return True` in the consumer left the pin green
+    while the wait returned on the first catalogue read — and a REBOUND import
+    alias (`from … import index_kind_absent as P` then `P = lambda r: True`) and
+    an in-function shadow were the same defect one line away. The module header
+    forbids a second definition of these predicates (`tests/_index_settle.py`: "ONE
+    definition, because that is one race"), so a consumer that defines its own is
+    exactly the case the pin must refuse.
+
+    ⛔ CLASS BODIES ARE SKIPPED: `class Helpers: index_kind_absent = staticmethod(…)`
+    binds an ATTRIBUTE, not the module name, and the attribute arm already refuses
+    it by its qualifier. Counting it here would unarm the legitimate bare import
+    (measured: an earlier version red-rooted itself on this).
+
+    ⛔ AN IN-FUNCTION BINDING COUNTS AS A REBINDING, deliberately: that is the
+    name-laundering shape (`ALWAYS = lambda r: True` … later `ALWAYS =
+    index_kind_absent`) and refusing it can only make the pin stricter.
+    """
+    out: set[str] = set()
+
+    def add_args(args: ast.arguments) -> None:
+        for arg in (*args.posonlyargs, *args.args, *args.kwonlyargs):
+            out.add(arg.arg)
+        if args.vararg:
+            out.add(args.vararg.arg)
+        if args.kwarg:
+            out.add(args.kwarg.arg)
+
+    def visit(node: ast.AST) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.ClassDef):
+                out.add(child.name)
+                continue  # a class body binds ATTRIBUTES, not module names
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                out.add(child.name)
+                add_args(child.args)
+            elif isinstance(child, ast.Lambda):
+                add_args(child.args)
+            elif isinstance(child, ast.Name) and isinstance(child.ctx, ast.Store):
+                out.add(child.id)
+            elif isinstance(child, ast.ExceptHandler) and child.name:
+                out.add(child.name)
+            visit(child)
+
+    visit(tree)
+    return out
+
+
+def _is_settle_module(node: ast.AST, module_aliases) -> bool:
+    """Does `node` name the `tests._index_settle` module itself?"""
+    if isinstance(node, ast.Name):
+        return node.id in module_aliases
+    # `import tests._index_settle` (no `as`) binds `tests`, so the reference is
+    # the nested `tests._index_settle`.
+    return (isinstance(node, ast.Attribute) and node.attr == "_index_settle"
+            and isinstance(node.value, ast.Name)
+            and node.value.id in module_aliases)
+
 #: CALLS that FOLD the waited-on collection into a boolean. `all(...)`/`any(...)`
 #: read the ELEMENTS, so their result varies with the rows even when the argument
 #: is a helper call. ⛔ `bool(...)` IS NOT ONE OF THEM: `bool(collection)` is True
@@ -437,11 +507,14 @@ def _until_is_armed(call, ctx=None) -> bool:
       * `Lambda` → `_lambda_is_row_predicate` (form + reads a row parameter);
       * `Constant` → armed unless it is `None` (`until=True` is not callable, so
         it raises at the first read — loud, not silent);
-      * `Name` → armed only for one of `_ROW_PREDICATES`, directly or through an
-        `ImportFrom` alias;
+      * `Name` → armed only for a name RESOLVED through a
+        `from tests._index_settle import …` alias that is not rebound;
       * `Attribute` → armed only for `_ROW_PREDICATES` reached through a name
-        bound to the `tests._index_settle` MODULE, so `other.index_kind_absent`
-        and `Helpers.index_kind_absent` are not certified by a name collision;
+        bound to the `tests._index_settle` MODULE — matched EXACTLY, in both the
+        `import … as` and `from tests import _index_settle as` spellings — so
+        `other.index_kind_absent`, `Helpers.index_kind_absent` and
+        `import tests.fake_index_settle as z` are not certified by a name
+        collision;
       * everything else — a `Call` (`make_always()`, `(lambda: True)()`)…, a
         tuple literal, an `IfExp`, a `Subscript`, a module-level `def`/`lambda`
         named as the value — is UNARMED.
@@ -458,10 +531,11 @@ def _until_is_armed(call, ctx=None) -> bool:
     that is the same accident-guard posture as the rest of this rule.
 
     ⛔ SO A MODULE-LEVEL `def`/`lambda`/REBINDING IS NOT A ROUTE IN AT ALL: only a
-    literal lambda or a documented predicate can arm a site. That is why the
-    scope-blindness that used to launder a name (`ALWAYS = lambda r: True`, then a
-    later in-function `ALWAYS = index_kind_absent`) cannot arise — there is no
-    name resolution to launder.
+    literal lambda or a NAME THAT RESOLVES to a documented predicate can arm a
+    site. A name is resolved through its `from tests._index_settle import …`
+    binding AND must not be rebound anywhere in the module (`_rebound_names`), so a
+    consumer's own `def index_kind_absent(rows): return True`, a rebound alias and
+    an in-function shadow all red — the spelling is not the predicate.
 
     ⛔ THE RESIDUAL, STATED AS MEASURED SO IT CANNOT BE MISTAKEN FOR COVERAGE: a
     lambda that DOES take a row parameter, DOES return an allowed form, and is
@@ -495,12 +569,17 @@ def _until_is_armed(call, ctx=None) -> bool:
         if isinstance(value, ast.Constant):
             return value.value is not None  # `until=True` raises at runtime: loud
         if isinstance(value, ast.Name):
-            return (value.id in _ROW_PREDICATES
-                    or aliases.get(value.id) in _ROW_PREDICATES)
+            # ⛔ RESOLVED, NOT SPELLED: the name must be bound by a
+            # `from tests._index_settle import …` AND never rebound, so a
+            # consumer's own `def index_kind_absent(rows): return True` (or a
+            # rebound alias, or an in-function shadow) is refused.
+            return (aliases.get(value.id) in _ROW_PREDICATES
+                    and value.id not in ctx.get("rebound", ()))
         if isinstance(value, ast.Attribute):
             return (value.attr in _ROW_PREDICATES
-                    and isinstance(value.value, ast.Name)
-                    and value.value.id in module_aliases)
+                    and _is_settle_module(value.value, module_aliases)
+                    and not (isinstance(value.value, ast.Name)
+                             and value.value.id in ctx.get("rebound", ())))
         # ⛔ THE FALLTHROUGH IS THE POINT: an unlisted form reds instead of
         # passing. `return True` here was five of the nine measured escapes.
         return False
@@ -545,18 +624,25 @@ def _settle_call_sites(paths) -> tuple[dict[str, list[int]], dict[str, list[int]
                 continue
             for alias in node.names:
                 aliases[alias.asname or alias.name] = alias.name
-        # Names bound to the `tests._index_settle` MODULE (`import tests._index_
-        # settle as _index_settle`, or any alias of it). Only these may carry a
-        # `_ROW_PREDICATES` attribute: matching the attribute NAME alone would
-        # certify `other.index_kind_absent` and `Helpers.index_kind_absent` — a
-        # name collision is not a predicate (#12856's review).
+        # Names bound to the `tests._index_settle` MODULE. Both spellings, because
+        # the second is the one this very file uses (`from tests import
+        # _index_settle as _settle`): registering only `ast.Import` made a
+        # correctly-armed module-qualified wait a FALSE RED (measured at #12856's
+        # review — one consumer's `until=_settle.index_kind_present` reddened the
+        # pin). The module name is matched EXACTLY, not by suffix.
         module_aliases: set[str] = set()
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 for alias in node.names:
-                    if alias.name.endswith("_index_settle"):
+                    if alias.name.lstrip(".") == _SETTLE_MODULE:
                         module_aliases.add(alias.asname or alias.name)
-        ctx = {"aliases": aliases, "module_aliases": module_aliases}
+            elif (isinstance(node, ast.ImportFrom)
+                  and (node.module or "").lstrip(".") == _SETTLE_PACKAGE):
+                for alias in node.names:
+                    if alias.name == "_index_settle":
+                        module_aliases.add(alias.asname or alias.name)
+        ctx = {"aliases": aliases, "module_aliases": module_aliases,
+               "rebound": _rebound_names(tree)}
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
@@ -1038,6 +1124,71 @@ def test_an_expired_bound_is_unarmed_whatever_the_predicate(tmp_path):
     call_sites, missing = _settle_call_sites([mod])
     assert call_sites == {"test_expired_bounds.py": [5, 7, 9, 11, 13, 15]}, call_sites
     assert missing == {"test_expired_bounds.py": [5, 7, 9]}, missing
+
+
+#: `(case name, `until=` expression source, armed?)` for the RESOLUTION half of the
+#: rule: a predicate NAME is only a predicate if it is the documented import and
+#: nothing rebound it. The first four were measured on the REAL tree at #12856's
+#: review — each left the pin green while the wait returned on the first read.
+_SHADOW_CASES = (
+    # ARMED: the documented import, as itself and through the module.
+    ("imported_alias_control", "OK", True),
+    ("from_tests_module_attr", "_settle.index_kind_present", True),
+    # UNARMED: the SPELLING is right and the RESOLUTION is not.
+    ("rebound_import_alias", "P", False),
+    ("local_def_named_like_predicate", "index_kind_present", False),
+    ("module_assign_named_like_predicate", "point_index_drops_visible", False),
+    ("in_function_shadow", "shadowed", False),
+    # UNARMED: a different module whose name merely ENDS in `_index_settle`.
+    ("foreign_module_suffix_collision", "z.index_kind_absent", False),
+)
+
+
+def test_a_predicate_name_must_RESOLVE_not_merely_be_spelled(tmp_path):
+    """`until=index_kind_absent` is not armed because of its letters.
+
+    ⛔ MEASURED DEFECT (#12856's review): `_ROW_PREDICATES` is a set of name
+    strings, so the `Name` arm certified a bare `until=index_kind_absent` with NO
+    import at all. Writing `def index_kind_absent(rows): return True` in the
+    consumer left the pin GREEN on the real tree — the wait returning on the
+    first catalogue read — and a rebound alias and an in-function shadow were the
+    same defect one line away. `tests/_index_settle.py` forbids a second
+    definition ("ONE definition, because that is one race"), so a consumer's own
+    copy is exactly what this pin must refuse.
+
+    ⛔ AND THE SAME ARMS PRODUCED A FALSE RED (fixed here too): `module_aliases`
+    was filled from `ast.Import` only, so `from tests import _index_settle as
+    _settle` — the form this very file uses — made a correctly-armed
+    `until=_settle.index_kind_present` red. Both spellings register now, and the
+    module name is matched EXACTLY (`import tests.fake_index_settle as z` no
+    longer qualifies).
+    """
+    lines = [
+        "from tests._index_settle import index_rows_after_settle",
+        "from tests._index_settle import index_kind_absent as OK",
+        "from tests._index_settle import index_kind_absent as P",
+        "from tests import _index_settle as _settle",
+        "import tests.fake_index_settle as z",
+        "P = lambda rows: True",
+        "def index_kind_present(rows):",
+        "    return True",
+        "point_index_drops_visible = lambda rows: True",
+    ]
+    for name, expr, _armed in _SHADOW_CASES:
+        lines.append(f"def test_{name}(proj):")
+        if name == "in_function_shadow":
+            lines.append("    shadowed = lambda rows: True")
+        lines.append(f"    index_rows_after_settle(proj, until={expr})")
+    mod = tmp_path / "test_shadow_cases.py"
+    mod.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    call_sites, missing = _settle_call_sites([mod])
+    rows = call_sites["test_shadow_cases.py"]
+    unarmed = set(missing.get("test_shadow_cases.py", []))
+    assert len(rows) == len(_SHADOW_CASES)
+    wrong = {name: ("UNARMED" if line in unarmed else "ARMED")
+             for (name, _expr, want), line in zip(_SHADOW_CASES, rows, strict=True)
+             if (line not in unarmed) != want}
+    assert not wrong, f"the resolution rule disagrees with _SHADOW_CASES: {wrong}"
 
 
 def test_two_waits_on_one_line_are_counted_as_two(tmp_path):
