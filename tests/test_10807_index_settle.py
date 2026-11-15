@@ -1,9 +1,9 @@
-"""The catalogue-settle wait two fixtures share (#10807) — pinned without a server.
+"""The catalogue-settle wait the fixtures share (#10807) — pinned without a server.
 
 WHY THIS FILE EXISTS
 --------------------
 `tests/_index_settle.index_rows_after_settle` is the ONE definition of "wait until
-the FalkorDB index catalogue has SETTLED", shared by two fixtures that each lost
+the FalkorDB index catalogue has SETTLED", shared by the fixtures that each lost
 the same race in a different file:
 
   * `tests/test_9079_handle_write_authority.py` drops `:Point(pointKind)` and then
@@ -20,7 +20,7 @@ idle lane and outlive the read only under CI load), so the MECHANISM is pinned
 here with a scripted fake: no server, no timing, no flake. What the live lanes
 prove is that the fixtures call it; this file proves it waits for the right
 thing, and that a bound which expires returns the LAST read rather than a
-tolerant pass — the property both callers' unchanged assertions depend on.
+tolerant pass — the property the callers' unchanged assertions depend on.
 """
 from __future__ import annotations
 
@@ -230,6 +230,13 @@ def test_index_kind_present_reads_the_kinds_map_and_fails_closed():
     # A row for ANOTHER label says nothing about this one.
     assert index_kind_present(_OBJECT_WITH_FULLTEXT, "Point", "name",
                               "FULLTEXT") is False
+    # …including a label that CONTAINS this one: the match is the label, not a
+    # substring of it (`ObjectMeta`'s row must not answer for `Object`).
+    assert index_kind_present([["ObjectMeta", ["name"], {"name": ["FULLTEXT"]}]],
+                              "Object", "name", "FULLTEXT") is False
+    # …and it is not case-folded either: a label is the engine's exact spelling.
+    assert index_kind_present([["object", ["name"], {"name": ["FULLTEXT"]}]],
+                              "Object", "name", "FULLTEXT") is False
     # A kinds map that is absent (or not a map) cannot prove the create.
     assert index_kind_present([["Object", ["name"], None]], "Object", "name",
                               "FULLTEXT") is False
@@ -304,8 +311,43 @@ def _settle_call_sites(paths) -> tuple[dict[str, list[int]], dict[str, list[int]
     return call_sites, missing
 
 
+def _settle_site_functions(paths) -> dict[str, set[str]]:
+    """Which FUNCTIONS in each module arm ``index_rows_after_settle``?
+
+    The MODULE key is too coarse a floor: a module that keeps ONE armed call
+    still satisfies it after every other was deleted. Measured at #12856's review
+    — deleting both waits inside the test that red is named for left the module
+    key green. Nested functions and class METHODS are attributed to their
+    enclosing name (``Class.method``), because `test_search_engine.py` arms its
+    waits in methods.
+    """
+    out: dict[str, set[str]] = {}
+
+    def _record(path_name: str, lines: set[int], node, prefix: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                name = prefix + child.name
+                end = child.end_lineno or child.lineno
+                if any(line in lines for line in range(child.lineno, end + 1)):
+                    out.setdefault(path_name, set()).add(name)
+                _record(path_name, lines, child, name + ".")
+            elif isinstance(child, ast.ClassDef):
+                _record(path_name, lines, child, prefix + child.name + ".")
+
+    for path in sorted(Path(p) for p in paths):
+        source = path.read_bytes()
+        if b"index_rows_after_settle" not in source:
+            continue
+        call_sites, _missing = _settle_call_sites([path])
+        lines = set(call_sites.get(path.name, []))
+        if not lines:
+            continue
+        _record(path.name, lines, ast.parse(source), "")
+    return out
+
+
 def test_every_consumer_passes_the_caller_precondition():
-    """The module's contract, applied at BOTH call sites — not just one (#10807).
+    """The module's contract, applied at EVERY documented call site (#10807).
 
     Quiescence alone is not sufficient: a read taken before the engine applied
     the drop is internally consistent (no `UNDER CONSTRUCTION`, the idle
@@ -320,18 +362,27 @@ def test_every_consumer_passes_the_caller_precondition():
     same reason this whole file exists. This module is exempt: it drives the raw
     wait on purpose, including quiescence-only.
 
-    ⛔ THE FLOOR NAMES THE TWO MODULES, not a count (review of #10807):
-    `len(call_sites) >= 2` could be satisfied by two NEW call sites while the two
-    documented ones were renamed or dropped, so the pin could stay green over the
-    exact regression it exists to catch.
+    ⛔ THE FLOOR NAMES (MODULE, FUNCTION) PAIRS — not a count, and not a module
+    (review of #10807, then of #12856): `len(call_sites) >= 2` could be satisfied
+    by two NEW call sites, and a MODULE key could be satisfied by one surviving
+    armed call while the documented one was deleted. Measured at #12856's review:
+    removing BOTH waits inside `test_event_id_index_is_required_so_an_existing_
+    graph_gets_it` left the module key green.
     """
     here = Path(__file__).resolve()
-    call_sites, missing = _settle_call_sites(
-        p for p in here.parent.glob("test_*.py") if p.name != here.name)
+    paths = [p for p in here.parent.glob("test_*.py") if p.name != here.name]
+    call_sites, missing = _settle_call_sites(paths)
     required = set(_settle._DOCUMENTED_CONSUMERS)
     assert required <= set(call_sites), (
         "the scan must find the call site in each module this file documents — a "
         f"missing one means the pin went vacuous (a rename?): {sorted(call_sites)}")
+    by_function = _settle_site_functions(paths)
+    have_sites = {(mod, fn) for mod, fns in by_function.items() for fn in fns}
+    required_sites = set(_settle._DOCUMENTED_SITES)
+    assert required_sites <= have_sites, (
+        "these documented (module, function) pairs no longer arm a settle — "
+        "removing the wait re-opens the pre-drop race the pair exists to close: "
+        f"{sorted(required_sites - have_sites)}")
     assert not missing, (
         "these `index_rows_after_settle` calls pass no `until`, so a stale "
         "pre-drop read (idle, no `UNDER CONSTRUCTION`) is returned on the first "

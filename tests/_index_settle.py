@@ -1,4 +1,4 @@
-"""Wait for the FalkorDB index CATALOGUE to settle — one definition (#10807).
+"""The ONE definition of "wait until the FalkorDB index catalogue has settled" (#10807).
 
 WHY THIS MODULE EXISTS
 ----------------------
@@ -9,8 +9,8 @@ definition — the retired row keeps naming the dropped field, and the new row's
 status reads `[Indexing] N/M: UNDER CONSTRUCTION` (the procedure yields a
 `status` column; docs.falkordb.com/cypher/indexing). Measured on an idle lane:
 0.3 s to converge. On a LOADED CI runner the same window outlived the read, and
-two fixtures in two different files each reported a drop that had LANDED as one
-that had not:
+fixtures in different files each reported a drop that had LANDED as one that had
+not:
 
   * `test (g)`, run 41817275671 — `tests/test_9079_handle_write_authority.py`
     dropped `:Point(pointKind)` and its own vacuity guard refused the good
@@ -25,7 +25,7 @@ divergence would be invisible, since each copy only fails on a loaded runner.
 ⛔ NOT in `tests/_live_utils.py`: that module is a declared `SHARED_MODULES`
 member (`tools/ci_selection.py`) because the docker-lane port seam is read by
 every surface, so a one-line edit there runs the FULL CI matrix. This module's
-consumers are both on `core` (a `tests/`-prefixed change falls through to
+consumers are on `core` (a `tests/`-prefixed change falls through to
 `core`), so it stays narrow — the same reasoning as `tests/_html_links.py`.
 """
 from __future__ import annotations
@@ -51,7 +51,7 @@ def index_rows_after_settle(proj, *, until=None,
     rebuild status, the idle ``OPERATIONAL`` one, the pre-drop definition. Only
     the caller knows what that read has to stop saying.
 
-    ⛔ A BOUND THAT EXPIRES RETURNS THE LAST READ, never a tolerant pass. Both
+    ⛔ A BOUND THAT EXPIRES RETURNS THE LAST READ, never a tolerant pass. The
     callers' assertions are unchanged, so a drop that genuinely cannot happen —
     or a schema that genuinely never converges — still reds loudly on the
     mid-flight catalogue instead of passing vacuously.
@@ -107,7 +107,31 @@ def _row_reports_kind(row, field: str, kind: str) -> bool | None:
 _DOCUMENTED_CONSUMERS = {
     "test_9079_handle_write_authority.py",
     "test_search_engine.py",
+    "test_11682_quote_indexed.py",
     "test_indexes.py",
+}
+
+
+#: The (module, function) pairs whose settle call the structural pin REQUIRES
+#: (`tests/test_10807_index_settle.py::test_every_consumer_passes_the_caller_
+#: precondition`). A module-level key is too coarse: measured at #12856's review,
+#: deleting BOTH waits inside `test_event_id_index_is_required_so_an_existing_
+#: graph_gets_it` left the module key satisfied by its five siblings — the pin
+#: for that very red went vacuous while staying green. A method is spelled
+#: `Class.method`, which is how the scan reports it.
+_DOCUMENTED_SITES = {
+    # #10807's originals
+    ("test_9079_handle_write_authority.py",
+     "test_schema_ddl_survives_the_armed_guard"),
+    ("test_search_engine.py",
+     "TestR2OrUnionAndSearchKeys.test_event_migration_does_not_drop_an_"
+     "already_correct_index"),
+    # #12856 — the red this list gained a consumer for, and its two siblings
+    # that the same diff arms
+    ("test_indexes.py",
+     "test_event_id_index_is_required_so_an_existing_graph_gets_it"),
+    ("test_indexes.py", "test_schema_probe_is_true_only_on_a_complete_schema"),
+    ("test_indexes.py", "test_schema_probe_rejects_the_boolean_is_operator_index"),
 }
 
 
