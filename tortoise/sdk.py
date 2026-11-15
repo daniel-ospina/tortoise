@@ -49137,15 +49137,18 @@ class TortoiseSDK:
             # ⛔ NORMALISE `str` SUBCLASSES BEFORE ANY DECISION (#12896, review
             # cycles 6 and 7). A subclass keeps the CALLER's `__eq__`/`__hash__`,
             # and the decisions below consult one — measured on an `archived`
-            # Object, the first THREE of these lifted the row and the fourth
-            # raised out of the door (see each bullet):
+            # Object: TWO of these lifted the row and TWO raised out of the door
+            # (see each bullet).
             #   • the ENTAILMENT shortcut compared by `==`, so a crafted `__eq__`
             #     returning `True` made every stored word look "entailed" and
-            #     `continue`d past the whole guard. This is the door BOTH of the
-            #     next two shapes came through — the shortcut runs first, and a
-            #     lying `__eq__` answers it for any content (measured:
-            #     `UnhashLying('banana')` and `HashCollide('banana')` both landed
-            #     `banana` on an `archived` row).
+            #     `continue`d past the whole guard. This is the door BOTH lifting
+            #     shapes came through — the shortcut runs first, and a lying
+            #     `__eq__` answers it for any content. Measured, both landing
+            #     `banana` on an `archived` row: a non-`str` whose `__eq__` returns
+            #     `True`, and a `str` SUBCLASS whose content is `banana` with the
+            #     same lie (a harmless per CPython's subclass priority — see the
+            #     test docstring, where the reflected call is shown to decide the
+            #     `==` before any content comparison).
             #   • the dead→dead membership `_np_status in _np_terminal` HASHES the
             #     target, so an UNHASHABLE subclass that does NOT answer `True`
             #     reached it and raised `TypeError: unhashable type` out of
@@ -49154,10 +49157,16 @@ class TortoiseSDK:
             #     compares with `==`, and a colliding-hash subclass whose content
             #     is not a terminal word is REFUSED, measured.)
             # `str.__str__` cannot consult an override and returns a PLAIN `str`,
-            # so every decision below runs on the value the store holds. It does
-            # NOT over-refuse: a subclass's CONTENT is unchanged, so the
+            # so every decision in THIS BLOCK runs on the value the store holds.
+            # It does NOT over-refuse: a subclass's CONTENT is unchanged, so the
             # legitimate paths (the no-op re-assert, dead→dead, the licensed
             # `status='live'` + both clears) keep their outcome for it.
+            # ⚠️ NOT EVERY DECISION IN THIS METHOD: the #1423 :Subject VOCABULARY
+            # guard below (`_subject_status_rendered`) reads the RAW value and
+            # decides with `isinstance` + `not in`, so a `str` subclass with a
+            # colliding `__hash__`/`__eq__` still stores an UNDECLARED Subject word
+            # there (measured on a live Subject; pre-existing, filed as #12905).
+            # This normalisation is scoped to the transition guard.
             # ⛔ `issubclass(type(x), str)`, NOT `isinstance(x, str)`: an object
             # can claim `__class__ = str` and `isinstance` believes it, while
             # `type()` does not — and `str.__str__` on such an impostor RAISES
