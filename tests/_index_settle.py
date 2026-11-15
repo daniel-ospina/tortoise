@@ -120,48 +120,52 @@ _DOCUMENTED_CONSUMERS = {
 #: for that very red went vacuous while staying green. A method is spelled
 #: `Class.method`, which is how the scan reports it.
 #:
-#: ⛔ THIS SET IS THE WHOLE ARMAMENT OF EVERY ``_DOCUMENTED_CONSUMERS`` MODULE,
-#: not a sample of it: the pin asserts set EQUALITY over those modules, so an
-#: armed wait that is missing here reds instead of sitting outside the floor.
-#: Measured at #12856's review cycle 5 — with a `required <= armed` floor, FIVE
-#: of the TEN armed functions were undeclared across those four modules and each
-#: could have lost its wait with the pin green. Declaring one and waiting for the
-#: next review to find the next one is the whack-a-mole this closes.
+#: ⛔ THIS MAP IS THE WHOLE ARMAMENT OF EVERY ``_DOCUMENTED_CONSUMERS`` MODULE,
+#: WITH EACH PAIR'S ARMED-CALL COUNT: the pin asserts, per pair, that the scan
+#: finds EXACTLY this many armed calls, so an armed wait that is missing here
+#: reds, AND so does deleting ONE of a pair's two waits. Measured at #12856's
+#: reviews — with a `required <= armed` floor FIVE of the TEN armed functions
+#: were undeclared; with a SET of pairs, SIX of the TEN declared pairs carried
+#: two waits, so removing one of the two (the DROP, keeping the recreate) left
+#: the pin green. Declaring one and waiting for the next review to find the next
+#: is the whack-a-mole this closes.
 #:
-#: ⚠️ THE FIGURE IS RE-DERIVABLE, so re-derive it before quoting it: at
-#: `12d8541791` `_DOCUMENTED_SITES` held 5 entries and `_settle_site_functions`
-#: reported 10 armed functions in these modules, leaving the 5 undeclared: both
+#: ⚠️ THE UNDECLARED FIGURE IS RE-DERIVABLE, so re-derive it before quoting it:
+#: at `12d8541791` this ledger held 5 entries and `_settle_site_functions`
+#: reported 10 armed functions in these modules, leaving the 5 undeclared (both
 #: `test_11682_quote_indexed.py` sites, `test_9079…._await_point_indexes`,
 #: `test_indexes.test_schema_probe_is_per_graph_not_per_process`, and
-#: `TestR2OrUnionAndSearchKeys.test_fts_leg_trace_index_missing_live`. The first
+#: `TestR2OrUnionAndSearchKeys.test_fts_leg_trace_index_missing_live`). The first
 #: draft of this comment said "six of eleven" — written from memory rather than
 #: from that measurement, and wrong on both numerals.
 #:
 #: A HELPER counts: `test_9079_handle_write_authority.
 #: _await_point_indexes` is where that module's wait lives, so it is the pair a
 #: removal would touch.
-_DOCUMENTED_SITES = {
+_DOCUMENTED_SITES: dict[tuple[str, str], int] = {
     # #10807's originals
     ("test_9079_handle_write_authority.py",
-     "test_schema_ddl_survives_the_armed_guard"),
-    ("test_9079_handle_write_authority.py", "_await_point_indexes"),
+     "test_schema_ddl_survives_the_armed_guard"): 1,
+    ("test_9079_handle_write_authority.py", "_await_point_indexes"): 1,
     ("test_search_engine.py",
      "TestR2OrUnionAndSearchKeys.test_event_migration_does_not_drop_an_"
-     "already_correct_index"),
+     "already_correct_index"): 1,
     ("test_search_engine.py",
-     "TestR2OrUnionAndSearchKeys.test_fts_leg_trace_index_missing_live"),
+     "TestR2OrUnionAndSearchKeys.test_fts_leg_trace_index_missing_live"): 1,
     # #11682's upgrade/pre-existing arms
     ("test_11682_quote_indexed.py",
-     "test_a_pre_11682_two_field_index_is_upgraded_to_carry_the_quote"),
+     "test_a_pre_11682_two_field_index_is_upgraded_to_carry_the_quote"): 2,
     ("test_11682_quote_indexed.py",
-     "test_a_pre_existing_array_quote_is_flattened_by_the_sweep"),
+     "test_a_pre_existing_array_quote_is_flattened_by_the_sweep"): 2,
     # #12856 — the red this list gained a consumer for, and its three siblings
-    # that the same diff arms
+    # that the same diff arms. The named red carries TWO waits: the DROP and the
+    # sweep's recreate.
     ("test_indexes.py",
-     "test_event_id_index_is_required_so_an_existing_graph_gets_it"),
-    ("test_indexes.py", "test_schema_probe_is_true_only_on_a_complete_schema"),
-    ("test_indexes.py", "test_schema_probe_rejects_the_boolean_is_operator_index"),
-    ("test_indexes.py", "test_schema_probe_is_per_graph_not_per_process"),
+     "test_event_id_index_is_required_so_an_existing_graph_gets_it"): 2,
+    ("test_indexes.py", "test_schema_probe_is_true_only_on_a_complete_schema"): 2,
+    ("test_indexes.py",
+     "test_schema_probe_rejects_the_boolean_is_operator_index"): 2,
+    ("test_indexes.py", "test_schema_probe_is_per_graph_not_per_process"): 1,
 }
 
 

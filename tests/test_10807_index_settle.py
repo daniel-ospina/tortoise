@@ -254,7 +254,7 @@ def test_index_kind_present_reads_the_kinds_map_and_fails_closed():
         "FULLTEXT") is True
 
 
-def _until_is_armed(call) -> bool:
+def _until_is_armed(call, none_names=frozenset()) -> bool:
     """Does this `index_rows_after_settle(...)` call pass a USABLE `until`?
 
     ⛔ A PRESENT KEYWORD IS NOT AN ARMED WAIT: `until=None` is the function's own
@@ -264,15 +264,22 @@ def _until_is_armed(call) -> bool:
     as `until=None` left every check green). The VALUE is judged, not the
     keyword.
 
-    Matched against the literal only: a caller that computes a predicate
-    dynamically is out of reach of an AST pin, and this docstring says so rather
-    than implying coverage.
+    ⛔ AND A NAME BOUND TO `None` IS NOT AN ESCAPE: `NONE = None` …
+    `until=NONE` reproduces the same vacuous pass one edit away, so a name that
+    the module binds to the literal `None` is resolved against `none_names`
+    (measured at #12856's review cycle 7). What stays out of reach is a predicate
+    COMPUTED at the call site (`until=(None if p else f)`, `until=make()`): an AST
+    pin cannot evaluate those, and they are named here rather than implied to be
+    covered. A `**{"until": None}` splat is reported UNARMED, which reds the pin
+    rather than passing it.
     """
     for kw in call.keywords:
         if kw.arg != "until":
             continue
-        return not (isinstance(kw.value, ast.Constant)
-                    and kw.value.value is None)
+        value = kw.value
+        if isinstance(value, ast.Constant):
+            return value.value is not None
+        return not (isinstance(value, ast.Name) and value.id in none_names)
     return False
 
 
@@ -314,6 +321,23 @@ def _settle_call_sites(paths) -> tuple[dict[str, list[int]], dict[str, list[int]
                 continue
             for alias in node.names:
                 aliases[alias.asname or alias.name] = alias.name
+        # Module-level names bound to the literal `None` — `NONE = None` then
+        # `until=NONE` is the quiescence-only default wearing a name (review
+        # cycle 7 at #12856). Resolved per file, not by shadowing analysis: a
+        # function-local rebind can only make this STRICTER (a call reported
+        # unarmed), which reds the pin rather than passing it.
+        none_names: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                if (isinstance(node.value, ast.Constant)
+                        and node.value.value is None):
+                    none_names.update(t.id for t in node.targets
+                                      if isinstance(t, ast.Name))
+            elif (isinstance(node, ast.AnnAssign)
+                  and isinstance(node.target, ast.Name)
+                  and isinstance(node.value, ast.Constant)
+                  and node.value.value is None):
+                none_names.add(node.target.id)
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
@@ -328,30 +352,37 @@ def _settle_call_sites(paths) -> tuple[dict[str, list[int]], dict[str, list[int]
             if not named:
                 continue
             call_sites.setdefault(path.name, []).append(node.lineno)
-            if not _until_is_armed(node):
+            if not _until_is_armed(node, none_names):
                 missing.setdefault(path.name, []).append(node.lineno)
     return call_sites, missing
 
 
-def _settle_site_functions(paths) -> dict[str, set[str]]:
-    """Which FUNCTIONS in each module arm ``index_rows_after_settle``?
+def _settle_site_functions(paths) -> dict[str, dict[str, int]]:
+    """How many armed-ish settle calls does each FUNCTION of each module carry?
 
     The MODULE key is too coarse a floor: a module that keeps ONE armed call
     still satisfies it after every other was deleted. Measured at #12856's review
     — deleting both waits inside the test that red is named for left the module
-    key green. Nested functions and class METHODS are attributed to their
-    enclosing name (``Class.method``), because `test_search_engine.py` arms its
-    waits in methods.
+    key green. A SET of functions is too coarse as well: removing ONE of a
+    documented function's two waits left it green (measured at review cycle 7).
+    Counting the call sites per function is what makes a single deletion visible.
+
+    Nested functions and class METHODS are attributed to their enclosing name
+    (``Class.method``; a nested function's sites also count for its parent,
+    because the parent's body contains them), because `test_search_engine.py`
+    arms its waits in methods.
     """
-    out: dict[str, set[str]] = {}
+    out: dict[str, dict[str, int]] = {}
 
     def _record(path_name: str, lines: set[int], node, prefix: str) -> None:
         for child in ast.iter_child_nodes(node):
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 name = prefix + child.name
                 end = child.end_lineno or child.lineno
-                if any(line in lines for line in range(child.lineno, end + 1)):
-                    out.setdefault(path_name, set()).add(name)
+                count = sum(1 for line in lines
+                            if child.lineno <= line <= end)
+                if count:
+                    out.setdefault(path_name, {})[name] = count
                 _record(path_name, lines, child, name + ".")
             elif isinstance(child, ast.ClassDef):
                 _record(path_name, lines, child, prefix + child.name + ".")
@@ -397,6 +428,11 @@ def test_every_consumer_passes_the_caller_precondition():
     modules were undeclared, so each could have lost its wait with this pin
     green — the same vacuity the pair granularity was added to close, one level
     down. Declaring a site is now part of arming a wait in a documented module.
+
+    ⛔ AND EACH PAIR DECLARES ITS CALL COUNT, not merely its existence: with a
+    SET of pairs, SIX of the TEN declared pairs carried TWO waits, so removing
+    one of the two — the DROP, keeping its recreate — left the pin green
+    (measured at review cycle 7). The count is the granularity the waits have.
     """
     here = Path(__file__).resolve()
     paths = [p for p in here.parent.glob("test_*.py") if p.name != here.name]
@@ -406,14 +442,23 @@ def test_every_consumer_passes_the_caller_precondition():
         "the scan must find the call site in each module this file documents — a "
         f"missing one means the pin went vacuous (a rename?): {sorted(call_sites)}")
     by_function = _settle_site_functions(paths)
-    have_sites = {(mod, fn) for mod, fns in by_function.items() for fn in fns}
-    required_sites = set(_settle._DOCUMENTED_SITES)
-    assert required_sites <= have_sites, (
+    have = {(mod, fn): n for mod, fns in by_function.items()
+            for fn, n in fns.items()}
+    declared = dict(_settle._DOCUMENTED_SITES)
+    assert declared.keys() <= have.keys(), (
         "these documented (module, function) pairs no longer arm a settle — "
         "removing the wait re-opens the pre-drop race the pair exists to close: "
-        f"{sorted(required_sites - have_sites)}")
+        f"{sorted(declared.keys() - have.keys())}")
+    drifted = {pair: {"declared": count, "armed": have.get(pair)}
+               for pair, count in declared.items()
+               if have.get(pair) != count}
+    assert not drifted, (
+        "these documented (module, function) pairs carry a different number of "
+        "armed settle calls than this pin declares — a wait was removed from (or "
+        "added to) one of them, which re-opens the pre-drop race the pair exists "
+        f"to close: {drifted}")
     undeclared = _undeclared_sites(
-        by_function, _settle._DOCUMENTED_CONSUMERS, required_sites)
+        by_function, _settle._DOCUMENTED_CONSUMERS, declared)
     assert not undeclared, (
         "these (module, function) pairs arm a settle in a module this pin "
         "DOCUMENTS but are absent from `_DOCUMENTED_SITES` — an undeclared wait "
@@ -433,7 +478,10 @@ def _undeclared_sites(by_function, documented_modules,
     The second half of the floor, kept as its own function so
     `test_the_floor_reds_on_an_armed_wait_it_does_not_declare` can drive it on
     synthetic input: an arm nobody has SEEN fire is indistinguishable from one
-    that cannot fire.
+    that cannot fire. ``by_function`` is module -> {function: armed count} (a
+    plain set of functions also works — iterating it yields the names), and
+    ``declared`` is any iterable of pairs, so a count ledger and a set ledger are
+    both accepted.
 
     Restricted to ``documented_modules`` on purpose — a module this pin does not
     document may arm a wait freely; only the modules it claims to speak for owe
@@ -492,12 +540,17 @@ def test_the_scan_sees_a_module_prefixed_call_and_its_missing_until(tmp_path):
     ⛔ `test_g` is the #12856 shape: `until=None` PRESENTS the keyword while
     asking for the quiescence-only read, so it must land in `missing` (measured
     at #12856's review cycle 6: this exact edit left every check green).
+
+    ⛔ `test_h` is the same defect ONE NAME AWAY — `NONE = None` then
+    `until=NONE`; a pin that only reads literals certifies it (measured at
+    review cycle 7).
     """
     mod = tmp_path / "test_synthetic_consumer.py"
     mod.write_text(
         "import tests._index_settle as _index_settle\n"
         "from tests._index_settle import index_rows_after_settle as settle\n"
         "from tests._index_settle import point_index_drops_visible as visible\n"
+        "NONE = None\n"
         "def test_a(proj):\n"
         "    _index_settle.index_rows_after_settle(proj)\n"
         "def test_b(proj):\n"
@@ -511,11 +564,14 @@ def test_the_scan_sees_a_module_prefixed_call_and_its_missing_until(tmp_path):
         "def test_f(proj):\n"
         "    visible(proj)\n"
         "def test_g(proj):\n"
-        "    index_rows_after_settle(proj, until=None)\n",
+        "    index_rows_after_settle(proj, until=None)\n"
+        "def test_h(proj):\n"
+        "    index_rows_after_settle(proj, until=NONE)\n",
         encoding="utf-8")
     call_sites, missing = _settle_call_sites([mod])
-    assert call_sites == {"test_synthetic_consumer.py": [5, 7, 9, 11, 13, 17]}, call_sites
-    assert missing == {"test_synthetic_consumer.py": [5, 11, 17]}, missing
+    assert call_sites == {
+        "test_synthetic_consumer.py": [6, 8, 10, 12, 14, 18, 20]}, call_sites
+    assert missing == {"test_synthetic_consumer.py": [6, 12, 18, 20]}, missing
 
 
 def test_index_cells_flattens_every_row():
