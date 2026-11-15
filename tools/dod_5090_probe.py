@@ -2296,6 +2296,7 @@ CHANNEL_READERS: tuple[tuple[str, str], ...] = (
 DECLARED_CHANNEL_BOUNDS: tuple[dict[str, str], ...] = (
     {
         "channel": "dockerfile",
+        "reader": "line reader: ENV/ARG",
         "cannot_see": ("an `ARG`-substituted `ENV` — `ARG V=0` then "
                        "`ENV FLAG=$V` — and a builder-stage-only `ENV` in a "
                        "multi-stage build"),
@@ -2306,6 +2307,7 @@ DECLARED_CHANNEL_BOUNDS: tuple[dict[str, str], ...] = (
     },
     {
         "channel": "entrypoint",
+        "reader": "line reader: shell export",
         "cannot_see": ("shell INDIRECTION — a value computed at run time "
                        "(`export FLAG=$(…)`, a sourced file, `[ -n \"$X\" ] && "
                        "export FLAG=1`)"),
@@ -2462,7 +2464,9 @@ def _run_config_resolver(argv: list[str]) -> dict:
     been blamed on the wrong line of a multi-line message.
     """
     try:
-        proc = subprocess.run(  # noqa: S603 — fixed argv, no shell
+        # Fixed argv, no shell (`shell=False` is the default): nothing here is
+        # caller-supplied text, so there is no injection surface to guard.
+        proc = subprocess.run(
             argv, cwd=str(REPO_ROOT), env=_resolver_env(), capture_output=True,
             text=True, timeout=RESOLVER_TIMEOUT_S, check=False)
     except FileNotFoundError:
@@ -2748,9 +2752,23 @@ def _fly_channel(path: Path, flag: str, is_truthy) -> dict:
     platform = _run_config_resolver(["fly", "config", "show"])
     text: str | None = None
     if platform["ok"] and platform["stdout"].strip():
-        out["resolver"] = FLY_RESOLVER
-        text = platform["stdout"]
-    else:
+        try:
+            # ⛔ VERIFIED BEFORE TRUSTED: the platform resolver's output is only usable
+            # if it is the TOML it claims to be. A banner, a JSON rendering or a version
+            # that changes the format must fall through to the grammar owner on the FILE
+            # — the other choice publishes `UNRESOLVED` on a box where the channel is
+            # perfectly readable, i.e. an instrument that measures its own wiring.
+            tomllib.loads(platform["stdout"])
+        except (tomllib.TOMLDecodeError, ValueError) as exc:
+            out["resolver"] = TOML_RESOLVER
+            out["warnings"].append(
+                f"{FLY_RESOLVER} answered but its output is not TOML ({exc}) — read the "
+                f"file with {TOML_RESOLVER} instead")
+            platform = {"ok": False, "reason": "output not TOML"}
+        else:
+            out["resolver"] = FLY_RESOLVER
+            text = platform["stdout"]
+    if text is None:
         # The platform resolver did not answer. That is NOT `UNRESOLVED`: the TOML
         # grammar owner still reads the file, and saying which one answered is how a
         # reader knows the difference.
@@ -2778,6 +2796,11 @@ def _fly_channel(path: Path, flag: str, is_truthy) -> dict:
         if is_truthy(literal):
             out["verdict"], out["armed"] = "ARMED", [TOML_RUNTIME_ENV_TABLE]
         else:
+            # ⛔ A non-truthy `[env]` value is the DISARMING direction, reported exactly as
+            # the compose one is: it OVERRIDES an image `ENV`, so calling the file merely
+            # "silent" would steer a reader toward "armed".
+            out["scopes"][TOML_RUNTIME_ENV_TABLE]["reason"] = (
+                f"set to a non-truthy value ({literal!r})")
             out["verdict"], out["falsy"], out["off"] = (
                 "NOT_ARMED", [TOML_RUNTIME_ENV_TABLE], [TOML_RUNTIME_ENV_TABLE])
     elif how.startswith("outside:"):
@@ -3990,7 +4013,7 @@ def _declared_bound_note(deployment: dict) -> str:
     if not rows:
         return "none"
     return "; ".join(
-        f"{row['channel']} (reader: {row['reader'] if 'reader' in row else 'line'}) "
+        f"{row['channel']} (reader: {row.get('reader', 'line reader')}) "
         f"cannot see {row['cannot_see']} — {row['why']}"
         for row in rows)
 

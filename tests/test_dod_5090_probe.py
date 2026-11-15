@@ -11733,3 +11733,69 @@ def test_12549_the_TWO_unconverted_channels_PUBLISH_their_bounds(
     # ⛔ ABSENT IS NOT EMPTY: a reading built without the bounds must not print "none".
     assert "carries no declared bounds" in probe._declared_bound_note({}), (
         probe._declared_bound_note({}))
+
+
+def test_12549_a_platform_resolver_that_answers_NON_TOML_falls_back_to_the_file(
+        tmp_path, monkeypatch):
+    """`fly config show` is trusted only after its OUTPUT parses — the box's box problem.
+
+    ⛔ Measured risk in the other direction from "fly is absent": a `fly` binary that
+    answers with a banner, a JSON rendering or a future format would make the channel
+    `UNRESOLVED` on a box where it is perfectly readable — an instrument measuring its
+    own wiring. So the platform output is VERIFIED before it is trusted, and a failed
+    verification falls through to the grammar owner on the FILE, with the reason named.
+    """
+    (tmp_path / "fly.toml").write_text(
+        '[env]\n  TORTOISE_EMBED_GATE = "1"\n', encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+
+    def _bad_platform(argv):
+        assert argv[:3] == ["fly", "config", "show"], argv
+        return {"ok": True, "stdout": "Update available: v9.9.9 -> v9.9.10\n",
+                "stderr": "", "argv": argv, "reason": None}
+
+    monkeypatch.setattr(probe, "_run_config_resolver", _bad_platform)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"] == {"fly.toml": "ON"}, shipped["deployment"]
+    note = _gate_note(shipped)
+    assert "answered but its output is not TOML" in note, note
+    assert "tomllib [env]" in note, note
+
+    # …and a platform resolver whose output IS toml is used, and named as the answerer.
+    def _good_platform(argv):
+        return {"ok": True, "stdout": '[env]\n  TORTOISE_EMBED_GATE = "1"\n',
+                "stderr": "", "argv": argv, "reason": None}
+
+    monkeypatch.setattr(probe, "_run_config_resolver", _good_platform)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"] == {"fly.toml": "ON"}, shipped["deployment"]
+    note = _gate_note(shipped)
+    assert "answered for THIS tree by: fly=fly config show" in note, note
+
+
+def test_12549_an_env_file_and_a_non_truthy_env_value_are_both_read(
+        tmp_path, monkeypatch):
+    """`env_file:` expands into the resolved environment; a non-truthy value DISARMS.
+
+    Two facts the line reader could not have: a compose `env_file:` entry reaches the
+    container's environment (compose expands it into `environment` before the model
+    exists), and a `[env]` value of `"0"` in `fly.toml` is the DISARMING direction — it
+    OVERRIDES an image `ENV`, so calling that file merely "silent" steers a reader
+    toward "armed".
+    """
+    (tmp_path / "svc.env").write_text("TORTOISE_EMBED_GATE=1\n", encoding="utf-8")
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  app:\n    image: alpine\n    env_file: [svc.env]\n", encoding="utf-8")
+    (tmp_path / "fly.toml").write_text(
+        '[env]\n  TORTOISE_EMBED_GATE = "0"\n', encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"] == {
+        "docker-compose.yml": "ON", "fly.toml": "OFF"}, shipped["deployment"]
+    # ⛔ The disarm is REPORTED, by path, exactly as the compose one is.
+    assert any("fly.toml: [env].TORTOISE_EMBED_GATE" in entry
+               for entry in shipped["disarming_assignments"]), \
+        shipped["disarming_assignments"]
+    note = _gate_note(shipped)
+    assert "values that OVERRIDE it OFF: [" in note, note
+    assert "fly.toml: [env].TORTOISE_EMBED_GATE" in note, note
