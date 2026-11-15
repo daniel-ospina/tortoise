@@ -80,6 +80,35 @@ def index_cells(rows) -> set[str]:
     return {str(cell) for row in rows for cell in row}
 
 
+def index_kind_present(rows, label: str, field: str, kind: str) -> bool:
+    """Does SOME catalogue row for ``label`` report ``field`` as ``kind`` yet?
+
+    The positive counterpart of :func:`index_kind_absent`, and it exists for the
+    same reason: a KIND-BLIND predicate can release a wait before the index its
+    caller asserts about exists. ``CREATE INDEX`` is queued exactly as a drop is
+    (FalkorDB ``Indexer_PopulateIndex`` -> ``INDEXER_IDX_POPULATE``), and the
+    catalogue's first report of a FIELD can precede the kind the caller needs —
+    so a caller asserting ``RANGE`` must wait on ``RANGE``, not merely on the
+    field name.
+
+    A row whose kinds map is MISSING answers False: a catalogue that cannot
+    prove the create must not certify it, so the caller keeps waiting (bounded,
+    fail-closed) instead of asserting about a read that never answered.
+    """
+    wanted = kind.upper()
+    for row in rows:
+        if not row or str(row[0]) != label:
+            continue
+        if len(row) < 3 or not isinstance(row[2], dict):
+            continue
+        kinds = row[2].get(field) or ()
+        if isinstance(kinds, str):
+            kinds = [kinds]
+        if wanted in {str(k).upper() for k in kinds}:
+            return True
+    return False
+
+
 def index_kind_absent(rows, label: str, field: str, kind: str) -> bool:
     """Does NO catalogue row for ``label`` still report ``field`` as ``kind``?
 

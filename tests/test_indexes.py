@@ -21,8 +21,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest  # noqa: I001
 from tests import _live_utils
-from tests._index_settle import index_kind_absent, index_rows_after_settle
-from tortoise.index_catalogue import index_catalogue_has_field
+from tests._index_settle import (
+    index_kind_absent,
+    index_kind_present,
+    index_rows_after_settle,
+)
 from tortoise.projection import FalkorProjection
 
 EXPECTED_RANGE_EMBEDDED = {
@@ -206,10 +209,12 @@ def test_event_id_index_is_required_so_an_existing_graph_gets_it():
         p1._ensure_indexes()  # the sweep the gate just unblocked
         # The RECREATE is asynchronous for the same reason, and its row appears
         # with a rebuild still in flight, so both halves are waited for: no
-        # `UNDER CONSTRUCTION` cell AND an `:Event(id)` row that names RANGE.
+        # `UNDER CONSTRUCTION` cell AND an `:Event(id)` entry that names RANGE —
+        # the KIND is part of the wait because it is what the assertion below
+        # asserts (a kind-blind predicate could release before the RANGE entry).
         rows = index_rows_after_settle(
             p1,
-            until=lambda r: index_catalogue_has_field(r, "id", label="Event"))
+            until=lambda r: index_kind_present(r, "Event", "id", "RANGE"))
         assert "RANGE" in _range_indexes(p1)["Event"].get("id", []), \
             f"the sweep did not recreate :Event(id): {rows}"
     finally:
@@ -1134,6 +1139,12 @@ def test_schema_probe_is_true_only_on_a_complete_schema(graph_factory):
         "the guard would skip the very DDL that recreates it (#4465)")
 
     proj._ensure_indexes()
+    # → and the RECREATE is queued too (#10807), so the graph is not "current"
+    # until the indexer has built the index the sweep just asked for.
+    index_rows_after_settle(
+        proj,
+        until=lambda rows: index_kind_present(
+            rows, "Point", "lastDreamedAt", "RANGE"))
     assert proj._schema_is_current() is True
 
 
@@ -1151,14 +1162,20 @@ def test_schema_probe_rejects_the_boolean_is_operator_index(graph_factory):
     # sees a catalogue without the poisoned index and the probe answers True.
     index_rows_after_settle(
         proj,
-        until=lambda rows: index_catalogue_has_field(
-            rows, "is_operator", label="Point"))
+        until=lambda rows: index_kind_present(
+            rows, "Point", "is_operator", "RANGE"))
     assert proj._schema_is_current() is False, (
         "a boolean is_operator index must fail the probe (#3154)")
 
     proj._ensure_indexes()
+    # The sweep's #3154 PURGE is a `DROP INDEX` — queued like any other DDL — so
+    # a read taken straight after the sweep still sees the poisoned index and
+    # the probe (correctly) answers NOT current. Wait for the purge to land and
+    # grade the assertion below on the SAME settled read.
+    rows = index_rows_after_settle(
+        proj,
+        until=lambda r: index_kind_absent(r, "Point", "is_operator", "RANGE"))
     assert proj._schema_is_current() is True
-    rows = proj.g.query("CALL db.indexes()").result_set
     assert not any("is_operator" in str(row[1]) for row in rows), (
         f"the sweep must purge the boolean index (#3154): {rows}")
 
