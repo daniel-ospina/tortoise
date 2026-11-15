@@ -7331,8 +7331,8 @@ _NEGATION_GOVERNS = re.compile(
     r"(?:walk|visit|reach|report)(?:s|es|ed|ing)?\b")
 # ⛔ `_COVERAGE` is RETAINED DELIBERATELY AND IS CURRENTLY IMPLIED, and saying so
 # is the point (#11437 review, P3). Measured: `_NEGATION_GOVERNS` already requires
-# one of the same four verbs AFTER the negation, so on all 146 candidate sentences
-# (the 113 rows across the four sets — 54 / 13 / 28 / 18 — plus the 33 sentences of
+# one of the same four verbs AFTER the negation, so on all 148 candidate sentences
+# (the 115 rows across the four sets — 54 / 15 / 28 / 18 — plus the 33 sentences of
 # the real §3 under
 # this predicate's own `split(". ")` segmentation) there is no case where the
 # governance test hits and this one does not — dropping the term from
@@ -7748,12 +7748,15 @@ def _residual_sentences(s3: str) -> list[str]:
     replacing it with `lowered.split("\n")` moves 0 of the rows and reds nothing,
     so a paragraph-sized unit would go unnoticed and weaken the same-sentence
     property this docstring relies on. ⛔ There is NO measured leak today: the
-    real-doc deletion and reversal arms still red under the coarser unit. It is
-    left to **#11541 D**, which already owns the sentence-granularity question
-    (in the opposite direction — that finding is about the split being too FINE),
-    and pinning it here would mean extracting the unit into a seam that exists
-    only to test itself. Stated so a reader knows it is a known gap, not an
-    examined default.
+    real-doc deletion and reversal arms still red under the coarser unit. It was
+    left to **#11541 D**, which owned the sentence-granularity question (in the
+    opposite direction — that finding is about the split being too FINE) — and
+    `#11541` D has since landed as the `false block: an inline `e.g.` example
+    splits the sentence` ROW in `declared_blocks`, i.e. the TOO-FINE face of this
+    one unit is a pinned result and this TOO-COARSE face is still prose. ⚠️ They
+    are one gap with two faces, which is why D did not produce a second mechanism:
+    pinning the unit would mean extracting it into a seam that exists only to test
+    itself. Stated so a reader knows it is a known gap, not an examined default.
     """
     lowered = s3.lower()
     return [sentence for sentence in lowered.split(". ")
@@ -8334,6 +8337,26 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
         "honest, present continuous: is not reaching":
             "the walk is not reaching a nested `def`'s decorators and parameter "
             "defaults",
+        # ⛔ THE `is|was wrong` MARKER'S SCOPE, PINNED (#11541 B). The marker is
+        # `\b(?:is|was)\s+wrong\b` and NOT a bare `wrong`, and this row is the
+        # reason: a bare `wrong` reds an HONEST sentence that merely names the
+        # wrong thing. Measured GREEN at this head and GREEN under the copula
+        # form; measured RED under a bare `\bwrong\b`, so the narrowing is a
+        # result rather than a claim about English.
+        "honest: names `the wrong shape` — bare `wrong` is not a defeater":
+            "a nested `def`'s decorators and parameter defaults are not reported "
+            "by this walk, so a name-based reading of the wrong shape misses "
+            "nothing",
+        # ⛔ THE `solely` CLOSURE'S CRY-WOLF CONTROL (#11541 A). The concessive arm
+        # must still ACCEPT the honest INCLUSIVE `not solely … but also`, which is
+        # how one honestly states an exclusion. It does, because the cue must
+        # GOVERN a coverage verb and `solely the decorators` governs a noun —
+        # measured GREEN here and RED-that-should-not-be under the bare pair that
+        # `#11437`'s round 7 removed. Without this row, adding `solely` to the arm
+        # could have blocked it and nothing would have said so.
+        "honest, inclusive: `not solely the decorators but also …`":
+            "not solely the decorators but also the parameter defaults of a "
+            "nested `def` sit outside the walk, and are therefore not reported",
     }
     for label, sentence in must_stay_green.items():
         assert sentence != original, f"green row {label!r} merely restates the claim"
