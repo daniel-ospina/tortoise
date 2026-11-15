@@ -49134,6 +49134,40 @@ class TortoiseSDK:
                     f"mean."
                 )
             _np_status = _nonpoint_status["status"]
+            # ⛔ NORMALISE `str` SUBCLASSES BEFORE ANY DECISION (#12896, review
+            # cycles 6 and 7). A subclass keeps the CALLER's `__eq__`/`__hash__`,
+            # and the decisions below consult one — measured on an `archived`
+            # Object, the first THREE of these lifted the row and the fourth
+            # raised out of the door (see each bullet):
+            #   • the ENTAILMENT shortcut compared by `==`, so a crafted `__eq__`
+            #     returning `True` made every stored word look "entailed" and
+            #     `continue`d past the whole guard. This is the door BOTH of the
+            #     next two shapes came through — the shortcut runs first, and a
+            #     lying `__eq__` answers it for any content (measured:
+            #     `UnhashLying('banana')` and `HashCollide('banana')` both landed
+            #     `banana` on an `archived` row).
+            #   • the dead→dead membership `_np_status in _np_terminal` HASHES the
+            #     target, so an UNHASHABLE subclass that does NOT answer `True`
+            #     reached it and raised `TypeError: unhashable type` out of
+            #     `update_entity` instead of refusing (measured: `UnhashHonest`).
+            #     (Hashability alone is not enough to match a word: `in` also
+            #     compares with `==`, and a colliding-hash subclass whose content
+            #     is not a terminal word is REFUSED, measured.)
+            # `str.__str__` cannot consult an override and returns a PLAIN `str`,
+            # so every decision below runs on the value the store holds. It does
+            # NOT over-refuse: a subclass's CONTENT is unchanged, so the
+            # legitimate paths (the no-op re-assert, dead→dead, the licensed
+            # `status='live'` + both clears) keep their outcome for it.
+            # ⛔ `issubclass(type(x), str)`, NOT `isinstance(x, str)`: an object
+            # can claim `__class__ = str` and `isinstance` believes it, while
+            # `type()` does not — and `str.__str__` on such an impostor RAISES
+            # `TypeError` (measured). An impostor is not a `str` word, so it is
+            # left untouched and takes the non-`str` path to the AX refusal at the
+            # two `type(...) is str` sites below, which is why those are exact-type
+            # tests too.
+            # ⚠️ The WRITE still reads `props`; this is the GUARD's view only.
+            if issubclass(type(_np_status), str):
+                _np_status = str.__str__(_np_status)
             for _np_label, _np_terminal, _np_section in (
                 ("Subject", _SUBJECT_TERMINAL_STATUSES, "§4.2"),
                 ("Object", _OBJECT_TERMINAL_STATUSES, "§4.3"),
@@ -49161,7 +49195,32 @@ class TortoiseSDK:
                 # non-string target is not a dead WORD, and that is exactly why it
                 # must not be exempted — it is a target the family's dead set does
                 # not contain, so from a dead row it is a resurrection.
-                if all(s == _np_status for s in _np_stored):
+                # ⛔ AND THE COMPARISON MUST BE `str`'s OWN, ON BOTH SIDES
+                # (#12896, review cycle 6 P1). Written as the natural
+                # `s == _np_status`, this line consulted the CALLER's `__eq__`
+                # before any type check ran: `str.__eq__(s, non_str)` returns
+                # `NotImplemented`, so Python falls back to the REFLECTED
+                # `non_str.__eq__(s)`, and a crafted `__eq__` returning `True`
+                # made every stored word look "entailed" — the guard `continue`d
+                # and a TERMINAL row was lifted (measured: `status=LyingEq()` on
+                # an `archived` row returned normally and the row read LIVE). The
+                # exact-`str` conjunct closes the target side, and the
+                # normalisation above has already removed every subclass, so this
+                # comparison runs on two plain `str`s whose `__eq__` is `str`'s.
+                # The `isinstance(s, str)` conjunct is what protects the STORED
+                # side: `str.__eq__` called unbound with a non-`str` FIRST
+                # argument RAISES `TypeError` (not `NotImplemented` — measured),
+                # so it must never be reached with one. ⛔ The target-side
+                # `type(_np_status) is str` conjunct is NOT load-bearing: the
+                # normalisation above already makes every real `str` target an
+                # exact `str`, and a non-`str` one fails it, so it changes no
+                # outcome — it is kept as an exactness statement so a later edit
+                # cannot quietly reintroduce a subclass here. Only the STORED-side
+                # conjunct defends.
+                if (type(_np_status) is str
+                        and all(isinstance(s, str)
+                                and str.__eq__(s, _np_status) is True
+                                for s in _np_stored)):
                     continue            # entailed: no transition asked for
                 _np_dead = sorted(s for s in _np_stored if s in _np_terminal)
                 if not _np_dead:
@@ -49193,7 +49252,7 @@ class TortoiseSDK:
                 # accepted and stores an undeclared word. That is the PRE-EXISTING
                 # Object-vocabulary hole (#10371, #8166 — a `:Subject` is validated,
                 # an `:Object` is not), not this guard's.
-                if isinstance(_np_status, str) and _np_status in _np_terminal:
+                if type(_np_status) is str and _np_status in _np_terminal:
                     continue            # dead->dead is legal for these families
                 # The carriers this row holds, keyed by the SAME declared
                 # properties the derivation reads (`DERIVED_FROM_RECORD`) —
@@ -49215,7 +49274,7 @@ class TortoiseSDK:
                         # conjuncts below read the KEY supplied and the carriers
                         # cleared, never the value, so without this a non-string
                         # target rode the coherent shape into the row.
-                        and isinstance(_np_status, str)
+                        and type(_np_status) is str
                         and _status_key_leaves_the_dead_state(props)
                         and _write_clears_every_lifecycle_carrier(
                             props, _np_carriers, _np_label)):

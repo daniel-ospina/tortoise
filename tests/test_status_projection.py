@@ -1029,6 +1029,32 @@ def _make_carrier_entity(sdk, label: str, name: str) -> str:
     return row[0]
 
 
+class _LyingEq:
+    """A non-`str` status whose `__eq__` answers `True` for ANYTHING (#12896).
+
+    The guard must answer "may this value leave the dead state?" from the TYPE,
+    never from a comparison the caller controls. `str.__eq__(stored, non_str)`
+    returns `NotImplemented`, so a natural `stored == target` falls back to THIS
+    reflected `__eq__` — measured: `status=_LyingEq()` on an `archived` row
+    returned normally, the `status` property was REMOVED, and the row read
+    `live`. It is unhashable on purpose (defining `__eq__` nulls `__hash__`),
+    which is a shape a store can hold — but it is NOT the `in _np_terminal`
+    membership door: for a non-`str` target the ENTAILMENT shortcut `continue`s
+    first, so this fixture never reaches the membership test. That door is pinned
+    by the str-SUBCLASS arm of
+    `test_a_str_subclass_cannot_forge_a_dead_word_or_crash_the_guard`
+    (`_UnhashHonest`), not here.
+    """
+
+    def __eq__(self, other):
+        return True
+
+    __hash__ = None
+
+    def __repr__(self):
+        return "_LyingEq()"
+
+
 #: Every carrier shape measured as ACCEPTED (and record-divergent) before the
 #: #10192 guard: a pointer/stamp alone, a BLANK pointer (the record view's
 #: `IS NOT NULL` reads `''` as a carrier), a carrier with an explicit LIVE status,
@@ -1276,7 +1302,10 @@ class TestLifecycleCarrierCoherence:
         finally:
             sdk.close()
 
-    @pytest.mark.parametrize("target", [["live"], {"a": 1}, 123, True, None])
+    @pytest.mark.parametrize("target", [["live"], {"a": 1}, 123, True, None,
+                                        _LyingEq()],
+                             ids=["list", "dict", "int", "bool", "none",
+                                  "lying-eq"])
     def test_a_non_string_or_absent_status_cannot_lift_a_dead_row(
             self, tmp_path, target):
         """⛔ The question is "is this in the DEAD set", never "is this a string".
@@ -1322,7 +1351,105 @@ class TestLifecycleCarrierCoherence:
         finally:
             sdk.close()
 
-    @pytest.mark.parametrize("target", [["live"], {"a": 1}, 123, True, None])
+    def test_a_str_subclass_cannot_forge_a_dead_word_or_crash_the_guard(
+            self, tmp_path):
+        """`isinstance(x, str)` is not the boundary — a SUBCLASS keeps the
+        caller's `__eq__`/`__hash__`, and the guard consulted both (#12896,
+        review cycles 6 and 7). Measured on a dead `archived` Object:
+
+            class HashCollide(str):          # content 'banana', lying __eq__
+                __hash__ = lambda self: hash("archived")
+                __eq__ = lambda self, other: True
+
+            status=HashCollide('banana')  ACCEPTED -> 'archived' -> 'banana'
+
+        ⛔ THROUGH THE **ENTAILMENT** SHORTCUT, not the dead→dead membership.
+        The comparison `'archived' == HashCollide('banana')` consults the
+        SUBCLASS's own `__eq__` FIRST — CPython gives a proper subclass priority
+        for the reflected comparison, BEFORE any content comparison (measured: a
+        logging `__eq__` is called with `'archived'` and `str`'s comparison never
+        runs; `str.__eq__('archived', HashCollide('banana'))` on its own is
+        `False`). Note this is a DIFFERENT mechanism from the non-`str` case: there
+        `str.__eq__(s, non_str)` returns `NotImplemented` and Python falls back to
+        the reflected call. Either way the write looked like "no transition asked
+        for". That shortcut runs FIRST, so it shadows the membership line for any
+        shape that lies about equality —
+        which is why a colliding `__hash__` ALONE does not lift a row (`in` also
+        compares, so a hash-only subclass whose content is `'banana'` is
+        REFUSED, measured).
+
+        The `TypeError` is a THIRD shape, and it needs an unhashable subclass
+        whose `__eq__` does NOT answer `True` — that one passes the entailment
+        check, reaches the membership test, and hashes:
+
+            class UnhashHonest(str):          # __eq__ never returns True
+                def __eq__(self, other): return other == "zzz"
+            status=UnhashHonest('banana')  TypeError: unhashable type
+
+        All three are closed by normalising the target with `str.__str__` (which
+        cannot consult an override) before ANY decision, so the guard reads the
+        value the store holds. The gate is `issubclass(type(x), str)`, not
+        `isinstance`: an object can claim `__class__ = str`, `isinstance`
+        believes it, and `str.__str__` on such an impostor RAISES (the impostor
+        arm below) — it is not a `str` word, so it takes the non-`str` path.
+
+        ⛔ The last arm pins the OTHER side: normalising must not over-refuse. A
+        plain subclass whose content IS the dead word is the same no-op it was —
+        `S('archived')` on an `archived` row is ACCEPTED and the row is unchanged.
+        """
+
+        class _HashCollide(str):
+            def __hash__(self):
+                return hash("archived")
+
+            def __eq__(self, other):
+                return True
+
+        class _UnhashHonest(str):
+            def __eq__(self, other):
+                return other == "zzz"
+
+        class _Impostor:
+            __class__ = str
+
+            def __eq__(self, other):
+                return True
+
+        class _PlainSub(str):
+            pass
+
+        sdk = TortoiseSDK(str(tmp_path / "t12882s.db"))
+        try:
+            oid = _make_carrier_entity(sdk, "Object", "eta")
+            sdk._get_proj().g.query(
+                "MATCH (o:Object {id:$id}) SET o.status='archived'",
+                params={"id": oid})
+            before = _carrier_row(sdk, "Object", "eta")
+            assert before[1] == "archived", before
+
+            for target, label in ((_HashCollide("banana"), "entailed-door"),
+                                  (_UnhashHonest("banana"),
+                                   "unhashable membership"),
+                                  (_Impostor(), "__class__ impostor")):
+                with pytest.raises(ValueError,
+                                   match="is TERMINAL for a :Object"):
+                    sdk.update_entity(oid, status=target)
+                assert _carrier_row(sdk, "Object", "eta") == before, (
+                    f"a {label} target moved the dead row: "
+                    + repr(_carrier_row(sdk, "Object", "eta")))
+
+            # normalising must not over-refuse: same CONTENT as the dead word
+            sdk.update_entity(oid, status=_PlainSub("archived"))
+            assert _carrier_row(sdk, "Object", "eta") == before, (
+                "a plain `str` subclass re-asserting the dead word was not the "
+                "no-op it was: " + repr(_carrier_row(sdk, "Object", "eta")))
+        finally:
+            sdk.close()
+
+    @pytest.mark.parametrize("target", [["live"], {"a": 1}, 123, True, None,
+                                        _LyingEq()],
+                             ids=["list", "dict", "int", "bool", "none",
+                                  "lying-eq"])
     def test_a_composed_non_string_status_is_refused_too(self, tmp_path, target):
         """The allowance is a COHERENCE test, not a licence for any value.
 
