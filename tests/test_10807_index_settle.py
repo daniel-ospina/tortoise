@@ -474,14 +474,20 @@ def _foldable_number(node) -> float | None:
 
     Only literals: a name is a runtime value an AST cannot evaluate, and
     pretending otherwise would unarm a site over a binding it never read.
+
+    ⛔ ``bool`` IS INCLUDED, because Python makes it a number here and the
+    helper does arithmetic on it: `time.monotonic() + False` is *now*, so
+    `timeout=False` is an expired bound that returns the FIRST catalogue read —
+    and the repo's own `*_timeout=` kwargs are frequently booleans
+    (`cancel_on_timeout=False`), so it reads as "no bound" to an author used to
+    those. `True` folds to 1.0 and stays ARMED: one second is a real bound.
     """
     sign = 1.0
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
         sign = -1.0 if isinstance(node.op, ast.USub) else 1.0
         node = node.operand
     if (isinstance(node, ast.Constant)
-            and isinstance(node.value, (int, float))
-            and not isinstance(node.value, bool)):
+            and isinstance(node.value, (int, float))):
         return sign * float(node.value)
     return None
 
@@ -1102,6 +1108,14 @@ def test_an_expired_bound_is_unarmed_whatever_the_predicate(tmp_path):
     and `timeout=bound_s` is a RUNTIME value this scan cannot evaluate (the real
     site at `tests/test_9079_handle_write_authority.py` passes exactly that), so
     both stay ARMED. Only a DECIDABLE bound of zero or less reds.
+
+    ⛔ AND `False` IS A ZERO: `time.monotonic() + False` is *now*, so
+    `timeout=False` returns on the FIRST read — measured at #12859's review, one
+    keyword added to the real site at `tests/test_indexes.py:202` left 45 passed,
+    byte-identical to the baseline. It is plausible rather than exotic because
+    the repo's own `*_timeout=` kwargs are often booleans (`cancel_on_timeout=
+    False`), where the keyword reads as "no bound". `timeout=True` folds to 1.0
+    and stays ARMED: a one-second bound is a real bound.
     """
     mod = tmp_path / "test_expired_bounds.py"
     mod.write_text(
@@ -1119,11 +1133,16 @@ def test_an_expired_bound_is_unarmed_whatever_the_predicate(tmp_path):
         "def test_runtime_bound(proj):\n"
         "    index_rows_after_settle(proj, until=index_kind_absent, timeout=BOUND_S)\n"
         "def test_no_bound(proj):\n"
-        "    index_rows_after_settle(proj, until=index_kind_absent)\n",
+        "    index_rows_after_settle(proj, until=index_kind_absent)\n"
+        "def test_bool_false(proj):\n"
+        "    index_rows_after_settle(proj, until=index_kind_absent, timeout=False)\n"
+        "def test_bool_true(proj):\n"
+        "    index_rows_after_settle(proj, until=index_kind_absent, timeout=True)\n",
         encoding="utf-8")
     call_sites, missing = _settle_call_sites([mod])
-    assert call_sites == {"test_expired_bounds.py": [5, 7, 9, 11, 13, 15]}, call_sites
-    assert missing == {"test_expired_bounds.py": [5, 7, 9]}, missing
+    assert call_sites == {
+        "test_expired_bounds.py": [5, 7, 9, 11, 13, 15, 17, 19]}, call_sites
+    assert missing == {"test_expired_bounds.py": [5, 7, 9, 17]}, missing
 
 
 #: `(case name, `until=` expression source, armed?)` for the RESOLUTION half of the
