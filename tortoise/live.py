@@ -442,11 +442,12 @@ def first_terminal_row(rows) -> tuple | None:
     (status text, then flag), never by position: point ids are not unique and
     server row order is not a contract (#7822).
 
-    ⚠️ Only ever called on a fan-out the caller has already found terminal: it
-    keeps no operator precedence (``classify_lifecycle_fanout`` ranks
-    ``operator`` ABOVE ``terminal``, so its verdict alone cannot answer this
-    question on a mixed operator+terminal fan-out — that is why the pair is read
-    from the rows rather than from the classifier's ``status``).
+    It carries NO operator precedence, and that is deliberate: it answers "which
+    row is dead", which a caller may ask of ANY fan-out — it returns ``None`` on
+    a healthy one. ``classify_lifecycle_fanout`` ranks ``operator`` ABOVE
+    ``terminal``, so its verdict ALONE cannot answer this question on a mixed
+    operator+terminal fan-out; the pair therefore comes from the rows, never from
+    the classifier's ``status``.
     """
     return min(((st, od) for _is_op, st, od in rows
                 if is_terminal_status(st, od)),

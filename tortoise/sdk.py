@@ -6690,7 +6690,20 @@ def _raise_update_point_status_error(proj, id: str, *,
     # one. That divergence is documented on both declarations (#7075) and no
     # in-repo writer can produce it; the refusal is still fail-closed.
     dead = first_terminal_row(status)
-    if dead is not None:
+    # ⛔ A ``live`` row is NOT answered by this block, flag or no flag.
+    # ``invalidate_point`` sets the flag and leaves the status alone, so
+    # ``live`` + flag is an ORDINARY shape, and a status-only promote of it is
+    # the #1088 idempotent NO-OP this function must keep returning ``True`` for
+    # (its docstring's "the ONE outcome that does not raise"). Answering "mint it
+    # again" would refuse a call that writes nothing and tell a caller their
+    # current-but-invalidated point is dead. Every OTHER terminal row is refused
+    # here, and the fall-through raise at the end is NOT redundant with this one:
+    # on an OPERATOR fan-out ``classify_lifecycle_fanout`` reports the operator's
+    # own status, which may be ``live`` — so falling through would take the #1088
+    # branch and report SUCCESS for a promote that matched nothing beside a dead
+    # sibling (pinned by
+    # `test_an_operator_fan_out_beside_a_dead_row_is_not_a_false_success`).
+    if dead is not None and dead[0] != 'live':
         _dead_status, _dead_flag = dead
         if _dead_flag and _dead_status not in TERMINAL_EXCLUDED_STATUSES:
             # The flag-ONLY shape: no terminal status word on the selected row,
@@ -6720,11 +6733,14 @@ def _raise_update_point_status_error(proj, id: str, *,
                 f"claim still holds, mint it again with `create_point(...)` — "
                 f"a revived claim is a NEW Point, not an edit to the dead one."
             )
-        raise ValueError(
-            f"Illegal status transition — update_point only promotes "  # noqa: F541
-            f"draft→live; use retract_point()/supersede_point() for "  # noqa: F541
-            f"lifecycle transitions"  # noqa: F541
-        )
+        # ⛔ This raise is NOT redundant with the fall-through one below, even
+        # though the sentence matches: on an OPERATOR fan-out
+        # `classify_lifecycle_fanout` reports the operator's own status, which
+        # may be `live` — falling through would then take the #1088 no-op branch
+        # and report SUCCESS for a promote that matched nothing beside a dead
+        # sibling. Pinned by
+        # `test_an_operator_fan_out_beside_a_dead_row_is_not_a_false_success`.
+        raise ValueError(_ILLEGAL_PROMOTE_STATUS_MSG)
     # No terminal row: the classify verdict's representative state is the
     # #1088 already-live answer's input. Read from the SAME rows and the SAME
     # stable key (the classifier sorts a copy), not from a second statement.
@@ -6740,10 +6756,7 @@ def _raise_update_point_status_error(proj, id: str, *,
             f"Point {id!r} is already live — the promote matched nothing, so "
             "the other properties were NOT applied; re-issue without "
             "`status` to update them")
-    raise ValueError(
-        f"Illegal status transition — update_point only promotes draft→live; "  # noqa: F541
-        f"use retract_point()/supersede_point() for lifecycle transitions"  # noqa: F541
-    )
+    raise ValueError(_ILLEGAL_PROMOTE_STATUS_MSG)
 
 
 class _WriteNotLanded(Exception):
@@ -10708,9 +10721,13 @@ _GUARDED_LIFECYCLE_PROPS = frozenset({"status"}) | _TEMPORAL_RESTAMP_PROPS
 #: two arms cannot drift.
 #:
 #: The FIRST conjunct is the promote VOCABULARY (#432): only a NULL-status
-#: legacy point or an explicit draft is promotable, and it is what keeps the CLI
-#: backfill working (ONTOLOGY §5: "CLI backfill promotes NULL-status legacy
-#: points to ``live`` (migration-only, not a drift)").
+#: legacy point or an explicit draft is promotable. That is also the shape
+#: ONTOLOGY §5's backfill line produces — "CLI backfill promotes NULL-status
+#: legacy points to ``live`` (migration-only, not a drift)" — and a NULL-status
+#: point WITHOUT the flag must keep promoting here too. ⛔ Not because the
+#: backfill routes through this arm (it does not: `_cmd_backfill` and the repair
+#: sweep write raw Cypher), but because a legacy status-less row is CURRENT and
+#: this arm is the door a caller promotes one through.
 #:
 #: The SECOND conjunct is the fix. The legacy ``outdated=true`` flag is a
 #: TERMINALITY signal — §5's ``outdated`` row: "Terminal on every read surface
@@ -10732,6 +10749,14 @@ _GUARDED_LIFECYCLE_PROPS = frozenset({"status"}) | _TEMPORAL_RESTAMP_PROPS
 _PROMOTABLE_CLAUSE = (
     "(n.status IS NULL OR n.status = 'draft') AND "
     + _terminal_excluded("n.status"))
+
+#: #432's refusal for a promote the vocabulary does not allow, spelled ONCE: the
+#: diagnostic raises it from two points (a terminal row in the fan-out, and the
+#: fall-through), and two copies of one sentence is how a message drifts. It is a
+#: plain string, not an f-string — it interpolates nothing.
+_ILLEGAL_PROMOTE_STATUS_MSG = (
+    "Illegal status transition — update_point only promotes draft→live; "
+    "use retract_point()/supersede_point() for lifecycle transitions")
 
 def _shape_or_refuse_caller_end(props: dict) -> dict | None:
     """#9202: read the CALLER's end for intent on the way in — shape or refuse.
@@ -48942,14 +48967,15 @@ class TortoiseSDK:
                     #
                     # ⛔ Review round 12d: the denial is scoped to a RECORDED
                     # terminal STATUS, not said absolutely. "No SDK door re-livens
-                    # a dead claim" was measured FALSE on the flag-dead shape the
-                    # same arm fires for (`status` NULL + legacy `outdated=true`):
-                    # `update_point(p, status='live')` stores `status='live'` on it,
-                    # because the promote arm's `WHERE n.status IS NULL OR … 'draft'`
-                    # does not read the flag — the residual recorded at this file's
-                    # own comment above `_promote_incident_operators`. The belief
-                    # layer still treats the node as dead (the flag), so nothing is
-                    # resurrected; the absolute sentence was just untrue.
+                    # a dead claim" was measured FALSE on the flag-dead shape
+                    # (`status` NULL + legacy `outdated=true`), where
+                    # `update_point(p, status='live')` stored `status='live'` and
+                    # the belief layer still treated the node as dead (the flag).
+                    # #12586 has since closed that door — see this file's comment
+                    # above `_promote_incident_operators` — so the sentence is
+                    # now true for it; it stays scoped because `promote_point`
+                    # still answers from the local `status != 'draft'` reading and
+                    # can re-liven a `draft` that carries the flag.
                     raise ValueError(
                         f"update_entity refused {_lifecycle_fields} on a dead "
                         f"claim: {_terminal_refusal}. A Point whose recorded "

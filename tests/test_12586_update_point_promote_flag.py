@@ -55,7 +55,7 @@ import uuid
 import pytest
 import redis.exceptions as redis_exc
 
-from tortoise.sdk import TortoiseSDK
+from tortoise.sdk import TortoiseSDK, _raise_update_point_status_error
 
 #: The plain-``:Point`` promote statement's distinctive tail. The
 #: ``:Point:Object`` arm bumps ``version`` BETWEEN ``$now,`` and ``n +=``, so
@@ -389,6 +389,70 @@ def test_an_already_live_status_only_promote_is_still_the_noop(env):
 
     assert out["status"] == "live"
     assert _row(sdk, pid) == ("live", False)
+
+
+def test_an_invalidated_live_row_keeps_the_1088_idempotent_answer(env):
+    """`live` + the flag is an ORDINARY row, and a status-only promote of it is
+    the #1088 no-op — not a refusal.
+
+    ``invalidate_point`` sets ``outdated=true`` and leaves the status alone, so
+    ``status='live'`` beside the flag is what a live claim looks like after it is
+    withdrawn. The pre-write probe answers the status-only call, but the
+    DIAGNOSTIC is reached in the retry window (``_promote_witness``, on an
+    aborted promote), and it must still answer ``True`` there — otherwise a
+    caller is told their current-but-invalidated point is dead and told to mint
+    a new one, for a call that writes nothing.
+
+    FALSIFIABLE: drop the ``_dead_status != 'live'`` guard from the flag-only arm
+    and this raises the flag refusal instead of returning ``True``.
+    """
+    sdk, _ = env
+    pid = sdk.create_point("statement", "a claim to invalidate",
+                           dedup=False)["id"]
+    _force(sdk, pid, status="live", outdated=True)
+
+    assert _raise_update_point_status_error(
+        sdk._get_proj(), pid, status_only=True, present=True) is True
+
+    # …and the door itself still answers the status-only call as the no-op.
+    out = sdk.update_point(pid, status="live")
+    assert out["status"] == "live"
+    assert _row(sdk, pid) == ("live", True)
+
+
+def test_an_operator_fan_out_beside_a_dead_row_is_not_a_false_success(env):
+    """One id, two rows: an OPERATOR and a terminal statement point.
+
+    ``classify_lifecycle_fanout`` ranks ``operator`` above ``terminal`` and
+    reports the OPERATOR's status — which here is ``live`` — so a diagnostic that
+    trusted that representative would take the #1088 no-op branch and report
+    SUCCESS for a promote that matched nothing beside a dead sibling. The
+    terminal row must win the answer.
+
+    The operator row is minted by raw write: ``create_operator`` mints its own id,
+    so a fan-out is the only way two such rows share one.
+
+    ⚠️ The pin targets the DIAGNOSTIC, not the door, on purpose: ``update_point``
+    answers a status-only call from its own single-row pre-write probe first, and
+    on a two-row fan-out *which* row that probe sees is server order — so a
+    door-level assertion here would be flaky rather than wrong. The diagnostic is
+    reached whenever the promote statement matched nothing (and on every aborted
+    promote through ``_promote_witness``), and there the terminal row must win.
+
+    FALSIFIABLE: let the terminal block fall through to the classifier's
+    representative status and this returns ``True`` instead of raising.
+    """
+    sdk, _ = env
+    twin = "opfan-" + uuid.uuid4().hex
+    sdk._get_proj().g.query(
+        "CREATE (n:Point {id:$id, status:'live', is_operator:true})",
+        params={"id": twin})
+    sdk._get_proj().g.query(
+        "CREATE (m:Point {id:$id, status:'retracted'})", params={"id": twin})
+
+    with pytest.raises(ValueError):
+        _raise_update_point_status_error(
+            sdk._get_proj(), twin, status_only=True, present=True)
 
 
 def test_a_flag_dead_row_keeps_its_non_status_revision_capability(env):
