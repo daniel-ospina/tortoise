@@ -48372,7 +48372,23 @@ class TortoiseSDK:
         # column went NULL, so the record derived the word from a column the
         # caller had just cleared.
         from tortoise.record_projection import snake  # local: avoids import weight
-        _name_keys = [k for k in props if snake(str(k)) == _SUCCESSOR_COLUMN]
+        # ⛔ BOTH RENDERINGS, because the RECORD reads the JOURNAL one (#12592
+        # cycle-5 P1). This file already knows the asymmetry: the live writer
+        # files by ``str(key)``, the journal (and therefore
+        # ``_split_properties`` -> ``snake(prop)``, which decides the column) by
+        # ``str.__str__(key)``. A ``str`` subclass whose CONTENT is
+        # ``superseded_by`` and whose ``__str__`` is something else is therefore a
+        # carrier to the record and invisible to a ``str(k)``-only test — the same
+        # class ``_carrier_prop_named_by`` documents nine hundred lines above, and
+        # the sibling carrier guard already reads the content rendering
+        # (``column = snake(key)``). Measured: ``snake(str(K))`` gave the
+        # ``__str__`` word while ``snake(str.__str__(K))`` gave the column, so a
+        # same-call clear through such a key was ADMITTED and nulled the record
+        # column while the graph kept its camel name. This is the REFUSAL side, so
+        # it widens to the union; `_successor_named_by` stays narrow on purpose.
+        _name_keys = [k for k in props
+                      if _SUCCESSOR_COLUMN in (snake(str(k)),
+                                               snake(str.__str__(k)))]
         _name_values = [props[k] for k in _name_keys]
         # ⛔ COUNTED BY KEY OBJECT, not by rendered name (#12592 cycle-4): a
         # `str` subclass with a colliding `__hash__` renders as the SAME name as

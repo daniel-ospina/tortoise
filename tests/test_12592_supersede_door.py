@@ -715,3 +715,34 @@ def test_a_snake_key_beside_the_camel_key_is_the_conflict(sdk):
     with pytest.raises(ValueError, match="CONFLICTING successor write"):
         sdk.update_entity(node, status="superseded", supersededBy="snakeconflict-v2",
                           superseded_by=None)
+
+
+def test_a_key_whose_RENDERING_hides_the_column_is_still_the_split(sdk):
+    """The RECORD files the JOURNAL rendering, so the guard must read both.
+
+    A `str` subclass whose CONTENT is `superseded_by` and whose `__str__` is
+    something else is a carrier to `_split_properties` (`snake(prop)` on the
+    journal prop) and invisible to a `str(k)`-only test. Measured on the cycle-4
+    head: `update_entity(<superseded Object, supersededBy='acme-v2'>,
+    status='superseded', **{K: None})` was ADMITTED — the graph kept the camel
+    name while the record's column went NULL, so the record folded `live`.
+
+    Mutation: test only `snake(str(k))` (the live rendering) -> both halves red,
+    because the call is accepted and the conflict is merged into one key.
+    """
+
+    class _K(str):
+        def __str__(self):
+            return "zzz"          # the live name; the CONTENT is the column
+
+    node = _make(sdk, "Object", "renderhide")
+    sdk.update_entity(node, status="superseded", supersededBy="renderhide-v2")
+    with pytest.raises(ValueError, match="CLEARS `supersededBy`"):
+        sdk.update_entity(node, status="superseded", **{_K("superseded_by"): None})
+    assert _row(sdk, "Object", node)[1] == "renderhide-v2", (
+        "a refused write through the hidden rendering still moved the row")
+
+    other = _make(sdk, "Object", "renderconflict")
+    with pytest.raises(ValueError, match="CONFLICTING successor write"):
+        sdk.update_entity(other, status="superseded", supersededBy="renderconflict-v2",
+                          **{_K("superseded_by"): None})
