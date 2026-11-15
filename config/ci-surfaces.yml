@@ -917,9 +917,9 @@ surfaces:
   # `tortoise/supabase_control.py` (the increment) — so `api` must run it. Its
   # fourth subject, the ledger writer `tortoise/record_writer.py`, is NOT an
   # `api` pattern (measured: select(['tortoise/record_writer.py']) -> ['core']),
-  # which is why this file is DUAL-REGISTERED on `core` too — the #3981 pattern
-  # `test_retrieval_metering.py` and `test_4242_metering_period_end_refresh.py`
-  # follow two lines up. The SOURCE_PATTERNS row for
+  # which is why this file is DUAL-REGISTERED on `core` too, on the same #3981
+  # precedent as `test_retrieval_metering.py` and
+  # `test_4242_metering_period_end_refresh.py` above. The SOURCE_PATTERNS row for
   # `tortoise/postgres_bytes.py` is added with this registration so a meter-only
   # diff ROUTES to `api` — the surface owning the two meters and the control
   # plane — instead of the `core` fallback. The guard is selected either way now
