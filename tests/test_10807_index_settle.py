@@ -368,6 +368,13 @@ def test_every_consumer_passes_the_caller_precondition():
     armed call while the documented one was deleted. Measured at #12856's review:
     removing BOTH waits inside `test_event_id_index_is_required_so_an_existing_
     graph_gets_it` left the module key green.
+
+    ⛔ AND IT IS SET EQUALITY OVER THE DOCUMENTED MODULES, not `declared ⊆ armed`.
+    A one-way check protects the pairs somebody remembered to list: measured at
+    #12856's review cycle 5, SIX of the ELEVEN armed functions in these four
+    modules were undeclared, so each could have lost its wait with this pin
+    green — the same vacuity the pair granularity was added to close, one level
+    down. Declaring a site is now part of arming a wait in a documented module.
     """
     here = Path(__file__).resolve()
     paths = [p for p in here.parent.glob("test_*.py") if p.name != here.name]
@@ -383,10 +390,65 @@ def test_every_consumer_passes_the_caller_precondition():
         "these documented (module, function) pairs no longer arm a settle — "
         "removing the wait re-opens the pre-drop race the pair exists to close: "
         f"{sorted(required_sites - have_sites)}")
+    undeclared = _undeclared_sites(
+        by_function, _settle._DOCUMENTED_CONSUMERS, required_sites)
+    assert not undeclared, (
+        "these (module, function) pairs arm a settle in a module this pin "
+        "DOCUMENTS but are absent from `_DOCUMENTED_SITES` — an undeclared wait "
+        "is one the floor cannot protect, so removing it later would leave the "
+        f"pin green: add them to `_DOCUMENTED_SITES`: {sorted(undeclared)}")
     assert not missing, (
         "these `index_rows_after_settle` calls pass no `until`, so a stale "
         "pre-drop read (idle, no `UNDER CONSTRUCTION`) is returned on the first "
         f"read and the caller's guard can refuse a GOOD fixture: {missing}")
+
+
+def _undeclared_sites(by_function, documented_modules,
+                      declared) -> set[tuple[str, str]]:
+    """Armed settle sites a DOCUMENTED module has that ``declared`` omits.
+
+    The second half of the floor, kept as its own function so
+    `test_the_floor_reds_on_an_armed_wait_it_does_not_declare` can drive it on
+    synthetic input: an arm nobody has SEEN fire is indistinguishable from one
+    that cannot fire.
+
+    Restricted to ``documented_modules`` on purpose — a module this pin does not
+    document may arm a wait freely; only the modules it claims to speak for owe
+    a declaration.
+    """
+    armed = {(mod, fn) for mod, fns in by_function.items() for fn in fns}
+    return {site for site in armed if site[0] in set(documented_modules)} \
+        - set(declared)
+
+
+def test_the_floor_reds_on_an_armed_wait_it_does_not_declare():
+    """Both directions of the SET-EQUALITY arm, on synthetic scans.
+
+    ⛔ Pre-fix the floor was `declared ⊆ armed` only, so an armed wait missing
+    from `_DOCUMENTED_SITES` was invisible: measured at #12856's review cycle 5,
+    SIX of the ELEVEN armed functions in the four documented modules were
+    undeclared and every one of them could have lost its wait with this pin
+    green. The clean case is asserted too, so the arm cannot be a constant-red.
+    """
+    documented = {"test_indexes.py"}
+    declared = {("test_indexes.py", "test_declared")}
+
+    # A documented module with an armed wait nobody declared -> reported.
+    assert _undeclared_sites(
+        {"test_indexes.py": {"test_declared", "test_undeclared"}},
+        documented, declared) == {("test_indexes.py", "test_undeclared")}
+
+    # Declared AND armed -> clean (the non-vacuity control).
+    assert _undeclared_sites(
+        {"test_indexes.py": {"test_declared"}}, documented, declared) == set()
+
+    # A module this pin does NOT document may arm a wait freely.
+    assert _undeclared_sites(
+        {"test_other.py": {"test_anything"}}, documented, declared) == set()
+
+    # A declared site that stopped arming is the OTHER arm's finding, not this one.
+    assert _undeclared_sites(
+        {"test_indexes.py": set()}, documented, declared) == set()
 
 
 def test_the_scan_sees_a_module_prefixed_call_and_its_missing_until(tmp_path):

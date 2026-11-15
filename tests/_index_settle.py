@@ -119,19 +119,40 @@ _DOCUMENTED_CONSUMERS = {
 #: graph_gets_it` left the module key satisfied by its five siblings — the pin
 #: for that very red went vacuous while staying green. A method is spelled
 #: `Class.method`, which is how the scan reports it.
+#:
+#: ⛔ THIS SET IS THE WHOLE ARMAMENT OF EVERY ``_DOCUMENTED_CONSUMERS`` MODULE,
+#: not a sample of it: the pin asserts set EQUALITY over those modules, so an
+#: armed wait that is missing here reds instead of sitting outside the floor.
+#: Measured at #12856's review cycle 5 — with a `required <= armed` floor, SIX of
+#: the ELEVEN armed functions were undeclared across those four modules and each
+#: could have lost its wait with the pin green. Declaring one and waiting for the
+#: next review to find the next one is the whack-a-mole this closes.
+#:
+#: A HELPER counts: `test_9079_handle_write_authority.
+#: _await_point_indexes` is where that module's wait lives, so it is the pair a
+#: removal would touch.
 _DOCUMENTED_SITES = {
     # #10807's originals
     ("test_9079_handle_write_authority.py",
      "test_schema_ddl_survives_the_armed_guard"),
+    ("test_9079_handle_write_authority.py", "_await_point_indexes"),
     ("test_search_engine.py",
      "TestR2OrUnionAndSearchKeys.test_event_migration_does_not_drop_an_"
      "already_correct_index"),
-    # #12856 — the red this list gained a consumer for, and its two siblings
+    ("test_search_engine.py",
+     "TestR2OrUnionAndSearchKeys.test_fts_leg_trace_index_missing_live"),
+    # #11682's upgrade/pre-existing arms
+    ("test_11682_quote_indexed.py",
+     "test_a_pre_11682_two_field_index_is_upgraded_to_carry_the_quote"),
+    ("test_11682_quote_indexed.py",
+     "test_a_pre_existing_array_quote_is_flattened_by_the_sweep"),
+    # #12856 — the red this list gained a consumer for, and its three siblings
     # that the same diff arms
     ("test_indexes.py",
      "test_event_id_index_is_required_so_an_existing_graph_gets_it"),
     ("test_indexes.py", "test_schema_probe_is_true_only_on_a_complete_schema"),
     ("test_indexes.py", "test_schema_probe_rejects_the_boolean_is_operator_index"),
+    ("test_indexes.py", "test_schema_probe_is_per_graph_not_per_process"),
 }
 
 
