@@ -497,6 +497,37 @@ def _is_settle_module(node: ast.AST, module_aliases, module_roots=frozenset()) -
 _FOLD_CALLS = frozenset({"all", "any"})
 
 
+def _folds_the_bare_rows(call: ast.Call, params: set[str]) -> bool:
+    """Is this ``all(...)``/``any(...)`` folding the ROWS THEMSELVES?
+
+    ⛔ A FOLD OVER THE CATALOGUE IS NOT A PREDICATE. Every `CALL db.indexes()`
+    row is a list of >= 3 non-empty cells, so `all(rows)` and `any(rows)` are
+    `True` on the FIRST read — the identical vacuity `lambda rows: rows` is
+    refused for, one wrapper word away (measured at #12859's review: the real
+    helper returned `reads=1` for each, against `reads=8` for
+    `index_kind_absent(...)` on the same pre-drop fixture, while the pin stayed
+    green). `all(x for x in rows)` yields the same rows and is the same thing.
+
+    A fold over something the caller COMPUTED from the rows
+    (`all(_point_indexes(index_cells(rows)))`, `all((pred(rows),))`) still varies
+    with them and stays ARMED.
+    """
+    args = list(call.args)
+    if len(args) != 1 or call.keywords:
+        return False
+    arg = args[0]
+    if isinstance(arg, ast.Name):
+        return arg.id in params
+    if isinstance(arg, ast.GeneratorExp) and len(arg.generators) == 1:
+        gen = arg.generators[0]
+        return (isinstance(gen.target, ast.Name)
+                and isinstance(gen.iter, ast.Name)
+                and gen.iter.id in params
+                and isinstance(arg.elt, ast.Name)
+                and arg.elt.id == gen.target.id)
+    return False
+
+
 def _call_forms_a_predicate(call: ast.Call, params: set[str],
                             ctx=None) -> bool:
     """Does this CALL's own result vary with the rows? (#12859's review)
@@ -539,7 +570,7 @@ def _call_forms_a_predicate(call: ast.Call, params: set[str],
         if func.id in rebound:
             return False
         if func.id in _FOLD_CALLS:
-            return True
+            return not _folds_the_bare_rows(call, params)
         return ctx.get("aliases", {}).get(func.id) in _ROW_PREDICATES
     if isinstance(func, ast.Attribute):
         # ⛔ AND A MODULE-QUALIFIED CALLEE IS A CORRECT SPELLING the old code
@@ -1243,7 +1274,9 @@ _ARMING_CASES = (
     ("module_qualified", "_index_settle.index_kind_absent", True),
     ("lambda_call", "lambda r: index_kind_absent(r, 'Event', 'id', 'RANGE')",
      True),
-    ("lambda_all", "lambda rows: all(rows)", True),
+    ("lambda_all", "lambda rows: all(rows)", False),
+    ("lambda_any", "lambda rows: any(rows)", False),
+    ("lambda_all_generator", "lambda rows: all(x for x in rows)", False),
     # A FOLD over a helper call is a predicate: `all(...)` reads the ELEMENTS, so
     # the result varies with the rows even though `_point_indexes(index_cells(
     # rows))` on its own does not (it is a non-empty tuple, always truthy).
