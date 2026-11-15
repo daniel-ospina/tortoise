@@ -49393,14 +49393,23 @@ class TortoiseSDK:
                 # class (measured: a target whose `__repr__` raises `RuntimeError`
                 # escaped as `RuntimeError`, review cycle 8 P3; the row was
                 # unchanged, so this is a contract break and not a fail-open).
-                try:
-                    _np_target_repr = repr(_np_status)
-                except Exception:  # noqa: BLE001, RUF100 — a hostile `__repr__` is the point
-                    _np_target_repr = f"<{type(_np_status).__name__}>"
+                # ⛔ BOTH operands, not just the target (review cycle 9 P3): the
+                # same f-string interpolates `id_val`, which is caller-controlled
+                # too — `update_entity(<id whose __repr__ raises>, status='live')`
+                # on an `archived` row escaped as the caller's own exception class
+                # (measured: `RuntimeError: id-repr-boom`, row unchanged).
+                def _np_safe_repr(_value):
+                    try:
+                        return repr(_value)
+                    except Exception:  # noqa: BLE001, RUF100 — a hostile `__repr__` is the point
+                        return f"<{type(_value).__name__}>"
+
+                _np_target_repr = _np_safe_repr(_np_status)
+                _np_id_repr = _np_safe_repr(id_val)
                 raise ValueError(
                     f"update_entity refused the status transition "
                     f"{_np_dead[0]!r} -> {_np_target_repr} on {_np_label} "
-                    f"{id_val!r}: {_np_dead[0]!r} is TERMINAL for a "
+                    f"{_np_id_repr}: {_np_dead[0]!r} is TERMINAL for a "
                     f":{_np_label} (ONTOLOGY {_np_section}), so this row cannot be "
                     f"made current again. ⛔ A dead {_np_label} is not resurrected "
                     f"by a prop edit — a {_np_label} that came back is a NEW "

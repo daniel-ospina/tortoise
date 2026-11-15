@@ -1448,6 +1448,17 @@ class TestLifecycleCarrierCoherence:
             with pytest.raises(ValueError, match="is TERMINAL for a :Object"):
                 sdk.update_entity(oid, status=_BoomRepr())
             assert _carrier_row(sdk, "Object", "zeta") == before, before
+
+            # ⛔ AND THE ID OPERAND (review cycle 9 P3): the same message
+            # interpolates `id_val`, so an id whose `__repr__` raises escaped as
+            # its own class too (measured: `RuntimeError: id-repr-boom`).
+            class _IdLie(str):
+                def __repr__(self):
+                    raise RuntimeError("id-repr-boom")
+
+            with pytest.raises(ValueError, match="is TERMINAL for a :Object"):
+                sdk.update_entity(_IdLie(oid), status="live")
+            assert _carrier_row(sdk, "Object", "zeta") == before, before
         finally:
             sdk.close()
 
