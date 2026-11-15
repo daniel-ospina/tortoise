@@ -361,35 +361,37 @@ def _rebound_names(tree: ast.AST) -> set[str]:
         if args.kwarg:
             out.add(args.kwarg.arg)
 
+    def add_class(cls: ast.ClassDef) -> None:
+        """Register a class's name, its METHODS, and its `global` declarations.
+
+        ⛔ RECURSIVE, because a class nested inside a class body is neither its own
+        method nor a module-level name: `continue` on the outer `ClassDef` left the
+        inner one's methods INVISIBLE (measured at #12859's review — 51 nested
+        classes with methods exist under `tests/`).
+
+        ⛔ THE CLASS BODY'S PLAIN ASSIGNMENTS ARE STILL SKIPPED at every depth:
+        ``class Helpers: index_kind_absent = staticmethod(…)`` binds an ATTRIBUTE,
+        and counting it unarmed the legitimate bare import (measured, so that stay
+        is deliberate). A `global`/`nonlocal` declaration in that body is the
+        exception — it is not a body statement in disguise, because it rebinds the
+        MODULE name when the body executes.
+        """
+        out.add(cls.name)
+        for sub in ast.walk(cls):
+            if isinstance(sub, (ast.Global, ast.Nonlocal)):
+                out.update(sub.names)
+        for sub in cls.body:
+            if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                out.add(sub.name)
+                add_args(sub.args)
+                visit(sub)
+            elif isinstance(sub, ast.ClassDef):
+                add_class(sub)
+
     def visit(node: ast.AST) -> None:
         for child in ast.iter_child_nodes(node):
             if isinstance(child, ast.ClassDef):
-                out.add(child.name)
-                # \u26d4 ONLY THE CLASS BODY'S OWN STATEMENTS ARE SKIPPED — its
-                # METHODS are not. `class Helpers: index_kind_absent =
-                # staticmethod(\u2026)` binds an ATTRIBUTE, and counting that body
-                # unarmed the legitimate bare import (measured, so the branch
-                # stays). But `continue` skipped the whole SUBTREE, so a
-                # METHOD-local `index_kind_absent = lambda rows: True` was never
-                # seen and the call was certified ARMED — MEASURED GREEN at
-                # #12859's review, on the REAL tree, in test_search_engine.py's
-                # documented class-method pair. A `def` inside a class binds
-                # names exactly as a top-level one does.
-                for sub in child.body:
-                    if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                        out.add(sub.name)
-                        add_args(sub.args)
-                        visit(sub)
-                # ⛔ AND A `global`/`nonlocal` DECLARATION IN THE CLASS BODY BINDS
-                # THE MODULE NAME: the comment above says a class body binds
-                # attributes, which is true of a plain assignment and FALSE under
-                # `global` — `class H: global index_kind_absent; …=lambda …: True`
-                # rebinds the module name when the body executes, and the skip
-                # meant it was never seen, so the bare-name arm certified it
-                # ARMED (measured at #12859's review).
-                for sub in ast.walk(child):
-                    if isinstance(sub, (ast.Global, ast.Nonlocal)):
-                        out.update(sub.names)
+                add_class(child)
                 continue
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 out.add(child.name)
@@ -409,7 +411,7 @@ def _rebound_names(tree: ast.AST) -> set[str]:
 def _is_settle_module(node: ast.AST, module_aliases, module_roots=frozenset()) -> bool:
     """Does `node` name the `tests._index_settle` module itself?
 
-    \u26d4 `module_roots` EXISTS BECAUSE `import tests._index_settle` (no `as`)
+    ⛔ `module_roots` EXISTS BECAUSE `import tests._index_settle` (no `as`)
     BINDS `tests`, NOT `tests._index_settle`. Registering only the full dotted
     name made the nested reference `tests._index_settle.index_kind_present`
     UNARMED — a false red on a correct spelling — while the docstring claimed the
@@ -560,7 +562,7 @@ def _foldable_number(node) -> float | None:
 def _numeric_bindings(tree: ast.AST) -> dict[str, float]:
     """Every name this module binds to a FOLDABLE NUMBER, as that number.
 
-    \u26d4 A DECIDABLE ZERO STORED IN A NAME IS STILL A DECIDABLE ZERO. Measured
+    ⛔ A DECIDABLE ZERO STORED IN A NAME IS STILL A DECIDABLE ZERO. Measured
     at #12859's review: `ZERO = 0` at module level with `timeout=ZERO` on BOTH
     waits of the red left the pin GREEN — the bound arm recognised only a bare
     numeric literal, so the name fell into the "runtime value we cannot read"
@@ -642,12 +644,18 @@ def _until_is_armed(call, ctx=None) -> bool:
     value is not in the source) stays armed — an AST cannot evaluate it, and
     that is the same accident-guard posture as the rest of this rule.
 
-    ⛔ AND THE BOUND IS READ THE WAY THE PREDICATE IS: a `**` splat, a computed
-    expression (`1 - 1`, `0 if x else 5`, a call) and a name bound to a DIFFERENT
-    number each time are UNARMED, and a name bound to ONE foldable number is
-    judged by that number — so `ZERO = 0` … `timeout=ZERO` reds exactly as
-    `timeout=0` does. Both were measured GREEN at #12859's review while the call
-    returned on the first catalogue read.
+    ⛔ AND THE BOUND IS READ THE WAY THE PREDICATE IS: a `**` splat and a
+    computed expression (`1 - 1`, `0 if x else 5`, a call) are UNARMED, and a
+    name bound to ONE foldable number is judged by that number — so `ZERO = 0` …
+    `timeout=ZERO` reds exactly as `timeout=0` does. Both were measured GREEN at
+    #12859's review while the call returned on the first catalogue read.
+
+    ⛔ A NAME BOUND TO TWO DIFFERENT NUMBERS STAYS ARMED — stated here because the
+    first draft of this paragraph claimed the opposite and a reviewer measured it
+    (ARMED, with a zero-second wait under it). Which binding is live at call time
+    is a runtime question, so an ambiguous name joins `timeout=bound_s` in the
+    runtime bucket rather than being guessed in either direction;
+    `_numeric_bindings` states the same from the collector's side.
 
     ⛔ THE REMAINING BOUND RESIDUAL, STATED SO IT CANNOT BE MISTAKEN FOR COVERAGE:
     only `<= 0` is judged, because that is the case an AST can decide exactly.
@@ -688,7 +696,7 @@ def _until_is_armed(call, ctx=None) -> bool:
     module_roots = ctx.get("module_roots", frozenset())
     numeric = ctx.get("numeric", {})
     for kw in call.keywords:
-        # \u26d4 A `**` SPLAT HIDES THE BOUND, so it cannot be SHOWN usable. The
+        # ⛔ A `**` SPLAT HIDES THE BOUND, so it cannot be SHOWN usable. The
         # `until` side already answers exactly this way — a `**{"until": None}`
         # never matches `kw.arg == "until"`, so the call falls through to UNARMED —
         # and `**{"timeout": 0}` was the same vacuity on the other keyword:
@@ -703,7 +711,7 @@ def _until_is_armed(call, ctx=None) -> bool:
             bound = numeric.get(kw.value.id)
         if bound is not None and bound <= 0:
             return False
-        # \u26d4 AN EXPRESSION IS NOT A BOUND THE SCAN CAN PROVE, and the
+        # ⛔ AN EXPRESSION IS NOT A BOUND THE SCAN CAN PROVE, and the
         # fallthrough is the whole point of this rule (the same reason the `until`
         # arm has one): only a foldable literal or a NAME stays armable — the name
         # `timeout=bound_s` at tests/test_9079_handle_write_authority.py is this
@@ -728,11 +736,22 @@ def _until_is_armed(call, ctx=None) -> bool:
             return (aliases.get(value.id) in _ROW_PREDICATES
                     and value.id not in ctx.get("rebound", ()))
         if isinstance(value, ast.Attribute):
+            # ⛔ THE REBOUND GUARD REACHES THE ROOT OF A NESTED SPELLING TOO:
+            # `tests` in `tests._index_settle.index_kind_present` is a name this
+            # module can rebind (a local `tests = [...]` really does exist under
+            # `tests/`), and guarding only a bare `Name` base certified the nested
+            # form over a shadowed package — a fail-open this delta introduced and
+            # a reviewer measured. Both depths are checked.
+            base = value.value
+            rebound = ctx.get("rebound", ())
+            shadowed = (
+                (isinstance(base, ast.Name) and base.id in rebound)
+                or (isinstance(base, ast.Attribute)
+                    and isinstance(base.value, ast.Name)
+                    and base.value.id in rebound))
             return (value.attr in _ROW_PREDICATES
-                    and _is_settle_module(value.value, module_aliases,
-                                          module_roots)
-                    and not (isinstance(value.value, ast.Name)
-                             and value.value.id in ctx.get("rebound", ())))
+                    and _is_settle_module(base, module_aliases, module_roots)
+                    and not shadowed)
         # ⛔ THE FALLTHROUGH IS THE POINT: an unlisted form reds instead of
         # passing. `return True` here was five of the nine measured escapes.
         return False
@@ -773,7 +792,7 @@ def _settle_call_sites(paths) -> tuple[dict[str, list[int]], dict[str, list[int]
         for node in ast.walk(tree):
             if not isinstance(node, ast.ImportFrom) or not node.module:
                 continue
-            # \u26d4 EXACT, NOT `endswith`: a module whose name merely ENDS in
+            # ⛔ EXACT, NOT `endswith`: a module whose name merely ENDS in
             # `_index_settle` is a DIFFERENT module, and this map is what makes
             # `until=<that alias>` resolve to a predicate NAME — so
             # `from tests.fake_index_settle import index_kind_absent` certified a
@@ -1318,7 +1337,7 @@ def test_an_expired_bound_is_unarmed_whatever_the_predicate(tmp_path):
         "    index_rows_after_settle(proj, until=index_kind_absent, timeout=False)\n"
         "def test_bool_true(proj):\n"
         "    index_rows_after_settle(proj, until=index_kind_absent, timeout=True)\n"
-        # \u26d4 APPENDED, so the line numbers above stay meaningful: a name bound to
+        # ⛔ APPENDED, so the line numbers above stay meaningful: a name bound to
         # a foldable number and a `**` splat are the two shapes a reader is most
         # likely to believe are "not a bound at all".
         "def test_name_zero(proj):\n"
@@ -1347,7 +1366,7 @@ def test_an_expired_bound_is_unarmed_whatever_the_predicate(tmp_path):
 def test_a_class_method_binding_counts_as_a_rebinding(tmp_path):
     """A `def`/assignment inside a CLASS binds names exactly as a top-level one does.
 
-    \u26d4 MEASURED FALSE CERTIFICATION (#12859's review): `_rebound_names` did
+    ⛔ MEASURED FALSE CERTIFICATION (#12859's review): `_rebound_names` did
     `out.add(child.name); continue` on a `ClassDef`, which skipped the whole
     SUBTREE — so a METHOD-local `index_kind_absent = lambda rows: True` was never
     seen and the pin certified the call ARMED. Measured on the REAL tree: in
@@ -1355,7 +1374,7 @@ def test_a_class_method_binding_counts_as_a_rebinding(tmp_path):
     shadowing the imported predicate left the pin GREEN (16 passed).
 
     The carve-out is for the class BODY (``class Helpers: index_kind_absent =
-    staticmethod(\u2026)`` binds an ATTRIBUTE, and counting it unarmed the
+    staticmethod(…)`` binds an ATTRIBUTE, and counting it unarmed the
     legitimate bare import — measured), never for the methods. Both directions are
     asserted here, because a fix that unarmed the bare import would be a false red
     on the shape 15 real sites rely on.
@@ -1387,14 +1406,31 @@ def test_a_class_method_binding_counts_as_a_rebinding(tmp_path):
         "a class-BODY attribute is not a rebinding of the MODULE name — the "
         "legitimate bare import must stay ARMED")
 
+    # ⛔ AND A CLASS NESTED IN A CLASS BODY IS RECURSED INTO: the first fix here
+    # visited only DIRECT methods, so the inner class's methods stayed invisible
+    # (measured at #12859's review — 51 nested classes with methods exist under
+    # `tests/`).
+    nested = tmp_path / "test_nested_class_shadow.py"
+    nested.write_text(
+        "from tests._index_settle import index_rows_after_settle\n"
+        "from tests._index_settle import index_kind_absent\n"
+        "class Outer:\n"
+        "    class Inner:\n"
+        "        def helper(self, proj):\n"
+        "            index_kind_absent = lambda rows: True\n"
+        "            index_rows_after_settle(proj, until=index_kind_absent)\n",
+        encoding="utf-8")
+    _, missing = _settle_call_sites([nested])
+    assert missing == {"test_nested_class_shadow.py": [7]}, missing
+
 
 def test_a_bare_dotted_settle_import_resolves_through_its_root(tmp_path):
     """`import tests._index_settle` binds `tests`, and the nested reference is valid.
 
-    \u26d4 MEASURED FALSE RED (#12859's review): `module_aliases` registered the
+    ⛔ MEASURED FALSE RED (#12859's review): `module_aliases` registered the
     full dotted `tests._index_settle`, but `_is_settle_module` compares the
     attribute's BASE — `tests` — so the nested branch could only ever match an
-    `import \u2026 as tests`. The docstring claimed the spelling was accepted while it
+    `import … as tests`. The docstring claimed the spelling was accepted while it
     reported UNARMED, which is a loud red on a CORRECT site.
 
     The root is registered in its own set so it cannot certify itself:
@@ -1427,7 +1463,7 @@ def test_a_bare_dotted_settle_import_resolves_through_its_root(tmp_path):
 def test_a_foreign_module_cannot_lend_a_predicate_name(tmp_path):
     """A module whose name merely ENDS in `_index_settle` is a DIFFERENT module.
 
-    \u26d4 MEASURED FALSE CERTIFICATION (#12859's review): the exact-match rule was
+    ⛔ MEASURED FALSE CERTIFICATION (#12859's review): the exact-match rule was
     applied to `module_aliases` and NOT to the predicate-alias map one screen
     above it, which still read `node.module.endswith("_index_settle")`. So
     `from tests.fake_index_settle import index_kind_absent` resolved as a
@@ -1447,6 +1483,48 @@ def test_a_foreign_module_cannot_lend_a_predicate_name(tmp_path):
         encoding="utf-8")
     _, missing = _settle_call_sites([mod])
     assert missing == {"test_foreign_from_import.py": [5]}, missing
+
+    # ⛔ AND THE ROOT POLICY IS CHECKED TOO: `tests` is a name this module can
+    # rebind (a local `tests = [...]` exists under `tests/`), so guarding only a
+    # bare `Name` base certified the NESTED form over a shadowed package — a
+    # fail-open the first fix introduced and a reviewer measured.
+    shadowed = tmp_path / "test_dotted_shadowed.py"
+    shadowed.write_text(
+        "import tests._index_settle\n"
+        "def test_d(proj, tests):\n"
+        "    tests._index_settle.index_rows_after_settle(\n"
+        "        proj, until=tests._index_settle.index_kind_present)\n",
+        encoding="utf-8")
+    _, missing = _settle_call_sites([shadowed])
+    assert missing == {"test_dotted_shadowed.py": [3]}, (
+        f"a rebound `tests` must not resolve through the module root — {missing}")
+
+
+def test_an_ambiguous_bound_name_stays_armed(tmp_path):
+    """A bound name with TWO different numbers is a runtime value, not a zero.
+
+    ⛔ THE CONTRACT, PINNED SO THE DOCSTRINGS CANNOT DRIFT APART (#12859's review):
+    the first draft of `_until_is_armed`'s bound paragraph claimed this shape was
+    UNARMED while `_numeric_bindings` said the opposite and the measurement said
+    ARMED. Guessing the LIVE binding from an AST is not possible, so the shape
+    joins `timeout=bound_s` in the runtime bucket and stays ARMED — which is the
+    safe direction for a FOLD (the deadline logic still reds the caller), and the
+    honest one for a reader.
+    """
+    mod = tmp_path / "test_ambiguous_bound.py"
+    mod.write_text(
+        "from tests._index_settle import index_rows_after_settle\n"
+        "from tests._index_settle import index_kind_absent\n"
+        "ZERO = 0\n"
+        "def test_elsewhere(proj):\n"
+        "    ZERO = 5\n"
+        "def test_wait(proj):\n"
+        "    index_rows_after_settle(proj, until=index_kind_absent, timeout=ZERO)\n",
+        encoding="utf-8")
+    _, missing = _settle_call_sites([mod])
+    assert missing == {}, (
+        "an AMBIGUOUS bound name is a runtime value and stays ARMED — only a "
+        f"single foldable number is judged; got {missing}")
 
 
 #: `(case name, `until=` expression source, armed?)` for the RESOLUTION half of the
