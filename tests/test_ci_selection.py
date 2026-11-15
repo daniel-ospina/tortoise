@@ -22253,8 +22253,8 @@ def test_the_health_honesty_suite_is_selected_on_BOTH_halves_of_its_module_pair(
     `.gitattributes:10-12` is explicit that union keeps BOTH sides' lines, which is why a
     duplicate mapping key or a duplicate entry can come out of it, and why
     `duplicate_entries()` exists to catch one. The narrower true statement is that union
-    never RECONCILES rows: it is why nothing but a pin on the dual registration notices the
-    lost arm.
+    never RECONCILES rows — and neither does plain mode, which carries the same zero `core`
+    rows — which is why nothing but a pin on the dual registration notices the lost arm.
 
     `integrity()` is not a substitute for this pin, and that is the point: it answers ONE
     question — is every `tests/**/test_*.py` classified SOMEWHERE — so a file that keeps

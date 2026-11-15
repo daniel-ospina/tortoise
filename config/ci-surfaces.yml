@@ -2434,7 +2434,8 @@ surfaces:
   # `record_writer.py` seam the meter is called from) matches no `api` SOURCE_PATTERN
   # and falls to `core`, so a `core`-only diff — a `tests/` change, or
   # `postgres_bytes.py` itself — is exactly the diff that must still run this guard.
-  # Same shape as the #4492 pair directly below: dual registration, one row per half.
+  # Same shape as `test_postgres_storage.py`'s #4492 pair: dual registration, one row
+  # per half, each carrying its own half's reason.
   - test_postgres_bytes.py
   # #12444: the tier-NAMING pin — `pro` is the identifier, Builder is the display
   # name (#4336). `core` is the classifying surface because `tortoise/pricing.py`
