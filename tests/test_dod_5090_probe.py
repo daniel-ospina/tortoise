@@ -7298,10 +7298,10 @@ def _doc_section(text: str, start: str, end: str) -> str:
 # ARE pinned by the `N `must_red` rows` sentence, but the verdicts read off them
 # were not, in the paragraph whose whole purpose is to record why 2 is the only
 # clean window. Edit a figure here and the pin reds; re-derive it by measurement:
-#   window 0: must_red leak 0/63; declared_open wrongly red 10/34; declared_blocks wrongly green 0/34; real doc HIT
-#   window 1: must_red leak 0/63; declared_open wrongly red 4/34; declared_blocks wrongly green 0/34; real doc HIT
-#   window 2: must_red leak 0/63; declared_open wrongly red 0/34; declared_blocks wrongly green 0/34; real doc HIT
-#   window 3: must_red leak 2/63; declared_open wrongly red 0/34; declared_blocks wrongly green 1/34; real doc HIT
+#   window 0: must_red leak 0/63; declared_open wrongly red 10/34; declared_blocks wrongly green 0/33; real doc HIT
+#   window 1: must_red leak 0/63; declared_open wrongly red 4/34; declared_blocks wrongly green 0/33; real doc HIT
+#   window 2: must_red leak 0/63; declared_open wrongly red 0/34; declared_blocks wrongly green 0/33; real doc HIT
+#   window 3: must_red leak 2/63; declared_open wrongly red 0/34; declared_blocks wrongly green 1/33; real doc HIT
 # ⛔ COST, taken deliberately: window 2 makes "…are never TOUCHED by the walk"
 # RED, because `touched` is not in the coverage list — a false block bought for
 # that false pass, which is the trade this predicate always takes.
@@ -7341,7 +7341,7 @@ _NEGATION_GOVERNS = re.compile(
 # ⛔ `_COVERAGE` is RETAINED DELIBERATELY AND IS CURRENTLY IMPLIED, and saying so
 # is the point (#11437 review, P3). Measured: `_NEGATION_GOVERNS` already requires
 # one of the same four verbs AFTER the negation, so on all 183 candidate sentences
-# (the 150 rows across the four sets — 63 / 19 / 34 / 34 — plus the 33 sentences of
+# (the 150 rows across the four sets — 63 / 20 / 34 / 33 — plus the 33 sentences of
 # the real §3 under
 # this predicate's own `split(". ")` segmentation) there is no case where the
 # governance test hits and this one does not — dropping the term from
@@ -7635,7 +7635,7 @@ _AFFIRMED = re.compile(
 _DEFEATED = re.compile(
     r"\bis false\b|\bincorrect\b|\bin fact\b|\bif\b"
     r"|(?:[,;:\u2014\u2013\-()\]\u2026]|\b(?:but|yet|and|however|while))"
-    r"(?:\s+\w+){0,3}?\s*actually\b")
+    r"(?:\s+(?!(?:not|never)\b)\w+){0,3}?\s*actually\b")
 
 def _residual_sentences(s3: str) -> list[str]:
     r"""Sentences of §3 that state the walk does NOT visit a nested def's
@@ -7698,10 +7698,14 @@ def _residual_sentences(s3: str) -> list[str]:
       used to call this "the one shape class the predicate closes rather than
       declares", which was true of the MARKER and untrue of the CLASS. `_DEFEATED` is assertion structure the vocabulary can see: `is false`
       / `incorrect` / `in fact` / `if`, plus — since `#11541` B — `actually`
-      after a clause BOUNDARY and a bounded SUBJECT gap (`(?:\s+\w+){0,3}?`, so
-      `, but it actually does` and `, but the body walk actually does` red as well
-      as the clause-initial `, but actually`; F9 closed the subject-interposed
-      half). ⚠️ It does NOT
+      after a clause BOUNDARY and a bounded SUBJECT gap
+      (`(?:\s+(?!(?:not|never)\b)\w+){0,3}?`, so `, but it actually does` and
+      `, but the body walk actually does` red as well as the clause-initial
+      `, but actually`). ⛔ F9 closed the CLAUSE-INITIAL and the up-to-three-word
+      SUBJECT-INTERPOSED forms — NOT "the subject-interposed half": a wider subject
+      gap, and a subject carrying punctuation the gap cannot cross, are still
+      ACCEPTED and are a `declared_open` row with an owner (round-3 review, F3: this
+      sentence used to claim the closure the row denies). ⚠️ It does NOT
       make the predicate sound: a marker LIST over English refutation verbs does
       not converge, so a refutation using none of the five is still GREEN. ⛔ TWO
       MARKERS WERE TRIED AND MEASURED BACK OUT (#11541 review, findings 2 and 3):
@@ -8433,13 +8437,21 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
         # ⛔ WHAT THESE FOUR ROWS PIN IS REACH, NOT CLOSURE. They prove the gap
         # SPANS a subject of up to three words; they do NOT prove three is enough.
         # Measured at this head, the class continues past the bound — a four-word
-        # subject, and any subject carrying punctuation `\w+` cannot cross (an
+        # subject, and any subject carrying punctuation the gap cannot cross (an
         # apostrophe, a hyphen, a backticked word), are still ACCEPTED. That
         # residual is a `declared_open` ROW
-        # (`open: `actually` inverse with a SUBJECT GAP WIDER than the bound`),
-        # because widening the bound does not converge — an earlier draft of this
-        # comment said "the bound's upper edge is pinned", which the rows do not
-        # verify and which the row now makes false (#11541 review, F1, P2).
+        # (`open: `actually` inverse with a SUBJECT GAP WIDER than the bound`).
+        # ⚠️ WHY IT IS DECLARED RATHER THAN CLOSED IS MEASURED, NOT ASSERTED (round-3
+        # review, F1): the WIDTH half genuinely does not converge — every width
+        # leaves a longer subject GREEN — but the PUNCTUATION half is cheap, and a
+        # comment claiming "widening does not converge" covered both was only true of
+        # one. Measured: `\S+` in place of `\w+` at the SAME `{0,3}` closes the
+        # hyphen and backtick members with 0/63 `must_red` leaks and 0 honest rows
+        # newly RED; `\S+` at `{0,5}` closes all six members the row names. That is
+        # a deliberate scope choice for a later round, NOT an impossibility — the row
+        # exists so the residual is visible, and the owner (`#11541`) can buy the
+        # cheap half whenever it is scheduled. An earlier draft of this comment said
+        # "the bound's upper edge is pinned", which the rows do not verify.
         # ⚠️ The price of the bound is real and is rowed in `declared_blocks` below
         # (`false block: an honest ASIDE with a SUBJECT`): an honest sentence that
         # names a third party and uses `actually` as an aside now reds. That is the
@@ -8589,6 +8601,18 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
         "honest: EMPHASIS `does not actually visit` (inside the negation's scope)":
             "the walk does not actually visit a nested `def`'s decorators and "
             "parameter defaults",
+        # ⛔ AND THE EMPHASIS PLACED AFTER A TERMINATOR, which is the SAME reading and
+        # must stay GREEN (#11541 review, round 3 F2). It was a `declared_blocks`
+        # price when the gap was `(?:\s+\w+){0,3}?`, because that gap spanned the
+        # `not` carrying the emphasis and RED an honest restatement. The gap refuses
+        # a `not`/`never` as one of its words now, which keeps every
+        # subject-interposed inverse RED and makes this honest form GREEN again —
+        # the price was AVOIDABLE, and this file does not take a false block it can
+        # buy back for one alternative. Re-measured after the change: 0/63
+        # `must_red` leaks, 0 other honest rows newly RED.
+        "honest: EMPHASIS AFTER a terminator (`, and it does not actually visit`)":
+            "a nested `def`'s decorators and parameter defaults are not reported "
+            "by this walk, and it does not actually visit them",
         # ⛔ AND THE NARROWED EXCLUSION, which belongs HERE and not in
         # `declared_open` (#11541 review, round 2 finding 7; RATIONALE CORRECTED in
         # round 3 F10). `whenever the outer method is analysed, the walk does not
@@ -8635,12 +8659,19 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
         #   ", but the body walk's visitor actually does report them"        (apostrophe)
         #   ", but the read-only walk actually does report them"            (hyphen)
         #   ", but the `body` walk actually does report them"               (backticks)
-        # DECLARED and not closed, because widening the bound does not converge —
-        # every width leaves a longer subject GREEN, which is the same
-        # non-converging-list argument this file records for the marker list. A row
-        # is what makes the residual visible; a wider `{0,N}` would only move the
-        # edge and hide it again. Owner: `#11541`. The sentence below is the 4-word
-        # member, the first width the shipped bound does NOT reach.
+        # DECLARED and not closed. ⛔ THE REASON IS SPLIT, and the split is measured
+        # (round-3 review, F1 — the earlier wording said "widening the bound does not
+        # converge" over BOTH halves, and that was only true of one):
+        #   * WIDTH does not converge — every width leaves a longer subject GREEN;
+        #   * PUNCTUATION is cheap and is a DELIBERATE DEFERRAL, not an
+        #     impossibility: `\S+` for `\w+` at the same `{0,3}` closes the hyphen
+        #     and backtick members (0/63 leaks, 0 honest rows newly RED), and `\S+`
+        #     at `{0,5}` closes ALL SIX members named above.
+        # A row is what makes the residual visible, and a wider `{0,N}` alone would
+        # only move the edge and hide it again — which is why the row comes first and
+        # the cheap half is scheduled rather than slipped in. Owner: `#11541`. The
+        # sentence below is the 4-word member, the first width the shipped bound does
+        # NOT reach.
         "open: `actually` inverse with a SUBJECT GAP WIDER than the bound":
             "a nested `def`'s decorators and parameter defaults are not reported "
             "by this walk, but the enclosing body walk actually does report them",
@@ -9026,14 +9057,14 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
         # whose price is unrowed is folklore (#11541 review: round 4 F5 measured
         # four RED and unrowed, round 5 F2 measured the class as SEVEN punctuation
         # members and found two more, and round 6 found the em-dash row the
-        # sentence below CLAIMED was present and was not). FOURTEEN rows follow —
+        # sentence below CLAIMED was present and was not). THIRTEEN rows follow —
         # `;`, `,`, `(`, `:`, the em dash, the en dash, the hyphen, the honest
         # PAUSE, the TWO the subject-interposed bound bought (a two-word and a
-        # THREE-word subject — the same ASIDE family one widening over), the
-        # bound's EMPHASIS price (a `does not actually` placed after a terminator,
-        # which the bounded gap now spans), and the THREE the closing-terminator
-        # widening bought (`)`, `]`, `…` — the class is TEN punctuation members
-        # now, #11541 review F4).
+        # THREE-word subject — the same ASIDE family one widening over), and the
+        # THREE the closing-terminator widening bought (`)`, `]`, `…` — the class is
+        # TEN punctuation members now, #11541 review F4). ⚠️ FOURTEEN until round 3:
+        # the EMPHASIS price that was fourteenth is a `must_stay_green` row now,
+        # because the negation-aware gap buys it back (#11541 review, F2).
         # ⛔ THE CONJUNCTION SPELLINGS (`but|yet|and|however|while` + `actually`)
         # are the one member set NOT separately rowed: same ASIDE family. Its
         # INVERSE direction IS covered, and it is covered in BOTH positions now —
@@ -9065,14 +9096,16 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
         # refutation starts a NEW clause, an emphasis sits INSIDE the negation's
         # scope — but the bounded gap now spans the `not` that carries the emphasis,
         # so an honest EMPHASIS placed after a terminator reds too. Measured: GREEN
-        # under the old `\s*` gap, RED under `(?:\s+\w+){0,3}?`. Honest (it
-        # restates the exclusion) and previously unrowed, which is the folklore this
-        # block exists to prevent. ⚠️ It is DECLARED rather than narrowed: narrowing
-        # back to `\s*` re-opens the four subject-interposed `must_red` rows, so the
-        # file takes the false block, as it does at every other widening.
-        "false block: honest EMPHASIS `does not actually` AFTER a terminator":
-            "a nested `def`'s decorators and parameter defaults are not reported "
-            "by this walk, and it does not actually visit them",
+        # under the old `\s*` gap, RED under the subject-blind `(?:\s+\w+){0,3}?`,
+        # and GREEN again under the negation-aware gap that ships. ⛔ IT WAS A PRICE
+        # HERE AND IS A `must_stay_green` ROW NOW (#11541 review, round 3 F2): the
+        # earlier justification — "narrowing back to `\s*` re-opens the four
+        # subject-interposed rows, so the file takes the false block" — was a FALSE
+        # DICHOTOMY, because it considered only the full revert. Refusing a
+        # `not`/`never` as one of the gap's words keeps every subject-interposed
+        # inverse RED **and** leaves this honest form GREEN, so no trade was needed.
+        # Re-measured after the change: 0/63 `must_red` leaks, 0 other honest rows
+        # newly RED, sweep verdicts unchanged.
         "false block: an honest ASIDE in a PARENTHETICAL using `actually`":
             "a nested `def`'s decorators and parameter defaults are not "
             "reported by this walk (actually the outer method does evaluate them)",
@@ -9743,7 +9776,7 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
     _defeated_markers = (
         r"\bis false\b", r"\bincorrect\b", r"\bin fact\b", r"\bif\b",
         r"(?:[,;:\u2014\u2013\-()\]\u2026]|\b(?:but|yet|and|however|while))"
-        r"(?:\s+\w+){0,3}?\s*actually\b")
+        r"(?:\s+(?!(?:not|never)\b)\w+){0,3}?\s*actually\b")
     assert _top_level_alternatives(_pinned_defeated.pattern) == \
         len(_defeated_markers), (
         f"`_DEFEATED` carries "
