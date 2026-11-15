@@ -2622,6 +2622,12 @@ def test_every_shipped_surface_is_named_with_a_state(tmp_path, monkeypatch):
     states = {rel: shipped["per_surface"][rel]["state"] for rel in probe.CONFIG_SURFACES}
     assert states == {
         ".env.example": "ON",
+        # ⛔ `compose.yaml`/`compose.yml` are compose's FIRST-choice filenames
+        # (Docker's CLI reference: compose looks for a `compose.yaml` or a
+        # `docker-compose.yaml`), so they are surfaces in their own right — ABSENT
+        # here because this fixture ships only `docker-compose.yml`.
+        "compose.yaml": "ABSENT",
+        "compose.yml": "ABSENT",
         "docker-compose.yml": "OFF",
         "docker-compose.yaml": "ABSENT",
         "Dockerfile": "ABSENT",
@@ -11968,3 +11974,58 @@ def test_12549_a_SIBLING_worktree_manifest_does_not_hold_this_row(tmp_path, monk
     shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
     assert shipped["deployment"]["files"] == {"docker-compose.yml": "ON"}, shipped["deployment"]
     assert shipped["deployment"]["measured"] is True, shipped["deployment"]
+
+
+def test_12549_a_PROFILE_GATED_arm_does_not_arm_the_file(tmp_path, monkeypatch):
+    """The OTHER direction: a profiled `1` must not arm a deployment that skips it (P1).
+
+    ⛔ `--profile '*'` answers "what is DECLARED", but a plain `docker compose up` starts
+    the DEFAULT service set only. Reading an arm out of a service that a default `up`
+    never starts publishes "armed" over a deployment whose gate is off — `#11455`'s
+    false-PASS class, and the mirror of the disarm that same flag exists to reveal. So
+    the two directions are deliberately asymmetric: a profiled DISARM blocks, a profiled
+    ARM is reported and never arms.
+
+    Measured: plain `up` on this fixture starts `['app']` with no FLAG at all; only
+    `--profile '*'` shows `debug-shell=1`.
+    """
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n"
+        "  app:\n    image: alpine\n"
+        "  debug-shell:\n    image: alpine\n"
+        "    profiles: [\"debug\"]\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"1\"\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"] == {"docker-compose.yml": "OFF"}, shipped["deployment"]
+    assert shipped["deployment"]["on"] is False, shipped["deployment"]
+    # ⛔ And it is REPORTED, not silently dropped — the reader can see the declaration.
+    note = _gate_note(shipped)
+    assert "profile-gated" in note, note
+    assert "debug-shell" in note, note
+
+
+def test_12549_the_compose_DEFAULT_filename_is_measured(tmp_path, monkeypatch):
+    """`compose.yaml` is compose's FIRST-choice filename and must not be invisible (P1).
+
+    Docker's CLI reference: compose *"traverses the working directory and its parent
+    directories looking for a `compose.yaml` or `docker-compose.yaml` file"* — so a tree
+    whose only compose file is `compose.yaml` is a real deployment surface. Measured: a
+    directory holding only `compose.yaml` resolves under a bare `docker compose config`.
+    Before `COMPOSE_BASE_NAMES` carried it, the file was neither read nor HELD, so a
+    disarm inside it never reached the row and an armed Dockerfile beside it made the
+    deployment read ARMED.
+    """
+    (tmp_path / "compose.yaml").write_text(
+        "services:\n  app:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"0\"\n", encoding="utf-8")
+    (tmp_path / "Dockerfile").write_text(
+        "FROM python:3.12\nENV TORTOISE_EMBED_GATE=1\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    files = shipped["deployment"]["files"]
+    assert "compose.yaml" in files, (
+        "compose.yaml is a compose default filename and must be measured: " + repr(files))
+    assert files["compose.yaml"] == "OFF", files
+    # The disarming default file must not be hidden behind the armed Dockerfile.
+    assert shipped["deployment"]["on"] is False, shipped["deployment"]

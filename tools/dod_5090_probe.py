@@ -2031,6 +2031,8 @@ def _write_seams_that_embed() -> dict[str, str]:
 #: longer an OFF spelling.
 CONFIG_SURFACES: tuple[str, ...] = (
     ".env.example",
+    "compose.yaml",
+    "compose.yml",
     "docker-compose.yml",
     "docker-compose.yaml",
     "Dockerfile",
@@ -2109,6 +2111,8 @@ CONFIG_SURFACES: tuple[str, ...] = (
 #: missed — the next channel (a `Procfile`-shaped runner, a second Fly manifest)
 #: is found by its manifest, not by someone remembering to add a string here.
 DEPLOYMENT_SURFACES: tuple[str, ...] = (
+    "compose.yaml",
+    "compose.yml",
     "docker-compose.yml",
     "docker-compose.yaml",
     "Dockerfile",
@@ -2151,7 +2155,16 @@ FLY_MANIFEST_GLOB = "fly*.toml"
 #: false PASS out of the verdict, and it is why the exclusion is a documented
 #: boundary rather than an oversight — a later "completeness" fix that globbed the
 #: family in would have to model merge ORDER before it could be correct.
-COMPOSE_BASE_NAMES: tuple[str, ...] = ("docker-compose.yml", "docker-compose.yaml")
+#: ⛔ The compose DEFAULT filename matters and used to be missing: Docker's CLI
+#: reference says compose *"traverses the working directory and its parent
+#: directories looking for a `compose.yaml` or `docker-compose.yaml` file"* — so
+#: `compose.yaml`/`compose.yml` is the FIRST choice, not a variant. Measured: a
+#: directory holding only `compose.yaml` resolves under a bare `docker compose
+#: config`. A tree whose only compose file is `compose.yaml` was therefore INVISIBLE
+#: to this walk — neither read nor HELD — and a disarm inside it never reached row 1
+#: (a fail-open, and the exact opposite of the "computed population" claim below).
+COMPOSE_BASE_NAMES: tuple[str, ...] = ("compose.yaml", "compose.yml",
+                                       "docker-compose.yml", "docker-compose.yaml")
 
 #: The TOML table a deployed process's environment comes from. Fly reads `[env]`
 #: into the machine's environment; `[build.args]` reaches the BUILD, never the
@@ -2236,23 +2249,35 @@ RESOLVER_ENV_ALLOW = frozenset({
 #: ENVIRONMENT is perfectly resolvable reads as `UNRESOLVED` — the collapse this lane
 #: exists to remove, one layer down. A syntax error or a failed interpolation still
 #: exits non-zero and is still `UNRESOLVED`.
-#: ⛔ `--profile '*'` is load-bearing, and it must precede the `config` subcommand
-#: (it is a TOP-LEVEL compose flag — `config --profile` is `unknown flag`, measured).
-#: Without it compose OMITS every profile-gated service from the resolved model, so an
-#: explicit disarm living inside one never reaches the walk and the file reads ARMED:
-#: measured on `{app: {FLAG: "1"}, worker: {profiles: ["batch"], environment:
-#: {FLAG: "0"}}}` — default → services `['app']` (reads `ON`, the `0` never seen and
-#: never named), with `--profile '*'` → `{app: "1", worker: "0"}` (`DISAGREE`). A
-#: missing disarm that reads as an arm is a FAIL-OPEN in the worst class this
-#: instrument has, so every profile is enabled: the walk wants to see every
-#: DECLARATION, not the subset a deploy would start.
-COMPOSE_RESOLVER = ("docker compose --profile '*' -f <file> config --format json "
-                    "--no-consistency")
+#: ⛔ TWO resolves, and the split is load-bearing in BOTH directions. `docker compose
+#: config` OMITS every `profiles:`-gated service unless a profile is enabled, so one
+#: resolve answers two different questions depending on the flag and neither answer is
+#: safe alone:
+#:
+#:   * the DEFAULT set is what a plain `docker compose up` STARTS. Only it can ARM the
+#:     row: a truthy value inside a profile-gated service does not arm a deployment
+#:     that never starts that service. Measured: `{app: {}, debug-shell: {profiles:
+#:     [debug], environment: {FLAG: "1"}}}` — plain `up` starts `['app']` with no
+#:     FLAG, while `--profile '*'` shows `debug-shell=1`. Treating the second as an arm
+#:     publishes "armed" over a deployment that is OFF (`#11455`'s false-PASS class).
+#:   * the ALL-PROFILES set is the only place a DISARM inside a profiled service can be
+#:     seen — the previous review's finding. Without it such a `0` vanished and the
+#:     file read ARMED. So it BLOCKS an arm, and it never creates one.
+#:
+#: Hence: default resolves the verdict, all-profiles may only DISARM or report. A
+#: supplementary resolve that REFUSES (measured: a profiled dev service referencing a
+#: gitignored `env_file` that is absent makes `--profile '*'` exit 1 while the default
+#: set resolves fine) is a WARNING, not `UNRESOLVED` for the whole file — converting
+#: the file would discard an arm the walk did measure on the default set, i.e. a false
+#: HOLD, the mirror of the fail-open.
+COMPOSE_RESOLVER = "docker compose -f <file> config --format json --no-consistency"
+COMPOSE_RESOLVER_ALL_PROFILES = ("docker compose --profile '*' -f <file> config "
+                                 "--format json --no-consistency")
 #: ⛔ `--local --toml -c <file>` are all three load-bearing. flyctl's own docs for
 #: `fly config show`: *"The configuration is presented by default in JSON format. The
 #: configuration data is retrieved from the Fly service."* — so a bare `fly config
-#: show` (a) fetches over the NETWORK with credentials and (b) resolves flyctl's
-#: DEFAULT `fly.toml`, not the manifest this walk is reading, so a tree holding both
+#: show` (a) fetches over the NETWORK with credentials, and (b) resolves flyctl's
+#: DEFAULT `fly.toml` rather than the manifest under measurement, so a tree holding both
 #: `fly.toml` and `fly.staging.toml` publishes one file's `[env]` as the other's.
 #: `--local` = *"Parse and show local fly.toml file instead of fetching from the Fly
 #: service"*, and `-c/--config` names the file. `--toml` asks for the format the
@@ -2487,10 +2512,18 @@ def _resolver_env() -> dict[str, str]:
     """The environment a resolver runs in — see `RESOLVER_ENV_ALLOW`.
 
     ⛔ `COMPOSE_DISABLE_ENV_FILE=1` is added HERE, not left to the ambient
-    environment, so the compose resolver reads the manifests' own text and never a
-    machine-local `.env` (`RESOLVER_ENV_ALLOW` documents the measurement). It is a
-    compose key; the other resolvers ignore it. Verified: the `${FLAG:-0}` fixture
-    reads `"0"` with it set even when a `.env` beside the manifest sets `FLAG=1`.
+    environment, so the compose resolver never reads a machine-local `.env` as an
+    **interpolation source** (`RESOLVER_ENV_ALLOW` documents the measurement). It is a
+    compose key; the other resolvers ignore it. Verified: the `${FLAG:-0}` fixture reads
+    `"0"` with it set even when a `.env` beside the manifest sets `FLAG=1`.
+
+    ⚠️ **Residual, and it is a declared bound rather than a closed hole:** a manifest
+    that ITSELF declares `env_file: .env` still pulls that file into the resolved
+    environment, because then the manifest names it and compose expands it — measured:
+    `env_file: [.env]` with a gitignored `.env` setting the flag returns `"1"` and the
+    row reads `ON`. That is not the interpolation leak this closes (a file cannot opt
+    itself in silently), but "never a machine-local `.env`" would be a false absolute;
+    the manifest's own `env_file:` is a shipped declaration and is read as one.
     """
     env = {k: v for k, v in os.environ.items() if k in RESOLVER_ENV_ALLOW}
     env["COMPOSE_DISABLE_ENV_FILE"] = "1"
@@ -2602,13 +2635,15 @@ def _compose_channel(path: Path, flag: str | None, is_truthy) -> dict:
     duplicate collapse.) The old line reader DID report the superseded line, which is
     the reading that let a claim about it leak into the note — see `#12070` item 4.
     """
-    run = _run_config_resolver(["docker", "compose", "--profile", "*", "-f", str(path),
-                                "config", "--format", "json", "--no-consistency"])
+    primary = _run_config_resolver(["docker", "compose", "-f", str(path),
+                                    "config", "--format", "json", "--no-consistency"])
+    run = primary
     out: dict = {"channel": "compose", "resolver": COMPOSE_RESOLVER,
                  "ok": False, "reason": run["reason"], "scopes": {},
                  "verdict": "UNRESOLVED", "mentioned": False,
                  "armed": [], "off": [], "silent_scopes": [], "unresolved": [],
                  "novalue": [], "falsy": [], "outside_runtime": [],
+                 "profiled_not_started": [],
                  "build_refs": [], "entrypoints": [], "warnings": []}
     if not run["ok"]:
         return out
@@ -2728,7 +2763,99 @@ def _compose_channel(path: Path, flag: str | None, is_truthy) -> dict:
         out["verdict"] = "ARMED"
     else:
         out["verdict"] = "NOT_ARMED"
+    _compose_profiled_scopes(path, flag, is_truthy, primary_services=set(services),
+                             out=out)
     return out
+
+
+def _compose_profiled_scopes(path: Path, flag: str, is_truthy, *, primary_services,
+                             out: dict) -> None:
+    """Read the ALL-PROFILES set and let it only DISARM or report — never arm.
+
+    See `COMPOSE_RESOLVER_ALL_PROFILES` for why TWO resolves exist. A service that is
+    not in the DEFAULT set is not started by a plain `docker compose up`, so:
+
+      * a truthy value in one is REPORTED (`profiled_not_started`) and does NOT arm the
+        file — the fail-open a single `--profile '*'` resolve introduced;
+      * a non-truthy or value-less entry in one BLOCKS an arm, because a deployment
+        that DOES enable that profile runs with the gate off (the case where the same
+        file also arms elsewhere must read as a disagreement, not as an arm);
+      * a supplementary resolve that REFUSES is a WARNING, not `UNRESOLVED` for the
+        file — the default set is a real measurement and discarding it would be a
+        false HOLD.
+
+    Runs AFTER the verdict reduction on purpose: it can only add to the blocking
+    buckets, so it must re-derive the verdict when it does.
+    """
+    supp = _run_config_resolver(["docker", "compose", "--profile", "*", "-f", str(path),
+                                 "config", "--format", "json", "--no-consistency"])
+    if not supp["ok"]:
+        out["warnings"].append(
+            f"`{COMPOSE_RESOLVER_ALL_PROFILES}` refused ({supp['reason']}), so services "
+            "behind a `profiles:` entry were NOT read — the verdict above is from the "
+            "DEFAULT service set only, and a disarm inside a profile-gated service "
+            "would be invisible here")
+        return
+    try:
+        model = json.loads(supp["stdout"] or "{}")
+    except json.JSONDecodeError:
+        out["warnings"].append(
+            f"`{COMPOSE_RESOLVER_ALL_PROFILES}` printed a model this walk cannot read, "
+            "so profile-gated services were NOT read")
+        return
+    services = (model.get("services") or {}) if isinstance(model, dict) else {}
+    if not isinstance(services, dict):
+        return
+    blocked = False
+    for name, service in services.items():
+        if name in primary_services:
+            continue          # already decided from the default set
+        service = service if isinstance(service, dict) else {}
+        env = service.get("environment") or {}
+        profiles = service.get("profiles") or []
+        where = f"{path.name}: services.{name}"
+        scope = out["scopes"].get(name)
+        if not isinstance(scope, dict):
+            scope = {"verdict": "NOT_ARMED", "value": None, "reason": None,
+                     "path": f"services.{name}.environment"}
+            out["scopes"][name] = scope
+        scope["profiles"] = list(profiles)
+        if flag not in env:
+            continue          # silent sibling: not a contrary reading either way
+        out["mentioned"] = True
+        if env[flag] is not None and is_truthy(env[flag]):
+            # ⛔ REPORTED, NEVER ARMED: a default `up` does not start this service.
+            scope["value"] = env[flag] if isinstance(env[flag], str) else str(env[flag])
+            scope["verdict"] = "NOT_STARTED"
+            scope["reason"] = ("declared in a PROFILE-GATED service (profiles: "
+                               f"{list(profiles)}), which a default `docker compose "
+                               "up` does not start")
+            out["profiled_not_started"].append(name)
+            out["warnings"].append(
+                f"{where}.{flag} = {scope['value']!r} is declared in a profile-gated "
+                f"service (profiles: {list(profiles)}) that a default `docker compose "
+                "up` does NOT start — reported, does not arm this file")
+            continue
+        blocked = True
+        if env[flag] is None:
+            scope["verdict"] = "NOT_ARMED"
+            scope["reason"] = ("no value in the file, in a profile-gated service "
+                               f"(profiles: {list(profiles)})")
+            out["novalue"].append(name)
+            out["off"].append(name)
+        else:
+            literal = env[flag] if isinstance(env[flag], str) else str(env[flag])
+            scope["value"] = literal
+            scope["verdict"] = "NOT_ARMED"
+            scope["reason"] = (f"set to a non-truthy value ({literal!r}) in a "
+                               f"profile-gated service (profiles: {list(profiles)})")
+            out["falsy"].append(name)
+            out["off"].append(name)
+    # Re-derive: the supplementary pass may only have ADDED blocking declarations.
+    if blocked and out["armed"] and out["verdict"] in ("ARMED", "NOT_ARMED"):
+        out["verdict"] = "DISAGREE"
+        out["reason"] = ", ".join(
+            f"{svc}={out['scopes'][svc]['verdict']}" for svc in sorted(out["scopes"]))
 
 
 def _toml_env_value(text: str, flag: str) -> tuple[str, object]:
