@@ -99,7 +99,7 @@ that governs the subject. (Filed as its own item in §A6, debt row D-22.)
 | 2 | `docs/architecture/STORAGE-ARCHITECTURE.md` (2099) | **READ (§1, §2, §2.0, §2.1, §2.2, §3, §5, §5.1, §5.2, §6, §6.1, §12.1c, §14.1, §17.1–§17.4.6)** | `:104` §1 the problem; `:116` §2.0 the owner ruling **and its 2026-11-07 SPLIT + the `OVERRIDES:` line**; `:173` §2.1 what FalkorDB charges for; `:217` §3 the split; `:236` *"READ THE AUTHORITY COLUMN AS AUTHORITY, NOT AS LOCATION"*; `:243` the per-write truth test; `:275` *"journal completeness is a PRECONDITION"*; `:285` **§ "The journal's scope: REBUILD, not durability"**; `:316` the invariant `derived tables = replay(the journal) NOT recompute(the sources)`; `:342` *"ONE ATOMIC WRITE … may be an outbox … **This is the whole answer**"* and *"**The current JSONL cannot do (1)**"*; `:361` *"They are also recorded in the journal, which is truth"*; `:427` §5.2 measured growth (and the per-capture total `#9025`); `:450` §6 the split does not fix volume; `:1115` §12.1c (vector index decision — **this, not SEARCH §12.1c, is where §12.1c lives**; see A1.3); `:1546` §14.1 decisions; `:1664` §17.1; `:1700` the 387-site measurement; `:1702` §17.2; `:1822` §17.4.2; `:2090` §17.5 |
 | 3 | `docs/architecture/SEARCH-ARCHITECTURE.md` (566) | **READ (§3, §4, §7)** | `:157` §3 "What runs where" (writes/projections/backup-restore stay in FalkorDB; the graph stays a *derived copy*); `:205` §4 "Authority (unchanged, cited not restated)"; `:361` §7 "The window" (why a complete cache is 193 % of the storage target and the window is not yet armed) |
 | 4 | `docs/ONTOLOGY.md` (1561) | **READ (§2, §4.2, §4.7, §5 headings)** | `:61` §2 the Four-Ontology Model table — the layer vocabulary used verbatim below; `:71` the Procedural row (`Object.status` is a **write-through cache** and *"the journal/event stream is the reconstruction source"*); `:75-97` the state-centric model (*"the Episodic layer's events are the truth; status is a fold cache over the events — never the truth itself"*); `:638` §4.7 temporal model; §5's kind vocabularies (read for the `decision`/`statement` split only) |
-| 5 | `docs/event-catalog.md` (330) | **READ (full)** | `:89-92` *"The JSONL rebuild journal that `rebuild_all` replays is a second, differently-shaped store"*; `:100-101` the `__TornTailSealed__` seal shifts no record index; `:263-266` **no down-version guarantee**; `:286` `seq` = *"Per-graph monotonic, atomic in-graph counter (`GraphEventMeta.last_seq`)"* — i.e. the catalogue documents the **` :GraphEvent`** counter, not `journal_event.seq`; `:305-307` the 30-day/500k retention |
+| 5 | `docs/event-catalog.md` (330) | **READ (full)** | `:89-92` *"The JSONL rebuild journal that `rebuild_all` replays is a second, differently-shaped store"*; `:100-101` the `__TornTailSealed__` seal shifts no record index; `:263-266` **no down-version guarantee**; `:286` `seq` = *"Per-graph monotonic, atomic in-graph counter (`GraphEventMeta.last_seq`)"* — i.e. the catalogue documents the **`:GraphEvent`** counter, not `journal_event.seq`; `:305-307` the 30-day/500k retention |
 | 6 | `docs/00_index.md` (247) | **READ (full)** | The population proof above; and the absence finding (`STORAGE-ARCHITECTURE` and `event-catalog` unregistered) |
 | 7 | `docs/retention-and-deletion.md` (606) | **READ** | `:30-34` *"This is the canonical document … link here and do not restate the number"*; `:41-42` the promise; `:73-75` *"Restore window ≠ retention window"*; `:92-97` no per-entity purge inside a live graph |
 | 8 | `docs/data-safety.md` (53) | **READ (full)** | `:15` retention is delegated here; `:36` graph content is **infrastructure-level encryption only**; `:37` control-plane audit events go Postgres-first with a local JSONL fallback — a **different** dual-write seam from the journal's |
@@ -223,7 +223,7 @@ other.
 
 ### A2.1 The JSONL journal: three writers, one append, one seam
 
-```
+```console
 $ rg -n "(self\._journal|self\.journal|event_log|_event_log|active_log|log)\.append\(" tortoise/
 tortoise/mining.py:997:        seq = api.log.append(record)
 tortoise/api.py:2153:        seq = self.log.append(event)
@@ -243,8 +243,12 @@ journal has *one* write primitive while the cache has none (§A6 D-01).
 
 ### A2.2 The JSONL journal: readers — one replay reader, four bypass readers
 
-```
+```console
 $ rg -n "log\.read_all\(|read_all\(salvage=True\)|read_for_replay" tortoise/     # 39 lines
+tortoise/m0.py:38:    points = fold(log.read_all())
+tortoise/log.py:841:# among the records a REPLAY would read — `read_all(salvage=True)`, the ONE
+tortoise/log.py:1210:def read_for_replay(log) -> list[dict]:
+… (39 lines in total)
 ```
 
 Production call sites that parse journal records (excluding docstring references and the embedded
@@ -264,7 +268,7 @@ Production call sites that parse journal records (excluding docstring references
 
 ### A2.3 The Postgres record: `journal_event` has exactly one writer and one reader that folds it
 
-```
+```console
 $ rg -n "INSERT INTO public\.journal_event|FROM public\.journal_event|journal_event_bytes_for_rows|_journal_row" tortoise/
 tortoise/record_projection.py:5995:def _journal_row(...)
 tortoise/record_projection.py:6005:        "INSERT INTO public.journal_event "
@@ -291,14 +295,14 @@ tortoise/cost_dimensions.py:492:            "journal_event_bytes_for_rows",
 
 ### A2.4 `:GraphEvent` and `:GraphEventMeta` — the second store and its own allocator
 
-```
+```console
 $ rg -n "^def (next_seq|capture_watermark|reestablish_watermark|append_event|read_after|purge_expired|purge_overflow|ensure_event_schema|degraded|degraded_graphs|clear_degraded|record_degraded|_refresh_first_seq)" tortoise/event_store.py
 222 record_degraded · 270 degraded · 284 degraded_graphs · 318 clear_degraded
 388 ensure_event_schema · 427 next_seq · 524 capture_watermark · 571 reestablish_watermark
 777 append_event · 922 read_after · 1014 purge_expired · 1038 purge_overflow · 1062 _refresh_first_seq
 ```
 
-```
+```console
 $ rg -n "next_seq\(|append_event\(|read_after\(|capture_watermark\(|reestablish_watermark\(" tortoise/*.py tortoise/projection/*.py | grep -v "^tortoise/event_store.py"     # 15 lines, call sites only
 tortoise/sdk.py:13832:                seq = next_seq(proj)
 tortoise/sdk.py:13833:                append_event(proj, seq, type_, graph_payload, self.ulid())
@@ -520,8 +524,8 @@ things, one of which `#12458` already measured as fatal:
 | Journal **segments** (manifest + boundary + a raising reconstruction claim) | **YES, writers flag-gated OFF** | `journal_segments.py`, `TORTOISE_JOURNAL_SEGMENTS` |
 | Atomic-write **ordering** on 4 doors | **PARTIALLY** | `create_point` (`#7951` inc 1 — **the record IS the commit point**), `update_point` revision arms (inc 2a), `delete_point` (**order reversed by `#9207`**), onboarding (declared, not journalled) |
 | **`last_applied_seq` on the record** (per-projection watermark) | **NO** — and this is the gap | the only `last_applied_seq` is `consistency.py:1341-1396`, a **file-based** journal↔graph watermark, not a record-side one. `#7951` inc 2's second half is *"STILL OPEN"* |
-| **A transactional outbox table** | **NO** (and none is needed for `journal_event` — the table *is* the outbox, because it is written in the same transaction as the layer rows) |
-| **A record-side ordinal allocator** | **NO** |
+| **A transactional outbox table** | **NO** (and none is needed for `journal_event` — the table *is* the outbox, because it is written in the same transaction as the layer rows) | — |
+| **A record-side ordinal allocator** | **NO** | — (proposed by §A7) |
 
 **⇒ The plan proposes only the last row.** Everything else in the ideal shape has a shipped implementation;
 what is missing is (a) the last row, (b) `last_applied_seq`, and (c) the *routing* that makes them the only
