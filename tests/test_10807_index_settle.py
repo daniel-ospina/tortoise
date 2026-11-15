@@ -254,41 +254,83 @@ def test_index_kind_present_reads_the_kinds_map_and_fails_closed():
         "FULLTEXT") is True
 
 
-def _until_is_armed(call, none_names=frozenset()) -> bool:
+def _foldable_bool(node) -> tuple[bool, bool | None]:
+    """Fold a CONSTANT-BOOLEAN expression: ``(True, value)`` when it is decidable.
+
+    One step per node, no evaluation of anything that reads data: literals,
+    ``not``, and ``and``/``or`` chains of already-foldable parts. This is what
+    lets the arming rule be an ALLOW-LIST without blessing `lambda r: not
+    False`, `lambda r: True or False`, or a name bound to either.
+    """
+    if isinstance(node, ast.Constant):
+        return True, bool(node.value)
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        ok, value = _foldable_bool(node.operand)
+        return (True, not value) if ok else (False, None)
+    if isinstance(node, ast.BoolOp):
+        parts = [_foldable_bool(v) for v in node.values]
+        if not all(ok for ok, _ in parts):
+            return False, None
+        values = [v for _, v in parts]
+        return True, (all(values) if isinstance(node.op, ast.And) else any(values))
+    return False, None
+
+
+def _until_is_armed(call, ctx=None) -> bool:
     """Does this `index_rows_after_settle(...)` call pass a USABLE `until`?
 
-    ⛔ A PRESENT KEYWORD IS NOT AN ARMED WAIT: `until=None` is the function's own
-    default — the quiescence-only read this pin exists to forbid — so the
-    syntactic `kw.arg == "until"` test certified exactly the defect it names
-    (measured at #12856's review cycle 6: rewriting both waits in the named red
-    as `until=None` left every check green). The VALUE is judged, not the
-    keyword.
+    ⛔ A PRESENT KEYWORD IS NOT AN ARMED WAIT, and neither is any single spelling
+    of a constant: `until=None` is the helper's own default — the quiescence-only
+    read this pin exists to forbid — so a syntactic `kw.arg == "until"` test
+    certified the exact defect it names. The same hole was then re-measured one
+    spelling at a time (#12856 review cycles 6-9): `until=None`, `NONE = None`
+    … `until=NONE`, `until=lambda r: True`, `until=bool`, `until=all`,
+    `until=lambda r: not False`, `until=lambda r: True or False`, a module-level
+    `ALWAYS = lambda r: True`, and `def _ALWAYS(rows): return True` — each
+    certified GREEN while returning on the FIRST catalogue read. Enumerating
+    spells is a deny-list, and a deny-list only ever covers the spellings
+    somebody thought of.
 
-    ⛔ AND A NAME BOUND TO `None` IS NOT AN ESCAPE: `NONE = None` …
-    `until=NONE` reproduces the same vacuous pass one edit away, so a name that
-    the module binds to the literal `None` is resolved against `none_names`
-    (measured at #12856's review cycle 7). What stays out of reach is a predicate
-    COMPUTED at the call site (`until=(None if p else f)`, `until=make()`): an AST
-    pin cannot evaluate those, and they are named here rather than implied to be
-    covered. A `**{"until": None}` splat is reported UNARMED, which reds the pin
-    rather than passing it.
-    ⛔ AND A CONSTANT-BODIED LAMBDA IS THE SAME VACUOUS READ as `until=None`:
-    `lambda r: True` returns on the FIRST catalogue read, so it satisfies the
-    `missing` arm while re-introducing the pre-drop read this pin exists to
-    forbid (measured at #12856's review cycle 8: rewriting the named red's
-    recreate wait as `until=lambda r: True` left every check green). A FALSY
-    constant is not blessed — it waits out the deadline and reds the caller's
-    assertion, which is fail-closed, so only a truthy constant is refused.
+    ⛔ SO THE RULE IS AN ALLOW-LIST: a call is armed only when the scan can show
+    the value is a PREDICATE OVER ROWS.
+      * a lambda whose body is not constant-foldable → armed (it reads `rows`);
+      * a name imported from `tests._index_settle` → armed (the documented
+        predicates), or a module-level `def` whose body is not a constant
+        `return`, or a module-level name bound to an armed-shaped value;
+      * a module-qualified `_index_settle.<predicate>` → armed.
+    Everything else — a bare builtin (`bool`, `any`), a truthy constant, or a
+    name the scan cannot resolve — is UNARMED, so the pin REDS and asks for a
+    declaration instead of certifying a read it cannot vouch for.
+
+    ⛔ THE RESIDUAL, STATED SO IT CANNOT BE MISTAKEN FOR COVERAGE: a predicate
+    reached through indirection OUTSIDE this file is out of reach — imported from
+    another test module (`from tests.test_x import _always as P; until=P`), or
+    rebound inside the function. Those stay armed and are the honest limit of an
+    AST pin; the `**{"until": None}` splat is reported UNARMED (it reds the pin
+    rather than passing it).
     """
+    ctx = ctx or {}
+    aliases = ctx.get("aliases", {})
+    predicate_names = ctx.get("predicate_names", frozenset())
+    settle_names = ctx.get("settle_names", frozenset())
     for kw in call.keywords:
         if kw.arg != "until":
             continue
         value = kw.value
+        if isinstance(value, ast.Lambda):
+            if not (value.args.args or value.args.posonlyargs
+                    or value.args.kwonlyargs):
+                return False  # not a predicate over rows at all
+            ok, constant = _foldable_bool(value.body)
+            return not constant if ok else True
         if isinstance(value, ast.Constant):
-            return value.value is not None
-        if isinstance(value, ast.Lambda) and isinstance(value.body, ast.Constant):
-            return not value.body.value
-        return not (isinstance(value, ast.Name) and value.id in none_names)
+            return value.value is not None  # `until=True` raises at runtime: loud
+        if isinstance(value, ast.Name):
+            return (value.id in predicate_names or value.id in settle_names
+                    or aliases.get(value.id) in settle_names)
+        if isinstance(value, ast.Attribute):
+            return value.attr in settle_names
+        return True
     return False
 
 
@@ -330,23 +372,48 @@ def _settle_call_sites(paths) -> tuple[dict[str, list[int]], dict[str, list[int]
                 continue
             for alias in node.names:
                 aliases[alias.asname or alias.name] = alias.name
-        # Module-level names bound to the literal `None` — `NONE = None` then
-        # `until=NONE` is the quiescence-only default wearing a name (review
-        # cycle 7 at #12856). Resolved per file, not by shadowing analysis: a
-        # function-local rebind can only make this STRICTER (a call reported
-        # unarmed), which reds the pin rather than passing it.
-        none_names: set[str] = set()
+        # The documented predicates, by their public names — the module under
+        # test is imported by this pin, so `dir()` IS the list. Used for a
+        # module-qualified `_index_settle.<name>` and for a name imported from it.
+        settle_names = {n for n in dir(_settle) if not n.startswith("_")}
+        # The ALLOW-LIST evidence for `_until_is_armed`, gathered from THIS
+        # file: which names are predicates over rows. A module-level `def` whose
+        # body is not a constant `return`, plus a module-level name bound to a
+        # lambda that reads its argument (or to another armed name), plus every
+        # public name of `tests._index_settle` (the documented predicates that a
+        # module-qualified `_index_settle.<name>` names).
+        predicate_names: set[str] = set()
+        assigned: dict[str, ast.expr] = {}
         for node in ast.walk(tree):
-            if isinstance(node, ast.Assign):
-                if (isinstance(node.value, ast.Constant)
-                        and node.value.value is None):
-                    none_names.update(t.id for t in node.targets
-                                      if isinstance(t, ast.Name))
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                body = [s for s in node.body
+                        if not (isinstance(s, ast.Expr)
+                                and isinstance(s.value, ast.Constant))]
+                constant_return = (
+                    len(body) == 1 and isinstance(body[0], ast.Return)
+                    and isinstance(body[0].value, ast.Constant))
+                if not constant_return:
+                    predicate_names.add(node.name)
+            elif isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        assigned[target.id] = node.value
             elif (isinstance(node, ast.AnnAssign)
-                  and isinstance(node.target, ast.Name)
-                  and isinstance(node.value, ast.Constant)
-                  and node.value.value is None):
-                none_names.add(node.target.id)
+                  and isinstance(node.target, ast.Name) and node.value is not None):
+                assigned[node.target.id] = node.value
+        for name, value in assigned.items():
+            if isinstance(value, ast.Lambda):
+                if not (value.args.args or value.args.posonlyargs
+                        or value.args.kwonlyargs):
+                    continue
+                ok, constant = _foldable_bool(value.body)
+                if not ok or not constant:
+                    predicate_names.add(name)
+            elif (isinstance(value, ast.Name)
+                  and (value.id in predicate_names or value.id in settle_names)):
+                predicate_names.add(name)
+        ctx = {"predicate_names": predicate_names,
+               "settle_names": settle_names, "aliases": aliases}
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
@@ -361,7 +428,7 @@ def _settle_call_sites(paths) -> tuple[dict[str, list[int]], dict[str, list[int]
             if not named:
                 continue
             call_sites.setdefault(path.name, []).append(node.lineno)
-            if not _until_is_armed(node, none_names):
+            if not _until_is_armed(node, ctx):
                 missing.setdefault(path.name, []).append(node.lineno)
     return call_sites, missing
 
@@ -593,6 +660,39 @@ def test_the_scan_sees_a_module_prefixed_call_and_its_missing_until(tmp_path):
         "test_synthetic_consumer.py": [6, 8, 10, 12, 14, 18, 20, 22, 24]}, call_sites
     assert missing == {
         "test_synthetic_consumer.py": [6, 12, 18, 20, 22]}, missing
+
+
+def test_the_arming_rule_is_an_allow_list_not_a_deny_list(tmp_path):
+    """Every spelling review cycles 6-9 measured GREEN is now UNARMED.
+
+    `until=bool`, `until=any`, `lambda r: not False`, `lambda r: True or False`,
+    a module-level `ALWAYS = lambda r: True`, and `def _ALWAYS(rows): return True`
+    each returned on the FIRST catalogue read (the quiescence-only defect) while
+    a deny-list certified them armed — one new spelling per cycle. The rule is now
+    an allow-list, so these are unarmed by construction rather than enumerated;
+    the last case keeps it non-vacuous (a real predicate over `rows` is armed).
+    """
+    mod = tmp_path / "test_denylist_shapes.py"
+    mod.write_text(
+        "from tests._index_settle import index_rows_after_settle\n"
+        "ALWAYS = lambda r: True\n"
+        "def _ALWAYS(rows):\n"
+        "    return True\n"
+        "def test_builtin(proj):\n"
+        "    index_rows_after_settle(proj, until=bool)\n"
+        "def test_not_false(proj):\n"
+        "    index_rows_after_settle(proj, until=lambda r: not False)\n"
+        "def test_boolop(proj):\n"
+        "    index_rows_after_settle(proj, until=lambda r: True or False)\n"
+        "def test_named_lambda(proj):\n"
+        "    index_rows_after_settle(proj, until=ALWAYS)\n"
+        "def test_named_def(proj):\n"
+        "    index_rows_after_settle(proj, until=_ALWAYS)\n"
+        "def test_real_predicate(proj):\n"
+        "    index_rows_after_settle(proj, until=lambda r: r[0])\n",
+        encoding="utf-8")
+    _call, missing = _settle_call_sites([mod])
+    assert missing == {"test_denylist_shapes.py": [6, 8, 10, 12, 14]}, missing
 
 
 def test_two_waits_on_one_line_are_counted_as_two(tmp_path):
