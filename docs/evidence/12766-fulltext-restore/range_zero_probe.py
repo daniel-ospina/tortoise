@@ -22,9 +22,13 @@ Usage::
 
     python docs/evidence/12766-fulltext-restore/range_zero_probe.py <port>
 
-Exit code 2 means INVALID HARNESS (no graph module, or the control case did not behave),
-mirroring ``fulltext_restore_cost.py``'s convention: a probe that cannot demonstrate its own
-control has not measured anything.
+Exit code 2 means INVALID HARNESS (no graph module, the control case lost a row, or the nodes
+did not survive intact), mirroring ``fulltext_restore_cost.py``'s convention: a probe that
+cannot demonstrate its own control has not measured anything.
+
+Exit code 3 means **NOT REPRODUCED** — the value-0 case lost no rows on this engine. That is a
+FINDING (the defect is absent/fixed here), not a harness fault, and it is deliberately a
+different code so a false negative is never dressed as instrumentation error.
 """
 
 from __future__ import annotations
@@ -32,9 +36,8 @@ from __future__ import annotations
 import json
 import sys
 
-import redis
-
 import fulltext_restore_cost as H  # same directory; the shared client/plumbing helpers
+import redis
 
 WINDOW = "MATCH (n:Num) WHERE n.score >= 0 AND n.score <= 999999 RETURN count(n)"
 
@@ -134,10 +137,6 @@ def main(argv):
     H._cleanup(client, graph)
 
     # ── the control must hold, or the probe has measured nothing ────────────
-    if zero["delta"] != 2:
-        print(f"INVALID HARNESS: the zero case lost {zero['delta']} rows, expected 2",
-              file=sys.stderr)
-        return 2
     if high["delta"] != 0:
         print(f"INVALID HARNESS: the minimum-value control lost {high['delta']} rows — "
               f"the defect is not specific to the value 0", file=sys.stderr)
@@ -147,6 +146,20 @@ def main(argv):
         print(f"INVALID HARNESS: the nodes did not survive intact "
               f"({bounds['nodes_by_id']} nodes, score_of_node_0="
               f"{bounds['score_of_node_0']}) — this would be data loss, not an index defect",
+              file=sys.stderr)
+        return 2
+    # ⚠️ Exit 3, NOT 2: a zero-case that loses nothing is the DEFECT NOT REPRODUCING (a
+    # fixed engine, or a build where the bug is absent) — a finding, not a harness fault.
+    # Reporting it as INVALID HARNESS would dress a false negative as instrumentation error.
+    if zero["delta"] == 0:
+        print(f"NOT REPRODUCED: the value-0 case lost no rows on this engine "
+              f"(window {zero['window_before']} -> {zero['window_after']}, "
+              f"inverted {zero['index_inverted_bytes_before']} -> "
+              f"{zero['index_inverted_bytes_after']}) — the defect did not reproduce here",
+              file=sys.stderr)
+        return 3
+    if zero["delta"] != 2:
+        print(f"INVALID HARNESS: the zero case lost {zero['delta']} rows, expected 2",
               file=sys.stderr)
         return 2
 

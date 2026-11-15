@@ -63,7 +63,7 @@ import redis
 #: a client timeout anything near that would convert a measurement into a socket error.
 CLIENT_TIMEOUT_S = 1800.0
 
-#: Above any block this harness is likely to see, per README §3a: one probe, one number.
+#: Above any block this harness is likely to see, per README §4: one probe, one number.
 BYSTANDER_TIMEOUT_S = 1800.0
 
 #: The index build is a full pass over the restored graph. The #7846 record's re-create
@@ -78,11 +78,13 @@ INDEX_READY_BOUND_S = 1800.0
 #: LIST-valued ``search_keys`` is NOT indexed by FalkorDB's fulltext index, so writing a
 #: list would produce an index populated with half the text and a run that understates
 #: the thing it claims to measure.
-_WORDS = (
-    "the river audit found three discrepancies in the ledger and the custodian agreed "
-    "to reconcile them before the quarter closed while the board reviewed the schedule "
-    "of payments and the auditor noted that the evidence was consistent with the claim"
-).split()
+_WORDS = [
+    "the", "river", "audit", "found", "three", "discrepancies", "in", "the",
+    "ledger", "and", "the", "custodian", "agreed", "to", "reconcile", "them",
+    "before", "the", "quarter", "closed", "while", "the", "board", "reviewed",
+    "the", "schedule", "of", "payments", "and", "the", "auditor", "noted",
+    "that", "the", "evidence", "was", "consistent", "with", "the", "claim",
+]
 SEARCH_KEY_TOKENS = 4
 BATCH = 500
 
@@ -233,7 +235,7 @@ def create_index(client, graph, kind):
         try:
             _rows(client, graph, form)
             return form
-        except Exception as exc:  # noqa: BLE001 — the fallback IS the point
+        except Exception as exc:  # the fallback IS the point
             errors.append(f"{form}: {exc}")
     raise RuntimeError(f"no supported {kind} index creation form: " + "; ".join(errors))
 
@@ -402,6 +404,22 @@ def cycle(client, graph, arm, kind, nodes, ready_docs):
         result["fts_hits_after"] = fts_hits(client, graph)
     elif kind == "RANGE":
         result["range_rows_after"] = range_hits(client, graph, nodes)
+
+    # ⛔ POST-RESTORE REFUSAL, because a missing reading is a REFUSAL and not a proceed.
+    # Without this, an H3 run (index data lost across the restore) or a node-losing restore
+    # exited 0 and printed a table, leaving "the index is still populated after" to be
+    # enforced by whoever reads the row. The committed runs all carry the full node count and
+    # non-zero hits; this closes the vacuous path rather than changing a published number.
+    if result["nodes_after"] != nodes:
+        _invalid_harness(
+            f"arm {arm!r} restored {result['nodes_after']} nodes of {nodes} — the payload "
+            f"did not come back whole, so the timings above are not about an index rebuild"
+        )
+    if kind == "FULLTEXT" and result["fts_hits_after"] == 0:
+        _invalid_harness(
+            f"arm {arm!r} restored a fulltext index that answers NO hits — the index data "
+            f"did not survive, so this run is H3, not an index-bearing restore"
+        )
     return result
 
 
@@ -458,9 +476,14 @@ def engine_header(client):
         if isinstance(module, dict):
             tokens = list(module.items())
         else:
+            # strict=False keeps the harness's existing reading: a RESP2 `MODULE LIST`
+            # reply is a flat name/value array, so the two slices are equal by
+            # construction and `strict=True` would add a new failure mode to a
+            # measurement path rather than describe the one it already has.
             tokens = list(zip(
                 [module[i] for i in range(0, len(module), 2)],
                 [module[i] for i in range(1, len(module), 2)],
+                strict=False,
             ))
         flat = {_text(key): _text(value) for key, value in tokens}
         if flat.get("name") == "graph":
@@ -531,12 +554,10 @@ def main(argv):
                 index_ddl = create_index(client, graph, kind)
                 label = "Doc" if kind == "FULLTEXT" else "Num"
                 row, ready_s = await_index(client, graph, label, kind, nodes)
-                # ⛔ THE GATE (#7846 §1): an empty index measures nothing.
-                if (row["numDocuments"] or 0) < nodes:
-                    _invalid_harness(
-                        f"the {kind} index on :{label} is not POPULATED "
-                        f"({row['numDocuments']} documents of {nodes})"
-                    )
+                # ⛔ THE GATE (#7846 §1): an empty index measures nothing. `await_index`
+                # already refuses unless `numDocuments >= nodes`, so a second comparison here
+                # would be a gate that can never fire — deliberately not duplicated. The
+                # FULLTEXT live-query refusal below is the one `await_index` cannot make.
                 if kind == "FULLTEXT" and fts_hits(client, graph) == 0:
                     _invalid_harness(
                         "the fulltext index answers no hits BEFORE the restore — "
@@ -586,7 +607,7 @@ def _summary(results, nodes):
             f"{arm:18s} {r['dump_s']:7.3f}s {r['del_s']:6.3f}s {r['restore_s']:8.3f}s "
             f"{r.get('recreate_s', 0.0):8.3f}s {r.get('ready_wait_s', 0.0):7.2f}s "
             f"{r['cycle_s']:8.3f}s {r['bystander_worst_ping_ms']:10.1f}ms "
-            f"{str(r.get('index_documents_after', '-')):>11s} {str(hits):>6s}"
+            f"{r.get('index_documents_after', '-')!s:>11s} {hits!s:>6s}"
         )
     print()
     for arm in ("fulltext-kept", "fulltext-dropped", "range-kept", "range-dropped"):

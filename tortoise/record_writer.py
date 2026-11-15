@@ -1718,7 +1718,13 @@ def _measure_written_bytes(
     every rebuild.
 
     ⛔ TOTAL — every failure is logged at DEBUG and returns ``None``. A meter
-    must never fail, or change the outcome of, a record write.
+    must never fail, or change the outcome of, a record write. ⚠️ THAT SENTENCE
+    IS TRUE ONLY BECAUSE OF THE SAVEPOINT in
+    :func:`tortoise.postgres_bytes.measure_written_rows`, not because the
+    exception is caught: this call runs inside the caller's transaction, and a
+    caught exception there still leaves it ABORTED, so the caller's `commit()`
+    would roll the whole write back (#12781 — ten empty-record failures on
+    `main` at `9e934efad5`).
 
     ⛔ IT DOES NOT WRITE THE LEDGER. The measurement is reported on
     :attr:`RecordWrite.written_bytes`; the increment happens where the COMMIT
