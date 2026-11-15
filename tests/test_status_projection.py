@@ -1841,9 +1841,18 @@ class TestNonScalarStatus12869:
         rounds 2-3); the other doors did not. It now lives in the shared helper,
         so a fourth door cannot miss it.
 
-        FALSIFIABLE BY: removing the `_status_write_is_ambiguous` call from
-        `_refuse_non_string_object_status` reds every arm (the create arm then
-        stores `['live']`).
+        FALSIFIABLE BY — PER ARM, because "reds every arm" was FALSE (review
+        round 3, P2; measured, one arm):
+          (a) create  — reds on removing the helper's check (`DID NOT RAISE`,
+              then `['live']` lands). This is the arm that pins the helper.
+          (b) update  — caught by `update_entity`'s OWN `#12786` check, which
+              runs before the helper is ever reached; it pins the DOOR, not the
+              helper.
+          (c) add_object — `_refuse_caller_named_funnel_keys` refuses a
+              renderer-only KEY before the guard sees it, and two EXACT `str`
+              keys cannot both render as `status`, so ambiguity is UNREACHABLE
+              at that door: the helper's check there is defence in depth, not the
+              mechanism.
         """
         class KHash(str):
             def __hash__(self):          # a different bucket, same rendering
@@ -1972,6 +1981,124 @@ class TestNonScalarStatus12869:
             api.add_object("enc-dict", "core:strategy", status={"a": 1})
             assert _carrier_row(sdk, "Object", "enc-dict")[1] is None
             assert log_path.exists()
+        finally:
+            sdk.close()
+
+    @pytest.mark.parametrize("payload_kind", ["subclass", "pair", "stronly"])
+    def test_a_renderer_only_status_does_NOT_land_on_the_MERGE_path(
+            self, tmp_path, payload_kind):
+        """The MERGE/ADOPT branch drops a declared `status` — but only one KEY.
+
+        The guard skips the merge path because `_persist_extra_props` drops a
+        declared status there (`#7925` r4). That drop is a LITERAL-name
+        `frozenset` membership, which HASHES the raw key, while the live write
+        inlines `str(key)` — so a `str` SUBCLASS key that only RENDERS as
+        `status` missed the skip set and was written by `SET n += $extra` on the
+        ON MATCH lane, after the guard had declined to look at it. MEASURED
+        before the fix, all three shapes:
+
+            create_object("held", kind)                    # exists
+            create_object("held", kind, **{KHash("status"): ['live']})
+            -> stored ['live'], row then unaddressable by every SDK status write
+            (same for `**{"status": None, KHash("status"): ['live']}` and for a
+             str subclass whose `__str__` renders `status`)
+
+        FALSIFIABLE BY: reverting `_persist_extra_props`' skip test to
+        `k in skip` alone reds every arm here (the value lands again).
+        """
+        class KHash(str):
+            def __hash__(self):
+                return 424242
+
+        class StrOnly(str):
+            def __str__(self):
+                return "status"
+
+        key = {"subclass": KHash("status"),
+               "pair": None,                       # built below
+               "stronly": StrOnly("x")}[payload_kind]
+        sdk = TortoiseSDK(str(tmp_path / f"t12869merge-{payload_kind}.db"))
+        try:
+            sdk.create_object("held", "core:strategy")
+            before = _carrier_row(sdk, "Object", "held")
+            extra = ({"status": None, KHash("status"): ["live"]}
+                     if key is None else {key: ["live"]})
+            sdk.create_object("held", "core:strategy", **extra)
+            assert _carrier_row(sdk, "Object", "held") == before, (
+                "a renderer-only status LANDED on the merge path — the row is "
+                f"now unaddressable: {_carrier_row(sdk, 'Object', 'held')}")
+            # …and the row is still addressable: the whole point.
+            sdk.update_entity(before[0], status="archived")
+            assert _carrier_row(sdk, "Object", "held")[1] == "archived"
+        finally:
+            sdk.close()
+
+    def test_a_renderer_only_status_does_NOT_land_on_the_ADOPT_path(
+            self, tmp_path):
+        """Same branch, the id-LESS holder shape (the ADOPT path).
+
+        `resolve_or_mint` stamps an id here, so this is also the shape where a
+        late failure would cost a write.
+
+        FALSIFIABLE BY: as above — reverting the render-aware skip reds it.
+        """
+        class KHash(str):
+            def __hash__(self):
+                return 424242
+
+        sdk = TortoiseSDK(str(tmp_path / "t12869adopt.db"))
+        try:
+            sdk._get_proj().g.query(
+                "CREATE (n:Object {name:'adoptme', objectKind:'core:strategy'})")
+            sdk.create_object("adoptme", "core:strategy",
+                              **{KHash("status"): ["live"]})
+            adopted = _carrier_row(sdk, "Object", "adoptme")
+            assert adopted[0], "the adopt path did not stamp an id"
+            assert adopted[1] is None, (
+                f"the adopted row took the renderer-only status: {adopted}")
+        finally:
+            sdk.close()
+
+    def test_an_OBJECT_declared_create_cannot_poison_a_SUBJECT_row(
+            self, tmp_path):
+        """The kind-redirect makes the Subject arm a door for `type='object'`.
+
+        `_apply_kind_guard` routes `objectKind="core:organization"` onto the
+        `:Subject` layer, whose own `#1423` presence test was
+        `props.get("status")` — a LITERAL-name lookup. A renderer-only key
+        passed validation unread and was then written under `status`, so an
+        object-declared create stored `['live']` on a `:Subject` row and every
+        Subject status write on it was refused afterwards. MEASURED. The
+        identical payload at a genuinely-Object door was already refused, which
+        is the two-spellings divergence `#1423` exists to prevent.
+
+        FALSIFIABLE BY: reverting the arm to `props.get("status", "live")` reds
+        this (the array lands on the Subject row).
+        """
+        class RStr(str):
+            def __str__(self):
+                return "status"
+
+        sdk = TortoiseSDK(str(tmp_path / "t12869subj.db"))
+        try:
+            with pytest.raises(ValueError, match="Invalid status"):
+                sdk.create_object("acme2", "core:organization",
+                                  **{RStr("x"): ["live"]})
+            assert sdk._get_proj().g.query(
+                "MATCH (n:Subject) RETURN count(n)").result_set[0][0] == 0, (
+                "a refused create left a Subject row behind")
+            # The plain-name shape is refused EARLIER, by the Object guard — it
+            # reads the literal key, so it gets there first (measured). Either
+            # message is a refusal that writes nothing; what must not happen is
+            # an Object-or-Subject row holding the list.
+            with pytest.raises(ValueError,
+                               match=r"refused a non-string|Invalid status"):
+                sdk.create_object("acme3", "core:organization",
+                                  status=["live"])
+            # …and a legal word still goes to the Subject layer.
+            sdk.create_object("acme4", "core:organization", status="live")
+            assert sdk._get_proj().g.query(
+                "MATCH (n:Subject) RETURN count(n)").result_set[0][0] == 1
         finally:
             sdk.close()
 
