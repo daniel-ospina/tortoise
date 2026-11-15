@@ -911,6 +911,29 @@ surfaces:
   # `test_integrity_covers_all_test_files` fails (every tests/**/test_*.py must
   # be classified — the scope-v5 drift trap).
   - test_retrieval_metering.py
+  # #12764: per-org Postgres bytes MEASURED from what we write. THREE of its four
+  # subjects ARE `api` patterns — `tortoise/postgres_bytes.py` (the meter + audit
+  # wrapper), `tortoise/metering.py` (`record_postgres_bytes_written`, the LEDGER
+  # WRITER that accumulates the figure) and `tortoise/supabase_control.py` (the
+  # increment) — so `api` must run it. Its fourth subject, the write-seam wiring
+  # `tortoise/record_writer.py` (`_measure_written_bytes` → `_record_written_bytes`,
+  # which says of itself "⛔ IT DOES NOT WRITE THE LEDGER"), is NOT an `api`
+  # pattern (measured: select(['tortoise/record_writer.py']) -> ['core']), which
+  # is why this file is DUAL-REGISTERED on `core` too — exactly ONE subject falls
+  # through — on the same #3981 precedent as `test_retrieval_metering.py` and
+  # `test_4242_metering_period_end_refresh.py` above. The SOURCE_PATTERNS row for
+  # `tortoise/postgres_bytes.py` is added with this registration so a meter-only
+  # diff ROUTES to `api` — the surface owning the two meters and the control
+  # plane — instead of the `core` fallback. The guard is selected either way now
+  # that the `core` half exists (measured: without the row -> ['core'], guard
+  # present; with it -> ['api'], guard present). Unregistered on `main`, where it
+  # reds the REQUIRED `manifest-integrity` leg and every PR's `python-ci-gate`
+  # inherits the red (#11978/#11049). ~4s, hermetic — no Docker, no network.
+  # ⚠️ Two lanes each appended a copy of this comment and both sections were
+  # merged in; the stale copy claimed "two of its subjects" and "the two subjects
+  # that only fall through". Collapsed to one block with the counts measured on
+  # this tree: 3 subjects -> `api`, 1 -> `core`.
+  - test_postgres_bytes.py
   # #3981: dual-registered with `core` for the same reason as test_boot_regressions.py
   # above. `api` is an exact-surface match that REPLACES the `core` fallback, so a
   # tortoise/hosted_api.py-only change would otherwise never run this file — which
@@ -4395,6 +4418,20 @@ surfaces:
   - test_cmux_dispatch.py
   - test_embed_metering.py   # #4488: the tally/middleware/hook + the registry-lane writer/reader (dual with `api`/`eval`)
   - test_retrieval_metering.py   # #4489: the tally/middleware/hook + the registry-lane writer/reader (dual with `api`)
+  # #12764: the `core` half of the dual registration (see the `api` entry). The
+  # only subject that selects `core` and nothing else is the write seam
+  # `tortoise/record_writer.py` (`_measure_written_bytes` → `_record_written_bytes`
+  # — measurement only; the LEDGER WRITER is `metering.record_postgres_bytes_written`)
+  # (measured on this tree: `--changed-files tortoise/record_writer.py -> ['core']`),
+  # so the `api` half alone would leave that seam's guard asleep on a
+  # record_writer.py-only diff.
+  # ⚠️ `tortoise/postgres_bytes.py` does NOT belong in this row's justification:
+  # it has its own SOURCE_PATTERNS entry (`tools/ci_selection.py`) and selects
+  # `api` (measured: `--changed-files tortoise/postgres_bytes.py -> ['api']`).
+  # Two lanes merged here and each brought this comment; their duplicate ROW was
+  # collapsed but both blocks survived, and the survivor asserted `['core']` —
+  # a figure this head falsifies. Corrected rather than carried.
+  - test_postgres_bytes.py
   - test_embedder_provision.py
   # #3990: the why block must name the operator that mediates a support (id +
   # type + Layer-3 label) plus any mitigation on it. `tortoise/why.py` selects
@@ -4409,6 +4446,15 @@ surfaces:
   - test_installer_preserves_foreign_skill_content.py
   - test_installer_agents_block_3429.py  # #3429: block version + upgrade path (dual: installer-only surface above)
   - test_lifecycle_guards.py        # #2498: shared lifecycle guard — also runs on a tortoise/live.py-only change (terminal vocabulary pin)
+  # #10371: `update_entity`'s Object and Subject arms get their OWN guard inside
+  # `_update_entity` (`tortoise/sdk.py`), because `_assert_lifecycle_guard` is
+  # `:Point`-hardcoded and those arms never reach it. `core` is the arm that owns
+  # the change: `tortoise/commit_ops.py` (where the per-family terminal sets live)
+  # selects `core`, and `tortoise/sdk.py` is a SHARED_MODULE (already the full
+  # matrix). The sibling `test_9649_update_entity_point_lifecycle.py` is `core`
+  # too. Unregistered on `main`, where it reds the REQUIRED `manifest-integrity`
+  # leg and every PR's `python-ci-gate` inherits the red (#11978).
+  - test_10371_nonpoint_lifecycle_guard.py
   - test_7902_write_path_label_widening.py  # #7902: the epistemic-label declaration lives in tortoise/live.py (core fallback) — keep the write-path widening guard awake on a live.py-only change
   - test_7927_epistemic_read_surfaces.py  # #7927: the residual :Point-only epistemic READS (analyze BFS, sdk selection, ranking, audit scope, SVBP) admit all four labels — the same live.py declaration, read side
   - test_about_edges.py
