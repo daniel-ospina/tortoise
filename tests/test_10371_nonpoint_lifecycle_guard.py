@@ -504,6 +504,85 @@ def test_a_mixed_dead_set_gets_no_un_supersede_hint(sdk):
         g.query("MATCH (n:Object {id:$id}) DELETE n", params={"id": shared})
 
 
+def _alias_key(content: str, rendering: str):
+    """A `str` subclass whose CONTENT and `__str__` name different properties.
+
+    `tortoise/live.py`'s two-renderer contract: the live write files by
+    `str(key)`, the journal keeps the content. Both round-2 P1s live in that gap.
+    """
+
+    class _Alias(str):
+        __hash__ = str.__hash__
+
+        def __new__(cls, value):
+            obj = str.__new__(cls, value)
+            obj._rendering = rendering
+            return obj
+
+        def __str__(self) -> str:
+            return self._rendering
+
+    return _Alias(content)
+
+
+@pytest.mark.parametrize("content,rendering", [
+    ("supersededBy", "supersededAt"),
+    ("supersededAt", "supersededBy"),
+])
+def test_a_key_whose_renderings_name_DIFFERENT_carriers_is_refused(
+        sdk, content, rendering):
+    """⛔ Same-carrier, not merely "both are carrier NAMES" (round 2, P1).
+
+    Membership of the declared-name SET was satisfied by a key whose content names
+    one carrier and whose `__str__` names the other — so the live write cleared
+    one property and the journal cleared the other. With the row holding only the
+    journal-side carrier, that write was ADMITTED (measured: `superseded` ->
+    `live`, both carriers NULL in the graph) while the record kept its own carrier
+    set and still derived `'superseded'`: a PARTIAL clear in record terms, which
+    is the shape `test_a_PARTIAL_carrier_clear_is_still_refused` claims to block.
+    Both directions are pinned because the ordering decides which property each
+    channel touches.
+    """
+    node = _object(sdk, "superseded")
+    # The carrier the LIVE write names is the one whose clear would be
+    # recorded under the OTHER property — that is the admitted shape.
+    sdk.update_entity(node, **{rendering: "2026-01-01T00:00:00Z"})
+    held = _carriers(sdk, node)
+    with pytest.raises(ValueError) as exc:
+        sdk.update_entity(node, **{"status": "live",
+                                   _alias_key(content, rendering): None})
+    assert "'superseded' -> 'live'" in str(exc.value)
+    assert _stored(sdk, node)["status"] == "superseded"
+    assert _carriers(sdk, node) == held, \
+        "a refused write must clear nothing"
+
+
+@pytest.mark.parametrize("order", ["shadow-first", "plain-first"])
+def test_two_keys_rendering_as_status_with_different_words_is_refused(sdk, order):
+    """⛔ No knowable landing word ⇒ refuse (round 2, P1).
+
+    `lifecycle_props_by_rendering` reads ONE value (first-wins over the union)
+    while the live map write applies the LAST. With a key whose content is a dead
+    word and whose `__str__` is `status`, `{shadow: 'superseded', 'status':
+    'live'}` was read as dead->dead (legal, guard `continue`d) and LANDED `live`
+    on a `superseded` row — a resurrection past #12745's pin, with the carriers
+    left intact (measured, and reproduced on `origin/main`). Both orderings are
+    pinned because the accepted one was order-dependent.
+    """
+    node = _superseded_with_carriers(sdk, _object)
+    shadow = _alias_key("superseded", "status")
+    props = ({shadow: "superseded", "status": "live"}
+             if order == "shadow-first"
+             else {"status": "live", shadow: "superseded"})
+    with pytest.raises(ValueError) as exc:
+        sdk.update_entity(node, **props)
+    assert "CONFLICTING status write" in str(exc.value), \
+        "the refusal must name the ambiguity, not report a transition verdict"
+    assert _stored(sdk, node)["status"] == "superseded"
+    assert _carriers(sdk, node) == ("v2", "2026-01-01T00:00:00Z"), \
+        "a refused write must store nothing"
+
+
 @pytest.mark.parametrize("maker,label,offers_pack_word", [
     (_object, "Object", True),
     (_subject, "Subject", False),

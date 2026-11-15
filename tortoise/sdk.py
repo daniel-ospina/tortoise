@@ -5611,13 +5611,44 @@ def _carrier_prop_named_by(key, props_read: tuple[str, ...]) -> str | None:
     the divergence class this guard exists to refuse. Requiring both renderings to
     name the carrier is the NARROW direction; the refusal side keeps the wide
     union (every channel that can SET the column, #10192's review P1).
+    BOTH renderings must name the SAME carrier. Requiring membership of the SET
+    of declared carrier names was not enough (review round 2, P1): a key whose
+    content names ``supersededBy`` and whose ``__str__`` names ``supersededAt``
+    satisfies both memberships while the live write clears one property and the
+    journal clears the other — so the admitted write was a PARTIAL clear in
+    record terms (the record keeps the carrier the journal did not name) against
+    a live graph whose carriers are gone. Measured; pinned.
     """
     if not isinstance(key, str):
         return None                  # a non-str cannot file a property name
     live, journal = str(key), str.__str__(key)
-    if live in props_read and journal in props_read:
+    if live == journal and live in props_read:
         return live
     return None
+
+
+def _status_values_disagree(props: dict) -> bool:
+    """Do two keys that both render as ``status`` ask for DIFFERENT words?
+
+    A write that applies ``status`` twice with different values is not a
+    transition this door can reason about, and guessing is a BYPASS (#12786
+    review round 2, P1). The guard reads ONE value —
+    :func:`lifecycle_props_by_rendering` is first-wins over the renderer union —
+    while the live map write applies ``str(key)``, so
+
+        ``{<content 'superseded', __str__ 'status'>: 'superseded',
+           'status': 'live'}``
+
+    was read as ``dead -> dead`` (legal, so the guard ``continue``d) and LANDED
+    ``live`` on a ``superseded`` row with its carriers intact — a resurrection
+    past #12745's own pin, measured. The asymmetry is `tortoise/live.py`'s
+    two-renderer contract again, this time on the VALUE. Fail closed instead of
+    picking a winner: no legitimate call writes `status` twice, so the only calls
+    refused here are ones whose landing word cannot be known.
+    """
+    ids = {id(key) for key in keys_rendering_as(props, {"status"})}
+    values = [value for key, value in props.items() if id(key) in ids]
+    return len({repr(value) for value in values}) > 1
 
 
 def _status_key_leaves_the_dead_state(props: dict) -> bool:
@@ -49037,6 +49068,23 @@ class TortoiseSDK:
         # / the `ObjectSuperseded` fold); the SDK gap is #12592.
         _nonpoint_status = lifecycle_props_by_rendering(props, {"status"})
         if _nonpoint_status:
+            # ⛔ BEFORE any transition reasoning: a status write whose renderings
+            # disagree has no knowable landing word (review round 2, P1 —
+            # measured: `{<content 'superseded', __str__ 'status'>: 'superseded',
+            # 'status': 'live'}` was read as dead->dead and landed `live` on a
+            # `superseded` row). Fail closed rather than guess.
+            if _status_values_disagree(props):
+                raise ValueError(
+                    f"update_entity refused a CONFLICTING status write on "
+                    f"{id_val!r}: more than one key in this call renders as "
+                    f"`status` and they ask for different words. A `str` "
+                    f"subclass whose content and `__str__` differ is filed "
+                    f"under one name by the live write and the other by the "
+                    f"journal, so which word lands cannot be known here — and "
+                    f"guessing it let a `superseded` row be written `live`. "
+                    f"Pass `status` ONCE, as a plain str, with the word you "
+                    f"mean."
+                )
             _np_status = _nonpoint_status["status"]
             for _np_label, _np_terminal, _np_section in (
                 ("Subject", _SUBJECT_TERMINAL_STATUSES, "§4.2"),
