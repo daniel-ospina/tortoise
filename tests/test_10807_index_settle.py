@@ -434,7 +434,7 @@ def _settle_call_sites(paths) -> tuple[dict[str, list[int]], dict[str, list[int]
 
 
 def _settle_site_functions(paths) -> dict[str, dict[str, int]]:
-    """How many armed-ish settle calls does each FUNCTION of each module carry?
+    """How many settle CALL SITES does each FUNCTION of each module carry?
 
     The MODULE key is too coarse a floor: a module that keeps ONE armed call
     still satisfies it after every other was deleted. Measured at #12856's review
@@ -456,7 +456,7 @@ def _settle_site_functions(paths) -> dict[str, dict[str, int]]:
                 name = prefix + child.name
                 end = child.end_lineno or child.lineno
                 # ⛔ COUNT CALLS, NOT DISTINCT LINES: two waits written on one
-                # line are two armed calls, and a `set` of line numbers would
+                # line are two settle calls, and a `set` of line numbers would
                 # report one — so deleting the second stayed green (measured at
                 # #12856's review cycle 8).
                 count = sum(1 for line in lines
@@ -509,10 +509,14 @@ def test_every_consumer_passes_the_caller_precondition():
     green — the same vacuity the pair granularity was added to close, one level
     down. Declaring a site is now part of arming a wait in a documented module.
 
-    ⛔ AND EACH PAIR DECLARES ITS CALL COUNT, not merely its existence: with a
-    SET of pairs, SIX of the TEN declared pairs carried TWO waits, so removing
-    one of the two — the DROP, keeping its recreate — left the pin green
-    (measured at review cycle 7). The count is the granularity the waits have.
+    ⛔ AND EACH PAIR DECLARES ITS SETTLE-CALL-SITE COUNT, not merely its
+    existence: with a SET of pairs, FIVE of the TEN declared pairs carried TWO
+    waits, so removing one of the two — the DROP, keeping its recreate — left the
+    pin green (measured at review cycle 7). The count is the granularity the
+    waits have. ⚠️ It counts CALL SITES, not "armed" ones: `_settle_site_
+    functions` keeps `_settle_call_sites`' site list and drops its `_missing`
+    set, so an `until`-less call still counts for its pair — it reds the
+    `missing` assertion instead.
     """
     here = Path(__file__).resolve()
     paths = [p for p in here.parent.glob("test_*.py") if p.name != here.name]

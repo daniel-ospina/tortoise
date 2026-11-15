@@ -121,11 +121,15 @@ _DOCUMENTED_CONSUMERS = {
 #: `Class.method`, which is how the scan reports it.
 #:
 #: ⛔ THIS MAP IS THE WHOLE ARMAMENT OF EVERY ``_DOCUMENTED_CONSUMERS`` MODULE,
-#: WITH EACH PAIR'S ARMED-CALL COUNT: the pin asserts, per pair, that the scan
-#: finds EXACTLY this many armed calls, so an armed wait that is missing here
-#: reds, AND so does deleting ONE of a pair's two waits. Measured at #12856's
+#: WITH EACH PAIR'S SETTLE-CALL-SITE COUNT: the pin asserts, per pair, that the
+#: scan finds EXACTLY this many `index_rows_after_settle(...)` CALL SITES, so an
+#: armed wait that is missing here reds, AND so does deleting ONE of a pair's
+#: two waits. ⚠️ The count is over CALL SITES, not "armed" ones — `_settle_site_
+#: functions` keeps `_settle_call_sites`' site list and DISCARDS its `_missing`
+#: set, so an `until`-less call still counts toward its pair; the unarmed call
+#: reds on the separate `missing` assertion instead. Measured at #12856's
 #: reviews — with a `required <= armed` floor FIVE of the TEN armed functions
-#: were undeclared; with a SET of pairs, SIX of the TEN declared pairs carried
+#: were undeclared; with a SET of pairs, FIVE of the TEN declared pairs carried
 #: two waits, so removing one of the two (the DROP, keeping the recreate) left
 #: the pin green. Declaring one and waiting for the next review to find the next
 #: is the whack-a-mole this closes.
