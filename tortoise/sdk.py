@@ -49095,6 +49095,11 @@ class TortoiseSDK:
                     f"mean."
                 )
             _np_status = _nonpoint_status["status"]
+            # #12869: "would this value LAND?" is the repo's own question
+            # (`sdk._status_is_stored_unhashable` asks it for the bundle
+            # validator), and a non-persistable shape is dropped rather than
+            # stored, so it is not a value any refusal below may fire on.
+            from .projection.entities import _is_persistable_prop_value
             for _np_label, _np_terminal, _np_section in (
                 ("Subject", _SUBJECT_TERMINAL_STATUSES, "§4.2"),
                 ("Object", _OBJECT_TERMINAL_STATUSES, "§4.3"),
@@ -49141,9 +49146,19 @@ class TortoiseSDK:
                 # below is the one that must speak to a null status — refusing it
                 # here would answer a carrier question with a type message and
                 # turn `_BARE_CARRIER_SHAPES`' null arms into a false positive.
+                # ⚠️ AND A NON-PERSISTABLE VALUE IS NOT REFUSED EITHER. That is
+                # the recorded `#7925` review-round-4 decision, not an oversight:
+                # the writers DROP a value FalkorDB cannot store (a dict/set/
+                # bytes — `#7369` degrades it to null before dispatch), so the row
+                # is never poisoned and refusing it would reject a write the
+                # writer performs. `_status_is_stored_unhashable` encodes the same
+                # distinction for the bundle validator; this is its update-door
+                # twin. What IS refused is a value that would LAND and be
+                # unreadable as a word: an array, an int, a bool.
                 if (_np_label == "Object"
                         and _np_status is not None
-                        and not isinstance(_np_status, str)):
+                        and not isinstance(_np_status, str)
+                        and _is_persistable_prop_value(_np_status)):
                     raise ValueError(
                         f"update_entity refused a non-string status write on "
                         f"Object {id_val!r}: {_np_status!r} is "
@@ -49959,32 +49974,58 @@ class TortoiseSDK:
             # `str` key makes this identical to `props["status"]`.
             # ⛔ `type` IS A PARAMETER HERE (`type: str`), so `type(x)` would
             # call the string. `__class__.__name__` is the shadow-free spelling.
-            _obj_status = lifecycle_props_by_rendering(props, {"status"})
-            if _obj_status:
-                _obj_word = _obj_status["status"]
-                if _obj_word is not None and not isinstance(_obj_word, str):
-                    raise ValueError(
-                        f"create_entity(type='object') refused a non-string "
-                        f"status for {name!r}: {_obj_word!r} is "
-                        f"{_obj_word.__class__.__name__}, not a `str`. ONTOLOGY "
-                        f"§4.3 declares `status` as a STRING, and the Object "
-                        f"family's word set is deliberately OPEN — a pack kind "
-                        f"validates against its own declared words (#10371), so "
-                        f"arbitrary STRINGS stay accepted and are not narrowed "
-                        f"here. A non-string is not a declared word under ANY "
-                        f"kind, and it cannot be stored: `:Object.status` is "
-                        f"what the lifecycle guard hashes to decide whether a "
-                        f"row is terminal, so a non-scalar stored here makes "
-                        f"every later lifecycle write on this row fail instead "
-                        f"of being answered (#12869). Pass `status` as a plain "
-                        f"str. Nothing was written."
-                    )
-            from .entity_identity import entity_create_lock
+            # ⛔ AND THIS GUARD IS A LANDING TEST, NOT A PRESENCE TEST (#12869).
+            # A create whose name is already held by a single LIVE row MERGES
+            # onto it, and `_upsert_object`'s ON MATCH lane never rewrites
+            # `status` (it is projection-owned) — so a declared status is
+            # DROPPED there and that row is never poisoned. Refusing it would
+            # reverse the recorded `#7925` round-4 decision that the bundle's
+            # array refusal fires ONLY at the item that MINTS the name (pinned by
+            # `test_object_item_status_is_accepted_when_a_holder_owns_the_name`
+            # and `test_second_same_name_item_declaring_array_is_dropped`). So the
+            # refusal is scoped by `resolve_or_mint`'s own `created` flag — the
+            # SAME resolver the write uses, called inside the SAME
+            # `entity_create_lock` the write takes (#3590: calling it outside the
+            # lock makes the empty-holder check a TOCTOU window, not a guard).
+            # ⚠️ A non-persistable shape (dict/set/bytes) is DROPPED by the
+            # writer and never stored (#7369), so it cannot be a value this
+            # refuses — the same `#7925` round-4 decision, which is why the check
+            # is `_is_persistable_prop_value` and not "not a string".
+            from .entity_identity import entity_create_lock, resolve_or_mint
+            from .projection.entities import _is_persistable_prop_value
             with entity_create_lock("Object", name):
+                _obj_target, _obj_created = resolve_or_mint(
+                    self._get_proj().g, "Object", name,
+                    explicit_id=_server_id)
+                if _obj_created:
+                    _obj_status = lifecycle_props_by_rendering(
+                        props, {"status"})
+                    if _obj_status:
+                        _obj_word = _obj_status["status"]
+                        if (_obj_word is not None
+                                and not isinstance(_obj_word, str)
+                                and _is_persistable_prop_value(_obj_word)):
+                            raise ValueError(
+                                f"create_entity(type='object') refused a "
+                                f"non-string status for {name!r}: "
+                                f"{_obj_word!r} is "
+                                f"{_obj_word.__class__.__name__}, not a `str`. "
+                                f"ONTOLOGY §4.3 declares `status` as a STRING, "
+                                f"and the Object family's word set is "
+                                f"deliberately OPEN — a pack kind validates "
+                                f"against its own declared words (#10371), so "
+                                f"arbitrary STRINGS stay accepted and are not "
+                                f"narrowed here. A non-string is not a declared "
+                                f"word under ANY kind, and it cannot be stored: "
+                                f"`:Object.status` is what the lifecycle guard "
+                                f"hashes to decide whether a row is terminal, so "
+                                f"a non-scalar stored here makes every later "
+                                f"lifecycle write on this row fail instead of "
+                                f"being answered (#12869). Pass `status` as a "
+                                f"plain str. Nothing was written."
+                            )
                 node = self._create_entity(
-                    "Object",
-                    self._entity_identity_for("Object", name,
-                                              explicit_id=_server_id),
+                    "Object", _obj_target,
                     _entity_door_props(
                         "objectKind", name, _with_folded_entity_name(name, props)),
                     "ObjectRegistered", is_episodic=is_episodic)

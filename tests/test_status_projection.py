@@ -1457,19 +1457,23 @@ class TestNonScalarStatus12869:
     """#12869 — a non-string `status` is refused at the door, and a row that
     already HOLDS one is refused rather than raised at."""
 
-    #: Every non-string shape measured ACCEPTED-and-STORED (or degraded to
-    #: null by `#7369`) before this change. `bool` and `int` are here because
-    #: they are hashable — they never raised, so measure-only testing of the
+    #: The PERSISTABLE non-string shapes — measured ACCEPTED-and-STORED before
+    #: this change, so each poisoned the row. `bool` and `int` are here because
+    #: they are HASHABLE: they never raised, so a test written only against the
     #: `TypeError` would have left them storing silently.
-    _NON_STRINGS = [
+    _REFUSED = (
         pytest.param(["live"], id="list"),
         pytest.param(["retracted"], id="list-terminal-word"),
         pytest.param(123, id="int"),
         pytest.param(True, id="bool"),
-        pytest.param({"a": 1}, id="dict"),
-    ]
+    )
 
-    @pytest.mark.parametrize("bad", _NON_STRINGS)
+    #: The NON-persistable shape. `#7369` degrades it to null before dispatch, so
+    #: the node never carries it and the row is never poisoned — which is the
+    #: recorded `#7925` round-4 reason it must stay ACCEPTED rather than refused.
+    _DROPPED = pytest.param({"a": 1}, id="dict")
+
+    @pytest.mark.parametrize("bad", _REFUSED)
     def test_the_OBJECT_update_door_refuses_a_non_string_status(
             self, tmp_path, bad):
         """Refused with the guard's own `ValueError` — never a `TypeError`.
@@ -1495,7 +1499,7 @@ class TestNonScalarStatus12869:
         finally:
             sdk.close()
 
-    @pytest.mark.parametrize("bad", _NON_STRINGS)
+    @pytest.mark.parametrize("bad", _REFUSED)
     def test_the_OBJECT_CREATE_door_refuses_a_non_string_status(
             self, tmp_path, bad):
         """The minting door too, or the defect is one call away.
@@ -1522,9 +1526,12 @@ class TestNonScalarStatus12869:
         the follow-up `status='live'` raised `TypeError: unhashable type:
         'list'`. Both halves must now be refusals.
 
-        FALSIFIABLE BY: reverting only the CREATE guard still reds here at the
-        store step (the list lands), even though the update guard survives —
-        which is what proves the two doors are pinned independently.
+        FALSIFIABLE BY: reverting the UPDATE-door Object check reds this arm
+        (MEASURED — it is the first assertion in `M2`'s red list). ⚠️ Reverting the
+        CREATE-door guard does NOT red it, and that is measured too: this arm
+        mints its row with NO status and then exercises `update_entity` alone, so
+        the two doors are pinned independently by
+        `test_the_OBJECT_CREATE_door_refuses_a_non_string_status`.
         """
         sdk = TortoiseSDK(str(tmp_path / "t12869r.db"))
         try:
@@ -1544,11 +1551,69 @@ class TestNonScalarStatus12869:
     #: STORED one, deliberately: a caller that supplied `123` gets the caller's
     #: error, and the corrupt row is the SECOND complaint, not the first. `None`
     #: and `'live'` are strings-or-clear, so they reach the stored check.
-    _STORED_TARGETS = [
+    _STORED_TARGETS = (
         pytest.param("live", "STORED status is", id="string-target"),
         pytest.param(None, "STORED status is", id="null-clear-target"),
         pytest.param(123, "non-string status write", id="non-string-target"),
-    ]
+    )
+
+    @pytest.mark.parametrize("bad", [_DROPPED])
+    def test_a_NON_PERSISTABLE_status_is_still_DROPPED_not_refused(
+            self, tmp_path, bad):
+        """`#7925` round 4 — the over-rejection this change must not ship.
+
+        A dict cannot be stored by FalkorDB, so `#7369` degrades it to null
+        before dispatch: the node never carries it and the lifecycle guard never
+        chokes on it. Refusing it would reject a write both writers perform, and
+        that exact over-rejection was already fixed once in `#7925` (pinned at
+        the bundle level by
+        `test_direct_route_object_and_event_status_values_not_over_rejected`).
+        The refusal is therefore scoped by "would this LAND?", the same question
+        `sdk._status_is_stored_unhashable` asks.
+
+        FALSIFIABLE BY: dropping the `_is_persistable_prop_value` conjunct from
+        either door reds this arm with the non-string refusal.
+        """
+        sdk = TortoiseSDK(str(tmp_path / "t12869drop.db"))
+        try:
+            # …at the CREATE door
+            sdk.create_object("drop-create", "core:strategy", status=bad)
+            assert _carrier_row(sdk, "Object", "drop-create")[1] is None, (
+                "the dict was STORED — #7369 should have degraded it to null")
+            # …and at the UPDATE door
+            oid = _carrier_row(sdk, "Object", "drop-create")[0]
+            sdk.update_entity(oid, status="live")
+            assert _carrier_row(sdk, "Object", "drop-create")[1] == "live"
+            sdk.update_entity(oid, status=bad)
+            assert _carrier_row(sdk, "Object", "drop-create")[1] is None, (
+                "the dict landed on the row instead of being dropped")
+        finally:
+            sdk.close()
+
+    def test_the_CREATE_guard_is_a_LANDING_test_not_a_presence_test(
+            self, tmp_path):
+        """A create that MERGES onto a live holder drops the status — so it is
+        NOT refused, and that is the recorded `#7925` round-4 decision.
+
+        `_upsert_object`'s ON MATCH lane never rewrites `status` (it is
+        projection-owned), so `['retracted']` on an already-held name lands
+        nowhere. Refusing it red the bundle pins
+        `test_object_item_status_is_accepted_when_a_holder_owns_the_name` and
+        `test_second_same_name_item_declaring_array_is_dropped` — both MEASURED
+        before the guard was scoped by `resolve_or_mint`'s `created` flag.
+
+        FALSIFIABLE BY: dropping the `if _obj_created:` gate reds this arm.
+        """
+        sdk = TortoiseSDK(str(tmp_path / "t12869merge.db"))
+        try:
+            sdk.create_object("held", "core:strategy")
+            before = _carrier_row(sdk, "Object", "held")
+            sdk.create_object("held", "core:strategy", status=["retracted"])
+            assert _carrier_row(sdk, "Object", "held") == before, (
+                "the re-create changed the merged row — the status was supposed "
+                f"to be dropped: {_carrier_row(sdk, 'Object', 'held')} != {before}")
+        finally:
+            sdk.close()
 
     @pytest.mark.parametrize("target,expected", _STORED_TARGETS)
     def test_a_row_that_ALREADY_holds_a_non_scalar_is_REFUSED_not_crashed(
@@ -1638,9 +1703,14 @@ class TestNonScalarStatus12869:
         (`_BARE_CARRIER_SHAPES`' `null-status-with-pointer`) with a TYPE message
         and turn two correct `"lifecycle CARRIER"` refusals into false positives.
 
-        FALSIFIABLE BY: dropping the `is not None` conjunct reds this arm AND
-        `test_a_bare_carrier_is_refused_and_writes_nothing[null-status-*]`,
-        which would then fail its `match="lifecycle CARRIER"`.
+        FALSIFIABLE BY: removing BOTH allowances — the `is not None` conjunct
+        AND the `_is_persistable_prop_value` scope — reds this arm and
+        `[null-clear-target]` (both MEASURED; that mutation is `M5'`). ⚠️ Removing
+        `is not None` ALONE reds nothing, and that is measured too: `None` is not
+        persistable, so the scope already excludes it. The conjunct is kept as an
+        explicit statement of the rule (`None` is the CLEAR, `#9974` R1), not as
+        the mechanism — the docstring says so rather than claiming a falsifier
+        that does not fire.
         """
         sdk = TortoiseSDK(str(tmp_path / "t12869n.db"))
         try:
@@ -1684,15 +1754,15 @@ class TestNonScalarStatus12869:
         Both families keep their OWN refusal text, which is why the new guard is
         placed on the Object arm alone rather than in front of the shared loop.
 
-        FALSIFIABLE BY: hoisting the Object check above the family loop reds the
-        Subject arm here (its message becomes the Object one) — the over-block
-        `AGENTS.md`'s "one rule per surface" teaching warns about.
+        FALSIFIABLE BY: adding the same refusal ABOVE the family loop reds the
+        Subject arm here, because that arm's own `#1423` message is what the
+        assertion matches (MEASURED).
         """
         sdk = TortoiseSDK(str(tmp_path / "t12869nb.db"))
         try:
             sid = _make_carrier_entity(sdk, "Subject", "omega")
             with pytest.raises(ValueError,
-                               match="Invalid status .* for a :Subject"):
+                               match=r"Invalid status .* for a :Subject"):
                 sdk.update_entity(sid, status=["live"])
             pid = sdk.create_point(content="a probe point", kind="statement")
             pid = pid["id"] if isinstance(pid, dict) else pid
@@ -1704,8 +1774,10 @@ class TestNonScalarStatus12869:
     def test_the_coherent_un_supersede_is_still_admitted(self, tmp_path):
         """#12825's allowance must survive a guard placed in the same loop.
 
-        FALSIFIABLE BY: making the Object type check an unconditional
-        `continue`/`raise` before the coherence test reds this arm.
+        FALSIFIABLE BY: removing the coherence `continue` (the
+        `_np_dead == [_SUPERSEDED_STATUS]` / `_status_key_leaves_the_dead_state` /
+        `_write_clears_every_lifecycle_carrier` block) reds this arm — MEASURED
+        (`M11`).
         """
         sdk = TortoiseSDK(str(tmp_path / "t12869u2.db"))
         try:
