@@ -454,6 +454,28 @@ def first_terminal_row(rows) -> tuple | None:
                key=lambda r: (str(r[0] or ""), bool(r[1])), default=None)
 
 
+def terminal_row_marker(row) -> str:
+    """The WORD a refusal/warning uses for a ``first_terminal_row`` result.
+
+    The second half of the same problem ``first_terminal_row`` answers: picking
+    the row is one decision, NAMING it is the next, and a caller that renders the
+    pair itself is how one row is called ``live`` in a warning while
+    ``is_terminal_status`` says it is dead (#12586 review cycle 4). The flag has
+    to be rendered, not just read: a row whose status is ``NULL`` or ``live``
+    while ``outdated`` is set is terminal BY THE FLAG, and ``status or "live"``
+    reports exactly the opposite of the verdict that selected it.
+
+    ``None`` renders ``live``: callers that ask on a healthy fan-out still need
+    the word ``classify_lifecycle_fanout`` would have given them.
+    """
+    if row is None:
+        return "live"
+    status, outdated = row
+    return ("outdated" if outdated
+            and status not in TERMINAL_EXCLUDED_STATUSES
+            else (status or "live"))
+
+
 def _live_only(clause: str, include_draft: bool = False) -> str:
     """Return a Cypher predicate excluding draft AND terminal nodes.
 

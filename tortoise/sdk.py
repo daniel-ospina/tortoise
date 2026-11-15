@@ -143,6 +143,7 @@ from .entity_identity import (  # #3633 route-then-refuse identity resolution
 from .live import _terminal_expression  # #3142 shared Cypher terminal predicate (POSITIVE direction)
 from .live import is_terminal_status  # #2498 shared terminal predicate (Python mirror)
 from .live import first_terminal_row  # #12586 "which row made this terminal?", one picker
+from .live import terminal_row_marker  # …and ONE way to name it
 from .live import classify_lifecycle_fanout  # #7822 fan-out-wide lifecycle verdict
 from .live import LIFECYCLE_FANOUT_QUERY  # #7822 the shared fan-out statement
 from .live import EPISTEMIC_LABELS  # #7902 epistemic-label write widening (shared with #7853 read widening)
@@ -22458,9 +22459,7 @@ class TortoiseSDK:
             status, outdated = hit
         elif kind != "terminal":
             return None
-        return ("outdated" if outdated
-                and status not in TERMINAL_EXCLUDED_STATUSES
-                else (status or "live"))
+        return terminal_row_marker((status, outdated))
 
     def _assert_window_start_not_inverted(self, point_id: str, now: str,
                                           *, door: str = "invalidate_point") -> None:
@@ -24551,8 +24550,12 @@ class TortoiseSDK:
         # below reads ``status`` ALONE, and the legacy ``outdated=true`` flag is
         # terminal on its own (§5: "Terminal on every read surface and for every
         # lifecycle transition"). A draft point invalidated before it was ever
-        # promoted (``invalidate_point`` / ``supersede_point`` leave
-        # ``status='draft'`` and set the flag) is therefore promoted to
+        # promoted (``invalidate_point`` leaves ``status='draft'`` and sets the
+        # flag; a pre-#9649 raw ``restatus`` after a supersede produces the same
+        # row — see ``test_6239_promote_after_supersede.py``, whose fixture
+        # writes exactly it. ``supersede_point`` itself writes
+        # ``status='superseded'`` + the flag, which this guard DOES block) is
+        # therefore promoted to
         # ``['live', outdated=true]`` through THIS door — the same
         # two-facts-disagree state #12586 closed on ``update_point``, measured on
         # the same tree. It is NOT fixed in that change on purpose: this verb is
@@ -24759,7 +24762,7 @@ class TortoiseSDK:
                     _logger.warning(
                         "promote_point: temporal target %s for %s is %s — "
                         "skipping the wire", tgt, point_id,
-                        hit[0] or "live")
+                        terminal_row_marker(hit))
         if live_targets and point.get("temporal_replacement"):
             for tgt in live_targets:
                 try:

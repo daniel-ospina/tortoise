@@ -505,6 +505,43 @@ def test_the_temporal_probe_names_the_row_the_shared_key_picks(env, caplog):
     assert "is superseded" not in text, text
 
 
+def test_a_flag_dead_temporal_target_is_named_outdated_not_live(env, caplog):
+    """A NULL-status target dead by the FLAG is named by the flag.
+
+    The picker reads the flag; a caller that then renders ``hit[0] or "live"``
+    throws the flag away — so the exact #12586 shape was logged as
+    ``is live — skipping the wire`` while being skipped *because it is terminal*
+    (#12586 review cycle 4, P2). ``live.terminal_row_marker`` is the one
+    renderer, shared with ``_lifecycle_terminal_marker``.
+
+    FALSIFIABLE: render ``hit[0] or "live"`` at the temporal probe and the
+    message says `is live`; remove the flag from the renderer and it says `live`
+    for this row too.
+    """
+    sdk, _ = env
+    prior = "tgtflag-" + uuid.uuid4().hex
+    sdk._get_proj().g.query(
+        "CREATE (:Point {id:$id, outdated:true})", params={"id": prior})
+    cid = sdk.create_point("decision", "promote over a flag-dead prior",
+                           status="draft")["id"]
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) "
+        "SET n.temporal_candidate = true, n.temporal_reviewed = 'merge', "
+        "n.temporal_target_ids = [$tgt]",
+        params={"id": cid, "tgt": prior})
+
+    caplog.set_level(logging.WARNING, logger="tortoise.sdk")
+    res = sdk.promote_point(cid)
+
+    assert res["promoted"] is True, res
+    assert not res.get("temporal_wired"), res
+    text = "\n".join(r.getMessage() for r in caplog.records
+                      if r.name == "tortoise.sdk")
+    assert prior in text, text
+    assert "is outdated — skipping the wire" in text, text
+    assert "is live" not in text, text
+
+
 @pytest.mark.parametrize("dead_first", [True, False])
 def test_a_live_row_beside_a_dead_sibling_is_refused_in_either_order(
         env, dead_first):
