@@ -134,6 +134,16 @@ ENV SENTENCE_TRANSFORMERS_HOME=/app/model
 # baked into the image at build time (code-review P2, #160). Fail fast with
 # a clean error if the cache is missing, instead of hanging on the network.
 ENV HF_HUB_OFFLINE=1
+# ── #12926: the two embedding switches, in the IMAGE's own environment ────
+# The image is a deployment channel of its own: a bare `docker run
+# ghcr.io/daniel-ospina/tortoise-selfhost` takes its environment from here, and
+# `fly.toml`'s `[env]` / `docker-compose.yml`'s `environment:` are overrides on
+# top. Both default to the values `.env.example` ships; the code defaults behind
+# them are OPPOSITE when unset (#11445, recorded in both gate modules), which is
+# exactly why a shipped surface must STATE them instead of relying on absence.
+# `tools/embed_switch_gate.py` (python-ci.yml) refuses a channel that omits one.
+ENV TORTOISE_VALUE_GATE=1
+ENV TORTOISE_EMBED_GATE=1
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
