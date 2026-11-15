@@ -2219,9 +2219,15 @@ RESOLVER_ENV_ALLOW = frozenset({
     "XDG_CONFIG_HOME", "XDG_CACHE_HOME",
 })
 
-#: The compose resolver's argv prefix, named once so the row text and the runner
-#: cannot drift apart.
-COMPOSE_RESOLVER = "docker compose config --format json"
+#: The compose resolver, named ONCE so the row text and the runner cannot drift apart.
+#: ⛔ `--no-consistency` is load-bearing for an INSTRUMENT: it asks compose to RESOLVE
+#: the model, not to certify that the project is deployable. Without it a service that
+#: carries an `environment:` but no `image:`/`build:` is refused with *"service \"t\" has
+#: neither an image nor a build context specified"* (measured), so a manifest whose
+#: ENVIRONMENT is perfectly resolvable reads as `UNRESOLVED` — the collapse this lane
+#: exists to remove, one layer down. A syntax error or a failed interpolation still
+#: exits non-zero and is still `UNRESOLVED`.
+COMPOSE_RESOLVER = "docker compose config --format json --no-consistency"
 FLY_RESOLVER = "fly config show"
 TOML_RESOLVER = "tomllib [env]"
 
@@ -2252,8 +2258,8 @@ UNREAD_ENV_CHANNEL_GLOBS: tuple[tuple[str, str], ...] = (
     ("docker-compose.override.yaml", "compose OVERRIDE — merge ORDER decides the value"),
     ("docker-compose.*.yml", "compose stage/override file — merge ORDER decides the value"),
     ("docker-compose.*.yaml", "compose stage/override file — merge ORDER decides the value"),
-    ("*.service", "systemd unit — `Environment=`/`EnvironmentFile=` set the process env"),
-    ("*.timer", "systemd unit — `Environment=`/`EnvironmentFile=` set the process env"),
+    ("**/*.service", "systemd unit — `Environment=`/`EnvironmentFile=` set the process env"),
+    ("**/*.timer", "systemd unit — `Environment=`/`EnvironmentFile=` set the process env"),
     ("**/kustomization.yaml", "kustomize — `configMapGenerator`/`envs:` set the process env"),
     ("**/kustomization.yml", "kustomize — `configMapGenerator`/`envs:` set the process env"),
     ("**/Chart.yaml", "helm chart — `values.yaml` sets the process env"),
@@ -2378,12 +2384,13 @@ def _exec_script_names(text: str, instructions: tuple[str, ...]) -> set[str]:
     file. A non-script form (`CMD ["uvicorn", …]`) yields nothing, which is the honest
     answer: that deployment has no entrypoint SCRIPT, so there is nothing to walk.
 
-    ⛔ This function reads DOCKERFILE instructions only; `_compose_exec_scripts` is the
-    compose `entrypoint:`/`command:` reader. The two were one function until the
-    compose route turned out to be dead code here (the line was uppercased and compared
-    to a raw lowercase instruction, so it could never match — fresh review of PR
-    #12474, P2); keeping the split means neither docstring can claim the other's route
-    again, which is exactly the defect that cost a round.
+    ⛔ This function reads DOCKERFILE instructions only. The compose
+    `entrypoint:`/`command:` route is the RESOLVER's (`#12549`): `_compose_channel`
+    returns canonical `entrypoints` from `docker compose config`, so the four spellings
+    a line reader had to enumerate — and the two it could not
+    (`_compose_exec_scripts`' declared bounds) — are no longer this module's problem.
+    The two routes stay separate so neither docstring can claim the other's, which is
+    the defect that cost a review round.
 
     ⛔ The instruction match is CASE-INSENSITIVE and accepts a SPACE OR A TAB: Dockerfile
     instruction names are case-insensitive, and `ENTRYPOINT	/entrypoint.sh` is legal.
@@ -2482,8 +2489,12 @@ def _run_config_resolver(argv: list[str]) -> dict:
 #: why it is parsed rather than dropped. (The message is
 #: `The "OTHER" variable is not set. Defaulting to a blank string.` — the name is
 #: QUOTED in compose's own stderr, so the quotes are part of the pattern.)
+#: ⛔ The quotes arrive LOGFMT-ESCAPED in the raw stderr (`msg="The \"OTHER\" variable …"`),
+#: so the backslashes are part of the bytes on the wire and an unescaped pattern matched
+#: NOTHING — measured, and the silent direction: the interpolation then read as an explicit
+#: empty string and the file as a measured `OFF`.
 _COMPOSE_UNSET_WARNING = re.compile(
-    r'The "(?P<name>[A-Za-z_][A-Za-z0-9_]*)" variable is not set')
+    r'The \\?"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\\?" variable is not set')
 
 
 def _compose_unset_interpolation(stderr: str) -> set[str]:
@@ -2497,8 +2508,8 @@ def _resolved_script_tokens(value: object) -> set[str]:
     The resolver hands back the canonical shape (a list of strings, or a string for
     the scalar form), so the token split no longer has to guess which of compose's
     four spellings the author used — that guessing is what the old
-    `_compose_exec_scripts` did, and the flow/bock-scalar shapes it could not guess
-    were declared bounds.
+    `_compose_exec_scripts` did, and the flow/block-scalar shapes it could not guess
+    were declared bounds — now resolved instead.
     """
     items: list[str] = []
     if isinstance(value, str):
@@ -2529,9 +2540,19 @@ def _compose_channel(path: Path, flag: str | None, is_truthy) -> dict:
     "armed", "off", "unresolved", "novalue", "falsy", "outside_runtime",
     "build_refs", "entrypoints", "warnings"}``. The per-service detail lives in
     ``scopes`` and is what a reader needs when the services disagree.
+
+    ⚠️ **Declared bound, MEASURED:** compose COLLAPSES a duplicated `environment:`
+    entry inside one service BEFORE the model exists — `[FLAG, FLAG=1]` and
+    `[FLAG=1, FLAG]` both resolve to a single value, and the superseded one is not in
+    the output. So this reading can report a no-value entry only where it is the
+    service's LAST word (where it decides the value); a superseded one has no effect
+    on what a deployment gets, and there is nothing for the resolver to report.
+    (`--no-normalize` does not restore it: it changes path normalisation, not the
+    duplicate collapse.) The old line reader DID report the superseded line, which is
+    the reading that let a claim about it leak into the note — see `#12070` item 4.
     """
     run = _run_config_resolver(["docker", "compose", "-f", str(path),
-                                "config", "--format", "json"])
+                                "config", "--format", "json", "--no-consistency"])
     out: dict = {"channel": "compose", "resolver": COMPOSE_RESOLVER,
                  "ok": False, "reason": run["reason"], "scopes": {},
                  "verdict": "UNRESOLVED", "mentioned": False,
@@ -2546,9 +2567,17 @@ def _compose_channel(path: Path, flag: str | None, is_truthy) -> dict:
         out["reason"] = f"`{COMPOSE_RESOLVER}` printed a model this walk cannot read ({exc})"
         return out
     services = (model.get("services") or {}) if isinstance(model, dict) else {}
-    if not isinstance(services, dict) or not services:
-        out["reason"] = (f"`{COMPOSE_RESOLVER}` resolved NO services — an empty compose "
-                        "file declares nothing, so its environment cannot be read")
+    if not isinstance(services, dict):
+        out["reason"] = (f"`{COMPOSE_RESOLVER}` printed a `services` value this walk "
+                        f"cannot read ({type(services).__name__})")
+        return out
+    if not services:
+        # ⛔ An EMPTY project is a RESOLVED, measured answer: `services: {}` declares
+        # nothing, so this file arms nothing. It is NOT `UNRESOLVED` — the resolver
+        # succeeded and there is nothing to be uncertain about. (A compose file with no
+        # `services` key at all is refused by compose itself and stays `UNRESOLVED`.)
+        out["ok"] = True
+        out["verdict"], out["off"] = "NOT_ARMED", []
         return out
     unset = _compose_unset_interpolation(run["stderr"])
     out["ok"] = True
@@ -2663,11 +2692,34 @@ def _toml_env_value(text: str, flag: str) -> tuple[str, object]:
     env = parsed.get(TOML_RUNTIME_ENV_TABLE)
     if isinstance(env, dict) and flag in env:
         return "env", env[flag]
+
+    def _find(body: object, path: str) -> tuple[str, object] | None:
+        """The first DOTTED path under ``body`` that holds ``flag``.
+
+        ⛔ NESTED tables matter here and a text reader cannot do this correctly: this
+        repo's own `fly.toml` puts the flag-shaped keys under `[build.args]`, which
+        `tomllib` hands back as `parsed["build"]["args"]` — a one-level scan reads the
+        `[build]` table, does not find the flag directly under it, and reports the
+        assignment as ABSENT rather than as build-time. Both directions of that error
+        matter, so the search is over the whole document.
+        """
+        if not isinstance(body, dict):
+            return None
+        if flag in body:
+            return path, body[flag]
+        for key, value in body.items():
+            if isinstance(value, dict):
+                found = _find(value, f"{path}.{key}" if path else key)
+                if found:
+                    return found
+        return None
+
     for table, body in parsed.items():
         if table == TOML_RUNTIME_ENV_TABLE:
             continue
-        if isinstance(body, dict) and flag in body:
-            return f"outside:{table}", body[flag]
+        found = _find(body, table)
+        if found:
+            return f"outside:{found[0]}", found[1]
     return "absent", None
 
 
@@ -3203,6 +3255,7 @@ def _apply_channel_reading(reading: dict, posix: str, flag: str,
         if verdict == "ARMED":
             hit = f"{where} = {value!r} [{resolver}]"
             buckets["hits"].append(hit)
+            buckets["surface_hits"].append(hit)
             buckets["surface_file_hits"].setdefault(posix, []).append(hit)
         elif verdict == "UNRESOLVED":
             buckets["indeterminate"].append(
@@ -3380,6 +3433,7 @@ def flag_in_shipped_configs(flag: str) -> dict:
             "unset_declarations": unset_declarations,
             "disarming_assignments": disarming_assignments,
             "outside_runtime": outside_runtime,
+            "surface_hits": surface_hits,
             "surface_disagree": surface_disagree,
             "surface_file_hits": surface_file_hits,
         }
@@ -3755,9 +3809,9 @@ def deployment_unmeasured_causes(deployment: dict, shipped: dict) -> list[str]:
             "could arm the gate")
     if unresolved_files:
         causes.append(
-            "deployment file(s) whose channel could not be RESOLVED "
-            f"{unresolved_files} — the value could arm OR disarm the gate and the "
-            "walk cannot read which (see `indeterminate assignments`)")
+            f"deployment file(s) this walk cannot RESOLVE {unresolved_files} — the "
+            "value could arm OR disarm the gate and the walk cannot read which (see "
+            "`indeterminate assignments`)")
     unread_channels = deployment.get("unread_channels") or []
     if unread_channels:
         causes.append(

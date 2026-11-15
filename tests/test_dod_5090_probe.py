@@ -2886,7 +2886,12 @@ def test_fly_toml_ENV_table_arms_the_deployment_and_build_args_do_not(
     # …and the ignored assignment is NAMED, never silently dropped: a reader has to
     # be able to see that the walk found the line and decided it is not runtime env.
     assert shipped["outside_runtime"], shipped
-    assert shipped["outside_runtime"][0].startswith("fly.toml:2:"), shipped["outside_runtime"]
+    # ⛔ The RESOLVER's vocabulary, not a line number (`#12549`): the table PATH is the
+    # thing that decides whether a key is a runtime environment, and a line number moves
+    # whenever the file is reflowed. `[build.args]` reaches `docker build`, never the
+    # process, so it is reported as outside the runtime environment.
+    assert shipped["outside_runtime"][0].startswith(
+        "fly.toml: [build.args] TORTOISE_EMBED_GATE"), shipped["outside_runtime"]
 
     # The SAME line inside `[env]` does arm it — so the OFF above is the table, not
     # an inability to read TOML.
@@ -3457,20 +3462,22 @@ def test_a_superseded_unset_does_not_claim_this_tree_DISARMS_the_flag(
     # The fixture's whole point: the value-less entry is REPORTED, and the file it sits
     # in ends `ON` because a LATER truthy assignment decides it. A silent sibling holds
     # the tree at `on: False`, which is what reached the false cause in the first place.
-    assert shipped["unset_declarations"], shipped
     assert files["docker-compose.yml"] == "ON", files
     assert files["Dockerfile.hosted"] == "OFF", files
     assert shipped["deployment"]["on"] is False, shipped["deployment"]
+    # ⛔ `#12549`: compose COLLAPSES a superseded duplicate before the model exists, so
+    # the resolved reading is `FLAG = "1"` and the earlier no-value entry is not in it.
+    # That is the resolver's own semantics and it is DECLARED (`_compose_channel`), not
+    # a direction silently dropped: the entry has no effect on the value a deployment
+    # gets, so there is nothing for this reading to report about it.
+    assert shipped["unset_declarations"] == [], shipped["unset_declarations"]
 
     caveat = probe.per_file_scope_note(shipped["deployment"])
     assert "DISARMS it" not in caveat, (
         "the caveat claimed this tree is disarmed BY a declaration whose own file it "
         "reads `ON`: " + caveat)
-    # …and the direction is still REPORTED, not dropped to make the sentence true.
-    assert "UNSET it" in caveat, caveat
     note = _gate_note(shipped)
     assert "DISARMS it" not in note, note
-    assert "declarations that UNSET it: ['docker-compose.yml:" in note, note
 
     # The POSITIVE control, in the same fixture shape: move the truthy assignment FIRST
     # and the value-less entry becomes the last word — the file ends `OFF`, and now the
@@ -3515,12 +3522,13 @@ def test_a_value_less_compose_environment_entry_is_reported_as_UNSET(
     # something: the empty reading cannot produce the DISARMS sentence (fresh review of
     # PR #12474, P3 — the first version's two arms passed for every input).
     assert "DISARMS it" in caveat, caveat
-    assert "UNSET it" in caveat, caveat
+    assert "fix NO VALUE for it" in caveat, caveat
     empty = probe.per_file_scope_note(
         {**shipped["deployment"], "unset_declarations": [], "disarming_assignments": []})
     assert "DISARMS it" not in empty, empty
     note = _gate_note(shipped)
-    assert "declarations that UNSET it: ['docker-compose.yml:" in note, note
+    assert ("declarations that fix NO VALUE for it (shell `unset` / compose no-value): "
+            "['docker-compose.yml:") in note, note
     # ⛔ …and the EXPLICIT-FALSE override is the other disarming direction: compose
     # `environment:` OVERRIDES the image's `ENV`, so a `"0"` here disarms a deployment
     # whose image arms it — and calling the file merely "silent" steered a reader to
@@ -3875,10 +3883,11 @@ def test_a_compose_VALUE_LESS_entry_is_LAST_WINS_not_just_reported(tmp_path, mon
                for entry in shipped["unset_declarations"]), shipped["unset_declarations"]
     assert not shipped["disarming_assignments"], shipped["disarming_assignments"]
 
-    # …and the reverse order leaves the arm standing — and the unset line is claimed ONCE.
-    # ⛔ It used to appear in BOTH lists here, the second time under a heading that calls an
-    # `unset` "a value that OVERRIDES it OFF" — false about it, and no longer even the
-    # direction the file ends in (fresh review of PR #12474, P2, measured).
+    # …and the reverse order leaves the arm standing. ⛔ `#12549`: compose COLLAPSES the
+    # superseded value-less entry before the model exists, so the resolved reading is
+    # `FLAG = "1"` and there is no no-value declaration left to report — the resolver's
+    # own semantics, declared on `_compose_channel` rather than papered over. The pin
+    # that survives is the one that matters: ONE line is never published as TWO claims.
     (tmp_path / "docker-compose.yml").write_text(
         "services:\n  tortoise:\n    environment:\n"
         "      - TORTOISE_EMBED_GATE\n"
@@ -3886,7 +3895,7 @@ def test_a_compose_VALUE_LESS_entry_is_LAST_WINS_not_just_reported(tmp_path, mon
     shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
     assert shipped["per_surface"]["docker-compose.yml"]["state"] == "ON", (
         shipped["per_surface"]["docker-compose.yml"])
-    assert len(shipped["unset_declarations"]) == 1, shipped["unset_declarations"]
+    assert shipped["unset_declarations"] == [], shipped["unset_declarations"]
     assert not shipped["disarming_assignments"], shipped["disarming_assignments"]
 
 
@@ -4070,16 +4079,21 @@ def test_a_run_key_outside_the_workflow_surface_is_not_executed(
 
 def test_a_real_mapping_after_a_block_scalar_still_reads_as_shipped_ON(
         tmp_path, monkeypatch):
-    """The block predicate must END where the scalar does.
+    """A documented mention does not swallow the REAL mapping beside it.
 
-    Skipping a body is only correct if the walk resumes at the next real
-    mapping key; a scanner that never ends the block would drop genuine
-    assignments and report `off by default` for a flag that ships ON.
+    ⛔ `#12549` moved compose to its resolver, so the shape this test can still
+    falsify is the one that survives that: a block scalar is a VALUE, never a key,
+    so the resolver cannot read a documented mention as a setting — and the real
+    `environment:` mapping beside it still arms the service. (The line-scanner whose
+    block predicate this test used to pin is gone; the fixture's `note:` key was not
+    even valid compose — `services.app additional properties 'note' not allowed`,
+    measured — so the old fixture was asserting against a document no deployment
+    could be built from. `x-note` is an extension field compose accepts.)
     """
     (tmp_path / "docker-compose.yml").write_text(
         "services:\n"
         "  app:\n"
-        "    note: >-\n"
+        "    x-note: |-\n"
         "      TORTOISE_EMBED_GATE is documented here, not set.\n"
         "    environment:\n"
         "      TORTOISE_EMBED_GATE: \"true\"\n",
@@ -4088,8 +4102,12 @@ def test_a_real_mapping_after_a_block_scalar_still_reads_as_shipped_ON(
     monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
     shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
     assert shipped["on"] is True, shipped
-    assert shipped["files"] == [
-        'docker-compose.yml: TORTOISE_EMBED_GATE: "true"'], shipped
+    # ⛔ The HIT is the resolver's own path now (`#12549`), not a line rendering: the
+    # line-shaped text moved whenever the fixture was reflowed, while
+    # `services.app.environment` is the thing that decides the value.
+    assert len(shipped["files"]) == 1, shipped
+    assert shipped["files"][0].startswith(
+        "docker-compose.yml: services.app.environment.TORTOISE_EMBED_GATE = 'true'"), shipped
 
 
 def test_searched_is_the_walk_not_the_list_of_mentions(tmp_path, monkeypatch):
@@ -11435,3 +11453,283 @@ def test_the_citation_check_REDS_on_a_deliberately_broken_citation():
     # documentation EXAMPLE is not a claim about this repo.
     example = f"`tests/test_x.py::{'test' + '_y'}`"
     assert _unresolved_citations(example, defined, modules, by_file) == []
+
+
+#: ── `#12549`: each deployment channel is read by the tool that owns its grammar ──────
+#: The four defects on the issue are the acceptance cases, and every one of them was
+#: reproduced by importing the tool and calling `flag_in_shipped_configs()` on a
+#: SYNTHETIC TREE — the technique the issue used, and the technique these keep. ⛔ The
+#: lesson across the five PRs that patched this walk before this lane is that each fix
+#: added a SHAPE and the next review found the adjacent one; so these falsifiers are
+#: about the CHANNEL's value, never about a spelling.
+
+
+def test_12549_compose_reads_PER_SERVICE_so_two_services_cannot_flip_the_answer(
+        tmp_path, monkeypatch):
+    """`#12549` defect 2 (both directions): no document-order coin flip.
+
+    The defect: `decisions` was one list per FILE, so the last `environment:` entry
+    anywhere in a multi-service document decided the whole file — the same facts in the
+    other order gave the opposite verdict, and the loser was published as
+    `(OVERRIDES an earlier truthy value)`, a compose claim that does not exist. Compose
+    defines NO override relation between two services.
+
+    ⛔ Both orderings are asserted, because a fix that flipped the coin rather than
+    removing it would pass one arm.
+    """
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    fixtures = {
+        "app=1 first": ("app", "1", "worker", "0"),
+        "worker=1 first": ("worker", "1", "app", "0"),
+    }
+    for label, (first, first_value, second, second_value) in fixtures.items():
+        (tmp_path / "docker-compose.yml").write_text(
+            "services:\n"
+            f"  {first}:\n    image: alpine\n    environment:\n"
+            f"      TORTOISE_EMBED_GATE: \"{first_value}\"\n"
+            f"  {second}:\n    image: alpine\n    environment:\n"
+            f"      TORTOISE_EMBED_GATE: \"{second_value}\"\n",
+            encoding="utf-8")
+        shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+        deployment = shipped["deployment"]
+        assert deployment["files"] == {"docker-compose.yml": "DISAGREE"}, (label, deployment)
+        assert deployment["disagreeing"] == ["docker-compose.yml"], (label, deployment)
+        # ⛔ NOT armed and NOT silent: both are false statements about a file that arms
+        # the gate in one service and disarms it in another.
+        assert deployment["armed"] == [] and deployment["silent"] == [], (label, deployment)
+        assert deployment["on"] is False, (label, deployment)
+        # …and the disagreement is STATED per service, in the row's own text.
+        note = _gate_note(shipped)
+        assert "PER-SERVICE DISAGREEMENT" in note, note
+        assert f"{first}=ARMED" in note and f"{second}=NOT_ARMED" in note, note
+        assert "compose defines no override relation between two services" in note, note
+
+
+def test_12549_a_compose_FLOW_MAPPING_is_read_by_the_resolver(
+        tmp_path, monkeypatch):
+    """`#12549` defect 3: the flow mapping that armed the gate read as SILENT.
+
+    `services: {app: {environment: {FLAG: "1"}}}` has no line for a line reader to
+    match — the value is inline, so no scope is pushed, and the inner key is mid-line
+    — so the only manifest that arms the gate was published as OFF with nothing
+    naming the line. The resolver models the document, so there is nothing to match.
+    """
+    (tmp_path / "docker-compose.yml").write_text(
+        'services: {app: {image: alpine, environment: {TORTOISE_EMBED_GATE: "1"}}}\n',
+        encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"] == {"docker-compose.yml": "ON"}, shipped["deployment"]
+    assert shipped["deployment"]["on"] is True, shipped["deployment"]
+    assert shipped["files"][0].startswith(
+        "docker-compose.yml: services.app.environment.TORTOISE_EMBED_GATE"), shipped["files"]
+
+
+def test_12549_an_ANCHOR_and_a_MERGE_KEY_are_resolved_too(tmp_path, monkeypatch):
+    """The same class as defect 3, one spelling over: a merge key is not a line.
+
+    `x-env: &common` + `<<: *common` arms the service and no line in the service says
+    so — the value arrives from a document-level anchor. A text reader sees the anchor
+    line and cannot tell whether any service merges it.
+    """
+    (tmp_path / "docker-compose.yml").write_text(
+        "x-env: &common\n"
+        "  TORTOISE_EMBED_GATE: \"1\"\n"
+        "services:\n"
+        "  app:\n"
+        "    image: alpine\n"
+        "    environment:\n"
+        "      <<: *common\n",
+        encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"] == {"docker-compose.yml": "ON"}, shipped["deployment"]
+
+
+def test_12549_a_resolver_that_REFUSES_is_UNRESOLVED_and_never_an_answer(
+        tmp_path, monkeypatch):
+    """`#12549` defect 1's doctrine, at the channel: a refusal is not a verdict.
+
+    A required interpolation (compose's own `${FLAG:?…}`) makes the resolver exit
+    non-zero. The file was READ; what could not be resolved is the VALUE — so it holds
+    the reading at `UNMEASURED` with the resolver's own reason, and it is never
+    published as `OFF` (a measurement never made) or as `ON`.
+    """
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n"
+        "  app:\n"
+        "    image: alpine\n"
+        "    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"${TORTOISE_EMBED_GATE:?deployments must say}\"\n",
+        encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"] == {"docker-compose.yml": "UNMEASURED"}, shipped
+    assert shipped["deployment"]["on"] is False, shipped["deployment"]
+    assert shipped["deployment"]["measured"] is False, shipped["deployment"]
+    # ⛔ The reason is CARRIED, and it is the resolver's, not a guess.
+    assert shipped["indeterminate"], shipped
+    assert "CHANNEL UNRESOLVED" in shipped["indeterminate"][0], shipped["indeterminate"]
+    note = _gate_note(shipped)
+    assert "deployment file(s) this walk cannot RESOLVE" in note, note
+    # ⛔ AND IT IS NOT CALLED UNREADABLE — the defect-1 misattribution, at its source.
+    assert "UNREADABLE deployment file(s)" not in note, note
+    assert "unreadable: none" in note, note
+
+
+def test_12549_an_UNSET_interpolation_is_not_read_as_an_explicit_empty(
+        tmp_path, monkeypatch):
+    """`${OTHER}` with `OTHER` unset must not read as `FLAG: ""` — same model, diff fact.
+
+    Compose WARNS and writes a blank string, so the model cannot tell an explicit
+    `""` from a variable it could not resolve. The warning is the only surviving
+    evidence, and it is what keeps this `UNRESOLVED` instead of a measured `OFF`.
+    """
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  app:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"${SOME_OTHER_FLAG}\"\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"] == {"docker-compose.yml": "UNMEASURED"}, shipped
+    # …the POSITIVE control: an explicit empty string IS a measured OFF (the file says
+    # so, deterministically) — the arm cannot pass by calling every blank UNRESOLVED.
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  app:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"\"\n", encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"] == {"docker-compose.yml": "OFF"}, shipped
+
+
+def test_12549_the_AMBIENT_environment_cannot_make_a_compose_default_read_armed(
+        tmp_path, monkeypatch):
+    """The lane's own exported flag is not a shipped arm (`#10996`, moved into compose).
+
+    Compose interpolates `${VAR}` from the SHELL first, so `${FLAG:-0}` resolves to the
+    lane's `FLAG=1` unless the resolver is run with the ambient environment dropped —
+    which would publish a false arm off the instrument's own shell. The default `0` is
+    what the FILE says, so `0` is the answer.
+    """
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  app:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"${TORTOISE_EMBED_GATE:-0}\"\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    monkeypatch.setenv("TORTOISE_EMBED_GATE", "1")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"] == {"docker-compose.yml": "OFF"}, shipped
+    # …and a file that says ON still reads ON with the environment dropped, so the
+    # scrub is a scrub and not a blanket OFF.
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  app:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"${TORTOISE_EMBED_GATE:-1}\"\n", encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"] == {"docker-compose.yml": "ON"}, shipped
+
+
+def test_12549_the_FLY_channel_is_read_by_the_TOML_grammar_owner(
+        tmp_path, monkeypatch):
+    """A quoted / dotted `[env]` key and a `[env]` written LAST are shapes, not corners.
+
+    The line reader this lane deletes matched `^KEY = "value"`. TOML's grammar allows a
+    QUOTED key, a DOTTED key and a table header anywhere in the document, so the walk
+    read real arms as `OFF` — and this lane's box has no `fly` binary at all, so the
+    channel is answered by `tomllib` and the row says WHICH resolver answered.
+    """
+    (tmp_path / "fly.toml").write_text(
+        "app = \"tortoise\"\n"
+        "[[services]]\n  internal_port = 8000\n"
+        "[env]\n"
+        "  \"TORTOISE_EMBED_GATE\" = \"1\"\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"] == {"fly.toml": "ON"}, shipped["deployment"]
+    note = _gate_note(shipped)
+    assert "fly=" in note and "answered for THIS tree by" in note, note
+    # ⛔ The resolver that answered is NAMED, and it is not assumed: `fly config show`
+    # is not installed on every box (measured: not on this lane's), so a note naming
+    # only the intended one would be a claim the run did not make.
+    assert "tomllib [env]" in note, note
+
+
+def test_12549_a_DISCOVERED_channel_with_NO_reader_HOLDS_the_row(
+        tmp_path, monkeypatch):
+    """`#12549` item 3: a channel the walk did not enumerate must HOLD, not vanish.
+
+    A systemd unit's `Environment=` sets a deployed process's environment and this
+    module has no reader for it. Before this lane the file was excluded by a COMMENT
+    (`COMPOSE_BASE_NAMES`'s override boundary, `#12070` item 8 — the direction that
+    fails OPEN); now a discovered manifest of that type makes the row `UNMEASURED`,
+    NAMED with the file and the reason.
+    """
+    (tmp_path / "deploy").mkdir()
+    (tmp_path / "deploy" / "tortoise.service").write_text(
+        "[Service]\nEnvironment=TORTOISE_EMBED_GATE=1\nExecStart=/app/entrypoint.sh\n",
+        encoding="utf-8")
+    (tmp_path / "Dockerfile.hosted").write_text("FROM python:3.12\n", encoding="utf-8")
+    _fake_rule_tree(tmp_path)
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    deployment = shipped["deployment"]
+    assert [entry["path"] for entry in deployment["unread_channels"]] == [
+        "deploy/tortoise.service"], deployment["unread_channels"]
+    # ⛔ A DISCOVERED-but-UNREAD channel is not a pass: "every deployment file is armed"
+    # over a population that excluded it is the `#12022` claim, one channel over.
+    assert deployment["measured"] is False, deployment
+    assert deployment["on"] is False, deployment
+    note = _gate_note(shipped)
+    assert "deployment CHANNEL(S) this walk has no reader for" in note, note
+    assert "deploy/tortoise.service" in note, note
+    _no_register(monkeypatch)
+    monkeypatch.setattr(probe, "embedding_writers", lambda: _gated_writer("tortoise.a::_w"))
+    row = probe.score_rule_bullet()
+    assert row.verdict == "PARTIAL", row.observed
+    hold = next(n for n in row.notes if n.startswith("shipped default UNMEASURED"))
+    assert "deploy/tortoise.service" in hold, hold
+
+
+def test_12549_the_COMPUTED_population_is_named_and_a_Procfile_is_declared_HARMLESS(
+        tmp_path, monkeypatch):
+    """The word "every" is a COMPUTED set, and a non-environment manifest says so.
+
+    `Procfile` names a command and carries no environment (Heroku/Railway config vars
+    live on the platform), so discovering one must NOT hold the row — while discovering
+    a systemd unit must (the test above). Both are DECLARED sets, so the difference is
+    a decision a reader can see rather than a glob that happened to miss.
+    """
+    (tmp_path / "Dockerfile.hosted").write_text("FROM python:3.12\n", encoding="utf-8")
+    (tmp_path / "Procfile").write_text("web: gunicorn app:app\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    deployment = shipped["deployment"]
+    assert deployment["unread_channels"] == [], deployment["unread_channels"]
+    assert deployment["measured"] is True, deployment
+    note = _gate_note(shipped)
+    assert "computed deployment population:" in note, note
+    assert "recognised as carrying NO environment: Procfile" in note, note
+
+
+def test_12549_the_TWO_unconverted_channels_PUBLISH_their_bounds(
+        tmp_path, monkeypatch):
+    """Item 5: `Dockerfile` and `entrypoint.sh` are DECLARED, each naming its shape.
+
+    ⛔ The `#11437`/`#11541` discipline: a declared bound says *"this NAMED shape was not
+    measured"*, never *"nothing was measured"*. A note that dropped them would let a
+    reader assume every channel was resolved by a grammar owner.
+    """
+    (tmp_path / "Dockerfile.hosted").write_text("FROM python:3.12\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    bounds = shipped["deployment"]["declared_bounds"]
+    assert {row["channel"] for row in bounds} == {"dockerfile", "entrypoint"}, bounds
+    dockerfile = next(row for row in bounds if row["channel"] == "dockerfile")
+    entrypoint = next(row for row in bounds if row["channel"] == "entrypoint")
+    # The shape each cannot see, and WHY — both are the load-bearing half.
+    assert "ARG" in dockerfile["cannot_see"], dockerfile
+    assert "--build-arg" in dockerfile["why"], dockerfile
+    assert "INDIRECTION" in entrypoint["cannot_see"], entrypoint
+    assert "ShellCheck" in entrypoint["why"], entrypoint
+    note = _gate_note(shipped)
+    assert "channels NOT converted (declared bounds):" in note, note
+    assert "ARG" in note and "INDIRECTION" in note, note
+    # ⛔ ABSENT IS NOT EMPTY: a reading built without the bounds must not print "none".
+    assert "carries no declared bounds" in probe._declared_bound_note({}), (
+        probe._declared_bound_note({}))
