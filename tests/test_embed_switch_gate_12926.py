@@ -352,6 +352,28 @@ def test_the_dockerfile_reader_reads_both_forms_and_fails_closed():
     assert "mentions TORTOISE_VALUE_GATE but not as an assignment" in channel.problems()[0]
 
 
+def test_a_prose_mention_does_not_override_a_readable_assignment():
+    """A file that STATES the switch and also names it in a log line is fine.
+
+    The refusal for a mention exists for the opposite case — a shape this reader does not model,
+    where a silent "not stated" would be indistinguishable from a genuine omission. Precedence
+    matters: reporting the mention over a working assignment would red a correct channel.
+    """
+    stated, ambiguous = gate._shell_assignments(
+        'export TORTOISE_VALUE_GATE="${TORTOISE_VALUE_GATE:-1}"\n'
+        'export TORTOISE_EMBED_GATE="${TORTOISE_EMBED_GATE:-1}"\n'
+        'echo "TORTOISE_EMBED_GATE is off"\n'
+    )
+    assert stated == {
+        "TORTOISE_VALUE_GATE": "${TORTOISE_VALUE_GATE:-1}",
+        "TORTOISE_EMBED_GATE": "${TORTOISE_EMBED_GATE:-1}",
+    }
+    assert ambiguous == {"TORTOISE_EMBED_GATE"}
+    channel = gate.Channel("entrypoint.sh", "entrypoint", "entrypoint assignments",
+                           stated=stated, ambiguous=tuple(sorted(ambiguous)))
+    assert channel.problems() == [], channel.problems()
+
+
 def test_the_entrypoint_reader_reads_defaults_and_ignores_a_valueless_export():
     stated, ambiguous = gate._shell_assignments(
         "#!/bin/sh\n"

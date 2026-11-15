@@ -143,22 +143,29 @@ class Channel:
     refused: bool = False
 
     def switch_problem(self, switch: str) -> str:
-        """The refusal for ``switch`` on this channel, or ``""`` when it is stated."""
+        """The refusal for ``switch`` on this channel, or ``""`` when it is stated.
+
+        Three shapes, and the ORDER is the point: a readable assignment WINS over a prose
+        mention (a file that states the switch in an `ENV` line and also names it in a log
+        message is fine), an empty value is a placeholder rather than an arm, and a mention with
+        no readable assignment is a **failure** — a shape this reader does not model must never
+        read as "not stated", which would be indistinguishable from a genuine omission.
+        """
         if self.unreadable:
             return ""  # reported once, as the channel-level failure
+        if switch in self.stated:
+            if self.stated[switch].strip():
+                return ""
+            return (
+                f"{self.channel} states {switch} as an EMPTY value ({self.resolver}) — an empty "
+                "placeholder arms nothing"
+            )
         if switch in self.ambiguous:
             return (
                 f"{self.channel} mentions {switch} but not as an assignment this gate can read "
                 f"({self.resolver}) — state it as a plain assignment"
             )
-        if switch not in self.stated:
-            return f"{self.channel} does not state {switch} ({self.resolver})"
-        if not self.stated[switch].strip():
-            return (
-                f"{self.channel} states {switch} as an EMPTY value ({self.resolver}) — an empty "
-                "placeholder arms nothing"
-            )
-        return ""
+        return f"{self.channel} does not state {switch} ({self.resolver})"
 
     @property
     def ok(self) -> bool:
