@@ -274,7 +274,7 @@ def _in_caller_transaction(conn: Any) -> bool:
 
     Read from the driver's own flag rather than from a cursor, so it holds for
     both psycopg2 and psycopg3 and for any duck-typed test double that models
-    ``autocommit`` (a double without the attribute is treated as 
+    ``autocommit`` (a double without the attribute is treated as
     transactional — the safe default, since a savepoint on a connection that
     cannot hold one is itself caught by the caller's ``except``).
     """

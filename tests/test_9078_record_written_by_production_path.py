@@ -153,6 +153,29 @@ def tenant() -> tuple[str, str]:
 RECORD_MIGRATION_FILES = [REPO_ROOT / "supabase" / "migrations" / name
                           for name in record_projection.RECORD_MIGRATIONS]
 
+#: The metering migrations the per-org byte meter lives in, in apply order.
+#: ⛔ THEY ARE NOT RECORD MIGRATIONS. `RECORD_MIGRATIONS` is name-gated on
+#: `_record_`, so `_ensure_record_schema` never applies these and a
+#: fixture-armed database carries no `journal_event_bytes_for_rows` at all —
+#: which is exactly the fault arm's trigger below, and the reason the POSITIVE
+#: arm needs its own fixture (#12784 review: without this the suite pins the
+#: fault shape and the call ORDER, but never once asserts that a real meter
+#: reply parses into a positive figure through `parse_written_rows`).
+METERING_MIGRATION_FILES = (
+    REPO_ROOT / "supabase" / "migrations" / "0014_metering_records.sql",
+    REPO_ROOT / "supabase" / "migrations"
+    / "20261114000001_per_org_postgres_bytes.sql",
+)
+
+#: `0014` FKs `metering_records.team_id` at `public.teams`, and the record
+#: schema carries no `teams` table (`0006_teams.sql` is not a record migration).
+#: The FK reads the PRIMARY KEY alone, so one column is the whole substrate this
+#: fixture needs — the same deliberate minimum `_PREAMBLE` states for
+#: `organizations` and `graphs`, and for the same reason.
+_METERING_PREAMBLE = """
+CREATE TABLE IF NOT EXISTS public.teams (id text PRIMARY KEY);
+"""
+
 #: The record migrations re-applied on the "`journal_event` present ⇒ already
 #: migrated" shortcut's OTHER branch, in apply order, as `(path, creates)`:
 #: `creates` is the ONE relation the file itself creates, or `None` for a file
@@ -2097,6 +2120,27 @@ def _ensure_record_schema(conn) -> None:
             cur.execute(path.read_text(encoding="utf-8"))
 
 
+def _ensure_metering_schema(conn) -> None:
+    """Apply the ledger + the meter, or SKIP when the fixture cannot carry them.
+
+    ⚠️ A SKIP IS NOT A PASS — it is the honest answer to "this database has no
+    meter", which is the fault arm's fixture, not this one's. This leg's
+    subject is a POSITIVE figure from a real `journal_event_bytes_for_rows`;
+    where the function cannot exist there is no positive claim left to make, so
+    nothing is claimed.
+    """
+    with conn.cursor() as cur:
+        cur.execute(_METERING_PREAMBLE)
+        for path in METERING_MIGRATION_FILES:
+            try:
+                cur.execute(path.read_text(encoding="utf-8"))
+            except Exception as exc:  # a fixture, and a skip claims nothing
+                conn.rollback()
+                pytest.skip(
+                    f"the metering fixture cannot be applied here "
+                    f"({path.name}): {exc}")
+
+
 def _seed_tenant(conn, tenant: tuple[str, str]) -> None:
     org, graph = tenant
     with conn.cursor() as cur:
@@ -2529,6 +2573,73 @@ def test_a_failing_byte_meter_cannot_roll_back_a_record_write(monkeypatch, tenan
         assert dict(monitoring.record_write_failure_counts()) == failures_before, (
             "a metering fault was charged to `record_write_failures` — that "
             "counter names a WRITE that did not land, and this write did")
+    finally:
+        conn.close()
+
+
+def test_the_meter_reports_a_POSITIVE_figure_from_a_real_meter_rpc(tenant):
+    """The parse chain, on a REAL function — the half §7b declines to answer.
+
+    ⛔ WHAT WAS MISSING, stated so the gap is not re-opened (#12784 review P2).
+    The savepoint's *attribution* claim is "the function still reported
+    `rows: 1`", and it was pinned by two artifacts that both decline to call
+    this module: §7b of
+    `supabase/tests/20261114000001_per_org_postgres_bytes.sql` asserts on the
+    RPC's own JSON (`m ->> 'rows'`) and never imports `postgres_bytes`, and
+    `test_the_meter_call_lands_AFTER_the_insert_it_measures` indexes the
+    source text. The only pin that asserted a positive byte figure,
+    `test_the_seam_MEASURES_and_does_not_write_the_ledger`, feeds a CANNED
+    `STORED_VECTOR` dict through a fake cursor — so it proves the seam plumbs a
+    number, never that a real reply parses or that the real transaction
+    attributes. MEASURED consequence of that hole: metering on a second/
+    committed-state connection (the rejected alternative) yields
+    `written_rows=0, written_bytes=0` with the row present in Postgres, and a
+    `chunk_detail` type change in a later append-only migration would produce
+    the same silent zero — with §7b and the order pin BOTH green.
+
+    So this leg drives the real `journal_event_bytes_for_rows` through
+    `measure_written_rows`, inside a caller-owned transaction (the shipped
+    shape, so the savepoint arm is the one under test), and asserts the figure
+    is POSITIVE — never merely present.
+
+    Falsifier: point `ROWS_RPC` at a function that does not exist (the fault
+    arm's own mutant) and this reds at `measured is None`; return the row from a
+    row set instead of the jsonb value and `parse_written_rows` refuses it.
+    """
+    conn = _record_db()
+    try:
+        _ensure_record_schema(conn)
+        _ensure_metering_schema(conn)
+        _seed_tenant(conn, tenant)
+        # The savepoint arm is `conn.autocommit == False` — the shape
+        # `record_writer._default_connect` always hands the meter.
+        conn.autocommit = False
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO public.journal_event "
+                    "(org_id, graph_id, seq, event_type, payload) "
+                    "VALUES (%s, %s, %s, %s, %s)",
+                    (*tenant, 1, "SessionRecorded",
+                     json.dumps({"id": "sess-meter-positive", "turn_count": 2})))
+            measured = postgres_bytes.measure_written_rows(
+                conn, org_id=tenant[0], graph_id=tenant[1], seqs=[1])
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        assert measured is not None, (
+            "the meter returned None against a database that HAS the function "
+            "and a row this transaction inserted — a metering fault must not "
+            "be the answer here, or the positive half is unpinned again")
+        assert measured.rows >= 1, (
+            "the meter attributed no row to this transaction: "
+            f"{measured.rows} row(s), {measured.row_bytes}B. This is the "
+            "silent-zero shape the savepoint ordering exists to avoid")
+        assert measured.row_bytes > 0, (
+            f"the meter reported a zero figure ({measured.row_bytes}B) for a "
+            "row it did count — `parse_written_rows` read a real reply into 0, "
+            "which the canned-dict pins cannot see")
     finally:
         conn.close()
 
