@@ -48827,6 +48827,19 @@ class TortoiseSDK:
             # label (which makes `rebuild_all` raise). Measured. `_lifecycle_ids`
             # is non-empty exactly when a Point is bound.
             _status = _lifecycle_rendered["status"]
+            # ⛔ THE GUARD'S WORD AND THE WRITTEN WORD MUST BE THE SAME OBJECT
+            # (#12907, review cycle 8 P1). `_status` above is the CALLER's
+            # object, and a `str` subclass can lie in `__len__` /`replace`, so
+            # the value the vocabulary test examined and the value the driver
+            # stored diverged (measured on a live Point: `__len__` -> 0 wrote
+            # `''` while the journal recorded the approved `'superseded'`, and
+            # a colliding `__hash__`/`__eq__` stored an UNDECLARED `'garbage'`
+            # past the vocabulary test). `str.__str__` is content, never a
+            # caller override, and rewrites nothing for an exact `str` — the
+            # normalisation the NON-POINT arm below applies to `props`, applied
+            # here to the value this arm writes AND journals.
+            if issubclass(type(_status), str):
+                _status = str.__str__(_status)
             if _lifecycle_ids:
                 if (not isinstance(_status, str)
                         or _status not in POINT_STATUS_VALUES):
@@ -49198,18 +49211,23 @@ class TortoiseSDK:
             # It does NOT over-refuse: a subclass's CONTENT is unchanged, so the
             # legitimate paths (the no-op re-assert, dead→dead, the licensed
             # `status='live'` + both clears) keep their outcome for it.
-            # ⚠️ NOT EVERY DECISION IN THIS METHOD: the #1423 :Subject VOCABULARY
-            # guard below (`_subject_status_rendered`) reads the RAW value and
-            # decides with `isinstance` + `not in`, so a `str` subclass with a
-            # colliding `__hash__`/`__eq__` still stores an UNDECLARED Subject word
-            # there (measured on a live Subject; pre-existing, filed as #12905).
-            # `_refuse_bare_lifecycle_carrier` (`sdk.py:5792`) is the same shape
-            # one guard over: it compares `status == _SUPERSEDED_STATUS` on the
-            # caller's value, so a `str` subclass whose `__eq__` answers `True`
-            # passes the carrier coherence test and lands `['banana', '<carrier>']`
-            # on a live row while plain `'banana'` is refused (measured;
-            # pre-existing, filed as #12903).
-            # This normalisation is scoped to the transition guard.
+            # ⚠️ NOT EVERY DECISION IN THIS METHOD — and one of the two changed
+            # shape with this PR. `_refuse_bare_lifecycle_carrier`
+            # (`sdk.py:5792`) still compares `status == _SUPERSEDED_STATUS` on the
+            # CALLER's value, so a `str` subclass whose `__eq__` answers `True`
+            # passes the carrier coherence test and lands `['banana',
+            # '<carrier>']` on a live row while plain `'banana'` is refused
+            # (measured; pre-existing, filed as #12903).
+            # The #1423 `:Subject` VOCABULARY guard below
+            # (`_subject_status_rendered`) reads `props`, and the props rewrite
+            # further down this method has already replaced a `str`-subclass
+            # status with its exact `str` content — so THAT collision shape is
+            # REFUSED at this head (measured: an undeclared word on a live
+            # Subject raises), i.e. this PR's rewrite closes #12905's VALUE axis
+            # at this site, and #12905 should be re-measured before its own
+            # claim is restated.
+            # This normalisation is scoped to the transition guard; the props
+            # rewrite is what reaches the neighbouring guards.
             # ⛔ `issubclass(type(x), str)`, NOT `isinstance(x, str)`: an object
             # can claim `__class__ = str` and `isinstance` believes it, while
             # `type()` does not — and `str.__str__` on such an impostor RAISES
@@ -49425,8 +49443,9 @@ class TortoiseSDK:
                     f"{_np_dead[0]!r} -> {_np_target_repr} on {_np_label} "
                     f"{_np_id_repr}: {_np_dead[0]!r} is TERMINAL for a "
                     f":{_np_label} (ONTOLOGY {_np_section}), so this row cannot be "
-                    f"made current again. ⛔ A dead {_np_label} is not resurrected "
-                    f"by a prop edit — a {_np_label} that came back is a NEW "
+                    f"made current again BY THIS CALL. ⛔ A dead {_np_label} is "
+                    f"not resurrected by a prop edit — a {_np_label} that came "
+                    f"back is a NEW "
                     f"entity, not an edit to the dead one. Mint it with the "
                     f"create door for that label and record the replacement "
                     f"through the supersession path "

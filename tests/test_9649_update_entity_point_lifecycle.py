@@ -154,6 +154,78 @@ def test_probe_1_every_terminal_status_resists_every_live_status(env, dead):
     assert _row(sdk, pid) == before
 
 
+# ══════════════════════════════════════════════════════════════════════
+# #12907 — the word the guard APPROVED is the word the driver STORED
+# ══════════════════════════════════════════════════════════════════════
+
+class _LyingLen(str):
+    """A `str` status whose RENDERING disagrees with its CONTENT (#12907).
+
+    A `str` subclass is a shape JSON/MCP cannot forge but a Python caller can.
+    Before the normalisation these pins require, the guard's word and the
+    driver's word were two different objects: measured on a live Point,
+    ``status=_LyingLen('superseded')`` stored ``''`` (the driver read
+    ``len()``/truthiness) while the journal recorded the approved
+    ``'superseded'`` — so the Point stayed CURRENT and ``rebuild_all`` would
+    have reverted the write.
+    """
+
+    def __len__(self) -> int:
+        return 0
+
+
+class _CollidingHash(str):
+    """A `str` status whose `__hash__`/`__eq__` collide with a LEGAL word.
+
+    ``'garbage'`` is not in §5's Point vocabulary, but under the collision
+    ``'garbage' in POINT_STATUS_VALUES`` answered True, so the vocabulary test
+    admitted an UNDECLARED word and stored it verbatim (measured).
+    """
+
+    def __hash__(self) -> int:
+        return hash("live")
+
+    def __eq__(self, other) -> bool:  # noqa: D105 — the lie IS the fixture
+        return True
+
+
+def test_the_written_word_is_the_word_the_guard_approved(env):
+    """#12907: normalise to the exact `str` content BEFORE the vocabulary test.
+
+    Mutant that reddens: drop the `str.__str__` normalisation in the Point arm
+    and the stored status becomes `''` while the journal still says
+    `superseded` — a graph/record divergence, not a refusal.
+    """
+    sdk, events = env
+    pid = _live(sdk)
+    assert _row(sdk, pid)["status"] == "live"
+
+    sdk.update_entity(pid, status=_LyingLen("superseded"))
+
+    after = _row(sdk, pid)
+    assert after["status"] == "superseded", (
+        "the driver stored a word the guard never approved (#12907): "
+        + repr(after))
+    blob = json.dumps(_mutations(events, pid))
+    assert "restatus" in blob, (
+        f"the terminalize must journal a restatus: {_mutations(events, pid)!r}")
+    assert '"superseded"' in blob, (
+        "the journal must carry the word the graph holds: " + blob)
+
+
+def test_an_undeclared_word_cannot_ride_a_colliding_hash(env):
+    """The vocabulary test must answer from CONTENT, not the caller's `__eq__`."""
+    sdk, _ = env
+    pid = _live(sdk)
+    before = _row(sdk, pid)
+
+    with pytest.raises(ValueError, match="Invalid status"):
+        sdk.update_entity(pid, status=_CollidingHash("garbage"))
+
+    assert _row(sdk, pid) == before, (
+        "a refused vocabulary write must leave the Point untouched")
+
+
 def test_the_legacy_outdated_flag_alone_makes_the_point_dead(env):
     """``outdated=true`` with a NULL status is terminal on every read surface
     (#2498), so it must be terminal on this door too."""

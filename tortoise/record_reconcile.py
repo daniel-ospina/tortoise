@@ -101,7 +101,9 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   place, as ``sdk.py``'s own refusal hint says) with BOTH carriers cleared in the
   SAME call, which #12825 restored and #12882 pinned. ⛔ **NOT the row's STORED
   word:** ``status='superseded'`` beside the two clears is ACCEPTED by the
-  entailed short-circuit (``all(s == _np_status …)``, ``sdk.py``) and leaves the
+  entailed short-circuit (``all(isinstance(s, str) and str.__eq__(s, _np_status)
+  is True …)``, ``sdk.py`` — the ``s == _np_status`` form this sentence used to
+  cite is GONE: it consulted the caller's ``__eq__``, #12896) and leaves the
   row TERMINAL *with its carriers gone* — the goal unmet and NO error reported.
   ⚠️ That row is not lost, but recovering it takes TWO accepted calls: re-plant a
   carrier (``update_entity(…, status='superseded', supersededBy='<successor>')``)
