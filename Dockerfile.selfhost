@@ -62,4 +62,14 @@ EXPOSE 8000
 RUN mkdir -p /data/events
 ENV TORTOISE_DB_PATH=/data/tortoise.db
 
+# ── #12926: the two embedding switches, in the IMAGE's own environment ────
+# A deployment's EFFECTIVE value is the one its channel states:
+# `docker-compose.yml`'s `environment:` overrides these, and a bare `docker run`
+# of this image takes them. Unset is not neutral here — the two code defaults are
+# OPPOSITE (`value_gate` ON, `embed_gate` OFF, `#11445` recorded in both
+# modules), so a channel that omits them silently turns half the rule off.
+# `tools/embed_switch_gate.py` (python-ci.yml) refuses such a channel.
+ENV TORTOISE_VALUE_GATE=1
+ENV TORTOISE_EMBED_GATE=1
+
 CMD ["uvicorn", "tortoise.selfhost:app", "--host", "0.0.0.0", "--port", "8000", "--timeout-graceful-shutdown", "5"]
