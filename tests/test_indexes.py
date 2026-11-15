@@ -21,6 +21,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest  # noqa: I001
 from tests import _live_utils
+from tests._index_settle import (
+    index_kind_absent,
+    index_kind_present,
+    index_rows_after_settle,
+)
 from tortoise.projection import FalkorProjection
 
 EXPECTED_RANGE_EMBEDDED = {
@@ -181,12 +186,37 @@ def test_event_id_index_is_required_so_an_existing_graph_gets_it():
         assert "RANGE" in _range_indexes(p1)["Event"].get("id", []), \
             "fresh graph never got the :Event(id) index"
         p1.g.query("DROP INDEX ON :Event(id)")
+        # ⛔ THE DROP IS AWAITED, NOT ASSUMED (#10807). FalkorDB drops an index
+        # ASYNCHRONOUSLY — `Indexer_DropIndex` (src/index/indexer.c) "simply
+        # place[s] the drop request onto a queue" and the indexer worker thread
+        # applies it later — so `CALL db.indexes()` can still report the
+        # PRE-drop definition. In that window `_schema_is_current()` correctly
+        # answers True about a graph whose drop has not been APPLIED yet, and
+        # this assertion reds on a LANDED drop: measured in the `test-slow (b)`
+        # leg (run 43729334642, `AssertionError: a graph missing :Event(id)
+        # still reads CURRENT`, `assert True is False`) while the same commit
+        # never reproduced it on an idle lane. The wait is bounded and returns
+        # the last read, so a drop that genuinely cannot happen — or a schema
+        # that never converges — still reds on the assertion below rather than
+        # passing vacuously.
+        index_rows_after_settle(
+            p1,
+            until=lambda rows: index_kind_absent(
+                rows, "Event", "id", "RANGE"))
         assert p1._schema_is_current() is False, (
             "a graph missing :Event(id) still reads CURRENT — the #4465 early "
             "return would skip the sweep that creates it, forever")
         p1._ensure_indexes()  # the sweep the gate just unblocked
+        # The RECREATE is asynchronous for the same reason, and its row appears
+        # with a rebuild still in flight, so both halves are waited for: no
+        # `UNDER CONSTRUCTION` cell AND an `:Event(id)` entry that names RANGE —
+        # the KIND is part of the wait because it is what the assertion below
+        # asserts (a kind-blind predicate could release before the RANGE entry).
+        rows = index_rows_after_settle(
+            p1,
+            until=lambda r: index_kind_present(r, "Event", "id", "RANGE"))
         assert "RANGE" in _range_indexes(p1)["Event"].get("id", []), \
-            "the sweep did not recreate :Event(id)"
+            f"the sweep did not recreate :Event(id): {rows}"
     finally:
         p1.close()
 
@@ -1098,11 +1128,27 @@ def test_schema_probe_is_true_only_on_a_complete_schema(graph_factory):
         "a freshly bootstrapped graph must read as current")
 
     proj.g.query("DROP INDEX ON :Point(lastDreamedAt)")
+    # The drop is asynchronous (#10807) — read the catalogue only once it is
+    # VISIBLE, or the probe answers about a drop the engine has not applied.
+    index_rows_after_settle(
+        proj,
+        until=lambda rows: index_kind_absent(
+            rows, "Point", "lastDreamedAt", "RANGE"))
     assert proj._schema_is_current() is False, (
         "a graph missing a required RANGE index must NOT read as current — "
         "the guard would skip the very DDL that recreates it (#4465)")
 
     proj._ensure_indexes()
+    # → and the RECREATE is not done when the sweep returns: its DEFINITION is
+    # registered synchronously but its POPULATION is queued, so the graph is not
+    # "current" until the indexer has built the index the sweep just asked for.
+    # The wait below covers that populate window (the `UNDER CONSTRUCTION` leg);
+    # the KIND is asserted too so a field still carried under another kind cannot
+    # release it.
+    index_rows_after_settle(
+        proj,
+        until=lambda rows: index_kind_present(
+            rows, "Point", "lastDreamedAt", "RANGE"))
     assert proj._schema_is_current() is True
 
 
@@ -1116,12 +1162,29 @@ def test_schema_probe_rejects_the_boolean_is_operator_index(graph_factory):
     """
     proj = graph_factory()
     proj.g.query("CREATE INDEX FOR (n:Point) ON (n.is_operator)")
+    # The created KIND must be visible before the probe reads: a read naming the
+    # field under a DIFFERENT kind must not release the wait. (A create's
+    # definition is registered synchronously — only its POPULATION is queued —
+    # so this is about KIND exactness, not about waiting out the DDL.)
+    index_rows_after_settle(
+        proj,
+        until=lambda rows: index_kind_present(
+            rows, "Point", "is_operator", "RANGE"))
     assert proj._schema_is_current() is False, (
         "a boolean is_operator index must fail the probe (#3154)")
 
     proj._ensure_indexes()
+    # The sweep's #3154 PURGE is a `DROP INDEX` — deferred on the indexer thread
+    # like any other drop — so a read taken straight after the sweep still sees
+    # the poisoned index and the probe (correctly) answers NOT current. Wait for
+    # the purge to land, then grade the PURGE assertion below on that settled
+    # read. ⛔ The line above it (`_schema_is_current()`) issues its OWN catalogue
+    # read (`tortoise/projection/__init__.py:20442`) and is NOT graded on `rows`;
+    # only the `is_operator` assertion is.
+    rows = index_rows_after_settle(
+        proj,
+        until=lambda r: index_kind_absent(r, "Point", "is_operator", "RANGE"))
     assert proj._schema_is_current() is True
-    rows = proj.g.query("CALL db.indexes()").result_set
     assert not any("is_operator" in str(row[1]) for row in rows), (
         f"the sweep must purge the boolean index (#3154): {rows}")
 
@@ -1141,6 +1204,10 @@ def test_schema_probe_is_per_graph_not_per_process(graph_factory):
     assert b._schema_is_current() is True
 
     b.g.query("DROP INDEX ON :Point(lastDreamedAt)")
+    index_rows_after_settle(  # the drop is applied asynchronously (#10807)
+        b,
+        until=lambda rows: index_kind_absent(
+            rows, "Point", "lastDreamedAt", "RANGE"))
     assert b._schema_is_current() is False
     assert a._schema_is_current() is True, (
         "graph A must NOT inherit graph B's drift — a guard keyed on "

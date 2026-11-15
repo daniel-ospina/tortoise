@@ -1,4 +1,4 @@
-"""Wait for the FalkorDB index CATALOGUE to settle — one definition (#10807).
+"""The ONE definition of "wait until the FalkorDB index catalogue has settled" (#10807).
 
 WHY THIS MODULE EXISTS
 ----------------------
@@ -9,8 +9,8 @@ definition — the retired row keeps naming the dropped field, and the new row's
 status reads `[Indexing] N/M: UNDER CONSTRUCTION` (the procedure yields a
 `status` column; docs.falkordb.com/cypher/indexing). Measured on an idle lane:
 0.3 s to converge. On a LOADED CI runner the same window outlived the read, and
-two fixtures in two different files each reported a drop that had LANDED as one
-that had not:
+fixtures in different files each reported a drop that had LANDED as one that had
+not:
 
   * `test (g)`, run 41817275671 — `tests/test_9079_handle_write_authority.py`
     dropped `:Point(pointKind)` and its own vacuity guard refused the good
@@ -25,7 +25,7 @@ divergence would be invisible, since each copy only fails on a loaded runner.
 ⛔ NOT in `tests/_live_utils.py`: that module is a declared `SHARED_MODULES`
 member (`tools/ci_selection.py`) because the docker-lane port seam is read by
 every surface, so a one-line edit there runs the FULL CI matrix. This module's
-consumers are both on `core` (a `tests/`-prefixed change falls through to
+consumers are on `core` (a `tests/`-prefixed change falls through to
 `core`), so it stays narrow — the same reasoning as `tests/_html_links.py`.
 """
 from __future__ import annotations
@@ -51,7 +51,7 @@ def index_rows_after_settle(proj, *, until=None,
     rebuild status, the idle ``OPERATIONAL`` one, the pre-drop definition. Only
     the caller knows what that read has to stop saying.
 
-    ⛔ A BOUND THAT EXPIRES RETURNS THE LAST READ, never a tolerant pass. Both
+    ⛔ A BOUND THAT EXPIRES RETURNS THE LAST READ, never a tolerant pass. The
     callers' assertions are unchanged, so a drop that genuinely cannot happen —
     or a schema that genuinely never converges — still reds loudly on the
     mid-flight catalogue instead of passing vacuously.
@@ -80,6 +80,132 @@ def index_cells(rows) -> set[str]:
     return {str(cell) for row in rows for cell in row}
 
 
+def _row_reports_kind(row, field: str, kind: str) -> bool | None:
+    """Does this catalogue row report ``field`` under ``kind``?
+
+    ``None`` means the row CANNOT ANSWER — an absent/short row, or a kinds map
+    that is not a map. Kept as ONE reader because the two predicates below are
+    that same question with opposite polarity on the unanswerable case ("keep
+    waiting" for a create, "do not certify" for a drop); two copies of the
+    kind-extraction would drift silently — the divergence this module's own
+    header forbids.
+    """
+    if not row or len(row) < 3 or not isinstance(row[2], dict):
+        return None
+    kinds = row[2].get(field) or ()
+    if isinstance(kinds, str):
+        kinds = [kinds]
+    return kind.upper() in {str(k).upper() for k in kinds}
+
+
+#: The consumers this module documents, and whose "wait" call sites the
+#: structural pin therefore REQUIRES (`test_every_consumer_passes_the_caller_
+#: precondition`): a rename or a dropped wait in any of them keeps a count-based
+#: floor green, so the floor names modules rather than a number. `test_indexes.py`
+#: joined at #12856 — its index-requirement test read the catalogue straight
+#: after the DDL and red on a LANDED drop.
+_DOCUMENTED_CONSUMERS = {
+    "test_9079_handle_write_authority.py",
+    "test_search_engine.py",
+    "test_11682_quote_indexed.py",
+    "test_indexes.py",
+}
+
+
+#: The (module, function) pairs whose settle call the structural pin REQUIRES
+#: (`tests/test_10807_index_settle.py::test_every_consumer_passes_the_caller_
+#: precondition`). A module-level key is too coarse: measured at #12856's review,
+#: deleting BOTH waits inside `test_event_id_index_is_required_so_an_existing_
+#: graph_gets_it` left the module key satisfied by its five siblings — the pin
+#: for that very red went vacuous while staying green. A method is spelled
+#: `Class.method`, which is how the scan reports it.
+#:
+#: ⛔ THIS MAP IS THE WHOLE ARMAMENT OF EVERY ``_DOCUMENTED_CONSUMERS`` MODULE,
+#: WITH EACH PAIR'S SETTLE-CALL-SITE COUNT: the pin asserts, per pair, that the
+#: scan finds EXACTLY this many `index_rows_after_settle(...)` CALL SITES, so an
+#: armed wait that is missing here reds, AND so does deleting ONE of a pair's
+#: two waits. ⚠️ The count is over CALL SITES, not "armed" ones — `_settle_site_
+#: functions` keeps `_settle_call_sites`' site list and DISCARDS its `_missing`
+#: set, so an `until`-less call still counts toward its pair; the unarmed call
+#: reds on the separate `missing` assertion instead. Measured at #12856's
+#: reviews — with a `required <= armed` floor FIVE of the TEN armed functions
+#: were undeclared; with a SET of pairs, FIVE of the TEN declared pairs carried
+#: two waits, so removing one of the two (the DROP, keeping the recreate) left
+#: the pin green. Declaring one and waiting for the next review to find the next
+#: is the whack-a-mole this closes.
+#:
+#: ⚠️ THE UNDECLARED FIGURE IS RE-DERIVABLE, so re-derive it before quoting it:
+#: at `12d8541791` this ledger held 5 entries and `_settle_site_functions`
+#: reported 10 armed functions in these modules, leaving the 5 undeclared (both
+#: `test_11682_quote_indexed.py` sites, `test_9079…._await_point_indexes`,
+#: `test_indexes.test_schema_probe_is_per_graph_not_per_process`, and
+#: `TestR2OrUnionAndSearchKeys.test_fts_leg_trace_index_missing_live`). The first
+#: draft of this comment said "six of eleven" — written from memory rather than
+#: from that measurement, and wrong on both numerals.
+#:
+#: A HELPER counts: `test_9079_handle_write_authority.
+#: _await_point_indexes` is where that module's wait lives, so it is the pair a
+#: removal would touch.
+_DOCUMENTED_SITES: dict[tuple[str, str], int] = {
+    # #10807's originals
+    ("test_9079_handle_write_authority.py",
+     "test_schema_ddl_survives_the_armed_guard"): 1,
+    ("test_9079_handle_write_authority.py", "_await_point_indexes"): 1,
+    ("test_search_engine.py",
+     "TestR2OrUnionAndSearchKeys.test_event_migration_does_not_drop_an_"
+     "already_correct_index"): 1,
+    ("test_search_engine.py",
+     "TestR2OrUnionAndSearchKeys.test_fts_leg_trace_index_missing_live"): 1,
+    # #11682's upgrade/pre-existing arms
+    ("test_11682_quote_indexed.py",
+     "test_a_pre_11682_two_field_index_is_upgraded_to_carry_the_quote"): 2,
+    ("test_11682_quote_indexed.py",
+     "test_a_pre_existing_array_quote_is_flattened_by_the_sweep"): 2,
+    # #12856 — the red this list gained a consumer for, and its three siblings
+    # that the same diff arms. The named red carries TWO waits: the DROP and the
+    # sweep's recreate.
+    ("test_indexes.py",
+     "test_event_id_index_is_required_so_an_existing_graph_gets_it"): 2,
+    ("test_indexes.py", "test_schema_probe_is_true_only_on_a_complete_schema"): 2,
+    ("test_indexes.py",
+     "test_schema_probe_rejects_the_boolean_is_operator_index"): 2,
+    ("test_indexes.py", "test_schema_probe_is_per_graph_not_per_process"): 1,
+}
+
+
+def index_kind_present(rows, label: str, field: str, kind: str) -> bool:
+    """Does SOME catalogue row for ``label`` report ``field`` as ``kind`` yet?
+
+    The positive counterpart of :func:`index_kind_absent`, and it exists for the
+    same reason: a KIND-BLIND predicate can release a wait before the index its
+    caller asserts about exists.
+
+    ⛔ WHAT THIS BUYS — KIND EXACTNESS AND FAIL-CLOSEDNESS, NOT CREATE LATENCY.
+    A create is NOT deferred the way a drop is: its DEFINITION (this kinds map)
+    is registered synchronously, and only the POPULATION is queued
+    (``Indexer_PopulateIndex`` -> ``INDEXER_IDX_POPULATE``; the row then reads
+    ``[Indexing] N/M: UNDER CONSTRUCTION`` with the kinds map ALREADY present).
+    Measured: an immediate catalogue read 5.7 ms after ``CREATE INDEX FOR
+    (n:Point) ON (n.lastDreamedAt)`` already names ``lastDreamedAt: [RANGE]``
+    with status ``OPERATIONAL``. So the wait that actually removes lateness is
+    the one on the DROP side, and ``index_rows_after_settle``'s
+    ``UNDER CONSTRUCTION`` leg is what covers the populate window. What THIS
+    predicate adds is that a field already present under a DIFFERENT kind must
+    not release the wait (a kind-blind predicate would), and that a row which
+    cannot be read keeps the wait closed.
+
+    A row whose kinds map is MISSING answers False: a catalogue that cannot
+    prove the create must not certify it, so the caller keeps waiting (bounded,
+    fail-closed) instead of asserting about a read that never answered.
+    """
+    for row in rows:
+        if not row or str(row[0]) != label:
+            continue
+        if _row_reports_kind(row, field, kind) is True:
+            return True
+    return False
+
+
 def index_kind_absent(rows, label: str, field: str, kind: str) -> bool:
     """Does NO catalogue row for ``label`` still report ``field`` as ``kind``?
 
@@ -92,16 +218,11 @@ def index_kind_absent(rows, label: str, field: str, kind: str) -> bool:
     prove the drop must not certify it, so the caller waits (bounded,
     fail-closed) instead of asserting about a read that never answered.
     """
-    wanted = kind.upper()
     for row in rows:
         if not row or str(row[0]) != label:
             continue
-        if len(row) < 3 or not isinstance(row[2], dict):
-            return False
-        kinds = row[2].get(field) or ()
-        if isinstance(kinds, str):
-            kinds = [kinds]
-        if wanted in {str(k).upper() for k in kinds}:
+        reports = _row_reports_kind(row, field, kind)
+        if reports is None or reports:
             return False
     return True
 
