@@ -841,10 +841,19 @@ FOLD_ON_CREATE_DEFAULTS: dict[str, dict[str, Any]] = {
 #:   isinstance(_np_status, str): continue`)". That skip is GONE — it was the
 #:   resurrection hole (#12882 part 2: a non-string target LIFTED a dead row
 #:   instead of being skipped) — and `update_entity(obj, status=None)` on a
-#:   `superseded`/terminal `:Object` is now REFUSED (measured: `ValueError …
-#:   'superseded' is TERMINAL for a :Object`, the row unchanged, no record). So
-#:   the `status=None` shape this bound states below can no longer be PRODUCED
-#:   through this door; what stays reachable is the STORED-side hole (#12869)
+#:   `superseded`/terminal `:Object` is now REFUSED **when the call names the
+#:   status ALONE** (measured: `ValueError … 'superseded' is TERMINAL for a
+#:   :Object`, the row unchanged, no record). ⛔ **NOT "the shape can no longer be
+#:   produced through this door":** the COMPOSED non-word write (`status=None`,
+#:   `123`, `True`, `['live']` TOGETHER WITH both carrier clears) is still ADMITTED
+#:   — the coherence allowance keys on the carrier CLEAR and
+#:   `_status_key_leaves_the_dead_state` reads the KEYS supplied, never the value
+#:   written — and it DOES produce the shape this bound states below, one call
+#:   away: measured, the row goes `(None, None, None)`, the graph reads CURRENT,
+#:   and this reader keeps folding the `superseded` an earlier supersede record
+#:   left (#12856 owns that decision; it is not repaired here). So what the null
+#:   refusal narrowed is the LONE-null route; what stays reachable is that
+#:   composed route, the STORED-side hole (#12869),
 #:   and a historical row already written that way.
 #:   ⛔ THE WRITE DOOR ADMITS THIS SHAPE, AND ONLY THIS SHAPE (#12786). A
 #:   terminal-Object guard (#12745) briefly refused EVERY departure from
@@ -1026,7 +1035,9 @@ FOLD_ON_CREATE_DEFAULTS: dict[str, dict[str, Any]] = {
 #:   carrier clears is ADMITTED — measured, the row goes `(None, None, None)` and
 #:   the graph reads CURRENT while this reader keeps the `superseded` an earlier
 #:   supersede record folded, so a rebuild HIDES a name the graph resolves. That
-#:   is (a) and (b) again, reachable by one composed call; it predates this
+#:   is BOTH shapes above again — an explicit null after a restatus/connector
+#:   fold, and an explicit null after the carrier derivation — reachable by one
+#:   composed call; it predates this
 #:   change and is tracked on #12856. The bound stays stated for it, and for a
 #:   row already written that way or written out of band. Closing it properly
 #:   still means modelling an explicit removal as a fold output (or narrowing the
@@ -1242,8 +1253,11 @@ class LifecycleEvent:
     #: NOT mean the caller cleared the field: `update_entity(obj, status=None)` is
     #: a real clear on a NON-terminal row (`sdk.py`: "a null REMOVES the property …
     #: a clear is CALLER intent"), and since #12882 that same call on a TERMINAL
-    #: row is REFUSED (a non-string target out of a dead state is a resurrection
-    #: attempt), so a null `restatus_status` reaching here is R4's declared bound —
+    #: row is REFUSED **when it names the status ALONE** (a non-string target out of
+    #: a dead state is a resurrection attempt) — while the COMPOSED form
+    #: (`status=None` TOGETHER WITH both carrier clears) is still admitted and does
+    #: journal a null `state.status`, which is exactly R4's declared bound below
+    #: (#12856) — so a null `restatus_status` reaching here is R4's declared bound —
     #: not a representable state here. A caller who wants a live value writes
     #: `status='live'`, which IS carried.
     restatus_status: str | None = None
