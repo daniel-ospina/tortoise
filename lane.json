@@ -1,0 +1,42 @@
+{
+  "_ref": "refs/lanes/cmux.kbg-surf-b-1794777745-p1184003-8fd03838",
+  "_sha": "b65f0f5a81eaac2e0f5b0edb8a7e3b696b73ffa2",
+  "artifacts": [
+    {
+      "kind": "log",
+      "value": "/home/cmux/orchestrator/bg/surf-b.log"
+    },
+    {
+      "kind": "branch",
+      "value": "feat/11609-b-write-containers"
+    },
+    {
+      "kind": "sha",
+      "value": "1340c397b6683a3dad81895995eb3e0e0d474f13"
+    },
+    {
+      "kind": "worktree",
+      "value": "/home/cmux/.worktrees/surf-b"
+    }
+  ],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 7800,
+  "duration_s": 7217,
+  "ended_at": 1794784962,
+  "exit_code": 143,
+  "heartbeat_at": 1794784962,
+  "host": "cmux",
+  "issue": null,
+  "kind": "bg",
+  "lane_id": "cmux.kbg-surf-b-1794777745-p1184003-8fd03838",
+  "lease_until": 1794792762,
+  "pid": 1184003,
+  "reason": "bound:exceeded-wallclock",
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1794777745,
+  "state": "FAILED",
+  "tag": "surf-b",
+  "worktree": "/home/cmux/.worktrees/surf-b"
+}
