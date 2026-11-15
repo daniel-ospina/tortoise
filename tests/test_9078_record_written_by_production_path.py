@@ -2196,11 +2196,20 @@ def _ensure_metering_schema(conn) -> None:
         check.execute(probe)
         present = check.fetchone()[0] is not None
     if present and meter_failure is not None:
+        # ⛔ NAME THE FILE AND STATE THE FACT, NOT AN INFERENCE. "the function
+        # present here is NOT the one this tree ships" is not something this
+        # function can know: the meter file can apply cleanly on an earlier run
+        # and then fail on a statement appended AFTER the function, so the
+        # installed body IS this tree's and the sentence is false. What the run
+        # actually establishes is that THIS file does not apply here — which is
+        # enough to refuse the figure, and is also the datum an operator needs
+        # (`0014_metering_records.sql` is the other member of the same list, and
+        # its failure is the benign one this function exists to survive).
         pytest.fail(
-            "this tree's metering migration does not apply "
-            f"({type(meter_failure).__name__}: {meter_failure}), so the "
-            "`journal_event_bytes_for_rows` present here is NOT the one this "
-            "tree ships — the positive leg would grade a stranger and pass it")
+            f"{meter_path.name} does not apply on this database "
+            f"({type(meter_failure).__name__}: {meter_failure}); an earlier or "
+            "foreign `journal_event_bytes_for_rows` may still be present, so "
+            "the positive leg cannot certify a figure from it")
     if not present:
         detail = (f"{type(failure).__name__}: {failure}" if failure
                   else "the migrations applied but the function is absent")
