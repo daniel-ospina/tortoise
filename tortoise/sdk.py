@@ -24493,7 +24493,11 @@ class TortoiseSDK:
         # "Terminal on every read surface and for every lifecycle transition"),
         # so a draft point invalidated before it was ever promoted used to come
         # back as `['live', outdated=true]` through THIS door (measured).
-        if status != "draft" or is_terminal_status(status, point.get("outdated")):
+        # ⛔ The flag is a conjunct of the CAS below, NOT an extra test here: this
+        # read can go stale between it and the write, and the CAS is the one
+        # statement that decides. Its zero-row path is the `raced` branch, which
+        # reports the row accurately (`not_draft`).
+        if status != "draft":
             return {"id": point_id, "status": status, "promoted": False,
                     "blocked": True, "reason": "not_draft"}
 
@@ -24574,6 +24578,9 @@ class TortoiseSDK:
         )
         if not r.result_set:
             # Raced with a concurrent promote — re-read and report the outcome.
+            # #12586: a zero row here is ALSO the answer for a row the CAS's
+            # terminality conjunct excluded (a draft that went flag-dead), which
+            # is why `_cas_witness` is consulted before the abort is re-raised.
             re = self.get_point(point_id)
             if not re:
                 # The node is GONE (deleted, or a second replacement between
