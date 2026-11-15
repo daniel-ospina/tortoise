@@ -559,3 +559,87 @@ def test_a_hybrid_row_nameless_as_object_is_prescribed_the_point_remedy(sdk):
     assert "binds :Object and :Point at once" in message, (
         f"a hybrid id was handed a route that cannot serve it: {message}")
     assert "is NOT the route here" in message, message
+
+
+# ── 6. The CLEAR and the per-node verdict (cycle-2 review P0 + P1) ────────
+
+def test_clearing_the_carrier_in_the_same_call_as_the_word_is_refused(sdk):
+    """A `supersededBy=None` beside the word splits the pair by the WRITE itself.
+
+    Measured on the cycle-1 head: a coherent Object superseded with 'acme-v2',
+    then ``update_entity(o, status='superseded', supersededBy=None)`` was
+    ACCEPTED and stored ``[['superseded', None]]`` — the exact state §4.3 says
+    the model does not have. The stored-value allowance reads the PRE-write row,
+    so it licensed a call that removed the very value it was reading.
+
+    Mutation: drop ``carrier_cleared`` from the per-row ``names_after`` test
+    (i.e. let the stored successor satisfy a call that clears it) -> red.
+    """
+    node = _make(sdk, "Object", "clearcall")
+    sdk.update_entity(node, status="superseded", supersededBy="acme-v2")
+    with pytest.raises(ValueError, match="CLEARS `supersededBy`"):
+        sdk.update_entity(node, status="superseded", supersededBy=None)
+    assert _row(sdk, "Object", node) == ["superseded", "acme-v2", None], (
+        "a refused clear still moved the row")
+
+
+@pytest.mark.parametrize("label", ["Object", "Subject"])
+def test_clearing_the_carrier_ALONE_on_a_superseded_row_is_refused(sdk, label):
+    """No `status` key at all: the row is stored 'superseded' and loses its name.
+
+    Measured on the cycle-1 head: ``update_entity(o, supersededBy=None)`` was
+    never even looked at, because the guard was only entered on a status write.
+    The word is what must not stand without its partner, so the guard reads the
+    STORED status when the call does not set one.
+
+    Mutation: gate the whole guard on ``status_value == 'superseded'`` instead of
+    ``status_value in (None, 'superseded')`` -> red.
+    """
+    node = _make(sdk, label, f"clearalone-{label.lower()}")
+    sdk.update_entity(node, status="superseded",
+                      supersededBy=f"clearalone-{label.lower()}-v2")
+    with pytest.raises(ValueError, match="CLEARS `supersededBy`"):
+        sdk.update_entity(node, supersededBy=None)
+    assert _row(sdk, label, node)[1] == f"clearalone-{label.lower()}-v2", (
+        "a refused clear still moved the row")
+
+
+def test_clearing_the_carrier_is_still_allowed_when_the_call_leaves_the_word(sdk):
+    """The refusal is about the WORD, not about clears — #12825's lift must pass.
+
+    Mutation: refuse any ``supersededBy=None`` regardless of the status in the
+    call -> red, and #12825's coherent un-supersede stops working.
+    """
+    node = _make(sdk, "Object", "clearok")
+    sdk.update_entity(node, status="superseded", supersededBy="clearok-v2")
+    sdk.update_entity(node, status="live", supersededBy=None, supersededAt=None)
+    assert _row(sdk, "Object", node) == ["live", None, None]
+
+
+def test_a_nameless_twin_is_not_authorised_by_its_siblings_corrects_edge(sdk):
+    """Ids are not unique, so the Point verdict must be PER NODE.
+
+    Two ``:Point`` nodes sharing one id, an incoming CORRECTS edge into ONE of
+    them: the id-keyed edge set said "this id is edged" and both rows were left
+    naming nobody (measured on the cycle-1 head). §7822's fan-out rule is the
+    same fact.
+
+    Mutation: go back to a set of ids (``RETURN DISTINCT n.id``) instead of
+    ``ID(n)`` -> this reds, because the call is ACCEPTED.
+    """
+    first = _make(sdk, "Point", "twin-12592")
+    successor = _make(sdk, "Point", "twin-12592-v2")
+    sdk._get_proj().g.query(
+        "MATCH (a:Point {id:$old}), (b:Point {id:$new}) MERGE (b)-[:CORRECTS]->(a)",
+        params={"old": first, "new": successor})
+    # a second node under the SAME id, with no successor of its own
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) CREATE (m:Point) SET m = properties(n)",
+        params={"id": first})
+    with pytest.raises(ValueError, match="no successor"):
+        sdk.update_entity(first, status="superseded")
+    stored = sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.status AS st", params={"id": first}
+    ).result_set
+    assert [r[0] for r in stored] == ["live", "live"], (
+        f"a nameless sibling rode its twin's edge: {stored}")
