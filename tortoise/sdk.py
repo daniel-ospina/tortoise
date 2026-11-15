@@ -49069,6 +49069,42 @@ class TortoiseSDK:
         # this refusal contradicts the "content and metadata revisions are still
         # accepted" sentence it ends on.
         #
+        # ⛔ A NON-STRING OR ABSENT TARGET IS STILL A TRANSITION. An earlier cut
+        # skipped the whole check when the target was not a `str` ("a non-string
+        # cannot be a dead WORD") — which let a dead row go CURRENT without ever
+        # naming a dead word. Measured, per target, on the pre-fix tree:
+        #
+        #   status=['live']   STORED as-is  -> no dead set contains it -> reads current
+        #   status=123        STORED as-is  -> same
+        #   status=True       STORED as-is  -> same
+        #   status={'a': 1}   DEGRADED to null (#7369: FalkorDB cannot write a map)
+        #                     -> the property is ABSENT, so it behaves like `None`
+        #   status=None       REMOVES the property
+        #
+        # Three are stored, two leave no status at all — and §4.3 settles the
+        # other two: "an Object created without a status stores none and reads as
+        # `live`". Every one of the five therefore makes a DEAD row current again,
+        # which is the harm whether or not that row carries a supersession
+        # (`archived` does not, and the row measured here was a plain object with a
+        # hand-set status). The question is "is the target in the family's DEAD
+        # set", never "is the target a string".
+        #
+        # ⛔ WHY THE OTHER FAMILY IN THIS SAME LOOP WAS ALREADY SAFE — and NOT for
+        # the reason an earlier cut of this comment gave ("both are
+        # presence-based"): the :Subject arm is protected by the #1423 VOCABULARY
+        # guard, which is string-TYPED (`not isinstance(_status, str) or _status
+        # not in _SUBJECT_STATUS_VALUES` raises `Invalid status ['live'] for a
+        # :Subject`, measured). Only the POINT arm is presence-based
+        # (`_assert_lifecycle_guard` refuses on the stored terminal marker). Two
+        # different mechanisms, neither of them this arm's.
+        #
+        # ⚠️ RESIDUAL, on the STORED side and NOT closed here: this fix guards the
+        # TARGET's hashability, not a stored value's. A row whose stored `status`
+        # is a list (reachable because a LIVE row accepts `status=['live']` —
+        # #10371's vocabulary hole) makes `s in _np_terminal` raise
+        # `TypeError: unhashable type: 'list'` on the NEXT lifecycle write, so the
+        # caller sees a traceback instead of a refusal. Filed as #12869.
+        #
         # The remedy is deliberately NOT `supersede()`: that door routes to
         # `supersede_point`/`invalidate_point`, which are `:Point`-only and raise
         # `No point <id>` for an Object or a Subject, so naming it here would be
@@ -49118,13 +49154,22 @@ class TortoiseSDK:
                 _np_stored = tuple(_np_row[1] or ())
                 if not _np_stored:
                     continue
-                if not isinstance(_np_status, str):
-                    continue            # a non-string cannot be a dead WORD
+                # ⛔ NO `isinstance` SKIP HERE (see the block comment ABOVE): a
+                # non-string target is not a dead WORD, and that is exactly why it
+                # must not be exempted — it is a target the family's dead set does
+                # not contain, so from a dead row it is a resurrection.
                 if all(s == _np_status for s in _np_stored):
                     continue            # entailed: no transition asked for
                 _np_dead = sorted(s for s in _np_stored if s in _np_terminal)
-                if not _np_dead or _np_status in _np_terminal:
-                    continue            # nothing dead, or dead->dead (legal here)
+                if not _np_dead:
+                    continue            # nothing dead to resurrect
+                # `isinstance` FIRST, and only for the membership test: an
+                # unhashable target (`status=['live']`, `status={'a': 1}`) raised
+                # `TypeError: unhashable type` out of `in`, so the caller got a
+                # traceback instead of this guard's AX three-part refusal
+                # (measured). Non-strings now fall THROUGH to the refusal.
+                if isinstance(_np_status, str) and _np_status in _np_terminal:
+                    continue            # dead->dead is legal for these families
                 # The carriers this row holds, keyed by the SAME declared
                 # properties the derivation reads (`DERIVED_FROM_RECORD`) —
                 # derived, never a literal pair, so a third declared source
