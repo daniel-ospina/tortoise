@@ -218,6 +218,17 @@ reason to remove the savepoint.) An **autocommit** connection
 takes no savepoint: each statement is its own transaction, so a failure there
 aborts nothing the caller owns.
 
+⛔ **THE SAVEPOINT KEEPS THE RECORD; IT DOES NOT MAKE THE METER RUN.** On a
+database where the metering migration IS applied, the meter is refused on
+**every** armed write: the migration grants `EXECUTE` to `service_role` only,
+while the record write path connects as `tortoise_record_app` (#12785). The
+write commits (that is the savepoint) and the org is simply never metered —
+`written_bytes` stays `0` and no ledger row is minted, so the per-org byte
+figure is **inert** until #12785 lands. It is disclosed rather than silent: the
+bytes appear as `unmetered_bytes` in `postgres_bytes.reconcile`. Fixing it is
+not a one-line `GRANT` — the function is `SECURITY DEFINER` and reads the
+journal, so granting this role `EXECUTE` needs a caller guard first.
+
 **Measured, then RECORDED after the commit.** `RecordWriter.write` only
 *measures*; the ledger increment happens where the commit is known
 (`write_live_record`, strictly after `connection.commit()`), because the ledger

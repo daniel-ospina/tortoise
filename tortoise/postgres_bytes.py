@@ -324,6 +324,17 @@ def measure_written_rows(
     (``UndefinedFunction``), the app role missing ``EXECUTE``
     (``InsufficientPrivilege``, which #12764 shipped), a lock timeout.
 
+    ⛔ THE SECOND TRIGGER IS NOT HYPOTHETICAL — IT IS THE DEPLOYED STATE, and
+    the savepoint must not be read as the meter working (#12785). The migration
+    grants ``EXECUTE`` to ``service_role`` ONLY, while the record write path
+    connects as ``tortoise_record_app``, so on any database where the migration
+    IS applied the meter is refused on EVERY armed write: the savepoint above
+    keeps the record, ``written_bytes`` stays 0, and no ledger row is minted.
+    That is disclosed rather than silent — the bytes surface as
+    ``unmetered_bytes`` in :func:`reconcile` — and #12785 tracks the fix, which
+    is NOT a one-line GRANT: the function is ``SECURITY DEFINER`` and reads the
+    journal, so granting this role ``EXECUTE`` needs a caller guard first.
+
     The savepoint does NOT skew the measurement, which is why it is a savepoint
     and not a second connection: the function attributes rows by
     ``xmin = pg_current_xact_id()``, and for a subtransaction that performs NO

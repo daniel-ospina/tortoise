@@ -2499,6 +2499,23 @@ def test_a_failing_byte_meter_cannot_roll_back_a_record_write(monkeypatch, tenan
         monkeypatch.setattr(
             postgres_bytes, "ROWS_RPC",
             f"{postgres_bytes.ROWS_RPC}_absent_on_this_schema")
+        # ⛔ PIN THE INVOCATION, not only the outcome (#12784 review P2). EVERY
+        # assertion below also holds when the meter is never CALLED at all:
+        # `_measure_written_bytes` returns early on a falsy `position` or a
+        # non-positive `n_records`, which yields the SAME (0, 0), the SAME
+        # `APPLIED` and the SAME unchanged failure counters. So a refactor of
+        # that precondition would silently turn this leg into a green test that
+        # exercises no savepoint. The spy makes "the meter ran and was refused"
+        # distinguishable from "the meter never ran".
+        meter_calls: list[dict] = []
+        _real_measure = postgres_bytes.measure_written_rows
+
+        def _spy_measure(*args, **kwargs):
+            meter_calls.append(kwargs)
+            return _real_measure(*args, **kwargs)
+
+        monkeypatch.setattr(
+            postgres_bytes, "measure_written_rows", _spy_measure)
         before = _count(conn, "session", tenant)
         failures_before = dict(monitoring.record_write_failure_counts())
         session_id = f"sess-meter-{uuid.uuid4().hex[:8]}"
@@ -2511,6 +2528,10 @@ def test_a_failing_byte_meter_cannot_roll_back_a_record_write(monkeypatch, tenan
         assert write is not None and write.applied, (
             "the write was not reported as applied on a metering fault: "
             f"{write!r}")
+        assert meter_calls, (
+            "the byte meter was NEVER INVOKED — this leg did not exercise the "
+            "savepoint at all, so a green result here would prove nothing "
+            "about it (#12784 review P2)")
         assert (write.written_bytes, write.written_rows) == (0, 0), (
             "an unmeasurable write must report NO bytes rather than a "
             f"fabricated figure: {write.written_bytes}B/{write.written_rows}r")
