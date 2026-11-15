@@ -3050,6 +3050,7 @@ def test_the_write_path_vocabulary_names_every_refusal_the_door_returns():
     # The count is DERIVED, never typed here either: a hard-coded "six" in the
     # pin would re-stale exactly the way the doc's did when the door grew.
     _WORD = {4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight"}
+    _WORD_INDEX = {word: number for number, word in _WORD.items()}
     size = len(returned)
     spelled = _WORD[size]
     assert f"one of {spelled}" in doc, (
@@ -3091,6 +3092,41 @@ def test_the_write_path_vocabulary_names_every_refusal_the_door_returns():
     assert not unwritten, (
         f"`RecordWrite.status` is the authoritative enumeration (the map says "
         f"so) and it does not name refusal={unwritten}")
+    # ⛔ A THIRD HOME (#9318 review cycle 5). `/health` publishes its own copy of
+    # this vocabulary — the per-token REMEDY table — and it said SIX values with
+    # `journal_collision` missing, i.e. the one token whose remedy is explicitly
+    # NOT a replay. Nothing reddened, because this pin only read the vocabulary
+    # module and the `RecordWrite.status` docstring. Bounded to the table itself
+    # so an unrelated mention of a token elsewhere in the file cannot satisfy it.
+    from tortoise import hosted_api
+
+    health_src = inspect.getsource(hosted_api)
+    table_start = health_src.find("THE VERDICT, not just the number")
+    table_end = health_src.find("THE VERDICT IS WINDOW-BASED")
+    assert table_start != -1 and table_end > table_start, (
+        "the `/health` remedy table moved — this pin can no longer find it, "
+        "and a pin that silently reads nothing is the defect it exists to stop")
+    table = health_src[table_start:table_end]
+    # The table spells the COUNTER's reasons, which are not 1:1 with
+    # `LIVE_WRITE_REFUSALS` (`no_journal`/`no_tenant` here vs
+    # `no_durable_journal`/`no_tenant_carried` there), so the derivation is the
+    # table's own bullet list against its own stated size — the drift #9318
+    # review cycle 5 found was exactly that pair disagreeing ("SIX values"
+    # followed by six bullets, with the seventh token missing entirely).
+    bullets = re.findall(r"^    #   ``([a-z_]+)``", table, re.MULTILINE)
+    assert "journal_collision" in bullets, (
+        f"the `/health` remedy table does not list `journal_collision` (it "
+        f"lists {bullets}) — that is the one refusal whose remedy is explicitly "
+        f"NOT a replay, so an operator reading this table is sent to `replay`")
+    spelled_sizes = [w for w in re.findall(r"— ([A-Z]+) values", table)
+                     if w.lower() in _WORD.values()]
+    assert spelled_sizes, (
+        "the `/health` remedy table no longer states how many values it covers")
+    for word in spelled_sizes:
+        assert len(bullets) == _WORD_INDEX[word.lower()], (
+            f"the `/health` remedy table says '{word}' values and lists "
+            f"{len(bullets)} ({bullets}) — the same one-set-two-sizes defect "
+            f"this pin exists for")
 
 
 # ── the demo seeders are writers too (the population, not the capture path) ──

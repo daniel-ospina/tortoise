@@ -998,14 +998,20 @@ class JournalPositionCollision(RecordProjectionError):
             f"payload carries no record id, so the record cannot tell which; "
             f"{evidence}"
         )
+        # ⛔ The CONSEQUENCE is cause-neutral too (review cycle 5). The earlier
+        # wording — "every row written under it would be indexed by ANOTHER
+        # RECORD's event" — re-asserted the one cause the sentence above just
+        # said it cannot decide, and it is outright false under the
+        # derivation-change cause: there, the surviving row IS this record's own
+        # event. What is true under BOTH causes is what is written here.
+        consequence = "the record cannot file this write's rows at that position"
         super().__init__(
             f"journal position {seq} of ({org_id!r}, {graph_id!r}) already "
             f"holds {stored_event_type!r} ({stored_payload_digest}, "
             f"{stored_payload_bytes} B of payload) while this write is "
             f"{event_type!r} ({payload_digest}, {payload_bytes} B). "
             f"The surviving row's content is not what this write would "
-            f"produce — {diagnosis} — so every row written under it would be "
-            f"indexed by another record's event. The "
+            f"produce — {diagnosis} — so {consequence}. The "
             f"journal still holds this record; the position row cannot be "
             f"repaired while the key carries no journal identity (#12894), "
             f"and `journal_event` is append-only by trigger."
@@ -6364,8 +6370,11 @@ def _identity_evidence(attempted: Any, stored: Any) -> tuple[str, str | None]:
       records about one node is EXACTLY what cannot be decided here;
     * ``disagrees`` — a shared identity differs. Two different coordinates, so a
       different record or the same record re-keyed since; again undecidable;
-    * ``one_sided`` — only one payload carries an identity, which is what a field
-      added (or removed) by a derivation change looks like;
+    * ``one_sided`` — one payload carries an identity the READ can compare and
+      the other carries none it can read, which is what a field added (or
+      removed) by a derivation change looks like. Deliberately about the read and
+      not about the payloads: the read is bounded to `_IDENTITY_SECTIONS`, so an
+      id under a withheld section is invisible, not absent;
     * ``none`` — nothing comparable, said rather than guessed.
 
     Pairing is LIKE WITH LIKE: a key is compared within a scope first (`""` =
@@ -6382,18 +6391,25 @@ def _identity_evidence(attempted: Any, stored: Any) -> tuple[str, str | None]:
     ours, theirs = _identity_pairs(attempted), _identity_pairs(stored)
     if not ours and not theirs:
         return "none", None
+    # ⛔ The sentence is scoped to the READ, never to the payloads (review cycle
+    # 5): the read is bounded to the top level and `_IDENTITY_SECTIONS`, so a
+    # payload that names the same id under `props` (withheld, never read) or in a
+    # list is NOT evidence that it names no identity at all — and the earlier
+    # "only … names X" was falsified by such a payload in the same message.
     if ours and not theirs:
         _key, _scope, label, value = ours[0]
         return "one_sided", (
-            f"only this write names {label}="
-            f"{_bounded(str(value), _ATTRIBUTION_VALUE_LIMIT)}")
+            f"this write names {label}="
+            f"{_bounded(str(value), _ATTRIBUTION_VALUE_LIMIT)} and the "
+            f"surviving row names no comparable identity")
     if theirs and not ours:
         _key, _scope, label, value = theirs[0]
         return "one_sided", (
-            f"only the surviving row names {label}="
-            f"{_bounded(str(value), _ATTRIBUTION_VALUE_LIMIT)}")
+            f"the surviving row names {label}="
+            f"{_bounded(str(value), _ATTRIBUTION_VALUE_LIMIT)} and this write "
+            f"names no comparable identity")
 
-    shared: list[tuple[str, str, Any, Any]] = []
+    shared: list[tuple[str, str, Any, Any, str]] = []
     for key, scope, label, value in ours:
         same_scope = [candidate for candidate in theirs
                       if candidate[0] == key and candidate[1] == scope]
@@ -6407,21 +6423,31 @@ def _identity_evidence(attempted: Any, stored: Any) -> tuple[str, str | None]:
             candidates = [candidate for candidate in theirs
                           if candidate[0] == key]
         for candidate in candidates:
-            shared.append((key, label, value, candidate[3]))
+            shared.append((key, label, value, candidate[3], candidate[2]))
     if not shared:
         return "none", None
 
-    def _rank(entry: tuple[str, str, Any, Any]) -> int:
+    def _rank(entry: tuple[str, str, Any, Any, str]) -> int:
         return _IDENTITY_KEY_RANK.get(entry[0], len(_IDENTITY_KEYS))
 
     disagreements = [entry for entry in shared
                      if entry[2] != entry[3] or type(entry[2]) is not type(entry[3])]
     if disagreements:
-        _key, label, value, other = min(disagreements, key=_rank)
-        return "disagrees", (
-            f"{label}: {_bounded(str(value), _ATTRIBUTION_VALUE_LIMIT)} vs "
-            f"{_bounded(str(other), _ATTRIBUTION_VALUE_LIMIT)}")
-    _key, label, value, _other = min(shared, key=_rank)
+        _key, label, value, other, other_label = min(disagreements, key=_rank)
+        if other_label != label:
+            # The two sides spell the same key in different scopes (a nested
+            # snapshot against a top-level field). Naming only this side's label
+            # told an operator the row "has a `point.id`" it does not have.
+            label = f"{label} (this write) vs {other_label} (surviving row)"
+        rendered = _bounded(str(value), _ATTRIBUTION_VALUE_LIMIT)
+        rendered_other = _bounded(str(other), _ATTRIBUTION_VALUE_LIMIT)
+        if type(value) is not type(other):
+            # `{"id": 1}` vs `{"id": "1"}` differ, and printing "1 vs 1" would
+            # read as a contradiction of the claim it supports (cycle 5).
+            rendered = f"{rendered} ({type(value).__name__})"
+            rendered_other = f"{rendered_other} ({type(other).__name__})"
+        return "disagrees", f"{label}: {rendered} vs {rendered_other}"
+    _key, label, value, _other, _other_label = min(shared, key=_rank)
     return "agrees", f"{label}={_bounded(str(value), _ATTRIBUTION_VALUE_LIMIT)}"
 
 
@@ -6430,10 +6456,17 @@ def _refuse_a_journal_collision(cursor: Any, statement: Statement, index: int,
     """Fail LOUDLY when an absorbed position holds a DIFFERENT record (#9318).
 
     THE ONE CALL SITE is :func:`replay`'s statement loop, which every
-    journal-position insert already passes through — the live door, a full
-    replay, the reconciler, the backfill tools. Putting the verdict anywhere
-    else (a caller, a second chokepoint) is how two writers come to disagree
-    about what the record holds.
+    journal-position insert passes through — today the live door
+    (`record_writer.write_live_record`), and every replay/backfill path that
+    calls :func:`replay`. Putting the verdict anywhere else (a caller, a second
+    chokepoint) is how two writers come to disagree about what the record holds.
+
+    ⚠️ The layer rows are NOT prevented, they are DISCARDED: `replay_plan` emits
+    a record's `mutations_for` statements before its position row, so by the time
+    this refusal fires they have executed (in a transaction the caller never
+    commits — `record_writer` rolls the borrow back). The committed state is
+    correct, which is what the tests assert; the ordering is named here so a
+    reader does not conclude this guard stops the layer statements.
 
     THREE OUTCOMES, and the distinction is the whole point of the change:
 

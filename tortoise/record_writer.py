@@ -596,7 +596,7 @@ class RecordWrite:
 def _refused(refusal: str, seq: int | None) -> RecordWrite:
     """The LIVE door's refusal report for an ARMED call that did not write.
 
-    ONE constructor for all six refusal arms (#8447), for two reasons:
+    ONE constructor for all SEVEN refusal arms (#8447, #9318), for two reasons:
 
     * the ARM decides the outcome, so no arm can drift back to ``return None``
       — the value this module reserves for NOT ARMED — by accident;

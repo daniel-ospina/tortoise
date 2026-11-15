@@ -272,14 +272,20 @@ def test_a_re_derived_record_is_not_reportable_as_two_records() -> None:
     assert "payload derivation changed since that row was written" in message
     assert "no record id" in message, (
         "the message must say WHY it cannot tell one record from two")
+    # ⛔ …and NOTHING that picks one. This is the leg that reds if a single-cause
+    # clause comes back anywhere in the message (review cycle 5 found one in the
+    # consequence clause: "indexed by another record's event").
+    assert "another record's event" not in message
+    assert "the SAME record" not in message
+    assert "they are two records" not in message
     # …and, as ever, no payload content.
     assert "corpus A document" not in message
 
 
 def test_two_payloads_with_no_comparable_identity_say_so() -> None:
-    """`unknown` is an answer, not a guess — a difference still collides."""
-    # NEITHER side carries an identity key, so `unknown` is the honest answer
-    # (`one_sided` is the answer when only one of them does — asserted below).
+    """`none` is an answer, not a guess — a difference still collides."""
+    # NEITHER side carries a readable identity key, so `none` is the honest
+    # answer (`one_sided` is the answer when only one of them does).
     # `IngestStarted` is a declared `NoRecordEffect` type (audit-only run
     # marker), so its record carries no node identity at all — the one shape in
     # which NO identity is comparable on both sides.
@@ -301,8 +307,8 @@ def test_a_shared_NODE_id_with_two_record_types_is_not_one_record() -> None:
     `same` on any shared id: `ObjectRegistered` vs `EntityMutated` about one
     object came back as "the SAME record", which is the cycle-1 defect mirrored
     — a cause asserted that the evidence cannot support. No state names a cause
-    now; the message names both causes and the reading says only what the ids
-    do, which here is that the write's payload carries no identity at all.
+    now: both payloads carry the same object id, so the reading says exactly
+    that, and the sentence around it names both causes.
     """
     conn = Absorbed(stored=("EntityMutated", _payload_of(RECORD_A)))
 
@@ -315,7 +321,6 @@ def test_a_shared_NODE_id_with_two_record_types_is_not_one_record() -> None:
     assert excinfo.value.identity_state == "agrees"
     message = str(excinfo.value)
     assert "they share id=obj-a" in message
-    assert "second durable journal" in message
 
 
 def test_a_NESTED_payload_identity_is_read() -> None:
@@ -338,7 +343,7 @@ def test_a_NESTED_payload_identity_is_read() -> None:
     assert excinfo.value.identity_state == "agrees"
     assert "point.id=p1" in str(excinfo.value), (
         "the identity was not read from the nested snapshot — a PointAdded's id "
-        "lives under `point`, and reporting 'unknown' for it tells an operator "
+        "lives under `point`, and reporting `none` for it tells an operator "
         "the payloads carry no identity when both do")
 
 
@@ -401,7 +406,7 @@ def test_an_identity_read_from_a_SUBDICT_matches_a_TOP_LEVEL_one() -> None:
     `PointAdded`/`PointRevised` carry the snapshot under `point` while other
     carriers put the id at the top level, so the two sides of a real comparison
     can arrive at DIFFERENT levels. Matching on the printed label instead of the
-    key would call them incomparable and fall back to `unknown` — losing the one
+    key would call them incomparable and fall back to `none` — losing the one
     signal the class exists to report.
     """
     state, detail = rp._identity_evidence({"point": {"id": "p1"}}, {"id": "p1"})
@@ -430,7 +435,8 @@ def test_the_surviving_row_may_be_the_only_side_naming_an_identity() -> None:
     state, detail = rp._identity_evidence({"objectKind": "document"}, {"id": "obj-a"})
 
     assert state == "one_sided"
-    assert detail == "only the surviving row names id=obj-a"
+    assert detail == ("the surviving row names id=obj-a and this write names "
+                      "no comparable identity")
 
 
 def test_a_number_typed_id_is_compared_by_type_not_by_stringification() -> None:
@@ -443,6 +449,10 @@ def test_a_number_typed_id_is_compared_by_type_not_by_stringification() -> None:
     state, _detail = rp._identity_evidence({"id": "1"}, {"id": 1})
 
     assert state == "disagrees"
+    # …and the detail says WHAT differs, not two identical-looking values.
+    state, detail = rp._identity_evidence({"id": "1"}, {"id": 1})
+    assert state == "disagrees"
+    assert detail == "id: 1 (str) vs 1 (int)"
 
 
 def test_a_WITHHELD_section_is_never_read_for_an_identity() -> None:
@@ -507,7 +517,25 @@ def test_a_BLANK_identity_is_not_an_agreeing_coordinate() -> None:
     assert rp._identity_evidence({"id": ""}, {"id": ""}) == ("none", None)
     state, detail = rp._identity_evidence({"id": ""}, {"id": "obj-a"})
     assert state == "one_sided"
-    assert detail == "only the surviving row names id=obj-a"
+    assert detail == ("the surviving row names id=obj-a and this write names "
+                      "no comparable identity")
+
+
+def test_one_sided_says_nothing_about_what_the_payloads_CARRY() -> None:
+    """The read is bounded, so "only one side names X" is unprovable (#9318 R5).
+
+    `_identity_evidence` visits the top level and `_IDENTITY_SECTIONS` only, so a
+    payload naming the same id under `props` (withheld, never read) or inside a
+    list looks one-sided. The sentence is scoped to the READ now — the earlier
+    "only … names X" was falsified by the surviving payload in the same message.
+    """
+    state, detail = rp._identity_evidence({"props": {"id": "obj-9"}},
+                                          {"id": "obj-9"})
+
+    assert state == "one_sided"
+    assert "only" not in (detail or "")
+    assert detail == ("the surviving row names id=obj-9 and this write names no "
+                      "comparable identity")
 
 
 def test_the_identity_values_are_BOUNDED_like_every_other_log_value() -> None:

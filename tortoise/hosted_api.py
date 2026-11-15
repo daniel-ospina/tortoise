@@ -7631,10 +7631,10 @@ def _record_health() -> dict:
         block["record_writes_applied"] = applied
         block["record_last_write_at"] = last_write_at
     # ⛔ THE VERDICT, not just the number (#10185/#10620). The full vocabulary
-    # this counter carries — SIX values, documented at
+    # this counter carries — SEVEN values, documented at
     # ``monitoring.record_record_write_failure`` — is not uniformly
     # replay-healable, and naming four of them here sent operators to a replay
-    # that could not exist for two:
+    # that could not exist for two (three, since #9318):
     #
     #   ``write_failed``      the record was unreachable or the projection
     #                         refused the row — a REPLAY heals it.
@@ -7651,6 +7651,13 @@ def _record_health() -> dict:
     #   ``seam_unimportable`` the record module itself could not be imported
     #                         (a failing import hook), so the seam never ran —
     #                         the remedy is the import, not a replay.
+    #   ``journal_collision`` (#9318) the record WAS reached and refused to file
+    #                         this record under a position that already holds
+    #                         different content — either another record's, or
+    #                         this record's own row written by an older payload
+    #                         derivation. NO REPLAY CAN HEAL IT: the position row
+    #                         is append-only and the key carries no journal
+    #                         identity, which is #12894's schema decision.
     #
     # THE VERDICT IS WINDOW-BASED, NOT A FOLD OVER THE COUNTERS. #10185
     # (owner-authored; the open home for this half) forbids the fold: the

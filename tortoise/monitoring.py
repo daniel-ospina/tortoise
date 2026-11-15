@@ -2133,17 +2133,20 @@ def record_record_write_failure(reason: str) -> None:
       neither set it names the graph-bound credential instead;
     * ``write_failed`` — the record was unreachable or the projection refused
       the record; ``replay`` heals it from the journal;
-    * ``journal_collision`` — the record WAS reached and refused to index this
-      record under a journal position that already names a DIFFERENT record
-      (#9318). Neither unreachable nor misconfigured: the journal holds the
-      record, and what the record cannot do is file it under that position — so
-      the fix is not on this deployment at all. The population is any journal
+    * ``journal_collision`` — the record WAS reached and refused to file this
+      record under a journal position that already holds different content
+      (#9318): either a DIFFERENT record's, or this record's own row written by
+      an older payload derivation. The exception states both possibilities and
+      never chooses between them, because the durable payload carries no record
+      id. Neither unreachable nor misconfigured: the journal holds the record,
+      and what the record cannot do is file it under that position — so the fix
+      is not on this deployment at all. The population is any journal
       instance whose numbering resumes below the tenant's position high-water
       mark: a second durable journal under one tenant (two corpus roots, two
       SDKs with different ``event_log_path``), a journal RESTORE, a rotation, or
       a truncation. ``replay`` heals every other failure; it cannot heal this
-      one, because the append-only row that owns the position carries another
-      record, and the key carries no journal identity — that is ``#12894``'s
+      one, because the append-only row that owns the position cannot be
+      repaired and the key carries no journal identity — that is ``#12894``'s
       schema decision. A genuine REPLAY (same position, same content) never
       reaches this counter: the fold compares the surviving row's content and
       stays silent;
