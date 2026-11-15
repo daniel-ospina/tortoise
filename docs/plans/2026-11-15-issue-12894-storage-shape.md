@@ -1099,10 +1099,13 @@ form of words** — so the honest rule is:
 **Preconditions on the cutover, both already recorded elsewhere:** the graph is **QUIESCED**
 (`durability-posture.md:403` imposes exactly this on a rebuild) — and ⛔ **for a reason, not as ritual: a
 QUIESCED graph is what makes the two floors comparable at all**, because a live writer moves the journal
-between the two reads. **A non-quiesced cutover is the sharpest silent failure in this section**; §A7.6
-falsifier 19 asserts it. And **no second journal exists** for the graph (D-24 / `#9318`; the enumerated floor
-comes from the segment-spanning reader, so a *sealed* journal is handled and a *replaced* one is caught only
-by case 1 **or** by the three tail conditions above).
+between the two reads. **A non-quiesced cutover is the sharpest silent failure in this section** — and ⛔ **it is
+NOT falsified, because nothing can detect it: §A7.6 #19 was withdrawn precisely here** (the seed takes no lock a
+journal writer contends), so quiescence is an **operator-asserted precondition** and §A8.2 item 7 is where that
+gap is recorded. And **no second journal exists** for the graph (D-24 / `#9318`; the enumerated floor
+comes from the segment-spanning reader, so a *sealed* journal is handled — and a *replaced* one is caught by
+case 1, **or by nothing at all**: case 2's three tail conditions cannot evaluate condition (iii) today, so it
+**refuses by default** and this precondition is an assertion, not a check (§A7.5.5, §A8.2 item 9).
 
 #### A7.5.6 The arm: AFTER COMMIT, and the export re-serialises into seq order (B4)
 
@@ -1594,7 +1597,7 @@ is the step that changes it — not a drive-by.
 
 | # | finding | where it landed | its falsifier |
 |---|---|---|---|
-| **B1** | the seed is silently wrong for a journal with no position rows | **§A7.5.5** — the seed as executable SQL, the enumerated floor taken from the replay's **own** reader, `GREATEST(record_floor, journal_floor)`, and the **refusal** when the record floor is above the journal floor; three outcomes tabulated with the operator action each; §A6 **D-28** carries the shrink trigger; §A4.1's "recount never a wrong answer" is scoped | **§A7.6 #7** — a journal of N with zero rows must next write `N+1`; and the refusal arm must write **no** counter row |
+| **B1** | the seed is silently wrong for a journal with no position rows | **§A7.5.5** — the seed as executable SQL, the enumerated floor taken from the replay's **own** reader, `GREATEST(record_floor, journal_floor)`, and the **refusal** when the record floor is above the journal floor; three outcomes tabulated with the operator action each; §A6 **D-28** carries the shrink trigger; §A4.1's "recount never a wrong answer" is scoped | **§A7.6 #7** — a journal of N with zero rows must next write `N+1`; and the refusal arm must write **no** counter row. ⛔ **Round 3 narrows B1's claim and says so: case 2 (the D-25 tail heal) is DEFERRED**, because its condition (iii) — the same journal identity — has no data source until `#9318`, so the seed refuses by default and those graphs stay uncut (§A8.2 item 9). **B1 is answered for the case that can be decided and explicitly not for the case that cannot** — the alternative was a lift on two of three conditions |
 | **B2** | no rollback path; append-only trigger makes a mis-numbered row unrepairable | **§A7.5.11** — *stop allocating, keep the carried numbers, never return a graph to enumeration*, with a per-graph exemption requiring a **proof predicate**; the repair ladder priced rung by rung; the GUC path and its blast radius named; recreate-the-graph excluded with the reason | **§A7.6 #8** — the rollback must be refused for a graph with a hole, not silently renumber |
 | **B3** | `record_cursor` absent from the record's table registry → restore restarts the allocator at zero | **§A7.8** — the full deliverable list (table, RLS `USING` **and** `WITH CHECK`, `GRANT SELECT, INSERT, UPDATE` and **no DELETE**, `THE_RECORD_TABLES`, `RECORD_MIGRATIONS` both directions) + the **first-updatable-record-table** rationale + the purge decision; **§A7.8** falsifier: restore a dump, assert the next write is `max(seq)+1` | **§A7.8** (three sub-assertions: table present, counter ≥ max, restore **refuses** when it is not) |
 | **B4** | the arm is never stated; both arms break a guarantee | **§A7.5.6** — **AFTER COMMIT**, with the three-way argument (before / after / staging-is-not-a-third-arm), the contiguous-prefix export that re-serialises into seq order, and the admitted price: **the per-graph lock returns on the export path**; §A7.5.1 supplies the lock fact that makes it safe | **§A7.6 #9** — commit 5 and 6 out of arrival order; the file must still read 5,6 |
