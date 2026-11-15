@@ -71,7 +71,7 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 > prose names no PR, issue or build status as history. The rule is scoped to new prose because the file
 > retains references that record where a term or a decision lives; sweeping those is a separate change.
 > The `Convention` line loses its `(v3.6, #909)` version-and-ticket tail for the same reason.
-
+>
 > **Changelog v3.34 (2026-11-12 — issue #11824 — the successor clause becomes a definition of the word):**
 >
 > **Owner approval of the exact changes** is on record on #11824 (comment `6815950417`, the decision relay:
@@ -196,6 +196,30 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 > half:** the `:Object` write path still carries no status-vocabulary guard at all (**#10371**, open), and
 > policy B still needs a word *then*, with a producer and a revival path. `archived` still does not close
 > policy B.
+>
+> **⚠️ CORRECTION APPENDED 2026-11-15 — the `:Object` EXAMPLE in the paragraph above is also history.** The
+> write-path half of `#10371` was built by #12745 (`52c8b8f413`): the `:Object` and `:Subject` arms now refuse a
+> dead row's `status` transition to a NON-dead word. So *"an `archived` Object can be given `status='live'`"* is
+> no longer true — measured embedded at `main` @ `9e934efad5` + the #12790 slice:
+> `update_entity(<archived Object>, status='live')` -> `ValueError: update_entity refused the status transition
+> 'archived' -> 'live' on Object '…': 'archived' is TERMINAL for a :Object (ONTOLOGY §4.3)`, and likewise for
+> `status='dead'`.
+>
+> ⛔ **The refusal is NARROWER than "a lifecycle write on a terminal Point"** — the phrase the Point correction
+> above uses, where it also covers the validity window. The `:Object`/`:Subject` guard keys on the status
+> word ALONE, so measured at the same head on an `archived` Object, `validTo='2026-02-02'` -> ACCEPTED,
+> `status='archived'` beside a `title` edit -> ACCEPTED (an entailed status is not a transition; the guard's own
+> `#9649` F4-2 note says so, because a generic tenant PUT is a read-modify-write), and `status='superseded'`
+> (dead to another dead word) -> ACCEPTED. Read it as *"a terminal row cannot leave its dead set by a status
+> word"*, not as *"a terminal row is immutable"*.
+>
+> **What survives, and is still `#10371`:** the status-*VOCABULARY* guard (the "Still unbuilt, deliberately"
+> block below) — measured at the same head, `update_entity(<live Object>, status='dead')` and
+> `status='nonsense-word'` are both ACCEPTED, because the guard asks only whether the row is DEAD, never whether
+> the word is declared. The guard's message cites "ONTOLOGY §4.3" for that rule, but §4.3 states the Object
+> status vocabulary, calls `deprecated` "an independent terminal state" and describes `superseded` as "means
+> replaced" — it does not say a terminal Object cannot return, so the CODE is the authority for this refusal
+> until §4.3 carries the sentence.
 >
 > **Still unbuilt, deliberately:** the guard that enforces this vocabulary, including the AX three-part
 > refusals (`status='outdated'` naming both `archived` and `superseded`; one refusal shape across

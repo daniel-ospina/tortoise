@@ -94,19 +94,24 @@ NAIVE_RETURNING = {
 
 
 class _FakeCursor:
-    def __init__(self, value, fail_on: str | None = None):
+    def __init__(self, value, fail_on: str | tuple[str, ...] | None = None):
         self.value = value
-        #: Raise on the statement whose SQL contains this token — the seam a
-        #: fault test needs (`ROLLBACK TO SAVEPOINT` must still be issued
+        #: Raise on any statement whose SQL contains one of these tokens — the
+        #: seam a fault test needs (`ROLLBACK TO SAVEPOINT` must still be issued
         #: AFTER the failing statement, so the double cannot simply refuse
-        #: everything).
+        #: everything). SEVERAL tokens are allowed because a test that wants the
+        #: RECOVERY to fail must fail the read FIRST (to enter the recovery) and
+        #: the rollback second; one token cannot express both.
         self.fail_on = fail_on
         self.calls = []
 
     def execute(self, sql, params=None):
         self.calls.append((sql, params))
-        if self.fail_on and self.fail_on in sql:
-            raise RuntimeError(f"fixture fault: {self.fail_on}")
+        tokens = (self.fail_on,) if isinstance(self.fail_on, str) else (
+            self.fail_on or ())
+        for token in tokens:
+            if token and token in sql:
+                raise RuntimeError(f"fixture fault: {token}")
 
     def fetchone(self):
         return (self.value,)
@@ -119,17 +124,24 @@ class _FakeCursor:
 
 
 class _FakeConn:
-    """A connection in AUTOCOMMIT — the audit/read shape.
+    """A connection in AUTOCOMMIT — a HYPOTHETICAL caller, not this repo's.
 
     Deliberately `autocommit = True`: a failure cannot poison a transaction no
-    one owns, so the meter takes no savepoint here. `_TxFakeConn` below models
-    the WRITE path, where the caller owns the transaction and the savepoint is
-    load-bearing.
+    one owns, so the meter takes no savepoint here. ⛔ NO IN-REPO CALLER HANDS
+    THE METER THIS SHAPE: the audit path goes through `per_org_bytes` ->
+    `cp.rpc_value(AUDIT_RPC, ...)` and never touches the meter, and the meter's
+    only caller is `record_writer._measure_written_bytes`, whose connection is
+    `_TxFakeConn` below (`_default_connect` deliberately never turns autocommit
+    on). The arm is still worth pinning — `measure_written_rows` is a public
+    seam and a duck-typed caller could be autocommit — but a positive
+    measurement pin must NOT live here alone, or it grades the branch the
+    record door never takes: see
+    `test_the_seam_MEASURES_and_does_not_write_the_ledger`, which runs on both.
     """
 
     autocommit = True
 
-    def __init__(self, value, fail_on: str | None = None):
+    def __init__(self, value, fail_on: str | tuple[str, ...] | None = None):
         self.cur = _FakeCursor(value, fail_on=fail_on)
 
     def cursor(self):
@@ -321,6 +333,39 @@ def test_a_failed_measure_rolls_BACK_TO_ITS_SAVEPOINT_so_the_write_survives():
         "so the caller's transaction is left ABORTED and its commit() becomes "
         f"a ROLLBACK — the record write is lost silently: {verbs}")
     assert verbs[-1].startswith("RELEASE SAVEPOINT "), verbs
+
+
+def test_a_recovery_that_cannot_roll_back_is_LOUD_never_a_silent_skip(caplog):
+    """If the RECOVERY fails the transaction may be ABORTED — say so (#12781).
+
+    `measure_written_rows` must stay TOTAL (return None, never raise into the
+    write door), and it does. But the savepoint bookkeeping failing is not the
+    benign "meter skipped" case: `ROLLBACK TO SAVEPOINT` that does not take
+    leaves the caller's transaction in the exact state #12781 was filed about,
+    where the door's `commit()` becomes a ROLLBACK. Logging that at DEBUG,
+    beside the harmless case, is how a data-loss path stays silent — so it is a
+    WARNING naming the consequence, and this leg reds if it drops back to DEBUG.
+    """
+    import logging
+
+    conn = _TxFakeConn(
+        json.dumps(STORED_VECTOR),
+        fail_on=(ROWS_RPC, "ROLLBACK TO SAVEPOINT"),
+    )
+    with caplog.at_level(logging.DEBUG, logger="tortoise.postgres_bytes"):
+        assert measure_written_rows(
+            conn, org_id="o", graph_id="g", seqs=[1]) is None, (
+            "a failed savepoint recovery escaped as an exception — the meter "
+            "must never break the write")
+
+    shouty = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert shouty, (
+        "a savepoint recovery that could not run was logged only at DEBUG — "
+        "indistinguishable from 'the meter was skipped', which is the #12781 "
+        "shape: the caller's transaction may be ABORTED")
+    assert any("ABORTED" in r.getMessage() for r in shouty), (
+        f"the recovery failure did not name the consequence: "
+        f"{[r.getMessage() for r in shouty]}")
 
 
 def test_an_autocommit_connection_is_not_wrapped_in_a_savepoint():
@@ -585,7 +630,18 @@ def test_the_figure_carries_its_method_and_its_exclusions():
 # ══════════════════════════════════════════════════════════════════════════
 
 
-def test_the_seam_MEASURES_and_does_not_write_the_ledger(monkeypatch):
+@pytest.mark.parametrize("conn_shape", [_FakeConn, _TxFakeConn],
+                         ids=["autocommit", "caller-transaction"])
+def test_the_seam_MEASURES_and_does_not_write_the_ledger(monkeypatch, conn_shape):
+    """⛔ BOTH ARMS, because only ONE of them is the shipped path (#12781 review).
+
+    `record_writer._default_connect` never turns autocommit on, so the meter's
+    real caller is the `caller-transaction` shape — the one that now takes the
+    savepoint. A positive-measurement pin that ran only on `_FakeConn` would
+    grade the branch the record write door never takes, and the savepoint arm
+    (whose attribution correctness is the whole reason a savepoint was chosen
+    over a second connection) would be asserted nowhere.
+    """
     from tortoise import record_writer as rw
 
     calls = []
@@ -593,11 +649,19 @@ def test_the_seam_MEASURES_and_does_not_write_the_ledger(monkeypatch):
         metering, "record_postgres_bytes_written",
         lambda *a, **k: calls.append((a, k)))
 
+    conn = conn_shape(STORED_VECTOR)
     written = rw._measure_written_bytes(
-        _FakeConn(STORED_VECTOR), org_id="o", graph_id="g",
+        conn, org_id="o", graph_id="g",
         first_seq=7, n_records=1, position=True)
 
     assert written is not None and written.row_bytes == 7_241
+    # The read really happened on THIS arm, carrying its params — otherwise a
+    # `written` figure could come from anywhere and this pin would be vacuous.
+    assert any(
+        ROWS_RPC in str(sql).lower() and params == ("o", "g", [7])
+        for sql, params in conn.cur.calls), (
+        f"the meter reported {written.row_bytes}B without issuing its read "
+        f"with these params on this arm: {conn.cur.calls}")
     assert calls == [], (
         "the seam must MEASURE only: a ledger increment here is made on "
         "another store before the caller's commit, so a rolled-back write "
@@ -639,6 +703,44 @@ def test_the_ledger_increment_happens_AFTER_the_commit_not_before():
     write_src = inspect.getsource(rw.RecordWriter.write)
     assert "_record_written_bytes" not in write_src
     assert "written_bytes=written.row_bytes" in write_src
+
+
+def test_the_meter_call_lands_AFTER_the_insert_it_measures():
+    """The savepoint is only SAFE because it sits after the insert (#12781).
+
+    `postgres_bytes.measure_written_rows` takes a SAVEPOINT, and PostgreSQL
+    keeps the TOP-LEVEL xid for a subtransaction that performs no write — which
+    is what lets the meter still attribute rows by
+    `xmin = pg_current_xact_id()`. That holds ONLY while the insert happens
+    BEFORE the savepoint. Move the measurement earlier (or wrap the insert in
+    the savepoint) and the subtransaction writes, every row carries a subxid,
+    the filter misses them all, `rows: 0`/`written_bytes: 0` comes back, and
+    `_record_written_bytes` skips the figure — every org silently unmetered with
+    the whole suite green.
+
+    ⛔ THIS IS THE CODE-SIDE HALF, and it is not covered by the SQL artifact.
+    `supabase/tests/20261114000001_per_org_postgres_bytes.sql` §7b pins
+    PostgreSQL's SEMANTICS both ways (savepoint-after-insert => rows 1,
+    savepoint-before-insert => rows 0), but it is a static script and never
+    calls this module — so it stays green if the shipped ordering inverts. Read
+    the two together; neither alone closes the loop.
+
+    A fake connection cannot answer "where in `write` did the call land", so
+    this reads the live door — the same shape as
+    `test_the_ledger_increment_happens_AFTER_the_commit_not_before`.
+    """
+    import inspect
+
+    from tortoise import record_writer as rw
+
+    src = inspect.getsource(rw.RecordWriter.write)
+    insert_at = src.index("record_projection.replay(")
+    meter_at = src.index("_measure_written_bytes(")
+    assert meter_at > insert_at, (
+        "the byte meter is called BEFORE the rows it measures are written — "
+        "the meter's savepoint would then CONTAIN the insert, so every row "
+        "would carry a subxid, `xmin = pg_current_xact_id()` would match "
+        "nothing, and the org would be silently unmetered (#12781)")
 
 
 def test_the_ledger_writer_is_non_fatal_from_the_seam(monkeypatch):

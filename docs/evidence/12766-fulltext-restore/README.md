@@ -24,7 +24,7 @@ over three files in this directory (`SIM905`, `RUF100`, `B905`, `RUF010` ×2, `I
 replaced each construct with an equivalent form — a list literal for `str.split()`, `!s` for
 `str(…)` inside an f-string, an explicit `zip(strict=False)`, a re-sorted import block, and the
 removal of a `noqa` for a rule this repo does not select. **No expression changed its value**, so
-the figures above stand, and `f6ac10e41f` / `c9ff52ad0c` remain the commits the harness was
+the figures in this record stand, and `f6ac10e41f` / `c9ff52ad0c` remain the commits the harness was
 measured at.
 
 **Verdict — the kept fulltext index DOES block the instance, for 1.585 s at 90 000 nodes. Zero-standing

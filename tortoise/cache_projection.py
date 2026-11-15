@@ -801,16 +801,51 @@ FOLD_ON_CREATE_DEFAULTS: dict[str, dict[str, Any]] = {
 #:   holds LIVE. Truthiness agrees with the graph here, so it is what this table
 #:   uses; `tests/test_cache_projection.py`'s
 #:   `test_an_empty_carrier_is_not_a_supersession` pins the measured edge.
-#: * **NOT MONOTONE — the carriers CAN be cleared, and the record writes that.**
-#:   An explicit `sdk.update_entity(obj, status='live', supersededBy=None,
-#:   supersededAt=None)` journals `EntityMutated op=supersede` with null state and
-#:   the record mutation is `UPDATE public.object SET superseded_by = %s,
-#:   superseded_at = %s` bound to `(None, None)` — measured, carriers cleared, and
-#:   a rebuild then correctly derives nothing. Only the STATUS-ONLY
-#:   `update_entity(status='live')` shape is a record no-op (`never_store` yields
-#:   a literal `SET node_key = node_key`), so only that shape leaves an
-#:   un-supersede unrecorded. Do not generalise one shape into "the record cannot
-#:   express un-superseded"; it can, via the carriers.
+#: * **NOT MONOTONE — the carriers CAN be cleared, and the RECORD writes that.**
+#:   The record mutation for an `EntityMutated op=supersede` carrying null state
+#:   is `UPDATE public.object SET superseded_by = %s, superseded_at = %s` bound to
+#:   `(None, None)` — `tests/test_cache_projection.py`'s
+#:   `test_the_record_can_clear_the_carriers_it_can_set` pins that SQL — so a
+#:   rebuild derives nothing **from the carriers**. ⛔ AND THAT IS NOT
+#:   AGREEMENT BY ITSELF: once the carriers are cleared, the SUPERSESSION word
+#:   survives a rebuild only where the stream itself carries it — `state.status`
+#:   on an `EntityMutated`, or the
+#:   creation record's `payload.status` (the #9974 birth leg), or a
+#:   connector/pack `status_folds` event — and a carrier-only supersession
+#:   carries it in NONE of them: `commit_ops.apply_supersessions` journals
+#:   `ObjectSuperseded` with the successor and no status word (the word is
+#:   written by the live `_fold_object_superseded`, never journaled). So clearing
+#:   the carriers of a carrier-only supersession makes this reader derive
+#:   whatever the stream LAST stated instead — nothing at all, or a stale
+#:   current-reading word from the birth record — while the graph holds
+#:   `superseded`: a rebuild would serve a name the graph buries — #9974's damage
+#:   direction, and why a clear is not an un-supersede. Do not
+#:   generalise any one shape into "the record cannot express un-superseded"; it
+#:   can, via the carriers. The STATUS-ONLY `update_entity(status='live')` shape is
+#:   a record no-op (`never_store` yields a literal `SET node_key = node_key`).
+#:   ⛔ **THE DOOR, NOT THE LAYER — #12745 closes ONE SDK route out of a dead row.**
+#:   The example this bullet used to carry
+#:   (`sdk.update_entity(obj, status='live', supersededBy=None,
+#:   supersededAt=None)`) is REFUSED at `main` since #12745: `superseded` is in
+#:   `commit_ops.OBJECT_TERMINAL_STATUSES`, and that door now refuses a dead
+#:   state's transition to a current-reading STATUS WORD (measured: the refusal
+#:   lands BEFORE any write, so no `EntityMutated` reaches this stream).
+#:   The record's expressive power above is unchanged — it is the graph write
+#:   that no longer happens.
+#:   ⛔ **AND THE ROUTE IS NOT CLOSED — do not read the paragraph above as "the
+#:   row cannot be made current again".** A NULL status is NOT a word, so the
+#:   same guard skips it (`sdk.py`, `if not isinstance(_np_status, str):
+#:   continue`) and `update_entity(obj, status=None)` on a superseded Object is
+#:   still ACCEPTED: measured, it REMOVES the property (`SET n += {status: null}`)
+#:   and journals one record, and `live._terminal_excluded` treats an ABSENT
+#:   status as current, so the graph then serves the row as LIVE while
+#:   `DERIVED_FROM_RECORD` still folds `superseded` from the retained carrier
+#:   pair — the residual this bound already states below (the `status=None`
+#:   shape, #9974). So an un-supersede is WRITABLE today and NOT MODELLED as a
+#:   removal today; the two halves of that sentence are different defects, and
+#:   #12592 is the
+#:   missing SDK *supersede* verb for an Object/Subject, not the un-supersede
+#:   route.
 #:   ⛔ THE WRITE DOOR ADMITS THIS SHAPE, AND ONLY THIS SHAPE (#12786). A
 #:   terminal-Object guard (#12745) briefly refused EVERY departure from
 #:   `superseded`, which made this bullet's measured shape unexpressible and
@@ -3318,7 +3353,14 @@ def apply_event_stream_folds(
         # no-op, and `DERIVED_FROM_RECORD` still derives from the retained pair.
         # That divergence PRE-EXISTS this change (#10189) and is recorded on
         # #9974; a temporal guess here would manufacture a rule the record cannot
-        # support.
+        # support. ⛔ AND #12745 CHANGED ONE ARM OF IT: the `status='<current-reading
+        # word>'` un-terminate of an Object or a Subject is REFUSED before any write,
+        # so the graph can no longer read LIVE that way while this reader folds
+        # `superseded`. The NULL-status shape is NOT refused (a null is not a word),
+        # so that arm of this bound is unchanged and still stands: the graph serves
+        # the row as current (absent status) while this reader keeps folding the
+        # retained carrier pair (#9974). The ordering gap is unchanged either way —
+        # it is the WORD write that stopped arriving.
         if _is_terminal_status(current):
             out.append(node)
             continue

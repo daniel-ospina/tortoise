@@ -625,8 +625,13 @@ matrix gains its second wave (`ceil(5/3)` = 2): one wave of the measured slow-le
 (row above), so its band goes ~9 m → ~18 m (1 wave → 2), still narrower than
 the fast band under the same cap (~31.5 m), so it does not become the run's widest leg. **The wall
 guard measures that band, not the per-leg share**: `slow_wall_projection()` takes the job's
-`max-parallel` and reports `waves x (max leg + setup)` — `8.64 m` per leg → **`17.28 m`** from the
-committed `durations` map — and
+`max-parallel` and reports `waves x (max leg + setup)` — `8.66 m` per leg → **`17.31 m`** from the
+committed `durations` map (re-derived from the map, not restated: registering
+`test_10371_nonpoint_lifecycle_guard.py` in `slow_files` moved this projection from the `8.64 m` →
+`17.28 m` it read before that entry — the `slow_files` membership takes the file out of the fast pool
+and onto the slow pool, which is the whole of the change: the `durations` weight it was given is the
+flat `DEFAULT_FAST_WEIGHT`, so the row itself packs identically to no row at all, measured. The
+`test_the_documented_slow_wall_restates_the_committed_maps_own_projection` pin recomputes it) — and
 `test_slow_shards_are_duration_packed_and_meet_the_wall_target` holds it to
 `SLOW_LEG_CAPPED_WALL_TARGET_MIN` (20 m). That constant is a documented departure from the 10 m
 per-leg guideline: a guard that stopped at the per-leg share stayed GREEN while the job's wall was

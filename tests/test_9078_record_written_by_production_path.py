@@ -153,6 +153,29 @@ def tenant() -> tuple[str, str]:
 RECORD_MIGRATION_FILES = [REPO_ROOT / "supabase" / "migrations" / name
                           for name in record_projection.RECORD_MIGRATIONS]
 
+#: The metering migrations the per-org byte meter lives in, in apply order.
+#: ⛔ THEY ARE NOT RECORD MIGRATIONS. `RECORD_MIGRATIONS` is name-gated on
+#: `_record_`, so `_ensure_record_schema` never applies these and a
+#: fixture-armed database carries no `journal_event_bytes_for_rows` at all —
+#: which is exactly the fault arm's trigger below, and the reason the POSITIVE
+#: arm needs its own fixture (#12784 review: without this the suite pins the
+#: fault shape and the call ORDER, but never once asserts that a real meter
+#: reply parses into a positive figure through `parse_written_rows`).
+METERING_MIGRATION_FILES = (
+    REPO_ROOT / "supabase" / "migrations" / "0014_metering_records.sql",
+    REPO_ROOT / "supabase" / "migrations"
+    / "20261114000001_per_org_postgres_bytes.sql",
+)
+
+#: `0014` FKs `metering_records.team_id` at `public.teams`, and the record
+#: schema carries no `teams` table (`0006_teams.sql` is not a record migration).
+#: The FK reads the PRIMARY KEY alone, so one column is the whole substrate this
+#: fixture needs — the same deliberate minimum `_PREAMBLE` states for
+#: `organizations` and `graphs`, and for the same reason.
+_METERING_PREAMBLE = """
+CREATE TABLE IF NOT EXISTS public.teams (id text PRIMARY KEY);
+"""
+
 #: The record migrations re-applied on the "`journal_event` present ⇒ already
 #: migrated" shortcut's OTHER branch, in apply order, as `(path, creates)`:
 #: `creates` is the ONE relation the file itself creates, or `None` for a file
@@ -2097,6 +2120,105 @@ def _ensure_record_schema(conn) -> None:
             cur.execute(path.read_text(encoding="utf-8"))
 
 
+def _ensure_metering_schema(conn) -> None:
+    """Apply the ledger + the meter on EVERY run; SKIP only when it is absent.
+
+    ⛔ THE SKIP IS GATED ON THE FUNCTION ITSELF, NOT ON THE APPLY SUCCEEDING
+    (#12784 review, measured). Skipping whenever an apply raised was wrong TWICE
+    over on a REUSED container — the shape `_record_db` explicitly supports:
+
+      - the meter may ALREADY be there (`journal_event_bytes_for_rows` present,
+        while `0014` re-raises `DuplicateObject` on its own UNGUARDED
+        `CREATE POLICY`, migration line 24), and
+      - the LEDGER may be there while the meter is NOT: `0014` then dies on that
+        same policy BEFORE the meter file runs, so a whole-block ``try`` leaves
+        the function absent and this leg skips on the one database that could
+        answer it. Measured: applying `20261114000001` alone to that shape
+        creates the function, and this leg then passes.
+
+    ⛔ AND PRESENT IS NOT "PRESENT AS THIS TREE SHIPS IT" (#12784 review P2,
+    measured). The first version returned the moment the probe found the
+    function, so on a container that already carried it a CHANGE to the metering
+    migration was invisible and this leg PASSED while certifying a meter the
+    tree does not ship — measured: moving the attribution filter to `AND false`
+    (the `t.xmin::text = pg_current_xact_id()::text` predicate in
+    `20261114000001_per_org_postgres_bytes.sql`, the one the header calls "the
+    exact discriminator") PASSES
+    on a container that already has the function, and REDS once the function is
+    dropped first. CI is fresh per run and was never affected; a local re-run
+    against `_record_db`'s reused container was. So the files are re-applied on
+    every run, the way `_ensure_record_schema`'s `RECORD_REAPPLY_STEPS`
+    re-applies the record files it can: presence is not a verdict on CONTENT.
+
+    So each file is applied in its OWN transaction — a colliding earlier file
+    must not deny a later one, and a file that DID apply must not be rolled back
+    by a later failure — and the probe is the only verdict on whether the meter
+    exists. That is `_ensure_record_schema`'s own convention one function up:
+    presence is decided by inspection, never inferred from an apply succeeding.
+    """
+    probe = ("SELECT to_regprocedure('public."
+             f"{postgres_bytes.ROWS_RPC}(text,text,bigint[])')")
+    meter_path = METERING_MIGRATION_FILES[-1]
+    failure = None
+    #: ⛔ A FAILED APPLY IS NOT EXCUSED BY A FUNCTION BEING THERE. On a reused
+    #: container the meter may be present from an EARLIER run, so "the probe found
+    #: it" cannot distinguish "this tree's migration applied" from "this tree's
+    #: migration RAISED and an older function survived" — and the leg would then
+    #: grade a stranger and PASS (#12784 review P2, measured: a syntax error added
+    #: to the meter file still gave `1 passed` on a container that already carried
+    #: the function). CI provisions fresh, so this is the local/reused path — the
+    #: exact path the re-apply loop above was written for, which is why the failure
+    #: of THIS file is fatal rather than tolerated.
+    meter_failure = None
+    statements = [((_METERING_PREAMBLE,), None)]
+    statements += [((path.read_text(encoding="utf-8"),), path)
+                   for path in METERING_MIGRATION_FILES]
+    for (statement,), path in statements:
+        try:
+            with conn.cursor() as cur:
+                cur.execute(statement)
+            conn.commit()          # durable: a later file's failure cannot undo it
+        except Exception as exc:   # a fixture: the probe below decides, not this
+            conn.rollback()
+            # ⛔ THE **LAST** FAILURE WINS, NOT THE FIRST. `0014`'s
+            # `DuplicateObject` on its unguarded `CREATE POLICY` is the benign
+            # collision this function exists to survive — naming it would send an
+            # operator to the one error that provably does NOT deny the meter,
+            # while the meter file's own failure (the one that decides) went
+            # unsurfaced. The meter file is applied last, so keeping the last
+            # failure names the file the probe is asking about. That string is the
+            # ONLY annotation a skip produces, and a skip reds the required
+            # `test-record-postgres` check via `record-postgres-leg-gate.py`.
+            failure = exc
+            if path == meter_path:
+                meter_failure = exc
+    with conn.cursor() as check:
+        check.execute(probe)
+        present = check.fetchone()[0] is not None
+    if present and meter_failure is not None:
+        # ⛔ NAME THE FILE AND STATE THE FACT, NOT AN INFERENCE. "the function
+        # present here is NOT the one this tree ships" is not something this
+        # function can know: the meter file can apply cleanly on an earlier run
+        # and then fail on a statement appended AFTER the function, so the
+        # installed body IS this tree's and the sentence is false. What the run
+        # actually establishes is that THIS file does not apply here — which is
+        # enough to refuse the figure, and is also the datum an operator needs
+        # (`0014_metering_records.sql` is the other member of the same list, and
+        # its failure is the benign one this function exists to survive).
+        pytest.fail(
+            f"{meter_path.name} does not apply on this database "
+            f"({type(meter_failure).__name__}: {meter_failure}); an earlier or "
+            "foreign `journal_event_bytes_for_rows` may still be present, so "
+            "the positive leg cannot certify a figure from it")
+    if not present:
+        detail = (f"{type(failure).__name__}: {failure}" if failure
+                  else "the migrations applied but the function is absent")
+        pytest.skip(
+            f"this database cannot carry the byte meter ({detail}) — "
+            "there is no positive figure to assert without it, and none is "
+            "claimed")
+
+
 def _seed_tenant(conn, tenant: tuple[str, str]) -> None:
     org, graph = tenant
     with conn.cursor() as cur:
@@ -2529,6 +2651,93 @@ def test_a_failing_byte_meter_cannot_roll_back_a_record_write(monkeypatch, tenan
         assert dict(monitoring.record_write_failure_counts()) == failures_before, (
             "a metering fault was charged to `record_write_failures` — that "
             "counter names a WRITE that did not land, and this write did")
+    finally:
+        conn.close()
+
+
+def test_the_meter_reports_a_POSITIVE_figure_from_a_real_meter_rpc(tenant):
+    """The parse chain, on a REAL function — the half §7b declines to answer.
+
+    ⛔ WHAT WAS MISSING, stated so the gap is not re-opened (#12784 review P2).
+    The savepoint's *attribution* claim is "the function still reported
+    `rows: 1`", and it was pinned by two artifacts that both decline to call
+    this module: §7b of
+    `supabase/tests/20261114000001_per_org_postgres_bytes.sql` asserts on the
+    RPC's own JSON (`m ->> 'rows'`) and never imports `postgres_bytes`, and
+    `test_the_meter_call_lands_AFTER_the_insert_it_measures` indexes the
+    source text. The only pin that asserted a positive byte figure,
+    `test_the_seam_MEASURES_and_does_not_write_the_ledger`, feeds a CANNED
+    `STORED_VECTOR` dict through a fake cursor — so it proves the seam plumbs a
+    number, never that a real reply parses or that the real transaction
+    attributes. MEASURED consequence of that hole: metering on a second/
+    committed-state connection (the rejected alternative) yields
+    `written_rows=0, written_bytes=0` with the row present in Postgres, and a
+    `chunk_detail` type change in a later append-only migration would produce
+    the same silent zero — with §7b and the order pin BOTH green.
+
+    So this leg drives the real `journal_event_bytes_for_rows` through
+    `measure_written_rows`, inside a caller-owned transaction (the shipped
+    shape, so the savepoint arm is the one under test), and asserts the figure
+    is POSITIVE — never merely present.
+
+    Falsifier — the one that DISCRIMINATES, measured: break the attribution in
+    the migration (add `AND false` to the `t.xmin::text = pg_current_xact_id()`
+    predicate — the `journal_event` SELECT's last `WHERE` clause — of
+    `20261114000001_per_org_postgres_bytes.sql`) and this reds at
+    `measured.rows == 1` with `it attributed 0 row(s)` — the silent-zero shape
+    the savepoint ordering exists to avoid. Returning the row from a row set
+    instead of the jsonb value is the second arm: `parse_written_rows` refuses
+    it.
+
+    ⛔ THE OBVIOUS MUTANT IS NOT ONE, and it is named here because it reads like
+    a falsifier and is not (#12784 review P2, measured). Pointing `ROWS_RPC` at
+    a function that does not exist does NOT red this leg — it SKIPS it.
+    `_ensure_metering_schema` builds its probe from that same constant
+    (`to_regprocedure('public.{ROWS_RPC}(…)')`), so the renamed name is missing
+    from the probe too, the apply then creates the REAL name, the closing probe
+    still misses, and the leg skips on "this database cannot carry the byte
+    meter" before `measured` is ever read. In CI that skip is a RED
+    (`.github/scripts/record-postgres-leg-gate.py` fails the job on any skip), so
+    the leg is not silently absent where it counts — but the mutant does not
+    test what it looks like it tests, and a local run reads as green.
+    """
+    conn = _record_db()
+    try:
+        _ensure_record_schema(conn)
+        _ensure_metering_schema(conn)
+        _seed_tenant(conn, tenant)
+        # The savepoint arm is `conn.autocommit == False` — the shape
+        # `record_writer._default_connect` always hands the meter.
+        conn.autocommit = False
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO public.journal_event "
+                    "(org_id, graph_id, seq, event_type, payload) "
+                    "VALUES (%s, %s, %s, %s, %s)",
+                    (*tenant, 1, "SessionRecorded",
+                     json.dumps({"id": "sess-meter-positive", "turn_count": 2})))
+            measured = postgres_bytes.measure_written_rows(
+                conn, org_id=tenant[0], graph_id=tenant[1], seqs=[1])
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        assert measured is not None, (
+            "the meter returned None against a database that HAS the function "
+            "and a row this transaction inserted — a metering fault must not "
+            "be the answer here, or the positive half is unpinned again")
+        assert measured.rows == 1, (
+            "exactly one row was inserted by this transaction, so the meter "
+            f"must attribute exactly one — it attributed {measured.rows} "
+            f"row(s) / {measured.row_bytes}B. 0 is the silent-zero shape the "
+            "savepoint ordering exists to avoid; >1 is the DOUBLE COUNT the "
+            "migration header names as the trap that is LIVE, and "
+            "`parse_written_rows` will not refuse it")
+        assert measured.row_bytes > 0, (
+            f"the meter reported a zero figure ({measured.row_bytes}B) for a "
+            "row it did count — `parse_written_rows` read a real reply into 0, "
+            "which the canned-dict pins cannot see")
     finally:
         conn.close()
 

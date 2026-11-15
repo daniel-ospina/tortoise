@@ -498,9 +498,12 @@ DIMENSIONS: tuple[Dimension, ...] = (
             "postgres_storage_footprint();``) with no periodic caller by "
             "design — a scheduled footprint sweep is a separate decision, not "
             "a missing hook. The PER-ORG meter is NOT in this class: it runs on "
-            "the record write path, as TWO statements (the row sum plus the "
-            "TOAST-chunk disclosure) plus the ledger writer's window lookup and "
-            "increment RPC — so FOUR extra round trips per write segment, "
+            "the record write path, as THREE statements (`SAVEPOINT`, the "
+            "read, `RELEASE` — the read being ONE RPC that returns the row "
+            "sum and the TOAST-chunk disclosure together, so the disclosure "
+            "costs no extra round trip) plus the ledger writer's window "
+            "lookup and increment RPC — so FIVE extra round trips per write "
+            "segment, "
             "inside the caller's open transaction. It is measured there and "
             "RECORDED only after the caller commits."),
         limits=(

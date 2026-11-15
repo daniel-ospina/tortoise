@@ -1282,8 +1282,13 @@ SOURCE_PATTERNS = {
             # `select(['tortoise/postgres_bytes.py'])` -> surfaces=['core'], guard
             # present; with it -> surfaces=['api'], guard present. Naming the
             # source REPLACES the `core` fallback and loses no other guard:
-            # `tests/test_postgres_bytes.py` is the ONLY test that reads this
-            # module, and it is registered on both surfaces.
+            # `tests/test_postgres_bytes.py` reads this module directly and is
+            # registered on both surfaces, and
+            # `tests/test_9078_record_written_by_production_path.py` imports it
+            # too (monkeypatching `ROWS_RPC`), registered `api` + `core` — so no
+            # test that reads this module loses coverage either way. (#12783
+            # review: this read "the ONLY test that reads this module", which the
+            # second file falsified; the CONCLUSION is unchanged.)
             "tortoise/postgres_bytes.py",
             "tortoise/transport.py",
             # #2938: EventAPI — the append surface `ingest.py`, `mining.py`,

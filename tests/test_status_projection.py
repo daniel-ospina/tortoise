@@ -1198,28 +1198,83 @@ class TestLifecycleCarrierCoherence:
         finally:
             sdk.close()
 
-    def test_clearing_a_supersession_is_still_writable(self, tmp_path):
-        """`supersededBy=None` is a CLEAR, not a carrier — never refused.
+    def test_clearing_a_supersession_cannot_lift_a_dead_row(self, tmp_path):
+        """A CLEAR is not a carrier — and it does not undo a supersession.
 
-        This is the record-carried un-supersede (`cache_projection`'s
-        NOT MONOTONE bullet): the mutation writes both carrier columns, so a
-        rebuild derives nothing and agrees with the graph.
+        The carrier CLEAR (`supersededBy=None`) is still not a CARRIER, so the
+        #10192 guard does not over-block it (review P1 extended that guard to the
+        snake spelling, not to the CLEAR). What a clear cannot do is make the row
+        current again: `superseded` is in the family's own recorded dead set
+        (`commit_ops.OBJECT_TERMINAL_STATUSES`), and since #12745
+        `update_entity` refuses a dead row's transition to a current-reading
+        STATUS WORD — it asks about the RESULT status, not about which keys the
+        call supplied. ⛔ The word is the whole of it: a NULL status is not a
+        word, the guard skips it, and `update_entity(status=None)` is still
+        ACCEPTED — that shape removes the property and leaves the graph reading
+        current while the record keeps folding `superseded`, a residual this
+        test does not touch (#9974).
+
+        This test used to assert the OPPOSITE — that
+        `update_entity(oid, status="live", supersededBy=None, supersededAt=None)`
+        un-superseded an Object, because the mutation writes both carrier columns
+        and a rebuild therefore derives nothing (`cache_projection`'s NOT
+        MONOTONE bullet). That shape was coherent at the record layer, and it is
+        inside #12745's blast radius all the same, so the assertion has been RED
+        on every head since #12745 landed (measured on `main` at `9e934efad5`):
+
+            ValueError: update_entity refused the status transition
+            'superseded' -> 'live' on Object '…': 'superseded' is TERMINAL for a
+            :Object (ONTOLOGY §4.3), so this row cannot be made current again.
+
+        The assertion is therefore RESTATED to the decided contract, not
+        dropped: the door refuses the transition, the refusal leaves the row
+        exactly as it was (nothing half-written, nothing journaled), and the
+        bare CLEAR with no `status` still writes. What is NOT pinned here: the
+        snake spelling is accepted (`None` is not a carrier under either
+        spelling) and its EFFECT is not asserted — a snake carrier SET writes a
+        shadow `superseded_by` node property that the CAMEL-keyed read surfaces
+        (`audit` 4b/4c, `assembly._probe_visible_successors`, the renderer) do
+        not consult, while `derived_invalidation._retirement` reads both
+        spellings, so a snake-only carrier can flip an input to retired with no
+        camel carrier present (#12782). A snake CLEAR removes the property again,
+        so a clear proves nothing about it either way.
         """
-        sdk = TortoiseSDK(str(tmp_path / "t10192x.db"))
+        events = tmp_path / "events"
+        events.mkdir()
+        journal = events / "events.jsonl"
+        sdk = TortoiseSDK(str(tmp_path / "t10192x.db"),
+                          event_log_path=str(journal))
         try:
             oid = _make_carrier_entity(sdk, "Object", "beta")
             sdk.update_entity(oid, status="superseded", supersededBy="beta-v2",
                               supersededAt="2026-01-01T00:00:00Z")
-            sdk.update_entity(oid, status="live", supersededBy=None,
-                              supersededAt=None)
-            assert _carrier_row(sdk, "Object", "beta")[1:] == ("live", None,
-                                                               None)
-            # …and the SNAKE spelling of a clear is a clear too: `None` is not a
-            # carrier under either spelling, so the guard must not over-block it
-            # (review P1 extended the guard to that spelling, not the CLEAR).
+            superseded_row = _carrier_row(sdk, "Object", "beta")
+            assert superseded_row[1:] == ("superseded", "beta-v2",
+                                          "2026-01-01T00:00:00Z"), (
+                superseded_row)
+            journal_before = len(_records(journal))
+            with pytest.raises(ValueError, match="is TERMINAL for a :Object"):
+                sdk.update_entity(oid, status="live", supersededBy=None,
+                                  supersededAt=None)
+            assert _carrier_row(sdk, "Object", "beta") == superseded_row, (
+                "a REFUSED un-supersede still moved the row — the refusal must "
+                "leave it exactly as it stood")
+            assert len(_records(journal)) == journal_before, (
+                "a refused un-supersede appended a journal record — the "
+                "refusal must land before any write reaches the stream")
+
+            # The CLEAR itself is still not a carrier: with no `status` in the
+            # call there is no transition to ask about, so it is accepted — and
+            # the row stays terminal, which is the point.
+            sdk.update_entity(oid, supersededBy=None, supersededAt=None)
+            cleared = _carrier_row(sdk, "Object", "beta")
+            assert cleared[1:] == ("superseded", None, None), (
+                f"the bare carrier CLEAR did not clear both columns while "
+                f"leaving the row dead: {cleared}")
+            # …and the SNAKE spelling of a clear is accepted too (`None` is not a
+            # carrier under either spelling). Its effect is NOT pinned here: a
+            # snake carrier SET is what writes the shadow property (#12782).
             sdk.update_entity(oid, superseded_by=None, superseded_at=None)
-            assert _carrier_row(sdk, "Object", "beta")[1:] == ("live", None,
-                                                               None)
         finally:
             sdk.close()
 

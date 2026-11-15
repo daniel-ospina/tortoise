@@ -1719,12 +1719,22 @@ def _measure_written_bytes(
 
     ⛔ TOTAL — every failure is logged at DEBUG and returns ``None``. A meter
     must never fail, or change the outcome of, a record write. ⚠️ THAT SENTENCE
-    IS TRUE ONLY BECAUSE OF THE SAVEPOINT in
-    :func:`tortoise.postgres_bytes.measure_written_rows`, not because the
-    exception is caught: this call runs inside the caller's transaction, and a
-    caught exception there still leaves it ABORTED, so the caller's `commit()`
-    would roll the whole write back (#12781 — ten empty-record failures on
-    `main` at `9e934efad5`).
+    HOLDS FOR THE METER'S OWN FAILURES — AND ONLY FOR THOSE — because of the
+    SAVEPOINT in :func:`tortoise.postgres_bytes.measure_written_rows`, not
+    because the exception is caught: this call runs inside the caller's
+    transaction, and a caught exception there still leaves it ABORTED, so the
+    caller's `commit()` would roll the whole write back (#12781 — ten
+    empty-record failures on `main` at `9e934efad5`).
+
+    ⛔ AND IT DOES NOT HOLD WHEN THE SAVEPOINT BOOKKEEPING ITSELF FAILS. If
+    ``SAVEPOINT``/``RELEASE`` cannot be issued (``25P02`` on an already-aborted
+    transaction, ``25P01`` outside a block, a dead connection) then the
+    savepoint is precisely what is missing, and a caller that commits into that
+    transaction anyway still rolls its rows back. That arm is DISCLOSED at
+    WARNING, not repaired — the same residual the meter's own
+    ``measure_written_rows`` docstring names. Every one of those triggers means
+    the write was already doomed before the meter ran, so no new loss is
+    introduced.
 
     ⛔ IT DOES NOT WRITE THE LEDGER. The measurement is reported on
     :attr:`RecordWrite.written_bytes`; the increment happens where the COMMIT

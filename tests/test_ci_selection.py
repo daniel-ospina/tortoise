@@ -22230,18 +22230,31 @@ def test_the_health_honesty_suite_is_selected_on_BOTH_halves_of_its_module_pair(
         (`c1db6f3df` carried TWO `api` and TWO `core`; #12482's `d05688df5990` deleted one
         of each, and #12645's pre-rebase original `9122a08a72` the other of each), and both
         deletions applied.
-      * the DUPLICATE came from the `merge=union` attribute (`.gitattributes:21`), which
-        keeps BOTH sides of the conflicted `api` region — so the rebase printed
-        "Successfully rebased". ⚠️ It did NOT go unnoticed: `--integrity` reds on it
-        (`duplicate_entries()` on `f2ec5ec092`'s manifest →
+      * the DUPLICATE did NOT come from `merge=union` keeping both copies of one row: each
+        conflicted `api` region carries the pin on exactly ONE side (plain mode leaves it at
+        `:1010` in the first region and `:1727` in the second, `<<<<<<<`/`=======`/
+        `>>>>>>>` around both), so both rows survive as one-per-region — each parent's own
+        surviving append — and the divergent deletions of the LOST ARM are the same
+        mechanism. Measured: plain `git merge-file -p` over the same three blobs carries the
+        same two `api` rows and the same zero `core` rows, differing only in the markers.
+        What the attribute (`.gitattributes:21`) did was keep each region's surviving side
+        INSTEAD of marking the conflict — so the rebase printed "Successfully rebased" over
+        a parseable file that still held two `api` rows. ⚠️ It did NOT go unnoticed:
+        `--integrity` reds on it (`duplicate_entries()` on `f2ec5ec092`'s manifest →
         `['api: test_12477_health_honesty.py']`). That is the half that WAS caught; the arm
         is the half that was not.
 
-    ⚠️ `config/ci-surfaces.yml`'s note retracts a DIFFERENT claim about this same driver,
-    and borrowing it here would be wrong: it says a duplicate is not evidence union ran,
-    because two INDEPENDENT appends at different anchors survive as two rows with the
-    attribute set or unset (#12464/#12640, 69 s apart). That is `main`'s original pair, not
-    a conflicted replay.
+    ⚠️ So `config/ci-surfaces.yml`'s note applies here too, rather than being a different
+    claim: a duplicate ROW is not evidence that union ran, because rows appended at
+    different anchors survive as two rows with the attribute set or unset (#12464/#12640,
+    69 s apart — `main`'s original pair, no conflict involved). What union changed in THIS
+    replay is only whether the merge STOPS: each conflicted region already had one side
+    empty, so it never had two rows of its own to keep. ⛔ Do NOT generalise that —
+    `.gitattributes:10-12` is explicit that union keeps BOTH sides' lines, which is why a
+    duplicate mapping key or a duplicate entry can come out of it, and why
+    `duplicate_entries()` exists to catch one. The narrower true statement is that union
+    never RECONCILES rows — and neither does plain mode, which carries the same zero `core`
+    rows — which is why nothing but a pin on the dual registration notices the lost arm.
 
     `integrity()` is not a substitute for this pin, and that is the point: it answers ONE
     question — is every `tests/**/test_*.py` classified SOMEWHERE — so a file that keeps
@@ -22254,6 +22267,24 @@ def test_the_health_honesty_suite_is_selected_on_BOTH_halves_of_its_module_pair(
     `d05688df5990` api=1/core=1.)
     """
     pin = "test_12477_health_honesty.py"
+
+    # The REGISTRATION itself, read off the manifest — the prose above says nothing under
+    # `tests/` ASSERTED the surface ROWS. MEASURED at this head, the selection asserts below
+    # already red when either row is deleted, because no OTHER surface lists this file
+    # (`onboarding` matches a `hosted_api.py` diff but carries no row for it), so what this
+    # pair adds is that the ROW is the subject of the assertion: the day any second surface
+    # also lists the file, a selection assert would pass over a lost `api`/`core` row and
+    # this one would not.
+    manifest = load_manifest()
+    assert pin in manifest["surfaces"]["api"], (
+        "`surfaces.api` must list this suite by NAME — the row is what a lost arm takes "
+        "away, and a selection assert is only as good as there being no sibling surface "
+        "that also carries the file"
+    )
+    assert pin in manifest["surfaces"]["core"], (
+        "`surfaces.core` must list this suite by NAME — the rows, not the selection, are "
+        "what a lost arm takes away"
+    )
 
     api_arm = _sel(["tortoise/hosted_api.py"])
     assert api_arm["surfaces"] == ["api", "onboarding"], api_arm["surfaces"]
