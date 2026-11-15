@@ -283,7 +283,7 @@ def test_a_reserved_envelope_prop_cannot_forge_or_suppress_the_record(env):
     # The Source door emits its OWN record (`SourceCreated`), bypasses the
     # intake strip, and drops the reserved names itself — including the ACTOR
     # keys, which the sanitizer would otherwise have taken.
-    sdk.create_source("https://example.com/rt", "document",
+    sdk.register_source("https://example.com/rt", "document",
                       recorded_ts=forged, initiated_by="FORGED-ACTOR",
                       summary="rt")
     src_rec = next(e for e in _journal(events)
@@ -359,7 +359,7 @@ def test_a_reserved_envelope_prop_cannot_forge_or_suppress_the_record(env):
     _loud_d30 = {"payload"}
     for name in sorted(_loud_d30 & set(_all_reserved)):
         with pytest.raises(ValueError, match="raw payload"):
-            sdk.create_source(f"https://example.com/d30-{name}", "document",
+            sdk.register_source(f"https://example.com/d30-{name}", "document",
                               **{name: _forged_prop_value(name, forged)})
     _bypass: dict[str, str] = {}
     for i, name in enumerate(n for n in _all_reserved if n not in _loud_d30):
@@ -370,7 +370,7 @@ def test_a_reserved_envelope_prop_cannot_forge_or_suppress_the_record(env):
         # through the documented nested-`props` convention (`_coerce_props`),
         # which is flattened before the names are splatted into `_emit_event`.
         _kw = {"props": {name: _value}} if name == "self" else {name: _value}
-        sdk.create_source(url, "document", **_kw)
+        sdk.register_source(url, "document", **_kw)
         _bypass[url] = name
     _src = {e.get("id"): e for e in _journal(events)
             if e.get("type") == "SourceCreated"}
@@ -415,7 +415,7 @@ def test_update_entity_source_refuses_reserved_props_loudly(env):
     """
     sdk, _events = env
     url = "https://example.com/refuse"
-    sdk.create_source(url, "document")
+    sdk.register_source(url, "document")
     # UNDECLARED reserved names: the loud D30 refusal still fires even though the
     # intake strip already removed them from `props` — the pre-strip capture is
     # what keeps the guard answerable.
@@ -489,7 +489,7 @@ def test_a_relay_door_strips_the_reserved_names_before_splatting(env):
     assert pt_live.get("summary") == "relayed" and "self" not in pt_live, (
         f"the update_entity relay mishandled a reserved prop: {pt_live!r}")
     url = "https://example.com/relay-source"
-    sdk.create_source(url, "document")
+    sdk.register_source(url, "document")
     with pytest.raises(ValueError, match="cannot be set on a :Source"):
         sdk.update_entity(url, props={"self": "FORGED"})
 

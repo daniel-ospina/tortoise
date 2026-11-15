@@ -412,7 +412,7 @@ class TestBaselineProvenance:
         the freeze is the token class, not a dead edge.
         """
         url = "https://legacy-token.example"
-        sdk.create_source(url, "document", tier="T1", sourceDate=FRESH)
+        sdk.register_source(url, "document", tier="T1", sourceDate=FRESH)
         pid = sdk.create_point("statement", "legacy token row",
                                extractedFrom=url)["id"]
 
@@ -668,7 +668,7 @@ class TestBaselineProvenance:
         trusted, so the forged point stays frozen at the value the caller
         actually set, with no marker.
         """
-        sdk.create_source("https://p1b-t4.example", "document", tier="T4",
+        sdk.register_source("https://p1b-t4.example", "document", tier="T4",
                           sourceDate=FRESH)
         honest = sdk.create_point("statement", "honest p1b", status="live",
                                   extractedFrom="https://p1b-t4.example")["id"]
@@ -706,7 +706,7 @@ class TestBaselineProvenance:
         p = sdk.create_point("statement", "worded, then orphaned",
                              status="live", credibility="gold",
                              extractedFrom=url)["id"]
-        sdk.create_source(url, "document", tier="T1", sourceDate=FRESH)
+        sdk.register_source(url, "document", tier="T1", sourceDate=FRESH)
         sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
         assert sdk.get_point(p)["ep_alpha"] == pytest.approx(5.1)  # T1 + word
         # Delete the ONLY source edge — the revert pass would otherwise fire.
@@ -836,7 +836,7 @@ class TestAuthorAsSourceIntegration:
         assert pt["baseline_source"] == "set-by-author"
 
     def test_originating_agent_session_is_weak(self, sdk):
-        sdk.create_source("session:orig", "agentSession")
+        sdk.register_source("session:orig", "agentSession")
         p = sdk.create_point("statement", "agent reasoned it",
                              extractedFrom="session:orig")
         sdk._apply_source_inheritance(recency_decay=1.0)
@@ -847,8 +847,8 @@ class TestAuthorAsSourceIntegration:
 
     def test_carrying_agent_session_contributes_zero(self, sdk):
         """A session that `references` an attached document is provenance."""
-        sdk.create_source("https://doc.example", "document", tier="T1")
-        sdk.create_source("session:carrier", "agentSession")
+        sdk.register_source("https://doc.example", "document", tier="T1")
+        sdk.register_source("session:carrier", "agentSession")
         sdk._get_proj().g.query(
             "MATCH (a:Source {url:$a}),(b:Source {url:$b}) "
             "CREATE (a)-[:references]->(b)",
@@ -878,10 +878,10 @@ class TestAuthorAsSourceIntegration:
         originating case the round-5 one. Both must now stay
         0.4 / 'set-by-author' / no label.
         """
-        sdk.create_source("https://explicitdoc.example", "document", tier="T1",
+        sdk.register_source("https://explicitdoc.example", "document", tier="T1",
                           sourceDate=FRESH)
         sess = f"session:explicit-{session_kind}"
-        sdk.create_source(sess, "agentSession")
+        sdk.register_source(sess, "agentSession")
         if session_kind == "carrier":
             sdk._get_proj().g.query(
                 "MATCH (a:Source {url:$a}),(b:Source {url:$b}) "
@@ -907,7 +907,7 @@ class TestAuthorAsSourceIntegration:
         """An authored gold word + a T1 source is the SOURCE aggregate
         (1 + 0.1 + 4 = 5.1) — the word is one weak body, not the claim's own
         frozen strength, and the real source displaces it."""
-        sdk.create_source("https://pw.example", "document", tier="T1",
+        sdk.register_source("https://pw.example", "document", tier="T1",
                           sourceDate=FRESH)
         p = sdk.create_point("statement", "gold word + T1 source", status="live",
                              credibility="gold", extractedFrom="https://pw.example")
@@ -940,7 +940,7 @@ class TestAuthorAsSourceIntegration:
         proj = sdk._get_proj()
         if ordering == "source-first":
             ref = "https://neutral-doc.example"
-            sdk.create_source(ref, "document")
+            sdk.register_source(ref, "document")
         elif ordering == "stub-first":
             ref = "https://neutral-stub.example"
         else:
@@ -978,7 +978,7 @@ class TestAuthorAsSourceIntegration:
         """An agent-authored gold claim: the agentSession IS the evidence body
         (weak); the word is not a T0 source, so the prior collapses from 0.909
         to the weakest registered weight, exactly like a person's word."""
-        sdk.create_source("session:agent-gold", "agentSession")
+        sdk.register_source("session:agent-gold", "agentSession")
         p = sdk.create_point("statement", "agent asserts gold", status="live",
                              credibility="gold",
                              extractedFrom="session:agent-gold")
@@ -990,9 +990,9 @@ class TestAuthorAsSourceIntegration:
     def test_nand_edge_never_changes_the_prior(self, sdk):
         """#6151 rejected alternative: the prior reads NO NAND edge. The same
         T1 topology gives Beta(5,1) whether or not the refutes edge exists."""
-        sdk.create_source("https://na.example", "document", tier="T1",
+        sdk.register_source("https://na.example", "document", tier="T1",
                           sourceDate=FRESH)
-        sdk.create_source("https://nb.example", "document", tier="T1",
+        sdk.register_source("https://nb.example", "document", tier="T1",
                           sourceDate=FRESH)
         a = sdk.create_point("statement", "A", status="live",
                              extractedFrom="https://na.example")["id"]
@@ -1009,9 +1009,9 @@ class TestAuthorAsSourceIntegration:
         """(a) POST-EP: the symmetric ``phi_nand`` makes BOTH sides pay, so an
         equal T1 pair settles at ~0.6689, not the prior-level 0.5. Expected and
         correct under this design — contradiction stays EP's domain."""
-        sdk.create_source("https://ea.example", "document", tier="T1",
+        sdk.register_source("https://ea.example", "document", tier="T1",
                           sourceDate=FRESH)
-        sdk.create_source("https://eb.example", "document", tier="T1",
+        sdk.register_source("https://eb.example", "document", tier="T1",
                           sourceDate=FRESH)
         a = sdk.create_point("statement", "A", status="live",
                              extractedFrom="https://ea.example")["id"]
@@ -1030,11 +1030,11 @@ class TestAuthorAsSourceIntegration:
         """(b) POST-EP: an agent-authored claim has no self-declared strength to
         defend (prior 0.5238), so a weak T4 refutation pushes it below 0.5.
         Identical to the person case — the weight no longer varies by author."""
-        sdk.create_source("session:agent-b", "agentSession")
+        sdk.register_source("session:agent-b", "agentSession")
         c = sdk.create_point("statement", "agent reasoned it", status="live",
                              credibility="gold",
                              extractedFrom="session:agent-b")["id"]
-        sdk.create_source("https://weak.example", "document", tier="T4",
+        sdk.register_source("https://weak.example", "document", tier="T4",
                           sourceDate=FRESH)
         w = sdk.create_point("statement", "weak refuter", status="live",
                              extractedFrom="https://weak.example")["id"]
@@ -1051,7 +1051,7 @@ class TestAuthorAsSourceIntegration:
         refutation only moved 0.9091 -> 0.8992."""
         c = sdk.create_point("statement", "person typed gold", status="live",
                              credibility="gold")["id"]
-        sdk.create_source("https://weak.example", "document", tier="T4",
+        sdk.register_source("https://weak.example", "document", tier="T4",
                           sourceDate=FRESH)
         w = sdk.create_point("statement", "weak refuter", status="live",
                              extractedFrom="https://weak.example")["id"]
@@ -1066,9 +1066,9 @@ class TestAuthorAsSourceIntegration:
         refuted premise keeps its source-derived prior and a downstream claim
         sees the contradiction only through EP. Pinned: the priors stay
         Beta(5,1) and the chain settles at the balanced 0.6689."""
-        sdk.create_source("https://cha.example", "document", tier="T1",
+        sdk.register_source("https://cha.example", "document", tier="T1",
                           sourceDate=FRESH)
-        sdk.create_source("https://chb.example", "document", tier="T1",
+        sdk.register_source("https://chb.example", "document", tier="T1",
                           sourceDate=FRESH)
         a = sdk.create_point("statement", "chain A", status="live",
                              extractedFrom="https://cha.example")["id"]
@@ -1099,7 +1099,7 @@ class TestAuthorAsSourceIntegration:
         (0.5238); the labelled claim stays >= the unlabelled one. The born-live
         part really did receive the provision and keeps it (3.0 + word + T4).
         """
-        sdk.create_source("https://d2t4.example", "document", tier="T4",
+        sdk.register_source("https://d2t4.example", "document", tier="T4",
                           sourceDate=FRESH)
         word = sdk.create_point("option", "draft word", status="draft",
                                 credibility="gold",
@@ -1131,9 +1131,9 @@ class TestAuthorAsSourceIntegration:
         body and must count. Measured before the fix: person 5.1 vs
         agent-with-carrying-session 5.0 (the word silently suppressed).
         """
-        sdk.create_source("https://carrydoc.example", "document", tier="T1",
+        sdk.register_source("https://carrydoc.example", "document", tier="T1",
                           sourceDate=FRESH)
-        sdk.create_source("session:carrier", "agentSession")
+        sdk.register_source("session:carrier", "agentSession")
         sdk._get_proj().g.query(
             "MATCH (a:Source {url:$a}),(b:Source {url:$b}) "
             "CREATE (a)-[:references]->(b)",
@@ -1175,7 +1175,7 @@ class TestAuthorAsSourceIntegration:
         assert before["baseline_system_default"] is True, before
         assert before["baseline_source"] == "set-by-author", before
         # Attach a REAL T1 source and run the recompute.
-        sdk.create_source("https://mit-t1.example", "document", tier="T1",
+        sdk.register_source("https://mit-t1.example", "document", tier="T1",
                           sourceDate=FRESH)
         sdk._get_proj()._link_source(mid, "https://mit-t1.example")
         sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
@@ -1200,7 +1200,7 @@ class TestAuthorAsSourceIntegration:
         assert pt["credibility"] == "T1", pt
         assert pt["baseline_system_default"] is True, pt
         assert pt["ep_alpha"] == pytest.approx(3.0 + AUTHOR_ASSERTION_WEAK_PC), pt
-        sdk.create_source("https://mit2-t1.example", "document", tier="T1",
+        sdk.register_source("https://mit2-t1.example", "document", tier="T1",
                           sourceDate=FRESH)
         sdk._get_proj()._link_source(mid, "https://mit2-t1.example")
         sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
@@ -1223,8 +1223,8 @@ class TestAuthorAsSourceIntegration:
         the falsifier the review asked for: reverting the query to tiered-only
         turns it red (probe recorded in the land report).
         """
-        sdk.create_source("https://neutral-carried.example", "document")
-        sdk.create_source("session:neutral-carrier", "agentSession")
+        sdk.register_source("https://neutral-carried.example", "document")
+        sdk.register_source("session:neutral-carrier", "agentSession")
         sdk._get_proj().g.query(
             "MATCH (a:Source {url:$a}),(b:Source {url:$b}) "
             "CREATE (a)-[:references]->(b)",
@@ -1251,7 +1251,7 @@ class TestAuthorAsSourceIntegration:
         one more weak body on top of the derived baseline; the next recompute
         re-derives it from the source PLUS the word.
         """
-        sdk.create_source("https://p2-t1.example", "document", tier="T1",
+        sdk.register_source("https://p2-t1.example", "document", tier="T1",
                           sourceDate=FRESH)
         p = sdk.create_point("statement", "inherited then word",
                              status="live",
@@ -1279,7 +1279,7 @@ class TestAuthorAsSourceIntegration:
         carrying a strong body, which the #398 ruling forbids. The belief path
         now routes ``agentSession`` to the carrier rule BEFORE tier resolution.
         """
-        sdk.create_source("session:tiered-p33", "agentSession", tier="T0")
+        sdk.register_source("session:tiered-p33", "agentSession", tier="T0")
         p = sdk.create_point("statement", "tiered session", status="live",
                              extractedFrom="session:tiered-p33")["id"]
         sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
@@ -1290,9 +1290,9 @@ class TestAuthorAsSourceIntegration:
     def test_explicitly_tiered_carrying_session_is_still_zero(self, sdk):
         """#6151 review P3-3 — a tiered ``agentSession`` that CARRIES an
         attached source is still provenance (ZERO), not a T0 body."""
-        sdk.create_source("https://p33-doc.example", "document", tier="T1",
+        sdk.register_source("https://p33-doc.example", "document", tier="T1",
                           sourceDate=FRESH)
-        sdk.create_source("session:p33-carrier", "agentSession", tier="T0")
+        sdk.register_source("session:p33-carrier", "agentSession", tier="T0")
         sdk._get_proj().g.query(
             "MATCH (a:Source {url:$a}),(b:Source {url:$b}) "
             "CREATE (a)-[:references]->(b)",
@@ -1323,11 +1323,11 @@ class TestExplicitBaselineSupersedesTheWord:
     @pytest.mark.parametrize("carrier", ["t1-source", "originating-session"])
     def test_explicit_baseline_survives_carrier(self, sdk, carrier):
         if carrier == "t1-source":
-            sdk.create_source("https://p1doc.example", "document", tier="T1",
+            sdk.register_source("https://p1doc.example", "document", tier="T1",
                               sourceDate=FRESH)
             attached = "https://p1doc.example"
         else:
-            sdk.create_source("session:p1-origin", "agentSession")
+            sdk.register_source("session:p1-origin", "agentSession")
             attached = "session:p1-origin"
         # Born with an authored word: label + one weak body.
         p = sdk.create_point("statement", f"word then explicit ({carrier})",
@@ -1354,7 +1354,7 @@ class TestExplicitBaselineSupersedesTheWord:
         ONE weak body + label (0.5238), and a real T1 source still displaces
         it (5.1 -> 0.8361).
         """
-        sdk.create_source("https://wordpath.example", "document", tier="T1",
+        sdk.register_source("https://wordpath.example", "document", tier="T1",
                           sourceDate=FRESH)
         p = sdk.create_point("statement", "word keeps its body",
                              status="live", credibility="gold",
@@ -1396,7 +1396,7 @@ class TestExplicitBaselineSupersedesTheWord:
         dup = sdk.create_point("option", "p1a decide word", dedup=True,
                                credibility="low")["id"]
         assert dup == p
-        sdk.create_source("https://p1a.example", "document", tier="T1",
+        sdk.register_source("https://p1a.example", "document", tier="T1",
                           sourceDate=FRESH)
         sdk._get_proj()._link_source(p, "https://p1a.example")
         sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
@@ -1468,7 +1468,7 @@ class TestWordPointRebaselinedAfterRebuild:
         assert healed["credibility"] == "T0", healed
         # With a real source the word plus the re-asserted provision recompute
         # above the neutral weak body (the +2.0 is re-injected).
-        sdk.create_source("https://rebuilt.example", "document", tier="T1",
+        sdk.register_source("https://rebuilt.example", "document", tier="T1",
                           sourceDate=FRESH)
         sdk._get_proj()._link_source(p, "https://rebuilt.example")
         sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)

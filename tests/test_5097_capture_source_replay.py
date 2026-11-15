@@ -399,7 +399,7 @@ def test_the_carrier_does_not_clear_a_version_window_the_node_had(tmp_path):
     sdk = TortoiseSDK(str(tmp_path / "tortoise.db"), event_log_path=log_path)
     try:
         url = f"session:{SESSION_ID}"
-        sdk.create_source(url, "agentSession", contentHash="h-1",
+        sdk.register_source(url, "agentSession", contentHash="h-1",
                           title="pinned window")
         proj = sdk._get_proj()
         before = _source_props(proj, url)
@@ -454,7 +454,7 @@ def test_the_capture_props_stay_unsettable_through_create_source(tmp_path):
                       event_log_path=str(tmp_path / "events" / "sdk.jsonl"))
     try:
         url = "session:caller-5097"
-        sdk.create_source(url, "agentSession", contentHash="h-1",
+        sdk.register_source(url, "agentSession", contentHash="h-1",
                           session_id="s-1", sessionId="forged",
                           capturedAt=SECOND_NOW, eventId="forged-event")
         props = _source_props(sdk._get_proj(), url)
@@ -497,7 +497,7 @@ def test_the_stub_completion_discriminator_is_not_caller_settable(tmp_path):
         forged = dict(sessionId="forged", capturedAt=SECOND_NOW,
                       eventId="forged-event")
         with pytest.raises(ValueError, match="_stub_completion"):
-            sdk.create_source(url, "agentSession", contentHash="h-1",
+            sdk.register_source(url, "agentSession", contentHash="h-1",
                               _stub_completion=True, **forged)
         # The fail-closed backstop every OTHER props surface passes through.
         with pytest.raises(ValueError, match="_stub_completion"):
@@ -518,7 +518,7 @@ def test_the_stub_completion_discriminator_is_not_caller_settable(tmp_path):
             params={"url": url}).result_set, (
             "the refused call still wrote a :Source")
         clean = "session:caller-5097-clean"
-        sdk.create_source(clean, "agentSession", contentHash="h-1")
+        sdk.register_source(clean, "agentSession", contentHash="h-1")
         props = _source_props(sdk._get_proj(), clean)
         assert props.get("sessionId") is None, (
             "a caller-created :Source gained the capture writer's provenance")

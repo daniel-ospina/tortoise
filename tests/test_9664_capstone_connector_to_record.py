@@ -740,7 +740,7 @@ def test_one_onboarding_call_reaches_the_record_and_its_id_reads_back(
 #: That is a measurement artifact, not a fact, and it had a second consequence:
 #: `tortoise_get` is ALSO a prefix of `tortoise_get_entity`, the live canonical
 #: read tool (`RETIRED_USE_INSTEAD`'s own value, and explicitly NOT retired at
-#: `tool_registry.py:1854-1861`), so the matcher reported the CORRECT copy as
+#: `tool_registry.py:1950-1861`), so the matcher reported the CORRECT copy as
 #: stale and the equality pins below would have told the fixer "do not widen
 #: this pin" while the xfail stayed armed forever — the fix could not clear the
 #: flag that was supposed to delete itself. The matcher now reads WHOLE tool
@@ -809,7 +809,7 @@ def test_the_retired_name_matcher_reads_whole_tool_names_not_substrings():
     tool", and a substring test answers a different question. `tortoise_get` is
     retired, `tortoise_get_point` is retired, and `tortoise_get_entity` is the
     LIVE canonical read tool (`RETIRED_USE_INSTEAD`'s own value, and the owner
-    ruling at `tool_registry.py:1854-1861` says it must NOT be retired). A
+    ruling at `tool_registry.py:1950-1861` says it must NOT be retired). A
     substring matcher reports all three as hits on any one of them.
 
     Mutation check: restore `name in (tool.description or "")` in

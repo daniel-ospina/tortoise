@@ -5966,7 +5966,7 @@ def tortoise_checkpoint(items: Any,
         return _SafeError({"error": f"checkpoint items exceed the batch cap "
                                     f"({MAX_CHECKPOINT_ITEMS})",
                            "code": ERR_QUOTA})
-    return _safe(_quota_gated(_get_org_sdk().checkpoint, "points",
+    return _safe(_quota_gated(_get_org_sdk()._checkpoint, "points",
                           abuse_weight=lambda r, a, k: int((r or {}).get("filed") or 0)), items,
                  agent_name=agent_name, threshold=threshold)
 
@@ -6646,7 +6646,7 @@ def tortoise_index_sessions(directory: str, extract_metadata: bool = True, llm_m
         return _http_excluded_error()
     if not os.path.isdir(directory):
         return _SafeError({"error": f"Directory not found: {directory!r}. Provide a valid path to a directory containing .md session files."})
-    return _safe(_get_org_sdk().index_sessions, directory, extract_metadata=extract_metadata, llm_model=llm_model)
+    return _safe(_get_org_sdk()._index_sessions, directory, extract_metadata=extract_metadata, llm_model=llm_model)
 
 def tortoise_index_files(directory: str, corpus_name: str | None = None,
                         extract_metadata: bool = False) -> dict:
@@ -6666,7 +6666,7 @@ def tortoise_index_files(directory: str, corpus_name: str | None = None,
     if not os.path.isdir(directory):
         return _SafeError({"error": f"Directory not found: {directory!r}. Provide a valid "
                                     f"path to a directory containing .md files."})
-    return _safe(_quota_gated(_get_org_sdk().index_directory, "points"),
+    return _safe(_quota_gated(_get_org_sdk()._index_directory, "points"),
                  directory, corpus_name=corpus_name,
                  extract_metadata=extract_metadata)
 
@@ -6717,7 +6717,7 @@ def tortoise_create_source(url: str, sourceKind: str, tier: str | None = None,
     # caller passed them there (kwarg wins; avoids TypeError on splat).
     props.pop("tier", None)
     props.pop("sourceDate", None)
-    return _safe(_quota_gated(_get_org_sdk().create_source, "points"), url, sourceKind,
+    return _safe(_quota_gated(_get_org_sdk()._create_source, "points"), url, sourceKind,
                  tier=tier, sourceDate=sourceDate, **props)
 
 
@@ -6748,7 +6748,7 @@ def tortoise_assess_source(url: str, assessor: str, score: float,
     (compute_reputation at write time). Feeds the source's reliability factor
     (clamped [0.1, 2.0]).
     """
-    return _safe(_quota_gated(_get_org_sdk().assess_source, "points"),
+    return _safe(_quota_gated(_get_org_sdk()._assess_source, "points"),
                  url, assessor, score, rationale)
 
 
@@ -6761,7 +6761,173 @@ def tortoise_set_source_tier(url: str, tier: str) -> dict:
     Dirty-marks the inheritance gate + clears the reliability cache so EP and
     reliability reads reflect the new tier promptly.
     """
-    return _safe(_get_org_sdk().set_source_tier, url, tier)
+    return _safe(_get_org_sdk()._set_source_tier, url, tier)
+
+
+# ── #4282 Phase 2 — the SOURCES / MINE / SESSION containers ──────
+# One tool per OWNER-APPROVED target row (`tortoise/__all__.py`;
+# `docs/product/beta-sdk-surface.md` rows 14-18 and 40). Each dispatches on the
+# discriminator `docs/product/bridge-table.md` Part A records for it — by
+# ARGUMENT (`tier=` vs `score=`, `items=` vs `conversation=`, `file_type=`) —
+# never on a fresh invented one. The members they absorb are RETIRED in the
+# same release (#3883): their names still answer through the warning shim with
+# their ORIGINAL bodies, which is why the functions above are untouched.
+#
+# The containers are thin on purpose. The SDK method owns the dispatch and its
+# refusals (one implementation of "which write did you mean"), so the MCP layer
+# cannot drift from it; the layer here adds only what no SDK may assume: the
+# transport exclusion for filesystem walks, the quota gate, and _safe's
+# structured-error mapping.
+
+def tortoise_register_source(url: str, sourceKind: str, tier: str | None = None,
+                             sourceDate: str | None = None, props: Any = None) -> dict:
+    """Declare a source exists — row 14. **The URL is its identity.**
+
+    Absorbs `tortoise_create_source` (retired, still answering). `tier` (T0-T4)
+    overrides the tier the source KIND would derive; `sourceDate` is the
+    evidence-age clock. A URL collision never re-kinds the existing Source.
+    """
+    props = _parse(props) or {}
+    _reject = _reject_server_managed_props(props)
+    if _reject:
+        return _SafeError({"error": _reject, "code": ERR_INVALID})
+    # tier/sourceDate are first-class kwargs (#398) — pop from props if a legacy
+    # caller passed them there (kwarg wins; avoids TypeError on splat).
+    props.pop("tier", None)
+    props.pop("sourceDate", None)
+    return _safe(_quota_gated(_get_org_sdk().register_source, "points"), url, sourceKind,
+                 tier=tier, sourceDate=sourceDate, **props)
+
+
+def tortoise_manage_source_trust(url: str,
+                                 tier: str | None = None,
+                                 assessor: str | None = None,
+                                 score: float | None = None,
+                                 rationale: str | None = None) -> dict:
+    """Set how far a source is trusted — row 18. Dispatch is BY ARGUMENT.
+
+    `tier=` sets the credibility tier (T0-T4). `score=` + `assessor=` +
+    `rationale=` records an assessment (a reputation-weighted Statement Point).
+    Supplying both is refused: they are different writes, not two spellings of
+    one. Reads are `tortoise_graph_overview(section="sources")` — the tier is a
+    property of the source, so reading it is not a trust write.
+
+    Absorbs `tortoise_assess_source` and `tortoise_set_source_tier` (retired,
+    still answering).
+    """
+    return _safe(_quota_gated(_get_org_sdk().manage_source_trust, "points"), url,
+                 tier=tier, assessor=assessor, score=score, rationale=rationale)
+
+
+def tortoise_index_sources_from_directory(directory: str,
+                                          file_type: str = "auto",
+                                          corpus_name: str | None = None,
+                                          extract_metadata: bool = False,
+                                          progress_file: str | None = None) -> dict:
+    """Register a directory's files as sources — row 15. **Nothing is extracted.**
+
+    `file_type` is the discriminator: `auto` (detect per file) | `agent_session`
+    | `meeting` | `doc`. Batched and resumable (`progress_file`). Absorbs
+    `tortoise_index_files` (retired, still answering) and the two tools already
+    retired into it — `tortoise_index_sessions` (`file_type="agent_session"`) and
+    `tortoise_ingest_corpus` (`file_type="doc"`).
+
+    #329: EXCLUDED from tenant HTTP — walks the server filesystem with a
+    caller-supplied path. Stdio/CLI only; node-creating, so quota-gated.
+    """
+    if _transport_mode.get() == "http":
+        return _http_excluded_error()
+    if not os.path.isdir(directory):
+        return _SafeError({"error": f"Directory not found: {directory!r}. Provide a valid "
+                                    f"path to a directory containing .md files."})
+    return _safe(_quota_gated(_get_org_sdk().index_sources_from_directory, "points"),
+                 directory, file_type=file_type, corpus_name=corpus_name,
+                 extract_metadata=extract_metadata, progress_file=progress_file)
+
+
+def tortoise_mine_knowledge_from_session(conversation: Any = None,
+                                         session_id: str | None = None,
+                                         harness: str | None = None,
+                                         items: Any = None,
+                                         agent_name: str = "checkpoint",
+                                         threshold: float = 0.95) -> dict:
+    """Mine ONE session — row 16. Dispatch is BY ARGUMENT.
+
+    `conversation=` files an agent session (turns → episodic Points, LLM
+    extraction → epistemic Points). **The backend is the target graph's
+    configuration**, so this arm goes through the SAME door as
+    `tortoise_session_capture`, with its gates: 429 capacity, 409 duplicate /
+    recording-off, 400 turn cap, 422 empty transcript, 402 quota. The server's
+    turn cap is the gate's, not a caller knob — that is why `max_turns` is on
+    the SDK method and not here.
+
+    `items=` files an already-distilled batch ({wing, room, content}) with
+    two-tier dedup; `agent_name` and `threshold` are the batch's own knobs.
+    Supplying both is refused — extraction and batch-filing are different
+    pipelines.
+
+    Absorbs `tortoise_checkpoint` and `tortoise_session_capture` (both retired,
+    still answering).
+    """
+    if items is not None and conversation is not None:
+        return _SafeError({"error": "pass conversation= (a transcript to extract from) "
+                                    "OR items= (a distilled batch to file) — they are "
+                                    "different pipelines", "code": ERR_INVALID})
+    if items is not None:
+        items = _parse(items)
+        # #329 batch cap: one call must not create unbounded nodes
+        from tortoise.quota import MAX_CHECKPOINT_ITEMS
+        if isinstance(items, list) and len(items) > MAX_CHECKPOINT_ITEMS:
+            return _SafeError({"error": f"items exceed the batch cap "
+                                        f"({MAX_CHECKPOINT_ITEMS})",
+                               "code": ERR_QUOTA})
+        return _safe(_quota_gated(_get_org_sdk().mine_knowledge_from_session,
+                                  "points",
+                                  abuse_weight=lambda r, a, k: int((r or {}).get("filed") or 0)),
+            items=items, agent_name=agent_name, threshold=threshold)
+    if conversation is not None:
+        return tortoise_session_capture(conversation, harness=harness,
+                                        session_id=session_id)
+    return _SafeError({"error": "nothing to mine — pass conversation= for one session "
+                                "transcript, or items= for a distilled batch",
+                       "code": ERR_INVALID})
+
+
+def tortoise_mine_knowledge_from_directory(directory: str,
+                                           extract_entities: bool = True) -> dict:
+    """Mine a FOLDER of files — row 17. Each file is mined by its own type.
+
+    Absorbs `tortoise_mine_conversations` (retired, still answering). It is the
+    BATCH FORM of `tortoise_mine_knowledge_from_session`, not an indexing mode:
+    this call extracts, `tortoise_index_sources_from_directory` does not.
+
+    #329: EXCLUDED from tenant HTTP — walks the server filesystem. Stdio/CLI only.
+    """
+    if _transport_mode.get() == "http":
+        return _http_excluded_error()
+    if not os.path.isdir(directory):
+        return _SafeError({"error": f"Directory not found: {directory!r}. Provide a valid "
+                                    f"path to a directory of conversation files."})
+    return _safe(_quota_gated(_get_org_sdk().mine_knowledge_from_directory, "points"),
+                 directory, extract_entities=extract_entities)
+
+
+def tortoise_check_connection(key_id: str | None = None) -> dict:
+    """What does this credential reach? — row 40. Read-only, and NOT a wizard.
+
+    Omit `key_id` for this connection: connectivity, the resolved graph +
+    namespace, and this caller's own account (one read, from the same
+    `get_organisation_account` the plan gates use). Pass `key_id` to inspect a
+    single credential's declared reach (graph, scopes, delegation depth,
+    revocation, expiry).
+
+    ⛔ The isolation promise is the KEY half, enforced by the answer shape: a key
+    belonging to another account and a key that does not exist return the SAME
+    `key_error`, so this call cannot be used as an existence oracle across
+    tenants. Replaced the dropped `run_onboarding` (#3540).
+    """
+    return _safe(_get_org_sdk().check_connection, key_id)
+
 
 def tortoise_get_entity(id: str | None = None, type: str | None = None,
                         limit: int = 20) -> Any:
@@ -7373,7 +7539,7 @@ def tortoise_mine_conversations(transcript: str | None = None,
         return _http_excluded_error()
     sdk = _get_org_sdk()
     if corpus_dir is not None:
-        return _safe(sdk.mine_corpus, corpus_dir,
+        return _safe(sdk._mine_corpus, corpus_dir,
                      extract_entities=extract_entities)
     if not transcript or not source_id:
         return _SafeError({"error": "transcript= and source_id= are required "

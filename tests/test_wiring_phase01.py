@@ -61,7 +61,7 @@ def _seed_clean_graph(sdk) -> tuple[str, str]:
     a = sdk.create_point("statement", "alice deployed the service")["id"]
     b = sdk.create_point("statement", "deploy passed all checks")["id"]
     sdk.create_operator("IMPL", a, [b])
-    sdk.create_source(f"https://example.com/src-{uuid.uuid4().hex[:8]}",
+    sdk.register_source(f"https://example.com/src-{uuid.uuid4().hex[:8]}",
                       "github_issue", tier="T1")
     return a, b
 
@@ -110,7 +110,7 @@ def _seed_anomalies(sdk, a: str, b: str) -> dict:
     neutral_url = f"https://example.com/nokind-{hex8}"
     g.query("CREATE (s:Source {url:$url, title:'no kind', "
             "ingestedAt:'2026-01-01T00:00:00Z'})", params={"url": neutral_url})
-    sdk.create_source(f"https://example.com/tiered-{hex8}", "github_issue",
+    sdk.register_source(f"https://example.com/tiered-{hex8}", "github_issue",
                       tier="T1")
 
     # ── Subject stub (auto-created signature: id = name, subjectKind='other')
