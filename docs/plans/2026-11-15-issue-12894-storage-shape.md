@@ -20,6 +20,13 @@ related:
 
 # #12894 Stage A — the storage shape, mapped, and the ideal stated against it
 
+> **This is v2 (Stage B round 2).** v1 answered the archaeology mandate and passed its own review cycle; the
+> Stage-B review then found the **mechanism** unbuildable — 7 blocking defects, four of them silent — and this
+> revision answers each one with a mechanism plus a falsifier. **`§A8` is the deliverable that proves none was
+> dropped** (`finding → section`), and **`§A8.2` is what this revision could not resolve** — read that first if
+> you are reviewing. The map (A1–A6) is revised only where the review found it contradictory; the shape (A7) is
+> substantially rewritten.
+
 **This document changes no product code.** It is the map (A1–A6) and the ideal stated against the map
 (A7), for Stage A of `#12894`.
 
@@ -678,7 +685,7 @@ marked ⚑ are named by **no document** and were found by reading code in this l
 | D-21 ⚑ | **`journal_event` retention has no ruling anywhere.** `#3843`/`#3853` bind `analytics_events`; `#12762` says so explicitly | `#12762` body | **B** | The record table gets the journal's growth **in addition to** the journal, forever, with no decision on pruning it. `#9025`'s bound decision, whenever it lands, will be about the file only. |
 | D-22 ⚑ | **The governing documents are not registered in `docs/00_index.md`**: `STORAGE-ARCHITECTURE.md` has no index row; `event-catalog.md` has **0** mentions; the `#7951` atomic-write plan has **0** | §A1.0 | **B** | A lane proving completeness from the index — as this mandate instructs — **cannot find the document that governs the subject**. This is the same class as the `#10114` lesson: a green check that answers a different question. |
 | D-23 ⚑ | **`docs/00_index.md`'s `#5612` cell still presents the pre-`#11821` vector figures as the current cost** in its first clause, then corrects them ~300 characters later in the same cell (the cell is **one** 1,931-character markdown line, so a "lines later" distance was never measurable) | `docs/00_index.md:153` | **O** | Deferred to the doc's own errata discipline; noted so Stage D does not re-derive it as a new finding. |
-| D-24 ⚑ | **The ordinal's validity rests on one invariant the code states in a comment rather than enforces: ONE journal file per graph, forever.** `record_writer.py:2408-2410`: *"\"One record one number by construction\" holds per JOURNAL FILE, while `journal_event`'s key is per `(org_id, graph_id, seq)`"* | `record_writer.py:2412`, `config.py:92` | **B** | ⛔ **This is NOT a new finding and the first draft was wrong to present it as one.** The paragraph continues (`:2412-2425`) to state the residual in full — *"a tenant with **TWO durable journals** … the second journal's rows are absorbed by `ON CONFLICT … DO NOTHING`"* — **and tracks it on `#9318` (OPEN)**, whose own text proposes journal identity in the key **"or a per-tenant ordinal allocator"**. So the fix A7.5 argues for is the second of the two fixes already named in the source. **What this map adds is only the reachable trigger**, because the issue is framed abstractly: the concrete way to get two journals is a **`TORTOISE_EVENT_LOG_BASE_DIR` change on a live deployment**, after which the same graph numbers from 1 while the record holds the old rows — silent, count-free, no degraded state. Nothing refuses it. |
+| D-24 ⚑ | **The ordinal's validity rests on one invariant the code states in a comment rather than enforces: ONE journal file per graph, forever.** `record_writer.py:2408-2410`: *"\"One record one number by construction\" holds per JOURNAL FILE, while `journal_event`'s key is per `(org_id, graph_id, seq)`"* | `record_writer.py:2412`, `config.py:84` | **B** | ⛔ **This is NOT a new finding and the first draft was wrong to present it as one.** The paragraph continues (`:2412-2425`) to state the residual in full — *"a tenant with **TWO durable journals** … the second journal's rows are absorbed by `ON CONFLICT … DO NOTHING`"* — **and tracks it on `#9318` (OPEN)**, whose own text proposes journal identity in the key **"or a per-tenant ordinal allocator"**. So the fix A7.5 argues for is the second of the two fixes already named in the source. **What this map adds is only the reachable trigger**, because the issue is framed abstractly: the concrete way to get two journals is a **`TORTOISE_EVENT_LOG_BASE_DIR` change on a live deployment**, after which the same graph numbers from 1 while the record holds the old rows — silent, count-free, no degraded state. Nothing refuses it. |
 | **D-25** | ⛔ **The ordinal is not merely unowned — on a live-size journal it is intermittently UNPROVABLE, and this is the single most important thing the first draft missed.** `EventLog.append` returns **`None`** rather than a position in two documented, **repeatable** windows: (a) a recount that outlasts a peer's 5 s `_FLOCK_TIMEOUT_S`, which stamps `_FLOCK_UNHEALTHY` for 30 s during which *"every append in that window returns `None`"* — *"the journal past roughly **50 MiB** can outlast a PEER's deadline … a **repeatable recount → degrade cycle**"* (`log.py:1503-1520`); and (b) a sidecar that cannot be written, where `_POSITION_CACHE_DEAD` means *"an append does NOT recount — it reports `None`"* (`log.py:1523-1530`) | `log.py:1503-1530`; `record_writer.py:2396-2407`; `record_projection.py:6402-6407`; `monitoring.py:1459-1466` | **B** | **A `None` position writes NO `journal_event` row** — `write_live_record(position=False)`, *"Such a record writes no position row … the row arrives on a later replay"* — so the record's ordinal is not just unowned, it is **missing for a population of live writes**, and D-03 is right that nothing (`last_applied_seq`) can detect the gap meanwhile. It is **counted, not silent** (`tortoise_record_position_unproven_total`), which is what keeps it out of P0 severity for the product — but the lane's own D-09 quotes the live journal at **974 MB, ~19× the 50 MiB threshold the code names**, on a box where a 20 MiB recount measures ~1.95 s. **Tracker: `#9252` (OPEN)** — *"a sidecar that cannot be written makes every append recount the whole journal under the lock"*, a `#9190` follow-up whose stated fix is *"a checkpointed counter with a tail reader"*. ⛔ **This is also the strongest available evidence FOR A7.5**, and the first draft never argues it: the code's own remedy for the file's position problem is a counter that does not recount. **Falsifier:** a peer append during a recount on a large journal must still yield a `journal_event.seq`. |
 | **D-26** | **A journal record can exist for a write that never landed — the exact inverse of D-25, and it falsifies A7.5's "journal export commits, record fails — cannot happen".** *"a MERGE that aborts after its bounded retries leaves an orphan record … a journal-only rebuild then restores the attribution of the attempt that never wrote a row"* | `STORAGE-ARCHITECTURE.md:1672-1698` | **B** | **`#9390` (OPEN)** — *"replay attribution skew: an orphan `SessionRecorded` from an aborted `:Session` MERGE wins the coalesce fold"*. So the journal is **not** a strict prefix of the record's committed set in either direction: D-25 is a record write with no journal position, D-26 is a journal record with no record row. **Any design that makes one store the total order must say which of the two it resolves**, and A7.5's window table assumed away the second. |
 
@@ -1331,6 +1338,82 @@ Stage C starts from the real population:
 ⚠️ **M2 session-capture's decline is pinned at `record_writer.py:2287-2290`** and its conversion (§A7.7 step 6.4)
 is the step that changes it — not a drive-by.
 
+---
+
+## A8 — The revision's own audit: `finding → section`, and what this revision could NOT resolve
+
+### A8.1 The deliverable table — every finding, and where it landed
+
+**Blocking (B1–B7).** Each has a **mechanism** and a **falsifier**; the column that matters is the third.
+
+| # | finding | where it landed | its falsifier |
+|---|---|---|---|
+| **B1** | the seed is silently wrong for a journal with no position rows | **§A7.5.5** — the seed as executable SQL, the enumerated floor taken from the replay's **own** reader, `GREATEST(record_floor, journal_floor)`, and the **refusal** when the record floor is above the journal floor; three outcomes tabulated with the operator action each; §A6 **D-28** carries the shrink trigger; §A4.1's "recount never a wrong answer" is scoped | **§A7.6 #7** — a journal of N with zero rows must next write `N+1`; and the refusal arm must write **no** counter row |
+| **B2** | no rollback path; append-only trigger makes a mis-numbered row unrepairable | **§A7.5.11** — *stop allocating, keep the carried numbers, never return a graph to enumeration*, with a per-graph exemption requiring a **proof predicate**; the repair ladder priced rung by rung; the GUC path and its blast radius named; recreate-the-graph excluded with the reason | **§A7.6 #8** — the rollback must be refused for a graph with a hole, not silently renumber |
+| **B3** | `record_cursor` absent from the record's table registry → restore restarts the allocator at zero | **§A7.8** — the full deliverable list (table, RLS `USING` **and** `WITH CHECK`, `GRANT SELECT, INSERT, UPDATE` and **no DELETE**, `THE_RECORD_TABLES`, `RECORD_MIGRATIONS` both directions) + the **first-updatable-record-table** rationale + the purge decision; **§A7.8** falsifier: restore a dump, assert the next write is `max(seq)+1` | **§A7.8** (three sub-assertions: table present, counter ≥ max, restore **refuses** when it is not) |
+| **B4** | the arm is never stated; both arms break a guarantee | **§A7.5.6** — **AFTER COMMIT**, with the three-way argument (before / after / staging-is-not-a-third-arm), the contiguous-prefix export that re-serialises into seq order, and the admitted price: **the per-graph lock returns on the export path**; §A7.5.1 supplies the lock fact that makes it safe | **§A7.6 #9** — commit 5 and 6 out of arrival order; the file must still read 5,6 |
+| **B5** | a stale counter becomes permanent silent loss | **§A7.5.2** (`GREATEST(cursor, max(seq)) + N`) and **§A7.5.4** (the live path **drops** `ON CONFLICT DO NOTHING`; replay refuses on divergence); **§A7.5.1** states the refusal posture | **§A7.6 #12** — reconciliation as an **armed** check, `cursor < max` **refuses the next write** |
+| **B6** | cursors ARE `:GraphEvent.seq`, so §A7.1 and §A4.5 cannot both be built | **§A7.1** — corrected to *"`:GraphEvent` **keeps its own positions`"*, with the two-coordinate table, the bounded `MAX_SEQ` domain and `first_seq`-purge-maintained facts; **§A7.7 step 4** restates it as a **build instruction** so Stage C cannot delete `next_seq` and write the journal's number into the feed | **§A7.6 #4** (+ §A7.7's step-4 warning) |
+| **B7** | `journal_event` is the only carrier of `Object.status`/`Subject.status` | **§A6 D-27** (new row: the terminal-fold stickiness makes a bound a **resurrection** bug) + **§A7.5.12** (the bound stays out) + **§A7.7 step 7** (the bound is the FILE only; a table bound is a different decision); §A2.8/D-30 give the in-tree precedent (`#3870`) | **§A7.6 #12**'s P0 arm + §A7.8 item 7 (the purge is extended only if a ruling says so) |
+
+**Material (M1–M15).** Each is folded into the section it belongs to — and the table is the proof none was dropped.
+
+| # | finding | landed in |
+|---|---|---|
+| **M1** | the census omits journal MUTATORS that are not appends | **§A2.7** (new: the three mutators, tabulated, each with the property it breaks) + **§A6 D-28** + **§A7.7 step 3** (the D-24 guard must cover all three doors) + **§A7.6 #1** |
+| **M2** | "the ordinal requires the journal never shrinks" as a debt row | **§A6 D-28** + **§A4.1** (the "recount, never a wrong answer" sentence scoped to the position) |
+| **M3** | the record's own restore is a second writer of `journal_event` | **§A6 D-29** + **§A7.8** (the restore must refuse when `cursor < max`) + the third falsifier sub-assertion |
+| **M4** | five surfaces is an undercount: `capture_spool` is absent from the plan entirely | **§A6 D-30** + **§A2.8** + **§A7.4** (the counting rule and the **sixth** surface) + **§A7.5.11/12** (its bound posture is the precedent) |
+| **M5** | "allocation order = commit order" preconditions must be stated | **§A7.5.3** (the four-precondition table, with the **refuse-to-arm** on a non-READ-COMMITTED DSN) + **§A7.6 #14** |
+| **M6** | a second allocator writes the same space (`replay_plan`) | **§A7.5.4** (carried wins; refuse on divergence; replay takes the **same** row lock) + **§A7.7 step 6.1** (readers ship first) + **§A7.6 #6** |
+| **M7** | two recorded decisions are reversed and not named among the reopens | **§A7.5.9** (`record_writer.py:78-101` decision 3 + the live door's `OVERRIDES`; and `:116-123` decision 5's *"nothing renumbers"*) — both named as **reopens with their route**, plus the reopen-vs-addendum distinction for the three descriptive sentences |
+| **M8** | batches: contiguity is required and block allocation is unstated | **§A7.5.2** (block allocation `+ N` / `RETURNING seq − N`, with the idempotency-key consequence stated) + **§A7.6 #10** (a hi-lo variant must go red) |
+| **M9** | the ordinal cannot be known at plan-build time | **§A7.5.2** (the data-modifying CTE: one statement, so the number is chosen *by* the statement; `RecordWrite.first_seq/last_seq` threaded back from `RETURNING`) |
+| **M10** | fail-soft contradicts "no burned position" | **§A7.5.7** (posture flips: fail-**hard** on the ordinal path; the breaker becomes fail-fast, and the alternative — a named bounded degraded state — is stated and rejected) + **§A7.6 #13** |
+| **M11** | tests and lanes are missing | **§A3.1** (the two missing lanes: MCP BASE/stdio and M2 session-capture) + **§A7.8.1** (the five suites that must move, with line counts and what each pins) + **§A7.7 step 6.4** |
+| **M12** | `tools/record_wiring_check.py` is absent yet asserts exactly the inverted rule | **§A5** (added to "what already exists", with both check names) + **§A7.7** (re-derived at step 6.1, **not** deleted, with the replacement held to the same strictness) |
+| **M13** | the completeness artifact contradicts itself | **§A1.4** (a four-row table answering each sub-claim at this head: two already fixed, one still true and now fixed, one not reproducible — with the 160-citation audit as the evidence) + the `INGEST_CONTRACT` row + **§A7.3** (the embedded-lane durability claim recorded as a third unqualified sentence) |
+| **M14** | D-20 is over-general | **§A6 D-20** (narrowed to `record_read.py`; the two counter-examples named; **the inference withdrawn**) |
+| **M15** | "the export is repaired by re-rendering from the record" is not achievable | **§A7.5.8** (the column-by-column table, a **correction to the finding's wording**, and the two arms with the widening chosen and its cost declared) + **§A7.6 #11** + **§A7.8 item 6** |
+
+**Two things the brief required kept, and where they are:** §A7.4's honesty is **§A7.4** itself — now with an
+explicit counting rule and **six** truth-bearing surfaces (the fifth being the file, the sixth `capture_spool`),
+plus the cache explicitly *not* counted and why. The missing sequencing step is **§A7.7 step 6**, five sub-steps,
+with **the coordinate it reconciles on** stated in bold: `journal_event.seq`, and only that.
+
+### A8.2 What this revision could NOT resolve — read this first, next round
+
+1. **Whether the GUC DELETE (B2 rung 2) should exist at all.** I can state its blast radius exactly — the
+   trigger's DELETE arm has **no WHERE guard**, it needs an owner role, there is no audit, and the only backstop
+   is a record dump no schedule takes — but I cannot make it *safe* without changing the trigger, and changing the
+   trigger to accept a scoped predicate is a **product change** this document is not authorised to specify. **The
+   honest unresolved question: is a scoped operator repair a legitimate operational tool, or should the answer be
+   "restore from a dump, and build the dump schedule first"?** I lean to the second and have not ruled it.
+2. **Whether fail-hard (M10) survives the durability posture's availability claims.** The flip follows from "the
+   record is the commit point", and `durability-posture.md` does not say what a record outage should do to the
+   write path — it says what durability *is*, not what availability may be traded. **A record outage becoming a
+   write outage is a product-level consequence that needs an owner ruling**, and this revision states it rather
+   than deciding it.
+3. **The export path's real cost.** §A7.5.6 says the per-graph lock returns on the export path and that a wedged
+   exporter delays export, not commit. **I have measured neither the added latency nor the contention**, and I
+   will not estimate them: the row-lock and exporter costs are stated as *unmeasured* here and in §9.2, because a
+   number invented in a plan becomes a number quoted in a review.
+4. **Whether six is the right final count of truth-bearing surfaces.** The counting rule is stated (§A7.4) so the
+   number is now derivable rather than asserted — but the rule itself is mine, and a reader who counts
+   "statements" gets ten while a reader who counts "stores" gets five. **If the rule is wrong, the number is
+   wrong, and the rule is easier to argue with than the number** — which is why the rule is printed.
+5. **Whether `:GraphEvent`'s allocator (D-07) can actually be retired without touching `first_seq`.** §A7.1 says
+   the coordinate does not change and §A7.7 step 4 says *who mints* changes instead. That is coherent on paper;
+   whether `next_seq`'s refusal-at-`MAX_SEQ` behaviour can be preserved when the value comes from the record is
+   **not** established here — a record-minted number has no `MAX_SEQ` guard, so step 4 may need to keep the
+   refusal as a **check on the record's number** rather than as an allocator. Flagged, not resolved.
+6. **The `#9025` bound and D-27 interact, and I have only stated the interaction.** If a bound on `journal_event`
+   is ever ruled in, the terminal-fold stickiness means the bound must be **per-node-state-aware** (you cannot
+   drop an `op=restatus` row for a node whose later rows remain) — which may make the bound *unimplementable*
+   rather than merely dangerous. That is a finding for whoever rules on `#9025`, and I have not proven either
+   way.
+
+---
 
 ## 6 — The tension between `durability-posture.md` and `STORAGE-ARCHITECTURE.md` §3, resolved in words
 
@@ -1381,6 +1464,16 @@ rather than an ambiguity:
    route A7.5's reopening must take** — and it is the reason Q3 needs a recorded home *before* the ordering
    changes, not after.
 
+⛔ **A fourth unqualified sentence exists, found by the Stage-B review (M13), and it is the only one that
+contradicts Q1 at the CONTRACT level rather than the architecture level:** `docs/INGEST_CONTRACT.md:463-467` —
+*"the default embedded mode has no AOF window, so the JSONL journal is the durability contract"*. Read plainly,
+that says the journal **is** durability, for the embedded lane, in the document customers' integrations are
+written against. It is not obviously wrong — on default embedded there is no AOF window, so the journal is what
+survives — but it is the same sentence class as `STORAGE-ARCHITECTURE.md:361`, and it is **worse placed**,
+because a customer reading a contract will read it as a promise. Recorded here rather than edited: it is a doc
+change with its own review (and it may need a *qualification*, not a deletion, since the embedded claim is
+operationally true). §A7.3 lists it as untouched by A7.
+
 **The resolution, in one sentence, to be carried into whichever document claims the vocabulary next:**
 
 > The journal is **authoritative as a total order over decisions** and **never authoritative as durable
@@ -1408,6 +1501,14 @@ search-console; no `seo-intelligence`). **Error class: server absent, not an aut
 shell but **is** in `$HOME/.env` — the same routing repair `#12459` recorded, which confirms its note rather
 than re-deriving it.
 
+**Stage B round 2 re-attempted rung 1 and got the same answer, for the same reason.** `mcp_catalog` again lists
+exa, brave-search, playwright-browser, gemini, tortoise and search-console — **no `seo-intelligence`** — so
+`mcp__seo-intelligence__perplexity_search` could not be called. **RUNG TAKEN: 2** (direct Perplexity API,
+`sonar`, 2 queries, ~$0.01; no `sonar-deep-research` and no `sonar-reasoning-pro`). ⛔ **The error is recorded
+as a class, not a stack trace: the server is ABSENT from the catalog** — the rung-1 route is not merely
+failing this session, it is not installed for this box, and the next lane hits the same wall unless it is
+fixed in the MCP configuration rather than at the query.
+
 ### 9.2 What each source gave, and whether it was verified locally
 
 | Claim taken | Source | Verified locally? |
@@ -1418,6 +1519,8 @@ than re-deriving it.
 | A **transactional counter row** (`UPDATE … SET c = c + 1 RETURNING`) gives gapless committed numbering by serialising on one row, at a throughput cost | same | **PARTIALLY — and the cost half is NOT a lateral move** (corrected in place, `§A7.5`): the journal does serialise per graph on one file handle (`thread lock + flock + one write(2)`, `log.py:594-620`), but `flock` covers only the seal read-modify-write plus one `write(2)` and is released before the API, record and cache legs, and it is **abandoned** after a 5 s timeout (`_FLOCK_TIMEOUT_S`, `log.py:625-633`). A row lock held until `COMMIT` across six statements is therefore a **new** bottleneck, not an equivalent one — quoting this row as reassurance re-asserts the equivalence `§A7.5` removes. The row-lock **semantics** remain unmeasured here (no Postgres bench was run — a bench is a real cost and A7.5 is a proposal, not a landing). |
 | Migrating an app-written WAL into the store: deploy the **new reader first**, backfill, dual-write, reconcile by event identity, cut readers, then writers, then retire; and state whether the order is **allocation**, **commit** or **publication** order because they are not interchangeable | OpenSearch migration-assistant architecture; Kafka topic-migration practice (`acemq.com/guides/kafka-migration-guide`); `architecture-weekly.com/p/the-write-ahead-log-a-foundation` | **YES, and it maps onto choices this repo already made**: `#12459` plans exactly this shape for a format change (readers before writers, per-record dispatch, append-only ⇒ both shapes readable forever, `:824`'s silent-drop warning is the falsifier); `#8526` is the reader-first arm for the self-host wiring gap. The paper trail is in-tree, not imported. |
 | Stored vectors: pgvector and every comparable delegate the vector to a store rather than a versioned on-disk format | (carried from `#12459`'s own survey, cited not re-run) | **YES**: `20261109000001_record_embedding_vector.sql` + `#11642` — the `embedding_vec vector(384)` GENERATED column is exactly that delegation. |
+| **Block allocation of a contiguous ordinal range in ONE statement** (`UPDATE counter SET next = next + N RETURNING next − N`): the block is reserved by one `UPDATE`, the row lock is held to transaction end, a *transactional* counter rolls the increment back (so no block is burned), and **allocating a block in one transaction and using it in another turns the unused tail into holes in an idempotency key** — which is why a hi-lo cache must not be used for a key consumers deduplicate on | PostgreSQL manual — `UPDATE … RETURNING`, explicit locking, transaction isolation, `CREATE SEQUENCE`, and the sequence-functions page (which states a sequence **cannot** provide gapless numbering and that `nextval()` is not rolled back) — **taken for Stage B round 2, M8/B5** | **YES, in this repo's own terms**: `journal_event`'s key is the position and the schema calls it *"the idempotency key: applying a position twice is a no-op"*, so a hole is a **visible loss**, not slack — which is why the design takes a **transactional** counter and refuses a hi-lo cache (§A7.5.2). `relation.id` is the counter-example that proves the distinction: a surrogate may take gaps (`20261012000003:167`). |
+| **Reader-first migration of a coordinate**: expand the readers, backfill, run a **mixed-version window** in which both encodings are accepted, cut the writers over, then contract; and **never run two independent allocators for one ordering domain** — the correctness boundary is *allocator ownership*, not the sequence's atomicity | Martin Fowler, `ParallelChange` (expand/contract); PostgreSQL `CREATE SEQUENCE` + transaction-isolation pages; Kafka's design notes on partition ordering vs. producer idempotence — **taken for Stage B round 2, M6/M11/§A7.7 step 6** | **PARTIALLY** — the pattern is in-tree as well (`#12459`'s readers-before-writers and per-record dispatch, `:824`'s silent-drop warning as its falsifier), and the *ownership* half is enforced mechanically here rather than by convention: the `record_cursor` **row lock** makes one allocator per graph a lock-ordered fact (§A7.5.1), and the absent-row rule makes "this graph is not cut over" a **state**, not a flag (§A7.5.12). **What is NOT verified locally:** that a long mixed-version window is safe for *this* system's readers — that is §A7.6 #6's falsifier, not a measurement. |
 
 **Tagged as NOT verified locally, and therefore not relied on for any decision in this document:** the
 PostgreSQL row-lock throughput numbers (no bench run); the "at least once" delivery rate of any specific
@@ -1437,12 +1540,22 @@ correct artifact — is the one that propagates, and because the near-miss is th
 
 ## 10 — What this lane did not do
 
-- **No product code.** No migration, no allocator, no test was written or edited. The six falsifiers in
+- **No product code.** No migration, no allocator, no test was written or edited. The fourteen falsifiers in
   §A7.6 are specified, not implemented.
-- **No reopen filed.** A7.5's argument is stated; it is **not** posted as a reopen on `#9190` or `#9078`,
-  because a reopen is the owner's to open and Stage B is where it is argued to convergence.
+- **No reopen filed, and the distinction now matters (Stage B round 2).** The **allocator** reopen is **already
+  RULED by the owner** (`#9190` comment `6902871297`), so A7.5 implements it on paper. The **two reopens this
+  revision newly identifies** — `record_writer.py:78-101` decision 3 + the live door's `OVERRIDES` (M7-a) and
+  `:116-123` decision 5's *"nothing renumbers"* (M7-b) — are **named with their route and NOT posted**, because
+  the route is a decision-list amendment on `record_writer.py`'s own header, authored as a reopen with this
+  evidence. ⛔ **Two things the ruling does NOT authorise, and this revision did not take:** a `:GraphEvent`
+  coordinate change (B6 — §A7.1 now says it keeps its own positions) and a retention bound on `journal_event`
+  (B7 — D-27 shows it is a correctness question, and §A7.5.12 refuses it). Either would be a **new reopen**.
 - **No bound chosen for the journal** (`#9025`) and **no absorption of `#9025`/`#12762`** — both were out of
-  scope by the brief, and the map records their state without deciding them.
+  scope by the brief, and the map records their state without deciding them. **B7 strengthens the refusal:**
+  a bound on `journal_event` is not `#9025`'s question at all, and §A7.7 step 7 says so explicitly.
+- **No product-level ruling taken on fail-hard (M10) or on the GUC repair (B2).** Both are stated with their
+  prices and both are listed in §A8.2 as unresolved, because each is an availability/operability decision that
+  belongs to the owner, not to an archaeology lane.
 - **No measurement run.** Every number quoted is from a committed artifact or a recorded command; nothing was
   re-measured (§9.2 says so per row) — **with one exception, added after review**: D-01's denominator. A
   single regex scan for mutating Cypher verbs over `tortoise/**/*.py` at this head returns **458 mutating
@@ -1527,6 +1640,38 @@ mid-set range that excludes the very precondition A7.5 depends on (`durability-p
 wording exists in no cited source (`#11821`), and a census that labelled the events directory as the volume's
 "used" (974 MB volume / 700 MB used / 652 MB events — `#9025`). The sixth was this table's own count of its
 cycle-8 rows.
+
+**Stage B round 1 — a different instrument, and it found a different class.** Nine fresh-context cycles above
+were asked *"is this document accurate?"* and they answered it: the map is accurate, the arithmetic
+reproduces, the citations are (now) correct. **Three further fresh-context reviewers were then asked a harder
+question — *"can this be BUILT?"* — and the answer was no.** Seven blocking defects, four of them **silent**,
+and fifteen material ones. ⛔ **That is the most important lesson this document contains, and it is not about
+citations: a document can pass nine accuracy cycles and still describe a mechanism that cannot be built,**
+because accuracy review checks statements against sources and mechanism review checks statements against
+each other. Every one of the seven was a **contradiction between two true sentences** in the same plan — a seed
+rule that derives the number the plan forbids deriving; a rollback that does not exist beside an append-only
+trigger; a sentence (:A7.1) that its own A4.5 refutes; a surface count that omits a store.**No amount of
+re-reading a true sentence finds that.**
+
+**Stage B round 2 (this revision)** answers each of the seven with a mechanism and a falsifier, and this
+section is the honest record of what the *revision itself* got wrong and had to correct:
+
+| what the round-2 revision found while answering | where it was wrong | what changed |
+|---|---|---|
+| the findings' own citation `record_projection.py:6005` for `ON CONFLICT DO NOTHING` | **drifted** — it is `:6008` | corrected in §A7.5.4; the finding's conclusion was unaffected |
+| the findings' M15 list of dropped keys (`type`, `ts`, …) | **imprecise** — `type` and `ts` **survive as the `event_type` and `recorded_at` columns**; the truly dropped keys are `event_id`, `initiated_by`, `projection_version`, plus two never-inserted node columns | §A7.5.8 records the correction and **keeps — sharpens — the finding's conclusion** |
+| the plan's own A5 citation `write_live_record` at `:1541` | **wrong** — that is a `:param` line; the `def` is at `:2270` | §A5 corrected |
+| A4.1's *"a recount, never a wrong answer"* | **true of the position, false of the seed** | scoped in §A4.1 and §A2.7, carried as D-28 |
+| D-20's generalisation that *"the record's read path does not depend on the journal"* | **false** — `record_serve.read_node` and `rebuild_from_record` both fold it | narrowed to the transcript read, and **the inference ("a precondition A7 does not have to build") withdrawn** |
+| `log.py`'s opaque tail cursor cited as `read_after` | **drifted** — `read_after` *consumes* a token; `cursor_at_end()` returns one | cited correctly in §A4.1 |
+| `config.py:92` as the base-dir config (D-24) | **drifted** — the env constant is at `:84`; `:92` is the resolver | **corrected in D-24's own row** (an earlier draft of this table said "not yet corrected"; that was true when written and is not true of the committed head — the row now cites `:84`) |
+| M13's “four citations point at blank lines” | **cannot be reproduced at this head** — an exhaustive re-audit of **160** resolvable `path:line` citations returns 2 flags, both inside this audit table quoting the pointer it corrected | §A1.4's four-row table records the verdict per sub-claim rather than accepting or dismissing the finding wholesale |
+
+⛔ **The last row is the one to keep.** A review finding is a **claim, not a fact** (and this document's own
+cycle history is the evidence): two of M13's four sub-claims were already fixed before round 1, one was still
+true, and one could not be reproduced at all. **Applying all four as written would have re-edited three
+correct passages** — which is how a false correction propagates, and why every row above was re-verified
+against the source before it was applied.
 
 **The cumulative lesson is worth stating plainly, because it is the artifact's own thesis:** an archaeology
 document is only as good as its pointers, and pointers decay the moment you edit the document around them.
