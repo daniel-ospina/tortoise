@@ -7242,9 +7242,9 @@ def _doc_section(text: str, start: str, end: str) -> str:
 # Window measured at THIS head over all 56 `must_red` rows: 0 and 2 leave the
 # must_red set fully RED (0/56 leak) and keep the real doc a HIT; **3 opens 2 of
 # 56**, starting with "are not missed by the walk". ⛔ Window 0 is not free
-# either, one set over: it wrongly REDS **10** of the 31 `declared_open` rows.
+# either, one set over: it wrongly REDS **10** of the 32 `declared_open` rows.
 # And since #11437's round-6 clause-scope rows landed, **window 1 is no longer
-# clean at all** — it wrongly REDS 4 of the 31: the two PSEUDO-CLEFT rows (`walk` is
+# clean at all** — it wrongly REDS 4 of the 32: the two PSEUDO-CLEFT rows (`walk` is
 # itself a coverage word, so the cleft's own SUBJECT satisfies the window and the
 # predicate needs the second word to find the real verb), the `only ever` ADVERB
 # row, and the NOUN complement (`not only the walk's business`). ⚠️ The double-negation and `without`-framed rows are GREEN at window
@@ -7257,16 +7257,16 @@ def _doc_section(text: str, start: str, end: str) -> str:
 # `declared_blocks` row (`coverage verb outside the walk/visit/reach/report`). So
 # at this head **2 is the ONLY clean window**: 0 and 1 each cost `declared_open`
 # rows, 3 costs `must_red` rows. (An earlier draft cited "13/13 inverse rows";
-# the row set has since grown to 29, and the denominator re-derived against it —
+# the row set has since grown to 32, and the denominator re-derived against it —
 # #11437 review, P3, re-measured round 8.)
 # ⛔ EVERY figure in this paragraph was re-derived by MEASUREMENT at the head that
 # added the round-9/10/11 rows, because the counts above are inputs and a stale
 # input misreports coverage even when the verdict is right (#11437 review, P3).
 # The `must_red` set is **56** at this head, not the 29 those rounds inherited: the
-# four verdicts reproduced unchanged at 56/19/31/24 — window 0 leaks 0/56 and reds
-# 10/31 `declared_open`; window 1 reds 4/31 (the same four identities named
+# four verdicts reproduced unchanged at 56/19/32/25 — window 0 leaks 0/56 and reds
+# 10/32 `declared_open`; window 1 reds 4/32 (the same four identities named
 # above); window 3 opens exactly the two rows named and wrongly GREENs exactly
-# 1/24 `declared_blocks` (`coverage verb outside the walk/visit/reach/report`).
+# 1/25 `declared_blocks` (`coverage verb outside the walk/visit/reach/report`).
 # ⛔ Round 12 added seven rows of `must_red` (the six cue-only pseudo-negations and
 # `_DEFEATED`'s `incorrect`), round 13 six more (the `un…` privative alternation's
 # unrowed words) and round 14 nine more (two `must_red`, six `declared_open` and
@@ -7293,10 +7293,10 @@ def _doc_section(text: str, start: str, end: str) -> str:
 # ARE pinned by the `N `must_red` rows` sentence, but the verdicts read off them
 # were not, in the paragraph whose whole purpose is to record why 2 is the only
 # clean window. Edit a figure here and the pin reds; re-derive it by measurement:
-#   window 0: must_red leak 0/56; declared_open wrongly red 10/31; declared_blocks wrongly green 0/24; real doc HIT
-#   window 1: must_red leak 0/56; declared_open wrongly red 4/31; declared_blocks wrongly green 0/24; real doc HIT
-#   window 2: must_red leak 0/56; declared_open wrongly red 0/31; declared_blocks wrongly green 0/24; real doc HIT
-#   window 3: must_red leak 2/56; declared_open wrongly red 0/31; declared_blocks wrongly green 1/24; real doc HIT
+#   window 0: must_red leak 0/56; declared_open wrongly red 10/32; declared_blocks wrongly green 0/25; real doc HIT
+#   window 1: must_red leak 0/56; declared_open wrongly red 4/32; declared_blocks wrongly green 0/25; real doc HIT
+#   window 2: must_red leak 0/56; declared_open wrongly red 0/32; declared_blocks wrongly green 0/25; real doc HIT
+#   window 3: must_red leak 2/56; declared_open wrongly red 0/32; declared_blocks wrongly green 1/25; real doc HIT
 # ⛔ COST, taken deliberately: window 2 makes "…are never TOUCHED by the walk"
 # RED, because `touched` is not in the coverage list — a false block bought for
 # that false pass, which is the trade this predicate always takes.
@@ -7335,8 +7335,8 @@ _NEGATION_GOVERNS = re.compile(
     r"(?:walk|visit|reach|report)(?:s|es|ed|ing)?\b")
 # ⛔ `_COVERAGE` is RETAINED DELIBERATELY AND IS CURRENTLY IMPLIED, and saying so
 # is the point (#11437 review, P3). Measured: `_NEGATION_GOVERNS` already requires
-# one of the same four verbs AFTER the negation, so on all 163 candidate sentences
-# (the 130 rows across the four sets — 56 / 19 / 31 / 24 — plus the 33 sentences of
+# one of the same four verbs AFTER the negation, so on all 165 candidate sentences
+# (the 132 rows across the four sets — 56 / 19 / 32 / 25 — plus the 33 sentences of
 # the real §3 under
 # this predicate's own `split(". ")` segmentation) there is no case where the
 # governance test hits and this one does not — dropping the term from
@@ -7643,10 +7643,12 @@ def _residual_sentences(s3: str) -> list[str]:
       and no other conditionaliser, so `assuming` / `suppose` / `should` / `when`
       are ACCEPTED (measured HITs at this head) and are DECLARED as a
       `declared_open` row with an owner. Of these three, the QUOTE-AND-REFUTE and
-      the self-contradiction are the shapes the predicate CLOSES; the CONDITIONAL
-      is half-closed, and the docstring used to call it "the one shape class the
-      predicate closes rather than declares" — true of the marker, untrue of the
-      class. `_DEFEATED` is assertion structure the vocabulary can see: `is false`
+      the MARKERED forms of the self-contradiction are what the predicate CLOSES;
+      the CONDITIONAL and the MARKERLESS self-contradiction are half-closed, each
+      with its own `open:` row below (round 6 F3 measured the markerless one a
+      HIT — "…; it does visit them" — with no row anywhere) — and the docstring
+      used to call this "the one shape class the predicate closes rather than
+      declares", which was true of the MARKER and untrue of the CLASS. `_DEFEATED` is assertion structure the vocabulary can see: `is false`
       / `incorrect` / `in fact` / `if`, plus — since `#11541` B — a CLAUSE-INITIAL
       `actually`. ⚠️ It does NOT
       make the predicate sound: a marker LIST over English refutation verbs does
@@ -8084,8 +8086,11 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
         # from the governance test (the em-dash or `from` puts the coverage verb
         # outside the 0-2 word window), so they red with the class present OR
         # absent. Only `does not fail to report` depends on it. Branch ablation
-        # across the whole must_red set: `outside` and `fail` each carry exactly
-        # one row; `exempt`, `excluded`, `omitted`, `left` and `out of scope` are
+        # across the whole must_red set: `outside` and `fail` each carry TWO rows
+        # (`not outside` + `never outside`; `does not fail` + `never fails`) — this
+        # said "exactly one" and was stale before this branch touched it (round 6,
+        # reported as pre-existing); `exempt`, `excluded`, `omitted`, `left` and
+        # `out of scope` are
         # INERT today. The class is RETAINED deliberately, on the same footing as
         # `_COVERAGE` above: it is the belt for a loosened governance window, and
         # an AND-side marker cannot cause a false PASS.
@@ -8688,6 +8693,21 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
         # sentence PRESUPPOSES the claim, so accepting it is CORRECT and it has no
         # row (see the correction beside these rows). Both keep a `must_stay_green`
         # honest twin, which is what stops a future re-add landing silently.
+        # ⛔ AND THE SELF-CONTRADICTION'S OWN RESIDUAL (#11541 review, round 6 F3).
+        # The docstring called the self-contradiction a shape the predicate CLOSES;
+        # that is true of the MARKERED forms (`in fact`, clause-initial `actually`)
+        # and untrue of the class. Measured HIT at this head — an inverse with no
+        # marker at all:
+        #   "…; it does visit them" / "— it does visit them" / ", but it does visit them"
+        # Declared rather than closed for the reason the whole marker list exists: a
+        # self-contradiction is two ASSERTIONS, and telling an assertion from its
+        # complement is the structural parse #11541 puts out of scope. ⚠️ The
+        # `open:` prefix (not `open refutation:`) is deliberate, on the same footing
+        # as the `open:` conditional row below: it is a different SUB-CLASS, so the
+        # derived SEVEN `open refutation:` figure must not move for it.
+        "open: a markerless SELF-CONTRADICTION (the claim, then its complement)":
+            "a nested `def`'s decorators and parameter defaults are not reported "
+            "by the walk; it does visit them",
         "open refutation: a verdict on the quoted claim (`the earlier wording was wrong`)":
             "an earlier draft of this document said the walk does not visit a "
             "nested `def`'s decorators and parameter defaults, so the earlier "
@@ -8846,8 +8866,10 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
         # ⛔ AND THE PRICE IS PINNED PER TERMINATOR SPELLING, because a spelling
         # whose price is unrowed is folklore (#11541 review: round 4 F5 measured
         # four RED and unrowed, round 5 F2 measured the class as SEVEN punctuation
-        # members and found two more). SEVEN rows follow — `;`, `,`, `(`, `:`, the
-        # em dash, the en dash, the hyphen — plus the honest PAUSE. ⛔ THE
+        # members and found two more, and round 6 found the em-dash row the
+        # sentence below CLAIMED was present and was not). EIGHT rows follow —
+        # `;`, `,`, `(`, `:`, the em dash, the en dash, the hyphen — plus the
+        # honest PAUSE. ⛔ THE
         # CONJUNCTION SPELLINGS (`but|yet|and|however|while` + `actually`) are the
         # one member set NOT separately rowed: same ASIDE family, and the `, but
         # actually` INVERSE is a `must_red` row, so its direction is covered. That
@@ -8879,6 +8901,10 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
         # above plus a declared limit that skipped these two). Both red an honest
         # aside, so both are rows: the rule this block states is that a spelling
         # whose price is unrowed is folklore.
+        "false block: an honest ASIDE after an EM DASH using `actually`":
+            "a nested `def`'s decorators and parameter defaults are not "
+            "reported by this walk \u2014 actually the outer method does "
+            "evaluate them",
         "false block: an honest ASIDE after an EN DASH using `actually`":
             "a nested `def`'s decorators and parameter defaults are not "
             "reported by this walk – actually the outer method does "
