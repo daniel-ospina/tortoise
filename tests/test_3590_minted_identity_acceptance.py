@@ -1142,7 +1142,9 @@ def test_the_bundle_guard_reads_the_live_holder_not_a_terminal_one(sdk):
     obj = client.create_entity("object", "Ghost", objectKind="core:strategy",
                                _server_id="id-ghost",
                                is_episodic=False)["node"]["id"]
-    client.update_entity(obj, status="superseded")
+    # #12592: the word names its successor (ONTOLOGY §4.3); the row still
+    # ends terminal, which is what these arms measure.
+    client.update_entity(obj, status="superseded", supersededBy="Ghost II")
 
     _exists, hit, _op, _bad, _carriers, merges, target = \
         client._entity_name_holders("Object", "Ghost")
@@ -1222,7 +1224,8 @@ def test_a_mention_of_a_superseded_name_does_not_mint_an_incarnation(sdk):
                                   objectKind="core:strategy",
                                   _server_id="id-retired",
                                   is_episodic=False)["node"]["id"]
-    client.update_entity(buried, status="superseded")
+    client.update_entity(buried, status="superseded",
+                         supersededBy="Retired II")
     registrations_before = [r for r in _journal(events)
                             if r.get("type") in ("ObjectRegistered",
                                                  "SubjectAdded")]
@@ -1329,7 +1332,8 @@ def test_a_lifecycle_event_on_a_terminal_only_object_is_a_recorded_no_op(
                                   objectKind="core:strategy",
                                   _server_id="id-buried",
                                   is_episodic=False)["node"]["id"]
-    client.update_entity(buried, status="superseded")
+    client.update_entity(buried, status="superseded",
+                         supersededBy="Buried II")
 
     # The DOOR writes the event (no ghost minted, nothing registered) and the
     # miss it records is the bounded, reported one.
