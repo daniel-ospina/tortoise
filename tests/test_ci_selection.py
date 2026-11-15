@@ -22272,14 +22272,19 @@ def test_the_health_honesty_suite_is_selected_on_BOTH_halves_of_its_module_pair(
     # `tests/` ASSERTED the surface ROWS. MEASURED at this head, the selection asserts below
     # already red when either row is deleted, because no OTHER surface lists this file
     # (`onboarding` matches a `hosted_api.py` diff but carries no row for it), so what this
-    # pair adds is that the ROW is the subject of the assertion: the day any second surface
-    # also lists the file, a selection assert would pass over a lost `api`/`core` row and
-    # this one would not.
+    # pair adds is that the ROW is the subject of the assertion. MEASURED, the masking is
+    # NARROWER than "any second surface": it needs a surface co-selected on the SAME diff.
+    # Adding this file to `surfaces.sdk` and deleting the `api` row still reds the
+    # selection assert (`select(['tortoise/hosted_api.py'])` -> `pin in test_files` False),
+    # and only a co-selected surface masks it — `onboarding` (added) + `api` deleted ->
+    # True, which is the hole this pair closes. The `core` half can never be masked:
+    # `select(['tortoise/monitoring.py'])` -> surfaces `['core']` alone, so no second
+    # surface exists to carry the file on that diff.
     manifest = load_manifest()
     assert pin in manifest["surfaces"]["api"], (
         "`surfaces.api` must list this suite by NAME — the row is what a lost arm takes "
-        "away, and a selection assert is only as good as there being no sibling surface "
-        "that also carries the file"
+        "away, and a selection assert is only as good as no CO-SELECTED surface also "
+        "carrying the file on the same diff"
     )
     assert pin in manifest["surfaces"]["core"], (
         "`surfaces.core` must list this suite by NAME — the rows, not the selection, are "
