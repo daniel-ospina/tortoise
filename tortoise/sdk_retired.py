@@ -362,14 +362,25 @@ REMOVED_SDK_METHODS: dict[str, str] = {
     # aware AST walk over `tortoise/`, `tests/` and `tools/` for `sdk.<name>` /
     # `self.<name>` / a bare attribute reference (`asyncio.to_thread(sdk.<name>, …)`
     # is such a reference, and a `(`-anchored grep misses it) / `getattr(sdk, "<name>")`.
+    # ⛔ AND THE SCAN MUST MATCH EVERY RECEIVER SHAPE. Measured the hard way: a scan keyed
+    # on `sdk.`/`self.` MISSED `TortoiseSDK().calibration_passed()` — its receiver is a
+    # CONSTRUCTOR CALL, not a name — i.e. it missed the one production caller in this
+    # block. Match on the ATTRIBUTE, then judge the receiver, or a real caller hides.
     #
     # WHY (c) IS A CONDITION AND NOT A COURTESY. The owner's #3836 (c) ruling retires a
     # name by FAILING and naming its replacement — no alias layer, no warning shim — and
     # its stated reason is that with zero users there is no caller to protect. A
     # deprecation window is what protects callers (PEP 387: an incompatible change only
     # after a documented deprecation; SemVer 2.0.0 rule 8: a MAJOR bump). So the ruling is
-    # only legitimate over names that HAVE no caller: a name with a production caller is
-    # not eligible for this block at all, deprecation window or not. That is the gate.
+    # only legitimate over names that HAVE no EXTERNAL caller. That is the gate.
+    #
+    # ⚠️ ONE REFINEMENT, and it is the repo's own precedent rather than an exception made
+    # here: an INTERNAL caller does not disqualify a name if the body can go PRIVATE and
+    # that caller re-points at it. That is exactly the `capture_session` -> 
+    # `_capture_session` shape already recorded above, and it is the shape
+    # `calibration_passed` took (one caller in `tortoise/gates.py`, re-pointed at
+    # `_calibration_marker_recorded`). What the ruling forbids is leaving a caller BROKEN;
+    # it does not forbid closing a door whose only key-holder is our own code.
     #
     # DEFERRED, with the reason, so the next wave does not re-derive it: `recall_gaps` and
     # `recall_subgraph` have zero production callers BUT are invoked dynamically by name
@@ -390,18 +401,20 @@ REMOVED_SDK_METHODS: dict[str, str] = {
     ),
     "list_relations": (
         "#12901 wave 1 (2026-11-15): DELETED. It listed the pack-declared relation "
-        "declarations and had zero callers. The beta `r6_canon` region records "
+        "declarations and had no caller ON THE SDK — the same-named methods elsewhere "
+        "(`pack_registry.list_relations`, reached as `registry.list_relations()`) are "
+        "DIFFERENT objects and survive untouched. The beta `r6_canon` region records "
         "`graph_overview` as its destination, which has no `def` today — so no hint is "
-        "emitted, because a hint must name something a caller can actually call. The "
-        "capability is not lost: `_get_kind_expander().list_relations()` is the live "
-        "registry call and survives, and `TortoiseSDK._resolve_traversal_path` still "
-        "reads it."
+        "emitted, because a hint must name something a caller can actually call. "
+        "`TortoiseSDK._resolve_traversal_path` still reads the registry call."
     ),
     "quarantine_batch": (
         "#12901 wave 1 (2026-11-15): DELETED. A thin delegate to "
         "`tortoise.mining.quarantine_batch`, which STAYS — batch lifecycle state lives "
-        "on :Batch marker nodes, so the capability was never the delegate, and the "
-        "delegate had zero callers on the SDK. The beta `w11_lifecycle` region records "
+        "on :Batch marker nodes, so the capability was never the delegate. It had no "
+        "PRODUCTION caller; its only call sites were tests, and they were re-pointed at "
+        "`tortoise.mining.quarantine_batch`, which is exactly what the delegate called. "
+        "The beta `w11_lifecycle` region records "
         "`update_knowledge` as the destination (quarantine is a FIELD on the partial "
         "update, not a verb). It is recorded here in prose and NOT in "
         "`SURPLUS_DELETION_DESTINATIONS`, which is the CLOSED #4282 block. It is "
@@ -411,16 +424,22 @@ REMOVED_SDK_METHODS: dict[str, str] = {
         "no source makes."
     ),
     "calibration_passed": (
-        "#12901 wave 1 (2026-11-15): DELETED. The Gate B calibration-milestone reader, "
-        "with zero callers on the SDK — `check_gates` takes that state as a PARAMETER "
-        "and never read it from here. The beta `r3` region records `check_confidence` as "
-        "its destination, which has no `def` today, so no hint is emitted. "
-        "`_CALIBRATION_MARKER_KEY` deliberately STAYS on the class: the projection's "
-        "config-reset preservation reads it, so the constant outlives the reader."
+        "#12901 wave 1 (2026-11-15): DELETED FROM THE PUBLIC SURFACE. The Gate B "
+        "calibration-milestone reader. ⚠️ It had ONE production caller — "
+        "`tortoise/gates.py`'s CLI read `TortoiseSDK().calibration_passed()` inside a "
+        "try/except — so this is NOT a zero-caller deletion and the departure is the "
+        "`capture_session` -> `_capture_session` shape instead: the body went PRIVATE as "
+        "`_calibration_marker_recorded`, gates.py reads that, and the unapproved PUBLIC "
+        "door closes with the capability intact. (A bare `sdk.<name>` scan MISSES this "
+        "caller — its receiver is a constructor call, not a name.) The beta `r3` region "
+        "records `check_confidence` as its destination, which has no `def` today, so no "
+        "hint is emitted. `_CALIBRATION_MARKER_KEY` deliberately STAYS on the class: the "
+        "projection's config-reset preservation reads it too."
     ),
     "membership_get": (
         "#12901 wave 1 (2026-11-15): DELETED. It read one membership row by id and had "
-        "zero callers on the SDK; the console reads memberships through the approved "
+        "no PRODUCTION caller — the only call sites were tests, re-pointed at the "
+        "registry read; the console reads memberships through the approved "
         "`list_members` surface instead. The beta `n1_console` region rules this class "
         "`Console plumbing` and puts no tenancy administration on the SDK, so there is "
         "**no** recorded destination to name."

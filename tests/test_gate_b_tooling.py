@@ -16,10 +16,12 @@ and they split in two — which is why the ledger records three and REBUILDS two
   pinned by literal — deriving it from the class attribute the accessor also
   reads would make a rename invisible.
   ⛔ **#12901 wave 1 retired the accessor itself.** The two tests are re-pointed
-  at the marker NODE (`_calibration_marker_present`, the same raw read the
-  accessor performed) instead of at a public method that no longer exists — the
-  durable contract was always "the writer stores the marker and a fresh SDK
-  still sees it", never "there is a public reader for it".
+  at the marker through the PRIVATE `_calibration_marker_recorded()` seam
+  (`_calibration_marker_present`) — the SAME seam `tortoise/gates.py` reads —
+  instead of at a public method that no longer exists, and
+  `test_gate_b_cli_reads_the_private_marker_seam` pins that wiring. The durable
+  contract was always "the writer stores the marker and a fresh SDK still sees
+  it", never "there is a public reader for it".
   `_CALIBRATION_MARKER_KEY` STAYS on the class: the projection's config-reset
   preservation reads it.
 - **Recorded as removed (3)** — `test_record_calibration_validation`,
@@ -260,17 +262,45 @@ def _store_calibration_marker(sdk, **props) -> None:
 
 
 def _calibration_marker_present(sdk) -> bool:
-    """Is the Gate B calibration-milestone marker stored? (the retired reader's own query)
+    """Is the Gate B calibration-milestone marker stored? (through the PRODUCTION seam)
 
-    #12901 wave 1 retired the public `TortoiseSDK.calibration_passed()` accessor;
-    this is the RAW read it performed, kept here so the WRITER's durable contract
-    is still covered. It deliberately does not reintroduce a public door.
+    #12901 wave 1 retired the public `TortoiseSDK.calibration_passed()` accessor. Its one
+    production caller (`tortoise/gates.py`, the Gate B CLI) reads the same marker through
+    the PRIVATE `_calibration_marker_recorded()` seam, so this helper drives THAT — not a
+    copy of its query — and the reader gates.py depends on is covered rather than assumed.
+
+    ⚠️ It used to re-spell the query here, which is exactly why a broken reader could stay
+    invisible: the test proved the MARKER round-tripped while the accessor it was supposed
+    to protect was deleted underneath a bare `except Exception`. Drive the seam.
     """
-    rows = sdk._get_proj().g.query(
-        "MATCH (m:Meta {key:$key}) RETURN m.recordedAt",
-        params={"key": TortoiseSDK._CALIBRATION_MARKER_KEY},
-    ).result_set
-    return bool(rows)
+    return sdk._calibration_marker_recorded()
+
+
+def test_gate_b_cli_reads_the_private_marker_seam():
+    """`tortoise/gates.py` resolves Gate B through the private seam, not a dead name.
+
+    ⛔ THIS IS THE REGRESSION THAT ACTUALLY HAPPENED. gates.py read
+    ``TortoiseSDK().calibration_passed()`` inside a bare ``except Exception``; #12901 wave 1
+    deleted that public method, the call started raising ``AttributeError``, the bare
+    except swallowed it, and ``calibration_passed`` resolved to ``False`` FOREVER — making
+    the Gate B CLI report "not recorded" for every issue while every existing test stayed
+    green (they pre-supply the flag to ``check_gates()`` and never exercised the read).
+
+    A receiver-keyed scan misses the caller too: its receiver is a CONSTRUCTOR CALL
+    (``TortoiseSDK()``), not a name. So the wiring is pinned at the source.
+
+    FAILS IF gates.py goes back to a public accessor that no longer exists, or invents a
+    third read path instead of the one seam.
+    """
+    import inspect
+
+    from tortoise import gates
+
+    src = inspect.getsource(gates)
+    assert "_calibration_marker_recorded()" in src
+    assert ".calibration_passed()" not in src
+    # The seam must be reachable on the class the CLI constructs, or the except swallows it.
+    assert callable(getattr(TortoiseSDK, "_calibration_marker_recorded"))
 
 
 def test_calibration_marker_key_is_the_persisted_literal():

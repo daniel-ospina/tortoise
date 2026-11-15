@@ -126,18 +126,28 @@ removal" row below), not something that has already left.
 
 ### Removed from the surface — 2026-11-15 (#12901 wave 1)
 
-**These 5 methods are gone from `TortoiseSDK`.** Each was OFF the approved 40 AND had **no
-production caller under `tortoise/`**, measured with a receiver-aware AST walk (the
-`callers: engine` cells the manifest recorded for three of them are `scan_callers`' DOCUMENTED
-receiver-blind name collisions — `registry.list_relations()` and
-`from .mining import quarantine_batch` — not calls on the SDK). The code is archived under
-`archive/sdk-methods/b2-sdk-retirement-wave-1/` and every departure is recorded in
-`tortoise/sdk_retired.py::REMOVED_SDK_METHODS`.
+**These 5 methods are gone from `TortoiseSDK`.** Each was OFF the approved 40. **Four had no
+production caller anywhere under `tortoise/`.** The fifth, `calibration_passed`, had exactly
+one — `tortoise/gates.py`'s Gate B CLI — so its **body went private** as
+`_calibration_marker_recorded()` and that CLI reads the seam instead: the
+`capture_session` → `_capture_session` precedent already in `tortoise/sdk_retired.py`, where a
+surplus-but-referenced method goes private rather than out. The unapproved public door closes
+in every case; the capability survives in the one case that was still wired to something.
+
+⚠️ **A receiver-keyed scan does not see that caller**: `TortoiseSDK().calibration_passed()`
+has a CONSTRUCTOR CALL for a receiver, not a name, so a walk keyed on `sdk.<name>` /
+`self.<name>` reports zero callers and is wrong. Match the ATTRIBUTE, then judge the receiver.
+
+The remaining four `callers: engine` cells the manifest recorded are `scan_callers`' DOCUMENTED
+receiver-blind name collisions (`registry.list_relations()`,
+`from .mining import quarantine_batch`) — different objects, not calls on the SDK. All code is
+archived under `archive/sdk-methods/b2-sdk-retirement-wave-1/` and every departure is recorded
+in `tortoise/sdk_retired.py::REMOVED_SDK_METHODS`.
 
 | Removed method | What it did | The 40-method target it was recorded against |
 |---|---|---|
 | `backfill_v25` | One-shot ONTOLOGY v2.5 status/pointKind migration. | — |
-| `calibration_passed` | Read the Gate B calibration-milestone marker. | `check_confidence` |
+| `calibration_passed` | Read the Gate B calibration-milestone marker. **Body went PRIVATE** (`_calibration_marker_recorded()`), which `tortoise/gates.py` now calls. | `check_confidence` |
 | `list_relations` | List the pack-declared relation declarations. | `graph_overview` |
 | `membership_get` | Read one membership row by id. | — |
 | `quarantine_batch` | Quarantine a batch (thin delegate to `tortoise.mining`). | `update_knowledge` |

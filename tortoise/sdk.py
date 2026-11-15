@@ -19829,7 +19829,9 @@ class TortoiseSDK:
         §3.9's ``IMPL``/``NAND`` plus §8's semantics vocabulary) nor a predicate an
         installed pack declares, ``update(<operator_id>, label=...)`` performs no
         declaredness check and installs the label silently. Take valid predicates
-        from ``list_relations()`` for the pack-declared leg, or the core set above.
+        from ``pack_registry.list_relations()`` for the pack-declared leg, or the core
+        set above. (#12901 wave 1 retired the SDK's ``list_relations()`` door; the
+        registry call it wrapped is unchanged.)
 
         Detects the node type by label:
           - Point → point-lifecycle semantics (delegates to update_point):
@@ -38493,7 +38495,7 @@ class TortoiseSDK:
             NOTE: ``_dedup_match_clauses`` keeps a DIFFERENT form on purpose
             (#2892/#2949); do not restore parity between the two.
           * ``n.pointKind`` NULL-or-an-evidence-kind — absent kind is
-            evidence by the repo's own resolution (``backfill_v25`` fills
+            evidence by the repo's own resolution (the retired ``backfill_v25`` filled
             'statement'; EP reads no kind at all), so a legacy kind-less
             Point is gated like the statement it is. #9592: an EMPTY-after-
             normalisation kind is in that SAME arm, because it means the same
@@ -54284,6 +54286,25 @@ class TortoiseSDK:
     # config-reset preservation reads it (`tortoise/projection/__init__.py`),
     # not because a public method still does.
     _CALIBRATION_PRECISION_TARGET = 0.70
+
+    def _calibration_marker_recorded(self) -> bool:
+        """Is the Gate B calibration-milestone marker stored? (PRIVATE seam)
+
+        #12901 wave 1 retired the PUBLIC `calibration_passed()`. Its one internal caller —
+        `tortoise/gates.py`, the workflow-layer gate helper — reads through THIS seam
+        instead, which is the `capture_session` -> `_capture_session` precedent in
+        `tortoise/sdk_retired.py`: a surplus-and-referenced method goes PRIVATE rather than
+        out, so the capability survives while the unapproved public door closes.
+
+        ⚠️ Deliberately NOT public: `tools/sdk_rename_table.py::_validate` fails any PUBLIC
+        SDK method with no canonical group/disposition row, and this name has none.
+        """
+        proj = self._get_proj()
+        rows = proj.g.query(
+            "MATCH (m:Meta {key:$key}) RETURN m.recordedAt",
+            params={"key": self._CALIBRATION_MARKER_KEY},
+        ).result_set
+        return bool(rows)
 
     # ── #2814: rebuild config third state ─────────────────────────
     # PRIVATE on purpose: `tools/sdk_rename_table.py::_validate` fails any

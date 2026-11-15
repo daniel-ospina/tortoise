@@ -395,7 +395,7 @@ Kind values are expanded through pack registries before queries execute. When yo
 
 This means `tortoise_search(query="auth bug", kind="WorkItem")` matches both dev and PM work items automatically. No manual kind expansion needed.
 
-Pack relations are queryable via `list_relations()`, which returns declared edge schemas with fromKind/toKind/mechanism triplets across all installed packs.
+Pack relations are queryable via `list_relations()` — a `PackRegistry` method in `tortoise.pack_registry`, not an SDK door (the SDK method of that name was retired in #12901 wave 1; its recorded destination, `graph_overview`, is one of the approved-but-not-yet-implemented methods). It returns declared edge schemas with fromKind/toKind/mechanism triplets across all installed packs.
 
 ## Degradation Behavior
 
@@ -476,18 +476,23 @@ Returns sources grouped by `sourceKind` with point counts — where data came FR
 Packs declare what KINDS and RELATIONS can exist:
 
 ```python
+from tortoise.sdk import _get_kind_expander
+
 # What edge types are registered across all installed packs?
-sdk.list_relations()  # returns fromKind/toKind/mechanism triplets
+_get_kind_expander().list_relations()  # returns fromKind/toKind/mechanism triplets
 
 # What kinds does a pack declare (including subclass/equivalence expansion)?
 sdk.expand_kind("WorkItem")  # returns ["WorkItem", "dev:issue", "pm:issue", ...]
 ```
 
+`_get_kind_expander()` is the cached registry the SDK itself reads (`_resolve_traversal_path`
+uses it). `expand_kind()` above is a live PUBLIC method — it is the supported door.
+
 ## Discovery Checklist
 
 - [ ] Ran `list_pointkinds()` before creating new points — know what structural types exist
 - [ ] Ran `list_sources()` if the data has provenance — know where existing data came from
-- [ ] Used pack-registered kinds for new points (check `list_relations()` / `expand_kind()`)
+- [ ] Used pack-registered kinds for new points (check `PackRegistry.list_relations()` / `expand_kind()`)
 - [ ] For decision comparisons: collected option IDs in an anchors list for `compute_confidence(anchors=...)`
 
 ---

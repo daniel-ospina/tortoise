@@ -2,13 +2,15 @@
 
 Plan §6.3: Gates A+B state is WORKFLOW-LAYER state — ``check_gates(child_issue)``
 lives in the workflow layer (CLI helper, GitHub-coupled), NOT the core SDK.
-The SDK exposes only the local ``calibration_passed()`` marker (stored
-milestone, #779) so DE2E-7 tests the local contract without a GitHub
-dependency.
+The SDK exposes only the local calibration-milestone marker (stored milestone, #779)
+so DE2E-7 tests the local contract without a GitHub dependency. #12901 wave 1 retired
+the PUBLIC ``calibration_passed()`` accessor; the CLI reads the same marker through
+``TortoiseSDK._calibration_marker_recorded()``.
 
 Gate semantics:
 - Gate A = the #320 epic (agent-session indexing) must be CLOSED.
-- Gate B = the calibration milestone must be recorded (calibration_passed).
+- Gate B = the calibration milestone must be recorded (the SDK's calibration-milestone
+  marker, read by the CLI through ``TortoiseSDK._calibration_marker_recorded()``).
 
 The pure function takes injectable state readers (tests mock them); the CLI
 shells out to ``gh`` for the issue body + dependency states and reads the SDK
@@ -48,8 +50,8 @@ def check_gates(child_issue: str | int,
             ('Depends on: ...'); when None the CLI path fetches it via gh.
         dependency_states: {issue_number: 'open'|'closed'|...} — when None,
             the CLI path resolves each dependency via gh.
-        calibration_passed: the local Gate B marker (SDK
-            ``calibration_passed()``, #779).
+        calibration_passed: the local Gate B marker (the SDK's calibration-milestone
+            marker, read by the CLI via ``_calibration_marker_recorded()``, #779).
         gh_runner: injectable ``gh api <path>`` runner for tests; default
             subprocess ``gh``.
 
@@ -140,11 +142,13 @@ def main(argv: list[str] | None = None) -> int:
     issue = int(argv[0])
     gh_runner = _default_gh_runner()
     body = _gh_issue_body(issue, gh_runner)
-    # Resolve the SDK marker when possible (read-only).
+    # Resolve the SDK marker when possible (read-only). #12901 wave 1 retired the PUBLIC
+    # `calibration_passed()` accessor, so this reads the same marker through the private
+    # seam it went to — the capability is unchanged, only the unapproved public door went.
     calibration_passed = False
     try:
         from tortoise.sdk import TortoiseSDK
-        calibration_passed = TortoiseSDK().calibration_passed()
+        calibration_passed = TortoiseSDK()._calibration_marker_recorded()
     except Exception:
         calibration_passed = False
     result = check_gates(issue, issue_body=body,
