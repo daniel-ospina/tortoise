@@ -1039,9 +1039,10 @@ class _LyingEq:
     returned normally, the `status` property was REMOVED, and the row read
     `live`. It is unhashable on purpose (defining `__eq__` nulls `__hash__`),
     which is a shape a store can hold — but it is NOT the `in _np_terminal`
-    membership door: for a non-`str` target the ENTAILMENT shortcut `continue`s
-    first, so this fixture never reaches the membership test. That door is pinned
-    by the str-SUBCLASS arm of
+    membership door: on the PRE-fix tree the ENTAILMENT shortcut `continue`d
+    first for a non-`str` target, so this fixture never reached the membership
+    test (at HEAD the shortcut is gated on an exact `str`, so it is not live for
+    a non-`str` at all). That door is pinned by the str-SUBCLASS arm of
     `test_a_str_subclass_cannot_forge_a_dead_word_or_crash_the_guard`
     (`_UnhashHonest`), not here.
     """
