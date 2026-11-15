@@ -542,6 +542,15 @@ def test_every_consumer_passes_the_caller_precondition():
     functions` keeps `_settle_call_sites`' site list and drops its `_missing`
     set, so an `until`-less call still counts for its pair — it reds the
     `missing` assertion instead.
+
+    ⛔ AND THE SCOPE CONSTANT IS PINNED, not trusted. `required` came from
+    `_DOCUMENTED_CONSUMERS` while the ledger came from `_DOCUMENTED_SITES`, so
+    an EMPTIED `_DOCUMENTED_CONSUMERS` made `required <= set(call_sites)`
+    trivially true and made `_undeclared_sites` filter on an empty module set —
+    the set-equality arm above went vacuous while the file stayed green
+    (measured at #12856's review: emptying it left 43 passed, 4 skipped, and a
+    NEWLY added undeclared armed wait in `test_indexes.py` passed with it). The
+    two must now AGREE, and the scope must be non-empty.
     """
     here = Path(__file__).resolve()
     paths = [p for p in here.parent.glob("test_*.py") if p.name != here.name]
@@ -554,6 +563,13 @@ def test_every_consumer_passes_the_caller_precondition():
     have = {(mod, fn): n for mod, fns in by_function.items()
             for fn, n in fns.items()}
     declared = dict(_settle._DOCUMENTED_SITES)
+    assert required and {m for m, _ in declared} == required, (
+        "the pin's SCOPE constant and its declaration ledger must agree and the "
+        "scope must be non-empty — a module named by one of them only is a wait "
+        "this floor cannot speak for, and an emptied `_DOCUMENTED_CONSUMERS` "
+        "would void the undeclared arm entirely: "
+        f"scope={sorted(required)}, "
+        f"declared={sorted({m for m, _ in declared})}")
     assert declared.keys() <= have.keys(), (
         "these documented (module, function) pairs no longer arm a settle — "
         "removing the wait re-opens the pre-drop race the pair exists to close: "
