@@ -49199,12 +49199,18 @@ class TortoiseSDK:
                         f"lifecycle word. ONTOLOGY {_np_section} declares "
                         f"`status` as a STRING, so this guard cannot tell "
                         f"whether the row is dead — and it will not guess by "
-                        f"treating an unreadable value as current. Repair the "
-                        f"row by writing a declared word onto it: the create and "
-                        f"update doors refuse a non-string since #12869, so this "
-                        f"row predates that guard, was written by a raw Cypher "
-                        f"producer, or was replayed from a journal recording "
-                        f"one."
+                        f"treating an unreadable value as current. ⛔ NO SDK "
+                        f"DOOR REPAIRS THIS, and that is deliberate rather "
+                        f"than an oversight: the same check refuses every "
+                        f"status write here, so `status='live'` and `status=None` "
+                        f"are refused too — writing any word would be guessing "
+                        f"the state this guard just declined to read. `None`-only "
+                        f"is not a safe exception either: it would let a dead "
+                        f"row read current. Non-status edits are still "
+                        f"accepted on this row, and the repair is a write "
+                        f"OUTSIDE this guard: a raw `MATCH (n:<label> "
+                        f"{{id:$id}}) SET n.status = $word` naming a declared "
+                        f"word, or a replay from a journal that records one."
                     )
                 if not isinstance(_np_status, str):
                     continue            # a non-string cannot be a dead WORD
@@ -49982,11 +49988,21 @@ class TortoiseSDK:
             # reverse the recorded `#7925` round-4 decision that the bundle's
             # array refusal fires ONLY at the item that MINTS the name (pinned by
             # `test_object_item_status_is_accepted_when_a_holder_owns_the_name`
-            # and `test_second_same_name_item_declaring_array_is_dropped`). So the
-            # refusal is scoped by `resolve_or_mint`'s own `created` flag — the
-            # SAME resolver the write uses, called inside the SAME
-            # `entity_create_lock` the write takes (#3590: calling it outside the
-            # lock makes the empty-holder check a TOCTOU window, not a guard).
+            # and `test_second_same_name_item_declaring_array_is_dropped`).
+            #
+            # ⛔ SO THE TEST IS "WILL THIS CALL CREATE THE NODE?", AND
+            # `resolve_or_mint`'s `created` FLAG IS NOT THAT QUESTION. It means
+            # "an id was minted", which is ALSO true for the ADOPT path — one
+            # LIVE id-less legacy holder that gets a stamped id (#3590 review
+            # F2). An adopt lands on an EXISTING node, so the status is dropped
+            # there too, and `_adopt_idless_holder` has already WRITTEN the stamp
+            # by the time this flag is readable: refusing on it would be a
+            # refusal that COSTS A WRITE, the atomicity rule `#9287`/`#10192`
+            # states and that this function's own `#12047` review F5 note
+            # re-states twenty lines up ("a refusal here leaves NOTHING
+            # behind"). The flag also cannot separate an `explicit_id` re-create
+            # from a first mint. So the node's own EXISTENCE is asked instead —
+            # the one question that is true exactly when the status would land.
             # ⚠️ A non-persistable shape (dict/set/bytes) is DROPPED by the
             # writer and never stored (#7369), so it cannot be a value this
             # refuses — the same `#7925` round-4 decision, which is why the check
@@ -50005,25 +50021,37 @@ class TortoiseSDK:
                         if (_obj_word is not None
                                 and not isinstance(_obj_word, str)
                                 and _is_persistable_prop_value(_obj_word)):
-                            raise ValueError(
-                                f"create_entity(type='object') refused a "
-                                f"non-string status for {name!r}: "
-                                f"{_obj_word!r} is "
-                                f"{_obj_word.__class__.__name__}, not a `str`. "
-                                f"ONTOLOGY §4.3 declares `status` as a STRING, "
-                                f"and the Object family's word set is "
-                                f"deliberately OPEN — a pack kind validates "
-                                f"against its own declared words (#10371), so "
-                                f"arbitrary STRINGS stay accepted and are not "
-                                f"narrowed here. A non-string is not a declared "
-                                f"word under ANY kind, and it cannot be stored: "
-                                f"`:Object.status` is what the lifecycle guard "
-                                f"hashes to decide whether a row is terminal, so "
-                                f"a non-scalar stored here makes every later "
-                                f"lifecycle write on this row fail instead of "
-                                f"being answered (#12869). Pass `status` as a "
-                                f"plain str. Nothing was written."
-                            )
+                            # The extra read is paid ONLY for a value this could
+                            # refuse, so an ordinary create issues exactly the
+                            # queries it did before (the resolver's docstring
+                            # records why a duplicated per-create probe is a
+                            # real cost, not a micro-optimisation).
+                            _obj_exists = self._get_proj().g.query(
+                                "MATCH (n:Object {id:$id}) RETURN count(n)",
+                                params={"id": _obj_target},
+                            ).result_set[0][0]
+                            if not _obj_exists:
+                                raise ValueError(
+                                    f"create_entity(type='object') refused a "
+                                    f"non-string status for {name!r}: "
+                                    f"{_obj_word!r} is "
+                                    f"{_obj_word.__class__.__name__}, not a "
+                                    f"`str`. ONTOLOGY §4.3 declares `status` "
+                                    f"as a STRING, and the Object family's word "
+                                    f"set is deliberately OPEN — a pack kind "
+                                    f"validates against its own declared words "
+                                    f"(#10371), so arbitrary STRINGS stay "
+                                    f"accepted and are not narrowed here. A "
+                                    f"non-string is not a declared word under "
+                                    f"ANY kind, and it cannot be stored: "
+                                    f"`:Object.status` is what the lifecycle "
+                                    f"guard hashes to decide whether a row is "
+                                    f"terminal, so a non-scalar stored here "
+                                    f"makes every later lifecycle write on this "
+                                    f"row fail instead of being answered "
+                                    f"(#12869). Pass `status` as a plain str. "
+                                    f"Nothing was written."
+                                )
                 node = self._create_entity(
                     "Object", _obj_target,
                     _entity_door_props(

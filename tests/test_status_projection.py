@@ -1592,26 +1592,113 @@ class TestNonScalarStatus12869:
 
     def test_the_CREATE_guard_is_a_LANDING_test_not_a_presence_test(
             self, tmp_path):
-        """A create that MERGES onto a live holder drops the status — so it is
+        """A create that lands on an EXISTING node drops the status — so it is
         NOT refused, and that is the recorded `#7925` round-4 decision.
 
-        `_upsert_object`'s ON MATCH lane never rewrites `status` (it is
-        projection-owned), so `['retracted']` on an already-held name lands
-        nowhere. Refusing it red the bundle pins
-        `test_object_item_status_is_accepted_when_a_holder_owns_the_name` and
-        `test_second_same_name_item_declaring_array_is_dropped` — both MEASURED
-        before the guard was scoped by `resolve_or_mint`'s `created` flag.
+        TWO shapes land on an existing node, and they are pinned separately
+        because `resolve_or_mint`'s `created` flag is true for BOTH the mint and
+        the ADOPT (an id-less legacy holder that gets a stamped id). Testing the
+        flag instead of the node's existence would have over-blocked adopt AND
+        refused AFTER `_adopt_idless_holder` had already written the stamp — a
+        refusal that costs a write.
 
-        FALSIFIABLE BY: dropping the `if _obj_created:` gate reds this arm.
+        FALSIFIABLE BY: removing the `if not _obj_exists:` gate reds both arms
+        (MEASURED); the adopt arm also then leaves the id stamped, which is the
+        atomicity half.
         """
         sdk = TortoiseSDK(str(tmp_path / "t12869merge.db"))
         try:
+            # (a) a live id-carrying holder: the ordinary MERGE
             sdk.create_object("held", "core:strategy")
             before = _carrier_row(sdk, "Object", "held")
             sdk.create_object("held", "core:strategy", status=["retracted"])
             assert _carrier_row(sdk, "Object", "held") == before, (
                 "the re-create changed the merged row — the status was supposed "
                 f"to be dropped: {_carrier_row(sdk, 'Object', 'held')} != {before}")
+
+            # (b) an id-LESS live holder: the ADOPT path. `resolve_or_mint`
+            # STAMPS an id here, so a refusal after that point would be a
+            # refusal that already wrote.
+            sdk._get_proj().g.query(
+                "CREATE (n:Object {name:'noid', objectKind:'core:strategy'})")
+            assert _carrier_row(sdk, "Object", "noid")[0] is None, (
+                "the fixture is supposed to be an id-LESS holder")
+            sdk.create_object("noid", "core:strategy", status=["retracted"])
+            adopted = _carrier_row(sdk, "Object", "noid")
+            assert adopted[0], (
+                "the adopt path did not stamp an id — it is the shape this arm "
+                "exists to cover")
+            assert adopted[1] is None, (
+                f"the adopted row took the array status: {adopted}")
+        finally:
+            sdk.close()
+
+    @pytest.mark.parametrize("bad", _REFUSED)
+    def test_a_REFUSED_create_writes_NOTHING(self, tmp_path, bad):
+        """Atomicity: the refusal precedes every write, including the id stamp.
+
+        FALSIFIABLE BY: moving the raise AFTER `_create_entity` reds this (the
+        node count becomes 1) — and moving it before `_obj_exists` while keying
+        on `created` reds the adopt arm above.
+        """
+        sdk = TortoiseSDK(str(tmp_path / "t12869atomic.db"))
+        try:
+            def count():
+                return sdk._get_proj().g.query(
+                    "MATCH (n:Object) RETURN count(n)").result_set[0][0]
+            before = count()
+            with pytest.raises(ValueError, match="refused a non-string"):
+                sdk.create_object("never-made", "core:strategy", status=bad)
+            assert count() == before, (
+                "a REFUSED create left a node behind — a refusal must not cost "
+                "a write (#9287/#10192)")
+            assert _carrier_row(sdk, "Object", "never-made") is None
+        finally:
+            sdk.close()
+
+    def test_no_SDK_status_write_can_repair_a_non_scalar_row(self, tmp_path):
+        """The refusal's prescription must be PERFORMABLE (AX rule 2 / #10183).
+
+        The guard declines to guess whether an unreadable row is dead, so it
+        refuses EVERY status write on it — `'live'`, the stored word, and `None`
+        alike (`None` alone would let a dead row read current). That means no SDK
+        door repairs the row, and the message says so and names the route that
+        does. This pin exists because the first draft of that message said
+        "repair the row by writing a declared word onto it" — a call this very
+        guard refuses, i.e. an unperformable prescription.
+
+        FALSIFIABLE BY: allowing a status write through on a foreign stored value
+        (drop the `_np_foreign` raise, or exempt a `str` target from it) reds the
+        `'live'` arm here, and would mean the message is wrong again.
+        """
+        sdk = TortoiseSDK(str(tmp_path / "t12869repair.db"))
+        try:
+            sdk.create_object("wrecked", "core:strategy")
+            oid = _carrier_row(sdk, "Object", "wrecked")[0]
+            sdk._get_proj().g.query(
+                "MATCH (n:Object {id:$i}) SET n.status = $s",
+                params={"i": oid, "s": ["archived"]})
+            for target in ("live", "archived", None):
+                with pytest.raises(ValueError, match="STORED status is"):
+                    sdk.update_entity(oid, status=target)
+            # NON-status edits still land (the refusal is the `status` field)…
+            sdk.update_entity(oid, description="a note")
+            assert _carrier_row(sdk, "Object", "wrecked")[1] == ["archived"], (
+                "a non-status edit disturbed the stored value")
+            # …and the documented repair route actually works: after a raw write
+            # of a DECLARED word the row is ADDRESSABLE again, so the ordinary
+            # guard answers it instead of refusing to read it. It answers with a
+            # TRANSITION verdict (`archived` -> `live` stays refused, #12745),
+            # which is the proof it read the word rather than choking on it.
+            sdk._get_proj().g.query(
+                "MATCH (n:Object {id:$i}) SET n.status = 'archived'",
+                params={"i": oid})
+            sdk.update_entity(oid, status="deprecated")
+            assert _carrier_row(sdk, "Object", "wrecked")[1] == "deprecated", (
+                "the row is still unaddressable after a raw repair")
+            with pytest.raises(ValueError, match="is TERMINAL for a :Object"):
+                sdk.update_entity(oid, status="live", supersededBy=None,
+                                  supersededAt=None)
         finally:
             sdk.close()
 
