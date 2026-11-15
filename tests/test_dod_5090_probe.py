@@ -11854,3 +11854,117 @@ def test_12549_a_MIXED_tree_names_the_silent_half_beside_the_disagreement(
     note = _gate_note(shipped)
     assert "PER-SERVICE DISAGREEMENT" in note, note
     assert "other deployment file(s) SILENT: ['Dockerfile.hosted']" in note, note
+
+
+def test_12549_an_UNTRACKED_dotenv_cannot_arm_a_compose_default(tmp_path, monkeypatch):
+    """A machine-local `.env` must not decide a published DoD reading (review P1).
+
+    ⛔ `.env` is gitignored (`.gitignore:30`) and untracked, so it is NOT a shipped
+    input — yet compose reads it as an interpolation source, and this repo's own
+    documented setup step (`cp .env.example .env`, with `.env.example:1644` setting
+    `TORTOISE_EMBED_GATE=1`) CREATES one. So without `COMPOSE_DISABLE_ENV_FILE=1` the
+    row reads ARMED on every developer box and OFF in CI, from a file nobody shipped.
+    Measured on this fixture: no `.env` → `"0"`; with `.env` → `"1"`.
+
+    The pre-existing ambient-env guard beside this one cannot see this: it only sets
+    an environment VARIABLE, and the leak arrives through a FILE.
+    """
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n"
+        "  app:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"${TORTOISE_EMBED_GATE:-0}\"\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+
+    # Baseline: the manifest's own default, no `.env` anywhere.
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"] == {"docker-compose.yml": "OFF"}, shipped["deployment"]
+
+    # …now the untracked dev file appears, with the value `.env.example` recommends.
+    (tmp_path / ".env").write_text("TORTOISE_EMBED_GATE=1\n", encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"] == {"docker-compose.yml": "OFF"}, (
+        "an untracked .env must not arm the row: " + repr(shipped["deployment"]))
+    assert shipped["deployment"]["on"] is False, shipped["deployment"]
+
+
+def test_12549_a_profile_gated_service_still_REPORTS_its_disarm(tmp_path, monkeypatch):
+    """A disarm inside a profiled service must be SEEN, not dropped (review P1).
+
+    ⛔ `docker compose config` OMITS every profile-gated service unless a profile is
+    enabled, so an explicit contrary value living in one vanished from the resolved
+    model and the file read ARMED — a deterministic green where the superseded line
+    reader had reported OFF. That is a fail-open in the worst class this instrument
+    has, and it is invisible in the output: the service is simply absent.
+    `--profile '*'` (a TOP-LEVEL flag, before `config`) puts every declaration in the
+    model. Measured: default → `{'app': {'FLAG': '1'}}`; with the flag → both services.
+    """
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n"
+        "  app:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"1\"\n"
+        "  worker:\n    image: alpine\n"
+        "    profiles: [\"batch\"]\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"0\"\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    # The profiled service's `0` is a real contrary value, so this is a DISAGREEMENT —
+    # not an arm. Reading it as ON is the fail-open this arm exists to catch.
+    assert shipped["deployment"]["files"] == {"docker-compose.yml": "DISAGREE"}, shipped["deployment"]
+    assert shipped["deployment"]["on"] is False, shipped["deployment"]
+    note = _gate_note(shipped)
+    assert "worker" in note, note
+
+
+def test_12549_the_platform_resolver_is_told_WHICH_file_and_asked_LOCALLY(
+        tmp_path, monkeypatch):
+    """`fly config show` must resolve THIS manifest, offline, as TOML (review P1).
+
+    ⛔ flyctl's docs for `fly config show`: *"The configuration is presented by default
+    in JSON format. The configuration data is retrieved from the Fly service."* A bare
+    invocation therefore (a) fetches over the NETWORK with credentials from a DoD probe
+    that must be offline, and (b) resolves flyctl's DEFAULT `fly.toml` rather than the
+    manifest under measurement — so on a tree carrying both `fly.toml` and
+    `fly.staging.toml` (a shape `FLY_MANIFEST_GLOB` explicitly claims to support) one
+    file's `[env]` is published as the other's. `--local` parses the local file,
+    `-c/--config` names it, and `--toml` asks for the format the trust check verifies.
+    """
+    seen: list[list[str]] = []
+
+    def _recording(argv):
+        seen.append(list(argv))
+        return {"ok": False, "stdout": "", "stderr": "not installed", "argv": argv,
+                "reason": "resolver-unavailable: not installed"}
+
+    monkeypatch.setattr(probe, "_run_config_resolver", _recording)
+    (tmp_path / "fly.staging.toml").write_text(
+        '[env]\n  TORTOISE_EMBED_GATE = "0"\n', encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert seen, "the platform resolver was never invoked"
+    argv = seen[0]
+    assert "--local" in argv, argv
+    assert "--toml" in argv, argv
+    # ⛔ And it must NAME the manifest, so the answer cannot be another file's.
+    assert str(tmp_path / "fly.staging.toml") in argv, argv
+
+
+def test_12549_a_SIBLING_worktree_manifest_does_not_hold_this_row(tmp_path, monkeypatch):
+    """Another lane's checkout is not part of the tree being measured (review P2).
+
+    ⛔ Every lane works in `<repo>/.worktrees/<lane>/`, so a recursive `**/Chart.yaml`
+    or `**/kustomization.yaml` glob reaches OTHER branches' manifests. Finding one sets
+    `deployment["measured"]` False and HOLDS row 1 — so one lane's in-flight change
+    would silently hold the row for every other lane, and the reading would depend on
+    files outside the measured tree. `_DISCOVERY_PRUNE` bounds the walk instead.
+    """
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  app:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"1\"\n", encoding="utf-8")
+    # A sibling worktree carrying a manifest type this walk has no reader for.
+    sibling = tmp_path / ".worktrees" / "some-other-lane"
+    sibling.mkdir(parents=True)
+    (sibling / "Chart.yaml").write_text("name: whatever\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"] == {"docker-compose.yml": "ON"}, shipped["deployment"]
+    assert shipped["deployment"]["measured"] is True, shipped["deployment"]

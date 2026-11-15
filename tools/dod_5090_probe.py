@@ -2210,9 +2210,18 @@ RESOLVER_TIMEOUT_S = 120
 #: measured — `FLAG=0` in the environment turns `FLAG: "${FLAG:-1}"` into `"0"`.
 #: The reading row 1 asks for is the SHIPPED config's, which is the same doctrine
 #: `measure()` applies to the process env (`#10996`): a lane's export is not a
-#: default. The project `.env` is still read by compose itself — that IS a shipped
-#: input — and this list deliberately does not try to enumerate "variables that
-#: could interpolate into the flag": it drops the ambient environment wholesale.
+#: default. This list deliberately does not try to enumerate "variables that could
+#: interpolate into the flag": it drops the ambient environment wholesale.
+#:
+#: ⛔ THE PROJECT `.env` IS **NOT** A SHIPPED INPUT, and an earlier revision of this
+#: comment said it was. `.env` is gitignored (`.gitignore:30`) and untracked, so it is
+#: a MACHINE-LOCAL file — and following this repo's own documented setup step
+#: (`cp .env.example .env`, and `.env.example:1644` sets `TORTOISE_EMBED_GATE=1`)
+#: CREATES one. Measured on a fixture with `FLAG: "${FLAG:-0}"`: no `.env` → `"0"`;
+#: with `.env` containing `FLAG=1` → `"1"`. A published DoD reading that flips on an
+#: untracked local file is exactly the leak this list exists to stop, so the
+#: resolver also runs with `COMPOSE_DISABLE_ENV_FILE=1` (see `_resolver_env`).
+#: `.env.example` is the shipped template; `.env` is the developer's copy of it.
 RESOLVER_ENV_ALLOW = frozenset({
     "PATH", "HOME", "TMPDIR", "TMP", "LANG", "LC_ALL",
     "DOCKER_CONFIG", "DOCKER_HOST", "DOCKER_CONTEXT", "XDG_RUNTIME_DIR",
@@ -2227,8 +2236,28 @@ RESOLVER_ENV_ALLOW = frozenset({
 #: ENVIRONMENT is perfectly resolvable reads as `UNRESOLVED` — the collapse this lane
 #: exists to remove, one layer down. A syntax error or a failed interpolation still
 #: exits non-zero and is still `UNRESOLVED`.
-COMPOSE_RESOLVER = "docker compose config --format json --no-consistency"
-FLY_RESOLVER = "fly config show"
+#: ⛔ `--profile '*'` is load-bearing, and it must precede the `config` subcommand
+#: (it is a TOP-LEVEL compose flag — `config --profile` is `unknown flag`, measured).
+#: Without it compose OMITS every profile-gated service from the resolved model, so an
+#: explicit disarm living inside one never reaches the walk and the file reads ARMED:
+#: measured on `{app: {FLAG: "1"}, worker: {profiles: ["batch"], environment:
+#: {FLAG: "0"}}}` — default → services `['app']` (reads `ON`, the `0` never seen and
+#: never named), with `--profile '*'` → `{app: "1", worker: "0"}` (`DISAGREE`). A
+#: missing disarm that reads as an arm is a FAIL-OPEN in the worst class this
+#: instrument has, so every profile is enabled: the walk wants to see every
+#: DECLARATION, not the subset a deploy would start.
+COMPOSE_RESOLVER = ("docker compose --profile '*' -f <file> config --format json "
+                    "--no-consistency")
+#: ⛔ `--local --toml -c <file>` are all three load-bearing. flyctl's own docs for
+#: `fly config show`: *"The configuration is presented by default in JSON format. The
+#: configuration data is retrieved from the Fly service."* — so a bare `fly config
+#: show` (a) fetches over the NETWORK with credentials and (b) resolves flyctl's
+#: DEFAULT `fly.toml`, not the manifest this walk is reading, so a tree holding both
+#: `fly.toml` and `fly.staging.toml` publishes one file's `[env]` as the other's.
+#: `--local` = *"Parse and show local fly.toml file instead of fetching from the Fly
+#: service"*, and `-c/--config` names the file. `--toml` asks for the format the
+#: output is then verified as, instead of a JSON rendering that could never parse.
+FLY_RESOLVER = "fly config show --local --toml -c <file>"
 TOML_RESOLVER = "tomllib [env]"
 
 
@@ -2276,7 +2305,16 @@ NON_ENV_MANIFEST_GLOBS: tuple[tuple[str, str], ...] = (
 #: Directories a recursive manifest glob never enters: a virtualenv or a vendored
 #: tree is not this repo's deployment config, and walking one makes the check slow
 #: enough that a lane skips it.
-_DISCOVERY_PRUNE = frozenset({".git", ".venv", "venv", "node_modules",
+#: ⛔ `.worktrees` is in this set for CORRECTNESS, not speed. Every lane works in a
+#: git worktree under `<repo>/.worktrees/<lane>/`, so a recursive `**/Chart.yaml`,
+#: `**/kustomization.yaml` or `**/*.service` glob reaches OTHER lanes' checkouts —
+#: including branches that add such a manifest. Those files are not part of the tree
+#: being measured, but finding one makes `deployment["measured"]` False and HOLDS row
+#: 1, so one lane's in-flight change would silently hold the row for every other lane
+#: (measured: `discover_deployment_channels()` walked `.git` and every sibling worktree
+#: and took 14.3 s per call on this checkout). The walk is bounded to the measured
+#: tree instead.
+_DISCOVERY_PRUNE = frozenset({".git", ".worktrees", ".venv", "venv", "node_modules",
                               "__pycache__", ".tox", ".mypy_cache", ".ruff_cache"})
 
 
@@ -2446,8 +2484,17 @@ class _ResolverUnavailable(Exception):
 
 
 def _resolver_env() -> dict[str, str]:
-    """The environment a resolver runs in — see `RESOLVER_ENV_ALLOW`."""
-    return {k: v for k, v in os.environ.items() if k in RESOLVER_ENV_ALLOW}
+    """The environment a resolver runs in — see `RESOLVER_ENV_ALLOW`.
+
+    ⛔ `COMPOSE_DISABLE_ENV_FILE=1` is added HERE, not left to the ambient
+    environment, so the compose resolver reads the manifests' own text and never a
+    machine-local `.env` (`RESOLVER_ENV_ALLOW` documents the measurement). It is a
+    compose key; the other resolvers ignore it. Verified: the `${FLAG:-0}` fixture
+    reads `"0"` with it set even when a `.env` beside the manifest sets `FLAG=1`.
+    """
+    env = {k: v for k, v in os.environ.items() if k in RESOLVER_ENV_ALLOW}
+    env["COMPOSE_DISABLE_ENV_FILE"] = "1"
+    return env
 
 
 def _run_config_resolver(argv: list[str]) -> dict:
@@ -2555,7 +2602,7 @@ def _compose_channel(path: Path, flag: str | None, is_truthy) -> dict:
     duplicate collapse.) The old line reader DID report the superseded line, which is
     the reading that let a claim about it leak into the note — see `#12070` item 4.
     """
-    run = _run_config_resolver(["docker", "compose", "-f", str(path),
+    run = _run_config_resolver(["docker", "compose", "--profile", "*", "-f", str(path),
                                 "config", "--format", "json", "--no-consistency"])
     out: dict = {"channel": "compose", "resolver": COMPOSE_RESOLVER,
                  "ok": False, "reason": run["reason"], "scopes": {},
@@ -2759,7 +2806,12 @@ def _fly_channel(path: Path, flag: str, is_truthy) -> dict:
                  "mentioned": False, "armed": [], "off": [], "unresolved": [],
                  "novalue": [], "falsy": [], "outside_runtime": [],
                  "build_refs": [], "entrypoints": [], "warnings": []}
-    platform = _run_config_resolver(["fly", "config", "show"])
+    # ⛔ `--local --toml -c <path>`: resolve THIS file, offline, in the format the
+    # trust check below actually verifies — see `FLY_RESOLVER`. A bare `fly config
+    # show` fetches from the Fly service and resolves flyctl's default `fly.toml`,
+    # which is neither this file nor a TOML document.
+    platform = _run_config_resolver(["fly", "config", "show", "--local", "--toml",
+                                     "-c", str(path)])
     text: str | None = None
     if platform["ok"] and platform["stdout"].strip():
         try:
