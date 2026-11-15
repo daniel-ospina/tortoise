@@ -932,16 +932,19 @@ class JournalPositionCollision(RecordProjectionError):
       the mis-index this class exists to stop;
     * the DIAGNOSIS must therefore not assert one cause. The message reports
       which of :func:`_identity_verdict`'s FIVE states the two payloads' record
-      identities support — `same` (one record, re-derived), `same_node` (one
-      node, two DIFFERENT records), `different` (two records, two identities),
-      `one_sided` (only one side carries an identity at all) or `unknown`
-      (nothing comparable) — and each state's text names the possibilities that
-      state can actually support. A message that said only "two DIFFERENT
-      records" would send an operator hunting a second journal that does not
-      exist, on a record whose only fault is that its rows predate a deploy; and
-      a message that said `same` on a shared NODE id would tell an operator "one
-      record" about two, which is the same false certainty in the other
-      direction.
+      coordinates support — `same` (every shared coordinate agrees, same record
+      type: a re-derivation OR two records about one node), `same_coordinate`
+      (coordinate agrees, record types differ: two records about one node),
+      `different` (a shared coordinate disagrees: the collision), `one_sided`
+      (only one side carries a coordinate at all) or `unknown` (nothing
+      comparable) — and each state's text names the possibilities that state can
+      actually support. A message that said only "two DIFFERENT records" would
+      send an operator hunting a second journal that does not exist, on a record
+      whose only fault is that its rows predate a deploy; and a message that said
+      "the SAME record" on a shared node id would tell an operator "one record"
+      about two, which is the same false certainty in the other direction. The
+      durable payload carries no record id at all (no journal column —
+      `#12894`), which is why no state may claim one.
 
     What would remove the residual rather than describe it: a derivation-version
     discriminator INSIDE the durable payload (`projection_version` is stripped
@@ -965,23 +968,27 @@ class JournalPositionCollision(RecordProjectionError):
         self.stored_event_type = stored_event_type
         self.stored_payload_digest = stored_payload_digest
         self.stored_payload_bytes = stored_payload_bytes
-        #: ``same`` / ``same_node`` / ``different`` / ``one_sided`` /
-        #: ``unknown`` — what the two payloads' record IDENTITIES support
+        #: ``same`` / ``same_coordinate`` / ``different`` / ``one_sided`` /
+        #: ``unknown`` — what the two payloads' shared COORDINATES support
         #: (:func:`_identity_verdict`). Reported, never used to change the
-        #: verdict: a shared-identity pair is still a difference the record may
-        #: not absorb, and a differing-identity pair is the collision this class
-        #: is named for.
+        #: verdict: a shared-coordinate pair is still a difference the record may
+        #: not absorb, and a disagreeing-coordinate pair is the collision this
+        #: class is named for. No state asserts record identity, because the
+        #: durable payload carries none.
         self.identity_state = identity_state
         if identity_state == "same":
             diagnosis = (
-                f"both payloads name the SAME record ({identity_detail}), so "
-                f"this may be a re-derivation of one record rather than two "
-                f"records — the record cannot tell the two apart, and it may "
-                f"not absorb the difference either way"
+                f"both payloads agree on every identity they share "
+                f"({identity_detail}) and carry the same record type — so this "
+                f"is either a re-derivation of one record or two records about "
+                f"one node; the durable payload carries no record id, so the "
+                f"record cannot tell the two apart, and it may not absorb the "
+                f"difference either way"
             )
-        elif identity_state == "same_node":
+        elif identity_state == "same_coordinate":
             diagnosis = (
-                f"both payloads name the SAME NODE ({identity_detail}) — two "
+                f"both payloads agree on the identity they share "
+                f"({identity_detail}), and their record TYPES differ — two "
                 f"records about one node, i.e. a second durable journal, a "
                 f"restore, a rotation, or a rebuild numbering below the "
                 f"high-water mark"
@@ -6245,20 +6252,28 @@ def _payload_digest(payload: Any) -> tuple[str, int]:
     return ("sha256:" + hashlib.sha256(encoded).hexdigest()[:12], len(encoded))
 
 
-#: The payload keys that IDENTIFY a record, ids only — and a deliberate
-#: SUBSET of `record_writer._RECORD_IDENTITY_KEYS` (which that module uses for the
-#: same purpose on the record it already holds). ⛔ `name` is EXCLUDED here on
-#: purpose: a source's `name` is its document title, which the record's own
-#: failure lines withhold as content, and it is mutable so it cannot identify a
-#: record across a re-derivation anyway. `event_id` is excluded because
-#: `ENVELOPE_KEYS` strips it from the durable payload — a key that cannot appear
-#: on EITHER side of the comparison is a key that can never answer.
+#: The payload keys that COORDINATE a record, ids only — and a deliberate
+#: SUBSET of `record_writer._RECORD_IDENTITY_KEYS` (which that module applies to
+#: the record it already holds). ⛔ `name` is EXCLUDED here on purpose: a source's
+#: `name` is its document title, which the record's own failure lines withhold as
+#: content, and it is mutable so it cannot identify a record across a
+#: re-derivation anyway. `event_id` is excluded because `ENVELOPE_KEYS` strips it
+#: from the durable payload — a key that cannot appear on EITHER side of the
+#: comparison is a key that can never answer.
 #: `tests/test_9318_journal_collision.py` pins both properties (subset of the
 #: writer's list, disjoint from `_CONTENT_COLUMNS`), so a future addition here
 #: cannot quietly start printing a title.
+#: ORDERED FINEST FIRST, and the order is load-bearing twice: it is the order
+#: `_identity_pairs` emits, and `_identity_verdict` labels a disagreement with
+#: the finest key that disagreed.
 _IDENTITY_KEYS: tuple[str, ...] = (
-    "eventId", "node_key", "session_id", "id",
+    "eventId", "id", "node_key", "session_id",
 )
+
+#: Rank of each identity key, for choosing WHICH key a verdict is labelled with.
+_IDENTITY_KEY_RANK: dict[str, int] = {
+    key: rank for rank, key in enumerate(_IDENTITY_KEYS)
+}
 
 
 def _payload_object(payload: Any) -> Any:
@@ -6271,6 +6286,22 @@ def _payload_object(payload: Any) -> Any:
         except (UnicodeDecodeError, ValueError):
             return None
     return payload
+
+
+def _identity_value(value: Any) -> Any:
+    """The value if it can be an id, else ``None`` (#9318 review 3, note 1).
+
+    An identity key is caller-settable, so its VALUE is caller data: a mapping or
+    a list under `id` would be rendered into the failure line as its repr, which
+    is how a document title reaches a log line the class docstring promises is
+    content-free. `record_writer._record_identity` accepts `str` only for the
+    same reason; `int` is admitted here because a jsonb round-trip preserves
+    numeric ids and `bool` is excluded because it is an `int` subclass. Anything
+    else is not an id, so it answers nothing rather than printing itself.
+    """
+    if isinstance(value, bool):
+        return None
+    return value if isinstance(value, (str, int)) else None
 
 
 def _identity_pairs(payload: Any) -> list[tuple[str, str, Any]]:
@@ -6287,20 +6318,23 @@ def _identity_pairs(payload: Any) -> list[tuple[str, str, Any]]:
 
     ``label`` is what the failure line prints (`id` on the top level,
     `point.id` when nested), so an operator can see WHERE the identity came from.
+    Values that cannot be an id (:func:`_identity_value`) are omitted entirely.
     """
     obj = _payload_object(payload)
     if not isinstance(obj, Mapping):
         return []
     pairs: list[tuple[str, str, Any]] = []
     for key in _IDENTITY_KEYS:
-        if obj.get(key) not in (None, ""):
-            pairs.append((key, key, obj[key]))
+        value = _identity_value(obj.get(key))
+        if value is not None:
+            pairs.append((key, key, value))
     for section, inner in obj.items():
         if not isinstance(inner, Mapping):
             continue
         for key in _IDENTITY_KEYS:
-            if inner.get(key) not in (None, ""):
-                pairs.append((key, f"{section}.{key}", inner[key]))
+            value = _identity_value(inner.get(key))
+            if value is not None:
+                pairs.append((key, f"{section}.{key}", value))
     return pairs
 
 
@@ -6316,54 +6350,78 @@ def _identity_verdict(attempted: Any, stored: Any, attempted_type: Any,
     operator hunting a journal that does not exist and one who knows a
     payload-shaping change landed.
 
-    FIVE STATES, because the evidence supports five and not four:
+    FIVE STATES, because the evidence supports five and not four. ⛔ Every one of
+    them is a statement about a COORDINATE, never about record identity: the
+    durable payload carries no record id (`event_id` is stripped and there is no
+    journal column — `#12894`), so `id`/`node_key`/`session_id` are node and
+    session coordinates a record happens to share. The previous cut returned
+    "the SAME record" whenever a shared `id` was accompanied by the same record
+    TYPE, which is a class, not an identity — two `PointRevised` of one point
+    from two journals are two records, and that message named no collision
+    cause at all (review cycle 3).
 
-    * ``same`` — same identity key, same value, SAME record type: one record, two
-      derivations of it (the cycle-1 residual);
-    * ``same_node`` — same identity, DIFFERENT record type: the ids agree because
-      they are NODE ids, and two records about one node (`PointAdded` vs
-      `PointRevised`, `ObjectRegistered` vs `EntityMutated`) are two records. The
-      FIRST cut of this function returned ``same`` here, which told an operator
-      "one record" about two and omitted every collision cause — the same class
-      of false certainty this function exists to remove;
-    * ``different`` — same identity key, different value: the collision;
+    * ``same`` — every identity they BOTH carry agrees, and the record types
+      agree too: a re-derivation of one record, or two records about one node.
+      The text says exactly that, and never "one record";
+    * ``same_coordinate`` — every shared identity agrees but the record TYPES
+      differ: two records about one node (`PointAdded` vs `PointRevised`,
+      `ObjectRegistered` vs `EntityMutated`), so the collision causes are named;
+    * ``different`` — a shared identity DISAGREES: the collision. Evaluated
+      across ALL shared keys, not the first one that matches, so an agreeing
+      coarse `session_id` cannot suppress a disagreeing `id` in the same pair
+      (two points of one capture session are two records, review cycle 3);
     * ``one_sided`` — only ONE side carries an identity at all, which is the
       re-derivation signature (a field added since the row was written) and must
       not be reported as "no identity comparable";
-    * ``unknown`` — neither side carries a comparable key. A real answer, never a
-      fallback to a guess.
+    * ``unknown`` — nothing comparable. A real answer, never a fallback to a
+      guess.
 
     Values are BOUNDED (`_ATTRIBUTION_VALUE_LIMIT`): an `id` is caller-chosen
     (`add_object(..., id=…)`, a source keyed by its URL), and this detail lands
     on the same log line whose `_record_identity` half bounds the same datum.
     """
     ours, theirs = _identity_pairs(attempted), _identity_pairs(stored)
-    for key, label, value in ours:
-        match = next((candidate for candidate in theirs
-                      if candidate[0] == key), None)
-        if match is None:
-            continue
-        rendered = _bounded(str(value), _ATTRIBUTION_VALUE_LIMIT)
-        if str(value) == str(match[2]):
-            if str(attempted_type) == str(stored_type):
-                return "same", f"{label}={rendered}"
-            return "same_node", (
-                f"{label}={rendered}, but {attempted_type!r} vs "
-                f"{stored_type!r}")
-        return "different", (
-            f"{label}: {rendered} vs "
-            f"{_bounded(str(match[2]), _ATTRIBUTION_VALUE_LIMIT)}")
+    if not ours and not theirs:
+        return "unknown", None
     if ours and not theirs:
-        key, label, value = ours[0]
+        _key, label, value = ours[0]
         return "one_sided", (
             f"only this write names {label}="
             f"{_bounded(str(value), _ATTRIBUTION_VALUE_LIMIT)}")
     if theirs and not ours:
-        key, label, value = theirs[0]
+        _key, label, value = theirs[0]
         return "one_sided", (
             f"only the surviving row names {label}="
             f"{_bounded(str(value), _ATTRIBUTION_VALUE_LIMIT)}")
-    return "unknown", None
+
+    shared: list[tuple[str, str, Any, Any]] = []
+    for key, label, value in ours:
+        match = next((candidate for candidate in theirs
+                      if candidate[0] == key), None)
+        if match is not None:
+            shared.append((key, label, value, match[2]))
+    if not shared:
+        # Both sides carry identities, but none of them is a key both sides
+        # speak — nothing is comparable, and saying so is the honest answer.
+        return "unknown", None
+
+    def _rank(entry: tuple[str, str, Any, Any]) -> int:
+        return _IDENTITY_KEY_RANK.get(entry[0], len(_IDENTITY_KEYS))
+
+    disagreements = [entry for entry in shared
+                     if entry[2] != entry[3] or type(entry[2]) is not type(entry[3])]
+    if disagreements:
+        _key, label, value, other = min(disagreements, key=_rank)
+        return "different", (
+            f"{label}: {_bounded(str(value), _ATTRIBUTION_VALUE_LIMIT)} vs "
+            f"{_bounded(str(other), _ATTRIBUTION_VALUE_LIMIT)}")
+
+    _key, label, value, _other = min(shared, key=_rank)
+    rendered = _bounded(str(value), _ATTRIBUTION_VALUE_LIMIT)
+    if str(attempted_type) == str(stored_type):
+        return "same", f"{label}={rendered}"
+    return "same_coordinate", (
+        f"{label}={rendered}, but {attempted_type!r} vs {stored_type!r}")
 
 
 def _refuse_a_journal_collision(cursor: Any, statement: Statement, index: int,
