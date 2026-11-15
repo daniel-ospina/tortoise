@@ -101,10 +101,15 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   SAME call, which #12825 restored and #12882 pinned. ⛔ **NOT the row's STORED
   word:** ``status='superseded'`` beside the two clears is ACCEPTED by the
   entailed short-circuit (``all(s == _np_status …)``, ``sdk.py``) and leaves the
-  row TERMINAL *with its carriers gone* — the goal unmet, no error reported, and
-  the row now on the carrier-less path, so it can no longer be un-superseded at
-  all (measured). Every OTHER terminal word has no SDK route at all (#12592), so
-  naming the clear there would prescribe a call that raises (AX rule 2). ⛔ Neither is
+  row TERMINAL *with its carriers gone* — the goal unmet and NO error reported.
+  ⚠️ That row is not lost, but recovering it takes TWO accepted calls: re-plant a
+  carrier (``update_entity(…, status='superseded', supersededBy='<successor>')``)
+  and THEN the coherent clear above; measured, the final journal record carries
+  ``status='live'`` with both carriers null, so graph and record agree. ⛔ Do NOT
+  read "carrier-less" as "irreparable" and reach for a whole-graph restore — the
+  wipe below is the last resort, not this one. Every OTHER terminal word has no
+  SDK route at all (#12592), so naming the clear there would prescribe a call
+  that raises (AX rule 2). ⛔ Neither is
   a record-sourced re-projection, which is ADDITIVE (``MERGE … SET n += $props``,
   no REMOVE pass) and would leave the value in place — and a clear writes
   ``state.status = null`` into the record, which the state-op leg's
