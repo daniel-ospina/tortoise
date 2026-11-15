@@ -7470,7 +7470,12 @@ _AFFIRMED = re.compile(
     #     "…are not merely outside the walk; the walk reports them"
     #     "the walk does not only ever visit …; it also reports them"
     #     "…are not simply outside the walk — the walk visits them"
-    #     -> the five `declared_open` rows labelled `open concessive: …`
+    #     -> the SIX `declared_open` rows labelled `open concessive: …` (the sixth,
+    #        `the cue is POSTPOSED`, was added after this line was written: the arm
+    #        matches `not only <verb>`, so moving the `only` AFTER the coverage verb
+    #        hides the cue entirely — #11541 review, round 7 F1 measured this line
+    #        and the one at the top of `_residual_sentences` as two contradicting
+    #        counts, `five` and `four`, over a set holding six)
     #   RED, the claim stated honestly — the false blocks this arm DOES buy:
     #     "…are never merely visited: they are never visited at all"
     #     "the gap is not merely walked past: … are not reported"
@@ -7758,8 +7763,10 @@ def _residual_sentences(s3: str) -> list[str]:
       ablated, so the arm is the sole cause (#11437 review, round 8, P3). All
       three are ROWS in `declared_blocks` below. ⛔ This is the other half of that
       arm's trade: it stops blocking the honest INCLUSIVE (`not only … but also`)
-      and starts blocking the honest CONCESSIVE, and the four inverses it therefore
-      leaves GREEN are the `open concessive:` rows in `declared_open`.
+      and starts blocking the honest CONCESSIVE, and the inverses it therefore
+      leaves GREEN are the SIX `open concessive:` rows in `declared_open` (this
+      said `four` and was already off by one on `main`; #11541 review, round 7 F1 —
+      two contradictory counts over one set are worse than one stale number).
 
     ⛔ NOT a false block, and listed here only to correct an earlier claim
     (#11437 review, P3): a PARTIAL exclusion stated as a HEDGE whose cue is one of
