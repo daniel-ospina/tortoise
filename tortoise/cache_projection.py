@@ -859,7 +859,9 @@ FOLD_ON_CREATE_DEFAULTS: dict[str, dict[str, Any]] = {
 #:   terminal-Object guard (#12745) briefly refused EVERY departure from
 #:   `superseded`, which made this bullet's measured shape unexpressible and
 #:   reddened `tests/test_status_projection.py::TestLifecycleCarrierCoherence::`
-#:   `test_clearing_a_supersession_is_still_writable`. The write door restores it
+#:   `test_a_coherent_un_supersede_lifts_the_row_and_a_status_only_write_cannot`
+#:   (the name #12790/#12882 gave the pin this sentence used to cite as
+#:   `test_clearing_a_supersession_is_still_writable`). The write door restores it
 #:   under the coherence condition this derivation needs — the row HELD a carrier
 #:   and the
 #:   write leaves NONE (`DERIVED_FROM_RECORD`, above, is what it reads) — so a

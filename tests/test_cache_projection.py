@@ -2732,7 +2732,7 @@ def test_a_terminal_pack_fold_latches_instead_of_being_resurrected():
     so the Object stays terminal and out of `recall_state`'s default view. The
     pre-fix record-side fold took the LAST writer by `seq` and wrote `active` —
     a terminal Object RESURRECTED on rebuild, the #2164/#3309 class the live
-    test `test_a_superseded_object_is_not_resurrected_by_a_connector_event`
+    test `test_a_superseded_object_is_never_resurrected_by_a_connector_event`
     exists to prevent (that one only covers the `superseded` carrier).
 
     Both temporal orders are asserted, because the reverse one shows the other

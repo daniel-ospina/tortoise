@@ -49053,8 +49053,11 @@ class TortoiseSDK:
         # `superseded -> live` — that one leaves the carriers set, so the record
         # would still read `'superseded'` against a live graph, which is the
         # #9974/#10192 divergence class rather than a recovery. (The test
-        # `test_clearing_a_supersession_is_still_writable` is the pin that caught
-        # the over-block; #12745's own suite pins the status-only refusal.)
+        # `test_a_coherent_un_supersede_lifts_the_row_and_a_status_only_write_cannot`
+        # is the pin that caught the over-block — it was
+        # `test_clearing_a_supersession_is_still_writable` when #12745 tripped it,
+        # and the name moved twice since; #12745's own suite pins the status-only
+        # refusal.)
         #
         # ⛔ THE WRITE IS THE ROW SET, so the READ is too. The per-label loop
         # below binds `MATCH (n:<label> {match_prop:$id}) SET n += $props` — every node
