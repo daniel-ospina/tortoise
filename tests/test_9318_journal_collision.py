@@ -613,6 +613,35 @@ def test_an_ENVELOPE_only_difference_is_invisible_to_the_verdict() -> None:
     assert dict(monitoring.record_write_failure_counts()) == before
 
 
+def test_the_verdict_never_compares_recorded_at() -> None:
+    """The ONE thing this class must never do: compare the `recorded_at` bind.
+
+    `ts` reaches the durable row (bound into `recorded_at` via
+    `COALESCE(%s::timestamptz, now())`), so adding `OR recorded_at IS DISTINCT
+    FROM %s::timestamptz` to the conflict predicate looks like a free way to see
+    a `ts`-only difference — and it would be a false-positive machine: when this
+    write carries no `ts`, `recorded_at` falls back to `now()`, so two replays of
+    ONE record would differ there and be refused as collisions. That is the one
+    failure mode the class docstring's residual argues against, and before this
+    pin NOTHING measured it (mutation: add the clause and bind
+    `statement.params[5]` -> 27 passed).
+
+    Pinned on the SQL and its bind ARITY rather than on behaviour: a behavioural
+    leg can only reach the `ts`-less replay through the whole door, while the
+    clause is what has to be absent.
+    """
+    assert "recorded_at" not in rp._JOURNAL_CONFLICT_CONTENT_SQL, (
+        "the collision predicate compares `recorded_at` — a `ts`-less replay "
+        "falls back to `now()` there, so two replays of ONE record would be "
+        "refused as collisions (see the class's second RESIDUAL block)")
+    # The predicate binds exactly (org, graph, seq, event_type, payload) — the
+    # five the INSERT also binds before `recorded_at`.
+    assert rp._JOURNAL_CONFLICT_CONTENT_SQL.count("%s") == 5, (
+        "the collision predicate no longer binds the five content parameters "
+        "(org, graph, seq, event_type, payload) — a widened bind set is how a "
+        "`ts`/`recorded_at` comparison would arrive")
+
+
 def test_a_different_event_type_alone_is_a_collision() -> None:
     """The verdict does not hang on the payload being comparable.
 

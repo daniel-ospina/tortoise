@@ -974,7 +974,11 @@ class JournalPositionCollision(RecordProjectionError):
     because `recorded_at` falls back to `now()` when `ts` is absent, and
     comparing it would then report a COLLISION for two replays of one record
     that omit `ts`. That is the false positive this class must never produce, so
-    the comparison stays on content; `#12894`'s journal IDENTITY in the key is
+    the UNCONDITIONAL comparison stays on content. (A CONDITIONAL comparison —
+    compare `recorded_at` only when THIS write carries a `ts` — could reach the
+    `ts`-only case without that false positive; that is a scope judgement left
+    to `#12894`, not an impossibility, and it is not taken here.)
+    `#12894`'s journal IDENTITY in the key is
     what removes the residual, exactly as for the residual above.
     `test_an_ENVELOPE_only_difference_is_invisible_to_the_verdict` pins the
     boundary so it is measured rather than implied, and reds when the key

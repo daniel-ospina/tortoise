@@ -563,8 +563,9 @@ class RecordWrite:
             # misses, and NOTHING here has its own term: `write_failed` covers an
             # unreachable record AND a record that WAS reached and refused the
             # projection; `journal_collision` (#9318) is a record that WAS reached
-            # and refused to index this record under a journal position another
-            # record already owns; `malformed_dsn` is a SET-UP defect (a value IS set and
+            # and refused to index it under a journal position holding content
+            # this write would not produce (a different record, OR this record's
+            # payload re-derived since that row was written); `malformed_dsn` is a SET-UP defect (a value IS set and
             # is wrong, so not `unconfigured`, which is defined as no value at
             # all); `no_tenant` is a deployment/caller gap; `no_tenant_carried` is
             # the same gap one arm over (a CARRIED tenant pair that was unusable);
