@@ -1371,6 +1371,45 @@ def test_the_seed_verb_refuses_a_divergence_and_names_it(schema, tenant, tmp_pat
         "a refused seed must leave NO counter row: absence IS 'not cut over'")
 
 
+def test_status_answers_the_divergence_remedy_beside_the_record(
+        schema, tenant, tmp_path, capsys):
+    """THE REMEDY MUST BE ABLE TO ANSWER ITS OWN QUESTION (fresh-context review, P2).
+
+    The door's divergence WARNING tells an operator to check the journal's
+    enumeration. `status` used to accept `--journal` and ignore it, reporting only
+    `journal_row_max` — so the one number the remedy needs was absent from the
+    command the remedy names. It now prints both readings, and the two derived
+    booleans that name which seed outcome they imply.
+    """
+    from tools import record_allocator_cli as cli
+
+    org, graph = tenant
+    _append_positions(schema, org, graph, [1, 2])
+
+    # 3 journal records against 2 position rows: the `None`-position TAIL.
+    tail = _journal_file(tmp_path, 3)
+    assert cli.main(["status", "--org-id", org, "--graph-id", graph,
+                     "--dsn", _door_dsn(), "--journal", str(tail),
+                     "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["journal_row_max"] == 2
+    assert payload["journal_enumerated_floor"] == 3
+    assert payload["healed_tail"] is True and payload["divergence"] is False, (
+        f"a tail was not named as a tail: {payload}")
+
+    # 2 journal records against 3 position rows: the DIVERGENCE the door refuses
+    # on. Same command, opposite verdict — which is the point of printing both.
+    _append_positions(schema, org, graph, [3])
+    short = _journal_file(tmp_path / "short", 2)
+    assert cli.main(["status", "--org-id", org, "--graph-id", graph,
+                     "--dsn", _door_dsn(), "--journal", str(short),
+                     "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["journal_row_max"] == 3
+    assert payload["divergence"] is True and payload["healed_tail"] is False, (
+        f"a divergence was not named as a divergence: {payload}")
+
+
 def test_the_seed_verb_refuses_to_guess_the_floor(schema, tenant):
     """`0` is a real answer for an empty graph, so it cannot be a DEFAULT.
 
