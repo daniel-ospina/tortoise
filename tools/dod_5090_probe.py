@@ -3796,12 +3796,20 @@ def _shell_heredoc_bodies(text: str) -> set[int]:
 
 
 def _shell_command_affects_flag(command: str, flag: str) -> bool:
-    """Does ONE simple command assign, export or unset ``flag``?
+    """Does ONE simple command change whether ``flag`` reaches the environment?
 
     Used to decide whether a CONDITIONAL operand (`… && export FLAG=1`) is the flag's
     business at all: a conditional operand that never touches the flag is silence, not an
     unmeasured reading, so the file must not be held for it.
+
+    ⛔ ``set -a`` / ``set +a`` COUNT, even though they never name the flag: allexport is
+    what decides whether a bare `FLAG=1` later in the file is exported, so a CONDITIONAL
+    allexport change is exactly as unmeasurable as a conditional `export FLAG=1` — and
+    leaving it out let that sentence in `DECLARED_CHANNEL_BOUNDS` claim more than the
+    reader does.
     """
+    if _shell_set_cluster_allexport(command) is not None:
+        return True
     parsed = _shell_export_args(command)
     if parsed is not None and flag in parsed[0]:
         return True
@@ -3866,8 +3874,14 @@ def _shell_commands(line: str) -> list[tuple[str, bool]]:
             index += 1
             continue
         if char == ";":
+            # ⛔ `;` ENDS the and-or list, so what follows is UNCONDITIONAL again:
+            # `a && b; export FLAG=1` runs the export whatever `a`/`b` did. Carrying the
+            # flag across the `;` read a real arm as unmeasured — a false HOLD, the
+            # mirror of the false ARM this whole branch is about (measured by this
+            # lane's own adversarial pass before review).
             commands.append(("".join(current), after_conditional))
             current = []
+            after_conditional = False
             index += 1
             continue
         if char in "&|":

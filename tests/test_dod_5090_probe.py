@@ -3982,7 +3982,17 @@ _CONDITIONAL_SHAPES = [
      "conditional DISARM"),
     ('export TORTOISE_EMBED_GATE=1\nfalse && unset TORTOISE_EMBED_GATE\n', "UNMEASURED",
      "bash: FLAG=1 — the unset never runs", "&& disarm that did not run"),
+    # ⛔ A conditional `set -a` decides whether a LATER BARE assignment exports, so it is
+    # flag-relevant even though it never names the flag — and it is not observable.
+    ('cond && set -a\nTORTOISE_EMBED_GATE=1\n', "UNMEASURED",
+     "bash: FLAG present only when `cond` succeeds — allexport decides it",
+     "conditional set -a"),
     # …CONTROLS — `;` is a real separator and must keep being READ, in both directions.
+    # ⛔ `a && b; export FLAG=1` runs the export whatever a/b did: `;` ENDS the and-or
+    # list. Carrying the conditional flag across the `;` read a real arm UNMEASURED — the
+    # mirror of the false ARM, found by this lane's own adversarial pass.
+    ('false && true; export TORTOISE_EMBED_GATE=1\n', "ON",
+     "bash: FLAG=1 — `;` ends the and-or list", "; RESETS the conditional list"),
     ('export TORTOISE_EMBED_GATE=1; true\n', "ON", "bash: FLAG=1",
      "; is a true separator (arm)"),
     ('export TORTOISE_EMBED_GATE=1; unset TORTOISE_EMBED_GATE\n', "OFF",
