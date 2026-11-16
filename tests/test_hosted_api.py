@@ -14661,19 +14661,28 @@ class TestOverLimitSurfacesOfferTheHumanPath:
         "cannot bound anything", "cannot be evaluated",
         "an unscoped cap would apply", "Import artifact exceeds the size cap",
         "Artifact exceeds the team graph size cap", "Session turn cap exceeded",
-        # ⚠️ `Too many registration attempts` is RETAINED while NO refusal's
-        # prose matches it any more (#12992 review P3, measured). The `/v1/register`
-        # 429 builds `detail={"code": "over_request_rate_limit_ip", "message": …}`
-        # and used to enter this universe on the KEY `over_request_rate_limit_ip`,
-        # which contains "limit" — the guard was asking its one question of a field
-        # name. Now that a dict's prose is its `message` value, that sentence names
-        # its next step and carries no `LIMIT_WORDS`, so the site is OUTSIDE the
-        # universe and this row exempts nothing. Kept rather than deleted because
-        # it is this registry's normal state for a THROTTLE (the seam-body row below
-        # is unmatched for the same reason) and because deleting it would silently
-        # re-arm: a future edit that gave that message limit prose would then be a
-        # RED demanding a fresh decision, which is the correct outcome, whereas an
-        # inert row plus this note is the one that a reader can audit.
+        # ⚠️ `Too many registration attempts` is INERT TODAY, and this note is the
+        # only thing that says so (#12992 review, measured — an earlier cut of this
+        # comment got all three details wrong, so read the code it names). The
+        # `/v1/register` 429 builds
+        # `detail={"message": "Too many registration attempts. Please try again
+        # later.", "error_code": "over_request_rate_limit_ip"}`: there is NO `code`
+        # key, and `over_request_rate_limit_ip` is the VALUE of `error_code`, not a
+        # key. That value used to drag the site into the universe because it
+        # contains "limit" — the guard asking its one question of a MACHINE field.
+        # Now that a dict's prose is its `message`, the sentence names its next
+        # step and carries no `LIMIT_WORDS`, so no refusal enters on this row.
+        #
+        # ⛔ RETAINING IT IS A DELIBERATE, LIVE EXEMPTION — not an oversight, and not
+        # the "inert row" an auditor can wave through. `NO_CONTACT_NEEDED` is a
+        # SUBSTRING test, so this row exempts ANY future refusal whose sentence
+        # contains these words, with no fresh decision recorded. Deleting it would
+        # instead red such a refusal and force that decision. This row is kept
+        # because that is the registry's established shape for a THROTTLE (the
+        # seam-body row below is matched by nothing either), and because a throttle
+        # that names its own retry genuinely has no ceiling to buy out of — but a
+        # reader who wants the stricter behaviour should delete it, and should know
+        # that is the choice being made here rather than a tidy-up.
         "Too many registration attempts", "Signup is rate-limited right now",
         # #3514: the demand surface's two THROTTLES. Each names its next step
         # ("retry shortly", plus the `Retry-After` header), so there is no
@@ -14809,10 +14818,12 @@ class TestOverLimitSurfacesOfferTheHumanPath:
 
         ⛔ AND THE `message` READING MUST NOT BE ABLE TO MAKE A REFUSAL
         INVISIBLE, which is why it is a PREFERENCE with a fallback and not a
-        substitution (measured, #12992 review P1). `_ingest_rate_limited`
-        (``hosted_api.py:10980``) builds ``"message": with_limit_contact(message)``
-        — a CALL, so the message-only reading resolves to the empty string and
-        the generic non-literal skip below swallowed the site ENTIRELY. It was
+        substitution (measured, #12992 review P1). `_ingest_rate_limited` builds
+        ``"message": with_limit_contact(message)`` — a CALL, so the message-only
+        reading resolves to the empty string and the generic non-literal skip
+        below swallowed the site ENTIRELY. (Cited by SYMBOL, never by line: the
+        line has already moved once under this docstring — an earlier cut said
+        `10980`, which is that function's `retry_after` computation.) It was
         in-universe and COMPLIANT before (it entered on the keys and its source
         segment carries the seam), i.e. the one shape that proves a dict refusal
         CAN carry the human path stopped being checked at all — and a removal of
@@ -14897,7 +14908,7 @@ class TestOverLimitSurfacesOfferTheHumanPath:
         `with_limit_contact` seam stayed GREEN, which is the one regression this
         file exists to catch.
 
-        Why it happens: `_ingest_rate_limited` (``hosted_api.py:10980``) builds
+        Why it happens: `_ingest_rate_limited` builds
         ``"message": with_limit_contact(message)`` — a CALL, so `ast.walk`
         yields no `Constant` and no resolvable `Name`, and the message-only
         reading is the empty string that the generic non-literal skip discards.

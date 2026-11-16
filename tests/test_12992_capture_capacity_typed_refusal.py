@@ -226,10 +226,19 @@ def test_the_degraded_arm_publishes_the_same_keys_as_the_healthy_one(
     exactly the degraded path where it is looking for an answer", measured twice
     (#12992 review P2).
 
-    The degraded arm is REACHABLE — `_capture_health` reads
-    `_CAPTURE_EXECUTOR._max_workers` inside its `try`, and a pool whose executor
-    was already collected raises there — so the operator's `jq .capture` must
-    answer on it, with the runbook's §4.1.1b key set, not a shorter one.
+    ⚠️ THE ARM IS DEFENSIVE, NOT REACHABLE FROM A SHIPPED PATH — stated plainly
+    because an earlier cut of this docstring claimed the opposite and was
+    MEASURED false (#12992 review). `_CAPTURE_EXECUTOR` is a module global that
+    is never reassigned, and a SHUT-DOWN executor still carries `_max_workers`
+    (`ThreadPoolExecutor(2).shutdown()`, then `._max_workers` → still `2`), so
+    nothing in production makes that read raise — the module's own comment inside
+    the `try` says exactly that ("a shut-down executor still carries it"). The
+    test therefore FORCES the arm through a non-executor object, because the rule
+    the repair follows is not about reachability: `docs/infra-runbook.md` §4.1.1b
+    documents ten keys, and the `wait_bound_breaches` precedent above is that
+    EVERY return of a documented block carries the documented key set — a reader
+    must never get a `KeyError` on the one path that exists to answer when the
+    measurement failed.
     """
     healthy = ha._capture_health()
 
