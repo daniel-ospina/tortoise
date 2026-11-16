@@ -536,9 +536,9 @@ jobs:
     #   * the tests still run, so a red run tells you about the code; and
     #   * a drift still fails loudly and still blocks the merge, because
     #     python-ci-gate (the required aggregate) lists this job in its needs.
-    # Cost: one extra job (~20s: checkout + setup-python + pyyaml), against a 25-minute suite
+    # Cost: one extra job (~20s: checkout + setup-python + pyyaml + the `docker` CLI the new
+    # gate step resolves compose with — its absence REFUSES rather than skips), against a suite
     # that used to be silently withheld. Unconditional on every event (push/PR) — same as before;
-    # needs pyyaml only, since tools/ci_selection.py imports it locally.
     #
     # timeout-minutes: this job now owns a network install (`pip install
     # pyyaml`) AND feeds the REQUIRED aggregate check — without a bound, a

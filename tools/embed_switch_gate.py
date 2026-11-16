@@ -20,7 +20,7 @@ from the resolved model:
 
 | channel | resolver |
 |---|---|
-| compose (per **service** — one service arming does not arm its neighbour) | ``docker compose -f <file> --env-file /dev/null config --format json`` |
+| compose (per **service** — one service arming does not arm its neighbour) | ``docker compose -f <file> --profile '*' --env-file /dev/null config --format json`` |
 | Fly manifest | ``fly config show --local --config <file>`` when ``flyctl`` is available, else ``tomllib`` on the manifest's ``[env]`` table |
 | image build file (``Dockerfile*``) | a strict ``ENV`` reader (no external resolver exists) |
 | entrypoint script (``entrypoint*.sh``) | a strict ``export``/assignment reader (no external resolver exists) |
