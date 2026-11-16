@@ -14810,7 +14810,7 @@ class TestOverLimitSurfacesOfferTheHumanPath:
         ⛔ AND THE `message` READING MUST NOT BE ABLE TO MAKE A REFUSAL
         INVISIBLE, which is why it is a PREFERENCE with a fallback and not a
         substitution (measured, #12992 review P1). `_ingest_rate_limited`
-        (``hosted_api.py:10980``) builds ``"message": with_limit_contact(message)``
+        (``hosted_api.py:10986``) builds ``"message": with_limit_contact(message)``
         — a CALL, so the message-only reading resolves to the empty string and
         the generic non-literal skip below swallowed the site ENTIRELY. It was
         in-universe and COMPLIANT before (it entered on the keys and its source
@@ -14897,7 +14897,7 @@ class TestOverLimitSurfacesOfferTheHumanPath:
         `with_limit_contact` seam stayed GREEN, which is the one regression this
         file exists to catch.
 
-        Why it happens: `_ingest_rate_limited` (``hosted_api.py:10980``) builds
+        Why it happens: `_ingest_rate_limited` (``hosted_api.py:10986``) builds
         ``"message": with_limit_contact(message)`` — a CALL, so `ast.walk`
         yields no `Constant` and no resolvable `Name`, and the message-only
         reading is the empty string that the generic non-literal skip discards.
