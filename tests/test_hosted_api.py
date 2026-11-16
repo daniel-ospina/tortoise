@@ -14729,6 +14729,81 @@ class TestOverLimitSurfacesOfferTheHumanPath:
                     out.setdefault(node.name, []).extend(vals)
         return out
 
+    def _str_constants(self, trees):
+        """Module-level ``NAME = <str>`` text, per module: ``rel -> {name: text}``.
+
+        A customer-facing refusal message is now routinely written as ONE shared
+        constant so the raise site and the surface that reports it cannot drift
+        (`_CAPTURE_CAPACITY_MESSAGE` is read by both `_reserve_capture_slot` and
+        `/health`'s capture block). A name resolves to no literal of its own, so
+        without this map such a message would fall into the documented
+        "non-literal" skip below and be INVISIBLE to every arm here — the guard
+        would stop reading the very prose it exists to check (#12992).
+
+        ⛔ Resolution is PER MODULE, never one cross-module map: two modules may
+        spell the same name differently, and a shared map would bind one
+        module's prose to another module's raise site.
+
+        Only a plain ``NAME = "..."`` / ``NAME: str = "..."`` is resolved. A
+        computed value has no prose to read and stays with the non-literal skip,
+        stated rather than guessed at.
+        """
+        out = {}
+        for rel, tree in trees.items():
+            consts = {}
+            for node in tree.body if isinstance(tree, ast.Module) else []:
+                if isinstance(node, ast.Assign):
+                    targets, value = node.targets, node.value
+                elif isinstance(node, ast.AnnAssign):
+                    targets, value = [node.target], node.value
+                else:
+                    continue
+                if not (isinstance(value, ast.Constant)
+                        and isinstance(value.value, str)):
+                    continue
+                for tgt in targets:
+                    if isinstance(tgt, ast.Name):
+                        consts[tgt.id] = value.value
+            out[rel] = consts
+        return out
+
+    @staticmethod
+    def _prose(val, consts):
+        """The customer-facing PROSE of a ``detail=`` value.
+
+        ⛔ FOR A DICT THE PROSE IS THE ``message`` VALUE — never every string
+        constant in the subtree. ``ast.walk`` over
+        ``detail={"code": …, "message": …}`` yields the KEYS, so a typed
+        refusal whose values are module constants produced the "prose"
+        ``codemessageretry_afterin_flightlimit``. That string CONTAINS "limit",
+        so the refusal entered this universe carrying none of the sentence the
+        customer is shown, and the one thing this file exists to check (does the
+        sentence offer the human path) was asked of the field names (#12992:
+        the capacity 429 in ``_reserve_capture_slot`` was reported as an
+        uncompliant over-limit refusal, with its `detail` printed as its own
+        keys). A dict with NO ``message`` key falls back to the old
+        every-string-constant reading, so nothing previously visible stops
+        being visible.
+
+        A ``Name`` is resolved through the module's own string constants (see
+        `_str_constants`); anything else contributes nothing and is left to the
+        non-literal skip.
+        """
+        nodes = [val]
+        if isinstance(val, ast.Dict):
+            keyed = [v for k, v in zip(val.keys, val.values, strict=True)
+                     if isinstance(k, ast.Constant) and k.value == "message"]
+            if keyed:
+                nodes = keyed
+        text = ""
+        for node in nodes:
+            for child in ast.walk(node):
+                if isinstance(child, ast.Constant) and isinstance(child.value, str):
+                    text += child.value
+                elif isinstance(child, ast.Name) and child.id in consts:
+                    text += consts[child.id]
+        return text
+
     def _refusal_messages(self):
         """Yield (module, line, construct, text, compliant) per refusal."""
         root = pathlib.Path(__file__).resolve().parent.parent
@@ -14739,6 +14814,7 @@ class TestOverLimitSurfacesOfferTheHumanPath:
                 trees[rel] = ast.parse(path.read_text(encoding="utf-8"))
         refusal_classes = self._refusal_class_names(trees)
         detail_builders = self._detail_builders(trees)
+        str_constants = self._str_constants(trees)
         for rel in self.MODULES:
             path = root / rel
             if not path.exists():       # a module move must not silently skip
@@ -14770,10 +14846,7 @@ class TestOverLimitSurfacesOfferTheHumanPath:
                     if name in refusal_classes:
                         pairs = [(f"raise {name}", a) for a in node.exc.args[:1]]
                 for construct, val in pairs:
-                    text = "".join(
-                        c.value for c in ast.walk(val)
-                        if isinstance(c, ast.Constant)
-                        and isinstance(c.value, str))
+                    text = self._prose(val, str_constants.get(rel, {}))
                     if not text.strip():
                         continue    # non-literal (e.g. str(exc)) — see class doc
                     if not any(w in text.lower() for w in self.LIMIT_WORDS):
