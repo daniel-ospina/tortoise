@@ -7796,10 +7796,21 @@ def replay_plan(records: Sequence[Mapping[str, Any]], *, org_id: str,
                 org_id=org_id, graph_id=graph_id, records=records))
         return plan
     for index, record in enumerate(records):
-        seq = _carried_position(record, start_seq + index, index)
+        # ⛔ THE CARRIED ORDINAL IS VALIDATED ONLY WHERE IT IS WRITTEN. It feeds
+        # `_journal_row` and nothing else, so reading it on the `position=False`
+        # arm refused a record-sourced batch over an ordinal the caller never
+        # asked to write — a false refusal with nothing to repair, since no
+        # position row is emitted at all (#12894 review cycle 9, P2). The sibling
+        # guard above is scoped the same way and for the same reason
+        # (`if position and not allocate and records:`).
+        # ⚠️ THE ORDER IS LOAD-BEARING AND UNCHANGED: the record's own mutations
+        # come first, then its position row (an identity row must precede the
+        # node row it names — `tests/test_record_projection.py` pins four such
+        # legs). Only the READ moved.
         plan.extend(mutations_for(record, org_id=org_id, graph_id=graph_id,
                                   columns=columns, refused=refused))
         if position:
+            seq = _carried_position(record, start_seq + index, index)
             plan.append(_journal_row(record, seq, org_id, graph_id))
     return plan
 

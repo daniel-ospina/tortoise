@@ -96,9 +96,11 @@ can take are NOT symmetric, and they must not be described with one sentence:
 did not). An **enumerated** replay cannot close the gap — it writes rows and never
 the counter, and on a cut-over graph it is refused outright — so the guard refuses
 every *later* record for the same reason, indefinitely. ⚠️ An **armed** replay of
-the missing record does close it (`replay(allocate=True)` runs `ALLOCATION_SQL`,
-which issues and commits the position; a leg pins that), but that is per-record
-surgery. The general remedy for a whole gap is the operator chain: `halt` →
+the missing record does close it: `replay(allocate=True)` runs `ALLOCATION_SQL`,
+which *issues* the position — `replay()` never commits (it is forbidden one), so
+the caller's commit is what lands the gap closed, and a rolled-back armed replay
+closes nothing. That is per-record surgery. The general remedy for a whole gap is
+the operator chain: `halt` →
 `seed --journal <path>` → `reopen` → `arm` (the seed is allowed
 here, because the record's rows are below the journal).
 * **journal BEHIND the counter** (a restored or truncated journal). This is

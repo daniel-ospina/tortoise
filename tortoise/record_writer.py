@@ -2765,11 +2765,13 @@ def write_live_record(record: Mapping[str, Any], *,
             "the record write was REFUSED (position_unverifiable) — the journal "
             "holds the record but the append could not PROVE its position, so "
             "the ordinal allocator (`%s`) has nothing to check the number it "
-            "would issue against. On the ALLOCATED arm a replay does NOT heal "
-            "this (an enumerated replay is refused on a cut-over graph), and "
+            "would issue against. An ENUMERATED replay does NOT heal this (it is "
+            "refused on a cut-over graph), and "
             "the journal consumed a position the counter did not — so EVERY "
-            "later armed write refuses for the same reason until the counter is "
-            "re-seeded. The remedy is the allocator's operator path: `halt` -> "
+            "later armed write refuses for the same reason until the gap is "
+            "closed (an ARMED replay of the missing record closes it one record "
+            "at a time, once the caller commits). For the whole gap the remedy "
+            "is the allocator's operator path: `halt` -> "
             "`seed --journal` -> `reopen` -> `arm`; record=%s %s",
             RECORD_ALLOCATE_ENV, record.get("type"), _record_identity(record),
         )
@@ -2825,8 +2827,10 @@ def write_live_record(record: Mapping[str, Any], *,
         #     graph it is refused outright (`_refuse_an_enumerated_replay`). So
         #     every LATER armed write refuses for the same reason. ⚠️ An ARMED
         #     replay of the missing record DOES close it — `replay(allocate=True)`
-        #     runs `ALLOCATION_SQL`, which issues and commits the position, and
-        #     `tests/test_12894_record_cursor_live.py` pins that. It is per-record
+        #     runs `ALLOCATION_SQL`, which ISSUES the position. `replay()` itself
+        #     never commits (it is forbidden one — the caller does), so the gap is
+        #     closed by the CALLER'S commit, and a rolled-back armed replay closes
+        #     nothing. That is per-record
         #     surgery, though, so the general remedy for a whole gap is the
         #     operator chain: `halt` → `seed --journal <path>` → `reopen` → `arm`
         #     (the seed is allowed here, because the record's rows are BELOW the

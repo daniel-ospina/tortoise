@@ -1745,6 +1745,31 @@ def test_replay_refuses_a_carried_ordinal_that_disagrees():
             f"{coercion.value}")
 
 
+def test_a_carried_ordinal_is_not_validated_when_no_position_is_written():
+    """⛔ THE READ IS SCOPED TO THE ROW IT FEEDS (#12894 review cycle 9, P2).
+
+    `_carried_position` feeds `_journal_row` and NOTHING else, so on the
+    `position=False` arm there is no row to number and nothing to repair. Reading
+    it anyway refused a record-sourced batch over an ordinal the caller never
+    asked to write, and told the operator to "repair the batch" when no position
+    row was emitted at all — a false refusal on the one path where the carried
+    number is inert. The sibling guard is scoped the same way and for the same
+    reason (`if position and not allocate and records: _refuse_an_enumerated_
+    replay(...)`).
+    """
+    plan = rp.replay_plan([{**RECORD, "seq": 9}], org_id="o", graph_id="g",
+                          position=False, start_seq=1)
+    assert plan, (
+        "the position=False plan is empty — the record's own mutations vanished "
+        "along with the ordinal that was skipped")
+
+    # …and the refusal still fires on the arm that WRITES the row, so this is a
+    # scope fix and not a hole: `position=True` refuses the same record.
+    with pytest.raises(rp.RecordProjectionError):
+        rp.replay_plan([{**RECORD, "seq": 9}], org_id="o", graph_id="g",
+                       start_seq=1)
+
+
 # ── (3d) the journal line and its row carry the SAME number ────────────────
 
 def test_the_armed_row_carries_the_journals_position(schema, tenant, app,
