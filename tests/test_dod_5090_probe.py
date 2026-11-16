@@ -3163,6 +3163,14 @@ def test_a_BRANCH_may_not_have_run_so_the_file_is_HELD(tmp_path, monkeypatch):
             "for i in 1 2; do\nexport TORTOISE_EMBED_GATE=1\ndone\n",
             # a case arm
             "case x in\n  x) export TORTOISE_EMBED_GATE=1 ;;\nesac\n",
+            # ⛔ …and the ONE-LINE `case` spelling, which published a DEFINITE `OFF` until
+            # the subject form was stripped: the splitter hands the scanner
+            # ``x in x) export …``, and `<subject> in ` blocked the arm pattern. It must
+            # read the same three-valued answer as the multi-line form, because the test
+            # is what this reader cannot evaluate (`bash -c 'case x in x) export FLAG=1
+            # ;; esac; env'` does export it — the row may not claim that, it did not
+            # evaluate the subject). Fresh review of #12902, P2.
+            "case x in x) export TORTOISE_EMBED_GATE=1 ;; esac\n",
     ):
         shipped = _shipped(script)
         assert shipped["per_surface"]["entrypoint"]["state"] == "UNMEASURED", (
@@ -3175,6 +3183,15 @@ def test_a_BRANCH_may_not_have_run_so_the_file_is_HELD(tmp_path, monkeypatch):
     # …and a plain group is unconditional, not a branch.
     assert _shipped("{ export TORTOISE_EMBED_GATE=1; }\n")[
         "per_surface"]["entrypoint"]["state"] == "ON"
+    # ⛔ CONTROL: the SUBJECT form is stripped only where a case PATTERN follows it. A
+    # loop's word list (`for x in a b`) carries no `<word>)`, so it must not be eaten by
+    # the case arm strip — the loop body is held by the BRANCH rule, not by a botched
+    # command parse that would silently drop the arm.
+    assert probe._shell_strip_leading_keywords("x in a b") == "x in a b"
+    assert probe._shell_strip_leading_keywords(
+        "x in x) export TORTOISE_EMBED_GATE=1") == "export TORTOISE_EMBED_GATE=1"
+    assert _shipped("for x in a b; do\nexport TORTOISE_EMBED_GATE=1\ndone\n")[
+        "per_surface"]["entrypoint"]["state"] == "UNMEASURED"
 
 
 def test_an_ARITHMETIC_left_shift_opens_NO_heredoc_body(tmp_path, monkeypatch):
@@ -3247,6 +3264,20 @@ def test_a_heredoc_whose_DELIMITER_is_unknown_HOLDS_the_file(tmp_path, monkeypat
     assert probe._shell_unresolved_heredoc_lines("cat <<'EOF'\nx\nEOF\n") == set()
     assert probe._shell_unresolved_heredoc_lines("cat <<.EOF\nx\n.EOF\n") == set()
     assert probe._shell_unresolved_heredoc_lines("x=$((1<<2))\n") == set()
+    # ⛔ A LINE THAT IS ALREADY A HEREDOC BODY IS DATA: an operator SPELLED inside one is
+    # not an operator. Scanning it held a file bash arms (fresh review of #12902, P3) —
+    # the same line was both a body (line 2) and an unresolved delimiter, and the file
+    # read `UNMEASURED` where bash exports the flag.
+    nested = "cat <<EOF\ncat <<$D\nEOF\nexport TORTOISE_EMBED_GATE=1\n"
+    assert probe._shell_heredoc_bodies(nested) == {2}
+    assert probe._shell_unresolved_heredoc_lines(nested) == set()
+    assert _walk(nested)["per_surface"]["entrypoint"]["state"] == "ON"
+    # …and a genuinely unresolved operator on a COMMAND line is still named, even when
+    # another heredoc's body sits above it — the skip is per LINE, not per file.
+    mixed = ("cat <<EOF\ncat <<$D\nEOF\n"
+             "cat <<$D >/dev/null\nexport TORTOISE_EMBED_GATE=1\n")
+    assert probe._shell_unresolved_heredoc_lines(mixed) == {4}
+    assert _walk(mixed)["per_surface"]["entrypoint"]["state"] == "UNMEASURED"
 
 
 def test_a_REDIRECTION_does_not_end_the_parent_shell(tmp_path, monkeypatch):

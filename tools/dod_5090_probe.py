@@ -3876,7 +3876,20 @@ def _shell_unresolved_heredoc_lines(text: str) -> set[int]:
     `DECLARED_CHANNEL_BOUNDS`; it is handled here instead, which is stronger.
     """
     unresolved: set[int] = set()
+    #: ⛔ A LINE THAT IS ALREADY A KNOWN HEREDOC BODY IS DATA, so an operator spelled in
+    #: it is not an operator. Scanning it held a file bash arms — a false HOLD produced by
+    #: `_shell_heredoc_bodies`' mirror image (measured by the fresh review of `#12902`, P3):
+    #:
+    #:     cat <<EOF / cat <<$D / EOF / export FLAG=1
+    #:       bash: FLAG=1      reader: UNMEASURED, bodies={2}, unresolved={2}
+    #:
+    #: — the SAME line was both a body and an unresolved delimiter. Skip what is already
+    #: known to be a body; an unresolved operator that is genuinely a COMMAND is still
+    #: named below.
+    bodies = _shell_heredoc_bodies(text)
     for number, raw in enumerate(text.splitlines(), 1):
+        if number in bodies:
+            continue
         masked = _shell_mask_arithmetic(_shell_mask_quoted(_shell_strip_comment(raw)))
         for match in _SHELL_HEREDOC_OP.finditer(masked):
             rest = raw[match.end():]
@@ -4122,6 +4135,18 @@ _SHELL_LEADING_KEYWORD = re.compile(
 #: is untouched: the parenthesis that opens the empty parameter list blocks the match.
 _SHELL_CASE_ARM_PATTERN = re.compile(r"^[^ \t(){};&|]+\)[ \t]+")
 
+#: ⛔ A `case` arm's SUBJECT and `in` sit between the keyword and the pattern, and the
+#: splitter hands the scanner all of it: `case x in x) export FLAG=1 ;; esac` becomes
+#: ``x in x) export FLAG=1``, whose leading `x in ` blocked `_SHELL_CASE_ARM_PATTERN` (it
+#: anchors at position 0). The arm therefore landed in NO bucket and the file published a
+#: DEFINITE `OFF` over a deployment bash arms — exactly the reading `_shell_control_flow_lines`
+#: says it refuses, one spelling over (fresh review of `#12902`, P2: the multi-line spelling
+#: was pinned and read `UNMEASURED`, the one-line spelling was neither pinned nor fixed). The
+#: subject form is only stripped when a PATTERN WORD and its `)` follow it, so `for x in a b`
+#: (a loop's word list, no `)` after a word) is untouched.
+_SHELL_CASE_SUBJECT_ARM_PATTERN = re.compile(
+    r"^[^ \t(){};&|]+[ \t]+in[ \t]+[^ \t(){};&|]+\)[ \t]*")
+
 
 def _shell_strip_leading_keywords(text: str) -> str:
     """``text`` with any leading shell KEYWORDS (`then`, `do`, `!`, …) removed."""
@@ -4143,7 +4168,8 @@ def _shell_strip_leading_keywords(text: str) -> str:
             continue
         match = _SHELL_LEADING_KEYWORD.match(stripped)
         if not match:
-            arm = _SHELL_CASE_ARM_PATTERN.match(stripped)
+            arm = (_SHELL_CASE_ARM_PATTERN.match(stripped)
+                   or _SHELL_CASE_SUBJECT_ARM_PATTERN.match(stripped))
             if not arm:
                 return stripped
             text = stripped[arm.end():]
