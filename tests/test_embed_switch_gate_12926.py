@@ -1471,3 +1471,133 @@ def test_the_real_tree_states_both_switches():
             continue
         for switch in SWITCHES:
             assert channel.stated.get(switch, "").strip(), (channel.channel, switch)
+
+
+def test_a_case_arm_inside_a_substitution_is_not_the_substitutions_CLOSER():
+    """Review P1 at `af655a8153` — the arm terminator closed the span, so `esac )` read as CODE.
+
+    A ``)`` inside ``$( … )`` has two meanings and the reader only knew one. In
+    ``mode=$( case "$MODE" in off) echo 0 ;; *) echo 1 ;; esac )`` the FIRST ``)`` ends a `case`
+    PATTERN, not the substitution — so the span ended at the arm, the leftover `esac )` was read as
+    code with no opener, and it decremented a REAL enclosing block (a function body, here). Both
+    ``export``s inside the never-called helper were then credited ``STATED``: ``ok``, exit 0, over
+    a process that receives neither switch. `case` is now counted inside a span, so its arms
+    cannot close it.
+    """
+    for label, script in (
+        (
+            "a case arm inside a command substitution",
+            "#!/bin/sh\n"
+            "set -eu\n"
+            "_configure() {\n"
+            '  mode=$( case "$MODE" in\n'
+            "             off) echo 0 ;;\n"
+            "             *)   echo 1 ;;\n"
+            "          esac )\n"
+            "  export TORTOISE_VALUE_GATE=1\n"
+            "  export TORTOISE_EMBED_GATE=1\n"
+            "}\n"
+            'exec "$@"\n',
+        ),
+        (
+            "a case arm containing a block",
+            "#!/bin/sh\n"
+            "if false; then\n"
+            '  y=$( case x in x) if true; then :; fi;; esac )\n'
+            "  export TORTOISE_VALUE_GATE=1\n"
+            "  export TORTOISE_EMBED_GATE=1\n"
+            "fi\n",
+        ),
+    ):
+        stated, ambiguous = gate._shell_assignments(script)
+        assert stated == {}, f"{label} closed a REAL enclosing block: {stated}"
+        assert {"TORTOISE_VALUE_GATE", "TORTOISE_EMBED_GATE"} <= ambiguous, (label, ambiguous)
+
+
+def test_a_line_that_closes_one_block_and_opens_another_is_NET_ZERO():
+    """Review P2 at `af655a8153` — the opener was only recognised at LINE START.
+
+    ``fi; if false; then`` closes one block and opens another. The closer matched, the opener did
+    not (it is mid-line), so the line counted as a net ``-1``: the new block was invisible and the
+    ``export``s in its body — a branch that never runs — were credited ``STATED``, exit 0. Openers
+    now match after a statement separator, exactly like closers already did, so the line is net
+    zero and the body stays conditional.
+    """
+    stated, ambiguous = gate._shell_assignments(
+        "#!/bin/sh\n"
+        "if true; then\n"
+        "  echo a\n"
+        "fi; if false; then\n"
+        "  export TORTOISE_VALUE_GATE=1\n"
+        "  export TORTOISE_EMBED_GATE=1\n"
+        "fi\n"
+        'exec "$@"\n'
+    )
+    assert stated == {}, f"a `fi; if …` line lost the block it opens: {stated}"
+    assert {"TORTOISE_VALUE_GATE", "TORTOISE_EMBED_GATE"} <= ambiguous, ambiguous
+
+
+def test_a_heredoc_opener_inside_a_comment_or_a_string_is_NOT_a_heredoc():
+    """Review P2 at `af655a8153` — the `<<` was searched on the RAW line.
+
+    ``# … cat <<EOF > /tmp/conf`` in a trailing comment (or ``echo "… << EOF …"``) opened a
+    PHANTOM body. The body then swallowed lines until it found ``EOF`` — including the real
+    ``if false; then`` header — so the branch's ``export``s sat at depth 0 and were credited
+    ``STATED``: ``ok``, exit 0. The opener is now located in the structural view (with span
+    DELIMITERS kept), so a ``<<`` inside a string or a comment is not an opener while a quoted
+    delimiter (``<<'EOF'``) still is.
+    """
+    for label, header in (
+        ("a trailing comment", "set -eu   # to write the config use: cat <<EOF > /tmp/conf\n"),
+        ("a quoted string", 'echo "operator tip: cat << EOF > /tmp/notes"\n'),
+    ):
+        stated, ambiguous = gate._shell_assignments(
+            "#!/bin/sh\n"
+            + header
+            + "if false; then\n"
+            "  echo disabled\n"
+            "EOF\n"
+            "  export TORTOISE_VALUE_GATE=1\n"
+            "  export TORTOISE_EMBED_GATE=1\n"
+            "fi\n"
+        )
+        assert stated == {}, f"{label} opened a phantom heredoc body: {stated}"
+        assert {"TORTOISE_VALUE_GATE", "TORTOISE_EMBED_GATE"} <= ambiguous, (label, ambiguous)
+
+    # The REAL spellings must still be bodies — including the backslash-quoted delimiter.
+    for label, opener in (
+        ("a quoted delimiter", "cat <<'EOF'"),
+        ("a backslash delimiter", "cat <<\\EOF"),
+        ("a tab-stripping body", "cat <<-EOF"),
+    ):
+        stated, ambiguous = gate._shell_assignments(
+            "#!/bin/sh\n"
+            "if false; then\n"
+            f"  {opener}\n"
+            "fi is not a keyword here\n"
+            "EOF\n"
+            "  export TORTOISE_VALUE_GATE=1\n"
+            "  export TORTOISE_EMBED_GATE=1\n"
+            "fi\n"
+        )
+        assert stated == {}, f"{label} body was read as shell: {stated}"
+        assert {"TORTOISE_VALUE_GATE", "TORTOISE_EMBED_GATE"} <= ambiguous, (label, ambiguous)
+
+
+def test_one_export_line_may_state_SEVERAL_switches():
+    """Review P2 at `af655a8153` — one `export` carrying two assignments was REFUSED, wrongly.
+
+    ``export TORTOISE_VALUE_GATE=1 TORTOISE_EMBED_GATE=1`` is ordinary shell and arms BOTH
+    switches, but the single-assignment regex took the whole remainder as the first value: the
+    channel was refused for not stating the second switch, and the ``ok`` line would have reported
+    the fabricated value ``1 TORTOISE_EMBED_GATE=1`` for the first. Both halves are what this
+    pins — the credit AND the value that gets printed.
+    """
+    for label, script in (
+        ("one line", "export TORTOISE_VALUE_GATE=1 TORTOISE_EMBED_GATE=1\n"),
+        ("a continuation", "export TORTOISE_VALUE_GATE=1 \\\n       TORTOISE_EMBED_GATE=1\n"),
+        ("a semicolon", "export TORTOISE_VALUE_GATE=1; export TORTOISE_EMBED_GATE=1\n"),
+    ):
+        stated, ambiguous = gate._shell_assignments("#!/bin/sh\n" + script + 'exec "$@"\n')
+        assert stated == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, (label, stated)
+        assert ambiguous == set(), (label, ambiguous)

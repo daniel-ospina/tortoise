@@ -60,7 +60,7 @@ inside an ``if false`` branch, or after a top-level ``exit`` was credited as ``S
 report then printed ``ok entrypoint.sh TORTOISE_VALUE_GATE=1`` for a value the process never
 receives (``entrypoint.sh`` carries ten top-level functions, so "move the export into the helper"
 is an ordinary edit rather than a contrived one). It now tracks block depth (``if``/``then``/
-``while``/``until``/``for``/``case``/``select``/``do`` and ``{``/``(`` bodies, with their closers)
+``while``/``until``/``for``/``case``/``select``/``do`` and ``{`` bodies, with their closers)
 plus a top-level ``exit``/``exec`` seen, and routes an assignment in any of those positions to the
 existing ``ambiguous`` verdict — the fail-closed one, whose message says the shape was not read as
 a statement. Two properties are deliberate: the model is SMALL, so an unmodelled form lands on
@@ -68,6 +68,17 @@ a statement. Two properties are deliberate: the model is SMALL, so an unmodelled
 and a CONDITIONAL arm (``if [ … ]; then export TORTOISE_EMBED_GATE=1; fi``) is refused, because a
 branch is not the shipped configuration stating a value — ``entrypoint.sh``'s own switch exports
 are top level. There is no widening for an honest shorthand: ``=0`` still passes by design.
+
+⛔ **Block keywords are matched against a STRUCTURAL view, in which every span the reader does not
+evaluate is BLANKED whole** — quoted and ANSI-C strings, comments, command substitutions
+(``$( … )``, backticks), subshell/``(`` bodies and heredoc bodies — with span state carried ACROSS
+lines, and a ``case`` arm's ``)`` never closing a substitution. A block keyword inside such a span
+is DATA (``echo "n/a; fi"``, ``$(case $M in off) … esac)``, ``$'don\'t; fi'``): reading it as
+structure was a measured fail-OPEN class, five shapes deep, each of which credited a
+never-running branch's ``export`` and exited 0. An ESCAPED character outside a span is data too,
+so ``echo \"n/a\"`` cannot open a span and refuse an honest file. One ``export`` line may state
+SEVERAL switches (``export A=1 B=2``); its words are tokenised on unquoted whitespace and shell
+metacharacters, so the value each channel reports is what the process actually receives.
 
 ⛔ **Heredoc bodies are DATA, and are DROPPED before the depth walk** (review P1). An
 ``export K=V`` inside a ``cat <<EOF … EOF`` body is not a statement the shell runs, so the body is
@@ -78,7 +89,9 @@ the ``mentions …`` wording. Two bounds, named rather than left silent: an open
 swallows the REST of the file (incomplete shell — fail-CLOSED, the channel is then refused), and the
 terminator is compared the way the shell compares it (leading TABS stripped for ``<<-`` only, the
 line otherwise EXACT), which is stricter than the sibling Dockerfile reader's ``_heredoc_end``.
-``<<<`` (here-string) and ``<<`` inside ``$(( … ))`` (a shift) are excluded, so neither is a body.
+The OPENER is located in the structural view, so a ``<<`` inside a string, a comment or an
+arithmetic span is not one (a ``<<<`` here-string is excluded by the pattern), while every real
+spelling — ``<<EOF``, ``<<'EOF'``, ``<<\\EOF``, ``<<-EOF`` — opens a body.
 
 ``.env.example`` is a template nothing deploys, so it is not a channel of this gate; the
 read-only instrument (``tools/dod_5090_probe.py``) is what scores it.
@@ -180,11 +193,17 @@ _ENV_PAIRS = re.compile(r"^\s*(?:[A-Za-z_][A-Za-z0-9_]*=(?:\"[^\"]*\"|'[^']*'|\S
 #: entrypoint.sh TORTOISE_EMBED_GATE=1` for a value uvicorn never sees — the false PASS this gate
 #: exists to prevent — so only an `export`ed assignment counts as a statement. Measured: with the
 #: optional group, `TORTOISE_EMBED_GATE=1` alone read `stated={'TORTOISE_EMBED_GATE': '1'}`.
-_SHELL_ASSIGNMENT = re.compile(r"^\s*export\s+(?P<key>[A-Za-z_][A-Za-z0-9_]*)=(?P<value>.*)$")
+#: One `export` argument list — `export` followed by its words. A SINGLE `export` may state
+#: several assignments (`export A=1 B=2`), so the words are tokenised rather than taking the whole
+#: remainder as one value: the single-assignment regex refused that ordinary shell as not stating
+#: the second switch while REPORTING `1 B=2` as the first switch's value (review P2, measured).
+_SHELL_EXPORT = re.compile(r"^\s*export\s+(?P<body>\S.*)$")
+#: A shell VARIABLE name: what may sit left of the `=` in an `export` word.
+_SHELL_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _SHELL_EXPORT_NAME = re.compile(r"^\s*export\s+(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s*$")
 
 #: Shell keywords that open a block whose body may never run at top level (`if`/`then`,
-#: `while`/`until`/`for`/`case`/`select`/`do`, and `{`/`(` bodies — `name() {` is the brace), and
+#: `while`/`until`/`for`/`case`/`select`/`do`, and a `{` body — `name() {` is the brace), and
 #: the closers that end one. An assignment inside a block is a CONDITIONAL, not a statement the
 #: shipped configuration makes; a top-level `exit`/`exec` ends what the rest of the file can
 #: contribute (`exec` replaces the process). The model is deliberately small: an unmodelled form
@@ -197,7 +216,7 @@ _SHELL_EXPORT_NAME = re.compile(r"^\s*export\s+(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s
 #: closing brace/paren only; openers are the block keywords ANYWHERE at line start (an INDENTED
 #: `  if false; then` is the shape that was missed) plus a trailing `do`/`{`/`(`.
 _SHELL_OPENERS = re.compile(
-    r"^\s*(?:if|while|until|for|case|select)\b|\bdo\s*$|\{\s*$|\(\s*$"
+    r"(?:^|[;&|])\s*(?:if|while|until|for|case|select)\b|\bdo\s*$|\{\s*$|\(\s*$"
 )
 #: ⛔ A closer may follow a STATEMENT SEPARATOR on the same line (review P1, measured). The model
 #: was line-anchored, so a one-line `if [ -n "$X" ]; then echo hi; fi` opened a block and never
@@ -218,8 +237,6 @@ _SHELL_CLOSERS = re.compile(
 _SHELL_HEREDOC = re.compile(
     r"(?<!<)<<-?\s*(?P<bs>\\)?(?P<q>['\"]?)(?P<delim>[A-Za-z_][A-Za-z0-9_]*)(?P=q)"
 )
-#: A `$(( … ))` arithmetic span — `<<` inside it is a SHIFT, not a heredoc opener.
-_SHELL_ARITHMETIC = re.compile(r"\$\(\(.*?\)\)")
 _SHELL_TERMINATES = re.compile(r"^\s*(?:exit|exec)\b")
 #: Two ways a LATER line takes an earlier `export K=1` back, both of which must drop the literal
 #: from `stated` — Docker and the shell are last-assignment-wins, and `stated` outranks `ambiguous`
@@ -586,47 +603,9 @@ def _dockerfile_env(text: str) -> tuple[dict[str, str], set[str], dict[str, str]
     return stated, ambiguous, shadowed
 
 
-def _shell_code_lines(text: str) -> list[str]:
-    """``text``'s logical lines with every HEREDOC BODY removed (review P1).
-
-    A heredoc body is DATA the script writes out, not a statement it runs, so it must not be read
-    as shell. Scanning it was a measured fail-OPEN: a ``fi``/``done``/``esac`` at line start
-    inside the body closed the enclosing block, the depth leaked down, and an ``export`` in a
-    branch that never runs was credited ``STATED`` — the gate then exited 0 over an unarmed
-    process. ``entrypoint.sh`` already opens a ``<<'PY'`` body, and writing a config snippet from
-    a heredoc is an ordinary entrypoint job, so the shape is not contrived.
-
-    A heredoc whose delimiter never appears swallows the rest of the file: the script is
-    incomplete shell, and crediting nothing from it is the fail-CLOSED direction (the channel is
-    then refused for not stating the switches rather than passing on a body nobody executes).
-    """
-    out: list[str] = []
-    pending: list[tuple[str, bool]] = []
-    for line in _logical_lines(text):
-        if pending:
-            # ⛔ The terminator must match what the SHELL accepts, not `strip()` (review P2,
-            # measured). Bash strips leading TABS only for `<<-`, and compares the line EXACTLY
-            # for `<<`; `strip()` also accepted spaces, so an indented terminator ended the body
-            # early and exports bash never reaches were read as top level. This mirrors the
-            # Dockerfile reader's rule so the two heredoc readers in this file agree.
-            delim, dash = pending[0]
-            candidate = line.lstrip("\t") if dash else line
-            if candidate.rstrip("\r") == delim:
-                pending.pop(0)
-            continue
-        out.append(line)
-        # ⛔ `<<` inside an ARITHMETIC expansion is a shift, not a heredoc (review P3, measured):
-        # `n=$(( 1 << shift ))` opened a phantom body named `shift` and swallowed the rest of the
-        # file, refusing an honest `=1` config. Arithmetic spans are removed before the search.
-        searchable = _SHELL_ARITHMETIC.sub("", line)
-        for match in _SHELL_HEREDOC.finditer(searchable):
-            pending.append((match.group("delim"), match.group(0).startswith("<<-")))
-    return out
-
-
 #: Spans whose BODY is data for the depth walk, never block structure. A command substitution or a
-#: subshell runs in its OWN shell, so an `if`/`fi` inside it neither opens nor closes a block in
-#: the script being read (and an `export` inside it never reaches the process, which is why a
+#: subshell runs in its OWN shell, so an `if`/`fi` inside it neither opens nor closes a block in the
+#: script being read (and an `export` inside it never reaches the process, which is why a
 #: substituted export must not be credited either). Quotes are spans for the same reason: their
 #: content is a string.
 _SPAN_SINGLE = "single-quote"
@@ -643,7 +622,67 @@ _SPAN_SUBSHELL = "subshell"
 _COMMENT_STARTS_AFTER = " \t;&|()<>"
 
 
-def _shell_structure(text: str, stack: tuple = ()) -> tuple[str, tuple]:
+def _word_at(text: str, index: int, word: str) -> bool:
+    """True when ``word`` sits at ``index`` as a whole shell WORD (not a substring of one)."""
+    end = index + len(word)
+    if text[index:end] != word:
+        return False
+    if index and (text[index - 1].isalnum() or text[index - 1] == "_"):
+        return False
+    return end >= len(text) or not (text[end].isalnum() or text[end] == "_")
+
+
+def _shell_code_lines(text: str) -> list[str]:
+    """``text``'s logical lines with every HEREDOC BODY removed (review P1).
+
+    A heredoc body is DATA the script writes out, not a statement it runs, so it must not be read
+    as shell. Scanning it was a measured fail-OPEN: a ``fi``/``done``/``esac`` at line start
+    inside the body closed the enclosing block, the depth leaked down, and an ``export`` in a
+    branch that never runs was credited ``STATED`` — the gate then exited 0 over an unarmed
+    process. ``entrypoint.sh`` already opens a ``<<'PY'`` body, and writing a config snippet from
+    a heredoc is an ordinary entrypoint job, so the shape is not contrived.
+
+    A heredoc whose delimiter never appears swallows the rest of the file: the script is
+    incomplete shell, and crediting nothing from it is the fail-CLOSED direction (the channel is
+    then refused for not stating the switches rather than passing on a body nobody executes).
+
+    ⛔ **The opener is found in the STRUCTURAL view, not the raw line (review P2, measured).** A
+    ``<<WORD`` inside a quoted string or an inline comment is NOT a heredoc, but reading the raw
+    line opened a PHANTOM body that swallowed the next real statement — including an
+    ``if false; then`` header — so the never-running ``export``s below it were credited ``STATED``
+    (exit 0). The view keeps span DELIMITERS, so a quoted delimiter (``<<'EOF'``, the commonest
+    spelling) is still recognised while the ``<<`` inside a string is blanked, and a ``<<`` inside
+    ``$(( … ))`` is blanked too because the whole arithmetic span is a substitution.
+    """
+    out: list[str] = []
+    pending: list[tuple[str, bool]] = []
+    stack: tuple = ()
+    for line in _logical_lines(text):
+        if pending:
+            # ⛔ The terminator must match what the SHELL accepts, not `strip()` (review P2,
+            # measured). Bash strips leading TABS only for `<<-`, and compares the line EXACTLY
+            # for `<<`; `strip()` also accepted spaces, so an indented terminator ended the body
+            # early and exports bash never reaches were read as top level. This mirrors the
+            # Dockerfile reader's rule so the two heredoc readers in this file agree.
+            delim, dash = pending[0]
+            candidate = line.lstrip("\t") if dash else line
+            if candidate.rstrip("\r") == delim:
+                pending.pop(0)
+            continue
+        out.append(line)
+        structure, stack = _shell_structure(line, stack, keep_delimiters=True)
+        for match in _SHELL_HEREDOC.finditer(line):
+            # Position-aligned: blanking preserves length, so `<` at the match start means the
+            # `<<` is CODE. A match inside a span, or past a comment cut, is not an opener.
+            if match.start() >= len(structure) or structure[match.start()] != "<":
+                continue
+            pending.append((match.group("delim"), match.group(0).startswith("<<-")))
+    return out
+
+
+def _shell_structure(
+    text: str, stack: tuple = (), keep_delimiters: bool = False
+) -> tuple[str, tuple]:
     """``text`` with every span body and a trailing comment blanked — the STRUCTURAL view.
 
     Block keywords are matched against THIS, never against the raw line (review P1 at
@@ -653,15 +692,22 @@ def _shell_structure(text: str, stack: tuple = ()) -> tuple[str, tuple]:
     `export`s inside it were credited ``STATED`` — the gate exited 0 over a process that receives
     neither switch.
 
-    ⛔ Why spans and not quote-cleaning (a fresh reviewer measured four more fail-opens in the
-    quote-only version at `19afbd0865`+, all the same root): a block keyword is data wherever it
-    sits inside a construct this reader does not evaluate — a quoted string, a comment, an
-    ANSI-C string (`$'don\\'t; fi'`), a command substitution (`$(if …; fi)`, `` `if …; fi` ``) or a
-    subshell (`( if …; fi )`). Each leaked a closer into the enclosing depth and re-armed the
-    never-running-branch credit, exit 0. So every span is BLANKED, contents included, and the
-    span can itself contain quotes, further substitutions and parens. The module's contract is
-    that an unmodelled form lands on ``ambiguous`` rather than a pass, and this is that contract
-    made structural: what the reader does not evaluate contributes nothing to the depth.
+    ⛔ Why spans and not quote-cleaning (fresh reviewers measured four more fail-opens in the
+    quote-only version, then two more in the first span version, all the same root): a block
+    keyword is data wherever it sits inside a construct this reader does not evaluate — a quoted
+    string, a comment, an ANSI-C string (`$'don\\'t; fi'`), a command substitution
+    (`$(if …; fi)`, `` `if …; fi` ``) or a subshell (`( if …; fi )`). Each leaked a closer into the
+    enclosing depth and re-armed the never-running-branch credit, exit 0. So every span is
+    BLANKED, contents included, and the span can itself contain quotes, further substitutions and
+    parens. The module's contract is that an unmodelled form lands on ``ambiguous`` rather than a
+    pass, and this is that contract made structural: what the reader does not evaluate contributes
+    nothing to the depth.
+
+    ⛔ **A `case` ARM terminator is not a closer (review P1, measured).** Inside a substitution,
+    ``)`` had no way to know it was ending a pattern (``$(case $M in off) echo 0 ;; esac)``), so the
+    span ENDED at the first arm; the leftover ``esac )`` was then read as code that closed a REAL
+    enclosing block, and a never-running branch's exports were credited STATED (exit 0). `case` is
+    therefore counted inside each span and its arms cannot close it.
 
     The mirror direction matters just as much, and it is why an ESCAPED character is blanked
     rather than read as a delimiter: `echo \\"n/a\\"` is a literal quote in bash, and reading it as
@@ -674,6 +720,9 @@ def _shell_structure(text: str, stack: tuple = ()) -> tuple[str, tuple]:
     column 0 that no per-line reader can know is data; and `$(` … `)` on separate lines is
     ordinary shell). Carrying the state is what makes the verdict about the SCRIPT rather than
     about each line.
+
+    ``keep_delimiters`` emits the span DELIMITERS instead of blanking them, for a caller that has
+    to locate a construct inside code without reading string content (the heredoc opener scan).
     """
     out: list[str] = []
     frames = list(stack)
@@ -682,6 +731,9 @@ def _shell_structure(text: str, stack: tuple = ()) -> tuple[str, tuple]:
 
     def blank(count: int) -> None:
         out.extend(" " * count)
+
+    def delim(segment: str) -> None:
+        out.append(segment if keep_delimiters else " " * len(segment))
 
     while index < length:
         char = text[index]
@@ -697,49 +749,71 @@ def _shell_structure(text: str, stack: tuple = ()) -> tuple[str, tuple]:
             closer = '"' if kind == _SPAN_DOUBLE else "'"
             if char == closer:
                 frames.pop()
-            blank(1)
+                delim(char)
+            else:
+                blank(1)
             index += 1
             continue
 
         if kind in (_SPAN_CMDSUB, _SPAN_SUBSHELL, _SPAN_BACKTICK):
             # Inside a substitution/subshell: parens (or the closing backtick) end it, quoted
-            # spans are stepped over, and nothing here opens or closes an enclosing block.
+            # spans are stepped over, `case` arms are not closers, and nothing here opens or
+            # closes an enclosing block.
+            depth, cases = frames[-1][1], frames[-1][2]
             if char == "\\" and index + 1 < length:
                 blank(2)
                 index += 2
                 continue
             if char in "\"'":
-                frames.append((_SPAN_DOUBLE if char == '"' else _SPAN_SINGLE, 0))
-                blank(1)
+                frames.append((_SPAN_DOUBLE if char == '"' else _SPAN_SINGLE, 0, 0))
+                delim(char)
                 index += 1
                 continue
             if char == "$" and index + 1 < length and text[index + 1] == "(":
-                frames.append((_SPAN_CMDSUB, 1))
-                blank(2)
+                frames.append((_SPAN_CMDSUB, 1, 0))
+                delim("$(")
                 index += 2
-                continue
-            if char == "`" and kind != _SPAN_BACKTICK:
-                frames.append((_SPAN_BACKTICK, 0))
-                blank(1)
-                index += 1
                 continue
             if kind == _SPAN_BACKTICK:
                 if char == "`":
                     frames.pop()
-                blank(1)
+                    delim(char)
+                else:
+                    blank(1)
                 index += 1
                 continue
+            if char == "`":
+                frames.append((_SPAN_BACKTICK, 0, 0))
+                delim(char)
+                index += 1
+                continue
+            if _word_at(text, index, "case"):
+                frames[-1] = (kind, depth, cases + 1)
+                blank(4)
+                index += 4
+                continue
+            if _word_at(text, index, "esac"):
+                frames[-1] = (kind, depth, max(0, cases - 1))
+                blank(4)
+                index += 4
+                continue
             if char == "(":
-                frames[-1] = (kind, frames[-1][1] + 1)
-                blank(1)
+                frames[-1] = (kind, depth + 1, cases)
+                delim(char)
                 index += 1
                 continue
             if char == ")":
-                if frames[-1][1] <= 1:
+                if cases:
+                    # ⛔ A `case` arm's terminator: the substitution continues.
+                    blank(1)
+                    index += 1
+                    continue
+                if depth <= 1:
                     frames.pop()
+                    delim(char)
                 else:
-                    frames[-1] = (kind, frames[-1][1] - 1)
-                blank(1)
+                    frames[-1] = (kind, depth - 1, cases)
+                    delim(char)
                 index += 1
                 continue
             blank(1)
@@ -752,37 +826,37 @@ def _shell_structure(text: str, stack: tuple = ()) -> tuple[str, tuple]:
             index += 2
             continue
         if char == "'":
-            frames.append((_SPAN_SINGLE, 0))
-            blank(1)
+            frames.append((_SPAN_SINGLE, 0, 0))
+            delim(char)
             index += 1
             continue
         if char == '"':
-            frames.append((_SPAN_DOUBLE, 0))
-            blank(1)
+            frames.append((_SPAN_DOUBLE, 0, 0))
+            delim(char)
             index += 1
             continue
         if char == "$" and index + 1 < length:
             following = text[index + 1]
             if following == "'":
-                frames.append((_SPAN_ANSI_C, 0))
-                blank(2)
+                frames.append((_SPAN_ANSI_C, 0, 0))
+                delim("$'")
                 index += 2
                 continue
             if following == "(":
-                frames.append((_SPAN_CMDSUB, 1))
-                blank(2)
+                frames.append((_SPAN_CMDSUB, 1, 0))
+                delim("$(")
                 index += 2
                 continue
         if char == "`":
-            frames.append((_SPAN_BACKTICK, 0))
-            blank(1)
+            frames.append((_SPAN_BACKTICK, 0, 0))
+            delim(char)
             index += 1
             continue
         if char == "(":
             # A subshell/group body or a function's `()`: blanked either way, so `( if …; fi )`
             # cannot leak a closer and `name() {` still leaves its `{` to open the block.
-            frames.append((_SPAN_SUBSHELL, 1))
-            blank(1)
+            frames.append((_SPAN_SUBSHELL, 1, 0))
+            delim(char)
             index += 1
             continue
         if char == "#" and (index == 0 or text[index - 1] in _COMMENT_STARTS_AFTER):
@@ -802,21 +876,93 @@ def _shell_structures(lines: list[str]) -> list[str]:
     return out
 
 
-def _shell_assignment(line: str, structure: str):
-    """``_SHELL_ASSIGNMENT.match``, but only for a head the STRUCTURE agrees is CODE.
+def _export_tokens(body: str) -> list[str]:
+    """``export``'s argument words, split on UNQUOTED whitespace and keeping their quotes.
 
-    The assignment match runs on the RAW line (the value needs its quotes intact), so without
-    this guard an ``export TORTOISE_*_GATE=1`` that is merely the TEXT of a top-level multi-line
+    Quotes are kept because the value is unwrapped later (``_unquote``) and its trailing comment
+    is cut quote-aware (``_strip_inline_comment``); splitting with a quote-stripping tokeniser
+    would make ``K="a # b"`` lose its value.
+    """
+    tokens: list[str] = []
+    current: list[str] = []
+    quote = ""
+    index = 0
+    while index < len(body):
+        char = body[index]
+        if quote:
+            current.append(char)
+            if char == "\\" and quote == '"' and index + 1 < len(body):
+                current.append(body[index + 1])
+                index += 2
+                continue
+            if char == quote:
+                quote = ""
+            index += 1
+            continue
+        if char == "\\" and index + 1 < len(body):
+            current.append(char)
+            current.append(body[index + 1])
+            index += 2
+            continue
+        if char in "\"'":
+            quote = char
+            current.append(char)
+            index += 1
+            continue
+        if char.isspace():
+            if current:
+                tokens.append("".join(current))
+                current = []
+            index += 1
+            continue
+        if char in ";&|<>":
+            # A shell METACHARACTER ends a word (and is not part of any value): `export A=1;B=2`
+            # states two assignments, and `A=1` — not `1;` — is what the process receives, which
+            # is what the `ok` line reports (review P2, measured).
+            if current:
+                tokens.append("".join(current))
+                current = []
+            index += 1
+            continue
+        if char == "#" and not current:
+            break  # a comment starts at this word start
+        current.append(char)
+        index += 1
+    if current:
+        tokens.append("".join(current))
+    return tokens
+
+
+def _shell_exports(line: str, structure: str) -> list[tuple[str, str]]:
+    """The ``(key, value)`` pairs ONE `export` line states, head-guarded against spans.
+
+    ⛔ **ONE `export` may state SEVERAL switches (review P2, measured).** The single-assignment
+    regex took the whole remainder as the first value, so `export TORTOISE_VALUE_GATE=1
+    TORTOISE_EMBED_GATE=1` — ordinary shell — was REFUSED as not stating the second switch while
+    REPORTING the fabricated value `1 TORTOISE_EMBED_GATE=1` for the first. Both halves are bugs:
+    the refusal is wrong, and the value cell a passing channel prints must be what the process
+    receives.
+
+    The head guard is the other half: the assignment text runs on the RAW line (the value needs its
+    quotes intact), so an ``export TORTOISE_*_GATE=1`` that is merely the TEXT of a multi-line
     string was credited ``STATED`` — measured: a script whose only "arm" is a line of help text
     inside ``echo "…"`` printed ``ok`` with exit 0 over a process that receives neither switch.
-    Blanking preserves length, so the head (``export KEY=``) can be compared byte-for-byte against
-    the same slice of the structural view: anything inside a span differs there.
+    Blanking preserves length, so the head (``export ``) is compared byte-for-byte against the
+    same slice of the structural view: anything inside a span differs there.
     """
-    match = _SHELL_ASSIGNMENT.match(line)
+    match = _SHELL_EXPORT.match(line)
     if not match:
-        return None
-    head = line[: match.start("value")]
-    return match if structure[: len(head)] == head else None
+        return []
+    head = line[: match.start("body")]
+    if structure[: len(head)] != head:
+        return []  # the `export` is inside a span: text, not a statement
+    pairs: list[tuple[str, str]] = []
+    for token in _export_tokens(match.group("body")):
+        key, separator, value = token.partition("=")
+        if not separator or not _SHELL_KEY.match(key):
+            continue  # `export NAME` states no value; not an arm
+        pairs.append((key, value))
+    return pairs
 
 
 def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
@@ -847,20 +993,21 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
             ambiguous.update(_mentioned_switches(line))
             continue
         conditional = depth > 0 or terminated
-        match = _shell_assignment(line, structure)
-        if match:
-            key, value = match.group("key"), _strip_inline_comment(match.group("value"))
-            if key in SWITCHES and (conditional or not _states_a_literal(value)):
-                # Same last-wins rule as the Dockerfile reader: an ambiguous assignment must
-                # drop an earlier literal, or the stale literal is reported as STATED while the
-                # script resolves empty (review P2). A CONDITIONAL assignment is the same verdict
-                # for the same reason: inside a function body, a branch or a loop it may never
-                # run, and after a top-level `exit`/`exec` it cannot.
-                ambiguous.add(key)
-                stated.pop(key, None)
-                continue
-            if not conditional:
-                stated[key] = _unquote(value)
+        exports = _shell_exports(line, structure)
+        if exports:
+            for key, raw_value in exports:
+                value = _strip_inline_comment(raw_value)
+                if key in SWITCHES and (conditional or not _states_a_literal(value)):
+                    # Same last-wins rule as the Dockerfile reader: an ambiguous assignment must
+                    # drop an earlier literal, or the stale literal is reported as STATED while
+                    # the script resolves empty (review P2). A CONDITIONAL assignment is the same
+                    # verdict for the same reason: inside a function body, a branch or a loop it
+                    # may never run, and after a top-level `exit`/`exec` it cannot.
+                    ambiguous.add(key)
+                    stated.pop(key, None)
+                    continue
+                if not conditional:
+                    stated[key] = _unquote(value)
             continue
         unset = _SHELL_UNSET.match(line)
         if unset:
