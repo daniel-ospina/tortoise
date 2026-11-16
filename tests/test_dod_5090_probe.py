@@ -12724,6 +12724,131 @@ def test_12549_a_MIXED_tree_names_the_silent_half_beside_the_disagreement(
     assert "other deployment file(s) SILENT: ['Dockerfile.hosted']" in note, note
 
 
+def _disagreeing_row_one(tmp_path, monkeypatch, *, armed_sibling: bool):
+    """A row-1 tree whose only deployment facts are a PER-SERVICE disagreement.
+
+    `#12902` fresh review, P1/P2: the hold note's leading clause was hardcoded to
+    `deployment["silent"]`, and the disarm narrative to a per-FILE last-wins rule —
+    both of which are wrong on the `DISAGREE` state that `#12549` defect 2 adds.
+    """
+    _fake_rule_tree(tmp_path)
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n"
+        "  app:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"1\"\n"
+        "  worker:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"0\"\n", encoding="utf-8")
+    if armed_sibling:
+        (tmp_path / "Dockerfile.hosted").write_text(
+            "FROM python:3.12\nENV TORTOISE_EMBED_GATE=1\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    _no_register(monkeypatch)
+    monkeypatch.setattr(probe, "embedding_writers",
+                        lambda: _gated_writer("tortoise.a::_w"))
+    monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
+    return probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+
+
+def _row_one_hold(row) -> str:
+    return next(n for n in row.notes
+                if n.startswith("shipped default NOT armed"))
+
+
+def test_12902_row1_hold_note_never_names_an_EMPTY_silent_population(
+        tmp_path, monkeypatch):
+    """A `DISAGREE` file is in NEITHER `silent` nor `armed`, so naming `silent` alone
+    published a cause about a population of zero.
+
+    ⛔ Measured pre-fix on the pure-disagreement tree: `silent deployment file(s): []
+    declare no gate of their own — read from that file ALONE the deployment is
+    unarmed` — a vacuous cause, and a consequence claim about nothing.
+    """
+    shipped = _disagreeing_row_one(tmp_path, monkeypatch, armed_sibling=False)
+    dep = shipped["deployment"]
+    assert dep["silent"] == [], shipped
+    assert dep["disagreeing"] == ["docker-compose.yml"], shipped
+    row = probe.score_rule_bullet()
+    assert row.verdict == "PARTIAL", f"{row.verdict}: {row.observed}"
+    hold = _row_one_hold(row)
+    assert "silent deployment file(s): []" not in hold, hold
+    assert "no deployment file ends silent" in hold, hold
+
+
+def test_12902_row1_hold_note_NAMES_the_armed_file_beside_a_disagreement(
+        tmp_path, monkeypatch):
+    """`armed_clause` takes its DISAGREE arm first, so on a MIXED tree the ARMED file
+    was named NOWHERE in the note — the note then opened by asserting nothing arms it.
+
+    ⛔ Measured pre-fix on `{'docker-compose.yml': 'DISAGREE', 'Dockerfile.hosted':
+    'ON'}`: `armed: ['Dockerfile']` / `silent: []`, and the hold note contained no
+    mention of the armed file at all.
+    """
+    shipped = _disagreeing_row_one(tmp_path, monkeypatch, armed_sibling=True)
+    dep = shipped["deployment"]
+    assert dep["files"]["Dockerfile.hosted"] == "ON", shipped
+    assert dep["armed"] and dep["silent"] == [], shipped
+    row = probe.score_rule_bullet()
+    assert row.verdict == "PARTIAL", f"{row.verdict}: {row.observed}"
+    hold = _row_one_hold(row)
+    assert "silent deployment file(s): []" not in hold, hold
+    assert "Dockerfile.hosted" in hold, hold
+    assert "DO arm it" in hold, hold
+
+
+def test_12902_a_PER_SERVICE_disarm_publishes_no_FILE_order_rule(
+        tmp_path, monkeypatch):
+    """A disarming value inside a `DISAGREE` file is a PER-SERVICE fact.
+
+    ⛔ Publishing `the LAST of them by compose override or by FILE order (an earlier
+    truthy assignment does not survive a later non-truthy one)` over it made ONE note
+    say two opposite things — that, and four clauses later `compose defines no override
+    relation between two services`. The truthy value PROSPERS in the service carrying
+    it, so the FILE-order rule is simply not in play.
+    """
+    shipped = _disagreeing_row_one(tmp_path, monkeypatch, armed_sibling=True)
+    dep = shipped["deployment"]
+    assert dep["disarming_assignments"], shipped
+    caveat = probe.per_file_scope_note(dep)
+    assert "by FILE order" not in caveat, caveat
+    assert "PER-SERVICE fact" in caveat, caveat
+    assert "FOR SOME SERVICES ONLY" in caveat, caveat
+
+
+def test_12902_an_OFF_file_STILL_publishes_the_FILE_order_rule(
+        tmp_path, monkeypatch):
+    """The POSITIVE CONTROL: the fix must not delete the per-FILE rule where it holds.
+
+    A single-service compose file that ends `OFF` HAS a per-FILE last word, and the
+    narrative (and the `this tree DISARMS it in` lead) must still be published.
+
+    ⛔ The fixture needs an INHERITED arm for the `OFF` value to be a disarming
+    ASSIGNMENT (`OVERRIDES an inherited value`); a lone `FLAG: "0"` is not one, and a
+    duplicate YAML key under the same mapping resolves `UNMEASURED`, not `OFF` — both
+    measured while writing this falsifier.
+    """
+    _fake_rule_tree(tmp_path)
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n"
+        "  tortoise:\n    build:\n      dockerfile: Dockerfile.selfhost\n"
+        "    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"0\"\n", encoding="utf-8")
+    (tmp_path / "Dockerfile.selfhost").write_text(
+        "FROM python:3.12\nENV TORTOISE_EMBED_GATE=1\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    _no_register(monkeypatch)
+    monkeypatch.setattr(probe, "embedding_writers",
+                        lambda: _gated_writer("tortoise.a::_w"))
+    monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    dep = shipped["deployment"]
+    assert dep["files"]["docker-compose.yml"] == "OFF", shipped
+    assert dep["disarming_assignments"], shipped
+    caveat = probe.per_file_scope_note(dep)
+    assert "by FILE order" in caveat, caveat
+    assert "this tree DISARMS it in " in caveat, caveat
+    assert "FOR SOME SERVICES ONLY" not in caveat, caveat
+
+
 def test_12549_an_UNTRACKED_dotenv_cannot_arm_a_compose_default(tmp_path, monkeypatch):
     """A machine-local `.env` must not decide a published DoD reading (review P1).
 

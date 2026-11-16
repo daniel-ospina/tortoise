@@ -5236,6 +5236,27 @@ def per_file_scope_note(deployment: dict) -> str:
                      "declares a `build:`/`dockerfile:` that names an image build file")
     unsets = len(deployment.get("unset_declarations") or ())
     overrides = len(deployment.get("disarming_assignments") or ())
+    # ⛔ A DISARMING DECLARATION INSIDE A `DISAGREE` FILE IS A PER-SERVICE FACT, NOT A
+    # PER-FILE LAST WORD (`#12902` fresh review, P2). `#12549` defect 2 made a compose
+    # file's verdict per SERVICE, so on such a file there IS no per-FILE last word to
+    # state: the truthy value PROSPERS in the service that carries it. Publishing the
+    # `LAST of them by … FILE order` narrative over it made ONE note say two opposite
+    # things — that clause, and four clauses later *"compose defines no override
+    # relation between two services"* (measured on
+    # `{'docker-compose.yml': 'DISAGREE'}` with `app=1` / `worker=0`). Split the
+    # population by the STATE of the file each declaration lives in, so each half is
+    # described by the rule that actually decided it.
+    _files_by_state = deployment.get("files") or {}
+
+    def _disarmed_state(entry: object) -> str | None:
+        return _files_by_state.get(str(entry).split(":", 1)[0])
+
+    overrides_service = sum(
+        1 for entry in (deployment.get("disarming_assignments") or ())
+        if _disarmed_state(entry) == "DISAGREE")
+    unsets_service = sum(
+        1 for entry in (deployment.get("unset_declarations") or ())
+        if _disarmed_state(entry) == "DISAGREE")
     disarm = ""
     if unsets or overrides:
         parts = []
@@ -5252,9 +5273,20 @@ def per_file_scope_note(deployment: dict) -> str:
                 "supplies none) — scored as the file's last word where "
                 "it is last, and a LATER truthy assignment leaves the arm standing")
         if overrides:
-            parts.append(f"{overrides} value(s) leave it OFF — the LAST of them by compose "
-                         "override or by FILE order (an earlier truthy assignment does not "
-                         "survive a later non-truthy one)")
+            per_file = overrides - overrides_service
+            if per_file:
+                parts.append(
+                    f"{per_file} value(s) leave it OFF — the LAST of them by compose "
+                    "override or by FILE order (an earlier truthy assignment does not "
+                    "survive a later non-truthy one)")
+            if overrides_service:
+                # ⛔ NO FILE-ORDER CLAIM HERE: the file these sit in has no single
+                # verdict to be last in (`#12902` fresh review, P2).
+                parts.append(
+                    f"{overrides_service} value(s) that leave it OFF — a PER-SERVICE "
+                    "fact, never a per-FILE last word (the truthy value PROSPERS in the "
+                    "service that carries it; compose defines no override relation "
+                    "between two services)")
         # ⛔ THE LEADING CLAUSE IS THE ONE A READER QUOTES, so it states what this tree's
         # files actually END as — the ORDER qualification above is a subordinate clause and
         # did not stop "and this tree DISARMS it in 1 declaration(s)" from being printed
@@ -5280,7 +5312,14 @@ def per_file_scope_note(deployment: dict) -> str:
         disarmed_by_declaration = sorted(
             posix for posix in declared_paths
             if files_by_state.get(posix) in ("OFF", "DISAGREE"))
-        lead = ("this tree DISARMS it in " if disarmed_by_declaration else
+        # ⛔ AND THE LEAD MUST NOT COLLAPSE A PER-SERVICE DISARM INTO A TREE-WIDE ONE:
+        # "this tree DISARMS it" over a `DISAGREE` file states a whole-tree consequence
+        # the per-service reading does not support (`#12902` fresh review, P2).
+        _all_service = bool(disarmed_by_declaration) and all(
+            files_by_state.get(posix) == "DISAGREE"
+            for posix in disarmed_by_declaration)
+        lead = ("this tree DISARMS it FOR SOME SERVICES ONLY in " if _all_service else
+                "this tree DISARMS it in " if disarmed_by_declaration else
                 "the disarming direction is REPORTED here but is NOT the last word in "
                 "its own file, so it does NOT disarm this tree — see ")
         disarm = ("; ⛔ and " + lead + " and ".join(parts)
@@ -6184,11 +6223,39 @@ def score_rule_bullet() -> Row:
         # asserted then retracted (fresh review of PR #12016 P3, #12070 item 4): a
         # reader quoting the leading clause of the old wording carried the false
         # statement even though the parenthetical retracted it.
+        # ⛔ The leading clause names the population THIS READING measured (`#12549`
+        # defect 1's cause-split, applied to the NOT-ARMED half). It used to name
+        # `deployment["silent"]` ALONE — hardcoded from the state before `#12549`, where
+        # `on is False` implied a non-empty `silent`. The fix adds `DISAGREE`, which is
+        # in NEITHER `silent` nor `armed`, so that clause rendered
+        # `silent deployment file(s): [] declare no gate of their own — read from that
+        # file ALONE the deployment is unarmed` on a tree whose services disagree: a
+        # VACUOUS cause, and a consequence claim about a population of zero. Worse, the
+        # ARMED sibling was named NOWHERE in this note, because `armed_clause` takes its
+        # DISAGREE arm FIRST (measured on
+        # `{'docker-compose.yml': 'DISAGREE', 'Dockerfile.hosted': 'ON'}` — `armed`
+        # non-empty, `silent` empty, and no clause named the arm) (`#12902` fresh
+        # review, P1). A published diagnostic must name ITS OWN measured state, which is
+        # the same rule `#12070` item 4 states for the leading clause.
+        not_armed: list[str] = []
+        if deployment["silent"]:
+            not_armed.append(
+                f"silent deployment file(s) {deployment['silent']} declare no gate of "
+                "their own — read from that file ALONE the deployment is unarmed")
+        if deployment["armed"] and deployment["disagreeing"]:
+            # Only when `armed_clause` will speak about the DISAGREEMENT instead of the
+            # arm — otherwise that clause names `armed` itself and this would repeat it.
+            not_armed.append(
+                f"deployment file(s) {deployment['armed']} DO arm it — the hold is the "
+                "per-service disagreement, never an absence of arms")
+        if not not_armed:
+            # Reached on a pure-DISAGREE tree. Non-vacuous, and it does not assert a
+            # population of zero as if it were a measurement.
+            not_armed.append(
+                "no deployment file ends silent; the hold is the state named below")
         notes.append(
             "shipped default NOT armed for every deployment file (hold this row "
-            "at PARTIAL — silent deployment file(s): "
-            f"{deployment['silent']} declare no gate of their own — read from that "
-            f"file ALONE the deployment is unarmed; "
+            f"at PARTIAL — {'; '.join(not_armed)}; "
             f"{per_file_scope_note(deployment)}; {armed_clause})"
         )
     if not stated or not shared or not gated:
