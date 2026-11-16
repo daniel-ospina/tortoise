@@ -198,20 +198,20 @@ def _kill_hook_tree(proc: subprocess.Popen) -> str:
     happened, for the failure message to splice in — the message must not claim
     a kill that was suppressed.
 
-    The group, not the child, for two reasons — BOTH on the TIMEOUT path,
-    because that is the only path on which this function runs at all:
-    `_run_hook` calls it from `except subprocess.TimeoutExpired`, and on the
-    SUCCESS path it deliberately kills nothing (a drain is *meant* to outlive
-    the hook — see that docstring).
+    The group, not the child, on the TIMEOUT path — and only there, because
+    that is the only path on which this function runs at all: `_run_hook`
+    calls it from `except subprocess.TimeoutExpired`, and on the SUCCESS path
+    it deliberately kills nothing (a drain is *meant* to outlive the hook —
+    see that docstring).  Two children are the reason it exists:
 
     - A hook killed after it has dispatched one of its three `nohup … session
       drain … >/dev/null 2>&1 &` arms (`session-start.sh:831`, `:840`–`:846`,
       `:848`–`:854`) leaves that drain in the group.  `nohup` ignores SIGHUP
       but changes neither the drain's process group nor its reachability by
       SIGKILL, so a bound that reaps only bash leaks it.  That window is
-      narrow: those arms
-      are the script's LAST statements (`:855-856` are their closing `fi`s), so
-      it is the instant between dispatch and exit — a completeness argument.
+      narrow: those arms are the script's LAST statements (`:855-856` are
+      their closing `fi`s), so it is the instant between dispatch and exit —
+      a completeness argument.
     - A hook that stalls before the `wait` (`:801`) can leave a live child in
       the group.  While bash is blocked inside the foreground `_run_digest`
       (`:793`) — which must return before `:801` can run — the child that arm
@@ -232,16 +232,19 @@ def _kill_hook_tree(proc: subprocess.Popen) -> str:
       CLI import ahead of it is covered — so it has usually exited by then, and
       bash has already reaped it.  If `:801` is never reached its exit status
       is simply never collected — not a zombie.
-      Neither of those two is guaranteed: `_run_digest` spawns NOTHING when
-      both its arms miss (`:687`-`:698` has no `else`, and a stall in the `-d`
-      test at `:690` is already inside the function with no child yet), and the
-      beacon does not exist at all unless `_probe_reachable` passed (`:781`).
-      Nor is the timeout path limited to them: `_record_hook_run`
-      (`:517`-`:529`) runs `date`, `mkdir` and a command-substitution subshell
-      after `:801`, so that window carries its own short-lived children.
-      Either way the guarantee this function makes good is one and the same:
-      whenever children ARE in the group, none of them survives the kill —
-      which a bash-only `proc.kill()` cannot say.
+      Neither of those is guaranteed to be there: `_run_digest` spawns NOTHING
+      when both its arms miss (`:687`-`:698` has no `else`, and a stall in the
+      `-d` test at `:690` is already inside the function with no child yet),
+      and the beacon does not exist at all unless `_probe_reachable` passed
+      (`:781`).  Nor is the group limited to them: `_record_hook_run`
+      (`:517`-`:529`) has two command substitutions (the second execs `date`)
+      and a `mkdir` after `:801`, so that window carries its own short-lived
+      children.
+
+    So what this function actually provides is the thing a bash-only
+    `proc.kill()` cannot: every member of the group is sent SIGKILL — and
+    where that is not what happened, the returned phrase says so instead of
+    claiming a kill that was suppressed.
 
     Both failures are absorbed on purpose —
     ``ProcessLookupError`` when the group is already gone, ``PermissionError``
