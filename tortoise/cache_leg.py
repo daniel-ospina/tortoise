@@ -20,10 +20,19 @@ cache graph ``org_<org>_<gid>``       2 / 3               0 / 0
 ``monitoring.metrics()``              ``record_writes_applied`` 0 → 6
 ===================================  ==================  ================
 
-The second column is #12943's own measurement (8 objects / 39 events / 5
-operators in Postgres, 0 in FalkorDB), and it is not a lost write: it is a
-write that landed, in full, in a store the record is not in. Nothing counted
-it, nothing warned, and no caller could tell.
+The second column is #12943's own shape for its IN-PROCESS writes (8 objects /
+39 events / 5 operators in Postgres and none of them in FalkorDB), and it is not
+a lost write: it is a write that landed, in full, in a store the record is not
+in. Nothing counted it, nothing warned, and no caller could tell.
+
+⚠️ The issue's cache column is **1**, not 0, and the difference is the
+diagnosis: that one object was written through REST (`POST /v1/objects`) by the
+DEPLOYED app, so the app had a shared cache and only the in-process writer did
+not reach it. The split is per PROCESS — a write from a process with no
+`TORTOISE_DB_URI` files truth in a shared Postgres and cache in a local file.
+(That is an inference from the issue's numbers plus this code path; it is not a
+measurement of the deployment, which this tree cannot reach. The counter below
+is what confirms it on the app.)
 
 WHY A COUNTER AND A WARNING, AND NOT A REFUSAL. ⛔ Two recorded decisions
 bound this module, and neither is reversed here:
@@ -110,6 +119,18 @@ def _redirected_to_a_server() -> bool:
     Outside the test lane the redirect never applies (it is gated on
     ``TORTOISE_TEST_MODE``), so a production embedded construction is always
     counted.
+
+    ⚠️ RESIDUAL, and the direction matters: this is a strict SUBSET of the real
+    gate (which also requires an explicit path, a supported scheme, and a test
+    caller frame absent from ``TORTOISE_TEST_NO_REDIRECT``). So it can only
+    UNDER-count — under ``TORTOISE_TEST_MODE=1`` with a URI set whose
+    construction is NOT redirected (a carve-out stem, a subprocess CLI child
+    with no test frame, an unsupported scheme) a genuinely-embedded SDK is
+    silently exempted. It never OVER-counts: production does not set
+    ``TORTOISE_TEST_MODE``, so no deployed process is exempted by this arm.
+    Mirroring the gate exactly was rejected because it reads the CALLER FRAME,
+    which is a per-construction fact a process-level constructor check cannot
+    ask; the miss is therefore named here instead of pretended away.
     """
     if os.environ.get("TORTOISE_TEST_MODE") != "1":
         return False
@@ -145,7 +166,8 @@ def cache_leg_reason(*, cache_uri: str | None) -> str | None:
     return CACHE_NOT_SHARED
 
 
-def note_local_cache(*, cache_path: str | None) -> str | None:
+def note_local_cache(*, cache_uri: str | None,
+                    cache_path: str | None) -> str | None:
     """Count (+ warn once) that this process's cache is not the record's store.
 
     Called from ``TortoiseSDK.__init__`` — the one constructor every write door
@@ -154,11 +176,18 @@ def note_local_cache(*, cache_path: str | None) -> str | None:
     (``mcp_auth._get_org_sdk``) are all covered by ONE call site rather than
     three that can drift.
 
+    ``cache_uri`` is passed THROUGH to the predicate rather than assumed: the
+    caller's own ``if self._db_uri is None`` is a cheap short-circuit, and the
+    moment it becomes the only thing standing between a SHARED cache and a
+    counter increment, the predicate's shared-cache arm is dead on the deployed
+    path and this module's "one declaration" claim is false. It is also what a
+    second caller (a moved hook, a new door) would otherwise get wrong.
+
     Deliberately cannot raise: a fault in observability must never deny a
     caller a graph it can use (the ``#5148`` rule this seam's siblings follow).
     """
     try:
-        reason = cache_leg_reason(cache_uri=None)
+        reason = cache_leg_reason(cache_uri=cache_uri)
         if reason is None:
             return None
         monitoring.record_cache_leg_failure(reason)
@@ -167,9 +196,10 @@ def note_local_cache(*, cache_path: str | None) -> str | None:
             _LOGGER.warning(
                 "the CACHE leg of this process is not the record's store: "
                 "TORTOISE_RECORD_DSN is armed (a shared Postgres) while this "
-                "SDK's cache is the embedded store %r. The record will hold "
-                "every write and the cache will hold none of them, and every "
-                "call still returns success (#12943, counted on "
+                "SDK's cache is the embedded store %r. The RECORD will hold "
+                "every write and the RECORD's cache will hold none of them — "
+                "nothing is lost, it is stranded in a store the record is not "
+                "in — and every call still returns success (#12943, counted on "
                 "monitoring.metrics()['cache_leg_failures']). Fix: set "
                 "TORTOISE_DB_URI to the shared FalkorDB this deployment reads "
                 "from — or, on a SINGLE-TENANT self-host where both stores are "

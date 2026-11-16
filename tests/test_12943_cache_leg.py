@@ -1,7 +1,8 @@
 """A write the RECORD accepted must reach the CACHE — and when it cannot, say so (#12943).
 
 THE MEASURED DEFECT. #12943 reported 8 objects / 39 events / 5 operators in
-Postgres and 0 in FalkorDB, and read it as a missing cache leg on the SDK path.
+Postgres and a cache holding one object — the single one written through REST —
+and read it as a missing cache leg on the SDK path.
 Measuring the write path says otherwise: ``create_object`` → ``create_entity``
 writes the GRAPH first (the apply-first declared lane, §17.1) and then appends
 the record, so the cache leg is present and precedes the record. The
@@ -146,10 +147,11 @@ def test_a_record_armed_process_with_a_local_cache_is_counted(
 def test_the_counter_is_on_the_metrics_surface(monkeypatch, tmp_path):
     """A counter nobody can read is not observability.
 
-    ``monitoring.metrics()`` is the surface ``/health``, the MCP
-    ``tortoise_health`` tool and the reconciler's operator read — the record's
-    own failures ride it (``record_write_failures``), and the cache leg's must
-    be beside them rather than in a log line nothing watches.
+    ``monitoring.metrics()`` is what the MCP ``tortoise_health`` tool and a
+    Prometheus scrape (``serve_health``) read. The HOSTED app publishes its own
+    curated block and has no ``/metrics`` route, so the cache leg is carried
+    onto BOTH: this test pins ``metrics()``, the sibling below pins
+    ``hosted_api._record_health``.
     """
     _arm_record(monkeypatch)
     _drop_uri(monkeypatch)
@@ -165,6 +167,25 @@ def test_the_counter_is_on_the_metrics_surface(monkeypatch, tmp_path):
     # deployment the record lost nothing, and reporting it as a record failure
     # would send an operator to the wrong store.
     assert payload["record_write_failures"] == {}
+
+
+def test_the_health_block_carries_it_too(monkeypatch, tmp_path):
+    """The surface an operator actually reads, not only the scrape (#12943).
+
+    The hosted app answers ``/health`` from ``hosted_api._record_health`` and has
+    no ``/metrics`` route, so a counter that only reached ``metrics()`` would
+    make the split visible to Prometheus and invisible to the operator
+    dashboard — the dichotomy this fix exists to close.
+    """
+    from tortoise import hosted_api
+
+    _arm_record(monkeypatch)
+    _drop_uri(monkeypatch)
+    monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "health.db"))
+    _embedded_sdk(tmp_path).close()
+    block = hosted_api._record_health()
+    assert "cache_leg_failures" in block, sorted(block)
+    assert block["cache_leg_failures"][cache_leg.CACHE_NOT_SHARED] >= 1
 
 
 def test_the_warning_names_both_stores_and_the_remedy(monkeypatch, tmp_path,
@@ -221,44 +242,57 @@ def test_a_shared_cache_is_not_counted(monkeypatch, tmp_path):
     assert _delta(before) == {}
 
 
-def test_an_unarmed_record_with_a_local_cache_is_not_counted(monkeypatch):
+def test_an_unarmed_record_with_a_local_cache_is_not_counted(monkeypatch,
+                                                             tmp_path):
     """⛔ #7722's embedded fallback is a DECISION, not the defect.
 
     A process with no record and no URI is the local/dev/onboarding lane, where
     the embedded graph is the only store and therefore is not a cache of
     anything. Reversing that would break onboarding to no purpose.
+
+    ⛔ Asserted THROUGH THE CONSTRUCTOR, not through the predicate alone:
+    `cache_leg_reason` is pure and returns None here, so a `== {}` delta beside
+    it is a constant — it would stay green if the hook were duplicated or the
+    condition widened.
     """
+    _drop_uri(monkeypatch)
     before = _counts()
-    assert cache_leg.cache_leg_reason(cache_uri=None) is None
+    _embedded_sdk(tmp_path).close()
     assert _delta(before) == {}
 
 
-def test_a_declared_single_tenant_deployment_may_run_a_local_cache(monkeypatch):
+def test_a_declared_single_tenant_deployment_may_run_a_local_cache(
+        monkeypatch, tmp_path):
     """⛔ The other recorded decision: a self-host where BOTH stores are local.
 
     ``record_writer.single_tenant_declared`` (#9192) is the operator's
     statement that this process serves exactly one tenant — the shape where an
     embedded graph and a same-box Postgres are a coherent pair, so the cache
-    really is the record's cache.
+    really is the record's cache. Asserted through the constructor for the same
+    reason as the test above.
     """
     _arm_record(monkeypatch)
+    _drop_uri(monkeypatch)
     monkeypatch.setenv(RECORD_SINGLE_TENANT_ENV, "1")
     monkeypatch.setenv(RECORD_ORG_ENV, "org1")
     monkeypatch.setenv(RECORD_GRAPH_ENV, "g1")
     before = _counts()
-    assert cache_leg.cache_leg_reason(cache_uri=None) is None
+    _embedded_sdk(tmp_path).close()
     assert _delta(before) == {}
 
 
-def test_the_test_lane_redirect_is_not_a_split(monkeypatch):
+def test_the_test_lane_redirect_is_not_a_split(monkeypatch, tmp_path):
     """Epic #1647's docker-lane redirect rewrites an embedded construction onto
     the ambient server, so the effective store IS shared and counting it would
-    report a split that does not exist."""
+    report a split that does not exist. Asserted through the constructor, and
+    through the REAL redirect: an explicit `db_path` plus `TORTOISE_TEST_MODE=1`
+    plus a loopback URI is the shape `projection.FalkorProjection.__init__`
+    rewrites."""
     _arm_record(monkeypatch)
     monkeypatch.setenv("TORTOISE_TEST_MODE", "1")
     monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@127.0.0.1:6379/g")
     before = _counts()
-    assert cache_leg.cache_leg_reason(cache_uri=None) is None
+    _embedded_sdk(tmp_path).close()
     assert _delta(before) == {}
 
 
@@ -300,18 +334,33 @@ def test_the_rest_door_counts_it(monkeypatch, tmp_path):
 
 
 def test_the_mcp_door_counts_it(monkeypatch, tmp_path):
-    """Door 3 — the MCP lane's SDK opener, which agents actually write through."""
-    from tortoise import mcp_auth
+    """Door 3 — the MCP lane's SDK opener, which agents actually write through.
+
+    ⛔ ``mcp_server._get_sdk`` CACHES into a module global and returns it
+    unconditionally afterwards, with no staleness check — unlike
+    ``hosted_api._make_sdk``'s anchor, which grew ``_anchor_usable`` for exactly
+    the #1502 class. Without pinning it to ``None`` here, this test (a) leaves
+    every later test in the worker holding a CLOSED SDK bound to a tmp dir this
+    fixture then deletes, and (b) makes its own assertion a property of process
+    HISTORY: anything that had cached ``_sdk`` earlier would satisfy it without
+    the door being built at all. Both halves are why it is set on BOTH sides of
+    the call, through ``monkeypatch`` so the module is restored after.
+    """
+    from tortoise import mcp_auth, mcp_server
 
     _arm_record(monkeypatch)
     monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "mcp.db"))
     _drop_uri(monkeypatch)
+    monkeypatch.setattr(mcp_server, "_sdk", None, raising=False)
+    monkeypatch.setattr(mcp_server, "sdk", None, raising=False)
     before = _counts()
     sdk = mcp_auth._get_base_sdk()
     try:
         assert _delta(before) == {cache_leg.CACHE_NOT_SHARED: 1}
     finally:
         sdk.close()
+        monkeypatch.setattr(mcp_server, "_sdk", None, raising=False)
+        monkeypatch.setattr(mcp_server, "sdk", None, raising=False)
 
 
 # ── 4. convergence: both stores, per door ────────────────────────────────────
@@ -368,16 +417,33 @@ def _count_record(owner_dsn: str, org: str, graph_id: str) -> dict[str, int]:
     return out
 
 
-def _cache_counts(cache_graph: str) -> dict[str, int]:
-    """Count the cache graph's node labels without the SDK's own seams."""
+def _cache_client():
+    """A client for the lane's shared cache, or SKIP on a shape we cannot parse.
+
+    ⛔ ``str.rsplit`` with ``maxsplit=1`` returns ONE element when the URI has no
+    userinfo, so a credential-less ``redis://host:6379/0`` (or ``rediss://``,
+    or a bare path) raised ``ValueError: not enough values to unpack`` — turning
+    an intended skip into a collection ERROR. Parsed with ``urlparse`` so the
+    scheme, host, port and password come from the URI's own grammar rather than
+    from a split.
+    """
+    from urllib.parse import unquote, urlparse
+
     from falkordb import FalkorDB
 
-    uri = os.environ["TORTOISE_DB_URI"]
-    body = uri.split("://", 1)[1]
-    creds, rest = body.rsplit("@", 1)
-    password = creds.split(":", 1)[1] if ":" in creds else ""
-    host, _, port = rest.split("/", 1)[0].partition(":")
-    db = FalkorDB(host=host, port=int(port or 6379), password=password or None)
+    uri = (os.environ.get("TORTOISE_DB_URI") or "").strip()
+    if not uri:
+        pytest.skip("TORTOISE_DB_URI not set — there is no shared cache to compare")
+    parsed = urlparse(uri)
+    if not parsed.hostname:
+        pytest.skip(f"cannot parse a FalkorDB host out of {uri.split('://')[0]}://…")
+    return FalkorDB(host=parsed.hostname, port=parsed.port or 6379,
+                    password=unquote(parsed.password) if parsed.password else None)
+
+
+def _cache_counts(cache_graph: str) -> dict[str, int]:
+    """Count the cache graph's node labels without the SDK's own seams."""
+    db = _cache_client()
     out: dict[str, int] = {}
     graph = db.select_graph(cache_graph)
     for label in ("Object", "Point"):
@@ -450,9 +516,13 @@ def test_the_mcp_door_writes_both_stores(monkeypatch, tmp_path):
     # (`hosted_api._make_sdk(namespace="registry")._get_registry()`), as the
     # onboarding-parity test does for its own lanes.
     from tortoise import hosted_api
-    hosted_api._make_sdk(namespace="registry")._get_registry().query(
-        "CREATE (t:Team {id:$id, onboarding_state:$st})",
-        params={"id": org, "st": "{}"})
+    registry = hosted_api._make_sdk(namespace="registry")
+    try:
+        registry._get_registry().query(
+            "CREATE (t:Team {id:$id, onboarding_state:$st})",
+            params={"id": org, "st": "{}"})
+    finally:
+        registry.close()
 
     # `_transport_mode` is the fail-closed auth gate the tool bodies read: it is
     # None until a transport initialises, and `None` refuses EVERY operation
@@ -517,9 +587,18 @@ def test_the_rest_door_shares_both_seams_with_the_measured_door(monkeypatch):
 
 
 def test_no_cache_leg_failure_is_counted_when_the_cache_is_shared(monkeypatch):
-    """The control for the convergence leg: a shared cache never trips it."""
-    _both_stores()
-    _arm_for_real(monkeypatch)
+    """The control the whole counter rests on: a shared cache never trips it.
+
+    ⛔ It must NOT require the record. This test never touches Postgres — it
+    asserts only that a NON-EMBEDDED construction is not counted — so gating it
+    on `TEST_RECORD_DB_URI` slept the one assertion that keeps the counter
+    trustworthy on every lane without a Postgres. Arming is presence-based, so
+    a fake DSN is the honest fixture; what is genuinely required is a shared
+    cache URI, and that is the one skip.
+    """
+    if not (os.environ.get("TORTOISE_DB_URI") or "").strip():
+        pytest.skip("TORTOISE_DB_URI not set — there is no shared cache to build")
+    _arm_record(monkeypatch)
     before = _counts()
     from tortoise import hosted_api
 

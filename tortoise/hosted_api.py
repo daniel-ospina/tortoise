@@ -7521,6 +7521,7 @@ def _record_health() -> dict:
     try:
         from tortoise import record_writer
         from tortoise.monitoring import (
+            cache_leg_failure_counts,
             record_last_write_at,
             record_non_journal_skip_counts,
             record_position_unproven_count,
@@ -7539,6 +7540,9 @@ def _record_health() -> dict:
                 "record_write_failures": None,
                 "record_non_journal_skips": None,
                 "record_position_unproven": None,
+                # Present-and-null for the same reason (#12943): a missing key
+                # must not read as "the cache is fine".
+                "cache_leg_failures": None,
                 # The POSITIVE pair is present-and-null here for the same reason:
                 # a consumer must not read a missing key as "no writes" (#9548).
                 "record_writes_applied": None, "record_last_write_at": None,
@@ -7618,6 +7622,12 @@ def _record_health() -> dict:
         # move the zero that means "no record row was lost" (#9231/#9307).
         skips = record_non_journal_skip_counts()
         unproven = record_position_unproven_count()
+        # #12943: the CACHE leg, read in the SAME snapshot so the block stays
+        # all-read or all-``None``. ``metrics()`` alone was not enough: the
+        # hosted app publishes THIS block and has no ``/metrics`` route, so a
+        # key that only existed there would have made the split visible to a
+        # scrape and invisible to ``/health`` — the surface an operator reads.
+        cache_leg = cache_leg_failure_counts()
         # The POSITIVE pair (#9548) rides the SAME snapshot for the same reason.
         applied = record_write_applied_count()
         last_write_at = record_last_write_at()
@@ -7630,6 +7640,7 @@ def _record_health() -> dict:
         block["record_position_unproven"] = unproven
         block["record_writes_applied"] = applied
         block["record_last_write_at"] = last_write_at
+        block["cache_leg_failures"] = cache_leg
     # ⛔ THE VERDICT, not just the number (#10185/#10620). The full vocabulary
     # this counter carries — SEVEN values, documented at
     # ``monitoring.record_record_write_failure`` — is not uniformly

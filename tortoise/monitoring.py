@@ -777,13 +777,26 @@ RECORD_WRITE_FAILURE_COUNT = Counter(
 #: "did the DERIVED copy get the same write?"), and folding them together would
 #: make a healthy record on an unshared cache read as a failing record.
 #:
+#: ⚠️ **THE UNIT IS A CONSTRUCTION, NOT A WRITE**, and the help text says so
+#: because the difference is load-bearing. The condition is a property of the
+#: PROCESS's two stores, and the check runs where that property is decided
+#: (``TortoiseSDK.__init__``), so one increment = one SDK built in the split
+#: shape. It is therefore NOT comparable with ``record_writes_applied`` beside
+#: it: ``hosted_api._make_sdk`` builds an anchor AND a per-request SDK on its
+#: embedded path, and ``_data_sdk`` serves reads as well as writes. What the
+#: number answers is "is this process split, and how hard is it being asked" —
+#: any non-zero value is the misconfiguration, and the RATE is constructions.
+#: (Counting at the write seam instead was rejected: it would need a check per
+#: write, on the hot path, to learn a fact that is already fixed at
+#: construction.)
+#:
 #: ``reason`` vocabulary: ``cache_not_shared`` (the only value today — see
 #: :mod:`tortoise.cache_leg`). Kept as a label rather than a bare counter so a
 #: future cache-leg fault names itself instead of arriving as an increment
 #: nobody can attribute.
 CACHE_LEG_FAILURE_COUNT = Counter(
     "tortoise_cache_leg_failures_total",
-    "Writes whose CACHE leg could not be a copy of the record (#12943)",
+    "SDK constructions whose cache is not the record's store (#12943)",
     ["reason"],
 )
 
@@ -2564,7 +2577,11 @@ def record_write_failure_counts() -> dict[str, int]:
 
 
 def record_cache_leg_failure(reason: str) -> None:
-    """Count one write whose CACHE leg was not a copy of the record (#12943).
+    """Count one SDK construction whose CACHE is not the record's store (#12943).
+
+    The UNIT is a construction, not a write — see ``CACHE_LEG_FAILURE_COUNT``'s
+    help for why that is the only place the condition can be answered, and why
+    the number is therefore not comparable with ``record_writes_applied``.
 
     Single writer: ``tortoise.cache_leg.note_local_cache`` (the ``#501``/``#3677``
     house shape — callers never touch the counter directly). The vocabulary is

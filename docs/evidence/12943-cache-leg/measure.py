@@ -99,15 +99,25 @@ def _cache_counts(db, graph_name: str) -> dict[str, int]:
 
 
 def _falkor_client():
+    """A client for the cache server.
+
+    ``urlparse``, not a hand split: ``str.rsplit("@", 1)`` yields ONE element
+    when the URI carries no userinfo, so a credential-less
+    ``redis://host:6379/0`` (or ``rediss://``, or a bare path) raised
+    ``ValueError`` here instead of being reported as the unusable URI it is.
+    """
+    from urllib.parse import unquote, urlparse  # noqa: PLC0415
+
     from falkordb import FalkorDB  # noqa: PLC0415
-    uri = os.environ["TORTOISE_DB_URI"]
-    # docker://:<pw>@host:port/dbname
-    body = uri.split("://", 1)[1]
-    creds, rest = body.rsplit("@", 1)
-    pw = creds.split(":", 1)[1] if ":" in creds else ""
-    hostport = rest.split("/", 1)[0]
-    host, _, port = hostport.partition(":")
-    return FalkorDB(host=host, port=int(port or 6379), password=pw or None)
+    uri = (os.environ.get("TORTOISE_DB_URI") or "").strip()
+    parsed = urlparse(uri)
+    if not parsed.hostname:
+        raise SystemExit(
+            f"TORTOISE_DB_URI ({uri.split('://')[0] or 'empty'}://…) names no "
+            "host — export the lane's docker:// URI, e.g. "
+            "`uv run python tools/test_lane.py uri`")
+    return FalkorDB(host=parsed.hostname, port=parsed.port or 6379,
+                    password=unquote(parsed.password) if parsed.password else None)
 
 
 def main() -> int:
@@ -163,6 +173,7 @@ def main() -> int:
     except Exception as exc:                            # noqa: BLE001
         print(f"WRITE RAISED: {type(exc).__name__}: {exc}")
 
+    sdk.close()
     after_metrics = dict(monitoring.metrics())
     deltas = {}
     for k, after in after_metrics.items():

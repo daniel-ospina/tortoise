@@ -29,9 +29,42 @@ Same tenant, same writes, same record. The only difference is `TORTOISE_DB_URI`.
 | `TORTOISE_DB_URI` **set** | 2 / 3 / 6 | **2 / 3** | `record_writes_applied: 0 → 6`, no failure |
 | `TORTOISE_DB_URI` **empty** | 2 / 3 / 6 | **0 / 0** | `record_writes_applied: 0 → 6`, no failure |
 
-The second row is #12943's report (8 objects / 39 events / 5 operators in
-Postgres, 0 in FalkorDB), reproduced exactly — and `/data/tortoise.db` is
-created with its mtime inside the run, which names the store the cache went to.
+## Residue this harness leaves
+
+Per run: one `org_<uuid>` / `g_<uuid>` row pair in `public.organizations` /
+`public.graphs`, one `journal_event` history (append-only by trigger, so it
+cannot be cleared), and one cache graph `org_<org>_<gid>`. All run-unique, all
+on whatever throwaway instances the DSNs point at, and nothing is ever removed —
+a harness that deletes rows is a harness that can delete the wrong ones.
+
+## Hypothesis verdicts
+
+The second row is the shape #12943 reported for its **in-process** writes — 8
+objects / 39 events / 5 operators in Postgres and **0 in FalkorDB** — and
+`/data/tortoise.db` is created with its mtime inside the run, which names the
+store those writes went to.
+
+⚠️ **The issue's cache column is 1, not 0, and that 1 matters.** Its own table
+says the cache held exactly one object, *"the one written through **REST**
+(`POST /v1/objects`) — so the REST door wrote both stores and the in-process
+door wrote only the record."* So the deployed app demonstrably HAD a shared
+cache, and the split is per PROCESS, not per deployment:
+
+* a REST write issued by the deployed app → lands in the shared FalkorDB, and
+  in the record. ✅
+* an in-process `_data_sdk` write issued by a process WITHOUT
+  `TORTOISE_DB_URI` → lands in the record, and in that process's embedded
+  file. ⛔
+
+That reading is an **inference from the issue's numbers plus the code**, not a
+measurement of the deployment: this lane has no access to the hosted app (no
+`fly` CLI on this box), so what is measured here is the CODE PATH — the same
+`_make_sdk` + `_bind_record_tenant` pair, run twice, with and without the URI.
+What the inference buys is the diagnosis: a cache with 1 of 9 writes is not a
+deployment that lacks a cache, it is a process that was not writing to the
+deployment's cache. Whoever runs the repair should confirm it on the app with
+`monitoring.metrics()["cache_leg_failures"]`, which is now the instrument that
+answers it without guessing.
 
 **So the cache leg does not fail. It succeeds, into a store the record is not
 in.** `TORTOISE_DB_URI` picks the cache and `TORTOISE_RECORD_DSN` picks the

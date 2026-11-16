@@ -11973,7 +11973,7 @@ class TortoiseSDK:
             # Deliberately NOT a raise: #7722's embedded fallback and a declared
             # single-tenant self-host are both coherent and must keep building.
             from .cache_leg import note_local_cache
-            note_local_cache(cache_path=self._db_path)
+            note_local_cache(cache_uri=self._db_uri, cache_path=self._db_path)
         self._proj: FalkorProjection | None = None
         self._ep = None  # lazy-init TortoiseEP
         self._evidence: dict[str, tuple[float, float]] = {}
