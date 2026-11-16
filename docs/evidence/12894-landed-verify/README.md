@@ -163,9 +163,9 @@ above: no caller enters the arm.**
 ## V3 — the seed / cutover for EXISTING graphs
 
 **There is a seed. It is unreachable.** There is no verb, no RPC, no migration that seeds, and no
-runbook step. `record_allocator.seed()` (`:361-463`) is called from tests only (item 7 of V2). The
+runbook step. `record_allocator.seed()` (`record_allocator.py:361-463`) is called from tests only (item 7 of V2). The
 migration `supabase/migrations/20261116000001_record_cursor_allocator.sql` creates the table
-(`:56-72`) and its grants/policies, and **inserts no row**. So on `main` today every graph is
+(`supabase/migrations/20261116000001_record_cursor_allocator.sql:56-72`) and its grants/policies, and **inserts no row**. So on `main` today every graph is
 *uncut*: no `record_cursor` row ⇒ `_refuse_an_enumerated_replay` returns immediately
 (`record_projection.py:7367-7368`, *"the refusal fires ONLY when the graph has a `record_cursor` ROW"*)
 and the live path enumerates as it always did.
@@ -229,7 +229,7 @@ VALUES (%s, %s, %s, %s, %s, COALESCE(%s::timestamptz, now()))
 ON CONFLICT (org_id, graph_id, seq) DO NOTHING
 ```
 
-(`record_projection.py:6343-6350`). It is not silent any more, but it is not free either:
+(`record_projection.py:6346-6351`). It is not silent any more, but it is not free either:
 
 - **the allocated insert has none** (`ALLOCATION_SQL`, `:6926-6945`, with the reason stated at
   `:6912-6917`): a duplicate there is `23505`, classified as `PositionCollision` and raised
@@ -249,11 +249,11 @@ ON CONFLICT (org_id, graph_id, seq) DO NOTHING
 | genuine replay (same type, same payload, same capture) | silent — that is idempotence | `:6718-6723` (the arm), `:6812-6813` (the silent return), `:6847` |
 | same type **and** same capture, payload differs → read as *derivation drift* | **silent** — admitted as a *reading*, not evidence | `:6820-6846`, `:6847` |
 | anything else → `JournalPositionCollision` | loud: named refusal `journal_collision`, counter, WARNING | `:6858-6872`, `record_writer.py:2747-2771` |
-| `ts` is `NULL` and the payload differs | loud (`capture_state="unknown"`) | `:6849-6853` |
+| `ts` is `NULL` and the payload differs | loud (`capture_state="unknown"`) | `record_projection.py:6849-6853` |
 
 The drift arm admits a shape the class docstring itself calls a *"mirror residual"*: *"TWO DIFFERENT
 RECORDS sharing an instant land here and are absorbed — with `_identity_evidence` never consulted, even
-where it would have answered `disagrees`"* (`:6829-6846`), pinned as admitted by
+where it would have answered `disagrees`"* (`record_projection.py:6829-6846`), pinned as admitted by
 `tests/test_9318_journal_collision.py::test_a_same_capture_instant_pair_is_ADMITTED_not_detected`.
 `#12965` (the head of `main`) is the commit that closed the two P0s in this guard, so the pair
 above is the post-`#12965` state.
@@ -333,7 +333,7 @@ it. `§A7.7` step numbers are the plan's.
 
 1. **The wiring gate must be re-derived, not widened** (`§A7.7` M12 — *specified*).
    `tools/record_wiring_check.py` accepts **either** the journal's ordinal **or** the allocator
-   (`tools/record_wiring_check.py:20-37`, `:443-500`), so it exits 0 (`measured`) over a tree where
+   (`tools/record_wiring_check.py:30-37`, `:443-500`), so it exits 0 (`measured`) over a tree where
    nothing passes `allocate=`. M12 said the two checks *"assert exactly the rule the change inverts"*
    and must be re-derived *at 6.1*; instead the old rule was **kept as an accepted alternative**. This
    is the instrument that should have made V2 visible, and it is the cheapest remaining fix.
@@ -387,7 +387,7 @@ it. `§A7.7` step numbers are the plan's.
    (no retention/delete on that table — `record_allocator.py:17-21` states the prohibition, and the
    app role holds `journal_event` **SELECT+INSERT only**: `GRANT SELECT, INSERT ON public.journal_event
    TO tortoise_record_app` (`supabase/migrations/20261025000001_record_tenancy_role_and_guc.sql:190`),
-   which `20261116000001:42-44` cites as the reason `record_cursor` withholds DELETE).
+   which `20261116000001:41-44` cites as the reason `record_cursor` withholds DELETE).
 10. **`§A7.7` step 1 — D-01's counts reconciled** (*specified, not done here*). This lane did not
     re-derive the 387/211/32 vs 442/38/288 vs 458/50 population.
 
@@ -403,13 +403,13 @@ The chain had four review rounds. Each named defect, and where it stands now:
 | 2 | **`recorded_at` discriminator, both directions** — (a) an unguarded arm reported every replay of a `ts`-less record as a collision; (b) a content match at a *different* capture was silently absorbed | **FIXED** | (a) `WHERE … (%s::timestamptz IS NOT NULL AND recorded_at IS DISTINCT FROM %s::timestamptz)` at `:6455-6458` with the false-red explained at `:6445-6454`; (b) `same_capture` is computed by Postgres in `_JOURNAL_CONFLICT_CONTENT_SQL` (`:6437-6460`) and only `same_type and same_capture and ts is not None` returns silently (`:6847`); everything else raises `JournalPositionCollision` (`:6858-6872`) |
 | 3 | **`23514` on an empty-graph seed** — a `CHECK (seq > 0)` on the cursor made the *emptiest* graph's own seed fail | **FIXED** | `seq bigint NOT NULL DEFAULT 0 CHECK (seq >= 0)` at `supabase/migrations/20261116000001_record_cursor_allocator.sql:61`, with the reasoning at `:24-32`; `journal_event` keeps `seq > 0` (`20261012000001:84`) because a *position* is always ≥ 1 |
 | 4 | **`42501` from `FORCE ROW LEVEL SECURITY` without the GUC** | **FIXED / not applicable as written** | the landed migration uses `ENABLE ROW LEVEL SECURITY` (`20261116000001:78`), **not** `FORCE` — so an owner-role connection is not subjected to the policy by this table. The seed sets *and verifies* the tenant GUC itself (`record_allocator.py:396-397`, `:637-650`), and `record_projection.scope_connection` does the same plus the role gate (`record_projection.py:7021-7024`). The refusal-vs-divergence distinction is pinned by `tests/test_12894_record_cursor_live.py::test_a_seed_without_the_guc_is_a_refusal_not_a_divergence` (`record_allocator.py:383-394`). ⚠️ The plan text still says `FORCE` (`§A7.5.5`, *"FORCE ROW LEVEL SECURITY on `record_cursor`"*), so plan and migration disagree — the *migration* is what runs, and it is the more forgiving of the two |
-| 5 | **the placeholder converter** — *"a statement mixing a literal `$1` with `%s` is refused by the converter"* | ⛔ **NOT FIXED — the claim is false, and the test that pins it passes for the wrong reason** | measured: `to_dollar_placeholders` (`record_projection.py:7806-7824`) refuses only on **arity** (`len(parts)-1 != len(params)`). `Statement("SELECT $1, %s", ("a",))` → `SELECT $1, $1`; `Statement("SELECT $1, %s, %s", ("a","b"))` → `SELECT $1, $1, $2`, both silently. The comment asserting the refusal is `record_allocator.py:199-202`; the test is `tests/test_12894_record_cursor.py:294-319`, and its case `Statement("SELECT $1, %s", ("a","b"))` raises **because there are two params for one placeholder**, not because a literal `$n` was detected — delete the literal and the same case still raises. No *landed* statement mixes the two (checked: the only `$<n>` occurrences in `record_projection.py` are inside comments/docstrings at `:266` and `:7570`), so this is a **false-passing gate**, not a live data defect — the shape it cannot see is one a future edit can introduce |
-| 6 | **`record_cursor` ships `ON DELETE CASCADE`** — a *recorded plan decision*, not a review finding, and the plan forbids it by name | ⛔ **MERGED CONTRARY TO THE PLAN** (already tracked as `#12987`) | migration: `FOREIGN KEY (org_id, graph_id) REFERENCES public.graphs (org_id, id) **ON DELETE CASCADE**` (`supabase/migrations/20261116000001_record_cursor_allocator.sql:70`). Plan `§A7.8` item 1 (`docs/plans/2026-11-15-issue-12894-storage-shape.md:1840`): *"⛔ **and NO `REFERENCES public.graphs … ON DELETE CASCADE`, deliberately, unlike every sibling record table** … `purge_org_record` deletes `public.organizations` and relies on that cascade, so a cascade FK here would **delete the counter with the purge** and let a re-armed graph restart at 1 — the exact outcome item 7 rules against"*. ⛔ **And the migration's own header (`:46-48`) ENDORSES the cascade** — *"DELETE stays withheld because the counter is never erased per-row; it goes with the graph via the FK's ON DELETE CASCADE, which is the tenant-erasure path"* — which is a direct contradiction of the plan's reasoning, not an oversight. So the finding is sharper than "unrecorded DDL": **two recorded reasonings disagree about the same constraint**, the plan's (a cascade lets a purge delete the counter, so a re-armed graph restarts at 1 — item 7 rules against it) and the migration's (the cascade *is* the tenant-erasure path, so withholding DELETE per-row is deliberate). `#12987`'s two options turn on exactly that question |
+| 5 | **the placeholder converter** — *"a statement mixing a literal `$1` with `%s` is refused by the converter"* | ⛔ **NOT FIXED — the claim is false, and the test that pins it passes for the wrong reason** | measured: `to_dollar_placeholders` (`record_projection.py:7806-7824`) refuses only on **arity** (`len(parts)-1 != len(params)`). `Statement("SELECT $1, %s", ("a",))` → `SELECT $1, $1`; `Statement("SELECT $1, %s, %s", ("a","b"))` → `SELECT $1, $1, $2`, both silently. The comment asserting the refusal is `record_allocator.py:199-202`; the test is `tests/test_12894_record_cursor.py:294-319`, and its case `Statement("SELECT $1, %s", ("a","b"))` raises **because there are two params for one placeholder**, not because a literal `$n` was detected — delete the literal and the same case still raises. No *landed* statement mixes the two (checked: the only `$<n>` occurrences in `record_projection.py` are inside comments/docstrings at `record_projection.py:266` and `record_projection.py:7570`), so this is a **false-passing gate**, not a live data defect — the shape it cannot see is one a future edit can introduce |
+| 6 | **`record_cursor` ships `ON DELETE CASCADE`** — a *recorded plan decision*, not a review finding, and the plan forbids it by name | ⛔ **MERGED CONTRARY TO THE PLAN** (already tracked as `#12987`) | migration: `FOREIGN KEY (org_id, graph_id) REFERENCES public.graphs (org_id, id) **ON DELETE CASCADE**` (`supabase/migrations/20261116000001_record_cursor_allocator.sql:70`). Plan `§A7.8` item 1 (`docs/plans/2026-11-15-issue-12894-storage-shape.md:1840`): *"⛔ **and NO `REFERENCES public.graphs … ON DELETE CASCADE`, deliberately, unlike every sibling record table** … `purge_org_record` deletes `public.organizations` and relies on that cascade, so a cascade FK here would **delete the counter with the purge** and let a re-armed graph restart at 1 — the exact outcome item 7 rules against"*. ⛔ **And the migration's own header (`supabase/migrations/20261116000001_record_cursor_allocator.sql:45-47`) ENDORSES the cascade** — *"DELETE stays withheld because the counter is never erased per-row; it goes with the graph via the FK's ON DELETE CASCADE, which is the tenant-erasure path"* — which is a direct contradiction of the plan's reasoning, not an oversight. So the finding is sharper than "unrecorded DDL": **two recorded reasonings disagree about the same constraint**, the plan's (a cascade lets a purge delete the counter, so a re-armed graph restarts at 1 — item 7 rules against it) and the migration's (the cascade *is* the tenant-erasure path, so withholding DELETE per-row is deliberate). `#12987`'s two options turn on exactly that question |
 
 ### One more thing that should not have been merged, in the sense that it reports success over a gap
 
 `tools/record_wiring_check.py` passing (exit 0) is **correct by its own contract** and still misleading
-about this chain: its contract admits two honest sources (`:20-37`), so the pre-`#12894` shape is a pass.
+about this chain: its contract admits two honest sources (`tools/record_wiring_check.py:30-37`), so the pre-`#12894` shape is a pass.
 `§A7.7` M12 required it to be re-derived at 6.1. It was not. This is V5 item 1 and it is the reason V2
 had to be established by a call-site census rather than by the repo's own instrument.
 
@@ -473,8 +473,9 @@ The honest comparison is `git log refs/pull/12959/head..<wip-ref>` plus a path-s
 
 ## 9. Commands used (verbatim, with counts)
 
-**Which invocations are registered, and which are not.** Three suite runs went through the lane's
-report tool (`WORKTREE-REPORT.md`, "Suites run"); every other measurement in this document is a
+**Which invocations are registered, and which are not.** Four suite runs went through the lane's
+report tool (`WORKTREE-REPORT.md`, "Suites run" — rows 1, 3 and 4 are the wiring check at three
+different heads, row 2 is the docs-lint invocation below); every other measurement in this document is a
 read-only inspection (`rg`, `sed`, `grep`, `git log`/`git merge-base`/`git for-each-ref`,
 `gh issue|pr view`, and two `uv run python -c` evaluations), quoted inline at the claim it supports and
 **not** in the report tool's register. The two `python` evaluations are reproduced verbatim in §6 (V6-5)
@@ -482,16 +483,20 @@ and §9 below so the negative findings are re-runnable rather than asserted.
 
 **One recorded suite did not run and is reported as red rather than omitted:** the docs-lint invocation exited
 `2` because the harness needs three outputs this lane did not produce, so the document was never
-linted by that tool — a gap in coverage, stated here rather than left to `WORKTREE-REPORT.md`:
+linted by that tool — a gap in coverage, stated here and recorded there as red, not omitted:
 
 ```bash
 uv run python tools/worktree_report.py init --issue 12894
 uv run python tools/gh_write_preflight.py --repo .
-uv run python tools/worktree_report.py run --cmd 'uv run python tools/record_wiring_check.py'   # exit 0
-uv run python tools/worktree_report.py run --cmd 'uv run python tools/docs_lint_baseline.py check --baseline config/docs-lint-baseline.json'   # exit 2, NEVER RAN
-uv run python tools/worktree_report.py note --not-done '<the docs-lint non-run, verbatim>'
+uv run python tools/worktree_report.py run --cmd 'uv run python tools/record_wiring_check.py'   # suite 1, exit 0
+uv run python tools/worktree_report.py run --cmd 'uv run python tools/docs_lint_baseline.py check --baseline config/docs-lint-baseline.json'   # suite 2, exit 2, NEVER RAN
+uv run python tools/worktree_report.py run --cmd 'uv run python tools/record_wiring_check.py'   # suite 3, exit 0 (re-run after the cycle-3 fixes)
+uv run python tools/worktree_report.py run --cmd 'uv run python tools/record_wiring_check.py'   # suite 4, exit 0 (re-run after the cycle-5 fixes)
 uv run python tools/worktree_report.py check        # exit 3 — VALID EVIDENCE, 1 FAILING SUITE
 ```
+
+The `Could not do` section of `WORKTREE-REPORT.md` carries the docs-lint non-run as a note rather
+than as a suite, and `check`'s `3` is what makes the gap a recorded red instead of a silence.
 
 The two evaluations the negative findings rest on, verbatim and re-runnable:
 
