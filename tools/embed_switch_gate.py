@@ -519,12 +519,16 @@ def _dockerfile_env(text: str) -> tuple[dict[str, str], set[str], dict[str, str]
             cursor = _heredoc_end(lines, cursor - 1, cursor)
             continue
         stage = envs[-1] if envs else before_from
-        # ⛔ NO inline-comment stripping here, unlike the shell reader: a Dockerfile has no
-        # trailing-comment form — Docker itself REFUSES `ENV K=1  # x` with
+        # ⛔ NO inline-comment stripping here, unlike the shell reader: in the `K=V` form a
+        # Dockerfile has no trailing-comment form — Docker itself REFUSES `ENV K=1  # x` with
         # `Syntax error - can't find = in "#"` (measured), so the line can never ship. Stripping
         # it would REPORT that value as stated for a file that does not build, and the direction
         # that matters here is a false STATED (review at `3e2b944afd`, P3). Left intact, the
-        # tiling rule refuses the line instead.
+        # tiling rule refuses the line instead. ⚠️ The LEGACY `ENV K V` form is the exception and
+        # is not treated as a trailing comment either: Docker FOLDS the text into the value
+        # (`ENV K 1 # on` ships `K=1 # on`), which is why this reader stores the whole remaining
+        # body — reporting the folded value is what makes the `ok` line true about what ships,
+        # even though the folded text is truthy-false to the gate's own resolver.
         body = match.group("body").strip()
         if _ENV_PAIRS.match(body):
             for key, value in _ENV_ASSIGNMENT.findall(body):
