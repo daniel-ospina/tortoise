@@ -3827,6 +3827,18 @@ def _shell_export_states(text: str, flag: str) -> list[dict]:
                 if "n" in options:
                     exported = False
                     states[-1]["unexport"] = True      # the value is RETAINED
+                    # ⛔ RETAINED does not mean UNCHANGED: the option removes the
+                    # export attribute and does NOT discard an assignment it is given —
+                    # `bash -c 'export FLAG=1; export -n FLAG=0; export FLAG; env'`
+                    # prints `FLAG=0` (MEASURED). Ignoring the argument kept `current`
+                    # on the value the revocation line had just replaced, so a later
+                    # bare `export FLAG` republished it and a deployment whose last
+                    # word is `0` read `ON` — a FALSE ARM, the direction this
+                    # instrument exists to close (fresh review cycle 3, P1).
+                    if flag in assigned:
+                        value = values.get(flag)
+                        if value is not None:
+                            current = value
                 else:
                     if flag in assigned:
                         # `export FLAG=v` also SETS the variable: the value a later bare

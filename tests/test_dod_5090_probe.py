@@ -3571,14 +3571,19 @@ def test_a_superseded_unset_does_not_claim_this_tree_DISARMS_the_flag(
 
 def test_a_value_less_compose_environment_entry_is_reported_as_UNSET(
         tmp_path, monkeypatch):
-    """A compose entry with NO value DISARMS the container — the direction that costs.
+    """A compose entry with NO value fixes NO value — a PASS-THROUGH, not a removal.
 
-    ⛔ Measured (fresh review of PR #12474, P2): `environment: - FLAG` / `FLAG:` /
-    `FLAG: null` REMOVES the variable from the container, so the caveat's
-    "inheritance can only ADD an arm" was false on a reachable shape — and the line
-    landed in NO bucket, so nothing a reader could consult said so. It is now reported,
-    the caveat names the bound, and the file still reads silent on that line (which is
-    right: it declares no value to arm with).
+    ⛔ Measured (`#12549`): `environment: - FLAG` / `FLAG:` / `FLAG: null` resolves to a
+    PASS-THROUGH from the environment `docker compose` runs in (with `FLAG=1` in the
+    shell the container gets `"1"`), so the file fixes NO value — which is why the line
+    is reported in a disarming bucket and the file still reads silent on it (it declares
+    no value to arm with, and the walk must not score an ambient value it cannot see).
+
+    ⚠️ The earlier docstring here — and the `#12474` caveat — said such an entry
+    *REMOVES* the variable from the container. That is the cause `#12549` measured to be
+    FALSE, reported by a line reader that never resolved the file: exactly the class of
+    claim this instrument exists to stop publishing. The test's NAME is kept for
+    continuity; the direction it asserts is the measured one.
     """
     (tmp_path / "docker-compose.yml").write_text(
         "services:\n  tortoise:\n    build:\n      dockerfile: Dockerfile.selfhost\n"
@@ -11886,6 +11891,25 @@ def test_12549_the_export_attribute_is_a_MOMENT_not_a_file_property(
         encoding="utf-8")
     shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
     assert shipped["deployment"]["files"]["entrypoint.sh"] == "ON", shipped
+    # ⛔ BUT "RETAINED" does not mean "UNCHANGED": the option does not discard an
+    # ASSIGNMENT it is given. MEASURED against the grammar owner —
+    # `bash -c 'export FLAG=1; export -n FLAG=0; export FLAG; env | grep ^FLAG='` prints
+    # `FLAG=0`. Ignoring the argument kept the PRE-revocation `1`, so the later bare
+    # export republished it and a deployment whose last word is `0` read `ON` (fresh
+    # review cycle 3, P1).
+    (tmp_path / "entrypoint.sh").write_text(
+        "#!/bin/bash\nexport TORTOISE_EMBED_GATE=1\n"
+        "export -n TORTOISE_EMBED_GATE=0\nexport TORTOISE_EMBED_GATE\n",
+        encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"]["entrypoint.sh"] == "OFF", shipped
+    # …and the assignment ALONE (no later bare export) is the same `0`: the revocation
+    # line's own argument decides the file, not only what it re-publishes later.
+    (tmp_path / "entrypoint.sh").write_text(
+        "#!/bin/bash\nexport TORTOISE_EMBED_GATE=1\n"
+        "export -n TORTOISE_EMBED_GATE=0\n", encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"]["entrypoint.sh"] == "OFF", shipped
     # …the POSITIVE control: the bare-export HOUSE IDIOM still arms the file, because the
     # export publishes the value already assigned. Without this arm the per-line state
     # would read every `FLAG=...` + `export FLAG` entrypoint as silence.
