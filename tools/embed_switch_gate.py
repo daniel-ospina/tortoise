@@ -53,6 +53,20 @@ is what *should* be shipped (presence, not policy — ``TORTOISE_*=0`` is a docu
 or anything about a **hand deploy**: the owner's ruling on ``#12926`` is *"a hand deploy is
 their problem, so let's not worry about it"*.
 
+⚠️ **AND THE SHELL READER HAS NO CONTROL-FLOW MODEL (review at `762f1c56d7`, P3 — measured).**
+``_shell_assignments`` is LINE-SHAPED: any indented ``export K=V`` counts as a statement. So a
+switch exported inside a function that is never called, inside a ``if false`` branch, or after a
+top-level ``exit`` is credited as ``STATED``, and this gate's own report then prints
+``ok  entrypoint.sh TORTOISE_VALUE_GATE=1`` for a value the process never receives — measured on
+synthetic entrypoints, all three shapes read ``OK``. ``entrypoint.sh`` carries ten top-level
+functions (plus one nested helper, ``_fragment_tell`` inside ``_redact_uri``), so "move the export
+into the helper" is an ordinary edit rather than a contrived one.
+That is NOT a widening of what an author may *honestly* ship (``=0`` passes by design), but it
+is this artifact stating a fact that is false, so it is recorded here rather than left silent.
+Closing it needs brace depth plus a top-level-``exit`` seen, routing a nested/post-exit
+assignment into the existing ``ambiguous`` verdict; until then, read ``ok … entrypoint.sh`` as
+"the token appears at a line that reads as a statement", not "the process receives it".
+
 ``.env.example`` is a template nothing deploys, so it is not a channel of this gate; the
 read-only instrument (``tools/dod_5090_probe.py``) is what scores it.
 
