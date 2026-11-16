@@ -1543,7 +1543,7 @@ def _migrate_with_rebuild_counts(tmp_path, monkeypatch, counts):
     # the file cost **620.80 s wall against 9.8 s user + 5.7 s system**, with
     # TEN `migrate`-route cases each at exactly 60.7-60.9 s — i.e. ~10 min of
     # pure socket wait. That is what killed the required `test (j)` leg: the
-    # shard's whole 20 min watchdog, spent waiting on a server boot, in BOTH
+    # shard's 23 min watchdog, ~10 min of it burned on server boots, in BOTH
     # attempts, with ZERO test-level attribution (the legs died inside this file
     # on ADJACENT migrate-route cases, not on one nodeid — att 1 on
     # `…keeps_the_error_pointer_for_a_rescue_file`, att 2 on
@@ -1583,7 +1583,7 @@ def test_the_migrate_route_counts_nodes_without_booting_a_server(
     Measured while it did (#12962): this file cost **620.80 s wall against 9.8 s
     user + 5.7 s system**, with ten `migrate`-route cases at exactly 60.7-60.9 s
     each — ~10 min of pure socket wait — and the required `test (j)` leg was
-    killed at its 20 min watchdog in BOTH attempts, inside this file, with ZERO
+    killed at its 23 min watchdog in BOTH attempts, inside this file, with ZERO
     test-level attribution (att 1 died on
     `…keeps_the_error_pointer_for_a_rescue_file`, att 2 on
     `…names_the_capture_source_when_it_observed_nothing` — adjacent

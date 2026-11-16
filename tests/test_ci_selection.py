@@ -10647,7 +10647,7 @@ _FLAT_DEFAULT_STILL_OWED_RE = re.compile(
     # #9442 rather than claimed closed here. Its size is COUNTED, not asserted — at
     # 3d74516 the rows whose tail names `--refresh-durations` and carries no `until`
     # (case-insensitive, as this regex compiles) numbered 112, of which 110 carry a
-    # landed `; was N` tail; at this head the same count is 113 / 111. The count is
+    # landed `; was N` tail; at `b7cd203` the same count is 114 / 111. The count is
     # pinned to a DEFINITION so the next reader can reproduce it rather than trust it
     # (`rows = [l for l in text.splitlines() if _DURATIONS_ROW_RE.match(l)]`;
     # `tail_names = [l for l in rows if "--refresh-durations" in m.group("tail")]`;
