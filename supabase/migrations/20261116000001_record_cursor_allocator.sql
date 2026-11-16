@@ -137,5 +137,19 @@ BEGIN
             'public.journal_event_bytes_for_rows(text,text,bigint[])') IS NOT NULL THEN
         GRANT EXECUTE ON FUNCTION public.journal_event_bytes_for_rows(
                 text, text, bigint[]) TO tortoise_record_app;
+    ELSE
+        -- ⛔ A SKIP HERE IS NOT SILENT, because a silent one is the FAIL-OPEN this
+        -- guard would otherwise become: the grant is absent, the meter returns
+        -- `None` (TOTAL by contract), and the org is charged 0 bytes with no
+        -- error anywhere. The NOTICE names WHICH grant is missing and WHY, so a
+        -- reader of a migration log is not left to discover it as a zero-byte
+        -- meter three assertions away. It cannot be an error: the record schema
+        -- and the metering schema are applied by different steps, and this file
+        -- must stay applyable where the metering migration has not run (the
+        -- statement order is the deploy's, not this file's, to decide).
+        RAISE NOTICE 'record_cursor_allocator: byte meter absent, so the EXECUTE '
+            'grant to tortoise_record_app was SKIPPED. Apply the metering '
+            'migration (20261114000001) and RE-APPLY this file, or every armed '
+            'record write will be charged 0 bytes by a meter that cannot run.';
     END IF;
 END $$;

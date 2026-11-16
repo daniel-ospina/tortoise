@@ -83,7 +83,39 @@ def _records(n: int) -> list[dict]:
 
 @pytest.fixture(scope="module")
 def schema():
-    """The record schema (this tree's migrations) + the byte meter, once."""
+    """The record schema (this tree's migrations) + the byte meter, once.
+
+    ⛔ THE THREE CALLS ARE THE **FILENAME ORDER** OF THE FILES THEY APPLY, and the
+    order is LOAD-BEARING — not tidiness. `20261116000001_record_cursor_allocator.sql`
+    grants the byte meter's EXECUTE to `tortoise_record_app` **guarded on the
+    meter's presence** (`to_regprocedure(...) IS NOT NULL`), because the record
+    schema and the metering schema are applied by different production steps. Its
+    function is created by the METERING migration `20261114000001`, which is
+    EARLIER by filename but is NOT in `RECORD_MIGRATIONS`. So on a fresh database
+    a single record-then-metering pass applies the cursor migration while the
+    meter does not exist yet, the guard fires its SKIP, `tortoise_record_app` has
+    no EXECUTE, and the meter raises `InsufficientPrivilege` -> returns `None`
+    (TOTAL by contract) -> the org is charged 0 bytes.
+
+    MEASURED on a fresh `pgvector/pgvector:pg16` (the exact CI shape), with the
+    single-pass pair: `test_the_allocated_number_reaches_the_watermark_and_the_`
+    `byte_meter` reported `written_rows=0` for a 2-record write, and
+    `has_function_privilege('tortoise_record_app', …) = f` with the function and
+    the role both present. It passed only when another file in the job had
+    migrated the container FIRST — i.e. this file's headline assertion depended
+    on the ORDER OF FILES IN THE JOB, which is exactly the accidental green a
+    falsifier must not have.
+
+    Metering-first is not an alternative: its files `CREATE POLICY` on
+    `public.metering_records`, which the RECORD schema creates, so it SKIPS with
+    `UndefinedTable` (measured). Re-applying the record step after the metering
+    step is what production does by filename (`…09…` -> `…14…` -> `…16…`), so the
+    fixture does the same thing instead of a two-call sequence that only works on
+    a reused container.
+
+    The grant is then ASSERTED, so a future ordering regression is a RED here
+    instead of a zero-byte meter reading three assertions later.
+    """
     from tests.test_9078_record_written_by_production_path import (
         _ensure_metering_schema,
         _ensure_record_schema,
@@ -91,8 +123,9 @@ def schema():
     )
 
     conn = _record_db()
-    _ensure_record_schema(conn)
-    _ensure_metering_schema(conn)
+    _ensure_record_schema(conn)      # the base shape the metering files depend on
+    _ensure_metering_schema(conn)    # …14… — the meter's function comes into being
+    _ensure_record_schema(conn)      # …16… — re-applied, so its guard can fire
     from tortoise import postgres_bytes
 
     with conn.cursor() as cur:
@@ -101,10 +134,17 @@ def schema():
         # the assertion below would then read a present meter as absent).
         cur.execute(
             "SELECT to_regclass('public.record_cursor'), "
-            f"to_regprocedure('public.{postgres_bytes.ROWS_RPC}(text,text,bigint[])')")
+            f"to_regprocedure('public.{postgres_bytes.ROWS_RPC}(text,text,bigint[])'), "
+            f"has_function_privilege('tortoise_record_app', "
+            f"'public.{postgres_bytes.ROWS_RPC}(text,text,bigint[])', 'EXECUTE')")
         row = cur.fetchone()
     assert row[0] is not None, "record_cursor was not created by the migrations"
     assert row[1] is not None, "the byte meter is absent — its assertions would lie"
+    assert row[2] is True, (
+        "the write role has NO EXECUTE on the byte meter, so the meter returns "
+        "None and every armed write is charged 0 bytes — this is the state "
+        "`20261116000001`'s guarded GRANT exists to remove, and it is skipped "
+        "whenever the record migrations are applied before the metering one")
     return conn
 
 
