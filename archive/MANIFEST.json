@@ -122,6 +122,63 @@
     },
     {
       "kind": "sdk-method",
+      "symbol": "apikey_create",
+      "batch": "12901-wave-2",
+      "reason": "Mint a control-plane API key. Body survives PRIVATE as `_apikey_create`; recorded destination `create_key` (row 34).",
+      "file": "archive/sdk-methods/12901-wave-2/apikey_create.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "d741bd4a5a8d45198ec9c8fd2324c93ca746af5e",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:apikey_create",
+          "sha256": "5c4b9a3566987fdc7b5119df92216f24785755a18d250d2607a681f945d9e7e5"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "apikey_revoke",
+      "batch": "12901-wave-2",
+      "reason": "Revoke a key (soft delete). Body survives PRIVATE as `_apikey_revoke`; recorded destination `revoke_key` (row 36).",
+      "file": "archive/sdk-methods/12901-wave-2/apikey_revoke.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "d741bd4a5a8d45198ec9c8fd2324c93ca746af5e",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:apikey_revoke",
+          "sha256": "e727445890566f651c1a170ec516cb1d5c985f26794c8623ceb4d9bd1da2208d"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "apikey_verify",
+      "batch": "12901-wave-2",
+      "reason": "Verify a presented key against stored hashes. Body survives PRIVATE as `_apikey_verify`; beta files it under CONSOLE PLUMBING; no destination.",
+      "file": "archive/sdk-methods/12901-wave-2/apikey_verify.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "d741bd4a5a8d45198ec9c8fd2324c93ca746af5e",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:apikey_verify",
+          "sha256": "bd87867d5e20c40f330f9e56891bc7d133f6d70f3e89f97c1f92685038d962c7"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
       "symbol": "backfill_v25",
       "batch": "b2-sdk-retirement-wave-1",
       "reason": "One-shot ONTOLOGY v2.5 migration (status/pointKind backfill); zero callers. Beta w8_backfill region: dead code carrying a public promise. No recorded destination.",
@@ -198,6 +255,63 @@
     },
     {
       "kind": "sdk-method",
+      "symbol": "graph_active_key_count",
+      "batch": "12901-wave-2",
+      "reason": "Non-revoked key count per graph. Body survives PRIVATE as `_graph_active_key_count`; recorded destination `list_keys`.",
+      "file": "archive/sdk-methods/12901-wave-2/graph_active_key_count.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "d741bd4a5a8d45198ec9c8fd2324c93ca746af5e",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:graph_active_key_count",
+          "sha256": "310a9b806efad356e07b2116d6ec59b39de8496ef0415c5f8bc14636bcd21e95"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "graph_delete",
+      "batch": "12901-wave-2",
+      "reason": "Soft-delete of a Graph node (tombstone). Body survives PRIVATE as `_graph_delete`; recorded destination `delete_memory_graph` (rows 30-33 range).",
+      "file": "archive/sdk-methods/12901-wave-2/graph_delete.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "d741bd4a5a8d45198ec9c8fd2324c93ca746af5e",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:graph_delete",
+          "sha256": "bc0242656e752281285f305b3e05547f25659f28d27d133551e1aceb97420973"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "graph_key_ids",
+      "batch": "12901-wave-2",
+      "reason": "APIKey ids bound to a graph (delete cascade). Body survives PRIVATE as `_graph_key_ids`; recorded destination `list_keys`.",
+      "file": "archive/sdk-methods/12901-wave-2/graph_key_ids.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "d741bd4a5a8d45198ec9c8fd2324c93ca746af5e",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:graph_key_ids",
+          "sha256": "4516ceb244c24002ed1906118811c95ac4b00f441b81f3b7545beea4df755efe"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
       "symbol": "index_directory",
       "batch": "11609-phase2-sources-containers",
       "reason": "name retired into index_sources_from_directory (#4282 Phase 2, #11609): row 15 keeps this walker under its own name, frozen here as the record of what the retired name did",
@@ -236,6 +350,63 @@
     },
     {
       "kind": "sdk-method",
+      "symbol": "invitation_get_by_id",
+      "batch": "12901-wave-2",
+      "reason": "Read one invitation row. Body survives PRIVATE as `_invitation_get_by_id`; beta: the invite UX belongs to the console; no destination.",
+      "file": "archive/sdk-methods/12901-wave-2/invitation_get_by_id.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "d741bd4a5a8d45198ec9c8fd2324c93ca746af5e",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:invitation_get_by_id",
+          "sha256": "e2adc683a055f82309888ced103a861e122676bf6baf8418d9be6f24b422047b"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "invitation_list",
+      "batch": "12901-wave-2",
+      "reason": "List an org's pending invitations. Body survives PRIVATE as `_invitation_list`; beta: the invite UX belongs to the console; no destination.",
+      "file": "archive/sdk-methods/12901-wave-2/invitation_list.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "d741bd4a5a8d45198ec9c8fd2324c93ca746af5e",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:invitation_list",
+          "sha256": "2c720f517c25f564358418ddd844aa5d461e8f902c84e6258d129a516f7a1a4f"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "invitation_revoke",
+      "batch": "12901-wave-2",
+      "reason": "Revoke a pending invitation. Body survives PRIVATE as `_invitation_revoke`; beta: the invite UX belongs to the console; no destination.",
+      "file": "archive/sdk-methods/12901-wave-2/invitation_revoke.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "d741bd4a5a8d45198ec9c8fd2324c93ca746af5e",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:invitation_revoke",
+          "sha256": "ecf6bf6295e7b7cd5beae8e6354b2159c1c6cf0a9dcdbb88d42137fae99827f8"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
       "symbol": "list_relations",
       "batch": "b2-sdk-retirement-wave-1",
       "reason": "Listed pack-declared relation declarations; zero callers. CANONICAL r6_canon (row R6) records graph_overview as destination (no def today, so no hint); the beta tables never recorded a target for this name. Registry call _get_kind_expander().list_relations() survives.",
@@ -250,6 +421,25 @@
           "path": "tortoise/sdk.py",
           "node": "FunctionDef:list_relations",
           "sha256": "863c3266d2d8ac35a6521f848aaf00b8a700f996f05c5ae8ad86ab6368ca5a24"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "membership_create",
+      "batch": "12901-wave-2",
+      "reason": "Add a user to an org with a role. Body survives PRIVATE as `_membership_create`; recorded destination `add_member` (row 37).",
+      "file": "archive/sdk-methods/12901-wave-2/membership_create.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "d741bd4a5a8d45198ec9c8fd2324c93ca746af5e",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:membership_create",
+          "sha256": "0cf93f098471db88ac6fdb4e3213f8e1e9b5c522e3f81233e949118840d7c5f5"
         }
       ]
     },
@@ -293,6 +483,25 @@
     },
     {
       "kind": "sdk-method",
+      "symbol": "org_get",
+      "batch": "12901-wave-2",
+      "reason": "Control-plane org read. Body survives PRIVATE as `_org_get`; recorded destination `get_organisation_account` (beta row 27). No hint: beta never names org_get.",
+      "file": "archive/sdk-methods/12901-wave-2/org_get.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "d741bd4a5a8d45198ec9c8fd2324c93ca746af5e",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:org_get",
+          "sha256": "6b25b8d3f55f861296f803b175e2016a213e3a396a2d2d5e7e659010635b469b"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
       "symbol": "quarantine_batch",
       "batch": "b2-sdk-retirement-wave-1",
       "reason": "Thin SDK delegate to `tortoise.mining.quarantine_batch` (which stays). No PRODUCTION caller: the only call sites were tests, re-pointed at tortoise.mining.quarantine_batch, which is exactly what the delegate called. Beta `w11_lifecycle` records `update_knowledge` as destination.",
@@ -307,6 +516,101 @@
           "path": "tortoise/sdk.py",
           "node": "FunctionDef:quarantine_batch",
           "sha256": "248ab05e8b7283a56ba65158ec7744d6500acbe8645678363744c6434eca7410"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "signup_token_lookup",
+      "batch": "12901-wave-2",
+      "reason": "Resolve an agent self-signup token. Body survives PRIVATE as `_signup_token_lookup`; beta: operator-side provisioning, not product surface; no destination.",
+      "file": "archive/sdk-methods/12901-wave-2/signup_token_lookup.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "d741bd4a5a8d45198ec9c8fd2324c93ca746af5e",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:signup_token_lookup",
+          "sha256": "39981b33eec5cb5067a631a521534a4a1242ff8c74c1f442b44799b3d89eef13"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "signup_token_recover",
+      "batch": "12901-wave-2",
+      "reason": "Re-mint the bootstrap key for a signup token. Body survives PRIVATE as `_signup_token_recover`; beta: operator-side provisioning; no destination.",
+      "file": "archive/sdk-methods/12901-wave-2/signup_token_recover.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "d741bd4a5a8d45198ec9c8fd2324c93ca746af5e",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:signup_token_recover",
+          "sha256": "24d1e1bd1ce53cbe77655a30b9cecd2da3447a0ef853634dd17d99c59e52d7ac"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "signup_token_revoke",
+      "batch": "12901-wave-2",
+      "reason": "Revoke a signup token. Body survives PRIVATE as `_signup_token_revoke`; beta: operator-side provisioning; no destination.",
+      "file": "archive/sdk-methods/12901-wave-2/signup_token_revoke.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "d741bd4a5a8d45198ec9c8fd2324c93ca746af5e",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:signup_token_revoke",
+          "sha256": "04bde96885a7c828675e3ffa166c025ed12981b5725201af50ecc99158bac9a7"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "sweep_invite_ghost_memberships",
+      "batch": "12901-wave-2",
+      "reason": "Scheduled repair of membership rows whose invite never completed. Body survives PRIVATE as `_sweep_invite_ghost_memberships`; beta rules it OUR MAINTENANCE; no destination.",
+      "file": "archive/sdk-methods/12901-wave-2/sweep_invite_ghost_memberships.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "d741bd4a5a8d45198ec9c8fd2324c93ca746af5e",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:sweep_invite_ghost_memberships",
+          "sha256": "7f735dad21cb9a76e7d717a0aba68d6deaa4754c31ae8e7016d4a13fd68191cf"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "trash_graphs",
+      "batch": "12901-wave-2",
+      "reason": "Tombstoned custom graphs (the trash view). Body survives PRIVATE as `_trash_graphs`; beta rules it OUR MAINTENANCE, never product surface; no destination.",
+      "file": "archive/sdk-methods/12901-wave-2/trash_graphs.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "d741bd4a5a8d45198ec9c8fd2324c93ca746af5e",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:trash_graphs",
+          "sha256": "305fd299e7c3f24c9073678506762bf28637440ab7617a403b67e9fa0c157fa8"
         }
       ]
     }

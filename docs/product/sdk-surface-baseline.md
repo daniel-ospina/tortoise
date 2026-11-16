@@ -14,10 +14,10 @@
 | measured | count |
 |---|---|
 | approved methods (the target) | 40 |
-| live public methods on `TortoiseSDK` | 118 |
+| live public methods on `TortoiseSDK` | 102 |
 | approved and implemented (row 1 `Tortoise(...)` resolves to the `TortoiseSDK` class) | 23 |
 | approved but not implemented yet | 17 |
-| live and NOT approved (migration backlog) | 96 |
+| live and NOT approved (migration backlog) | 80 |
 
 Row 1 of the owner's table is `Tortoise(...)` — the class a caller constructs. It resolves
 to `TortoiseSDK` (the only constructible entry point); it is not a method on it.
@@ -57,9 +57,6 @@ the count above is the honest measure of the gap.
 
 - `annotate_ask_hits`
 - `annotate_operator`
-- `apikey_create`
-- `apikey_revoke`
-- `apikey_verify`
 - `audit`
 - `belief_timeline`
 - `calibrate_summary`
@@ -92,15 +89,9 @@ the count above is the honest measure of the gap.
 - `get_point`
 - `get_session`
 - `get_source_reliability`
-- `graph_active_key_count`
-- `graph_delete`
-- `graph_key_ids`
 - `ingest`
 - `ingest_corpus`
 - `invalidate_point`
-- `invitation_get_by_id`
-- `invitation_list`
-- `invitation_revoke`
 - `issue_insight`
 - `link_source_to_entity`
 - `list_batch`
@@ -112,10 +103,8 @@ the count above is the honest measure of the gap.
 - `list_sources`
 - `list_tags`
 - `list_topics`
-- `membership_create`
 - `mitigate_operator`
 - `org_create`
-- `org_get`
 - `paginated_query`
 - `promote_point`
 - `provenance`
@@ -132,20 +121,15 @@ the count above is the honest measure of the gap.
 - `session_context`
 - `session_index_health`
 - `set_point_baseline`
-- `signup_token_lookup`
-- `signup_token_recover`
-- `signup_token_revoke`
 - `stale_points`
 - `status`
 - `suggest_entry_points`
 - `summarize_structure`
 - `supersede_point`
-- `sweep_invite_ghost_memberships`
 - `taxonomy`
 - `test_guard`
 - `topic_summarize`
 - `tortoise_fts_query`
-- `trash_graphs`
 - `ulid`
 - `update`
 - `update_point`

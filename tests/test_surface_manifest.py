@@ -660,7 +660,10 @@ def test_every_rows_reason_agrees_with_the_dependency_column_beside_it():
 #:   re-keys carry both columns again. The number is re-derived from the MERGED manifest,
 #:   never carried from either side — 38 was main's own measured count and was two short
 #:   here, which is exactly the allowance this floor exists to forbid.
-COMPARABLE_CALLER_ROWS_FLOOR = 40
+#:   40 -> 25 on 2026-11-16 (#12901 wave 2): fifteen of the sixteen retired rows carried a
+#:   caller list in both columns (`org_create`'s N1 neighbours are the exception), so they
+#:   left the comparison with the row. Re-derived from THIS manifest, never carried.
+COMPARABLE_CALLER_ROWS_FLOOR = 25
 
 
 def test_the_reason_dependency_cross_check_can_fail():
@@ -4889,7 +4892,11 @@ def test_the_live_surface_is_the_baseline_the_guard_froze():
     # ⛔ `adjust_relationship` and `refresh_confidence` are NOT implemented rows: they are
     # approved targets still ABSENT from the live class (see the 23 the declaration gate
     # prints), so naming them as delivered here was false.
-    assert live["sdk"] == manifest["counts"]["sdk_public_methods"] == 118
+    # 118 -> 102 on 2026-11-16 (#12901 wave 2): the canonical control-plane partition
+    # (`N1`–`N6`) left the PUBLIC surface — sixteen members, every body privatised as the
+    # seam its hosted caller now uses — so the live set shrank again without touching the
+    # approved 40 (none of the sixteen was an approved row).
+    assert live["sdk"] == manifest["counts"]["sdk_public_methods"] == 102
 
 
 def test_the_sdk_count_the_sequencing_list_types_is_the_measured_one():

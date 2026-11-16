@@ -786,19 +786,28 @@ OVERRIDE: dict[str, tuple[str, str]] = {
     "close": (UNCHANGED, "unchanged4"),
     # N1 — the five the beta doc files as console plumbing.
     "org_create": (UNBACKED, ""),
-    "org_get": ("get_organisation_account", "n1_account"),
+    # ⛔ #12901 wave 2: TEN rows LEFT the public surface here — `org_get`,
+    # `graph_delete`, `trash_graphs`, `graph_key_ids`, `graph_active_key_count`,
+    # `membership_create`, `apikey_create`, `apikey_revoke`, `apikey_verify` and
+    # `sweep_invite_ghost_memberships`. They leave this map with the `def` they keyed,
+    # for the reason `_validate` enforces (a row for a name with no `def` is a STALE map
+    # key) and because the rename table maps names that still EXIST. Their RECORDED
+    # DESTINATIONS moved to `tortoise/sdk_retired.py::WAVE2_DELETION_DESTINATIONS`, which
+    # is where a departed name's disposition lives; the `CITES` regions that authorised
+    # each row stay, because they are the anchor to the beta ledger's own text.
     # N1's target is PUBLIC since #10015 (2026-11-14): `get_organisation_account` gained
     # its `def`, so the partition must COVER it and the disposition is UNCHANGED because
     # the method IS its own destination — the same move N2's three rows made in phase 2.3.
-    # `org_get` above stays the DEPRECATED predecessor that maps onto it (`retain`, per the
-    # rename table's own reading of row 28), which is why both names are live at once.
+    # ⛔ #12901 wave 2: `org_get`, the deprecated predecessor that mapped onto it, is no
+    # longer a public `def` — its body survives as `_org_get` and its recorded destination
+    # is in `sdk_retired.WAVE2_DELETION_DESTINATIONS`. So the "both names are live at once"
+    # state this comment used to describe is over: exactly one name is live here.
     "get_organisation_account": (UNCHANGED, "n1_account"),
     # 2026-10-25 owner ruling (#4282): `org_list` is GONE, not folded. It ran
     # `MATCH (t:Team)` with no tenant filter — every customer's account — and had
     # zero callers. A scoped account list is NEW behaviour, so it has no row here.
     # See the OVERRIDES line on #4282 before adding one back.
     # N2
-    "graph_delete": ("delete_memory_graph", "n2_rename"),
     # #4282 phase 2.3 landed these three targets and retired the four names they
     # absorbed (`graph_list`, `graph_restore`, `graph_set_name`,
     # `graph_set_recording` — see `tortoise/sdk_retired.py`). The rows are now
@@ -806,23 +815,19 @@ OVERRIDE: dict[str, tuple[str, str]] = {
     "list_memory_graphs": (UNCHANGED, "n2_list"),
     "restore_memory_graph": (UNCHANGED, "n2_restore"),
     "update_memory_graph": (UNCHANGED, "n2_update"),
-    "graph_key_ids": ("list_keys", "n2_keys"),
-    "graph_active_key_count": ("list_keys", "n2_keys"),
     # 2026-10-25 owner ruling (#4282): `graph_count` left the PUBLIC surface and is
     # now the internal `_graph_count`. It is the plan-quota counter (it skips
     # deleted graphs so a deletion frees a slot) and only our server calls it; a
     # customer counts by listing. No target row, so no disposition row here.
-    "trash_graphs": (DISCARDED, "maintenance"),
-    # N3
-    "membership_create": ("add_member", "n3_members"),
-    # ⛔ #12901 wave 1: `membership_get` LEFT the public surface (recorded in
-    # `REMOVED_SDK_METHODS`); the map only carries names that still exist.
-    # N4
-    "apikey_create": ("create_key", "n4_keys"),
-    "apikey_revoke": ("revoke_key", "n4_keys"),
-    "apikey_verify": (DISCARDED, "n1_console"),
-    # N5 — the two that are maintenance, not invite UX.
-    "sweep_invite_ghost_memberships": (DISCARDED, "maintenance"),
+    # N3/N4/N5/N6 are now EMPTY of rows.
+    # ⛔ #12901 wave 1 removed `membership_get`; wave 2 removed the rest of N3–N6
+    # (`membership_create`, `apikey_create`, `apikey_revoke`, `apikey_verify`,
+    # `invitation_list`/`_get_by_id`/`_revoke`, `sweep_invite_ghost_memberships`, the
+    # three `signup_token_*`). The four group labels stay in the canonical doc with an
+    # explicit `—` member cell: an empty group is a FINDING the rendered table reports
+    # (`unfilled`), not a table to delete — the partition is the record of what the
+    # control plane WAS, and deleting it would erase the trace wave 2 has to be
+    # re-derivable from.
 }
 
 # ─────────────────────────────────────────────────────────────────────
@@ -854,9 +859,7 @@ TENSION_CITES: dict[str, tuple[str, str]] = {
                     "`validate_domain`, `dream_health_check`, `dream_health_state`, "
                     "`test_guard` |"),
     "t_n2": (CANON, "| N2 | `graph` | `list_memory_graphs`, "
-                    "`graph_delete`, `restore_memory_graph`, `trash_graphs`, "
-                    "`update_memory_graph`, `graph_key_ids`, "
-                    "`graph_active_key_count` |"),
+                    "`restore_memory_graph`, `update_memory_graph` |"),
     "t_w8": (CANON, "| W8 | `manage_source_trust` | #14 |"),
     "t_w15": (CANON, "| W15 | `adjust_relationship` | #21 |"),
 }

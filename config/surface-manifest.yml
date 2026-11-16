@@ -24,6 +24,14 @@
 # cannot be green by construction.
 #
 #
+# LOWERED 124 → 102 (SDK methods) on 2026-11-16 by #12901 wave 2 — the
+# control-plane partition (`N1`–`N6`): sixteen members left the public surface and
+# every body was privatised. The tools pin is unchanged (wave 2 touches no MCP tool).
+# Same reason as every line below — slack above the live surface is a false PASS
+# waiting to happen, and leaving it at 124 would let a re-added retired control-plane
+# name (`apikey_create`, `graph_delete`, `org_get`, …) land UNDER the ceiling while
+# `surface-guard` step 7 stayed green.
+#
 # LOWERED 72 → 67 (tools) and 150 → 124 (SDK methods) on 2026-11-13 by the
 # SOURCES/MINE/SESSION batch of #4282 Phase 2 (#11609 lane C), to the live counts that
 # batch produced. LOWERING, not raising, is what the pin needs here, and the reason is
@@ -90,7 +98,7 @@
 # only asks that question calls it fine — which is why this record also asks about ancestry).
 manifest_version: 1
 issue: 3863
-cut_at_commit: 8bb02fdbf2fd1a349dac05fc78b91793f4b509f0
+cut_at_commit: 6c160da471d98ae206164409bfae3a4aeff62b6b
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -914,7 +922,7 @@ approval_pr: '4120'
 approval_date: '2026-09-18'
 counts:
   tools: 59
-  sdk_public_methods: 118
+  sdk_public_methods: 102
   retired: 44
   keyword_distribution:
     fetch: 14
@@ -929,7 +937,7 @@ counts:
     operate: 2
 high_water_counts:
   tools: 67
-  sdk_public_methods: 124
+  sdk_public_methods: 102
 retired:
 - name: tortoise_annotate_operator
   use_instead: tortoise_adjust_relationship(id, bias=..., precision=..., consistency=..., directness=...)
@@ -2868,75 +2876,6 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
-- name: sdk:apikey_create
-  method: apikey_create
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.apikey_create.
-  dependency: 'reached by no registered MCP tool; caller categories: cli, tenant-rest'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: 'no MCP tool binds it; callers: cli, tenant-rest'
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-- name: sdk:apikey_revoke
-  method: apikey_revoke
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.apikey_revoke.
-  dependency: 'reached by no registered MCP tool; caller categories: tenant-rest'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: 'no MCP tool binds it; callers: tenant-rest'
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: control-plane
-- name: sdk:apikey_verify
-  method: apikey_verify
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.apikey_verify.
-  dependency: 'reached by no registered MCP tool; caller categories: engine'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: 'no MCP tool binds it; callers: engine'
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: internal
 - name: sdk:approve_merge
   method: approve_merge
   approved: true
@@ -3859,75 +3798,6 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
-- name: sdk:graph_active_key_count
-  method: graph_active_key_count
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.graph_active_key_count.
-  dependency: 'reached by no registered MCP tool; caller categories: tenant-rest'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: 'no MCP tool binds it; callers: tenant-rest'
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: no-caller-found
-- name: sdk:graph_delete
-  method: graph_delete
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.graph_delete.
-  dependency: 'reached by no registered MCP tool; caller categories: tenant-rest'
-  lifecycle: active
-  used_by: eval-harness, tooling, docs
-  recommendation: review
-  reason: 'no MCP tool binds it; callers: tenant-rest'
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: control-plane
-- name: sdk:graph_key_ids
-  method: graph_key_ids
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.graph_key_ids.
-  dependency: 'reached by no registered MCP tool; caller categories: tenant-rest'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: 'no MCP tool binds it; callers: tenant-rest'
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: no-caller-found
 - name: sdk:index_sources_from_directory
   method: index_sources_from_directory
   approved: true
@@ -4020,75 +3890,6 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
-- name: sdk:invitation_get_by_id
-  method: invitation_get_by_id
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.invitation_get_by_id.
-  dependency: 'reached by no registered MCP tool; caller categories: engine, tenant-rest'
-  lifecycle: active
-  used_by: docs
-  recommendation: review
-  reason: 'no MCP tool binds it; callers: engine, tenant-rest'
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: internal
-- name: sdk:invitation_list
-  method: invitation_list
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.invitation_list.
-  dependency: 'reached by no registered MCP tool; caller categories: tenant-rest'
-  lifecycle: active
-  used_by: docs
-  recommendation: review
-  reason: 'no MCP tool binds it; callers: tenant-rest'
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: no-caller-found
-- name: sdk:invitation_revoke
-  method: invitation_revoke
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.invitation_revoke.
-  dependency: 'reached by no registered MCP tool; caller categories: tenant-rest'
-  lifecycle: active
-  used_by: docs
-  recommendation: review
-  reason: 'no MCP tool binds it; callers: tenant-rest'
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: no-caller-found
 - name: sdk:issue_insight
   method: issue_insight
   approved: false
@@ -4411,29 +4212,6 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
-- name: sdk:membership_create
-  method: membership_create
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.membership_create.
-  dependency: 'reached by no registered MCP tool; caller categories: engine, tenant-rest'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: 'no MCP tool binds it; callers: engine, tenant-rest'
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: internal
 - name: sdk:mine_knowledge_from_directory
   method: mine_knowledge_from_directory
   approved: true
@@ -4526,29 +4304,6 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
-- name: sdk:org_get
-  method: org_get
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.org_get.
-  dependency: 'reached by no registered MCP tool; caller categories: engine, tenant-rest'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: 'no MCP tool binds it; callers: engine, tenant-rest'
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: internal
 - name: sdk:paginated_query
   method: paginated_query
   approved: false
@@ -5010,75 +4765,6 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
-- name: sdk:signup_token_lookup
-  method: signup_token_lookup
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.signup_token_lookup.
-  dependency: 'reached by no registered MCP tool; caller categories: engine, tenant-rest'
-  lifecycle: active
-  used_by: docs
-  recommendation: review
-  reason: 'no MCP tool binds it; callers: engine, tenant-rest'
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: internal
-- name: sdk:signup_token_recover
-  method: signup_token_recover
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.signup_token_recover.
-  dependency: 'reached by no registered MCP tool; caller categories: tenant-rest'
-  lifecycle: active
-  used_by: docs
-  recommendation: review
-  reason: 'no MCP tool binds it; callers: tenant-rest'
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: no-caller-found
-- name: sdk:signup_token_revoke
-  method: signup_token_revoke
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.signup_token_revoke.
-  dependency: 'reached by no registered MCP tool; caller categories: tenant-rest'
-  lifecycle: active
-  used_by: docs
-  recommendation: review
-  reason: 'no MCP tool binds it; callers: tenant-rest'
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: no-caller-found
 - name: sdk:stale_points
   method: stale_points
   approved: false
@@ -5217,29 +4903,6 @@ rows:
   exemption: false
   approval: null
   class: internal
-- name: sdk:sweep_invite_ghost_memberships
-  method: sweep_invite_ghost_memberships
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.sweep_invite_ghost_memberships.
-  dependency: 'reached by no registered MCP tool; caller categories: other-tooling, tenant-rest'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: 'no MCP tool binds it; callers: other-tooling, tenant-rest'
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: internal
 - name: sdk:taxonomy
   method: taxonomy
   approved: false
@@ -5332,29 +4995,6 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
-- name: sdk:trash_graphs
-  method: trash_graphs
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.trash_graphs.
-  dependency: 'reached by no registered MCP tool; caller categories: tenant-rest'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: 'no MCP tool binds it; callers: tenant-rest'
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: no-caller-found
 - name: sdk:ulid
   method: ulid
   approved: false

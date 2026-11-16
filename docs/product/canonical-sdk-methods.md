@@ -20,10 +20,10 @@ related:
 
 # Canonical SDK method surface — an inventory, not the target
 
-**Read this for coverage, not for names.** This document is two things: an **inventory of all 119
+**Read this for coverage, not for names.** This document is two things: an **inventory of all 102
 methods that exist today**, placed in exactly one group, duplicates collapsed and gaps named; and,
 alongside that, an **earlier target sketch** (32 groups over the 124 members live when it
-was written; the live surface is 119 today — see *The count*). The 26 names that left
+was written; the live surface is 102 today — see *The count*). The 26 names that left
 the surface on 2026-10-27 are recorded in *Removed from the surface* below rather than in a group.
 
 > ⛔ **The SDK target is `docs/product/beta-sdk-surface.md` (40 methods), not this document.**
@@ -44,8 +44,8 @@ owner-approved `docs/product/canonical-mcp-tools.md`.
 
 | | |
 |---|---|
-| Public methods on `TortoiseSDK` (parsed by `ast`, no leading underscore) | **119** |
-| Rows in `config/surface-manifest.yml` (`counts.sdk_public_methods`) | **119** |
+| Public methods on `TortoiseSDK` (parsed by `ast`, no leading underscore) | **102** |
+| Rows in `config/surface-manifest.yml` (`counts.sdk_public_methods`) | **102** |
 
 The two agree exactly. The count moved 150 → 149 in #4282 phase 2.3, then 149 → 147 on
 2026-10-25 (the plan-quota counter `graph_count` went internal as `_graph_count`; the
@@ -83,12 +83,21 @@ number:
   `update_entity`'s Point-lifecycle behaviour — the `restatus` journal record and the
   transition-naming refusal — is CARRIED by `update_knowledge`, not dropped with the name.
 
+- **119 → 102 on 2026-11-16** — `#12901` wave 2 retired the SIXTEEN members of this document's own
+  control-plane partition (`N1`–`N6`) that are off the approved 40 and bound by no MCP tool. Every
+  one was PRIVATISED rather than deleted (each body has a caller in the hosted API, the CLI or
+  `mcp_auth`), so the declaration stays at 40 and no capability moved.
+
 The overlap is chosen rather than assumed: wave 1 admitted a name only when NO `tool_registry` entry
-(live or retired) bound it, and the four doors this batch re-keys were live MCP tools at that time,
-so the two waves could not have consumed each other's candidates. **119 is the count today**, and it
-is derived, not typed: `ast` over `tortoise/sdk.py`, `tools/sdk_surface.py --check` and
-`counts.sdk_public_methods` in `config/surface-manifest.yml` all read 119. *Removed from the surface*
-below is the per-method record.
+(live or retired) bound it, and the four doors that batch re-keyed were live MCP tools at that time,
+so the waves could not have consumed each other's candidates. Wave 2 rests on the same gate plus the
+partition: it is `N1`–`N6` minus the approved rows minus the one MCP-bound member, and the three
+waves are disjoint by construction (the wave-1 and wave-2 candidate lists share no name — wave 1's
+members were checked against every `tool_registry` entry, wave 2's are checked against the partition
+AND against wave 1's recorded set). **102 is the count today**, and it is derived, not typed: `ast`
+over `tortoise/sdk.py`, `tools/sdk_surface.py --check` and `counts.sdk_public_methods` in
+`config/surface-manifest.yml` all read 102. *Removed from the surface* below is the per-method
+record.
 
 > A previous draft reported 152 and explained the two-method gap as the manifest excluding
 the eval lane. That was wrong, and how it arose is worth naming: the method count was
@@ -140,7 +149,7 @@ of these to the public surface is a **new** surface change and needs the owner a
 
 `test_guard` is **not** in this list and was **not** deleted: `beta-sdk-surface.md` rules it *"Kept
 and relocated … it guards the production-wipe incident, so the code must survive"*. ⚠️ **But it is
-still ON the public surface today** — it is one of the 119 (`config/sdk-surface.json`,
+still ON the public surface today** — it is one of the 102 (`config/sdk-surface.json`,
 `sdk.py::TortoiseSDK.test_guard`), and `tools/sdk_surface.py --check` counts it. The
 `beta-sdk-surface.md` ruling is about the approved 40-method TARGET, where it is relocated rather
 than deleted; on the live surface it remains a *removal candidate* (see the "Candidates for
@@ -176,6 +185,62 @@ in `tortoise/sdk_retired.py::REMOVED_SDK_METHODS`.
 | `list_relations` | List the pack-declared relation declarations. | `graph_overview` |
 | `membership_get` | Read one membership row by id. | — |
 | `quarantine_batch` | Quarantine a batch (thin delegate to `tortoise.mining`). | `update_knowledge` |
+
+### Removed from the surface — 2026-11-16 (#12901 wave 2 — **the control plane**)
+
+**These 16 methods are gone from `TortoiseSDK`.** They are exactly the members of the control-plane
+partition above (`N1`–`N6`) that are off the approved 40 and bound by no MCP tool. The five
+N-members that STAY do so by the same rule and not by preference: `check_connection`,
+`get_organisation_account`, `list_memory_graphs`, `restore_memory_graph` and
+`update_memory_graph` are approved target rows, and `org_create` is bound by a live MCP tool.
+
+**Every one of the 16 was PRIVATISED, not deleted.** Unlike the 26-name block (whose members had no
+caller anywhere) and wave 1 (one of whose five had a single production caller), every wave-2 name is
+called from `tortoise/hosted_api.py`, `tortoise/__main__.py`, `tortoise/mcp_auth.py` or one
+`graph-scripts/` entry point. Each body therefore survives under a leading underscore (`_org_get`,
+`_apikey_create`, …) and its callers were re-pointed at it — the `capture_session` →
+`_capture_session` precedent, applied to a whole partition: **the public SDK door closes and the
+capability does not move.**
+
+**This is not a capability deletion, and it is not a rename either.** The owner-approved beta surface
+puts these capabilities on the TENANCY block (`get_organisation_account`, `create_key`, `list_keys`,
+`revoke_key`, `add_member`, `delete_memory_graph`) — or rules them "our maintenance" / "console
+plumbing" and off the surface entirely. The destinations below are the ones
+`tools/sdk_rename_table.py` records; a `—` means the ledger records that the name never belonged on
+the surface, not that a judgement was made here.
+
+All code is archived under `archive/sdk-methods/12901-wave-2/` and every departure is recorded in
+`tortoise/sdk_retired.py::REMOVED_SDK_METHODS` with its destination in
+`WAVE2_DELETION_DESTINATIONS`.
+
+⚠️ **One disagreement is recorded rather than smoothed over.** The competitor-evidence table lower in
+this document (the N1–N6 rationale row) argues that `signup_token_*` is *product* capability because
+we intend agents to self-sign up with an API key. The owner-approved `beta-sdk-surface.md` rules the
+same three names *"Operator-side agent self-signup — our provisioning, not product surface"*, and the
+approved 40 contain no signup verb. **The approved document wins** — this inventory is not the
+owner — and the disagreement is left visible here so that a later reader reopens the DOOR (an owner
+approval) rather than re-adding the names to the surface on this document's authority. Nothing was
+deleted: `_signup_token_lookup` / `_signup_token_recover` / `_signup_token_revoke` still implement the
+path for the hosted signup route.
+
+| Removed method | What it did | The 40-method target it was recorded against |
+|---|---|---|
+| `apikey_create` | Mint a control-plane API key. **Body went PRIVATE** (`_apikey_create`). | `create_key` |
+| `apikey_revoke` | Revoke a key (soft delete). **Body went PRIVATE** (`_apikey_revoke`). | `revoke_key` |
+| `apikey_verify` | Verify a presented key against the stored hashes. **Body went PRIVATE** (`_apikey_verify`). | — |
+| `graph_active_key_count` | Count a graph's non-revoked keys. **Body went PRIVATE** (`_graph_active_key_count`). | `list_keys` |
+| `graph_delete` | Soft-delete a Graph node (tombstone). **Body went PRIVATE** (`_graph_delete`). | `delete_memory_graph` |
+| `graph_key_ids` | The APIKey ids bound to a graph (delete cascade). **Body went PRIVATE** (`_graph_key_ids`). | `list_keys` |
+| `invitation_get_by_id` | Read one invitation row. **Body went PRIVATE** (`_invitation_get_by_id`). | — |
+| `invitation_list` | List an org's pending invitations. **Body went PRIVATE** (`_invitation_list`). | — |
+| `invitation_revoke` | Revoke a pending invitation. **Body went PRIVATE** (`_invitation_revoke`). | — |
+| `membership_create` | Add a user to an org with a role. **Body went PRIVATE** (`_membership_create`). | `add_member` |
+| `org_get` | Read one org row from the control-plane registry. **Body went PRIVATE** (`_org_get`). | `get_organisation_account` |
+| `signup_token_lookup` | Resolve an agent self-signup token. **Body went PRIVATE** (`_signup_token_lookup`). | — |
+| `signup_token_recover` | Re-mint the bootstrap key for a signup token. **Body went PRIVATE** (`_signup_token_recover`). | — |
+| `signup_token_revoke` | Revoke a signup token. **Body went PRIVATE** (`_signup_token_revoke`). | — |
+| `sweep_invite_ghost_memberships` | Scheduled repair of membership rows whose invite never completed. **Body went PRIVATE** (`_sweep_invite_ghost_memberships`). | — |
+| `trash_graphs` | List an org's tombstoned custom graphs. **Body went PRIVATE** (`_trash_graphs`). | — |
 
 ## The principle
 
@@ -266,12 +331,12 @@ Operator/admin surfaces. **Not** part of the agent-facing read/write guarantee.
 
 | # | Namespace | Members |
 |---|---|---|
-| N1 | `org` | `org_create`, `org_get`, `get_organisation_account`, `check_connection` |
-| N2 | `graph` | `list_memory_graphs`, `graph_delete`, `restore_memory_graph`, `trash_graphs`, `update_memory_graph`, `graph_key_ids`, `graph_active_key_count` |
-| N3 | `membership` | `membership_create` |
-| N4 | `apikey` | `apikey_create`, `apikey_revoke`, `apikey_verify` |
-| N5 | `invitation` | `invitation_list`, `invitation_get_by_id`, `invitation_revoke`, `sweep_invite_ghost_memberships` |
-| N6 | `signup_token` | `signup_token_lookup`, `signup_token_recover`, `signup_token_revoke` |
+| N1 | `org` | `org_create`, `get_organisation_account`, `check_connection` |
+| N2 | `graph` | `list_memory_graphs`, `restore_memory_graph`, `update_memory_graph` |
+| N3 | `membership` | — (every member left the surface; see the wave-2 removals below) |
+| N4 | `apikey` | — (every member left the surface; see the wave-2 removals below) |
+| N5 | `invitation` | — (every member left the surface; see the wave-2 removals below) |
+| N6 | `signup_token` | — (every member left the surface; see the wave-2 removals below) |
 
 **`check_connection` is the one member of this block that is a BETA TARGET, not a console
 verb.** It is beta row 40 — the owner's replacement for the dropped `run_onboarding`

@@ -83,7 +83,16 @@ DOC = ROOT / "docs" / "product" / "sdk-surface-declaration.md"
 # paragraph above requires. The waves are disjoint by construction: wave 1's membership
 # rule excluded any name a `tool_registry` entry bound, and the four doors Phase 2
 # re-keys were live MCP tools at that time.
-DECLARED_COUNT = 118
+#
+# 118 -> 102 on 2026-11-16: #12901 wave 2 privatised the sixteen members of the canonical
+# control-plane partition (`N1`-`N6`) that are off the approved 40 and bound by no MCP
+# tool (`org_get`, `graph_delete`, `trash_graphs`, `graph_key_ids`,
+# `graph_active_key_count`, `membership_create`, `apikey_create`/`_revoke`/`_verify`,
+# `invitation_*`, `sweep_invite_ghost_memberships`, `signup_token_*`). Every body survives
+# as a private seam its hosted caller now uses, so this is a DOOR closing, not a
+# capability leaving — which is why `high_water_counts` moves DOWN with it (to 102) rather
+# than staying where it was.
+DECLARED_COUNT = 102
 
 
 def _declaration() -> dict:
