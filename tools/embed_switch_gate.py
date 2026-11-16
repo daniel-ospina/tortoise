@@ -51,7 +51,19 @@ pins them.
 shadows ``[env]``; an operator can override the environment any way they like), that the value
 is what *should* be shipped (presence, not policy — ``TORTOISE_*=0`` is a documented choice),
 or anything about a **hand deploy**: the owner's ruling on ``#12926`` is *"a hand deploy is
-their problem, so let's not worry about it"*. ``.env.example`` is a template nothing deploys,
+their problem, so let's not worry about it"*.
+
+⚠️ **And the CI bound, stated rather than implied (review round 6, P3).** This step lives in
+``test-concurrency-falkor``, a ``DEFERRABLE_LEGS`` member, so its red is adjudicated by
+``ci-introduced-failure`` — which attributes failures from the job log's test-id shaped entries.
+A *gate-step* red emits no such id, so in the narrow case where the SAME leg's live pytest step
+also reds for a main-owned reason, the leg's id set is entirely main's and the aggregate can read
+green over this step's red. ``if: always()`` closes "the step never ran"; it cannot close "the
+step's red is invisible to the id-based predicate". That residual is pre-existing for the compose
+parse check beside it and is not enlarged by this gate — but the guarantee is
+"a config omitting a switch is refused at PR time", **not** "it can never merge while another
+required leg is main-owned-red". Moving this to a non-deferrable leg would change the required
+check set, which is its own decision. ``.env.example`` is a template nothing deploys,
 so it is not a channel of this gate; the read-only instrument
 (``tools/dod_5090_probe.py``) is what scores it.
 
@@ -119,10 +131,40 @@ ENTRYPOINT_GLOB = "entrypoint*.sh"
 #: failure ("mentions it but the assignment shape was not read"), never a silent pass.
 _ENV_ASSIGNMENT = re.compile(r"(?P<key>[A-Za-z_][A-Za-z0-9_]*)=(?P<value>\"[^\"]*\"|'[^']*'|\S*)")
 _ENV_INSTRUCTION = re.compile(r"(?i)^\s*ENV\s+(?P<body>.+)$")
+#: The body of an `ENV` line that is NOTHING BUT `K=V` pairs (quotes honoured). Anything else is
+#: not tiled, so it is never parsed as a set of assignments.
+_ENV_PAIRS = re.compile(r"^\s*(?:[A-Za-z_][A-Za-z0-9_]*=(?:\"[^\"]*\"|'[^']*'|\S*)\s*)+$")
 _SHELL_ASSIGNMENT = re.compile(r"^\s*(?:export\s+)?(?P<key>[A-Za-z_][A-Za-z0-9_]*)=(?P<value>.*)$")
 _SHELL_EXPORT_NAME = re.compile(r"^\s*export\s+(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s*$")
 
-#: A value that is NOTHING BUT a variable interpolation, with its optional fallback captured.
+#: A trailing `#` comment (idiomatic after a shell assignment) is NOT part of the value — leaving
+#: it in made `export K=""  # off for now` read as a non-empty statement and skip the EMPTY-value
+#: refusal (review round 6, P3). Cut only outside quotes and only where a comment can start.
+def _strip_inline_comment(text: str) -> str:
+    """``text`` without a trailing shell/YAML-style comment (quote-aware)."""
+    quote = ""
+    for index, char in enumerate(text):
+        if quote:
+            if char == quote:
+                quote = ""
+            continue
+        if char in "\"'":
+            quote = char
+            continue
+        if char == "#" and (index == 0 or text[index - 1].isspace()):
+            return text[:index]
+    return text
+
+
+def _unquote(value: str) -> str:
+    """``value`` without one layer of matching surrounding quotes."""
+    text = value.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+        return text[1:-1]
+    return text
+
+
+#: A value that is NOTHING BUT a variable interpolation, with its optional operator captured.
 #: ``${X:-1}`` states a value (the fallback); ``${X:-}``, ``${X}`` and ``$X`` do not — they state
 #: whatever the caller's environment holds, which can be empty, and the gate would then read a
 #: channel as armed while the process resolves OFF (review P3). Neither reader resolves
@@ -136,11 +178,17 @@ _PURE_INTERPOLATION = re.compile(
 
 def _states_a_literal(value: str) -> bool:
     """Whether ``value`` states a value that does not depend on an unresolved interpolation."""
-    text = value.strip().strip("\"'").strip()
+    text = _unquote(_strip_inline_comment(value))
     match = _PURE_INTERPOLATION.match(text)
     if not match:
         return True  # a literal (a partial interpolation like `a-${X}` is literal enough)
-    fallback = (match.group("fallback") or "").strip().strip("\"'").strip()
+    operator = match.group("op") or ""
+    # ⛔ ONLY `-`/`:-` (default-when-UNSET) survives an unset variable. `${X:+1}`/`${X+1}` expand
+    # to EMPTY exactly when X is unset — the shipped case — so accepting them was a fail-open in a
+    # reader built to fail closed (review round 6, P3).
+    if operator not in ("-", ":-"):
+        return False
+    fallback = _unquote((match.group("fallback") or "").strip())
     return bool(fallback)
 
 #: Env keys kept when the resolver shell is scrubbed. Deliberately an ALLOWLIST: a lane's
@@ -273,22 +321,24 @@ def _dockerfile_env(text: str) -> tuple[dict[str, str], set[str]]:
         match = _ENV_INSTRUCTION.match(line)
         if not match:
             continue
-        body = match.group("body").strip()
-        pairs = _ENV_ASSIGNMENT.findall(body)
-        if pairs and _ENV_ASSIGNMENT.match(body):
-            for key, value in pairs:
+        body = _strip_inline_comment(match.group("body")).strip()
+        if _ENV_PAIRS.match(body):
+            for key, value in _ENV_ASSIGNMENT.findall(body):
                 if key in SWITCHES and not _states_a_literal(value):
                     ambiguous.add(key)  # an interpolation that can resolve empty (review P3)
                     continue
-                stated[key] = value.strip("\"'")
+                stated[key] = _unquote(value)
             continue
         parts = body.split(None, 1)
         if len(parts) == 2 and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", parts[0]):
             if parts[0] in SWITCHES and not _states_a_literal(parts[1]):
                 ambiguous.add(parts[0])
                 continue
-            stated[parts[0]] = parts[1].strip().strip("\"'")
+            stated[parts[0]] = _unquote(parts[1])
             continue
+        # ⛔ Nothing here TILES the body, so a switch mentioned anywhere in it (including in
+        # trailing text after an unrelated `K=V`, which Docker folds into THAT value) is not a
+        # statement this reader can credit (review round 6, P3).
         ambiguous.update(_mentioned_switches(body))
     return stated, ambiguous
 
@@ -305,11 +355,11 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
     for line in _logical_lines(text):
         match = _SHELL_ASSIGNMENT.match(line)
         if match:
-            key, value = match.group("key"), match.group("value")
+            key, value = match.group("key"), _strip_inline_comment(match.group("value"))
             if key in SWITCHES and not _states_a_literal(value):
                 ambiguous.add(key)  # `${X:-}` / `$X` — can resolve empty (review P3)
                 continue
-            stated[key] = value.strip().strip("\"'")
+            stated[key] = _unquote(value)
             continue
         if _SHELL_EXPORT_NAME.match(line):
             continue  # `export NAME` states no value; not an arm
