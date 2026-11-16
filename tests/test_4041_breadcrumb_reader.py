@@ -180,13 +180,15 @@ def _custom_python3(bindir: Path, *, stdout: str = "", stderr: str = "",
 #:
 #: 60 s is the hook's OWN bound, not a test-harness convenience: the install
 #: snippet in ``session-start.sh`` sets the Claude Code SessionStart `timeout`
-#: to 60 so a hung relay cannot stall a session, and the script records its own
-#: worst measured path as 3.40 s cold against a project bound of 15 s API wait.
-#: A hook that cannot finish inside 60 s is therefore outside its shipped
-#: contract — ~18x the documented worst path — and this harness must say THAT,
-#: attributably, at 60 s, instead of letting it surface later as an unnamed
-#: per-test timeout. (The MOCKED path this file drives costs 0.25 s; do not
-#: quote a ratio against that, it is not the shipped hook's cost.)
+#: to 60 so a hung relay cannot stall a session.  For headroom, use the envelope
+#: that same header documents — a project bound of 15 s API wait + 3.40 s
+#: measured cold start, ~18.4 s — so 60 s is ~3.3x it.  ⛔ Do NOT quote
+#: 60/0.25 = 240x: 0.25 s is the MOCKED path this file drives, not the shipped
+#: hook's cost, and a ratio of that shape was retracted once already because
+#: the hook's own header says "no SessionStart measurement ever backed that
+#: figure".  A hook that cannot finish inside 60 s is outside its shipped
+#: contract, and this harness must say THAT, attributably, at 60 s, instead of
+#: letting it surface later as an unnamed per-test timeout.
 _HOOK_TIMEOUT_S = 60.0
 
 
@@ -246,7 +248,8 @@ def _run_hook(home: Path, *, path: str, src: Path | None = None,
        does not, but a seam that forgets to is one edit away — would silently
        become the thing the test waits for.  A file descriptor cannot be
        waited on, so the class is gone rather than argued about
-       (`test_the_hook_runner_is_not_hostage_to_a_background_child`).
+       (`test_the_hook_runner_returns_on_the_hook_not_on_what_it_left_`
+       `behind`).
     2. A hang is NAMED.  Before this, a hook that did not return produced no
        assertion, no output and no cause: `test_a_capture_failure_breadcrumb_
        reaches_the_agent` redded shard `test (c)` on main 792269c931 as
@@ -261,6 +264,16 @@ def _run_hook(home: Path, *, path: str, src: Path | None = None,
        behind the real hook: pipe capture returns in 0.24 s).  What this change
        can promise is the part the log could not give: 60 s, the hook's name,
        and the hook's own output.
+
+    ⛔ The SUCCESS path deliberately does NOT kill the process group: the
+    hook's `nohup … session drain` child is *supposed* to outlive the hook, and
+    killing it would make the harness unrepresentative.  Two consequences,
+    stated so they are not discovered as surprises: a child the hook leaves
+    behind survives the test (one orphan per call, bounded by the child's own
+    work), and bytes such a child writes to the hook's stdout AFTER bash exits
+    are not captured — under the "forgot the redirection" seam above, a test
+    asserting `stdout == ""` could pass on a race rather than red.  No current
+    dispatch writes after exit (all four redirect both streams).
     """
     (home / "tmp").mkdir(parents=True, exist_ok=True)
     #: A dedicated sub-directory, NOT the home root: it keeps the harness's own
@@ -297,9 +310,9 @@ def _run_hook(home: Path, *, path: str, src: Path | None = None,
     if returncode is None:
         raise AssertionError(
             f"the shipped hook {argv[-1]} did not finish within {timeout:g}s "
-            f"(its own SessionStart bound is 60 s against a 3.40 s worst "
-            f"documented path), so this is a hung hook or a runner too slow to "
-            f"run it — NOT an assertion about the payload: {killed}. "
+            f"(its own SessionStart bound is 60 s, ~3.3x the ~18.4 s envelope "
+            f"the hook documents), so this is a hung hook or a runner too slow "
+            f"to run it — NOT an assertion about the payload: {killed}. "
             f"stdout={stdout!r} stderr={stderr!r}")
     return subprocess.CompletedProcess(argv, returncode, stdout, stderr)
 
@@ -1949,8 +1962,14 @@ def test_a_hook_that_never_returns_is_reported_by_name_at_the_bound(tmp_path):
     slow runner.  This pins the diagnosable form.
 
     Mutation: drop the `except subprocess.TimeoutExpired` arm (let
-    `proc.wait` raise), or return silently instead of raising — this REDs, and
-    the SIGKILL/`reaped` phrasing disappears from the message."""
+    `proc.wait` raise), return silently instead of raising, or drop EITHER
+    `os.killpg(...)` or `start_new_session=True` — each REDs.  The last two are
+    why the assertion is on the EXACT success phrase and why the elapsed bound
+    sits below the reap timeout: a kill that does nothing still answers
+    `already gone` (the group id was reaped) and appends `could not be
+    reaped`, so a loose `"SIGKILLed" in message or "reaped" in message` would
+    PASS while the hook's children leaked (measured by review round 2: both
+    mutants were green before this tightening)."""
     home = tmp_path / "home"
     home.mkdir()
     hook = tmp_path / "a-hook-that-hangs.sh"
@@ -1965,7 +1984,14 @@ def test_a_hook_that_never_returns_is_reported_by_name_at_the_bound(tmp_path):
     message = str(caught.value)
     assert str(hook) in message, message
     assert "did not finish within 2s" in message, message
-    assert "SIGKILLed" in message or "reaped" in message, message
-    assert elapsed < 30, (
+    # EXACT phrase: the failure suffix ("could not be reaped within 10 s") is
+    # the OTHER outcome, so a substring test on "reaped" passes when the kill
+    # did nothing at all.
+    assert "its whole process group was SIGKILLed" in message, message
+    # Below the 10 s reap timeout: a kill that misses the group pays that reap
+    # in full, so this bound (2 s timeout + reap) still fires early enough to
+    # name the leak rather than accepting it.
+    assert elapsed < 8, (
         f"the bound took {elapsed:.1f}s to fire for a 2 s bound: the harness is "
-        f"waiting on something other than the hook")
+        f"waiting on something other than the hook, or the group kill missed "
+        f"its children and paid the reap timeout")
