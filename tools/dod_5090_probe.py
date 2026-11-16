@@ -2426,7 +2426,11 @@ DECLARED_CHANNEL_BOUNDS: tuple[dict[str, str], ...] = (
         "reader": "line reader: shell export",
         "cannot_see": ("shell INDIRECTION — a value computed at run time "
                        "(`export FLAG=$(…)`, a sourced file, `[ -n \"$X\" ] && "
-                       "export FLAG=1`)"),
+                       "export FLAG=1`), and the `declare -x` / `typeset -x` "
+                       "spellings of the export attribute — a textually visible "
+                       "spelling this reader does not match, so it lands in no bucket "
+                       "at all (tracked as `#12952`; the `export NAME=value` spelling "
+                       "IS read)"),
         "why": ("a shell's value is decided by EXECUTION, not by text, and "
                 "ShellCheck checks syntax and never evaluates values — there is no "
                 "resolver for this grammar short of running the script. Phase 1 "
