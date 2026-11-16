@@ -26950,12 +26950,21 @@ class TortoiseSDK:
     def get_point(self, id: str, *, served_out: dict | None = None) -> dict:
         """Get a Point by ID. Returns dict of all properties, or ``{}`` if absent.
 
-        Two absent shapes, and only two: ``{}`` when the absence is ESTABLISHED
-        (the record was asked and holds no such row, or `off` mode is unarmed),
-        and ``{residency: "not-hot"}`` when nobody who could see the node was
+        Two absent shapes: ``{}`` when the absence is ESTABLISHED (the record
+        was asked and holds no such row, or `off` mode is unarmed), and
+        ``{residency: "not-hot"}`` when nobody who could see the node was
         consulted (#7952 — a cache miss is never reported as an empty answer).
-        Both are falsy only in the first case, which is what keeps `if props:`
-        a correct write-verification for a caller.
+        ⛔ ONLY THE FIRST IS FALSY, and that is the whole of what ``if props:``
+        can tell a caller: the marker shape is a TRUTHY dict carrying no node
+        properties, and BOTH marker arms return it — the `off` +
+        ``TORTOISE_RESIDENCY`` partial-cache arm below, and the armed
+        ``not_hot`` arm. So `if props:` separates an ESTABLISHED absence from a
+        found node and nothing more; a write-verification must ALSO read
+        ``props.get("id")`` (a found node always carries one) or refuse the
+        ``residency`` marker, or it reports a node this store could not see as a
+        successful write. ⚠️ This paragraph used to say the opposite — that
+        ``if props:`` was a correct write-verification — and that sentence, not
+        the behaviour, was the defect (#12947 review, P2).
 
         #432: retracted points (status='retracted') ARE returned by get_point
         — they are tombstoned, not deleted. Query surfaces exclude them by
