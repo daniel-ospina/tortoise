@@ -961,12 +961,15 @@ class JournalPositionCollision(RecordProjectionError):
 
     ⛔ THE POLARITY THAT DECIDES THE TIE: silence is EARNED, never defaulted.
     The guard is silent on ONE piece of POSITIVE evidence that the position
-    holds THIS record — identical durable content (a replay) — and on ONE
+    holds THIS record — the conflict query returning NO row, i.e. identical type,
+    identical payload AND identical capture (a replay) — and on ONE
     DELIBERATE ADMISSION, made with its cost stated below: identical type AND
     identical capture time, which is the DRIFT reading and NOT evidence of
     identity (an identical `recorded_at` says only that two writes named one
     instant, and `ts` is a per-record value the emission path supplies, not one
-    the position derives). A difference it cannot attribute to
+    the position derives). ⚠️ A content match at a DIFFERENT capture is NOT
+    silent: the `recorded_at` arm selects it and it refuses (that is the shape
+    `#9318` names). A difference it cannot attribute to
     drift is NOT silently absorbed: when this write carries no `ts` its capture
     time cannot be compared, so that difference refuses (the false-red residual
     at the end of this section).
@@ -1125,14 +1128,24 @@ class JournalPositionCollision(RecordProjectionError):
         # derivation-change cause: there, the surviving row IS this record's own
         # event. What is true under BOTH causes is what is written here.
         consequence = "the record cannot file this write's rows at that position"
+        # ⛔ WHICH DIFFERENCE THIS LINE NAMES (review cycle 7). The diagnosis below
+        # is CONTENT-shaped, and the capture arm is the one shape where the
+        # content can be BYTE-IDENTICAL: for a `ts`-only pair the two digests
+        # printed above MATCH, so saying "the surviving row's content is not what
+        # this write would produce" would be refuted by this very line.
+        content = (
+            "The surviving row's content is IDENTICAL to what this write would "
+            "produce; only the CAPTURE TIME differs"
+            if payload_digest == stored_payload_digest
+            else "The surviving row's content is not what this write would produce"
+        )
         super().__init__(
             f"journal position {seq} of ({org_id!r}, {graph_id!r}) already "
             f"holds {stored_event_type!r} ({stored_payload_digest}, "
             f"{stored_payload_bytes} B of payload) while this write is "
             f"{event_type!r} ({payload_digest}, {payload_bytes} B). "
             f"{capture}"
-            f"The surviving row's content is not what this write would "
-            f"produce — {diagnosis} — so {consequence}. The "
+            f"{content} — {diagnosis} — so {consequence}. The "
             f"journal still holds this record; the position row cannot be "
             f"repaired while the key carries no journal identity (#12894), "
             f"and `journal_event` is append-only by trigger."
@@ -6608,9 +6621,12 @@ def _refuse_a_journal_collision(cursor: Any, statement: Statement, index: int,
     FOUR OUTCOMES, and the distinction is the whole point of the change:
 
     * the INSERT affected a row ⇒ nothing to decide, return;
-    * it affected none, and the surviving row's content MATCHES ⇒ a genuine
-      REPLAY. Return in SILENCE — no exception, no counter, no log line. The
-      schema's *"applying a position twice is a no-op"* is preserved exactly;
+    * the conflict query returns NO row ⇒ nothing differs (same type, same
+      payload, same capture) ⇒ a genuine REPLAY. Return in SILENCE — no
+      exception, no counter, no log line. The schema's *"applying a position
+      twice is a no-op"* is preserved exactly. ⚠️ A content match at a DIFFERENT
+      capture does NOT reach this arm: the `recorded_at` arm selects it and it is
+      REFUSED (#12904 P0-2), which is the shape #9318 names;
     * it affected none, the `event_type` matches and `recorded_at` matches, and
       only the payload differs ⇒ READ AS DERIVATION DRIFT: the same record
       re-derived since that row was written. Also SILENT (#12904 P0-1) —
@@ -6621,8 +6637,9 @@ def _refuse_a_journal_collision(cursor: Any, statement: Statement, index: int,
     * anything else ⇒ a COLLISION. Raise :class:`JournalPositionCollision`.
 
     ⛔ SILENCE IS EARNED. It is returned on ONE piece of POSITIVE evidence that
-    the position holds THIS record — identical durable content — and on ONE
-    DELIBERATE ADMISSION with its cost stated: identical type AND capture, which
+    the position holds THIS record — the conflict query returning NO row, i.e.
+    identical type, identical payload AND identical capture (a replay) — and on
+    ONE DELIBERATE ADMISSION with its cost stated: identical type AND capture, which
     is the drift reading and NOT evidence of identity (an equal `recorded_at`
     says only that two writes named one instant). A difference this function
     cannot attribute to drift (a `ts`-less write has no capture time to compare)
