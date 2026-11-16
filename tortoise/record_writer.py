@@ -2514,7 +2514,11 @@ def write_live_record(record: Mapping[str, Any], *,
     a FAILURE never raises: it is counted
     (``monitoring.metrics()["record_write_failures"]``) and logged, because the
     journal already holds the record and a question about the derived record
-    must not fail a write that persisted. ``replay`` heals the gap. That
+    must not fail a write that persisted. ``replay`` heals the gap — ⛔ ON THE
+    UNARMED ARM ONLY: on the ARMED arm an enumerated replay is REFUSED once the
+    graph is cut over (:func:`record_projection._refuse_an_enumerated_replay`),
+    so there the only repair is the allocator's operator path (see the
+    ``position_unverifiable`` arm below). That
     contract is enforced, not just intended: every counter call goes through
     :func:`_count_write_failure`, which suppresses its own failures.
 
@@ -2821,14 +2825,26 @@ def write_live_record(record: Mapping[str, Any], *,
         #     for the same reason. Remedy in order: `halt` →
         #     `seed --journal <path>` → `reopen` → `arm` (the seed is allowed
         #     here, because the record's rows are BELOW the journal).
-        #   * the journal BEHIND the counter — the RESTORED / TRUNCATED / SEALED
-        #     states above. WORSE, not better: each refused append still advances
-        #     the journal by one, so the guard stops refusing after
-        #     `counter - floor` records — and each of those records LOST its row
-        #     with no operator action at all. It does not wedge, it eats.
-        #     `seed --journal` REFUSES here (`SEED_SQL` requires
-        #     `row_max <= enumerated_floor`), so the remedy is to restore the
-        #     journal, or to state `--enumerated-floor` deliberately.
+        #   * the journal BEHIND the counter — the RESTORED / TRUNCATED states
+        #     above. WORSE, not better: each refused append still advances the
+        #     journal by one, so the guard stops refusing after `counter - floor`
+        #     records — and each of those records LOST its row with no operator
+        #     action at all. It does not wedge, it eats. `seed --journal` REFUSES
+        #     here (`SEED_SQL` needs `row_max <= enumerated_floor`) and a re-seed
+        #     cannot lift the counter DOWN (`GREATEST(cursor_row.seq,
+        #     EXCLUDED.seq)` is monotone), so `--enumerated-floor` only lets the
+        #     SEED RUN — it is not a remedy. The remedy is to RESTORE the journal
+        #     so its enumeration reaches the counter again.
+        #   * SEALED (`TORTOISE_JOURNAL_SEGMENTS=1`) is NEITHER, and it must not be
+        #     filed under the bullet above: after a seal `EventLog.append` reports
+        #     the FILE-LOCAL index (it restarts at 1) while the counter is
+        #     per-GRAPH over the whole layout, so the guard refuses for `local`
+        #     1..`counter` and then ACCEPTS at `local == counter + 1`, writing a row
+        #     whose number is NOT the journal's position — a silent, permanent
+        #     split of the two coordinates this guard exists to keep. That is why
+        #     the seal is a GATED operator transition: re-seed from a SEGMENT-AWARE
+        #     count, never drive-and-watch. (Tracked in #13050: the guard cannot
+        #     see the seal from here.)
         #
         # That is the price of keeping one invariant — the line and its row carry
         # the same number — instead of guessing which side is right.
@@ -2862,17 +2878,22 @@ def write_live_record(record: Mapping[str, Any], *,
                     "write consumed a position the counter did not — the gap "
                     "never closes and EVERY later armed write refuses until you "
                     "re-seed: `halt`, `seed --journal <path>`, `reopen`, `arm`. "
-                    "If the JOURNAL is behind — a restored, truncated or "
-                    "re-sealed journal — it does NOT wedge: the guard stops "
-                    "refusing after `counter - floor` records, and each of them "
-                    "SILENTLY LOSES ITS ROW; `seed --journal` refuses in that "
-                    "state, so restore the journal or pass "
-                    "`--enumerated-floor` deliberately. ON A SEALED graph "
-                    "(TORTOISE_JOURNAL_SEGMENTS=1) the `status --journal` form "
-                    "above REFUSES by design -- it will not half-count a segmented "
-                    "layout -- so measure that layout total with "
-                    "`journal_segments.read_all_segments` and pass it as "
-                    "`--enumerated-floor N`. record=%s %s",
+                    "If the JOURNAL is behind — a restored or truncated "
+                    "journal — it does NOT wedge: the guard stops refusing "
+                    "after `counter - floor` records, and each of them "
+                    "SILENTLY LOSES ITS ROW; `seed --journal` refuses there and "
+                    "a re-seed cannot lower the counter, so RESTORE THE "
+                    "JOURNAL (`--enumerated-floor` only lets the seed run, it is "
+                    "not a remedy). A SEALED journal is a THIRD case and neither "
+                    "of the above: `status --journal` REFUSES a segmented layout "
+                    "by design (it will not half-count one), and measuring the "
+                    "layout total with `journal_segments.read_all_segments` and "
+                    "passing it as `--enumerated-floor N` corrects the SEED, not "
+                    "the comparison — the append's number stays FILE-LOCAL while "
+                    "the counter is per-graph, so the guard later ACCEPTS at "
+                    "`local == counter + 1` and writes a MIS-numbered row. A seal "
+                    "is a gated operator transition; tracked in #13050. "
+                    "record=%s %s",
                     seq, allocated_first, record.get("type"),
                     _record_identity(record),
                 )

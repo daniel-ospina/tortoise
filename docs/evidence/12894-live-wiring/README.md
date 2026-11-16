@@ -97,13 +97,22 @@ did not). The gap never closes — a replay writes rows, never the counter — s
 guard refuses every *later* record for the same reason, indefinitely. Remedy in
 order: `halt` → `seed --journal <path>` → `reopen` → `arm` (the seed is allowed
 here, because the record's rows are below the journal).
-* **journal BEHIND the counter** (a restored or truncated journal, or a sealed one
-whose file-local index restarts at 1). This is *worse*, not better: each refused
-append still advances the journal by one, so the guard stops refusing after
-`counter - floor` records — and **each of those records silently loses its row**
-with no operator action at all. It does not wedge, it eats. `seed --journal`
-refuses in this state (`SEED_SQL` requires `row_max <= enumerated_floor`), so the
-remedy is to restore the journal or to state `--enumerated-floor` deliberately.
+* **journal BEHIND the counter** (a restored or truncated journal). This is
+*worse*, not better: each refused append still advances the journal by one, so the
+guard stops refusing after `counter - floor` records — and **each of those records
+silently loses its row** with no operator action at all. It does not wedge, it
+eats. `seed --journal` refuses in this state (`SEED_SQL` requires
+`row_max <= enumerated_floor`) and a re-seed cannot lift the counter *down*
+(`GREATEST(cursor_row.seq, EXCLUDED.seq)` is monotone), so `--enumerated-floor` is
+not a remedy — it only lets the seed RUN. The remedy is to restore the journal, so
+its enumeration reaches the counter again.
+* **a SEALED journal** is a third case with neither property, and it is why the seal
+is a gated operator transition. After a seal `EventLog.append` reports the
+**file-local** index (it restarts at 1) while the counter is per-graph over the
+whole layout, so the guard refuses for `local` 1..`counter` and then *accepts* at
+`local == counter + 1` — writing a row whose number is not the journal's position,
+a silent and permanent split of the two coordinates the guard exists to keep.
+Re-seed from a segment-aware count; never drive-and-watch.
 
 This is the price of keeping one invariant rather than guessing which side of a
 disagreement is right, and it is a real operational consequence of the design, not
@@ -111,9 +120,12 @@ a defect to be discovered in production. Both the door's WARNING and
 `tools/record_allocator_cli.py status --journal` now say which side is ahead, and
 `status` reports the door's own condition as `position_divergence` — distinct from
 the seed's `divergence`, which is a different pair (`row_max > floor`) and can
-read `false` while the door refuses. The residual — no automatic recovery, and no
-repair path that does not require an operator — is recorded here rather than
-designed away in this lane (#12894 review cycles 4–5, P1).
+read `false` while the door refuses. ⚠️ `position_divergence` is exact for a
+SINGLE-FILE journal only: on a segmented layout the append's number is file-local
+while every floor this tool can be given is segment-spanning, so the two sides of
+that comparison are not the door's two sides. The residual — no automatic
+recovery, and no repair path that does not require an operator — is recorded here
+rather than designed away in this lane (#12894 review cycles 4–6, P1).
 
 ---
 
@@ -128,13 +140,15 @@ the plan builder alone — because "a green suite that never exercises
 **The exception, stated so the green count is read as what it is** (an earlier cut
 of this paragraph claimed the rule without it, #12894 review cycles 4–5, P2): three
 falsifiers assert a fact that belongs to the allocator or the plan, not to the
-door, and drive that layer directly — (3a) `test_two_writers_allocate_in_commit_
-order` and (3b) `test_a_rolled_back_allocation_is_reissued_exactly_once` call
-`record_allocator.execute_allocation`; (3c) is TWO legs, `test_replay_reads_a_
-carried_ordinal` and `test_replay_refuses_a_carried_ordinal_that_disagrees`, and
-both drive `record_projection.replay_plan` without touching the door. Every other
-leg — including all six divergence, seal and unproven-position refusals — goes
-through the door.
+door, and drive that layer directly — (3a)
+`test_two_writers_allocate_in_commit_order` and (3b)
+`test_a_rolled_back_allocation_is_reissued_exactly_once` call
+`record_allocator.execute_allocation`; (3c) is TWO legs,
+`test_replay_reads_a_carried_ordinal` and
+`test_replay_refuses_a_carried_ordinal_that_disagrees`, and both drive
+`record_projection.replay_plan` without touching the door. Every other leg —
+including all six divergence, seal and unproven-position refusals — goes through
+the door.
 
 | # | Falsifier | Leg | Red before the code because |
 |---|---|---|---|

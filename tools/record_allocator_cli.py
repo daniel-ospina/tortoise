@@ -226,14 +226,24 @@ def _cmd_status(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
         payload["healed_tail"] = args.floor > row_max
         # ⛔ THE DOOR'S OWN CONDITION, and read the arithmetic before changing it.
         # The door issues `cursor + 1` and compares it with the position the append
-        # reported, which on a journal holding `floor` records is `floor + 1`. So
-        # the door ACCEPTS iff `cursor + 1 == floor + 1`, i.e. iff
+        # reported, which on a SINGLE-FILE journal holding `floor` records is
+        # `floor + 1`. So the door ACCEPTS iff `cursor + 1 == floor + 1`, i.e. iff
         # `cursor == floor`. The `+ 1` appears on BOTH sides and cancels — which is
         # why the test is `cursor != floor` and not `cursor + 1 != floor`: the
         # latter is off by one and reports the condition INVERTED (true on a
         # healthy armed graph, false on the wedged one it exists to expose), which
         # is worse than no field at all because the door's WARNING names this field
         # as authoritative (#12894 review cycle 5, P1 — measured).
+        #
+        # ⛔ SCOPE: SINGLE-FILE JOURNALS ONLY, and the limit is a real one rather
+        # than a hedge. On a SEGMENTED layout `EventLog.append` reports the
+        # FILE-LOCAL index (it restarts at 1 after a seal), while every `floor` this
+        # tool can be given is the SEGMENT-SPANNING enumeration — `_journal_floor`
+        # now refuses a segmented layout by name, and its message sends the operator
+        # to `read_all_segments`, which counts every segment. Those are different
+        # coordinates, so the two sides of this comparison are not the door's two
+        # sides and the field cannot be trusted there: read it only for a journal
+        # that has never sealed, and treat a seal as its own gated transition.
         payload["position_divergence"] = (
             cursor is not None
             and cursor[1] == ra.MODE_ACTIVE

@@ -1561,8 +1561,12 @@ def test_the_armed_door_refuses_a_record_whose_position_is_unproven(
     On the enumerated arm it writes the layer rows and NO position row. On the
     ALLOCATED arm there is nothing to verify the issued number against, so the
     write is REFUSED rather than allocating a position the journal cannot
-    corroborate — a fail-closed refusal of one record, not a lost write (the
-    journal holds it and a replay heals it).
+    corroborate. ⛔ AND DO NOT CALL IT "one record, healed by a replay" — on the
+    ARMED arm a replay is not the repair: the journal consumed a position the
+    counter did not, so every later armed write refuses too, and an enumerated
+    replay is REFUSED on a cut-over graph
+    (`record_projection._refuse_an_enumerated_replay`). The only repair is the
+    allocator's operator path; the door's WARNING names it.
     """
     org, graph = tenant
     _seed_and_arm(app, org, graph, 0)
