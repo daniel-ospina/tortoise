@@ -194,15 +194,22 @@ def test_MCP_off_plus_the_RESIDENCY_flag_still_marks_a_PARTIAL_cache(monkeypatch
 
     monkeypatch.delenv(rs.RECORD_SERVE_ENV, raising=False)
     monkeypatch.setenv("TORTOISE_RESIDENCY", "1")
-    rs.reset_fallback_counts()
+    opened = _opener(_FakeConn(rows=[_row()]))
+    monkeypatch.setattr(rs, "open_record", opened)
     mcp_harness(None, coverage="partial", hot_keys=["other"])
 
     out = tortoise_get_point("p-1")
 
     assert out.get(RESIDENCY_FIELD) == RESIDENCY_NOT_HOT, (
         "a partial cache must not be allowed to establish absence (#7952)")
-    assert rs.fallback_counts() == {}, (
-        "the seam must not be consulted with TORTOISE_RECORD_SERVE unset")
+    # ⛔ Pin the OPENER, not the counter: `note_fallback` has one production
+    # caller (`answered_by_cache` ← `serve_point._fell_back`), and `serve_point`
+    # returns uncounted for `MODE_OFF` — so `fallback_counts() == {}` holds even
+    # when the seam IS consulted and refuses structurally (#12941 review P2,
+    # measured). The opener is the falsifiable property.
+    assert opened.calls == [], (
+        "the seam was consulted with TORTOISE_RECORD_SERVE unset — `off` must "
+        "open no record connection at all")
 
 
 def test_MCP_off_plus_the_RESIDENCY_flag_on_a_COMPLETE_cache_is_byte_identical(
