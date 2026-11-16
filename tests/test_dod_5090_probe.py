@@ -6288,14 +6288,25 @@ def test_the_census_states_the_consequence_of_removing_each_label():
     by_tool = {e["tool"]: e for e in sc["surface"] if "tool" in e}
     assert by_tool["tortoise_recall"]["reaches_affected_labels"] == ["object"], \
         by_tool["tortoise_recall"]
-    assert by_tool["tortoise_suggest_entry_points"]["reaches_affected_labels"] == \
-        [], by_tool["tortoise_suggest_entry_points"]
+    # ⛔ #11609 Phase 2 RETIRED the two doors whose `sdk_method` used to make them
+    # entrants here (`tortoise_suggest_entry_points`, `tortoise_search_sessions`):
+    # each now declares no `sdk_method` because its member method is private behind
+    # `tortoise_search_knowledge`. They therefore left this census, and the reach
+    # they carried did NOT leave with them — the container that serves them IS
+    # named, with its fixed-type read carried as `UNMEASURED` (the module's
+    # under-reporting channel: an entrant whose type is not a literal is never
+    # dropped). Asserting the absence keeps a silently-vanished door from reading
+    # as a surface with nothing to say about it.
+    assert "tortoise_suggest_entry_points" not in by_tool, sorted(by_tool)
+    assert "tortoise_search_sessions" not in by_tool, sorted(by_tool)
+    assert str(by_tool["tortoise_search_knowledge"]["reaches_affected_labels"]).startswith(
+        "UNMEASURED"), by_tool["tortoise_search_knowledge"]
     assert by_tool["tortoise_search"]["reaches_affected_labels"] == \
         "any (the caller chooses)", by_tool["tortoise_search"]
-    # `:Event` is not part of THIS fixture's affected set, so the sessions tool —
-    # which asks the leg for `event` — correctly reads NO change here.
-    assert by_tool["tortoise_search_sessions"]["reaches_affected_labels"] == [], \
-        by_tool["tortoise_search_sessions"]
+    # `:Event` is not part of THIS fixture's affected set, so the container the
+    # sessions door now answers through correctly reads NO change here.
+    assert "event" in by_tool["tortoise_search_knowledge"]["entity_types"], \
+        by_tool["tortoise_search_knowledge"]
 
     # …and with an affected `:Event`, it does — the same derivation, one graph
     # over, so the pair is pinned rather than assumed.
@@ -6307,8 +6318,9 @@ def test_the_census_states_the_consequence_of_removing_each_label():
                                    at="2026-11-05T00:00:00Z",
                                    graph_names=["g2"])["surface_consequence"]
     event_tools = {e["tool"]: e for e in event_sc["surface"] if "tool" in e}
-    assert event_tools["tortoise_search_sessions"]["reaches_affected_labels"] == \
-        ["event"], event_tools["tortoise_search_sessions"]
+    assert "event" in event_tools["tortoise_search_knowledge"]["entity_types"], \
+        event_tools["tortoise_search_knowledge"]
+    assert "tortoise_search_sessions" not in event_tools, sorted(event_tools)
 
 
 def test_the_census_reports_BYTES_for_an_UNINDEXED_label():
@@ -6390,8 +6402,8 @@ def test_the_surface_named_is_the_one_that_can_pass_entity_type():
     assert "object" in recall["entity_types"], (
         f"tortoise_recall's default state read queries :Object and is not named: {recall}")
     sessions = next(t for t in surface
-                    if t.get("tool") == "tortoise_search_sessions")
-    assert sessions["entity_types"] == ["event"], sessions
+                    if t.get("tool") == "tortoise_search_knowledge")
+    assert "event" in sessions["entity_types"], sessions
     for entry in surface:
         if "tool" in entry:
             assert entry["takes_entity_type"] is True, entry
@@ -6434,8 +6446,8 @@ def test_a_tool_whose_SDK_method_fixes_entity_type_is_named():
     assert "tortoise_fts_query" in declared, (
         f"a mention OF THE LEG is not declared: {declared}")
     assert methods["recall_state"] == {"object", "point"}, methods
-    assert methods["search_sessions"] == {"event"}, methods
-    assert methods["suggest_entry_points"] == {"point"}, (
+    assert methods["_search_sessions"] == {"event"}, methods
+    assert methods["_suggest_entry_points"] == {"point"}, (
         "a call that omits entity_type runs the SDK default, and it must be "
         f"resolved from the signature, not reported as UNKNOWN: {methods}")
     assert probe.VECTOR_LEG_SDK_METHOD not in methods, (
@@ -10257,7 +10269,7 @@ def test_a_tool_that_reaches_the_leg_through_a_HELPER_is_named():
     assert error is None, error
     assert methods["review_connections"] == {"point"}, methods
     named = {e["tool"] for e in probe.vector_leg_surface() if "tool" in e}
-    assert "tortoise_review_connections" in named, sorted(named)
+    assert "tortoise_review_link_candidates" in named, sorted(named)
 
 
 def test_the_census_reports_EVERY_index_KIND_not_only_VECTOR():

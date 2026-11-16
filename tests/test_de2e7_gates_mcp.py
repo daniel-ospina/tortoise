@@ -80,13 +80,18 @@ class TestDe2e7:
     def test_phase4_tools_registered(self):
         from tortoise.tool_registry import TOOL_REGISTRY
         names = {t.name for t in TOOL_REGISTRY}
-        phase4 = {"tortoise_mine_conversations", "tortoise_list_dedup_candidates",
+        phase4 = {"tortoise_mine_conversations", "tortoise_review_link_candidates",
                   "tortoise_approve_merge", "tortoise_promote_point",
-                  "tortoise_belief_timeline"}
+                  "tortoise_check_confidence"}
         assert phase4 <= names, phase4 - names
         by_name = {t.name: t for t in TOOL_REGISTRY}
         assert by_name["tortoise_promote_point"].sdk_method == "promote_point"
-        assert by_name["tortoise_belief_timeline"].sdk_method == "belief_timeline"
+        # #11609 Phase 2 retired `tortoise_list_dedup_candidates` and
+        # `tortoise_belief_timeline` into the containers named here; the pin moves
+        # with the doors rather than being dropped (the SDK method
+        # `belief_timeline` itself is still live and is driven below).
+        assert by_name["tortoise_review_link_candidates"].sdk_method == "review_link_candidates"
+        assert by_name["tortoise_check_confidence"].sdk_method == "check_confidence"
 
     def test_mcp_handler_error_contract(self, monkeypatch):
         """J-6: handlers return {error: message} on failure — the REAL SDK

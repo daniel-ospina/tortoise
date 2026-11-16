@@ -313,7 +313,7 @@ EMPTY_PATTERN: tuple[tuple[str, str, str, tuple[str, ...], int], ...] = (
     ),
     (
         "tortoise/sdk.py",
-        "provenance",
+        "_provenance",
         "the provenance walk reports which edge types reach a `:Subject`, and its "
         "single untyped bracket is OUTGOING from one (`MATCH (s:Subject "
         "{id:$sid})-[r]->(n)`); no `aboutObject` triple has a `:Subject` source "

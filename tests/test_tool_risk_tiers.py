@@ -50,8 +50,15 @@ from tortoise.tool_registry import (
 #: the `maintenance` tier is carried by the two confidence tools today. The RULING is
 #: unchanged — a maintenance entry is not a read and must not claim `readOnlyHint`.
 MAINTENANCE_TOOLS = (
+    # #3883/#4282: the retired door keeps its entry (served() includes the shims).
     "tortoise_get_confidence",
     "tortoise_compute_confidence",
+    # #11609 Phase 2 — the containers that absorbed the confidence/topic reads are
+    # all "refreshes stored state, still callable by a `graphs:read` key": each
+    # recomputes or re-derives on read rather than serving a stored answer.
+    "tortoise_check_confidence",
+    "tortoise_list_knowledge",
+    "tortoise_search_knowledge",
 )
 
 
@@ -126,8 +133,15 @@ class TestTheRiskAxis:
         #   (47 read + 3 maintenance -> 46 read + 2 maintenance). The other two left the
         #   writing side: `tortoise_backfill_v25` (destructive) and `tortoise_pack_install`
         #   (admin).
-        assert len(reading) == 48, sorted(reading)   # 46 read + 2 maintenance
-        assert len(served()) == 91, sorted(e.name for e in served())
+        #   #11609 Phase 2 (this branch) — nine READ/QUERY doors RETIRED-FORWARD, so they
+        #   stay in `served()` as shims (no served-count move), while the FIVE containers
+        #   they retired into are NEW entries: 91 -> 96 served, and the reading-eligible
+        #   population 48 -> 53. Their tiers, measured from the registry: three are
+        #   `maintenance` (`tortoise_check_confidence`, `tortoise_list_knowledge`,
+        #   `tortoise_search_knowledge`) and two are `read`
+        #   (`tortoise_explore_connections`, `tortoise_review_link_candidates`).
+        assert len(reading) == 53, sorted(reading)   # 48 read + 5 maintenance
+        assert len(served()) == 96, sorted(e.name for e in served())
 
     def test_the_destructive_set_is_pinned_by_name(self):
         """`destructive` means "removes or overwrites user-authored state".
@@ -553,7 +567,17 @@ class TestTheReadThroughToolsRegressionPin:
 
         tools = asyncio.run(_tools())
         assert tools, "served tool list is empty — the check would be vacuous"
-        for name in MAINTENANCE_TOOLS:
+        # #11609 Phase 2 retired `tortoise_get_confidence` FORWARD (#3883), so it is
+        # deliberately off the advertised list and a client never sees its hint —
+        # the loop below can only pin what is advertised. The skip is asserted, not
+        # assumed: every MAINTENANCE_TOOLS name that is absent from the list must be
+        # a RETIRED_TOOL_REGISTRY entry.
+        retired_names = {e.name for e in RETIRED_TOOL_REGISTRY}
+        off_list = [n for n in MAINTENANCE_TOOLS if n not in tools]
+        assert all(n in retired_names for n in off_list), (
+            f"maintenance tools missing from the served list without a retirement "
+            f"record: {sorted(set(off_list) - retired_names)}")
+        for name in (n for n in MAINTENANCE_TOOLS if n in tools):
             ann = tools[name].annotations
             assert ann is not None, f"{name}: no annotations on the served tool"
             assert ann.readOnlyHint is False, (

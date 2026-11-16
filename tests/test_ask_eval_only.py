@@ -202,11 +202,17 @@ def test_n2_mcp_tools_list_serves_no_ask_tool(monkeypatch):
     #   #11609 batch 1 — four no-destination tools were ARCHIVED (`tortoise_analyze`,
     #   `tortoise_backfill_v25`, `tortoise_packs_list`, `tortoise_pack_install`). THREE
     #   of them were in this listing (the fourth, `tortoise_backfill_v25`, was
+    #   `tortoise_backfill_v25`, was
     #   `http_policy=False`), so 66 - 3 = 63 measured here. Lowered to 63 with that
     #   measurement, not to whatever a green run last produced.
-    # Anything BELOW 63 is unexplained shrinkage and this arm reds on it; lowering the
+    #   #11609 Phase 2 (this branch) — nine READ/QUERY doors retired into five
+    #   containers. ALL NINE were `http_policy=True` and ALL FIVE containers are too,
+    #   so the listing moves by -9 + 5 = -4: 63 - 4 = 59, re-measured from the
+    #   registry's own `http_policy` population (64 live entries, 59 advertised; the
+    #   five stdio-only rows include `tortoise_mine_conversations`).
+    # Anything BELOW 59 is unexplained shrinkage and this arm reds on it; lowering the
     # floor again needs the same kind of recorded reason, never a green run.
-    assert len(names) >= 63, f"default surface shrank to {len(names)}"
+    assert len(names) >= 59, f"default surface shrank to {len(names)}"
     # The floor is a proxy for the real invariant, and a proxy cannot tell a
     # recorded consolidation from a silent drop. Pin the invariant itself: the
     # default HTTP listing serves EXACTLY the registry's `http_policy` population
