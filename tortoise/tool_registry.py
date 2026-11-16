@@ -1021,7 +1021,8 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
     ToolDefinition(
         name="tortoise_ingest_corpus",
         id="surface.ingest_corpus",
-        description="DEPRECATED — use tortoise_index_files. Batch document ingestion — walk directory, parse YAML frontmatter "
+        description="DEPRECATED — use tortoise_index_sources_from_directory(directory, "
+                    "file_type=\"doc\"). Batch document ingestion — walk directory, parse YAML frontmatter "
                     "from .md files, create/update document Sources "
                     "(D10: a document is a :Source). "
                     "EXCLUDED from tenant HTTP — walks server filesystem with user-supplied path.",
@@ -1220,7 +1221,8 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
     ToolDefinition(
         name="tortoise_index_sessions",
         id="surface.index_sessions",
-        description="DEPRECATED — use tortoise_index_files. Index session .md files "
+        description="DEPRECATED — use tortoise_index_sources_from_directory(directory, "
+                    "file_type=\"agent_session\"). Index session .md files "
                     "as AgentSession Events. "
                     "EXCLUDED from tenant HTTP — walks server filesystem with user-supplied path.",
         risk="destructive",
@@ -1563,7 +1565,9 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         name="tortoise_register_source",
         id="surface.register_source",
         description="Declare a source exists — the URL is its identity (#4282 row 14). "
-                    "Absorbs tortoise_create_source. `tier` (T0-T4) overrides the tier "
+                    "The one door for source registration: the retired per-name "
+                    "source-creation tools answer through the #3883 shim and route here. "
+                    "`tier` (T0-T4) overrides the tier "
                     "the source KIND derives; `sourceDate` is the evidence-age clock. "
                     "An existing Source (URL collision) is never re-kinded.",
         risk="write",
@@ -1578,8 +1582,8 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "ARGUMENT: `tier=` (T0-T4) sets the credibility tier; `score=` with "
                     "`assessor=` and `rationale=` records an assessment (a "
                     "reputation-weighted Statement Point). Passing both is refused — "
-                    "they are different writes. Absorbs tortoise_assess_source and "
-                    "tortoise_set_source_tier. Reads: "
+                    "they are different writes. The retired assess/set-tier switches "
+                    "answer through the #3883 shim and route here. Reads: "
                     "tortoise_graph_overview(section='sources').",
         risk="destructive",
         http_policy=True,
@@ -1589,9 +1593,10 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         name="tortoise_index_sources_from_directory",
         id="surface.index_sources_from_directory",
         description="Register a directory's files as sources — NOTHING is extracted "
-                    "(#4282 row 15). Absorbs tortoise_index_files, plus "
-                    "tortoise_index_sessions (`file_type='agent_session'`) and "
-                    "tortoise_ingest_corpus (`file_type='doc'`). `file_type`: auto | "
+                    "(#4282 row 15). The one index path: the legacy per-type index "
+                    "walks and the old corpus ingester answer through the #3883 shim "
+                    "and route here, selecting their mode with `file_type`. "
+                    "`file_type`: auto | "
                     "agent_session | meeting | doc. Batched and resumable "
                     "(progress_file). Returns the honest summary (file_count, indexed, "
                     "updated, skipped, failed, aborted, ignored, errors[], by_kind); "
@@ -1609,10 +1614,12 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         description="Mine ONE session (#4282 row 16). Dispatch is BY ARGUMENT: "
                     "`conversation=` files an agent session (turns become episodic "
                     "Points, LLM extraction produces epistemic Points; the backend is "
-                    "the target graph's configuration) — same door and gates as "
-                    "tortoise_session_capture; `items=` files an already-distilled batch "
+                    "the target graph's configuration) — same door and gates as the "
+                    "retired session-capture tool, which answers through the #3883 shim; "
+                    "`items=` files an already-distilled batch "
                     "({wing, room, content}) with two-tier dedup. Passing both is "
-                    "refused. Absorbs tortoise_checkpoint and tortoise_session_capture. "
+                    "refused. The retired checkpoint and session-capture names route "
+                    "here. "
                     "CONSENT (#3662, Option 1): this tool runs server-side and cannot "
                     "read the caller's TORTOISE_CAPTURE, so calling it with "
                     "`conversation=` IS the agreement to record the session — tell the "
@@ -1629,8 +1636,9 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         description="Mine a FOLDER of files, each by its own content type (#4282 row "
                     "17) — the batch form of tortoise_mine_knowledge_from_session, not a "
                     "kind of indexing: this call EXTRACTS, "
-                    "tortoise_index_sources_from_directory does not. Absorbs "
-                    "tortoise_mine_conversations. EXCLUDED from tenant HTTP — walks the "
+                    "tortoise_index_sources_from_directory does not. The retired "
+                    "conversation-mining name answers through the #3883 shim and routes "
+                    "here. EXCLUDED from tenant HTTP — walks the "
                     "server filesystem.",
         risk="destructive",
         http_policy=False,
@@ -2225,8 +2233,8 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     # shape the alias's own `Migrate to:` text repudiates 1000 lines away. The
     # paged form is the only destination that can be walked to the whole population.
     "tortoise_query_points_by_tag": "tortoise_query(tag=..., offset=..., limit=...)",
-    "tortoise_index_sessions": "tortoise_index_files(directory)",
-    "tortoise_ingest_corpus": "tortoise_index_files(directory)",
+    "tortoise_index_sessions": 'tortoise_index_sources_from_directory(directory, file_type="agent_session")',
+    "tortoise_ingest_corpus": 'tortoise_index_sources_from_directory(directory, file_type="doc")',
     # #3540 ruling B (owner, 2026-10-12): ONE consolidated source-management
     # operation replaces the two per-source switches, so the surface ends one
     # tool FEWER while the number of agent-settable sources grows (the

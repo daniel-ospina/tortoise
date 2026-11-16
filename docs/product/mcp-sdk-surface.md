@@ -320,9 +320,9 @@ not recorded here has no approval behind it, and the carve-out does not cover it
 | Tool | Does | Reaches | Used by | Recomm. | Status and rationale |
 |---|---|---|---|---|---|
 | `tortoise_create_document` | Create a document — a :Source (research, planDoc, meetingNotes, etc.). NOT keyed by url: every call mints a fresh id, so a repeat writes a second Source and a second DocumentCre… | create_document | never called, tooling, docs | **merge** | in group `create` · never called · **proposed: move to `graph`** — `tortoise_create_entity` in the same group already does this job (its own description names what it consolidates), so this is one name too many — the caller keeps working either way · group `create` is split across ['graph', 'sources']; proposed family `graph` — waits for your approval |
-| `tortoise_index_sources_from_directory` | Register a directory's files as sources — NOTHING is extracted (#4282 row 15). Absorbs tortoise_index_files, plus tortoise_index_sessions (`file_type='agent_session'`) and torto… | index_sources_from_directory | never called | **review** | never called — never called and referenced only from documentation, so nothing observable uses it. This is the residue that needs your judgement — I am not calling it fat on `never called` alone |
+| `tortoise_index_sources_from_directory` | Register a directory's files as sources — NOTHING is extracted (#4282 row 15). The one index path: the legacy per-type index walks and the old corpus ingester answer through the… | index_sources_from_directory | never called | **review** | never called — never called and referenced only from documentation, so nothing observable uses it. This is the residue that needs your judgement — I am not calling it fat on `never called` alone |
 | `tortoise_manage_source_trust` | Set how far a source is trusted (#4282 row 18). Dispatch is BY ARGUMENT: `tier=` (T0-T4) sets the credibility tier; `score=` with `assessor=` and `rationale=` records an assessm… | manage_source_trust | never called | **review** | never called — never called and referenced only from documentation, so nothing observable uses it. This is the residue that needs your judgement — I am not calling it fat on `never called` alone |
-| `tortoise_register_source` | Declare a source exists — the URL is its identity (#4282 row 14). Absorbs tortoise_create_source. `tier` (T0-T4) overrides the tier the source KIND derives; `sourceDate` is the… | register_source | never called | **review** | never called — never called and referenced only from documentation, so nothing observable uses it. This is the residue that needs your judgement — I am not calling it fat on `never called` alone |
+| `tortoise_register_source` | Declare a source exists — the URL is its identity (#4282 row 14). The one door for source registration: the retired per-name source-creation tools answer through the #3883 shim… | register_source | never called | **review** | never called — never called and referenced only from documentation, so nothing observable uses it. This is the residue that needs your judgement — I am not calling it fat on `never called` alone |
 
 ### review — 3
 
@@ -361,8 +361,8 @@ retirement safe; a retired name that stopped resolving would be a silent removal
 | `tortoise_get_point` | `tortoise_get_entity(id, type="point")` | `get_point` | http |
 | `tortoise_health` | `tortoise_graph_overview(section="health")` | ~~health~~ (no such method) | http |
 | `tortoise_index_files` | `tortoise_index_sources_from_directory(directory, file_type=..., progress_file=...)` | ~~index_directory~~ (no such method) | stdio-only |
-| `tortoise_index_sessions` | `tortoise_index_files(directory)` | ~~index_sessions~~ (no such method) | stdio-only |
-| `tortoise_ingest_corpus` | `tortoise_index_files(directory)` | `ingest_corpus` | stdio-only |
+| `tortoise_index_sessions` | `tortoise_index_sources_from_directory(directory, file_type="agent_session")` | ~~index_sessions~~ (no such method) | stdio-only |
+| `tortoise_ingest_corpus` | `tortoise_index_sources_from_directory(directory, file_type="doc")` | `ingest_corpus` | stdio-only |
 | `tortoise_list_pointkinds` | `tortoise_graph_overview(section="pointkinds")` | `list_pointkinds` | http |
 | `tortoise_list_sources` | `tortoise_graph_overview(section="sources")` | `list_sources` | http |
 | `tortoise_list_tags` | `tortoise_graph_overview(section="tags")` | `list_tags` | http |

@@ -80,7 +80,7 @@ class TestDe2e7:
     def test_phase4_tools_registered(self):
         from tortoise.tool_registry import TOOL_REGISTRY
         names = {t.name for t in TOOL_REGISTRY}
-        phase4 = {"tortoise_mine_conversations", "tortoise_list_dedup_candidates",
+        phase4 = {"tortoise_mine_knowledge_from_directory", "tortoise_list_dedup_candidates",
                   "tortoise_approve_merge", "tortoise_promote_point",
                   "tortoise_belief_timeline"}
         assert phase4 <= names, phase4 - names
@@ -102,7 +102,11 @@ class TestDe2e7:
         assert isinstance(res, dict) and "error" in res, res
         res2 = mcp.tortoise_approve_merge("no-such-candidate", action="merge")
         assert isinstance(res2, dict) and "error" in res2, res2
-        res3 = mcp.tortoise_mine_conversations()
+        # #4282 Phase 2 (#11609 lane C): `tortoise_mine_conversations` retired into
+        # `tortoise_mine_knowledge_from_directory`, whose handler refuses a path that is
+        # not a directory BEFORE any SDK access — the same "returns an error dict, never
+        # raises" contract this line exists to measure.
+        res3 = mcp.tortoise_mine_knowledge_from_directory("/nonexistent-corpus-123")
         assert isinstance(res3, dict) and "error" in res3, res3
         # Raising SDK method → {error: message} (sanitized, no crash).
         def boom(*a, **k):

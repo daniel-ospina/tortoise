@@ -756,8 +756,16 @@ def test_one_onboarding_call_reaches_the_record_and_its_id_reads_back(
 #: which side of `http_policy` each measured tool sits on.
 _RETIRED_NAMES_NAMED_BY_LIVE_DESCRIPTIONS = {
     "tortoise_query": ("tortoise_get_point",),
-    "tortoise_index_files": ("tortoise_index_sessions", "tortoise_ingest_corpus"),
 }
+#: #4282 Phase 2 (#11609 lane C) FIXED the stdio-only half by retiring it. The second
+#: entry here was `tortoise_index_files` naming `tortoise_index_sessions` and
+#: `tortoise_ingest_corpus`. `tortoise_index_files` is itself retired now (its own
+#: description lives in `RETIRED_TOOL_REGISTRY`, which this pin does not scan), and the
+#: live container that replaced it names neither: a LIVE description must tell a model
+#: what to CALL, and the absorbed names are what the #3883 shim and
+#: `docs/product/bridge-table.md` are for. The five container descriptions that had
+#: grown the same defect in the container commit were reworded in the same pass, so this
+#: pin shrank instead of being widened.
 
 #: A tool name as it is spelled in prose: `tortoise_` + lowercase/underscore/digit.
 #: Greedy on purpose — `tortoise_get_point` and `tortoise_get_entity` are two
@@ -951,21 +959,17 @@ def test_the_stale_description_set_is_exactly_what_was_measured():
 
 
 def test_the_stale_description_set_says_which_half_is_the_connectors():
-    """The measured set is 2 tools / 3 names, and only ONE tool is advertised.
+    """The measured set is ONE tool / ONE name, and it is the advertised one.
 
-    The constant and the `xfail` reason above could read as though four
+    The constant and the `xfail` reason above could read as though more
     *advertised* descriptions were stale — a count that would itself be an
     artifact of the substring matcher (`tortoise_get` counted as "named" because
-    it prefixes `tortoise_get_point`). It is 2 tools / 3 names, and a ChatGPT-style
-    tool-grant client is mis-instructed once. `tortoise_index_files`
-    carries `http_policy=False` (`tortoise/tool_registry.py`), and
-    `HTTP_ALLOWED` is derived from exactly that flag (`get_http_allowed` in
-    `tortoise/tool_registry.py`, bound as `HTTP_ALLOWED` in
-    `tortoise/mcp_auth.py`), so by this file's OWN definition of advertised
-    (`test_the_connector_advertises_the_journey_tools_and_nothing_retired`:
-    `{t.name for t in TOOL_REGISTRY if t.http_policy}`) only `tortoise_query`
-    reaches the connector. The impact claim is therefore pinned mechanically
-    rather than left in prose that the next lane would read as measurement.
+    it prefixes `tortoise_get_point`). It is 1 tool / 1 name, and that tool is
+    advertised, so a ChatGPT-style tool-grant client is mis-instructed once.
+    (`tortoise_index_files` used to be the stdio-only half of this claim; it was
+    retired into `tortoise_index_sources_from_directory` by #4282 Phase 2, and the
+    live container names no retired tool, so that half is FIXED rather than
+    re-worded.)
 
     Both halves are asserted by equality, so a tool changing `http_policy` (or a
     third stale description appearing on either side) forces a re-measure instead
@@ -983,9 +987,9 @@ def test_the_stale_description_set_says_which_half_is_the_connectors():
         f"advertised stale tools: {http_facing!r}. Only an HTTP-advertised tool's "
         "description can mis-instruct a tool-grant client; re-measure before "
         "re-wording the xfail reason")
-    assert stdio_only == ["tortoise_index_files"], (
-        "which stale descriptions belong to stdio-only tools changed: "
-        f"{stdio_only!r}. Those are real defects for a stdio client, but they "
+    assert stdio_only == [], (
+        "a stale description belongs to a stdio-only tool again: "
+        f"{stdio_only!r}. Those are real defects for a stdio client even though they "
         "cannot reach a connector — keep both facts in the claim")
 
 

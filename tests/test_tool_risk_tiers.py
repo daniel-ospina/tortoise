@@ -126,8 +126,12 @@ class TestTheRiskAxis:
         #   (47 read + 3 maintenance -> 46 read + 2 maintenance). The other two left the
         #   writing side: `tortoise_backfill_v25` (destructive) and `tortoise_pack_install`
         #   (admin).
-        assert len(reading) == 48, sorted(reading)   # 46 read + 2 maintenance
-        assert len(served()) == 91, sorted(e.name for e in served())
+        #   #11609 batch 2 — SIX containers landed and SEVEN names retired, but a retired
+        #   name stays in `served()` (its shim still answers with its tier), so the only
+        #   movement here is the one new `read` row: `tortoise_check_connection` (row 40),
+        #   the answer to "what does this credential reach". 48 -> 49 (47 read + 2 maint).
+        assert len(reading) == 49, sorted(reading)   # 47 read + 2 maintenance
+        assert len(served()) == 97, sorted(e.name for e in served())
 
     def test_the_destructive_set_is_pinned_by_name(self):
         """`destructive` means "removes or overwrites user-authored state".
@@ -176,6 +180,18 @@ class TestTheRiskAxis:
             # bulk re-ingest that rewrites an existing corpus' stored rows
             "tortoise_index_files", "tortoise_ingest_corpus",
             "tortoise_index_sessions", "tortoise_mine_conversations",
+            # #4282 Phase 2 (#11609 lane C): the containers that REPLACED those four.
+            # Each keeps the tier its members had, because the capability — not the
+            # name — is what puts a row here: a corpus re-ingest still overwrites stored
+            # rows it did not name (`index_sources_from_directory`,
+            # `mine_knowledge_from_directory`), the batch/transcript filing arms still
+            # write over an existing session's rows (`mine_knowledge_from_session`), and
+            # the trust write still overwrites a user-authored tier or appends a
+            # reputation Point (`manage_source_trust`).
+            "tortoise_index_sources_from_directory",
+            "tortoise_mine_knowledge_from_directory",
+            "tortoise_mine_knowledge_from_session",
+            "tortoise_manage_source_trust",
         }, sorted(destructive)
 
     def test_the_admin_set_is_pinned_by_name(self):
@@ -222,6 +238,10 @@ class TestTheRiskAxis:
             "tortoise_ingest",
             "tortoise_onboarding_github_index",
             "tortoise_session_capture",
+            # #4282 Phase 2 (#11609 lane C): `tortoise_register_source` inherits the tier
+            # of the `tortoise_create_source` row it replaced — additive because it
+            # writes the row its own `url` identifies, and a repeat converges on it.
+            "tortoise_register_source",
         }, sorted(writes)
 
     def test_the_maintenance_tier_is_exactly_the_ruling(self):
@@ -362,6 +382,9 @@ class TestHintsCannotDrift:
             # clients read as `idempotentHint`.
             ("tortoise_create_point", True),
             ("tortoise_create_source", True),
+            # #4282 Phase 2 (#11609 lane C): the same operation under its approved
+            # name — the source's identity is its URL, so a repeat converges on it.
+            ("tortoise_register_source", True),
             # ⛔ `tortoise_get_source_reliability` is pinned FALSE below, not omitted — it is a getter in
             # the write tier, and an earlier revision of this PR declared it
             # repeatable on "a repeat converges on the same value" — but the value
@@ -420,7 +443,13 @@ class TestHintsCannotDrift:
         # 45 -> 43: #11609 batch 1 removed two more writing tools, both ARCHIVED rather
         # than retired-forward (`tortoise_backfill_v25` (destructive) and
         # `tortoise_pack_install` (admin)).
-        assert len(expected) == 43, sorted(expected)  # census, hard-coded
+        # 43 -> 48: #11609 batch 2 retired SEVEN writing tools into SIX containers, and a
+        # retired name stays in `served()` (its shim answers with its tier) — so the
+        # writing census grows by the six new names and loses nothing: four
+        # `destructive` (`index_sources_from_directory`, `mine_knowledge_from_directory`,
+        # `mine_knowledge_from_session`, `manage_source_trust`), one `write`
+        # (`register_source`) and one `read` (`check_connection`) that is NOT here.
+        assert len(expected) == 48, sorted(expected)  # census, hard-coded
 
 
 class TestTheMitigationWriteIsNeverAdvertisedAsRepeatable:
@@ -595,7 +624,11 @@ IDENTITY_UPSERT_OVERWRITERS = (
     "tortoise_create_subject",
     "tortoise_create_object",
     "tortoise_create_entity",
-    "tortoise_mine_conversations",
+    # #4282 Phase 2 (#11609 lane C): the name moved, the property did not. This test
+    # reads the hint off the SERVED tool list, and a retired name is no longer
+    # registered there (it answers through the #3883 shim), so the witness must be the
+    # LIVE container.
+    "tortoise_mine_knowledge_from_directory",
 )
 
 

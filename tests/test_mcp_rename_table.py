@@ -58,8 +58,10 @@ RETIRED_LITERAL: dict[str, str] = {
     "tortoise_get_operator": 'tortoise_get_entity(id, type="operator")',
     "tortoise_get_point": 'tortoise_get_entity(id, type="point")',
     "tortoise_health": 'tortoise_graph_overview(section="health")',
-    "tortoise_index_sessions": "tortoise_index_files(directory)",
-    "tortoise_ingest_corpus": "tortoise_index_files(directory)",
+    "tortoise_index_sessions":
+        'tortoise_index_sources_from_directory(directory, file_type="agent_session")',
+    "tortoise_ingest_corpus":
+        'tortoise_index_sources_from_directory(directory, file_type="doc")',
     # #3540 ruling B: the two per-source switches retired into the ONE
     # consolidated source-management operation (net one tool fewer).
     "tortoise_onboarding_github_index":
@@ -92,6 +94,16 @@ RETIRED_LITERAL: dict[str, str] = {
     "tortoise_stale": 'tortoise_graph_overview(section="stale", days=..., limit=...)',
     "tortoise_status": 'tortoise_graph_overview(section="status")',
     "tortoise_taxonomy": 'tortoise_graph_overview(section="taxonomy")',
+    # #4282 Phase 2 (#11609 lane C): seven names were retired into the
+    # SOURCES/MINE/SESSION containers — one member per row except
+    # `manage_source_trust` (two) — so the map grew 23 -> 30.
+    'tortoise_assess_source': 'tortoise_manage_source_trust(url, score=..., assessor=..., rationale=...)',
+    'tortoise_checkpoint': 'tortoise_mine_knowledge_from_session(items=..., agent_name=..., threshold=...)',
+    'tortoise_create_source': 'tortoise_register_source(url, sourceKind, tier=...)',
+    'tortoise_index_files': 'tortoise_index_sources_from_directory(directory, file_type=..., progress_file=...)',
+    'tortoise_mine_conversations': 'tortoise_mine_knowledge_from_directory(directory=..., extract_entities=...)',
+    'tortoise_session_capture': 'tortoise_mine_knowledge_from_session(conversation=..., harness=..., session_id=...)',
+    'tortoise_set_source_tier': 'tortoise_manage_source_trust(url, tier="T0"-"T4")',
 }
 
 # The names whose 0.1 destination differs from the destination of their redirect.
@@ -489,8 +501,8 @@ def test_b1_states_plainly_that_there_are_no_disagreements() -> None:
     # 18 after #3540; 23 after #4282's `graph_overview` batch retired five more names
     # into the container (and `tortoise_overview` itself into its target). The pin moves
     # with each landed container batch.
-    assert len(RETIRED_LITERAL) == 23, (
-        f"the redirect map is {len(RETIRED_LITERAL)} names, not the landed 23"
+    assert len(RETIRED_LITERAL) == 30, (
+        f"the redirect map is {len(RETIRED_LITERAL)} names, not the landed 30"
     )
 
 

@@ -312,10 +312,13 @@ def drive_handler(name: str, fn: Any) -> DriveResult:
 # LISTED condition, closed in both directions — an unlisted no-read entry fails,
 # and a listed entry that starts reading fails as a stale ledger row.
 _HANDLER_SERVED_NO_SDK_READ: dict[str, str] = {
-    "tortoise_session_capture": (
-        "hosted-only: with no org (or the self-host sentinel) it returns the "
-        "requires-hosted-mode error before any SDK access."
-    ),
+    # `tortoise_session_capture` was the third entry here: hosted-only, so its handler
+    # returned the requires-hosted-mode error before any SDK access. #4282 Phase 2
+    # (#11609 lane C) RETIRED the name into `tortoise_mine_knowledge_from_session` —
+    # and a retired name leaves `TOOL_REGISTRY`, so it is no longer a scoreboard row
+    # (the import-time orphan check above is what caught the stale entry). Its
+    # replacement is NOT a no-read entry: the container reads
+    # `mine_knowledge_from_session` on both arms, so it belongs on the normal path.
     "tortoise_graph_set_recording": (
         "hosted control-plane (#2302): returns the requires-hosted-mode error when "
         "there is no org, before reading the SDK."
@@ -337,11 +340,31 @@ _HANDLER_SERVED_NO_SDK_READ: dict[str, str] = {
 # early-return branch a generic vector cannot satisfy. Each is explained; the
 # import-time gate below refuses an override that names no registry entry.
 _DRIVE_OVERRIDES: dict[str, tuple[tuple[str, tuple, dict], ...]] = {
-    "tortoise_index_files": (
+    # #4282 Phase 2 (#11609 lane C): `tortoise_index_files` retired into this container,
+    # which keeps the same early return — the handler refuses before any SDK read unless
+    # the path really is a directory.
+    "tortoise_index_sources_from_directory": (
         (
             "real-directory",
             (),
             {"directory": "."},  # the handler returns early unless os.path.isdir(directory)
+        ),
+    ),
+    "tortoise_mine_knowledge_from_session": (
+        (
+            "items-batch",
+            (),
+            # the handler refuses with NEITHER `conversation=` nor `items=` before any
+            # SDK read, and `conversation=` would go through the capture door (a
+            # different method) — the batch arm is the vector that reads this one.
+            {"items": [{"content": "x"}]},
+        ),
+    ),
+    "tortoise_mine_knowledge_from_directory": (
+        (
+            "real-directory",
+            (),
+            {"directory": "."},  # early return unless os.path.isdir(directory)
         ),
     ),
     "tortoise_get_entity": (
