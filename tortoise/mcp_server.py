@@ -3404,6 +3404,14 @@ _QUOTA_GATED: frozenset[str] = frozenset({
     "tortoise_retract_point",
     # epic #888 W2 consolidated write surface
     "tortoise_create_entity", "tortoise_update", "tortoise_operator_action",
+    # #11609 Phase 2 (#4282): the container that ABSORBED the update doors above.
+    # It is not in this set for parity's sake — its body reaches the same
+    # node/edge-creating writers through `tortoise_update` (properties),
+    # `invalidate_point` and `retract_point` (the temporal arms), so leaving it out
+    # let the #329 completeness gate go red in the very batch that retires the
+    # gates' own names (`tests/test_mcp_http.py::TestIntrospectiveQuotaCompleteness`
+    # measures membership, not intent).
+    "tortoise_update_knowledge",
     # #684: node-creating tools that were missed in the original #329 audit
     "tortoise_file_human_approval",  # creates Event + decision Point + IMPL edges
     "tortoise_assess_source",        # creates assessment Point

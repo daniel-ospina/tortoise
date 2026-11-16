@@ -227,15 +227,24 @@ def test_every_passthrough_wrapper_declares_its_sdk_methods_type():
         "these wrappers' source could not be read, so they were never classified — "
         "an unreadable wrapper is a hole in the scan, not a reshaping one:\n  "
         + "\n  ".join(unreadable))
-    # ⛔ AND a floor of ONE, because exhaustiveness alone is a tautology: every
-    # iteration adds to exactly one counter, so a classifier that stops matching
-    # every REAL wrapper answers `checked=0, reshaped=51` and the equality still
-    # holds (measured: `_passthrough_of` -> None passes all three asserts above).
-    # The classifier's own self-test does not cover that drift — its inputs are
-    # synthetic, so it keeps passing while no production wrapper matches. One is
-    # the right floor: it cannot red on a correct retirement (a retirement moves a
-    # door's NAME, not its shape) but it reds the instant the comparison stops
-    # comparing anything.
+    # ⛔ AND a floor of ONE — read what it does and does not buy. Exhaustiveness
+    # alone is a TAUTOLOGY: every iteration increments exactly one counter (or lands
+    # in a list already proven empty), so an "unclassified row" is unrepresentable
+    # and that equality can never fail. The bucket that actually swallows holes is
+    # `reshaped`: `_passthrough_of` returns None for ANY shape it does not recognise,
+    # so a real pass-through rewritten in an idiom the classifier does not know (e.g.
+    # `return _safe(_quota_gated(_get_org_sdk().m, "points"), …)`, which the registry
+    # does use) is counted as "reshaping" and escapes — the same escape `_tail_name`'s
+    # note records a review round measuring. This floor therefore detects TOTAL
+    # collapse only (measured: `_passthrough_of` -> None answers checked=0,
+    # reshaped=51 and would otherwise satisfy every assert above); it is NOT a drift
+    # detector, and it cannot be one without a second, independent classifier.
+    # It is also a deliberate FALSE-RED risk in the other direction: a future batch
+    # that absorbs EVERY remaining pass-through door into reshaping containers takes
+    # checked to 0 and WILL red here, on a change that may be correct. Accepted on
+    # purpose — "no wrapper in the registry passes its SDK value through any more" is
+    # a class-level change a reviewer should see, not a silent one. (What the literal
+    # `>= 20` got wrong was different: it red at 19 while 19 was CORRECT.)
     assert checked > 0, (
         f"not one of {len(pairs)} registry rows was classified as a pass-through "
         f"({reshaped} read as reshaping) — a classifier that matches no real "

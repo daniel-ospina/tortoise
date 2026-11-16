@@ -240,8 +240,14 @@ def test_every_advertising_tool_keeps_graph_optional_and_a_string():
     #
     #   The SIBLING derivation in tests/test_ask_eval_only.py gives the same population
     #   from the other direction: 63 - 13 + 5 = 55 filtered (`#4282` Phase 2 retires 13
-    #   http doors and adds 5 advertised containers), and the UNFILTERED registry total
-    #   moves 68 - 13 + 5 = 60. Both are stated so the next batch can re-derive either.
+    #   http doors and adds 5 advertised containers). ⛔ The UNFILTERED total is a
+    #   DIFFERENT sum and must not reuse those terms: all fourteen doors were in
+    #   `TOOL_REGISTRY` (`tortoise_dream` included — it was only `http_policy=False`)
+    #   and all six containers joined it, so 68 - 14 + 6 = 60. The two formulas
+    #   coincide numerically (−13+5 = −14+6 = −8) and that is precisely the trap: a
+    #   reader who moves one set of terms to the other population gets the right total
+    #   for the wrong reason, and the next batch's drift would be invisible. Both are
+    #   stated so the next batch can re-derive either, in its own population.
     assert len(advertising) >= 52, (
         f"the advertising population collapsed to {len(advertising)} tool(s) — expected "
         "at least 52 (55 HTTP-filtered live tools minus the 3 excluded names in that "

@@ -654,7 +654,7 @@ Never hand-edit inside markers you did not write; the next refresh discards it.
    - Claude Desktop / Claude Web: you have no REST/curl surface, and **no
      dashboard click connects anything** — the server writes this same
      checkpoint itself on your first successful graph write
-     (`tortoise_create_point` / `tortoise_record_decision` →
+     (`tortoise_create_point` / `tortoise_write_question` →
      `_maybe_onboarding_auto_complete()`). File a first memory and the
      dashboard reflects it on its own: the done step (step 3) shows Connected
      the moment your agent files. The connect step does NOT advance by itself
