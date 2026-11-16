@@ -824,11 +824,14 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
     ToolDefinition(
         name="tortoise_supersede",
         id="surface.supersede",
-        description="Atomically replace old Point with new — CORRECTS edge + outdated flag. "
-                    "transfer_edges=True (default): full supersede — all edges move from "
-                    "old to new. transfer_edges=False: invalidate behavior — outdated flag "
-                    "+ CORRECTS edge only, no edge transfer. "
-                    "dry_run=True previews exactly which edges would transfer and changes nothing.",
+        description="Atomically replace a node with its successor. The arm follows the OLD "
+                    "node's label: a Point gets a full supersede — CORRECTS edge + outdated "
+                    "flag + every edge moved to the new node; an Object/Subject gets the "
+                    "family supersede — status='superseded' + supersededBy (the successor's "
+                    "NAME) + supersededAt, with no edge transfer. transfer_edges=None "
+                    "(default, not supplied) takes that label-driven arm; True/False are "
+                    "POINT-ONLY and are REFUSED on an Object/Subject rather than silently "
+                    "dropped. dry_run=True previews exactly what would change.",
         risk="destructive",
         http_policy=True,
         sdk_method="supersede_knowledge",  # #11609 lane B: retired into the container
@@ -1696,12 +1699,14 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
     ToolDefinition(
         name="tortoise_supersede_knowledge",
         id="surface.supersede_knowledge",
-        description="Replace a node with a successor, keeping the history. Dispatches on the "
-                    "LINK POLICY: transfer_edges=True (default) → full supersede — CORRECTS "
-                    "edge, outdated flag, and every edge moves from old to new; "
-                    "transfer_edges=False → invalidate only — mark outdated with a CORRECTS "
-                    "edge and transfer nothing. dry_run=True previews the edge transfer and "
-                    "changes nothing.",
+        description="Replace a node with a successor, keeping the history. The arm follows "
+                    "the OLD node's label: a Point gets a full supersede — CORRECTS edge, "
+                    "outdated flag, and every edge moved from old to new; an Object/Subject "
+                    "gets the family supersede — status='superseded' + supersededBy (the "
+                    "successor's NAME) + supersededAt, no edge transfer. transfer_edges=None "
+                    "(default, not supplied) takes that label-driven arm; True/False are "
+                    "POINT-ONLY and are REFUSED on an Object/Subject rather than silently "
+                    "dropped. dry_run=True previews what would change and changes nothing.",
         risk="destructive",
         http_policy=True,
         sdk_method="supersede_knowledge",

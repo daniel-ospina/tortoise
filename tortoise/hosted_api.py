@@ -23049,7 +23049,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # ── 6b. Supersessions — client-derived records (the deterministic channel
     # for the Object status fold, #1350), applied via the SHARED
     # apply_supersessions helper (#2164/#2193): pt_<sha> refs → the canonical
-    # supersede() CORRECTS (terminal-probed, idempotent); entity records →
+    # supersede_point() CORRECTS (terminal-probed, idempotent); entity records →
     # id-style ObjectSuperseded journal (full provenance incl. session_id) +
     # count-verified fold. ONE consumer-side discipline with capture
     # (_extract_session_v2) and eval ingest_v2 — §6b's inline consumer was the
@@ -23107,7 +23107,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
         # #4970: same remap the capture path applies (#4716 Part 1, the
         # adjacent hole). ``supersedes_by`` is a payload ``pt_<sha>`` id BY
         # CONSTRUCTION and shares the operators' two-id-space hole — a
-        # re-keyed successor reached ``sdk.supersede(prior, '<payload id>')
+        # re-keyed successor reached ``sdk.supersede_knowledge(prior, '<payload id>')
         # with the target missing, which RAISED and was swallowed by
         # ``apply_supersessions`` as ``point supersede '<prior>' → '<payload
         # id>' failed: …`` (NOT the ``… ref '<payload id>' not found`` skip,

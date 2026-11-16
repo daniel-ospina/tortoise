@@ -22842,7 +22842,7 @@ class TortoiseSDK:
                 missing_ok=True) is None:
             return {"invalidated": False, "id": id, "corrected_by": corrected_by_id}
         # #2498: guard the CORRECTOR leg too — `supersede_point` guards BOTH
-        # endpoints and `supersede(..., transfer_edges=False)` routes here, so
+        # endpoints and `supersede_knowledge(..., transfer_edges=False)` routes here, so
         # an unguarded corrector let `(operator|terminal)-[:CORRECTS]->(point)`
         # through on one leg and not the other. A missing corrector still
         # raises (structural failure — would orphan an outdated point).
@@ -23060,31 +23060,11 @@ class TortoiseSDK:
             # left `1`, `0`, `'yes'`, `1.0` still silently dropped (measured), so
             # the singleton shape only narrowed the defect. `None` is the
             # not-supplied default and is the ONLY value that takes this arm.
-            if transfer_edges is False:
-                # The INVALIDATE half keeps its own prescription: a :{label} that
-                # was retired with no successor is `archived`, and that is the
-                # repair a caller who wanted this arm actually needs.
-                raise ValueError(
-                    f"supersede_knowledge: transfer_edges=False is the INVALIDATE half, "
-                    f"and it is Point-only — `outdated` + a `CORRECTS` edge are "
-                    f"a Point's machinery (ONTOLOGY §4.7), and "
-                    f"{_refusal_repr(old_id)} is a :{label}. A :{label} that "
-                    f"was retired with NO successor is 'archived' under §4.3 — "
-                    f"`update_knowledge({_refusal_repr(old_id)}, status='archived')` "
-                    f"— or, if it WAS replaced, name the successor with "
-                    f"`supersede_knowledge({_refusal_repr(old_id)}, <successor id>)`."
-                )
-            if transfer_edges is not None:
-                raise ValueError(
-                    f"supersede_knowledge: transfer_edges={transfer_edges!r} cannot be "
-                    f"honoured on a :{label} — that keyword is Point-only: "
-                    f"`outdated` + a `CORRECTS` edge + edge transfer are a Point's "
-                    f"machinery (ONTOLOGY §4.7), while this arm records "
-                    f"status='superseded' + supersededBy + supersededAt with NO edge "
-                    f"transfer. Drop the keyword to take this arm, or call it for a "
-                    f"Point; a :{label} retired with no successor is "
-                    f"`update_knowledge(id, status='archived')`."
-                )
+            # The two refusals live in ONE helper (#12914 round-3 finding 2), so the
+            # dry-run preview calls the SAME check instead of restating it — a
+            # preview that restates a refusal is a second source of truth, and the
+            # divergence this round fixed was exactly that class.
+            self._refuse_family_transfer_edges(label, old_id, transfer_edges)
             # The family write records status + carrier + stamp; it has no slot
             # for a bi-temporal window, so a window kwarg is refused here rather
             # than dropped — the same rule main states for the invalidate arm,
@@ -23184,7 +23164,45 @@ class TortoiseSDK:
             return None
         return {1: "Point", 2: "Object", 3: "Subject"}[best[0]]
 
-    def _supersede_entity(self, label: str, old_id: str, new_id: str) -> dict:
+    def _refuse_family_transfer_edges(self, label: str, old_id: str,
+                                      transfer_edges: bool | None) -> None:
+        """Refuse ANY supplied ``transfer_edges`` on the family arm (#12914).
+
+        Extracted from ``supersede_knowledge`` (round-3 finding 2) so the MCP
+        dry-run preview runs the SAME check: the preview must refuse what the
+        write refuses, and two copies of a refusal are two statements that drift.
+        ``None`` is the not-supplied default and is the ONLY value that passes —
+        the arm has no slot for the keyword, so every supplied value is refused
+        rather than silently dropped (#10053).
+        """
+        if transfer_edges is False:
+            # The INVALIDATE half keeps its own prescription: a :{label} that
+            # was retired with no successor is `archived`, and that is the
+            # repair a caller who wanted this arm actually needs.
+            raise ValueError(
+                f"supersede_knowledge: transfer_edges=False is the INVALIDATE half, "
+                f"and it is Point-only — `outdated` + a `CORRECTS` edge are "
+                f"a Point's machinery (ONTOLOGY §4.7), and "
+                f"{_refusal_repr(old_id)} is a :{label}. A :{label} that "
+                f"was retired with NO successor is 'archived' under §4.3 — "
+                f"`update_knowledge({_refusal_repr(old_id)}, status='archived')` "
+                f"— or, if it WAS replaced, name the successor with "
+                f"`supersede_knowledge({_refusal_repr(old_id)}, <successor id>)`."
+            )
+        if transfer_edges is not None:
+            raise ValueError(
+                f"supersede_knowledge: transfer_edges={transfer_edges!r} cannot be "
+                f"honoured on a :{label} — that keyword is Point-only: "
+                f"`outdated` + a `CORRECTS` edge + edge transfer are a Point's "
+                f"machinery (ONTOLOGY §4.7), while this arm records "
+                f"status='superseded' + supersededBy + supersededAt with NO edge "
+                f"transfer. Drop the keyword to take this arm, or call it for a "
+                f"Point; a :{label} retired with no successor is "
+                f"`update_knowledge(id, status='archived')`."
+            )
+
+    def _supersede_entity(self, label: str, old_id: str, new_id: str,
+                          *, dry_run: bool = False) -> dict:
         """The per-family supersession for ``:Object`` / ``:Subject`` (#12592).
 
         Writes the coherent pair through the ONE entity write path, so the
@@ -23398,6 +23416,17 @@ class TortoiseSDK:
         successor_name = names[0]
         from .projection import _now_iso
         instant = _now_iso()
+        # ⛔ ``dry_run`` IS THE MCP PREVIEW'S DOOR, NOT A PUBLIC MODE (#12914
+        # round-3 finding 2). It runs EVERY guard above and skips only the write,
+        # so the preview cannot accept what the write refuses (the divergence the
+        # finding measured in the other direction: ``dry_run=True`` refused a
+        # family supersede the write accepted). Nothing above this line touches
+        # the graph, which is what makes the claim checkable. The ``supersededAt``
+        # it reports is the instant the write WOULD stamp — the real write mints
+        # its own, so a caller must not reserve it.
+        if dry_run:
+            return {"superseded": True, "id": old_id, "label": label,
+                    "superseded_by": successor_name, "superseded_at": instant}
         applied = self.update_knowledge(
             old_id, status=_SUPERSEDED_STATUS,
             supersededBy=successor_name, supersededAt=instant)
@@ -23543,20 +23572,6 @@ class TortoiseSDK:
         # self / terminal successor would terminalize the old point with no valid
         # replacement (phantom PointSuperseded).
         #
-        # ⛔ THE COMPARISON IS A CALLER READ TOO (#12914 review P2, cycle 9): `==`
-        # on this pair dispatches to the caller — ``str.__eq__`` answers
-        # ``NotImplemented`` for a GENUINE ``str`` SUBCLASS that overrides
-        # ``__eq__``, so the subclass's answer is the one that lands. Measured: a
-        # str subclass whose ``__eq__`` returns False walked
-        # ``supersede_knowledge(<live Point>, SubLyingEq(<the same id>))`` past this gate,
-        # and the write stored the row as its OWN successor — row
-        # ``['superseded', True, None]`` with a ``CORRECTS`` edge
-        # ``<id> -> <id>`` — the exact state this gate exists to refuse. Two
-        # "words" exist only when BOTH operands are genuinely ``str``, which is
-        # also the only pair the gate can decide WITHOUT running caller code, so
-        # that pair is compared in BASE CONTENT (the bound ``_supersede_entity``
-        # carries on the entity arm, cycle 7). Every other pair keeps exactly the
-        # comparison it had, so no non-``str`` id changes behaviour here.
         # ⛔ THE COMPARISON IS A CALLER READ TOO (#12914 review P2, cycle 9): `==`
         # on an operand that is not genuinely `str` dispatches to the caller —
         # ``str.__eq__`` answers ``NotImplemented`` for a GENUINE ``str``

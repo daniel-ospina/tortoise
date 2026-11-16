@@ -126,7 +126,7 @@
 # only asks that question calls it fine — which is why this record also asks about ancestry).
 manifest_version: 1
 issue: 3863
-cut_at_commit: bc00777726eedad9620bebfbe30e2c2453611060
+cut_at_commit: 486f5ca25b637b1a4346af06ce16876ae06a4912
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -1570,10 +1570,12 @@ rows:
   keyword_rank: 4
   cluster: null
   canonical: null
-  job: 'Replace a node with a successor, keeping the history. Dispatches on the LINK POLICY: transfer_edges=True
-    (default) → full supersede — CORRECTS edge, outdated flag, and every edge moves from old to new; transfer_edges=False
-    → invalidate only — mark outdated with a CORRECTS edge and transfer nothing. dry_run=True previews the edge
-    transfer and changes nothing.'
+  job: 'Replace a node with a successor, keeping the history. The arm follows the OLD node''s label: a Point gets
+    a full supersede — CORRECTS edge, outdated flag, and every edge moved from old to new; an Object/Subject gets
+    the family supersede — status=''superseded'' + supersededBy (the successor''s NAME) + supersededAt, no edge
+    transfer. transfer_edges=None (default, not supplied) takes that label-driven arm; True/False are POINT-ONLY
+    and are REFUSED on an Object/Subject rather than silently dropped. dry_run=True previews what would change and
+    changes nothing.'
   dependency: declares TortoiseSDK.supersede_knowledge (resolves)
   lifecycle: active
   used_by: never called, tooling, docs

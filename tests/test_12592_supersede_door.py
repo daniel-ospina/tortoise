@@ -1876,6 +1876,69 @@ def test_transfer_edges_None_is_the_ONLY_default_and_other_falsy_values_keep_the
 
     p = _make(sdk, "Point", "arm-point-default")
     out = sdk.supersede_knowledge(p, _make(sdk, "Point", "arm-point-default-v2"))
-    assert out.get("invalidated") is True, out
-    assert out.get("edges_transferred") == 0 or isinstance(
-        out.get("edges_transferred"), int), out
+    # ⛔ `invalidated` CANNOT TELL THE ARMS APART (#12914 round-3 finding 5).
+    # `supersede_point` has ONE exit that returns `invalidated: True` for BOTH
+    # arms, so the old assertion here passed whether the omitted keyword took
+    # FULL SUPERSEED or INVALIDATE — the block's claim rested on the next line
+    # alone. Measured on the reviewed head: the full arm answers
+    # `{'invalidated': True, ..., 'edges_transferred': 0}` and the invalidate arm
+    # answers `{'invalidated': True, ...}` with the key absent. Mutation: make the
+    # `None` default fall to the invalidate arm -> the key-presence line reds.
+    assert "edges_transferred" in out, out
+    assert isinstance(out.get("edges_transferred"), int), out
+
+
+def test_the_dry_run_preview_takes_the_same_arm_the_write_takes(sdk):
+    """The preview and the write choose the SAME arm (#12914 round-3 finding 2).
+
+    Measured on the reviewed head: the family write answered
+    ``{'superseded': True, 'label': 'Object', 'superseded_by': 'fam-b'}`` while the
+    IDENTICAL call with ``dry_run=True`` answered ``{'error': "No point '<id>'"}``
+    — ``_preview_supersede`` was Point-only, so the one public route to a family
+    supersede could not be previewed at all, and the ``dry_run`` contract ("it
+    runs the same guards, so a rejected input is rejected in the preview too")
+    was false in the other direction.
+
+    Mutation: restore a Point-only ``_preview_supersede`` (drop the label
+    dispatch) -> the family preview asserts red; restate the family keyword
+    refusal in the preview instead of calling the write's helper -> the
+    preview-vs-write equality reds on the first wording drift.
+    """
+    from tortoise import mcp_server as mcp
+    from tortoise.mcp_auth import _current_org_id, _current_org_limits, _transport_mode
+
+    _transport_mode.set("stdio")
+    _current_org_id.set(None)
+    _current_org_limits.set(None)
+    original = mcp._get_org_sdk
+    mcp._get_org_sdk = lambda: sdk
+    try:
+        node = _make(sdk, "Object", "preview-arm")
+        successor = _make(sdk, "Object", "preview-arm-v2")
+
+        preview = mcp.tortoise_supersede(node, successor, dry_run=True)
+        assert preview.get("dry_run") is True, preview
+        assert preview.get("superseded") is True, preview
+        assert preview["target"]["superseded_by"] == "preview-arm-v2", preview
+        assert _row(sdk, "Object", node)[0] != "superseded", "the preview wrote"
+
+        # A keyword the family arm cannot honour is refused by the PREVIEW with
+        # the WRITE's own words — one helper, compared value-for-value.
+        refused_preview = mcp.tortoise_supersede(node, successor, True, dry_run=True)
+        refused_write = mcp.tortoise_supersede(node, successor, True, dry_run=False)
+        assert "transfer_edges=True" in refused_preview.get("error", ""), refused_preview
+        assert refused_preview == refused_write, (refused_preview, refused_write)
+        assert _row(sdk, "Object", node)[0] != "superseded", "a refusal wrote"
+
+        # The Point arm keeps its edge walk (the family branch must not swallow it).
+        point = _make(sdk, "Point", "preview-point")
+        point_v2 = _make(sdk, "Point", "preview-point-v2")
+        point_preview = mcp.tortoise_supersede(point, point_v2, dry_run=True)
+        assert point_preview.get("dry_run") is True, point_preview
+        assert point_preview.get("corrects_edge"), point_preview
+        assert _row(sdk, "Point", point)[0] != "superseded", "the preview wrote"
+    finally:
+        mcp._get_org_sdk = original
+        _transport_mode.set(None)
+        _current_org_id.set(None)
+        _current_org_limits.set(None)
