@@ -227,12 +227,13 @@ do not: a warning that names nothing serves a caller who does not exist. The **9
 > `tortoise_onboarding_demo_create`, `tortoise_onboarding_github_connect`,
 > `tortoise_onboarding_github_status` are no longer in `TOOL_REGISTRY` (76 live tools then).
 > **This branch's `graph_overview` container then moved the live surface from 76 to 72 at that
-> head**, so 72 was the figure there until #11609 batch 1 moved the live surface from 72 to 68;
-**at this head BOTH Phase 2 lanes have landed, and their waves compose: batch 2's
-SOURCES/MINE/SESSION containers moved the live surface 68 → 67 at their own wave, lane B's
-WRITE/MUTATE containers took it 67 → 59, and #11609 family A's READ/QUERY containers then
-took the live surface 59 → 55**
-> (`uv run python tools/surface_manifest.py check` is the live count).
+> head**, so 72 was the figure there until #11609 batch 1 moved the live surface 72 → 68;
+> **#11609 lane B's six WRITE/MUTATE containers then took it 68 → 60**, **#12948's
+> SOURCES/MINE/SESSION containers then took it 60 → 59**, **#12951's
+> READ/QUERY containers took the live surface 59 → 55**, and **#11609's door-retirement wave
+> (#4282 Phase 2, the seven doors whose containers the three waves above had already
+> advertised) took the live surface 55 → 48 — which is the live advertised count at this
+> head** (`uv run python tools/surface_manifest.py check` is the live count).
 > **The five REMOVED tools'** capabilities survive as hand-written REST
 > routes in `tortoise/hosted_api.py` (`POST /v1/demo`, `GET|PATCH /v1/onboarding/state`,
 > `POST /v1/onboarding/seed`, `POST /v1/onboarding/github/connect`,
@@ -346,21 +347,28 @@ tools with 30 retired-forward entries — every one of the seven still ANSWERS
 on its retired name (#3883), which is why the advertised count falls while the served count does
 not, and **none of them is archived** — a name with a destination keeps its shim.
 
-**Composed at this head** (this PR's re-cut onto the branch that already carries lane B): the two
-records above describe two waves that are now on the SAME tree, so they compose rather than replace
-one another: the three batches composing on this tree took the live surface 68 → 55 — batch 2's
-SOURCES/MINE/SESSION containers 68 → 67, lane B's WRITE/MUTATE containers 67 → 59, and #11609's
-READ/QUERY family A (#12951) retiring nine advertised doors into the six containers it landed,
-59 → 55 — so the surface is now **55 advertised tools**
-with **53** retired-forward entries (68 + 6 + 6 − 7 − 14 = 59, then 59 − 9 + 5 = 55;
-and 23 + 7 + 14 + 9 = 53 — every retired name still answers on its retired name), and the SERVED
-population is **108**
-(55 live + 53 shims). Both waves' SDK halves compose the same way:
-125 → 120 (#12901 wave 1) → 112 (#11609's READ/QUERY family A, #12951: six containers in, fourteen
-read methods re-privatised) → 111 (lane B: four retired, three delivered) → 110 (batch 2: six approved
-in, seven retired out) → **94** (#12901 wave 2: sixteen control-plane doors closed, their bodies kept
-private). Every number here is MEASURED off the merged registry, not added
-by hand — `tools/bridge_table.py` and `tests/test_tool_risk_tiers.py` read the same three.
+**Composed at this head — ALL THREE waves.** The records above describe waves that are now on the
+SAME tree, so they COMPOSE rather than replace one another, and no single wave's number is the
+answer (each was measured on its own base). They retire DISJOINT door sets — the READ/QUERY
+wave's nine, the WRITE/MUTATE wave's fourteen and the SOURCES/MINE/SESSION wave's seven share no
+name — so the composed surface is:
+
+- the surface is now **48 advertised tools** with **60** retired-forward entries: the three
+  container waves and the door-retirement wave compose on ONE tree — each wave was measured on
+  its own base, so
+  (68 − 9 + 5 − 14 + 6 − 7 + 6 = 55, then the door wave's −7 with no container row arriving =
+  48, and 23 + 9 + 14 + 7 + 7 = 60) over a SERVED population of
+  **108** rows (48 live + 60 shims), which is what `config/surface-order.yml` totals and what
+  `surface_manifest.py check` re-derives;
+- **94 public SDK methods**, composed the same way, on a surface this wave does not touch:
+  125 → 120 (#12901 wave 1) → 112 (#11609's READ/QUERY family A, #12951: six containers in,
+  fourteen read methods re-privatised) → 111 (lane B: four retired, three delivered) → 110
+  (batch 2: six approved in, seven retired out) → **94** (#12901 wave 2: sixteen control-plane
+  doors closed, their bodies kept private). The door-retirement wave retires MCP names only, so
+  it contributes no SDK term — 94 is `origin/main`'s pinned count and this branch inherits it.
+
+Every number here is MEASURED off the merged registry, not added by hand — `tools/bridge_table.py`,
+`tools/surface_manifest.py` and `tests/test_tool_risk_tiers.py` read the same three.
 
 Three consequences for readers of the paragraph below, which is left as written because it records
 the 2026-10-27 ruling, not the current state:

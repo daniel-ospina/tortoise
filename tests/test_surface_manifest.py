@@ -302,15 +302,24 @@ def test_the_owner_facing_docs_present_tense_counts_are_the_derived_ones():
         f"carries {retired}"
     )
 
-    # 2. "took the live surface A → B" — B is a claim about this head.
-    live_endpoints = [
-        int(b) for b in re.findall(r"took the live surface \d+\s*→\s*(\d+)", canonical)
+    # 2. "took the live surface A → B" — the move COMPOSES, so the rule is the chain.
+    # #11609 lane E added a second movement to this doc (59 → 55, then 55 → 48), and each
+    # endpoint except the LAST is an intermediate state, not a claim about this head. So:
+    # every move's endpoint must be the next move's start (the composition is stated, not
+    # implied), and the LAST endpoint is the one that must equal this head's count.
+    moves = [
+        (int(a), int(b))
+        for a, b in re.findall(r"took the live surface (\d+)\s*→\s*(\d+)", canonical)
     ]
-    assert live_endpoints, "the canonical doc stopped naming the surface this container lands on"
-    assert live_endpoints == [live] * len(live_endpoints), (
-        f"canonical-mcp-tools.md ends the container's movement on {live_endpoints[0]} advertised "
-        f"tools; the manifest derives {live}"
-    )
+    assert moves, "the canonical doc stopped naming the surface this container lands on"
+    for (start_a, end_a), (start_b, _end_b) in zip(moves, moves[1:]):
+        assert end_a == start_b, (
+            "canonical-mcp-tools.md records two movements that do NOT compose: "
+            f"{start_a} → {end_a} then {start_b} → … — the later wave measured on a base the "
+            "earlier one did not produce")
+    assert moves[-1][1] == live, (
+        f"canonical-mcp-tools.md ends the container's movement on {moves[-1][1]} advertised "
+        f"tools; the manifest derives {live}")
 
     # 3. The vision doc's present-tense restatement of the same two numbers.
     served_claims = re.findall(r"the MCP server serves \*\*(\d+) tools\*\* \((\d+) of them advertised", vision)
@@ -2316,7 +2325,16 @@ def test_response_fields_block_is_present_and_anchored():
         "the response_fields block is the single source of truth for "
         "off-by-default response additions and must not be empty or missing"
     )
+    # A retired-FORWARD name is STILL SERVED (#3883), so a record anchored to one
+    # describes a real response — and the seven doors #11609 lane E retired each carry
+    # true rows here. Reading only the advertised rows made the anchor demand the
+    # opposite: delete a record of keys the shim still emits. Same rule as
+    # `surface_manifest._check_manifest` (#11609 lane E).
     row_names = {str(r["name"]) for r in doc["rows"] if isinstance(r, dict) and "name" in r}
+    row_names |= {
+        str(r["name"]) for r in (doc.get("retired") or [])
+        if isinstance(r, dict) and r.get("name")
+    }
     for rf in block:
         assert rf.get("response") and rf.get("field"), f"malformed entry: {rf!r}"
         assert rf["response"] in row_names or f"sdk:{rf['response']}" in row_names, (

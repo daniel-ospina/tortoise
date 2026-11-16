@@ -3867,8 +3867,21 @@ def cmd_check(args: argparse.Namespace) -> int:
         # read — an endpoint response is anchored by its `sdk:<method>` row, and
         # `_partition_rows` drops exactly those. Reading `rows` here made the anchor
         # property unable to see any SDK endpoint at all.
+        #
+        # ⛔ AND THE RETIRED-FORWARD NAMES ARE ANCHORS TOO (#11609 lane E). A retired name
+        # is STILL SERVED (#3883): it resolves, it runs, and its response carries the very
+        # fields this block records — so a record anchored to one describes a real surface.
+        # Reading only `rows` (the ADVERTISED surface) made the rule demand the opposite:
+        # the seven doors lane E retired each carried true `response_fields` rows, and the
+        # only way to satisfy the anchor was to DELETE them — losing a record of keys the
+        # shim still emits, to satisfy a rule about anchoring. The retired block is where
+        # those names live now, so it is read here.
         _row_names = {
             str(r["name"]) for r in doc["rows"] if isinstance(r, dict) and "name" in r
+        } | {
+            str(r["name"])
+            for r in (doc.get("retired") or [])
+            if isinstance(r, dict) and r.get("name")
         }
         for rf in _rf_block:
             if not isinstance(rf, dict) or not rf.get("response"):
