@@ -3215,6 +3215,17 @@ def test_a_BRANCH_may_not_have_run_so_the_file_is_HELD(tmp_path, monkeypatch):
             'case "${ENV}" in prod) export TORTOISE_EMBED_GATE=1 ;; esac\n',
             "case ${ENV:-prod} in prod) export TORTOISE_EMBED_GATE=1 ;; esac\n",
             'case "$ENV" in "prod") export TORTOISE_EMBED_GATE=1 ;; esac\n',
+            # ⛔ …and a QUOTED / COMMAND-SUBSTITUTED subject with an ALTERNATION arm: the
+            # pattern-position test still spelled the subject as a class without `{`, `}`,
+            # quotes or SPACES, so `case "${ENV}" in prod|staging)` and
+            # `case $(echo prod) in prod)` failed it, the `|` fell through to the subshell
+            # return, and the line was dropped — a definite `OFF` with an EMPTY
+            # `indeterminate` bucket where bash arms (measured; fresh review of `#12902`,
+            # P1/P2). The subject is now any shell WORD up to the ` in ` before the pattern.
+            'case "${ENV}" in prod|staging) export TORTOISE_EMBED_GATE=1 ;; esac\n',
+            "case ${ENV:-prod} in prod|staging) export TORTOISE_EMBED_GATE=1 ;; esac\n",
+            "case $(echo prod) in prod) export TORTOISE_EMBED_GATE=1 ;; esac\n",
+            "case `echo prod` in prod) export TORTOISE_EMBED_GATE=1 ;; esac\n",
     ):
         shipped = _shipped(script)
         assert shipped["per_surface"]["entrypoint"]["state"] == "UNMEASURED", (
@@ -3291,6 +3302,16 @@ def test_a_BRANCH_may_not_have_run_so_the_file_is_HELD(tmp_path, monkeypatch):
     # measured reading; what must never return is `ON`.
     assert _shipped("foo|bar) export TORTOISE_EMBED_GATE=1\n")[
         "per_surface"]["entrypoint"]["state"] == "OFF"
+    # ⛔ …and the same FALSE-ARM direction through the CONSTRUCT GATE, where the two depth
+    # counters can DESYNC: an unmatched `done`/`fi` inside a `case` leaves the line
+    # "covered" by `_shell_case_open_lines` while `_shell_control_flow_lines` no longer
+    # calls it a control line, and the arm was then stripped and scored UNCONDITIONALLY —
+    # definite `ON` over a script bash REFUSES (`bash -n` exit 2, nothing runs, so the flag
+    # is UNSET). `in_case` now requires BOTH, so a desync can over-hold but never over-arm
+    # (fresh review of `#12902`, P3).
+    assert _shipped("case $ENV in\n  prod) ;;\ndone\n"
+                    "  prod) export TORTOISE_EMBED_GATE=1 ;;\nesac\n")[
+        "per_surface"]["entrypoint"]["state"] != "ON"
     # …pinned at the helper too, so the strip and the construct test cannot drift: the same
     # text IS stripped once a `case` covers it, and is NOT stripped when none does.
     assert probe._shell_strip_leading_keywords(

@@ -4231,10 +4231,15 @@ _SHELL_CASE_ARM_PATTERN = re.compile(r"^" + _SHELL_CASE_PATTERN_LIST + r"[ \t]+"
 #: parameter expansion … before the shell attempts to match", bash(1) 3.2.5.2), and
 #: both published a DEFINITE `OFF` with an empty `indeterminate` bucket — a false PASS
 #: in the direction this PR exists to close, and a regression the safer spelling
-#: CAUSED: the unquoted `case $ENV in prod)` control read `UNMEASURED`. Only a
-#: separator (`;`) and the `)` that opens the arm may not appear in the subject.
+#: CAUSED: the unquoted `case $ENV in prod)` control read `UNMEASURED`. The SUBJECT is any
+#: shell WORD that ends at the ` in ` before the pattern list — quotes, `${…}`, `$( … )` and
+#: backticks included, spaces and all — so it is matched as a non-greedy span gated by the
+#: ` in ` + pattern list that must follow, not as a character class: `case $(uname -s) in
+#: Linux) export FLAG=1 ;; esac` is ordinary bash and ARMS (measured), and a class that
+#: excludes SPACES scored it a definite `OFF` (fresh review of `#12902`, P1/P2).
+_SHELL_CASE_SUBJECT = r".+?"
 _SHELL_CASE_SUBJECT_PATTERN = re.compile(
-    r"^[^ \t;)]+[ \t]+in[ \t]+" + _SHELL_CASE_PATTERN_LIST + r"[ \t]*")
+    r"^" + _SHELL_CASE_SUBJECT + r"[ \t]+in[ \t]+" + _SHELL_CASE_PATTERN_LIST + r"[ \t]*")
 
 #: ⛔ A PATTERN POSITION is where a `case` arm's pattern list begins: the first alternative,
 #: bare or after `case <subject> in` — OR after a bare `in`, because bash lets the head be
@@ -4247,7 +4252,8 @@ _SHELL_CASE_SUBJECT_PATTERN = re.compile(
 #: `UNMEASURED` — so the bar was what made a held shape definite (fresh review of `#12902`,
 #: P2).
 _SHELL_CASE_PATTERN_POSITION = re.compile(
-    r"^(?:case[ \t]+[^ \t(){};&|]+[ \t]+in[ \t]+|in[ \t]+)?" + r"\(?[ \t]*" +
+    r"^(?:case[ \t]+" + _SHELL_CASE_SUBJECT + r"[ \t]+in[ \t]+|in[ \t]+)?" +
+    r"\(?[ \t]*" +
     _SHELL_CASE_ALTERNATIVE +
     r"(?:" + _SHELL_CASE_SEPARATOR + _SHELL_CASE_ALTERNATIVE + r")*$")
 
@@ -4557,7 +4563,8 @@ def _shell_export_states(text: str, flag: str) -> list[dict]:
         # +a` are ORDERED, not a file-wide flag: allexport marks the variables *created
         # or modified AFTERWARDS* (bash(1)), so an assignment BEFORE `set -a` is a plain
         # shell variable and `set +a` ends the mode.
-        for command, conditional in _shell_commands(line, number in case_open_lines):
+        for command, conditional in _shell_commands(
+                line, number in case_open_lines and number in control_lines):
             # ⛔ A BRANCH is a conditional operand one construct over: a command inside an
             # `if`/`case`/loop may not have run, and this reader cannot evaluate the test.
             # The caller holds the file for it; here it changes no state (fresh review of
@@ -5336,7 +5343,8 @@ def flag_in_shipped_configs(flag: str) -> dict:
                   conditional or number in control_lines)
                  for number, raw in enumerate(text.splitlines(), 1)
                  for index, (command, conditional)
-                 in enumerate(_shell_commands(raw, number in case_open_lines))]
+                 in enumerate(_shell_commands(
+                     raw, number in case_open_lines and number in control_lines))]
                 if posix.endswith(".sh")
                 else [(number, 0, raw, raw, False)
                       for number, raw in enumerate(text.splitlines(), 1)])
