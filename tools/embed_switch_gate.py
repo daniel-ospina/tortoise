@@ -566,10 +566,20 @@ def evaluate(root: Path = REPO_ROOT) -> tuple[list[Channel], list[str]]:
     """The channels and the failure lines. An EMPTY population is a failure, never a pass."""
     channels = discover(root)
     failures: list[str] = []
+    # ⛔ "Nothing compared" is not a pass — in EITHER shape: an empty population (nothing was
+    # discovered) and a population whose every member is `noted` (discovered shapes, none of which
+    # is a deployment channel — e.g. a compose file left with only sidecar services, whose
+    # Tortoise service lost every `TORTOISE_*` key and so stopped being recognised as one).
+    checked = [channel for channel in channels if not channel.noted]
     if not channels:
         failures.append(
             f"no deployment channel was discovered under {root} — nothing was compared, and "
             "'nothing compared' is not a pass"
+        )
+    elif not checked:
+        failures.append(
+            "every discovered manifest was skipped as a non-channel, so no deployment channel was "
+            "checked — 'nothing compared' is not a pass"
         )
     for channel in channels:
         failures.extend(channel.problems())

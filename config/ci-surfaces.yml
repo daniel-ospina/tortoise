@@ -2327,6 +2327,20 @@ surfaces:
   # nothing else, so a `core`-only registration would leave every assertion
   # asleep on the exact diff class that can break it.
   - test_12447_provision_discovery.py
+  # #12926: the embedding switches must be STATED by every deployment channel (the pre-merge
+  # check) and their effective values reported at boot. Dual-registered with `core` (see the
+  # `#12926` entry there — the check itself, the boot-report module and the two OPPOSITE defaults
+  # it pins as unmoved). This arm exists because the boot calls live in `tortoise/hosted_api.py`
+  # and `tortoise/selfhost.py`, BOTH of which are `api` SOURCE_PATTERNS that REPLACE the `core`
+  # fallback (#2938) — measured before this entry:
+  # `--changed-files tortoise/hosted_api.py` -> surfaces ['api','onboarding'] and
+  # `--changed-files tortoise/selfhost.py` -> ['api'], with this file ABSENT from `test_files` in
+  # both. So deleting `report_effective_switches()` from a daemon — the exact silent regression
+  # the Visibility half of the issue exists to prevent — merged with every pin here asleep, and
+  # `--integrity` cannot see it (it does not read `CORE_ALSO`, and it never judges a
+  # cross-surface gap). Same #10465/#5084 silent-drop class as the `test_embed_gate_5008.py`
+  # `eval` arm and the `tools/dod_5090_probe.py` `CORE_ALSO` row.
+  - test_embed_switch_gate_12926.py
   battery:
   - test_stdlib_shadow_guard.py  # #10060 N1: repo-wide guard — see the note on the `api` entry
   - test_battery_arms.py

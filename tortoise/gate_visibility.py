@@ -40,37 +40,49 @@ from . import embed_gate, value_gate
 
 _logger = logging.getLogger(__name__)
 
-#: ``(switch, resolver, default-behind-unset)`` — the resolver is the module's own
+#: ``(switch, resolver)`` — the resolver is the module's own
 #: ``resolve_enabled``, i.e. the ONE place each default is applied, so this table cannot
 #: disagree with the write path about what "absent" means. (It calls ``resolve_enabled`` rather
 #: than ``*_gate_enabled()`` so the *flag read* stays at the one seam each module documents —
 #: `tests/test_embed_gate_5008.py::test_the_EMBED_flag_is_read_at_the_submission_seam_only`
 #: pins that — while the *resolution* is still shared, never re-spelled here.) Ordered as the
 #: epic states the two questions: the DISCARD one, then the EMBED one.
-SWITCHES: tuple[tuple[str, Any, str], ...] = (
-    (value_gate.ENV_FLAG, value_gate.resolve_enabled, "ON"),
-    (embed_gate.ENV_FLAG, embed_gate.resolve_enabled, "OFF"),
+SWITCHES: tuple[tuple[str, Any], ...] = (
+    (value_gate.ENV_FLAG, value_gate.resolve_enabled),
+    (embed_gate.ENV_FLAG, embed_gate.resolve_enabled),
 )
 
 
 def effective_switches() -> tuple[dict, ...]:
     """Each switch: its effective value, the value it was stated with, and where it came from.
 
-    ``stated`` is ``None`` when the variable is absent — the case the whole issue is about — and
-    the empty string when it is present but blank (the truthy contract reads that as unset too,
-    so the report names the code default rather than implying an operator chose it).
+    Three SOURCES, and the middle one is a distinct fact rather than a rounding of the other two
+    (review P3): ``absent`` is the case the whole issue is about; ``blank`` is a variable that
+    exists and states nothing — and the truthy contract reads a blank value as **OFF for BOTH**
+    switches, so calling it "unset → code default ON" for the value gate would print a default
+    that is NOT the value in force; ``environment`` is an operator's real statement.
+
+    ``code_default`` is DERIVED by resolving ``None`` through the same function, never written
+    out as a literal here: a hand-written "ON"/"OFF" copy is a second declaration of each default
+    that no test compares, so a future reopen of `#11445` could leave this line contradicting the
+    gate it reports on — the exact failure the module exists to prevent.
     """
     reported: list[dict] = []
-    for switch, resolve, default in SWITCHES:
+    for switch, resolve in SWITCHES:
         raw = os.environ.get(switch)
-        stated = raw is not None and bool(str(raw).strip())
+        if raw is None:
+            source = "absent"
+        elif not str(raw).strip():
+            source = "blank"
+        else:
+            source = "environment"
         reported.append(
             {
                 "switch": switch,
-                "effective": bool(resolve(os.environ.get(switch))),
+                "effective": bool(resolve(raw)),
                 "stated": raw,
-                "source": "environment" if stated else "code-default",
-                "default_when_unset": default,
+                "source": source,
+                "code_default": bool(resolve(None)),
             }
         )
     return tuple(reported)
@@ -81,10 +93,12 @@ def startup_line() -> str:
     parts = []
     for report in effective_switches():
         value = "ON" if report["effective"] else "OFF"
-        if report["source"] == "environment":
-            origin = f"stated {report['stated']!r}"
+        if report["source"] == "absent":
+            origin = f"unset → code default {'ON' if report['code_default'] else 'OFF'}"
+        elif report["source"] == "blank":
+            origin = f"stated {report['stated']!r} — blank reads as unset, so this value is the residual"
         else:
-            origin = f"unset → code default {report['default_when_unset']}"
+            origin = f"stated {report['stated']!r}"
         parts.append(f"{report['switch']}={value} ({origin})")
     return "tortoise embedding gates: " + " ".join(parts)
 
