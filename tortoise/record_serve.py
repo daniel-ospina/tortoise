@@ -438,6 +438,27 @@ ANCHORED_READS: dict[str, AnchoredRead] = {
                "credential, and the selfhost surface presents none — serving it "
                "would need its own tenant decision, not a copy of this one.",
     ),
+    "auto-detect-by-id": AnchoredRead(
+        name="auto-detect-by-id",
+        status=NOT_SERVED,
+        cypher="MATCH (n) WHERE n.id = $id OR n.eventId = $id OR n.url = $id "
+               "RETURN n LIMIT 1  (through `projection._resolve_entity`, "
+               "POINT PRIORITY over Point/Subject/Object/Source/Event)",
+        reason="the BARE by-id door — `tortoise_get_entity(<id>)` and "
+               "`tortoise_get(<id>)` with no `type` (`mcp_server._get_auto_detect`) "
+               "— resolves a node id across FIVE labels with Point priority and "
+               "then an AgentSession lookup, all on the cache. It carries a "
+               "coordinate but not ONE label's, so a record answer would have to "
+               "re-decide the resolution ORDER across labels before it could "
+               "claim parity, and `node-by-key`'s parity is measured for `Point` "
+               "only (#9721). Enumerated here rather than left unlisted because "
+               "it is a LIVE caller-facing read-your-writes gap: an agent that "
+               "writes a Point and verifies with the bare form still reads `{}` "
+               "(#12941's residual, filed there rather than absorbed by a parity "
+               "claim this unit cannot show). The TYPED point form "
+               "(`type=\"point\"`) is served — it lands on "
+               "`tortoise_get_point`, see `internal-accessor`.",
+    ),
     "whole-graph": AnchoredRead(
         name="whole-graph",
         status=NOT_SERVED,

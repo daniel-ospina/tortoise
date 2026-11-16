@@ -189,6 +189,96 @@ def test_MCP_says_not_hot_when_the_record_could_not_be_asked(monkeypatch,
     assert out.get("fallbackReason") == rs.FALLBACK_RECORD_UNAVAILABLE
 
 
+def test_MCP_an_ESTABLISHED_absence_still_returns_an_empty_dict(monkeypatch,
+                                                               mcp_harness):
+    """#12941 review P0-1: the absence shape must stay FALSY.
+
+    The seam's attribution was being merged into an empty answer, so a point
+    that does not exist came back as a TRUTHY dict — and a verifier written as
+    `if out: my write landed` read an absence as a success, the same wrong
+    answer this issue removes, inverted. `hosted_api` never had this problem (an
+    absence is a 404 wrapper); the MCP door must not either.
+    """
+    from tortoise.mcp_server import tortoise_get_point
+
+    rs.reset_fallback_counts()
+    monkeypatch.setenv(rs.RECORD_SERVE_ENV, rs.MODE_PREFER)
+    # The record WAS asked and holds no such row: an absence, not `not-hot`.
+    monkeypatch.setattr(rs, "open_record", _opener(_FakeConn(rows=[])))
+    mcp_harness(None)
+
+    out = tortoise_get_point("p-1")
+
+    assert out == {}, f"an established absence must stay falsy — got {out!r}"
+    assert not out
+
+
+def test_MCP_record_mode_absence_is_also_empty(monkeypatch, mcp_harness):
+    """…and `record` mode (which never falls back) keeps the same falsy shape."""
+    from tortoise.mcp_server import tortoise_get_point
+
+    monkeypatch.setenv(rs.RECORD_SERVE_ENV, rs.MODE_RECORD)
+    monkeypatch.setattr(rs, "open_record", _opener(_FakeConn(rows=[])))
+    mcp_harness(None)
+
+    assert tortoise_get_point("p-1") == {}
+
+
+def test_MCP_resolves_the_tenant_the_lane_actually_carries(monkeypatch,
+                                                          mcp_harness):
+    """The MCP lane carries the tenant AMBIENTLY, not on the SDK (#12941 P2-3).
+
+    `mcp_auth._get_org_sdk` never sets `_record_tenant`; the tenant arrives
+    through `record_writer.use_record_tenant`, installed by
+    `OrgResolutionMiddleware` (`_record_tenant_scope`) for the whole request. A
+    stub that hand-sets `_record_tenant` would prove the plumbing and nothing
+    about production, so this test carries NO carried tenant — only the ambient
+    scope — and the record read must still happen.
+    """
+    from tortoise import mcp_server
+    from tortoise.record_writer import use_record_tenant
+
+    rs.reset_fallback_counts()
+    monkeypatch.setenv(rs.RECORD_SERVE_ENV, rs.MODE_PREFER)
+    monkeypatch.setattr(rs, "open_record", _opener(_FakeConn(rows=[_row()])))
+    stub = _sdk_class()(None, tenant=None)      # the production shape
+    monkeypatch.setattr(mcp_server, "_get_org_sdk", lambda: stub)
+
+    with use_record_tenant(*TENANT):
+        out = mcp_server.tortoise_get_point("p-1")
+
+    assert out.get("id") == "p-1", (
+        "the ambient tenant the MCP lane installs was not used, so the read "
+        f"never reached the record — got {out!r}")
+    assert out.get("servedFrom") == "record"
+
+
+def test_MCP_attribution_shadows_a_stored_property_of_the_same_name(monkeypatch,
+                                                                    mcp_harness):
+    """The reserved-name rule (#12941 P2-3), the same one the hosted door states.
+
+    A point whose own props carry `servedFrom` must not be able to forge an
+    attribution — and in `off` mode, where no attribution exists, the stored
+    value must pass through untouched (the pre-#12941 shape).
+    """
+    from tortoise.mcp_server import tortoise_get_point
+
+    stored = {"id": "p-1", "servedFrom": "user-owned", "status": "live"}
+    # `off`, unarmed: the stored property is the caller's data and nothing else.
+    monkeypatch.delenv(rs.RECORD_SERVE_ENV, raising=False)
+    monkeypatch.delenv("TORTOISE_RESIDENCY", raising=False)
+    mcp_harness(stored)
+    assert tortoise_get_point("p-1")["servedFrom"] == "user-owned"
+
+    # Armed and served by the cache: the attribution WINS.
+    rs.reset_fallback_counts()
+    monkeypatch.setenv(rs.RECORD_SERVE_ENV, rs.MODE_PREFER)
+    monkeypatch.setattr(rs, "open_record", _opener(_FakeConn(rows=[])))
+    mcp_harness(stored)
+    assert tortoise_get_point("p-1")["servedFrom"] == "cache", (
+        "a stored property forged an attribution on an armed read")
+
+
 # ── 2. the SDK door — the same two guarantees, opt-in ──────────────────────
 
 
@@ -291,7 +381,9 @@ def test_SDK_a_RECORD_answered_absence_is_never_marked_not_hot(monkeypatch):
 # ── 3. the hosted door — the 404 must carry the verdict ────────────────────
 
 
-def _call_endpoint(monkeypatch, mode, *, cache="empty", record=None):
+def _call_endpoint(monkeypatch, mode, *, cache="empty", record=None,
+                   declaration=None):
+    """Drive the REAL route. `declaration` arms the residency `:Meta` marker."""
     from fastapi import HTTPException
 
     import tortoise.hosted_api as api
@@ -301,10 +393,23 @@ def _call_endpoint(monkeypatch, mode, *, cache="empty", record=None):
             class _G:
                 def query(self, sql, params=None, **_k):
                     if ":Meta" in sql:
-                        return type("_R", (), {"result_set": []})()
-                    rows = ([[{"id": "p-1", "content": "cache",
-                               "pointKind": "claim", "status": "live"}]]
-                            if cache == "props" else [])
+                        meta = ([[declaration[0], declaration[1]]]
+                                if declaration else [])
+                        return type("_R", (), {"result_set": meta})()
+                    # The tombstone rule lives in the QUERY: the cache hands a
+                    # retracted point to the endpoint as "no row", exactly as the
+                    # production Cypher does.
+                    if cache == "retracted":
+                        # The TOMBSTONE-FILTERED query (the one whose text names
+                        # `retracted`) answers "no row"; the any-status query
+                        # answers the retracted node (#12941 review P1-3).
+                        rows = ([] if "retracted" in sql else
+                                [[{"id": "p-1", "status": "retracted"}]])
+                    elif cache == "props":
+                        rows = [[{"id": "p-1", "content": "cache",
+                                  "pointKind": "claim", "status": "live"}]]
+                    else:
+                        rows = []
                     return type("_R", (), {"result_set": rows})()
             return type("P", (), {"g": _G()})()
 
@@ -359,6 +464,41 @@ def test_hosted_off_mode_carries_no_verdict_without_its_own_flag(monkeypatch):
     assert body is None and err is not None and err.status_code == 404
     assert err.detail == "Point not found", (
         "off mode must stay byte-identical: a plain string detail, no wrapper")
+
+
+def test_hosted_off_mode_reports_not_hot_for_a_partial_cache(monkeypatch):
+    """#7952 at the hosted door: `off` + a PARTIAL cache is not an absence.
+
+    The marker has its OWN flag (`TORTOISE_RESIDENCY`), which is why this does
+    not move the default — a deployment that arms neither switch is unchanged.
+    """
+    monkeypatch.delenv(rs.RECORD_SERVE_ENV, raising=False)
+    monkeypatch.setenv("TORTOISE_RESIDENCY", "1")
+    body, err = _call_endpoint(monkeypatch, rs.MODE_OFF, cache="empty",
+                               declaration=("partial", ["other"]))
+
+    assert body is None and err is not None and err.status_code == 404
+    assert isinstance(err.detail, dict), f"expected a verdict, got {err.detail!r}"
+    assert err.detail[RESIDENCY_FIELD] == RESIDENCY_NOT_HOT
+
+
+def test_hosted_off_mode_does_not_mark_a_RETRACTED_point_not_hot(monkeypatch):
+    """The mirror (#12941 review P1-3): the cache CAN see a retracted point.
+
+    `_cache_props` applies the endpoint's tombstone rule, so a retracted node
+    answers this route with `None`. Reading that as "the store cannot see it"
+    marked a node the store plainly holds `not-hot` — a false impairment on a
+    correctness-guaranteed 404.
+    """
+    monkeypatch.delenv(rs.RECORD_SERVE_ENV, raising=False)
+    monkeypatch.setenv("TORTOISE_RESIDENCY", "1")
+    body, err = _call_endpoint(monkeypatch, rs.MODE_OFF, cache="retracted",
+                               declaration=("partial", ["other"]))
+
+    assert body is None and err is not None and err.status_code == 404
+    assert err.detail == "Point not found", (
+        "a retracted point the cache holds was reported as an impairment — "
+        f"got {err.detail!r}")
 
 
 # ── 4. the three modes, named once ────────────────────────────────────────

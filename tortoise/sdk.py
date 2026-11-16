@@ -26948,7 +26948,14 @@ class TortoiseSDK:
         return {"results": results, "total": total, "hasMore": skip + limit < total}
 
     def get_point(self, id: str, *, served_out: dict | None = None) -> dict:
-        """Get a Point by ID. Returns dict of all properties, or {} if not found.
+        """Get a Point by ID. Returns dict of all properties, or ``{}`` if absent.
+
+        Two absent shapes, and only two: ``{}`` when the absence is ESTABLISHED
+        (the record was asked and holds no such row, or `off` mode is unarmed),
+        and ``{residency: "not-hot"}`` when nobody who could see the node was
+        consulted (#7952 — a cache miss is never reported as an empty answer).
+        Both are falsy only in the first case, which is what keeps `if props:`
+        a correct write-verification for a caller.
 
         #432: retracted points (status='retracted') ARE returned by get_point
         — they are tombstoned, not deleted. Query surfaces exclude them by
@@ -26992,11 +26999,27 @@ class TortoiseSDK:
         exist"*. ``TORTOISE_RESIDENCY`` gates that marker in ``off`` mode, the
         same as everywhere else.
         """
-        proj = self._get_proj()
+        # ⛔ THE PROJECTION IS LAZY (#12941 review P1-1). Opening it is a COLD
+        # OPEN (connect, version probe, `_ensure_indexes()`, and on a restored
+        # graph an index BUILD budgeted by `probe_setup_timeout()`), and in
+        # `record` mode this read must answer with the graph engine STOPPED —
+        # that is the property the mode exists for (`record_serve`'s header) and
+        # the one `hosted_api.get_point` already honours by constructing no
+        # handle at all. So the handle is built on FIRST USE: never in `record`
+        # mode, and on the MCP lane (which builds a fresh SDK per call,
+        # `mcp_auth._get_org_sdk`) that is the difference between paying a cold
+        # open for every armed read and paying it only when the cache is really
+        # needed.
+        _proj: list = []
+
+        def _cache_handle():
+            if not _proj:
+                _proj.append(self._get_proj())
+            return _proj[0]
 
         def _cache_answer() -> dict | None:
             """The cache's answer: ``None`` for a miss (the seam's vocabulary)."""
-            rows = proj.g.query(
+            rows = _cache_handle().g.query(
                 "MATCH (n:Point {id:$id}) RETURN properties(n)",
                 params={"id": id},
             ).result_set
@@ -27036,7 +27059,7 @@ class TortoiseSDK:
             # repaired: the marker says "this store cannot see it", which is all a
             # partial cache (or an armed deployment) can honestly say.
             props = _cache_answer() or {}
-            marker = point_residency(proj.g, found=bool(props), key=id)
+            marker = point_residency(_cache_handle().g, found=bool(props), key=id)
             # ⛔ OFF emits NO attribution — that is the pre-#12941 shape, and the
             # `servedFrom`/`fallbackReason` pair is the ARMED read's statement
             # about a fallback, of which `off` performs none (`hosted_api.get_point`

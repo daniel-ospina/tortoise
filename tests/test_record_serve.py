@@ -172,8 +172,9 @@ def test_the_registry_serves_the_anchored_surface_and_nothing_else():
     assert set(rs.served_reads()) == {rs.READ_POINT_BY_ID, rs.READ_NODE_BY_KEY}
     # The exclusions are part of the decision, not an omission.
     assert set(rs.not_served_reads()) == {
-        "anchored-neighbours", "anchored-ep-scalars", "entity-accessor",
-        "internal-accessor", "selfhost-endpoint", "whole-graph",
+        "anchored-neighbours", "anchored-ep-scalars", "auto-detect-by-id",
+        "entity-accessor", "internal-accessor", "selfhost-endpoint",
+        "whole-graph",
     }
 
 

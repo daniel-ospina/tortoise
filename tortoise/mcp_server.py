@@ -5188,6 +5188,14 @@ def tortoise_get_point(id: str) -> dict:
     """Get a single Point by ID. Returns all properties, or empty dict.
     Alias → get(id, type='point') (epic #888 W3).
 
+    ⚠️ ARMED MODES (`TORTOISE_RECORD_SERVE`) change what an ABSENT answer looks
+    like, in one direction only: a node that does not exist still returns `{}`,
+    while an answer the store could not SEE returns a dict carrying
+    `residency: "not-hot"`. That is deliberate — `not-hot` is never an empty
+    answer (#7952), and a found node additionally names the store that answered
+    (`servedFrom` / `fallbackReason`). With the flag unset the response is
+    unchanged.
+
     #12941 — THIS DOOR HONOURS `TORTOISE_RECORD_SERVE`. The read runs through
     `TortoiseSDK.get_point(..., served_out=...)`, the opt-in caller-facing form
     of the one seam (`tortoise/record_serve.py`), so an agent that writes and
@@ -5201,18 +5209,39 @@ def tortoise_get_point(id: str) -> dict:
     all — `record_serve`'s `internal-accessor` exclusion was written when it
     could not.
 
+    ⛔ AN ARMED ABSENCE STILL RETURNS `{}` (#12941 review P0-1). The seam's
+    attribution is NOT merged into an answer that found nothing: this tool's
+    contract is "properties, or empty dict", and a verifier written as
+    `if out: my write landed` would read a TRUTHY attribution dict for a node
+    that does not exist as a success — the same wrong answer this issue removes,
+    inverted. So an absence the RECORD established (`servedFrom: record`, or a
+    `record-miss` fallback) returns `{}` exactly as `off` mode does; only a
+    `not-hot` answer — which is NOT an absence claim, and must never read as an
+    empty one (#7952) — returns a non-empty dict, carrying the marker and the
+    reason. The full attribution for an established absence stays available to
+    SDK callers through the `served_out` sink, which is caller-owned and cannot
+    be confused with the node.
+
     ⛔ OWNERSHIP OF THE OUT-DICT. `served_out` is filled by the seam and merged
-    here, and the attribution WINS over a stored property of the same name: a
-    caller that cannot tell a fallback from stored data would have exactly the
-    invisible fallback this seam forbids (the reserved-name rule
-    `hosted_api.get_point` states). In `off` mode with no marker armed the dict
-    is empty, so the response is the pre-#12941 shape exactly.
+    into a FOUND answer, and there the attribution WINS over a stored property
+    of the same name: a caller that cannot tell a fallback from stored data
+    would have exactly the invisible fallback this seam forbids (the
+    reserved-name rule `hosted_api.get_point` states). In `off` mode with no
+    marker armed the dict is empty, so the response is the pre-#12941 shape
+    exactly.
     """
     served: dict = {}
     out = _safe(_get_org_sdk().get_point, id, served_out=served)
     if not isinstance(out, dict) or isinstance(out, _SafeError):
         return out
-    return {**(out or {}), **served} if served else out
+    if not out:
+        # No node. Return the not-hot verdict when the seam reached one, else the
+        # empty dict that means "not here" (#12941 review P0-1).
+        from tortoise.residency import RESIDENCY_FIELD
+
+        marker = served.get(RESIDENCY_FIELD)
+        return {RESIDENCY_FIELD: marker, **served} if marker else {}
+    return {**out, **served}
 
 
 # ── Entity Resolution (GAP-01 #6987) ──────────────────────────
@@ -7314,6 +7343,15 @@ def _get_auto_detect(id: str) -> dict:
     Order: canonical entity resolution (id | eventId | url, Point priority)
     then AgentSession lookup by session_id/sessionId. Returns {} when the
     id matches nothing (same contract as get_point/get_entity).
+
+    ⚠️ RESIDUAL (#12941): this door reads the CACHE only and names no store, and
+    it is enumerated as its own `record_serve.ANCHORED_READS` exclusion
+    (`auto-detect-by-id`) rather than served — it resolves across five labels
+    with Point priority, so a record answer would have to re-decide the
+    resolution ORDER before it could claim parity. An agent verifying a
+    just-written POINT through this bare form therefore still reads `{}`; the
+    typed form (`tortoise_get(id, type="point")` → `tortoise_get_point`) honours
+    the seam.
     """
     sdk = _get_org_sdk()
     try:

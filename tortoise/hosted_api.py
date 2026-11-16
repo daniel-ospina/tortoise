@@ -13875,6 +13875,22 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
         ).result_set
         return dict(rows[0][0]) if rows else None
 
+    def _cache_sees_node() -> bool:
+        """Can the CACHE see this id at all, tombstone included? (#12941 P1-3)
+
+        `_cache_props` applies the endpoint's TOMBSTONE rule, so a cache that
+        holds a retracted point answers `None` — reading that as "the store
+        cannot see it" would mark a node the store can plainly see `not-hot`, a
+        FALSE impairment on a correctness-guaranteed 404. Only reached on the
+        residency-armed `off` 404 arm, which is why one extra bounded read is
+        acceptable here and nowhere else.
+        """
+        rows = sdk._get_proj().g.query(
+            "MATCH (p:Point {id: $id}) RETURN properties(p)",
+            params={"id": point_id},
+        ).result_set
+        return bool(rows)
+
     served = None
     if mode != record_serve.MODE_OFF:
         tenant = _resolve_record_tenant(org)
@@ -14046,9 +14062,13 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
             # unarmed deployment still pays nothing and answers the same string.
             marker = None
             if record_serve.residency_armed():
+                # `found` is the CACHE's own visibility, not the endpoint's
+                # tombstone-filtered answer (#12941 review P1-3): only a node the
+                # cache cannot see at ALL is outside the hot set.
                 marker = await _read_offload(
                     lambda: record_serve.point_residency(
-                        sdk._get_proj().g, found=False, key=point_id),
+                        sdk._get_proj().g, found=_cache_sees_node(),
+                        key=point_id),
                     op="get_point.residency")
             if marker:
                 raise HTTPException(
