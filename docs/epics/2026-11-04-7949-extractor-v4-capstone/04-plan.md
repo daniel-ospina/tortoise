@@ -636,7 +636,8 @@ core**. So:
 
 | path | derivation | where |
 |---|---|---|
-| **operator / label path** | ✅ **already derived** from the packs: `declared \|= {r.get("predicate") for r in reg.list_relations()}` | `tortoise/sdk.py:25722` (`declared = declared_relation_predicates()`) → `pack_registry.py:637`/`:664` (`declared_relation_predicates()` — the `def` and the union it builds) |
+
+| **operator / label path** | ✅ **already derived** from the packs: `declared \|= {r.get("predicate") for r in reg.list_relations()}` | `tortoise/sdk.py:25892` (`declared = declared_relation_predicates()`) → `pack_registry.py:637`/`:664` (`declared_relation_predicates()` — the `def` and the union it builds) |
 | **structural path** | ⛔ **a static literal** — and it is **1 of FIVE declarations in one file**, and **not the one the verdict reads**: `relation_write_paths` reads **`STRUCTURAL_WRITE_PREDICATES`** (the union), while `create_edge` gates on `_VALID_EDGE_PREDICATES` | `projection/edges.py:717` (`_VALID_EDGE_PREDICATES`) · `:735` (`_VALID_ABOUT_EDGE_PREDICATES`) · `:751` (`STRUCTURAL_WRITE_PREDICATES`) · `:54` (`DERIVABLE_STRUCTURAL_RELS`) · `:1225` (`structural_edge_carrier`) · the reader `from .projection.edges import STRUCTURAL_WRITE_PREDICATES` at `pack_registry.py:755` (used `:761`) |
 | **per-graph gating** | ✅ **the resolver exists and is THREE-VALUED** — `pack_state.graph_installed_namespaces(sdk, *, graph_name=None)`: `None` ⇒ no `:PackInstall` records ⇒ **catalog union**; a `frozenset` ⇒ recorded ∪ already-in-data; an **empty** frozenset ⇒ a configured graph whose set is deliberately empty (`#2728`), where the union fallback **must not** apply. The SDK v2 master's write gate stays ungated (`#5202`) | `tortoise/pack_state.py:1170`; caveat in `docs/EXPANSION_PACKS.md` (`#2714`/`#2728`) |
 
@@ -714,9 +715,9 @@ receipt, not on the status code:**
 a **fresh** `session_id`" — which **discards the door's own convergence machinery and mints a second session's
 points**, double-minting silently. The door already owns the retry semantics: a same-session re-POST on a convergent
 lane is the TRUE retry (`hosted_api.py:18131` assigns `retry_failed_capture`, `:18159` consumes it at `a577d0e25c`, the head this
-section's numbers are stamps of — at this head they are `:19439`/`:19467`; blocked for `m2`);
+section's numbers are stamps of — at this head they are `:19445`/`:19473`; blocked for `m2`);
 a **replay** fires only when `capture_ok` is `True`/legacy-`None` and returns `mode: "replayed"`
-(`hosted_api.py:18717` at `a577d0e25c`; `:20036` here); and `#3129`'s abandoned marker writes `capture_ok=false` **precisely so that** a same-session
+(`hosted_api.py:18717` at `a577d0e25c`; `:20042` here); and `#3129`'s abandoned marker writes `capture_ok=false` **precisely so that** a same-session
 retry is a true retry. ⚠️ §5.4's citation (`:17212-17217`) was wrong, and the correction to it was RIGHT when
 written: the range did hold `_SESSION_CAPTURED_AT_SOURCE_VALUES` and `class SessionRequest` at `a577d0e25c`
 (`:17212`/`:17216`). The NUMBER then rotted — at `5843fdf234` (the pre-de-conflict head, and already at `d05688df59`, the

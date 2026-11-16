@@ -1289,6 +1289,7 @@ def test_the_guard_reds_when_the_live_surface_grows_past_the_high_water_pin(tmp_
     """
     doc = _manifest()
     # The pin is set ONE BELOW the live count so the run must red: the property
+
     # under test is "growth past the pin reds", not any particular number — so it is
     # READ from the live count instead of being re-typed on every surface move (#11609
     # lane B moved it 68 -> 60 and found this literal had been hand-carried twice).
@@ -4855,11 +4856,15 @@ def test_the_live_surface_is_the_baseline_the_guard_froze():
     # live, since it carries the #8482 wrap-envelope repair). The pin moves with every
     # landed container batch until the approved 27 is reached. #4282 Phase 3.2 (main) then
     # removes the five `run_onboarding` tools — a disjoint name set — so the merged
+
     # surface is 72, not either side's own figure.
     # #11609 lane B (#4282 Phase 2): 68 -> 60 — fourteen WRITE/MUTATE doors retired into
     # six approved containers (68 − 14 + 6). The retired names still ANSWER (#3883), so
     # the SERVED surface is unchanged; this pin is the ADVERTISED one.
-    assert live["mcp"] == manifest["counts"]["tools"] == 60
+    # #11609 lane C composes with lane B on this tree: 60 -> 59 (six SOURCES/MINE/SESSION
+    # containers in, seven advertised members retired into them; the 68 the branch started
+    # from is lane B's pre-wave number, so the merged arithmetic is 68 + 6 + 6 - 7 - 14).
+    assert live["mcp"] == manifest["counts"]["tools"] == 59
     # #4282 Phase 2.2 (#10053): 149 -> 150, the three approved-but-absent names now
     # having a `def` (+3) less `main`'s two retirements in #10012 (`graph_count` →
     # `_graph_count`, `org_list` deleted) (−2). The manifest pin records the same
@@ -4872,6 +4877,7 @@ def test_the_live_surface_is_the_baseline_the_guard_froze():
     # The approved 40 did not grow — the approval (`#10015` comment `6863608333`) delivers a
     # name that was already approved and unshipped, the same move PR #10053 made for three
     # rows — so `high_water_counts` (150) does not move; only the frozen ROW SET does.
+
     # 125 -> 119 in two DISJOINT retirement waves. #12901 (2026-11-15) retired five
     # off-surface methods with no production caller (125 -> 120; none an approved row).
     # #11609 lane B then took 120 -> 119, a NEGATIVE net by the batch's own rule that a
@@ -4883,7 +4889,7 @@ def test_the_live_surface_is_the_baseline_the_guard_froze():
     # ⛔ `adjust_relationship` and `refresh_confidence` are NOT implemented rows: they are
     # approved targets still ABSENT from the live class (see the 23 the declaration gate
     # prints), so naming them as delivered here was false.
-    assert live["sdk"] == manifest["counts"]["sdk_public_methods"] == 119
+    assert live["sdk"] == manifest["counts"]["sdk_public_methods"] == 118
 
 
 def test_the_sdk_count_the_sequencing_list_types_is_the_measured_one():

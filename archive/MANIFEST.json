@@ -160,6 +160,82 @@
     },
     {
       "kind": "sdk-method",
+      "symbol": "checkpoint",
+      "batch": "11609-phase2-sources-containers",
+      "reason": "name retired into mine_knowledge_from_session(items=...) (#4282 Phase 2, #11609): row 16 keeps this batch filer as its items arm, frozen here as the record of what the retired name did",
+      "file": "archive/sdk-methods/11609-phase2-sources-containers/checkpoint.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:checkpoint",
+          "sha256": "eab69267989677c61a9c9bdadb1364e83a8201916c85b101f2430c3258a5b1b3"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "create_source",
+      "batch": "11609-phase2-sources-containers",
+      "reason": "name retired into register_source (#4282 Phase 2, #11609): the approved row 14 keeps this body under its own name, frozen here as the record of what the retired name did",
+      "file": "archive/sdk-methods/11609-phase2-sources-containers/create_source.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:create_source",
+          "sha256": "8b7dffdd5c78733f9f6515623e1138fe55526d422175b7ba55c03005949edb84"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "index_directory",
+      "batch": "11609-phase2-sources-containers",
+      "reason": "name retired into index_sources_from_directory (#4282 Phase 2, #11609): row 15 keeps this walker under its own name, frozen here as the record of what the retired name did",
+      "file": "archive/sdk-methods/11609-phase2-sources-containers/index_directory.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:index_directory",
+          "sha256": "b7c271211ccc065bab96e3c76af0714ffae8db04945f64cd8828e94e28926035"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "index_sessions",
+      "batch": "11609-phase2-sources-containers",
+      "reason": "name retired into index_sources_from_directory(file_type='agent_session') (#4282 Phase 2, #11609); it was a single delegation, frozen as the record of what the retired name did",
+      "file": "archive/sdk-methods/11609-phase2-sources-containers/index_sessions.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:index_sessions",
+          "sha256": "73cf36a7a355e28c4137e276a5b43288b942ad296c3b526c5cfd2bcecaca075f"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
       "symbol": "list_relations",
       "batch": "b2-sdk-retirement-wave-1",
       "reason": "Listed pack-declared relation declarations; zero callers. CANONICAL r6_canon (row R6) records graph_overview as destination (no def today, so no hint); the beta tables never recorded a target for this name. Registry call _get_kind_expander().list_relations() survives.",
@@ -193,6 +269,25 @@
           "path": "tortoise/sdk.py",
           "node": "FunctionDef:membership_get",
           "sha256": "32964a8738eb57ac53df7d32d98ca5c74ea469389c9aafc394c2049092a75337"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "mine_corpus",
+      "batch": "11609-phase2-sources-containers",
+      "reason": "name retired into mine_knowledge_from_directory (#4282 Phase 2, #11609): row 17 keeps this miner under its own name, frozen here as the record of what the retired name did",
+      "file": "archive/sdk-methods/11609-phase2-sources-containers/mine_corpus.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:mine_corpus",
+          "sha256": "5e3af56db6e2f1cdb752c49376225b7c84eb0e1af4ba231eef2b7be6b6c9f106"
         }
       ]
     },

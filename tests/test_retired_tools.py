@@ -71,11 +71,15 @@ class TestDeclaration:
         declared surface change". Note that `beta-sdk-surface.md` says of itself, in its
         own header: "This document is a PROPOSAL, and it is NOT the authority for the
         MCP target" — where it and `canonical-mcp-tools.md` differ, canonical governs.
+        #11609 batch 2 then moved it 125 → 124 (SIX approved containers implemented, SEVEN
+        live names retired), and the phase rule is that every batch ends BELOW where it
+        started, which is what makes this pin move DOWN and never up.
         #12521 (`8e4e335b05`) gave it its `def`, approved by daniel-ospina on 2026-11-14
         and recorded at `#10015` comment `6863608333`; `docs/product/beta-sdk-surface.md`
         read *"40 methods against **125** today"* at that move and
         `config/surface-manifest.yml`'s `counts.sdk_public_methods` was `125`, so this
         assertion was then the one place still pinned to the pre-delivery number.
+
 
         TWO waves then moved it DOWN, and they are disjoint (wave 1's membership rule
         excluded any name a `tool_registry` entry bound, live or retired; the four doors
@@ -134,11 +138,14 @@ class TestDeclaration:
             for n in dir(TortoiseSDK)
             if not n.startswith("_") and callable(getattr(TortoiseSDK, n))
         ]
-        # 119 is the number `config/surface-manifest.yml` derives
+
+        # 118 is the number `config/surface-manifest.yml` derives
         # (`counts.sdk_public_methods`, re-cut at this head) and the one
         # `tools/surface-guard.py` pins as the frozen baseline. Measured, not
-        # typed: `uv run python tools/sdk_surface.py --check` reads 119.
-        assert len(public) == 119, f"SDK surface changed: {len(public)} != 119"
+        # typed: `uv run python tools/sdk_surface.py --check` reads 118.
+        # The composition of the two #4282 Phase 2 waves: 125 -> 120 (#12901
+        # wave 1) -> 119 (lane B) -> 118 (this lane, +6 approved / -7 retired).
+        assert len(public) == 118, f"SDK surface changed: {len(public)} != 118"
 
     def test_retired_sdk_bindings_that_resolve_are_still_public(self):
         from tortoise.sdk import TortoiseSDK

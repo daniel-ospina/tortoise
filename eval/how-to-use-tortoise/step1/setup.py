@@ -179,7 +179,7 @@ def seed(input_id: str, db: str) -> dict:
                 when="2026-10-01",
             )
             minted["P1_churn_4_1"] = p1["id"]
-            src = sdk.create_source(
+            src = sdk.register_source(
                 "https://dash.internal.example/churn/q3",
                 "document",
                 tier="T1",

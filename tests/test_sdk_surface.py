@@ -62,10 +62,11 @@ DOC = ROOT / "docs" / "product" / "sdk-surface-declaration.md"
 # approved 40 did NOT grow — the owner's approval (`#10015` comment `6863608333`) is for
 # delivering a name that was already approved and unshipped, which is the same move PR
 # #10053 made for three rows ("what grew is the IMPLEMENTATION of three names the owner
-# already approved"). `high_water_counts.sdk_public_methods` stays at 150 in
+# already approved"). `high_water_counts.sdk_public_methods` stays at 124 in
 # `config/surface-manifest.yml` — the growth pin did not move, and this literal tracks the
 # frozen row set, which must move whenever a row is added.
 #
+
 # 125 -> 119 in TWO disjoint waves. #12901 (2026-11-15): five OFF-SURFACE methods
 # (`backfill_v25`, `list_relations`, `quarantine_batch`, `calibration_passed`,
 # `membership_get`) were deleted from the public surface, frozen into
@@ -82,7 +83,7 @@ DOC = ROOT / "docs" / "product" / "sdk-surface-declaration.md"
 # paragraph above requires. The waves are disjoint by construction: wave 1's membership
 # rule excluded any name a `tool_registry` entry bound, and the four doors Phase 2
 # re-keys were live MCP tools at that time.
-DECLARED_COUNT = 119
+DECLARED_COUNT = 118
 
 
 def _declaration() -> dict:

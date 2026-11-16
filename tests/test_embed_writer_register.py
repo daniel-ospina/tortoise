@@ -4032,8 +4032,13 @@ def test_a_no_live_vector_declaration_executes_no_store_clause() -> None:
 #:     surface is dropped, not stored (`#3998`), so a declaration that names the delegate while the
 #:     delegate stops admitting the key is a claim about a write that no longer happens.
 DELEGATED_STORE_ROUTES: dict[str, dict[str, object]] = {
-    "tortoise.sdk::create_source": {
-        "handoff": ("tortoise/sdk.py", "create_source"),
+    # `#12948`: the public `create_source` was RETIRED into the
+    # SOURCES/MINE/SESSION containers, so the body — and the seam this route
+    # names — is the private `_create_source`. The key follows the writer the
+    # instrument FINDS (a retired public alias is not a writer any more), and
+    # `handoff` follows the `def` that must still exist.
+    "tortoise.sdk::_create_source": {
+        "handoff": ("tortoise/sdk.py", "_create_source"),
         "handoff_call": "_create_entity",
         "delegate": ("tortoise/projection/entities.py", "_upsert_source"),
         "passthrough": "_persist_extra_props",
@@ -4263,14 +4268,14 @@ def test_the_delegation_pin_REDS_on_each_fact_it_rests_on() -> None:
     to the REAL source text (asserted to have changed, so a stale anchor cannot pass silently) and
     the helper must name the fact it lost.
     """
-    route = DELEGATED_STORE_ROUTES["tortoise.sdk::create_source"]
+    route = DELEGATED_STORE_ROUTES["tortoise.sdk::_create_source"]
     delegate_rel = route["delegate"][0]  # type: ignore[index]
     allowlist = str(route["allowlist"])
     delegate_source = (REPO_ROOT / delegate_rel).read_text(encoding="utf-8")
     handoff_source = (REPO_ROOT / route["handoff"][0]).read_text(encoding="utf-8")  # type: ignore[index]
     kwargs = dict(
         handoff_source=handoff_source,
-        reason=EMBED_WRITER_CLASSES["tortoise.sdk::create_source"].reason,
+        reason=EMBED_WRITER_CLASSES["tortoise.sdk::_create_source"].reason,
         handoff=route["handoff"],  # type: ignore[arg-type]
         handoff_call=str(route["handoff_call"]),
         delegate=route["delegate"],  # type: ignore[arg-type]
