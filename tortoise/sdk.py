@@ -8774,6 +8774,32 @@ def _refuse_non_string_object_status(props, *, door: str, target: object,
     declared = lifecycle_props_by_rendering(props, {"status"})
     if not declared:
         return
+    # ⛔ THE LANDING TEST RUNS FIRST — ABOVE EVERY REFUSAL (#12869 review, P2).
+    # A write that MERGES onto (or ADOPTS) an existing node drops a declared
+    # `status` entirely (`#7925` round 4), so there is nothing at this call to
+    # refuse. The ORDER is not cosmetic: at the create door `lands` is asked
+    # AFTER `resolve_or_mint`, which has already stamped an id onto an id-less
+    # live holder on the ADOPT path — so a refusal raised above this line is a
+    # refusal that COSTS A WRITE (`#9287`/`#10192`), and on a journaling lane it
+    # loses the record too. MEASURED before the fix, on a journaled SDK with a
+    # fixture holder minted raw as `CREATE (n:Object {name:'noid', …})`:
+    #
+    #   create_object('noid','core:strategy', status=b'live')
+    #     -> ValueError: … has no JSON form;  row now holds an id it did not
+    #        have, journal has 0 lines.
+    #   create_object('noid2','core:strategy',
+    #                 **{"status": None, KHash("status"): ["live"]})
+    #     -> ValueError: … CONFLICTING status write;  row id-bearing, journal 0.
+    #
+    # Both are the "a refusal that COSTS A WRITE" the atomicity rule forbids and
+    # that `test_a_REFUSED_create_writes_NOTHING` claims is impossible — it could
+    # not see them, because every value in `_REFUSED` passes `lands()`->False on
+    # adopt and so never reached these two checks. Asking `lands` first makes the
+    # claim true by construction instead of by test coverage.
+    # ⚠️ `declared` is still asked FIRST, so a call that names no status issues no
+    # graph read: the thunk is paid for only where a refusal was on the table.
+    if lands is not None and not lands():
+        return                                      # ON CREATE only: not stored
     # ⛔ BEFORE reading the value: two keys rendering as `status` make the read
     # below (FIRST-wins) and the write (LAST-wins) different keys, so ANY value
     # this function concludes about is not the value that lands. Measured: a
@@ -8829,8 +8855,8 @@ def _refuse_non_string_object_status(props, *, door: str, target: object,
             ) from None
     if not _value_ok(word):
         return                                      # the #7369 gate drops it
-    if lands is not None and not lands():
-        return                                      # ON CREATE only: not stored
+    # ⛔ `lands` IS ALREADY SPENT ABOVE, deliberately: the one landing test runs
+    # before every refusal, so a refusal here can never follow a write.
     # ⛔ `type(word)` would be fine here, but `type` is a PARAMETER name at one
     # of the three callers (`create_entity(type, …)`), so the shadow-free
     # spelling is used uniformly rather than per-caller.
@@ -12004,6 +12030,24 @@ def _live_operator_mechanism_pairs(proj, ids):
                       for p in _priced_pairs(_otype or "", ordered, _odir)}
         priced_out[_oid] = (_otype, priced)
     return priced_out
+
+
+def _refusal_repr(value) -> str:
+    """`repr` for a caller-controlled operand in a REFUSAL message.
+
+    A refusal's contract is the exception CLASS — `ValueError` — so a
+    `__repr__` that raises would replace it with its own class (measured:
+    `RuntimeError: repr-boom`), turning a refusal into an unspecified failure
+    for the caller (#12907 review cycle 1, P3, both `update_entity` arms).
+
+    ONE definition for EVERY refusal that names a caller operand, module-level
+    so an arm added before a local helper exists cannot fall back to the raw
+    `!r` — the exact gap the #12907 Point arm carried.
+    """
+    try:
+        return repr(value)
+    except Exception:  # noqa: BLE001, RUF100 — a hostile `__repr__` is the point
+        return f"<{type(value).__name__}>"
 
 
 class TortoiseSDK:
@@ -29533,8 +29577,20 @@ class TortoiseSDK:
                 if _mint is None or isinstance(_mint, str):
                     continue
                 from .projection import _value_ok
-                from .projection.entities import _is_persistable_prop_value
-                if not (_is_persistable_prop_value(_mint) or _value_ok(_mint)):
+                # ⛔ THE DOOR'S OWN PREDICATE, NOT THE OR (review round 4, P3).
+                # This arm asked
+                # `not (_is_persistable_prop_value(_mint) or _value_ok(_mint))`
+                # — the fold filter OR the transport gate — while the door asks
+                # `_value_ok` ALONE, and one file over the same OR was measured
+                # WRONG IN BOTH DIRECTIONS (see the helper's docstring). The
+                # divergence was caller-visible: `status=('a\x00b',)` answers
+                # True to the fold and False to the gate, so the validator
+                # refused a bundle whose own message said "the write door
+                # refuses a non-string (#12869), so this bundle would abort at
+                # step 3" — a refusal asserting a refusal that does not happen,
+                # while `create_object(…, status=('a\x00b',))` is ACCEPTED and
+                # stores nothing. One predicate, and it is the door's.
+                if not _value_ok(_mint):
                     continue
                 violations.append({
                     "section": "entities", "index": i,
@@ -48944,11 +49000,47 @@ class TortoiseSDK:
             # RENDERING-aware, it is also what tells an echo through an exotic
             # key apart from a write that never named the field at all. A
             # mutation that deletes it is an EQUIVALENT mutant, not a hole.)
+            # ⛔ BOTH SIDES ARE COMPARED BY CONTENT, never by the object (#12907
+            # review cycle 3, P2). This exemption is what DISARMS the terminal
+            # guard on the line below, and that guard is the ONLY instrument for
+            # a stored word `_ALLOWED_TRANSITIONS` has no key for (`deprecated`,
+            # the legacy `outdated` flag, an operator fan-out) — the loop down at
+            # the status arm DEFERS on an unknown word, so a wrongly-entailed
+            # call reaches the write with nothing left to refuse it. A `str`
+            # subclass answers `__eq__` for whichever side of the tuple element
+            # it occupies, so either operand could make `('live',) ==
+            # ('deprecated',)` true. Measured, both directions:
+            #   stored `deprecated` read as a lying-`__eq__` subclass ->
+            #     `status='live'` ACCEPTED, row resurrected, guard never asked;
+            #   stored `deprecated` + `status=<lying subclass 'live'>` ->
+            #     ACCEPTED and resurrected too — that one is CALLER-controlled,
+            #     no engine seam needed (the class sits in `props`, normalised to
+            #     its content only AFTER this test).
+            # So each side is reduced to its exact content, and a side that is
+            # not a `str` at all (a stored list/int, an impostor claiming
+            # `__class__ = str`) makes the set NOT entailed — fail-closed: the
+            # guard is asked rather than skipped. The legal shapes are unchanged,
+            # because a genuine `str` subclass reduces to the content it holds: a
+            # read-modify-write echo is still entailed (the #3305 capability a
+            # refused echo contradicted), and a subclass carrying a DIFFERENT
+            # WORD is not. ⛔ Not a subclass whose *rendering* differs: that one
+            # IS entailed here (measured — `__str__` is never consulted, calls=0),
+            # and what catches it is the write arm's own normalisation
+            # (`_status = str.__str__(_status)`), not this test (#12907 cycle 4).
+            _pt_statuses_exact = (
+                tuple(str.__str__(_stored_status)
+                      for _stored_status in _pt_statuses)
+                if all(issubclass(type(_stored_status), str)
+                       for _stored_status in _pt_statuses) else None)
+            _rendered_status = _lifecycle_rendered.get("status")
+            _rendered_status_exact = (
+                str.__str__(_rendered_status)
+                if issubclass(type(_rendered_status), str) else None)
             _status_entailed = (
                 "status" in _lifecycle_rendered
                 and not (_TEMPORAL_RESTAMP_PROPS & set(_lifecycle_rendered))
                 and not _bound_null_statuses
-                and _pt_statuses == (_lifecycle_rendered["status"],))
+                and _pt_statuses_exact == (_rendered_status_exact,))
             for _lifecycle_id in (() if _status_entailed else _lifecycle_ids):
                 try:
                     # ⛔ `refuse_event_terminalization=False` (#11825 merge): this
@@ -49051,14 +49143,40 @@ class TortoiseSDK:
             # label (which makes `rebuild_all` raise). Measured. `_lifecycle_ids`
             # is non-empty exactly when a Point is bound.
             _status = _lifecycle_rendered["status"]
+            # ⛔ THE GUARD'S WORD AND THE WRITTEN WORD MUST BE THE SAME OBJECT
+            # (#12907, review cycle 8 P1). `_status` above is the CALLER's
+            # object, and a `str` subclass can lie in `__len__` /`replace`, so
+            # the value the vocabulary test examined and the value the driver
+            # stored diverged (measured on a live Point: `__len__` -> 0 wrote
+            # `''` while the journal recorded the approved `'superseded'`, and
+            # a colliding `__hash__`/`__eq__` stored an UNDECLARED `'garbage'`
+            # past the vocabulary test). `str.__str__` is content, never a
+            # caller override, and rewrites nothing for an exact `str` — the
+            # normalisation the NON-POINT arm below applies to `props`, applied
+            # here to the value this arm writes AND journals.
+            if issubclass(type(_status), str):
+                _status = str.__str__(_status)
             if _lifecycle_ids:
-                if (not isinstance(_status, str)
-                        or _status not in POINT_STATUS_VALUES):
+                # ⛔ `type(...) is str`, NOT `isinstance` (#12907 review cycle 1,
+                # P2). The normalisation above SKIPS an object that claims
+                # `__class__ = str` — it is not a `str` subclass, and
+                # `str.__str__` on it RAISES — so an `isinstance` test believed
+                # the impostor and the membership test below hashed/compared it:
+                # measured on a LIVE Point, `status=<impostor>` (__hash__ =
+                # hash('live'), __eq__ -> True, replace() -> 'archived') was
+                # ACCEPTED and stored `archived` — a §5 terminal word, on a live
+                # Point, with NO journal record (`_journal_entity_mutation`
+                # returned False on the non-serialisable value): a graph/record
+                # divergence. Every legitimate shape is exact-str here, because a
+                # real `str` subclass was just normalised to its exact content.
+                if type(_status) is not str or _status not in POINT_STATUS_VALUES:
                     # Same refusal `update_point` issues (#3311 defect 1). The
                     # raise precedes every write, so a refused status leaves
-                    # the node untouched.
+                    # the node untouched. The operand is rendered through
+                    # `_refusal_repr` so a hostile `__repr__` cannot replace the
+                    # promised `ValueError` with its own class.
                     raise ValueError(
-                        f"Invalid status {_status!r}. "
+                        f"Invalid status {_refusal_repr(_status)}. "
                         f"Must be one of: {', '.join(sorted(POINT_STATUS_VALUES))}"
                     )
                 # ── #9649: the DECLARED transition, from `_ALLOWED_TRANSITIONS` ──
@@ -49117,7 +49235,22 @@ class TortoiseSDK:
                 # refusal below as "the verbs are optional": it fires only for
                 # UNdeclared targets.
                 for _stored in _pt_statuses or ():
-                    if not isinstance(_stored, str) or _stored == _status:
+                    # ⛔ Normalise the STORED side to its exact content, then
+                    # compare with `str.__eq__` — never `_stored == _status`
+                    # (#12907 review cycle 1, P2). The LEFT operand's type
+                    # decides who answers, so a stored `str` subclass could
+                    # answer `True` and skip the transition check entirely.
+                    # ⛔ NOT `type(_stored) is not str: continue` (review cycle
+                    # 2, P3): that SKIPPED the check for every stored subclass,
+                    # which is a guard-STRENGTH regression against the parent
+                    # (it checked them). Normalising keeps the check. A genuine
+                    # non-str (a stored list/int) and an impostor claiming
+                    # `__class__ = str` still defer — the former has no declared
+                    # row to ask about, and the engine cannot return either.
+                    if not issubclass(type(_stored), str):
+                        continue
+                    _stored = str.__str__(_stored)
+                    if str.__eq__(_stored, _status) is True:
                         continue
                     _declared = _ALLOWED_TRANSITIONS.get(_stored)
                     if _declared is None or _status in _declared:
@@ -49154,23 +49287,32 @@ class TortoiseSDK:
                     # named id is real; the typed address is kept as a separate
                     # clause so the caller can still recognise its own call.
                     _named_id = _lifecycle_ids[0]
+                    # ⛔ No raw `_named_id == id_val` (review cycle 2, P3): the
+                    # RIGHT operand's `__eq__` answers for a `str` subclass, so a
+                    # raising one turned this refusal into `RuntimeError:
+                    # eq-boom` (measured). Content comparison with the resolved
+                    # id (a plain str) on the LEFT cannot reach the caller.
+                    _addressed_same = (
+                        issubclass(type(id_val), str)
+                        and str.__eq__(_named_id, str.__str__(id_val)) is True)
                     _addressed_as = (
-                        "" if _named_id == id_val
-                        else f" (addressed as {id_val!r})")
+                        "" if _addressed_same
+                        else f" (addressed as {_refusal_repr(id_val)})")
                     raise ValueError(
                         f"update_entity refused the status transition "
-                        f"{_stored!r} -> {_status!r} on Point "
-                        f"{_named_id!r}{_addressed_as}: "
+                        f"{_refusal_repr(_stored)} -> "
+                        f"{_refusal_repr(_status)} on Point "
+                        f"{_refusal_repr(_named_id)}{_addressed_as}: "
                         f"this door's declared Point transitions from "
-                        f"{_stored!r} are {{{_declared_text}}} "
+                        f"{_refusal_repr(_stored)} are {{{_declared_text}}} "
                         f"(`_ALLOWED_TRANSITIONS` — ONTOLOGY §5's table, plus "
                         f"#432's decision that a draft may terminalize before it "
-                        f"is ever live), so {_status!r} is not a declared "
-                        f"transition through this door.{_reserved} Use a "
-                        f"declared transition, or — "
+                        f"is ever live), so {_refusal_repr(_status)} is not a "
+                        f"declared transition through this door.{_reserved} Use "
+                        f"a declared transition, or — "
                         f"if the claim itself changed — mint a new Point and "
                         f"supersede this one with "
-                        f"`supersede_point({_named_id!r}, <new_id>)`."
+                        f"`supersede_point({_refusal_repr(_named_id)}, <new_id>)`."
                     )
                 # Write FIRST, journal SECOND, gated on the write having
                 # MATCHED (a missed/no-op write must never leave a phantom
@@ -49272,13 +49414,31 @@ class TortoiseSDK:
         #
         # The target word is still never inspected (a pack kind's word for
         # "current" is not `live`), which is this guard's own rule. What stays
-        # refused, unchanged: any `archived`/`deprecated`/`retracted` origin, a
+        # refused IN ONE CALL: any `archived`/`deprecated`/`retracted` origin, a
         # MIXED dead set across the bound rows, and the status-ONLY
         # `superseded -> live` — that one leaves the carriers set, so the record
         # would still read `'superseded'` against a live graph, which is the
         # #9974/#10192 divergence class rather than a recovery. (The test
-        # `test_clearing_a_supersession_is_still_writable` is the pin that caught
-        # the over-block; #12745's own suite pins the status-only refusal.)
+        # `test_a_coherent_un_supersede_lifts_the_row_and_a_status_only_write_cannot`
+        # is the pin that caught the over-block — it was
+        # `test_clearing_a_supersession_is_still_writable` when #12745 tripped it,
+        # and the name moved twice since; #12745's own suite pins the status-only
+        # refusal.)
+        #
+        # ⛔ WHAT "IN ONE CALL" CONCEDES — measured, and NOT closed here (#12908).
+        # The dead→dead arm below admits `archived|deprecated|retracted ->
+        # superseded` while the SAME call carries a successor, and the coherent
+        # allowance above then withdraws that supersession — so the resurrection
+        # the single call refuses lands in two accepted calls. Measured at this
+        # head: `('archived', None, None)` -> `status='superseded',
+        # supersededBy='succ-1'` (ACCEPTED) -> `status='live'` with both carriers
+        # cleared (ACCEPTED) -> `('live', None, None)`, and the row is recalled
+        # again after `rebuild_all`. Pre-existing (both arms predate this PR), and
+        # closing it is a §4.3 DECISION, not a patch: refuse the reclassification
+        # outright, or track the supersession's provenance so only a supersession
+        # that was minted on a live row can be withdrawn. FILED, not fixed here —
+        # #12908 carries the measurement and both options. So do NOT read the
+        # paragraph above as "the origin is closed": it is closed in one call.
         #
         # ⛔ THE WRITE IS THE ROW SET, so the READ is too. The per-label loop
         # below binds `MATCH (n:<label> {match_prop:$id}) SET n += $props` — every node
@@ -49293,6 +49453,47 @@ class TortoiseSDK:
         # this refusal contradicts the "content and metadata revisions are still
         # accepted" sentence it ends on.
         #
+        # ⛔ A NON-STRING OR ABSENT TARGET IS STILL A TRANSITION. An earlier cut
+        # skipped the whole check when the target was not a `str` ("a non-string
+        # cannot be a dead WORD") — which let a dead row go CURRENT without ever
+        # naming a dead word. Measured, per target, on the pre-fix tree:
+        #
+        #   status=['live']   STORED as-is  -> no dead set contains it -> reads current
+        #   status=123        STORED as-is  -> same
+        #   status=True       STORED as-is  -> same
+        #   status={'a': 1}   DEGRADED to null (#7369: FalkorDB cannot write a map)
+        #                     -> the property is ABSENT, so it behaves like `None`
+        #   status=None       REMOVES the property
+        #
+        # Three are stored, two leave no status at all — and §4.3 settles the
+        # other two: "an Object created without a status stores none and reads as
+        # `live`". Every one of the five therefore makes a DEAD row current again,
+        # which is the harm whether or not that row carries a supersession
+        # (`archived` does not, and the row measured here was a plain object with a
+        # hand-set status). The question is "is the target in the family's DEAD
+        # set", never "is the target a string".
+        #
+        # ⛔ WHY THE OTHER FAMILY IN THIS SAME LOOP WAS ALREADY SAFE — and NOT for
+        # the reason an earlier cut of this comment gave ("both are
+        # presence-based"): the :Subject arm is protected by the #1423 VOCABULARY
+        # guard, which is string-TYPED (`not isinstance(_status, str) or _status
+        # not in _SUBJECT_STATUS_VALUES` raises `Invalid status ['live'] for a
+        # :Subject`, measured). Only the POINT arm is presence-based
+        # (`_assert_lifecycle_guard` refuses on the stored terminal marker). Two
+        # different mechanisms, neither of them this arm's.
+        #
+        # ⚠️ RESIDUAL, on the STORED side, and NARROWED BY THIS PR (#12896 review,
+        # P2) rather than left as it was: this fix guards the TARGET's type and
+        # hashability. A row whose stored `status` is a list is reachable at all
+        # only because a LIVE row accepts `status=['live']` (#10371's vocabulary
+        # hole). Before the P2 above, that stored shape made the dead-set build
+        # raise `TypeError: unhashable type: 'list'` on the NEXT lifecycle write;
+        # the dead set now takes `str` stored values only, so NO traceback escapes
+        # here (measured: stored `['live']`, then `'live'`/`['live']`/`123`/`None`
+        # all ACCEPTED, row intact). What is left is the VOCABULARY hole, not a
+        # traceback — #12869's wording predates this narrowing and should be
+        # re-measured there before it is restated.
+        #
         # The remedy is deliberately NOT `supersede()`: that door routes to
         # `supersede_point`/`invalidate_point`, which are `:Point`-only and raise
         # `No point <id>` for an Object or a Subject, so naming it here would be
@@ -49301,6 +49502,20 @@ class TortoiseSDK:
         # / the `ObjectSuperseded` fold); the SDK gap is #12592.
         _nonpoint_status = lifecycle_props_by_rendering(props, {"status"})
         if _nonpoint_status:
+
+            def _np_safe_repr(_value):
+                """`repr` that cannot be hijacked by the caller (review cycle 9/10).
+
+                Both refusals below name caller-controlled operands, and a
+                `__repr__` that raises would turn the promised `ValueError` into
+                that exception class instead (measured, both doors: `RuntimeError:
+                repr-boom` on the target, `RuntimeError: id-repr-boom` on the id;
+                the row is unchanged in both cases, so this is a contract break
+                and not a fail-open). ONE helper for BOTH operands, so a later
+                refusal cannot be added with the raw `!r` again.
+                """
+                return _refusal_repr(_value)
+
             # ⛔ BEFORE any transition reasoning: a status write whose renderings
             # disagree has no knowable landing word (review round 2, P1 —
             # measured: `{<content 'superseded', __str__ 'status'>: 'superseded',
@@ -49309,7 +49524,7 @@ class TortoiseSDK:
             if _status_write_is_ambiguous(props):
                 raise ValueError(
                     f"update_entity refused a CONFLICTING status write on "
-                    f"{id_val!r}: more than one key in this call renders as "
+                    f"{_np_safe_repr(id_val)}: more than one key in this call renders as "
                     f"`status` and they ask for different words. A `str` "
                     f"subclass whose content and `__str__` differ is filed "
                     f"under one name by the live write and the other by the "
@@ -49319,6 +49534,88 @@ class TortoiseSDK:
                     f"mean."
                 )
             _np_status = _nonpoint_status["status"]
+            # ⛔ NORMALISE `str` SUBCLASSES BEFORE ANY DECISION (#12896, review
+            # cycles 6 and 7). A subclass keeps the CALLER's `__eq__`/`__hash__`,
+            # and the decisions below consult one — measured on an `archived`
+            # Object: TWO of these lifted the row and TWO raised out of the door
+            # (see each bullet).
+            #   • the ENTAILMENT shortcut compared by `==`, so a crafted `__eq__`
+            #     returning `True` made every stored word look "entailed" and
+            #     `continue`d past the whole guard. This is the door BOTH lifting
+            #     shapes came through — the shortcut runs first, and a lying
+            #     `__eq__` answers it for any content. Measured, both landing
+            #     `banana` on an `archived` row: a non-`str` whose `__eq__` returns
+            #     `True`, and a `str` SUBCLASS whose content is `banana` with the
+            #     same lie (a harmless per CPython's subclass priority — see the
+            #     test docstring, where the reflected call is shown to decide the
+            #     `==` before any content comparison).
+            #   • the dead→dead membership `_np_status in _np_terminal` HASHES the
+            #     target, so an UNHASHABLE subclass that does NOT answer `True`
+            #     reached it and raised `TypeError: unhashable type` out of
+            #     `update_entity` instead of refusing (measured: `UnhashHonest`).
+            #     (Hashability alone is not enough to match a word: `in` also
+            #     compares with `==`, and a colliding-hash subclass whose content
+            #     is not a terminal word is REFUSED, measured.)
+            # `str.__str__` cannot consult an override and returns a PLAIN `str`,
+            # so every decision in THIS BLOCK runs on the value the store holds.
+            # It does NOT over-refuse: a subclass's CONTENT is unchanged, so the
+            # legitimate paths (the no-op re-assert, dead→dead, the licensed
+            # `status='live'` + both clears) keep their outcome for it.
+            # ⚠️ NOT EVERY DECISION IN THIS METHOD — and one of the two changed
+            # shape with this PR. `_refuse_bare_lifecycle_carrier`
+            # (`sdk.py:5792`) still compares `status == _SUPERSEDED_STATUS` on the
+            # CALLER's value, so a `str` subclass whose `__eq__` answers `True`
+            # passes the carrier coherence test and lands `['banana',
+            # '<carrier>']` on a live row while plain `'banana'` is refused
+            # (measured; pre-existing, filed as #12903).
+            # The #1423 `:Subject` VOCABULARY guard below
+            # (`_subject_status_rendered`) reads `props`, and the props rewrite
+            # further down this method has already replaced a `str`-subclass
+            # status with its exact `str` content — so THAT collision shape is
+            # REFUSED at this head (measured: an undeclared word on a live
+            # Subject raises), i.e. this PR's rewrite closes #12905's VALUE axis
+            # at this site, and #12905 should be re-measured before its own
+            # claim is restated.
+            # This normalisation is scoped to the transition guard; the props
+            # rewrite is what reaches the neighbouring guards.
+            # ⛔ `issubclass(type(x), str)`, NOT `isinstance(x, str)`: an object
+            # can claim `__class__ = str` and `isinstance` believes it, while
+            # `type()` does not — and `str.__str__` on such an impostor RAISES
+            # `TypeError` (measured). An impostor is not a `str` word, so it is
+            # left untouched and takes the non-`str` path to the AX refusal at the
+            # two `type(...) is str` sites below, which is why those are exact-type
+            # tests too.
+            # ⛔ AND THE **WRITE** MUST CARRY THAT SAME PLAIN `str` (#12906, review
+            # cycle 8 P1). Normalising the GUARD's copy alone left the two words
+            # free to differ: the driver renders what it is GIVEN, and
+            # `falkordb.helpers.quote_string` calls `len(v)` and `v.replace(...)`
+            # ON THE CALLER'S OBJECT. A `str` subclass whose content IS the stored
+            # word — so the entailed shortcut rightly reads "no transition asked
+            # for" — but whose `replace`/`__len__` render something else therefore
+            # wrote a word the guard never approved. Measured at `70b37dcfc5` on an
+            # `archived` Object, embedded engine:
+            #
+            #     class RSub(str):
+            #         def replace(self, a, b, *c): return 'live'
+            #     update_entity(oid, status=RSub('archived'))
+            #     -> ACCEPTED, stored status became 'live'   (a RESURRECTION)
+            #
+            #     class LSub(str):
+            #         def __len__(self): return 0
+            #     update_entity(oid, status=LSub('archived'))
+            #     -> ACCEPTED, stored status became ''
+            #
+            # So rewrite every key that renders as `status` to the plain content
+            # the guard decided on, before any write sees it. `str.__str__` is this
+            # file's established no-override rendering (see above) and returns the
+            # same content a plain subclass stores today, so no legitimate call
+            # changes behaviour; only a value whose RENDERING disagreed with its
+            # content is affected, and it can no longer disagree.
+            if issubclass(type(_np_status), str):
+                _np_status = str.__str__(_np_status)
+                for _np_key in list(keys_rendering_as(props, {"status"})):
+                    if issubclass(type(props[_np_key]), str):
+                        props[_np_key] = str.__str__(props[_np_key])
             for _np_label, _np_terminal, _np_section in (
                 ("Subject", _SUBJECT_TERMINAL_STATUSES, "§4.2"),
                 ("Object", _OBJECT_TERMINAL_STATUSES, "§4.3"),
@@ -49386,8 +49683,14 @@ class TortoiseSDK:
                 # direction: it lets a status write through a lifecycle check
                 # that never actually ran. The guard cannot answer "is this row
                 # dead?" from a value that is not a word, and it will not guess.
-                # `None` cannot appear here (`collect` DROPS nulls) and would not
-                # be foreign if it did: an ABSENT status reads live (#9974 R1).
+                # ⛔ THE FAIL-OPEN IS MEASURED, not argued: on the TOLERATE side
+                # a row storing `['archived']` accepts `status='live'` (the
+                # target is not a dead WORD, so the dead set is empty and the
+                # write is `continue`d) and the row reads CURRENT again — the
+                # resurrection every guard in this loop exists to refuse. Same
+                # for `status=None`, which REMOVES the property and reads live by
+                # absence (#9974 R1). `None` cannot appear here as a STORED value
+                # (`collect` DROPS nulls).
                 # ⛔ THIS REFUSAL APPLIES TO :Subject TOO, and that is a stated
                 # decision rather than an accident of the loop's shape (review
                 # round 3, P2 — it narrows a family the write-side guard leaves
@@ -49422,33 +49725,92 @@ class TortoiseSDK:
                         f"{{id:$id}}) SET n.status = $word` naming a declared "
                         f"word, or a replay from a journal that records one."
                     )
-                if not isinstance(_np_status, str):
-                    continue            # a non-string cannot be a dead WORD
-                if all(s == _np_status for s in _np_stored):
+                # ⛔ NO `isinstance` SKIP HERE (see the block comment ABOVE): a
+                # non-string target is not a dead WORD, and that is exactly why it
+                # must not be exempted — it is a target the family's dead set does
+                # not contain, so from a dead row it is a resurrection.
+                # ⛔ AND THE COMPARISON MUST BE `str`'s OWN, ON BOTH SIDES
+                # (#12896, review cycle 6 P1). Written as the natural
+                # `s == _np_status`, this line consulted the CALLER's `__eq__`
+                # before any type check ran: `str.__eq__(s, non_str)` returns
+                # `NotImplemented`, so Python falls back to the REFLECTED
+                # `non_str.__eq__(s)`, and a crafted `__eq__` returning `True`
+                # made every stored word look "entailed" — the guard `continue`d
+                # and a TERMINAL row was lifted (measured: `status=LyingEq()` on
+                # an `archived` row returned normally and the row read LIVE). The
+                # exact-`str` conjunct closes the target side, and the
+                # normalisation above has already removed every subclass, so this
+                # comparison runs on two plain `str`s whose `__eq__` is `str`'s.
+                # The `isinstance(s, str)` conjunct is what protects the STORED
+                # side: `str.__eq__` called unbound with a non-`str` FIRST
+                # argument RAISES `TypeError` (not `NotImplemented` — measured),
+                # so it must never be reached with one. ⛔ The target-side
+                # `type(_np_status) is str` conjunct is NOT load-bearing: the
+                # normalisation above already makes every real `str` target an
+                # exact `str`, and a non-`str` one fails it, so it changes no
+                # outcome — it is kept as an exactness statement so a later edit
+                # cannot quietly reintroduce a subclass here. Only the STORED-side
+                # conjunct defends — and since `#12869` refuses a non-`str` stored
+                # value ABOVE, that defence is now second-line: the first is the
+                # `_np_foreign` refusal, which is why this loop cannot be reached
+                # with such a value at all. Kept anyway so a future edit that
+                # moves or weakens `_np_foreign` cannot turn this line into a
+                # `TypeError`.
+                if (type(_np_status) is str
+                        and all(isinstance(s, str)
+                                and str.__eq__(s, _np_status) is True
+                                for s in _np_stored)):
                     continue            # entailed: no transition asked for
-                _np_dead = sorted(s for s in _np_stored if s in _np_terminal)
+                # The DEAD set is built from `str` STORED values only. That
+                # conjunct is defence-in-depth at this head rather than the
+                # mechanism: `_np_foreign` above has already REFUSED every row
+                # that holds a non-`str` stored value, so this line cannot see
+                # one. It is kept because the alternative readings are both
+                # wrong — an unhashable value in `in` raises `TypeError`, and
+                # excluding it from the set alone would make the dead set EMPTY
+                # and the write `continue`, which is the fail-open `_np_foreign`
+                # exists to close. ⛔ `#12869`'s claim was re-measured at this
+                # head, as `#12896` asked: the shape is reachable only from a
+                # pre-fix SDK / raw Cypher / journal replay, and the door now
+                # answers it with the `ValueError` above — not a traceback, and
+                # not a silent accept. Pinned by
+                # `test_a_row_that_ALREADY_holds_a_non_scalar_is_REFUSED_not_crashed`
+                # and, for the no-traceback half, by
+                # `test_a_non_string_stored_status_does_not_crash_the_dead_set`.
+                _np_dead = sorted(
+                    s for s in _np_stored
+                    if isinstance(s, str) and s in _np_terminal)
                 if not _np_dead:
-                    continue            # nothing dead
-                # ⛔ THE MEMBERSHIP TEST HASHES, so it is where a `str` SUBCLASS
-                # with `__hash__` disabled used to raise `TypeError: unhashable
-                # type` out of the guard — the very failure #12869 is about, one
-                # input class over (measured here and on `origin/main`). Refused
-                # AT THE HASH, not at every door: a create stores such a word by
-                # content and it round-trips as a plain `str`, so refusing it
-                # there was an over-block (review round 3, P2).
-                try:
-                    _np_asked_terminal = _np_status in _np_terminal
-                except TypeError:
-                    raise ValueError(
-                        f"update_entity refused an UNREADABLE status for "
-                        f"{id_val!r}: {_np_status!r} is a `str` subclass whose "
-                        f"`__hash__` is disabled, so this guard cannot compare "
-                        f"it with a declared word and would raise `TypeError` "
-                        f"instead of answering (#12869). Pass `status` as a "
-                        f"plain str."
-                    ) from None
-                if _np_asked_terminal:
-                    continue            # dead->dead (legal here)
+                    continue            # nothing dead to resurrect
+                # `isinstance` FIRST, and only for the membership test: an
+                # unhashable target (`status=['live']`, `status={'a': 1}`) raised
+                # `TypeError: unhashable type` out of `in`, so the caller got a
+                # traceback instead of this guard's AX three-part refusal
+                # (measured). Non-strings now fall THROUGH to the refusal.
+                # ⛔ AND THE COHERENCE ALLOWANCE BELOW RE-CHECKS IT (review cycle
+                # 5, P1). That allowance keys on `_status_key_leaves_the_dead
+                # _state` (the KEYS supplied) and on the two carriers being NULL,
+                # and it never read the VALUE written — so a non-string target
+                # TOGETHER WITH both carrier clears was ADMITTED, landing the row
+                # CURRENT on a word nobody can read (measured at the head review
+                # cycle 5: `(123, None, None)`, `(True, None, None)`,
+                # `(['live'], None, None)`, and `(None, None, None)` for `None`
+                # and for `{'a': 1}` through #7369), and for the null shapes the
+                # record kept folding `superseded` against a current graph
+                # (#9974's damage direction). It predates this branch, but #12856
+                # — which held the decision — closed without it, and a decision
+                # that licenses "exactly one shape" cannot be implemented by a
+                # door that admits eight, so the allowance now requires a `str`
+                # target: the licensed `status='live'` + both clears is
+                # untouched, and every non-string + clears is REFUSED (measured,
+                # row unchanged, journal delta 0).
+                # ⚠️ What this does NOT validate is the WORD itself: a `str` this
+                # family never declared (`status='banana'` + both clears) is still
+                # accepted and stores an undeclared word. That is the PRE-EXISTING
+                # Object-vocabulary hole (#10371, #8166 — a `:Subject` is validated,
+                # an `:Object` is not), not this guard's.
+                if type(_np_status) is str and _np_status in _np_terminal:
+                    continue            # dead->dead is legal for these families
                 # The carriers this row holds, keyed by the SAME declared
                 # properties the derivation reads (`DERIVED_FROM_RECORD`) —
                 # derived, never a literal pair, so a third declared source
@@ -49465,6 +49827,11 @@ class TortoiseSDK:
                 # while the live write never touched `status`, clearing the
                 # carriers off a row that stayed `superseded` (measured).
                 if (_np_dead == [_SUPERSEDED_STATUS]
+                        # A `str` target ONLY (review cycle 5, P1): the three
+                        # conjuncts below read the KEY supplied and the carriers
+                        # cleared, never the value, so without this a non-string
+                        # target rode the coherent shape into the row.
+                        and type(_np_status) is str
                         and _status_key_leaves_the_dead_state(props)
                         and _write_clears_every_lifecycle_carrier(
                             props, _np_carriers, _np_label)):
@@ -49501,13 +49868,25 @@ class TortoiseSDK:
                     if (_np_dead == [_SUPERSEDED_STATUS]
                         and _carriers_are_present(_np_carriers)) else ""
                 )
+                # `_np_status` is a plain `str` by here when the caller sent a
+                # `str` subclass, but a NON-`str` target reaches this message with
+                # its own `__repr__` — and a caller-controlled dunder must not be
+                # able to turn the promised `ValueError` into its own exception
+                # class (measured: a target whose `__repr__` raises `RuntimeError`
+                # escaped as `RuntimeError`, review cycle 8 P3; the row was
+                # unchanged, so this is a contract break and not a fail-open).
+                # Both operands, through the one helper hoisted above the
+                # ambiguity door — see `_np_safe_repr`.
+                _np_target_repr = _np_safe_repr(_np_status)
+                _np_id_repr = _np_safe_repr(id_val)
                 raise ValueError(
                     f"update_entity refused the status transition "
-                    f"{_np_dead[0]!r} -> {_np_status!r} on {_np_label} "
-                    f"{id_val!r}: {_np_dead[0]!r} is TERMINAL for a "
+                    f"{_np_dead[0]!r} -> {_np_target_repr} on {_np_label} "
+                    f"{_np_id_repr}: {_np_dead[0]!r} is TERMINAL for a "
                     f":{_np_label} (ONTOLOGY {_np_section}), so this row cannot be "
-                    f"made current again. ⛔ A dead {_np_label} is not resurrected "
-                    f"by a prop edit — a {_np_label} that came back is a NEW "
+                    f"made current again BY THIS CALL. ⛔ A dead {_np_label} is "
+                    f"not resurrected by a prop edit — a {_np_label} that came "
+                    f"back is a NEW "
                     f"entity, not an edit to the dead one. Mint it with the "
                     f"create door for that label and record the replacement "
                     f"through the supersession path "
@@ -50259,10 +50638,19 @@ class TortoiseSDK:
             # ⚠️ A non-persistable shape (dict/set/bytes) is DROPPED by the
             # writer and never stored (#7369), so it cannot be a value this
             # refuses — the same `#7925` round-4 decision, which is why the test
-            # is the transport gate (`_value_ok`) and not "not a string". It is
-            # `True` there so a `bytes`/`frozenset` status is refused instead of
-            # being handed to the JSON encoder when this SDK has a journal (see
-            # the helper's `journals`).
+            # is the transport gate (`_value_ok`) and not "not a string".
+            # ⛔ THIS DOOR DOES NOT PASS `journals` (#12869 review, P2). It used
+            # to, on the claim that it made a `bytes`/`frozenset` status
+            # "refused instead of being handed to the JSON encoder" — which was
+            # false on the RESOLVE branch (`_obj_created` False skips this call
+            # entirely, so the value still reached the encoder and
+            # `_journal_write_failures` incremented) and, on the mint branch,
+            # narrowed `status` alone on a mechanism that is not
+            # `status`-specific: `_journal_entity_event` SWALLOWS the encoder
+            # failure and logs "LIVE-ONLY and will not survive a rebuild"
+            # (#4240), exactly as it does for `tags=frozenset(...)`. So the
+            # refusal lives at the ONE door that raises (`EventAPI.add_object`)
+            # and #4240 keeps this lane, uniformly for every unencodable prop.
             from .entity_identity import entity_create_lock, resolve_or_mint
             with entity_create_lock("Object", name):
                 _obj_target, _obj_created = resolve_or_mint(

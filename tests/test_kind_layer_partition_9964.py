@@ -581,15 +581,46 @@ def test_an_unhashable_status_cannot_crash_the_routing_guard(sdk):
     where `origin/main` wrote the node. The Subject door's own validation tests
     `isinstance(…, str)` FIRST; the guard must mirror it (a non-str status is
     not routable, and it is not a crash either).
+
+    ⛔ RESTATED BY #12869, and the reason is recorded rather than assumed. This
+    pin asserted TWO contracts on ONE fixture, and they belong to different
+    decisions:
+
+      1. **#1934's** — an ADVISORY must never refuse a write. That is the
+         ROUTING guard's job and it is UNCHANGED: the first arm below still
+         lands the write on the object door and still reports
+         `kind_other_layer`.
+      2. *"no write may be refused"* for a NON-STRING `status`. That is not
+         #1934's axis — #1934 is about an advisory deciding a write's fate,
+         while this is a TYPE question. #12869 answers it the other way: §4.3
+         declares `status` a STRING for every kind, and the `:Subject` (#1423),
+         `:Point` (#3311) and `:Event` doors already refuse a non-string. The
+         Object door was the only one that accepted it, which is the
+         three-family divergence #12869 closes.
+
+    So the ADVISORY arm moves to an undeclared STRING — legal under every
+    family, so #1934's contract is still exactly what it exercises — and the
+    unhashable shape gets its own arm asserting the refusal this pin was named
+    for (a `ValueError`, never a `TypeError`).
     """
-    r = sdk.create_object("Q3", objectKind="core:team", status=["active"])
-    assert r.get("id"), "no write may be refused or crash (#1934)"
+    # ── 1. #1934: the ADVISORY must not refuse a write ──────────────────
+    # `banana` is not a Subject status, so the routing guard still has
+    # something to report; the write still lands, which is the contract.
+    r = sdk.create_object("Q3", objectKind="core:team", status="banana")
+    assert r.get("id"), "warn-not-block (#1934): the write must land"
     labels, object_kind, _sk, _pk, _ek = _node(sdk, r["id"])
     assert labels == ["Object"], r
     assert object_kind == "core:team"
     # Reported (not re-routed, not crashed): the status is not a Subject status.
     assert [n["code"] for n in _layer_notes(r)] == ["kind_other_layer"], \
         r.get("advisories")
+
+    # ── 2. #12869: the unhashable shape is a REFUSAL, never a crash ─────
+    with pytest.raises(ValueError, match="refused a non-string status"):
+        sdk.create_object("Q3b", objectKind="core:team", status=["active"])
+    assert sdk._get_proj().g.query(
+        "MATCH (n:Object {name:'Q3b'}) RETURN count(n)").result_set[0][0] == 0, (
+        "the refused create left an Object row behind")
 
 
 def test_two_disagreeing_spellings_never_drop_the_caller_s_kind(sdk):
