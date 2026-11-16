@@ -341,8 +341,11 @@ referenced entity), not by a HOLD the probe's arms never reach. Its other premis
 CLOSED, and S2.2's
 mechanical half now defaults ON — the composition is the `vet_enabled = (vet_arbiter is not None or
 _vet_enabled() or _value_gate_enabled())` assignment (`extractor_v2.py:11731-11732` at `80c912244`;
-**`:12302-12303` at `d69faaf38`**), and the default-ON itself lives at `tortoise/value_gate.py:81`
-(`is_truthy(os.environ.get(ENV_FLAG, "1"))`).
+**`:12302-12303` at `d69faaf38`**), and the default-ON itself lives at `tortoise/value_gate.py:89`
+(`return is_truthy("1" if raw is None else raw)` — `#12926` moved it out of
+`value_gate_enabled()` into `resolve_enabled(raw)`, the one site that applies it, so the
+startup diagnostic can report the gate's own answer; `resolve_enabled` is what
+`value_gate_enabled()` delegates to, and the default did not change).
 `extractor_v2.py:1185` is the **`TORTOISE_VET` toggle** on this tree
 (`return is_truthy(os.environ.get("TORTOISE_VET")) or _s2_seam_armed()`, `def _vet_enabled` at
 `:1177`), still OFF by default — cite it for that and nothing else. ⚠️ It was `:1183` only on the
@@ -775,7 +778,7 @@ git grep -c 'result\["relations"\]' -- tests/          # tree-wide MATCHES — T
                                                           # — 3 — and tests/test_7949_capstone_measure.py
                                                           # — 4 — SOURCE-TEXT scans and one prose comment, not
                                                           # consumers: one is the `extractor_v2.py` scan
-                                                          # (`:14514`) that derives the doc's cite, two are the
+                                                          # (`:14521`) that derives the doc's cite, two are the
                                                           # finder's own conditions (#12569), and the fourth is
                                                           # a prose line about `#11001`'s in-place correction
 # ⛔⛔ THIS GREP COUNTS LINES, NOT READERS — do not read the per-file numbers as "who consumes the
@@ -852,7 +855,7 @@ git grep -rn -E 'hasPart|hierarchies|decomposesInto' -- 'docs/evidence/7949-caps
 grep -E '^e1 |metric=objects|vet-downgrades|metric=real_facts' /tmp/e1e2.log
 grep -n -E 'after_share <= 0.50|>= 90 of 90' docs/evidence/7949-capstone/PRE-REGISTRATION.md
 git grep -n 'vet_enabled = ' -- tortoise/extractor_v2.py   # the default-ON composition (symbol, not a line)
-git grep -n 'ENV_FLAG, "1"' -- tortoise/value_gate.py      # the default-ON itself (value_gate.py:81)
+git grep -n 'is_truthy("1" if raw is None' -- tortoise/value_gate.py   # the default-ON itself (value_gate.py:89)
 git grep -n 'os.environ.get("TORTOISE_VET")' -- tortoise/extractor_v2.py   # the toggle (OFF by default)
 # the 62.3 % share is QUOTED from a research record, re-read (not re-derived):
 sed -n '192p;314p' docs/research/2026-09-24-4333-node-volume-storage-cost/research-brief.md

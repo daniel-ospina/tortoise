@@ -3612,7 +3612,7 @@ async def _unhandled_exception_handler(request: Request, exc: Exception):
         # ⚠️ MEASURED, and it corrects an earlier claim here (review round 7, P2):
         # at DEBUG this line is NOT emitted in the hosted deployment. uvicorn's
         # `LOGGING_CONFIG` configures only the `uvicorn*` loggers and leaves root
-        # at WARNING, `Dockerfile.hosted:153` passes no `--log-level`, and nothing
+        # at WARNING, `Dockerfile.hosted:163` passes no `--log-level`, and nothing
         # in `tortoise/` or `entrypoint.sh` sets a level for `tortoise.*` — so
         # `tortoise.api` is effectively WARNING there and `Logger.isEnabledFor`
         # drops the record (reproduced under the real `dictConfig`). The PRODUCTION
@@ -49805,3 +49805,16 @@ def _session_list_conds(actor_filter: str | None) -> tuple[list[str], dict]:
         conds.insert(0, "s.actor_user_id = $uid")
         params["uid"] = actor_filter
     return conds, params
+
+# ── #12926: state the two embedding switches the process actually resolved ──
+# Module scope, not `_lifespan`: this is the process boot (`uvicorn
+# tortoise.hosted_api:app`), a lifespan may legally run more than once in a
+# process, and a boot record that repeated per lifespan would read as a state
+# change. The two switches read OPPOSITE ways when unset (`value_gate` ON,
+# `embed_gate` OFF — both modules record that, and changing either is a reopen of
+# `#11445`), so an unstated EMBED switch silently keeps a vector on every row;
+# the line makes the OFF direction visible instead of silent. A RECORD, never a
+# refusal: the pre-merge refusal is `tools/embed_switch_gate.py`.
+from tortoise.gate_visibility import report_effective_switches as _report_gates  # noqa: E402
+
+_report_gates()
