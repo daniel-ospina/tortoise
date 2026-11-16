@@ -236,7 +236,15 @@ _SHELL_EXPORT_NAME = re.compile(r"^\s*export\s+(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s
 #: openers to 91 closers, so the depth never returns to 0; without it, 91 to 91.
 _SHELL_OPENERS = re.compile(
     r"(?:^|[;&|])\s*(?:(?:then|else|elif|do)\s+)?(?:if|while|until|for|case|select)\b"
-    r"|\{\s*$|\(\s*$"
+    # ⛔ `{` is an opener WHEREVER it appears at a word start, not only at end of statement
+    # (review P1, measured): a one-line function body (`f() { :; export K=1; }`) put the brace
+    # mid-statement, so it never opened, the body ran at depth 0, and an export the process never
+    # receives was credited `STATED` (exit 0). The preceding-character class is what keeps the
+    # OTHER `{`s out: `${VAR}` has a `$` before it (parameter expansion, not a block) and brace
+    # expansion (`a{b,c}`) has a word character before it, as does a `{` inside an arithmetic or
+    # quoted span — which is blanked before this runs anyway.
+    r"|(?:^|[\s;&|()])\{"
+    r"|\(\s*$"
 )
 #: ⛔ A closer may follow a STATEMENT SEPARATOR on the same line (review P1, measured). The model
 #: was line-anchored, so a one-line `if [ -n "$X" ]; then echo hi; fi` opened a block and never
@@ -649,6 +657,12 @@ _SPAN_ANSI_C = "ansi-c"
 _SPAN_CMDSUB = "command-substitution"
 _SPAN_BACKTICK = "backtick"
 _SPAN_SUBSHELL = "subshell"
+#: ⛔ ARITHMETIC is its own span, not a command substitution (review P1, measured). `$(( 1 << n ))`
+#: IS a `$(` and was read as a command substitution, which happened to blank the `<<` — the right
+#: verdict for the wrong reason. Keeping the two apart is what lets the heredoc OPENER scan read a
+#: substitution's body as code (so a `<<'EOF'` inside `$( … )` is found and its body dropped)
+#: without turning a SHIFT into a phantom heredoc opener.
+_SPAN_ARITH = "arithmetic"
 
 #: Characters after which an unquoted `#` BEGINS A COMMENT (bash starts one at any WORD start).
 #: Metacharacters plus blanks; `$#`/`a#b`/`${1#/}` are not comments, which is why this is a set
@@ -688,10 +702,22 @@ def _shell_code_lines(text: str) -> list[str]:
     (exit 0). The view keeps span DELIMITERS, so a quoted delimiter (``<<'EOF'``, the commonest
     spelling) is still recognised while the ``<<`` inside a string is blanked, and a ``<<`` inside
     ``$(( … ))`` is blanked too because the whole arithmetic span is a substitution.
+
+    ⛔ **A heredoc opened INSIDE a substitution is dropped too (review P1, measured).** The opener
+    scan used the ordinary structural view, which blanks a substitution's body — so a
+    ``usage=$(cat <<'EOF' … EOF)`` opener was invisible, its body was read as SHELL, and a `)`
+    inside the body closed the substitution frame early so the rest of the body ran as code: an
+    `export` on a help line was credited ``STATED`` (exit 0) over a process that receives neither
+    switch. The opener scan therefore uses a SECOND view that keeps substitution bodies as code
+    (strings, comments and arithmetic still blanked), which locates the opener wherever it sits.
     """
     out: list[str] = []
     pending: list[tuple[str, bool]] = []
     stack: tuple = ()
+    # The opener scan's own span state: same lines, substitutions kept as code. It is carried
+    # separately because the two views open different frames, and mixing them would carry a
+    # string frame from one into the other.
+    scan_stack: tuple = ()
     for line in _logical_lines(text):
         if pending:
             # ⛔ The terminator must match what the SHELL accepts, not `strip()` (review P2,
@@ -706,17 +732,27 @@ def _shell_code_lines(text: str) -> list[str]:
             continue
         out.append(line)
         structure, stack = _shell_structure(line, stack, keep_delimiters=True)
+        scan, scan_stack = _shell_structure(
+            line, scan_stack, keep_delimiters=True, keep_substitutions=True
+        )
         for match in _SHELL_HEREDOC.finditer(line):
             # Position-aligned: blanking preserves length, so `<` at the match start means the
-            # `<<` is CODE. A match inside a span, or past a comment cut, is not an opener.
-            if match.start() >= len(structure) or structure[match.start()] != "<":
+            # `<<` is CODE. A match inside a span, or past a comment cut, is not an opener — and
+            # the second view is what makes "inside a SUBSTITUTION" mean code here.
+            if not any(
+                match.start() < len(view) and view[match.start()] == "<"
+                for view in (structure, scan)
+            ):
                 continue
             pending.append((match.group("delim"), match.group(0).startswith("<<-")))
     return out
 
 
 def _shell_structure(
-    text: str, stack: tuple = (), keep_delimiters: bool = False
+    text: str,
+    stack: tuple = (),
+    keep_delimiters: bool = False,
+    keep_substitutions: bool = False,
 ) -> tuple[str, tuple]:
     """``text`` with every span body and a trailing comment blanked — the STRUCTURAL view.
 
@@ -758,6 +794,11 @@ def _shell_structure(
 
     ``keep_delimiters`` emits the span DELIMITERS instead of blanking them, for a caller that has
     to locate a construct inside code without reading string content (the heredoc opener scan).
+
+    ``keep_substitutions`` goes one step further for that caller: a substitution's BODY stays CODE
+    (only strings, comments and arithmetic are still blanked), because a heredoc opener may sit
+    inside `$( … )` and is invisible if the whole span is blank. Nothing that reads the DEPTH may
+    use this view — a `fi` inside `$( … )` would then close a real block.
     """
     out: list[str] = []
     frames = list(stack)
@@ -790,13 +831,36 @@ def _shell_structure(
             index += 1
             continue
 
+        if kind == _SPAN_ARITH:
+            # Arithmetic is DATA for this reader in BOTH views: `1 << n` is a SHIFT, never a
+            # heredoc opener, and `case`/`esac` inside it is a string test, not a shell block.
+            # Parens nest (and close it) the same way a substitution's do.
+            depth = frames[-1][1]
+            if char == "(":
+                frames[-1] = (kind, depth + 1, 0)
+            elif char == ")":
+                if depth <= 1:
+                    frames.pop()
+                else:
+                    frames[-1] = (kind, depth - 1, 0)
+            blank(1)
+            index += 1
+            continue
+
         if kind in (_SPAN_CMDSUB, _SPAN_SUBSHELL, _SPAN_BACKTICK):
             # Inside a substitution/subshell: parens (or the closing backtick) end it, quoted
             # spans are stepped over, `case` arms are not closers, and nothing here opens or
             # closes an enclosing block.
             depth, cases = frames[-1][1], frames[-1][2]
+
+            def body(segment: str) -> None:
+                # ⛔ In `keep_substitutions` mode the BODY is code (the heredoc opener scan needs
+                # to see a `<<'EOF'` sitting inside `$( … )`); every other caller blanks it so a
+                # `fi` in a substitution cannot close a real block.
+                out.append(segment if keep_substitutions else " " * len(segment))
+
             if char == "\\" and index + 1 < length:
-                blank(2)
+                body(text[index : index + 2])
                 index += 2
                 continue
             if char in "\"'":
@@ -805,6 +869,12 @@ def _shell_structure(
                 index += 1
                 continue
             if char == "$" and index + 1 < length and text[index + 1] == "(":
+                if text[index + 2 : index + 3] == "(":
+                    # `$(( … ))` is ARITHMETIC even inside a substitution: keep `1 << n` a SHIFT.
+                    frames.append((_SPAN_ARITH, 2, 0))
+                    delim("$((")
+                    index += 3
+                    continue
                 frames.append((_SPAN_CMDSUB, 1, 0))
                 delim("$(")
                 index += 2
@@ -814,7 +884,7 @@ def _shell_structure(
                     frames.pop()
                     delim(char)
                 else:
-                    blank(1)
+                    body(char)
                 index += 1
                 continue
             if char == "`":
@@ -824,12 +894,12 @@ def _shell_structure(
                 continue
             if _word_at(text, index, "case"):
                 frames[-1] = (kind, depth, cases + 1)
-                blank(4)
+                body(text[index : index + 4])
                 index += 4
                 continue
             if _word_at(text, index, "esac"):
                 frames[-1] = (kind, depth, max(0, cases - 1))
-                blank(4)
+                body(text[index : index + 4])
                 index += 4
                 continue
             if char == "(":
@@ -840,7 +910,7 @@ def _shell_structure(
             if char == ")":
                 if cases:
                     # ⛔ A `case` arm's terminator: the substitution continues.
-                    blank(1)
+                    body(char)
                     index += 1
                     continue
                 if depth <= 1:
@@ -851,7 +921,7 @@ def _shell_structure(
                     delim(char)
                 index += 1
                 continue
-            blank(1)
+            body(char)
             index += 1
             continue
 
@@ -878,6 +948,16 @@ def _shell_structure(
                 index += 2
                 continue
             if following == "(":
+                if text[index + 2 : index + 3] == "(":
+                    # ⛔ `$((` is ARITHMETIC, not a command substitution (review P1, measured).
+                    # Treating it as one was only accidentally right: it blanked the span, which
+                    # hid a `1 << n` SHIFT. The two are separated now so the heredoc opener scan
+                    # can read a real substitution's body as code without inventing a heredoc
+                    # out of a shift.
+                    frames.append((_SPAN_ARITH, 2, 0))
+                    delim("$((")
+                    index += 3
+                    continue
                 frames.append((_SPAN_CMDSUB, 1, 0))
                 delim("$(")
                 index += 2
@@ -1008,18 +1088,24 @@ def _shell_exports(line: str, structure: str) -> list[tuple[str, str]]:
 #: matched FIRST so it cannot read as two empty statements.
 _SHELL_STATEMENT = re.compile(r";;|;|&&|\|\|")
 
-#: A BARE `&` — the background operator — matched at a token boundary and nowhere else:
-#: `&&` (its own separator), `>&`/`&>` (a redirect), `|&` (a pipe) and `&>>` all put the `&`
-#: beside another metacharacter, so this matches only the operator that sends a statement to a
-#: SUBSHELL. That matters because a subshell's export never reaches the process (verified: `bash
-#: -c 'export K=1 & wait; env'` prints no K), so crediting it is the false PASS this gate exists to
-#: prevent — `export TORTOISE_VALUE_GATE=1 &` used to read `stated` (review, measured).
-_SHELL_BACKGROUND = re.compile(r"(?<![&>|])&(?![&>])")
+#: A statement pushed into a SUBSHELL never reaches the process the image starts, so its `export`
+#: is not the shipped configuration stating a value. Three spellings, all measured against bash:
+#:
+#: * a BARE `&` (the background operator) — `export K=1 & wait` leaves the parent with K UNSET;
+#: * a PIPE — either side of `|` runs in its own subshell, so `export K=1 | cat` leaves the parent
+#:   with K UNSET. ⚠️ A `|&` (pipe-with-stderr) is the same operator and was measured the same way;
+#: * `&&`/`||` are NOT here — they are statement SEPARATORS and are carried as the third element
+#:   of `_shell_statements`, because only the RIGHT-hand side is conditional.
+#:
+#: Redirects are excluded on purpose: `&>`, `>&2`, `>|` and `&>>` put the metacharacter beside
+#: another one and only move a stream, so reading one as a fork would REFUSE an honest config
+#: (`test_the_short_circuit_guard_does_not_refuse_an_honest_entrypoint` and
+#: `test_a_redirect_is_not_a_fork` pin that direction, which is why the pipe arm carries a `>`
+#: lookbehind: `>|` is bash's CLOBBER redirect, not a pipe).
+_SHELL_FORK = re.compile(r"(?<!>)\|&?(?![&|])|(?<![&>|])&(?![&>])")
 
 
-def _shell_statements(
-    line: str, structure: str
-) -> list[tuple[str, str, str]]:
+def _shell_statements(line: str, structure: str) -> list[tuple[str, str, str]]:
     """Split one logical line into ``(raw, structural, separator)`` STATEMENT segments.
 
     Offsets come from the STRUCTURAL view (span bodies and the trailing comment already blanked,
@@ -1035,6 +1121,7 @@ def _shell_statements(
     (review, measured: `true || export K=1` and `[ -n "$MAYBE" ] && export K=1` both printed `ok`,
     while `env -i … bash` printed neither switch). It is the same class as an `if`-guarded export,
     which this reader already refuses — so the caller needs the guard, not just the text.
+    ``;``-separated statements stay creditable, which is why the split exists.
     """
     segments: list[tuple[str, str, str]] = []
     start = 0
@@ -1084,7 +1171,7 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
         for raw, view, separator in _shell_statements(line, structure):
             depth = max(0, depth - len(_SHELL_CLOSERS.findall(view)))
             # ⛔ `depth > 0 or terminated` is NOT the whole population of statements the process
-            # may never receive, and the two gaps were both measured fail-OPEN (review):
+            # may never receive, and the gaps were all measured fail-OPEN (review):
             #
             #   * a SHORT-CIRCUIT right-hand side — `[ -n "$MAYBE" ] && export K=1`, `true ||
             #     export K=1`, `false && export K=1`. `&&`/`||` are split out as separate
@@ -1092,17 +1179,17 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
             #     depth 0 and was CREDITED — `ok`, exit 0, while `env -i … bash` printed neither
             #     switch. `;`-separated statements are ordinary and stay creditable, which is the
             #     whole reason the split exists, so the separator has to be carried, not guessed;
-            #   * a BACKGROUNDED statement — `export K=1 &` runs in a subshell, so the parent never
-            #     has K. It was credited for the same reason (`_export_tokens` merely stops the word
-            #     at the `&`).
+            #   * a FORKED statement — `export K=1 &` and `export K=1 | cat` (and `|&`) both run in
+            #     a SUBSHELL, so the parent never has K. Measured: `bash -c 'export K=1 & wait; …'`
+            #     and `bash -c 'export K=1 | cat; …'` both leave K UNSET.
             #
-            # Both land on `ambiguous`, the direction that fails CLOSED. A branch is not the
-            # shipped configuration stating a value, whether it is spelled `if …; then`, `&&`, or
-            # `&`. The `export` in the shipped `entrypoint.sh` is a plain top-level one, so this
-            # cannot refuse an honest channel (`test_the_real_entrypoint_is_unaffected`).
+            # All land on `ambiguous`, the direction that fails CLOSED. A branch or a fork is not
+            # the shipped configuration stating a value, whether it is spelled `if …; then`, `&&`,
+            # `&` or `|`. The `export` in the shipped `entrypoint.sh` is a plain top-level one, so
+            # this cannot refuse an honest channel (`test_the_real_entrypoint_statements_are_unconditional`).
             short_circuit = separator in ("&&", "||")
-            backgrounded = _SHELL_BACKGROUND.search(view) is not None
-            conditional = depth > 0 or terminated or short_circuit or backgrounded
+            forked = _SHELL_FORK.search(view) is not None
+            conditional = depth > 0 or terminated or short_circuit or forked
             exports = _shell_exports(raw, view)
             if exports:
                 for key, raw_value in exports:

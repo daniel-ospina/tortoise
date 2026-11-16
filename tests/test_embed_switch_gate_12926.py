@@ -632,6 +632,20 @@ def test_a_trailing_comment_is_not_part_of_the_value():
         "  if false; then\n    export TORTOISE_VALUE_GATE=1\n  fi\n",
         "exit 0\nexport TORTOISE_VALUE_GATE=1\n",
         "for f in a b; do\n  export TORTOISE_VALUE_GATE=1\ndone\n",
+        # ⛔ the ONE-LINE function body (review at `6a221f9053`, measured): the `{` is
+        # mid-statement, so it never opened and the body ran at depth 0 — `ok`, exit 0, over a
+        # process that receives neither switch (`env -i … bash script /usr/bin/env` printed
+        # neither).
+        "arm() { :; export TORTOISE_VALUE_GATE=1; }\n",
+        "arm() { export TORTOISE_VALUE_GATE=1; }\n",
+        # ⛔ the right-hand side of `&&`/`||` (review at `6a221f9053`, measured): split into its
+        # own statement with nothing recording WHY, so a guard-then-arm line was credited STATED.
+        '[ -n "$MAYBE_FROM_RUNTIME" ] && export TORTOISE_VALUE_GATE=1\n',
+        '[ -z "$MAYBE_FROM_RUNTIME" ] || export TORTOISE_VALUE_GATE=1\n',
+        # ⛔ a FORKED statement (review at `6a221f9053`, measured): a background `&` and a
+        # pipeline stage both run in a SUBSHELL, so the export never reaches the process.
+        "export TORTOISE_VALUE_GATE=1 &\n",
+        "export TORTOISE_VALUE_GATE=1 | tee /tmp/log\n",
     ],
 )
 def test_an_assignment_the_process_never_receives_is_refused(body):
@@ -1537,6 +1551,67 @@ def test_a_line_that_closes_one_block_and_opens_another_is_NET_ZERO():
     assert {"TORTOISE_VALUE_GATE", "TORTOISE_EMBED_GATE"} <= ambiguous, ambiguous
 
 
+def test_a_heredoc_opened_INSIDE_a_substitution_is_a_body_not_shell():
+    """Review P1 at `6a221f9053` — the opener scan could not see `<<EOF` inside `$( … )`.
+
+    The structural view BLANKS a substitution's body, so the `<<'EOF'` in
+    ``usage=$(cat <<'EOF' … EOF)`` never registered as an opener and its body was read as SHELL.
+    A `)` in the body (a numbered help line, ``1) Set the db uri``) then closed the substitution
+    frame EARLY, and the rest of the body ran as code: the help text's `export` was credited
+    ``STATED`` — ``ok``, exit 0 — over a process that receives neither switch (measured:
+    ``env -i … bash script /usr/bin/env`` printed neither).
+    The opener scan now uses a second view that keeps substitution bodies as CODE (strings,
+    comments and arithmetic still blanked), so the body is dropped where it belongs.
+    """
+    stated, ambiguous = gate._shell_assignments(
+        "#!/bin/bash\n"
+        "usage=$(cat <<'EOF'\n"
+        "1) Set the db uri\n"
+        "export TORTOISE_VALUE_GATE=1 TORTOISE_EMBED_GATE=1\n"
+        "EOF\n"
+        ")\n"
+        'exec "$@"\n'
+    )
+    assert stated == {}, f"a heredoc body inside a substitution was read as shell: {stated}"
+    # ⛔ And the names inside the body are NOT mentions either — the body is data, so nothing in it
+    # is a statement or a reference. The channel is refused for stating neither switch (measured:
+    # `entrypoint.sh does not state TORTOISE_VALUE_GATE (entrypoint assignments)`), which is the
+    # fail-closed direction this gate owes on a file it can see contains no arm.
+    assert ambiguous == set(), ambiguous
+    channel = gate.Channel(
+        "entrypoint.sh", "entrypoint", "entrypoint assignments", stated=stated, ambiguous=ambiguous
+    )
+    assert len(channel.problems()) == 2, channel.problems()
+
+    # ⛔ AND THE FIX MUST NOT TURN A SHIFT INTO A HEREDOC. `$(( 1 << n ))` is arithmetic, and it
+    # stays blanked in BOTH views, so the `<<` never opens a phantom body that would swallow the
+    # real statement below it and REFUSE an honest config.
+    stated, ambiguous = gate._shell_assignments(
+        "#!/bin/bash\n"
+        "shift_by=$(( 1 << n ))\n"
+        "export TORTOISE_VALUE_GATE=1 TORTOISE_EMBED_GATE=1\n"
+        'exec "$@"\n'
+    )
+    assert stated == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, stated
+    assert ambiguous == set(), ambiguous
+
+
+def test_a_redirect_is_not_a_fork():
+    """The other direction: `&>`/`>&2`/`>|` move a STREAM, they do not fork a subshell.
+
+    Reading them as a fork would route an honest top-level `export` to ``ambiguous`` and REFUSE a
+    config that arms both switches — a false refusal is a bug on this gate too.
+    """
+    for label, line in (
+        ("combined redirect", "export TORTOISE_VALUE_GATE=1 &> /tmp/log"),
+        ("stderr dup", "export TORTOISE_EMBED_GATE=1 2>&1"),
+        ("clobber redirect", "export TORTOISE_VALUE_GATE=1 >| /tmp/log"),
+    ):
+        stated, ambiguous = gate._shell_assignments("#!/bin/bash\n" + line + '\nexec "$@"\n')
+        assert stated, f"{label} was read as a fork and refused: {ambiguous}"
+        assert ambiguous == set(), (label, ambiguous)
+
+
 def test_a_heredoc_opener_inside_a_comment_or_a_string_is_NOT_a_heredoc():
     """Review P2 at `af655a8153` — the `<<` was searched on the RAW line.
 
@@ -1764,6 +1839,11 @@ _SHORT_CIRCUIT_BODIES = (
     # a BACKGROUNDED statement: the subshell exports, the process inherits nothing
     'export TORTOISE_VALUE_GATE=1 &',
     'export TORTOISE_VALUE_GATE=1 2>/dev/null &',
+    # a FORKED statement: BOTH sides of a pipe run in their own subshell (measured 2026-11-16:
+    # `bash -c 'export K=1 | cat; …'` and `bash -c 'export K=1 |& cat; …'` both print `[UNSET]`),
+    # so the parent never receives the value either. `|&` is the same operator with stderr piped.
+    'export TORTOISE_VALUE_GATE=1 | cat',
+    'export TORTOISE_VALUE_GATE=1 |& cat',
 )
 
 
@@ -1819,20 +1899,26 @@ def test_the_short_circuit_guard_does_not_refuse_an_honest_entrypoint():
             {"TORTOISE_VALUE_GATE": "1"},
         ),
         (
-            "an `>&2` redirect is not a background operator",
+            "a `>&2` redirect is not a fork",
             "export TORTOISE_VALUE_GATE=1 >&2",
             {"TORTOISE_VALUE_GATE": "1"},
         ),
         (
-            "an `&>file` redirect is not a background operator",
+            "an `&>file` redirect is not a fork",
             "export TORTOISE_VALUE_GATE=1 &>/dev/null",
             {"TORTOISE_VALUE_GATE": "1"},
         ),
         (
-            "a `|&` pipe is not a background operator",
-            "export TORTOISE_VALUE_GATE=1 |& cat",
+            "a `>|` clobber redirect is not a fork",
+            "export TORTOISE_VALUE_GATE=1 >|/tmp/log",
             {"TORTOISE_VALUE_GATE": "1"},
         ),
+        # ⛔ `|&` IS NOT ONE OF THEM (measured 2026-11-16, this box):
+        #   bash -c 'export K=1 |& cat; echo "[${K:-UNSET}]"'   ->  [UNSET]
+        # so a `|` — and `|&`, the same operator with stderr piped too — puts the statement in a
+        # SUBSHELL and the parent never receives the value. It was pinned here as CREDITED, which
+        # is a false-PASS pin: it asserted the gate may credit a value the process cannot have.
+        # The refusal lives in `test_a_statement_that_short_circuits_or_backgrounds_is_not_credited`.
     ):
         stated, ambiguous = gate._shell_assignments(script + "\n")
         assert stated == expected, f"{label}: {script!r} -> {stated} / ambiguous={ambiguous}"
