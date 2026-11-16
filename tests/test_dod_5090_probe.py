@@ -2969,6 +2969,73 @@ def test_the_entrypoint_is_DISCOVERED_from_the_image_and_its_exports_are_read(
     assert "entrypoint.sh=ON(shell:export)" in note, note
 
 
+def test_a_self_referencing_default_respects_the_value_ALREADY_SET(
+        tmp_path, monkeypatch):
+    """`${FLAG:-1}` is a default, and a DEFAULT does not overwrite a set value.
+
+    ⛔ OPEN P1 of the fresh review of #12902. `_resolved_assignment` answered the
+    default UNCONDITIONALLY, with no input for what the variable already held — while
+    the shell state machine had already computed it. MEASURED against bash, not
+    reasoned about:
+
+    ```
+    $ bash -c 'export F=0; export F=${F:-1}; echo $F'
+    0
+    ```
+
+    so the container runs the gate OFF while the walk published `entrypoint.sh=ON`,
+    and `deployment["on"]` (what `score_rule_bullet` reads as `on_by_default`) is a
+    published `True` over a deployment whose gate is off — the `#11455` class this
+    row exists to remove.
+
+    Every arm below is a `bash -c` transcript of the SAME two lines, so a later
+    "simplification" that reads the default unconditionally reds here rather than
+    silently re-opening the false arm.
+    """
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nENTRYPOINT ["/entrypoint.sh"]\n', encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+
+    def _state(script: str) -> str:
+        (tmp_path / "entrypoint.sh").write_text("#!/bin/bash\n" + script,
+                                               encoding="utf-8")
+        return probe.flag_in_shipped_configs(
+            "TORTOISE_EMBED_GATE")["per_surface"]["entrypoint"]["state"]
+
+    # ── the P1 itself: a SET value survives `:-`, so the file reads OFF ──
+    # `bash -c 'export F=0; export F=${F:-1}; echo $F'` → 0
+    assert _state('export TORTOISE_EMBED_GATE=0\n'
+                  'export TORTOISE_EMBED_GATE=${TORTOISE_EMBED_GATE:-1}\n') == "OFF"
+    # …and the SAME two commands on ONE line, which is why the prior value is tracked
+    # per COMMAND: a per-line value would hand the second command the line-start state.
+    # `bash -c 'export F=0; export F=${F:-1}; echo $F'` → 0
+    assert _state('export TORTOISE_EMBED_GATE=0; '
+                  'export TORTOISE_EMBED_GATE=${TORTOISE_EMBED_GATE:-1}\n') == "OFF"
+    # …`-` and `:=` behave the same on a SET value: all three keep it.
+    # `bash -c 'export F=0; export F=${F-1}; echo $F'` → 0
+    assert _state('export TORTOISE_EMBED_GATE=0\n'
+                  'export TORTOISE_EMBED_GATE=${TORTOISE_EMBED_GATE-1}\n') == "OFF"
+    # `bash -c 'export F=0; export F=${F:=1}; echo $F'` → 0
+    assert _state('export TORTOISE_EMBED_GATE=0\n'
+                  'export TORTOISE_EMBED_GATE=${TORTOISE_EMBED_GATE:=1}\n') == "OFF"
+
+    # ── CONTROLS: the fix must not disarm a real default ──
+    # nothing assigned first → `bash -c 'export F=${F:-1}'` → 1
+    assert _state('export TORTOISE_EMBED_GATE=${TORTOISE_EMBED_GATE:-1}\n') == "ON"
+    # an EMPTY value is NULL to `:-`/`:=` but NOT to `-`, which is bash's own split:
+    # `bash -c 'export F=; export F=${F:-1}; echo $F'` → 1, `…${F-1}` → ``
+    assert _state('export TORTOISE_EMBED_GATE=\n'
+                  'export TORTOISE_EMBED_GATE=${TORTOISE_EMBED_GATE:-1}\n') == "ON"
+    assert _state('export TORTOISE_EMBED_GATE=\n'
+                  'export TORTOISE_EMBED_GATE=${TORTOISE_EMBED_GATE-1}\n') == "OFF"
+
+    # ── a PRIOR VALUE THAT IS ITSELF AN EXPANSION is not a value: reading the raw
+    # `${OTHER}` text as a literal would publish a MEASURED `OFF` about a question the
+    # run never measured. UNMEASURED holds the surface instead.
+    assert _state('export TORTOISE_EMBED_GATE=${OTHER_VAR}\n'
+                  'export TORTOISE_EMBED_GATE=${TORTOISE_EMBED_GATE:-1}\n') == "UNMEASURED"
+
+
 def test_an_unexported_shell_assignment_is_not_a_shipped_environment_entry(
         tmp_path, monkeypatch):
     """A shell VARIABLE is not the process environment; only `export` reaches Python.

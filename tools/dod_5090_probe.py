@@ -3750,7 +3750,16 @@ def _shell_export_states(text: str, flag: str) -> list[dict]:
     current: str | None = None
     states: list[dict] = []
     for line in lines:
-        states.append({"exported": exported, "publish": None, "unexport": False})
+        # ``values`` is the value the variable holds BEFORE each parent-shell command
+        # on this line runs, one entry per `_shell_commands(line)` element. bash
+        # evaluates a `${FLAG:-…}` default against THAT value, so `_resolved_assignment`
+        # needs it — reading the default unconditionally published an ARM for a gate
+        # bash keeps OFF (`export F=0` then `export F=${F:-1}` → bash `0`, walker `ON`;
+        # fresh review of #12902, P1). Recorded per COMMAND, not per line: on
+        # `F=0; export F=${F:-1}` the second command must see `0`, and a per-line value
+        # would hand it the line-start state.
+        states.append({"exported": exported, "publish": None, "unexport": False,
+                       "values": []})
         # ⛔ ONE LINE IS NOT ONE COMMAND: `set -a; set +a;` runs BOTH, and reading only
         # the FIRST left the allexport state ARMED where bash has already ended it — a
         # FALSE ARM (measured: `bash -c 'set -a; set +a; FLAG=1; env'` has no FLAG).
@@ -3760,6 +3769,7 @@ def _shell_export_states(text: str, flag: str) -> list[dict]:
         # or modified AFTERWARDS* (bash(1)), so an assignment BEFORE `set -a` is a plain
         # shell variable and `set +a` ends the mode.
         for command in _shell_commands(line):
+            states[-1]["values"].append(current)
             text = command.strip()
             if not text:
                 continue
@@ -3844,7 +3854,8 @@ def _shell_line_is_exported(line: str, flag: str,
 #: why (a shell's value is decided by execution, not by text).
 
 
-def _resolved_assignment(value: str, flag: str) -> tuple[bool, str]:
+def _resolved_assignment(value: str, flag: str,
+                         prior: str | None = None) -> tuple[bool, str]:
     """``(resolved, literal)`` for an assigned value that may be a shell default.
 
     `entrypoint.sh`'s own form is `export VAR="${VAR:-default}"` — a DEFAULT, which
@@ -3855,18 +3866,46 @@ def _resolved_assignment(value: str, flag: str) -> tuple[bool, str]:
     * anything else that references another variable (`${OTHER}`, `${FLAG:+x}`) is
       INDETERMINATE, and the caller must not read it as silence — the same
       doctrine as an unreadable file, one line down.
+
+    ⛔ **A DEFAULT ONLY APPLIES WHEN THE VARIABLE IS NOT ALREADY SET** — reading the
+    default unconditionally published an ARM for a gate bash keeps OFF (fresh review
+    of #12902, P1). Measured: `bash -c 'export F=0; export F=${F:-1}; echo $F'`
+    prints `0`, while the walker read the `:-1` and published `entrypoint.sh=ON`.
+    ``prior`` is the value the SHELL STATE MACHINE has already tracked for this
+    variable at this command (`_shell_export_states` → ``values``) — the model
+    knows it and the resolver was never told. The shell channel therefore passes
+    it; compose/YAML callers pass nothing and keep the literal reading.
+
+    The three operator spellings differ and this follows bash, not a simplification:
+
+    * `:-` / `:=` substitute when the name is UNSET **or NULL (empty)**;
+    * `-` / `=` substitute only when the name is UNSET, so an empty-but-set value
+      survives (`bash -c 'F=; echo "${F-1}"'` prints nothing).
+
+    ``prior is None`` means the file never assigned it — an INHERITED value this
+    file-reader cannot see — so the default stands, which is the pre-existing and
+    documented reading for a runtime default.
     """
     if not value.startswith("$"):
         return True, value
     match = re.fullmatch(
         r"\$\{?(?P<name>[A-Za-z_][A-Za-z0-9_]*)"
-        r"(?:(?::?[-=])(?P<default>[^}]*))?\}?", value)
+        r"(?:(?P<op>:?[-=])(?P<default>[^}]*))?\}?", value)
     if not match:
         return False, ""
     if match.group("name") != flag or match.group("default") is None:
         return False, ""
+    if prior is not None:
+        # ⛔ A PRIOR VALUE THAT IS ITSELF AN EXPANSION IS NOT A VALUE. `export FLAG=${
+        # OTHER}` then `export FLAG=${FLAG:-1}` leaves `current` as the raw text
+        # `${OTHER}`, and `is_truthy` would read that string as a literal OFF — a
+        # measured answer to a question the run never measured. UNMEASURED instead.
+        if prior.startswith("$"):
+            return False, ""
+        # `:-`/`:=` treat an EMPTY value as unset; `-`/`=` do not.
+        if prior != "" or not match.group("op").startswith(":"):
+            return True, prior
     return True, match.group("default").strip().strip("'\"")
-
 
 
 #: ⛔ There is deliberately NO truthy vocabulary in this module. The values a
@@ -4446,13 +4485,13 @@ def flag_in_shipped_configs(flag: str) -> dict:
             # source line number, so the per-line state (`shell_exports[number - 1]`) and
             # the reported `file:line` remain the original ones.
             scan_lines = (
-                [(number, command, raw)
+                [(number, index, command, raw)
                  for number, raw in enumerate(text.splitlines(), 1)
-                 for command in _shell_commands(raw)]
+                 for index, command in enumerate(_shell_commands(raw))]
                 if posix.endswith(".sh")
-                else [(number, raw, raw)
+                else [(number, 0, raw, raw)
                       for number, raw in enumerate(text.splitlines(), 1)])
-            for number, line, shown in scan_lines:
+            for number, index, line, shown in scan_lines:
                 if number in bodies:
                     executed = (workflow
                                 and bodies[number] in EXECUTED_BLOCK_KEYS)
@@ -4538,7 +4577,15 @@ def flag_in_shipped_configs(flag: str) -> dict:
                              if shell_exports is not None else None)
                     if value is None:
                         continue
-                resolved, literal = _resolved_assignment(value, flag)
+                # ⛔ The value the SHELL MACHINE already holds for this variable at this
+                # command (`_shell_export_states` → ``values``), so a self-referencing
+                # default (`export F=${F:-1}`) is judged against what bash will really
+                # substitute rather than against the default alone (fresh review of
+                # #12902, P1). NON-shell channels pass nothing and are untouched.
+                resolved, literal = _resolved_assignment(
+                    value, flag,
+                    prior=(shell_exports[number - 1]["values"][index]
+                           if shell_exports is not None else None))
                 if not resolved:
                     indeterminate.append(f"{posix}:{number}: {shown.strip()[:90]}")
                     surface_indeterminate.append(posix)
