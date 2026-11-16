@@ -300,7 +300,12 @@ def test_gate_b_cli_reads_the_private_marker_seam():
     assert "_calibration_marker_recorded()" in src
     assert ".calibration_passed()" not in src
     # The seam must be reachable on the class the CLI constructs, or the except swallows it.
-    assert callable(getattr(TortoiseSDK, "_calibration_marker_recorded"))
+    # ⛔ Attribute access, not `getattr(..., "<name>")`: B009 (ruff, active on this repo's
+    # select surface) is right that a constant-name `getattr` is no safer than the plain
+    # access — and the plain access is strictly more informative, because a missing seam
+    # raises `AttributeError: type object 'TortoiseSDK' has no attribute
+    # '_calibration_marker_recorded'` instead of a bare `assert False`.
+    assert callable(TortoiseSDK._calibration_marker_recorded)
 
 
 def test_calibration_marker_key_is_the_persisted_literal():
