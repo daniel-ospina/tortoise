@@ -10,7 +10,7 @@ census has one command:
 
     uv run python tools/hosted_api_cite_census.py            # human-readable
     uv run python tools/hosted_api_cite_census.py --json     # for a script
-    uv run python tools/hosted_api_cite_census.py --pivot 24861
+    uv run python tools/hosted_api_cite_census.py --pivot 24872
     uv run python tools/hosted_api_cite_census.py --check    # exit 1 when a note is stale
     uv run python tools/hosted_api_cite_census.py --refresh  # re-state every figure in place
 
@@ -129,7 +129,9 @@ _CITE_CANDIDATE_RE = r"[[:alnum:]_.-]*hosted_api\.py:[0-9]+"
 #: repaired by re-deriving all three; #12947 moved it 24692 -> 24731 (24728 after
 #: its forward merge of main, then +3 more comment lines in the same PR, and
 #: re-derived all of the three at each step; #12992's typed-refusal block added
-#: 130 lines above the site, moving it 24731 -> 24861, and re-derived all three).
+#: 130 lines above the site, moving it 24731 -> 24861, and its own review's
+#: `/health` degraded-arm repair added 11 more, 24861 -> 24872 — all three
+#: re-derived at each hop).
 #: Two
 #: distinct wrongnesses, with distinct start points — do not merge them:
 #:   • `pivot_is_the_lifetime_site(<old pivot>)` goes FALSE the moment the CALL
@@ -143,7 +145,7 @@ _CITE_CANDIDATE_RE = r"[[:alnum:]_.-]*hosted_api\.py:[0-9]+"
 #: `tests/test_demo_session_read_exclusion_8290.py` asserts it equals the site —
 #: and that pin is what reds when a forward merge grows the module, which is the
 #: remedy this constant relies on rather than a hand sweep.
-DEFAULT_PIVOT = 24861
+DEFAULT_PIVOT = 24872
 
 _SCORECARD = "tortoise/activation_scorecard.py"
 _HOSTED = "tortoise/hosted_api.py"
