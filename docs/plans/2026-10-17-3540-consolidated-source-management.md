@@ -139,7 +139,7 @@ implementation if guessed:
    `mcp_server.py:6020`): *"when a name is retired, a caller still gets an answer and is TOLD the name is
    retired, naming the replacement"*, and `#3883` is documented as a hard prerequisite for executing
    removals. `RETIRED_TOOL_REGISTRY` is derived — `[t for t in _ENTRY_DECLARATIONS if t.name in
-   RETIRED_USE_INSTEAD]` (`tool_registry.py:2319-2321`) — so adding the two names to that map removes them
+   RETIRED_USE_INSTEAD]` (`tool_registry.py:2326-2328`) — so adding the two names to that map removes them
    from the *advertised* surface (the count really does shrink) while a caller still resolves them and
    is pointed at `tortoise_manage_sources`. **Deleting the entries instead would answer "tool not
    found"**, which is the behaviour #3883 exists to prevent.

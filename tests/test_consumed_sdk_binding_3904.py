@@ -335,9 +335,11 @@ _HANDLER_SERVED_NO_SDK_READ: dict[str, str] = {
     # registered is a stale claim, not documentation.
 }
 
-# Targeted vectors for the three handlers whose declared read sits behind an
-# early-return branch a generic vector cannot satisfy. Each is explained; the
-# import-time gate below refuses an override that names no registry entry.
+# Targeted vectors for the handlers whose declared read sits behind an
+# early-return branch a generic vector cannot satisfy — one per such handler, so
+# the count is whatever the population is, never a typed number that can drift
+# with the suite green. Each is explained; the import-time gate below refuses an
+# override that names no registry entry.
 _DRIVE_OVERRIDES: dict[str, tuple[tuple[str, tuple, dict], ...]] = {
     # #11609 Phase 2 lane C (`#12948` review B1 finding 7): `tortoise_index_files` was
     # RETIRED into `tortoise_index_sources_from_directory`, so the override is

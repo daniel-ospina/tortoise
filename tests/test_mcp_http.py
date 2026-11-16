@@ -2282,12 +2282,33 @@ class TestSC5IndexFilesSurface:
         # description carries the corpus_name guidance line (cycle-21)
         assert "corpus_name" in entry.description
         assert "unique corpus_name" in entry.description
-        # wrong-tool guidance: points at the absorbed legacy tools
-        assert "tortoise_index_sessions" in entry.description
-        assert "tortoise_ingest_corpus" in entry.description
-        # …and at the member this row absorbed, so a caller holding the old name
-        # is told where the capability went (#3883's contract, in the description).
-        assert "tortoise_index_files" in entry.description
+        # wrong-tool guidance: a caller holding one of the absorbed per-kind doors
+        # is told where the capability went (#3883's contract). ⛔ The CARRIER moved
+        # with the capability in #11609 lane C: this container is LIVE, and a live
+        # description naming retired tools is exactly the defect
+        # `test_9664::test_a_live_tool_description_never_recommends_a_retired_tool`
+        # pins against (a tool-grant client cannot call those names). So the
+        # redirect is carried by each retired entry's own `retired_use_instead`,
+        # which the registry derives from `RETIRED_USE_INSTEAD` — the machine-
+        # readable place a shim caller is actually sent. Asserting the names are in
+        # THIS prose would pin the superseded carrier AND re-grow the #9664 set.
+        assert "file_type='agent_session'" in entry.description
+        assert "file_type='doc'" in entry.description
+        from tortoise.tool_registry import RETIRED_USE_INSTEAD
+        for absorbed, arm in (
+            ("tortoise_index_sessions", 'file_type="agent_session"'),
+            ("tortoise_ingest_corpus", 'file_type="doc"'),
+            ("tortoise_index_files", "file_type=..."),
+        ):
+            assert absorbed in RETIRED_USE_INSTEAD, (
+                f"{absorbed} must be RETIRED into the container")
+            assert RETIRED_USE_INSTEAD[absorbed].startswith(
+                "tortoise_index_sources_from_directory("), (
+                f"{absorbed} must point at the container, not a dead end: "
+                f"{RETIRED_USE_INSTEAD[absorbed]!r}")
+            assert arm in RETIRED_USE_INSTEAD[absorbed], (
+                f"{absorbed} must name the {arm} arm that reproduces it: "
+                f"{RETIRED_USE_INSTEAD[absorbed]!r}")
 
     def test_index_files_quota_gated(self):
         """The index surface MUST join _QUOTA_GATED (S8 pin, I25).
@@ -2305,15 +2326,33 @@ class TestSC5IndexFilesSurface:
 
     def test_legacy_tools_deprecation_markers(self):
         """Both legacy tools are RETIRED (#3883): they keep the DEPRECATED
-        description naming the replacement, and stay http-excluded."""
-        from tortoise.tool_registry import RETIRED_TOOL_REGISTRY
+        description naming the replacement, and stay http-excluded.
+
+        ⛔ Retargeted by #11609 lane C. The replacement this method used to pin
+        (`tortoise_index_files`) was itself RETIRED into
+        `tortoise_index_sources_from_directory`, so the old pin asserted a POINTER
+        AT A DEAD END — the very defect that finding B2 removed from the pointers
+        this PR re-cut. The marker must name a LIVE tool, and the pointer must be
+        the one the registry actually serves (derived from `RETIRED_USE_INSTEAD`,
+        never a typed copy that can drift with the suite green).
+        """
+        from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, RETIRED_USE_INSTEAD, TOOL_REGISTRY
         by_name = {t.name: t for t in RETIRED_TOOL_REGISTRY}
+        live = {t.name for t in TOOL_REGISTRY}
         for legacy in ("tortoise_index_sessions", "tortoise_ingest_corpus"):
             d = by_name[legacy].description
             assert d.startswith("DEPRECATED"), f"{legacy} missing DEPRECATED marker: {d}"
-            assert "tortoise_index_files" in d, f"{legacy} marker must name the replacement"
+            assert "tortoise_index_sources_from_directory" in d, (
+                f"{legacy} marker must name the LIVE replacement: {d}")
             assert by_name[legacy].http_policy is False, f"{legacy} must stay http-excluded"
-            assert by_name[legacy].retired_use_instead == "tortoise_index_files(directory)"
+            # The pointer the shim serves IS the live map's value, and its target
+            # is a tool a client can actually call (B2: two hops resolve nowhere).
+            pointer = by_name[legacy].retired_use_instead
+            assert pointer == RETIRED_USE_INSTEAD[legacy], (
+                f"{legacy} pointer drifted from RETIRED_USE_INSTEAD: {pointer!r}")
+            target = pointer.split("(", 1)[0]
+            assert target in live, (
+                f"{legacy} points at {target}, which is not a LIVE tool")
 
     def test_index_files_absent_from_http_tools_list(self, mcp_client):
         """E2E-17(e) structural half: the filesystem-walk tool is not

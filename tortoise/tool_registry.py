@@ -1021,7 +1021,9 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
     ToolDefinition(
         name="tortoise_ingest_corpus",
         id="surface.ingest_corpus",
-        description="Batch document ingestion — walk directory, parse YAML frontmatter "
+        description="DEPRECATED — use "
+                    "tortoise_index_sources_from_directory(directory, file_type=\"doc\"). "
+                    "Batch document ingestion — walk directory, parse YAML frontmatter "
                     "from .md files, create/update document Sources "
                     "(D10: a document is a :Source). "
                     "EXCLUDED from tenant HTTP — walks server filesystem with user-supplied path.",
@@ -1220,7 +1222,10 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
     ToolDefinition(
         name="tortoise_index_sessions",
         id="surface.index_sessions",
-        description="Index session .md files "
+        description="DEPRECATED — use "
+                    "tortoise_index_sources_from_directory(directory, "
+                    "file_type=\"agent_session\"). "
+                    "Index session .md files "
                     "as AgentSession Events. "
                     "EXCLUDED from tenant HTTP — walks server filesystem with user-supplied path.",
         risk="destructive",
