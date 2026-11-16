@@ -3197,6 +3197,16 @@ def test_a_BRANCH_may_not_have_run_so_the_file_is_HELD(tmp_path, monkeypatch):
             "case $ENV in (prod|staging|dev) export TORTOISE_EMBED_GATE=1 ;; esac\n",
             "case $ENV in\n  (prod|staging|dev) export TORTOISE_EMBED_GATE=1 ;;\nesac\n",
             "case $ENV\nin prod|staging|dev) export TORTOISE_EMBED_GATE=1 ;;\nesac\n",
+            # ⛔ …and a QUOTED or PARAMETERISED SUBJECT (`case "${ENV}" in prod)`,
+            # `case ${ENV:-prod} in prod)`). bash expands the `case` word before matching
+            # (bash(1) 3.2.5.2), so both are ordinary and both ARM the file — but the
+            # subject character class rejected `{`, `}` and quotes, so the arm landed in no
+            # bucket and the file published a DEFINITE `OFF` with an empty `indeterminate`
+            # bucket: a false PASS, and one the SAFER spelling caused (the unquoted control
+            # read `UNMEASURED`; fresh review of `#12902`, P2).
+            'case "${ENV}" in prod) export TORTOISE_EMBED_GATE=1 ;; esac\n',
+            "case ${ENV:-prod} in prod) export TORTOISE_EMBED_GATE=1 ;; esac\n",
+            'case "$ENV" in "prod") export TORTOISE_EMBED_GATE=1 ;; esac\n',
     ):
         shipped = _shipped(script)
         assert shipped["per_surface"]["entrypoint"]["state"] == "UNMEASURED", (
@@ -3243,6 +3253,31 @@ def test_a_BRANCH_may_not_have_run_so_the_file_is_HELD(tmp_path, monkeypatch):
     assert shipped["per_surface"]["entrypoint"]["state"] == "UNMEASURED", (
         shipped["per_surface"]["entrypoint"])
     assert shipped["indeterminate"], shipped["indeterminate"]
+    # ⛔ THE MIRROR OF THE `echo in y)` CONTROL, one spelling over: a bare ARM outside a
+    # `case` is not a pattern, and `foo|bar) export FLAG=1` is a line bash REFUSES
+    # (`syntax error near unexpected token ')'`, exit 2, nothing exported). While the arm
+    # strip was unconditional, the `|`-tolerance kept the bar (a single word is a valid
+    # pattern POSITION) and the pseudo-arm was stripped, so the file read `ON` — a FALSE
+    # ARM in the certification direction, published over a line that cannot ship at all
+    # (fresh review of `#12902`, P3). bash leaves the flag UNSET here, so `OFF` is the
+    # measured reading; what must never return is `ON`.
+    assert _shipped("foo|bar) export TORTOISE_EMBED_GATE=1\n")[
+        "per_surface"]["entrypoint"]["state"] == "OFF"
+    # …pinned at the helper too, so the strip and the construct test cannot drift: the same
+    # text IS stripped once a `case` covers it, and is NOT stripped when none does.
+    assert probe._shell_strip_leading_keywords(
+        "prod|staging) export TORTOISE_EMBED_GATE=1") == \
+        "prod|staging) export TORTOISE_EMBED_GATE=1"
+    assert probe._shell_strip_leading_keywords(
+        "prod|staging) export TORTOISE_EMBED_GATE=1", in_case=True) == \
+        "export TORTOISE_EMBED_GATE=1"
+    # …and the construct test itself, both directions (a one-line `case` covers its own
+    # line; an `esac` closes the cover again).
+    assert probe._shell_case_open_lines(
+        "case x in x) export F=1 ;; esac\n") == {1}
+    assert probe._shell_case_open_lines(
+        "case $E in\n  prod|staging) export F=1 ;;\nesac\nexport F=0\n") == {1, 2, 3}
+    assert probe._shell_case_open_lines("foo|bar) export F=1\n") == set()
     # ── CONTROL: a pipe between two REAL commands still drops the line (subshell) ──
     assert probe._shell_commands("export TORTOISE_EMBED_GATE=1 |cat") == []
     assert _shipped("for x in a b; do\nexport TORTOISE_EMBED_GATE=1\ndone\n")[

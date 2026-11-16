@@ -4159,8 +4159,17 @@ _SHELL_CASE_ARM_PATTERN = re.compile(r"^" + _SHELL_CASE_PATTERN_LIST + r"[ \t]+"
 #: `_shell_strip_leading_keywords`) and only when a PATTERN WORD and its `)` follow it, so
 #: `for x in a b` (a loop's word list) and a line bash refuses to parse (`echo in y) …`) are
 #: untouched.
+#: ⛔ The SUBJECT is a shell WORD, not a run of "simple" characters. Enumerating the
+#: excluding set (braces, quotes, `$`) rejected every spelling that QUOTES or
+#: PARAMETERISES the subject — `case "${ENV}" in prod) export FLAG=1 ;; esac` and
+#: `case ${ENV:-prod} in prod) …` are ordinary bash (the `case` word "undergoes
+#: parameter expansion … before the shell attempts to match", bash(1) 3.2.5.2), and
+#: both published a DEFINITE `OFF` with an empty `indeterminate` bucket — a false PASS
+#: in the direction this PR exists to close, and a regression the safer spelling
+#: CAUSED: the unquoted `case $ENV in prod)` control read `UNMEASURED`. Only a
+#: separator (`;`) and the `)` that opens the arm may not appear in the subject.
 _SHELL_CASE_SUBJECT_PATTERN = re.compile(
-    r"^[^ \t(){};&|]+[ \t]+in[ \t]+" + _SHELL_CASE_PATTERN_LIST + r"[ \t]*")
+    r"^[^ \t;)]+[ \t]+in[ \t]+" + _SHELL_CASE_PATTERN_LIST + r"[ \t]*")
 
 #: ⛔ A PATTERN POSITION is where a `case` arm's pattern list begins: the first alternative,
 #: bare or after `case <subject> in` — OR after a bare `in`, because bash lets the head be
@@ -4190,8 +4199,42 @@ _SHELL_CASE_PATTERN_REST = re.compile(
     r"(?:" + _SHELL_CASE_SEPARATOR + _SHELL_CASE_ALTERNATIVE + r")*" + r"[ \t]*\)")
 
 
-def _shell_strip_leading_keywords(text: str) -> str:
-    """``text`` with any leading shell KEYWORDS (`then`, `do`, `!`, …) removed."""
+def _shell_case_open_lines(text: str) -> set[int]:
+    """The 1-BASED lines an open `case` construct covers, including the line that opens it.
+
+    ⛔ **A `case` ARM's pattern is strippable ONLY inside a `case`.** Stripped from an
+    ARBITRARY command, `foo|bar) export FLAG=1` read `ON` while bash refuses the line
+    (`syntax error near unexpected token ')'`, exit 2, nothing exported) — a FALSE ARM in
+    the certification direction (fresh review of `#12902`, P3). The same rule is what lets
+    a PATTERN ALTERNATION's `|` be kept without keeping an `a|b` pipeline, so the answer
+    has to be a property of the CONSTRUCT, not of the line's shape.
+
+    A one-line construct (`case x in x|y) export FLAG=1 ;; esac`) counts, because the
+    line carries its own `case`. Nesting is counted, and `esac` closes one level. Quoted
+    text and comments are masked first, so a `case` inside a string or a comment opens
+    nothing.
+    """
+    covered: set[int] = set()
+    depth = 0
+    for number, raw in enumerate(text.splitlines(), 1):
+        masked = _shell_mask_arithmetic(_shell_mask_quoted(_shell_strip_comment(raw)))
+        words = set(re.findall(r"(?<![A-Za-z0-9_])[A-Za-z_][A-Za-z0-9_]*(?![A-Za-z0-9_])",
+                               masked))
+        opens = "case" in words
+        closes = "esac" in words
+        if depth > 0 or opens:
+            covered.add(number)
+        depth = max(depth + (1 if opens else 0) - (1 if closes else 0), 0)
+    return covered
+
+
+def _shell_strip_leading_keywords(text: str, in_case: bool = False) -> str:
+    """``text`` with any leading shell KEYWORDS (`then`, `do`, `!`, …) removed.
+
+    ``in_case`` says the line is covered by an open `case` (``_shell_case_open_lines``);
+    the bare ARM strip below is gated on it, because a pattern outside a `case` is not a
+    pattern.
+    """
     while True:
         stripped = text.strip()
         if stripped.startswith("!") and (len(stripped) == 1
@@ -4223,13 +4266,19 @@ def _shell_strip_leading_keywords(text: str) -> str:
                 if subject:
                     text = text[subject.end():]
             continue
+        # ⛔ A PATTERN OUTSIDE A `case` IS NOT A PATTERN: `foo|bar) export FLAG=1` is a
+        # line bash refuses (syntax error, nothing exported), and stripping its
+        # pseudo-arm published `ON` — a FALSE ARM (fresh review of `#12902`, P3). The
+        # strip is reachable again only when a `case` construct covers the line.
+        if not in_case:
+            return stripped
         arm = _SHELL_CASE_ARM_PATTERN.match(stripped)
         if not arm:
             return stripped
         text = stripped[arm.end():]
 
 
-def _shell_commands(line: str) -> list[tuple[str, bool]]:
+def _shell_commands(line: str, in_case: bool = False) -> list[tuple[str, bool]]:
     """Split ONE shell line into the parent-shell commands, and say which are CONDITIONAL.
 
     Returns ``(command, conditional)`` pairs in execution order. ``conditional`` is True
@@ -4294,7 +4343,7 @@ def _shell_commands(line: str) -> list[tuple[str, bool]]:
             # flag across the `;` read a real arm as unmeasured — a false HOLD, the
             # mirror of the false ARM this whole branch is about (measured by this
             # lane's own adversarial pass before review).
-            commands.append((_shell_strip_leading_keywords("".join(current)),
+            commands.append((_shell_strip_leading_keywords("".join(current), in_case),
                               after_conditional))
             current = []
             after_conditional = False
@@ -4324,7 +4373,7 @@ def _shell_commands(line: str) -> list[tuple[str, bool]]:
                 # test passes (`&&`) or fails (`||`), and this reader cannot evaluate
                 # it. Both are emitted, but the flag is sticky from here on: `a && b &&
                 # c` makes c depend on b, which already depends on a.
-                commands.append((_shell_strip_leading_keywords("".join(current)),
+                commands.append((_shell_strip_leading_keywords("".join(current), in_case),
                               after_conditional))
                 current = []
                 after_conditional = True
@@ -4351,7 +4400,7 @@ def _shell_commands(line: str) -> list[tuple[str, bool]]:
             return commands
         current.append(char)
         index += 1
-    commands.append((_shell_strip_leading_keywords("".join(current)),
+    commands.append((_shell_strip_leading_keywords("".join(current), in_case),
                               after_conditional))
     return commands
 
@@ -4413,6 +4462,7 @@ def _shell_export_states(text: str, flag: str) -> list[dict]:
     #: exists for the identical rule one grammar over.
     heredoc_bodies = _shell_heredoc_bodies(text)
     control_lines = _shell_control_flow_lines(text)
+    case_open_lines = _shell_case_open_lines(text)
     for number, line in enumerate(lines, 1):
         #: ⛔ ONE ENTRY PER COMMAND, as LISTS read at the COMMAND index by the caller.
         #: They were one scalar per LINE, and the caller applied that single line-final
@@ -4442,7 +4492,7 @@ def _shell_export_states(text: str, flag: str) -> list[dict]:
         # +a` are ORDERED, not a file-wide flag: allexport marks the variables *created
         # or modified AFTERWARDS* (bash(1)), so an assignment BEFORE `set -a` is a plain
         # shell variable and `set +a` ends the mode.
-        for command, conditional in _shell_commands(line):
+        for command, conditional in _shell_commands(line, number in case_open_lines):
             # ⛔ A BRANCH is a conditional operand one construct over: a command inside an
             # `if`/`case`/loop may not have run, and this reader cannot evaluate the test.
             # The caller holds the file for it; here it changes no state (fresh review of
@@ -5214,12 +5264,14 @@ def flag_in_shipped_configs(flag: str) -> dict:
             reads_shell = posix.endswith(".sh") or workflow
             control_lines = (_shell_control_flow_lines(text)
                              if reads_shell else set())
+            case_open_lines = (_shell_case_open_lines(text)
+                               if reads_shell else set())
             scan_lines = (
                 [(number, index, command, raw,
                   conditional or number in control_lines)
                  for number, raw in enumerate(text.splitlines(), 1)
                  for index, (command, conditional)
-                 in enumerate(_shell_commands(raw))]
+                 in enumerate(_shell_commands(raw, number in case_open_lines))]
                 if posix.endswith(".sh")
                 else [(number, 0, raw, raw, False)
                       for number, raw in enumerate(text.splitlines(), 1)])
