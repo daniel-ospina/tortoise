@@ -831,9 +831,16 @@ authorise, named here so a later reader does not infer them:
 #### A7.5.1 Why a counter row and not a sequence — and what the row lock actually buys
 
 ```sql
--- public.record_cursor(org_id, graph_id, seq, updated_at) ; one row per graph
+-- public.record_cursor(org_id, graph_id, seq, mode, updated_at) ; one row per graph
+-- ⛔ ILLUSTRATIVE OF THE INCREMENT'S TRANSACTIONALITY ONLY — §A7.5.2 is the allocator. Copied verbatim without
+--    `mode = 'allocating'`, this statement allocates on a `halted` AND on a `seeded` graph, which would undo
+--    rung 0 (§A7.5.11), §A7.5.12's mode table and falsifier 17(b); copied without the divergence guard it silently
+--    repairs the `cursor < max` that §A7.5.2 raises on (B5).
 UPDATE public.record_cursor SET seq = seq + 1, updated_at = now()
  WHERE org_id = %s AND graph_id = %s
+   AND mode = 'allocating'                                   -- a halted/seeded graph must match no row
+   AND seq >= COALESCE((SELECT max(seq) FROM public.journal_event
+                         WHERE org_id = %s AND graph_id = %s), 0)   -- loud, not repaired here
 RETURNING seq;
 ```
 
@@ -1226,11 +1233,23 @@ case 1, **or by nothing at all**: case 2b's three tail conditions cannot evaluat
 
 #### A7.5.6 The arm: AFTER COMMIT for `allocating`, BEFORE COMMIT for `halted` — and the export re-serialises into seq order (B4)
 
-⚠️ **And the drainer needs one rule it did not have:** for a `halted` graph it **drains the pre-halt backlog to
-`max(journal_event.seq)` and then stops** — the counter is frozen by design, so `record_cursor.seq > last_exported`
-(§A7.5.6's burned-number rule) is never true again, and a hole left by a halt is neither "in flight" nor "burned".
-Falsifier 15's **age**-based lag alarm must therefore be **mode-aware**: on a `halted` graph "no progress" is the
-expected steady state, not the failure it is built to catch.
+⚠️ **And the drainer needs one rule it did not have:** for a `halted` graph it **drains the backlog as at the
+halt — to the FROZEN `record_cursor.seq`, NOT to `max(journal_event.seq)` — and then stops.** The counter is frozen
+by design, so `record_cursor.seq > last_exported` (the burned rule) is never true again, and a hole left by a halt
+is neither "in flight" nor "burned" — §A7.5.6's hole table carries its own row for that shape.
+⛔ **The target is the frozen counter and not the table's max, and the distinction is the whole rule:** on a halted
+graph the **file leads** (PRE-COMMIT arm), so `max(journal_event.seq)` keeps **rising** as post-halt writes commit
+rows — draining to it would append a second line for positions the file already carries, giving two records at one
+`seq` and shifting the enumeration that is the halted graph's own position source (§A7.5.4 would then refuse on
+`carried != start_seq + i`). **And after the halt the WRITER is the exporter**: on a halted graph
+`EventLog.append` appends the line and advances `last_exported` with it; the drainer never appends again until a
+re-cut.
+
+⛔ **The export-lag AGE alarm is ARMED ONLY IN `mode = 'allocating'`** — not "mode-aware", which would leave the
+scope to the implementer. On a `halted` graph, and on a `seeded` graph (which is every graph created after
+cutover until §A7.7 6.6 ships, §A7.8 item 8), "no progress" is the **expected steady state**, so an alarm armed
+there fires forever on a healthy system — the failure a mode check written as "suppress in `halted`" relocates
+rather than removes. Falsifier 15(c) asserts both directions.
 
 **There is no third arm, and the argument is short.** The journal line must (a) carry a number that only exists
 once allocated, and (b) be visible to replay **only if the transaction committed**:
@@ -1296,6 +1315,7 @@ timeout**:
 | **a row exists** | append it, advance, continue |
 | **no row, and a live transaction holds the counter row** | wait (bounded by the transaction, and by (a) above) |
 | **no row, no holder, and `record_cursor.seq > last_exported` (the counter has moved past it)** | **BURNED** → advance `last_exported` past it, **count it** (`tortoise_journal_export_burned_total`), and continue. This is the same fact the reconciliation uses, so the two cannot disagree. |
+| **no row, no holder, and `record_cursor.seq == last_exported` — a `halted` graph's rolled-back write** | **BURNED, for the same reason and via the same counter** — the counter is **frozen** on a halted graph, so no allocator will ever fill this position; the file already carries `last_exported + 1` (PRE-COMMIT arm), so the drainer appends nothing and steps past it. ⛔ **This row exists because the third row structurally cannot cover it** (`cursor > last_exported` is never true again once the counter is frozen) and the second row needs a holder that will never exist — without it a halted graph's hole matches **no** row and the drainer waits on it forever, which is the stall this table was added to prevent |
 
 ⚠️ **What the drained file looks like with a burned number: the export is not contiguous, and `#2488`'s
 enumeration assumption no longer describes it.** That is the honest consequence of a repair rung, and it is why
@@ -1493,7 +1513,7 @@ what each means:
 
 ⛔ **The transitions are the mechanism, and leaving them implicit was the round-2 review's P1.** A mode column
 whose writers are unspecified is a column that drifts: `seeded` and `halted` both mean "nobody allocates", so a
-writer that sets the wrong one silently moves a graph between two states with opposite remedies. **Four
+writer that sets the wrong one silently moves a graph between two states with opposite remedies. **Five
 transitions exist, each with exactly one writer — plus one WRITER THAT IS NOT A TRANSITION and sets `mode`
 arbitrarily**, which is why it gets its own row below rather than being left out of the table:
 
@@ -1504,7 +1524,8 @@ arbitrarily**, which is why it gets its own row below rather than being left out
 | `seeded` → `allocating` | **the 6.3 arming step** — a single `UPDATE … SET mode='allocating' WHERE mode='seeded'`, guarded by the quiescence assertion | §A7.7 step 6.3, *after* the backfill, never before |
 | `allocating` → `halted` | **rung 0** (§A7.5.11) — the `UPDATE … SET mode='halted' … AND mode='allocating'` printed there, guarded by the quiescence assertion | an operator-initiated rollback; **`halted` is never entered automatically**. ⛔ **This row said "rung 2's bump and rung 3's restore" and neither writes `mode`** — rung 1 is a decision not to act, rung 2 is a journal DELETE, rung 3 installs the dump's mode — so the state had no writer until rung 0 was added (found by the review of this revision). The "one writer" claim is now true per row — but the table was still **incomplete** until the restore row above was added (found by the next review) |
 | **`* → *` (any mode, by restore)** | **`record-restore` / rung 3** — `pg_restore --data-only` writes the **dump's** `mode` for every restored graph | ⛔ **A restore into an EMPTY target only, and that is the whole of the reachable shape** (found by the review of this revision). The fifth writer is real — §A7.8 item 4 puts `record_cursor` in `THE_RECORD_TABLES`, that tuple **is** the dump's `--table` list (`record_backup.py:1167` → `record_tables()`), and `pg_restore --data-only` bulk-loads every column — **but the verb refuses a populated target outright** (`restore_record_backup` raises `RecordRestoreRefused` on any non-empty target, `record_backup.py:1698-1709`). So "a dump taken while a graph was `allocating`, restored onto a graph since halted" **cannot happen**, and the guard an earlier form of this row proposed ("compare the restored `allocating` against the live `halted`") had **no live `mode` to compare against**. In the shape the verb permits, the restored `mode` is consistent with the restored counter by construction and needs no guard. **The residual is a FUTURE one, stated so it is not re-derived: if a later change ever lifts the populated-target refusal, that change must carry the guard** — which is this item's own standard ("an unexamined purge is how a deliberate choice becomes an accident") applied to restore |
-| `halted` → `seeded` | **the operator, explicitly** — `UPDATE public.record_cursor SET mode='seeded' WHERE org_id=$1 AND graph_id=$2 AND mode='halted'`, guarded by the same quiescence assertion and taken **only** when the operator intends a re-cut | a halted graph is re-cut by a **fresh seed**, never re-armed: re-arming a graph whose carried numbers were already consumed is how the same ordinal gets issued twice. ⛔ **The transition that makes that possible must be named, because §A7.5.5 step (0) REFUSES `mode IN ('allocating','halted')`** and round 3's conflict arm is scoped `WHERE mode = 'seeded'` — so without this writer "re-cut by a fresh seed" named a call that refused, and `halted` was a **one-way door** in the section whose subject is a *reversible* rollback (found by the review of this revision). The quiescence guard is what keeps it a decision rather than a default: re-cutting a graph whose allocator is live is the thing §A7.5.12's "never re-armed" sentence is for |
+| `halted` → `allocating` (**the re-cut, completing**) | **the operator, explicitly, in ONE statement that both recomputes the floor and arms** — `UPDATE public.record_cursor SET mode='allocating', seq = $enumerated_floor, updated_at=now() WHERE org_id=$1 AND graph_id=$2 AND mode='halted' AND $record_floor = $enumerated_floor`, guarded by the quiescence assertion | ⛔ **This row replaces a routing that could not complete** (found by the review of this revision): the earlier form went `halted → seeded` and relied on `seeded → allocating` to finish the job — but `seeded` means *nobody allocates*, the only `seeded → allocating` writer is the **per-cutover** step 6.3, and this table's own text calls arming a graph whose numbers were consumed *"re-arming … how the same ordinal gets issued twice"*. A re-cut that stopped at `seeded` left the graph permanently on today's allocator; one that went through 6.3 armed an **unverified** counter, because 6.3 carries no floor check. **The re-cut is therefore ONE transition with ONE writer that recomputes and arms together, and it refuses unless the floors are equal** — the same healthy-case rule as §A7.5.5. If the floors differ the graph **stays `halted`** (no partial move, no `seeded` limbo) and the case-2b deferral applies. |
+| `halted` → `seeded` (**abandoning the counter**) | **the operator, explicitly** — `UPDATE public.record_cursor SET mode='seeded' WHERE org_id=$1 AND graph_id=$2 AND mode='halted'`, guarded by the same quiescence assertion | ⛔ **NOT the re-cut** — this is the state for a graph whose counter is to be *discarded* and rebuilt from the journal, and it is only reachable when the operator intends to **re-run the whole cutover for that graph** (6.2 + 6.3). Reaching it without 6.3 leaves the graph in the pre-arm window, which is why the row above exists and why this one is not the re-cut's route. a halted graph is re-cut by a **fresh seed**, never re-armed: re-arming a graph whose carried numbers were already consumed is how the same ordinal gets issued twice. ⛔ **The transition that makes that possible must be named, because §A7.5.5 step (0) REFUSES `mode IN ('allocating','halted')`** and round 3's conflict arm is scoped `WHERE mode = 'seeded'` — so without this writer "re-cut by a fresh seed" named a call that refused, and `halted` was a **one-way door** in the section whose subject is a *reversible* rollback (found by the review of this revision). The quiescence guard is what keeps it a decision rather than a default: re-cutting a graph whose allocator is live is the thing §A7.5.12's "never re-armed" sentence is for.|
 
 **`mode` is machine-readable on purpose** — §A7.7 step 6.5 gates the removal of the enumeration fallback on
 `mode = 'allocating'`, so the classification is a column read, not a log-and-hope.
@@ -1605,6 +1626,12 @@ is deliberately not reused:** a renumbered list would hide the withdrawal, and t
     assert (a) it is killed by `idle_in_transaction_session_timeout` and its counter rolls back, and (b) the
     export-lag **age** alarm fires while later commits keep succeeding. *Red today: nothing measures export
     lag at all, and "stalled" is indistinguishable from "idle" — the S2 shape the capstone measured.*
+    ⛔ **(c) THE ALARM IS ARMED ONLY IN `allocating`, ASSERTED IN BOTH DIRECTIONS IN THE SAME RUN.** On a `halted`
+    graph and on a `seeded` graph the age alarm must **not** fire; on an `allocating` graph with an
+    equivalent induced stall it must go **red**. *The paired leg is the point:* a one-sided test passes an
+    implementation that suppresses the alarm everywhere, which is the failure the mode check exists to prevent.
+    Without (c) the mode rule is unverifiable, and this section's own standard is that "a blocking answer with no
+    falsifier was treated as not answered".*
 16. **B6's own falsifier — because the round-1 one could not detect B6 (P1, round-2 review).** Capture a feed
     cursor (`poll_events` → `next_cursor`) **before** the change, replay the feed at the new head, and assert the
     captured cursor **still lands on the same `:GraphEvent` rows**. Falsifier 4 asserts that *replay reproduces
@@ -1711,7 +1738,7 @@ mixed-version window. Its coordinate is stated at the end of this section.**
    a *bigger* change than the one this plan proposes. ⛔ **§A8.2 item 5 was the honest signal: a step the plan
    could not state a mechanism for should not have been in the sequence at all.**
 5. **D-05** (`#8699`) the fold's parity, which unblocks *"the cache driven from the record"*.
-6. **⛔ NEW — the allocation cutover, reader-first, in five sub-steps.** This is the step that does not exist in
+6. **⛔ NEW — the allocation cutover, reader-first, in six sub-steps.** This is the step that does not exist in
    the round-1 sequence, and it is what makes the allocator move a *migration* rather than a *flip*:
    1. **Readers ship first.** `replay_plan` learns to **prefer the carried `seq`** and to **refuse** on a
       mismatch (§A7.5.4); the journal reader learns to tolerate a line with a `seq` it does not need. With no
@@ -1754,7 +1781,9 @@ mixed-version window. Its coordinate is stated at the end of this section.**
       between them would allocate from a counter that does not exist. **Rollback: this is the LAST thing that may
       be reverted** — unshipping it silently returns every new graph to enumeration, which no alert covers.
    **Rollback of each sub-step:** 6.1 and 6.2 are reversible with no data change; 6.3 is reversible by *"stop
-   allocating"* (§A7.5.11); 6.4 is where the reopens (M7) must already be recorded; 6.5 is **not** reversible
+   allocating"* (§A7.5.11); **6.6 is shipped WITH 6.3 and is the LAST thing that may be reverted** — unshipping it
+   silently returns every new graph to enumeration, which no alert covers; 6.4 is where the reopens (M7) must
+   already be recorded; 6.5 is **not** reversible
    without proof per graph, and is therefore the last thing done.
 7. **D-09** the bound — owner decision, and it should follow the shape change, not precede it: bounding the
    file while the file is still the commit point converts a cost problem into a data-loss problem
@@ -1770,7 +1799,7 @@ mixed-version window. Its coordinate is stated at the end of this section.**
   **exactly the rule the change inverts**. A check deleted "because it now fails" removes the only instrument
   that can see a door which stopped writing its position. Its replacement asserts the *new* rule (the door hands
   the record a number the **record** minted) at the **same** strictness.
-- **M11 — the five test suites Stage C must check** that pin the behaviour being replaced (four of which must move) are named in §A7.8's "suites that must
+- **M11 — the six test suites Stage C must check** that pin the behaviour being replaced (four of which must move) are named in §A7.8's "suites that must
   move" table, because a plan that names two test files for a change of this size has not looked at what pins
   it.
 
@@ -1792,7 +1821,7 @@ collides and (with today's clause) is swallowed.
 | 5 | **the migration named in `RECORD_MIGRATIONS`** (`record_projection.py:193`) | the registry **is** the tuple; a file not in it is read by nobody. `tests/test_9231_record_migrations_trigger.py` pins **both directions** — tuple→disk (`:229-230`: every name exists) and disk→tuple (`:263-268`: every shipped file is named). A migration that ships without the tuple entry is read by nobody **and** the test that would say so does not exist for it. |
 | 6 | **`journal_event` widened for a reproducible export (M15)** — `event_id`, `initiated_by`, `projection_version` carried (as columns or unfiltered in `payload`), and `node_label`/`node_key` **populated** by `_journal_row` | without it §A7.5.8's "re-render from the record" is a fiction. Cost, declared: row bytes grow, so `journal_event_bytes_for_rows` (`#12762`) moves — **a price the owner should see before it is paid**, not a rounding error. ⛔ **This item is also a PRECONDITION of §A7.5.4's refusal guard and of §A7.7 step 6.1**, not merely of §A7.5.8: until `event_id` is in the table, a replay can only compare *numbers*, so "same position, different record" is unobservable and its conflict is still absorbable. |
 | 7 | **the org purge RPC: extend, or explicitly not** | if `purge_org_record` deletes `journal_event` rows but leaves `record_cursor`, the counter continues above the purge — which is **correct** (a position must never be reused within the record) and makes the reconciliation's healthy predicate `cursor >= COALESCE(max(journal_event.seq), 0)`, with `cursor > COALESCE(max(...), 0)` meaning *burned by a purge*. ⛔ **The `COALESCE` is load-bearing HERE more than anywhere else:** the purge is precisely the operation that leaves a counter above a graph with **zero** `journal_event` rows, so a bare `max()` is NULL over exactly the population this item describes — and both of its arms (healthy and burned) would then be neither true nor false. Extending the purge to delete the cursor row would instead let a re-armed graph restart at 1 and collide. **So: NOT extended, and the reason is written into the RPC's comment** — and it is **item 1's missing cascade FK that makes that ruling hold**: the purge reaches these tables through `organizations → graphs → <table>`, so a `record_cursor` carrying the siblings' `ON DELETE CASCADE` would be deleted by a purge this RPC never touches — an unexamined purge is how a deliberate choice becomes an accident. |
-| 8 | **the graph-creation hook — and it ARMS, not only seeds** — wherever a `:Graph` is created on a record-armed lane, insert `record_cursor(org_id, graph_id, seq = 0, mode = 'allocating')` in the creating transaction (it resolves to **case 0**, `seq = 0`, so it is cheap and cannot race a writer that does not exist yet). ⛔ **`mode = 'allocating'` is load-bearing, not a default:** a hook that ran §A7.5.5's seed verbatim would take item 1's `DEFAULT 'seeded'`, and `seeded` means **nobody allocates** (§A7.5.12's mode table) — so the graph would fall back to the enumeration and keep today's allocator, i.e. the exact harm this item was added to remove. There is **no 6.2→6.3 window for a brand-new graph** (its journal is empty, so there is nothing to backfill and nothing to quiesce), which is why the hook goes straight to `allocating` rather than through the two-step the cutover needs | ⛔ **Without it the cutover is a SNAPSHOT POPULATION, not a migration.** §A7.7 step 6.2 seeds the graphs that exist on cutover day, once; a graph created afterwards has no counter row, is "uncut" by §A7.5.12's own definition, and keeps the enumerating allocator — with the D-25 `position=None` window, the 60 s fail-soft breaker and the two-journal-files hazard that this plan exists to remove. §A7.5.7's fail-hard posture does not cover it (it is scoped to "the ordinal path"), and §A8.2 item 10 records the consequence for any window where the hook is not yet shipped. **Deliverable, not a nice-to-have: without it the plan fixes the past and not the future.** |
+| 8 | **the graph-creation hook — it ARMS, not only seeds, and its CARRIER is a new RPC.** ⛔ **"In the creating transaction" is not buildable as first written** (found by the review of this revision) and the plan does not get to leave the carrier to an implementer: the `:Graph` is a **FalkorDB** node (`sdk.py` `reg.query("CREATE (g:Graph …)")`) and on the record-armed lane graph creation is a **PostgREST insert with a compensating delete and no open transaction** (`hosted_api.py` `insert_graph` → `supabase_control.py` `cp.query("graphs", method="POST")` → `_rollback_graph` on failure), plus a **second**, best-effort creation site for the default graph (`_mint_default_graph_row_best_effort`, *"never fails the caller"*). So the deliverable is **one Postgres RPC — `provision_graph_record(org_id, graph_id)` — that inserts the `public.graphs` row AND `record_cursor(org_id, graph_id, seq = 0, mode = 'allocating')` in ONE transaction**, called at both chokepoints. **Fail-hard: a graph whose cursor row cannot be written must fail creation, never be born uncut** — the best-effort mint must not swallow it, or the graph silently keeps today's allocator forever  (it resolves to **case 0**, `seq = 0`, so it is cheap and cannot race a writer that does not exist yet). ⛔ **`mode = 'allocating'` is load-bearing, not a default:** a hook that ran §A7.5.5's seed verbatim would take item 1's `DEFAULT 'seeded'`, and `seeded` means **nobody allocates** (§A7.5.12's mode table) — so the graph would fall back to the enumeration and keep today's allocator, i.e. the exact harm this item was added to remove. There is **no 6.2→6.3 window for a brand-new graph** (its journal is empty, so there is nothing to backfill and nothing to quiesce), which is why the hook goes straight to `allocating` rather than through the two-step the cutover needs | ⛔ **Without it the cutover is a SNAPSHOT POPULATION, not a migration.** §A7.7 step 6.2 seeds the graphs that exist on cutover day, once; a graph created afterwards has no counter row, is "uncut" by §A7.5.12's own definition, and keeps the enumerating allocator — with the D-25 `position=None` window, the 60 s fail-soft breaker and the two-journal-files hazard that this plan exists to remove. §A7.5.7's fail-hard posture does not cover it (it is scoped to "the ordinal path"), and §A8.2 item 10 records the consequence for any window where the hook is not yet shipped. **Deliverable, not a nice-to-have: without it the plan fixes the past and not the future.** |
 
 **Falsifier (B3, and it is the whole point): restore a dump into a fresh database, then assert the next write is
 `max(seq)+1`.** Two sub-assertions, because there are two ways to get it wrong: (a) the dump **contains**
@@ -1805,7 +1834,7 @@ collide.
 
 ### A7.8.1 The suites that must move, and the tests that pin it (M11)
 
-The round-1 plan named **two** test files for a change that inverts the behaviour of four of these five suites (the fifth, `tests/test_9206_apply_first_lane.py`, is listed so Stage C does not assume it is unchanged). Named here so
+The round-1 plan named **two** test files for a change that inverts the behaviour of four of these six suites (the fifth, `tests/test_9206_apply_first_lane.py`, is listed so Stage C does not assume it is unchanged). Named here so
 Stage C starts from the real population:
 
 | suite | lines | what it pins | what the change does to it |
@@ -1839,7 +1868,7 @@ is the step that changes it — not a drive-by.
 | **B7** | `journal_event` is the only carrier of `Object.status`/`Subject.status` | **§A6 D-27** (new row: the terminal-fold stickiness makes a bound a **resurrection** bug) + **§A7.5.12** (the bound stays out) + **§A7.7 step 7** (the bound is the FILE only; a table bound is a different decision); §A2.8/D-30 give the in-tree precedent (`#3870`) | **§A7.6 #20** (prefix deletion + rebuild must still read terminal) + §A7.8 item 7 (the purge is extended only if a ruling says so). ⛔ **This cell cited #12 and was wrong — #12 is a *number* reconciliation, and a prefix deletion leaves `max(seq)` unchanged, so it stays green through the resurrection B7 describes.** |
 | **M16** | nothing seeded a graph created **after** the cutover, so the fix was a snapshot | **§A7.8 item 8** (a creation hook that writes `seq = 0, mode = 'allocating'`) · **§A7.7 step 6.6** (shipped with 6.3, and the last thing that may be reverted) · **§A7.8.1** (the suite that pins it) · **§A8.2 item 10** (the residual until it lands) | **§A7.8.1**'s new row — a graph created after cutover must have a counter row **in `allocating`**, and must allocate `1` on its first write. ⛔ **The `mode` half is the falsifier's point:** a hook that only seeds writes `DEFAULT 'seeded'`, which allocates nothing, and the test must go red on it |
 
-**Material (M1–M16).** Each is folded into the section it belongs to — and the table is the proof none was dropped.
+**Material (M1–M16).** Each is folded into the section it belongs to — and the table is the proof none was dropped. ⛔ **M16's row must live in THIS table, not in the blocking table above it:** an earlier form appended it to the *blocking* table (whose preamble says B1–B7) while retitling this one to M1–M16, so both headings misdescribed their tables — in the section whose stated job is *"the table is the proof none was dropped"*.
 
 | # | finding | landed in |
 |---|---|---|
@@ -1853,7 +1882,7 @@ is the step that changes it — not a drive-by.
 | **M8** | batches: contiguity is required and block allocation is unstated | **§A7.5.2** (block allocation `+ N` / `RETURNING seq − N`, with the idempotency-key consequence stated) + **§A7.6 #10** (a hi-lo variant must go red) |
 | **M9** | the ordinal cannot be known at plan-build time | **§A7.5.2** (the data-modifying CTE: one statement, so the number is chosen *by* the statement; `RecordWrite.first_seq/last_seq` threaded back from `RETURNING`) |
 | **M10** | fail-soft contradicts "no burned position" | **§A7.5.7** (posture flips: fail-**hard** on the ordinal path; the breaker becomes fail-fast, and the alternative — a named bounded degraded state — is stated and rejected) + **§A7.6 #13** |
-| **M11** | tests and lanes are missing | **§A3.1** (the two missing lanes: MCP BASE/stdio and M2 session-capture) + **§A7.8.1** (the five suites Stage C must check, four of which must move, with line counts and what each pins) + **§A7.7 step 6.4** |
+| **M11** | tests and lanes are missing | **§A3.1** (the two missing lanes: MCP BASE/stdio and M2 session-capture) + **§A7.8.1** (the six suites Stage C must check, four of which must move, with line counts and what each pins) + **§A7.7 step 6.4** |
 | **M12** | `tools/record_wiring_check.py` is absent yet asserts exactly the inverted rule | **§A5** (added to "what already exists", with both check names) + **§A7.7** (re-derived at step 6.1, **not** deleted, with the replacement held to the same strictness) |
 | **M13** | the completeness artifact contradicts itself | **§A1.4** (a four-row table answering each sub-claim at this head: two already fixed, one still true and now fixed, one not reproducible — with the 160-citation audit as the evidence) + the `INGEST_CONTRACT` row + **§A7.3** (the embedded-lane durability claim recorded as a third unqualified sentence) |
 | **M14** | D-20 is over-general | **§A6 D-20** (narrowed to `record_read.py`; the two counter-examples named; **the inference withdrawn**) |
@@ -1861,7 +1890,7 @@ is the step that changes it — not a drive-by.
 
 **Two things the brief required kept, and where they are:** §A7.4's honesty is **§A7.4** itself — now with an
 explicit counting rule and **six** truth-bearing surfaces (the fifth being the file, the sixth `capture_spool`),
-plus the cache explicitly *not* counted and why. The missing sequencing step is **§A7.7 step 6**, five sub-steps,
+plus the cache explicitly *not* counted and why. The missing sequencing step is **§A7.7 step 6**, six sub-steps,
 with **the coordinate it reconciles on** stated in bold: `journal_event.seq`, and only that.
 
 ### A8.2 What this revision could NOT resolve — read this first, next round
@@ -2091,7 +2120,7 @@ same section had just recorded described a state the code makes impossible.
 | found | what was wrong | what it is now |
 |---|---|---|
 | **P1** | **§A8.3.3's seed-context cell was claimed corrected and was byte-identical to the previous head** — it still offered *"or as the table owner"* **and** still asserted `"both floors read 0"` ⇒ *"case 0/2a seeds 0"*: the two exact claims §A7.5.5's SQL now denies. The previous round had edited the **sibling** cell and recorded the fix against this one | corrected, with the marker, and the row now says it was left standing for two rounds while this section claimed it fixed. ⛔ **A reader of §A8.3.3 held a picture of the seed that the seed's own SQL contradicted — and "seeds 0" is the shape that invites the over-correction R2 produced** |
-| **P1** | **the `halted` state had no append arm, and under §A7.5.6's only arm the SECOND write after a halt collides.** The enumeration position is the file's line count; the AFTER-COMMIT export leaves the file trailing the table, so write #1 takes `N+1` and write #2 recomputes `N+1` from a stale file and raises `23505` on `journal_event`'s PK (§A7.5.4 dropped the conflict absorber). Rung 0's "**costs nothing**" and #12's justification both rested on a mechanism that could not take two writes — permanently if the drainer is wedged, which §A7.5.6 itself contemplates | **a halted graph's append arm is the PRE-COMMIT arm — and the arm is now scoped PER MODE in §A7.5.6 itself**, not only in rung 0, with §A7.5.10 and §A8.1's B4 cell de-universalised with it. What it says: the file leads, `EventLog.append` writes the line, the drainer idles.** §A7.5.6's AFTER-COMMIT arm is a property of the **`allocating`** mode, exactly as §A7.7 6.5's fallback removal is — one arm per graph, never neither and never both. ⛔ **The row as first written claimed §A7.5.6 already scoped it; §A7.5.6 mentioned no mode at all until the eighth pass put the scope there, and §A7.5.10 and §A8.1's B4 cell asserted the universal arm** — corrected in all three (§A8.3.7) |
+| **P1** | **the `halted` state had no append arm, and under §A7.5.6's only arm the SECOND write after a halt collides.** The enumeration position is the file's line count; the AFTER-COMMIT export leaves the file trailing the table, so write #1 takes `N+1` and write #2 recomputes `N+1` from a stale file and raises `23505` on `journal_event`'s PK (§A7.5.4 dropped the conflict absorber). Rung 0's "**costs nothing**" and #12's justification both rested on a mechanism that could not take two writes — permanently if the drainer is wedged, which §A7.5.6 itself contemplates | **a halted graph's append arm is the PRE-COMMIT arm — and the arm is now scoped PER MODE in §A7.5.6 itself**, not only in rung 0, with §A7.5.10 and §A8.1's B4 cell de-universalised with it. What it says: the file leads, `EventLog.append` writes the line, the drainer idles. §A7.5.6's AFTER-COMMIT arm is a property of the **`allocating`** mode, exactly as §A7.7 6.5's fallback removal is — one arm per graph, never neither and never both. ⛔ **The row as first written claimed §A7.5.6 already scoped it; §A7.5.6 mentioned no mode at all until the eighth pass put the scope there, and §A7.5.10 and §A8.1's B4 cell asserted the universal arm** — corrected in all three (§A8.3.7) |
 | **P1** | **the restore row's hazard was unreachable through the shipped verb, and its proposed guard had nothing to compare against.** `restore_record_backup` raises `RecordRestoreRefused` on any non-empty target (`record_backup.py:1698-1709`), so "a dump restored onto a graph since halted" cannot happen — and in the only shape the verb permits (an empty target) there is **no live `mode`** for "compare restored `allocating` against live `halted`" to compare against | restated to the reachable shape: the fifth writer is real, the verb's populated-target refusal is what makes the hazard impossible, and the guard is recorded as a **future** obligation on whoever lifts that refusal |
 | **P2** | **"four test suites" vs five rows vs "the five suites that must move"** — §A7.7 and §A7.8.1 said four, §A8.1's M11 cell said five must move, and the table has five rows of which the fifth is explicitly *"unchanged … listed so Stage C does not assume it is"* | "the five suites Stage C must check, four of which must move", with the fifth named and its status stated |
 | **P2** | **"Three descriptive statements also become false" — there is a fourth**, and it sits in the very paragraph this plan cites for the QUIESCED precondition: `durability-posture.md:405`, *"because the journal carries no `seq` its number is lost too"* | added as the fourth, **with the consequence stated**: the QUIESCED requirement survives for this plan's own reason (a live writer moves the journal between the two floor reads), not for the seq-less-file reason that document gives |
@@ -2130,6 +2159,37 @@ incomplete**, plus three sections still asserting the universal arm the round be
 | **P2** | the halted drainer rule named `max(journal_event.seq)` as its target — **a quantity that keeps rising** on exactly the graph the rule is for, since the file leads and post-halt writes keep committing rows. Read live, it appends a second line for positions the file already carries | the target is the **frozen `record_cursor.seq`**, with the consequence stated (two records at one `seq` would shift the enumeration that is the halted graph's own position source), plus the bookkeeping that was missing: **on a halted graph the writer is the exporter** |
 | **P2** | §A8.3.6's halted-arm cell carried **a literally duplicated clause**, in the audit table this round is about | deduplicated and the emphasis span closed |
 | **P2** | **§A7.5.1's allocator snippet — the first SQL a reader meets — lacked `mode = 'allocating'`.** Copied verbatim it allocates on a halted graph, undoing rung 0, §A7.5.12's table and falsifier 17(b) | the snippet now carries the predicate **and** the divergence guard, and is labelled *illustrative of the transactionality only — §A7.5.2 is the allocator*. ⛔ **The mirror of this document's designated defect — a printed statement that does something it must not — is worse than one that does nothing** |
+
+#### A8.3.9 The eleventh pass: four of the previous round's fixes were never written, and the audit said they were
+
+The tenth pass asked whether the fixes *did what they were written for*, and found the hook's `mode`. The eleventh
+pass asked the next question — *is the fix in the file?* — and found that **four of the tenth round's fixes were
+never written at all**, while §A8.3.8 recorded all four as applied: the hole table's fourth row, the drainer's
+frozen-counter target, falsifier 15(c), and §A7.5.1's snippet.
+
+**The cause is mechanical, and it is worth naming because it will happen again: the edits were applied by one batch
+script whose fourth replacement did not match, so the script aborted before writing — and its output said nothing
+that distinguished "aborted" from "applied".** The author read the *intent*, not the file. Every later check
+consisted of reading the audit row, which was written from the same intent. **A batch tool that fails atomically
+looks exactly like one that succeeded, to a reader who does not re-open the artifact.**
+
+| found | what was wrong | what it is now |
+|---|---|---|
+| **P0** | **the hook's carrier does not exist.** *"In the same transaction that creates the `:Graph`"* has no referent: the `:Graph` is a **FalkorDB** node, and on the record-armed lane graph creation is a **PostgREST insert with a compensating delete and no open transaction** (`hosted_api.py:27179` → `supabase_control.py:4184` → `_rollback_graph`), plus a **second** best-effort site for the default graph (`_mint_default_graph_row_best_effort`, *"never fails the caller"*). An implementer would have had to invent the carrier, and at the best-effort site it fails **silently** — the graph is born uncut forever | §A7.8 item 8 now names the carrier: **one Postgres RPC, `provision_graph_record(org_id, graph_id)`, that inserts the `public.graphs` row AND `record_cursor(seq = 0, mode = 'allocating')` in ONE transaction**, called at both chokepoints, with the **fail-hard** rule stated — a graph whose cursor row cannot be written must fail creation, and the best-effort mint must not swallow it. ⛔ **This is the same unbuildable cross-store claim for which §A7.7 step 4 deleted D-07**, one deliverable later |
+| **P1** | **the `halted → seeded` re-cut could never complete.** It routed through `seeded` and relied on `seeded → allocating` to finish — but `seeded` means *nobody allocates*, the only `seeded → allocating` writer is the **per-cutover** step 6.3, and this table's own text calls arming a consumed counter *"how the same ordinal gets issued twice"*. One route parked the graph permanently on today's allocator; the other armed an **unverified** counter, because 6.3 carries no floor check | **`halted → allocating` is now ONE transition with ONE writer** that recomputes the floor and arms together, refusing unless the floors are equal (the §A7.5.5 healthy-case rule). Differing floors leave the graph **`halted`** — no partial move, no `seeded` limbo. `halted → seeded` is retained but explicitly **not** the re-cut: it is for a graph whose counter is discarded and whose whole cutover is re-run |
+| **P1** | **§A8.1's preambles misdescribed their own tables** — *"Material (M1–M16)"* over M1–M15, and *"Blocking (B1–B7)"* over eight rows, because M16 had been appended to the **blocking** table | M16's home is stated as the Material table, and the defect is named in place — a count over a population, in the section whose job is *"the table is the proof none was dropped"* |
+| **P1** | **the counts over step 6 and §A7.8.1 were not swept** when 6.6 and the sixth suite were added: step 6 was still *"in five sub-steps"* in two places, M11 and §A7.8.1 still said five suites, and **§A7.7's rollback map still enumerated 6.1–6.5**, omitting the one sub-step whose own text says it is the last thing that may be reverted | six sub-steps, six suites, and 6.6 added to the rollback map. ⛔ **A lane trusting "the five sub-steps" would land 6.1–6.5 and no creation-time caller — re-creating the exact harm 6.6 exists to remove** |
+| **P2** | §A8.3.6's cell had an orphan `**` where the deleted duplicate used to be (13 markers, odd) | closed |
+| **P2** | §A7.5.12 said *"Four transitions exist"* over a table of five | five |
+
+⛔ **What the eleventh pass proves, and it is about the tooling rather than the document: a fix record written from
+the same intent as the fix cannot detect a fix that was never made.** Four rounds have now found an audit row
+asserting an unapplied fix, and this is the first one where the mechanism is visible — a batch edit aborted
+atomically and reported success for the whole batch. The rule that follows is not "write better records": it is
+**re-open the artifact after every write, and treat a batch's exit status as no evidence about its individual
+members.**
+
+---
 
 ⛔ **What the tenth pass proves: the tenth round is where a fix's own premise gets tested, and it failed.** For four
 rounds the document was fixed by adding mechanisms; this round's P0 was that the new mechanism's *state* was
