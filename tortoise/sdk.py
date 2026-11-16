@@ -48760,8 +48760,11 @@ class TortoiseSDK:
             # guard is asked rather than skipped. The legal shapes are unchanged,
             # because a genuine `str` subclass reduces to the content it holds: a
             # read-modify-write echo is still entailed (the #3305 capability a
-            # refused echo contradicted), and a subclass rewriting its content
-            # is not.
+            # refused echo contradicted), and a subclass carrying a DIFFERENT
+            # WORD is not. ⛔ Not a subclass whose *rendering* differs: that one
+            # IS entailed here (measured — `__str__` is never consulted, calls=0),
+            # and what catches it is the write arm's own normalisation
+            # (`_status = str.__str__(_status)`), not this test (#12907 cycle 4).
             _pt_statuses_exact = (
                 tuple(str.__str__(_stored_status)
                       for _stored_status in _pt_statuses)

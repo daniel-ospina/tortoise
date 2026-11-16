@@ -451,10 +451,15 @@ def test_a_lying_eq_cannot_disarm_the_entailed_exemption(env, monkeypatch):
     `test_deprecated_is_terminal_even_though_the_map_has_no_key` above, and
     `test_a_map_less_stored_status_still_defers` pins the loop's deferral).
 
-    Mutant that reddens: compare the stored tuple / the rendered status object
-    directly (`_pt_statuses == (_lifecycle_rendered["status"],)`) and BOTH
-    phases are ACCEPTED, storing `live` on a dead row (a resurrection) with the
-    guard never asked.
+    Mutant that reddens: (M2) compare the stored tuple / the rendered status
+    object directly (`_pt_statuses == (_lifecycle_rendered["status"],)`) and
+    BOTH phases (a) and (b) are ACCEPTED, storing `live` on a dead row (a
+    resurrection) with the guard never asked. (M3) destroy the exemption
+    outright (`_status_entailed = False`) and phase (c) is REFUSED — that is
+    what makes phase (c) discriminating, and it is only true because phase (c)
+    sits on a TERMINAL row (#12907 cycle 4, P3: on a live row the same phase
+    stayed GREEN under M3, because a live row's guard passes whether it was
+    asked or skipped).
     """
     sdk, events = env
 
@@ -498,10 +503,17 @@ def test_a_lying_eq_cannot_disarm_the_entailed_exemption(env, monkeypatch):
     # a subclass ECHO of the row's own word reduces to that content, so it stays
     # entailed and still lands. Without this the fix could "pass" by refusing
     # everything — fail-closed is cheaper than fail-open, but it is not free.
+    # ⛔ The row MUST be TERMINAL. On a LIVE row this phase passes under an
+    # over-fix that destroys the exemption outright (`_status_entailed = False`),
+    # because a live row's guard passes whether it was asked or skipped — so a
+    # live-row phase asserted nothing (#12907 cycle 4, P3, measured).
     monkeypatch.undo()
     pid3 = _live(sdk, "a claim that echoes its own word through a subclass")
-    sdk.update_entity(pid3, status=_LieEq("live"), content="echoed, rewritten")
-    assert _row(sdk, pid3)["status"] == "live"
+    sdk.retract_point(pid3)
+    sdk.update_entity(pid3, status=_LieEq("retracted"), content="echoed, rewritten")
+    assert _row(sdk, pid3)["status"] == "retracted", (
+        "the entailed echo must land and must not disturb the terminal word: "
+        + repr(_row(sdk, pid3)))
     assert sdk.get_point(pid3)["content"] == "echoed, rewritten", (
         "the entailed path must still write the content it carried")
 
