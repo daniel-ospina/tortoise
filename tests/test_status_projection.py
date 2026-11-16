@@ -2329,6 +2329,22 @@ class TestNonScalarStatus12869:
             assert sdk._validate_bundle({"entities": [
                 {"ref": "o", "type": "object", "name": "dict-ok",
                  "status": {"a": 1}}]}) == []
+            # ⛔ AND THE VALIDATOR'S PREDICATE IS THE DOOR'S, NOT THE OR (#12869
+            # review round 4, P3). This arm asked
+            # `_is_persistable_prop_value(_mint) or _value_ok(_mint)`, so a value
+            # the FOLD filter keeps and the TRANSPORT gate drops was refused here
+            # while `create_object` ACCEPTED it — the validator refusing a bundle
+            # on a value the door stores nothing of, and saying so in a message
+            # that asserted a refusal which does not happen. `('a\x00b',)` is
+            # exactly that shape (measured: fold True, gate False).
+            assert sdk._validate_bundle({"entities": [
+                {"ref": "t", "type": "object", "name": "tuple-ok",
+                 "status": ("a\x00b",)}]}) == [], (
+                "the validator refused a bundle the door accepts")
+            # …and the two authorities agree on it, on the real door:
+            sdk.create_object("tuple-ok", "core:strategy", status=("a\x00b",))
+            assert _carrier_row(sdk, "Object", "tuple-ok")[1] is None, (
+                "the door stored a value the validator is supposed to mirror")
         finally:
             sdk.close()
 
@@ -2628,6 +2644,71 @@ class TestNonScalarStatus12869:
             sdk.create_object("acme4", "core:organization", status="live")
             assert sdk._get_proj().g.query(
                 "MATCH (n:Subject) RETURN count(n)").result_set[0][0] == 1
+        finally:
+            sdk.close()
+
+    def test_a_refusal_cannot_run_AFTER_the_ADOPT_stamp(self, tmp_path):
+        """A refusal that lands after `resolve_or_mint` COSTS A WRITE (#12869 P2).
+
+        `create_entity(type='object')` RESOLVES before it guards, and
+        `_adopt_idless_holder` has already stamped an id onto an id-less live
+        holder by the time the helper is reachable. So any refusal the helper
+        raises ABOVE its `lands` test fires after that write — the atomicity
+        rule `#9287`/`#10192` states, and the exact thing
+        `test_a_REFUSED_create_writes_NOTHING` claims is impossible. That test
+        cannot see it: every value in its `_REFUSED` set answers `lands()` False
+        on adopt, so none of them ever reached these two checks.
+
+        MEASURED before the fix, on this fixture: BOTH calls raised, the row was
+        left id-bearing and the journal held 0 lines — a live-without-durable
+        row (`#3590`) produced by a refusal that was supposed to write nothing.
+
+        FALSIFIABLE BY: moving the `lands` thunk back BELOW the ambiguity check
+        reds the second arm with the `ValueError` it must not raise (MEASURED);
+        re-adding `journals=bool(self._event_log_path)` to the create door reds
+        the third arm the same way.
+        """
+        class KHash(str):
+            def __hash__(self):          # a different bucket, same rendering
+                return 424242
+
+        sdk = TortoiseSDK(str(tmp_path / "t12869adopt2.db"),
+                          event_log_path=str(tmp_path / "t12869adopt2.jsonl"))
+        try:
+            for name in ("noid-a", "noid-b"):
+                sdk._get_proj().g.query(
+                    "CREATE (n:Object {name:$n, objectKind:'core:strategy'})",
+                    params={"n": name})
+            # (1) The ambiguity refusal must not fire after the ADOPT stamp. The
+            #     node EXISTS, so this call's declared status is DROPPED by the
+            #     merge lane — there is nothing here to refuse.
+            sdk.create_object("noid-b", "core:strategy",
+                              **{"status": None, KHash("status"): ["live"]})
+            adopted = _carrier_row(sdk, "Object", "noid-b")
+            assert adopted[0], "the adopt path did not stamp an id"
+            assert adopted[1] is None, (
+                f"the adopted row took the renderer-only status: {adopted}")
+            # (2) …and an unencodable status is NOT this door's refusal either:
+            #     `_journal_entity_event` swallows the encoder failure and logs
+            #     LIVE-ONLY (#4240), exactly as it does for `tags=frozenset(...)`,
+            #     so narrowing `status` alone here narrowed on a mechanism that
+            #     is not `status`-specific. The refusal lives at the ONE door
+            #     that RAISES (`EventAPI.add_object`).
+            sdk.create_object("noid-a", "core:strategy", status=b"live")
+            enc = _carrier_row(sdk, "Object", "noid-a")
+            assert enc[0], "the adopt path did not stamp an id"
+            assert enc[1] is None, (
+                f"an unencodable status landed on the node: {enc}")
+            # (3) …and on a node this call MINTS, where the status really would
+            #     be written, an unencodable value is still ACCEPTED — #4240's
+            #     LIVE-ONLY lane, uniformly for every unencodable prop. This is
+            #     the arm that pins the create door's decision NOT to pass
+            #     `journals`: re-adding it reds here (MEASURED).
+            sdk.create_object("enc-fresh", "core:strategy", status=b"live")
+            fresh = _carrier_row(sdk, "Object", "enc-fresh")
+            assert fresh[0], "the create did not mint a node"
+            assert fresh[1] is None, (
+                f"an unencodable status landed on a fresh node: {fresh}")
         finally:
             sdk.close()
 
