@@ -6771,15 +6771,23 @@ def test_mcp_failed_recapture_names_the_stored_harness(tmp_path, monkeypatch):
 def test_mcp_capture_renders_a_typed_detail_as_its_message(tmp_path, monkeypatch):
     """#12992: a TYPED `detail` must reach the dashboard sub-line as its MESSAGE.
 
-    The capture door's refusals are dicts now (the points/cost 402's
-    `quota_refusal_payload`, the 429 in #12992, the 503's
-    `{error_code, message}`), and TWO consumers render one detail: this tool
-    surface and `hosted_api._record_capture_last_error`, which stringifies a
-    dict to `detail["message"]` precisely because "a Python repr would leak
-    structure". The helper's branch only runs on a NON-string detail, so the
-    tool passing `str(detail)` defeated it and the org-visible sub-line carried
+    TWO consumers render one detail: this tool surface and
+    `hosted_api._record_capture_last_error`, which stringifies a dict to
+    `detail["message"]` precisely because "a Python repr would leak structure".
+    The helper's branch only runs on a NON-string detail, so the tool passing
+    `str(detail)` defeated it and the org-visible sub-line carried
     `{'code': 'quota_exceeded', …}` while the same refusal through REST — which
     passes `e.detail` untouched — painted the sentence.
+
+    ⚠️ THE FIXTURE BELOW IS A **PLAIN** DICT, and that is the shape this test
+    witnesses (#12992 review P2): the plain-dict refusals are the 403 scope /
+    graph-scoped-team details and the 503's `{error_code, message}`. The
+    points/cost 402's own production detail is NOT a plain dict —
+    `quota_refusal_payload` returns a `quota.RefusalPayload`, a `dict` SUBCLASS
+    whose `__str__` returns `message` (#4614) — so it already rendered readably
+    under `str(detail)` and is the counter-example to this defect, not an
+    instance of it. Raising the status as 402 here is incidental: what makes
+    the mutation visible is the detail being a plain dict.
 
     RED mutation: restore `str(detail)` at the `_record_capture_last_error`
     call in `tortoise_session_capture` → the stored value becomes the repr and

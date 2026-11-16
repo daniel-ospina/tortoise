@@ -7380,9 +7380,11 @@ def _capture_health() -> dict:
             refused = _CAPTURE_REFUSED_TOTAL
             last = _CAPTURE_LAST_REFUSED_AT
             ceiling = _CAPTURE_MAX_IN_FLIGHT
-            # `_max_workers` is the pool's own attribute; a shut-down executor
-            # still carries it, so this needs no guard beyond the outer except.
+            # `_max_workers` survives a shut-down executor, so it needs no guard.
+            # ⛔ THE FORMATTING IS IN-GUARD: `fromtimestamp` can raise → a 500.
             workers = _CAPTURE_EXECUTOR._max_workers
+            last_refused_at = None if last is None else datetime.fromtimestamp(
+                last, UTC).isoformat()
     except Exception as exc:  # a health path must always answer
         # ⛔ THE DEGRADED ARM PUBLISHES THE SAME KEYS AS THE HEALTHY ONE (#12992
         # review P2). An ad-hoc short dict is the defect this file records 250
@@ -7404,9 +7406,7 @@ def _capture_health() -> dict:
         "max_in_flight": ceiling,
         "workers": workers,
         "refused_total": refused,
-        "last_refused_at": (
-            datetime.fromtimestamp(last, UTC).isoformat() if last is not None
-            else None),
+        "last_refused_at": last_refused_at,
         "refusing": refusing,
         "refusal_window_s": _CAPTURE_REFUSAL_WINDOW_S,
         "code": _CAPTURE_CAPACITY_CODE,
