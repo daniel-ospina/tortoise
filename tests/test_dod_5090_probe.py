@@ -10165,7 +10165,7 @@ def test_the_census_doc_collects_what_the_file_collects():
     a `TORTOISE_DB_URI` satisfies) — one more skip and one fewer pass than the docker
     lane, which is the invariant that lasts; the two figures above are bound to the sha
     for exactly that reason. The two splits therefore add to the tree's OWN collected
-    count: `214 + 1` and `213 + 2` at THIS tree, both equal to the `215` the pin re-derives
+    count: `239 + 1` and `238 + 2` at THIS tree, both equal to the `240` the pin re-derives
     below (the `eee465029a` pair, `185/1` and `184/2`, adds to that tree's 186 instead),
     which is why the doc states its split as
     lane-bound: a carve-out run must not "correct" the docker lane's figure.
@@ -12029,3 +12029,126 @@ def test_12549_the_compose_DEFAULT_filename_is_measured(tmp_path, monkeypatch):
     assert files["compose.yaml"] == "OFF", files
     # The disarming default file must not be hidden behind the armed Dockerfile.
     assert shipped["deployment"]["on"] is False, shipped["deployment"]
+
+
+def test_12549_the_OVERRIDE_family_HOLDS_the_row_under_compose_yaml_too(tmp_path, monkeypatch):
+    """`compose.override.yaml` must HOLD the row, exactly as its `docker-compose` twin does.
+
+    ⛔ The recorded decision (`#12070` item 8) is that an override file's merge order is
+    the caller's decision, so a discovered override HOLDS the row rather than being
+    resolved. Adding `compose.yaml` as a base name without its override companions
+    opened the hole that decision closes: measured on `compose.yaml` armed `"1"` +
+    `compose.override.yaml` disarming `"0"`, default discovery (what a real
+    `docker compose up` reads) resolves `"0"` — the gate is OFF — while the walk's
+    explicit `-f compose.yaml` resolves `"1"` (a `-f` SUPPRESSES the auto-merge). The
+    row therefore published ARMED over a disarmed deployment.
+    """
+    (tmp_path / "compose.yaml").write_text(
+        "services:\n  app:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"1\"\n", encoding="utf-8")
+    (tmp_path / "compose.override.yaml").write_text(
+        "services:\n  app:\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"0\"\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    deployment = shipped["deployment"]
+    unread = [entry["path"] for entry in deployment["discovery"]["unread"]]
+    assert "compose.override.yaml" in unread, (
+        "a compose override must HOLD the row, naming the file: " + repr(unread))
+    assert deployment["measured"] is False, deployment
+    assert deployment["on"] is False, deployment
+
+
+def test_12549_a_fully_PROFILED_file_still_REPORTS_that_it_mentions_the_flag(
+        tmp_path, monkeypatch):
+    """An all-profiled file must not be published as declaring nothing.
+
+    ⛔ The empty-DEFAULT-set early return used to skip the all-profiles pass, so a file
+    whose only service is `profiles:`-gated was reported as `mentions: none` and
+    "declare no gate of their own" — two prose claims the run did not measure, about a
+    file that spells the flag out. The VERDICT is still OFF (a default `up` selects no
+    service), but the declaration must be visible.
+    """
+    (tmp_path / "compose.yaml").write_text(
+        "services:\n"
+        "  debug-shell:\n    image: alpine\n"
+        "    profiles: [\"debug\"]\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"1\"\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"] == {"compose.yaml": "OFF"}, shipped["deployment"]
+    note = _gate_note(shipped)
+    # The declaration is REPORTED, and the gate is still not armed by it.
+    assert "profile-gated" in note, note
+    assert "debug-shell" in note, note
+
+
+def test_12549_compose_yaml_is_labelled_COMPOSE_not_dockerfile(tmp_path, monkeypatch):
+    """The per-file reader label must name the reader that actually answered.
+
+    ⛔ The label was `"compose" if posix.startswith("docker-compose") else "dockerfile"`,
+    so `compose.yaml` — a compose base since this PR — was published as
+    `compose.yaml=ON(dockerfile)` beside a note citing `docker compose … config`: two
+    labels for one fact, the "diagnostic naming a neighbour's state" class this module
+    polices.
+    """
+    (tmp_path / "compose.yaml").write_text(
+        "services:\n  app:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"1\"\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["channels"] == {"compose.yaml": "compose"}, \
+        shipped["deployment"]["channels"]
+
+
+def test_12549_a_PROFILED_disarm_is_not_rendered_as_an_OVERRIDE(tmp_path, monkeypatch):
+    """A profile-gated `0` must not claim "OVERRIDES an inherited value".
+
+    ⛔ Nothing is inherited in the deployment a default `up` describes: that deployment
+    never starts the service. The verifier's own `detail["reason"]` says so ("in a
+    profile-gated service"), so rendering the override sentence is a cause the resolver
+    did not measure — `#12549` defect 1's class, one layer down.
+    """
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n"
+        "  app:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"1\"\n"
+        "  worker:\n    image: alpine\n    profiles: [\"batch\"]\n"
+        "    environment:\n      TORTOISE_EMBED_GATE: \"0\"\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    # The verdict is unchanged: an explicit contrary value beside an arm is a DISAGREE.
+    assert shipped["deployment"]["files"] == {"docker-compose.yml": "DISAGREE"}, \
+        shipped["deployment"]
+    entries = shipped["disarming_assignments"]
+    assert any("DISARMS only when its `profiles:` entry is enabled" in e for e in entries), entries
+    assert not any("OVERRIDES an inherited value" in e for e in entries), entries
+
+
+def test_12549_a_SUPERSEDED_compose_base_is_reported_not_measured(tmp_path, monkeypatch):
+    """With two base names present, only the one compose SELECTS decides the reading.
+
+    ⛔ Compose picks ONE base file by fixed precedence and warns (`Found multiple config
+    files … Using compose.yaml`). Measuring both invents a deployment file that does not
+    exist: it produced a false HOLD on any tree mid-migration and attributed a disarm to
+    a file nothing reads. The superseded name is REPORTED (`non_env`) so it does not
+    vanish, and it contributes nothing to the verdict.
+    """
+    (tmp_path / "compose.yaml").write_text(
+        "services:\n  app:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"1\"\n", encoding="utf-8")
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  app:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"0\"\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    deployment = shipped["deployment"]
+    # Only the SELECTED file is a deployment file.
+    assert "docker-compose.yml" not in deployment["files"], deployment["files"]
+    assert deployment["files"].get("compose.yaml") == "ON", deployment["files"]
+    assert deployment["on"] is True, deployment
+    # …and the superseded one is reported rather than silently dropped.
+    superseded = [entry for entry in deployment["discovery"]["non_env"]
+                  if entry["path"] == "docker-compose.yml"]
+    assert superseded, deployment["discovery"]["non_env"]
+    assert "superseded" in superseded[0]["reason"], superseded[0]

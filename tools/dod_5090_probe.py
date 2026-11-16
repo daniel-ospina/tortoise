@@ -2208,9 +2208,38 @@ def _fly_manifests() -> list[Path]:
 
 
 def _compose_files() -> list[Path]:
-    """The compose BASE files that exist (see `COMPOSE_BASE_NAMES`)."""
+    """The compose BASE file compose SELECTS — ONE, not every present name.
+
+    ⛔ Compose chooses a single base file by fixed precedence (`COMPOSE_BASE_NAMES`,
+    measured against the binary: with `compose.yaml` and `docker-compose.yml` both
+    present it warns *"Found multiple config files with supported names … Using
+    compose.yaml"*; with `docker-compose.yml` and `docker-compose.yaml` it takes
+    `docker-compose.yml`). Measuring every present name invents deployment files that
+    do not exist: measured on `compose.yaml` `"1"` + `docker-compose.yml` `"0"`, the
+    walk reported `files {compose.yaml: ON, docker-compose.yml: OFF}`, `on: False` —
+    a false HOLD on any tree mid-migration — and attributed a disarm to a file the
+    deployment never reads. The superseded names are REPORTED
+    (`_compose_superseded_files`), never counted as deployment files.
+    """
+    for name in COMPOSE_BASE_NAMES:
+        target = REPO_ROOT / name
+        if target.is_file():
+            return [target]
+    return []
+
+
+def _compose_superseded_files() -> list[Path]:
+    """Compose base files that exist but are NOT the one compose selects.
+
+    They are recognised and reported (`discover_deployment_channels` puts each in
+    `non_env` with the reason), so they neither vanish silently nor decide a reading:
+    a deployment does not read them.
+    """
+    selected = _compose_files()
+    if not selected:
+        return []
     return [REPO_ROOT / name for name in COMPOSE_BASE_NAMES
-            if (REPO_ROOT / name).is_file()]
+            if (REPO_ROOT / name).is_file() and (REPO_ROOT / name) != selected[0]]
 
 
 #: How long a resolver may take. Generous: `compose config` parses and interpolates
@@ -2308,6 +2337,18 @@ TOML_RESOLVER = "tomllib [env]"
 #: invisible — but the types this repo can plausibly grow are enumerated rather than
 #: implied, which is the `#11437`/`#11541` discipline (`test_a_declared_bound_names_…`).
 UNREAD_ENV_CHANNEL_GLOBS: tuple[tuple[str, str], ...] = (
+    # ⛔ BOTH SPELLINGS, because the compose DEFAULT filename is `compose.yaml`. The
+    # guard below the base-name change has to follow the name, or the fix that made
+    # `compose.yaml` VISIBLE opens the hole its `docker-compose.*` twin already closes:
+    # measured on `compose.yaml` armed `"1"` + `compose.override.yaml` disarming `"0"`
+    # — default discovery (what a real `docker compose up` reads) resolves `"0"`, while
+    # the walk's `-f compose.yaml` resolves `"1"` (an explicit `-f` SUPPRESSES the
+    # auto-merge). So the row published ARMED over a deployment whose gate is OFF, and
+    # the override was not in `unread` either, so nothing held the row.
+    ("compose.override.yml", "compose OVERRIDE — merge ORDER decides the value"),
+    ("compose.override.yaml", "compose OVERRIDE — merge ORDER decides the value"),
+    ("compose.*.yml", "compose stage/override file — merge ORDER decides the value"),
+    ("compose.*.yaml", "compose stage/override file — merge ORDER decides the value"),
     ("docker-compose.override.yml", "compose OVERRIDE — merge ORDER decides the value"),
     ("docker-compose.override.yaml", "compose OVERRIDE — merge ORDER decides the value"),
     ("docker-compose.*.yml", "compose stage/override file — merge ORDER decides the value"),
@@ -2351,6 +2392,18 @@ CHANNEL_READERS: tuple[tuple[str, str], ...] = (
     ("dockerfile", "line reader: ENV/ARG — DECLARED, not converted"),
     ("entrypoint", "line reader: shell export — DECLARED, not converted"),
 )
+
+#: ⚠️ **Declared host dependence, same discipline as the Fly channel's**: the compose
+#: channel is answered by the `docker` binary, so a box WITHOUT `docker compose` makes
+#: every compose file `UNRESOLVED` and holds row 1 on every tree. That is a fail-closed
+#: reading (never a false PASS), and it is declared here rather than discovered by a
+#: reader wondering why the row is held on a bare box. It also costs TWO spawns per
+#: compose file — the default set and the all-profiles set (see
+#: `COMPOSE_RESOLVER_ALL_PROFILES`) — which is why the per-file result is not
+#: re-resolved by any caller.
+COMPOSE_CHANNEL_HOST_DEPENDENCE = (
+    "requires `docker compose` on the host; absent ⇒ every compose file is UNRESOLVED "
+    "and row 1 HOLDS (fail-closed, never a false PASS)")
 
 #: The two channels phase 1 does NOT convert, one row each, naming the shape it
 #: cannot see and why — so the bound is a published reading rather than a silence.
@@ -2436,6 +2489,14 @@ def discover_deployment_channels() -> dict:
         for path in _manifest_glob(pattern):
             non_env.append({"path": path.relative_to(REPO_ROOT).as_posix(),
                             "reason": reason})
+    selected = _compose_files()
+    for path in _compose_superseded_files():
+        non_env.append({
+            "path": path.relative_to(REPO_ROOT).as_posix(),
+            "reason": ("superseded compose base — compose selects ONE base file by "
+                       f"precedence and chose {selected[0].name!r}, so a deployment "
+                       "never reads this one"),
+        })
     return {"files": files, "readers": dict(CHANNEL_READERS),
             "unread": sorted(unread, key=lambda entry: entry["path"]),
             "non_env": non_env, "types": types}
@@ -2662,8 +2723,15 @@ def _compose_channel(path: Path, flag: str | None, is_truthy) -> dict:
         # nothing, so this file arms nothing. It is NOT `UNRESOLVED` — the resolver
         # succeeded and there is nothing to be uncertain about. (A compose file with no
         # `services` key at all is refused by compose itself and stays `UNRESOLVED`.)
+        #
+        # ⚠️ But "declares nothing" must not be said about a file whose EVERY service
+        # is profile-gated — that file spells the flag out. The all-profiles pass runs
+        # first so `mentioned` / `profiled_not_started` / `warnings` are filled, while
+        # the VERDICT stays NOT_ARMED: a default `up` selects no service at all.
         out["ok"] = True
         out["verdict"], out["off"] = "NOT_ARMED", []
+        _compose_profiled_scopes(path, flag, is_truthy, primary_services=set(),
+                                 out=out)
         return out
     unset = _compose_unset_interpolation(run["stderr"])
     out["ok"] = True
@@ -3482,8 +3550,18 @@ def _apply_channel_reading(reading: dict, posix: str, flag: str,
             buckets["unset_declarations"].append(
                 f"{where} (no value — compose takes it from the environment it runs in)")
         elif reason.startswith("set to a non-truthy"):
-            buckets["disarming_assignments"].append(
-                f"{where} = {value!r} (OVERRIDES an inherited value)")
+            # ⛔ A profile-gated value is NOT an override: nothing is inherited in the
+            # deployment a default `up` describes, because that deployment never
+            # starts the service. Rendering it as "OVERRIDES an inherited value" is a
+            # cause the resolver did not measure (it reports `profiles:` on the scope),
+            # so the two directions get two sentences.
+            if "profile-gated service" in reason:
+                buckets["disarming_assignments"].append(
+                    f"{where} = {value!r} (DISARMS only when its `profiles:` entry is "
+                    "enabled — a default `docker compose up` does not start it)")
+            else:
+                buckets["disarming_assignments"].append(
+                    f"{where} = {value!r} (OVERRIDES an inherited value)")
     verdict = reading.get("verdict")
     if verdict == "UNRESOLVED":
         buckets["surface_indeterminate"].append(posix)
@@ -3590,8 +3668,10 @@ def flag_in_shipped_configs(flag: str) -> dict:
         if rel == "entrypoint":
             return _entrypoint_scripts()
         if rel in COMPOSE_BASE_NAMES:
-            target = REPO_ROOT / rel
-            return [target] if target.is_file() else []
+            # ⛔ Only the name compose SELECTS is a deployment file; a superseded name
+            # is reported through `_compose_superseded_files`, not measured here —
+            # measuring it would attribute an arm/disarm to a file nothing reads.
+            return [p for p in _compose_files() if p.name == rel]
         target = REPO_ROOT / rel
         return ([target] if target.is_file()
                 else sorted(target.rglob("*")) if target.is_dir() else [])
@@ -3920,7 +4000,10 @@ def flag_in_shipped_configs(flag: str) -> dict:
         "channels": {
             posix: ("toml:[env]" if posix.endswith(".toml") else
                     "shell:export" if posix.endswith(".sh") else
-                    "compose" if posix.startswith("docker-compose") else
+                    "compose" if (posix.startswith("docker-compose")
+                                  or posix.startswith("compose.")
+                                  or posix in ("compose.yaml",
+                                               "compose.yml")) else
                     "dockerfile")
             for posix in deployment_present
         },
